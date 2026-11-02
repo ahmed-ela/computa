@@ -49,13 +49,43 @@ async function computaSavedConversation(input, c, dom, config) {
       if (closing || selecting) guard();
       return dom.picker(closing, selecting);
     };
+    let modeObservationDiagnostic = null;
     function selectionEvidence(required = true) {
       if (usesModes) {
+        modeObservationDiagnostic = null;
         const controls = dom.modeControls(), selected = state.mode?.choice;
         if (input.modelChoice != null || input.expectedModelChoice != null) c.fail('mode_unverified', 'mode_named_input');
         // Finite diagnostics only: retain the same required/optional failure
         // behavior and physical pins; never adopt remounted controls here.
-        const unverified = detail => { if (required) c.fail('mode_unverified', detail); return null; };
+        const unverified = detail => {
+          // Classify this existing read only. A false/optional proof must still
+          // fail native validation; diagnostic flags grant no selection proof.
+          let diagnostic;
+          if (state.submitted) {
+            try {
+              diagnostic = { version: 1, reason: detail, required, boundSelectionPresent: !!selected,
+                boundMode: selected ? ['chat', 'deepthink'].includes(selected.key) ? selected.key : 'other' : 'absent',
+                deepThinkSelected: controls.deepThink.selected, searchSelected: controls.search.selected,
+                deepThinkSameNode: controls.deepThink.node === state.mode?.deepThink,
+                searchSameNode: controls.search.node === state.mode?.search,
+                modeMatches: !!selected && c.equalChoice(controls.choices[controls.deepThink.selected ? 1 : 0], selected),
+                deepThinkWasConnected: state.mode?.deepThink?.isConnected === true,
+                searchWasConnected: state.mode?.search?.isConnected === true,
+                composerSameNode: controls.scope === state.prepared?.scope,
+                composerWasConnected: state.prepared?.scope?.isConnected === true,
+                firstBodyBound: !!state.first };
+            } catch { /* Metadata cannot change the original proof failure. */ }
+          }
+          if (required) {
+            try { c.fail('mode_unverified', detail); }
+            catch (error) {
+              if (diagnostic && error?.computaAdapterFailure) error.modeObservationDiagnostic = diagnostic;
+              throw error;
+            }
+          }
+          modeObservationDiagnostic = diagnostic || null;
+          return null;
+        };
         if (!selected) return unverified('mode_unbound');
         if (controls.search.selected) return unverified('search_selected');
         if (controls.deepThink.node !== state.mode.deepThink) return unverified('deepthink_replaced');
@@ -89,6 +119,7 @@ async function computaSavedConversation(input, c, dom, config) {
       return { t, form, output: { url: document.URL, sessionLifecycle: 'saved_conversation_delete', temporary: false,
         composer: c.enabled(form.editor), userCount: t.users.length, responseCount: t.answers.length,
         [usesModes ? 'modeEvidence' : 'modelEvidence']: evidence,
+        ...(usesModes && !evidence && modeObservationDiagnostic ? { modeObservationDiagnostic } : {}),
         text: state.first && !cleanupInspection ? extracted.text : '', answerComplete: !!complete && !cleanupInspection,
         busy: state.submitted && !complete, interrupted: false, conversationIdentity: state.first ? state.canonical : null,
         firstUserIdentity: state.first?.id || null, firstUserVerified: false, firstUserMarkerVerified: false, firstUserFingerprint: null } };
@@ -360,7 +391,9 @@ async function computaSavedConversation(input, c, dom, config) {
       && ['conversation_changed', 'document_changed', 'model_mismatch', 'model_unverified', 'mode_mismatch', 'mode_unverified'].includes(error.error))) state.terminal = true;
     return error?.computaAdapterFailure ? { error: error.error, ...(error.detail ? { detail: error.detail } : {}),
       ...(config.selectionKind === 'mode' && error.error === 'conversation_changed' && error.detail === 'first_container_children'
-        && error.firstContainerDiagnostic ? { firstContainerDiagnostic: error.firstContainerDiagnostic } : {}) }
+        && error.firstContainerDiagnostic ? { firstContainerDiagnostic: error.firstContainerDiagnostic } : {}),
+      ...(config.selectionKind === 'mode' && error.error === 'mode_unverified' && error.modeObservationDiagnostic
+        ? { modeObservationDiagnostic: error.modeObservationDiagnostic } : {}) }
       : { error: 'document_changed' };
   }
 }

@@ -190,6 +190,44 @@ final class DeepSeekWebModelTransportTests: XCTestCase {
         try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
     }
 
+    func testNullModeProofCapturesInitialRemountReasonOnceBeforeCleanupWithoutRepairOrReplay() async throws {
+        let fixture = try Fixture(setup: """
+            deepseekFixture.options.delayUser = true;
+            document.querySelector('.ds-button--circle').addEventListener('click', () => {
+              const control = document.querySelectorAll('.ds-toggle-button')[0];
+              control.replaceWith(control.cloneNode(true));
+            });
+            """)
+        defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        var diagnostics: [String] = []
+        fixture.transport.setDeepSeekModeDiagnosticObserverForTesting { diagnostics.append($0) }
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic delayed first body with remounted mode control")
+        do {
+            _ = try await call(fixture, "webProviderPoll", token)
+            XCTFail("A null optional mode proof must preserve the original native failure")
+        } catch let failure as EmbeddedWebModelTransport.Failure {
+            XCTAssertEqual(failure, .modelUnverified)
+        }
+        XCTAssertEqual(diagnostics.count, 1)
+        let packet = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(try XCTUnwrap(diagnostics.first).utf8)) as? [String: Any])
+        XCTAssertEqual(packet["reason"] as? String, "deepthink_replaced")
+        XCTAssertEqual(packet["required"] as? Bool, false)
+        XCTAssertEqual(packet["modeMatches"] as? Bool, true)
+        XCTAssertEqual(packet["searchSelected"] as? Bool, false)
+        XCTAssertEqual(packet["deepThinkWasConnected"] as? Bool, false)
+        XCTAssertEqual(packet["searchWasConnected"] as? Bool, true)
+        XCTAssertEqual(packet["composerSameNode"] as? Bool, true)
+        XCTAssertEqual(packet["firstBodyBound"] as? Bool, false)
+        _ = try await evaluate(fixture.view, "deepseekFixture.appendUser(); return true;")
+        let finished = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "failed")
+        XCTAssertEqual(diagnostics.count, 1, "A later required cleanup failure cannot overwrite the original read")
+        try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+        let toggles = try await evaluate(fixture.view, "return [deepseekFixture.counters.deepThinkClicks, deepseekFixture.counters.searchClicks];") as? [Int]
+        XCTAssertEqual(toggles, [0, 1], "Diagnostics never repair or replay a mode toggle")
+    }
+
     func testChangedFirstUserBodyRetainsExactOwnershipFailureAndNativeDiagnostic() async throws {
         let fixture = try Fixture(setup: "deepseekFixture.options.holdResponse=true")
         defer { fixture.shutdown() }

@@ -909,4 +909,46 @@ describe('Kimi saved-conversation adapter', () => {
     expect((await f.run('observeDeletedConversation', { deleteOperation })).deleteProof.conversationDeleted).toBe(true);
     expect(f.counts()).toEqual({ insertions: 1, sends: 1, confirms: 1 });
   });
+  test('a long editor uses its ancestor-clipped visible point without scrolling or reinsertion', async () => {
+    for (const transformed of [false, true]) {
+      const f = adapterFixture(); await f.select(); await f.run('prepare'); await f.run('insert');
+      const dx = transformed ? 11 : 0, dy = transformed ? 7 : 0, scale = transformed ? 0.9 : 1;
+      const geometry = { left: 36 + dx, top: 208.5 + dy, width: 303 * scale, height: 170 * scale };
+      f.editor.getBoundingClientRect = () => ({ left: geometry.left, top: geometry.top - 14731 * scale, width: geometry.width, height: 14904 * scale });
+      f.scope.values.overflowY = 'auto'; f.scope.getBoundingClientRect = () => geometry;
+      const fallback = f.document.elementFromPoint, points: number[][] = [];
+      f.document.elementFromPoint = (x: number, y: number) => {
+        if (x < 150) return fallback(x, y);
+        points.push([x,y]); return x > geometry.left && x < geometry.left + geometry.width
+          && y > geometry.top && y < geometry.top + geometry.height ? f.editor : f.body;
+      };
+      expect((await f.run('sendReady')).sendReady).toBe(true);
+      expect(points).toEqual([[geometry.left + geometry.width/2, geometry.top + geometry.height/2]]);
+      expect(f.counts()).toEqual({ insertions: 1, sends: 0, confirms: 0 });
+      expect((await f.run('submit')).submitted).toBe(true); expect(f.counts().sends).toBe(1);
+    }
+  });
+
+  test('clipping never grants readiness through occlusion, full clipping, invalid geometry or detached controls', async () => {
+    for (const mode of ['overlay','fully-clipped','invalid-ancestor','detached','deep-ancestry']) {
+      const f = adapterFixture(); await f.select(); await f.run('prepare'); await f.run('insert');
+      f.editor.getBoundingClientRect = () => ({ left:36, top:-14522.5, width:303, height:14904 });
+      f.scope.values.overflowY = 'auto'; f.scope.getBoundingClientRect = () => ({ left:36,
+        top: mode === 'fully-clipped' ? 500 : 208.5, width:mode === 'invalid-ancestor' ? NaN : 303, height:170 });
+      const fallback = f.document.elementFromPoint;
+      f.document.elementFromPoint = (x: number, y: number) => x < 150 ? fallback(x,y) : mode === 'overlay' ? f.body : f.editor;
+      if (mode === 'detached') f.remove(f.scope);
+      if (mode === 'deep-ancestry') {
+        const oldParent = f.scope.parentElement!; oldParent.children = oldParent.children.filter(node => node !== f.scope);
+        let parent = oldParent;
+        for (let n = 0; n < 65; n++) { const wrapper = new f.Node('DIV'); parent.append(wrapper); parent = wrapper; }
+        parent.append(f.scope);
+      }
+      const result = await f.run('sendReady'); expect(result.error).toBeDefined();
+      if (mode !== 'detached') expect(result).toMatchObject({ error:'composer_unavailable', detail:'editor_hit_' +
+        ({ overlay:'occluded', 'fully-clipped':'outside_clip', 'invalid-ancestor':'invalid_geometry', 'deep-ancestry':'ancestor_limit' } as any)[mode] });
+      expect(f.counts()).toEqual({ insertions:1, sends:0, confirms:0 });
+    }
+  });
+
 });

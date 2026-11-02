@@ -195,6 +195,53 @@ describe('DeepSeek composed mode adapter (not live qualification)', () => {
     }
   });
 
+  test('a null mode proof retains finite same-read reasons before the first user has rendered', async () => {
+    for (const reason of ['unchanged', 'mode_unbound', 'search_selected', 'deepthink_replaced', 'search_replaced', 'mode_choice_changed']) {
+      const f = fixture({ fresh: true }); await submitted(f);
+      f.userTurn.detach(); f.answerTurn.detach();
+      if (reason === 'mode_unbound') f.world.__computaDeepSeekSavedSessionV1.mode = null;
+      if (reason === 'search_selected') f.setMode(false, true);
+      if (reason === 'mode_choice_changed') f.setMode(true, false);
+      if (reason === 'deepthink_replaced' || reason === 'search_replaced') {
+        const old = reason === 'deepthink_replaced' ? f.deepThink : f.search;
+        const replacement = old.cloneNode(true); old.detach(); f.scope.append(replacement);
+      }
+      const result = await f.run('inspect');
+      expect(result.error).toBeUndefined(); expect(result.text).toBe(''); expect(result.userCount).toBe(0);
+      expect(result.firstUserVerified).toBe(false); expect(result.answerComplete).toBe(false);
+      if (reason === 'unchanged') {
+        expect(result.modeObservationDiagnostic).toBeUndefined(); expect(result.modeEvidence.selected).toEqual(mode());
+      } else {
+        expect(result.modeEvidence).toBeNull();
+        expect(result.modeObservationDiagnostic).toEqual({ version: 1, reason, required: false,
+          boundSelectionPresent: reason !== 'mode_unbound', boundMode: reason === 'mode_unbound' ? 'absent' : 'chat',
+          deepThinkSelected: reason === 'mode_choice_changed', searchSelected: reason === 'search_selected',
+          deepThinkSameNode: !['mode_unbound','deepthink_replaced'].includes(reason),
+          searchSameNode: !['mode_unbound','search_replaced'].includes(reason),
+          modeMatches: !['mode_unbound','mode_choice_changed'].includes(reason),
+          deepThinkWasConnected: !['mode_unbound','deepthink_replaced'].includes(reason),
+          searchWasConnected: !['mode_unbound','search_replaced'].includes(reason),
+          composerSameNode: true, composerWasConnected: true, firstBodyBound: false });
+        expect(JSON.stringify(result.modeObservationDiagnostic)).not.toContain(prompt);
+      }
+      expect(f.send.clicks).toBe(1); expect(f.trigger.clicks).toBe(0); expect(f.remove.clicks).toBe(0); expect(f.confirm.clicks).toBe(0);
+    }
+  });
+
+  test('required mode failures retain the same terminal reason and bounded read flags', async () => {
+    const f = fixture({ fresh: true }); await submitted(f);
+    const original = f.deepThink; const replacement = original.cloneNode(true); original.detach(); f.scope.append(replacement);
+    const rejected = await f.run('inspect');
+    expect(rejected.error).toBe('mode_unverified'); expect(rejected.detail).toBe('deepthink_replaced');
+    expect(rejected.modeObservationDiagnostic.required).toBe(true);
+    expect(rejected.modeObservationDiagnostic.deepThinkWasConnected).toBe(false);
+    expect(rejected.modeObservationDiagnostic.modeMatches).toBe(true);
+    expect(rejected.modeObservationDiagnostic.searchSelected).toBe(false);
+    expect(rejected.text).toBeUndefined(); expect(rejected.firstUserVerified).toBeUndefined();
+    expect((await f.run('inspect')).detail).toBe('terminal_operation');
+    expect(f.send.clicks).toBe(1); expect(f.trigger.clicks).toBe(0); expect(f.confirm.clicks).toBe(0);
+  });
+
   test('empty noninteractive decoration preserves exact long-prompt ownership and verified cleanup for both modes', async () => {
     const text = 'Synthetic complete prompt café 👋 <tag> \n'.repeat(1700) + '\n\nComputa session marker: ' + marker;
     for (const key of ['chat', 'deepthink']) {

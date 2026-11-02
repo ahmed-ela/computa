@@ -261,7 +261,8 @@ export function adapterFixture(options: { delayedUser?: boolean; provisional?: b
       expectedModelChoice: instant, ...(action === 'selectModel' ? { modelChoice: instant } : {}), prompt: fixturePrompt, ...overrides,
       ...(['insert', 'submit'].includes(action) && !Object.hasOwn(overrides, 'savedSubmissionFingerprint') ? { savedSubmissionFingerprint: fixtureFingerprint } : {}),
     }, document, window, f.location, f.world,
-    (node: any) => ({ visibility: node.values.visibility || 'visible', display: node.closest('[hidden]') ? 'none' : 'block' }),
+    (node: any) => ({ visibility: node.values.visibility || 'visible', display: node.closest('[hidden]') ? 'none' : 'block',
+      overflowX: node.values.overflowX || 'visible', overflowY: node.values.overflowY || 'visible' }),
     class {
       private record: typeof observers[number];
       constructor(callback: () => void) { this.record = { callback, attributes: [], active: false }; observers.push(this.record); }

@@ -78,7 +78,7 @@ function computaDeepSeekDOM(c) {
       return { node, selected: pressed === 'true' };
     };
     const deepThink = get('DeepThink'), search = get('Search');
-    return { deepThink, search, choices: [{ key: 'chat', label: 'Chat' }, { key: 'deepthink', label: 'DeepThink' }] };
+    return { scope, deepThink, search, choices: [{ key: 'chat', label: 'Chat' }, { key: 'deepthink', label: 'DeepThink' }] };
   }
   function modeEvidence() {
     const modes = modeControls();

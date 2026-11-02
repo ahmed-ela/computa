@@ -118,6 +118,59 @@ final class SavedAdapterFailureDiagnosticTests: XCTestCase {
         XCTAssertFalse(EmbeddedWebModelTransport.isDeepSeekFirstUserFailure(["error": "conversation_changed"], provider: .deepseek))
     }
 
+    private func nullDeepSeekModeObservation() -> [String: Any] {
+        ["modeEvidence": NSNull(), "modeObservationDiagnostic": ["version": 1, "reason": "deepthink_replaced", "required": false,
+            "boundSelectionPresent": true, "boundMode": "chat", "deepThinkSelected": false, "searchSelected": false,
+            "deepThinkSameNode": false, "searchSameNode": true, "modeMatches": true,
+            "deepThinkWasConnected": false, "searchWasConnected": true,
+            "composerSameNode": true, "composerWasConnected": true, "firstBodyBound": false]]
+    }
+
+    @MainActor func testDeepSeekNullAndRequiredModeDiagnosticsPreserveFiniteFailureReason() throws {
+        let original = nullDeepSeekModeObservation()
+        let raw = try XCTUnwrap(EmbeddedWebModelTransport.deepSeekModeObservationDiagnostic(original, provider: .deepseek))
+        let value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any])
+        XCTAssertEqual(value["reason"] as? String, "deepthink_replaced")
+        XCTAssertEqual(value["modeMatches"] as? Bool, true)
+        XCTAssertEqual(value["searchSelected"] as? Bool, false)
+        XCTAssertLessThanOrEqual(raw.utf8.count, 768)
+        var required = original; var packet = try XCTUnwrap(original["modeObservationDiagnostic"] as? [String: Any])
+        packet["required"] = true; required["modeObservationDiagnostic"] = packet
+        required["error"] = "mode_unverified"; required["detail"] = "deepthink_replaced"
+        XCTAssertNotNil(EmbeddedWebModelTransport.deepSeekModeObservationDiagnostic(required, provider: .deepseek))
+        XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(required, provider: .deepseek, action: "inspect"),
+                       "action=inspect error=mode_unverified detail=deepthink_replaced")
+        required["detail"] = "search_replaced"
+        XCTAssertNil(EmbeddedWebModelTransport.deepSeekModeObservationDiagnostic(required, provider: .deepseek))
+        for provider in EmbeddedWebModelTransport.Provider.allCases where provider != .deepseek {
+            XCTAssertNil(EmbeddedWebModelTransport.deepSeekModeObservationDiagnostic(original, provider: provider))
+        }
+        var positive = original; positive["modeEvidence"] = ["selected": ["key": "chat", "label": "Chat"]]
+        XCTAssertNil(EmbeddedWebModelTransport.deepSeekModeObservationDiagnostic(positive, provider: .deepseek))
+    }
+
+    @MainActor func testDeepSeekModeObservationRejectsPrivateFieldsMalformedFlagsAndContradictoryReasons() throws {
+        let original = nullDeepSeekModeObservation()
+        let packet = try XCTUnwrap(original["modeObservationDiagnostic"] as? [String: Any])
+        let changes: [(String, Any)] = [("version", true), ("version", 2), ("reason", "PRIVATE_CANARY"),
+            ("reason", "search_replaced"), ("boundMode", "PRIVATE_CANARY"), ("boundMode", "absent"),
+            ("required", 0), ("deepThinkSelected", "false"), ("searchSelected", true),
+            ("deepThinkSameNode", true), ("modeMatches", NSNull()), ("url", "https://private.invalid/PRIVATE_CANARY")]
+        for (key, value) in changes {
+            var invalid = packet; invalid[key] = value
+            var observed = original; observed["modeObservationDiagnostic"] = invalid
+            XCTAssertNil(EmbeddedWebModelTransport.deepSeekModeObservationDiagnostic(observed, provider: .deepseek), key)
+        }
+        for key in packet.keys {
+            var invalid = packet; invalid.removeValue(forKey: key)
+            var observed = original; observed["modeObservationDiagnostic"] = invalid
+            XCTAssertNil(EmbeddedWebModelTransport.deepSeekModeObservationDiagnostic(observed, provider: .deepseek), key)
+        }
+        var observed = original
+        observed["text"] = "PRIVATE_CANARY"; observed["url"] = "https://private.invalid/PRIVATE_CANARY"
+        XCTAssertFalse(try XCTUnwrap(EmbeddedWebModelTransport.deepSeekModeObservationDiagnostic(observed, provider: .deepseek)).contains("PRIVATE_CANARY"))
+    }
+
     private func firstContainerFailure() -> [String: Any] {
         ["error": "conversation_changed", "detail": "first_container_children",
          "firstContainerDiagnostic": ["version": 1, "containerChildren": 2, "wrapperChildren": 1, "bodyChildren": 0,
@@ -251,4 +304,19 @@ final class SavedAdapterFailureDiagnosticTests: XCTestCase {
         XCTAssertEqual(EmbeddedWebModelTransport.kimiAdapterFailureDiagnostic(value, action: "discoverModels"),
             EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(value, provider: .kimi, action: "discoverModels"))
     }
+    @MainActor func testKimiEditorHitReasonsAreFiniteAndProviderScoped() {
+        for reason in ["disabled", "invalid_geometry", "outside_viewport", "ancestor_limit", "ancestor_changed", "outside_clip", "occluded"] {
+            let detail = "editor_hit_" + reason
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+                ["error": "composer_unavailable", "detail": detail], provider: .kimi, action: "sendReady"),
+                "action=sendReady error=composer_unavailable detail=\(detail)")
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+                ["error": "composer_unavailable", "detail": detail], provider: .qwen, action: "sendReady"),
+                "action=sendReady error=composer_unavailable detail=other")
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+                ["error": "composer_unavailable", "detail": detail + " PRIVATE_CANARY"], provider: .kimi, action: "sendReady"),
+                "action=sendReady error=composer_unavailable detail=other")
+        }
+    }
+
 }

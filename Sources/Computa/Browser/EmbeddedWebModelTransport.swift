@@ -538,6 +538,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var loggedGroqSendFailure = false
         var loggedGroqSendReveal = false
         var loggedSavedAdapterFailure = false
+        var loggedDeepSeekModeObservation = false
         var kimiDiscoveryProgress = KimiDiscoveryProgressLogBudget()
         var quotaDiagnosticLog = QuotaDiagnosticLogBudget()
         var modelSelectionRequested = false
@@ -779,6 +780,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var preparedEditorReadinessTransformForTesting: (@MainActor (Any?) -> Any?)?
     private var beforePageResultValidationDetailedForTesting: (@MainActor (String, Bool) async -> Void)?
     private var firstUserDiagnosticsObserverForTesting: (@MainActor ([String]) -> Void)?
+    private var deepSeekModeDiagnosticObserverForTesting: (@MainActor (String) -> Void)?
     private var routeDiscardDiagnosticsObserverForTesting: (@MainActor ([String]) -> Void)?
     private var boundCertificateDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
     private var claudeCompletionDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
@@ -888,6 +890,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setSubmissionDiagnosticsObserverForTesting(_ observer: (@MainActor (String, String) -> Void)?) {
         submissionDiagnosticsObserverForTesting = observer
+    }
+
+    func setDeepSeekModeDiagnosticObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
+        deepSeekModeDiagnosticObserverForTesting = observer
     }
 
     func setFirstUserDiagnosticsObserverForTesting(_ observer: (@MainActor ([String]) -> Void)?) {
@@ -1852,6 +1858,61 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return deepSeekFirstUserFailureDetails.contains(detail)
     }
 
+    /// A rejected mode observation, never current selection authority. The
+    /// optional JS proof can be null before a first user is visible; preserve
+    /// its finite reason before native validation throws modelUnverified.
+    static func deepSeekModeObservationDiagnostic(_ observed: [String: Any], provider: Provider) -> String? {
+        guard provider == .deepseek,
+              let packet = observed["modeObservationDiagnostic"] as? [String: Any],
+              Set(packet.keys) == ["version", "reason", "required", "boundSelectionPresent", "boundMode",
+                  "deepThinkSelected", "searchSelected", "deepThinkSameNode", "searchSameNode", "modeMatches",
+                  "deepThinkWasConnected", "searchWasConnected", "composerSameNode", "composerWasConnected", "firstBodyBound"],
+              ComputerToolArgumentContract.exactInt64(packet["version"]) == 1,
+              let reason = packet["reason"] as? String,
+              ["mode_unbound", "search_selected", "deepthink_replaced", "search_replaced", "mode_choice_changed"].contains(reason),
+              let boundMode = packet["boundMode"] as? String, ["absent", "chat", "deepthink", "other"].contains(boundMode) else { return nil }
+        var safe: [String: Any] = ["version": 1, "reason": reason, "boundMode": boundMode]
+        var flags: [String: Bool] = [:]
+        for key in ["required", "boundSelectionPresent", "deepThinkSelected", "searchSelected", "deepThinkSameNode",
+                    "searchSameNode", "modeMatches", "deepThinkWasConnected", "searchWasConnected",
+                    "composerSameNode", "composerWasConnected", "firstBodyBound"] {
+            guard let value = firstUserDiagnosticBool(packet[key]) else { return nil }
+            flags[key] = value; safe[key] = value
+        }
+        let required = flags["required"] == true, bound = flags["boundSelectionPresent"] == true
+        guard bound == (boundMode != "absent") else { return nil }
+        if required {
+            guard observed["error"] as? String == "mode_unverified", observed["detail"] as? String == reason else { return nil }
+        } else {
+            guard observed["error"] == nil, observed["modeEvidence"] is NSNull else { return nil }
+        }
+        switch reason {
+        case "mode_unbound": guard !bound else { return nil }
+        case "search_selected": guard bound, flags["searchSelected"] == true else { return nil }
+        case "deepthink_replaced": guard bound, flags["searchSelected"] == false, flags["deepThinkSameNode"] == false else { return nil }
+        case "search_replaced": guard bound, flags["searchSelected"] == false, flags["deepThinkSameNode"] == true,
+            flags["searchSameNode"] == false else { return nil }
+        case "mode_choice_changed": guard bound, flags["searchSelected"] == false, flags["deepThinkSameNode"] == true,
+            flags["searchSameNode"] == true, flags["modeMatches"] == false else { return nil }
+        default: return nil
+        }
+        guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), bytes.count <= 768,
+              let value = String(data: bytes, encoding: .utf8) else { return nil }
+        return value
+    }
+
+    private func logDeepSeekModeObservation(_ observed: [String: Any], session: Session, action: String) {
+        guard session.provider == .deepseek, session.state == "running", session.submitted,
+              session.sequence == 1, session.modelSelectionVerified, !session.loggedDeepSeekModeObservation,
+              let diagnostic = Self.deepSeekModeObservationDiagnostic(observed, provider: session.provider) else { return }
+        session.loggedDeepSeekModeObservation = true
+        let safeAction = ["inspect", "verifyModel", "stop"].contains(action) ? action : "other"
+        Self.inspectionLog.error("modeObservationDiagnostic version=1 provider=deepseek action=\(safeAction, privacy: .public) sequence=1 structure=\(diagnostic, privacy: .public)")
+        #if DEBUG
+        deepSeekModeDiagnosticObserverForTesting?(diagnostic)
+        #endif
+    }
+
     /// Failure-time layout only; never an ownership proof. Reconstruct fixed
     /// records from exact keys/types, at most four children and capped counts.
     static func deepSeekFirstContainerDiagnosticRecords(_ observed: [String: Any], provider: Provider) -> [String]? {
@@ -1913,6 +1974,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 "picker_menu_replaced", "model_row_shape", "model_choices_duplicate", "model_checked_count", "picker_not_closed",
                 "picker_menu_ambiguous", "picker_menu_labelledby", "picker_menu_scope", "picker_menu_expansion",
                 "option_close_binding", "option_close_selection",
+                "editor_hit_disabled", "editor_hit_invalid_geometry", "editor_hit_outside_viewport", "editor_hit_ancestor_limit",
+                "editor_hit_ancestor_changed", "editor_hit_outside_clip", "editor_hit_occluded",
                 "more_binding", "more_row_shape", "more_checked_count", "more_selected_label",
                 "more_aria_links_changed", "more_boundary_spent", "more_center_changed",
                 "more_center_invalid", "more_center_occluded", "more_point_outside", "more_claim_changed",
@@ -4897,6 +4960,30 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         else if let token, let uuid = UUID(uuidString: token) {
             uuidShape = token == uuid.uuidString.lowercased() ? "lower" : token == uuid.uuidString ? "upper" : "mixed"
         } else { uuidShape = "other" }
+        // Fixed shape metadata only. Reserved words are a diagnostic vocabulary,
+        // not evidence that Qwen supports these routes and never an allowlist.
+        let segments = path.split(separator: "/", maxSplits: 3).count
+        let segmentCount = segments > 2 ? "3plus" : String(segments)
+        let tokenBytes = rawToken.map { $0.utf8.count > 128 ? "over128" : String($0.utf8.count) } ?? "absent"
+        let tokenChars: String
+        if rawToken == nil || rawToken?.isEmpty == true { tokenChars = "absent" }
+        else if rawToken!.utf8.count > 128 { tokenChars = "oversized" }
+        else if let token, !token.isEmpty {
+            let bytes = Array(token.utf8)
+            if bytes.allSatisfy({ (48...57).contains($0) }) { tokenChars = "digits" }
+            else if bytes.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) { tokenChars = "lower_hex" }
+            else if bytes.allSatisfy({ (48...57).contains($0) || (65...70).contains($0) }) { tokenChars = "upper_hex" }
+            else if bytes.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) }) { tokenChars = "ascii_alnum" }
+            else if bytes.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95 }) { tokenChars = "ascii_slug" }
+            else { tokenChars = "other" }
+        } else { tokenChars = "other" }
+        let tokenPrefix: String
+        if rawToken == nil || rawToken?.isEmpty == true { tokenPrefix = "absent" }
+        else if let token,
+                let prefix = ["new", "temp", "temporary", "local", "pending", "undefined", "null"].first(where: {
+                    token == $0 || token.hasPrefix($0 + "-") || token.hasPrefix($0 + "_") || token.hasPrefix($0 + ":")
+                }) { tokenPrefix = prefix }
+        else { tokenPrefix = "other" }
         let query = components?.percentEncodedQuery
         let queryShape = query.map { $0.isEmpty ? "empty" : "present" } ?? "absent"
         let queryKey: String
@@ -4909,7 +4996,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         } else { queryKey = query == nil ? "absent" : "empty" }
         let userInfo = url?.user != nil || url?.password != nil
         let fragment = components?.percentEncodedFragment != nil
-        return "scheme=\(scheme) host=\(host) port=\(port) userInfo=\(userInfo) path=\(pathShape) pathEncoded=\(pathEncoded) trailingSlash=\(trailingSlash) uuid=\(uuidShape) query=\(queryShape) queryKey=\(queryKey) fragment=\(fragment)"
+        return "scheme=\(scheme) host=\(host) port=\(port) userInfo=\(userInfo) path=\(pathShape) pathEncoded=\(pathEncoded) trailingSlash=\(trailingSlash) uuid=\(uuidShape) segments=\(segmentCount) tokenBytes=\(tokenBytes) tokenChars=\(tokenChars) tokenPrefix=\(tokenPrefix) query=\(queryShape) queryKey=\(queryKey) fragment=\(fragment)"
     }
 
     private func rejectWebsiteBlocker(_ session: Session, action: String, phase: String) throws {
@@ -4941,7 +5028,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         Self.inspectionLog.error("websiteBlocked provider=\(session.provider.rawValue, privacy: .public) action=\(action, privacy: .public) phase=\(phase, privacy: .public) sequence=\(session.sequence) code=\(failure.diagnosticCode ?? "unknown", privacy: .public) firstFailure=\(session.terminalFailure == nil) navigation={\(navigation, privacy: .public)}")
         if failure == .unexpectedPage(.qwen) {
             let route = Self.unexpectedQwenRouteDiagnostic(url)
-            Self.inspectionLog.error("unexpectedRouteDiagnostic version=1 provider=qwen action=\(action, privacy: .public) phase=\(phase, privacy: .public) sequence=\(session.sequence) \(route, privacy: .public)")
+            Self.inspectionLog.error("unexpectedRouteDiagnostic version=2 provider=qwen action=\(action, privacy: .public) phase=\(phase, privacy: .public) sequence=\(session.sequence) \(route, privacy: .public)")
         }
         let firstFailure = session.terminalFailure == nil
         let recorded = recordedWebsiteBlocker(failure, session: session)
@@ -5976,6 +6063,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     }
                 }
             }
+            logDeepSeekModeObservation(observed, session: session, action: action)
             logClaudeRemountHostFailure(observed, session: session, action: action,
                                        generation: generation, allowsBlockedProvider: allowBlockedProvider)
             if ["temporary_mode_unavailable", "temporary_mode_unverified"].contains(error),
@@ -6733,7 +6821,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             logModelMismatch(observation, session: session, action: action, stage: "evidence_validation")
             throw Failure.modelMismatch
         }
-        catch { throw Failure.modelUnverified }
+        catch {
+            logDeepSeekModeObservation(observation, session: session, action: action)
+            throw Failure.modelUnverified
+        }
         guard session.selectionEvidence.map({ $0.isSameResolvedSelection(as: current) }) ?? true else {
             logModelMismatch(observation, session: session, action: action, stage: "pinned_selection")
             throw Failure.modelMismatch

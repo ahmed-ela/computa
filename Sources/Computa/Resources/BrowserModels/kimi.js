@@ -139,6 +139,43 @@ try {
   if (input.expectedConversation != null && input.expectedConversation !== state.canonical)
     c.fail('conversation_changed', 'conversation_url');
 
+  function editorHitFailure(editor) {
+    if (!c.enabled(editor)) return 'disabled';
+    if (typeof editor.getBoundingClientRect !== 'function' || typeof document.elementFromPoint !== 'function') return 'invalid_geometry';
+    const rect = node => {
+      const r = node.getBoundingClientRect(), right = r.left + r.width, bottom = r.top + r.height;
+      return [r.left,r.top,r.width,r.height,right,bottom].every(Number.isFinite) && r.width > 0 && r.height > 0
+        ? { left:r.left, top:r.top, right, bottom } : null;
+    };
+    const r = rect(editor), width = window.innerWidth, height = window.innerHeight;
+    if (!r || ![width,height].every(Number.isFinite) || width <= 0 || height <= 0) return 'invalid_geometry';
+    let left = Math.max(0,r.left), top = Math.max(0,r.top), right = Math.min(width,r.right), bottom = Math.min(height,r.bottom);
+    if (right <= left || bottom <= top) return 'outside_viewport';
+    const seen = new Set(); let ancestor = editor.parentElement, reachedRoot = false;
+    while (ancestor) {
+      if (seen.size >= 64) return 'ancestor_limit';
+      if (seen.has(ancestor) || !ancestor.isConnected) return 'ancestor_changed';
+      seen.add(ancestor);
+      const style = getComputedStyle(ancestor), values = [style.overflowX,style.overflowY];
+      if (!values.every(value => ['visible','hidden','clip','scroll','auto'].includes(value))) return 'invalid_geometry';
+      const clipX = values[0] !== 'visible', clipY = values[1] !== 'visible';
+      if (clipX || clipY) {
+        const clip = rect(ancestor);
+        if (!clip) return 'invalid_geometry';
+        // Transformed border boxes conservatively bound the actual overflow
+        // clip. They choose one candidate point only: the final browser hit
+        // test must still prove it belongs to this exact editor, not an overlay.
+        if (clipX) { left = Math.max(left,clip.left); right = Math.min(right,clip.right); }
+        if (clipY) { top = Math.max(top,clip.top); bottom = Math.min(bottom,clip.bottom); }
+        if (right <= left || bottom <= top) return 'outside_clip';
+      }
+      if (ancestor === document.documentElement) { reachedRoot = true; break; }
+      ancestor = ancestor.parentElement;
+    }
+    if (!reachedRoot || !editor.isConnected || !document.documentElement.contains(editor)) return 'ancestor_changed';
+    const x = left + (right-left)/2, y = top + (bottom-top)/2;
+    return editor.contains(document.elementFromPoint(x,y)) ? null : 'occluded';
+  }
   function composerText(editor) {
     // Live Lexical insertText settles asynchronously into one P[dir=ltr]
     // containing a data-lexical-text span whose text retains literal newlines.
@@ -789,7 +826,8 @@ try {
   if (input.action === 'verifyModel') return { ...initial.output, modelEvidence: evidence };
   if (input.action === 'stop') return { ...initial.output, stopped: false }; // No Stop control observed yet.
   const form = initial.form;
-  if (!c.enabled(form.editor) || !c.hit(form.editor)) c.fail('composer_unavailable');
+  const editorHitReason = editorHitFailure(form.editor);
+  if (editorHitReason) c.fail('composer_unavailable', 'editor_hit_' + editorHitReason);
   if (input.action === 'prepare') {
     if (!fresh() || state.prepared) c.fail('composer_not_empty');
     state.prepared = { editor: form.editor, scope: form.scope, send: form.send };

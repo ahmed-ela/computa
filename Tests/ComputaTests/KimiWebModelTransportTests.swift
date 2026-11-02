@@ -754,6 +754,76 @@ final class KimiWebModelTransportTests: XCTestCase {
         try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
     }
 
+    func testOverflowClippedLongEditorKeepsExactPromptAndOneSend() async throws {
+        for transformed in [false, true] {
+            let fixture = try Fixture(); defer { fixture.shutdown() }
+            let token = try await start(fixture)
+            _ = try await evaluate(fixture.view, "kimiFixture.options.lexicalNeverSettle = true; return true;")
+            var geometry: [String: Any]?
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                if action == "insert" {
+                    geometry = try? await self.installLongEditorClip(fixture, transformed: transformed, overlay: false)
+                }
+            }
+            let prompt = String(repeating: "Synthetic long line with literal \"quotes\".\n", count: 600)
+            _ = try await call(fixture, "webProviderSend", token, prompt: prompt)
+            _ = try await wait(fixture, token, state: "complete")
+            XCTAssertEqual(geometry?["oldPointHitsEditor"] as? Bool, false, "Must reproduce the viewport-only false negative")
+            XCTAssertEqual(geometry?["clipCenterHitsEditor"] as? Bool, true)
+            XCTAssertEqual(geometry?["editorExceedsClip"] as? Bool, true)
+            XCTAssertEqual(geometry?["sameEditor"] as? Bool, true)
+            try await assertInsertionCounts(fixture, settlements: 1, sends: 1)
+            let prompts = try await evaluate(fixture.view, "return fixturePrompts;") as? [String]
+            XCTAssertEqual(prompts?.count, 1)
+            XCTAssertTrue(prompts?.first?.hasPrefix(prompt + "\n\nComputa session marker: ") == true)
+            let finished = try await call(fixture, "webProviderFinish", token)
+            XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+        }
+    }
+
+    func testOverlayOverClippedLongEditorPreventsSendWithoutReinsertion() async throws {
+        let fixture = try Fixture(); defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        _ = try await evaluate(fixture.view, "kimiFixture.options.lexicalNeverSettle = true; return true;")
+        var geometry: [String: Any]?
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "insert" { geometry = try? await self.installLongEditorClip(fixture, transformed: false, overlay: true) }
+        }
+        do {
+            _ = try await call(fixture, "webProviderSend", token, prompt: String(repeating: "Synthetic long line.\n", count: 800))
+            XCTFail("An actual overlay must prevent Send")
+        } catch let failure as EmbeddedWebModelTransport.Failure {
+            XCTAssertEqual(failure, .editorFailure("composer_unavailable"))
+        }
+        XCTAssertEqual(geometry?["oldPointHitsEditor"] as? Bool, false)
+        XCTAssertEqual(geometry?["clipCenterHitsEditor"] as? Bool, false)
+        try await assertInsertionCounts(fixture, settlements: 1, sends: 0)
+        try await assertCounts(fixture, sends: 0, headers: 0, selections: 0, confirmations: 0)
+    }
+
+    private func installLongEditorClip(_ fixture: Fixture, transformed: Bool, overlay: Bool) async throws -> [String: Any] {
+        let result = try await evaluate(fixture.view, """
+            const editor = document.querySelector('.chat-input-editor'), clip = editor.parentElement;
+            kimiFixture.settleInput();
+            Object.assign(editor.style, {minHeight:'0',maxHeight:'none',height:'auto',width:'303px',padding:'0',border:'0',overflow:'visible',lineHeight:'18px'});
+            Object.assign(clip.style, {position:'fixed',left:'36px',top:'208.5px',width:'303px',height:'170px',overflow:'auto',zIndex:'5',
+              transform: '\(transformed ? "translate(11px,7px) scale(.9)" : "none")'});
+            clip.scrollTop = clip.scrollHeight;
+            const r = editor.getBoundingClientRect(), a = clip.getBoundingClientRect();
+            if (\(overlay ? "true" : "false")) {
+              const cover = document.createElement('div');
+              Object.assign(cover.style,{position:'fixed',left:a.left+'px',top:a.top+'px',width:a.width+'px',height:a.height+'px',zIndex:'10000',background:'white'});
+              document.body.append(cover);
+            }
+            const x = (Math.max(0,r.left)+Math.min(innerWidth,r.right))/2;
+            const y = (Math.max(0,r.top)+Math.min(innerHeight,r.bottom))/2;
+            return {oldPointHitsEditor:editor.contains(document.elementFromPoint(x,y)),
+              clipCenterHitsEditor:editor.contains(document.elementFromPoint(a.left+a.width/2,a.top+a.height/2)),
+              editorExceedsClip:r.height>a.height*20, sameEditor:editor===document.querySelector('.chat-input-editor')};
+            """)
+        return try XCTUnwrap(result as? [String: Any])
+    }
+
     func testDelayedLexicalCommitWaitsForExactReadbackWithoutReinserting() async throws {
         let fixture = try Fixture(); defer { fixture.shutdown() }
         let token = try await start(fixture)

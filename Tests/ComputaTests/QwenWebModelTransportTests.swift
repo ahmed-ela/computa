@@ -35,7 +35,7 @@ final class QwenWebModelTransportTests: XCTestCase {
             for fragment in fragments { XCTAssertTrue(result.split(separator: " ").contains(Substring(fragment)), fragment) }
             XCTAssertEqual(EmbeddedWebModelTransport.Provider.qwen.accepts(raw), admitted,
                 "Diagnostic classification never grants route authority")
-            XCTAssertLessThanOrEqual(result.utf8.count, 256)
+            XCTAssertLessThanOrEqual(result.utf8.count, 384)
             for forbidden in ["PRIVATE_", "private-", "11111111", "http://", "https://", "chat.qwen.ai"] {
                 XCTAssertFalse(result.contains(forbidden))
             }
@@ -58,16 +58,48 @@ final class QwenWebModelTransportTests: XCTestCase {
                 let pair = field.split(separator: "=", maxSplits: 1)
                 return (String(pair[0]), String(pair[1]))
             })
-            XCTAssertEqual(Set(fields.keys), ["scheme", "host", "port", "userInfo", "path", "pathEncoded", "trailingSlash", "uuid", "query", "queryKey", "fragment"])
+            XCTAssertEqual(Set(fields.keys), ["scheme", "host", "port", "userInfo", "path", "pathEncoded", "trailingSlash", "uuid", "segments", "tokenBytes", "tokenChars", "tokenPrefix", "query", "queryKey", "fragment"])
             XCTAssertEqual(fields["queryKey"], expectedKey)
             XCTAssertTrue(allowedKeys.contains(try XCTUnwrap(fields["queryKey"])))
             XCTAssertFalse(result.contains("PRIVATE"))
             XCTAssertFalse(result.contains(String(repeating: "X", count: 128)))
-            XCTAssertLessThanOrEqual(result.utf8.count, 256)
+            XCTAssertLessThanOrEqual(result.utf8.count, 384)
             XCTAssertFalse(EmbeddedWebModelTransport.Provider.qwen.accepts(url.absoluteString))
         }
         XCTAssertEqual(EmbeddedWebModelTransport.unexpectedQwenRouteDiagnostic(nil),
-            "scheme=absent host=absent port=absent userInfo=false path=absent pathEncoded=false trailingSlash=false uuid=absent query=absent queryKey=absent fragment=false")
+            "scheme=absent host=absent port=absent userInfo=false path=absent pathEncoded=false trailingSlash=false uuid=absent segments=0 tokenBytes=absent tokenChars=absent tokenPrefix=absent query=absent queryKey=absent fragment=false")
+    }
+
+    func testUnexpectedRouteTokenShapesStayFiniteAndNeverAdmitUnknownConversations() throws {
+        let cases: [(String, [String])] = [
+            ("new", ["segments=2", "tokenBytes=3", "tokenChars=ascii_alnum", "tokenPrefix=new"]),
+            ("undefined", ["tokenBytes=9", "tokenPrefix=undefined"]),
+            ("null", ["tokenBytes=4", "tokenPrefix=null"]),
+            ("temp-PRIVATE_TOKEN", ["tokenChars=ascii_slug", "tokenPrefix=temp"]),
+            ("temporary_PRIVATE_TOKEN", ["tokenPrefix=temporary"]),
+            ("local:PRIVATE_TOKEN", ["tokenChars=other", "tokenPrefix=local"]),
+            ("pending-PRIVATE_TOKEN", ["tokenPrefix=pending"]),
+            ("00000000000000000000000000000000", ["tokenBytes=32", "tokenChars=digits", "tokenPrefix=other"]),
+            ("abcdefabcdefabcdefabcdefabcdefab", ["tokenBytes=32", "tokenChars=lower_hex"]),
+            ("ABCDEFABCDEFABCDEFABCDEFABCDEFAB", ["tokenBytes=32", "tokenChars=upper_hex"]),
+            ("privateToken123", ["tokenChars=ascii_alnum", "tokenPrefix=other"]),
+            ("private-token_123", ["tokenChars=ascii_slug", "tokenPrefix=other"]),
+            ("newspaper-private", ["tokenPrefix=other"]),
+            ("%C3%A9-private", ["pathEncoded=true", "tokenChars=other", "tokenPrefix=other"]),
+            ("private/extra", ["segments=3plus"]),
+            (String(repeating: "x", count: 4096), ["tokenBytes=over128", "tokenChars=oversized", "tokenPrefix=other"]),
+        ]
+        for (token, fragments) in cases {
+            let url = try XCTUnwrap(URL(string: "https://chat.qwen.ai/c/" + token))
+            let result = EmbeddedWebModelTransport.unexpectedQwenRouteDiagnostic(url)
+            for fragment in fragments { XCTAssertTrue(result.split(separator: " ").contains(Substring(fragment)), fragment) }
+            XCTAssertFalse(EmbeddedWebModelTransport.Provider.qwen.accepts(url.absoluteString),
+                "Shape diagnostics must never authorize an unobserved route, including reserved-looking tokens")
+            XCTAssertLessThanOrEqual(result.utf8.count, 384)
+            for forbidden in ["PRIVATE_TOKEN", "privateToken123", "private-token_123", "newspaper-private", "abcdefabcdef", "ABCDEFABCDEF", String(repeating: "x", count: 128), "https://", "chat.qwen.ai"] {
+                XCTAssertFalse(result.contains(forbidden), "No raw conversation token or origin is retained")
+            }
+        }
     }
 
     func testServerReleasesEachObservedModelStreamOnlyAfterDurableOwnedDeletion() async throws {

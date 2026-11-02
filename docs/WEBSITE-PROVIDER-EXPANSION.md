@@ -1,15 +1,18 @@
 # Kimi, Qwen and DeepSeek website adapters
 
-Status: candidate build392, 2026-11-02 UTC. Installed 0.8.0 (391), source
-`017b6fe5b97229bcace6880b2464fa07f17d7175`, completes Kimi and Qwen discovery.
-Fresh tasks still fail Kimi picker binding, Qwen's route check after submit,
-and DeepSeek's initial message shape. The candidate handles a claimed Kimi
-option-close transition and DeepSeek's observed empty decoration, preserving
-exact message, model/mode, route and action checks. Qwen's rejected route needs
-bounded diagnostics; generic runtime high-demand wording is not capacity evidence.
-All three are enabled for controlled pilots; installed responses, cleanup and
-tool workflows remain unqualified.
-PR #20 remains draft.
+Status: installed 0.8.0 (392), 2026-11-02 UTC, source
+`a7d4d774659ab6b028e8000b9870e6d95bd58f10`. All three fresh native marker
+checks failed: Kimi Instant before Send, Qwen Plus at the post-submit route
+check, and DeepSeek Chat after verified mode selection and submission. No
+accepted answer or tool result was produced. Qwen's terminal error now preserves
+its exact unexpected-page cause; the generic high-demand wording is gone.
+DeepSeek's detailed first-container and replaced-toggle observations came from
+cleanup, after the primary failures, and do not establish those primary causes.
+Kimi, Qwen and DeepSeek are enabled for controlled pilots; native responses,
+verified saved-chat cleanup and tool workflows remain unqualified. Candidate393
+fixes a reproduced Kimi editor-clipping error and adds bounded Qwen/DeepSeek
+diagnostics, without new route or ownership acceptance. Its source checks pass;
+no build393 installation or live result is claimed. PR #20 remains draft.
 
 The requested route is each provider's signed-in website in Computa's browser.
 Qwen's website is separate from Alibaba's existing Qwen 3.7 Flash API option.
@@ -477,14 +480,20 @@ also examines raw protocol errors, since the app's saved failure history can
 replace a generic engine message and otherwise make a UI-only check misleading.
 
 One fresh DeepSeek Chat task verified Chat mode with Search off and its
-submission, then failed first-user ownership after 1,268 ms. Its failure-time
-packet shows two container children: the first DIV contains the complete prompt
-leaf; the second is an empty DIV with no element children. Both entire-root
-and entire-container text equal the prompt leaf. This isolates the child-count
-assumption, rather than a changed or truncated prompt. Candidate392 permits
-only that empty noninteractive decoration beside the existing prompt wrapper;
-unique body, whole-text equality, exact digest/private marker, stable physical
-nodes, canonical route and all action/deletion guards remain unchanged.
+submission, then failed after 1,268 ms. The primary provider failure was recorded
+at 11:08:19.319Z and the raw engine terminated at 11:08:19.332Z. The retained
+native error identifies `modelUnverified`; its precise initial DOM observation
+was not retained. The `first_container_children` packet arrived later, at
+11:08:19.415Z, during cleanup. It shows two container children: the first DIV
+contains the complete prompt leaf; the second is an empty DIV with no element
+children. Entire-root and entire-container text equal the prompt leaf.
+Candidate392 permits only that empty noninteractive decoration beside the
+existing prompt wrapper while preserving unique body, whole-text equality,
+exact digest/private marker, physical nodes, canonical route and all action
+checks. This fixes the observed cleanup-read blocker; it is not evidence of
+fixing the earlier primary failure. Optional mode-evidence reads can return
+no proof for several distinct conditions without retaining their reason, so
+a source path is identified but no particular initial condition is established.
 
 All three failed native records are preserved. None produced an accepted answer
 or tool result, and later website rendering does not change their outcome.
@@ -503,6 +512,71 @@ and prompt projection were not weakened. The passing engine gate verifies the
 raw terminal error JSON, no retry notification, one provider start/Send/finish
 and zero tools or assistant answers. These are native-action counts, not a count
 of all HTTP requests. Installed provider qualification remains pending.
+
+### Installed392 results and bounded candidate393 evidence
+
+Build392 was signed, installed and matched to source
+`a7d4d774659ab6b028e8000b9870e6d95bd58f10`, its four artifact/install receipts,
+and the running executable (PID5490). One fresh zero-tool marker was submitted
+per selection; these failed records are retained separately:
+
+| Selection | Duration | Observed failure | Cleanup |
+| --- | ---: | --- | --- |
+| Kimi Instant | 2,159 ms | `sendReady / composer_unavailable`, sequence0; no website Send | Closed, `not_created` |
+| Qwen3.7-Plus | 3,048 ms | `unexpected_website_page` at `submit / after`, sequence1 | Unconfirmed |
+| DeepSeek Chat | 1,343 ms | Primary `browser_model_error` after mode and submission proof; detailed initial condition not retained | Unconfirmed |
+
+Kimi startup discovery separately rejected `picker_menu_scope`. The marker
+still reached the pre-Send readiness check, where the exact unavailable control
+was not retained; these observations must not be collapsed into one cause.
+
+Qwen's first rejection was at 11:49:36.529Z; cleanup repeated the same finite
+route shape 97 ms later. Its expected HTTPS origin had a `/c/` path whose token
+was not a UUID, with no encoding, trailing slash, port, query, fragment or user
+info. Earlier direct Plus/Max captures showed only lowercase UUID routes. The
+actual token and whether it represents a transient provisional conversation
+remain unknown. Send may already have dispatched; it was not replayed. The
+native terminal now preserves the full `unexpected_website_page` model error,
+`retryable: false` and `required_action: inspect_website`, without high-demand
+text. No selection/submission proof or answer was released.
+
+DeepSeek's primary journal failure was recorded at 11:51:48.535Z and its engine
+terminated at 11:51:48.550Z. The `deepthink_replaced` diagnostic arrived at
+11:51:48.605Z during cleanup, after an exact first-body read. It establishes
+that the required cleanup read saw a different DeepThink node, not which
+condition caused the initial optional mode-evidence read to fail. Current mode,
+Search-control replacement and old composer/control connectivity are not all
+established by that packet. No mode repair, control adoption or Send replay was
+performed.
+
+Candidate393 stages finite Qwen segment/token length, character-class and
+reserved-prefix classifications without raw identifiers or broader admission.
+DeepSeek's candidate retains the first negative optional mode-evidence packet
+before cleanup can obscure it, using fixed booleans and reason enums only.
+These are diagnostic proposals, not demonstrated fixes or installed results.
+Kimi's bounded unsent composer inspection is separate from provider qualification.
+One normal empty Kimi tab received a 21,723-character synthetic draft, without
+Send. The settled text matched its exact SHA-256 and retained the same editor,
+scope and Send controls: one `P[dir=ltr]`, one lexical span and one text node.
+The editor extended above the viewport inside a scrolling ancestor. The current
+viewport-only hit point was outside that ancestor's visible area; its center
+hit the same editor. Candidate393 corrects this editor-only clipping calculation
+and still requires a topmost hit inside the exact editor. Native confirmation
+remains pending; this probe alone does not prove the cause of the earlier task.
+The synthetic draft was cleared, no conversation was created, the test tab was
+closed, and both temporary Inspector settings were restored.
+Candidate393 passed 91 distinct native tests and 163 JavaScript/resource/version
+tests (4,831 assertions). The real WebKit regressions reproduce the old hit-test
+failure with a long exact draft in ordinary and transformed scroll containers,
+then verify one Send and owned deletion. A real overlay still prevents Send and
+reinsertion. Its first run expected the wrong native error variant; correcting
+only the test to assert the existing `editorFailure("composer_unavailable")`
+made that focused rerun pass. The initial failure log is retained. DeepSeek's
+same-read diagnostic regression preserves its initial remount reason through
+later cleanup, with unchanged mode rejection and action counts.
+The five prepared browser/terminal/file fixtures remain unstarted until the
+corresponding native response and durable cleanup gates pass. Qwen Max and
+DeepThink were not submitted in this build392 marker set.
 
 ### Direct website observations before native qualification
 
@@ -551,9 +625,10 @@ developer setting were restored after the approved two-message-per-provider scop
 
 ## Remaining gates
 
-1. Verify Kimi's fixed hover sequence in a fresh installed discovery, then
-   require an Instant reply and exact saved-chat deletion before tool workflows.
-2. Verify Qwen/DeepSeek's installed choices with fresh replies and local workflows.
+1. Resolve Kimi's pre-Send composer readiness failure and separate startup menu
+   rejection; require an Instant reply and exact saved-chat deletion before tools.
+2. Capture Qwen's unknown post-submit route and DeepSeek's first negative mode
+   observation, then verify fresh responses and cleanup without replaying failures.
 3. Verify DeepSeek's completion signal while an actual response is still streaming.
 4. Preserve the same negative fixtures for route/model changes, duplicate
    controls, uncertain Send, lost ownership and delayed/unconfirmed deletion.

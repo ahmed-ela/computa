@@ -40,12 +40,16 @@ Existing Chrome and native desktop tooling retain their separate behavior.
 
 - [ ] Add and qualify the three signed-in websites, separately from Alibaba's
   existing Qwen API integration. Kimi Instant, Qwen3.7-Plus/Qwen3.8-Max and
-  DeepSeek Chat/DeepThink are enabled for controlled pilots. Installed391
-  completes Kimi/Qwen discovery. Kimi still fails task picker binding;
-  Qwen rejects a route after submit and DeepSeek rejects an empty decoration
-  beside the exact first message. Candidate392 addresses the observed layout
-  and claimed option-close transitions and improves Qwen route/error diagnostics;
-  live native qualification and durable cleanup remain pending.
+  DeepSeek Chat/DeepThink are enabled for controlled pilots. Installed392
+  failed all three fresh native markers: Kimi Instant before Send (2,159 ms),
+  Qwen Plus on a non-UUID `/c/` route after submit (3,048 ms), and DeepSeek Chat
+  after verified mode/submission (1,343 ms). No answer or tool result was accepted;
+  Qwen and DeepSeek cleanup remains unconfirmed. DeepSeek's391 empty decoration
+  and392 replaced-toggle packets came from cleanup after the primary errors,
+  so neither establishes the primary cause. Qwen's exact terminal error is now
+  preserved instead of generic high demand. Candidate393 diagnostics target
+  the missing route/mode evidence without broadening acceptance; native replies,
+  durable cleanup and tool workflows remain unqualified.
   Discover concrete models from each live picker, verify the exact submitted
   message and final response, and delete only the owned test conversation.
   Kimi Instant returned direct synthetic markers; build382 Qwen3.7-Plus and
@@ -58,7 +62,7 @@ Existing Chrome and native desktop tooling retain their separate behavior.
 - [ ] Audit the remaining terminal website HTTP403/409 mappings against the
   bundled runtime's outer retry policy. Distinguish repeated HTTP attempts from
   browser action replay; existing admission and ownership gates are separate.
-  Candidate392 corrects the observed unexpected-page case only.
+  Installed392 corrects the observed unexpected-page error presentation only.
 
 ## Claude website-model qualification
 
