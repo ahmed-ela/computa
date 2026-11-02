@@ -2984,10 +2984,14 @@ final class WebsiteBenchmarkCaptureLease: @unchecked Sendable {
 /// Provider/model admission remains with each caller; this grants no authority.
 enum WebsiteSyntheticFirstRequest {
     static func matches(_ request: WebModelResponseCodec.Request, expectedUserText: String) -> Bool {
-        guard request.continuationRequest.count <= WebModelResponseCodec.maximumPromptBytes,
-              APIModelCorrectionJSON.isUnambiguous(request.continuationRequest),
-              let object = try? JSONSerialization.jsonObject(with: request.continuationRequest) as? [String: Any],
-              object["model"] as? String == request.model,
+        matches(request.continuationRequest, model: request.model, expectedUserText: expectedUserText)
+    }
+
+    static func matches(_ data: Data, model: String, expectedUserText: String) -> Bool {
+        guard data.count <= WebModelResponseCodec.maximumPromptBytes,
+              APIModelCorrectionJSON.isUnambiguous(data),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["model"] as? String == model,
               ["previous_response_id", "conversation", "conversation_id", "response_id"].allSatisfy({ object[$0] == nil || object[$0] is NSNull }),
               let input = object["input"] as? [[String: Any]], (2...34).contains(input.count) else { return false }
         // Top-level instructions are engine/native-owned and remain in the captured

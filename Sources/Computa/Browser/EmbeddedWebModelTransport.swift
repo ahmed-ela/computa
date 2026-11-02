@@ -334,7 +334,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .usageLimited(let provider): "\(provider.displayName)'s website usage limit has been reached. After your account's limit resets, restart Computa, then start a fresh task."
             case .humanVerificationRequired(let provider): "\(provider.displayName) has a saved or current website-verification block. Check its website in Computa's built-in browser and resolve any challenge shown. Once the page is clear, refresh website models before retrying. No prompt was replayed."
             case .unexpectedPage(let provider): "\(provider.displayName)'s website opened an unexpected page. Check its page in Computa's built-in browser before retrying. No prompt was replayed."
-            case .preparationDeadline: "The website did not prepare a verified temporary or incognito chat before the 45-second deadline. This website inference was not submitted."
+            case .preparationDeadline: "The website did not prepare a verified chat session before the 45-second deadline. This website inference was not submitted."
             case .deadline: "The website did not finish its response before the five-minute deadline."
             }
         }
@@ -513,6 +513,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var loggedGroqSendFailure = false
         var loggedGroqSendReveal = false
         var loggedKimiAdapterFailure = false
+        var kimiDiscoveryProgress = KimiDiscoveryProgressLogBudget()
         var quotaDiagnosticLog = QuotaDiagnosticLogBudget()
         var modelSelectionRequested = false
         var modelSelectionVerified = false
@@ -627,6 +628,60 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let modernMarkers: Int, logicalAnswers: Int, scopedCopies: Int, enabledCopies: Int, depth: Int
     }
 
+    /// Only finite picker state, never model/response/ownership evidence.
+    struct KimiDiscoveryProgressDiagnostic: Hashable {
+        enum Phase: String, CaseIterable { case unclaimed, opening, moreOpening, moreClosing, selected, verifying, closing, verified, other }
+        let phase: Phase
+        let mainMenuPresent: Bool, mainExpanded: Bool, mainCollapsed: Bool
+        let submenuClaimed: Bool, submenuPresent: Bool, submenuExpanded: Bool, submenuCollapsed: Bool
+
+        init?(_ raw: Any?) {
+            let flags = ["mainMenuPresent", "mainExpanded", "mainCollapsed", "submenuClaimed",
+                         "submenuPresent", "submenuExpanded", "submenuCollapsed"]
+            guard let value = raw as? [String: Any], Set(value.keys) == Set(flags + ["phase"]),
+                  let rawPhase = value["phase"] as? String, let phase = Phase(rawValue: rawPhase) else { return nil }
+            var parsed: [String: Bool] = [:]
+            for key in flags {
+                guard let flag = value[key] as? NSNumber, CFGetTypeID(flag) == CFBooleanGetTypeID() else { return nil }
+                parsed[key] = flag.boolValue
+            }
+            self.phase = phase
+            mainMenuPresent = parsed["mainMenuPresent"]!; mainExpanded = parsed["mainExpanded"]!; mainCollapsed = parsed["mainCollapsed"]!
+            submenuClaimed = parsed["submenuClaimed"]!; submenuPresent = parsed["submenuPresent"]!
+            submenuExpanded = parsed["submenuExpanded"]!; submenuCollapsed = parsed["submenuCollapsed"]!
+        }
+
+        var logFields: String {
+            "phase=\(phase.rawValue) mainMenuPresent=\(mainMenuPresent) mainExpanded=\(mainExpanded) mainCollapsed=\(mainCollapsed) submenuClaimed=\(submenuClaimed) submenuPresent=\(submenuPresent) submenuExpanded=\(submenuExpanded) submenuCollapsed=\(submenuCollapsed)"
+        }
+    }
+
+    /// Distinct-state deduplication has a fixed budget. Even when it is spent,
+    /// retain one latest finite observation for the pre-cleanup terminal record.
+    struct KimiDiscoveryProgressLogBudget {
+        private var seen = Set<KimiDiscoveryProgressDiagnostic>()
+        private var latest: KimiDiscoveryProgressDiagnostic?
+        private var finished = false
+        mutating func observe(_ diagnostic: KimiDiscoveryProgressDiagnostic) -> String? {
+            guard !finished else { return nil }
+            latest = diagnostic
+            guard seen.count < 12, seen.insert(diagnostic).inserted else { return nil }
+            return diagnostic.logFields
+        }
+        mutating func finish() -> String? {
+            guard !finished else { return nil }
+            finished = true
+            return latest?.logFields
+        }
+    }
+
+    static func removeKimiDiscoveryProgressDiagnostic(from observation: inout [String: Any],
+        provider: Provider, action: String) -> KimiDiscoveryProgressDiagnostic? {
+        let raw = observation.removeValue(forKey: "discoveryProgressDiagnostic")
+        guard provider == .kimi, ["discoverModels", "selectModel"].contains(action) else { return nil }
+        return KimiDiscoveryProgressDiagnostic(raw)
+    }
+
     /// Diagnostic-only budget: two changed progress shapes, a reserved first
     /// idle-incomplete shape, and one completion per acknowledged submission.
     /// Old observations cannot renew it; unknown busy state is not idle.
@@ -702,6 +757,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var claudeCompletionDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
     private var submissionDiagnosticsObserverForTesting: (@MainActor (String, String) -> Void)?
     private var firstUserStructureEmissionObserverForTesting: (@MainActor (Bool, String) -> Void)?
+    private var kimiDiscoveryProgressObserverForTesting: (@MainActor (String) -> Void)?
     private var modelDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
     private var claudeRemountHostObserverForTesting: (@MainActor (String) -> Void)?
     private var adapterTimeoutObserverForTesting: (@MainActor (String) -> Void)?
@@ -842,6 +898,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setModelValidationObserverForTesting(_ observer: (@MainActor (ModelValidationObservationForTesting) -> Void)?) {
         modelValidationObserverForTesting = observer
+    }
+
+    func setKimiDiscoveryProgressObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
+        kimiDiscoveryProgressObserverForTesting = observer
     }
 
     func setModelDiagnosticsObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
@@ -1615,6 +1675,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
             throw preparationFailure(session)
         } catch {
+            logKimiDiscoveryTerminal(session, error: error)
             recordProviderGate(error, provider: provider)
             if closed { throw error }
             let cleanup = await finish(session, cancel: true)
@@ -1788,6 +1849,29 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             Self.inspectionLog.notice("sendFailure provider=groq \(diagnostic, privacy: .public)")
         }
         return .editorFailure(diagnostic)
+    }
+
+    private func logKimiDiscoveryProgress(_ diagnostic: KimiDiscoveryProgressDiagnostic?, session: Session) {
+        guard session.provider == .kimi, session.isDiscovery, !session.submitted,
+              let diagnostic, let fields = session.kimiDiscoveryProgress.observe(diagnostic) else { return }
+        let record = "event=observation " + fields
+        Self.inspectionLog.notice("kimiDiscoveryProgress version=1 provider=kimi sessionID=\(session.token.lowercased(), privacy: .public) \(record, privacy: .public)")
+        #if DEBUG
+        kimiDiscoveryProgressObserverForTesting?(record)
+        #endif
+    }
+
+    private func logKimiDiscoveryTerminal(_ session: Session, error: Error) {
+        guard session.provider == .kimi, session.isDiscovery,
+              let fields = session.kimiDiscoveryProgress.finish() else { return }
+        let reason = error is CancellationError ? "cancelled" : (error as? Failure) == .preparationDeadline ? "preparation_timeout" : "failed"
+        // Historical last validated callback, emitted before cleanup can close
+        // its document. No fresh page read, poll, action or authority is added.
+        let record = "event=terminal reason=" + reason + " lastObservation " + fields
+        Self.inspectionLog.error("kimiDiscoveryProgress version=1 provider=kimi sessionID=\(session.token.lowercased(), privacy: .public) \(record, privacy: .public)")
+        #if DEBUG
+        kimiDiscoveryProgressObserverForTesting?(record)
+        #endif
     }
 
     private func preparationFailure(_ session: Session) -> Failure {
@@ -5564,6 +5648,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         try Task.checkCancellation()
         guard var observed = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw Failure.pageUnavailable }
+        let kimiProgress = Self.removeKimiDiscoveryProgressDiagnostic(from: &observed, provider: provider, action: action)
+        logKimiDiscoveryProgress(kimiProgress, session: session)
         // This immutable attempt diagnostic is stripped before response or
         // readiness validation; logging cannot grant scroll/Send authority.
         let sendReveal = Self.groqSendRevealDiagnostic(observed.removeValue(forKey: "sendRevealDiagnostic"),

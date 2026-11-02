@@ -1,13 +1,13 @@
 # Kimi, Qwen and DeepSeek website adapters
 
-Status: candidate build385 preparation, 2026-11-02 UTC. Installed 0.8.0 (384),
-source `2a42e0459d2a3568b07a50abdb400018356dff94`, passed Kimi's initial page
-binding but failed model-picker discovery before any prompt. Kimi Instant
-therefore did not appear in the selector. The normal page's selected K3 lives
-under More models; the adapter assumed a checked top-level row. Candidate385
-addresses that nested selection. Installed recovery and tool-use qualification
-remain pending. Qwen and DeepSeek
-have no enabled native website adapter yet. PR #20 remains draft.
+Status: candidate build386 preparation, 2026-11-02 UTC. Installed 0.8.0 (385),
+source `5d7a1fc662c7632687d48bd1ec45819b99b19cd0`, includes Kimi's nested
+selection handling but still reached the 45-second startup discovery deadline.
+No prompt was sent and no Kimi choices were exposed. The specific pending
+stage was not captured before the owned page closed. Candidate386 is being
+prepared to retain bounded discovery diagnostics before cleanup; it is not a
+verified repair. Installed recovery and tool-use qualification remain pending.
+Qwen and DeepSeek have no enabled native website adapter yet. PR #20 remains draft.
 
 The requested route is each provider's signed-in website in Computa's browser.
 Qwen's website is separate from Alibaba's existing Qwen 3.7 Flash API option.
@@ -180,7 +180,41 @@ replaced or contradictory selections remain failures, and uncertain actions
 cannot be repeated. The JavaScript gate passed 53 tests with 594 assertions.
 The native gate passed 50 tests, including real-WebKit discovery from K3,
 switching to Instant followed by one Send and verified deletion, and rejection
-of a foreign submenu binding. Installed qualification is still pending.
+of a foreign submenu binding. These fixture passes did not establish installed
+discovery recovery; the build385 result follows.
+
+### Build385 discovery deadline and candidate386 diagnostics
+
+Signed build385, source `5d7a1fc662c7632687d48bd1ec45819b99b19cd0`, was installed
+and running as process 32050. Startup discovery still reached the existing
+45-second preparation deadline. No fixed adapter error or specific pending
+phase was retained, no model choices were exposed, no prompt was sent, and no
+website cleanup task was created. This does not establish whether the nested
+menu failed to open, selection was still pending, or another preparation step
+was waiting. The bounded installed observation is
+`work/new-website-providers-20261102/build385/kimi-discovery-timeout385.json`.
+
+Inspector approval for the new Kimi tab remains pending. Candidate386's next
+change is diagnostic-only: preserve finite discovery-stage evidence before
+cleanup closes the owned page. Existing picker reads expose a fixed phase and
+booleans for main/submenu presence, expansion, collapse and claimed actions.
+Native validation admits only exact keys and Boolean types, removes the
+diagnostic metadata before ordinary verification, and retains at most 12 distinct
+records plus the last observation before discovery-error cleanup. No requests,
+timers, Send actions, uncertain-menu retries or deadline extensions are added.
+The focused build386 native gate passed 99 tests. The combined JavaScript and
+version gate passed 64 tests with 682 assertions (55 Kimi adapter tests and nine
+version tests). Results and log hashes are retained in
+`work/new-website-providers-20261102/build386/final-source-gates.json`.
+Installed reproduction remains pending; these diagnostic fixture passes do not
+establish a fix or Kimi qualification.
+
+A separate normal-UI observation on installed385 found that Accessibility Press
+on More models left the submenu closed, while pointer hover opened the checked
+K3 row. The top menu was dismissed without changing a model or sending a prompt.
+Screenshots are retained as `build386/kimi-more-axpress385.png` and
+`build386/kimi-more-hover385.png` under the workspace evidence directory. This is
+UI interaction evidence, not proof of how the adapter's DOM event behaves.
 
 ### Direct website observations before native qualification
 
@@ -229,10 +263,11 @@ developer setting were restored after the approved two-message-per-provider scop
 
 ## Remaining gates
 
-1. Validate candidate385's nested-selection handling, then verify installed Kimi Instant
-   discovery, fresh replies and exact saved-conversation deletion before
-   qualifying browser, terminal and file tasks. The provider catalog also
-   drives automatic startup discovery; builds383 and384 failed at distinct stages.
+1. Run candidate386's gated pre-cleanup discovery diagnostics to capture the
+   unresolved build385 deadline, then repair its demonstrated cause and
+   verify installed Kimi Instant discovery, fresh replies and exact saved-chat
+   deletion before qualifying browser, terminal and file tasks. The provider
+   catalog drives automatic startup discovery; builds383–385 failed at distinct stages.
 2. Finish Qwen's fixed adapter and native ownership/cleanup integration from
    the observed website controls; keep it outside public discovery meanwhile.
 3. Integrate DeepSeek's observed mode controls and scoped deletion chain, then

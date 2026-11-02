@@ -37,6 +37,53 @@ final class KimiWebModelTransportTests: XCTestCase {
         XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
     }
 
+    func testStalledNestedDiscoveryRetainsFiniteLastObservationBeforeClosingWithoutReplaying() async throws {
+        let fixture = try Fixture(initialNestedModel: true); defer { fixture.shutdown() }
+        fixture.transport.setTimeoutsForTesting(preparation: .seconds(3), response: .seconds(3))
+        var installed = false, terminalBeforeClose = false
+        var records: [String] = []
+        fixture.transport.setKimiDiscoveryProgressObserverForTesting { record in
+            records.append(record)
+            if record.hasPrefix("event=terminal "), let id = fixture.createdID {
+                terminalBeforeClose = fixture.browser.webView(for: id) === fixture.view
+            }
+        }
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "discoverModels", !installed {
+                installed = true
+                _ = try? await self.evaluate(fixture.view, """
+                    window.fixtureMoreDispatches = 0;
+                    document.getElementById('fixture-more-trigger').addEventListener('click', event => {
+                        window.fixtureMoreDispatches++;
+                        event.preventDefault(); event.stopImmediatePropagation();
+                    }, true);
+                    return true;
+                    """)
+            }
+        }
+        do {
+            _ = try await fixture.transport.discoverModels(provider: "kimi")
+            XCTFail("An unacknowledged submenu open cannot complete discovery")
+        } catch let error as EmbeddedWebModelTransport.Failure {
+            XCTAssertEqual(error, .preparationDeadline)
+        }
+        XCTAssertTrue(installed); XCTAssertTrue(terminalBeforeClose)
+        let terminal = records.filter { $0.hasPrefix("event=terminal ") }
+        XCTAssertEqual(terminal.count, 1)
+        XCTAssertTrue(terminal.first?.contains("reason=preparation_timeout lastObservation phase=moreOpening") == true)
+        XCTAssertTrue(terminal.first?.contains("submenuClaimed=true submenuPresent=false submenuExpanded=false submenuCollapsed=true") == true)
+        XCTAssertLessThanOrEqual(records.count, 13)
+        XCTAssertEqual(Set(records).count, records.count)
+        for privateValue in ["K3", "Instant", "kimi.com", "fixture-more", fixture.createdID?.uuidString ?? "not-an-id"] {
+            XCTAssertFalse(records.joined().contains(privateValue))
+        }
+        let clicks = try await evaluate(fixture.view, "return window.fixtureMoreDispatches;") as? Int
+        XCTAssertEqual(clicks, 1)
+        try await assertCounts(fixture, sends: 0, headers: 0, selections: 0, confirmations: 0)
+        XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
     func testInstantSelectionFromNestedK3ReopensForProofThenSendsAndDeletesOnce() async throws {
         let fixture = try Fixture(initialNestedModel: true); defer { fixture.shutdown() }
         let token = try await start(fixture)

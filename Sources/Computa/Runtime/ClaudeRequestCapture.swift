@@ -9,13 +9,29 @@ enum ClaudeRequestCapture {
     static let purpose = "claude_post_browser_tabs_request_v1"
     static let maximumLifetime: TimeInterval = 600
     static let maximumRecordBytes = WebModelResponseCodec.maximumPromptBytes * 12 + 8_192
+    static let execPurpose = "claude_synthetic_post_exec_command_request_v3"
+
+    static func syntheticExecPath(nonce: UUID) -> String {
+        "/tmp/computa-claude-exec-\(nonce.uuidString.lowercased())/marker.txt"
+    }
+
+    static func syntheticExecUserText(nonce: UUID) -> String {
+        "Use the terminal to read the local file \(syntheticExecPath(nonce: nonce)). Return only its exact contents. Do not modify the file."
+    }
 
     private enum Trigger: String {
         case afterBrowserTabs = "after_browser_tabs"
         case afterBrowserFill = "after_browser_fill"
+        case afterExecCommand = "after_exec_command"
 
-        var callName: String { self == .afterBrowserTabs ? "browser_tabs" : "browser_fill" }
-        var purpose: String { "claude_post_\(callName)_request_v1" }
+        var callName: String {
+            switch self {
+            case .afterBrowserTabs: "browser_tabs"
+            case .afterBrowserFill: "browser_fill"
+            case .afterExecCommand: "exec_command"
+            }
+        }
+        var purpose: String { self == .afterExecCommand ? execPurpose : "claude_post_\(callName)_request_v1" }
     }
 
     struct Context: Sendable {
@@ -174,10 +190,12 @@ enum ClaudeRequestCapture {
             makeRecord: { arm in
                 guard APIModelCorrectionJSON.isUnambiguous(arm),
                       let value = try? JSONSerialization.jsonObject(with: arm) as? [String: Any],
-                      Set(value.keys) == ["schemaVersion", "purpose", "nonce", "taskID", "turnID", "modelID", "trigger", "expiresAt"],
-                      ComputerToolArgumentContract.exactInt64(value["schemaVersion"]) == 1,
                       let triggerText = value["trigger"] as? String,
                       let trigger = Trigger(rawValue: triggerText),
+                      Set(value.keys) == (trigger == .afterExecCommand
+                        ? ["schemaVersion", "purpose", "nonce", "taskID", "threadID", "turnID", "modelID", "trigger", "expiresAt", "userPromptSHA256", "resultMarker"]
+                        : ["schemaVersion", "purpose", "nonce", "taskID", "turnID", "modelID", "trigger", "expiresAt"]),
+                      ComputerToolArgumentContract.exactInt64(value["schemaVersion"]) == (trigger == .afterExecCommand ? 3 : 1),
                       value["purpose"] as? String == trigger.purpose,
                       let nonce = canonicalID(value["nonce"]),
                       value["taskID"] as? String == context.taskID.uuidString.lowercased(),
@@ -187,6 +205,15 @@ enum ClaudeRequestCapture {
                       let expiry = timestampFormatter().date(from: expiryText),
                       timestampFormatter().string(from: expiry) == expiryText,
                       expiry > now, expiry.timeIntervalSince(now) <= maximumLifetime else { return nil }
+                let exec: ExecResult?
+                if trigger == .afterExecCommand {
+                    guard value["threadID"] as? String == context.threadID.uuidString.lowercased(),
+                          value["userPromptSHA256"] as? String == sha256(Data(syntheticExecUserText(nonce: nonce).utf8)),
+                          let marker = value["resultMarker"] as? String,
+                          prompt.utf8.elementsEqual(request.prompt.utf8),
+                          let matched = syntheticExecResult(request, context: context, nonce: nonce, marker: marker) else { return nil }
+                    exec = matched
+                } else { exec = nil }
                 // Default-disabled and mismatched arms do not parse history,
                 // re-encode the catalog or allocate a raw diagnostic payload.
                 guard let canonical = String(data: request.continuationRequest, encoding: .utf8),
@@ -196,8 +223,8 @@ enum ClaudeRequestCapture {
                 // Monotonic elapsed time prevents an expiry extension while the
                 // synchronous file claim/write is in flight, including clock changes.
                 deadline = started + .milliseconds(Int64(expiry.timeIntervalSince(now) * 1_000))
-                let record: [String: Any] = [
-                    "schemaVersion": 1, "purpose": trigger.purpose, "stage": "pre_send",
+                var record: [String: Any] = [
+                    "schemaVersion": trigger == .afterExecCommand ? 3 : 1, "purpose": trigger.purpose, "stage": "pre_send",
                     "submissionVerified": false, "automaticReplay": false,
                     "nonce": nonce.uuidString.lowercased(), "expiresAt": expiryText,
                     "capturedAt": timestampFormatter().string(from: now), "provider": "claude",
@@ -216,9 +243,100 @@ enum ClaudeRequestCapture {
                     "promptUTF8Bytes": prompt.utf8.count, "toolCatalog": catalog,
                     "toolCatalogSHA256": sha256(catalogData),
                 ]
+                if let exec {
+                    record["userPromptSHA256"] = value["userPromptSHA256"]
+                    record["triggerCommandSHA256"] = sha256(Data(exec.command.utf8))
+                    record["triggerOutputSHA256"] = sha256(Data(exec.output.utf8))
+                    record["triggerOutputUTF8Bytes"] = exec.output.utf8.count
+                    record["resultMarkerSHA256"] = sha256(Data(exec.marker.utf8))
+                    record["evidenceClass"] = "native_request_diagnostic"
+                }
                 return try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys, .withoutEscapingSlashes])
             }, isCurrent: { !Task.isCancelled && deadline.map { ContinuousClock.now < $0 } == true },
             beforeArmClaim: beforeArmClaim)
+    }
+
+    private struct ExecResult {
+        let command: String
+        let output: String
+        let marker: String
+    }
+
+    /// An arm prepared before the first Send cannot know the generated call ID
+    /// or command timing header. Bind them from one exact native call/result
+    /// suffix, after a fresh synthetic prefix, and retain their hashes. Never
+    /// accept an arbitrary successful command or mine an older history item.
+    private static func syntheticExecResult(_ request: WebModelResponseCodec.Request, context: Context,
+                                            nonce: UUID, marker: String) -> ExecResult? {
+        guard marker.range(of: #"\ACLAUDEEXEC[0-9a-f]{64}\z"#, options: .regularExpression) != nil,
+              APIModelCorrectionJSON.isUnambiguous(request.continuationRequest),
+              var object = try? JSONSerialization.jsonObject(with: request.continuationRequest) as? [String: Any],
+              let input = object["input"] as? [[String: Any]], (4...36).contains(input.count) else { return nil }
+        let call = input[input.count - 2], result = input[input.count - 1]
+        guard Set(call.keys).isSubset(of: ["type", "name", "namespace", "call_id", "id", "arguments", "status", "internal_chat_message_metadata_passthrough"]),
+              call["type"] as? String == "function_call", call["name"] as? String == "exec_command",
+              call["namespace"] == nil || call["namespace"] as? String == "functions",
+              call["status"] == nil || call["status"] as? String == "completed",
+              let callID = call["call_id"] as? String,
+              callID.range(of: #"\Acall_[A-Za-z0-9_-]{1,128}\z"#, options: .regularExpression) != nil,
+              Set(result.keys).isSubset(of: ["type", "call_id", "output", "id", "internal_chat_message_metadata_passthrough"]),
+              result["type"] as? String == "function_call_output", result["call_id"] as? String == callID,
+              let output = result["output"] as? String, output.utf8.count <= 768,
+              let arguments = call["arguments"] as? String, arguments.utf8.count <= 1_024,
+              APIModelCorrectionJSON.isUnambiguous(Data(arguments.utf8)),
+              let params = try? JSONSerialization.jsonObject(with: Data(arguments.utf8)) as? [String: Any],
+              Set(params.keys).isSubset(of: ["cmd", "max_output_tokens", "yield_time_ms"]),
+              let command = params["cmd"] as? String,
+              command == "cat " + syntheticExecPath(nonce: nonce) else { return nil }
+        if let id = call["id"] {
+            guard let value = id as? String,
+                  value.range(of: #"\Afc_[A-Za-z0-9_-]{1,128}\z"#, options: .regularExpression) != nil else { return nil }
+        }
+        if let id = result["id"] {
+            guard let value = id as? String, value.hasPrefix("fco_"),
+                  canonicalID(String(value.dropFirst(4))) != nil else { return nil }
+        }
+        for item in [call, result] {
+            if let raw = item["internal_chat_message_metadata_passthrough"] {
+                guard let metadata = raw as? [String: Any],
+                      Set(metadata.keys).isSubset(of: ["turn_id", "create_time"]),
+                      let turn = metadata["turn_id"] as? String, UUID(uuidString: turn) == context.turnID else { return nil }
+                if let rawTime = metadata["create_time"] {
+                    guard let time = rawTime as? NSNumber, CFGetTypeID(time) != CFBooleanGetTypeID(),
+                          time.doubleValue.isFinite, (0...4_102_444_800).contains(time.doubleValue) else { return nil }
+                }
+            }
+        }
+        // Native admission already binds request identity. Do not let an
+        // inconsistent body metadata copy enter this diagnostic as that proof.
+        if let raw = object["client_metadata"], !(raw is NSNull) {
+            guard let metadata = raw as? [String: Any],
+                  let text = metadata["x-codex-turn-metadata"] as? String,
+                  APIModelCorrectionJSON.isUnambiguous(Data(text.utf8)),
+                  let identity = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
+                  let thread = identity["thread_id"] as? String, UUID(uuidString: thread) == context.threadID,
+                  let turn = identity["turn_id"] as? String, UUID(uuidString: turn) == context.turnID else { return nil }
+        }
+        for (key, range) in [("max_output_tokens", Int64(1)...4_096), ("yield_time_ms", Int64(250)...30_000)] {
+            if let value = params[key] {
+                guard let integer = ComputerToolArgumentContract.exactInt64(value), range.contains(integer) else { return nil }
+            }
+        }
+        // The observed exec_command envelope has six lines. Permit one final LF
+        // only; an error/session header, extra output or nested fake receipt fails.
+        var lines = output.components(separatedBy: "\n")
+        if lines.last == "" { lines.removeLast() }
+        guard lines.count == 6,
+              lines[0].range(of: #"\AChunk ID: [0-9a-f]{6}\z"#, options: .regularExpression) != nil,
+              lines[1].range(of: #"\AWall time: [0-9]{1,3}\.[0-9]{1,6} seconds\z"#, options: .regularExpression) != nil,
+              lines[2] == "Process exited with code 0",
+              lines[3].range(of: #"\AOriginal token count: [0-9]{1,4}\z"#, options: .regularExpression) != nil,
+              lines[4] == "Output:", lines[5].utf8.elementsEqual(marker.utf8) else { return nil }
+        object["input"] = Array(input.dropLast(2))
+        guard let prefix = try? JSONSerialization.data(withJSONObject: object),
+              WebsiteSyntheticFirstRequest.matches(prefix, model: request.model,
+                  expectedUserText: syntheticExecUserText(nonce: nonce)) else { return nil }
+        return ExecResult(command: command, output: output, marker: marker)
     }
 
     /// Select only the immediate native call/output suffix. Historical mentions,

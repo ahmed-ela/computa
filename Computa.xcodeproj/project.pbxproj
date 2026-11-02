@@ -253,6 +253,7 @@
 		BE4AA496791A1F7A653B9D02 /* WebBridgeWebsiteModelRefreshTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE3EAEA6C79A01B3D32F01BC /* WebBridgeWebsiteModelRefreshTests.swift */; };
 		BEA9A1A1F9D2B6A446E1FE3F /* AppServerWireTrace.swift in Sources */ = {isa = PBXBuildFile; fileRef = E785A0E548BF7774640DB613 /* AppServerWireTrace.swift */; };
 		BEE025F47815C1E658978981 /* WebBridgePermissionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FE6743E5B772EEEC8672B2A /* WebBridgePermissionTests.swift */; };
+		BF667ADEB3AC49FEB5D5D770 /* KimiDiscoveryProgressTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5DC780F3273F89D1C529F54 /* KimiDiscoveryProgressTests.swift */; };
 		BFEA189E4B42C6C48F7742AB /* NativeBackgroundCaptureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5A327E962480AC12380D02 /* NativeBackgroundCaptureTests.swift */; };
 		C0B9B33EE141CFDFEE1D0657 /* ClaudeFirstRequestCaptureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DC24555ACDE15CD1CE1CF06 /* ClaudeFirstRequestCaptureTests.swift */; };
 		C11AA91A21E499D9BBD39E1B /* ComputerSearchEvidenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F34776A3E5836993D853A03F /* ComputerSearchEvidenceTests.swift */; };
@@ -628,6 +629,7 @@
 		C040586E0130B7AD2F8052A0 /* RuntimeAPISteerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeAPISteerTests.swift; sourceTree = "<group>"; };
 		C0B5A101F263E30CF4A3C0E6 /* RuntimeFileEditingLiveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeFileEditingLiveTests.swift; sourceTree = "<group>"; };
 		C1F383FB3D7477E02D821B08 /* PermissionInspectorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionInspectorTests.swift; sourceTree = "<group>"; };
+		C5DC780F3273F89D1C529F54 /* KimiDiscoveryProgressTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KimiDiscoveryProgressTests.swift; sourceTree = "<group>"; };
 		C6E2B75E6837334A514F8F4C /* WebsiteRequestPacer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebsiteRequestPacer.swift; sourceTree = "<group>"; };
 		C6EC0F9D2BD1A807808395A2 /* GroqToolCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GroqToolCatalog.swift; sourceTree = "<group>"; };
 		C88095A569E895DB0D0DABD9 /* WebsiteModelFormatCorrectionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebsiteModelFormatCorrectionStore.swift; sourceTree = "<group>"; };
@@ -946,6 +948,7 @@
 				6B7369339D010D1BFDDBAD6F /* GroqToolCatalogTests.swift */,
 				E9DA4ACDA7CAC7A5655A6E4E /* HeadlessMLXModelSwitchLiveTests.swift */,
 				B19A16BAD8B266D357964FCC /* HeadlessMLXServerTests.swift */,
+				C5DC780F3273F89D1C529F54 /* KimiDiscoveryProgressTests.swift */,
 				01B0E0DC5BB8E34E0499B5B9 /* KimiFixturePage.swift */,
 				75DD5955AD548B2F4BA21B21 /* KimiSavedConversationTests.swift */,
 				DCCD5C2540636AEFB563E6FC /* KimiWebModelTransportTests.swift */,
@@ -1645,6 +1648,7 @@
 				5D499D184AEA09E288FB3E0C /* GroqToolCatalogTests.swift in Sources */,
 				78A1D3D82FC6E941AEEB9CA6 /* HeadlessMLXModelSwitchLiveTests.swift in Sources */,
 				3DF03DCF8CB1094FCFD34DAD /* HeadlessMLXServerTests.swift in Sources */,
+				BF667ADEB3AC49FEB5D5D770 /* KimiDiscoveryProgressTests.swift in Sources */,
 				F6123C05D516FEAB5F666FD1 /* KimiFixturePage.swift in Sources */,
 				DB56DCA2F383E7E4847E0F03 /* KimiSavedConversationTests.swift in Sources */,
 				C50CE06F8E1B3D5F7CBDE413 /* KimiWebModelTransportTests.swift in Sources */,

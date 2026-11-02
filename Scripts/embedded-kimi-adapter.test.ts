@@ -227,6 +227,45 @@ describe('Kimi saved-conversation adapter', () => {
     expect(f.more.clicks).toBe(2); expect(f.trigger.clicks).toBe(2);
   });
 
+  test('finite discovery progress distinguishes an unacknowledged submenu open without replay', async () => {
+    const f = adapterFixture({ nestedSelected: true });
+    f.more.onClick = () => {};
+    expect((await f.run()).discoveryProgressDiagnostic).toBeUndefined();
+    await f.run('discoverModels', { expectedModelChoice: undefined });
+    const expected = { phase: 'moreOpening', mainMenuPresent: true, mainExpanded: true, mainCollapsed: false,
+      submenuClaimed: true, submenuPresent: false, submenuExpanded: false, submenuCollapsed: true };
+    for (let read = 0; read < 4; read++) {
+      const result = await f.run('discoverModels', { expectedModelChoice: undefined });
+      expect(result.pending).toBe(true); expect(result.discoveryProgressDiagnostic).toEqual(expected);
+    }
+    expect(f.trigger.clicks).toBe(1); expect(f.more.clicks).toBe(1);
+    expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
+    const serialized = JSON.stringify(expected);
+    for (const privateValue of [f.more.getAttribute('id'), f.moreMenu.getAttribute('id'), 'K3', 'kimi.com', marker])
+      expect(serialized).not.toContain(privateValue!);
+  });
+
+  test('finite discovery progress distinguishes an unacknowledged submenu close and disappears from ordinary reads', async () => {
+    const f = adapterFixture({ nestedSelected: true }), click = f.more.onClick!;
+    f.more.onClick = () => { if (f.more.getAttribute('aria-expanded') !== 'true') click(); };
+    await f.run('discoverModels', { expectedModelChoice: undefined });
+    await f.run('discoverModels', { expectedModelChoice: undefined });
+    for (let read = 0; read < 4; read++) {
+      const result = await f.run('discoverModels', { expectedModelChoice: undefined });
+      expect(result.pending).toBe(true);
+      expect(result.discoveryProgressDiagnostic).toEqual({ phase: 'moreClosing', mainMenuPresent: true,
+        mainExpanded: true, mainCollapsed: false, submenuClaimed: true, submenuPresent: true,
+        submenuExpanded: true, submenuCollapsed: false });
+    }
+    expect(f.more.clicks).toBe(2); expect(f.trigger.clicks).toBe(1);
+    expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
+    f.more.onClick = click; click();
+    expect((await discover(f)).modelChoices).toEqual([instant]);
+    expect((await f.run()).discoveryProgressDiagnostic).toBeUndefined();
+    expect((await f.run('verifyModel', { expectedModelChoice: { key: 'k3-agent', label: 'K3' } })).discoveryProgressDiagnostic).toBeUndefined();
+    expect(f.counts().sends).toBe(0);
+  });
+
   test('replacement after nested checked-row proof and lost submenu click replies never gain authority or replay', async () => {
     const changed = adapterFixture({ nestedSelected: true });
     const click = changed.more.onClick!;

@@ -81,6 +81,7 @@ function computaProviderCore(request, provider, origin, actions) {
 // Kimi saved-conversation adapter. Uses the exact embedded-provider-core.js prefix.
 // Saved conversations require an explicit confirmed deletion, never temp mode.
 let kimiDraftState = null;
+let kimiDiscoveryProgress = null;
 try {
   const actions = ['inspect', 'discoverModels', 'selectModel', 'verifyModel', 'prepare',
     'insert', 'sendReady', 'submit', 'stop', 'deleteConversation', 'selectConversationDeletion',
@@ -206,6 +207,21 @@ try {
       && menus[0].getAttribute('id') === state.deletion.menuID
       && menus[0].getAttribute('aria-labelledby') === state.deletion.headerID;
     const closed = !menu && (menus.length === 0 || ownedDeleteMenu) && trigger.getAttribute('aria-expanded') === 'false';
+    // Finite metadata from this existing picker read only. No label, identifier,
+    // URL or page text is published, and this observation grants no authority.
+    if (['discoverModels', 'selectModel'].includes(input.action)) {
+      const phase = state.selection?.stage || (state.model ? 'verified' : 'unclaimed');
+      kimiDiscoveryProgress = {
+        phase: ['unclaimed', 'opening', 'moreOpening', 'moreClosing', 'selected', 'verifying', 'closing', 'verified'].includes(phase) ? phase : 'other',
+        mainMenuPresent: !!menu,
+        mainExpanded: trigger.getAttribute('aria-expanded') === 'true',
+        mainCollapsed: trigger.getAttribute('aria-expanded') === 'false',
+        submenuClaimed: !!nested,
+        submenuPresent: !!nested && menus.some(node => node.getAttribute('id') === nested.menuID),
+        submenuExpanded: !!nested && nested.trigger.getAttribute('aria-expanded') === 'true',
+        submenuCollapsed: !!nested && nested.trigger.getAttribute('aria-expanded') === 'false',
+      };
+    }
     return { trigger, menu, closed, label: c.normalize(label.textContent) };
   }
   function choices(menu) {
@@ -365,7 +381,8 @@ try {
       modelEvidence: evidence, text: state.first && !cleanupInspection ? extracted.text : '', answerComplete: !!complete && !cleanupInspection,
       busy: state.submitted && !complete, interrupted: false, conversationIdentity: state.first ? state.canonical : null,
       firstUserIdentity: state.first?.id || null, firstUserVerified: false, firstUserMarkerVerified: false,
-      firstUserFingerprint: null } };
+      firstUserFingerprint: null,
+      ...(kimiDiscoveryProgress ? { discoveryProgressDiagnostic: kimiDiscoveryProgress } : {}) } };
   }
   const fresh = () => !state.submitted && !state.first && !state.deletion && currentRoute().kind === 'fresh'
     && transcript().users.length === 0 && transcript().answers.length === 0 && composer().empty;

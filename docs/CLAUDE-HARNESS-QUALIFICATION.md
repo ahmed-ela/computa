@@ -1,14 +1,21 @@
 # Claude harness qualification
 
-Installed build384 uses source `2a42e0459d2a3568b07a50abdb400018356dff94`.
+Installed build385 uses source `5d7a1fc662c7632687d48bd1ec45819b99b19cd0`.
+The latest controlled Claude results below were obtained on build384, source
+`2a42e0459d2a3568b07a50abdb400018356dff94`; they are not reattributed to build385.
 On build382, the fresh Opus 3 marker passed, but the subsequent workflow and
 first-tool requests failed before tool dispatch. Build383 adds a Claude-only
 response-presentation experiment. A fresh build384 Opus 3 request returned a
 valid exact marker in 9.393 seconds, with one verified inference and saved
 closure, but made zero tool calls despite being asked to run `printf`. That
 establishes a valid response for this run, not terminal execution or tool
-qualification. The exact synthetic case is
-`work/claude-qualification-20261031/evidence/opus3-firsttool384-a`.
+qualification. A second fresh request read an unpredictable fixture through
+four successful terminal calls, three redundant, but ended after 57.189 seconds
+and five inferences with two malformed responses and no final answer. All five
+inferences have matching closed cleanup receipt records. This proves terminal
+execution in that case, not a reliable completed tool workflow. The cases are
+`work/claude-qualification-20261031/evidence/opus3-firsttool384-a` and
+`evidence/opus3-firsttool384-b` under the same directory.
 Full live qualification remains incomplete. Details are in
 the November 2 results below. The four independently audited workflow passes were obtained
 on build380, source `e62bbbaf80018b4edbc027112af1d5636a048a4a`, and have not been
@@ -2229,6 +2236,71 @@ authored prose, trailing prose and rendered-widget text still fail rather than
 being stripped to extract a valid inner object. Other providers retain their
 previous handoff bytes. The focused native run passed all 230 tests across
 instruction, response-codec, Claude correction and Kimi lifecycle suites;
-the Kimi cases are included in that count. Fresh installed Claude first-tool
-and workflow checks remain pending before any claim that the wording fixes
-the live failure.
+the Kimi cases are included in that count. The subsequent build384 first-tool
+checks below do not establish that this wording fixes the live failure.
+
+## Installed build384: successful reads followed by format failure, November 2 UTC
+
+The first fresh Opus 3 case, `opus3-firsttool384-a`, returned its known prompt
+marker in 9.393 seconds with one inference and no native tool calls. Its unused
+one-shot diagnostic arm was archived and retired only after exact task, inode,
+timestamp and hash verification. A correct marker already present in the prompt
+does not establish terminal use.
+
+The separate `opus3-firsttool384-b` prompt named a synthetic local file whose
+random contents were absent from the prompt. Four native `exec_command` calls
+ran the same exact `cat` command; all exited zero and returned the fixture's
+complete contents. Three reads were redundant, including two identical calls
+from one accepted response. The task lasted 57.189 seconds across five website
+inferences. The third and fifth inferences failed with `malformed_website_reply`;
+there was no final answer. All five have exact matching closed cleanup receipt
+records in the captured journal. The audit did not reopen their durable receipt
+files. The generic native high-demand error is not evidence of provider quota.
+
+The existing one-shot rejected-reply capture was consumed by the third inference,
+not the initial inference. An independent join verified its task, thread, turn,
+model, session and generation against that exact later journal entry. Its raw
+reply contains a valid literal `tool_calls` JSON block, a 30-character authored
+introductory paragraph, and renderer icon/language-label text. The adapter
+reported `outside_content` and used `rendered_fallback`; the strict parser then
+rejected `invalid_json`. The final malformed reply was not captured because the
+one-shot slot had already been consumed. The initial-inference verifier was
+left unchanged. The exact later reply was privately archived before its
+consumed diagnostic output was retired under the existing directory lock.
+
+These results rule out a bad fixture path, quoting failure or failed terminal
+execution for the four recorded calls. They do not establish why Claude kept
+requesting the read: the actual outgoing follow-up website prompts were not
+captured, so preservation of tool results in those prompts remains unproven.
+Existing source tests
+`testLongHistoryAndResultOnlyContinuationReceiveFreshCurrentContract` and
+`testExternalRelayActionAndMatchingOutputRoundTripAcrossWebsiteProviders`
+cover projection preservation in controlled cases. They were reviewed for this
+investigation, not rerun, and are not live outbound evidence for build384-b.
+
+Evidence is retained under
+`work/claude-qualification-20261031/evidence/opus3-firsttool384-b/` in
+`capture/summary.json`, `independent-audit.json`,
+`rejected-reply-later-inference-verification.json`, the private raw reply, and
+`rejected-reply-retirement.json`. Earlier 382 and 384-a records remain intact.
+
+### Candidate386: bounded request capture after terminal output
+
+The next diagnostic extends the existing private `ClaudeRequestCapture` arm
+with an explicit `after_exec_command` purpose. It is being prepared to capture
+the canonical request and actual server prompt for one exact fresh synthetic
+task after one linked successful terminal read. The binding includes native
+task/thread/turn/model, a nonce, the synthetic prompt hash, and the expected
+result marker; command, output and call-ID hashes support a later submission
+journal join. Only the narrowly specified synthetic fixture command and output
+may consume the arm, using the existing one-shot, no-overwrite lock mechanism.
+
+This is diagnostic preparation, not a repair or a live capture. It adds no Send,
+replay, parser relaxation or ownership authority. The focused build386 native
+gate passed 99 tests, including the new synthetic continuation capture cases;
+the combined Kimi JavaScript and version gate passed 64 tests with 682 assertions.
+The receipt is `work/new-website-providers-20261102/build386/final-source-gates.json`.
+The capture records the server's projected prompt at `pre_send` with
+`submissionVerified=false`, not the page or network request. A later exact
+submission-journal join is still required. Installed capture and proof of what
+tool-result content reaches the provider remain pending.
