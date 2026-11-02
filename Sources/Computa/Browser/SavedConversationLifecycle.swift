@@ -1,25 +1,49 @@
 import Foundation
 import CoreFoundation
 
-/// Only the routes observed during a single Kimi plain-chat submission. Route
-/// recognition is not conversation ownership; native first-body proof is separate.
-enum KimiSavedConversationRoute: Equatable {
+/// Closed provider policies for the saved-conversation lifecycle. A provider
+/// does not inherit another website's routes, temporary mode or cleanup key.
+enum SavedConversationPolicy: String {
+    case kimi, qwen, deepseek
+
+    var host: String {
+        switch self { case .kimi: "www.kimi.ai"; case .qwen: "chat.qwen.ai"; case .deepseek: "chat.deepseek.com" }
+    }
+    var origin: String { "https://" + host }
+    var conversationPrefix: String {
+        switch self { case .kimi: "/chat/"; case .qwen: "/c/"; case .deepseek: "/a/chat/s/" }
+    }
+    var cleanupInspectionKey: String {
+        switch self { case .kimi: "kimiCleanupInspection"; case .qwen, .deepseek: "savedCleanupInspection" }
+    }
+}
+
+/// Only observed route shapes. Recognition is not ownership: a canonical
+/// conversation still requires the exact native first-body proof after Send.
+enum SavedConversationRoute: Equatable {
     case fresh, provisional(String), canonical(String)
 
-    init?(_ url: URL) {
-        guard url.scheme == "https", url.host == "www.kimi.ai", url.port == nil,
+    init?(_ url: URL, policy: SavedConversationPolicy) {
+        guard url.scheme == "https", url.host == policy.host, url.port == nil,
               url.user == nil, url.password == nil, url.fragment == nil,
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
         let items = components.queryItems ?? []
-        guard items.isEmpty || items == [URLQueryItem(name: "chat_enter_method", value: "home")] else { return nil }
-        if url.absoluteString == "https://www.kimi.ai/" { self = .fresh; return }
-        guard url.path.hasPrefix("/chat/") else { return nil }
-        let id = String(url.path.dropFirst(6))
-        guard url.absoluteString == "https://www.kimi.ai/chat/" + id + (items.isEmpty ? "" : "?chat_enter_method=home") else { return nil }
-        if id.range(of: #"^p[a-f0-9]{7}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"#, options: .regularExpression) != nil {
+        switch policy {
+        case .kimi:
+            guard items.isEmpty || items == [URLQueryItem(name: "chat_enter_method", value: "home")] else { return nil }
+        case .qwen, .deepseek:
+            guard components.query == nil else { return nil }
+        }
+        if url.absoluteString == policy.origin + "/" { self = .fresh; return }
+        guard url.path.hasPrefix(policy.conversationPrefix) else { return nil }
+        let id = String(url.path.dropFirst(policy.conversationPrefix.count))
+        let suffix = items.isEmpty ? "" : "?chat_enter_method=home"
+        guard url.absoluteString == policy.origin + policy.conversationPrefix + id + suffix else { return nil }
+        if policy == .kimi,
+           id.range(of: #"^p[a-f0-9]{7}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"#, options: .regularExpression) != nil {
             self = .provisional(url.path)
         } else if let uuid = UUID(uuidString: id), uuid.uuidString.lowercased() == id {
-            self = .canonical("https://www.kimi.ai" + url.path)
+            self = .canonical(policy.origin + url.path)
         } else { return nil }
     }
 
@@ -30,13 +54,14 @@ enum KimiSavedConversationRoute: Equatable {
 }
 
 /// Monotonic observation state only. It cannot authorize an answer or deletion.
-struct KimiSavedConversationRoutes {
+struct SavedConversationRoutes {
+    let policy: SavedConversationPolicy
     private(set) var last: URL?
     private(set) var provisional: String?
     private(set) var canonical: String?
 
     mutating func observe(_ url: URL, submitted: Bool) -> Bool {
-        guard let route = KimiSavedConversationRoute(url) else { return false }
+        guard let route = SavedConversationRoute(url, policy: policy) else { return false }
         if !submitted { return route == .fresh && provisional == nil && canonical == nil }
         if url == last { return true }
         switch route {
@@ -56,7 +81,7 @@ struct KimiSavedConversationRoutes {
 
 /// One operation, three separately claimed UI mutations. Observations never
 /// replenish a claim, including when a callback is lost or throws after dispatch.
-struct KimiDeletionProgress {
+struct SavedConversationDeletionProgress {
     enum Action: String, CaseIterable, Hashable {
         case openMenu = "deleteConversation"
         case selectDelete = "selectConversationDeletion"
@@ -121,7 +146,7 @@ struct KimiDeletionProgress {
 
 /// Dispatch acknowledgement only. A response and deletion still require the
 /// full first-body proof on the canonical route after native adopts this ack.
-enum KimiSubmissionAcknowledgement {
+enum SavedConversationSubmissionAcknowledgement {
     static func matches(_ raw: Any?, owner: String, generation: UUID, fingerprint: String) -> Bool {
         guard let value = raw as? [String: Any],
               Set(value.keys) == ["ownerToken", "documentGeneration", "sequence", "outboundFingerprint"],

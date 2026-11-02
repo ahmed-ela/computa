@@ -127,6 +127,7 @@ actor WebModelServer {
         let provider: String
         let modelID: String
         let modelChoice: WebsiteModelChoice?
+        let modeChoice: WebsiteModeChoice?
         let transport: any WebModelTransport
         var inferenceID: UUID
         let context: InferenceContext
@@ -148,7 +149,7 @@ actor WebModelServer {
         var documentGeneration: UUID?
         var firstUserFingerprint: String?
         var hasObservedClaudeOutput = false
-        var resolvedModel: WebsiteModelEvidence?
+        var resolvedSelection: WebsiteSelectionEvidence?
         var completedResponseCount: Int?
         var completedText: String?
         var completedSnapshot: Data?
@@ -164,7 +165,7 @@ actor WebModelServer {
         let context: InferenceContext
         let continuation: WebsiteTurnContinuation
         let transportGeneration: UUID
-        let resolvedModel: WebsiteModelEvidence?
+        let resolvedSelection: WebsiteSelectionEvidence?
         let turnInferenceCount: Int
         let cumulativePromptUTF8Count: Int
         var ambiguousHandoff = false
@@ -868,7 +869,7 @@ actor WebModelServer {
                 profile?.mark(.cleanupReleaseStart)
                 defer { profile?.mark(.cleanupReleaseEnd) }
                 guard let snapshot = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw Failure.persistenceRequired }
-                try recordEvidence(pending.session.resolvedModel, snapshot: snapshot, taskID: taskID,
+                try recordEvidence(pending.session.resolvedSelection, snapshot: snapshot, taskID: taskID,
                     inferenceID: pending.session.inferenceID, session: pending.session,
                     phase: "release_verified", cleanupAttemptID: receipt.attemptID)
             } catch {
@@ -1033,17 +1034,17 @@ actor WebModelServer {
             // retained message text. Native IDs correlate counts, not content.
             Self.promptLog.info("promptSizes version=1 provider=groq task=\(taskID, privacy: .public) thread=\(context.threadID, privacy: .public) turn=\(context.turnID, privacy: .public) inference=\(inferenceID.uuidString.lowercased(), privacy: .public) \(request.promptStatistics.diagnostic, privacy: .public)")
         }
-        func verifiedModelEvidence(_ snapshot: [String: Any], session: inout Session) throws -> WebsiteModelEvidence? {
-            let current = try Self.modelEvidence(snapshot, session: session)
+        func verifiedSelectionEvidence(_ snapshot: [String: Any], session: inout Session) throws -> WebsiteSelectionEvidence? {
+            let current = try Self.selectionEvidence(snapshot, session: session)
             guard !session.usesVerifiedHistory || current != nil else { throw Failure.modelUnverified }
-            if let pinned = session.resolvedModel {
+            if let pinned = session.resolvedSelection {
                 guard let current, pinned.isSameResolvedSelection(as: current) else { throw Failure.modelMismatch }
-            } else if let current { session.resolvedModel = current }
+            } else if let current { session.resolvedSelection = current }
             return current
         }
         attempts: while true {
             var correctionCandidate: (reason: WebsiteModelFormatCorrectionStore.Reason, session: Session,
-                deadline: ContinuousClock.Instant, evidence: WebsiteModelEvidence?, snapshot: [String: Any]?)?
+                deadline: ContinuousClock.Instant, evidence: WebsiteSelectionEvidence?, snapshot: [String: Any]?)?
             do {
                 try requireCurrentContext()
                 if provider == "chatgpt" {
@@ -1054,12 +1055,13 @@ actor WebModelServer {
                 guard let selection = WebsiteModelCatalog.inferenceSelection(for: request.model),
                       selection.provider == provider else { throw Failure.invalidRequest }
                 let choice = selection.choice
+                let modeChoice = selection.modeChoice
                 var session: Session
                 let prompt: String
                 if var previous = lease {
                     guard let yielded, yielded.inferenceID == previous.inferenceID,
                           previous.context == context, previous.provider == provider,
-                          previous.modelID == request.model, previous.modelChoice == choice,
+                          previous.modelID == request.model, previous.modelChoice == choice, previous.modeChoice == modeChoice,
                           previous.transportGeneration == transportGeneration,
                           let completedCount = previous.completedResponseCount,
                           let completedText = previous.completedText,
@@ -1079,7 +1081,7 @@ actor WebModelServer {
                     try requireCurrentContext()
                     guard observed["state"] as? String == "complete" else { throw Self.snapshotFailure(observed) }
                     try Self.verifyInferenceSnapshot(observed, session: &previous)
-                    _ = try verifiedModelEvidence(observed, session: &previous)
+                    _ = try verifiedSelectionEvidence(observed, session: &previous)
                     guard (observed["modelProofContext"] as? [String: Any])?["responseCount"] as? Int == completedCount,
                           observed["text"] as? String == completedText else { throw Failure.invalidRequest }
                     previous.inferenceID = inferenceID
@@ -1116,6 +1118,10 @@ actor WebModelServer {
                     if let choice {
                         guard let encoded = choice.canonicalJSONString else { throw Failure.invalidRequest }
                         params["modelChoice"] = encoded
+                    }
+                    if let modeChoice {
+                        guard choice == nil else { throw Failure.invalidRequest }
+                        params["modeChoice"] = modeChoice.canonicalJSONString
                     }
                     try recordTransactionEvidence(taskID: taskID, inferenceID: inferenceID, context: context,
                         provider: provider, modelID: request.model, sessionToken: nil, phase: "start_requested",
@@ -1182,13 +1188,13 @@ actor WebModelServer {
                     claudeResponseStream = nil
                     let advertised = reply["turnContinuationCapability"]
                     session = Session(token: rawToken, provider: provider, modelID: request.model,
-                        modelChoice: choice, transport: transport, inferenceID: inferenceID,
+                        modelChoice: choice, modeChoice: modeChoice, transport: transport, inferenceID: inferenceID,
                         context: context, transportGeneration: transportGeneration,
                         provesNativeContinuation: provesNativeContinuation,
                         provesFreshSessionSubmission: provesFreshSessionSubmission,
                         retainsConversation: retainsConversation(provider: provider))
                     session.requestMetadata = requestMetadata
-                    session.resolvedModel = correctionSource?.resolvedModel ?? closed?.resolvedModel
+                    session.resolvedSelection = correctionSource?.resolvedSelection ?? closed?.resolvedSelection
                     session.turnInferenceCount = correctionSource?.turnInferenceCount ?? closed?.turnInferenceCount ?? 0
                     session.cumulativePromptUTF8Count = correctionSource?.cumulativePromptUTF8Count ?? closed?.cumulativePromptUTF8Count ?? 0
                     // Capture ownership before cancellation or validation can fail.
@@ -1217,7 +1223,7 @@ actor WebModelServer {
                               reply["turnContinuationCapability"] == nil,
                               reply["freshSessionSubmissionProof"] == nil else { throw Failure.invalidRequest }
                     }
-                    if reply["state"] as? String == "ready" { _ = try verifiedModelEvidence(reply, session: &session) }
+                    if reply["state"] as? String == "ready" { _ = try verifiedSelectionEvidence(reply, session: &session) }
                     let stageDeadline = ContinuousClock.now + readinessTimeout
                     let readinessDeadline = correctionTicket == nil ? stageDeadline : min(stageDeadline, responseDeadline ?? stageDeadline)
                     var ready = reply["state"] as? String == "ready"
@@ -1228,7 +1234,7 @@ actor WebModelServer {
                         let state = try await call(session.transport, operation: "webProviderPoll", params: ["sessionToken": session.token])
                         try requireCurrentContext()
                         guard ContinuousClock.now < readinessDeadline else { throw Failure.preparationDeadline }
-                        if ["ready", "running"].contains(state["state"] as? String ?? "") { _ = try verifiedModelEvidence(state, session: &session) }
+                        if ["ready", "running"].contains(state["state"] as? String ?? "") { _ = try verifiedSelectionEvidence(state, session: &session) }
                         if state["state"] as? String == "ready" { ready = true }
                         else if !["loading", "running"].contains(state["state"] as? String ?? "") { throw Self.snapshotFailure(state) }
                         if !ready { try await waitForNextPoll(session, after: revision, until: readinessDeadline) }
@@ -1347,7 +1353,7 @@ actor WebModelServer {
                 try Self.verifyInferenceSnapshot(sent, session: &session)
                 var submissionModelVerificationPending = sent["modelVerificationPending"] as? Bool == true
                 if !submissionModelVerificationPending {
-                    let submittedEvidence = try verifiedModelEvidence(sent, session: &session)
+                    let submittedEvidence = try verifiedSelectionEvidence(sent, session: &session)
                     try recordEvidence(submittedEvidence, snapshot: sent, taskID: taskID, inferenceID: inferenceID, session: session, phase: "submission_verified")
                 }
                 sessions[taskID] = session
@@ -1376,7 +1382,7 @@ actor WebModelServer {
                     switch value["state"] as? String {
                     case "complete":
                         try Self.verifyInferenceSnapshot(value, session: &session)
-                        let evidence = try verifiedModelEvidence(value, session: &session)
+                        let evidence = try verifiedSelectionEvidence(value, session: &session)
                         if submissionModelVerificationPending {
                             // Dispatch-only observations never assert fresh model
                             // selection. The owned final answer establishes both
@@ -1447,8 +1453,8 @@ actor WebModelServer {
                             singleAction: request.singleActionRelay && provider == "chatgpt")
                         let responseID = "resp_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
                         let encoded = try request.stream
-                            ? WebModelResponseCodec.streamData(for: selection.reply, request: request, responseID: responseID, websiteModelEvidence: evidence, websiteToolSelection: selection.metadataValue)
-                            : WebModelResponseCodec.completedResponse(for: selection.reply, request: request, responseID: responseID, websiteModelEvidence: evidence, websiteToolSelection: selection.metadataValue)
+                            ? WebModelResponseCodec.streamData(for: selection.reply, request: request, responseID: responseID, websiteSelectionEvidence: evidence, websiteToolSelection: selection.metadataValue)
+                            : WebModelResponseCodec.completedResponse(for: selection.reply, request: request, responseID: responseID, websiteSelectionEvidence: evidence, websiteToolSelection: selection.metadataValue)
                         responseProfile?.mark(.encoded)
                         let continuation: WebsiteTurnContinuation? = try session.usesVerifiedHistory ? WebsiteTurnContinuation(request: request, encodedResponse: encoded) : nil
                         if let requestMetadata {
@@ -1490,7 +1496,7 @@ actor WebModelServer {
                             }
                             if let continuation {
                                 closedTurns[taskID] = ClosedTurn(inferenceID: inferenceID, context: context, continuation: continuation,
-                                    transportGeneration: session.transportGeneration, resolvedModel: session.resolvedModel,
+                                    transportGeneration: session.transportGeneration, resolvedSelection: session.resolvedSelection,
                                     turnInferenceCount: session.turnInferenceCount, cumulativePromptUTF8Count: session.cumulativePromptUTF8Count)
                             }
                         }
@@ -1507,7 +1513,7 @@ actor WebModelServer {
                     case "running":
                         try Self.verifyInferenceSnapshot(value, session: &session)
                         if value["modelVerificationPending"] as? Bool != true {
-                            _ = try verifiedModelEvidence(value, session: &session)
+                            _ = try verifiedSelectionEvidence(value, session: &session)
                         }
                         sessions[taskID] = session
                         lease = session
@@ -1533,7 +1539,7 @@ actor WebModelServer {
                         if correctionTicket == nil, correctionProof, !context.isMaintenance,
                               !session.retainsConversation,
                               session.sequence == 1, session.baselineResponseCount == 0,
-                              session.resolvedModel != nil, session.documentGeneration != nil,
+                              session.resolvedSelection != nil, session.documentGeneration != nil,
                               !session.submittedPromptFingerprint.isEmpty,
                               sessions[taskID]?.token == session.token,
                               session.turnInferenceCount < Self.maximumTurnInferences,
@@ -1727,7 +1733,7 @@ actor WebModelServer {
         LocalModelCatalog.webProvider(for: model)
     }
 
-    private static func modelEvidence(_ snapshot: [String: Any], session: Session) throws -> WebsiteModelEvidence? {
+    private static func selectionEvidence(_ snapshot: [String: Any], session: Session) throws -> WebsiteSelectionEvidence? {
         guard snapshot["modelVerificationPending"] == nil, snapshot["pendingSubmissionContext"] == nil,
               snapshot["modelVerificationPendingReason"] == nil else {
             throw Failure.modelUnverified
@@ -1737,9 +1743,14 @@ actor WebModelServer {
                 throw Failure.productModeUnverified
             }
         }
-        guard session.modelChoice != nil || snapshot["modelEvidence"] != nil && !(snapshot["modelEvidence"] is NSNull) else { return nil }
-        do { return try WebsiteModelEvidence.parse(snapshot["modelEvidence"], provider: session.provider, expected: session.modelChoice) }
-        catch WebsiteModelEvidence.Failure.mismatch { throw Failure.modelMismatch }
+        // Mode proof is a distinct native capability. A foreign proof kind is
+        // terminal even when an older provider uses its website default.
+        guard session.provider == "deepseek" || snapshot["modeEvidence"] == nil else { throw Failure.modelUnverified }
+        guard session.modeChoice != nil || session.modelChoice != nil
+            || snapshot["modelEvidence"] != nil && !(snapshot["modelEvidence"] is NSNull) else { return nil }
+        do { return try WebsiteSelectionEvidence.parse(snapshot: snapshot, provider: session.provider,
+            expectedModel: session.modelChoice, expectedMode: session.modeChoice) }
+        catch WebsiteSelectionEvidence.Failure.mismatch { throw Failure.modelMismatch }
         catch { throw Failure.modelUnverified }
     }
 
@@ -1757,7 +1768,7 @@ actor WebModelServer {
 
     private func captureRejectedReply(_ text: String, diagnostic: RejectedReplyDiagnostic,
                                       taskID: String, inferenceID: UUID, session: Session,
-                                      evidence: WebsiteModelEvidence?, snapshot: [String: Any]) {
+                                      evidence: WebsiteSelectionEvidence?, snapshot: [String: Any]) {
         guard let directory = rejectedReplyDirectory, let task = UUID(uuidString: taskID),
               let token = UUID(uuidString: session.token),
               text.utf8.count <= WebModelRejectedReplyCapture.maximumReplyBytes,
@@ -1788,7 +1799,7 @@ actor WebModelServer {
                                     "modelID": session.modelID, "replyText": text,
                                     "diagnostic": diagnosticFields, "automaticReplay": false]
         if let thread = evidenceThreads[task.uuidString.lowercased()] { record["threadID"] = thread }
-        if let evidence { record["modelEvidence"] = evidence.dictionary }
+        if let evidence { record[evidence.snapshotField] = evidence.dictionary }
         if let context = snapshot["modelProofContext"] as? [String: Any],
            let rawGeneration = context["documentGeneration"] as? String, let generation = UUID(uuidString: rawGeneration) {
             record["documentGeneration"] = generation.uuidString.lowercased()
@@ -1877,7 +1888,7 @@ actor WebModelServer {
                         "freshSessionSubmissionCapability", "pendingSubmissionContext"],
                       snapshot["provider"] as? String == "claude",
                       snapshot["modelVerificationPendingReason"] as? String == "claude_detached_header_v1",
-                      session.modelChoice != nil, session.resolvedModel != nil,
+                      session.modelChoice != nil, session.resolvedSelection != nil,
                       session.provesFreshSessionSubmission, !session.provesNativeContinuation,
                       session.sequence == 1, session.baselineResponseCount == 0,
                       !session.hasObservedClaudeOutput,
@@ -1895,7 +1906,7 @@ actor WebModelServer {
                 }
             } else {
                 guard session.provider == "chatgpt", session.modelChoice?.chatGPTPower != nil,
-                      session.resolvedModel != nil, snapshot["modelVerificationPendingReason"] == nil,
+                      session.resolvedSelection != nil, snapshot["modelVerificationPendingReason"] == nil,
                       (try? WebsiteProductModeEvidence.parse(snapshot["productModeEvidence"], requireTemporary: true)) != nil else {
                     throw Failure.invalidRequest
                 }
@@ -1986,7 +1997,7 @@ actor WebModelServer {
         if let turnScoped { policy = turnScoped }
         else if provider == "chatgpt" { policy = nil }
         else { policy = Self.requiresNativeContinuationProof(provider: provider) }
-        let transactionMode = provider == "kimi" ? "saved_conversation_delete_per_inference"
+        let transactionMode = SavedConversationPolicy(rawValue: provider) != nil ? "saved_conversation_delete_per_inference"
             : provider == "groq" ? "explicit_clear_per_inference"
             : policy.map { $0 ? "temporary_conversation_per_turn" : "temporary_conversation_per_inference" } ?? "capability_pending"
         var record: [String: Any] = ["schemaVersion": 2, "timestamp": formatter.string(from: Date()),
@@ -2001,7 +2012,7 @@ actor WebModelServer {
         return record
     }
 
-    private func recordEvidence(_ evidence: WebsiteModelEvidence?, snapshot: [String: Any], taskID: String,
+    private func recordEvidence(_ evidence: WebsiteSelectionEvidence?, snapshot: [String: Any], taskID: String,
                                 inferenceID: UUID, session: Session, phase: String, cleanupAttemptID: String? = nil, errorCode: String? = nil) throws {
         var checkedSession = session
         try Self.verifyInferenceSnapshot(snapshot, session: &checkedSession)
@@ -2022,7 +2033,7 @@ actor WebModelServer {
         record["sequence"] = session.sequence
         if let cleanupAttemptID { record["cleanupAttemptID"] = cleanupAttemptID }
         if let errorCode { record["errorCode"] = errorCode }
-        if let evidence { record["modelEvidence"] = evidence.dictionary }
+        if let evidence { record[evidence.snapshotField] = evidence.dictionary }
         if session.provider == "chatgpt",
            let product = try? WebsiteProductModeEvidence.parse(snapshot["productModeEvidence"], requireTemporary: true) {
             record["productModeEvidence"] = product.dictionary

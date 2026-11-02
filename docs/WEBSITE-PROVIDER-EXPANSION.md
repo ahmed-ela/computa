@@ -1,13 +1,13 @@
 # Kimi, Qwen and DeepSeek website adapters
 
-Status: candidate build387 preparation, 2026-11-02 UTC. Installed 0.8.0 (386),
-source `31afeb27797339a6d5f96384810647c203b9a63c`, captured Kimi discovery
-stalling at `moreOpening`: the main menu was open but the submenu remained
-collapsed after its claimed click. No prompt was sent and no choices were
-exposed. Candidate387 replaces the submenu click with one pointer entry/exit
-event, matching normal UI hover behavior. Live recovery and tool-use
-qualification remain pending.
-Qwen and DeepSeek have no enabled native website adapter yet. PR #20 remains draft.
+Status: candidate build388 integration, 2026-11-02 UTC. Installed 0.8.0 (387),
+source `8febb511e3bdc53ea5e7a0e2f10b608dd3fcd6d3`, still stalls Kimi discovery
+at `moreOpening`: neither the earlier click nor the pointer-only experiment
+opened its submenu. No Kimi prompt was submitted. The next candidate includes
+mouse compatibility events within one claimed hover transition. Live recovery
+and tool-use qualification remain pending. Qwen and DeepSeek's native
+foundations are integrated locally; public admission is being prepared.
+PR #20 remains draft.
 
 The requested route is each provider's signed-in website in Computa's browser.
 Qwen's website is separate from Alibaba's existing Qwen 3.7 Flash API option.
@@ -245,6 +245,66 @@ zero Send actions. The combined JavaScript/version gate passed 72 tests with
 fixture. These fixtures validate the candidate mechanism and protections;
 live discovery and response checks remain required.
 
+### Build387 result and shared provider foundation
+
+Signed installed build387, process 46928, again reached the discovery deadline
+at `moreOpening`. The exact claimed submenu remained absent and collapsed;
+the main menu remained present and expanded. No prompt or marker was sent.
+Evidence is `build387/kimi-startup387-complete.log`. The local pointer-event
+fixtures passed, but did not represent a website listening to legacy mouse
+events. The next candidate tests a fixed boundary sequence rather than retrying
+the spent live operation. Normal pointer input can include mouse compatibility
+events; see the [W3C mapping](https://www.w3.org/TR/pointerevents3/#compatibility-mapping-with-mouse-events).
+
+Qwen and DeepSeek now share the saved-conversation state machine and strict
+native deletion lease. DeepSeek has typed Chat/DeepThink mode intent/evidence,
+separate from named model evidence; Search must be off and no backend model
+version is asserted. Its request IDs are `browser/deepseek/mode/chat` and
+`browser/deepseek/mode/deepthink`. Qwen admits only the observed Plus/Max
+choices when its public pilot is enabled.
+
+Canonical shared engine, provider DOM drivers, generation command and fixtures
+are included under `Scripts/EmbeddedSavedProviders` and
+`Scripts/embedded-saved-provider-resources.ts`. Generated-resource equality is
+tested; a clean checkout does not depend on private workspace source files.
+The first integrated foundation gate passed 98 native tests and 89 JavaScript
+tests with 1,636 assertions. Two test compilation gaps (an exhaustive provider
+switch and an optional Boolean assertion) were corrected before that pass.
+Logs remain under `build388/native-foundation*.log` and `js-foundation.log`.
+These are local foundation results, not installed provider qualification.
+
+### Candidate388 integration corrections
+
+The Kimi candidate now dispatches one fixed pointer-and-mouse boundary sequence
+for each claimed submenu entry or exit. Every event retains the exact physical
+target and ownership checks; a partial or unacknowledged operation cannot replay.
+Native WebKit fixtures accept its exact legacy mouse-coordinate flooring only
+when the delivered point still hits that same bound control. This changes the
+fixture's representation check, not production targeting or verification.
+
+The initial integrated native suite exposed a missing DeepSeek engine metadata
+prefix: the tool catalog had been seeded from UI options, but DeepSeek has no
+selectable default model. Registered provider prefixes now supply the pinned
+terminal and freeform patch capabilities independently of UI defaults. Request
+admission still requires an exact supported model or mode. DeepSeek failure
+history now also rejects a bare provider ID. An older mixed-provider prompt test
+was updated to expect the observed raw-JSON format for Qwen and DeepSeek.
+
+Qwen's two observed named models and DeepSeek's two observed modes are enabled
+for controlled pilot testing. A separate validated mode cache and shared startup
+queue preserve their identities. Actual WebKit-to-server fixtures exercise all
+four selections through response publication and durable saved-chat cleanup.
+Finite adapter failure identifiers are captured once per owned session for all
+three saved-chat providers; page prose, URLs and exception text are excluded.
+Installed replies and tool workflows remain separate required evidence.
+
+The combined candidate388 native gate passed 421 tests with no failures,
+including the new provider server/cleanup paths and existing provider regressions.
+The JavaScript/resource/version gate passed 168 tests with 2,767 assertions;
+the provider selector passed 23 tests with 420 assertions, type checking and
+the production WebUI build. Earlier failed runs remain retained alongside the
+passing logs under `build388/`. These results do not establish live qualification.
+
 ### Direct website observations before native qualification
 
 Kimi's approved test tab uses `https://www.kimi.ai/`. Its model menu offered
@@ -292,15 +352,10 @@ developer setting were restored after the approved two-message-per-provider scop
 
 ## Remaining gates
 
-1. Run candidate386's gated pre-cleanup discovery diagnostics to capture the
-   unresolved build385 deadline, then repair its demonstrated cause and
-   verify installed Kimi Instant discovery, fresh replies and exact saved-chat
-   deletion before qualifying browser, terminal and file tasks. The provider
-   catalog drives automatic startup discovery; builds383–385 failed at distinct stages.
-2. Finish Qwen's fixed adapter and native ownership/cleanup integration from
-   the observed website controls; keep it outside public discovery meanwhile.
-3. Integrate DeepSeek's observed mode controls and scoped deletion chain, then
-   verify its completion signal while an actual response is still streaming.
+1. Verify Kimi's fixed hover sequence in a fresh installed discovery, then
+   require an Instant reply and exact saved-chat deletion before tool workflows.
+2. Verify Qwen/DeepSeek's installed choices with fresh replies and local workflows.
+3. Verify DeepSeek's completion signal while an actual response is still streaming.
 4. Preserve the same negative fixtures for route/model changes, duplicate
    controls, uncertain Send, lost ownership and delayed/unconfirmed deletion.
 5. Record each installed model's actual tool results and durable cleanup

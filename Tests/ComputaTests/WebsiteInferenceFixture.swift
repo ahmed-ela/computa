@@ -8,12 +8,18 @@ import XCTest
 let websiteInferenceFixtureGeneration = UUID(uuidString: "10913cbc-442d-4d04-b1a5-b372df40c52c")!
 let syntheticChatGPTChoice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/medium", label: "Medium")
 let syntheticChatGPTModelID = syntheticChatGPTChoice.modelID
+// Named-model protocol matrices keep typed website behavior modes separate.
+// DeepSeek is covered by explicit mode-evidence and real server/receipt fixtures.
+let namedWebsiteModelProviders = WebsiteModelCatalog.providers.filter { $0 != "deepseek" }
+let syntheticQwenChoice = WebsiteModelChoice(provider: "qwen", key: "Qwen3.7-Plus", label: "Qwen3.7-Plus")
 // Kimi's current plain-chat pilot admits one observed choice. Fixtures must not
 // invent a second choice or use its intentionally unsupported website default.
 let syntheticKimiChoice = WebsiteModelChoice(provider: "kimi", key: "k28-instant", label: "Instant")
 
 func syntheticWebsiteModelID(_ provider: String) -> String {
     if provider == "kimi" { return syntheticKimiChoice.modelID }
+    if provider == "qwen" { return syntheticQwenChoice.modelID }
+    if provider == "deepseek" { return WebsiteModeChoice(deepSeekMode: .chat).requestID }
     if provider == "groq" {
         return WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
     }
@@ -22,6 +28,10 @@ func syntheticWebsiteModelID(_ provider: String) -> String {
 
 func syntheticWebsiteChoice(provider: String, key: String, label: String) -> WebsiteModelChoice {
     if provider == "kimi" { return syntheticKimiChoice }
+    if provider == "qwen" {
+        let name = key.contains("new") ? "Qwen3.8-Max" : "Qwen3.7-Plus"
+        return WebsiteModelChoice(provider: provider, key: name, label: name)
+    }
     if provider == "groq" {
         return WebsiteModelChoice(provider: provider,
             key: key.contains("new") ? "openai/gpt-oss-20b" : "openai/gpt-oss-120b",

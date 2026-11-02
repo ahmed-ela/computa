@@ -57,6 +57,10 @@ final class WebsiteModelStateTests: XCTestCase {
         let state = AppState(tasks: [busy], preferences: preferences, websiteModelDiscovery: { provider in
             calls.append(provider)
             return provider == "chatgpt" ? [latest, sol] : [modelStateChoice(provider: provider, key: "fixture", label: "Fixture")]
+        }, websiteModeDiscovery: { provider in
+            XCTAssertEqual(provider, "deepseek")
+            calls.append(provider)
+            return modelStateModes
         })
         await state.refreshWebsiteModels()
         XCTAssertTrue(calls.isEmpty, "Busy manual refresh must not create a provider probe")
@@ -109,10 +113,11 @@ final class WebsiteModelStateTests: XCTestCase {
         let old = WebsiteModelChoice(provider: "claude", key: "Haiku 4.5", label: "Haiku 4.5")
         let fresh = [WebsiteModelChoice(provider: "claude", key: "Opus 5.5", label: "Opus 5.5"),
                      WebsiteModelChoice(provider: "claude", key: "Haiku 5.5", label: "Haiku 5.5")]
-        let others = WebsiteModelCatalog.providers.filter { $0 != "claude" }.map {
+        let others = namedWebsiteModelProviders.filter { $0 != "claude" }.map {
             modelStateChoice(provider: $0, key: "cached", label: "Cached")
         }
         WebsiteModelCatalog.save(others + [old], to: preferences)
+        WebsiteModeCatalog.save(modelStateModes, to: preferences)
         preferences.set(old.modelID, forKey: "LocalCodex.defaultModelID")
         let entry = TimelineEntry(kind: .assistant, title: "Saved", body: "Unchanged history")
         let task = AgentTask(id: "saved", title: "Saved", summary: "", status: .completed,
@@ -121,6 +126,10 @@ final class WebsiteModelStateTests: XCTestCase {
         let state = AppState(tasks: [task], preferences: preferences, websiteModelDiscovery: { provider in
             calls.append(provider)
             return provider == "claude" ? fresh : others.filter { $0.provider == provider }
+        }, websiteModeDiscovery: { provider in
+            XCTAssertEqual(provider, "deepseek")
+            calls.append(provider)
+            return modelStateModes
         })
         var retries: [Bool] = []
         state.setWebsiteModelRefreshObserverForTesting { _, retry in retries.append(retry) }
@@ -144,8 +153,9 @@ final class WebsiteModelStateTests: XCTestCase {
 
     func testRestoredSelectionAfterWebReadyRevalidatesItsProviderOnce() async {
         let preferences = isolatedTestPreferences()
-        let cached = WebsiteModelCatalog.providers.map { modelStateChoice(provider: $0, key: "cached", label: "Cached") }
+        let cached = namedWebsiteModelProviders.map { modelStateChoice(provider: $0, key: "cached", label: "Cached") }
         WebsiteModelCatalog.save(cached, to: preferences)
+        WebsiteModeCatalog.save(modelStateModes, to: preferences)
         let claude = cached.first { $0.provider == "claude" }!
         let fresh = WebsiteModelChoice(provider: "claude", key: "Opus 5.5", label: "Opus 5.5")
         let history = TimelineEntry(kind: .assistant, title: "Saved", body: "Preserve restored history")
@@ -155,6 +165,10 @@ final class WebsiteModelStateTests: XCTestCase {
         let state = AppState(tasks: [], preferences: preferences, websiteModelDiscovery: { provider in
             calls.append(provider)
             return provider == "claude" ? [fresh] : cached.filter { $0.provider == provider }
+        }, websiteModeDiscovery: { provider in
+            XCTAssertEqual(provider, "deepseek")
+            calls.append(provider)
+            return modelStateModes
         })
         var retryBlocked: [Bool] = []
         state.setWebsiteModelRefreshObserverForTesting { _, retry in retryBlocked.append(retry) }
@@ -178,8 +192,9 @@ final class WebsiteModelStateTests: XCTestCase {
 
     func testRestoredRunningSelectionWaitsForIdleAndDoesNotRetryItsFailedRefresh() async {
         let preferences = isolatedTestPreferences()
-        let cached = WebsiteModelCatalog.providers.map { modelStateChoice(provider: $0, key: "cached", label: "Cached") }
+        let cached = namedWebsiteModelProviders.map { modelStateChoice(provider: $0, key: "cached", label: "Cached") }
         WebsiteModelCatalog.save(cached, to: preferences)
+        WebsiteModeCatalog.save(modelStateModes, to: preferences)
         let claude = cached.first { $0.provider == "claude" }!
         let restored = AgentTask(id: "restored-running", title: "Running", summary: "", status: .running,
                                  workspace: "/tmp", model: claude.modelID)
@@ -188,6 +203,10 @@ final class WebsiteModelStateTests: XCTestCase {
             calls.append(provider)
             if provider == "claude" { throw EmbeddedWebModelTransport.Failure.usageLimited(.claude) }
             return cached.filter { $0.provider == provider }
+        }, websiteModeDiscovery: { provider in
+            XCTAssertEqual(provider, "deepseek")
+            calls.append(provider)
+            return modelStateModes
         })
         state.refreshWebsiteModelsIfNeeded()
         await waitForDiscovery { calls == ["chatgpt"] && !state.websiteModelsRefreshing }
@@ -212,6 +231,8 @@ final class WebsiteModelStateTests: XCTestCase {
         let ledger = WebsiteDiscoveryLedger()
         let state = AppState(tasks: [], preferences: preferences, websiteModelDiscovery: { provider in
             try await ledger.discover(provider)
+        }, websiteModeDiscovery: { provider in
+            try await ledger.discoverModes(provider)
         })
         let expected = WebsiteModelCatalog.providers.filter { $0 != "chatgpt" } + ["chatgpt"]
         state.refreshWebsiteModelsIfNeeded()
@@ -227,13 +248,18 @@ final class WebsiteModelStateTests: XCTestCase {
 
     func testStartupWaitsForIdleWithoutPollingOrReplayingFailedProviders() async {
         let preferences = isolatedTestPreferences()
-        let cached = WebsiteModelCatalog.providers.map { modelStateChoice(provider: $0, key: "cached", label: "Cached") }
+        let cached = namedWebsiteModelProviders.map { modelStateChoice(provider: $0, key: "cached", label: "Cached") }
         WebsiteModelCatalog.save(cached, to: preferences)
+        WebsiteModeCatalog.save(modelStateModes, to: preferences)
         preferences.set(cached.first { $0.provider == "claude" }!.modelID, forKey: "LocalCodex.defaultModelID")
         var calls: [String] = []
         let state = AppState(tasks: [], preferences: preferences, websiteModelDiscovery: { provider in
             calls.append(provider)
             throw EmbeddedWebModelTransport.Failure.usageLimited(.claude)
+        }, websiteModeDiscovery: { provider in
+            XCTAssertEqual(provider, "deepseek")
+            calls.append(provider)
+            return modelStateModes
         })
         var retries: [Bool] = []
         state.setWebsiteModelRefreshObserverForTesting { _, retry in retries.append(retry) }
@@ -260,14 +286,19 @@ final class WebsiteModelStateTests: XCTestCase {
 
     func testStartupRejectsLateChoicesAndDefersUnattemptedProvidersUntilIdle() async {
         let preferences = isolatedTestPreferences()
-        let cached = WebsiteModelCatalog.providers.map { modelStateChoice(provider: $0, key: "cached", label: "Cached") }
+        let cached = namedWebsiteModelProviders.map { modelStateChoice(provider: $0, key: "cached", label: "Cached") }
         WebsiteModelCatalog.save(cached, to: preferences)
+        WebsiteModeCatalog.save(modelStateModes, to: preferences)
         var calls: [String] = []
         var held: CheckedContinuation<[WebsiteModelChoice], Error>?
         let state = AppState(tasks: [], preferences: preferences, websiteModelDiscovery: { provider in
             calls.append(provider)
             if calls.count == 1 { return try await withCheckedThrowingContinuation { held = $0 } }
             return cached.filter { $0.provider == provider }
+        }, websiteModeDiscovery: { provider in
+            XCTAssertEqual(provider, "deepseek")
+            calls.append(provider)
+            return modelStateModes
         })
         state.refreshWebsiteModelsIfNeeded()
         await waitForDiscovery { held != nil }
@@ -289,6 +320,10 @@ final class WebsiteModelStateTests: XCTestCase {
         let deferred = AppState(tasks: [], preferences: isolatedTestPreferences(), websiteModelDiscovery: { provider in
             deferredCalls.append(provider)
             return [modelStateChoice(provider: provider, key: "fixture", label: "Fixture")]
+        }, websiteModeDiscovery: { provider in
+            XCTAssertEqual(provider, "deepseek")
+            deferredCalls.append(provider)
+            return modelStateModes
         })
         deferred.activeTurnTaskIDs.insert("busy")
         deferred.refreshWebsiteModelsIfNeeded()
@@ -299,6 +334,8 @@ final class WebsiteModelStateTests: XCTestCase {
         let ledger = WebsiteDiscoveryLedger(delay: .seconds(60))
         let active = AppState(tasks: [], preferences: isolatedTestPreferences(), websiteModelDiscovery: { provider in
             try await ledger.discover(provider)
+        }, websiteModeDiscovery: { provider in
+            try await ledger.discoverModes(provider)
         })
         active.refreshWebsiteModelsIfNeeded()
         await waitForDiscovery { !ledger.calls.isEmpty }
@@ -311,14 +348,19 @@ final class WebsiteModelStateTests: XCTestCase {
 
     func testActivityBeforeDiscoveryEntryDefersDemandWithoutSpendingLaunchAttempt() async {
         let preferences = isolatedTestPreferences()
-        let cached = WebsiteModelCatalog.providers.map { modelStateChoice(provider: $0, key: "cached", label: "Cached") }
+        let cached = namedWebsiteModelProviders.map { modelStateChoice(provider: $0, key: "cached", label: "Cached") }
         WebsiteModelCatalog.save(cached, to: preferences)
+        WebsiteModeCatalog.save(modelStateModes, to: preferences)
         let claude = cached.first { $0.provider == "claude" }!
         preferences.set(claude.modelID, forKey: "LocalCodex.defaultModelID")
         var calls: [String] = []
         let state = AppState(tasks: [], preferences: preferences, websiteModelDiscovery: { provider in
             calls.append(provider)
             return cached.filter { $0.provider == provider }
+        }, websiteModeDiscovery: { provider in
+            XCTAssertEqual(provider, "deepseek")
+            calls.append(provider)
+            return modelStateModes
         })
         withObservationTracking {
             _ = state.websiteModelsRefreshing
@@ -338,8 +380,9 @@ final class WebsiteModelStateTests: XCTestCase {
 
     func testSelectionDemandCoalescesAndDoesNotRefreshUnselectedCachedProviders() async {
         let preferences = isolatedTestPreferences()
-        let cached = WebsiteModelCatalog.providers.map { modelStateChoice(provider: $0, key: "cached", label: "Cached") }
+        let cached = namedWebsiteModelProviders.map { modelStateChoice(provider: $0, key: "cached", label: "Cached") }
         WebsiteModelCatalog.save(cached, to: preferences)
+        WebsiteModeCatalog.save(modelStateModes, to: preferences)
         let claude = cached.first { $0.provider == "claude" }!
         let task = AgentTask(id: "claude-task", title: "Claude", summary: "", status: .completed,
                              workspace: "/tmp", model: claude.modelID)
@@ -347,6 +390,10 @@ final class WebsiteModelStateTests: XCTestCase {
         let state = AppState(tasks: [task], preferences: preferences, websiteModelDiscovery: { provider in
             calls.append(provider)
             return cached.filter { $0.provider == provider }
+        }, websiteModeDiscovery: { provider in
+            XCTAssertEqual(provider, "deepseek")
+            calls.append(provider)
+            return modelStateModes
         })
         state.selectTask(nil)
         state.refreshWebsiteModelsIfNeeded()
@@ -367,8 +414,9 @@ final class WebsiteModelStateTests: XCTestCase {
     func testAutomaticInvalidCatalogAndUncertainCleanupKeepCacheWithoutRetry() async {
         for cleanupUncertain in [false, true] {
             let preferences = isolatedTestPreferences()
-            let cached = WebsiteModelCatalog.providers.map { modelStateChoice(provider: $0, key: "cached", label: "Cached") }
+            let cached = namedWebsiteModelProviders.map { modelStateChoice(provider: $0, key: "cached", label: "Cached") }
             WebsiteModelCatalog.save(cached, to: preferences)
+            WebsiteModeCatalog.save(modelStateModes, to: preferences)
             let claude = cached.first { $0.provider == "claude" }!
             preferences.set(claude.modelID, forKey: "LocalCodex.defaultModelID")
             var calls: [String] = []
@@ -376,6 +424,10 @@ final class WebsiteModelStateTests: XCTestCase {
                 calls.append(provider)
                 if cleanupUncertain { throw EmbeddedWebModelTransport.Failure.discoveryCleanupFailed }
                 return [claude, claude]
+            }, websiteModeDiscovery: { provider in
+                XCTAssertEqual(provider, "deepseek")
+                calls.append(provider)
+                return modelStateModes
             })
             state.refreshWebsiteModelsIfNeeded()
             await waitForDiscovery { calls == ["claude"] && !state.websiteModelsRefreshing }
@@ -391,19 +443,22 @@ final class WebsiteModelStateTests: XCTestCase {
 
     func testExplicitRefreshReplacesAllCachedProviders() async {
         let preferences = isolatedTestPreferences()
-        let cached = WebsiteModelCatalog.providers.map {
+        let cached = namedWebsiteModelProviders.map {
             modelStateChoice(provider: $0, key: "cached", label: "Cached")
         }
         WebsiteModelCatalog.save(cached, to: preferences)
+        WebsiteModeCatalog.save(modelStateModes, to: preferences)
         let ledger = WebsiteDiscoveryLedger()
         let state = AppState(tasks: [], preferences: preferences, websiteModelDiscovery: { provider in
             try await ledger.discover(provider)
+        }, websiteModeDiscovery: { provider in
+            try await ledger.discoverModes(provider)
         })
 
         await state.refreshWebsiteModels()
 
         XCTAssertEqual(ledger.calls, WebsiteModelCatalog.providers)
-        XCTAssertEqual(Set(state.websiteModelChoices.map(\.provider)), Set(WebsiteModelCatalog.providers))
+        XCTAssertEqual(Set(state.websiteModelChoices.map(\.provider) + state.websiteModeChoices.map(\.provider)), Set(WebsiteModelCatalog.providers))
         XCTAssertTrue(state.websiteModelChoices.allSatisfy(\.isSelectable))
         XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), state.websiteModelChoices)
         XCTAssertNil(state.websiteModelsError)
@@ -411,10 +466,11 @@ final class WebsiteModelStateTests: XCTestCase {
 
     func testExplicitRefreshPreservesManualRecoveryIntentBehindPartialStartup() async {
         let preferences = isolatedTestPreferences()
-        let cached = WebsiteModelCatalog.providers.filter { $0 != "gemini" }.map {
+        let cached = namedWebsiteModelProviders.filter { $0 != "gemini" }.map {
             modelStateChoice(provider: $0, key: "cached", label: "Cached")
         }
         WebsiteModelCatalog.save(cached, to: preferences)
+        WebsiteModeCatalog.save(modelStateModes, to: preferences)
         var calls: [String] = []
         var active = 0, maximumActive = 0
         var held: CheckedContinuation<[WebsiteModelChoice], Error>?
@@ -425,6 +481,14 @@ final class WebsiteModelStateTests: XCTestCase {
             defer { active -= 1 }
             if calls.count == 1 { return try await withCheckedThrowingContinuation { held = $0 } }
             return [modelStateChoice(provider: provider, key: "fixture", label: "Fixture")]
+        }, websiteModeDiscovery: { provider in
+            XCTAssertEqual(provider, "deepseek")
+            calls.append(provider)
+            active += 1
+            maximumActive = max(maximumActive, active)
+            defer { active -= 1 }
+            await Task.yield()
+            return modelStateModes
         })
         var observed: [(provider: String, retryBlocked: Bool)] = []
         state.setWebsiteModelRefreshObserverForTesting { observed.append(($0, $1)) }
@@ -449,7 +513,7 @@ final class WebsiteModelStateTests: XCTestCase {
             XCTAssertEqual(observed.filter { $0.provider == provider && $0.retryBlocked }.count, 1,
                            "The explicit recovery intent must survive the non-recovery startup probe")
         }
-        XCTAssertEqual(Set(state.websiteModelChoices.map(\.provider)), Set(WebsiteModelCatalog.providers))
+        XCTAssertEqual(Set(state.websiteModelChoices.map(\.provider) + state.websiteModeChoices.map(\.provider)), Set(WebsiteModelCatalog.providers))
         XCTAssertTrue(state.websiteModelChoices.allSatisfy(\.isSelectable))
         XCTAssertFalse(state.websiteModelsRefreshing)
         XCTAssertNil(state.websiteModelsError)
@@ -466,17 +530,22 @@ final class WebsiteModelStateTests: XCTestCase {
     func testDiscoveryPublishesExactChoicesToBothSelectorsAndPersistsThem() async throws {
         let preferences = isolatedTestPreferences()
         let task = AgentTask(id: "fixture-task", title: "Fixture", summary: "", status: .draft, workspace: "/tmp", model: "browser/chatgpt")
-        let offered = Dictionary(uniqueKeysWithValues: WebsiteModelCatalog.providers.map { provider in
+        let offered = Dictionary(uniqueKeysWithValues: namedWebsiteModelProviders.map { provider in
             let choices = provider == "chatgpt"
                 ? [WebsiteModelChoice(provider: provider, key: "chat/latest/medium", label: "Medium"),
                    WebsiteModelChoice(provider: provider, key: "chat/latest/pro", label: "GPT-6 Pro")]
                 : provider == "kimi" ? [syntheticKimiChoice]
+                : provider == "qwen" ? [syntheticWebsiteChoice(provider: provider, key: "fixture-old", label: "Fixture"),
+                                         syntheticWebsiteChoice(provider: provider, key: "fixture-new", label: "Fixture")]
                 : [WebsiteModelChoice(provider: provider, key: "fixture-fast", label: "Fixture Fast"),
                    WebsiteModelChoice(provider: provider, key: "fixture-pro", label: "Fixture Pro")]
             return (provider, choices)
         })
         let state = AppState(tasks: [task], preferences: preferences, websiteModelDiscovery: { provider in
             offered[provider] ?? []
+        }, websiteModeDiscovery: { provider in
+            XCTAssertEqual(provider, "deepseek")
+            return modelStateModes
         })
         await state.refreshWebsiteModels()
         let snapshot = WebUISnapshot(state: state)
@@ -488,12 +557,17 @@ final class WebsiteModelStateTests: XCTestCase {
         for choice in state.websiteModelChoices {
             XCTAssertTrue(snapshot.modelOptions.contains { $0.id == choice.modelID && $0.label.contains(choice.label) && $0.available == true })
         }
+        XCTAssertEqual(state.websiteModeChoices, modelStateModes)
+        for mode in state.websiteModeChoices {
+            XCTAssertTrue(snapshot.modelOptions.contains { $0.id == mode.requestID && $0.label.contains(mode.label) && $0.available == true })
+        }
         let choice = try XCTUnwrap(state.websiteModelChoices.first)
         XCTAssertTrue(state.setTaskModel(choice.modelID, taskID: task.id))
         XCTAssertTrue(state.setDefaultModel(choice.modelID))
         let reopened = AppState(tasks: [], preferences: preferences)
         XCTAssertEqual(reopened.defaultModel, choice.modelID)
         XCTAssertEqual(reopened.websiteModelChoices, state.websiteModelChoices)
+        XCTAssertEqual(reopened.websiteModeChoices, modelStateModes)
         // Compare after selection: an unavailable initial default is retained
         // only while selected and disappears when the observed choice replaces it.
         XCTAssertEqual(WebUISnapshot(state: reopened).modelOptions.map(\.id), WebUISnapshot(state: state).modelOptions.map(\.id))
@@ -507,6 +581,9 @@ final class WebsiteModelStateTests: XCTestCase {
         let task = AgentTask(id: "saved-task", title: "Saved", summary: "", status: .completed, workspace: "/tmp", model: old.modelID)
         let state = AppState(tasks: [task], preferences: preferences, websiteModelDiscovery: { provider in
             [modelStateChoice(provider: provider, key: "fixture-new", label: "Fixture New")]
+        }, websiteModeDiscovery: { provider in
+            XCTAssertEqual(provider, "deepseek")
+            return modelStateModes
         })
         await state.refreshWebsiteModels()
         XCTAssertEqual(state.defaultModel, old.modelID)
@@ -552,6 +629,9 @@ final class WebsiteModelStateTests: XCTestCase {
             if provider == "chatgpt" { return [old, old] }
             if provider == "gemini" { throw WebsiteModelCatalog.Failure.invalidChoices }
             return [modelStateChoice(provider: provider, key: "fixture-new", label: "Fixture New")]
+        }, websiteModeDiscovery: { provider in
+            XCTAssertEqual(provider, "deepseek")
+            return modelStateModes
         })
         await state.refreshWebsiteModels()
         XCTAssertEqual(state.websiteModelChoices.filter { $0.provider == "chatgpt" }, [old])
@@ -571,6 +651,9 @@ final class WebsiteModelStateTests: XCTestCase {
             WebsiteModelCatalog.save([medium], to: preferences)
             let state = AppState(tasks: [], preferences: preferences, websiteModelDiscovery: { provider in
                 provider == "chatgpt" ? [rejected] : [modelStateChoice(provider: provider, key: "fixture", label: "Fixture")]
+            }, websiteModeDiscovery: { provider in
+                XCTAssertEqual(provider, "deepseek")
+                return modelStateModes
             })
             await state.refreshWebsiteModels()
             XCTAssertEqual(state.websiteModelChoices.filter { $0.provider == "chatgpt" }, [medium])
@@ -584,6 +667,8 @@ final class WebsiteModelStateTests: XCTestCase {
         let ledger = WebsiteDiscoveryLedger()
         let state = AppState(tasks: [], preferences: isolatedTestPreferences(), websiteModelDiscovery: { provider in
             try await ledger.discover(provider)
+        }, websiteModeDiscovery: { provider in
+            try await ledger.discoverModes(provider)
         })
         let first = Task { await state.refreshWebsiteModels() }
         for _ in 0..<1_000 where !state.websiteModelsRefreshing { await Task.yield() }
@@ -604,12 +689,17 @@ final class WebsiteModelStateTests: XCTestCase {
         let others = [modelStateChoice(provider: "chatgpt", key: "cached", label: "Cached"),
                       modelStateChoice(provider: "claude", key: "cached", label: "Cached")]
         WebsiteModelCatalog.save(others + [old], to: preferences)
+        WebsiteModeCatalog.save(modelStateModes, to: preferences)
         preferences.set(old.modelID, forKey: "LocalCodex.defaultModelID")
         let task = AgentTask(id: "old-gemini", title: "Saved", summary: "", status: .completed, workspace: "/tmp", model: old.modelID)
         var calls: [String] = []
         let state = AppState(tasks: [task], preferences: preferences, websiteModelDiscovery: { provider in
             calls.append(provider)
             return [replacement]
+        }, websiteModeDiscovery: { provider in
+            XCTAssertEqual(provider, "deepseek")
+            calls.append(provider)
+            return modelStateModes
         })
 
         await state.refreshWebsiteModels(provider: "gemini")
@@ -633,10 +723,11 @@ final class WebsiteModelStateTests: XCTestCase {
         let preferences = isolatedTestPreferences()
         let old = WebsiteModelChoice(provider: "groq", key: "fixture-old", label: "Fixture Old")
         let observed = WebsiteModelChoice(provider: "groq", key: "fixture-observed", label: "Fixture Observed")
-        let others = WebsiteModelCatalog.providers.filter { $0 != "groq" }.map {
+        let others = namedWebsiteModelProviders.filter { $0 != "groq" }.map {
             modelStateChoice(provider: $0, key: "cached", label: "Cached")
         }
         WebsiteModelCatalog.save(others + [old], to: preferences)
+        WebsiteModeCatalog.save(modelStateModes, to: preferences)
         preferences.set(old.modelID, forKey: "LocalCodex.defaultModelID")
         let task = AgentTask(id: "saved-groq", title: "Saved", summary: "", status: .completed,
                              workspace: "/tmp", model: old.modelID)
@@ -645,6 +736,10 @@ final class WebsiteModelStateTests: XCTestCase {
             calls.append(provider)
             guard signedIn else { throw WebsiteModelCatalog.Failure.invalidChoices }
             return [observed]
+        }, websiteModeDiscovery: { provider in
+            XCTAssertEqual(provider, "deepseek")
+            calls.append(provider)
+            return modelStateModes
         })
         await state.refreshWebsiteModels(provider: "groq")
         XCTAssertEqual(calls, ["groq"])
@@ -670,8 +765,9 @@ final class WebsiteModelStateTests: XCTestCase {
     func testScopedRefreshFailureOrInvalidCatalogPreservesAllSavedChoices() async throws {
         for failure in ["throw", "foreign", "duplicate"] {
             let preferences = isolatedTestPreferences()
-            let cached = WebsiteModelCatalog.providers.map { modelStateChoice(provider: $0, key: "cached", label: "Cached") }
+            let cached = namedWebsiteModelProviders.map { modelStateChoice(provider: $0, key: "cached", label: "Cached") }
             WebsiteModelCatalog.save(cached, to: preferences)
+            WebsiteModeCatalog.save(modelStateModes, to: preferences)
             let saved = preferences.data(forKey: WebsiteModelCatalog.preferenceKey)
             var calls: [String] = []
             let state = AppState(tasks: [], preferences: preferences, websiteModelDiscovery: { provider in
@@ -680,6 +776,10 @@ final class WebsiteModelStateTests: XCTestCase {
                 if failure == "throw" { throw WebsiteModelCatalog.Failure.invalidChoices }
                 return failure == "foreign" ? [choice, modelStateChoice(provider: "claude", key: "new", label: "New")]
                     : [choice, choice]
+            }, websiteModeDiscovery: { provider in
+                XCTAssertEqual(provider, "deepseek")
+                calls.append(provider)
+                return modelStateModes
             })
 
             await state.refreshWebsiteModels(provider: "gemini")
@@ -697,6 +797,10 @@ final class WebsiteModelStateTests: XCTestCase {
         let state = AppState(tasks: [], preferences: isolatedTestPreferences(), websiteModelDiscovery: { provider in
             calls.append(provider)
             return [modelStateChoice(provider: provider, key: "new", label: "New")]
+        }, websiteModeDiscovery: { provider in
+            XCTAssertEqual(provider, "deepseek")
+            calls.append(provider)
+            return modelStateModes
         })
         for provider in ["", "Gemini", "gemini ", "unknown", "browser/gemini"] {
             await state.refreshWebsiteModels(provider: provider)
@@ -717,6 +821,14 @@ final class WebsiteModelStateTests: XCTestCase {
             defer { active -= 1 }
             if calls.count == 1 { return try await withCheckedThrowingContinuation { held = $0 } }
             return [modelStateChoice(provider: provider, key: "new", label: "New")]
+        }, websiteModeDiscovery: { provider in
+            XCTAssertEqual(provider, "deepseek")
+            calls.append(provider)
+            active += 1
+            maximumActive = max(maximumActive, active)
+            defer { active -= 1 }
+            await Task.yield()
+            return modelStateModes
         })
         let scoped = Task { await state.refreshWebsiteModels(provider: "gemini") }
         await waitForDiscovery { held != nil }
@@ -737,14 +849,19 @@ final class WebsiteModelStateTests: XCTestCase {
         browser.recordHumanVerificationRequired(provider: "gemini")
         let checkpoint = browser.savedHumanVerificationCheckpointIDs["gemini"]
         let preferences = isolatedTestPreferences()
-        let cached = WebsiteModelCatalog.providers.map { modelStateChoice(provider: $0, key: "cached", label: "Cached") }
+        let cached = namedWebsiteModelProviders.map { modelStateChoice(provider: $0, key: "cached", label: "Cached") }
         WebsiteModelCatalog.save(cached, to: preferences)
+        WebsiteModeCatalog.save(modelStateModes, to: preferences)
         let saved = preferences.data(forKey: WebsiteModelCatalog.preferenceKey)
         var calls: [String] = []
         var held: CheckedContinuation<[WebsiteModelChoice], Error>?
         let state = AppState(tasks: [], preferences: preferences, browserSession: browser, websiteModelDiscovery: { provider in
             calls.append(provider)
             return try await withCheckedThrowingContinuation { held = $0 }
+        }, websiteModeDiscovery: { provider in
+            XCTAssertEqual(provider, "deepseek")
+            calls.append(provider)
+            return modelStateModes
         })
         state.activeTurnTaskIDs.insert("already-running")
         await state.refreshWebsiteModels(provider: "gemini")
@@ -785,6 +902,8 @@ final class WebsiteModelStateTests: XCTestCase {
         let ledger = WebsiteDiscoveryLedger(delay: .seconds(60))
         let state = AppState(tasks: [], preferences: isolatedTestPreferences(), websiteModelDiscovery: { provider in
             try await ledger.discover(provider)
+        }, websiteModeDiscovery: { provider in
+            try await ledger.discoverModes(provider)
         })
         let refresh = Task { await state.refreshWebsiteModels() }
         for _ in 0..<1_000 where ledger.calls.isEmpty { await Task.yield() }
@@ -809,18 +928,29 @@ private final class WebsiteDiscoveryLedger {
     let delay: Duration
     init(delay: Duration = .milliseconds(20)) { self.delay = delay }
     func discover(_ provider: String) async throws -> [WebsiteModelChoice] {
+        try await observe(provider)
+        return [modelStateChoice(provider: provider, key: "fixture", label: "Fixture")]
+    }
+    func discoverModes(_ provider: String) async throws -> [WebsiteModeChoice] {
+        XCTAssertEqual(provider, "deepseek")
+        try await observe(provider)
+        return modelStateModes
+    }
+    private func observe(_ provider: String) async throws {
         calls.append(provider)
         active += 1
         maximumActive = max(maximumActive, active)
         defer { active -= 1 }
         do { try await Task.sleep(for: delay) }
         catch { cancelled = true; throw error }
-        return [modelStateChoice(provider: provider, key: "fixture", label: "Fixture")]
     }
 }
 
 private func modelStateChoice(provider: String, key: String, label: String) -> WebsiteModelChoice {
     provider == "chatgpt" ? WebsiteModelChoice(provider: provider, key: "chat/latest/medium", label: "Medium")
         : provider == "kimi" ? syntheticKimiChoice
+        : provider == "qwen" ? syntheticWebsiteChoice(provider: provider, key: key, label: label)
         : WebsiteModelChoice(provider: provider, key: key, label: label)
 }
+
+private var modelStateModes: [WebsiteModeChoice] { WebsiteModeChoice.DeepSeekMode.allCases.map { .init(deepSeekMode: $0) } }

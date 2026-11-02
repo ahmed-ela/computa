@@ -32,14 +32,16 @@ struct WebsiteTurnFailureStore: Sendable {
 
         private static func canonicalDiagnostic(_ text: String, modelID: String) -> String? {
             guard text.utf8.count <= 8_192, let provider = WebModelServer.provider(for: modelID),
+                  provider != "deepseek" || WebsiteModeChoice.parse(requestID: modelID) != nil,
                   let webProvider = EmbeddedWebModelTransport.Provider(rawValue: provider),
                   let supplied = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
                   let error = supplied["error"] as? [String: Any], let code = error["code"] as? String else { return nil }
-            // Legacy fixed errors have no retry metadata. Kimi's distinct
-            // unsupported-response envelope does, and must retain a real Bool.
+            // Legacy fixed errors have no retry metadata. The saved-chat
+            // adapters' distinct unsupported-response envelope does, and must retain a real Bool.
             // Exact generated envelopes still pass canonical equality below.
+            let savedLiteralSource = ["kimi", "qwen", "deepseek"].contains(provider)
             if code != "browser_model_error" && code != "website_turn_limit"
-                && (code != "unsupported_website_response" || provider == "kimi") {
+                && (code != "unsupported_website_response" || savedLiteralSource) {
                 guard let retryable = error["retryable"] as? NSNumber, CFGetTypeID(retryable) == CFBooleanGetTypeID(),
                       retryable.boolValue == false else { return nil }
             }
@@ -54,8 +56,8 @@ struct WebsiteTurnFailureStore: Sendable {
             case "unsupported_website_response":
                 if provider == "chatgpt" {
                     nativeError = WebModelResponseCodec.Failure.unsupportedWebsiteResponse
-                } else if provider == "kimi" {
-                    // This fixed adapter's unreadable literal source is a
+                } else if savedLiteralSource {
+                    // These fixed adapters' unreadable literal source is a
                     // terminal turn diagnosis, not arbitrary provider prose.
                     nativeError = EmbeddedWebModelTransport.Failure.responseFormatUnavailable
                 } else { return nil }

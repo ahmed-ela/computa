@@ -72,7 +72,9 @@ function computaProviderCore(request, provider, origin, actions) {
     record.observer.observe(document.documentElement || document, { subtree: true, childList: true,
       characterData: true, attributes: true, attributeFilter: ['disabled', 'aria-disabled', 'aria-hidden', 'aria-busy',
         'aria-label', 'aria-expanded', 'aria-controls', 'aria-selected', 'data-state', 'class', 'style', 'hidden', 'inert',
-        ...(provider === 'kimi' ? ['role', 'contenteditable', 'data-lexical-editor', 'data-testid', 'aria-haspopup', 'id'] : [])] });
+        ...(provider === 'kimi' ? ['role', 'contenteditable', 'data-lexical-editor', 'data-testid', 'aria-haspopup', 'id']
+          : provider === 'qwen' ? ['role', 'aria-haspopup']
+          : provider === 'deepseek' ? ['role', 'placeholder', 'aria-pressed'] : [])] });
     globalThis[signalKey] = record;
   }
   return { uuid, fail, normalize, bodyText, choiceValid, equalChoice, physical, visible, enabled, nodes, unique, hit, hitFailure, context, assertContext, hash };
@@ -257,6 +259,60 @@ try {
       || !c.enabled(trigger) || labels.length !== 1 || c.normalize(labels[0].textContent) !== p.label)
       c.fail('model_unverified', 'more_binding');
     return { trigger, triggerID, menuID, label: labels[0], menu: null, selected: null };
+  }
+  function moreBoundary(p, selection, entering) {
+    const more = selection.more, phase = entering ? 'moreOpening' : 'moreClosing';
+    if (!more || (entering ? more.boundary !== undefined : more.boundary !== 'entered'))
+      c.fail('model_unverified', 'more_binding');
+    // Spend the complete transition before its first dispatch. A failed or
+    // partially dispatched transition is terminal, never resumed or replayed.
+    more.boundary = entering ? 'entering' : 'exiting';
+    const target = more.trigger, relatedTarget = entering ? p.menu : document.body;
+    const rectangle = target.getBoundingClientRect();
+    const clientX = rectangle.left + rectangle.width / 2, clientY = rectangle.top + rectangle.height / 2;
+    const validate = () => {
+      guard();
+      const current = picker(), binding = moreTrigger(current);
+      if (state.terminal || state.selection !== selection || selection.stage !== phase
+        || selection.more !== more || current.trigger !== p.trigger || current.menu !== p.menu
+        || current.label !== p.label || binding.trigger !== target || binding.label !== more.label
+        || binding.triggerID !== more.triggerID || binding.menuID !== more.menuID
+        || !relatedTarget.isConnected || relatedTarget !== (entering ? current.menu : document.body)
+        || choices(current.menu).some(row => row.checked)) c.fail('model_unverified', 'more_binding');
+      if (!entering) {
+        const submenuPresent = visible(document, 'div.kimi-menu-positioner[role="menu"]')
+          .some(node => node.getAttribute('id') === more.menuID);
+        if (submenuPresent) nestedSelection(current, selection, choices(current.menu));
+        else if (target.getAttribute('aria-expanded') !== 'false' || !more.selected
+          || current.label !== more.selected.choice.label) c.fail('model_unverified', 'more_selected_label');
+      }
+      pickerHit(target, entering ? 'more_open' : 'more_close');
+      const now = target.getBoundingClientRect();
+      if (![clientX, clientY].every(Number.isFinite)
+        || now.left + now.width / 2 !== clientX || now.top + now.height / 2 !== clientY
+        || !target.contains(document.elementFromPoint(clientX, clientY)))
+        c.fail('model_unverified', 'more_binding');
+    };
+    const boundary = entering ? ['over', 'enter'] : ['out', 'leave'];
+    // dispatchEvent does not synthesize mouse compatibility events. These four
+    // events are one fixed transition, not alternate probes or a retry ladder.
+    // Enter/leave neither bubble nor cross a shadow boundary; over/out do both.
+    for (const EventType of [PointerEvent, MouseEvent]) {
+      for (let index = 0; index < boundary.length; index++) {
+        validate();
+        const pointer = EventType === PointerEvent, crosses = index === 0;
+        const event = new EventType((pointer ? 'pointer' : 'mouse') + boundary[index], {
+          bubbles: crosses, cancelable: crosses, composed: crosses, view: window,
+          relatedTarget, clientX, clientY, buttons: 0, button: pointer ? -1 : 0,
+          ...(pointer ? { pointerType: 'mouse', pointerId: 1, isPrimary: true } : {}),
+        });
+        // Default prevention is not ownership revocation or menu proof.
+        // Preserve the fixed sequence; later bound DOM reads decide success.
+        target.dispatchEvent(event);
+        validate();
+      }
+    }
+    more.boundary = entering ? 'entered' : 'exited';
   }
   function nestedSelection(p, selection, rows) {
     const more = selection.more, current = moreTrigger(p);
@@ -474,22 +530,16 @@ try {
         if (more.trigger.getAttribute('aria-expanded') !== 'false') c.fail('model_unverified', 'more_binding');
         pickerHit(more.trigger, 'more_open');
         selection.more = more; selection.stage = 'moreOpening';
-        // One claimed entry event; acknowledgement still requires the exact
-        // bound submenu and checked row on a later ordinary read.
-        more.trigger.dispatchEvent(new PointerEvent('pointerover', {
-          bubbles: true, composed: true, pointerType: 'mouse', isPrimary: true, relatedTarget: p.menu,
-        })); return { ...read().output, pending: true };
+        moreBoundary(p, selection, true);
+        return { ...read().output, pending: true };
       }
       if (selection.stage !== 'moreOpening') c.fail('model_unverified', 'model_checked_count');
       const selected = nestedSelection(p, selection, rows);
       if (!selected) return { ...read().output, pending: true };
       pickerHit(selection.more.trigger, 'more_close');
       selection.stage = 'moreClosing';
-      // One claimed exit event, with no click fallback or event sequence.
-      // Absent acknowledgement leaves this close spent until its deadline.
-      selection.more.trigger.dispatchEvent(new PointerEvent('pointerout', {
-        bubbles: true, composed: true, pointerType: 'mouse', isPrimary: true, relatedTarget: document.body,
-      })); return { ...read().output, pending: true };
+      moreBoundary(p, selection, false);
+      return { ...read().output, pending: true };
     } else if (selection.more) c.fail('model_unverified', 'model_checked_count');
     if (p.label !== checked.choice.label) c.fail('model_mismatch');
     const target = desired ? rows.find(row => c.equalChoice(row.choice, desired)) : checked;

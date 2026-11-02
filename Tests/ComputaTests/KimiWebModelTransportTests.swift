@@ -53,9 +53,9 @@ final class KimiWebModelTransportTests: XCTestCase {
                 installed = true
                 _ = try? await self.evaluate(fixture.view, """
                     window.fixtureMoreDispatches = 0;
-                    document.getElementById('fixture-more-trigger').addEventListener('pointerover', event => {
+                    document.getElementById('fixture-more-trigger').addEventListener('mouseover', event => {
                         window.fixtureMoreDispatches++;
-                        event.preventDefault(); event.stopImmediatePropagation();
+                        event.stopImmediatePropagation();
                     }, true);
                     return true;
                     """)
@@ -84,7 +84,7 @@ final class KimiWebModelTransportTests: XCTestCase {
         XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
     }
 
-    func testDelayedSubmenuPointerAcknowledgementsDoNotReplayEntryOrExit() async throws {
+    func testDelayedLegacyMouseSubmenuAcknowledgementsDoNotReplayEntryOrExit() async throws {
         let fixture = try Fixture(initialNestedModel: true); defer { fixture.shutdown() }
         var configured = false
         fixture.transport.setBeforePageResultValidationForTesting { action in
@@ -101,8 +101,191 @@ final class KimiWebModelTransportTests: XCTestCase {
         let actions = try await evaluate(fixture.view,
             "return [kimiFixture.counters.moreOpens,kimiFixture.counters.moreCloses,kimiFixture.counters.moreClicks,kimiFixture.counters.sends];") as? [Int]
         XCTAssertEqual(actions, [1, 1, 0, 0])
+        try await assertMoreBoundaryEvents(fixture)
         XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
         XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
+    func testSameBoundarySequenceAlsoSupportsPointerOnlySubmenuListeners() async throws {
+        let fixture = try Fixture(initialNestedModel: true); defer { fixture.shutdown() }
+        var configured = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "inspect", !configured {
+                configured = true
+                _ = try? await self.evaluate(fixture.view, "kimiFixture.options.moreEventFamily = 'pointer'; return true;")
+            }
+        }
+        let choices = try await fixture.transport.discoverModels(provider: "kimi")
+        XCTAssertEqual(choices, [choice]); XCTAssertTrue(configured)
+        try await assertMoreBoundaryEvents(fixture)
+        let counts = try await evaluate(fixture.view,
+            "return [kimiFixture.counters.moreOpens,kimiFixture.counters.moreCloses,kimiFixture.counters.moreClicks,kimiFixture.counters.sends];") as? [Int]
+        XCTAssertEqual(counts, [1, 1, 0, 0])
+    }
+
+    func testDefaultPreventionPreservesBoundarySequenceAndRequiresVerifiedSubmenu() async throws {
+        for type in ["pointerover", "mouseover", "pointerout", "mouseout"] {
+            let fixture = try Fixture(initialNestedModel: true); defer { fixture.shutdown() }
+            var configured = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                if action == "inspect", !configured {
+                    configured = true
+                    _ = try? await self.evaluate(fixture.view, """
+                        document.getElementById('fixture-more-trigger').addEventListener('\(type)', event => {
+                            event.preventDefault();
+                        }, true); return true;
+                        """)
+                }
+            }
+            let choices = try await fixture.transport.discoverModels(provider: "kimi")
+            XCTAssertTrue(configured); XCTAssertEqual(choices, [choice])
+            try await assertMoreBoundaryEvents(fixture)
+            let prevented = try await evaluate(fixture.view,
+                "return kimiFixture.moreEvents.filter(event => event.prevented).map(event => event.type);") as? [String]
+            XCTAssertEqual(prevented, [type])
+            let counts = try await evaluate(fixture.view,
+                "return [kimiFixture.counters.modelOpens,kimiFixture.counters.modelSelections,kimiFixture.counters.moreSelections,kimiFixture.counters.beforeInput,kimiFixture.counters.sends];") as? [Int]
+            XCTAssertEqual(counts, [1, 0, 0, 0, 0])
+            XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+            XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+        }
+    }
+
+    func testPreventedBoundaryWithoutSubmenuAcknowledgementRemainsPendingUntilDeadlineWithoutReplay() async throws {
+        let fixture = try Fixture(initialNestedModel: true); defer { fixture.shutdown() }
+        fixture.transport.setTimeoutsForTesting(preparation: .seconds(3), response: .seconds(3))
+        var configured = false
+        var records: [String] = []
+        fixture.transport.setKimiDiscoveryProgressObserverForTesting { records.append($0) }
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "inspect", !configured {
+                configured = true
+                _ = try? await self.evaluate(fixture.view, """
+                    kimiFixture.options.moreEventFamily = 'inert';
+                    const target = document.getElementById('fixture-more-trigger');
+                    for (const type of ['pointerover','pointerenter','mouseover','mouseenter'])
+                        target.addEventListener(type, event => { event.preventDefault(); }, true);
+                    return true;
+                    """)
+            }
+        }
+        do {
+            _ = try await fixture.transport.discoverModels(provider: "kimi")
+            XCTFail("Prevented but unacknowledged events establish no submenu proof")
+        } catch let error as EmbeddedWebModelTransport.Failure {
+            XCTAssertEqual(error, .preparationDeadline)
+        }
+        XCTAssertTrue(configured)
+        XCTAssertTrue(records.contains { $0.contains("reason=preparation_timeout lastObservation phase=moreOpening") })
+        let events = try await evaluate(fixture.view, "return kimiFixture.moreEvents.map(event => event.type);") as? [String]
+        XCTAssertEqual(events, ["pointerover", "pointerenter", "mouseover", "mouseenter"])
+        let prevented = try await evaluate(fixture.view,
+            "return kimiFixture.moreEvents.filter(event => event.prevented).map(event => event.type);") as? [String]
+        XCTAssertEqual(prevented, ["pointerover", "mouseover"])
+        let counts = try await evaluate(fixture.view,
+            "return [kimiFixture.counters.modelOpens,kimiFixture.counters.moreOpens,kimiFixture.counters.modelSelections,kimiFixture.counters.beforeInput,kimiFixture.counters.sends];") as? [Int]
+        XCTAssertEqual(counts, [1, 0, 0, 0, 0])
+        XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
+    func testSameIDReplacementDuringBoundaryCannotReceiveItsRemainingEvents() async throws {
+        let fixture = try Fixture(initialNestedModel: true); defer { fixture.shutdown() }
+        var configured = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "inspect", !configured {
+                configured = true
+                _ = try? await self.evaluate(fixture.view, """
+                    window.fixtureReplacementEvents = 0;
+                    const target = document.getElementById('fixture-more-trigger');
+                    target.addEventListener('pointerenter', () => {
+                        const replacement = target.cloneNode(true);
+                        for (const type of ['mouseover','mouseenter','pointerout','pointerleave','mouseout','mouseleave'])
+                            replacement.addEventListener(type, () => { window.fixtureReplacementEvents++; });
+                        target.replaceWith(replacement);
+                    }, true); return true;
+                    """)
+            }
+        }
+        do { _ = try await fixture.transport.discoverModels(provider: "kimi"); XCTFail("Replacement cannot inherit a transition") }
+        catch { }
+        XCTAssertTrue(configured)
+        let events = try await evaluate(fixture.view, "return kimiFixture.moreEvents.map(event => event.type);") as? [String]
+        XCTAssertEqual(events, ["pointerover", "pointerenter"])
+        let counts = try await evaluate(fixture.view,
+            "return [fixtureReplacementEvents,kimiFixture.counters.modelOpens,kimiFixture.counters.modelSelections,kimiFixture.counters.beforeInput,kimiFixture.counters.sends];") as? [Int]
+        XCTAssertEqual(counts, [0, 1, 0, 0, 0])
+        XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
+    func testCheckedRowReplacementDuringExitStopsBeforeRemainingBoundaryEvents() async throws {
+        let fixture = try Fixture(initialNestedModel: true); defer { fixture.shutdown() }
+        var configured = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "inspect", !configured {
+                configured = true
+                _ = try? await self.evaluate(fixture.view, """
+                    document.getElementById('fixture-more-trigger').addEventListener('pointerout', () => {
+                        const row = document.querySelector('[data-testid="model-more-option"]');
+                        row.replaceWith(row.cloneNode(true));
+                    }, true); return true;
+                    """)
+            }
+        }
+        do { _ = try await fixture.transport.discoverModels(provider: "kimi"); XCTFail("Replaced checked row cannot retain menu proof") }
+        catch { }
+        XCTAssertTrue(configured)
+        let events = try await evaluate(fixture.view, "return kimiFixture.moreEvents.map(event => event.type);") as? [String]
+        XCTAssertEqual(events, ["pointerover", "pointerenter", "mouseover", "mouseenter", "pointerout"])
+        let counts = try await evaluate(fixture.view,
+            "return [kimiFixture.counters.modelOpens,kimiFixture.counters.modelSelections,kimiFixture.counters.moreSelections,kimiFixture.counters.beforeInput,kimiFixture.counters.sends];") as? [Int]
+        XCTAssertEqual(counts, [1, 0, 0, 0, 0])
+        XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
+    func testOwnerRevocationWithinBoundaryStopsBeforeLegacyEvents() async throws {
+        let fixture = try Fixture(initialNestedModel: true); defer { fixture.shutdown() }
+        var configured = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "inspect", !configured {
+                configured = true
+                _ = try? await self.evaluate(fixture.view, """
+                    document.getElementById('fixture-more-trigger').addEventListener('pointerenter', () => {
+                        globalThis.__computaModelOwner = 'revoked';
+                    }, true); return true;
+                    """, world: self.world)
+            }
+        }
+        do { _ = try await fixture.transport.discoverModels(provider: "kimi"); XCTFail("Revoked owner cannot finish its transition") }
+        catch { }
+        XCTAssertTrue(configured)
+        let events = try await evaluate(fixture.view, "return kimiFixture.moreEvents.map(event => event.type);") as? [String]
+        XCTAssertEqual(events, ["pointerover", "pointerenter"])
+        let counts = try await evaluate(fixture.view,
+            "return [kimiFixture.counters.modelOpens,kimiFixture.counters.modelSelections,kimiFixture.counters.beforeInput,kimiFixture.counters.sends];") as? [Int]
+        XCTAssertEqual(counts, [1, 0, 0, 0])
+        XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
+    private func assertMoreBoundaryEvents(_ fixture: Fixture, file: StaticString = #filePath, line: UInt = #line) async throws {
+        let value = try await evaluate(fixture.view, "return kimiFixture.moreEvents;")
+        let rows = try XCTUnwrap(value as? [[String: Any]])
+        XCTAssertEqual(rows.compactMap { $0["type"] as? String }, ["pointerover", "pointerenter", "mouseover", "mouseenter",
+            "pointerout", "pointerleave", "mouseout", "mouseleave"], file: file, line: line)
+        for (index, row) in rows.enumerated() {
+            for key in ["bubbles", "cancelable", "composed"] {
+                XCTAssertEqual(row[key] as? Bool, index % 2 == 0, key, file: file, line: line)
+            }
+            for key in ["targetMatches", "relatedMatches", "centered", "deliveredHit"] {
+                XCTAssertEqual(row[key] as? Bool, true,
+                    "\(key) event=\(row["type"] ?? "missing") delivered=(\(row["clientX"] ?? "missing"),\(row["clientY"] ?? "missing")) center=(\(row["centerX"] ?? "missing"),\(row["centerY"] ?? "missing"))",
+                    file: file, line: line)
+            }
+            XCTAssertEqual(row["trusted"] as? Bool, false, "No claim to trusted user input", file: file, line: line)
+        }
     }
 
     func testInstantSelectionFromNestedK3ReopensForProofThenSendsAndDeletesOnce() async throws {

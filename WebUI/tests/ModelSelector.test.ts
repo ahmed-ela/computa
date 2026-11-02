@@ -216,6 +216,39 @@ describe('website model selectors', () => {
     }
   });
 
+  test('DeepSeek typed modes render provider-first human labels without asserting a backend model', async () => {
+    const modes: ModelOption[] = ['Chat', 'DeepThink'].map((label) => ({
+      id: `browser/deepseek/mode/${label.toLowerCase()}`, label: `DeepSeek / ${label} · Built-in browser`,
+      detail: `Uses ${label} with Search off. No backend model or version is attested.`, highMemory: false, available: true,
+    }));
+    const hidden = { ...modes[0], id: 'browser/deepseek', label: 'DeepSeek / Website default · Built-in browser' };
+    const selected: string[] = [];
+    selectionHandlers.length = 0;
+    const html = renderToStaticMarkup(h(ModelSelector, { options: [hidden, ...modes], model: modes[0].id,
+      label: 'Task model', onSelect: (value: string) => selected.push(value) })).html;
+    expect(await renderedProviderGroups(html)).toEqual([{ name: 'DeepSeek', icons: ['deepseek'], ids: modes.map(({ id }) => id) }]);
+    expect(await textBySelector(html, '.model-option-name')).toEqual(['Chat', 'Chat', 'DeepThink']);
+    expect(html).toContain('aria-label="DeepSeek modes"');
+    expect(html).toContain('No backend model or version is attested.');
+    expect(html).not.toContain('>browser/deepseek/');
+    selectionHandlers[0](modes[1].id);
+    expect(selected).toEqual([modes[1].id]);
+    const unavailable = renderToStaticMarkup(h(ModelSelector, { options: [{ ...modes[1], available: false }],
+      model: modes[1].id, label: 'Task model', onSelect: () => {} })).html;
+    expect(await textBySelector(unavailable, '.model-option-name')).toEqual(['DeepThink', 'DeepThink']);
+    expect((await parsedElements(unavailable)).find((element) => element.attributes['data-value'] === modes[1].id)?.attributes['aria-disabled']).toBe('true');
+  });
+
+  test('DeepSeek refresh recognizes only the exact typed mode routes', () => {
+    for (const mode of ['chat', 'deepthink']) {
+      expect(websiteModelsRefreshAction(`browser/deepseek/mode/${mode}`)).toEqual({ action: 'refreshWebsiteModels', provider: 'deepseek' });
+    }
+    for (const invalid of ['browser/deepseek/mode/Chat', 'browser/deepseek/mode/pro', 'browser/deepseek/mode/chat/extra',
+      'browser/deepseek/mode/chat\n', 'browser/qwen/mode/chat', 'api/deepseek/mode/chat']) {
+      expect(websiteModelsRefreshAction(invalid)).toBeUndefined();
+    }
+  });
+
   test('saved local and website-default models stay readable but remain absent from the choices', async () => {
     const local = { id: 'local/saved-model', label: 'Local / Saved model · MLX', detail: 'Saved local selection', highMemory: false };
     for (const [model, name] of [[local.id, 'Saved model'], ['local/unknown-model', 'local/unknown-model'],

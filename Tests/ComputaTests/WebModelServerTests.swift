@@ -357,7 +357,7 @@ final class WebModelServerTests: XCTestCase {
     func testBrowserCatalogReprojectsOnlyAfterAdmittedInferenceAndPreservesContinuation() async throws {
         let unboundNames = Set(["browser_tabs", "browser_open", "browser_bind"])
         let boundNames = Set(EmbeddedBrowserTools.definitions().compactMap { $0["name"] as? String })
-        for provider in WebsiteModelCatalog.providers {
+        for provider in namedWebsiteModelProviders {
             let state = WebsiteBrowserAvailabilityFixture()
             let base = FixtureWebModelTransport(replyTexts: [
                 #"{"type":"tool_calls","calls":[{"name":"browser_open","arguments":{"url":"https://example.invalid/"}}]}"#,
@@ -1357,7 +1357,7 @@ final class WebModelServerTests: XCTestCase {
     }
 
     func testConcreteWebsiteChoicesAreVerifiedAgainForEachFreshInference() async throws {
-        for provider in WebsiteModelCatalog.providers {
+        for provider in namedWebsiteModelProviders {
             let choice = syntheticWebsiteChoice(provider: provider, key: "fixture-fast", label: "Fixture Fast")
             let transport = ChoiceWebModelTransport()
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
@@ -1376,8 +1376,8 @@ final class WebModelServerTests: XCTestCase {
     }
 
     func testChoiceAndProviderSwitchesStartOnlyAfterThePriorInferenceClosure() async throws {
-        for oldProvider in WebsiteModelCatalog.providers {
-            for newProvider in WebsiteModelCatalog.providers {
+        for oldProvider in namedWebsiteModelProviders {
+            for newProvider in namedWebsiteModelProviders {
                 let old = syntheticWebsiteChoice(provider: oldProvider, key: "fixture-old", label: "Fixture Old")
                 let new = syntheticWebsiteChoice(provider: newProvider, key: "fixture-new", label: "Fixture New")
                 // A one-choice Kimi pilot still exercises fresh-inference
@@ -1446,7 +1446,7 @@ final class WebModelServerTests: XCTestCase {
     }
 
     func testConcreteWebsiteChoiceRejectsWrongSelectionAtEveryAdmittedSnapshotWithoutReplay() async throws {
-        for provider in WebsiteModelCatalog.providers {
+        for provider in namedWebsiteModelProviders {
             for point in ChoiceSnapshotPoint.allCases {
                 for mutation in [ChoiceEvidenceMutation.wrongSelectedKey, .wrongSelectedLabel] {
                     let choice = syntheticWebsiteChoice(provider: provider, key: "fixture-fast", label: "Fixture Fast")
@@ -1493,7 +1493,7 @@ final class WebModelServerTests: XCTestCase {
     }
 
     func testContradictoryResponseModelCannotBeAdmittedEvenWhenPickerStillMatches() async throws {
-        for provider in WebsiteModelCatalog.providers {
+        for provider in namedWebsiteModelProviders {
             let choice = syntheticWebsiteChoice(provider: provider, key: "fixture-fast", label: "Fixture Fast")
             let transport = ChoiceWebModelTransport(point: .complete, mutation: .wrongResponse)
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
@@ -2300,19 +2300,19 @@ final class WebModelServerTests: XCTestCase {
         _ = await server.shutdown()
     }
 
-    func testEveryWebsiteUsesEmbeddedTransportAndClosesBeforeShutdown() async throws {
+    func testEveryNamedWebsiteUsesEmbeddedTransportAndClosesBeforeShutdown() async throws {
         let embedded = FixtureWebModelTransport()
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
         await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(embedded, defaultChatChoice: syntheticChatGPTChoice))
-        for provider in WebsiteModelCatalog.providers {
+        for provider in namedWebsiteModelProviders {
             let input = Data("{\"model\":\"\(syntheticWebsiteModelID(provider))\",\"input\":\"Say OK\",\"tools\":[],\"stream\":true}".utf8)
             let result = try await server.fixtureInfer(input, taskID: provider)
             XCTAssertTrue(String(decoding: result, as: UTF8.self).contains("response.completed"))
         }
         let providers = await embedded.startedProviders()
-        XCTAssertEqual(providers, WebsiteModelCatalog.providers)
+        XCTAssertEqual(providers, namedWebsiteModelProviders)
         let prompts = await embedded.sentPrompts()
-        XCTAssertEqual(prompts.count, WebsiteModelCatalog.providers.count)
+        XCTAssertEqual(prompts.count, namedWebsiteModelProviders.count)
         for (provider, prompt) in zip(providers, prompts) {
             XCTAssertEqual(try canonicalRequest(in: prompt)["model"] as? String, syntheticWebsiteModelID(provider),
                            "Website routing must preserve its requested browser model, without API substitution")
@@ -2320,13 +2320,13 @@ final class WebModelServerTests: XCTestCase {
         let issues = await server.shutdown()
         XCTAssertTrue(issues.isEmpty)
         let operations = await embedded.operations()
-        XCTAssertEqual(operations.filter { $0 == "webProviderFinish" }.count, WebsiteModelCatalog.providers.count)
+        XCTAssertEqual(operations.filter { $0 == "webProviderFinish" }.count, namedWebsiteModelProviders.count)
         XCTAssertFalse(operations.contains("webProviderCancel"))
     }
 
-    func testEveryEmbeddedProviderRejectsMalformedOrHeaderPrefixedRepliesInsteadOfFinalSuccess() async throws {
+    func testEveryNamedEmbeddedProviderRejectsMalformedOrHeaderPrefixedRepliesInsteadOfFinalSuccess() async throws {
         let tool = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf fixture"}}]}"#
-        for provider in WebsiteModelCatalog.providers {
+        for provider in namedWebsiteModelProviders {
             for response in ["\u{E056}\njson\n" + tool,
                              #"{"type":"message","text":"Observed "Fixture marker value""}"#,
                              "The command completed.\n{\"type\":\"tool_calls\",\"calls\":["] {
@@ -2357,13 +2357,13 @@ final class WebModelServerTests: XCTestCase {
         }
     }
 
-    func testEveryEmbeddedProviderPreservesTheSharedToolHandoffAndMatchingContinuation() async throws {
+    func testEveryNamedEmbeddedProviderPreservesTheSharedToolHandoffAndMatchingContinuation() async throws {
         let tools: [[String: Any]] = [["type": "namespace", "name": "functions", "tools": [
             ["type": "function", "name": "exec_command", "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]]]],
             ["type": "function", "name": "write_stdin", "parameters": ["type": "object", "properties": ["session_id": ["type": "integer"]]]],
         ]]]
         let developer = ComputaAgentInstructions.developerInstructions()
-        for provider in WebsiteModelCatalog.providers {
+        for provider in namedWebsiteModelProviders {
             let transport = FixtureWebModelTransport(replyTexts: [
                 #"{"type":"tool_calls","calls":[{"name":"functions.exec_command","arguments":{"cmd":"printf fixture"}}]}"#,
                 #"{"type":"message","text":"Observed fixture output"}"#,
@@ -2438,7 +2438,7 @@ final class WebModelServerTests: XCTestCase {
     }
 
     func testExplicitTranscriptCleanupIsAcceptedOnlyForTheOwnedGroqLease() async throws {
-        for provider in WebsiteModelCatalog.providers {
+        for provider in namedWebsiteModelProviders {
             let transport = FixtureWebModelTransport(cleanupResult: "transcript_cleared")
             let root = FileManager.default.temporaryDirectory.appendingPathComponent("computa-cleanup-lifecycle-" + UUID().uuidString)
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
@@ -2467,7 +2467,7 @@ final class WebModelServerTests: XCTestCase {
             let journal = try turnJournal(root: root, task: provider)
             XCTAssertFalse(journal.isEmpty)
             let expectedMode = provider == "groq" ? "explicit_clear_per_inference"
-                : provider == "kimi" ? "saved_conversation_delete_per_inference"
+                : ["kimi", "qwen"].contains(provider) ? "saved_conversation_delete_per_inference"
                 : provider == "gemini" ? "temporary_conversation_per_turn" : "temporary_conversation_per_inference"
             for record in journal {
                 XCTAssertEqual(record["transactionMode"] as? String, expectedMode)
@@ -3307,6 +3307,7 @@ private actor FixtureWebModelTransport: WebModelTransport {
         switch currentProvider {
         case "groq": providerFixtureChoice = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B")
         case "kimi": providerFixtureChoice = syntheticKimiChoice
+        case "qwen": providerFixtureChoice = syntheticQwenChoice
         default: providerFixtureChoice = nil
         }
         if let choice = fixedChoice ?? providerFixtureChoice, ["ready", "running", "complete"].contains(response["state"] as? String ?? "") {

@@ -18734,7 +18734,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         case .chatgpt: ["GPT-6", "GPT-5.6 Sol", "GPT-5.5"]
         case .gemini: ["3.5 Flash-Lite", "3.8 Flash", "3.1 Pro"]
         case .claude: ["Sonnet 5.5", "Haiku 4.5", "Sonnet 5", "Sonnet 4.6"]
-        case .groq, .kimi: [] // These providers use their dedicated picker/lifecycle fixtures.
+        case .groq, .kimi, .qwen, .deepseek: [] // These providers use their dedicated picker/mode/lifecycle fixtures.
         }
     }
 

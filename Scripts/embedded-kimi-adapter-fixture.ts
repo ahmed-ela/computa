@@ -128,7 +128,7 @@ export const submissionFingerprint = createHash('sha256').update(prompt.replace(
 
 export function adapterFixture(options: { delayedUser?: boolean; provisional?: boolean; streaming?: boolean;
   insertionFails?: boolean; insertionThrows?: boolean; delayedInsertion?: boolean; paragraphInsertion?: boolean;
-  submitThrows?: boolean; confirmationThrows?: boolean; retainHistoryLink?: boolean; outbound?: string; nestedSelected?: boolean } = {}) {
+  submitThrows?: boolean; confirmationThrows?: boolean; retainHistoryLink?: boolean; outbound?: string; nestedSelected?: boolean; hoverEvents?: 'mouse' | 'pointer' } = {}) {
   const f = kimiFixture(), { Node, document, body, window } = f;
   const fixturePrompt = options.outbound ?? prompt;
   const fixtureFingerprint = createHash('sha256').update(fixturePrompt.replace(/\r\n?/g, '\n').normalize('NFC').trim()).digest('hex');
@@ -149,10 +149,15 @@ export function adapterFixture(options: { delayedUser?: boolean; provisional?: b
   f.trigger.onClick = () => f.trigger.getAttribute('aria-expanded') === 'true' ? hide() : show();
   // Experimental fixture contract: clicks are inert; only the proposed
   // pointer entry/exit events operate this synthetic submenu. Not live proof.
+  // Default deliberately listens only to legacy mouse events. Pointer-only
+  // fixtures previously hid that dispatchEvent supplies no compatibility pair.
   f.more.onDispatch = (event: any) => {
-    if (event.type === 'pointerout') hideMore();
-    else if (event.type === 'pointerover') { f.moreMenu.removeAttribute('hidden'); f.more.setAttribute('aria-expanded', 'true'); }
-    else throw new Error('Unexpected submenu event');
+    const prefix = options.hoverEvents ?? 'mouse';
+    if (event.type === prefix + 'out') hideMore();
+    else if (event.type === prefix + 'over') { f.moreMenu.removeAttribute('hidden'); f.more.setAttribute('aria-expanded', 'true'); }
+  };
+  f.more.dispatchEvent = (event: any) => {
+    f.more.events.push(event); f.more.onDispatch?.(event); return !event.defaultPrevented;
   };
   for (const row of f.options) row.onClick = () => {
     f.options.forEach(other => other.setAttribute('aria-checked', other === row ? 'true' : 'false'));
@@ -244,7 +249,7 @@ export function adapterFixture(options: { delayedUser?: boolean; provisional?: b
     document.URL = options.provisional ? provisional : canonical;
     if (!options.delayedUser) appendUser();
   };
-  const execute = new AsyncFunction('input', 'document', 'window', 'location', 'globalThis', 'getComputedStyle', 'MutationObserver', 'crypto', 'PointerEvent',
+  const execute = new AsyncFunction('input', 'document', 'window', 'location', 'globalThis', 'getComputedStyle', 'MutationObserver', 'crypto', 'PointerEvent', 'MouseEvent',
     adapterSource);
   let fingerprint: string | undefined, conversation: string | undefined;
   const run = async (action = 'inspect', overrides: Record<string, unknown> = {}) => {
@@ -264,7 +269,15 @@ export function adapterFixture(options: { delayedUser?: boolean; provisional?: b
     },
     { subtle: { digest: async (algorithm: string, bytes: Uint8Array) => {
       const value = await crypto.subtle.digest(algorithm, bytes); const hook = digestHook; digestHook = undefined; hook?.(); return value;
-    } } }, class { constructor(public type: string, init: Record<string, unknown>) { Object.assign(this, init); } });
+    } } }, class {
+      defaultPrevented = false; cancelable = false;
+      constructor(public type: string, init: Record<string, unknown>) { Object.assign(this, init); }
+      preventDefault() { if (this.cancelable) this.defaultPrevented = true; }
+    }, class {
+      defaultPrevented = false; cancelable = false;
+      constructor(public type: string, init: Record<string, unknown>) { Object.assign(this, init); }
+      preventDefault() { if (this.cancelable) this.defaultPrevented = true; }
+    });
     if (result.firstUserVerified) { fingerprint = result.firstUserFingerprint; conversation = result.conversationIdentity; }
     return result;
   };

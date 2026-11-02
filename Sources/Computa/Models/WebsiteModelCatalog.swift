@@ -8,7 +8,7 @@ struct WebsiteModelChoice: Codable, Equatable, Sendable {
     let label: String
 
     var isValid: Bool {
-        WebsiteModelCatalog.knownProviders.contains(provider)
+        provider != "deepseek" && WebsiteModelCatalog.knownProviders.contains(provider)
             && Self.validField(key) && Self.validField(label)
     }
 
@@ -35,6 +35,9 @@ struct WebsiteModelChoice: Codable, Equatable, Sendable {
 
     var isRetired: Bool {
         if provider == "kimi" { return key != "k28-instant" || label != "Instant" }
+        // Observed Plus/Max are staged for a native pilot. Omni remains
+        // unavailable; this policy does not alias Alibaba's API model IDs.
+        if provider == "qwen" { return key != label || !["Qwen3.7-Plus", "Qwen3.8-Max"].contains(key) }
         guard provider == "chatgpt" else { return false }
         guard let power = chatGPTPower else { return true }
         if power == .pro {
@@ -114,8 +117,9 @@ enum WebsiteModelCatalog {
     // Kimi Instant has passed offline adapter/native gates and is admitted for
     // the installed pilot. Live tool qualification remains pending; agent modes
     // stay excluded by the exact key/label policy in WebsiteModelChoice.
-    static let providers = ["chatgpt", "gemini", "claude", "groq", "kimi"]
-    static let knownProviders = ["chatgpt", "gemini", "claude", "groq", "kimi"]
+    static let providers = ["chatgpt", "gemini", "claude", "groq", "kimi", "qwen", "deepseek"]
+    // The pilot exposes only observed Plus/Max names and typed Chat/DeepThink modes.
+    static let knownProviders = ["chatgpt", "gemini", "claude", "groq", "kimi", "qwen", "deepseek"]
     static let maximumChoicesPerProvider = 32
     static let preferenceKey = "Computa.websiteModelChoices.v3-chat-latest-power"
     static let priorPreferenceKey = "Computa.websiteModelChoices.v2-chat-product"
@@ -124,6 +128,10 @@ enum WebsiteModelCatalog {
     struct Selection: Equatable, Sendable {
         let provider: String
         let choice: WebsiteModelChoice?
+        let modeChoice: WebsiteModeChoice?
+        init(provider: String, choice: WebsiteModelChoice?, modeChoice: WebsiteModeChoice? = nil) {
+            self.provider = provider; self.choice = choice; self.modeChoice = modeChoice
+        }
     }
 
     enum Failure: LocalizedError {
@@ -143,11 +151,16 @@ enum WebsiteModelCatalog {
         case "claude": "Claude"
         case "groq": "Groq"
         case "kimi": "Kimi"
+        case "qwen": "Qwen"
+        case "deepseek": "DeepSeek"
         default: provider
         }
     }
 
     static func selection(for modelID: String) -> Selection? {
+        if let mode = WebsiteModeChoice.parse(requestID: modelID) {
+            return Selection(provider: mode.provider, choice: nil, modeChoice: mode)
+        }
         for provider in providers where modelID == "browser/\(provider)" {
             return Selection(provider: provider, choice: nil)
         }
@@ -171,12 +184,14 @@ enum WebsiteModelCatalog {
     static func choice(for modelID: String) -> WebsiteModelChoice? { selection(for: modelID)?.choice }
 
     /// History retains structurally valid old IDs; inference requires the
-    /// current provider policy, including explicit ChatGPT power and Kimi choices.
+    /// current provider policy, including explicit ChatGPT power and saved-conversation choices.
     static func inferenceSelection(for modelID: String) -> Selection? {
         guard let selected = selection(for: modelID), providers.contains(selected.provider) else { return nil }
-        if selected.provider == "chatgpt" {
+        if selected.provider == "deepseek" {
+            guard selected.choice == nil, let mode = selected.modeChoice, mode.requestID == modelID else { return nil }
+        } else if selected.provider == "chatgpt" {
             guard let choice = selected.choice, choice.isSelectable, choice.modelID == modelID else { return nil }
-        } else if selected.provider == "kimi" {
+        } else if ["kimi", "qwen"].contains(selected.provider) {
             guard let choice = selected.choice, choice.isSelectable else { return nil }
         } else if let choice = selected.choice, !choice.isSelectable { return nil }
         return selected
@@ -228,6 +243,13 @@ enum WebsiteModelCatalog {
                 ? "Selects \(choice.label) in signed-in \(providerLabel(choice.provider)). Computa verifies the website's selected model before sending and accepting a response. Website limits still apply."
                 : "Saved website choice: \(choice.label). It is absent from the latest observed menu. Refresh website models after signing in; Computa will not substitute another model.",
             highMemory: false, available: selectable)
+    }
+
+    /// Mode labels are explicit behavior choices; backend identity remains unclaimed.
+    static func option(for mode: WebsiteModeChoice, available: Bool = false) -> LocalModelOption {
+        LocalModelOption(id: mode.requestID, label: "DeepSeek / \(mode.label) · Built-in browser",
+            detail: "Uses DeepSeek's \(mode.label) website mode with Search off. No backend model or version is attested.",
+            highMemory: false, available: available && providers.contains(mode.provider))
     }
 
     static func validate(_ choices: [WebsiteModelChoice], provider: String) throws {

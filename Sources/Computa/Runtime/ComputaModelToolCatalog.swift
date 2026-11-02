@@ -6,9 +6,10 @@ import CoreFoundation
 /// producer contract and command editing support. Other fields mirror pinned
 /// fallback metadata; context/provider configuration remain in thread config.
 /// The pinned engine's models-manager matches the longest catalog slug prefix,
-/// then retains the complete requested slug. Thus browser/<provider>/choice/...
-/// inherits the already-admitted browser/<provider> freeform patch metadata even
-/// when discovered after launch. No cached catalog reload or restart is assumed.
+/// then retains the complete requested slug. Both named /choice/ IDs and typed
+/// /mode/ IDs inherit their registered browser/<provider> patch metadata even
+/// when discovered after launch. Metadata prefixes do not admit an inference
+/// request or expose a selectable default. No catalog reload is assumed.
 enum ComputaModelToolCatalog {
     enum BrowserReadMode: Sendable, Equatable { case fresh, continuation }
 
@@ -544,6 +545,10 @@ enum ComputaModelToolCatalog {
 
     static func catalogData(additionalModelID: String? = nil) throws -> Data {
         var ids = Set(LocalModelCatalog.options.map(\.id))
+        // Provider capabilities must not depend on UI defaults: typed-mode
+        // providers intentionally have no selectable/default LocalModelOption.
+        let websitePrefixes = Set(WebsiteModelCatalog.providers.map { "browser/" + $0 })
+        ids.formUnion(websitePrefixes)
         // The engine matches slug prefixes. Future configured API models use
         // the same native patch executor without reloading its model catalog.
         ids.insert("api/")
@@ -563,7 +568,7 @@ enum ComputaModelToolCatalog {
                 "include_skills_usage_instructions": false, "include_plugin_usage_instructions": false,
                 "include_apps_usage_instructions": false, "supports_reasoning_summary_parameter": true,
                 "default_reasoning_summary": "auto", "support_verbosity": false,
-                "default_verbosity": NSNull(), "apply_patch_tool_type": LocalModelCatalog.isWebBrowser(id) || id.hasPrefix("api/") ? "freeform" : NSNull(),
+                "default_verbosity": NSNull(), "apply_patch_tool_type": websitePrefixes.contains(id) || LocalModelCatalog.isWebBrowser(id) || id.hasPrefix("api/") ? "freeform" : NSNull(),
                 "web_search_tool_type": "text", "truncation_policy": ["mode": "bytes", "limit": 10_000],
                 "supports_image_detail_original": false, "context_window": 272_000,
                 "effective_context_window_percent": 95, "experimental_supported_tools": [String](),

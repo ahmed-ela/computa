@@ -258,6 +258,7 @@ enum WebModelResponseCodec {
         }
         let provider = LocalModelCatalog.webProvider(for: model)
         let isChatGPT = provider == "chatgpt", isClaude = provider == "claude", isGroq = provider == "groq"
+        let usesRawJSONSource = provider == "qwen" || provider == "deepseek"
         guard object["input"] is String || object["input"] is [Any] else {
             throw Failure.missingInput
         }
@@ -417,7 +418,7 @@ enum WebModelResponseCodec {
         let responseContract = compactGroq ? ComputaAgentInstructions.groqResponseContract(currentBrowserHandoff: browserHandoff,
             hasFunctions: offered.values.contains { !$0.isCustom }, hasCustomTools: !customNames.isEmpty)
             : ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames,
-            includedInstructionText: includedInstructionText, responseFormat: isClaude ? .literalFencedJSON : .fencedJSON,
+            includedInstructionText: includedInstructionText, responseFormat: usesRawJSONSource ? .rawJSON : isClaude ? .literalFencedJSON : .fencedJSON,
             singleActionRelay: isChatGPT,
             currentBrowserHandoff: browserHandoff,
             allowedToolNames: policy.allowedNames)
@@ -939,11 +940,14 @@ enum WebModelResponseCodec {
         responseID: String = "resp_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
         createdAt: Int = Int(Date().timeIntervalSince1970),
         websiteModelEvidence: WebsiteModelEvidence? = nil,
+        websiteSelectionEvidence: WebsiteSelectionEvidence? = nil,
         websiteToolSelection: String? = nil
     ) throws -> Data {
+        guard websiteModelEvidence == nil || websiteSelectionEvidence == nil else { throw Failure.invalidRequest }
+        let selectionEvidence = websiteSelectionEvidence ?? websiteModelEvidence.map(WebsiteSelectionEvidence.model)
         _ = try validated(reply, request: request)
         let output = outputItems(for: reply, responseID: responseID)
-        let initial = response(request: request, reply: reply, responseID: responseID, createdAt: createdAt, output: [], completed: false, websiteModelEvidence: websiteModelEvidence, websiteToolSelection: websiteToolSelection)
+        let initial = response(request: request, reply: reply, responseID: responseID, createdAt: createdAt, output: [], completed: false, websiteSelectionEvidence: selectionEvidence, websiteToolSelection: websiteToolSelection)
         var events: [[String: Any]] = [
             ["type": "response.created", "response": initial],
             ["type": "response.in_progress", "response": initial],
@@ -978,7 +982,7 @@ enum WebModelResponseCodec {
             }
             events.append(["type": "response.output_item.done", "output_index": index, "item": item])
         }
-        let completed = response(request: request, reply: reply, responseID: responseID, createdAt: createdAt, output: output, completed: true, websiteModelEvidence: websiteModelEvidence, websiteToolSelection: websiteToolSelection)
+        let completed = response(request: request, reply: reply, responseID: responseID, createdAt: createdAt, output: output, completed: true, websiteSelectionEvidence: selectionEvidence, websiteToolSelection: websiteToolSelection)
         events.append(["type": "response.completed", "response": completed])
         var result = Data()
         for (sequence, var event) in events.enumerated() {
@@ -998,12 +1002,15 @@ enum WebModelResponseCodec {
         responseID: String = "resp_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
         createdAt: Int = Int(Date().timeIntervalSince1970),
         websiteModelEvidence: WebsiteModelEvidence? = nil,
+        websiteSelectionEvidence: WebsiteSelectionEvidence? = nil,
         websiteToolSelection: String? = nil
     ) throws -> Data {
+        guard websiteModelEvidence == nil || websiteSelectionEvidence == nil else { throw Failure.invalidRequest }
+        let selectionEvidence = websiteSelectionEvidence ?? websiteModelEvidence.map(WebsiteSelectionEvidence.model)
         _ = try validated(reply, request: request)
         return try JSONSerialization.data(withJSONObject: response(
             request: request, reply: reply, responseID: responseID, createdAt: createdAt,
-            output: outputItems(for: reply, responseID: responseID), completed: true, websiteModelEvidence: websiteModelEvidence, websiteToolSelection: websiteToolSelection
+            output: outputItems(for: reply, responseID: responseID), completed: true, websiteSelectionEvidence: selectionEvidence, websiteToolSelection: websiteToolSelection
         ), options: [.sortedKeys, .withoutEscapingSlashes])
     }
 
@@ -1299,7 +1306,7 @@ enum WebModelResponseCodec {
         }
     }
 
-    private static func response(request: Request, reply: Reply, responseID: String, createdAt: Int, output: [[String: Any]], completed: Bool, websiteModelEvidence: WebsiteModelEvidence? = nil, websiteToolSelection: String? = nil) -> [String: Any] {
+    private static func response(request: Request, reply: Reply, responseID: String, createdAt: Int, output: [[String: Any]], completed: Bool, websiteSelectionEvidence: WebsiteSelectionEvidence? = nil, websiteToolSelection: String? = nil) -> [String: Any] {
         let finalText: String
         let endTurn: Bool
         switch reply {
@@ -1319,8 +1326,8 @@ enum WebModelResponseCodec {
         // metadata value cannot impersonate the host's finite diagnostic.
         var metadata = value["metadata"] as? [String: Any] ?? [:]
         var metadataChanged = metadata.removeValue(forKey: "computa_website_tool_selection") != nil
-        if let websiteModelEvidence {
-            metadata["computa_website_model"] = websiteModelEvidence.dictionary
+        if let websiteSelectionEvidence {
+            metadata = websiteSelectionEvidence.responseMetadata(preserving: metadata)
             metadataChanged = true
         }
         if let websiteToolSelection {

@@ -46,7 +46,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     /// Every session pins one provider. A valid route on another provider can
     /// never satisfy its ownership checks, including before its first submit.
     enum Provider: String, CaseIterable {
-        case chatgpt, claude, gemini, groq, kimi
+        case chatgpt, claude, gemini, groq, kimi, qwen, deepseek
 
         /// Each provider must explicitly declare the lifecycle its adapter
         /// proves. A new provider never inherits temporary mode by exclusion.
@@ -56,7 +56,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             switch self {
             case .chatgpt, .claude, .gemini: .temporary
             case .groq: .visibleTranscriptClear
-            case .kimi: .savedConversationDelete
+            case .kimi, .qwen, .deepseek: .savedConversationDelete
             }
         }
 
@@ -67,6 +67,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .gemini: "gemini.google.com"
             case .groq: "chat.groq.com"
             case .kimi: "www.kimi.ai"
+            case .qwen: "chat.qwen.ai"
+            case .deepseek: "chat.deepseek.com"
             }
         }
 
@@ -77,6 +79,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .gemini: "Gemini"
             case .groq: "Groq"
             case .kimi: "Kimi"
+            case .qwen: "Qwen"
+            case .deepseek: "DeepSeek"
             }
         }
 
@@ -87,7 +91,23 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .gemini: URL(string: "https://gemini.google.com/app")!
             case .groq: URL(string: "https://chat.groq.com/")!
             case .kimi: URL(string: "https://www.kimi.ai/")!
+            case .qwen: URL(string: "https://chat.qwen.ai/")!
+            case .deepseek: URL(string: "https://chat.deepseek.com/")!
             }
+        }
+
+        var usesWebsiteModes: Bool { self == .deepseek }
+        /// Internal selection phases keep their existing names; only this closed
+        /// native capability selects the adapter's distinct mode API.
+        func selectionAdapterAction(_ action: String) -> String {
+            guard usesWebsiteModes else { return action }
+            return ["discoverModels": "discoverModes", "selectModel": "selectMode", "verifyModel": "verifyMode"][action] ?? action
+        }
+
+        var savedConversationPolicy: SavedConversationPolicy? { SavedConversationPolicy(rawValue: rawValue) }
+
+        func savedConversationRoute(_ url: URL) -> SavedConversationRoute? {
+            savedConversationPolicy.flatMap { SavedConversationRoute(url, policy: $0) }
         }
 
         func startURL(choice: WebsiteModelChoice?) -> URL {
@@ -111,7 +131,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
         func accepts(_ raw: String) -> Bool {
             guard let url = originURL(raw) else { return false }
-            if self == .kimi { return KimiSavedConversationRoute(url) != nil }
+            if savedConversationPolicy != nil { return savedConversationRoute(url) != nil }
             return isFreshPath(url.path) || conversationURL(raw) != nil
         }
 
@@ -125,7 +145,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             // Only the root and its model query have been observed. Neither
             // a saved-conversation route nor temporary mode is established.
             case .groq: return nil
-            case .kimi: return KimiSavedConversationRoute(url)?.conversation
+            case .kimi, .qwen, .deepseek: return savedConversationRoute(url)?.conversation
             }
             guard url.path.range(of: pattern, options: .regularExpression) != nil else { return nil }
             return "https://\(host)" + (url.path.hasSuffix("/") ? String(url.path.dropLast()) : url.path)
@@ -142,7 +162,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             switch self {
             case .chatgpt: return "https://\(host)/"
             case .claude: return "https://\(host)/new"
-            case .groq, .kimi: return "https://\(host)/"
+            case .groq, .kimi, .qwen, .deepseek: return "https://\(host)/"
             case .gemini:
                 guard let range = url.path.range(of: #"^/(?:u/[0-9]{1,3}/)?app(?=/|$)"#, options: .regularExpression) else { return nil }
                 return "https://\(host)" + String(url.path[range])
@@ -157,13 +177,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .claude: return query.contains { $0.name == "incognito" }
             case .gemini: return false // Gemini changes its mode without changing the route.
             case .groq: return false // A model query is not temporary-session proof.
-            case .kimi: return false // Saved-chat deletion is not temporary mode.
+            case .kimi, .qwen, .deepseek: return false // Saved-chat deletion is not temporary mode.
             }
         }
 
         func acceptsUnboundStart(_ url: URL) -> Bool {
             guard accepts(url.absoluteString), conversationURL(url.absoluteString) == nil else { return false }
-            if self == .kimi { return url == startURL }
+            if savedConversationPolicy != nil { return url == startURL }
             return self == .gemini || self == .chatgpt ? true : acceptsTemporaryToggle(url)
         }
 
@@ -206,7 +226,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .chatgpt: path == "/"
             case .claude: path == "/new" || path == "/new/"
             case .gemini: path.range(of: #"^/(?:u/[0-9]{1,3}/)?app/?$"#, options: .regularExpression) != nil
-            case .groq, .kimi: path == "/"
+            case .groq, .kimi, .qwen, .deepseek: path == "/"
             }
         }
     }
@@ -346,6 +366,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let tabID: UUID
         let provider: Provider
         let modelChoice: WebsiteModelChoice?
+        let modeChoice: WebsiteModeChoice?
+        var selectionIntent: WebsiteSelectionIntent? {
+            modeChoice.map(WebsiteSelectionIntent.mode) ?? modelChoice.map(WebsiteSelectionIntent.model)
+        }
         let isDiscovery: Bool
         let isRecoveryProbe: Bool
         let view: WKWebView
@@ -394,15 +418,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var explicitClearReady = false
         var requiresSavedDelete: Bool { provider.lifecycle == .savedConversationDelete && !isDiscovery }
         var savedDeleteReady = false
-        var kimiRoutes = KimiSavedConversationRoutes()
+        var savedRoutes: SavedConversationRoutes?
         var savedDeleteSubmission: FreshSubmissionBinding?
         final class SavedDeleteOperation {
             let id = UUID()
-            let generation: UUID, url: URL, conversation: String, fingerprint: String, model: WebsiteModelChoice
-            var progress = KimiDeletionProgress()
-            init(generation: UUID, url: URL, conversation: String, fingerprint: String, model: WebsiteModelChoice) {
+            let generation: UUID, url: URL, conversation: String, fingerprint: String
+            let selection: WebsiteSelectionIntent, evidence: WebsiteSelectionEvidence
+            var progress = SavedConversationDeletionProgress()
+            init(generation: UUID, url: URL, conversation: String, fingerprint: String, selection: WebsiteSelectionIntent, evidence: WebsiteSelectionEvidence) {
                 self.generation = generation; self.url = url; self.conversation = conversation
-                self.fingerprint = fingerprint; self.model = model
+                self.fingerprint = fingerprint; self.selection = selection; self.evidence = evidence
             }
             var dictionary: [String: Any] {
                 ["id": id.uuidString, "documentGeneration": generation.uuidString, "sequence": 1,
@@ -460,7 +485,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             let binding: FreshSubmissionBinding
             let url: URL
             let responseFingerprint: String
-            let modelEvidence: WebsiteModelEvidence
+            let selectionEvidence: WebsiteSelectionEvidence
         }
         var freshSubmissionBinding: FreshSubmissionBinding?
         var freshSubmissionCompletion: FreshSubmissionCompletion?
@@ -512,7 +537,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var loggedGroqComposerFailure = false
         var loggedGroqSendFailure = false
         var loggedGroqSendReveal = false
-        var loggedKimiAdapterFailure = false
+        var loggedSavedAdapterFailure = false
         var kimiDiscoveryProgress = KimiDiscoveryProgressLogBudget()
         var quotaDiagnosticLog = QuotaDiagnosticLogBudget()
         var modelSelectionRequested = false
@@ -523,7 +548,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // This separate negative state never carries model or answer proof.
         var claudeModelObservationPending = false
         var loggedPendingModelVerification = false
-        var modelEvidence: WebsiteModelEvidence?
+        var selectionEvidence: WebsiteSelectionEvidence?
         var lastModelDiagnostic: String?
         var loggedClaudeRemountHostFailure = false
         var loggedModelMismatch = false
@@ -551,10 +576,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // Private troubleshooting only; never part of response/model authority.
         var rendererWorkDiagnostic: (generation: UUID, sequence: Int, expiry: Double, value: [String: Any])?
 
-        init(provider: Provider, tabID: UUID, view: WKWebView, documentGeneration: UUID, modelChoice: WebsiteModelChoice? = nil,
+        init(provider: Provider, tabID: UUID, view: WKWebView, documentGeneration: UUID, modelChoice: WebsiteModelChoice? = nil, modeChoice: WebsiteModeChoice? = nil,
              isDiscovery: Bool = false, isRecoveryProbe: Bool = false) {
             self.provider = provider
+            savedRoutes = provider.savedConversationPolicy.map { SavedConversationRoutes(policy: $0) }
             self.modelChoice = modelChoice
+            self.modeChoice = modeChoice
             self.isDiscovery = isDiscovery
             self.isRecoveryProbe = isRecoveryProbe
             self.tabID = tabID
@@ -990,7 +1017,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     func grantInspectorDiagnostic(_ authorization: ChatGPTInspectorLease, sessionToken: String) async -> Bool {
         guard !Task.isCancelled, let session = sessions[sessionToken], session.provider == .chatgpt,
               !session.isDiscovery, !session.isRecoveryProbe, ["ready", "complete"].contains(session.state),
-              session.temporary, session.modelSelectionVerified, session.modelEvidence != nil,
+              session.temporary, session.modelSelectionVerified, session.selectionEvidence != nil,
               browser.webView(for: session.tabID) === session.view,
               let generation = browser.documentGeneration(for: session.tabID),
               generation == (session.documentGeneration ?? session.initialDocumentGeneration),
@@ -1044,7 +1071,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     func activateRequestMetadata(sessionToken: String) async -> Bool {
         guard let session = sessions[sessionToken], session.provider == .chatgpt, !session.isDiscovery,
               !session.isRecoveryProbe, session.state == "ready", !session.submitted,
-              session.temporary, session.modelSelectionVerified, session.modelEvidence != nil else { return false }
+              session.temporary, session.modelSelectionVerified, session.selectionEvidence != nil else { return false }
         let snapshot = await browser.modelRequestMetadata(command: "activate", tabID: session.tabID,
             view: session.view, ownerToken: session.token)
         return snapshot?.active == true && snapshot?.expired == false
@@ -1165,7 +1192,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var streamRetained = false
         defer { if !streamRetained { streamCandidate?.revoke() } }
         try Task.checkCancellation()
-        guard Set(values.keys) == ["provider"] || Set(values.keys) == ["provider", "modelChoice"] else { throw Failure.invalidRequest }
+        guard Set(values.keys) == ["provider"] || Set(values.keys) == ["provider", "modelChoice"]
+            || Set(values.keys) == ["provider", "modeChoice"] else { throw Failure.invalidRequest }
         guard let raw = values["provider"], let provider = Provider(rawValue: raw) else { throw Failure.unsupportedProvider }
         let choice: WebsiteModelChoice?
         if let encoded = values["modelChoice"] {
@@ -1173,8 +1201,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   parsed.isSelectable else { throw Failure.invalidRequest }
             choice = parsed
         } else { choice = nil }
+        let modeChoice: WebsiteModeChoice?
+        if let encoded = values["modeChoice"] {
+            guard let parsed = WebsiteModeChoice.parse(encoded), parsed.provider == raw else { throw Failure.invalidRequest }
+            modeChoice = parsed
+        } else { modeChoice = nil }
+        guard provider.usesWebsiteModes ? choice == nil && modeChoice != nil : modeChoice == nil else { throw Failure.invalidRequest }
         guard provider != .chatgpt || choice?.chatGPTPower != nil else { throw Failure.invalidRequest }
-        guard provider != .groq && provider != .kimi || choice != nil else { throw Failure.invalidRequest }
+        guard provider.lifecycle == .temporary || choice != nil || modeChoice != nil else { throw Failure.invalidRequest }
         let claudeResponseStream: ClaudeResponseStreamLease?
         if let candidate = streamCandidate, provider == .claude, choice != nil,
            let admission, admission.provider == provider.rawValue, admission.modelID == choice?.modelID,
@@ -1223,7 +1257,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let session: Session
         do {
             try Task.checkCancellation()
-            session = try createSession(provider: provider, choice: choice, isDiscovery: false,
+            session = try createSession(provider: provider, choice: choice, modeChoice: modeChoice, isDiscovery: false,
                 requestMetadata: requestMetadata, claudeResponseStream: claudeResponseStream,
                 preparedTab: preparedTab, reservedStart: true)
         } catch {
@@ -1486,11 +1520,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 session.loggedPendingModelVerification = false
                 session.state = "running"
                 let submittedSequence = session.sequence
-                // Kimi's first callback proves only this one dispatch. A nested
+                // Saved-conversation callbacks prove only this one dispatch. A nested
                 // first-body read cannot run before its acknowledgement below.
                 // The next poll still proves canonical ownership and the model.
                 let sent = try await page(session, action: "submit", prompt: outbound,
-                    recheckModelAfterAwait: session.provider != .kimi)
+                    recheckModelAfterAwait: session.provider.savedConversationPolicy == nil)
                 guard sent["submitted"] as? Bool == true else { throw Failure.editorFailure("submission_unconfirmed") }
                 session.acknowledgedSendSequence = submittedSequence
                 logModelNativeLifecycle(session, phase: .submitted)
@@ -1571,7 +1605,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if !session.isRecoveryProbe, let gate = providerGates[session.provider] { throw gate.failure }
     }
 
-    private func createSession(provider: Provider, choice: WebsiteModelChoice?, isDiscovery: Bool,
+    private func createSession(provider: Provider, choice: WebsiteModelChoice?, modeChoice: WebsiteModeChoice? = nil, isDiscovery: Bool,
                                isRecoveryProbe: Bool = false, requestMetadata: ChatGPTRequestMetadataLease? = nil,
                                claudeResponseStream: ClaudeResponseStreamLease? = nil,
                                preparedTab: UUID? = nil, reservedStart: Bool = false) throws -> Session {
@@ -1593,7 +1627,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         } else { id = try createTab(provider.startURL(choice: choice)) }
         guard let view = browser.webView(for: id), let generation = browser.documentGeneration(for: id) else { throw Failure.staleSession }
         let session = Session(provider: provider, tabID: id, view: view, documentGeneration: generation,
-                              modelChoice: choice, isDiscovery: isDiscovery, isRecoveryProbe: isRecoveryProbe)
+                              modelChoice: choice, modeChoice: modeChoice, isDiscovery: isDiscovery, isRecoveryProbe: isRecoveryProbe)
         if provider == .claude, !isDiscovery, !isRecoveryProbe, preparedTab == nil,
            claudeResponseStream?.isCurrent == true {
             session.claudeResponseStream = claudeResponseStream
@@ -1610,6 +1644,25 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     /// Read available choices on an empty owned page, without sending a prompt.
     func discoverModels(provider rawProvider: String, retryBlocked: Bool = false,
                         recoveryCandidateIsCurrent: (@MainActor () -> Bool)? = nil) async throws -> [WebsiteModelChoice] {
+        try Task.checkCancellation()
+        guard let provider = Provider(rawValue: rawProvider) else { throw Failure.unsupportedProvider }
+        guard !provider.usesWebsiteModes else { throw Failure.invalidRequest }
+        return try await discoverSelections(provider: rawProvider, retryBlocked: retryBlocked,
+            recoveryCandidateIsCurrent: recoveryCandidateIsCurrent).models
+    }
+
+    /// Observe website modes without pretending that a toggle identifies a backend model.
+    func discoverModes(provider rawProvider: String, retryBlocked: Bool = false,
+                       recoveryCandidateIsCurrent: (@MainActor () -> Bool)? = nil) async throws -> [WebsiteModeChoice] {
+        try Task.checkCancellation()
+        guard let provider = Provider(rawValue: rawProvider) else { throw Failure.unsupportedProvider }
+        guard provider.usesWebsiteModes else { throw Failure.invalidRequest }
+        return try await discoverSelections(provider: rawProvider, retryBlocked: retryBlocked,
+            recoveryCandidateIsCurrent: recoveryCandidateIsCurrent).modes
+    }
+
+    private func discoverSelections(provider rawProvider: String, retryBlocked: Bool,
+        recoveryCandidateIsCurrent: (@MainActor () -> Bool)?) async throws -> (models: [WebsiteModelChoice], modes: [WebsiteModeChoice]) {
         try Task.checkCancellation()
         guard let provider = Provider(rawValue: rawProvider) else { throw Failure.unsupportedProvider }
         guard recoveryCandidateIsCurrent?() != false else { throw CancellationError() }
@@ -1640,14 +1693,35 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 session.modelSelectionRequested = true
                 let result = try await page(session, action: "discoverModels", maximumWait: min(.seconds(10), deadline - .now))
                 if result["pending"] as? Bool != true {
-                    guard let choices = result["modelChoices"] as? [[String: String]], !choices.isEmpty, choices.count <= 32 else { throw Failure.modelUnverified }
-                    let parsed = try choices.map { choice -> WebsiteModelChoice in
-                        guard Set(choice.keys) == ["key", "label"], let key = choice["key"], let label = choice["label"] else { throw Failure.modelUnverified }
-                        let model = WebsiteModelChoice(provider: rawProvider, key: key, label: label)
-                        guard model.isObservedChoice else { throw Failure.modelUnverified }
-                        return model
+                    let qualified: [WebsiteModelChoice]
+                    let modes: [WebsiteModeChoice]
+                    if provider.usesWebsiteModes {
+                        guard result["modelChoices"] == nil, let rawModes = result["modeChoices"] as? [[String: Any]],
+                              rawModes.count == WebsiteModeChoice.DeepSeekMode.allCases.count else { throw Failure.modelUnverified }
+                        modes = try rawModes.map { raw in
+                            guard let mode = WebsiteModeChoice.parse(raw, provider: rawProvider) else { throw Failure.modelUnverified }
+                            return mode
+                        }
+                        guard Set(modes.map(\.key)).count == modes.count else { throw Failure.modelUnverified }
+                        qualified = []
+                    } else {
+                        guard result["modeChoices"] == nil else { throw Failure.modelUnverified }
+                        guard let choices = result["modelChoices"] as? [[String: String]], !choices.isEmpty, choices.count <= 32 else { throw Failure.modelUnverified }
+                        let parsed = try choices.map { choice -> WebsiteModelChoice in
+                            guard Set(choice.keys) == ["key", "label"], let key = choice["key"], let label = choice["label"] else { throw Failure.modelUnverified }
+                            let model = WebsiteModelChoice(provider: rawProvider, key: key, label: label)
+                            guard model.isValid else { throw Failure.modelUnverified }
+                            return model
+                        }
+                        guard Set(parsed.map(\.key)).count == parsed.count, Set(parsed.map(\.label)).count == parsed.count else { throw Failure.modelUnverified }
+                        // Qwen's menu also offers the unqualified Omni choice. Keep
+                        // pilot admission native and validate the entire raw menu
+                        // before filtering; excluded entries cannot conceal defects.
+                        guard provider != .qwen || parsed.allSatisfy({ $0.key == $0.label }) else { throw Failure.modelUnverified }
+                        qualified = provider == .qwen ? parsed.filter(\.isObservedChoice) : parsed
+                        guard !qualified.isEmpty, qualified.allSatisfy(\.isObservedChoice) else { throw Failure.modelUnverified }
+                        modes = []
                     }
-                    guard Set(parsed.map(\.key)).count == parsed.count, Set(parsed.map(\.label)).count == parsed.count else { throw Failure.modelUnverified }
                     let cleanup = await finish(session, cancel: false)
                     guard let receipt = try JSONSerialization.jsonObject(with: cleanup) as? [String: Any],
                           receipt["cleanup"] as? String == "not_created" else { throw Failure.modelUnverified }
@@ -1669,7 +1743,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         browser.clearHumanVerificationRequired(provider: provider.rawValue)
                         providerGates.removeValue(forKey: provider)
                     }
-                    return parsed
+                    return (qualified, modes)
                 }
                 _ = try await waitForChange(sessionToken: token, after: revision, until: deadline)
             }
@@ -1731,7 +1805,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private func canObserveKimiInitialHydration(_ session: Session) -> Bool {
         session.provider == .kimi && sessions[session.token] === session && session.terminalFailure == nil && !Task.isCancelled
             && session.state == "loading" && session.documentGeneration == nil
-            && !session.modelSelectionRequested && !session.modelSelectionVerified && session.modelEvidence == nil
+            && !session.modelSelectionRequested && !session.modelSelectionVerified && session.selectionEvidence == nil
             && !session.savedDeleteReady && session.savedDeleteSubmission == nil && session.savedDeleteOperation == nil
             && !session.temporaryRequested && !session.temporary && !session.submitted && !session.pendingSubmission
             && session.sequence == 0 && session.acknowledgedSendSequence == 0
@@ -1739,23 +1813,71 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && browser.webView(for: session.tabID) === session.view && session.view.url == Provider.kimi.startURL
     }
 
+    /// A closed extension of the existing negative-only Kimi envelope. No
+    /// caller-supplied provider, URL, answer or selection can widen this shape.
+    static func isSavedInitialHydrationObservation(_ observed: [String: Any], provider: Provider) -> Bool {
+        switch provider {
+        case .kimi, .qwen, .deepseek: isKimiInitialHydrationObservation(observed)
+        default: false
+        }
+    }
+
+    private func canObserveSavedInitialHydration(_ session: Session) -> Bool {
+        if session.provider == .kimi { return canObserveKimiInitialHydration(session) }
+        // The newer providers have no provisional or account-selection root.
+        // All original preclaim fences remain mandatory before adopting any
+        // document generation, lifecycle, mode/model, draft or Send proof.
+        guard session.provider == .qwen || session.provider == .deepseek else { return false }
+        return sessions[session.token] === session && session.terminalFailure == nil && !Task.isCancelled
+            && session.state == "loading" && session.documentGeneration == nil
+            && !session.modelSelectionRequested && !session.modelSelectionVerified && session.selectionEvidence == nil
+            && !session.savedDeleteReady && session.savedDeleteSubmission == nil && session.savedDeleteOperation == nil
+            && !session.temporaryRequested && !session.temporary && !session.submitted && !session.pendingSubmission
+            && session.sequence == 0 && session.acknowledgedSendSequence == 0
+            && session.firstUserFingerprint == nil && session.conversation == nil && session.conversationIdentity == nil
+            && browser.webView(for: session.tabID) === session.view && session.view.url == session.provider.startURL
+    }
+
     /// Fixed native identifiers only. Page prose, URLs, exception messages and
     /// arbitrary detail fields never enter the diagnostic, even on failure.
-    static func kimiAdapterFailureDiagnostic(_ observed: [String: Any], action: String) -> String? {
-        guard let error = observed["error"] as? String else { return nil }
-        let actions = ["inspect", "discoverModels", "selectModel", "verifyModel", "prepare", "insert", "sendReady",
-            "submit", "stop", "deleteConversation", "selectConversationDeletion", "confirmConversationDeletion", "observeDeletedConversation"]
+    static func savedAdapterFailureDiagnostic(_ observed: [String: Any], provider: Provider, action: String) -> String? {
+        guard [Provider.kimi, .qwen, .deepseek].contains(provider), let error = observed["error"] as? String else { return nil }
+        let actions = ["inspect", "prepare", "insert", "sendReady", "submit", "stop", "deleteConversation",
+            "selectConversationDeletion", "confirmConversationDeletion", "observeDeletedConversation"]
+            + (provider == .deepseek ? ["discoverModes", "selectMode", "verifyMode"] : ["discoverModels", "selectModel", "verifyModel"])
         let errors = ["document_changed", "conversation_changed", "model_unverified", "model_mismatch", "model_unavailable",
-            "composer_unavailable", "prompt_not_inserted", "send_unavailable", "unsupported_response_format", "not_fresh"]
-        let details = ["composer", "send_control", "model_trigger", "model_label", "structure_limit", "owner_token",
-            "document_url", "unexpected_exception", "picker_binding", "picker_label", "picker_menu_binding",
-            "picker_menu_replaced", "model_row_shape", "model_choices_duplicate", "model_checked_count", "picker_not_closed",
-            "more_binding", "more_row_shape", "more_checked_count", "more_selected_label"]
-            + ["picker_open", "picker_close", "model_option", "more_open", "more_close"].flatMap { stage in
-                ["disabled", "invalid_geometry", "outside_viewport", "occluded"].map { stage + "_" + $0 }
-            }
-        let detail = observed["detail"] as? String
+            "composer_unavailable", "composer_not_empty", "prompt_not_inserted", "send_unavailable", "unsupported_response_format",
+            "not_fresh", "response_too_large", "unknown_action"]
+            + (provider == .deepseek ? ["mode_unverified", "mode_mismatch"] : [])
+        let commonDetails = ["composer", "composer_scope", "send_control", "structure_limit", "owner_token", "document_url",
+            "ambiguous_structure", "conversation_url", "first_user_container", "first_user_message", "user_count",
+            "response_scope", "authored_source", "terminal_operation", "deleting_session", "delete_operation", "delete_ownership",
+            "delete_phase", "delete_not_ready", "delete_route", "delete_header", "delete_trigger", "delete_menu", "delete_control",
+            "delete_confirmation", "delete_dialog", "delete_title", "delete_body"]
+        let providerDetails: [String]
+        switch provider {
+        case .kimi:
+            providerDetails = ["model_trigger", "model_label", "unexpected_exception", "picker_binding", "picker_label", "picker_menu_binding",
+                "picker_menu_replaced", "model_row_shape", "model_choices_duplicate", "model_checked_count", "picker_not_closed",
+                "more_binding", "more_row_shape", "more_checked_count", "more_selected_label"]
+                + ["picker_open", "picker_close", "model_option", "more_open", "more_close"].flatMap { stage in
+                    ["disabled", "invalid_geometry", "outside_viewport", "occluded"].map { stage + "_" + $0 }
+                }
+        case .qwen:
+            providerDetails = ["model_trigger", "model_label", "model_menu", "stop_control", "stop_conversation",
+                "response_actions", "response_container", "delete_cancel", "delete_confirm"]
+        case .deepseek:
+            providerDetails = ["mode_toggle", "deepthink_control", "deepthink_control_label", "search_control", "search_control_label",
+                "delete_anchor", "delete_buttons"]
+        default: return nil
+        }
+        let details = commonDetails + providerDetails, detail = observed["detail"] as? String
         return "action=\(actions.contains(action) ? action : "other") error=\(errors.contains(error) ? error : "other") detail=\(detail.map { details.contains($0) ? $0 : "other" } ?? "absent")"
+    }
+
+    // Preserve the existing Kimi diagnostic entry point for its focused tests.
+    static func kimiAdapterFailureDiagnostic(_ observed: [String: Any], action: String) -> String? {
+        savedAdapterFailureDiagnostic(observed, provider: .kimi, action: action)
     }
 
     private func observesLifecycle(_ observed: [String: Any], session: Session) -> Bool {
@@ -1837,7 +1959,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               ComputerToolArgumentContract.exactInt64(observed["userCount"]) == 0,
               ComputerToolArgumentContract.exactInt64(observed["responseCount"]) == 0,
               flag("inserted", false), flag("insertionDispatched", true), flag("insertionPending", true), flag("pending", true),
-              KimiSubmissionAcknowledgement.matches(observed["insertionAcknowledgement"], owner: session.token,
+              SavedConversationSubmissionAcknowledgement.matches(observed["insertionAcknowledgement"], owner: session.token,
                   generation: generation, fingerprint: binding.outboundFingerprint) else { return false }
         return true
     }
@@ -2540,11 +2662,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         session.initialReadRetry = nil
         logInspection(observed, session: session)
         if session.state == "loading" {
-            if session.provider == .kimi, observed["pending"] as? Bool == true, observed["url"] == nil {
+            if session.provider.savedConversationPolicy != nil, observed["pending"] as? Bool == true, observed["url"] == nil {
                 // This negative pre-binding observation carries no model,
                 // response, document or conversation authority. Existing DOM
                 // wakeups and the fixed preparation deadline bound the wait.
-                guard Self.isKimiInitialHydrationObservation(observed), canObserveKimiInitialHydration(session) else { throw Failure.notFresh }
+                guard Self.isSavedInitialHydrationObservation(observed, provider: session.provider), canObserveSavedInitialHydration(session) else { throw Failure.notFresh }
                 return try snapshot(session)
             }
             if session.provider == .groq, observed["pending"] as? Bool == true,
@@ -2585,10 +2707,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // controls or composer aria-hidden. Advance this claimed phase
                 // so its adapter can close the popup. Only fresh checked model
                 // proof and restored temporary mode can finish preparation.
-                guard session.lifecycleVerified, session.modelChoice != nil else { throw Failure.modelUnverified }
+                guard session.lifecycleVerified, session.selectionIntent != nil else { throw Failure.modelUnverified }
                 let selected = try await page(session, action: "selectModel", maximumWait: min(.seconds(10), deadline - .now))
                 if selected["pending"] as? Bool != true {
-                    session.modelEvidence = try validatedModelEvidence(selected, session: session, action: "selectModel")
+                    session.selectionEvidence = try validatedSelectionEvidence(selected, session: session, action: "selectModel")
                     session.modelSelectionVerified = true
                     _ = try await page(session, action: "verifyModel", maximumWait: min(.seconds(10), deadline - .now))
                     session.state = "ready"
@@ -2600,9 +2722,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     case .visibleTranscriptClear: session.explicitClearReady = true
                     case .savedConversationDelete: session.savedDeleteReady = true
                     }
-                    if let choice = session.modelChoice {
-                        if let evidence = try? WebsiteModelEvidence.parse(observed["modelEvidence"], provider: session.provider.rawValue, expected: choice) {
-                            session.modelEvidence = evidence
+                    if session.selectionIntent != nil {
+                        if let evidence = try? WebsiteSelectionEvidence.parse(snapshot: observed, provider: session.provider.rawValue,
+                            expectedModel: session.modelChoice, expectedMode: session.modeChoice) {
+                            session.selectionEvidence = evidence
                             session.modelSelectionVerified = true
                             _ = try await page(session, action: "verifyModel", maximumWait: min(.seconds(10), deadline - .now))
                             session.state = "ready"
@@ -2610,7 +2733,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             session.modelSelectionRequested = true
                             let selected = try await page(session, action: "selectModel", maximumWait: min(.seconds(10), deadline - .now))
                             if selected["pending"] as? Bool != true {
-                                session.modelEvidence = try validatedModelEvidence(selected, session: session, action: "selectModel")
+                                session.selectionEvidence = try validatedSelectionEvidence(selected, session: session, action: "selectModel")
                                 session.modelSelectionVerified = true
                                 _ = try await page(session, action: "verifyModel", maximumWait: min(.seconds(10), deadline - .now))
                                 session.state = "ready"
@@ -2632,7 +2755,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             }
                             guard ContinuousClock.now < deadline else { throw preparationFailure(session) }
                         }
-                        session.modelEvidence = try validatedModelEvidence(defaultObservation, session: session, action: "discoverModels")
+                        session.selectionEvidence = try validatedSelectionEvidence(defaultObservation, session: session, action: "discoverModels")
                         session.modelSelectionVerified = true
                         _ = try await page(session, action: "verifyModel", maximumWait: min(.seconds(10), deadline - .now))
                         session.state = "ready"
@@ -2657,7 +2780,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                count(observed, "userCount") == session.sequence,
                (session.baseline...session.baseline + 1).contains(count(observed, "responseCount")),
                (observed["text"] as? String)?.isEmpty == true,
-               (try? validatedModelEvidence(observed, session: session, action: "inspect")) != nil {
+               (try? validatedSelectionEvidence(observed, session: session, action: "inspect")) != nil {
                 throw Failure.responseStreamFailed(failureCandidate.reason)
             }
             if session.provider == .chatgpt, observed["responseLoadFailed"] as? Bool == true {
@@ -2697,7 +2820,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     if completedRendererFailure(proven), proven["modelVerificationPending"] == nil,
                        let original = observed["text"] as? String, let current = proven["text"] as? String,
                        original.utf8.elementsEqual(current.utf8),
-                       (try? validatedModelEvidence(proven, session: session, action: "inspect")) != nil {
+                       (try? validatedSelectionEvidence(proven, session: session, action: "inspect")) != nil {
                         await captureArmedRendererFailureDiagnostic(session, deadline: deadline)
                         throw Failure.responseRenderingFailed
                     }
@@ -3120,7 +3243,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let record: [String: Any] = ["kind": "chatgpt_response_progress_v1", "phase": "failure", "cause": cause,
             "sequence": session.sequence, "confirmedUsers": session.confirmedUsers,
             "pendingSubmission": session.pendingSubmission, "currentSubmissionVerified": session.currentSubmissionVerified,
-            "modelSelectionVerified": session.modelSelectionVerified, "modelEvidencePresent": session.modelEvidence != nil,
+            "modelSelectionVerified": session.modelSelectionVerified, "modelEvidencePresent": session.selectionEvidence != nil,
             "ownedViewCurrent": viewCurrent, "ownedDocumentCurrent": documentCurrent,
             "lastInspectionAvailable": inspectionCurrent,
             "lastInspection": lastInspection]
@@ -4861,7 +4984,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && session.preparedSubmission == nil && session.currentSubmission == nil && session.previousSubmission == nil
             && !session.currentSubmissionVerified && session.firstUserFingerprint == nil
             && session.documentGeneration == nil && session.routeContext == nil && session.conversation == nil
-            && session.modelEvidence == nil && session.productModeEvidence == nil
+            && session.selectionEvidence == nil && session.productModeEvidence == nil
             && session.baseline == 0 && session.observedResponseCount == 0
     }
 
@@ -5141,13 +5264,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       preparedReadinessSink: ((PreparedEditorReadinessReceipt) -> Void)? = nil,
                       explicitClearOperation: Session.ExplicitClearOperation? = nil,
                       savedDeleteOperation: Session.SavedDeleteOperation? = nil,
-                      allowKimiCleanupInspection: Bool = false,
+                      allowSavedCleanupInspection: Bool = false,
                       maximumWait: Duration = .seconds(10)) async throws -> [String: Any] {
-        if allowKimiCleanupInspection {
-            guard session.provider == .kimi, action == "inspect", allowBlockedProvider, enforceModel,
+        if allowSavedCleanupInspection {
+            guard session.provider.savedConversationPolicy != nil, action == "inspect", allowBlockedProvider, enforceModel,
                   !recheckModelAfterAwait, !recheckProductAfterAwait, savedDeleteOperation == nil else { throw Failure.invalidRequest }
         }
-        let savedDeleteAction = KimiDeletionProgress.Action(rawValue: action)
+        let savedDeleteAction = SavedConversationDeletionProgress.Action(rawValue: action)
         guard (savedDeleteAction != nil) == (savedDeleteOperation != nil) else { throw Failure.invalidRequest }
         if let operation = savedDeleteOperation {
             guard isCurrent(operation, session: session), enforceModel,
@@ -5217,8 +5340,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if provider == .groq {
             guard provider.acceptsGroqModelQuery(url, expectedKey: session.modelChoice?.key) else { throw Failure.modelMismatch }
         }
-        if provider == .kimi, savedDeleteOperation == nil {
-            guard session.kimiRoutes.observe(url, submitted: session.submitted) else { throw Failure.ownershipFailure(.routeBefore) }
+        if provider.savedConversationPolicy != nil, savedDeleteOperation == nil {
+            guard session.savedRoutes?.observe(url, submitted: session.submitted) == true else { throw Failure.ownershipFailure(.routeBefore) }
         }
         let context = provider.routeContext(url.absoluteString)
         if let pinned = session.routeContext, context != pinned { throw Failure.ownershipFailure(.routeBefore) }
@@ -5269,7 +5392,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
         }
         var input: [String: Any] = [
-            "provider": provider.rawValue, "action": action, "expectedURL": url.absoluteString,
+            "provider": provider.rawValue, "action": provider.selectionAdapterAction(action), "expectedURL": url.absoluteString,
             "ownerToken": session.token, "bindOwner": session.state == "loading" && !session.submitted,
             "expectedUserCounts": expectedCounts,
             "expectedFirstUserMarker": session.firstUserMarker,
@@ -5286,9 +5409,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 && session.pendingSubmission && session.sequence > 1,
         ]
         if requireClaudeSafeguardPause { input["requireClaudeSafeguardPause"] = true }
-        if allowKimiCleanupInspection { input["kimiCleanupInspection"] = true }
-        if provider == .groq || provider == .kimi { input["documentGeneration"] = generation.uuidString }
-        if provider == .kimi, ["insert", "submit"].contains(action) {
+        if allowSavedCleanupInspection {
+            guard let policy = provider.savedConversationPolicy else { throw Failure.invalidRequest }
+            input[policy.cleanupInspectionKey] = true
+        }
+        if provider == .groq || provider.savedConversationPolicy != nil { input["documentGeneration"] = generation.uuidString }
+        if provider.savedConversationPolicy != nil,
+           action == "submit" || provider == .kimi && action == "insert" {
             let phaseMatches = action == "insert"
                 ? session.sequence == 0 && !session.submitted && !session.pendingSubmission
                 : session.sequence == 1 && session.submitted && session.pendingSubmission
@@ -5402,7 +5529,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 ["fromURL": $0.fromURL.absoluteString, "toURL": $0.toURL.absoluteString]
             }
         }
-        if let choice = session.modelChoice {
+        if let mode = session.modeChoice {
+            if action == "selectModel" { input["modeChoice"] = mode.dictionary }
+            if enforceModel || deferModelVerification, session.modelSelectionVerified,
+               !["stop", "cleanup", "discoverModels"].contains(action) {
+                input["expectedModeChoice"] = mode.dictionary
+            }
+        } else if let choice = session.modelChoice {
             if allowFirstUserExpansion || allowBoundFirstUserExpansion {
                 input["firstUserExpansionModelChoice"] = ["key": choice.key, "label": choice.label]
             }
@@ -5410,7 +5543,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             if enforceModel || deferModelVerification, session.modelSelectionVerified, !["stop", "cleanup", "discoverModels"].contains(action) {
                 input["expectedModelChoice"] = ["key": choice.key, "label": choice.label]
             }
-        } else if provider == .gemini, session.modelSelectionVerified, let evidence = session.modelEvidence,
+        } else if provider == .gemini, session.modelSelectionVerified, let evidence = session.selectionEvidence?.namedModel,
                   !["stop", "cleanup", "discoverModels"].contains(action) {
             input["expectedModelChoice"] = ["key": evidence.selected.key, "label": evidence.selected.label]
         }
@@ -5554,27 +5687,27 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                !session.temporaryRequested, !session.submitted { throw Failure.pageUnavailable }
             throw Failure.ownershipFailure(.routeAfter)
         }
-        if provider == .kimi, savedDeleteOperation == nil {
-            guard session.kimiRoutes.observe(currentURL, submitted: session.submitted) else { throw Failure.ownershipFailure(.routeAfter) }
+        if provider.savedConversationPolicy != nil, savedDeleteOperation == nil {
+            guard session.savedRoutes?.observe(currentURL, submitted: session.submitted) == true else { throw Failure.ownershipFailure(.routeAfter) }
         }
-        if currentURL != url, provider == .kimi {
+        if currentURL != url, provider.savedConversationPolicy != nil {
             if let operation = savedDeleteOperation {
                 guard operation.progress.claimed.contains(.confirmDelete),
                       (savedDeleteAction == .confirmDelete || savedDeleteAction == .observe),
                       url == operation.url, currentURL == provider.startURL else { throw Failure.ownershipFailure(.routeAfter) }
             } else if session.submitted, session.sequence == 1, session.conversation == nil {
-                guard KimiSavedConversationRoute(url) != KimiSavedConversationRoute(currentURL) else { throw Failure.ownershipFailure(.routeAfter) }
+                guard provider.savedConversationRoute(url) != provider.savedConversationRoute(currentURL) else { throw Failure.ownershipFailure(.routeAfter) }
                 if ["inspect", "verifyModel"].contains(action), refreshChangedRoute {
                     return try await page(session, action: "inspect", enforceModel: enforceModel,
-                        refreshChangedRoute: KimiSavedConversationRoute(currentURL)?.conversation == nil,
+                        refreshChangedRoute: provider.savedConversationRoute(currentURL)?.conversation == nil,
                         recheckModelAfterAwait: recheckModelAfterAwait, recheckProductAfterAwait: recheckProductAfterAwait,
-                        allowBlockedProvider: allowBlockedProvider, allowKimiCleanupInspection: allowKimiCleanupInspection,
+                        allowBlockedProvider: allowBlockedProvider, allowSavedCleanupInspection: allowSavedCleanupInspection,
                         maximumWait: evaluationDeadline - .now)
                 }
                 guard action == "submit" else { throw Failure.ownershipFailure(.routeAfter) }
             } else { throw Failure.ownershipFailure(.routeAfter) }
         }
-        if currentURL != url, provider != .kimi {
+        if currentURL != url, provider.savedConversationPolicy == nil {
             if provider == .groq, session.isDiscovery, action == "inspect", session.state == "loading",
                session.documentGeneration == nil, !session.modelSelectionRequested, !session.explicitClearReady,
                !session.submitted, !session.pendingSubmission, session.sequence == 0,
@@ -5718,10 +5851,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             Self.inspectionLog.error("productModeDiagnostic provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence) structure=\(safe, privacy: .public)")
         }
         if let error = observed["error"] as? String {
-            if provider == .kimi, !session.loggedKimiAdapterFailure,
-               let diagnostic = Self.kimiAdapterFailureDiagnostic(observed, action: action) {
-                session.loggedKimiAdapterFailure = true
-                Self.inspectionLog.error("adapterFailureDiagnostic version=1 provider=kimi \(diagnostic, privacy: .public) generationBound=\(session.documentGeneration != nil) sequence=\(session.sequence)")
+            if !session.loggedSavedAdapterFailure,
+               let diagnostic = Self.savedAdapterFailureDiagnostic(observed, provider: provider, action: provider.selectionAdapterAction(action)) {
+                session.loggedSavedAdapterFailure = true
+                Self.inspectionLog.error("adapterFailureDiagnostic version=1 provider=\(provider.rawValue, privacy: .public) \(diagnostic, privacy: .public) generationBound=\(session.documentGeneration != nil) sequence=\(session.sequence)")
             }
             logClaudeRemountHostFailure(observed, session: session, action: action,
                                        generation: generation, allowsBlockedProvider: allowBlockedProvider)
@@ -5739,6 +5872,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
             switch error {
             case "product_mode_unverified": throw Failure.productModeUnverified
+            case "mode_unverified" where provider.usesWebsiteModes: throw Failure.modelUnverified
+            case "mode_mismatch" where provider.usesWebsiteModes: throw Failure.modelMismatch
             case "model_unverified": throw Failure.modelUnverified
             case "model_mismatch":
                 logModelMismatch(observed, session: session, action: action, stage: "adapter_error")
@@ -5946,14 +6081,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if session.provider.lifecycle == .savedConversationDelete, !observesLifecycle(observed, session: session) {
             throw Failure.savedDeleteUnverified
         }
-        if provider == .kimi, observed["pending"] as? Bool == true, observed["url"] == nil {
-            guard Self.isKimiInitialHydrationObservation(observed), action == "inspect",
-                  canObserveKimiInitialHydration(session), !allowBlockedProvider, !allowKimiCleanupInspection, savedDeleteOperation == nil,
+        if provider.savedConversationPolicy != nil, observed["pending"] as? Bool == true, observed["url"] == nil {
+            guard Self.isSavedInitialHydrationObservation(observed, provider: provider), action == "inspect",
+                  canObserveSavedInitialHydration(session), !allowBlockedProvider, !allowSavedCleanupInspection, savedDeleteOperation == nil,
                   currentURL == url, currentURL == provider.startURL,
                   ContinuousClock.now < evaluationDeadline else { throw Failure.notFresh }
             return observed
         }
-        if provider == .kimi, action == "submit" {
+        if provider.savedConversationPolicy != nil, action == "submit" {
             guard enforceModel, !recheckModelAfterAwait, session.requiresSavedDelete, session.savedDeleteReady,
                   session.submitted, session.pendingSubmission, session.sequence == 1, session.acknowledgedSendSequence == 0,
                   session.firstUserFingerprint == nil, session.conversation == nil, url == provider.startURL,
@@ -5962,10 +6097,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   ComputerToolArgumentContract.exactInt64(observed["userCount"]) == 0,
                   ComputerToolArgumentContract.exactInt64(observed["responseCount"]) == 0,
                   let submitted = observed["submitted"] as? NSNumber, CFGetTypeID(submitted) == CFBooleanGetTypeID(), submitted.boolValue,
-                  KimiSubmissionAcknowledgement.matches(observed["submissionAcknowledgement"], owner: session.token,
+                  SavedConversationSubmissionAcknowledgement.matches(observed["submissionAcknowledgement"], owner: session.token,
                     generation: generation, fingerprint: binding.outboundFingerprint),
                   ContinuousClock.now < evaluationDeadline else { throw Failure.ownershipFailure(.javaScriptSubmission) }
-            session.modelEvidence = try validatedModelEvidence(observed, session: session, action: action)
+            session.selectionEvidence = try validatedSelectionEvidence(observed, session: session, action: action)
             return observed
         }
         if let operation = savedDeleteOperation {
@@ -5995,21 +6130,21 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   observesLifecycle(observed, session: session),
                   Self.validExplicitClearProof(observed["clearProof"], operation: operation),
                   ContinuousClock.now < evaluationDeadline else { throw Failure.ownershipFailure(.unboundCleanup) }
-            _ = try validatedModelEvidence(observed, session: session, action: action)
+            _ = try validatedSelectionEvidence(observed, session: session, action: action)
             return observed
         }
         if pendingSubmissionProductRecheck {
             guard canRecheckUnacknowledgedChatGPTProduct(session),
                   Self.isChatGPTPendingProductReceipt(observed) else { throw Failure.ownershipFailure(.javaScriptSubmission) }
         }
-        if provider == .kimi, observed["ownershipPending"] as? Bool == true {
+        if provider.savedConversationPolicy != nil, observed["ownershipPending"] as? Bool == true {
             guard action == "inspect", session.submitted, session.sequence == 1, session.pendingSubmission,
                   session.acknowledgedSendSequence == 1, session.conversation == nil, session.firstUserFingerprint == nil,
                   let binding = session.savedDeleteSubmission, binding.generation == generation,
-                  KimiSavedConversationRoute(currentURL)?.conversation == nil,
+                  provider.savedConversationRoute(currentURL)?.conversation == nil,
                   (0...1).contains(count(observed, "userCount")), observed["text"] as? String == "",
                   observed["answerComplete"] as? Bool == false else { throw Failure.ownershipFailure(.javaScriptFirstUser) }
-            session.modelEvidence = try validatedModelEvidence(observed, session: session, action: action)
+            session.selectionEvidence = try validatedSelectionEvidence(observed, session: session, action: action)
             return ["temporary": false, "sessionLifecycle": "saved_conversation_delete", "userCount": 0,
                 "responseCount": session.baseline, "text": "", "busy": true, "answerComplete": false, "ownershipPending": true]
         }
@@ -6173,7 +6308,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                                            allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
                                                            maximumWait: evaluationDeadline - .now)
                 }
-                if provider != .kimi, !promotion, session.conversation == nil, let conversation = provider.conversationURL(observedURL) {
+                if provider.savedConversationPolicy == nil, !promotion, session.conversation == nil, let conversation = provider.conversationURL(observedURL) {
                     // Preserve the initial route pin while waiting for render;
                     // a later promotion still requires the first-message proof.
                     session.conversation = conversation
@@ -6189,7 +6324,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 if session.requiresExplicitClear { pending["sessionLifecycle"] = "explicit_clear" }
                 if session.requiresSavedDelete { pending["sessionLifecycle"] = "saved_conversation_delete" }
                 if observed["modelVerificationPending"] as? Bool == true { pending["modelVerificationPending"] = true }
-                else if let evidence = session.modelEvidence { pending["modelEvidence"] = evidence.dictionary }
+                else if let evidence = session.selectionEvidence { pending[evidence.snapshotField] = evidence.dictionary }
                 if let evidence = session.productModeEvidence { pending["productModeEvidence"] = evidence.dictionary }
                 return pending
             }
@@ -6213,7 +6348,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 session.promoted = true
             } else if session.conversation == nil, let conversation = provider.conversationURL(observedURL) {
                 guard session.submitted else { throw Failure.notFresh }
-                if provider == .kimi {
+                if provider.savedConversationPolicy != nil {
                     guard session.firstUserFingerprint != nil, count(observed, "userCount") == 1 else { throw Failure.ownershipFailure(.javaScriptFirstUser) }
                 }
                 session.conversation = conversation
@@ -6274,7 +6409,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
            !allowBlockedProvider {
             // Only an ordinary, fully validated read restores positive proof.
             // A model-only callback or a cleanup read cannot clear this state.
-            _ = try validatedModelEvidence(observed, session: session, action: action)
+            _ = try validatedSelectionEvidence(observed, session: session, action: action)
             session.claudeModelObservationPending = false
             Self.inspectionLog.notice("claudeModelObservation phase=restored sessionID=\(session.token, privacy: .public) generation=\(generation.uuidString, privacy: .public) sequence=\(session.sequence)")
         }
@@ -6290,7 +6425,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               session.observedResponseCount == 0, session.response.isEmpty, !session.profiledFirstPositive,
               !session.completionCandidate, session.responseCodeStructure == nil,
               session.freshSubmissionCompletion == nil, session.temporary, session.lifecycleVerified,
-              session.modelChoice != nil, session.modelSelectionVerified, session.modelEvidence != nil,
+              session.modelChoice != nil, session.modelSelectionVerified, session.selectionEvidence != nil,
               let binding = session.freshSubmissionBinding,
               session.firstUserFingerprint == binding.outboundFingerprint,
               session.documentGeneration == binding.generation,
@@ -6438,7 +6573,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             return
         }
         if enforceModel, session.modelSelectionVerified, !["stop", "cleanup", "discoverModels"].contains(action) {
-            let evidence = try validatedModelEvidence(observed, session: session, action: action)
+            let evidence = try validatedSelectionEvidence(observed, session: session, action: action)
             // A native await can cross a model change without navigation. Read
             // the fixed proof again, rather than accepting the earlier result.
             if recheck, action != "verifyModel" {
@@ -6457,25 +6592,26 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                            preparedReadinessRequest: preparedReadinessRequest,
                                            preparedReadinessSink: preparedReadinessSink,
                                            maximumWait: maximumWait)
-                let currentEvidence = try validatedModelEvidence(fresh, session: session, action: freshAction)
+                let currentEvidence = try validatedSelectionEvidence(fresh, session: session, action: freshAction)
                 guard evidence.isSameResolvedSelection(as: currentEvidence) else {
                     logModelMismatch(fresh, session: session, action: freshAction, stage: "after_await")
                     throw Failure.modelMismatch
                 }
             }
-            session.modelEvidence = evidence
+            session.selectionEvidence = evidence
         }
     }
 
-    private func validatedModelEvidence(_ observation: [String: Any], session: Session, action: String = "other") throws -> WebsiteModelEvidence {
-        let current: WebsiteModelEvidence
-        do { current = try WebsiteModelEvidence.parse(observation["modelEvidence"], provider: session.provider.rawValue, expected: session.modelChoice) }
-        catch WebsiteModelEvidence.Failure.mismatch {
+    private func validatedSelectionEvidence(_ observation: [String: Any], session: Session, action: String = "other") throws -> WebsiteSelectionEvidence {
+        let current: WebsiteSelectionEvidence
+        do { current = try WebsiteSelectionEvidence.parse(snapshot: observation, provider: session.provider.rawValue,
+            expectedModel: session.modelChoice, expectedMode: session.modeChoice) }
+        catch WebsiteSelectionEvidence.Failure.mismatch {
             logModelMismatch(observation, session: session, action: action, stage: "evidence_validation")
             throw Failure.modelMismatch
         }
         catch { throw Failure.modelUnverified }
-        guard session.modelEvidence.map({ $0.isSameResolvedSelection(as: current) }) ?? true else {
+        guard session.selectionEvidence.map({ $0.isSameResolvedSelection(as: current) }) ?? true else {
             logModelMismatch(observation, session: session, action: action, stage: "pinned_selection")
             throw Failure.modelMismatch
         }
@@ -6517,7 +6653,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private func logModelMismatch(_ observation: [String: Any], session: Session, action: String, stage: String) {
         guard session.provider == .gemini, !session.loggedModelMismatch else { return }
         let expected = session.modelChoice.map { ["key": $0.key, "label": $0.label] }
-        let pinned = session.modelEvidence.map { ["key": $0.selected.key, "label": $0.selected.label] }
+        let pinned = session.selectionEvidence?.namedModel.map { ["key": $0.selected.key, "label": $0.selected.label] }
         guard let diagnostic = Self.sanitizedGeminiModelMismatchDiagnostic(stage: stage, action: action,
             sequence: session.sequence, expected: expected, pinned: pinned, observed: observation["modelEvidence"]) else { return }
         session.loggedModelMismatch = true
@@ -6634,7 +6770,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && sessions[session.token] === session && browser.webView(for: session.tabID) === session.view
             && session.documentGeneration == operation.generation
             && browser.documentGeneration(for: session.tabID) == operation.generation
-            && session.modelChoice == operation.model && session.modelSelectionVerified && session.modelEvidence != nil
+            && session.selectionIntent == operation.selection && session.modelSelectionVerified
+            && session.selectionEvidence?.isSameResolvedSelection(as: operation.evidence) == true
             && session.conversation == operation.conversation
             && session.submitted && !session.pendingSubmission && session.sequence == 1
             && session.acknowledgedSendSequence == 1 && session.confirmedUsers == 1
@@ -6658,7 +6795,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   session.firstUserFingerprint == nil, session.savedDeleteOperation == nil,
                   session.view.url == session.provider.startURL else { throw Failure.ownershipFailure(.unboundCleanup) }
             let observed = try await page(session, action: "inspect", recheckModelAfterAwait: false,
-                recheckProductAfterAwait: false, allowBlockedProvider: true, allowKimiCleanupInspection: true)
+                recheckProductAfterAwait: false, allowBlockedProvider: true, allowSavedCleanupInspection: true)
             try requireLifecycle(observed, session: session)
             guard count(observed, "userCount") == 0, count(observed, "responseCount") == 0,
                   observed["busy"] as? Bool == false, observed["composer"] as? Bool == true else { throw Failure.notFresh }
@@ -6668,15 +6805,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if let existing = session.savedDeleteOperation { operation = existing }
         else {
             let observed = try await page(session, action: "inspect", recheckModelAfterAwait: false,
-                recheckProductAfterAwait: false, allowBlockedProvider: true, allowKimiCleanupInspection: true)
+                recheckProductAfterAwait: false, allowBlockedProvider: true, allowSavedCleanupInspection: true)
             try requireLifecycle(observed, session: session)
             guard observed["ownershipPending"] as? Bool != true, session.sequence == 1, session.confirmedUsers == 1,
                   !session.pendingSubmission, session.acknowledgedSendSequence == 1, count(observed, "userCount") == 1,
                   let fingerprint = session.firstUserFingerprint, let generation = session.documentGeneration,
                   let url = session.view.url, let conversation = session.conversation,
                   session.provider.conversationURL(url.absoluteString) == conversation,
-                  let model = session.modelChoice else { throw Failure.ownershipFailure(.unboundCleanup) }
-            operation = .init(generation: generation, url: url, conversation: conversation, fingerprint: fingerprint, model: model)
+                  let selection = session.selectionIntent, let evidence = session.selectionEvidence else { throw Failure.ownershipFailure(.unboundCleanup) }
+            operation = .init(generation: generation, url: url, conversation: conversation, fingerprint: fingerprint, selection: selection, evidence: evidence)
             session.savedDeleteOperation = operation
         }
         let deadline = ContinuousClock.now + .seconds(10)
@@ -6713,7 +6850,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && session.documentGeneration == operation.generation
             && browser.documentGeneration(for: session.tabID) == operation.generation
             && session.view.url == operation.url && session.modelChoice == operation.model
-            && session.modelSelectionVerified && session.modelEvidence != nil
+            && session.modelSelectionVerified && session.selectionEvidence != nil
             && session.submitted && !session.pendingSubmission && session.sequence == 1
             && session.acknowledgedSendSequence == 1 && session.confirmedUsers == 1
             && operation.sequence == 1 && session.firstUserFingerprint == operation.firstUserFingerprint
@@ -6997,7 +7134,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             value["sessionLifecycle"] = "saved_conversation_delete"; value["temporary"] = false
         }
         if pendingModel { value["modelVerificationPending"] = true }
-        if !pendingModel, let evidence = session.modelEvidence { value["modelEvidence"] = evidence.dictionary }
+        if !pendingModel, let evidence = session.selectionEvidence { value[evidence.snapshotField] = evidence.dictionary }
         if let evidence = session.productModeEvidence { value["productModeEvidence"] = evidence.dictionary }
         if session.usesSubmissionOwnership {
             value["turnContinuationCapability"] = Self.turnContinuationCapability
@@ -7058,8 +7195,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               observation["firstUserFingerprint"] as? String == first,
               let text = observation["text"] as? String, !text.isEmpty,
               text.utf8.elementsEqual(session.response.utf8),
-              let model = try? validatedModelEvidence(observation, session: session, action: "inspect") else { return nil }
-        return .init(binding: binding, url: url, responseFingerprint: Self.promptFingerprint(text), modelEvidence: model)
+              let model = try? validatedSelectionEvidence(observation, session: session, action: "inspect") else { return nil }
+        return .init(binding: binding, url: url, responseFingerprint: Self.promptFingerprint(text), selectionEvidence: model)
     }
 
     private func freshSessionSubmissionProof(_ session: Session) -> [String: Any]? {
@@ -7069,7 +7206,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               session.sequence == 1, session.baseline == 0, session.observedResponseCount == 1,
               session.confirmedUsers == 1, !session.pendingSubmission, session.temporary,
               session.modelChoice != nil, session.modelSelectionVerified,
-              session.modelEvidence?.isSameResolvedSelection(as: proof.modelEvidence) == true,
+              session.selectionEvidence?.isSameResolvedSelection(as: proof.selectionEvidence) == true,
               session.firstUserFingerprint == proof.binding.outboundFingerprint,
               session.documentGeneration == proof.binding.generation,
               sessions[session.token] === session, browser.webView(for: session.tabID) === session.view,
@@ -7421,7 +7558,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         #endif
         guard session.provider == .chatgpt, !session.isDiscovery, session.state == "complete",
               session.modelChoice != nil, session.modelSelectionVerified, !session.modelVerificationPending,
-              session.modelEvidence != nil,
+              session.selectionEvidence != nil,
               let expiry = rendererDiagnosticExpiry(),
               let successExpiry = defaults.object(forKey: key) as? NSNumber,
               CFGetTypeID(successExpiry) != CFBooleanGetTypeID(), successExpiry.doubleValue == expiry else { return false }

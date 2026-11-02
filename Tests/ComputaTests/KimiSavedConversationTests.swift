@@ -3,16 +3,17 @@ import XCTest
 @testable import Computa
 
 final class KimiSavedConversationTests: XCTestCase {
+    private func kimiRoute(_ url: URL) -> SavedConversationRoute? { SavedConversationRoute(url, policy: .kimi) }
     private let root = URL(string: "https://www.kimi.ai/")!
     private let canonical = URL(string: "https://www.kimi.ai/chat/11111111-abcd-4333-8444-555555555555")!
     private let provisional = URL(string: "https://www.kimi.ai/chat/p1111111-2222-4333-8444-555555555555?chat_enter_method=home")!
     private let id = UUID(), generation = UUID(), fingerprint = String(repeating: "a", count: 64)
 
     func testExactObservedRoutesDoNotInventConversationOwnership() {
-        XCTAssertEqual(KimiSavedConversationRoute(root), .fresh)
-        XCTAssertNil(KimiSavedConversationRoute(provisional)?.conversation)
-        XCTAssertEqual(KimiSavedConversationRoute(canonical)?.conversation, canonical.absoluteString)
-        XCTAssertEqual(KimiSavedConversationRoute(URL(string: canonical.absoluteString + "?chat_enter_method=home")!)?.conversation,
+        XCTAssertEqual(kimiRoute(root), .fresh)
+        XCTAssertNil(kimiRoute(provisional)?.conversation)
+        XCTAssertEqual(kimiRoute(canonical)?.conversation, canonical.absoluteString)
+        XCTAssertEqual(kimiRoute(URL(string: canonical.absoluteString + "?chat_enter_method=home")!)?.conversation,
                        canonical.absoluteString)
         for raw in ["http://www.kimi.ai/", "https://kimi.ai/", "https://www.kimi.ai:443/", "https://user@www.kimi.ai/",
                     "https://www.kimi.ai/?chat_enter_method=home", "https://www.kimi.ai/?", root.absoluteString + "#",
@@ -21,12 +22,12 @@ final class KimiSavedConversationTests: XCTestCase {
                     canonical.absoluteString.replacingOccurrences(of: "11111111", with: "%311111111"),
                     canonical.absoluteString.replacingOccurrences(of: "abcd", with: "ABCD"),
                     "https://www.kimi.ai/chat/p-arbitrary", "https://www.kimi.ai.example.test/"] {
-            XCTAssertNil(KimiSavedConversationRoute(URL(string: raw)!), raw)
+            XCTAssertNil(kimiRoute(URL(string: raw)!), raw)
         }
     }
 
     func testRouteSequenceAllowsOnlyOneMonotonicPromotionAfterSend() {
-        var state = KimiSavedConversationRoutes()
+        var state = SavedConversationRoutes(policy: .kimi)
         XCTAssertTrue(state.observe(root, submitted: false))
         XCTAssertFalse(state.observe(provisional, submitted: false))
         XCTAssertTrue(state.observe(root, submitted: true))
@@ -42,14 +43,14 @@ final class KimiSavedConversationTests: XCTestCase {
     }
 
     func testDirectCanonicalPromotionIsAllowedButDoesNotAllowAnotherChat() {
-        var state = KimiSavedConversationRoutes()
+        var state = SavedConversationRoutes(policy: .kimi)
         XCTAssertTrue(state.observe(canonical, submitted: true))
         XCTAssertFalse(state.observe(root, submitted: true))
         XCTAssertFalse(state.observe(provisional, submitted: true))
     }
 
     func testDeletionStagesRequireReadinessAndEachMutationHasOneClaim() {
-        var progress = KimiDeletionProgress()
+        var progress = SavedConversationDeletionProgress()
         XCTAssertEqual(progress.claimNext(), .openMenu)
         XCTAssertEqual(progress.claimNext(), .observe)
         XCTAssertTrue(accept(&progress, proof(.menu)))
@@ -71,7 +72,7 @@ final class KimiSavedConversationTests: XCTestCase {
     }
 
     func testUnacknowledgedMutationNeverBecomesAnotherDispatch() {
-        var progress = KimiDeletionProgress()
+        var progress = SavedConversationDeletionProgress()
         XCTAssertEqual(progress.claimNext(), .openMenu)
         for _ in 0..<4 { XCTAssertEqual(progress.claimNext(), .observe) }
         XCTAssertTrue(accept(&progress, proof(.menu, ready: true)))
@@ -83,7 +84,7 @@ final class KimiSavedConversationTests: XCTestCase {
     }
 
     func testUnclaimedAcknowledgementsAndPhaseRollbackAreRejected() {
-        var progress = KimiDeletionProgress()
+        var progress = SavedConversationDeletionProgress()
         XCTAssertFalse(accept(&progress, proof(.menu)))
         XCTAssertEqual(progress.claimNext(), .openMenu)
         XCTAssertFalse(accept(&progress, proof(.confirmation)))
@@ -106,12 +107,12 @@ final class KimiSavedConversationTests: XCTestCase {
             ("nextActionReady", 0), ("conversationDeleted", 0), ("remoteErasureVerified", 0),
             ("remoteErasureVerified", true), ("extra", "canary")]
         for (key, value) in mutations {
-            var progress = KimiDeletionProgress(); _ = progress.claimNext()
+            var progress = SavedConversationDeletionProgress(); _ = progress.claimNext()
             var changed = proof(.menu); changed[key] = value
             XCTAssertFalse(accept(&progress, changed), key)
             XCTAssertNil(progress.phase)
         }
-        var progress = KimiDeletionProgress(); _ = progress.claimNext()
+        var progress = SavedConversationDeletionProgress(); _ = progress.claimNext()
         var missing = proof(.menu); missing.removeValue(forKey: "conversationURL")
         XCTAssertFalse(accept(&progress, missing))
     }
@@ -120,14 +121,14 @@ final class KimiSavedConversationTests: XCTestCase {
         let owner = UUID().uuidString
         let value: [String: Any] = ["ownerToken": owner, "documentGeneration": generation.uuidString,
             "sequence": 1, "outboundFingerprint": fingerprint]
-        XCTAssertTrue(KimiSubmissionAcknowledgement.matches(value, owner: owner, generation: generation, fingerprint: fingerprint))
+        XCTAssertTrue(SavedConversationSubmissionAcknowledgement.matches(value, owner: owner, generation: generation, fingerprint: fingerprint))
         for (key, changed) in [("ownerToken", UUID().uuidString as Any), ("documentGeneration", UUID().uuidString as Any),
                                ("sequence", 2 as Any), ("sequence", true as Any), ("outboundFingerprint", "wrong" as Any),
                                ("extra", true as Any)] {
             var altered = value; altered[key] = changed
-            XCTAssertFalse(KimiSubmissionAcknowledgement.matches(altered, owner: owner, generation: generation, fingerprint: fingerprint), key)
+            XCTAssertFalse(SavedConversationSubmissionAcknowledgement.matches(altered, owner: owner, generation: generation, fingerprint: fingerprint), key)
         }
-        XCTAssertFalse(KimiSubmissionAcknowledgement.matches(nil, owner: owner, generation: generation, fingerprint: fingerprint))
+        XCTAssertFalse(SavedConversationSubmissionAcknowledgement.matches(nil, owner: owner, generation: generation, fingerprint: fingerprint))
     }
 
     @MainActor func testInitialHydrationAdmitsOnlyTheExactNegativeShape() {
@@ -230,13 +231,13 @@ final class KimiSavedConversationTests: XCTestCase {
         XCTAssertFalse(provider.accepts("https://www.kimi.ai/?incognito"))
     }
 
-    private func proof(_ phase: KimiDeletionProgress.Phase, ready: Bool = false, deleted: Bool = false) -> [String: Any] {
+    private func proof(_ phase: SavedConversationDeletionProgress.Phase, ready: Bool = false, deleted: Bool = false) -> [String: Any] {
         ["id": id.uuidString, "documentGeneration": generation.uuidString, "sequence": 1,
          "firstUserFingerprint": fingerprint, "conversationURL": canonical.absoluteString, "phase": phase.rawValue,
          "menuAcknowledged": true, "deleteAcknowledged": phase != .menu, "confirmAcknowledged": phase == .observing,
          "nextActionReady": ready, "conversationDeleted": deleted, "remoteErasureVerified": false]
     }
-    private func accept(_ progress: inout KimiDeletionProgress, _ value: [String: Any]) -> Bool {
+    private func accept(_ progress: inout SavedConversationDeletionProgress, _ value: [String: Any]) -> Bool {
         progress.accept(value, id: id, generation: generation, fingerprint: fingerprint, conversation: canonical.absoluteString)
     }
 }

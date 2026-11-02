@@ -3,7 +3,7 @@ import Foundation
 /// A profile-scoped checkpoint remembers only finite provider IDs and random
 /// observation IDs. It never stores a website address or any page content.
 struct EmbeddedHumanVerificationStore {
-    static let providers: Set<String> = ["chatgpt", "claude", "gemini", "groq", "kimi"]
+    static let providers: Set<String> = ["chatgpt", "claude", "gemini", "groq", "kimi", "qwen", "deepseek"]
     private static let maximumRecordBytes = 1_024
 
     let defaults: UserDefaults

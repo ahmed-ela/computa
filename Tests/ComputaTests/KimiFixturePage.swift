@@ -65,7 +65,7 @@ enum KimiFixturePage {
       const provisional = '/chat/p1111111-2222-4333-8444-555555555555?chat_enter_method=home';
       const options = { delayUser: false, holdProvisional: false, holdResponse: false,
         menuDelayMs: 0, dialogDelayMs: 0, canonicalDelayMs: 60, retainHistoryLink: false,
-        moreOpenDelayMs: 0, moreCloseDelayMs: 0,
+        moreOpenDelayMs: 0, moreCloseDelayMs: 0, moreEventFamily: 'mouse',
         lexicalDelayMs: 0, lexicalNeverSettle: false, lexicalWrongText: false, preventNativeInput: true,
         reply: '{"type":"message","text":"Offline Kimi fixture reply"}' };
       const counters = { beforeInput: 0, input: 0, settlements: 0, earlySends: 0, sends: 0,
@@ -84,15 +84,33 @@ enum KimiFixturePage {
       // Candidate fixture only: a click has no submenu effect. Real WebKit
       // dispatch reaches these ordinary handlers; no adapter state is read.
       more.addEventListener('click', () => { counters.moreClicks++; });
-      more.addEventListener('pointerover', event => {
-        if (event.target !== more || event.pointerType !== 'mouse' || event.relatedTarget !== menu) return;
-        counters.moreOpens++;
-        setTimeout(() => { moreMenu.hidden = false; more.setAttribute('aria-expanded', 'true'); }, options.moreOpenDelayMs);
-      });
-      more.addEventListener('pointerout', event => {
-        if (event.target !== more || event.pointerType !== 'mouse' || event.relatedTarget !== document.body) return;
-        counters.moreCloses++; setTimeout(hideMore, options.moreCloseDelayMs);
-      });
+      const moreEvents = [];
+      for (const type of ['pointerover','pointerenter','mouseover','mouseenter','pointerout','pointerleave','mouseout','mouseleave']) {
+        more.addEventListener(type, event => {
+          const rect = more.getBoundingClientRect(), entering = ['pointerover','pointerenter','mouseover','mouseenter'].includes(type);
+          const centerX = rect.left + rect.width / 2, centerY = rect.top + rect.height / 2;
+          // WebKit exposes legacy MouseEvent client coordinates as their floor.
+          // Permit only that exact subpixel representation, never a nearby point.
+          const representsCenter = (actual, expected) => Number.isFinite(actual) && Number.isFinite(expected)
+            && (actual === expected || type.startsWith('mouse')
+              && actual === Math.floor(expected) && Math.abs(actual - expected) < 1);
+          if (moreEvents.length < 32) moreEvents.push({type, bubbles:event.bubbles, cancelable:event.cancelable,
+            composed:event.composed, trusted:event.isTrusted, prevented:event.defaultPrevented, targetMatches:event.target === more,
+            relatedMatches:event.relatedTarget === (entering ? menu : document.body),
+            clientX:event.clientX, clientY:event.clientY, centerX, centerY,
+            centered:representsCenter(event.clientX, centerX) && representsCenter(event.clientY, centerY),
+            deliveredHit:more.contains(document.elementFromPoint(event.clientX, event.clientY))});
+          if (event.target !== more) return;
+          const prefix = options.moreEventFamily;
+          if (prefix === 'pointer' && event.pointerType !== 'mouse') return;
+          if (type === prefix + 'over' && event.relatedTarget === menu) {
+            counters.moreOpens++;
+            setTimeout(() => { moreMenu.hidden = false; more.setAttribute('aria-expanded', 'true'); }, options.moreOpenDelayMs);
+          } else if (type === prefix + 'out' && event.relatedTarget === document.body) {
+            counters.moreCloses++; setTimeout(hideMore, options.moreCloseDelayMs);
+          }
+        });
+      }
       moreOption.addEventListener('click', () => { counters.moreSelections++; });
       for (const row of menu.querySelectorAll('[data-testid="model-option"]')) row.addEventListener('click', () => {
         counters.modelSelections++;
@@ -220,7 +238,7 @@ enum KimiFixturePage {
         });
       }
       header.addEventListener('click', () => { counters.headerOpens++; setTimeout(showDeleteMenu, options.menuDelayMs); });
-      window.kimiFixture = { options, counters, inputEvents, appendUser, completeResponse,
+      window.kimiFixture = { options, counters, inputEvents, moreEvents, appendUser, completeResponse,
         selectNestedInitially: () => {
           for (const row of menu.querySelectorAll('[data-testid="model-option"]')) row.setAttribute('aria-checked', 'false');
           moreOption.setAttribute('aria-checked', 'true'); moreCurrent.textContent = 'K3';

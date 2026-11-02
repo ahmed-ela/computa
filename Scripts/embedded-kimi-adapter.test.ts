@@ -157,7 +157,7 @@ describe('Kimi saved-conversation adapter', () => {
     const result = await discover(f);
     expect(result.modelChoices).toEqual([instant]);
     expect(result.modelEvidence.selected).toEqual({ key: 'k3-agent', label: 'K3' });
-    expect(f.trigger.clicks).toBe(2); expect(f.more.events.length).toBe(2);
+    expect(f.trigger.clicks).toBe(2); expect(f.more.events.length).toBe(8);
     expect(f.options.reduce((sum, row) => sum + row.clicks, 0)).toBe(0);
     expect(f.moreOption.clicks).toBe(0);
     expect(f.menu.getAttribute('hidden')).not.toBeNull(); expect(f.moreMenu.getAttribute('hidden')).not.toBeNull();
@@ -168,7 +168,7 @@ describe('Kimi saved-conversation adapter', () => {
     const f = adapterFixture({ nestedSelected: true });
     const result = await f.select();
     expect(result.modelEvidence.selected).toEqual(instant); expect(result.modelChoices).toEqual([instant]);
-    expect(f.trigger.clicks).toBe(3); expect(f.more.events.length).toBe(2);
+    expect(f.trigger.clicks).toBe(3); expect(f.more.events.length).toBe(8);
     expect(f.options[2].clicks).toBe(1); expect(f.moreOption.clicks).toBe(0);
     expect(f.moreOption.getAttribute('aria-checked')).toBe('false');
     expect((await f.run('verifyModel')).modelEvidence.selected).toEqual(instant);
@@ -176,6 +176,149 @@ describe('Kimi saved-conversation adapter', () => {
     expect((await forbidden.select({ key: 'k3-agent', label: 'K3' })).error).toBe('model_mismatch');
     expect(forbidden.options.reduce((sum, row) => sum + row.clicks, 0) + forbidden.moreOption.clicks).toBe(0);
     expect(forbidden.counts().sends).toBe(0);
+  });
+
+  test('one fixed boundary sequence supports legacy-mouse and pointer-only listeners with native boundary flags', async () => {
+    for (const hoverEvents of ['mouse', 'pointer'] as const) {
+      const f = adapterFixture({ nestedSelected: true, hoverEvents });
+      expect((await discover(f)).modelChoices).toEqual([instant]);
+      const events = f.more.events as any[];
+      expect(events.map(event => event.type)).toEqual([
+        'pointerover', 'pointerenter', 'mouseover', 'mouseenter',
+        'pointerout', 'pointerleave', 'mouseout', 'mouseleave',
+      ]);
+      events.forEach((event, index) => {
+        const crosses = index % 2 === 0;
+        expect(event).toMatchObject({ bubbles: crosses, cancelable: crosses, composed: crosses,
+          clientX: 60, clientY: 25, buttons: 0, defaultPrevented: false });
+        expect(event.view).toBe(f.window);
+        expect(event.relatedTarget).toBe(index < 4 ? f.menu : f.body);
+        if (event.type.startsWith('pointer')) expect(event).toMatchObject({ pointerType: 'mouse', isPrimary: true, button: -1 });
+      });
+      expect(f.more.clicks + f.moreOption.clicks).toBe(0);
+      expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
+      expect((await discover(f)).modelChoices).toEqual([instant]);
+      expect(f.more.events.length).toBe(8);
+    }
+  });
+
+  test('default prevention alone preserves the sequence and only later exact menu proof qualifies it', async () => {
+    for (const preventAt of [1, 3, 5, 7]) {
+      const f = adapterFixture({ nestedSelected: true }), original = f.more.onDispatch!;
+      f.more.onDispatch = (event: any) => {
+        if (f.more.events.length === preventAt) event.preventDefault();
+        original(event);
+      };
+      await f.run('discoverModels', { expectedModelChoice: undefined });
+      const dispatched = await f.run('discoverModels', { expectedModelChoice: undefined });
+      expect(dispatched.pending).toBe(true);
+      expect(dispatched.modelEvidence).toBeNull();
+      expect(dispatched.modelChoices).toBeUndefined();
+      expect(f.more.events.length).toBe(4);
+      const proven = await discover(f);
+      expect(proven.modelChoices).toEqual([instant]);
+      expect(proven.modelEvidence.selected).toEqual({ key: 'k3-agent', label: 'K3' });
+      expect(f.more.events.length).toBe(8);
+      expect((f.more.events[preventAt - 1] as any).defaultPrevented).toBe(true);
+      expect((await discover(f)).modelChoices).toEqual([instant]);
+      expect(f.more.events.length).toBe(8);
+      expect(f.options.reduce((sum, row) => sum + row.clicks, 0) + f.moreOption.clicks).toBe(0);
+      expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
+    }
+  });
+
+  test('prevented boundary events without submenu acknowledgement remain pending without claiming proof or replay', async () => {
+    for (const blocked of ['entry', 'exit']) {
+      const f = adapterFixture({ nestedSelected: true }), original = f.more.onDispatch!;
+      f.more.onDispatch = (event: any) => {
+        event.preventDefault();
+        if (blocked === 'exit' && ['pointerover', 'pointerenter', 'mouseover', 'mouseenter'].includes(event.type)) original(event);
+      };
+      await f.run('discoverModels', { expectedModelChoice: undefined });
+      await f.run('discoverModels', { expectedModelChoice: undefined });
+      for (let read = 0; read < 5; read++) {
+        const result = await f.run('discoverModels', { expectedModelChoice: undefined });
+        expect(result.pending).toBe(true);
+        expect(result.discoveryProgressDiagnostic.phase).toBe(blocked === 'entry' ? 'moreOpening' : 'moreClosing');
+        expect(result.modelEvidence).toBeNull(); expect(result.modelChoices).toBeUndefined();
+      }
+      expect(f.more.events.length).toBe(blocked === 'entry' ? 4 : 8);
+      expect(f.trigger.clicks).toBe(1); expect(f.more.clicks + f.moreOption.clicks).toBe(0);
+      expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
+    }
+  });
+
+  test('every partial-dispatch exception spends the entire claimed boundary without resuming', async () => {
+    for (let failAt = 1; failAt <= 8; failAt++) {
+      const f = adapterFixture({ nestedSelected: true }), dispatch = f.more.dispatchEvent.bind(f.more);
+      f.more.dispatchEvent = (event: any) => {
+        const result = dispatch(event);
+        if (f.more.events.length === failAt) throw new Error('Synthetic dispatch failure after delivery');
+        return result;
+      };
+      expect((await discover(f)).detail).toBe('unexpected_exception');
+      expect(f.more.events.length).toBe(failAt);
+      expect((await discover(f)).detail).toBe('terminal_operation');
+      expect(f.more.events.length).toBe(failAt);
+      expect(f.trigger.clicks).toBe(1); expect(f.counts().sends).toBe(0);
+    }
+  });
+
+  test('same-ID target replacement between any boundary events cannot receive the remaining sequence', async () => {
+    for (let replaceAt = 1; replaceAt <= 8; replaceAt++) {
+      const f = adapterFixture({ nestedSelected: true }), original = f.more.onDispatch!;
+      let replacement: any;
+      f.more.onDispatch = (event: any) => {
+        original(event);
+        if (f.more.events.length === replaceAt) {
+          replacement = f.more.cloneNode(true); f.remove(f.more); f.menu.append(replacement);
+        }
+      };
+      expect((await discover(f)).error).toBe('model_unverified');
+      expect(f.more.events.length).toBe(replaceAt);
+      expect(replacement.events.length).toBe(0);
+      expect((await discover(f)).detail).toBe('terminal_operation');
+      expect(f.more.events.length).toBe(replaceAt); expect(replacement.events.length).toBe(0);
+      expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
+    }
+  });
+
+  test('checked-row mutation during exit aborts before remaining boundary events and never replays', async () => {
+    for (const change of ['replacement', 'checked', 'label', 'link']) {
+      const f = adapterFixture({ nestedSelected: true }), original = f.more.onDispatch!;
+      f.more.onDispatch = (event: any) => {
+        original(event);
+        if (event.type !== 'pointerout') return;
+        if (change === 'replacement') { const next = f.moreOption.cloneNode(true); f.remove(f.moreOption); f.moreMenu.append(next); }
+        else if (change === 'checked') f.moreOption.setAttribute('aria-checked', 'false');
+        else if (change === 'label') f.moreOption.querySelector('.kimi-menu-item__label')!.text = 'Changed';
+        else f.moreMenu.setAttribute('aria-labelledby', 'foreign-trigger');
+      };
+      expect((await discover(f)).error).toBe('model_unverified');
+      expect(f.more.events.map((event: any) => event.type)).toEqual(['pointerover', 'pointerenter', 'mouseover', 'mouseenter', 'pointerout']);
+      expect((await discover(f)).detail).toBe('terminal_operation');
+      expect(f.more.events.length).toBe(5); expect(f.moreOption.clicks).toBe(0);
+      expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
+    }
+  });
+
+  test('revoked owner or generation aborts within the synchronous boundary and restoration cannot replay it', async () => {
+    for (const revoke of ['owner', 'generation']) {
+      const f = adapterFixture({ nestedSelected: true }), original = f.more.onDispatch!;
+      let saved: any;
+      f.more.onDispatch = (event: any) => {
+        original(event);
+        if (f.more.events.length !== 2) return;
+        if (revoke === 'owner') { saved = f.world.__computaModelOwner; f.world.__computaModelOwner = 'revoked'; }
+        else { saved = f.world.__computaKimiSavedSessionV1.generation; f.world.__computaKimiSavedSessionV1.generation = 'revoked'; }
+      };
+      expect((await discover(f)).error).toBe('document_changed');
+      expect(f.more.events.length).toBe(2);
+      if (revoke === 'owner') f.world.__computaModelOwner = saved;
+      else f.world.__computaKimiSavedSessionV1.generation = saved;
+      expect((await discover(f)).detail).toBe('terminal_operation');
+      expect(f.more.events.length).toBe(2); expect(f.counts().sends).toBe(0);
+    }
   });
 
   test('zero top-level checks require a verified nested selection, never an inferred current model', async () => {
@@ -213,7 +356,8 @@ describe('Kimi saved-conversation adapter', () => {
 
   test('nested menu mounting may lag its single open event without replaying it', async () => {
     const f = adapterFixture({ nestedSelected: true });
-    f.more.onDispatch = () => {
+    f.more.onDispatch = event => {
+      if (!['mouseover', 'mouseout'].includes(event.type)) return;
       if (f.more.getAttribute('aria-expanded') === 'true') {
         f.more.setAttribute('aria-expanded', 'false'); f.moreMenu.setAttribute('hidden', '');
       } else f.more.setAttribute('aria-expanded', 'true');
@@ -221,10 +365,10 @@ describe('Kimi saved-conversation adapter', () => {
     await f.run('discoverModels', { expectedModelChoice: undefined });
     await f.run('discoverModels', { expectedModelChoice: undefined });
     for (let read = 0; read < 3; read++) expect((await f.run('discoverModels', { expectedModelChoice: undefined })).pending).toBe(true);
-    expect(f.more.events.length).toBe(1);
+    expect(f.more.events.length).toBe(4);
     f.moreMenu.removeAttribute('hidden');
     expect((await discover(f)).modelChoices).toEqual([instant]);
-    expect(f.more.events.length).toBe(2); expect(f.trigger.clicks).toBe(2);
+    expect(f.more.events.length).toBe(8); expect(f.trigger.clicks).toBe(2);
   });
 
   test('finite discovery progress distinguishes an unacknowledged submenu open without replay', async () => {
@@ -238,7 +382,7 @@ describe('Kimi saved-conversation adapter', () => {
       const result = await f.run('discoverModels', { expectedModelChoice: undefined });
       expect(result.pending).toBe(true); expect(result.discoveryProgressDiagnostic).toEqual(expected);
     }
-    expect(f.trigger.clicks).toBe(1); expect(f.more.events.length).toBe(1);
+    expect(f.trigger.clicks).toBe(1); expect(f.more.events.length).toBe(4);
     expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
     const serialized = JSON.stringify(expected);
     for (const privateValue of [f.more.getAttribute('id'), f.moreMenu.getAttribute('id'), 'K3', 'kimi.com', marker])
@@ -247,7 +391,7 @@ describe('Kimi saved-conversation adapter', () => {
 
   test('finite discovery progress distinguishes an unacknowledged submenu close and disappears from ordinary reads', async () => {
     const f = adapterFixture({ nestedSelected: true }), click = f.more.onDispatch!;
-    f.more.onDispatch = () => { if (f.more.getAttribute('aria-expanded') !== 'true') click({ type: 'pointerover' }); };
+    f.more.onDispatch = () => { if (f.more.getAttribute('aria-expanded') !== 'true') click({ type: 'mouseover' }); };
     await f.run('discoverModels', { expectedModelChoice: undefined });
     await f.run('discoverModels', { expectedModelChoice: undefined });
     for (let read = 0; read < 4; read++) {
@@ -257,9 +401,9 @@ describe('Kimi saved-conversation adapter', () => {
         mainExpanded: true, mainCollapsed: false, submenuClaimed: true, submenuPresent: true,
         submenuExpanded: true, submenuCollapsed: false });
     }
-    expect(f.more.events.length).toBe(2); expect(f.trigger.clicks).toBe(1);
+    expect(f.more.events.length).toBe(8); expect(f.trigger.clicks).toBe(1);
     expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
-    f.more.onDispatch = click; click({ type: 'pointerout' });
+    f.more.onDispatch = click; click({ type: 'mouseout' });
     expect((await discover(f)).modelChoices).toEqual([instant]);
     expect((await f.run()).discoveryProgressDiagnostic).toBeUndefined();
     expect((await f.run('verifyModel', { expectedModelChoice: { key: 'k3-agent', label: 'K3' } })).discoveryProgressDiagnostic).toBeUndefined();
@@ -269,11 +413,11 @@ describe('Kimi saved-conversation adapter', () => {
   test('replacement after nested checked-row proof and lost submenu event replies never gain authority or replay', async () => {
     const changed = adapterFixture({ nestedSelected: true });
     const click = changed.more.onDispatch!;
-    changed.more.onDispatch = () => { if (changed.more.getAttribute('aria-expanded') !== 'true') click({ type: 'pointerover' }); };
+    changed.more.onDispatch = () => { if (changed.more.getAttribute('aria-expanded') !== 'true') click({ type: 'mouseover' }); };
     for (let step = 0; step < 3; step++) await changed.run('discoverModels', { expectedModelChoice: undefined });
     const old = changed.moreOption; changed.remove(old); changed.moreMenu.append(old.cloneNode(true));
     expect((await discover(changed)).detail).toBe('more_selected_label');
-    expect(changed.more.events.length).toBe(2);
+    expect(changed.more.events.length).toBe(8);
     expect((await discover(changed)).detail).toBe('terminal_operation');
     const thrown = adapterFixture({ nestedSelected: true }), original = thrown.more.onDispatch!;
     thrown.more.onDispatch = event => { original(event); throw new Error('Synthetic lost event callback'); };

@@ -9,7 +9,7 @@ struct WebsiteSessionCleanupReceipt: Codable, Equatable, Sendable {
         case shuttingDown = "shutting_down", runtimeChanged = "runtime_changed"
         case cleanupUnverified = "cleanup_unverified", unsupportedRuntime = "unsupported_runtime"
     }
-    enum Provider: String, Codable, Sendable { case chatgpt, gemini, claude, groq, kimi }
+    enum Provider: String, Codable, Sendable { case chatgpt, gemini, claude, groq, kimi, qwen, deepseek }
     enum Route: String, Codable, Sendable {
         case embedded
         // Decode existing saved receipts without retaining a Chrome execution route.
@@ -114,8 +114,9 @@ struct WebsiteSessionCleanupReceipt: Codable, Equatable, Sendable {
         func validModel(_ modelID: String, provider: Provider) -> Bool {
             let key = ModelKey(provider: provider.rawValue, modelID: Data(modelID.utf8))
             if let previous = models[key] { return previous }
-            let valid = modelID == "browser/\(provider.rawValue)"
-                || WebsiteModelCatalog.choice(for: modelID)?.provider == provider.rawValue
+            let valid = provider == .deepseek
+                ? WebsiteModeChoice.parse(requestID: modelID)?.provider == provider.rawValue
+                : modelID == "browser/\(provider.rawValue)" || WebsiteModelCatalog.choice(for: modelID)?.provider == provider.rawValue
             // A pass with unusual model diversity keeps the same validation;
             // it merely stops memoizing rather than accumulating unbounded keys.
             if models.count < 64 { models[key] = valid }

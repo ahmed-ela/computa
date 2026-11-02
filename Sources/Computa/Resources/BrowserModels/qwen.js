@@ -1,0 +1,662 @@
+// Small private-world primitives; provider DOM semantics remain in each adapter.
+// Embedded verbatim in standalone adapters and checked by their fixture tests.
+function computaProviderCore(request, provider, origin, actions) {
+  const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value);
+  const fail = (error, detail) => { throw { computaAdapterFailure: true, error, ...(detail ? { detail } : {}) }; };
+  const normalize = value => typeof value === 'string' ? value.normalize('NFC').replace(/\s+/g, ' ').trim() : '';
+  const bodyText = value => typeof value === 'string' ? value.replace(/\r\n?/g, '\n').normalize('NFC').trim() : '';
+  const choiceValid = value => !!value && !Array.isArray(value) && typeof value === 'object'
+    && Object.keys(value).length === 2 && typeof value.key === 'string' && typeof value.label === 'string'
+    && value.key.length > 0 && new TextEncoder().encode(value.key).length <= 128
+    && value.label.length > 0 && new TextEncoder().encode(value.label).length <= 128
+    && normalize(value.key) === value.key && normalize(value.label) === value.label
+    && !/[\p{Cc}\p{Cf}]/u.test(value.key + value.label);
+  const equalChoice = (left, right) => choiceValid(left) && choiceValid(right)
+    && left.key === right.key && left.label === right.label;
+  const physical = node => !!node && node.isConnected && node.getClientRects().length > 0
+    && getComputedStyle(node).visibility !== 'hidden' && getComputedStyle(node).display !== 'none';
+  const visible = node => physical(node) && !node.closest('[hidden], [inert], [aria-hidden="true"]');
+  const enabled = node => visible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true';
+  const nodes = (root, selector, maximum = 256) => {
+    const found = [...root.querySelectorAll(selector)];
+    if (found.length > maximum) fail('document_changed', 'structure_limit');
+    return found;
+  };
+  const unique = (values, error = 'document_changed', detail = 'ambiguous_structure') => {
+    if (values.length !== 1) fail(error, detail);
+    return values[0];
+  };
+  const hitFailure = node => {
+    if (!enabled(node)) return 'disabled';
+    if (typeof node.getBoundingClientRect !== 'function' || typeof document.elementFromPoint !== 'function') return 'invalid_geometry';
+    const r = node.getBoundingClientRect(), width = window.innerWidth, height = window.innerHeight;
+    const right = r.left + r.width, bottom = r.top + r.height;
+    if (![r.left, r.top, r.width, r.height, right, bottom, width, height].every(Number.isFinite)
+      || r.width <= 0 || r.height <= 0 || width <= 0 || height <= 0) return 'invalid_geometry';
+    // An expanding editor can extend above the viewport. Test one point in its
+    // visible intersection; an overlay or ancestor clip still fails the hit.
+    const left = Math.max(0, r.left), top = Math.max(0, r.top);
+    const clippedRight = Math.min(width, right), clippedBottom = Math.min(height, bottom);
+    if (clippedRight <= left || clippedBottom <= top) return 'outside_viewport';
+    const x = left + (clippedRight - left) / 2, y = top + (clippedBottom - top) / 2;
+    return node.contains(document.elementFromPoint(x, y)) ? null : 'occluded';
+  };
+  const hit = node => hitFailure(node) === null;
+  const originalDocument = document, expectedURL = request.expectedURL;
+  const context = () => request.provider === provider && window === window.top && document === originalDocument
+    && location.origin === origin && document.URL === expectedURL
+    && globalThis.__computaModelOwner === request.ownerToken;
+  if (request.provider !== provider || window !== window.top || location.origin !== origin
+    || typeof expectedURL !== 'string' || document.URL !== expectedURL) fail('document_changed', 'document_url');
+  if (!actions.includes(request.action)) fail('unknown_action');
+  if (!uuid(request.ownerToken) || !uuid(request.documentGeneration)) fail('document_changed', 'owner_token');
+  if (globalThis.__computaModelOwner === undefined && request.bindOwner === true) globalThis.__computaModelOwner = request.ownerToken;
+  if (!context()) fail('document_changed', 'owner_token');
+  const assertContext = () => { if (!context()) fail('document_changed', 'document_url'); };
+  const hash = async text => {
+    if (typeof text !== 'string' || text.length > 180_200) fail('conversation_changed', 'first_user_message');
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    assertContext();
+    return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+  };
+  const signalKey = '__computaProviderChangeSignal';
+  if (globalThis[signalKey]?.owner !== request.ownerToken || globalThis[signalKey]?.document !== originalDocument
+    || globalThis[signalKey]?.url !== expectedURL) {
+    globalThis[signalKey]?.observer?.disconnect?.();
+    const record = { owner: request.ownerToken, document: originalDocument, url: expectedURL, observer: null };
+    record.observer = new MutationObserver(() => {
+      if (!context() || globalThis[signalKey] !== record) return;
+      try { window.webkit?.messageHandlers?.computaChatGPTSignal?.postMessage({ ownerToken: record.owner, kind: 'dom_changed' }); }
+      catch { /* Wakeups never grant model, response or action authority. */ }
+    });
+    record.observer.observe(document.documentElement || document, { subtree: true, childList: true,
+      characterData: true, attributes: true, attributeFilter: ['disabled', 'aria-disabled', 'aria-hidden', 'aria-busy',
+        'aria-label', 'aria-expanded', 'aria-controls', 'aria-selected', 'data-state', 'class', 'style', 'hidden', 'inert',
+        ...(provider === 'kimi' ? ['role', 'contenteditable', 'data-lexical-editor', 'data-testid', 'aria-haspopup', 'id']
+          : provider === 'qwen' ? ['role', 'aria-haspopup']
+          : provider === 'deepseek' ? ['role', 'placeholder', 'aria-pressed'] : [])] });
+    globalThis[signalKey] = record;
+  }
+  return { uuid, fail, normalize, bodyText, choiceValid, equalChoice, physical, visible, enabled, nodes, unique, hit, hitFailure, context, assertContext, hash };
+}
+
+// Workspace extraction of Kimi's saved-chat protocol. DOM drivers supply only
+// provider semantics; this engine owns claims, identity, acknowledgement and
+// deletion stages. It does not register a provider or relax native admission.
+async function computaSavedConversation(input, c, dom, config) {
+  let state = null;
+  try {
+    const deletionActions = ['deleteConversation', 'selectConversationDeletion', 'confirmConversationDeletion', 'observeDeletedConversation'];
+    const key = config.stateKey;
+    if (globalThis[key] === undefined) globalThis[key] = {
+      owner: input.ownerToken, document, window, generation: input.documentGeneration,
+      model: null, selection: null, mode: null, modeSelection: null, prepared: null, inserted: null, send: null,
+      submitted: false, first: null, provisional: null, canonical: null, deletion: null, terminal: false,
+      initialControls: {}, initialReadComplete: false
+    };
+    state = globalThis[key];
+    const guard = (exactURL = true) => {
+      if (exactURL) c.assertContext();
+      if (globalThis[key] !== state || globalThis.__computaModelOwner !== input.ownerToken
+        || state.owner !== input.ownerToken || state.document !== document || state.window !== window
+        || state.generation !== input.documentGeneration || window !== window.top
+        || new URL(document.URL).origin !== config.origin) c.fail('document_changed', 'owner_token');
+    };
+    guard();
+    if (state.terminal) c.fail('conversation_changed', 'terminal_operation');
+    const cleanupInspection = input.action === 'inspect' && input.savedCleanupInspection === true;
+    const route = dom.route();
+    if (!state.submitted && route.kind !== 'fresh') c.fail('not_fresh');
+    if (state.submitted && !state.deletion?.confirmAcknowledged) {
+      if (route.kind === 'provisional') {
+        if (state.canonical || state.provisional && state.provisional !== route.path) c.fail('conversation_changed', 'conversation_url');
+        state.provisional = route.path;
+      } else if (route.kind === 'canonical') {
+        if (state.canonical && state.canonical !== route.canonical) c.fail('conversation_changed', 'conversation_url');
+        state.canonical = route.canonical;
+      } else if (state.canonical || state.provisional) c.fail('conversation_changed', 'conversation_url');
+    }
+    if (input.expectedConversation != null && input.expectedConversation !== state.canonical)
+      c.fail('conversation_changed', 'conversation_url');
+    const usesModes = config.selectionKind === 'mode';
+    function selectionEvidence(required = true) {
+      if (usesModes) {
+        const controls = dom.modeControls(), selected = state.mode?.choice;
+        if (input.modelChoice != null || input.expectedModelChoice != null) c.fail('mode_unverified');
+        if (!selected || controls.search.selected || controls.deepThink.node !== state.mode.deepThink
+          || controls.search.node !== state.mode.search) {
+          if (required) c.fail('mode_unverified');
+          return null;
+        }
+        const evidence = dom.modeEvidence();
+        if (!c.equalChoice(evidence.selected, selected)) {
+          if (required) c.fail('mode_unverified');
+          return null;
+        }
+        if (input.expectedModeChoice != null && !c.equalChoice(selected, input.expectedModeChoice)) c.fail('mode_mismatch');
+        return evidence;
+      }
+      const p = dom.picker(), selected = state.model?.choice;
+      if (!selected || !p.closed || p.trigger !== state.model.trigger || p.label !== selected.label) {
+        if (required) c.fail('model_unverified');
+        return null;
+      }
+      if (input.expectedModelChoice != null && !c.equalChoice(selected, input.expectedModelChoice)) c.fail('model_mismatch');
+      return { selected, verification: 'website_selection', source: 'model_picker_label' };
+    }
+    function sameFirst(first) {
+      const now = dom.transcript().first;
+      return !!first && !!now && first.root === now.root && first.body === now.body
+        && first.container === now.container && first.id === now.id && first.text === now.text;
+    }
+    function read() {
+      const t = dom.transcript(), form = dom.composer(), evidence = selectionEvidence(false), extracted = dom.rawAnswer(t.answer);
+      state.initialReadComplete = true;
+      const terminalUI = !!state.first && !!evidence && !state.deletion && dom.completionCandidate(t.answer);
+      if (terminalUI && extracted.formatIssue && !cleanupInspection && !deletionActions.includes(input.action))
+        c.fail('unsupported_response_format', 'authored_source');
+      const complete = terminalUI && extracted.finalMarkup && !!extracted.text.trim();
+      return { t, form, output: { url: document.URL, sessionLifecycle: 'saved_conversation_delete', temporary: false,
+        composer: c.enabled(form.editor), userCount: t.users.length, responseCount: t.answers.length,
+        [usesModes ? 'modeEvidence' : 'modelEvidence']: evidence,
+        text: state.first && !cleanupInspection ? extracted.text : '', answerComplete: !!complete && !cleanupInspection,
+        busy: state.submitted && !complete, interrupted: false, conversationIdentity: state.first ? state.canonical : null,
+        firstUserIdentity: state.first?.id || null, firstUserVerified: false, firstUserMarkerVerified: false, firstUserFingerprint: null } };
+    }
+    const fresh = () => !state.submitted && !state.first && !state.deletion && dom.route().kind === 'fresh'
+      && dom.transcript().users.length === 0 && dom.transcript().answers.length === 0 && dom.composer().empty;
+    function initialHydrationPending() {
+      // Only the first empty-page inspection may describe missing controls as
+      // loading. This envelope grants no selection, transcript or action proof.
+      // Native retains the existing preparation deadline and DOM-change wait.
+      if (input.action !== 'inspect' || cleanupInspection || state.initialReadComplete
+        || state.model || state.selection || state.mode || state.modeSelection || state.prepared
+        || state.inserted || state.send || state.submitted || state.first || state.provisional
+        || state.canonical || state.deletion || route.kind !== 'fresh') return false;
+      const reject = (error, detail) => { state.terminal = true; c.fail(error, detail); };
+      const retain = (name, node) => {
+        const prior = state.initialControls[name];
+        if (prior && prior !== node || node && (!c.visible(node) || dom.authored(node)))
+          reject('document_changed', name);
+        if (node) state.initialControls[name] = node;
+        return node;
+      };
+      const control = (name, root, selector) => {
+        const candidates = c.nodes(root, selector);
+        if (candidates.length > 1) reject('document_changed', name);
+        return retain(name, candidates[0] || null);
+      };
+      try { return !dom.initialReady({ control, retain, reject }); }
+      catch (error) { state.terminal = true; throw error; }
+    }
+    if (initialHydrationPending()) return { pending: true, sessionLifecycle: 'saved_conversation_delete', temporary: false, composer: false };
+    if (usesModes && ['discoverModes', 'selectMode'].includes(input.action)) {
+      if (!fresh()) c.fail('not_fresh');
+      if (input.modelChoice != null || input.expectedModelChoice != null) c.fail('mode_unverified');
+      const controls = dom.modeControls();
+      if (input.action === 'discoverModes') {
+        // Discovery never changes Search or DeepThink. Mode evidence remains
+        // separate from a backend model name; a later explicit select binds it.
+        return { ...read().output, modeChoices: controls.choices, discoveryComplete: false };
+      }
+      const desired = input.modeChoice;
+      if (!c.choiceValid(desired) || !controls.choices.some(choice => c.equalChoice(choice, desired))) c.fail('mode_unverified');
+      if (!state.modeSelection && state.mode && c.equalChoice(state.mode.choice, desired) && selectionEvidence(false))
+        return { ...read().output, selected: true, modeChoices: controls.choices };
+      if (!state.modeSelection) state.modeSelection = { choice: desired, deepThink: controls.deepThink.node,
+        search: controls.search.node, searchClaimed: false, thinkClaimed: false };
+      const selection = state.modeSelection;
+      if (!c.equalChoice(selection.choice, desired) || selection.deepThink !== controls.deepThink.node
+        || selection.search !== controls.search.node) c.fail('mode_mismatch');
+      if (controls.search.selected) {
+        if (selection.searchClaimed) return { ...read().output, pending: true };
+        if (!c.hit(controls.search.node)) c.fail('mode_unverified');
+        selection.searchClaimed = true; controls.search.node.click(); return { ...read().output, pending: true };
+      }
+      const current = dom.modeEvidence();
+      if (!c.equalChoice(current.selected, desired)) {
+        if (selection.thinkClaimed) return { ...read().output, pending: true };
+        if (!c.hit(controls.deepThink.node)) c.fail('mode_unverified');
+        selection.thinkClaimed = true; controls.deepThink.node.click(); return { ...read().output, pending: true };
+      }
+      state.mode = { choice: desired, deepThink: selection.deepThink, search: selection.search };
+      state.modeSelection = null;
+      return { ...read().output, selected: true, modeChoices: controls.choices };
+    }
+    if (['discoverModels', 'selectModel'].includes(input.action)) {
+      if (usesModes) c.fail('mode_unverified');
+      if (!fresh()) c.fail('not_fresh');
+      const desired = input.action === 'selectModel' ? input.modelChoice : null;
+      if (desired !== null && !c.choiceValid(desired)) c.fail('model_unverified');
+      const p = dom.picker();
+      if (state.model && (!desired || c.equalChoice(state.model.choice, desired)))
+        return { ...read().output, selected: true, modelChoices: state.model.choices, discoveryComplete: false };
+      if (!state.selection) {
+        if (!p.closed || !c.hit(p.trigger)) c.fail('model_unverified');
+        state.selection = { trigger: p.trigger, target: desired, stage: 'opening', menu: null, choice: null, choices: null };
+        p.trigger.click(); return { ...read().output, pending: true };
+      }
+      const selection = state.selection;
+      if (p.trigger !== selection.trigger || !!desired !== !!selection.target
+        || desired && !c.equalChoice(desired, selection.target)) c.fail('model_mismatch');
+      if (selection.stage === 'closing') {
+        if (!p.closed) return { ...read().output, pending: true };
+        if (p.label !== selection.choice.label) c.fail('model_mismatch');
+        state.model = { choice: selection.choice, trigger: p.trigger, choices: selection.choices };
+        state.selection = null;
+        return { ...read().output, selected: true, modelChoices: state.model.choices, discoveryComplete: false };
+      }
+      if (selection.stage === 'selected' && p.closed) {
+        if (!c.hit(p.trigger)) c.fail('model_unverified');
+        selection.stage = 'verifying'; selection.menu = null;
+        p.trigger.click(); return { ...read().output, pending: true };
+      }
+      if (!p.menu) return { ...read().output, pending: true };
+      if (selection.menu && selection.menu !== p.menu) c.fail('model_unverified');
+      selection.menu = p.menu;
+      const rows = dom.modelRows(p.menu), checked = rows.find(row => row.selected);
+      const target = desired ? rows.find(row => c.equalChoice(row.choice, desired)) : checked;
+      if (!target || p.label !== checked.choice.label) c.fail('model_mismatch');
+      if (!target.selected) {
+        if (selection.stage !== 'opening') return { ...read().output, pending: true };
+        if (!c.hit(target.node)) c.fail('model_unverified');
+        selection.stage = 'selected'; target.node.click(); return { ...read().output, pending: true };
+      }
+      selection.choice = target.choice; selection.choices = rows.map(row => row.choice); selection.stage = 'closing';
+      if (!c.hit(p.trigger)) c.fail('model_unverified');
+      p.trigger.click(); return { ...read().output, pending: true };
+    }
+    if (state.deletion && !deletionActions.includes(input.action)) c.fail('conversation_changed', 'deleting_session');
+    const deleteKeys = ['id', 'documentGeneration', 'sequence', 'firstUserFingerprint', 'conversationURL'];
+    const deletionOperation = () => {
+      const op = input.deleteOperation;
+      if (!op || Array.isArray(op) || Object.keys(op).length !== deleteKeys.length || !deleteKeys.every(key => Object.hasOwn(op, key))
+        || !c.uuid(op.id) || op.documentGeneration !== input.documentGeneration || op.sequence !== 1
+        || !state.first || op.firstUserFingerprint !== state.first.fingerprint || op.conversationURL !== state.canonical
+        || input.expectedFirstUserFingerprint !== op.firstUserFingerprint
+        || state.deletion && !deleteKeys.every(key => state.deletion[key] === op[key])) c.fail('conversation_changed', 'delete_operation');
+      return op;
+    };
+    const proof = (op, record, deleted = false, nextActionReady = false) => ({ ...op, phase: record.stage,
+      menuAcknowledged: record.menuAcknowledged, deleteAcknowledged: record.deleteAcknowledged,
+      confirmAcknowledged: record.confirmAcknowledged, nextActionReady, conversationDeleted: deleted, remoteErasureVerified: false });
+    const pending = (op, record, ready = false) => ({ url: document.URL, sessionLifecycle: 'saved_conversation_delete',
+      temporary: false, pending: true, deleteProof: proof(op, record, false, ready) });
+    if (state.deletion?.confirmAcknowledged) {
+      const op = deletionOperation(), record = state.deletion;
+      if (input.action !== 'observeDeletedConversation') c.fail('conversation_changed', 'delete_phase');
+      if (route.kind !== 'fresh' && route.canonical !== record.conversationURL) c.fail('conversation_changed', 'delete_route');
+      if (route.kind !== 'fresh' || !dom.deletionObserved(record)) return pending(op, record);
+      return { url: document.URL, sessionLifecycle: 'saved_conversation_delete', temporary: false,
+        composer: true, userCount: 0, responseCount: 0, text: '', busy: false, answerComplete: false,
+        firstUserVerified: false, firstUserMarkerVerified: false, firstUserFingerprint: null, conversationIdentity: null,
+        deleteProof: proof(op, record, true) };
+    }
+    let initial = read();
+    if (!Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.length || input.expectedUserCounts.length > 2
+      || input.expectedUserCounts.some(value => ![0, 1].includes(value)) || !input.expectedUserCounts.includes(initial.t.users.length))
+      c.fail('conversation_changed', 'user_count');
+    if (initial.t.first) {
+      if (!state.submitted || !state.inserted || initial.t.first.text !== state.inserted.prompt
+        || !c.uuid(input.expectedFirstUserMarker) || input.expectedFirstUserMarker !== state.inserted.marker
+        || !state.inserted.prompt.endsWith(`\n\nComputa session marker: ${input.expectedFirstUserMarker}`))
+        c.fail('conversation_changed', 'first_user_message');
+      if (route.kind !== 'canonical') return { ...initial.output, ownershipPending: true, text: '', answerComplete: false };
+      const fingerprint = await c.hash(c.bodyText(initial.t.first.text));
+      guard(); if (!sameFirst(initial.t.first)) c.fail('conversation_changed', 'first_user_message');
+      selectionEvidence();
+      if (state.first) {
+        const unpublished = input.action === 'inspect' && input.allowFirstUserBinding === true && input.expectedFirstUserFingerprint == null;
+        if (!sameFirst(state.first) || state.first.fingerprint !== fingerprint
+          || input.expectedFirstUserFingerprint !== fingerprint && !unpublished) c.fail('conversation_changed', 'first_user_message');
+      } else {
+        if (input.action !== 'inspect' || input.allowFirstUserBinding !== true || input.expectedFirstUserFingerprint != null)
+          c.fail('conversation_changed', 'first_user_message');
+        state.first = { ...initial.t.first, fingerprint };
+      }
+      initial = read();
+      Object.assign(initial.output, { firstUserVerified: true, firstUserMarkerVerified: true, firstUserFingerprint: fingerprint });
+    } else if (state.first) c.fail('conversation_changed', 'first_user_message');
+    if (deletionActions.includes(input.action)) {
+      const op = deletionOperation();
+      const deletionTarget = record => {
+        if (!sameFirst(state.first) || dom.route().canonical !== record.conversationURL) c.fail('conversation_changed', 'delete_ownership');
+        if (record.stage === 'menu') {
+          if (dom.deletionTrigger(record.driverContext) !== record.header) c.fail('conversation_changed', 'delete_header');
+          const found = dom.deletionMenu(record);
+          if (found && record.menu && found.menu !== record.menu) c.fail('conversation_changed', 'delete_menu');
+          if (found) record.menu = found.menu;
+          return found?.target || null;
+        }
+        if (record.stage === 'confirmation') {
+          const found = dom.deletionConfirmation(record);
+          if (found && record.dialog && found.dialog !== record.dialog) c.fail('conversation_changed', 'delete_confirmation');
+          if (found) record.dialog = found.dialog;
+          return found?.target || null;
+        }
+        return null;
+      };
+      if (!state.deletion) {
+        if (input.action !== 'deleteConversation' || route.kind !== 'canonical' || !sameFirst(state.first))
+          c.fail('conversation_changed', 'delete_ownership');
+        const driverContext = dom.deletionContext ? dom.deletionContext(state.first) : null;
+        if (!driverContext && (dom.deletionMenu() || dom.deletionConfirmation())) c.fail('conversation_changed', 'delete_ownership');
+        const header = dom.deletionTrigger(driverContext);
+        if (!header || !c.hit(header)) c.fail('conversation_changed', 'delete_header');
+        state.deletion = { ...op, stage: 'menu', header, trigger: header, driverContext, menu: null, dialog: null,
+          menuAcknowledged: false, deleteAcknowledged: false, confirmAcknowledged: false,
+          roots: [initial.t.first.root, initial.t.first.body, initial.t.answer?.root].filter(Boolean) };
+        header.click(); state.deletion.menuAcknowledged = true;
+        return pending(op, state.deletion, !!deletionTarget(state.deletion));
+      }
+      const record = state.deletion;
+      if (input.action === 'observeDeletedConversation') return pending(op, record, !!deletionTarget(record));
+      const expected = record.stage === 'menu' ? 'selectConversationDeletion'
+        : record.stage === 'confirmation' ? 'confirmConversationDeletion' : null;
+      if (input.action !== expected) c.fail('conversation_changed', 'delete_phase');
+      const target = deletionTarget(record);
+      if (!target) c.fail('conversation_changed', 'delete_not_ready');
+      if (record.stage === 'menu') {
+        record.stage = 'confirmation'; target.click(); record.deleteAcknowledged = true;
+        return pending(op, record, !!deletionTarget(record));
+      }
+      record.stage = 'observing'; target.click(); record.confirmAcknowledged = true;
+      // A synchronous confirmed canonical→root transition is metadata only.
+      // The next pinned read must independently prove the deletion outcome.
+      guard(false);
+      const now = dom.route(false);
+      if (now.kind !== 'fresh' && now.canonical !== record.conversationURL) c.fail('conversation_changed', 'delete_route');
+      return pending(op, record);
+    }
+    if (input.action === 'inspect') return initial.output;
+    const evidence = selectionEvidence();
+    if (usesModes && input.action === 'verifyMode') return { ...initial.output, modeEvidence: evidence };
+    if (input.action === 'verifyModel') {
+      if (usesModes) c.fail('mode_unverified');
+      return { ...initial.output, modelEvidence: evidence };
+    }
+    if (input.action === 'stop') return { ...initial.output, stopped: false };
+    const form = initial.form;
+    if (!c.enabled(form.editor) || !c.hit(form.editor)) c.fail('composer_unavailable');
+    if (input.action === 'prepare') {
+      if (!fresh() || state.prepared) c.fail('composer_not_empty');
+      state.prepared = { editor: form.editor, scope: form.scope }; state.send = form.send;
+      form.editor.focus(); guard(); selectionEvidence();
+      if (dom.composer().editor !== form.editor || !dom.composer().empty) c.fail('composer_not_empty');
+      return { ...initial.output, prepared: document.activeElement === form.editor };
+    }
+    const prompt = input.prompt, marker = input.expectedFirstUserMarker;
+    if (typeof prompt !== 'string' || !prompt || new TextEncoder().encode(prompt).length > 180_000
+      || !c.uuid(marker) || !prompt.endsWith(`\n\nComputa session marker: ${marker}`)) c.fail('prompt_not_inserted');
+    if (!state.prepared || state.prepared.editor !== form.editor || state.prepared.scope !== form.scope)
+      c.fail('composer_unavailable');
+    if (input.action === 'insert') {
+      if (!fresh() || state.inserted || document.activeElement !== form.editor) c.fail('composer_not_empty');
+      state.inserted = { prompt, marker };
+      dom.insertLiteral(form, prompt); // Exactly one attempt, never a corrective retry.
+      guard(); selectionEvidence();
+      const after = dom.composer();
+      if (after.editor !== form.editor || after.scope !== form.scope || after.text !== prompt) {
+        state.terminal = true; c.fail('prompt_not_inserted');
+      }
+      return { ...initial.output, inserted: true };
+    }
+    if (state.submitted || state.inserted?.prompt !== prompt || state.inserted.marker !== marker
+      || form.text !== prompt || initial.t.users.length !== 0) c.fail('prompt_not_inserted');
+    if (state.send && form.send !== state.send) c.fail('composer_unavailable');
+    if (form.send) state.send = form.send;
+    if (input.action === 'sendReady') return { ...initial.output, sendReady: form.sendReady };
+    if (!form.sendReady) c.fail('send_unavailable');
+    const outboundFingerprint = input.savedSubmissionFingerprint;
+    if (typeof outboundFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(outboundFingerprint)) c.fail('prompt_not_inserted');
+    state.submitted = true; form.send.click();
+    return { ...initial.output, submitted: true, submissionAcknowledgement: { ownerToken: input.ownerToken,
+      documentGeneration: input.documentGeneration, sequence: 1, outboundFingerprint } };
+  } catch (error) {
+    if (state && (!error?.computaAdapterFailure || state.deletion || (state.submitted || state.initialReadComplete
+      || state.model || state.selection || state.mode || state.modeSelection || state.prepared || state.inserted)
+      && ['conversation_changed', 'document_changed', 'model_mismatch', 'model_unverified', 'mode_mismatch', 'mode_unverified'].includes(error.error))) state.terminal = true;
+    return error?.computaAdapterFailure ? { error: error.error, ...(error.detail ? { detail: error.detail } : {}) }
+      : { error: 'document_changed' };
+  }
+}
+
+// Qwen DOM driver. The saved-conversation engine owns all
+// mutation claims, native acknowledgement, exact-body hashing and lifecycle.
+// Only insertLiteral mutates, and only after the engine's insertion claim.
+function computaQwenDOM(c) {
+  const visible = (root, selector, max = 256) => c.nodes(root, selector, max).filter(c.visible);
+  const one = (values, reason) => c.unique(values, 'document_changed', reason);
+  const optional = (values, reason) => values.length ? one(values, reason) : null;
+  const authored = node => !!node.closest('.qwen-chat-message');
+  const leaf = (root, selector, reason) => {
+    const node = one(visible(root, selector), reason);
+    if (node.children.length !== 0) c.fail('document_changed', reason);
+    return node;
+  };
+  const route = (exactURL = true) => {
+    if (exactURL) c.assertContext();
+    if (document.URL === 'https://chat.qwen.ai/') return { kind: 'fresh', canonical: null, path: '/', conversation: null, id: null };
+    const match = /^https:\/\/chat\.qwen\.ai\/c\/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/.exec(document.URL);
+    if (!match) c.fail('conversation_changed', 'conversation_url');
+    return { kind: 'canonical', canonical: document.URL, path: '/c/' + match[1], conversation: document.URL, id: match[1] };
+  };
+  function initialReady({ control, retain, reject }) {
+    if (c.nodes(document, '.qwen-chat-message', 64).length) reject('not_fresh');
+    const editor = control('composer', document, 'textarea.message-input-textarea');
+    const trigger = control('model_trigger', document, 'div.wms-trigger[role="button"][aria-label="Select Model"][aria-haspopup="listbox"]');
+    const name = trigger ? control('model_label', trigger, '.wms-trigger__text') : null;
+    if (trigger && (trigger.getAttribute('aria-expanded') !== 'false'
+      || name && (name.children.length !== 0 || !c.normalize(name.textContent)))) reject('model_unverified');
+    if (visible(document, '[role="listbox"]').length) reject('model_unverified');
+    if (editor) {
+      const scope = retain('composer_scope', editor.closest('.message-input-container-area'));
+      if (!scope || c.nodes(scope, 'textarea.message-input-textarea').length !== 1
+        || typeof editor.value !== 'string') reject('composer_unavailable');
+      if (editor.value !== '') reject('composer_not_empty');
+      // The observed empty Qwen composer legitimately omits Send. Its absence
+      // is not missing readiness, and an unrelated Stop is never a fresh page.
+      control('send_control', scope, '.chat-prompt-send-button > button.send-button[aria-label="Send"]');
+      if (c.nodes(scope, '.chat-prompt-send-button > button.stop-button[aria-label="Stop"]').length) reject('not_fresh');
+    }
+    return !!editor && !!trigger && !!name;
+  }
+  function picker() {
+    const trigger = one(visible(document, 'div.wms-trigger[role="button"][aria-label="Select Model"][aria-haspopup="listbox"]')
+      .filter(node => !authored(node)), 'model_trigger');
+    const name = leaf(trigger, '.wms-trigger__text', 'model_label');
+    const menus = visible(document, '[role="listbox"]').filter(node => !authored(node));
+    const menu = optional(menus, 'model_menu');
+    if (!['true', 'false'].includes(trigger.getAttribute('aria-expanded'))
+      || menu && (!menu.classList.contains('wms-list') || menu.getAttribute('aria-label') !== 'Models'
+        || trigger.getAttribute('aria-expanded') !== 'true')
+      || !menu && trigger.getAttribute('aria-expanded') !== 'false') c.fail('model_unverified');
+    return { trigger, menu, label: c.normalize(name.textContent), closed: menu === null };
+  }
+  function modelRows(menu) {
+    if (picker().menu !== menu) c.fail('model_unverified');
+    const rows = visible(menu, '.wms-list__item[role="option"]', 32).map(node => {
+      const label = c.normalize(leaf(node, '.wms-list__name-text', 'model_label').textContent);
+      // No DOM model identifier was observed. Keep the exact label as an opaque
+      // website key, separate from Alibaba's API IDs and catalog.
+      const choice = { key: label, label }, selected = node.getAttribute('aria-selected');
+      if (!c.choiceValid(choice) || !c.enabled(node) || !['true', 'false'].includes(selected)
+        || node.classList.contains('wms-list__item--selected') !== (selected === 'true')) c.fail('model_unverified');
+      return { node, choice, selected: selected === 'true' };
+    });
+    if (!rows.length || new Set(rows.map(row => row.choice.key)).size !== rows.length
+      || rows.filter(row => row.selected).length !== 1
+      || rows.find(row => row.selected).choice.label !== picker().label) c.fail('model_unverified');
+    return rows;
+  }
+  function composer() {
+    const editor = one(visible(document, 'textarea.message-input-textarea').filter(node => !authored(node)), 'composer');
+    const scope = editor.closest('.message-input-container-area');
+    if (!scope || !c.visible(scope) || c.nodes(scope, 'textarea.message-input-textarea').length !== 1
+      || typeof editor.value !== 'string' || new TextEncoder().encode(editor.value).length > 180_200) c.fail('composer_unavailable');
+    const send = optional(visible(scope, '.chat-prompt-send-button > button.send-button[aria-label="Send"]'), 'send_control');
+    const stop = optional(visible(scope, '.chat-prompt-send-button > button.stop-button[aria-label="Stop"]'), 'stop_control');
+    if (send && stop) c.fail('composer_unavailable');
+    if (stop && stop.getAttribute('data-chat-id') !== route().id) c.fail('conversation_changed', 'stop_conversation');
+    return { editor, scope, text: editor.value, empty: editor.value === '', send, stop,
+      sendReady: !!send && c.enabled(editor) && c.hit(send), streaming: !!stop };
+  }
+  function transcript() {
+    const users = c.nodes(document, '.qwen-chat-message.qwen-chat-message-user', 2);
+    const answers = c.nodes(document, '.qwen-chat-message.qwen-chat-message-assistant', 2);
+    if (users.length > 1 || answers.length > 1 || answers.length > users.length) c.fail('conversation_changed', 'user_count');
+    if (!users.length) return { users, answers, first: null, answer: null };
+    const current = route();
+    if (!current.id) c.fail('conversation_changed', 'conversation_url');
+    const root = users[0], turn = root.parentElement, container = one(visible(root, '.chat-user-message-container'), 'first_user_container');
+    const body = leaf(container, '.chunked-text-renderer-root > p.user-message-content', 'first_user_message');
+    const id = container.getAttribute('data-msg-id');
+    if (!c.visible(root) || !c.uuid(id) || container.getAttribute('data-chat-id') !== current.id
+      || !turn?.classList.contains('qwen-chat-message-select-turn-message')
+      || !turn.parentElement?.classList.contains('qwen-chat-message-select-turn')) c.fail('conversation_changed', 'first_user_message');
+    let answer = null;
+    if (answers.length) {
+      const node = answers[0], answerTurn = node.parentElement;
+      const content = one(visible(node, '.chat-response-message'), 'response_container');
+      const answerID = content.getAttribute('id')?.replace(/^chat-response-message-/, '');
+      if (!c.visible(node) || !c.uuid(answerID) || content.getAttribute('id') !== 'chat-response-message-' + answerID
+        || answerID === id || !answerTurn?.classList.contains('qwen-chat-message-select-turn-message')
+        || answerTurn.parentElement !== turn.parentElement
+        || [...turn.parentElement.children].indexOf(answerTurn) <= [...turn.parentElement.children].indexOf(turn))
+        c.fail('conversation_changed', 'response_scope');
+      answer = { root: node, content, id: answerID };
+    }
+    return { users, answers, first: { root, container, body, id, text: body.textContent }, answer };
+  }
+  function completionCandidate(answer) {
+    if (!answer) return false;
+    const current = route(), form = composer();
+    const rails = visible(answer.content, '.response-message-footer-actions > .qwen-chat-package-comp-new-action-control');
+    if (rails.length !== 1) return false;
+    const rail = rails[0];
+    if (rail.getAttribute('data-chat-id') !== current.id || rail.getAttribute('data-msg-id') !== answer.id)
+      c.fail('conversation_changed', 'response_actions');
+    const actions = ['Copy', 'Good Response', 'Bad Response', 'Share', 'Regenerate'];
+    return !form.stop && c.enabled(form.editor) && form.empty && actions.every(label => {
+      const controls = visible(rail, `button[aria-label="${label}"]`);
+      return controls.length === 1 && c.enabled(controls[0]);
+    });
+  }
+  function rawAnswer(answer) {
+    if (!answer) return { text: '', finalMarkup: false, formatIssue: false };
+    const flows = c.nodes(answer.content, '.chat-response-message-render-flow');
+    if (!flows.length) return { text: '', finalMarkup: false, formatIssue: false };
+    const unsupported = () => ({ text: '', finalMarkup: false, formatIssue: true });
+    if (flows.length !== 1 || !c.visible(flows[0])) return unsupported();
+    const flow = flows[0], phases = c.nodes(flow, '.response-message-content.phase-answer');
+    if (!phases.length) return { text: '', finalMarkup: false, formatIssue: false };
+    if (phases.length !== 1 || !phases[0].classList.contains('t2t')) return unsupported();
+    const phase = phases[0];
+    const child = (parent, tag, cls) => {
+      if (!c.visible(parent) || parent.children.length !== 1
+        || [...parent.childNodes].some(node => node.nodeType === 3 && !/^\s*$/.test(node.textContent || ''))) return null;
+      const node = parent.children[0];
+      return node.tagName === tag && node.classList.contains(cls) && c.visible(node) ? node : null;
+    };
+    const custom = child(phase, 'DIV', 'custom-qwen-markdown');
+    const markdown = custom && child(custom, 'DIV', 'qwen-markdown');
+    const paragraph = markdown && child(markdown, 'DIV', 'qwen-markdown-paragraph');
+    const span = paragraph && child(paragraph, 'SPAN', 'qwen-markdown-text');
+    const literal = span && child(span, 'SPAN', 'qwen-markdown-text-node');
+    if (!literal || literal.children.length !== 0) return unsupported();
+    let budget = 10_000;
+    const onlyAuthoredSource = node => {
+      if (--budget < 0) return false;
+      if (node === phase) return true;
+      if (node.nodeType === 3) return /^\s*$/.test(node.textContent || '');
+      if (node.nodeType !== 1 || node.tagName !== 'DIV') return false;
+      // The observed thinking-status presentation is a sibling of the answer,
+      // never an authored markdown descendant. No reasoning content is read.
+      if (node.parentElement === flow && node.classList.contains('qwen-chat-thinking-tool-status-card-wraper')) return true;
+      return [...node.childNodes].every(onlyAuthoredSource);
+    };
+    if (!onlyAuthoredSource(flow)) return unsupported();
+    const text = literal.textContent;
+    if (typeof text !== 'string' || new TextEncoder().encode(text).length > 220_000) c.fail('response_too_large');
+    // Return the whole source even when it is invalid JSON. Monaco/fences,
+    // additional prose blocks and multiple fragments never become a repaired
+    // protocol object; the ordinary codec independently validates raw bytes.
+    return { text, finalMarkup: true, formatIssue: false };
+  }
+  function deletionTrigger() {
+    if (!route().id) c.fail('conversation_changed', 'delete_route');
+    const trigger = one(visible(document, '.chat-menu-trigger > button[aria-label="More"]').filter(node => !authored(node)), 'delete_trigger');
+    return trigger;
+  }
+  function deletionMenu() {
+    const menus = visible(document, 'div[role="menu"]').filter(node => !authored(node));
+    const menu = optional(menus, 'delete_menu');
+    if (!menu) return null;
+    if (!menu.classList.contains('qwen-chat-v2-dropdown-menu-popup')) c.fail('conversation_changed', 'delete_menu');
+    const rows = visible(menu, '[role="menuitem"]').filter(row => {
+      const labels = visible(row, '.qwen-chat-v2-dropdown-menu-item-label');
+      return labels.length === 1 && labels[0].children.length === 0 && labels[0].textContent === 'Delete';
+    });
+    const target = one(rows, 'delete_control');
+    if (!target.classList.contains('qwen-chat-v2-dropdown-menu-item-danger')
+      || !target.classList.contains('chat-menu-item-error') || !target.classList.contains('chat-menu-item'))
+      c.fail('conversation_changed', 'delete_control');
+    return { menu, target: c.hit(target) ? target : null };
+  }
+  function deletionConfirmation() {
+    const current = route();
+    if (!current.id) c.fail('conversation_changed', 'delete_route');
+    const dialog = optional(visible(document, '[role="dialog"]').filter(node => !authored(node)), 'delete_dialog');
+    if (!dialog) return null;
+    const title = leaf(dialog, '.ant-modal-title', 'delete_title');
+    const body = leaf(dialog, '.ant-modal-body > [data-aes-exp="expChatDeleteMiddle"]', 'delete_body');
+    const buttons = visible(dialog, '.qwen-chat-v2-modal-footer-btns > button');
+    const confirm = one(buttons.filter(node => c.normalize(node.textContent) === 'Delete'), 'delete_confirm');
+    const cancel = one(buttons.filter(node => c.normalize(node.textContent) === 'Cancel'), 'delete_cancel');
+    if (!dialog.classList.contains('chat-item-delete-confirm') || dialog.getAttribute('aria-modal') !== 'true'
+      || !title.getAttribute('id') || dialog.getAttribute('aria-labelledby') !== title.getAttribute('id')
+      || title.textContent !== 'Delete this chat?' || body.getAttribute('data-chat-id') !== current.id
+      || body.textContent !== 'Once deleted, this chat cannot be recovered, and the files in it will be permanently removed. If you have shared this conversation, the share link will no longer be accessible.'
+      || buttons.length !== 2 || !confirm.classList.contains('qwen-chat-v2-btn-danger')
+      || !cancel.classList.contains('qwen-chat-v2-btn-plain')) c.fail('conversation_changed', 'delete_confirmation');
+    return { dialog, target: c.hit(confirm) ? confirm : null };
+  }
+  function deletionObserved(record) {
+    if (route().kind !== 'fresh') return false;
+    // A fresh-page skeleton is pending; only an actual empty usable composer
+    // plus disappearance of this operation's roots can establish local cleanup.
+    if (!visible(document, 'textarea.message-input-textarea').length) return false;
+    const form = composer();
+    const ownID = record.conversationURL.split('/').at(-1);
+    const links = c.nodes(document, 'a[href]', 512).filter(node => {
+      try { return new URL(node.getAttribute('href'), document.URL).href.split(/[?#]/)[0] === record.conversationURL; }
+      catch { return false; }
+    });
+    return form.empty && c.enabled(form.editor) && !form.stop
+      && c.nodes(document, '.qwen-chat-message').length === 0
+      && c.nodes(document, '[role="dialog"]').length === 0
+      && c.nodes(document, '[data-chat-id]').every(node => node.getAttribute('data-chat-id') !== ownID)
+      && record.roots.every(node => !node.isConnected) && !!record.dialog && !record.dialog.isConnected && links.length === 0;
+  }
+  function insertLiteral(form, prompt) {
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+    if (!(form.editor instanceof HTMLTextAreaElement) || typeof setter !== 'function') c.fail('composer_unavailable');
+    setter.call(form.editor, prompt);
+    form.editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));
+  }
+  return { route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer,
+    deletionTrigger, deletionMenu, deletionConfirmation, deletionObserved, insertLiteral };
+}
+
+// Standalone composition; not registered or exposed by the native catalog yet.
+try {
+  const actions = ['inspect', 'discoverModels', 'selectModel', 'verifyModel', 'prepare', 'insert', 'sendReady', 'submit', 'stop',
+    'deleteConversation', 'selectConversationDeletion', 'confirmConversationDeletion', 'observeDeletedConversation'];
+  const c = computaProviderCore(input, 'qwen', 'https://chat.qwen.ai', actions);
+  return await computaSavedConversation(input, c, computaQwenDOM(c), {
+    stateKey: '__computaQwenSavedSessionV1', origin: 'https://chat.qwen.ai'
+  });
+} catch (error) {
+  return error?.computaAdapterFailure ? { error: error.error, ...(error.detail ? { detail: error.detail } : {}) }
+    : { error: 'document_changed' };
+}

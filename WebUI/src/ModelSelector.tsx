@@ -107,7 +107,7 @@ export function ModelSelector({ options, model, label, disabled = false, classNa
           </DropdownMenuSubTrigger>
           <DropdownMenuPortal>
             <DropdownMenuSubContent className="model-selector-submenu" sideOffset={6} collisionPadding={12}
-              aria-label={`${group.name} models`}>
+              aria-label={`${group.name} ${group.id === 'deepseek' ? 'modes' : 'models'}`}>
               <DropdownMenuRadioGroup value={model} onValueChange={selectModel}>
                 {group.options.map((option) => <DropdownMenuRadioItem key={option.id} value={option.id}
                   textValue={modelOptionLabel(option)} title={option.detail} disabled={disabled || option.available === false}>
@@ -128,6 +128,8 @@ type WebsiteModelsRefreshAction = Extract<NativeAction, { action: 'refreshWebsit
 
 export function websiteModelsRefreshAction(model?: string): WebsiteModelsRefreshAction | undefined {
   if (model === undefined) return { action: 'refreshWebsiteModels' };
+  if (model === 'browser/deepseek/mode/chat' || model === 'browser/deepseek/mode/deepthink')
+    return { action: 'refreshWebsiteModels', provider: 'deepseek' };
   const match = /^browser\/([a-z][a-z0-9_-]*)(?:\/choice\/[A-Za-z0-9_-]+)?$/.exec(model);
   return match && match[0] === model && Object.hasOwn(websiteProviderNames, match[1])
     ? { action: 'refreshWebsiteModels', provider: match[1] as WebsiteModelProvider } : undefined;
