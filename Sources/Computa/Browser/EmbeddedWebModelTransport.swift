@@ -1347,7 +1347,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 let inserted = try await page(session, action: "insert", prompt: outbound,
                     prepareFirstInstantInInsert: prepareFirstInstantInInsert,
                     preparedReadinessRequest: readinessRequest, preparedReadinessSink: { readinessReceipt = $0 })
-                guard inserted["inserted"] as? Bool == true else { throw Failure.editorFailure("insertion_unconfirmed") }
+                guard inserted["inserted"] as? Bool == true || canAwaitKimiInsertion(inserted, session: session) else {
+                    throw Failure.editorFailure("insertion_unconfirmed")
+                }
                 if prepareFirstInstantInInsert {
                     guard inserted["temporary"] as? Bool == true, session.temporary else { throw Failure.temporaryUnverified }
                     guard count(inserted, "responseCount") == 0, count(inserted, "userCount") == 0,
@@ -1712,6 +1714,31 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             _ = try await browser.waitForModelChange(tabID: session.tabID, after: revision, until: deadline)
         }
         throw sendReadinessFailure(session, diagnostic: lastGroqDiagnostic)
+    }
+
+    /// A successful input dispatch can precede Lexical's DOM commit. This
+    /// receipt authorizes only the existing bounded, read-only readiness wait;
+    /// it is not prompt verification, a Send receipt or conversation ownership.
+    private func canAwaitKimiInsertion(_ observed: [String: Any], session: Session) -> Bool {
+        func flag(_ key: String, _ expected: Bool) -> Bool {
+            guard let value = observed[key] as? NSNumber, CFGetTypeID(value) == CFBooleanGetTypeID() else { return false }
+            return value.boolValue == expected
+        }
+        guard session.provider == .kimi, session.requiresSavedDelete, session.savedDeleteReady, !session.temporary,
+              sessions[session.token] === session, session.terminalFailure == nil, !Task.isCancelled,
+              session.state == "ready", session.sequence == 0, !session.submitted, !session.pendingSubmission,
+              session.acknowledgedSendSequence == 0, session.firstUserFingerprint == nil, session.conversation == nil,
+              session.modelSelectionVerified, session.modelChoice != nil,
+              let generation = session.documentGeneration, let binding = session.savedDeleteSubmission,
+              binding.generation == generation, browser.webView(for: session.tabID) === session.view,
+              browser.documentGeneration(for: session.tabID) == generation,
+              session.view.url == session.provider.startURL, observed["url"] as? String == session.provider.startURL.absoluteString,
+              ComputerToolArgumentContract.exactInt64(observed["userCount"]) == 0,
+              ComputerToolArgumentContract.exactInt64(observed["responseCount"]) == 0,
+              flag("inserted", false), flag("insertionDispatched", true), flag("insertionPending", true), flag("pending", true),
+              KimiSubmissionAcknowledgement.matches(observed["insertionAcknowledgement"], owner: session.token,
+                  generation: generation, fingerprint: binding.outboundFingerprint) else { return false }
+        return true
     }
 
     private func sendReadinessFailure(_ session: Session, diagnostic: String?) -> Failure {
@@ -5130,9 +5157,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if requireClaudeSafeguardPause { input["requireClaudeSafeguardPause"] = true }
         if allowKimiCleanupInspection { input["kimiCleanupInspection"] = true }
         if provider == .groq || provider == .kimi { input["documentGeneration"] = generation.uuidString }
-        if provider == .kimi, action == "submit" {
+        if provider == .kimi, ["insert", "submit"].contains(action) {
+            let phaseMatches = action == "insert"
+                ? session.sequence == 0 && !session.submitted && !session.pendingSubmission
+                : session.sequence == 1 && session.submitted && session.pendingSubmission
             guard let binding = session.savedDeleteSubmission, binding.generation == generation,
-                  session.sequence == 1, session.pendingSubmission else { throw Failure.invalidRequest }
+                  phaseMatches else { throw Failure.invalidRequest }
             input["savedSubmissionFingerprint"] = binding.outboundFingerprint
         }
         if let operation = savedDeleteOperation {

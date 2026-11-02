@@ -137,6 +137,43 @@ final class WebsiteSessionCleanupTests: XCTestCase {
         }
     }
 
+    func testPublicProvidersHaveDurableReceiptIdentitiesAndKimiTransactionsRoundTrip() throws {
+        for provider in WebsiteModelCatalog.providers {
+            XCTAssertNotNil(WebsiteSessionCleanupReceipt.Provider(rawValue: provider),
+                            "Public provider \(provider) must be representable in durable cleanup receipts")
+        }
+        let choice = WebsiteModelChoice(provider: "kimi", key: "k28-instant", label: "Instant")
+        let cases: [(WebsiteSessionCleanupReceipt.Outcome, WebsiteSessionCleanupReceipt.Reason, String?, Int)] = [
+            (.closed, .deleted, UUID().uuidString, 2),
+            (.unconfirmed, .cleanupUnverified, UUID().uuidString, 2),
+            (.unconfirmed, .cleanupUnverified, nil, 3),
+            (.noOwnedSession, .notCreated, nil, 4),
+        ]
+        let store = WebsiteSessionCleanupStore(directory: try directory())
+        for (outcome, reason, token, schema) in cases {
+            let receipt = WebsiteSessionCleanupReceipt(taskID: UUID().uuidString, threadID: UUID().uuidString,
+                turnID: UUID().uuidString, runtimeGeneration: UUID(), outcome: outcome, provider: .kimi,
+                route: .embedded, modelID: choice.modelID, reason: reason, trigger: .inference,
+                receiptSaved: true, inferenceID: UUID().uuidString, sessionToken: token)
+            XCTAssertEqual(receipt.schemaVersion, schema)
+            XCTAssertTrue(receipt.isValid)
+            let bytes = try JSONEncoder().encode(receipt)
+            XCTAssertEqual(try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self, from: bytes), receipt)
+            XCTAssertTrue(store.save(receipt))
+            XCTAssertTrue(store.save(receipt), "Exact persistence retry remains idempotent")
+            XCTAssertTrue(WebsiteSessionCleanupStore(directory: store.directory).latest().contains(receipt))
+            let mutations: [[String: Any]] = [["provider": "groq"], ["modelID": "browser/claude"],
+                                            ["reason": "transcript_cleared"]]
+            for mutation in mutations {
+                var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+                mutation.forEach { raw[$0.key] = $0.value }
+                let changed = try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self,
+                    from: JSONSerialization.data(withJSONObject: raw))
+                XCTAssertFalse(changed.isValid)
+            }
+        }
+    }
+
     func testGroqUnconfirmedReceiptRetainsExactProviderModelAndAttemptBinding() throws {
         let choice = WebsiteModelChoice(provider: "groq", key: "synthetic-model", label: "Synthetic model")
         let receipt = WebsiteSessionCleanupReceipt(taskID: UUID().uuidString, threadID: UUID().uuidString,

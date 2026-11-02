@@ -41,11 +41,28 @@ disconnected captured roots/dialog and removal of the owned history link.
 It does not prove remote erasure. Ambiguous dispatch, foreign routes or lost
 acknowledgments retain failure and the owned view instead of replaying actions.
 
-Real WebKit integration exposed rendered paragraph spacing and smart-quote
-changes during prompt insertion. One safely escaped `insertHTML` operation
-plus strict paragraph reading now preserves the literal full prompt, including
-code whitespace, quotes, markup and Unicode. No clipboard operation, global
-typing preference or uncertain-action insertion fallback was introduced.
+The original plain WebKit fixture exposed rendered paragraph spacing and
+smart-quote changes during prompt insertion. Its escaped `insertHTML` solution
+passed that fixture, but a draft-only check in the actual Kimi Lexical editor
+caught a missing behavior: the editor applies input asynchronously and flattens
+the inserted paragraph HTML. The candidate was withheld before installation.
+In the same approved test tab, one `insertText` operation instead preserved exact
+multiline text, quotes and trailing spaces after asynchronous reconciliation,
+in a `p > span[data-lexical-text="true"]` structure. No provider message was sent;
+the draft was cleared and both developer settings restored. The corrected adapter
+claims one text insertion, then uses the existing event-driven readiness wait
+for exact settled readback before Send. Empty pending input grants no Send or
+conversation authority; changed, replaced, cancelled or late drafts cannot be
+reinserted. No fixed delay or text normalization was added.
+
+The real-WebKit controlled-editor fixture now obtains its payload from the actual
+`beforeinput` event, cancels default editing and commits asynchronously. A bounded
+comparison established that unhandled default editing emits smart-quote replacement
+events, whereas the controlled path returns success and preserves all input bytes.
+This reproduces the live DOM result without claiming Kimi's exact framework version.
+The corrected resource passed 39 JavaScript tests/349 assertions and 30 Kimi native
+tests, including the full harness payload, delayed/failed insertion, deletion and
+the actual WebKit-to-server durable receipt. Installed qualification remains pending.
 
 Validation passed 31 JavaScript tests/242 assertions and 21 Kimi native tests
 (10 contract and 11 real-WebKit cases). The native cases are included in the
@@ -61,6 +78,25 @@ also passed a separate 51-test run: 12 existing transport, 11 Kimi contract,
 12 Kimi real-WebKit and 16 catalog cases. These overlap the earlier batch and
 must not be summed as independent coverage. Installed discovery and live
 tool-use qualification remain pending.
+
+A preinstall audit found that Kimi was absent from the durable cleanup receipt
+provider enum and the persisted human-verification checkpoint set. Native
+deletion had passed, but the missing receipt identity would have prevented the
+server from saving its confirmation and releasing the response. Both finite
+provider sets now include Kimi. A separate 24-test gate passed, including an
+actual offline WebKit → server → durable deletion receipt/reload/retry workflow,
+receipt schema/identity checks and checkpoint persistence. No affected build
+was signed or installed. Shared server and app-state fixtures now use Kimi's
+single admitted Instant choice; they do not invent a default or second model.
+
+The broader shared integration gate passed 227 tests, with the optional synthetic
+performance benchmark skipped. A separate 24-test failure-history gate passed:
+Kimi's fixed unsupported-literal-response diagnostic now persists and restores
+the exact failed turn, while altered or foreign-provider envelopes are rejected.
+These counts include overlapping persistence coverage; they are not additional
+live-provider qualifications. The subsequent nonempty production Lexical check
+found the asynchronous insertion gap described above; its corrected focused gates
+passed before installation.
 
 ## Live observations
 
@@ -97,11 +133,15 @@ unqualified. Evidence is retained privately as `qwen-plus-direct-observation.jso
 and `qwen-max-direct-observation.json` in
 `work/new-website-providers-20261102/`.
 
-DeepSeek is now signed in through the recognized existing account. Its first
-bounded direct Chat-mode marker returned the requested raw response. Scoped
-deletion inspection is still in progress; no cleanup or native harness pass
-is claimed for it yet. Existing human conversations remain outside the test
-scope.
+DeepSeek is now signed in through the recognized existing account. Two bounded
+direct checks, with DeepThink off and on, returned the exact raw JSON markers.
+Each owned test conversation was deleted through its history entry and modal;
+the fresh route, empty composer/transcript and absent test entry were verified.
+Its page exposes a DeepThink mode toggle, not a named backend model picker.
+Both responses had already finished by the first read, so a negative streaming
+completion check and native harness qualification remain pending. Existing human
+conversations were untouched. All three provider Inspector settings and Safari's
+developer setting were restored after the approved two-message-per-provider scope.
 
 ## Remaining gates
 
@@ -110,8 +150,8 @@ scope.
    file tasks. The provider catalog also drives automatic startup discovery.
 2. Finish Qwen's fixed adapter and native ownership/cleanup integration from
    the observed website controls; keep it outside public discovery meanwhile.
-3. Capture DeepSeek's concrete model controls, enabled Send, exact user/answer
-   containers, terminal completion signal and scoped deletion confirmation.
+3. Integrate DeepSeek's observed mode controls and scoped deletion chain, then
+   verify its completion signal while an actual response is still streaming.
 4. Preserve the same negative fixtures for route/model changes, duplicate
    controls, uncertain Send, lost ownership and delayed/unconfirmed deletion.
 5. Record each installed model's actual tool results and durable cleanup

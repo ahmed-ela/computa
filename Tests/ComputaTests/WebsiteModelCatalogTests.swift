@@ -3,6 +3,16 @@ import XCTest
 @testable import Computa
 
 final class WebsiteModelCatalogTests: XCTestCase {
+    func testSharedInferenceFixturesUseSelectableChoicesForEveryPublicProvider() {
+        for provider in WebsiteModelCatalog.providers {
+            XCTAssertNotNil(WebsiteModelCatalog.inferenceSelection(for: syntheticWebsiteModelID(provider)), provider)
+            for intent in ["fixture-old", "fixture-new", "fixture-fast"] {
+                let choice = syntheticWebsiteChoice(provider: provider, key: intent, label: "Fixture Choice")
+                XCTAssertEqual(WebsiteModelCatalog.inferenceSelection(for: choice.modelID)?.choice, choice, provider)
+            }
+        }
+    }
+
     func testGroqUsesObservedChoicesWithoutSeedingOrAliasingAnotherProvider() throws {
         let preferences = isolatedTestPreferences()
         XCTAssertTrue(WebsiteModelCatalog.load(from: preferences).isEmpty)

@@ -54,9 +54,9 @@ describe('Kimi saved-conversation adapter', () => {
     expect((await f.run('submit')).error).toBe('prompt_not_inserted'); expect(f.counts().sends).toBe(1);
   });
 
-  test('logical Lexical paragraphs preserve the complete payload despite WebKit rendered spacing', async () => {
+  test('synthetic WebKit paragraphs preserve the complete payload despite rendered spacing', async () => {
     const outbound = '\n  café 👋\tNBSP\u00a0  \n\nLine \\"quoted\\" and \\\\ literal  \n\n\nComputa session marker: ' + marker;
-    const f = adapterFixture({ outbound }); await f.select(); await f.run('prepare');
+    const f = adapterFixture({ outbound, paragraphInsertion: true }); await f.select(); await f.run('prepare');
     expect((await f.run('insert')).inserted).toBe(true);
     expect(f.editor.innerText).not.toBe(outbound); expect(f.draftText()).toBe(outbound);
     expect(f.editor.innerText.split('\n').length).toBeGreaterThan(outbound.split('\n').length);
@@ -74,23 +74,21 @@ describe('Kimi saved-conversation adapter', () => {
     expect(f.messages.userBody.textContent).toBe(outbound); expect(f.counts().sends).toBe(1);
   });
 
-  test('one literal fragment preserves quotes and treats HTML-like prompt text only as text', async () => {
+  test('one literal insertText preserves bytes without treating HTML-like prompt text as markup', async () => {
     const outbound = '  "straight" and \'single\' — café 👋\u00a0\t  \n\n'
       + '</p><script>globalThis.fixtureInjected = true</script><img src=x onerror="bad()">\n'
       + '&lt; &quot; &#39; &amp; literal\rreturn\n\nComputa session marker: ' + marker;
     const f = adapterFixture({ outbound }); const result = await f.submit();
     expect(result.firstUserVerified).toBe(true); expect(f.messages.userBody.textContent).toBe(outbound);
-    expect(f.insertionHTML).toContain('&quot;straight&quot; and &#39;single&#39;');
-    expect(f.insertionHTML).toContain('&lt;/p&gt;&lt;script&gt;');
-    expect(f.insertionHTML).toContain('&amp;lt; &amp;quot; &amp;#39; &amp;amp; literal&#13;return');
-    expect(f.insertionHTML).not.toContain('<script>'); expect(f.insertionHTML).not.toContain('<img');
+    expect(f.insertionText).toBe(outbound);
+    expect(adapterSource).not.toContain("execCommand('insertHTML'");
     expect(f.editor.querySelectorAll('SCRIPT, IMG')).toHaveLength(0);
     expect(f.counts()).toEqual({ insertions: 1, sends: 1, confirms: 0 });
   });
 
   test('hidden, nested, ambiguous and reordered composer content cannot pass exact Send verification', async () => {
     for (const mutation of ['hidden', 'inert', 'aria-hidden', 'span', 'control', 'inline-break', 'empty-paragraph', 'root-text', 'reordered', 'changed-space']) {
-      const f = adapterFixture(); await f.select(); await f.run('prepare'); await f.run('insert');
+      const f = adapterFixture({ paragraphInsertion: true }); await f.select(); await f.run('prepare'); await f.run('insert');
       const first = f.editor.children[0];
       if (['hidden', 'inert', 'aria-hidden'].includes(mutation)) first.setAttribute(mutation, mutation === 'aria-hidden' ? 'true' : '');
       else if (mutation === 'span') { const text = first.text; first.replaceChildren(new f.Node('SPAN', {}, text)); }
@@ -106,13 +104,112 @@ describe('Kimi saved-conversation adapter', () => {
   });
 
   test('uncertain insertion and Send acknowledgements cannot be replayed', async () => {
-    for (const type of ['insertionFails', 'submitThrows'] as const) {
+    for (const type of ['insertionFails', 'insertionThrows', 'submitThrows'] as const) {
       const f = adapterFixture({ [type]: true }); const failed = await f.submit();
       expect(failed.error).toBeDefined();
       expect(failed.submissionAcknowledgement).toBeUndefined();
       const before = f.counts();
-      expect((await f.run(type === 'insertionFails' ? 'insert' : 'submit')).error).toBe('conversation_changed');
+      expect((await f.run(type === 'submitThrows' ? 'submit' : 'insert')).error).toBe('conversation_changed');
       expect(f.counts()).toEqual(before);
+    }
+  });
+
+  test('live Lexical shape keeps embedded newlines and excludes the rendered trailing LF', async () => {
+    const outbound = 'Synthetic draft\n"literal" & <code>\n\ntrailing  spaces  \n\nComputa session marker: ' + marker;
+    const f = adapterFixture({ outbound }); await f.select(); await f.run('prepare');
+    const result = await f.run('insert');
+    expect(result.inserted).toBe(true); expect(result.insertionPending).toBe(false);
+    expect(f.editor.children).toHaveLength(1); expect(f.editor.children[0].getAttribute('dir')).toBe('ltr');
+    expect(f.editor.children[0].children[0].getAttribute('data-lexical-text')).toBe('true');
+    expect(f.editor.textContent).toBe(outbound); expect(f.editor.innerText).toBe(outbound + '\n');
+    expect((await f.run('sendReady')).sendReady).toBe(true);
+    expect((await f.run('submit')).submitted).toBe(true); expect((await f.run()).firstUserVerified).toBe(true);
+    expect(f.messages.userBody.textContent).toBe(outbound); expect(f.counts().insertions).toBe(1);
+  });
+
+  test('async Lexical insertion acknowledges only dispatch until exact settled readback', async () => {
+    const f = adapterFixture({ delayedInsertion: true }); await f.select(); await f.run('prepare');
+    const result = await f.run('insert');
+    expect(result).toMatchObject({ inserted: false, insertionDispatched: true, insertionPending: true, pending: true,
+      firstUserVerified: false, userCount: 0, text: '', answerComplete: false });
+    expect(result.insertionAcknowledgement).toEqual({ ownerToken: '9fe25e48-2e0b-46cb-84f7-7b4f32e1794f',
+      documentGeneration: generation, sequence: 1, outboundFingerprint: submissionFingerprint });
+    for (let read = 0; read < 4; read++) {
+      expect(await f.run('sendReady')).toMatchObject({ inserted: false, insertionPending: true, pending: true, sendReady: false });
+      expect(f.counts()).toEqual({ insertions: 1, sends: 0, confirms: 0 });
+    }
+    expect((await f.run('insert')).error).toBe('composer_not_empty'); expect(f.counts().insertions).toBe(1);
+    f.settleInsertion();
+    expect(await f.run('sendReady')).toMatchObject({ inserted: true, insertionPending: false, sendReady: true });
+    expect((await f.run('submit')).submitted).toBe(true); expect((await f.run()).firstUserVerified).toBe(true);
+    expect(f.counts()).toEqual({ insertions: 1, sends: 1, confirms: 0 });
+  });
+
+  test('pending insertion cannot submit early or accept a nonempty wrong settlement', async () => {
+    for (const settlement of [null, prompt.replace(/\n/g, ''), prompt.replace('"quoted"', '”quoted”'), prompt + ' ']) {
+      const f = adapterFixture({ delayedInsertion: true }); await f.select(); await f.run('prepare'); await f.run('insert');
+      if (settlement !== null) f.settleInsertion(settlement);
+      const result = await f.run(settlement === null ? 'submit' : 'sendReady');
+      expect(result.error).toBe('prompt_not_inserted'); expect(result.insertionAcknowledgement).toBeUndefined();
+      f.settleInsertion(); expect((await f.run('sendReady')).detail).toBe('terminal_operation');
+      expect(f.counts()).toEqual({ insertions: 1, sends: 0, confirms: 0 });
+    }
+  });
+
+  test('a verified draft cannot become empty and regain pending-insertion authority', async () => {
+    const f = adapterFixture(); await f.select(); await f.run('prepare');
+    expect((await f.run('insert')).inserted).toBe(true); f.setDraft('');
+    expect((await f.run('sendReady')).error).toBe('prompt_not_inserted');
+    expect(f.counts().sends).toBe(0); expect(f.counts().insertions).toBe(1);
+  });
+
+  test('Lexical span reader rejects hidden, nested, split, unmarked and changed-byte structures', async () => {
+    for (const mutation of ['hidden', 'inert', 'aria-hidden', 'unmarked', 'direction', 'nested', 'split', 'multiple-paragraphs', 'mixed-text', 'unicode', 'nbsp']) {
+      const outbound = 'café\tNBSP\u00a0 and "quotes"\n\nComputa session marker: ' + marker;
+      const f = adapterFixture({ outbound }); await f.select(); await f.run('prepare'); await f.run('insert');
+      const paragraph = f.editor.children[0], span = paragraph.children[0];
+      if (['hidden', 'inert', 'aria-hidden'].includes(mutation)) span.setAttribute(mutation, mutation === 'aria-hidden' ? 'true' : '');
+      else if (mutation === 'unmarked') span.removeAttribute('data-lexical-text');
+      else if (mutation === 'direction') paragraph.removeAttribute('dir');
+      else if (mutation === 'nested') span.append(new f.Node('SPAN', {}, 'extra'));
+      else if (mutation === 'split') paragraph.append(span.cloneNode(true));
+      else if (mutation === 'multiple-paragraphs') f.editor.append(paragraph.cloneNode(true));
+      else if (mutation === 'mixed-text') paragraph.text = 'extra';
+      else if (mutation === 'unicode') span.text = span.text.normalize('NFD');
+      else span.text = span.text.replace('\u00a0', ' ');
+      expect((await f.run('sendReady')).error).toBeDefined(); expect(f.counts().sends).toBe(0);
+    }
+  });
+
+  test('pending readback stays pinned to the prepared editor, owner, generation, prompt and selection', async () => {
+    for (const mutation of ['editor', 'owner', 'generation', 'prompt', 'model']) {
+      const f = adapterFixture({ delayedInsertion: true }); await f.select(); await f.run('prepare'); await f.run('insert');
+      const overrides: Record<string, unknown> = {};
+      if (mutation === 'editor') { f.remove(f.editor); f.scope.append(f.editor.cloneNode(true)); }
+      if (mutation === 'owner') overrides.ownerToken = marker;
+      if (mutation === 'generation') overrides.documentGeneration = marker;
+      if (mutation === 'prompt') overrides.prompt = 'Different ' + prompt;
+      if (mutation === 'model') f.triggerName.text = 'Changed model';
+      expect((await f.run('sendReady', overrides)).error).toBeDefined();
+      expect(f.counts()).toEqual({ insertions: 1, sends: 0, confirms: 0 });
+    }
+  });
+
+  test('Lexical span text nodes are budgeted before iteration or text extraction', async () => {
+    const f = adapterFixture(); await f.select(); await f.run('prepare'); await f.run('insert');
+    const span = f.editor.children[0].children[0];
+    Object.defineProperty(span, 'childNodes', { get: () => ({ length: 360_403,
+      [Symbol.iterator]() { throw new Error('Over-budget text nodes must never be iterated'); } }) });
+    Object.defineProperty(span, 'textContent', { get() { throw new Error('Over-budget text must never be read'); } });
+    expect((await f.run('sendReady')).error).toBe('composer_unavailable'); expect(f.counts().sends).toBe(0);
+  });
+
+  test('missing or malformed native insertion fingerprint cannot dispatch input', async () => {
+    for (const savedSubmissionFingerprint of [undefined, '', 1, 'a'.repeat(63), 'A'.repeat(64), 'x'.repeat(64)]) {
+      const f = adapterFixture(); await f.select(); await f.run('prepare');
+      const inserted = await f.run('insert', { savedSubmissionFingerprint });
+      expect(inserted.error).toBe('prompt_not_inserted'); expect(inserted.insertionAcknowledgement).toBeUndefined();
+      expect(f.counts().insertions).toBe(0); expect(f.counts().sends).toBe(0);
     }
   });
 

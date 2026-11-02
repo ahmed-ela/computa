@@ -18,6 +18,48 @@ final class KimiWebModelTransportTests: XCTestCase {
         XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
     }
 
+    func testServerReleasesKimiResponseOnlyWithItsNativeDurableDeletionReceipt() async throws {
+        let fixture = try Fixture(); defer { fixture.shutdown() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaKimiReceipt-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let server = WebModelServer(), generation = UUID()
+        let task = UUID().uuidString, thread = UUID().uuidString, turn = UUID().uuidString
+        await server.configureEmbeddedTransport(fixture.transport)
+        await server.configureEvidenceDirectory(directory.appendingPathComponent("evidence"))
+        await server.configureCleanupReceipts(directory: directory, runtimeGeneration: generation) { _ in }
+        do {
+            let request = try JSONSerialization.data(withJSONObject: ["model": choice.modelID,
+                "input": "Return the synthetic offline fixture reply.", "tools": []] as [String: Any])
+            let response = try await server.fixtureInfer(request, taskID: task, threadID: thread, turnID: turn,
+                runtimeGeneration: generation)
+            XCTAssertTrue(String(decoding: response, as: UTF8.self).contains("Offline Kimi fixture reply"))
+            let receipts = await server.latestCleanupReceipts()
+            XCTAssertEqual(receipts.count, 1)
+            let receipt = try XCTUnwrap(receipts.first)
+            XCTAssertTrue(receipt.isValid); XCTAssertTrue(receipt.isTransactionLinked); XCTAssertTrue(receipt.receiptSaved)
+            XCTAssertEqual(receipt.provider, .kimi); XCTAssertEqual(receipt.route, .embedded)
+            XCTAssertEqual(receipt.modelID, choice.modelID); XCTAssertEqual(receipt.reason, .deleted)
+            XCTAssertEqual(receipt.outcome, .closed); XCTAssertEqual(receipt.trigger, .inference)
+            XCTAssertEqual(receipt.taskID, task.lowercased()); XCTAssertEqual(receipt.threadID, thread.lowercased())
+            XCTAssertEqual(receipt.turnID, turn.lowercased()); XCTAssertNotNil(receipt.sessionToken)
+            XCTAssertEqual(receipt.runtimeGeneration, generation.uuidString.lowercased())
+            XCTAssertEqual(WebsiteSessionCleanupStore(directory: directory).latest(), [receipt],
+                           "A fresh store must recover the exact native lease after restart")
+            let encoded = try JSONEncoder().encode(receipt)
+            XCTAssertEqual(try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self, from: encoded), receipt)
+            let retried = await server.retryWebsiteSessionCleanup(taskID: task, runtimeGeneration: generation)
+            XCTAssertEqual(retried, receipt)
+            try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+            XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+            XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+            _ = await server.shutdown()
+        } catch {
+            _ = await server.shutdown()
+            throw error
+        }
+    }
+
     func testOneExactUnicodeSubmissionCompletesAndDeletesOnlyItsOwnedChat() async throws {
         let fixture = try Fixture(); defer { fixture.shutdown() }
         let token = try await start(fixture)
@@ -68,12 +110,162 @@ final class KimiWebModelTransportTests: XCTestCase {
         let prefix = prompt + "\n\nComputa session marker: "
         XCTAssertTrue(captured[0].hasPrefix(prefix))
         XCTAssertNotNil(UUID(uuidString: String(captured[0].dropFirst(prefix.count))))
-        let receipt = try await evaluate(fixture.view, "return {inputEvents:kimiFixture.counters.input, injected:window.kimiFixtureInjected===true || document.getElementById('injected')!==null};") as? [String: Any]
-        XCTAssertEqual(receipt?["inputEvents"] as? Int, 1)
+        let receipt = try await evaluate(fixture.view, "return {injected:window.kimiFixtureInjected===true || document.getElementById('injected')!==null};") as? [String: Any]
+        try await assertInsertionCounts(fixture, settlements: 1, sends: 1)
         XCTAssertEqual(receipt?["injected"] as? Bool, false)
         let finished = try await call(fixture, "webProviderFinish", token)
         XCTAssertEqual(finished["cleanup"] as? String, "deleted")
         try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+    }
+
+    func testDelayedLexicalCommitWaitsForExactReadbackWithoutReinserting() async throws {
+        let fixture = try Fixture(); defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        _ = try await evaluate(fixture.view, "kimiFixture.options.lexicalNeverSettle = true; return true;")
+        var insertions = 0, readinessReads = 0
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "insert" { insertions += 1 }
+            if action == "sendReady" {
+                readinessReads += 1
+                if readinessReads == 1 {
+                    let before = try? await self.evaluate(fixture.view,
+                        "return {empty:document.querySelector('.chat-input-editor').textContent === '', sends:kimiFixture.counters.sends};") as? [String: Any]
+                    XCTAssertEqual(before?["empty"] as? Bool, true)
+                    XCTAssertEqual(before?["sends"] as? Int, 0)
+                    _ = try? await self.evaluate(fixture.view, "kimiFixture.settleInput(); return true;")
+                }
+            }
+        }
+        let prompt = "Exact \"quotes\" and 'apostrophe'\n\n  spaces\tand\u{00a0}NBSP <tag> &amp;\n"
+        _ = try await call(fixture, "webProviderSend", token, prompt: prompt)
+        _ = try await wait(fixture, token, state: "complete")
+        XCTAssertEqual(insertions, 1); XCTAssertGreaterThanOrEqual(readinessReads, 2)
+        let prompts = try await evaluate(fixture.view, "return fixturePrompts;") as? [String]
+        XCTAssertEqual(prompts?.count, 1)
+        XCTAssertTrue(prompts?.first?.hasPrefix(prompt + "\n\nComputa session marker: ") == true)
+        try await assertInsertionCounts(fixture, settlements: 1, sends: 1)
+        let finished = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+    }
+
+    func testControlledEditorBeforeInputDefaultComparisonPreservesExactEventPayload() async throws {
+        for preventNativeInput in [false, true] {
+            let fixture = try Fixture(); defer { fixture.shutdown() }
+            _ = try await start(fixture)
+            _ = try await evaluate(fixture.view, "kimiFixture.options.preventNativeInput = \(preventNativeInput ? "true" : "false"); return true;")
+            let commandResult = try await evaluate(fixture.view, #"""
+                const editor = document.querySelector('.chat-input-editor'); editor.focus();
+                const payload = "Synthetic café 👋\nActual \\ and \"quoted\" content\n\n  spaces\tNBSP: <tag>&amp;\n";
+                return document.execCommand('insertText', false, payload);
+                """#, world: world)
+            let observation = try await evaluate(fixture.view, #"""
+                const editor = document.querySelector('.chat-input-editor');
+                const payload = "Synthetic café 👋\nActual \\ and \"quoted\" content\n\n  spaces\tNBSP: <tag>&amp;\n";
+                await new Promise(resolve => setTimeout(resolve, 30));
+                return { preventNativeInput:kimiFixture.options.preventNativeInput,
+                    exact:editor.textContent === payload, renderedLength:editor.textContent.length,
+                    expectedLength:payload.length, inputEvents:kimiFixture.inputEvents,
+                    beforeInput:kimiFixture.counters.beforeInput, inputs:kimiFixture.counters.input,
+                    settlements:kimiFixture.counters.settlements, sends:kimiFixture.counters.sends };
+                """#) as? [String: Any]
+            var receipt = try XCTUnwrap(observation)
+            receipt["returned"] = try XCTUnwrap(commandResult as? Bool)
+            let encoded = try JSONSerialization.data(withJSONObject: receipt, options: .sortedKeys)
+            XCTAssertLessThan(encoded.count, 8192)
+            FileHandle.standardError.write(Data(("KimiControlledEditorEventComparison " + String(decoding: encoded, as: UTF8.self) + "\n").utf8))
+            XCTAssertEqual(receipt["returned"] as? Bool, true)
+            XCTAssertEqual(receipt["sends"] as? Int, 0)
+            if preventNativeInput {
+                XCTAssertEqual(receipt["exact"] as? Bool, true)
+                XCTAssertEqual(receipt["beforeInput"] as? Int, 1)
+                XCTAssertEqual(receipt["settlements"] as? Int, 1)
+            }
+        }
+    }
+
+    func testChangedLexicalCommitPreventsSendAndCannotReinsert() async throws {
+        let fixture = try Fixture(); defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        _ = try await evaluate(fixture.view, "kimiFixture.options.lexicalNeverSettle = true; kimiFixture.options.lexicalWrongText = true; return true;")
+        var released = false, insertions = 0
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "insert" { insertions += 1 }
+            if action == "sendReady", !released {
+                released = true
+                _ = try? await self.evaluate(fixture.view, "kimiFixture.settleInput(); return true;")
+            }
+        }
+        let prompt = "Synthetic wrong deferred input"
+        do {
+            _ = try await call(fixture, "webProviderSend", token, prompt: prompt)
+            XCTFail("A changed nonempty editor must not reach Send")
+        } catch let error as EmbeddedWebModelTransport.Failure {
+            XCTAssertEqual(error, .editorFailure("prompt_not_inserted"))
+        }
+        XCTAssertTrue(released)
+        do { _ = try await call(fixture, "webProviderSend", token, prompt: prompt); XCTFail("Input is never replayed") } catch { }
+        XCTAssertEqual(insertions, 1)
+        try await assertInsertionCounts(fixture, settlements: 1, sends: 0)
+    }
+
+    func testMissingLexicalCommitExpiresAndLateCommitCannotSendOrReinsert() async throws {
+        let fixture = try Fixture(); defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        _ = try await evaluate(fixture.view, "kimiFixture.options.lexicalNeverSettle = true; return true;")
+        let started = ContinuousClock.now, prompt = "Synthetic lost deferred input"
+        do {
+            _ = try await call(fixture, "webProviderSend", token, prompt: prompt)
+            XCTFail("A dispatch receipt alone must not enable Send")
+        } catch let error as EmbeddedWebModelTransport.Failure {
+            XCTAssertEqual(error, .editorFailure("send_unavailable"))
+        }
+        XCTAssertLessThan(ContinuousClock.now - started, .seconds(6), "The read-only readiness wait stays bounded")
+        try await assertInsertionCounts(fixture, settlements: 0, sends: 0)
+        _ = try await evaluate(fixture.view, "kimiFixture.settleInput(); return true;")
+        do { _ = try await call(fixture, "webProviderSend", token, prompt: prompt); XCTFail("Late input cannot reopen a failed Send") } catch { }
+        try await assertInsertionCounts(fixture, settlements: 1, sends: 0)
+    }
+
+    func testReplacedEditorDuringLexicalWaitCannotSendOrReinsert() async throws {
+        let fixture = try Fixture(); defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        _ = try await evaluate(fixture.view, "kimiFixture.options.lexicalNeverSettle = true; return true;")
+        var replaced = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "sendReady", !replaced {
+                replaced = true
+                _ = try? await self.evaluate(fixture.view, """
+                    const editor = document.querySelector('.chat-input-editor');
+                    editor.replaceWith(editor.cloneNode(true)); kimiFixture.settleInput(); return true;
+                    """)
+            }
+        }
+        let prompt = "Synthetic displaced editor"
+        do { _ = try await call(fixture, "webProviderSend", token, prompt: prompt); XCTFail("A replacement editor cannot inherit the insertion") } catch { }
+        XCTAssertTrue(replaced)
+        do { _ = try await call(fixture, "webProviderSend", token, prompt: prompt); XCTFail("A replacement editor cannot cause reinsertion") } catch { }
+        try await assertInsertionCounts(fixture, settlements: 0, sends: 0)
+    }
+
+    func testCancelledLexicalWaitDoesNotSendAfterLateCommit() async throws {
+        let fixture = try Fixture(); defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        _ = try await evaluate(fixture.view, "kimiFixture.options.lexicalNeverSettle = true; return true;")
+        var cancelled = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "sendReady", !cancelled {
+                cancelled = true
+                withUnsafeCurrentTask { $0?.cancel() }
+            }
+        }
+        let prompt = "Synthetic cancelled deferred input"
+        let sending = Task { try await self.call(fixture, "webProviderSend", token, prompt: prompt)["state"] as? String }
+        do { _ = try await sending.value; XCTFail("Cancellation must stop Send") } catch { }
+        XCTAssertTrue(cancelled)
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        _ = try await evaluate(fixture.view, "kimiFixture.settleInput(); return true;")
+        do { _ = try await call(fixture, "webProviderSend", token, prompt: prompt); XCTFail("Cancelled input is never replayed") } catch { }
+        try await assertInsertionCounts(fixture, settlements: 1, sends: 0)
     }
 
     func testProvisionalRouteCannotPublishAnswerAndCanonicalPromotionDoesNotResend() async throws {
@@ -251,7 +443,7 @@ final class KimiWebModelTransportTests: XCTestCase {
             // Preserve the original bounded failure before WebKit teardown can
             // replace its description with a deinitialization-state failure.
             let native = (error as? EmbeddedWebModelTransport.Failure).map { String(describing: $0) } ?? "other"
-            print("KimiFixtureOriginalError phase=\(operation) type=\(String(reflecting: type(of: error))) domain=\((error as NSError).domain) code=\((error as NSError).code) native=\(native)")
+            FileHandle.standardError.write(Data("KimiFixtureOriginalError phase=\(operation) type=\(String(reflecting: type(of: error))) domain=\((error as NSError).domain) code=\((error as NSError).code) native=\(native)\n".utf8))
             if operation == "webProviderSend", let shape = try? await evaluate(fixture.view, #"""
                 const editor = document.querySelector('.chat-input-editor');
                 const expected = globalThis.__computaKimiSavedSessionV1?.inserted?.prompt;
@@ -277,7 +469,11 @@ final class KimiWebModelTransportTests: XCTestCase {
                     textExact:text===expected, childCount:editor.childNodes.length, nodes};
                 """#, world: world), let safe = try? JSONSerialization.data(withJSONObject: shape, options: .sortedKeys), safe.count <= 4096,
                 let line = String(data: safe, encoding: .utf8) {
-                print("KimiFixtureComposerShape " + line)
+                FileHandle.standardError.write(Data(("KimiFixtureComposerShape " + line + "\n").utf8))
+            }
+            if operation == "webProviderSend", let events = try? await evaluate(fixture.view, "return kimiFixture.inputEvents;"),
+               let encoded = try? JSONSerialization.data(withJSONObject: events, options: .sortedKeys), encoded.count <= 8192 {
+                FileHandle.standardError.write(Data(("KimiFixtureInputEvents " + String(decoding: encoded, as: UTF8.self) + "\n").utf8))
             }
             throw error
         }
@@ -295,6 +491,16 @@ final class KimiWebModelTransportTests: XCTestCase {
     private func assertCounts(_ fixture: Fixture, sends: Int, headers: Int, selections: Int, confirmations: Int) async throws {
         let actual = try await evaluate(fixture.view, "return [kimiFixture.counters.sends, kimiFixture.counters.headerOpens, kimiFixture.counters.deleteSelections, kimiFixture.counters.confirmations];") as? [Int]
         XCTAssertEqual(actual, [sends, headers, selections, confirmations])
+    }
+    private func assertInsertionCounts(_ fixture: Fixture, settlements: Int, sends: Int) async throws {
+        let value = try await evaluate(fixture.view,
+            "return [kimiFixture.counters.beforeInput, kimiFixture.counters.input, kimiFixture.counters.settlements, kimiFixture.counters.earlySends, kimiFixture.counters.sends];") as? [Int]
+        let actual = try XCTUnwrap(value)
+        XCTAssertEqual(actual.count, 5)
+        guard actual.count == 5 else { return }
+        XCTAssertEqual(actual[0], 1, "Exactly one native insertion's beforeinput payload")
+        XCTAssertEqual(actual[1], 0, "Cancelling the native edit prevents its substitution/input events")
+        XCTAssertEqual(Array(actual[2...]), [settlements, 0, sends])
     }
     private func evaluate(_ view: WKWebView, _ source: String, world: WKContentWorld = .page) async throws -> Any {
         let completion = EmbeddedScriptResult()

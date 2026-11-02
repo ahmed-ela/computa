@@ -53,9 +53,13 @@ enum KimiFixturePage {
       const provisional = '/chat/p1111111-2222-4333-8444-555555555555?chat_enter_method=home';
       const options = { delayUser: false, holdProvisional: false, holdResponse: false,
         menuDelayMs: 0, dialogDelayMs: 0, canonicalDelayMs: 60, retainHistoryLink: false,
+        lexicalDelayMs: 0, lexicalNeverSettle: false, lexicalWrongText: false, preventNativeInput: true,
         reply: '{"type":"message","text":"Offline Kimi fixture reply"}' };
-      const counters = { input: 0, sends: 0, modelOpens: 0, modelSelections: 0, headerOpens: 0, deleteSelections: 0, confirmations: 0 };
+      const counters = { beforeInput: 0, input: 0, settlements: 0, earlySends: 0, sends: 0,
+        modelOpens: 0, modelSelections: 0, headerOpens: 0, deleteSelections: 0, confirmations: 0 };
       let outbound = null, user = null, answer = null, historyLink = null;
+      let nativeInput = null, pendingCommit = null, lexicalSettled = false;
+      const inputEvents = []; let firstEventData = null;
       window.fixturePrompts = [];
       function hideModel() { menu.hidden = true; model.setAttribute('aria-expanded', 'false'); }
       model.addEventListener('click', () => {
@@ -67,7 +71,58 @@ enum KimiFixturePage {
         for (const other of menu.querySelectorAll('[data-testid="model-option"]')) other.setAttribute('aria-checked', String(other === row));
         model.querySelector('.name').textContent = row.querySelector('.name').textContent; hideModel();
       });
-      editor.addEventListener('input', () => { counters.input++; send.classList.toggle('disabled', !editor.innerText.trim()); });
+      // Model the observed controlled-editor boundary using actual browser
+      // input events. No prompt argument, adapter state or test request is read.
+      // The default cancels the native edit and commits the beforeinput payload;
+      // the explicit comparison mode retains native substitution events as
+      // evidence. This is a bounded fixture, not a bundled Lexical runtime.
+      function recordInputEvent(event) {
+        if (inputEvents.length >= 32) return;
+        const data = typeof event.data === 'string' ? event.data : null;
+        if (firstEventData === null && data !== null) firstEventData = data;
+        let hash = 2166136261;
+        if (data !== null) for (let i = 0; i < data.length; i++) hash = Math.imul(hash ^ data.charCodeAt(i), 16777619) >>> 0;
+        inputEvents.push({ event: event.type, inputType: ['insertText','insertReplacementText','insertParagraph','insertLineBreak'].includes(event.inputType) ? event.inputType : 'other',
+          dataLength: data?.length ?? null, dataFNV1a: data === null ? null : hash.toString(16).padStart(8, '0'),
+          sameAsFirst: data !== null && data === firstEventData, cancelable: event.cancelable, defaultPrevented: event.defaultPrevented });
+      }
+      function queueEditorCommit(captured) {
+        lexicalSettled = false;
+        const empty = document.createElement('p'); empty.append(document.createElement('br'));
+        editor.replaceChildren(empty); send.classList.add('disabled');
+        // One execCommand can emit an input event per paragraph. Coalesce that
+        // one real beforeinput payload, without losing it on later input events
+        // or manufacturing text from the native request/adapter state.
+        if (!captured || captured.scheduled) return;
+        captured.scheduled = true;
+        pendingCommit = () => {
+          if (nativeInput !== captured || !editor.isConnected) return;
+          nativeInput = null;
+          const paragraph = document.createElement('p'); paragraph.dir = 'ltr';
+          const span = document.createElement('span'); span.setAttribute('data-lexical-text', 'true');
+          span.textContent = options.lexicalWrongText ? captured.text + 'foreign edit' : captured.text;
+          paragraph.append(span); editor.replaceChildren(paragraph);
+          lexicalSettled = true; counters.settlements++;
+          send.classList.toggle('disabled', !span.textContent);
+        };
+        if (!options.lexicalNeverSettle) setTimeout(() => {
+          const commit = pendingCommit; pendingCommit = null; commit?.();
+        }, options.lexicalDelayMs);
+      }
+      editor.addEventListener('beforeinput', event => {
+        counters.beforeInput++;
+        nativeInput = event.inputType === 'insertText' && typeof event.data === 'string'
+          ? { text: event.data, scheduled: false } : null;
+        if (options.preventNativeInput && nativeInput) {
+          event.preventDefault();
+          if (event.defaultPrevented) queueEditorCommit(nativeInput);
+        }
+        recordInputEvent(event);
+      });
+      editor.addEventListener('input', event => {
+        counters.input++; recordInputEvent(event);
+        queueEditorCommit(nativeInput);
+      });
       function completeResponse() {
         if (!answer || answer.querySelector('.segment-assistant-actions')) return;
         const rail = document.createElement('div'); rail.className = 'segment-assistant-actions';
@@ -98,6 +153,7 @@ enum KimiFixturePage {
         if (!options.holdResponse) completeResponse();
       }
       send.addEventListener('click', () => {
+        if (!lexicalSettled) { counters.earlySends++; return; }
         if (send.classList.contains('disabled') || outbound !== null) return;
         // Model this fixture editor's logical paragraphs independently of
         // WebKit's rendered paragraph spacing. No adapter-private state is read.
@@ -135,7 +191,8 @@ enum KimiFixturePage {
         });
       }
       header.addEventListener('click', () => { counters.headerOpens++; setTimeout(showDeleteMenu, options.menuDelayMs); });
-      window.kimiFixture = { options, counters, appendUser, completeResponse,
+      window.kimiFixture = { options, counters, inputEvents, appendUser, completeResponse,
+        settleInput: () => { const commit = pendingCommit; pendingCommit = null; commit?.(); },
         canonicalize: () => history.replaceState({}, '', canonical),
         resumeStreaming: () => answer?.querySelector('.segment-assistant-actions')?.remove() };
       window.fixtureReady = true; window.fixtureGeneration = 'initial';

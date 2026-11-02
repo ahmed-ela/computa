@@ -3,6 +3,78 @@ import XCTest
 @testable import Computa
 
 final class WebsiteFailureHistoryTests: XCTestCase {
+    func testKimiUnsupportedLiteralResponseSurvivesStoreRecreationAndKeepsTheExactTurnFailed() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaKimiFormatHistory-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = WebsiteModelChoice(provider: "kimi", key: "k28-instant", label: "Instant").modelID
+        let failure = EmbeddedWebModelTransport.Failure.responseFormatUnavailable
+        XCTAssertFalse(failure.blocksProviderUntilRefresh)
+        let data = try WebModelServer.errorBody(for: failure)
+        let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let fields = try XCTUnwrap(envelope["error"] as? [String: Any])
+        XCTAssertEqual(fields["code"] as? String, "unsupported_website_response")
+        XCTAssertEqual(fields["retryable"] as? Bool, false)
+        XCTAssertEqual(fields["required_action"] as? String, "inspect_website")
+        let task = UUID().uuidString, thread = UUID().uuidString, turnID = UUID().uuidString.lowercased()
+        let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+            turnID: turnID, modelID: model, diagnosticText: String(decoding: data, as: UTF8.self)))
+        XCTAssertTrue(WebsiteTurnFailureStore(directory: root).append(record))
+        let restored = try WebsiteTurnFailureStore(directory: root).load(threadID: thread)
+        XCTAssertEqual(restored, [record])
+        let saved = try XCTUnwrap(restored.first)
+        XCTAssertEqual(saved.taskID, task.lowercased())
+        XCTAssertEqual(saved.threadID, thread.lowercased())
+        XCTAssertEqual(saved.modelID, model)
+        XCTAssertTrue(NSDictionary(dictionary: try XCTUnwrap(JSONSerialization.jsonObject(with: Data(saved.entry.body.utf8))
+            as? [String: Any])).isEqual(to: envelope))
+        let previousTurn = UUID().uuidString.lowercased()
+        let generic = "Generic engine error"
+        let raw = try history([turn(previousTurn, status: "failed", error: ["message": "Earlier failure"]),
+            turn(turnID, status: "failed", error: ["message": generic])])
+        let failedTurns = Set(restored.map(\.turnID))
+        var entries = try AppServerThreadHistoryContract.entries(from: raw, excludingAssistantTurns: failedTurns)
+        let index = try XCTUnwrap(entries.firstIndex { $0.id == saved.entry.id })
+        entries[index] = saved.entry
+        XCTAssertEqual(entries.first { $0.id == "agent-error:" + previousTurn }?.body, "Earlier failure")
+        XCTAssertEqual(entries.last?.body, saved.diagnosticText)
+        XCTAssertFalse(entries.contains { $0.kind == .assistant && $0.turnID == turnID })
+        XCTAssertFalse(entries.contains { $0.body == generic })
+        XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(from: raw,
+            rejectedTurns: failedTurns, failedTurns: failedTurns), .failed)
+    }
+
+    func testKimiUnsupportedLiteralHistoryRejectsAlteredMetadataAndOtherProviderEnvelopes() throws {
+        let data = try WebModelServer.errorBody(for: EmbeddedWebModelTransport.Failure.responseFormatUnavailable)
+        let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let fields = try XCTUnwrap(envelope["error"] as? [String: Any])
+        let model = WebsiteModelChoice(provider: "kimi", key: "k28-instant", label: "Instant").modelID
+        let task = UUID().uuidString, thread = UUID().uuidString, turnID = UUID().uuidString
+        func rejected(_ object: [String: Any], forModel selected: String? = nil) throws {
+            XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turnID,
+                modelID: selected ?? model,
+                diagnosticText: String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)))
+        }
+        let mutations: [[String: Any]] = [["message": "PRIVATE_PAGE_CANARY"], ["retryable": true], ["retryable": 0],
+            ["required_action": "retry_send"], ["type": "server_error"], ["code": "browser_model_error"],
+            ["param": "input"], ["pageText": "PRIVATE_PAGE_CANARY"]]
+        for mutation in mutations {
+            var changed = envelope, changedFields = fields
+            mutation.forEach { changedFields[$0.key] = $0.value }; changed["error"] = changedFields
+            try rejected(changed)
+        }
+        for key in fields.keys {
+            var missing = envelope, missingFields = fields
+            missingFields.removeValue(forKey: key); missing["error"] = missingFields
+            try rejected(missing)
+        }
+        var extra = envelope; extra["pageText"] = "PRIVATE_PAGE_CANARY"; try rejected(extra)
+        for foreign in [syntheticChatGPTModelID, "browser/claude", "browser/gemini", "browser/groq", "api/cerebras/model/fixture"] {
+            try rejected(envelope, forModel: foreign)
+        }
+        let chatGPT = try WebModelServer.errorBody(for: WebModelResponseCodec.Failure.unsupportedWebsiteResponse)
+        try rejected(try XCTUnwrap(JSONSerialization.jsonObject(with: chatGPT) as? [String: Any]))
+    }
+
     func testClaudeResponseBlockSurvivesStoreRecreationWithExactTurnAndFailedHistory() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaClaudeBlockedHistory-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }

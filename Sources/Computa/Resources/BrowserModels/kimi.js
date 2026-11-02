@@ -136,9 +136,10 @@ try {
     c.fail('conversation_changed', 'conversation_url');
 
   function composerText(editor) {
-    // WebKit renders P separators as extra visual newlines. Lexical's observed
-    // plain-text shape is direct paragraphs, with a lone BR for an empty line.
-    // Reconstruct only that shape; never trim or normalize the user's bytes.
+    // Live Lexical insertText settles asynchronously into one P[dir=ltr]
+    // containing a data-lexical-text span whose text retains literal newlines.
+    // The empty P/BR and synthetic WebKit P/text shapes are separately tested.
+    // Read only those structures; never trim, normalize or repair payload bytes.
     const paragraphs = [...editor.childNodes], lines = [];
     let nodes = paragraphs.length, bytes = 0;
     if (nodes > 180_201) c.fail('composer_unavailable');
@@ -150,8 +151,16 @@ try {
       if (nodes > 360_402) c.fail('composer_unavailable');
       const emptyBreak = children.length === 1 && children[0].nodeType === 1 && children[0].tagName === 'BR'
         && children[0].childNodes.length === 0 && c.visible(children[0]);
-      if (!emptyBreak && (!children.length || children.some(node => node.nodeType !== 3))) c.fail('composer_unavailable');
-      const line = emptyBreak ? '' : children.map(node => node.textContent).join('');
+      const span = children.length === 1 && children[0].nodeType === 1 && children[0].tagName === 'SPAN' ? children[0] : null;
+      if (span) {
+        nodes += span.childNodes.length;
+        if (nodes > 360_402) c.fail('composer_unavailable');
+      }
+      const lexical = span && paragraphs.length === 1 && paragraph.getAttribute('dir') === 'ltr'
+        && span.getAttribute('data-lexical-text') === 'true' && span.getAttribute('contenteditable') == null
+        && c.visible(span) && span.childNodes.length > 0 && [...span.childNodes].every(node => node.nodeType === 3);
+      if (!emptyBreak && !lexical && (!children.length || children.some(node => node.nodeType !== 3))) c.fail('composer_unavailable');
+      const line = emptyBreak ? '' : lexical ? span.textContent : children.map(node => node.textContent).join('');
       bytes += new TextEncoder().encode(line).length + (lines.length ? 1 : 0);
       if (bytes > 180_200) c.fail('composer_unavailable');
       lines.push(line);
@@ -511,28 +520,40 @@ try {
     || state.prepared.send !== form.send) c.fail('composer_unavailable');
   if (input.action === 'insert') {
     if (!fresh() || state.inserted || document.activeElement !== form.editor) c.fail('composer_not_empty');
-    state.inserted = { prompt, marker }; // Reserve before the only insertion attempt.
+    const outboundFingerprint = input.savedSubmissionFingerprint;
+    if (typeof outboundFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(outboundFingerprint)) c.fail('prompt_not_inserted');
+    state.inserted = { prompt, marker, outboundFingerprint, dispatched: false, verified: false }; // Claim before the only attempt.
     const selection = window.getSelection(), range = document.createRange();
     range.selectNodeContents(form.editor); selection.removeAllRanges(); selection.addRange(range);
-    // insertText runs WebKit's typing substitutions (including smart quotes).
-    // Insert one escaped literal fragment instead, retaining the browser input
-    // event. There is no retry or corrective insertion if readback disagrees.
-    const entities = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '\r': '&#13;' };
-    const html = prompt.split('\n').map(line => '<p>'
-      + (line === '' ? '<br>' : line.replace(/[&<>"'\r]/g, character => entities[character])) + '</p>').join('');
-    if (!document.execCommand('insertHTML', false, html)) { state.terminal = true; c.fail('insert_command_rejected'); }
+    // Kimi's live Lexical handler preserves literal insertText but commits it
+    // later; insertHTML flattens its newlines. A dispatch receipt is not an
+    // inserted-prompt proof. Native may only observe sendReady after this call.
+    if (!document.execCommand('insertText', false, prompt)) { state.terminal = true; c.fail('insert_command_rejected'); }
+    state.inserted.dispatched = true;
     guard(); modelEvidence();
     const after = composer();
-    if (after.editor !== form.editor || after.text !== prompt) { state.terminal = true; c.fail('prompt_not_inserted'); }
-    return { ...initial.output, inserted: true };
+    if (after.editor !== form.editor || after.scope !== form.scope || after.send !== form.send
+      || after.text !== prompt && !after.empty) { state.terminal = true; c.fail('prompt_not_inserted'); }
+    state.inserted.verified = after.text === prompt;
+    return { ...initial.output, inserted: state.inserted.verified, insertionDispatched: true,
+      insertionPending: !state.inserted.verified, pending: !state.inserted.verified,
+      insertionAcknowledgement: { ownerToken: input.ownerToken, documentGeneration: input.documentGeneration,
+        sequence: 1, outboundFingerprint } };
   }
   if (state.submitted || state.inserted?.prompt !== prompt || state.inserted.marker !== marker
-    || form.text !== prompt || initial.t.users.length !== 0) c.fail('prompt_not_inserted');
+    || !state.inserted.dispatched || initial.t.users.length !== 0) c.fail('prompt_not_inserted');
+  if (form.text !== prompt) {
+    if (input.action === 'sendReady' && form.empty && !state.inserted.verified)
+      return { ...initial.output, inserted: false, insertionPending: true, sendReady: false, pending: true };
+    state.terminal = true; c.fail('prompt_not_inserted');
+  }
+  state.inserted.verified = true;
   const ready = form.sendEnabled && c.hit(form.send);
-  if (input.action === 'sendReady') return { ...initial.output, sendReady: ready };
+  if (input.action === 'sendReady') return { ...initial.output, inserted: true, insertionPending: false, sendReady: ready };
   if (!ready) c.fail('send_unavailable');
   const outboundFingerprint = input.savedSubmissionFingerprint;
-  if (typeof outboundFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(outboundFingerprint))
+  if (typeof outboundFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(outboundFingerprint)
+    || outboundFingerprint !== state.inserted.outboundFingerprint)
     c.fail('prompt_not_inserted');
   state.submitted = true; form.send.click();
   // This proves only that the single exact-draft click returned. Native pins

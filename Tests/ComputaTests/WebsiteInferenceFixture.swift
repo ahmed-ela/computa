@@ -8,8 +8,12 @@ import XCTest
 let websiteInferenceFixtureGeneration = UUID(uuidString: "10913cbc-442d-4d04-b1a5-b372df40c52c")!
 let syntheticChatGPTChoice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/medium", label: "Medium")
 let syntheticChatGPTModelID = syntheticChatGPTChoice.modelID
+// Kimi's current plain-chat pilot admits one observed choice. Fixtures must not
+// invent a second choice or use its intentionally unsupported website default.
+let syntheticKimiChoice = WebsiteModelChoice(provider: "kimi", key: "k28-instant", label: "Instant")
 
 func syntheticWebsiteModelID(_ provider: String) -> String {
+    if provider == "kimi" { return syntheticKimiChoice.modelID }
     if provider == "groq" {
         return WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
     }
@@ -17,6 +21,7 @@ func syntheticWebsiteModelID(_ provider: String) -> String {
 }
 
 func syntheticWebsiteChoice(provider: String, key: String, label: String) -> WebsiteModelChoice {
+    if provider == "kimi" { return syntheticKimiChoice }
     if provider == "groq" {
         return WebsiteModelChoice(provider: provider,
             key: key.contains("new") ? "openai/gpt-oss-20b" : "openai/gpt-oss-120b",

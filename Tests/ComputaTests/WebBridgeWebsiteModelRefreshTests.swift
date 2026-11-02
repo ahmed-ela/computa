@@ -8,8 +8,7 @@ final class WebBridgeWebsiteModelRefreshTests: XCTestCase {
         var calls: [String] = []
         let state = AppState(tasks: [], preferences: isolatedTestPreferences(), websiteModelDiscovery: { provider in
             calls.append(provider)
-            return [provider == "chatgpt" ? syntheticChatGPTChoice
-                : WebsiteModelChoice(provider: provider, key: "fixture", label: "Fixture")]
+            return [syntheticWebsiteChoice(provider: provider, key: "fixture", label: "Fixture")]
         })
         let bridge = WebBridge(state: state)
         for provider in WebsiteModelCatalog.providers {

@@ -215,7 +215,11 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
             browser.recordHumanVerificationRequired(provider: "gemini")
             let checkpoint = browser.savedHumanVerificationCheckpointIDs["gemini"]
             let preferences = isolatedTestPreferences()
-            if !beforeProbe { WebsiteModelCatalog.save(WebsiteModelCatalog.providers.flatMap(Self.choices), to: preferences) }
+            // Isolate revocation from unrelated missing-provider demand. The
+            // before-probe case deliberately holds selected ChatGPT's refresh;
+            // the during-probe case has only the human Gemini recovery intent.
+            WebsiteModelCatalog.save(WebsiteModelCatalog.providers.flatMap(Self.choices), to: preferences)
+            if !beforeProbe { preferences.set(LocalModelCatalog.defaultModelID, forKey: "LocalCodex.defaultModelID") }
             let runtime = EmbeddedConfigurationRuntime(browser: browser)
             var held: CheckedContinuation<[WebsiteModelChoice], Error>?
             let state = AppState(tasks: [], runtime: runtime, preferences: preferences, browserSession: browser,
@@ -227,6 +231,8 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
                 })
             var observed: [String] = []
             state.setWebsiteModelRefreshObserverForTesting { provider, _ in observed.append(provider) }
+            XCTAssertEqual(state.websiteModelChoices.count, WebsiteModelCatalog.providers.count)
+            XCTAssertEqual(WebsiteModelCatalog.selection(for: state.defaultModel)?.provider, beforeProbe ? "chatgpt" : nil)
             state.refreshWebsiteModelsIfNeeded()
             if beforeProbe { try await waitUntil { held != nil } }
             let (id, _) = try await healthyHumanPage(browser)
@@ -249,6 +255,8 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         defer { browser.shutdown() }
         browser.recordHumanVerificationRequired(provider: "gemini")
         let preferences = isolatedTestPreferences()
+        // This fixture exercises human recovery, not selected-provider startup.
+        preferences.set(LocalModelCatalog.defaultModelID, forKey: "LocalCodex.defaultModelID")
         WebsiteModelCatalog.save(WebsiteModelCatalog.providers.flatMap(Self.choices), to: preferences)
         let runtime = EmbeddedConfigurationRuntime(browser: browser)
         var probes = 0
@@ -290,7 +298,7 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         state.refreshWebsiteModelsIfNeeded()
         try await waitUntil { held != nil }
         let explicit = Task { await state.refreshWebsiteModels() }
-        try await waitUntil { state.websiteModelRefreshIntentsForTesting.count == 3 }
+        try await waitUntil { state.websiteModelRefreshIntentsForTesting.count == WebsiteModelCatalog.providers.count }
         held?.resume(returning: Self.choices("chatgpt")); held = nil
         await explicit.value
         XCTAssertEqual(observed.first?.0, "chatgpt"); XCTAssertEqual(observed.first?.1, false)
@@ -314,6 +322,7 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         defer { browser.shutdown() }
         browser.recordHumanVerificationRequired(provider: "gemini")
         let preferences = isolatedTestPreferences()
+        preferences.set(LocalModelCatalog.defaultModelID, forKey: "LocalCodex.defaultModelID")
         WebsiteModelCatalog.save(WebsiteModelCatalog.providers.flatMap(Self.choices), to: preferences)
         let runtime = EmbeddedConfigurationRuntime(browser: browser)
         var held: CheckedContinuation<[WebsiteModelChoice], Error>?
@@ -367,6 +376,7 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
             defer { browser.shutdown() }
             browser.recordHumanVerificationRequired(provider: "gemini")
             let preferences = isolatedTestPreferences()
+            preferences.set(LocalModelCatalog.defaultModelID, forKey: "LocalCodex.defaultModelID")
             WebsiteModelCatalog.save(WebsiteModelCatalog.providers.flatMap(Self.choices), to: preferences)
             let runtime = EmbeddedConfigurationRuntime(browser: browser)
             var held: CheckedContinuation<[WebsiteModelChoice], Error>?
@@ -416,6 +426,7 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         browser.recordHumanVerificationRequired(provider: "gemini")
         let checkpoint = browser.savedHumanVerificationCheckpointIDs["gemini"]
         let preferences = isolatedTestPreferences()
+        preferences.set(LocalModelCatalog.defaultModelID, forKey: "LocalCodex.defaultModelID")
         WebsiteModelCatalog.save(WebsiteModelCatalog.providers.flatMap(Self.choices), to: preferences)
         let runtime = EmbeddedConfigurationRuntime(browser: browser)
         var held: CheckedContinuation<[WebsiteModelChoice], Error>?
@@ -454,7 +465,8 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
             defer { browser.shutdown() }
             browser.recordHumanVerificationRequired(provider: "gemini")
             let preferences = isolatedTestPreferences()
-            if !pending { WebsiteModelCatalog.save(WebsiteModelCatalog.providers.flatMap(Self.choices), to: preferences) }
+            WebsiteModelCatalog.save(WebsiteModelCatalog.providers.flatMap(Self.choices), to: preferences)
+            if !pending { preferences.set(LocalModelCatalog.defaultModelID, forKey: "LocalCodex.defaultModelID") }
             var held: CheckedContinuation<[WebsiteModelChoice], Error>?
             var geminiReads = 0
             let state = AppState(tasks: [], preferences: preferences, browserSession: browser,
@@ -465,6 +477,8 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
                     }
                     return Self.choices(provider)
                 })
+            XCTAssertEqual(state.websiteModelChoices.count, WebsiteModelCatalog.providers.count)
+            XCTAssertEqual(WebsiteModelCatalog.selection(for: state.defaultModel)?.provider, pending ? "chatgpt" : nil)
             state.refreshWebsiteModelsIfNeeded()
             if pending { try await waitUntil { held != nil } }
             let (_, view) = try await healthyHumanPage(browser)
@@ -572,6 +586,7 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
 
     private static func choices(_ provider: String) -> [WebsiteModelChoice] {
         provider == "chatgpt" ? [.init(provider: provider, key: "chat/latest/instant", label: "Instant")]
+            : provider == "kimi" ? [syntheticKimiChoice]
             : [.init(provider: provider, key: "fixture-choice", label: "Fixture choice")]
     }
 

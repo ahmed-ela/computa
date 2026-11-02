@@ -42,11 +42,13 @@ function kimiFixture() {
   const empty = new Node('P'); empty.append(new Node('BR')); editor.append(empty); scope.append(editor);
   const draftText = () => editor.children.map(paragraph => paragraph.children.length === 1
     && paragraph.children[0].tagName === 'BR' ? '' : paragraph.textContent).join('\n');
-  // Native probe: four logical paragraphs produced eight rendered LFs. Model
-  // input follows paragraph semantics, independently of innerText spacing.
-  Object.defineProperty(editor, 'innerText', { get: () => editor.children.length
-    ? editor.children.map(paragraph => paragraph.children.length === 1 && paragraph.children[0].tagName === 'BR'
-      ? '' : paragraph.textContent).join('\n\n') + '\n\n' : '' });
+  // The live Lexical span adds one rendered trailing LF. The separate synthetic
+  // WK paragraph fixture adds visual block spacing. Neither changes raw text.
+  Object.defineProperty(editor, 'innerText', { get: () => editor.children.length === 1
+    && editor.children[0].children[0]?.getAttribute('data-lexical-text') === 'true'
+      ? editor.children[0].textContent + '\n' : editor.children.length
+        ? editor.children.map(paragraph => paragraph.children.length === 1 && paragraph.children[0].tagName === 'BR'
+          ? '' : paragraph.textContent).join('\n\n') + '\n\n' : '' });
   body.append(trigger, menu, scope);
   const world: Record<string, any> = {}, location = { origin: 'https://www.kimi.ai' };
   const window: any = { innerWidth: 1000, innerHeight: 800 }; window.top = window;
@@ -99,6 +101,11 @@ function kimiFixture() {
         editor.append(paragraph);
       }
     },
+    setLexicalDraft: (text: string) => {
+      const paragraph = new Node('P', { dir: 'ltr' });
+      paragraph.append(new Node('SPAN', { 'data-lexical-text': 'true' }, text));
+      editor.replaceChildren(paragraph);
+    },
     mutationCount: () => body.descendants().reduce((sum, node) => sum + node.clicks + node.events.length, 0),
   };
 }
@@ -112,7 +119,8 @@ export const prompt = 'Exact synthetic café\nA second line, "quoted" and \\ lit
 export const submissionFingerprint = createHash('sha256').update(prompt.replace(/\r\n?/g, '\n').normalize('NFC').trim()).digest('hex');
 
 export function adapterFixture(options: { delayedUser?: boolean; provisional?: boolean; streaming?: boolean;
-  insertionFails?: boolean; submitThrows?: boolean; confirmationThrows?: boolean; retainHistoryLink?: boolean; outbound?: string } = {}) {
+  insertionFails?: boolean; insertionThrows?: boolean; delayedInsertion?: boolean; paragraphInsertion?: boolean;
+  submitThrows?: boolean; confirmationThrows?: boolean; retainHistoryLink?: boolean; outbound?: string } = {}) {
   const f = kimiFixture(), { Node, document, body, window } = f;
   const fixturePrompt = options.outbound ?? prompt;
   const fixtureFingerprint = createHash('sha256').update(fixturePrompt.replace(/\r\n?/g, '\n').normalize('NFC').trim()).digest('hex');
@@ -138,22 +146,19 @@ export function adapterFixture(options: { delayedUser?: boolean; provisional?: b
   f.editor.onFocus = () => { document.activeElement = f.editor; };
   window.getSelection = () => ({ removeAllRanges() {}, addRange() {} });
   document.createRange = () => ({ selectNodeContents(node: any) { if (node !== f.editor) throw new Error('Unexpected selection'); } });
-  let insertions = 0, sends = 0, confirms = 0, submittedText: string | null = null, insertionHTML: string | null = null;
-  document.execCommand = (command: string, _: boolean, html: string) => {
-    if (command !== 'insertHTML' || document.activeElement !== f.editor) throw new Error('Unexpected insertion');
-    insertionHTML = html;
-    insertions++; if (options.insertionFails) return false;
-    // Inert parser accepts only the intended paragraph/text fragment. Decoding
-    // is one pass, matching HTML entities rather than recursively unescaping.
-    const paragraphs = [...html.matchAll(/<p>([\s\S]*?)<\/p>/g)];
-    if (!paragraphs.length || paragraphs.map(match => match[0]).join('') !== html) throw new Error('Unexpected fragment shape');
-    const values: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'", '#13': '\r' };
-    const lines = paragraphs.map(([, content]) => {
-      if (content === '<br>') return '';
-      if (/[<>]/.test(content)) throw new Error('Unexpected fragment markup');
-      return content.replace(/&(amp|lt|gt|quot|#39|#13);/g, (_, entity) => values[entity]);
-    });
-    f.setDraft(lines.join('\n')); send.setAttribute('class', 'send-button-container'); return true;
+  let insertions = 0, sends = 0, confirms = 0, submittedText: string | null = null, insertionText: string | null = null;
+  const settleInsertion = (text = fixturePrompt) => {
+    if (!insertions) throw new Error('No synthetic insertion has been dispatched');
+    if (options.paragraphInsertion) f.setDraft(text); else f.setLexicalDraft(text);
+    send.setAttribute('class', 'send-button-container');
+  };
+  document.execCommand = (command: string, _: boolean, text: string) => {
+    if (command !== 'insertText' || document.activeElement !== f.editor) throw new Error('Unexpected insertion');
+    insertionText = text;
+    insertions++; if (options.insertionThrows) throw new Error('Unknown insertion acknowledgement');
+    if (options.insertionFails) return false;
+    if (!options.delayedInsertion) settleInsertion(text);
+    return true;
   };
   let messages: ReturnType<typeof f.installTranscript> | undefined;
   let response: ReturnType<typeof f.installResponseMarkup> | undefined;
@@ -225,7 +230,7 @@ export function adapterFixture(options: { delayedUser?: boolean; provisional?: b
       expectedUserCounts: [0, 1], expectedFirstUserMarker: marker, expectedFirstUserFingerprint: fingerprint,
       expectedConversation: conversation, allowFirstUserBinding: action === 'inspect' && !fingerprint,
       expectedModelChoice: instant, ...(action === 'selectModel' ? { modelChoice: instant } : {}), prompt: fixturePrompt, ...overrides,
-      ...(action === 'submit' && !Object.hasOwn(overrides, 'savedSubmissionFingerprint') ? { savedSubmissionFingerprint: fixtureFingerprint } : {}),
+      ...(['insert', 'submit'].includes(action) && !Object.hasOwn(overrides, 'savedSubmissionFingerprint') ? { savedSubmissionFingerprint: fixtureFingerprint } : {}),
     }, document, window, f.location, f.world,
     (node: any) => ({ visibility: node.values.visibility || 'visible', display: node.closest('[hidden]') ? 'none' : 'block' }),
     class { observe() {} disconnect() {} },
@@ -251,11 +256,11 @@ export function adapterFixture(options: { delayedUser?: boolean; provisional?: b
   };
   const operation = () => ({ id: '547dbbf5-8955-4b65-9b18-5a6e16c3cd7d', documentGeneration: generation,
     sequence: 1, firstUserFingerprint: fingerprint, conversationURL: canonical });
-  return { ...f, run, select, submit, operation, send, sendIcon, remove, appendUser, finishResponse,
+  return { ...f, run, select, submit, operation, send, sendIcon, remove, appendUser, finishResponse, settleInsertion,
     onDigest: (hook: () => void) => { digestHook = hook; }, occlude: (node: any) => { occluded = node; },
     counts: () => ({ insertions, sends, confirms }),
     get messages() { return messages!; }, get response() { return response!; }, get box() { return box; },
-    get insertionHTML() { return insertionHTML; },
+    get insertionText() { return insertionText; },
     get part() { return part; }, get thoughtPart() { return thoughtPart; }, get rail() { return rail; },
     get header() { return header; }, get deleteRow() { return deleteRow; }, get deletionMenu() { return deletionMenu; },
     get confirmation() { return confirmation!; }, get fingerprint() { return fingerprint; } };

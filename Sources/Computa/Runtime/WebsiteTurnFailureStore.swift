@@ -35,9 +35,11 @@ struct WebsiteTurnFailureStore: Sendable {
                   let webProvider = EmbeddedWebModelTransport.Provider(rawValue: provider),
                   let supplied = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
                   let error = supplied["error"] as? [String: Any], let code = error["code"] as? String else { return nil }
-            // These fixed local errors have no retry metadata. Only their
-            // exact generated envelopes can pass the canonical equality below.
-            if code != "browser_model_error" && code != "unsupported_website_response" && code != "website_turn_limit" {
+            // Legacy fixed errors have no retry metadata. Kimi's distinct
+            // unsupported-response envelope does, and must retain a real Bool.
+            // Exact generated envelopes still pass canonical equality below.
+            if code != "browser_model_error" && code != "website_turn_limit"
+                && (code != "unsupported_website_response" || provider == "kimi") {
                 guard let retryable = error["retryable"] as? NSNumber, CFGetTypeID(retryable) == CFBooleanGetTypeID(),
                       retryable.boolValue == false else { return nil }
             }
@@ -50,8 +52,13 @@ struct WebsiteTurnFailureStore: Sendable {
                 nativeError = reason
             case "browser_model_error": nativeError = EmbeddedWebModelTransport.Failure.pageUnavailable
             case "unsupported_website_response":
-                guard provider == "chatgpt" else { return nil }
-                nativeError = WebModelResponseCodec.Failure.unsupportedWebsiteResponse
+                if provider == "chatgpt" {
+                    nativeError = WebModelResponseCodec.Failure.unsupportedWebsiteResponse
+                } else if provider == "kimi" {
+                    // This fixed adapter's unreadable literal source is a
+                    // terminal turn diagnosis, not arbitrary provider prose.
+                    nativeError = EmbeddedWebModelTransport.Failure.responseFormatUnavailable
+                } else { return nil }
             case "website_turn_limit": nativeError = WebModelServer.Failure.turnLimit
             case "malformed_website_reply":
                 guard let rawReason = error["reason"] as? String,

@@ -1380,6 +1380,8 @@ final class WebModelServerTests: XCTestCase {
             for newProvider in WebsiteModelCatalog.providers {
                 let old = syntheticWebsiteChoice(provider: oldProvider, key: "fixture-old", label: "Fixture Old")
                 let new = syntheticWebsiteChoice(provider: newProvider, key: "fixture-new", label: "Fixture New")
+                // A one-choice Kimi pilot still exercises fresh-inference
+                // retirement. Other pairs exercise choice/provider changes.
                 let transport = ChoiceWebModelTransport()
                 let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
                 await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
@@ -1562,7 +1564,11 @@ final class WebModelServerTests: XCTestCase {
                 let prompts = await transport.sentPrompts()
                 let actual = try canonicalRequest(in: XCTUnwrap(prompts.last))
                 var expected = object
-                expected["client_metadata"] = ["x-codex-turn-metadata": try websiteInferenceFixtureMetadata(taskID: provider, turnID: "composition-\(iteration)")]
+                // Website presentation preserves the complete task/history,
+                // while native API transport and correlation stay local.
+                expected.removeValue(forKey: "stream")
+                XCTAssertNil(actual["stream"])
+                XCTAssertNil(actual["client_metadata"])
                 XCTAssertEqual(actual as NSDictionary, expected as NSDictionary)
             }
             let operations = await transport.operations()
@@ -2334,7 +2340,7 @@ final class WebModelServerTests: XCTestCase {
                     XCTFail("A malformed embedded reply must not return final success or tool events: \(stream.count) bytes")
                 } catch {
                     guard case let .malformedReply(diagnostic) = error as? WebModelServer.Failure else {
-                        return XCTFail("Expected a finite malformed-reply diagnostic")
+                        return XCTFail("Expected a finite malformed-reply diagnostic for \(provider), received \(error.localizedDescription)")
                     }
                     XCTAssertEqual(diagnostic.reason, .invalidJSON)
                     XCTAssertEqual(diagnostic.utf8Bytes, response.utf8.count)
@@ -2394,11 +2400,14 @@ final class WebModelServerTests: XCTestCase {
             for (prompt, raw) in zip(prompts, [first, next]) {
                 let actual = try canonicalRequest(in: prompt)
                 var expected = try XCTUnwrap(JSONSerialization.jsonObject(with: raw) as? [String: Any])
-                expected["client_metadata"] = ["x-codex-turn-metadata": try websiteInferenceFixtureMetadata(taskID: provider)]
+                expected.removeValue(forKey: "stream")
+                XCTAssertNil(actual["stream"])
+                XCTAssertNil(actual["client_metadata"])
                 XCTAssertEqual(actual as NSDictionary, expected as NSDictionary)
                 XCTAssertTrue(prompt.contains("Local command execution is offered as: functions.exec_command."))
                 XCTAssertTrue(prompt.contains("Exact currently offered local function names: functions.exec_command, functions.write_stdin\nExact currently offered custom names: (none)"))
-                XCTAssertTrue(prompt.hasSuffix("Exact-OK message:\n{\"type\":\"message\",\"text\":\"OK\"}\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
+                let literalBoundary = provider == "claude" ? "\n" + ComputaAgentInstructions.literalFencedResponseBoundary : ""
+                XCTAssertTrue(prompt.hasSuffix("Exact-OK message:\n{\"type\":\"message\",\"text\":\"OK\"}\(literalBoundary)\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
             }
             let providers = await transport.startedProviders()
             XCTAssertEqual(providers, provider == "gemini" ? [provider] : [provider, provider])
@@ -2458,6 +2467,7 @@ final class WebModelServerTests: XCTestCase {
             let journal = try turnJournal(root: root, task: provider)
             XCTAssertFalse(journal.isEmpty)
             let expectedMode = provider == "groq" ? "explicit_clear_per_inference"
+                : provider == "kimi" ? "saved_conversation_delete_per_inference"
                 : provider == "gemini" ? "temporary_conversation_per_turn" : "temporary_conversation_per_inference"
             for record in journal {
                 XCTAssertEqual(record["transactionMode"] as? String, expectedMode)
@@ -3289,12 +3299,17 @@ private actor FixtureWebModelTransport: WebModelTransport {
             default: throw WebModelServer.Failure.invalidRequest
             }
         }
-        // Fixed synthetic menu, independent of the requested model. Concrete
-        // Groq fixtures now exercise actual tokenizer/model routing; this does
-        // not replace contradictory evidence in ChoiceWebModelTransport.
-        let groqFixtureChoice = currentProvider == "groq"
-            ? WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B") : nil
-        if let choice = fixedChoice ?? groqFixtureChoice, ["ready", "running", "complete"].contains(response["state"] as? String ?? "") {
+        // Fixed synthetic menus, independent of the requested model. Concrete
+        // Groq and Kimi requests still require their exact observed choice;
+        // never reflect the request or repair contradictory evidence from
+        // ChoiceWebModelTransport.
+        let providerFixtureChoice: WebsiteModelChoice?
+        switch currentProvider {
+        case "groq": providerFixtureChoice = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B")
+        case "kimi": providerFixtureChoice = syntheticKimiChoice
+        default: providerFixtureChoice = nil
+        }
+        if let choice = fixedChoice ?? providerFixtureChoice, ["ready", "running", "complete"].contains(response["state"] as? String ?? "") {
             response["modelEvidence"] = ["selected": ["key": choice.key, "label": choice.label],
                 "source": "selected_model_indicator", "verification": "website_selection"]
         }

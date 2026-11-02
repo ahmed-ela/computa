@@ -9,7 +9,7 @@ struct WebsiteSessionCleanupReceipt: Codable, Equatable, Sendable {
         case shuttingDown = "shutting_down", runtimeChanged = "runtime_changed"
         case cleanupUnverified = "cleanup_unverified", unsupportedRuntime = "unsupported_runtime"
     }
-    enum Provider: String, Codable, Sendable { case chatgpt, gemini, claude, groq }
+    enum Provider: String, Codable, Sendable { case chatgpt, gemini, claude, groq, kimi }
     enum Route: String, Codable, Sendable {
         case embedded
         // Decode existing saved receipts without retaining a Chrome execution route.

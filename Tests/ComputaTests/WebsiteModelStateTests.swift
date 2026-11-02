@@ -56,7 +56,7 @@ final class WebsiteModelStateTests: XCTestCase {
         var calls: [String] = []
         let state = AppState(tasks: [busy], preferences: preferences, websiteModelDiscovery: { provider in
             calls.append(provider)
-            return provider == "chatgpt" ? [latest, sol] : [WebsiteModelChoice(provider: provider, key: "fixture", label: "Fixture")]
+            return provider == "chatgpt" ? [latest, sol] : [modelStateChoice(provider: provider, key: "fixture", label: "Fixture")]
         })
         await state.refreshWebsiteModels()
         XCTAssertTrue(calls.isEmpty, "Busy manual refresh must not create a provider probe")
@@ -466,18 +466,25 @@ final class WebsiteModelStateTests: XCTestCase {
     func testDiscoveryPublishesExactChoicesToBothSelectorsAndPersistsThem() async throws {
         let preferences = isolatedTestPreferences()
         let task = AgentTask(id: "fixture-task", title: "Fixture", summary: "", status: .draft, workspace: "/tmp", model: "browser/chatgpt")
-        let state = AppState(tasks: [task], preferences: preferences, websiteModelDiscovery: { provider in
-            provider == "chatgpt"
+        let offered = Dictionary(uniqueKeysWithValues: WebsiteModelCatalog.providers.map { provider in
+            let choices = provider == "chatgpt"
                 ? [WebsiteModelChoice(provider: provider, key: "chat/latest/medium", label: "Medium"),
                    WebsiteModelChoice(provider: provider, key: "chat/latest/pro", label: "GPT-6 Pro")]
+                : provider == "kimi" ? [syntheticKimiChoice]
                 : [WebsiteModelChoice(provider: provider, key: "fixture-fast", label: "Fixture Fast"),
                    WebsiteModelChoice(provider: provider, key: "fixture-pro", label: "Fixture Pro")]
+            return (provider, choices)
+        })
+        let state = AppState(tasks: [task], preferences: preferences, websiteModelDiscovery: { provider in
+            offered[provider] ?? []
         })
         await state.refreshWebsiteModels()
         let snapshot = WebUISnapshot(state: state)
         XCTAssertFalse(snapshot.websiteModelsRefreshing)
         XCTAssertNil(snapshot.websiteModelsError)
-        XCTAssertEqual(state.websiteModelChoices.count, WebsiteModelCatalog.providers.count * 2)
+        XCTAssertEqual(state.websiteModelChoices.count, offered.values.reduce(0) { $0 + $1.count })
+        XCTAssertEqual(state.websiteModelChoices.filter { $0.provider == "kimi" }, [syntheticKimiChoice],
+                       "A one-choice pilot must not invent a second family to satisfy a generic selector fixture")
         for choice in state.websiteModelChoices {
             XCTAssertTrue(snapshot.modelOptions.contains { $0.id == choice.modelID && $0.label.contains(choice.label) && $0.available == true })
         }
@@ -499,7 +506,7 @@ final class WebsiteModelStateTests: XCTestCase {
         preferences.set(old.modelID, forKey: "LocalCodex.defaultModelID")
         let task = AgentTask(id: "saved-task", title: "Saved", summary: "", status: .completed, workspace: "/tmp", model: old.modelID)
         let state = AppState(tasks: [task], preferences: preferences, websiteModelDiscovery: { provider in
-            [WebsiteModelChoice(provider: provider, key: "fixture-new", label: "Fixture New")]
+            [modelStateChoice(provider: provider, key: "fixture-new", label: "Fixture New")]
         })
         await state.refreshWebsiteModels()
         XCTAssertEqual(state.defaultModel, old.modelID)
@@ -544,7 +551,7 @@ final class WebsiteModelStateTests: XCTestCase {
         let state = AppState(tasks: [], preferences: preferences, websiteModelDiscovery: { provider in
             if provider == "chatgpt" { return [old, old] }
             if provider == "gemini" { throw WebsiteModelCatalog.Failure.invalidChoices }
-            return [WebsiteModelChoice(provider: provider, key: "fixture-new", label: "Fixture New")]
+            return [modelStateChoice(provider: provider, key: "fixture-new", label: "Fixture New")]
         })
         await state.refreshWebsiteModels()
         XCTAssertEqual(state.websiteModelChoices.filter { $0.provider == "chatgpt" }, [old])
@@ -814,5 +821,6 @@ private final class WebsiteDiscoveryLedger {
 
 private func modelStateChoice(provider: String, key: String, label: String) -> WebsiteModelChoice {
     provider == "chatgpt" ? WebsiteModelChoice(provider: provider, key: "chat/latest/medium", label: "Medium")
+        : provider == "kimi" ? syntheticKimiChoice
         : WebsiteModelChoice(provider: provider, key: key, label: label)
 }
