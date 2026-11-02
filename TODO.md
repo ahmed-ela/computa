@@ -40,10 +40,11 @@ Existing Chrome and native desktop tooling retain their separate behavior.
 
 - [ ] Add and qualify the three signed-in websites, separately from Alibaba's
   existing Qwen API integration. Kimi Instant, Qwen3.7-Plus/Qwen3.8-Max and
-  DeepSeek Chat/DeepThink are enabled for controlled pilots. Installed390
-  completes Kimi discovery but fails task hover targeting; Qwen fails its
-  menu-close check and DeepSeek rejects initial message structure.
-  Candidate391 has focused fixes/diagnostics;
+  DeepSeek Chat/DeepThink are enabled for controlled pilots. Installed391
+  completes Kimi/Qwen discovery. Kimi still fails task picker binding;
+  Qwen rejects a route after submit and DeepSeek rejects an empty decoration
+  beside the exact first message. Candidate392 addresses the observed layout
+  and claimed option-close transitions and improves Qwen route/error diagnostics;
   live native qualification and durable cleanup remain pending.
   Discover concrete models from each live picker, verify the exact submitted
   message and final response, and delete only the owned test conversation.
@@ -53,6 +54,11 @@ Existing Chrome and native desktop tooling retain their separate behavior.
   inspection remains pending. These direct website observations are not native
   harness/tool-use passes.
   See the [implementation status](docs/WEBSITE-PROVIDER-EXPANSION.md).
+
+- [ ] Audit the remaining terminal website HTTP403/409 mappings against the
+  bundled runtime's outer retry policy. Distinguish repeated HTTP attempts from
+  browser action replay; existing admission and ownership gates are separate.
+  Candidate392 corrects the observed unexpected-page case only.
 
 ## Claude website-model qualification
 

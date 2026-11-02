@@ -8,6 +8,68 @@ import XCTest
 final class QwenWebModelTransportTests: XCTestCase {
     private let world = WKContentWorld.world(name: "computa-chatgpt-model-v1")
 
+    func testUnexpectedRouteDiagnosticSeparatesOriginPathAndQueryWithoutChangingAdmission() throws {
+        let canonical = "https://chat.qwen.ai/c/11111111-abcd-4333-8444-555555555555"
+        let cases: [(String, Bool, [String])] = [
+            ("https://chat.qwen.ai/", true, ["scheme=https", "host=expected", "path=root", "query=absent"]),
+            (canonical, true, ["host=expected", "path=conversation_uuid", "queryKey=absent", "fragment=false"]),
+            ("https://private-host.example/c/11111111-abcd-4333-8444-555555555555", false, ["host=other", "path=conversation_uuid"]),
+            ("http://chat.qwen.ai/", false, ["scheme=http", "host=expected", "path=root"]),
+            ("https://chat.qwen.ai/c/private-conversation-canary", false, ["path=conversation_other"]),
+            ("https://chat.qwen.ai/private-path-canary", false, ["path=other"]),
+            (canonical.uppercased().replacingOccurrences(of: "HTTPS://CHAT.QWEN.AI/C/", with: "https://chat.qwen.ai/c/"),
+                false, ["path=conversation_other", "uuid=upper", "pathEncoded=false", "trailingSlash=false"]),
+            (canonical.replacingOccurrences(of: "abcd", with: "AbCd"), false, ["uuid=mixed"]),
+            (canonical + "/", false, ["path=conversation_other", "uuid=lower", "trailingSlash=true"]),
+            (canonical.replacingOccurrences(of: "/c/1", with: "/c/%31"), false, ["pathEncoded=true", "uuid=lower"]),
+            (canonical + "?model=PRIVATE_QUERY_VALUE", false, ["path=conversation_uuid", "query=present", "queryKey=model"]),
+            (canonical + "?", false, ["query=empty", "queryKey=empty"]),
+            (canonical + "#PRIVATE_FRAGMENT", false, ["fragment=true"]),
+            ("https://chat.qwen.ai:443/", false, ["port=https_default"]),
+            ("https://private-user:private-password@chat.qwen.ai/", false, ["userInfo=true"]),
+        ]
+        for (raw, admitted, fragments) in cases {
+            let url = try XCTUnwrap(URL(string: raw))
+            XCTAssertEqual(EmbeddedWebModelTransport.Provider.qwen.accepts(raw), admitted)
+            let result = EmbeddedWebModelTransport.unexpectedQwenRouteDiagnostic(url)
+            for fragment in fragments { XCTAssertTrue(result.split(separator: " ").contains(Substring(fragment)), fragment) }
+            XCTAssertEqual(EmbeddedWebModelTransport.Provider.qwen.accepts(raw), admitted,
+                "Diagnostic classification never grants route authority")
+            XCTAssertLessThanOrEqual(result.utf8.count, 256)
+            for forbidden in ["PRIVATE_", "private-", "11111111", "http://", "https://", "chat.qwen.ai"] {
+                XCTAssertFalse(result.contains(forbidden))
+            }
+        }
+    }
+
+    func testUnexpectedRouteDiagnosticNeverPublishesUnknownKeysOrValues() throws {
+        let queries = [
+            "PRIVATE_KEY=PRIVATE_VALUE": "other",
+            "%6dodel=PRIVATE_VALUE": "model",
+            "chat_id=PRIVATE_VALUE": "chat_id",
+            "model=PRIVATE_VALUE&PRIVATE_KEY=PRIVATE_SECOND_VALUE": "multiple",
+            String(repeating: "X", count: 4096) + "=PRIVATE_VALUE": "other",
+        ]
+        let allowedKeys = Set(["absent", "empty", "model", "model_id", "chat_id", "conversation_id", "chat_enter_method", "multiple", "other"])
+        for (query, expectedKey) in queries {
+            let url = try XCTUnwrap(URL(string: "https://chat.qwen.ai/?" + query))
+            let result = EmbeddedWebModelTransport.unexpectedQwenRouteDiagnostic(url)
+            let fields = Dictionary(uniqueKeysWithValues: result.split(separator: " ").map { field in
+                let pair = field.split(separator: "=", maxSplits: 1)
+                return (String(pair[0]), String(pair[1]))
+            })
+            XCTAssertEqual(Set(fields.keys), ["scheme", "host", "port", "userInfo", "path", "pathEncoded", "trailingSlash", "uuid", "query", "queryKey", "fragment"])
+            XCTAssertEqual(fields["queryKey"], expectedKey)
+            XCTAssertTrue(allowedKeys.contains(try XCTUnwrap(fields["queryKey"])))
+            XCTAssertFalse(result.contains("PRIVATE"))
+            XCTAssertFalse(result.contains(String(repeating: "X", count: 128)))
+            XCTAssertLessThanOrEqual(result.utf8.count, 256)
+            XCTAssertFalse(EmbeddedWebModelTransport.Provider.qwen.accepts(url.absoluteString))
+        }
+        XCTAssertEqual(EmbeddedWebModelTransport.unexpectedQwenRouteDiagnostic(nil),
+            "scheme=absent host=absent port=absent userInfo=false path=absent pathEncoded=false trailingSlash=false uuid=absent query=absent queryKey=absent fragment=false")
+    }
+
     func testServerReleasesEachObservedModelStreamOnlyAfterDurableOwnedDeletion() async throws {
         for label in ["Qwen3.7-Plus", "Qwen3.8-Max"] {
             let fixture = try Fixture(); defer { fixture.shutdown() }

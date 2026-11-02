@@ -195,7 +195,7 @@ try {
     if (label.children.length !== 0) c.fail('model_unverified', 'picker_label');
     const menus = visible(document, 'div.kimi-menu-positioner[role="menu"]').filter(node => !authored(node));
     const matches = menus.filter(node => node.getAttribute('id') === controlled);
-    if (matches.length > 1) c.fail('model_unverified', 'picker_menu_binding');
+    if (matches.length > 1) c.fail('model_unverified', 'picker_menu_ambiguous');
     const menu = matches[0] || null;
     const nested = state.selection?.more;
     const ownedNested = nested && menus.length === 2 && menus.includes(menu)
@@ -209,10 +209,35 @@ try {
     const mainClosePending = state.selection?.stage === 'closing' && state.selection.trigger === trigger
       && state.selection.menu === menu && !!menu && menus.length === 1 && c.choiceValid(state.selection.choice)
       && c.normalize(label.textContent) === state.selection.choice.label;
-    if (menu && (menu.getAttribute('aria-labelledby') !== id || menus.length !== 1 && !ownedNested
-      || trigger.getAttribute('aria-expanded') !== 'true'
-        && !(mainClosePending && trigger.getAttribute('aria-expanded') === 'false')))
-      c.fail('model_unverified', 'picker_menu_binding');
+    const selecting = state.selection?.stage === 'selected' ? state.selection : null;
+    if (selecting) {
+      const option = selecting.option, currentLabel = c.normalize(label.textContent);
+      if (!option || selecting.trigger !== trigger || !selecting.menu
+        || id !== option.triggerID || controlled !== option.menuID
+        || !['true', 'false'].includes(trigger.getAttribute('aria-expanded'))
+        || !c.equalChoice(selecting.target, option.choice)
+        || currentLabel !== option.choice.label && currentLabel !== option.previous.choice.label
+        || menus.length !== (menu ? 1 : 0)) c.fail('model_unverified', 'option_close_binding');
+      if (menu) {
+        if (menu !== selecting.menu) c.fail('model_unverified', 'picker_menu_replaced');
+        const rows = choices(menu), target = rows.find(row => c.equalChoice(row.choice, option.choice));
+        const checked = rows.find(row => row.checked);
+        if (target?.node !== option.node || rows.length !== option.rows.length
+          || rows.some((row, index) => !c.equalChoice(row.choice, option.rows[index].choice)
+            || row.family !== option.rows[index].family)) c.fail('model_unverified', 'option_close_selection');
+        // Pending acknowledgement may still show the prior nested selection.
+        // It grants no evidence; the clicked target must be verified on reopen.
+        const checkedNode = checked && (c.equalChoice(checked.choice, option.choice) ? option.node
+          : c.equalChoice(checked.choice, option.previous.choice) ? option.previous.node : null);
+        if (checked ? checked.node !== checkedNode : !option.previousNested)
+          c.fail('model_unverified', 'option_close_selection');
+      }
+    }
+    if (menu && menu.getAttribute('aria-labelledby') !== id) c.fail('model_unverified', 'picker_menu_labelledby');
+    if (menu && menus.length !== 1 && !ownedNested) c.fail('model_unverified', 'picker_menu_scope');
+    if (menu && trigger.getAttribute('aria-expanded') !== 'true'
+      && !((mainClosePending || selecting) && trigger.getAttribute('aria-expanded') === 'false'))
+      c.fail('model_unverified', 'picker_menu_expansion');
     if (menu && state.selection?.menu && state.selection.menu !== menu)
       c.fail('model_unverified', 'picker_menu_replaced');
     if (!menu && ['moreOpening', 'moreClosing'].includes(state.selection?.stage))
@@ -390,7 +415,7 @@ try {
   }
   function modelEvidence(required = true) {
     const p = picker(), selected = state.model?.choice;
-    if (!selected || !p.closed || p.trigger !== state.model.trigger || p.label !== selected.label) {
+    if (state.selection?.stage === 'selected' || !selected || !p.closed || p.trigger !== state.model.trigger || p.label !== selected.label) {
       if (required) c.fail('model_unverified'); else return null;
     }
     if (input.expectedModelChoice != null && !c.equalChoice(selected, input.expectedModelChoice)) c.fail('model_mismatch');
@@ -546,9 +571,12 @@ try {
       state.selection = null;
       return { ...read().output, selected: true, modelChoices: state.model.choices, discoveryComplete: false };
     }
-    if (selection.stage === 'selected' && p.closed) {
+    if (selection.stage === 'selected') {
+      // One option click owns this close. Wait for DOM, ARIA and label; never
+      // fight its pending close or promote the label directly to model proof.
+      if (!p.closed || p.label !== selection.target.label) return { ...read().output, pending: true };
       pickerHit(p.trigger, 'picker_open');
-      selection.menu = null; selection.more = null;
+      selection.menu = null; selection.more = null; selection.option = null;
       selection.stage = 'verifying'; p.trigger.click(); return { ...read().output, pending: true };
     }
     if (!p.menu) return { ...read().output, pending: true };
@@ -598,6 +626,9 @@ try {
     if (!target.checked) {
       if (!['opening', 'moreClosing'].includes(selection.stage)) return { ...read().output, pending: true };
       pickerHit(target.node, 'model_option');
+      selection.option = { node: target.node, choice: target.choice, previous: checked,
+        previousNested: checked === selection.more?.selected, rows: rows.map(row => ({ choice: row.choice, family: row.family })),
+        triggerID: p.trigger.getAttribute('id'), menuID: p.menu.getAttribute('id') };
       selection.stage = 'selected'; target.node.click(); return { ...read().output, pending: true };
     }
     selection.choice = target.choice;

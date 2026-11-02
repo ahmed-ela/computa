@@ -195,6 +195,59 @@ describe('DeepSeek composed mode adapter (not live qualification)', () => {
     }
   });
 
+  test('empty noninteractive decoration preserves exact long-prompt ownership and verified cleanup for both modes', async () => {
+    const text = 'Synthetic complete prompt café 👋 <tag> \n'.repeat(1700) + '\n\nComputa session marker: ' + marker;
+    for (const key of ['chat', 'deepthink']) {
+      const f = fixture({ fresh: true }); const hash = await submitted(f, mode(key), text);
+      f.collapse.append(new f.Node('DIV'));
+      const result = await f.run('inspect', { expectedModeChoice: mode(key) });
+      expect(result.error).toBeUndefined(); expect(result.firstUserVerified).toBe(true);
+      expect(result.firstUserFingerprint).toBe(hash); expect(result.text).toBe(raw);
+      expect(result.modeEvidence.selected).toEqual(mode(key)); expect(result.modeEvidence.search).toBe(false);
+      expect(f.collapse.textContent).toBe(text); expect(f.user.textContent).toBe(text);
+      expect(result.firstContainerDiagnostic).toBeUndefined();
+      const input = deletion(hash);
+      expect((await f.run('deleteConversation', input)).deleteProof.menuAcknowledged).toBe(true);
+      expect((await f.run('selectConversationDeletion', input)).deleteProof.deleteAcknowledged).toBe(true);
+      expect((await f.run('confirmConversationDeletion', input)).deleteProof.confirmAcknowledged).toBe(true);
+      expect((await f.run('observeDeletedConversation', input)).deleteProof.conversationDeleted).toBe(true);
+      expect(f.send.clicks).toBe(1); expect(f.trigger.clicks).toBe(1); expect(f.remove.clicks).toBe(1); expect(f.confirm.clicks).toBe(1);
+    }
+  });
+
+  test('decorations cannot hide text, controls, extra structure, or altered prompt ownership', async () => {
+    const variants = ['text', 'hidden-text', 'child', 'button', 'duplicate', 'two', 'reversed', 'changed-prompt',
+      'role-button', 'role-link', 'tabindex', 'contenteditable', 'aria-haspopup', 'aria-controls', 'aria-activedescendant',
+      'aria-pressed', 'aria-checked', 'aria-expanded', 'onclick', 'changed-during-hash', 'body-replaced-during-hash'];
+    for (const variant of variants) {
+      const f = fixture({ fresh: true }); await submitted(f);
+      const extra = new f.Node(variant === 'button' ? 'BUTTON' : 'DIV');
+      f.collapse.append(extra);
+      if (['text', 'hidden-text'].includes(variant)) extra.text = 'FOREIGN_TEXT_CANARY';
+      if (variant === 'hidden-text') extra.values.hidden = '';
+      if (variant === 'child') extra.append(new f.Node('I'));
+      if (variant === 'duplicate') extra.append(new f.Node('SPAN', {}, prompt));
+      if (variant === 'two') f.collapse.append(new f.Node('DIV'));
+      if (variant === 'reversed') f.collapse.children.reverse();
+      if (variant === 'changed-prompt') f.firstText.text += ' foreign';
+      if (variant.startsWith('role-')) extra.values.role = variant.slice(5);
+      if (['tabindex', 'contenteditable', 'aria-haspopup', 'aria-controls', 'aria-activedescendant',
+        'aria-pressed', 'aria-checked', 'aria-expanded', 'onclick'].includes(variant)) extra.values[variant] = '';
+      if (variant === 'changed-during-hash') f.beforeDigest(() => { extra.text = 'FOREIGN_TEXT_CANARY'; });
+      if (variant === 'body-replaced-during-hash') f.beforeDigest(() => {
+        const wrapper = f.firstText.parentElement!; f.firstText.detach(); wrapper.append(f.firstText.cloneNode(true));
+      });
+      const result = await f.run('inspect', { expectedModeChoice: mode() });
+      expect(result.error).toBeDefined(); expect(result.text).toBeUndefined(); expect(result.firstUserVerified).toBeUndefined();
+      expect(result.firstUserFingerprint).toBeUndefined(); expect(result.deletionProof).toBeUndefined();
+      expect(JSON.stringify(result)).not.toContain('FOREIGN_TEXT_CANARY');
+      expect((await f.run('inspect')).detail).toBe('terminal_operation');
+      expect((await f.run('submit')).detail).toBe('terminal_operation');
+      expect((await f.run('deleteConversation')).detail).toBe('terminal_operation');
+      expect(f.send.clicks).toBe(1); expect(f.trigger.clicks).toBe(0); expect(f.remove.clicks).toBe(0); expect(f.confirm.clicks).toBe(0);
+    }
+  });
+
   test('first-container failure captures finite same-read structure but never grants ownership or retries', async () => {
     for (const variant of ['empty', 'text', 'many', 'unknown-tag', 'snapshot-throws']) {
       const f = fixture({ fresh: true }); await submitted(f);

@@ -67,12 +67,13 @@ enum KimiFixturePage {
         menuDelayMs: 0, dialogDelayMs: 0, canonicalDelayMs: 60, retainHistoryLink: false,
         moreOpenDelayMs: 0, moreCloseDelayMs: 0, moreEventFamily: 'mouse',
         moreCloseOrder: 'together', mainCloseOrder: 'together', closeAcknowledgementDelayMs: 200,
+        optionCloseOrder: 'together', optionLabelLag: false,
         lexicalDelayMs: 0, lexicalNeverSettle: false, lexicalWrongText: false, preventNativeInput: true,
         reply: '{"type":"message","text":"Offline Kimi fixture reply"}' };
       const counters = { beforeInput: 0, input: 0, settlements: 0, earlySends: 0, sends: 0,
         modelOpens: 0, modelCloses: 0, modelSelections: 0, moreOpens: 0, moreCloses: 0, moreSelections: 0, moreClicks: 0,
         headerOpens: 0, deleteSelections: 0, confirmations: 0 };
-      let outbound = null, user = null, answer = null, historyLink = null;
+      let outbound = null, user = null, answer = null, historyLink = null, pendingOption = null;
       let nativeInput = null, pendingCommit = null, lexicalSettled = false;
       const inputEvents = []; let firstEventData = null;
       window.fixturePrompts = [];
@@ -134,8 +135,20 @@ enum KimiFixturePage {
         counters.modelSelections++;
         for (const other of menu.querySelectorAll('[data-testid="model-option"]')) other.setAttribute('aria-checked', String(other === row));
         moreOption.setAttribute('aria-checked', 'false'); moreCurrent.textContent = '';
-        model.querySelector('.name').textContent = row.querySelector('.name').textContent; hideModel();
+        if (!options.optionLabelLag) model.querySelector('.name').textContent = row.querySelector('.name').textContent;
+        if (options.optionCloseOrder === 'together') {
+          model.querySelector('.name').textContent = row.querySelector('.name').textContent; hideModel();
+        } else {
+          pendingOption = row;
+          if (options.optionCloseOrder === 'ariaFirst') model.setAttribute('aria-expanded', 'false');
+          else if (options.optionCloseOrder === 'domFirst') menu.hidden = true;
+        }
       });
+      function finishOptionClose() {
+        if (!pendingOption) return;
+        model.querySelector('.name').textContent = pendingOption.querySelector('.name').textContent;
+        hideModel(); pendingOption = null;
+      }
       // Model the observed controlled-editor boundary using actual browser
       // input events. No prompt argument, adapter state or test request is read.
       // The default cancels the native edit and commits the beforeinput payload;
@@ -256,7 +269,9 @@ enum KimiFixturePage {
         });
       }
       header.addEventListener('click', () => { counters.headerOpens++; setTimeout(showDeleteMenu, options.menuDelayMs); });
-      window.kimiFixture = { options, counters, inputEvents, moreEvents, appendUser, completeResponse,
+      window.kimiFixture = { options, counters, inputEvents, moreEvents, appendUser, completeResponse, finishOptionClose,
+        optionState: () => ({pending:!!pendingOption,visible:!menu.hidden,expanded:model.getAttribute('aria-expanded'),
+          targetLabel:!!pendingOption && model.querySelector('.name').textContent === pendingOption.querySelector('.name').textContent}),
         selectNestedInitially: () => {
           for (const row of menu.querySelectorAll('[data-testid="model-option"]')) row.setAttribute('aria-checked', 'false');
           moreOption.setAttribute('aria-checked', 'true'); moreCurrent.textContent = 'K3';

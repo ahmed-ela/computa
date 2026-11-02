@@ -1911,6 +1911,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         case .kimi:
             providerDetails = ["model_trigger", "model_label", "unexpected_exception", "picker_binding", "picker_label", "picker_menu_binding",
                 "picker_menu_replaced", "model_row_shape", "model_choices_duplicate", "model_checked_count", "picker_not_closed",
+                "picker_menu_ambiguous", "picker_menu_labelledby", "picker_menu_scope", "picker_menu_expansion",
+                "option_close_binding", "option_close_selection",
                 "more_binding", "more_row_shape", "more_checked_count", "more_selected_label",
                 "more_aria_links_changed", "more_boundary_spent", "more_center_changed",
                 "more_center_invalid", "more_center_occluded", "more_point_outside", "more_claim_changed",
@@ -4872,6 +4874,44 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return "; first difference \(index); actual/expected scalars \(actual)/\(expected)"
     }
 
+    /// Diagnostic classification only. Never retains a URL, identifier, query
+    /// value or unknown key, and never affects provider route admission.
+    static func unexpectedQwenRouteDiagnostic(_ url: URL?) -> String {
+        let components = url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) }
+        let scheme = (url?.scheme).map { ["https", "http"].contains($0) ? $0 : "other" } ?? "absent"
+        let host = (url?.host).map { $0 == Provider.qwen.host ? "expected" : "other" } ?? "absent"
+        let port = (url?.port).map { $0 == 443 ? "https_default" : "other" } ?? "absent"
+        let path = components?.percentEncodedPath ?? ""
+        let pathShape: String
+        if path.isEmpty { pathShape = "absent" }
+        else if path == "/" { pathShape = "root" }
+        else if path.hasPrefix("/c/") {
+            let identifier = String(path.dropFirst(3))
+            pathShape = UUID(uuidString: identifier)?.uuidString.lowercased() == identifier ? "conversation_uuid" : "conversation_other"
+        } else { pathShape = "other" }
+        let pathEncoded = path.contains("%"), trailingSlash = path.count > 1 && path.hasSuffix("/")
+        let rawToken = path.hasPrefix("/c/") ? path.dropFirst(3).split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false).first : nil
+        let token = rawToken.flatMap { $0.utf8.count <= 128 ? String($0).removingPercentEncoding : nil }
+        let uuidShape: String
+        if rawToken == nil || rawToken?.isEmpty == true { uuidShape = "absent" }
+        else if let token, let uuid = UUID(uuidString: token) {
+            uuidShape = token == uuid.uuidString.lowercased() ? "lower" : token == uuid.uuidString ? "upper" : "mixed"
+        } else { uuidShape = "other" }
+        let query = components?.percentEncodedQuery
+        let queryShape = query.map { $0.isEmpty ? "empty" : "present" } ?? "absent"
+        let queryKey: String
+        if let query, !query.isEmpty {
+            let parts = query.split(separator: "&", maxSplits: 1, omittingEmptySubsequences: false)
+            let rawName = parts.first?.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
+            let name = rawName.utf8.count <= 128 ? String(rawName).removingPercentEncoding : nil
+            let known = ["model", "model_id", "chat_id", "conversation_id", "chat_enter_method"]
+            queryKey = parts.count > 1 ? "multiple" : name.map { known.contains($0) ? $0 : "other" } ?? "other"
+        } else { queryKey = query == nil ? "absent" : "empty" }
+        let userInfo = url?.user != nil || url?.password != nil
+        let fragment = components?.percentEncodedFragment != nil
+        return "scheme=\(scheme) host=\(host) port=\(port) userInfo=\(userInfo) path=\(pathShape) pathEncoded=\(pathEncoded) trailingSlash=\(trailingSlash) uuid=\(uuidShape) query=\(queryShape) queryKey=\(queryKey) fragment=\(fragment)"
+    }
+
     private func rejectWebsiteBlocker(_ session: Session, action: String, phase: String) throws {
         let url = session.view.url
         let initialBlank = session.documentGeneration == nil && url?.absoluteString == "about:blank"
@@ -4899,6 +4939,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let navigation = browser.modelNavigationDiagnostic(tabID: session.tabID, view: session.view)?.logDescription
             ?? EmbeddedBrowserSession.ModelNavigationDiagnostic.unknownLogDescription
         Self.inspectionLog.error("websiteBlocked provider=\(session.provider.rawValue, privacy: .public) action=\(action, privacy: .public) phase=\(phase, privacy: .public) sequence=\(session.sequence) code=\(failure.diagnosticCode ?? "unknown", privacy: .public) firstFailure=\(session.terminalFailure == nil) navigation={\(navigation, privacy: .public)}")
+        if failure == .unexpectedPage(.qwen) {
+            let route = Self.unexpectedQwenRouteDiagnostic(url)
+            Self.inspectionLog.error("unexpectedRouteDiagnostic version=1 provider=qwen action=\(action, privacy: .public) phase=\(phase, privacy: .public) sequence=\(session.sequence) \(route, privacy: .public)")
+        }
         let firstFailure = session.terminalFailure == nil
         let recorded = recordedWebsiteBlocker(failure, session: session)
         if failure == .humanVerificationRequired(.gemini) {

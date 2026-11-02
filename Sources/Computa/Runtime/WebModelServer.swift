@@ -2369,6 +2369,10 @@ actor WebModelServer {
             case .usageLimited:
                 return .init(status: "429 Too Many Requests", type: "too_many_requests", code: failure.diagnosticCode!)
             case .capacity: return .init(status: "429 Too Many Requests", type: "too_many_requests", code: "provider_capacity")
+            // The request no longer has a valid owned website context. HTTP 400
+            // preserves this body in the pinned runtime's nonretryable
+            // InvalidRequest path; HTTP 500 would become generic high demand.
+            case .unexpectedPage: return .init(status: "400 Bad Request", type: "model_error", code: "unexpected_website_page")
             case .turnLimit: return .init(status: "409 Conflict", type: "invalid_request", code: "website_turn_limit")
             case .modelUnavailable: return .init(status: "404 Not Found", type: "not_found", code: "model_unavailable", param: "model")
             case .invalidRequest, .unsupportedProvider: return .init(status: "400 Bad Request", type: "invalid_request", code: "invalid_request")

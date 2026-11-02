@@ -559,6 +559,14 @@ function computaDeepSeekDOM(c) {
       throw error;
     }
   }
+  function emptyNoninteractiveDecoration(node) {
+    // The observed collapsed prompt appends one empty DIV leaf. It contributes
+    // no text and is never a control or an action target for this adapter.
+    return node?.tagName === 'DIV' && node.children.length === 0 && node.textContent === ''
+      && [null, '', 'none', 'presentation'].includes(node.getAttribute('role'))
+      && ['tabindex', 'contenteditable', 'aria-haspopup', 'aria-controls', 'aria-activedescendant',
+        'aria-pressed', 'aria-checked', 'aria-expanded', 'onclick'].every(name => node.getAttribute(name) === null);
+  }
   function transcript() {
     const roots = c.nodes(document, '.ds-message', 2);
     const users = roots.filter(root => root.classList.contains('d29f3d7d'));
@@ -570,11 +578,14 @@ function computaDeepSeekDOM(c) {
     const root = users[0], container = one(visible(root, '.ds-collapsible-text'), 'first_user_container');
     const body = leaf(container, 'div > span', 'first_user_message'), turn = root.parentElement;
     const id = turn?.getAttribute('data-virtual-list-item-key');
-    // Preserve every structural/text check; fixed reasons distinguish a long
-    // collapsed rendering from a changed prompt without publishing either body.
+    // Retain the unique complete prompt and exact whole-root/container text.
+    // A textless decoration may be a sibling, never a substitute prompt body.
     if (!c.visible(root)) c.fail('conversation_changed', 'first_root_hidden');
     if (!id || !/^-?[0-9]{1,10}$/.test(id)) c.fail('conversation_changed', 'first_id_invalid');
-    if (container.children.length !== 1) rejectFirstContainer(root, container, body);
+    const children = container.children;
+    const decorated = children.length === 2 && children[0].contains(body)
+      && emptyNoninteractiveDecoration(children[1]);
+    if (children.length !== 1 && !decorated) rejectFirstContainer(root, container, body);
     if (container.children[0].children.length !== 1) c.fail('conversation_changed', 'first_wrapper_children');
     if (container.textContent !== body.textContent) c.fail('conversation_changed', 'first_container_text');
     if (root.textContent !== body.textContent) c.fail('conversation_changed', 'first_root_text');

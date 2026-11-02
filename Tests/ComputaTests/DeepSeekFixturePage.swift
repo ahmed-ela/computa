@@ -43,7 +43,7 @@ enum DeepSeekFixturePage {
   const arrow = 'M8.3125 0.980206C8.66767 1.05312 8.97902 1.2042 9.2627 1.43235C9.48724 1.613 9.73029 1.85795 9.97949 2.10716L14.707 6.8347L13.293 8.24876L9 3.95579V15.0417H7V3.95579L2.70703 8.24876L1.29297 6.8347L6.02051 2.10716C6.26971 1.85795 6.51277 1.613 6.7373 1.43235C6.97662 1.23988 7.28445 1.04404 7.6875 0.980206C7.8973 0.947029 8.1031 0.955183 8.3125 0.980206Z';
   const options = { holdResponse: false, delayUser: false, canonicalDelayMs: 0, menuDelayMs: 0,
     dialogDelayMs: 0, retainHistoryLink: false, inertSearch: false, inertDeepThink: false,
-    searchDelayMs: 0, deepThinkDelayMs: 0,
+    searchDelayMs: 0, deepThinkDelayMs: 0, firstUserSiblingKind: 'none',
     reply: '{"type":"message","text":"Synthetic DeepSeek native reply"}' };
   const counters = { inputs: 0, sends: 0, deepThinkClicks: 0, searchClicks: 0, historyOpens: 0,
     deleteSelections: 0, confirmations: 0, earlySends: 0 };
@@ -124,7 +124,20 @@ enum DeepSeekFixturePage {
     const user = node('div', { class: 'd29f3d7d ds-message' });
     const collapse = node('div', { class: 'ds-collapsible-text' }), wrapper = node('div');
     firstBody = node('span', {}, sent);
-    wrapper.append(firstBody); collapse.append(wrapper); user.append(collapse); userTurn.append(user); transcript.append(userTurn);
+    wrapper.append(firstBody); collapse.append(wrapper);
+    const kind = options.firstUserSiblingKind;
+    if (kind !== 'none') {
+      const extra = node(kind === 'button' ? 'button' : 'div');
+      if (kind === 'text' || kind === 'hidden-text') extra.textContent = 'Synthetic extra text';
+      if (kind === 'hidden-text') extra.hidden = true;
+      if (kind === 'focusable') extra.setAttribute('tabindex', '-1');
+      if (kind === 'editable') extra.setAttribute('contenteditable', '');
+      if (kind === 'aria-control') extra.setAttribute('role', 'button');
+      if (kind === 'duplicate') extra.append(node('span', {}, sent));
+      collapse.append(extra);
+      if (kind === 'two') collapse.append(node('div'));
+    }
+    user.append(collapse); userTurn.append(user); transcript.append(userTurn);
     ownHistory = node('a', { href: conversationPath });
     ownHistory.append(node('div', {}, 'Synthetic DeepSeek chat'));
     historyTrigger = node('div', { role: 'button', class: 'ds-button', tabindex: '0' }, 'More');

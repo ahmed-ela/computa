@@ -229,6 +229,21 @@ final class SavedAdapterFailureDiagnosticTests: XCTestCase {
         }
     }
 
+    @MainActor func testKimiPickerCloseReasonsAreFiniteAndProviderScoped() {
+        for detail in ["picker_menu_ambiguous", "picker_menu_labelledby", "picker_menu_scope", "picker_menu_expansion",
+                       "option_close_binding", "option_close_selection"] {
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+                ["error":"model_unverified", "detail":detail], provider:.kimi, action:"inspect"),
+                "action=inspect error=model_unverified detail=\(detail)")
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+                ["error":"model_unverified", "detail":detail], provider:.qwen, action:"inspect"),
+                "action=inspect error=model_unverified detail=other")
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+                ["error":"model_unverified", "detail":detail + " PRIVATE_PAGE_CANARY"], provider:.kimi, action:"inspect"),
+                "action=inspect error=model_unverified detail=other")
+        }
+    }
+
     @MainActor func testKimiCompatibilityEntryPointKeepsTheExistingFiniteResult() {
         let value: [String: Any] = ["error": "model_unverified", "detail": "picker_close_occluded"]
         XCTAssertEqual(EmbeddedWebModelTransport.kimiAdapterFailureDiagnostic(value, action: "discoverModels"),

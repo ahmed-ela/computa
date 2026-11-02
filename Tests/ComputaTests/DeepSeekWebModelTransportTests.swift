@@ -73,6 +73,58 @@ final class DeepSeekWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testLongPromptWithEmptyDecorationPreservesBothModeProofsAndVerifiedDeletion() async throws {
+        for mode in WebsiteModeChoice.DeepSeekMode.allCases {
+            let fixture = try Fixture(setup: "deepseekFixture.options.firstUserSiblingKind='empty'")
+            defer { fixture.shutdown() }
+            let token = try await start(fixture, mode: mode)
+            let prompt = String(repeating: "Synthetic complete prompt café 👋 <tag> \n", count: 1_700)
+            _ = try await call(fixture, "webProviderSend", token, prompt: prompt)
+            let complete = try await wait(fixture, token, state: "complete")
+            XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Synthetic DeepSeek native reply"}"#)
+            let choice = WebsiteModeChoice(deepSeekMode: mode)
+            XCTAssertEqual(try WebsiteModeEvidence.parse(complete["modeEvidence"], provider: "deepseek", expected: choice).selected, choice)
+            XCTAssertNil(complete["modelEvidence"])
+            let observed = try await evaluate(fixture.view, """
+                const container = document.querySelector('.ds-collapsible-text');
+                return { sent: fixturePrompts[0], echo: container.textContent, count: container.children.length,
+                  empty: container.children[1].textContent === '', leaf: container.children[1].children.length === 0 };
+                """) as? [String: Any]
+            let sent = try XCTUnwrap(observed?["sent"] as? String)
+            XCTAssertTrue(sent.hasPrefix(prompt + "\n\nComputa session marker: "))
+            XCTAssertEqual(observed?["echo"] as? String, sent)
+            XCTAssertEqual(observed?["count"] as? Int, 2)
+            XCTAssertEqual(observed?["empty"] as? Bool, true); XCTAssertEqual(observed?["leaf"] as? Bool, true)
+            let finished = try await call(fixture, "webProviderFinish", token)
+            XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+            try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+            XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+            XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+        }
+    }
+
+    func testExtraTextHiddenTextOrInteractiveDecorationCannotGrantAnswerOrReplay() async throws {
+        for kind in ["text", "hidden-text", "button", "focusable", "editable", "aria-control", "duplicate", "two"] {
+            let fixture = try Fixture(setup: "deepseekFixture.options.firstUserSiblingKind='\(kind)'")
+            defer { fixture.shutdown() }
+            let token = try await start(fixture)
+            _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic exact decorated prompt")
+            do {
+                _ = try await call(fixture, "webProviderPoll", token)
+                XCTFail("Extra text or controls must not release an answer: \(kind)")
+            } catch let failure as EmbeddedWebModelTransport.Failure {
+                XCTAssertEqual(failure, .ownershipFailure(.javaScriptFirstUser), kind)
+            }
+            do {
+                _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic exact decorated prompt")
+                XCTFail("Rejected ownership must not replay Send: \(kind)")
+            } catch { }
+            let finished = try await call(fixture, "webProviderFinish", token)
+            XCTAssertEqual(finished["cleanup"] as? String, "failed", kind)
+            try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+        }
+    }
+
     func testDelayedToggleClaimsAreObservedWithoutRepeatedClicks() async throws {
         let fixture = try Fixture(setup: "deepseekFixture.options.searchDelayMs=100; deepseekFixture.options.deepThinkDelayMs=100")
         defer { fixture.shutdown() }

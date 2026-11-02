@@ -246,6 +246,86 @@ final class KimiWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testClaimedInstantOptionWaitsForCloseAndLabelThenReopensForVerification() async throws {
+        for order in ["ariaFirst", "domFirst", "neither"] {
+            let fixture = try Fixture(initialNestedModel: true); defer { fixture.shutdown() }
+            fixture.transport.setTimeoutsForTesting(preparation: .seconds(3), response: .seconds(5))
+            var configured = false, observedPending = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                if action == "inspect", !configured {
+                    configured = true
+                    _ = try? await self.evaluate(fixture.view, "kimiFixture.options.optionCloseOrder='\(order)'; kimiFixture.options.optionLabelLag=true; return true;")
+                }
+                guard action == "selectModel", !observedPending,
+                    let state = try? await self.evaluate(fixture.view, "return kimiFixture.optionState();") as? [String: Any],
+                    state["pending"] as? Bool == true else { return }
+                observedPending = true
+                XCTAssertEqual(state["visible"] as? Bool, order != "domFirst")
+                XCTAssertEqual(state["expanded"] as? String, order == "ariaFirst" ? "false" : "true")
+                XCTAssertEqual(state["targetLabel"] as? Bool, false)
+                let counts = try? await self.evaluate(fixture.view,
+                    "return [kimiFixture.counters.modelOpens,kimiFixture.counters.modelCloses,kimiFixture.counters.modelSelections,kimiFixture.counters.beforeInput,kimiFixture.counters.sends];") as? [Int]
+                XCTAssertEqual(counts, [1,0,1,0,0])
+                _ = try? await self.evaluate(fixture.view, "setTimeout(() => kimiFixture.finishOptionClose(),100); return true;")
+            }
+            let token = try await start(fixture)
+            XCTAssertTrue(configured); XCTAssertTrue(observedPending)
+            let counts = try await evaluate(fixture.view,
+                "return [kimiFixture.counters.modelOpens,kimiFixture.counters.modelCloses,kimiFixture.counters.modelSelections,kimiFixture.counters.moreOpens,kimiFixture.counters.moreCloses,kimiFixture.counters.beforeInput,kimiFixture.counters.sends];") as? [Int]
+            XCTAssertEqual(counts, [2,1,1,1,1,0,0])
+            let finished = try await call(fixture, "webProviderFinish", token)
+            XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+            XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+            XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+        }
+    }
+
+    func testPendingInstantOptionCannotAdoptReplacementOrReplayItsClick() async throws {
+        for selector in ["#fixture-model-menu", "[data-moon-key=\"k28-instant\"]"] {
+            let fixture = try Fixture(initialNestedModel: true); defer { fixture.shutdown() }
+            var configured = false, replaced = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                if action == "inspect", !configured {
+                    configured = true
+                    _ = try? await self.evaluate(fixture.view, "kimiFixture.options.optionCloseOrder='ariaFirst'; return true;")
+                }
+                guard action == "selectModel", !replaced,
+                    let state = try? await self.evaluate(fixture.view, "return kimiFixture.optionState();") as? [String: Any],
+                    state["pending"] as? Bool == true else { return }
+                replaced = true
+                _ = try? await self.evaluate(fixture.view, "const old=document.querySelector('\(selector)'); old.replaceWith(old.cloneNode(true)); return true;")
+            }
+            do { _ = try await start(fixture); XCTFail("A replacement cannot inherit the claimed option") }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelUnverified) }
+            XCTAssertTrue(configured); XCTAssertTrue(replaced)
+            let counts = try await evaluate(fixture.view,
+                "return [kimiFixture.counters.modelOpens,kimiFixture.counters.modelCloses,kimiFixture.counters.modelSelections,kimiFixture.counters.beforeInput,kimiFixture.counters.sends];") as? [Int]
+            XCTAssertEqual(counts, [1,0,1,0,0])
+            XCTAssertNotNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+            XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+        }
+    }
+
+    func testUnacknowledgedInstantOptionKeepsThePreparationDeadlineWithoutReplay() async throws {
+        let fixture = try Fixture(initialNestedModel: true); defer { fixture.shutdown() }
+        fixture.transport.setTimeoutsForTesting(preparation: .seconds(3), response: .seconds(5))
+        var configured = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "inspect", !configured {
+                configured = true
+                _ = try? await self.evaluate(fixture.view, "kimiFixture.options.optionCloseOrder='neither'; return true;")
+            }
+        }
+        do { _ = try await start(fixture); XCTFail("A clicked option is not a completed selection") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .preparationDeadline) }
+        XCTAssertTrue(configured)
+        let counts = try await evaluate(fixture.view,
+            "return [kimiFixture.counters.modelOpens,kimiFixture.counters.modelCloses,kimiFixture.counters.modelSelections,kimiFixture.counters.beforeInput,kimiFixture.counters.sends];") as? [Int]
+        XCTAssertEqual(counts, [1,0,1,0,0])
+        XCTAssertNotNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
     func testClaimedMenuClosesWaitForBothDOMAndARIAAcknowledgementsWithoutReplay() async throws {
         for (scope, order) in [("more", "ariaFirst"), ("more", "domFirst"), ("main", "ariaFirst"), ("main", "domFirst")] {
             let fixture = try Fixture(initialNestedModel: true); defer { fixture.shutdown() }

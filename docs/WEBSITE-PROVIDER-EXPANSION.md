@@ -1,13 +1,14 @@
 # Kimi, Qwen and DeepSeek website adapters
 
-Status: candidate build391, 2026-11-02 UTC. Installed 0.8.0 (390), source
-`046f348229a62525e7d648ac9f68eaebff2e2b3c`, completes Kimi discovery but rejects
-a moved center during task selection. Qwen reaches its menu-close transition
-but rejects mismatched ARIA/visibility. DeepSeek rejects the initial user-message
-container's child count after one Send. The candidate keeps Kimi's original
-point on its bound target, observes Qwen's claimed close, and captures bounded
-failure-time DeepSeek structure. All three are enabled for controlled
-pilots; installed responses, cleanup and tool workflows remain unqualified.
+Status: candidate build392, 2026-11-02 UTC. Installed 0.8.0 (391), source
+`017b6fe5b97229bcace6880b2464fa07f17d7175`, completes Kimi and Qwen discovery.
+Fresh tasks still fail Kimi picker binding, Qwen's route check after submit,
+and DeepSeek's initial message shape. The candidate handles a claimed Kimi
+option-close transition and DeepSeek's observed empty decoration, preserving
+exact message, model/mode, route and action checks. Qwen's rejected route needs
+bounded diagnostics; generic runtime high-demand wording is not capacity evidence.
+All three are enabled for controlled pilots; installed responses, cleanup and
+tool workflows remain unqualified.
 PR #20 remains draft.
 
 The requested route is each provider's signed-in website in Computa's browser.
@@ -436,6 +437,72 @@ The final combined candidate passed 84 focused native WebKit/diagnostic tests
 and 203 JavaScript/resource/version tests with 4,414 assertions in two disjoint
 runs. Independent read-only review found no new authority or replay regression.
 Installed responses and cleanup are still required before qualification.
+
+### Installed391 and candidate392
+
+Installed391 was verified against its signed artifact and running executable.
+A name-only macOS launch initially selected an older staged app; the identity
+check caught it before any baseline or prompt. That copy was closed and the
+installed app was launched by its absolute path. Subsequent cases bind PID90113,
+the exact source commit and all four artifact/install receipts.
+
+Kimi and Qwen startup discovery succeeded. One fresh Instant task failed before
+website Send at `inspect / model_unverified / picker_menu_binding`, sequence0,
+after 2,735 ms. A fixture reproduces that failure when an already-clicked option
+collapses ARIA before its menu disappears. A separate still-open transition
+also exposed row-processing fallthrough. The installed diagnostic does not yet
+distinguish those guards. Candidate392 retains the claimed option, physical
+menu/trigger/target, prior or exact target selection and unchanged ordered
+choices during the pending close. It withholds model evidence until DOM, ARIA
+and the requested label settle, then opens once for fresh checked-row verification.
+It never repeats the option click, extends the deadline or adopts replacement
+controls. Finite diagnostic reasons distinguish any remaining binding failure.
+
+One fresh Qwen Plus task failed after 3,595 ms. The native UI showed a high-demand
+message, but its retained provider failure was `unexpected_website_page`.
+The bounded native log identifies `submit / after / sequence=1`, with settled
+navigation and no navigation error. The submit invocation may have dispatched
+before rejection; the task must not be replayed. The runtime converts HTTP500
+into generic high-demand wording, so that text is not evidence of a provider
+capacity limit. No rejected URL shape was retained in this run. Selection or
+submission proof was not published, and its cleanup remains unconfirmed.
+
+Candidate392 logs only closed route-shape enums and booleans, never URL values,
+identifiers or unknown query keys; route admission is unchanged. Unexpected-page
+errors now use HTTP400 with the existing full typed error body. The pinned
+runtime maps this to nonretryable `InvalidRequest`; HTTP500 becomes generic
+high demand, and the initially considered HTTP409 takes an outer retry path.
+The latter was discarded before installation. The actual bundled-engine fixture
+also examines raw protocol errors, since the app's saved failure history can
+replace a generic engine message and otherwise make a UI-only check misleading.
+
+One fresh DeepSeek Chat task verified Chat mode with Search off and its
+submission, then failed first-user ownership after 1,268 ms. Its failure-time
+packet shows two container children: the first DIV contains the complete prompt
+leaf; the second is an empty DIV with no element children. Both entire-root
+and entire-container text equal the prompt leaf. This isolates the child-count
+assumption, rather than a changed or truncated prompt. Candidate392 permits
+only that empty noninteractive decoration beside the existing prompt wrapper;
+unique body, whole-text equality, exact digest/private marker, stable physical
+nodes, canonical route and all action/deletion guards remain unchanged.
+
+All three failed native records are preserved. None produced an accepted answer
+or tool result, and later website rendering does not change their outcome.
+No failed operation was replayed. The prepared browser/terminal/file workflows
+remain unstarted until a selection passes its response and cleanup checks.
+
+Candidate392 passed 86 distinct native tests and 208 JavaScript/resource/version
+tests (5,258 assertions). The native total combines 15 DeepSeek tests, 69 Kimi,
+Qwen and diagnostic tests, the corrected HTTP gate, and one actual bundled-engine
+regression. Initial HTTP-fixture failures were caused by missing synthetic Qwen
+model proof; the fixture now supplies explicit proof before the intended failure.
+The initial engine gate also incorrectly expected API-only streaming fields in
+Qwen's compact website prompt. Its corrected assertions require those fields
+absent while retaining the exact user task and tool schemas. Production selection
+and prompt projection were not weakened. The passing engine gate verifies the
+raw terminal error JSON, no retry notification, one provider start/Send/finish
+and zero tools or assistant answers. These are native-action counts, not a count
+of all HTTP requests. Installed provider qualification remains pending.
 
 ### Direct website observations before native qualification
 

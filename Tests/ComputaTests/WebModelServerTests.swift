@@ -2586,7 +2586,8 @@ final class WebModelServerTests: XCTestCase {
     func testExternalWebsiteGatesAreFiniteHTTPFailuresWithoutInferenceRetriesOrToolOutput() async throws {
         for (model, failure, code, action) in externalGateCases {
             for point in [DiagnosticFailurePoint.start, .readinessPoll, .sendThrown, .responsePoll] {
-                let transport = ExternalGateWebModelTransport(point: point, failure: failure)
+                let transport = ExternalGateWebModelTransport(point: point, failure: failure,
+                    modelChoice: model == syntheticQwenChoice.modelID ? syntheticQwenChoice : nil)
                 let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
                 await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
                 let endpoint = try await server.start().appendingPathComponent("responses")
@@ -2601,7 +2602,7 @@ final class WebModelServerTests: XCTestCase {
                 urlRequest.setValue(try await bindWebsiteInferenceFixtureTurn(server, taskID: "external-gate-task"), forHTTPHeaderField: "X-Computa-Task-ID")
                 urlRequest.setValue(try websiteInferenceFixtureMetadata(taskID: "external-gate-task"), forHTTPHeaderField: "x-codex-turn-metadata")
                 let (data, response) = try await URLSession.shared.data(for: urlRequest)
-                let expectedStatus = code == "website_usage_limit" ? 429 : (code == "unexpected_website_page" ? 500 : 403)
+                let expectedStatus = code == "website_usage_limit" ? 429 : (code == "unexpected_website_page" ? 400 : 403)
                 XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, expectedStatus)
                 let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
                 let error = try XCTUnwrap(body["error"] as? [String: Any])
@@ -2611,6 +2612,12 @@ final class WebModelServerTests: XCTestCase {
                 XCTAssertEqual(error["code"] as? String, code)
                 XCTAssertEqual(error["retryable"] as? Bool, false)
                 XCTAssertEqual(error["required_action"] as? String, action)
+                if code == "unexpected_website_page" {
+                    XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 400,
+                        "The pinned runtime must take InvalidRequest, not its retryable 409 UnexpectedStatus or generic 500 branch")
+                    XCTAssertEqual(error["type"] as? String, "model_error")
+                    XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("high demand"))
+                }
                 XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("response.completed"))
                 XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("function_call"))
                 XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("https://"))
@@ -2731,7 +2738,9 @@ final class WebModelServerTests: XCTestCase {
         [("browser/gemini", .humanVerificationRequired(.gemini), "website_verification_required", "complete_website_verification"),
          (syntheticChatGPTModelID, .signInRequired, "sign_in_required", "sign_in"),
          ("browser/claude", .usageLimited(.claude), "website_usage_limit", "wait_for_quota_reset"),
-         (syntheticChatGPTModelID, .unexpectedPage(.chatgpt), "unexpected_website_page", "inspect_website")]
+         (syntheticChatGPTModelID, .unexpectedPage(.chatgpt), "unexpected_website_page", "inspect_website"),
+         (WebsiteModelChoice(provider: "qwen", key: "Qwen3.7-Plus", label: "Qwen3.7-Plus").modelID,
+          .unexpectedPage(.qwen), "unexpected_website_page", "inspect_website")]
     }
 
     func testCleanupPreservesSafeReasonAndRetriesOnlyTheOwnedToken() async throws {
@@ -3084,10 +3093,11 @@ private actor ExternalGateWebModelTransport: WebModelTransport {
     private let token = UUID().uuidString
     private let point: DiagnosticFailurePoint
     private let failure: EmbeddedWebModelTransport.Failure
+    private let modelChoice: WebsiteModelChoice?
     private var ledger: [String] = []
 
-    init(point: DiagnosticFailurePoint, failure: EmbeddedWebModelTransport.Failure) {
-        self.point = point; self.failure = failure
+    init(point: DiagnosticFailurePoint, failure: EmbeddedWebModelTransport.Failure, modelChoice: WebsiteModelChoice? = nil) {
+        self.point = point; self.failure = failure; self.modelChoice = modelChoice
     }
 
     func operations() -> [String] { ledger }
@@ -3108,7 +3118,14 @@ private actor ExternalGateWebModelTransport: WebModelTransport {
         case "webProviderFinish", "webProviderCancel": response = ["cleanup": "not_created"]
         default: throw WebModelServer.Failure.invalidRequest
         }
-        return try JSONSerialization.data(withJSONObject: syntheticPreparedWebsiteSnapshot(response))
+        var snapshot = syntheticPreparedWebsiteSnapshot(response)
+        if ["ready", "running", "complete"].contains(snapshot["state"] as? String ?? ""),
+           let modelChoice, modelChoice.provider == "qwen", snapshot["modelEvidence"] == nil {
+            // Explicit synthetic fixture selection; never infer proof from a request ID.
+            snapshot["modelEvidence"] = ["selected": ["key": modelChoice.key, "label": modelChoice.label],
+                "source": "model_picker_label", "verification": "website_selection"]
+        }
+        return try JSONSerialization.data(withJSONObject: snapshot)
     }
 }
 

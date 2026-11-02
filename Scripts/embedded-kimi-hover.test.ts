@@ -176,7 +176,7 @@ test('pending submenu close still rejects changed physical bindings, checked sel
 test('collapsed visible submenu without a claimed close cannot establish its first selection proof', async () => {
   const f = adapterFixture({ nestedSelected: true }), dispatch = f.more.onDispatch!;
   f.more.onDispatch = (event: any) => { dispatch(event); if (event.type === 'mouseover') f.more.setAttribute('aria-expanded', 'false'); };
-  expect((await settle(f)).detail).toBe('picker_menu_binding');
+  expect((await settle(f)).detail).toBe('picker_menu_scope');
   expect(f.more.events.map((event: any) => event.type)).toEqual(['pointerover', 'pointerenter', 'mouseover']);
   expect((await discover(f)).detail).toBe('terminal_operation');
   expect(f.more.events).toHaveLength(3); expect(f.counts().sends).toBe(0);
@@ -243,7 +243,7 @@ test('a claimed point leaving the target, becoming occluded, or losing its physi
     expect(result.error).toBe('model_unverified');
     if (change === 'outside') expect(result.detail).toBe('more_point_outside');
     else if (change === 'occluded') expect(result.detail).toBe('more_center_occluded');
-    else expect(result.detail).toBe(phase === 'pointerover' ? 'more_trigger_changed' : 'picker_menu_binding');
+    else expect(result.detail).toBe(phase === 'pointerover' ? 'more_trigger_changed' : 'picker_menu_scope');
     const expectedEvents = phase === 'pointerover' ? ['pointerover'] : [...entry, 'pointerout'];
     expect(f.more.events.map((event: any) => event.type)).toEqual(expectedEvents);
     for (let repeat = 0; repeat < 3; repeat++) expect((await discover(f)).detail).toBe('terminal_operation');
@@ -292,4 +292,69 @@ test('safe legacy flooring preserves the sequence but any other coordinate encod
     }
     expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
   }
+});
+
+
+async function claimedOptionClose(order: 'ariaFirst' | 'domFirst' | 'neither', lag: 'none' | 'label' | 'checked' = 'none') {
+  const f = adapterFixture({ nestedSelected: true }), option = f.options.find(row => row.getAttribute('data-moon-key') === instant.key)!;
+  const click = option.onClick!;
+  option.onClick = () => {
+    click();
+    if (order !== 'domFirst') f.menu.removeAttribute('hidden');
+    if (order !== 'ariaFirst') f.trigger.setAttribute('aria-expanded', 'true');
+    if (lag === 'label') f.triggerName.text = 'K3';
+    if (lag === 'checked') option.setAttribute('aria-checked', 'false');
+  };
+  const step = () => f.run('selectModel', { modelChoice: instant, expectedModelChoice: instant });
+  let result: any;
+  for (let i = 0; i < 8 && option.clicks === 0; i++) result = await step();
+  return { f, option, step, result, close: () => { f.triggerName.text = 'Instant'; option.setAttribute('aria-checked','true');
+    f.menu.setAttribute('hidden',''); f.trigger.setAttribute('aria-expanded','false'); } };
+}
+
+test('a claimed Instant option waits for its close and delayed label/check acknowledgements before one verification reopen', async () => {
+  for (const order of ['ariaFirst', 'domFirst', 'neither'] as const) for (const lag of ['none', 'label', 'checked'] as const) {
+    const { f, option, step, result, close } = await claimedOptionClose(order, lag);
+    expect(result.error).toBeUndefined(); expect(result.pending).toBe(true); expect(result.modelEvidence).toBeNull();
+    for (let i = 0; i < 3; i++) {
+      const pending = await step(); expect(pending.pending).toBe(true); expect(pending.modelEvidence).toBeNull();
+      const inspected = await f.run('inspect'); expect(inspected.error).toBeUndefined(); expect(inspected.modelEvidence).toBeNull();
+    }
+    expect(option.clicks).toBe(1); expect(f.trigger.clicks).toBe(1); expect(f.more.events).toHaveLength(8);
+    close(); const done = await f.select();
+    expect(done.error).toBeUndefined(); expect(done.modelEvidence.selected).toEqual(instant);
+    expect(option.clicks).toBe(1); expect(f.trigger.clicks).toBe(3); expect(f.more.events).toHaveLength(8);
+    expect(f.counts()).toEqual({ insertions:0, sends:0, confirms:0 });
+  }
+});
+
+test('pending option closure rejects replacement, changed bindings, foreign labels and checked rows without replay', async () => {
+  for (const change of ['menu','target','checked','aria','expanded','label','owner','generation']) {
+    const { f, option, step, result } = await claimedOptionClose('ariaFirst');
+    expect(result.pending).toBe(true);
+    if (change === 'menu' || change === 'target') { const old = change === 'menu' ? f.menu : option;
+      const parent = old.parentElement!, copy = old.cloneNode(true); f.remove(old); parent.append(copy); }
+    else if (change === 'checked') { option.setAttribute('aria-checked','false'); f.options[0].setAttribute('aria-checked','true'); }
+    else if (change === 'aria') f.trigger.setAttribute('aria-controls','foreign-menu');
+    else if (change === 'expanded') f.trigger.setAttribute('aria-expanded','unknown');
+    else if (change === 'label') f.triggerName.text = 'Foreign model';
+    else if (change === 'owner') f.world.__computaModelOwner = 'revoked';
+    else f.world.__computaKimiSavedSessionV1.generation = 'revoked';
+    expect((await step()).error).toBeDefined(); expect((await step()).error).toBeDefined();
+    expect(option.clicks).toBe(1); expect(f.trigger.clicks).toBe(1); expect(f.more.events).toHaveLength(8);
+    expect(f.counts()).toEqual({ insertions:0, sends:0, confirms:0 });
+  }
+});
+
+
+test('an inspect between the option acknowledgement and deferred ARIA close stays non-authoritative', async () => {
+  const { f, option, step, result, close } = await claimedOptionClose('neither');
+  expect(result.pending).toBe(true);
+  f.trigger.setAttribute('aria-expanded','false');
+  const observed = await f.run('inspect');
+  expect(observed.error).toBeUndefined(); expect(observed.modelEvidence).toBeNull();
+  expect((await step()).pending).toBe(true);
+  expect(option.clicks).toBe(1); expect(f.trigger.clicks).toBe(1);
+  close(); expect((await f.select()).modelEvidence.selected).toEqual(instant);
+  expect(option.clicks).toBe(1); expect(f.trigger.clicks).toBe(3); expect(f.counts().sends).toBe(0);
 });
