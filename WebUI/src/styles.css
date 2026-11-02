@@ -67,7 +67,6 @@ kbd { font: inherit; font-size: 10px; color: var(--text-tertiary); }
 .primary-nav { display: grid; gap: 6px; padding: 10px 14px 14px; }
 .nav-button { display: flex; width: 100%; align-items: center; justify-content: flex-start; gap: 9px; text-align: left; }
 .nav-button > span:nth-child(2) { flex: 1; }
-.nav-shortcut { color: var(--text-tertiary); font-size: 10px; }
 .approval-nav { min-height: 32px; color: var(--orange); font-size: 12px; }
 .count-pill { margin-left: auto; font-variant-numeric: tabular-nums; }
 .connection-dot, .status-dot, .task-row-status { width: 5px; height: 5px; flex: 0 0 5px; border-radius: 50%; background: currentColor; }
@@ -87,11 +86,6 @@ kbd { font: inherit; font-size: 10px; color: var(--text-tertiary); }
 .task-row-elapsed { flex: 0 0 auto; color: var(--text-secondary); font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .sidebar-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 30px 10px; color: var(--text-tertiary); font-size: 11px; text-align: center; }
 .sidebar-empty strong { margin-top: 4px; color: var(--text-secondary); font-weight: 500; }
-.sidebar-footer { padding: 12px 14px; border-top: 1px solid var(--border); }
-.runtime-state { display: flex; align-items: center; gap: 7px; padding: 2px 8px 10px; color: var(--text-secondary); font-size: 10px; }
-.runtime-state > span:last-child { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.profile-button { display: flex; width: 100%; align-items: center; justify-content: flex-start; gap: 9px; text-align: left; }
-.profile-button kbd { margin-left: auto; }
 
 /* Keep the work itself visually primary. */
 .workspace { display: flex; min-width: 0; flex: 1; flex-direction: column; }
