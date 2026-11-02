@@ -2015,3 +2015,33 @@ Opus 4.7/Opus 4.8 still refuse the tested workflows, Opus 3 still produces
 malformed responses, and Opus 5 blocks the request. No further demonstrated
 host defect from these captures would turn those cases into successful
 workflows while preserving the established boundaries.
+
+## Build381: retain the Claude block diagnosis after reopening a chat
+
+The resumed review found a separate host defect in error history. Build380
+displayed the specific `website_response_blocked` error in the live task, but
+`WebsiteTurnFailureStore` did not admit that finite error code. The persistence
+call therefore returned without saving a record. Reopening the chat could show
+only the engine's generic high-demand error. The store directory exists, but
+the exact `opus5-marker380-l` thread has no diagnostic file, confirming that
+the live UI check alone did not establish durable error history.
+
+Build381 admits Claude's exact canonical blocked-response envelope. Changed
+messages, retry metadata, extra fields and other providers remain rejected.
+The saved classification keeps the matching turn failed; it does not replay
+a prompt, create a provider-wide block, change cleanup rules or reconstruct a
+missing historical record. This fixes diagnosis persistence, not Claude's
+acceptance of the harness request. The model qualification matrix above remains
+unchanged.
+
+The new persistence regression failed before the fix at record creation. After
+the fix, all 22 website failure-history tests passed, including store recreation,
+exact turn identity and rejection of altered envelopes. The private evidence is
+retained under `work/claude-qualification-20261031/claude-block-history381-a/`.
+Four additional runtime tests passed. The bundled engine's actual terminal
+path saved the block diagnostic before shutdown, and a fresh runtime restored
+the exact failed turn with no website operations or tool calls during reload.
+The initial attempt had exactly one start, Send and poll. The adjacent page
+inspection, completion-only failure and cleanup-retry cases also passed.
+These use a synthetic transport and the real bundled engine; they do not claim
+a new live Claude response. Nine versioning tests also passed.

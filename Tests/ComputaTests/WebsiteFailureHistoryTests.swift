@@ -3,6 +3,87 @@ import XCTest
 @testable import Computa
 
 final class WebsiteFailureHistoryTests: XCTestCase {
+    func testClaudeResponseBlockSurvivesStoreRecreationWithExactTurnAndFailedHistory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaClaudeBlockedHistory-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let failure = EmbeddedWebModelTransport.Failure.responseBlocked(.claude)
+        XCTAssertFalse(failure.blocksProviderUntilRefresh, "Saving a turn failure must not invent a provider-wide gate")
+        let data = try WebModelServer.errorBody(for: failure)
+        let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let fields = try XCTUnwrap(envelope["error"] as? [String: Any])
+        XCTAssertEqual(fields["code"] as? String, "website_response_blocked")
+        XCTAssertEqual(fields["retryable"] as? Bool, false)
+        XCTAssertEqual(fields["required_action"] as? String, "inspect_website")
+        let models = ["browser/claude", WebsiteModelChoice(provider: "claude", key: "opus-5", label: "Opus 5").modelID]
+        for model in models {
+            let task = UUID().uuidString, thread = UUID().uuidString, turnID = UUID().uuidString.lowercased()
+            let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+                turnID: turnID, modelID: model, diagnosticText: String(decoding: data, as: UTF8.self)))
+            XCTAssertTrue(WebsiteTurnFailureStore(directory: root).append(record))
+            let restored = try WebsiteTurnFailureStore(directory: root).load(threadID: thread)
+            XCTAssertEqual(restored, [record])
+            let saved = try XCTUnwrap(restored.first)
+            XCTAssertEqual(saved.taskID, task.lowercased())
+            XCTAssertEqual(saved.threadID, thread.lowercased())
+            XCTAssertEqual(saved.modelID, model)
+            XCTAssertEqual(saved.entry.id, "agent-error:" + turnID)
+            XCTAssertTrue(NSDictionary(dictionary: try XCTUnwrap(JSONSerialization.jsonObject(with: Data(saved.entry.body.utf8))
+                as? [String: Any])).isEqual(to: envelope))
+
+            // The engine's generic terminal error must be replaced only for the
+            // matching saved turn. Prior failure evidence remains independent.
+            let previousTurn = UUID().uuidString.lowercased()
+            let generic = "We’re currently experiencing high demand, which may cause temporary errors."
+            let raw = try history([turn(previousTurn, status: "failed", error: ["message": "Earlier failure"]),
+                turn(turnID, status: "failed", error: ["message": generic, "codexErrorInfo": "internal_server_error"])])
+            let failedTurns = Set(restored.map(\.turnID))
+            var entries = try AppServerThreadHistoryContract.entries(from: raw, excludingAssistantTurns: failedTurns)
+            let errorIndex = try XCTUnwrap(entries.firstIndex { $0.id == saved.entry.id })
+            entries[errorIndex] = saved.entry
+            XCTAssertEqual(entries.first { $0.id == "agent-error:" + previousTurn }?.body, "Earlier failure")
+            XCTAssertEqual(entries.last?.body, saved.diagnosticText)
+            XCTAssertFalse(entries.contains { $0.kind == .assistant && $0.turnID == turnID })
+            XCTAssertFalse(entries.contains { $0.body == generic })
+            XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(from: raw,
+                rejectedTurns: failedTurns, failedTurns: failedTurns), .failed)
+        }
+    }
+
+    func testClaudeResponseBlockHistoryRejectsAlteredMetadataOtherProvidersAndPageText() throws {
+        let data = try WebModelServer.errorBody(for: EmbeddedWebModelTransport.Failure.responseBlocked(.claude))
+        let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let fields = try XCTUnwrap(envelope["error"] as? [String: Any])
+        let task = UUID().uuidString, thread = UUID().uuidString, turnID = UUID().uuidString
+        func rejected(_ object: [String: Any], model: String = "browser/claude") throws {
+            XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turnID,
+                modelID: model, diagnosticText: String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)))
+        }
+        let mutations: [[String: Any]] = [["message": "PRIVATE_PAGE_CANARY"], ["retryable": true], ["retryable": 0],
+            ["required_action": "retry_send"], ["code": "website_response_failed"], ["type": "server_error"],
+            ["param": "input"], ["reason": "PRIVATE_PAGE_CANARY"], ["url": "https://private.invalid/PRIVATE_PAGE_CANARY"],
+            ["prompt": "PRIVATE_PROMPT_CANARY"]]
+        for mutation in mutations {
+            var altered = envelope, alteredFields = fields
+            mutation.forEach { alteredFields[$0.key] = $0.value }; altered["error"] = alteredFields
+            try rejected(altered)
+        }
+        for key in fields.keys {
+            var missing = envelope, missingFields = fields
+            missingFields.removeValue(forKey: key); missing["error"] = missingFields
+            try rejected(missing)
+        }
+        var extra = envelope; extra["pageText"] = "PRIVATE_PAGE_CANARY"
+        try rejected(extra)
+        for model in [syntheticChatGPTModelID, "browser/gemini", "browser/groq", "api/cerebras/model/fixture"] {
+            try rejected(envelope, model: model)
+        }
+        for provider in [EmbeddedWebModelTransport.Provider.chatgpt, .gemini, .groq] {
+            let foreign = try WebModelServer.errorBody(for: EmbeddedWebModelTransport.Failure.responseBlocked(provider))
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: foreign) as? [String: Any])
+            try rejected(object, model: "browser/" + provider.rawValue)
+        }
+    }
+
     func testQuotaRecoveryMessageUsesAvailableRestartPathAndPreservesExactLegacyHistory() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaQuotaHistory-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }

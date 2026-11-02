@@ -62,6 +62,12 @@ struct WebsiteTurnFailureStore: Sendable {
             case "website_verification_required": nativeError = EmbeddedWebModelTransport.Failure.humanVerificationRequired(webProvider)
             case "sign_in_required": nativeError = EmbeddedWebModelTransport.Failure.signInRequired
             case "website_usage_limit": nativeError = EmbeddedWebModelTransport.Failure.usageLimited(webProvider)
+            case "website_response_blocked":
+                // Only Claude currently emits this finite native classification.
+                // Preserve its exact terminal warning across history reloads;
+                // page text and retry metadata still fail canonical equality.
+                guard provider == "claude" else { return nil }
+                nativeError = EmbeddedWebModelTransport.Failure.responseBlocked(.claude)
             case "unexpected_website_page": nativeError = EmbeddedWebModelTransport.Failure.unexpectedPage(webProvider)
             case "website_ownership_unverified":
                 guard let rawReason = error["ownership_reason"] as? String,

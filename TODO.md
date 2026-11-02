@@ -47,6 +47,8 @@ Existing Chrome and native desktop tooling retain their separate behavior.
   that earlier response.
   Opus 5's safeguard block remains unresolved. Build380 now has a live 2.905 s
   typed-block/confirmed-cleanup check, but no accepted response or workflow.
+  Build381 fixes a separately reproduced loss of that specific error on history
+  reload. It does not repair provider acceptance or restore missing old records.
   Preserve the
   other models' refusals, format failures, eligibility limits and historical
   unconfirmed cleanup. Fresh build380 tasks confirmed Sonnet 5/Sonnet 4.6 and
