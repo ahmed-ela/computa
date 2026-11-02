@@ -989,6 +989,114 @@ final class KimiWebModelTransportTests: XCTestCase {
         try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
     }
 
+    func testOptimisticEmptyFirstIDsRemainPendingUntilPhysicalReplacementAndCanonicalProof() async throws {
+        let fixture = try Fixture(); defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        _ = try await evaluate(fixture.view, "kimiFixture.options.optimisticUser = true; kimiFixture.options.holdProvisional = true; return true;")
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic optimistic identity")
+        let initialShape = try await evaluate(fixture.view, """
+            const root = document.querySelector('.chat-content-item-user');
+            const body = root.querySelector('.user-content__text');
+            return {emptyRootID:root.getAttribute('data-archer-id') === '',
+              emptyTurnID:root.getAttribute('data-conversation-turn-id') === '',
+              exactSend:body.textContent === fixturePrompts[0],
+              answers:document.querySelectorAll('.chat-content-item-assistant').length};
+            """) as? [String: Any]
+        XCTAssertEqual(initialShape?["emptyRootID"] as? Bool, true)
+        XCTAssertEqual(initialShape?["emptyTurnID"] as? Bool, true)
+        XCTAssertEqual(initialShape?["exactSend"] as? Bool, true)
+        XCTAssertEqual(initialShape?["answers"] as? Int, 0)
+        let pending = try await call(fixture, "webProviderPoll", token)
+        XCTAssertEqual(pending["state"] as? String, "running")
+        XCTAssertEqual(pending["text"] as? String, "")
+        let pendingContext = try XCTUnwrap(pending["modelProofContext"] as? [String: Any])
+        XCTAssertEqual(pendingContext["firstUserFingerprint"] as? String, "")
+        XCTAssertEqual(pendingContext["responseCount"] as? Int, 0)
+        try await assertInsertionCounts(fixture, settlements: 1, sends: 1)
+        let replaced = try await evaluate(fixture.view, "return kimiFixture.replaceOptimisticUser();") as? [String: Bool]
+        XCTAssertEqual(replaced, ["previousDetached": true, "differentPhysicalRoot": true, "textPreserved": true])
+        let provisional = try await call(fixture, "webProviderPoll", token)
+        XCTAssertEqual(provisional["state"] as? String, "running")
+        XCTAssertEqual(provisional["text"] as? String, "")
+        let provisionalContext = try XCTUnwrap(provisional["modelProofContext"] as? [String: Any])
+        XCTAssertEqual(provisionalContext["firstUserFingerprint"] as? String, "")
+        _ = try await evaluate(fixture.view, "kimiFixture.canonicalize(); return true;")
+        let complete = try await wait(fixture, token, state: "complete")
+        XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Offline Kimi fixture reply"}"#)
+        let completeContext = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+        XCTAssertEqual((completeContext["firstUserFingerprint"] as? String)?.count, 64)
+        let finished = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+        try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+        XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
+    func testOptimisticEmptyFirstIDsRejectCanonicalOrChangedEvidenceWithoutReplay() async throws {
+        for mutation in ["canonical", "malformed", "prompt", "nestedBody", "model"] {
+            let fixture = try Fixture(); defer { fixture.shutdown() }
+            let token = try await start(fixture)
+            _ = try await evaluate(fixture.view, "kimiFixture.options.optimisticUser = true; kimiFixture.options.holdProvisional = true; return true;")
+            let prompt = "Synthetic negative optimistic identity"
+            _ = try await call(fixture, "webProviderSend", token, prompt: prompt)
+            let pending = try await call(fixture, "webProviderPoll", token)
+            XCTAssertEqual(pending["state"] as? String, "running")
+            XCTAssertEqual(pending["text"] as? String, "")
+            _ = try await evaluate(fixture.view, """
+                const root = document.querySelector('.chat-content-item-user');
+                const body = root.querySelector('.user-content__text');
+                if ('\(mutation)' === 'canonical') kimiFixture.canonicalize();
+                if ('\(mutation)' === 'malformed') root.setAttribute('data-archer-id', 'not-an-id');
+                if ('\(mutation)' === 'prompt') body.textContent += ' foreign edit';
+                if ('\(mutation)' === 'nestedBody') { const nested = document.createElement('span'); nested.textContent = body.textContent; body.replaceChildren(nested); }
+                if ('\(mutation)' === 'model') document.querySelector('.current-model .name').textContent = 'K3';
+                return true;
+                """)
+            do { _ = try await call(fixture, "webProviderPoll", token); XCTFail("Changed optimistic evidence cannot establish ownership: \(mutation)") }
+            catch { XCTAssertNotNil(error as? EmbeddedWebModelTransport.Failure) }
+            let finished = try await call(fixture, "webProviderFinish", token)
+            XCTAssertEqual(finished["cleanup"] as? String, "failed")
+            do { _ = try await call(fixture, "webProviderSend", token, prompt: prompt); XCTFail("Failed ownership cannot replay Send") }
+            catch { XCTAssertNotNil(error as? EmbeddedWebModelTransport.Failure) }
+            try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+            try await assertInsertionCounts(fixture, settlements: 1, sends: 1)
+            XCTAssertNotNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+            XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+        }
+    }
+
+    func testOptimisticEmptyFirstIDsCannotReviveAfterDeadlineOrCancellation() async throws {
+        for terminal in ["deadline", "cancel"] {
+            let fixture = try Fixture(); defer { fixture.shutdown() }
+            fixture.transport.setTimeoutsForTesting(preparation: .seconds(3), response: .seconds(1))
+            let token = try await start(fixture)
+            _ = try await evaluate(fixture.view, "kimiFixture.options.optimisticUser = true; kimiFixture.options.holdProvisional = true; return true;")
+            let prompt = "Synthetic terminal optimistic identity"
+            _ = try await call(fixture, "webProviderSend", token, prompt: prompt)
+            let pending = try await call(fixture, "webProviderPoll", token)
+            XCTAssertEqual(pending["state"] as? String, "running")
+            XCTAssertEqual(pending["text"] as? String, "")
+            if terminal == "deadline" {
+                do { _ = try await wait(fixture, token, state: "complete"); XCTFail("Empty IDs must not extend the fixed response deadline") }
+                catch let error as EmbeddedWebModelTransport.Failure { XCTAssertEqual(error, .deadline) }
+            }
+            let ended = try await call(fixture, terminal == "cancel" ? "webProviderCancel" : "webProviderFinish", token)
+            XCTAssertEqual(ended["cleanup"] as? String, "failed")
+            _ = try await evaluate(fixture.view, "kimiFixture.replaceOptimisticUser(); kimiFixture.canonicalize(); return true;")
+            do {
+                let late = try await call(fixture, "webProviderPoll", token)
+                XCTAssertNotEqual(late["state"] as? String, "complete")
+                XCTAssertEqual(late["text"] as? String, "")
+            } catch { XCTAssertNotNil(error as? EmbeddedWebModelTransport.Failure) }
+            do { _ = try await call(fixture, "webProviderSend", token, prompt: prompt); XCTFail("A terminal session cannot resend after IDs settle") }
+            catch { XCTAssertNotNil(error as? EmbeddedWebModelTransport.Failure) }
+            try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+            try await assertInsertionCounts(fixture, settlements: 1, sends: 1)
+            XCTAssertNotNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+            XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+        }
+    }
+
     func testDelayedDeletionStagesObserveUntilReadyWithoutRepeatingClicks() async throws {
         let fixture = try Fixture(); defer { fixture.shutdown() }
         let token = try await start(fixture)

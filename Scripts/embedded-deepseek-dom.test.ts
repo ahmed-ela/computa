@@ -112,11 +112,26 @@ describe('DeepSeek DOM driver', () => {
   test('menu and confirmation reads need separate acknowledged claims and keep DOM identity', () => {
     const f = fixture(), record: any = f.record(); record.deleteAcknowledged = false; f.body.append(f.menu);
     expect(f.read().deletionMenu(record).target).toBe(f.remove);
-    record.menuAcknowledged = false; fails(() => f.read().deletionMenu(record), 'delete_phase'); record.menuAcknowledged = true;
-    f.menu.detach(); f.body.append(f.modal); fails(() => f.read().deletionConfirmation(record), 'delete_phase');
+    record.menuAcknowledged = false; fails(() => f.read().deletionMenu(record), 'delete_menu_open_unacknowledged'); record.menuAcknowledged = true;
+    f.menu.detach(); f.body.append(f.modal); fails(() => f.read().deletionConfirmation(record), 'delete_confirm_selection_unacknowledged');
     record.deleteAcknowledged = true; expect(f.read().deletionConfirmation(record).target).toBe(f.confirm);
     f.firstText.text += ' changed'; fails(() => f.read().deletionConfirmation(record), 'delete_ownership');
     expect(f.mutations()).toBe(0);
+  });
+  test('cleanup phase diagnostics distinguish exact failed predicates without dispatching', () => {
+    for (const kind of ['menu_ack', 'selection_ack', 'menu_binding', 'visible_menu']) {
+      const f = fixture(), record: any = f.record(); f.body.append(f.modal);
+      if (kind === 'menu_ack') record.menuAcknowledged = false;
+      if (kind === 'selection_ack') record.deleteAcknowledged = false;
+      if (kind === 'menu_binding') record.menu = null;
+      if (kind === 'visible_menu') f.body.append(f.menu);
+      const detail = { menu_ack: 'delete_confirm_menu_unacknowledged', selection_ack: 'delete_confirm_selection_unacknowledged',
+        menu_binding: 'delete_confirm_menu_unbound', visible_menu: 'delete_confirm_menu_still_visible' }[kind];
+      fails(() => f.read().deletionConfirmation(record), detail);
+      expect(f.mutations()).toBe(0);
+    }
+    const f = fixture(), record = f.record(); f.body.append(f.menu);
+    fails(() => f.read().deletionMenu(record), 'delete_menu_selection_spent'); expect(f.mutations()).toBe(0);
   });
   test('route drift, wrong wording and duplicate dialogs prevent confirmation', () => {
     for (const kind of ['route', 'wording', 'duplicate']) {

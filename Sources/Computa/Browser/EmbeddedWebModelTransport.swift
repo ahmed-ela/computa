@@ -2022,7 +2022,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             providerDetails = ["mode_toggle", "deepthink_control", "deepthink_control_label", "search_control", "search_control_label",
                 "mode_named_input", "mode_unbound", "search_selected", "deepthink_replaced", "search_replaced", "mode_choice_changed",
                 "composer_handoff_ineligible", "composer_handoff_binding", "composer_handoff_changed",
-                "delete_anchor", "delete_buttons"] + deepSeekFirstUserFailureDetails
+                "delete_anchor", "delete_buttons",
+                "delete_menu_open_unacknowledged", "delete_menu_selection_spent", "delete_confirm_menu_unacknowledged",
+                "delete_confirm_selection_unacknowledged", "delete_confirm_menu_unbound", "delete_confirm_menu_still_visible"] + deepSeekFirstUserFailureDetails
         default: return nil
         }
         let details = commonDetails + providerDetails, detail = observed["detail"] as? String

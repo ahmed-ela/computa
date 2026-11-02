@@ -690,6 +690,91 @@ describe('Kimi saved-conversation adapter', () => {
     expect(f.counts().sends).toBe(1);
   });
 
+  test('empty initial IDs wait without binding until the replacement UUID root and canonical route', async () => {
+    const f = adapterFixture({ provisional: true, optimisticUser: true });
+    const pending = await f.submit(), oldRoot = f.messages.user;
+    expect(pending).toMatchObject({ ownershipPending: true, userCount: 1, responseCount: 0, text: '',
+      firstUserVerified: false, firstUserMarkerVerified: false, firstUserFingerprint: null, answerComplete: false });
+    expect(f.world.__computaKimiSavedSessionV1.first).toBeNull(); expect(f.fingerprint).toBeUndefined();
+    const before = f.counts();
+    for (let i = 0; i < 3; i++) expect((await f.run()).ownershipPending).toBe(true);
+    expect(f.counts()).toEqual(before);
+    f.replaceOptimisticUser(); expect(f.messages.user).not.toBe(oldRoot); expect(oldRoot.isConnected).toBe(false);
+    const replacement = await f.run(); expect(replacement.ownershipPending).toBe(true);
+    expect(replacement.text).toBe(''); expect(f.fingerprint).toBeUndefined();
+    f.document.URL = canonical;
+    const complete = await f.run();
+    expect(complete.firstUserVerified).toBe(true); expect(complete.firstUserMarkerVerified).toBe(true);
+    expect(complete.firstUserFingerprint).toBe(submissionFingerprint); expect(complete.answerComplete).toBe(true);
+    expect(f.world.__computaKimiSavedSessionV1.first.root).toBe(f.messages.user);
+    expect(f.counts()).toEqual(before); expect(f.counts().sends).toBe(1);
+  });
+
+  test('optimistic waiting preserves the entire long outbound including its exact marker suffix', async () => {
+    const outbound = ('Synthetic tool schema café \\ quoted "value"\n'.repeat(1600)) + '\nComputa session marker: ' + marker;
+    const f = adapterFixture({ provisional: true, optimisticUser: true, outbound });
+    const pending = await f.submit(); expect(pending.ownershipPending).toBe(true);
+    expect(f.messages.userBody.textContent).toBe(outbound); expect(f.fingerprint).toBeUndefined();
+    f.replaceOptimisticUser(); f.document.URL = canonical;
+    const complete = await f.run(); expect(complete.firstUserVerified).toBe(true); expect(complete.answerComplete).toBe(true);
+    expect(f.messages.userBody.textContent).toBe(outbound); expect(f.counts().insertions).toBe(1); expect(f.counts().sends).toBe(1);
+  });
+
+  test('empty-ID wait rejects missing malformed mixed or canonical identities and changed content', async () => {
+    for (const kind of ['missing_root', 'missing_turn', 'malformed_root', 'nonempty_turn', 'canonical', 'body',
+      'marker', 'body_shape', 'duplicate_body', 'duplicate_user', 'answer', 'count', 'model']) {
+      const f = adapterFixture({ provisional: true, optimisticUser: true });
+      await f.select(); await f.run('prepare'); await f.run('insert'); await f.run('submit');
+      let extra: Record<string, unknown> = {};
+      if (kind === 'missing_root') f.messages.user.removeAttribute('data-archer-id');
+      if (kind === 'missing_turn') f.messages.user.removeAttribute('data-conversation-turn-id');
+      if (kind === 'malformed_root') f.messages.user.setAttribute('data-archer-id', 'private-unaccepted-id');
+      if (kind === 'nonempty_turn') f.messages.user.setAttribute('data-conversation-turn-id', marker);
+      if (kind === 'canonical') f.document.URL = canonical;
+      if (kind === 'body') f.messages.userBody.text = prompt.replace('Exact', 'Other');
+      if (kind === 'marker') extra = { expectedFirstUserMarker: generation };
+      if (kind === 'body_shape') f.messages.userBody.append(new f.Node('SPAN', {}, ''));
+      if (kind === 'duplicate_body') f.messages.content.append(new f.Node('SPAN', { class: 'user-content__text' }, prompt));
+      if (kind === 'duplicate_user') f.installTranscript();
+      if (kind === 'answer') f.body.append(new f.Node('DIV', { class: 'chat-content-item chat-content-item-assistant' }));
+      if (kind === 'count') extra = { expectedUserCounts: [0] };
+      if (kind === 'model') f.triggerName.text = 'Foreign selection';
+      const result = await f.run('inspect', extra);
+      expect(result.error).toBeDefined(); expect(result.ownershipPending).toBeUndefined();
+      expect(result.firstUserVerified).toBeUndefined(); expect(result.text).toBeUndefined();
+      expect(f.fingerprint).toBeUndefined(); expect(f.counts().sends).toBe(1);
+    }
+  });
+
+  test('empty-ID wait is inspect-only and cannot survive changed ownership or acquire a second Send', async () => {
+    for (const kind of ['verifyModel', 'stop', 'deleteConversation', 'cleanup', 'binding', 'fingerprint', 'owner', 'generation']) {
+      const f = adapterFixture({ provisional: true, optimisticUser: true });
+      expect((await f.submit()).ownershipPending).toBe(true);
+      const action = ['verifyModel', 'stop', 'deleteConversation'].includes(kind) ? kind : 'inspect';
+      const extra = kind === 'cleanup' ? { kimiCleanupInspection: true } : kind === 'binding' ? { allowFirstUserBinding: false }
+        : kind === 'fingerprint' ? { expectedFirstUserFingerprint: submissionFingerprint }
+        : kind === 'owner' ? { ownerToken: marker } : kind === 'generation' ? { documentGeneration: marker } : {};
+      const result = await f.run(action, extra);
+      expect(result.error).toBeDefined(); expect(result.ownershipPending).toBeUndefined();
+      expect(f.counts().sends).toBe(1); expect(f.counts().confirms).toBe(0); expect(f.fingerprint).toBeUndefined();
+    }
+    const f = adapterFixture({ provisional: true, optimisticUser: true }); await f.submit();
+    expect((await f.run('submit')).error).toBeDefined(); expect(f.counts().sends).toBe(1);
+  });
+
+  test('replaced UUID user still requires exact full-body and post-hash physical ownership', async () => {
+    for (const kind of ['wrong_text', 'turn_link', 'changed_during_hash', 'old_root_returns']) {
+      const f = adapterFixture({ provisional: true, optimisticUser: true }); await f.submit();
+      const oldRoot = f.messages.user; f.replaceOptimisticUser(); f.document.URL = canonical;
+      if (kind === 'wrong_text') f.messages.userBody.text = prompt.replace('Exact', 'Other');
+      if (kind === 'turn_link') f.messages.user.setAttribute('data-conversation-turn-id', marker);
+      if (kind === 'changed_during_hash') f.onDigest(() => { f.messages.userBody.text += ' changed'; });
+      if (kind === 'old_root_returns') { oldRoot.connected = true; f.body.append(oldRoot); }
+      const result = await f.run(); expect(result.error).toBeDefined(); expect(result.firstUserVerified).toBeUndefined();
+      expect(f.fingerprint).toBeUndefined(); expect(f.counts().sends).toBe(1);
+    }
+  });
+
   test('stale native route reads cannot poison the one allowed fresh-to-provisional-to-canonical promotion', async () => {
     const f = adapterFixture({ provisional: true });
     await f.select(); await f.run('prepare'); await f.run('insert');

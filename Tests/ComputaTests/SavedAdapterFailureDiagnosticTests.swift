@@ -70,6 +70,21 @@ final class SavedAdapterFailureDiagnosticTests: XCTestCase {
         }
     }
 
+    @MainActor func testDeepSeekCleanupFailureReasonsRemainFiniteAndProviderScoped() {
+        for detail in ["delete_menu_open_unacknowledged", "delete_menu_selection_spent", "delete_confirm_menu_unacknowledged", "delete_confirm_selection_unacknowledged", "delete_confirm_menu_unbound", "delete_confirm_menu_still_visible"] {
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+                ["error": "conversation_changed", "detail": detail], provider: .deepseek, action: "selectConversationDeletion"),
+                "action=selectConversationDeletion error=conversation_changed detail=\(detail)")
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+                ["error": "conversation_changed", "detail": detail], provider: .qwen, action: "selectConversationDeletion"),
+                "action=selectConversationDeletion error=conversation_changed detail=other")
+        }
+        XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+            ["error": "conversation_changed", "detail": "delete_confirm_menu_still_visible private-page-text"],
+            provider: .deepseek, action: "selectConversationDeletion"),
+            "action=selectConversationDeletion error=conversation_changed detail=other")
+    }
+
     @MainActor func testDeepSeekModeBindingFailureStagesRemainFiniteAndProviderScoped() {
         for detail in ["mode_named_input", "mode_unbound", "search_selected", "deepthink_replaced", "search_replaced", "mode_choice_changed"] {
             XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(

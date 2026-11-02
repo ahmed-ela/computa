@@ -782,7 +782,8 @@ function computaDeepSeekDOM(c) {
   }
   function deletionMenu(record) {
     deletionGuard(record);
-    if (record.menuAcknowledged !== true || record.deleteAcknowledged === true) c.fail('conversation_changed', 'delete_phase');
+    if (record.menuAcknowledged !== true) c.fail('conversation_changed', 'delete_menu_open_unacknowledged');
+    if (record.deleteAcknowledged === true) c.fail('conversation_changed', 'delete_menu_selection_spent');
     const menu = optional(visible(document, '[role="menu"]'), 'delete_menu');
     if (!menu) return null;
     if (!menu.classList.contains('ds-dropdown-menu') || authored(menu) || record.menu && record.menu !== menu)
@@ -796,9 +797,10 @@ function computaDeepSeekDOM(c) {
   }
   function deletionConfirmation(record) {
     deletionGuard(record);
-    if (record.menuAcknowledged !== true || record.deleteAcknowledged !== true
-      || !record.menu?.classList.contains('ds-dropdown-menu') || visible(document, '[role="menu"]').length)
-      c.fail('conversation_changed', 'delete_phase');
+    if (record.menuAcknowledged !== true) c.fail('conversation_changed', 'delete_confirm_menu_unacknowledged');
+    if (record.deleteAcknowledged !== true) c.fail('conversation_changed', 'delete_confirm_selection_unacknowledged');
+    if (!record.menu?.classList.contains('ds-dropdown-menu')) c.fail('conversation_changed', 'delete_confirm_menu_unbound');
+    if (visible(document, '[role="menu"]').length) c.fail('conversation_changed', 'delete_confirm_menu_still_visible');
     const dialog = optional(visible(document, '[role="dialog"]'), 'delete_dialog');
     if (!dialog) return null;
     const modal = dialog.closest('.ds-modal');

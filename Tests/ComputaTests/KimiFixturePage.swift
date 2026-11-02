@@ -63,7 +63,7 @@ enum KimiFixturePage {
       const header = document.getElementById('fixture-header-trigger'), messages = document.getElementById('fixture-messages');
       const canonical = '/chat/11111111-abcd-4333-8444-555555555555';
       const provisional = '/chat/p1111111-2222-4333-8444-555555555555?chat_enter_method=home';
-      const options = { delayUser: false, holdProvisional: false, holdResponse: false,
+      const options = { delayUser: false, holdProvisional: false, holdResponse: false, optimisticUser: false,
         menuDelayMs: 0, dialogDelayMs: 0, canonicalDelayMs: 60, retainHistoryLink: false,
         moreOpenDelayMs: 0, moreCloseDelayMs: 0, moreEventFamily: 'mouse',
         moreCloseOrder: 'together', mainCloseOrder: 'together', closeAcknowledgementDelayMs: 200,
@@ -211,11 +211,28 @@ enum KimiFixturePage {
       function appendUser() {
         if (user || typeof outbound !== 'string') throw new Error('Invalid fixture append');
         user = document.createElement('div'); user.className = 'chat-content-item chat-content-item-user';
-        user.setAttribute('data-archer-id', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee');
-        user.setAttribute('data-conversation-turn-id', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee');
+        const identity = options.optimisticUser ? '' : 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+        user.setAttribute('data-archer-id', identity);
+        user.setAttribute('data-conversation-turn-id', identity);
         const userContent = document.createElement('div'); userContent.className = 'user-content';
         const userText = document.createElement('span'); userText.className = 'user-content__text'; userText.textContent = outbound;
         userContent.append(userText); user.append(userContent); messages.append(user);
+        if (!options.optimisticUser) appendAnswer();
+      }
+      function replaceOptimisticUser() {
+        if (!user || answer || user.getAttribute('data-archer-id') !== ''
+          || user.getAttribute('data-conversation-turn-id') !== '') throw new Error('Invalid optimistic fixture replacement');
+        // Replace the actual Send-derived DOM; never regenerate a changed
+        // prompt from the native request or adapter state.
+        const previous = user, replacement = user.cloneNode(true);
+        replacement.setAttribute('data-archer-id', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee');
+        replacement.setAttribute('data-conversation-turn-id', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee');
+        previous.replaceWith(replacement); user = replacement; appendAnswer();
+        return { previousDetached: !previous.isConnected, differentPhysicalRoot: previous !== user,
+          textPreserved: previous.textContent === user.textContent };
+      }
+      function appendAnswer() {
+        if (!user || answer) throw new Error('Invalid fixture answer');
         answer = document.createElement('div'); answer.className = 'chat-content-item chat-content-item-assistant';
         answer.setAttribute('data-archer-id', 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff');
         answer.innerHTML = '<div class="segment-content-box"><div class="toolcall-rollup">'
@@ -269,7 +286,7 @@ enum KimiFixturePage {
         });
       }
       header.addEventListener('click', () => { counters.headerOpens++; setTimeout(showDeleteMenu, options.menuDelayMs); });
-      window.kimiFixture = { options, counters, inputEvents, moreEvents, appendUser, completeResponse, finishOptionClose,
+      window.kimiFixture = { options, counters, inputEvents, moreEvents, appendUser, replaceOptimisticUser, completeResponse, finishOptionClose,
         optionState: () => ({pending:!!pendingOption,visible:!menu.hidden,expanded:model.getAttribute('aria-expanded'),
           targetLabel:!!pendingOption && model.querySelector('.name').textContent === pendingOption.querySelector('.name').textContent}),
         selectNestedInitially: () => {

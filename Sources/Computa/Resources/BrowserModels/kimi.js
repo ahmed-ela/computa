@@ -481,6 +481,47 @@ try {
     }
     return { users, answers, first, answer };
   }
+  function verifyUserCount(count) {
+    if (!Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.length || input.expectedUserCounts.length > 2
+      || input.expectedUserCounts.some(value => ![0, 1].includes(value))
+      || !input.expectedUserCounts.includes(count)) c.fail('conversation_changed', 'user_count');
+  }
+  function verifyFirstPrompt(first) {
+    if (!state.submitted) c.fail('conversation_changed', 'first_submission_unclaimed');
+    if (!state.inserted) c.fail('conversation_changed', 'first_insertion_missing');
+    if (first.text !== state.inserted.prompt) c.fail('conversation_changed', 'first_full_echo_mismatch');
+    if (!c.uuid(input.expectedFirstUserMarker)) c.fail('conversation_changed', 'first_marker_invalid');
+    if (input.expectedFirstUserMarker !== state.inserted.marker) c.fail('conversation_changed', 'first_marker_mismatch');
+    if (!state.inserted.prompt.endsWith(`\n\nComputa session marker: ${input.expectedFirstUserMarker}`))
+      c.fail('conversation_changed', 'first_marker_suffix');
+  }
+  function initialUserIdentityPending() {
+    // The observed optimistic first user has two present-but-empty IDs. Its
+    // replacement receives real UUIDs before the provisional route promotes.
+    // Keep that transient root out of transcript(), hashing and first binding.
+    if (input.action !== 'inspect' || cleanupInspection || route.kind !== 'provisional'
+      || !state.submitted || !state.prepared || !state.inserted?.dispatched || !state.inserted.verified
+      || state.first || state.canonical || state.deletion || input.allowFirstUserBinding !== true
+      || input.expectedFirstUserFingerprint != null) return null;
+    const users = c.nodes(document, '.chat-content-item.chat-content-item-user', 32);
+    const answers = c.nodes(document, '.chat-content-item.chat-content-item-assistant', 32);
+    if (users.length !== 1 || answers.length !== 0) return null;
+    const root = users[0];
+    if (root.getAttribute('data-archer-id') !== '' || root.getAttribute('data-conversation-turn-id') !== '') return null;
+    const body = one(visible(root, '.user-content .user-content__text'), 'first_body_count');
+    if (!c.visible(root)) c.fail('conversation_changed', 'first_root_hidden');
+    if (body.tagName !== 'SPAN' || body.children.length !== 0) c.fail('conversation_changed', 'first_body_shape');
+    verifyUserCount(1); verifyFirstPrompt({ text: body.textContent });
+    const form = composer(), evidence = modelEvidence();
+    // Native accepts this existing negative receipt only after the sole Send
+    // is acknowledged, while its first body and canonical lineage are unbound.
+    // No response, first-user identity, fingerprint or cleanup authority exists.
+    return { url: document.URL, sessionLifecycle: 'saved_conversation_delete', temporary: false,
+      composer: c.enabled(form.editor), userCount: 1, responseCount: 0, modelEvidence: evidence,
+      text: '', answerComplete: false, busy: true, ownershipPending: true,
+      conversationIdentity: null, firstUserIdentity: null, firstUserVerified: false,
+      firstUserMarkerVerified: false, firstUserFingerprint: null };
+  }
   function sameFirst(first) {
     guard(); const now = transcript().first;
     return !!now && ['root', 'body', 'id', 'text'].every(key => now[key] === first[key]);
@@ -721,19 +762,13 @@ try {
       firstUserVerified: false, firstUserMarkerVerified: false, firstUserFingerprint: null,
       conversationIdentity: null, deleteProof: deleteProof(op, record, true) };
   }
+  const pendingIdentity = initialUserIdentityPending();
+  if (pendingIdentity) return pendingIdentity;
   const initial = read();
   state.initialReadComplete = true;
-  if (!Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.length || input.expectedUserCounts.length > 2
-    || input.expectedUserCounts.some(value => ![0, 1].includes(value))
-    || !input.expectedUserCounts.includes(initial.t.users.length)) c.fail('conversation_changed', 'user_count');
+  verifyUserCount(initial.t.users.length);
   if (initial.t.first && !state.deletion?.confirmAcknowledged) {
-    if (!state.submitted) c.fail('conversation_changed', 'first_submission_unclaimed');
-    if (!state.inserted) c.fail('conversation_changed', 'first_insertion_missing');
-    if (initial.t.first.text !== state.inserted.prompt) c.fail('conversation_changed', 'first_full_echo_mismatch');
-    if (!c.uuid(input.expectedFirstUserMarker)) c.fail('conversation_changed', 'first_marker_invalid');
-    if (input.expectedFirstUserMarker !== state.inserted.marker) c.fail('conversation_changed', 'first_marker_mismatch');
-    if (!state.inserted.prompt.endsWith(`\n\nComputa session marker: ${input.expectedFirstUserMarker}`))
-      c.fail('conversation_changed', 'first_marker_suffix');
+    verifyFirstPrompt(initial.t.first);
     // A provisional route is a pending observation, never first-body authority.
     if (route.kind !== 'canonical') return { ...initial.output, ownershipPending: true, text: '', answerComplete: false };
     const fingerprint = await c.hash(c.bodyText(initial.t.first.text));

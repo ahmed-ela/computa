@@ -126,7 +126,7 @@ export const provisional = 'https://www.kimi.ai/chat/p5258a69-5b44-4d8d-ad88-170
 export const prompt = 'Exact synthetic café\nA second line, "quoted" and \\ literal\n\nComputa session marker: ' + marker;
 export const submissionFingerprint = createHash('sha256').update(prompt.replace(/\r\n?/g, '\n').normalize('NFC').trim()).digest('hex');
 
-export function adapterFixture(options: { delayedUser?: boolean; provisional?: boolean; streaming?: boolean;
+export function adapterFixture(options: { delayedUser?: boolean; provisional?: boolean; streaming?: boolean; optimisticUser?: boolean;
   insertionFails?: boolean; insertionThrows?: boolean; delayedInsertion?: boolean; paragraphInsertion?: boolean;
   submitThrows?: boolean; confirmationThrows?: boolean; retainHistoryLink?: boolean; outbound?: string; nestedSelected?: boolean; hoverEvents?: 'mouse' | 'pointer';
   mouseCoordinates?: (value: number) => number } = {}) {
@@ -189,7 +189,7 @@ export function adapterFixture(options: { delayedUser?: boolean; provisional?: b
     if (!options.delayedInsertion) settleInsertion(text);
     return true;
   };
-  let messages: ReturnType<typeof f.installTranscript> | undefined;
+  let messages: ReturnType<typeof f.installTranscript> | undefined, optimisticSettled = false;
   let response: ReturnType<typeof f.installResponseMarkup> | undefined;
   let box: any, rollup: any, part: any, thoughtPart: any, rail: any, header: any, deletionMenu: any, deleteRow: any;
   let confirmation: ReturnType<typeof f.installConfirmation> | undefined, historyLink: any;
@@ -204,6 +204,10 @@ export function adapterFixture(options: { delayedUser?: boolean; provisional?: b
     if (messages) throw new Error('Only one fixture dispatch is allowed');
     if (submittedText === null) throw new Error('Fixture has no submitted text');
     messages = f.installTranscript(); messages.userBody.text = submittedText;
+    if (options.optimisticUser && !optimisticSettled) {
+      messages.user.setAttribute('data-archer-id', ''); messages.user.setAttribute('data-conversation-turn-id', '');
+      remove(messages.answer); return;
+    }
     response = f.installResponseMarkup(); response.code.replaceChildren(); response.code.text = '{"type":"message","text":"Synthetic reply"}';
     box = new Node('DIV', { class: 'segment-content-box' }); rollup = new Node('DIV', { class: 'toolcall-rollup' });
     thoughtPart = new Node('DIV', { class: 'toolcall-rollup__part toolcall-rollup__flat' });
@@ -242,6 +246,11 @@ export function adapterFixture(options: { delayedUser?: boolean; provisional?: b
       };
     };
     historyLink = new Node('A', { href: canonical }, 'Synthetic title'); body.append(historyLink);
+  };
+  const replaceOptimisticUser = () => {
+    if (!messages || optimisticSettled || messages.user.getAttribute('data-archer-id') !== '')
+      throw new Error('No initial optimistic user is retained');
+    remove(messages.user); remove(messages.answer); messages = undefined; optimisticSettled = true; appendUser();
   };
   send.onClick = () => {
     sends++; if (options.submitThrows) throw new Error('Unknown submission acknowledgement');
@@ -304,7 +313,7 @@ export function adapterFixture(options: { delayedUser?: boolean; provisional?: b
   };
   const operation = () => ({ id: '547dbbf5-8955-4b65-9b18-5a6e16c3cd7d', documentGeneration: generation,
     sequence: 1, firstUserFingerprint: fingerprint, conversationURL: canonical });
-  return { ...f, run, select, submit, operation, send, sendIcon, remove, appendUser, finishResponse, settleInsertion,
+  return { ...f, run, select, submit, operation, send, sendIcon, remove, appendUser, replaceOptimisticUser, finishResponse, settleInsertion,
     observers, signals,
     emitAttribute: (name: string) => { for (const observer of observers) if (observer.active && observer.attributes.includes(name)) observer.callback(); },
     onDigest: (hook: () => void) => { digestHook = hook; }, occlude: (node: any) => { occluded = node; },

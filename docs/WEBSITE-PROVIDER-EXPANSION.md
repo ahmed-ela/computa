@@ -662,6 +662,48 @@ DeepThink and tool workflows were not started. Fresh394 workflow fixtures remain
 prepared only. Evidence is private under the build394 marker-capture directories
 and `provider-live394.log`.
 
+### Candidate397: Kimi initial user identity and DeepSeek cleanup diagnostics
+
+The build394 Kimi marker failed `first_root_id_invalid` 57 ms after Send
+acknowledgement. A separate owned browser probe observed one exact first-user
+body on the provisional route with both ID attributes present but empty and
+no assistant message. About 1.3 seconds later, a different physical user root
+carried matching UUIDs before canonical route promotion. This establishes a
+legitimate website phase; it does not reconstruct the original native page's
+exact attribute values.
+
+Candidate397 waits on only that initial empty-ID state. The existing native
+gate requires the single acknowledged Send, pending first body and no bound
+conversation. The adapter additionally requires one visible leaf body matching
+the full sent prompt and marker, zero answers, the same provisional route and
+verified selected model. The observation grants no response, fingerprint or
+cleanup authority and does not retain the temporary root. Normal canonical
+route, UUID, turn linkage, full-body hash and physical identity checks still
+establish ownership after replacement. Deadlines, cancellation, action counts
+and cleanup verification remain unchanged; no prompt is replayed.
+
+DeepSeek's build394 response completed before saved-chat cleanup failed with
+`delete_phase`. Candidate397 distinguishes six existing cleanup predicates
+using fixed diagnostic labels. It preserves their evaluation order, DOM reads,
+failures and actions. A closing menu remaining visible after the sole Delete
+row click is a hypothesis, not a proved cause or repaired transition. The shared
+deletion engine and its one-dispatch policy are unchanged.
+
+The integrated source passed **65 distinct native tests** (46 Kimi transport,
+19 saved-adapter diagnostics) and **150 JavaScript/version tests** with
+**4,657 assertions**. Real WebKit cases cover physical user replacement, exact
+proof before response/deletion, invalid evidence, fixed deadline, cancellation
+and no late revival or second Send. The current source hashes match the two
+reviewed candidates; counts are taken from unique test cases and final suite
+summaries, without adding overlapping summaries.
+
+At documentation preparation, build396 remains installed. Packaging and fresh
+native model qualification of397 are pending. Earlier Kimi, Qwen and DeepSeek
+failures and unconfirmed cleanup remain failed records. No new reply,
+browser/terminal/file workflow or live cleanup pass is claimed. Evidence is
+retained privately under `work/new-website-providers-20261102/build397/`, with
+source/test hashes in `final-source-gates.json`.
+
 ### Direct website observations before native qualification
 
 Kimi's approved test tab uses `https://www.kimi.ai/`. Its model menu offered
@@ -709,10 +751,11 @@ developer setting were restored after the approved two-message-per-provider scop
 
 ## Remaining gates
 
-1. Capture Kimi's exact first-user predicate without weakening full echo, marker
-   or physical ownership checks; require an Instant reply and durable deletion.
-2. Gate and install the exact Qwen provisional-route and DeepSeek complete-remount
-   candidates, then verify fresh native responses and cleanup without replay.
+1. Install the gated Kimi initial empty-ID wait and require a fresh native
+   Instant reply and durable deletion without weakening full-body ownership.
+2. Resolve Qwen's initial answer identity transition and use DeepSeek's finite
+   cleanup diagnostics to identify its failing predicate; require fresh native
+   responses and cleanup without replay for both providers.
 3. Verify DeepSeek's completion signal while an actual response is still streaming.
 4. Preserve negative fixtures for foreign routes/models, partial/repeated remounts,
    uncertain Send, lost ownership and delayed/unconfirmed deletion.
