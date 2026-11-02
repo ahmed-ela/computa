@@ -301,27 +301,32 @@ async function computaSavedConversation(input, c, dom, config) {
     if (!Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.length || input.expectedUserCounts.length > 2
       || input.expectedUserCounts.some(value => ![0, 1].includes(value)) || !input.expectedUserCounts.includes(initial.t.users.length))
       c.fail('conversation_changed', 'user_count');
+    // Diagnostic-only mode detail: Qwen retains its existing detail and both
+    // providers retain all exact body, marker, identity and fingerprint gates.
+    const firstFailure = detail => c.fail('conversation_changed', usesModes ? detail : 'first_user_message');
     if (initial.t.first) {
-      if (!state.submitted || !state.inserted || initial.t.first.text !== state.inserted.prompt
-        || !c.uuid(input.expectedFirstUserMarker) || input.expectedFirstUserMarker !== state.inserted.marker
-        || !state.inserted.prompt.endsWith(`\n\nComputa session marker: ${input.expectedFirstUserMarker}`))
-        c.fail('conversation_changed', 'first_user_message');
+      if (!state.submitted || !state.inserted) firstFailure('first_not_submitted');
+      if (initial.t.first.text !== state.inserted.prompt) firstFailure('first_prompt_mismatch');
+      if (!c.uuid(input.expectedFirstUserMarker)) firstFailure('first_marker_invalid');
+      if (input.expectedFirstUserMarker !== state.inserted.marker) firstFailure('first_marker_mismatch');
+      if (!state.inserted.prompt.endsWith(`\n\nComputa session marker: ${input.expectedFirstUserMarker}`)) firstFailure('first_marker_suffix');
       if (route.kind !== 'canonical') return { ...initial.output, ownershipPending: true, text: '', answerComplete: false };
       const fingerprint = await c.hash(c.bodyText(initial.t.first.text));
-      guard(); if (!sameFirst(initial.t.first)) c.fail('conversation_changed', 'first_user_message');
+      guard(); if (!sameFirst(initial.t.first)) firstFailure('first_changed_after_hash');
       selectionEvidence();
       if (state.first) {
         const unpublished = input.action === 'inspect' && input.allowFirstUserBinding === true && input.expectedFirstUserFingerprint == null;
-        if (!sameFirst(state.first) || state.first.fingerprint !== fingerprint
-          || input.expectedFirstUserFingerprint !== fingerprint && !unpublished) c.fail('conversation_changed', 'first_user_message');
+        if (!sameFirst(state.first)) firstFailure('first_pinned_node_changed');
+        if (state.first.fingerprint !== fingerprint) firstFailure('first_pinned_hash_mismatch');
+        if (input.expectedFirstUserFingerprint !== fingerprint && !unpublished) firstFailure('first_expected_hash_mismatch');
       } else {
         if (input.action !== 'inspect' || input.allowFirstUserBinding !== true || input.expectedFirstUserFingerprint != null)
-          c.fail('conversation_changed', 'first_user_message');
+          firstFailure('first_binding_not_authorized');
         state.first = { ...initial.t.first, fingerprint };
       }
       initial = read();
       Object.assign(initial.output, { firstUserVerified: true, firstUserMarkerVerified: true, firstUserFingerprint: fingerprint });
-    } else if (state.first) c.fail('conversation_changed', 'first_user_message');
+    } else if (state.first) firstFailure('first_disappeared');
     if (deletionActions.includes(input.action)) {
       const op = deletionOperation();
       const deletionTarget = record => {
@@ -525,10 +530,14 @@ function computaDeepSeekDOM(c) {
     const root = users[0], container = one(visible(root, '.ds-collapsible-text'), 'first_user_container');
     const body = leaf(container, 'div > span', 'first_user_message'), turn = root.parentElement;
     const id = turn?.getAttribute('data-virtual-list-item-key');
-    if (!c.visible(root) || !id || !/^-?[0-9]{1,10}$/.test(id)
-      || container.children.length !== 1 || container.children[0].children.length !== 1
-      || container.textContent !== body.textContent || root.textContent !== body.textContent)
-      c.fail('conversation_changed', 'first_user_message');
+    // Preserve every structural/text check; fixed reasons distinguish a long
+    // collapsed rendering from a changed prompt without publishing either body.
+    if (!c.visible(root)) c.fail('conversation_changed', 'first_root_hidden');
+    if (!id || !/^-?[0-9]{1,10}$/.test(id)) c.fail('conversation_changed', 'first_id_invalid');
+    if (container.children.length !== 1) c.fail('conversation_changed', 'first_container_children');
+    if (container.children[0].children.length !== 1) c.fail('conversation_changed', 'first_wrapper_children');
+    if (container.textContent !== body.textContent) c.fail('conversation_changed', 'first_container_text');
+    if (root.textContent !== body.textContent) c.fail('conversation_changed', 'first_root_text');
     let answer = null;
     if (answers.length) {
       const node = answers[0], answerTurn = node.parentElement;

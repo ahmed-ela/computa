@@ -99,3 +99,99 @@ test('already-selected Instant does not acquire submenu event behavior', async (
   const f = adapterFixture(); expect((await f.select()).modelEvidence.selected).toEqual(instant);
   expect(f.more.events).toHaveLength(0); expect(f.more.clicks).toBe(0); expect(f.trigger.clicks).toBe(2);
 });
+
+
+function partialMoreClose(f: ReturnType<typeof adapterFixture>, order: 'ariaFirst' | 'domFirst') {
+  const dispatch = f.more.onDispatch!;
+  f.more.onDispatch = (event: any) => {
+    if (event.type !== 'mouseout') { dispatch(event); return; }
+    if (order === 'ariaFirst') f.more.setAttribute('aria-expanded', 'false');
+    else f.moreMenu.setAttribute('hidden', '');
+  };
+  return () => { f.more.setAttribute('aria-expanded', 'false'); f.moreMenu.setAttribute('hidden', ''); };
+}
+
+test('split submenu close acknowledgements remain pending in either DOM/ARIA order without replay', async () => {
+  for (const order of ['ariaFirst', 'domFirst'] as const) {
+    const f = adapterFixture({ nestedSelected: true }), acknowledge = partialMoreClose(f, order);
+    await discover(f); await discover(f); await discover(f);
+    for (let read = 0; read < 5; read++) {
+      const result = await discover(f);
+      expect(result.pending).toBe(true); expect(result.modelEvidence).toBeNull(); expect(result.modelChoices).toBeUndefined();
+      expect(result.discoveryProgressDiagnostic).toMatchObject({ phase: 'moreClosing', mainMenuPresent: true,
+        mainExpanded: true, submenuPresent: order === 'ariaFirst', submenuExpanded: order === 'domFirst', submenuCollapsed: order === 'ariaFirst' });
+    }
+    expect(f.more.events.map((event: any) => event.type)).toEqual([...entry, ...exit]);
+    expect(f.trigger.clicks).toBe(1); expect(f.more.clicks + f.moreOption.clicks).toBe(0);
+    acknowledge(); expect((await settle(f)).modelChoices).toEqual([instant]);
+    expect(f.more.events).toHaveLength(8); expect(f.trigger.clicks).toBe(2);
+    expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
+  }
+});
+
+test('split main-menu close acknowledgements remain pending in either DOM/ARIA order without replay', async () => {
+  for (const order of ['ariaFirst', 'domFirst'] as const) {
+    const f = adapterFixture({ nestedSelected: true }), click = f.trigger.onClick!;
+    f.trigger.onClick = () => {
+      if (f.trigger.clicks === 1) { click(); return; }
+      if (order === 'ariaFirst') f.trigger.setAttribute('aria-expanded', 'false');
+      else f.menu.setAttribute('hidden', '');
+    };
+    for (let read = 0; read < 4; read++) await discover(f);
+    for (let read = 0; read < 5; read++) {
+      const result = await discover(f);
+      expect(result.pending).toBe(true); expect(result.modelEvidence).toBeNull(); expect(result.modelChoices).toBeUndefined();
+      expect(result.discoveryProgressDiagnostic).toMatchObject({ phase: 'closing', mainMenuPresent: order === 'ariaFirst',
+        mainExpanded: order === 'domFirst', mainCollapsed: order === 'ariaFirst', submenuPresent: false });
+    }
+    expect(f.trigger.clicks).toBe(2); expect(f.more.events).toHaveLength(8);
+    f.trigger.setAttribute('aria-expanded', 'false'); f.menu.setAttribute('hidden', '');
+    expect((await settle(f)).modelChoices).toEqual([instant]);
+    expect(f.trigger.clicks).toBe(2); expect(f.more.events).toHaveLength(8);
+    expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
+  }
+});
+
+test('pending submenu close still rejects changed physical bindings, checked selection and malformed ARIA', async () => {
+  const mutations = [
+    (f: ReturnType<typeof adapterFixture>) => { const old = f.more, parent = old.parentElement!; const next = old.cloneNode(true); f.remove(old); parent.append(next); },
+    (f: ReturnType<typeof adapterFixture>) => { const old = f.moreMenu, parent = old.parentElement!; const next = old.cloneNode(true); f.remove(old); parent.append(next); },
+    (f: ReturnType<typeof adapterFixture>) => { const old = f.moreOption, parent = old.parentElement!; const next = old.cloneNode(true); f.remove(old); parent.append(next); },
+    (f: ReturnType<typeof adapterFixture>) => { f.moreOption.setAttribute('aria-checked', 'false'); },
+    (f: ReturnType<typeof adapterFixture>) => { f.moreMenu.setAttribute('aria-labelledby', 'foreign-trigger'); },
+    (f: ReturnType<typeof adapterFixture>) => { f.more.setAttribute('aria-expanded', 'unknown'); },
+    (f: ReturnType<typeof adapterFixture>) => { f.world.__computaModelOwner = 'revoked'; },
+  ];
+  for (const mutate of mutations) {
+    const f = adapterFixture({ nestedSelected: true }); partialMoreClose(f, 'ariaFirst');
+    await discover(f); await discover(f); await discover(f);
+    expect((await discover(f)).pending).toBe(true); mutate(f);
+    expect((await discover(f)).error).toBeDefined();
+    expect((await discover(f)).error).toBeDefined();
+    expect(f.more.events).toHaveLength(8); expect(f.trigger.clicks).toBe(1);
+    expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
+  }
+});
+
+test('collapsed visible submenu without a claimed close cannot establish its first selection proof', async () => {
+  const f = adapterFixture({ nestedSelected: true }), dispatch = f.more.onDispatch!;
+  f.more.onDispatch = (event: any) => { dispatch(event); if (event.type === 'mouseover') f.more.setAttribute('aria-expanded', 'false'); };
+  expect((await settle(f)).detail).toBe('picker_menu_binding');
+  expect(f.more.events.map((event: any) => event.type)).toEqual(['pointerover', 'pointerenter', 'mouseover']);
+  expect((await discover(f)).detail).toBe('terminal_operation');
+  expect(f.more.events).toHaveLength(3); expect(f.counts().sends).toBe(0);
+});
+
+test('pending main close cannot adopt a replacement menu or changed selected label', async () => {
+  for (const change of ['menu', 'label']) {
+    const f = adapterFixture({ nestedSelected: true }), click = f.trigger.onClick!;
+    f.trigger.onClick = () => { if (f.trigger.clicks === 1) click(); else f.trigger.setAttribute('aria-expanded', 'false'); };
+    for (let i = 0; i < 4; i++) await discover(f);
+    expect((await discover(f)).pending).toBe(true);
+    if (change === 'menu') { const old = f.menu, parent = old.parentElement!; const next = old.cloneNode(true); f.remove(old); parent.append(next); }
+    else f.triggerName.text = 'Changed';
+    expect((await discover(f)).error).toBeDefined();
+    expect(f.trigger.clicks).toBe(2); expect(f.more.events).toHaveLength(8);
+    expect(f.counts().sends).toBe(0);
+  }
+});

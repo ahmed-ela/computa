@@ -36,7 +36,11 @@ function computaQwenDOM(c) {
       control('send_control', scope, '.chat-prompt-send-button > button.send-button[aria-label="Send"]');
       if (c.nodes(scope, '.chat-prompt-send-button > button.stop-button[aria-label="Stop"]').length) reject('not_fresh');
     }
-    return !!editor && !!trigger && !!name;
+    // Mounted controls alone do not prove that discovery can click its
+    // retained picker. Keep the existing pre-claim initial wait until the same
+    // hit test used immediately before clicking succeeds. DOM-change signals
+    // wake this read; native retains its original preparation deadline.
+    return !!editor && !!trigger && !!name && c.hit(trigger);
   }
   function picker() {
     const trigger = one(visible(document, 'div.wms-trigger[role="button"][aria-label="Select Model"][aria-haspopup="listbox"]')

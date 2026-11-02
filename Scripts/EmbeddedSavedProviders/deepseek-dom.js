@@ -97,10 +97,14 @@ function computaDeepSeekDOM(c) {
     const root = users[0], container = one(visible(root, '.ds-collapsible-text'), 'first_user_container');
     const body = leaf(container, 'div > span', 'first_user_message'), turn = root.parentElement;
     const id = turn?.getAttribute('data-virtual-list-item-key');
-    if (!c.visible(root) || !id || !/^-?[0-9]{1,10}$/.test(id)
-      || container.children.length !== 1 || container.children[0].children.length !== 1
-      || container.textContent !== body.textContent || root.textContent !== body.textContent)
-      c.fail('conversation_changed', 'first_user_message');
+    // Preserve every structural/text check; fixed reasons distinguish a long
+    // collapsed rendering from a changed prompt without publishing either body.
+    if (!c.visible(root)) c.fail('conversation_changed', 'first_root_hidden');
+    if (!id || !/^-?[0-9]{1,10}$/.test(id)) c.fail('conversation_changed', 'first_id_invalid');
+    if (container.children.length !== 1) c.fail('conversation_changed', 'first_container_children');
+    if (container.children[0].children.length !== 1) c.fail('conversation_changed', 'first_wrapper_children');
+    if (container.textContent !== body.textContent) c.fail('conversation_changed', 'first_container_text');
+    if (root.textContent !== body.textContent) c.fail('conversation_changed', 'first_root_text');
     let answer = null;
     if (answers.length) {
       const node = answers[0], answerTurn = node.parentElement;

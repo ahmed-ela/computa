@@ -66,10 +66,11 @@ enum KimiFixturePage {
       const options = { delayUser: false, holdProvisional: false, holdResponse: false,
         menuDelayMs: 0, dialogDelayMs: 0, canonicalDelayMs: 60, retainHistoryLink: false,
         moreOpenDelayMs: 0, moreCloseDelayMs: 0, moreEventFamily: 'mouse',
+        moreCloseOrder: 'together', mainCloseOrder: 'together', closeAcknowledgementDelayMs: 200,
         lexicalDelayMs: 0, lexicalNeverSettle: false, lexicalWrongText: false, preventNativeInput: true,
         reply: '{"type":"message","text":"Offline Kimi fixture reply"}' };
       const counters = { beforeInput: 0, input: 0, settlements: 0, earlySends: 0, sends: 0,
-        modelOpens: 0, modelSelections: 0, moreOpens: 0, moreCloses: 0, moreSelections: 0, moreClicks: 0,
+        modelOpens: 0, modelCloses: 0, modelSelections: 0, moreOpens: 0, moreCloses: 0, moreSelections: 0, moreClicks: 0,
         headerOpens: 0, deleteSelections: 0, confirmations: 0 };
       let outbound = null, user = null, answer = null, historyLink = null;
       let nativeInput = null, pendingCommit = null, lexicalSettled = false;
@@ -77,9 +78,26 @@ enum KimiFixturePage {
       window.fixturePrompts = [];
       function hideMore() { moreMenu.hidden = true; more.setAttribute('aria-expanded', 'false'); }
       function hideModel() { menu.hidden = true; model.setAttribute('aria-expanded', 'false'); hideMore(); }
+      function beginMoreClose() {
+        if (options.moreCloseOrder === 'ariaFirst') {
+          more.setAttribute('aria-expanded', 'false');
+          setTimeout(() => { moreMenu.hidden = true; }, options.closeAcknowledgementDelayMs);
+        } else if (options.moreCloseOrder === 'domFirst') {
+          moreMenu.hidden = true;
+          setTimeout(() => { more.setAttribute('aria-expanded', 'false'); }, options.closeAcknowledgementDelayMs);
+        } else hideMore();
+      }
       model.addEventListener('click', () => {
-        if (!menu.hidden) hideModel();
-        else { counters.modelOpens++; menu.hidden = false; model.setAttribute('aria-expanded', 'true'); }
+        if (!menu.hidden) {
+          counters.modelCloses++;
+          if (options.mainCloseOrder === 'ariaFirst') {
+            model.setAttribute('aria-expanded', 'false');
+            setTimeout(() => { menu.hidden = true; hideMore(); }, options.closeAcknowledgementDelayMs);
+          } else if (options.mainCloseOrder === 'domFirst') {
+            menu.hidden = true;
+            setTimeout(() => { model.setAttribute('aria-expanded', 'false'); hideMore(); }, options.closeAcknowledgementDelayMs);
+          } else hideModel();
+        } else { counters.modelOpens++; menu.hidden = false; model.setAttribute('aria-expanded', 'true'); }
       });
       // Candidate fixture only: a click has no submenu effect. Real WebKit
       // dispatch reaches these ordinary handlers; no adapter state is read.
@@ -107,7 +125,7 @@ enum KimiFixturePage {
             counters.moreOpens++;
             setTimeout(() => { moreMenu.hidden = false; more.setAttribute('aria-expanded', 'true'); }, options.moreOpenDelayMs);
           } else if (type === prefix + 'out' && event.relatedTarget === document.body) {
-            counters.moreCloses++; setTimeout(hideMore, options.moreCloseDelayMs);
+            counters.moreCloses++; setTimeout(beginMoreClose, options.moreCloseDelayMs);
           }
         });
       }

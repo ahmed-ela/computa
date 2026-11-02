@@ -182,6 +182,10 @@ try {
     return { editor, scope, send, text, empty, sendIcon: icons.length === 1 && c.visible(icons[0]),
       sendEnabled: icons.length === 1 && !send.classList.contains('disabled') && c.enabled(send) };
   }
+  function moreCloseClaimed(more) {
+    return !!more && state.selection?.more === more && state.selection.stage === 'moreClosing'
+      && ['exiting', 'exited'].includes(more.boundary) && !!more.menu && !!more.selected;
+  }
   function picker() {
     const trigger = one(visible(document, 'div.current-model[data-testid="model-select-trigger"][aria-haspopup="menu"]')
       .filter(node => !authored(node)), 'model_trigger');
@@ -198,9 +202,17 @@ try {
       && menus.some(node => node !== menu && node.getAttribute('id') === nested.menuID
         && node.getAttribute('aria-labelledby') === nested.triggerID
         && (!nested.menu || nested.menu === node))
-      && nested.trigger.isConnected && nested.trigger.getAttribute('aria-expanded') === 'true';
+      && nested.trigger.isConnected && (nested.trigger.getAttribute('aria-expanded') === 'true'
+        || moreCloseClaimed(nested) && nested.trigger.getAttribute('aria-expanded') === 'false');
+    // A claimed close may acknowledge ARIA before its physical menu disappears.
+    // This remains pending, pinned to the previously verified selection/menu.
+    const mainClosePending = state.selection?.stage === 'closing' && state.selection.trigger === trigger
+      && state.selection.menu === menu && !!menu && menus.length === 1 && c.choiceValid(state.selection.choice)
+      && c.normalize(label.textContent) === state.selection.choice.label;
     if (menu && (menu.getAttribute('aria-labelledby') !== id || menus.length !== 1 && !ownedNested
-      || trigger.getAttribute('aria-expanded') !== 'true')) c.fail('model_unverified', 'picker_menu_binding');
+      || trigger.getAttribute('aria-expanded') !== 'true'
+        && !(mainClosePending && trigger.getAttribute('aria-expanded') === 'false')))
+      c.fail('model_unverified', 'picker_menu_binding');
     if (menu && state.selection?.menu && state.selection.menu !== menu)
       c.fail('model_unverified', 'picker_menu_replaced');
     if (!menu && ['moreOpening', 'moreClosing'].includes(state.selection?.stage))
@@ -293,8 +305,9 @@ try {
         const submenuPresent = visible(document, 'div.kimi-menu-positioner[role="menu"]')
           .some(node => node.getAttribute('id') === more.menuID);
         if (submenuPresent) nestedSelection(current, selection, choices(current.menu));
-        else if (target.getAttribute('aria-expanded') !== 'false' || !more.selected
-          || current.label !== more.selected.choice.label) c.fail('model_unverified', 'more_selected_label');
+        else if ((!['true', 'false'].includes(target.getAttribute('aria-expanded')) || !moreCloseClaimed(more))
+          || !more.selected || current.label !== more.selected.choice.label)
+          c.fail('model_unverified', 'more_selected_label');
       }
       pickerHit(target, entering ? 'more_open' : 'more_close');
       const now = target.getBoundingClientRect();
@@ -338,7 +351,9 @@ try {
     const menu = matches[0];
     if (!menu) return null;
     if (menu.getAttribute('aria-labelledby') !== more.triggerID) c.fail('model_unverified', 'more_submenu_labelledby');
-    if (more.trigger.getAttribute('aria-expanded') !== 'true') c.fail('model_unverified', 'more_submenu_expansion');
+    if (more.trigger.getAttribute('aria-expanded') !== 'true'
+      && !(moreCloseClaimed(more) && more.trigger.getAttribute('aria-expanded') === 'false'))
+      c.fail('model_unverified', 'more_submenu_expansion');
     if (more.menu && more.menu !== menu) c.fail('model_unverified', 'more_submenu_changed');
     more.menu = menu;
     const options = visible(menu, 'div[data-testid="model-more-option"][role="menuitemradio"]', 32).map(node => {
@@ -538,8 +553,11 @@ try {
         nestedSelection(p, selection, rows);
         return { ...read().output, pending: true };
       }
-      if (more.trigger.getAttribute('aria-expanded') !== 'false' || !more.selected
-        || p.label !== more.selected.choice.label) c.fail('model_unverified', 'more_selected_label');
+      if (!moreCloseClaimed(more) || !more.selected || p.label !== more.selected.choice.label)
+        c.fail('model_unverified', 'more_selected_label');
+      const expanded = more.trigger.getAttribute('aria-expanded');
+      if (expanded === 'true') return { ...read().output, pending: true };
+      if (expanded !== 'false') c.fail('model_unverified', 'more_selected_label');
       checked = more.selected;
     } else if (!checked) {
       if (selection.stage === 'opening') {

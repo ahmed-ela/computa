@@ -1,12 +1,12 @@
 # Kimi, Qwen and DeepSeek website adapters
 
-Status: candidate build388 integration, 2026-11-02 UTC. Installed 0.8.0 (387),
-source `8febb511e3bdc53ea5e7a0e2f10b608dd3fcd6d3`, still stalls Kimi discovery
-at `moreOpening`: neither the earlier click nor the pointer-only experiment
-opened its submenu. No Kimi prompt was submitted. The next candidate includes
-mouse compatibility events within one claimed hover transition. Live recovery
-and tool-use qualification remain pending. Qwen and DeepSeek's native
-foundations are integrated locally; public admission is being prepared.
+Status: candidate build390, 2026-11-02 UTC. Installed 0.8.0 (389), source
+`0f3f358734c13a72de3ffb0a19a966e12d552659`, opens Kimi's submenu but rejects
+its closing transition. Qwen rejects an occluded picker before input. DeepSeek
+discovers both modes but rejects first-message ownership after one Send.
+The candidate addresses menu acknowledgement and initial hit readiness, and
+adds exact finite DeepSeek failure reasons. All three are enabled for controlled
+pilots; installed responses, cleanup and tool workflows remain unqualified.
 PR #20 remains draft.
 
 The requested route is each provider's signed-in website in Computa's browser.
@@ -332,6 +332,37 @@ repeat a spent operation or claim that the underlying live issue is repaired.
 Its focused gate passed 68 native WebKit/diagnostic tests and 176 JavaScript,
 resource and version tests with 3,225 assertions. Fresh installed diagnosis is
 still required; the build388 failure is not converted into a pass.
+
+### Installed build389 diagnosis and candidate390
+
+Build389 (`0f3f358`) reached Kimi's `moreClosing` phase before rejecting
+`picker_menu_binding`. Offline tests reproduce the rejection when a claimed
+close updates ARIA and physical visibility in separate steps. Candidate390
+waits for both acknowledgements of that one close, retaining the previously
+verified control, menu, checked selection and owner. It never replays entry,
+exit or click events. The exact live acknowledgement order remains unproved.
+
+Qwen rejected `picker_open_occluded` before its first picker click. Initial
+readiness now requires the retained trigger to pass the same hit test used
+immediately before dispatch. Existing DOM events wake the pending read within
+the original preparation deadline. A permanently obstructed or replaced
+control still fails without input. Pure paint or animation completion without
+an observed DOM change can still reach that deadline; the live obstruction's
+source has not yet been identified.
+
+One fresh DeepSeek Chat request failed `first_user_message` about 370 ms after
+dispatch, before any answer or tool call was accepted. Native cleanup remained
+unconfirmed. Read-only inspection of that exact synthetic conversation later
+found the full prompt and expected JSON reply. Its collapsed controls contained
+no extra text, and the settled structure satisfied the current body checks.
+This does not identify which initial check failed. Candidate390 adds finite,
+content-free reasons for the existing prompt, structure and binding guards;
+none of their acceptance conditions change. No failed prompt was replayed.
+Temporary Inspector settings were restored.
+
+Candidate390 passed 73 focused native WebKit/diagnostic tests, plus 186
+JavaScript/resource/version tests with 3,686 assertions across two disjoint
+runs. These are fixture results, not installed-provider qualification.
 
 ### Direct website observations before native qualification
 

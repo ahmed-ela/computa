@@ -39,9 +39,11 @@ Existing Chrome and native desktop tooling retain their separate behavior.
 ## Kimi, Qwen and DeepSeek website integrations
 
 - [ ] Add and qualify the three signed-in websites, separately from Alibaba's
-  existing Qwen API integration. Candidate383 enables only Kimi Instant for an
-  installed pilot after 31 adapter and 23 native fixture passes; live native
-  qualification remains pending. Qwen and DeepSeek adapters remain disabled.
+  existing Qwen API integration. Kimi Instant, Qwen3.7-Plus/Qwen3.8-Max and
+  DeepSeek Chat/DeepThink are enabled for controlled pilots. Installed389
+  still fails Kimi menu closing, Qwen initial hit readiness and DeepSeek
+  first-message ownership. Candidate390 has focused fixes/diagnostics;
+  live native qualification and durable cleanup remain pending.
   Discover concrete models from each live picker, verify the exact submitted
   message and final response, and delete only the owned test conversation.
   Kimi Instant returned direct synthetic markers; build382 Qwen3.7-Plus and

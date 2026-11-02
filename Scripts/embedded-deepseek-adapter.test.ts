@@ -162,6 +162,39 @@ describe('DeepSeek composed mode adapter (not live qualification)', () => {
     }
   });
 
+  test('long first-body diagnostics reject structural extras and changed ownership without extracting a partial prompt', async () => {
+    const text = 'Synthetic long body '.repeat(2000) + '\n\nComputa session marker: ' + marker;
+    for (const kind of ['unchanged', 'first_id_invalid', 'first_container_children', 'first_wrapper_children',
+      'first_container_text', 'first_root_text', 'first_prompt_mismatch', 'first_marker_invalid',
+      'first_marker_mismatch', 'first_changed_after_hash', 'first_binding_not_authorized']) {
+      const f = fixture({ fresh: true }); await submitted(f, mode(), text);
+      if (kind === 'first_id_invalid') f.userTurn.values['data-virtual-list-item-key'] = 'not-an-observed-id';
+      if (kind === 'first_container_children') f.collapse.append(new f.Node('BUTTON', {}, 'Show more'));
+      if (kind === 'first_wrapper_children') f.firstText.parentElement!.append(new f.Node('I', {}, 'extra'));
+      if (kind === 'first_container_text') f.collapse.text = 'outside';
+      if (kind === 'first_root_text') f.user.append(new f.Node('BUTTON', {}, 'Show more'));
+      if (kind === 'first_prompt_mismatch') f.firstText.text += ' altered';
+      if (kind === 'first_changed_after_hash') f.beforeDigest(() => {
+        const parent = f.firstText.parentElement!; f.firstText.detach(); parent.append(f.firstText.cloneNode(true));
+      });
+      const result = await f.run('inspect', { expectedModeChoice: mode(),
+        ...(kind === 'first_marker_invalid' ? { expectedFirstUserMarker: 'invalid' } : {}),
+        ...(kind === 'first_marker_mismatch' ? { expectedFirstUserMarker: '22222222-3333-4444-8555-666666666666' } : {}),
+        ...(kind === 'first_binding_not_authorized' ? { allowFirstUserBinding: false } : {}) });
+      if (kind === 'unchanged') {
+        expect(result.firstUserVerified).toBe(true); expect(result.firstUserFingerprint).toBe(await fingerprint(text));
+      } else {
+        expect(result.error).toBe('conversation_changed'); expect(result.detail).toBe(kind);
+        expect(result.firstUserVerified).toBeUndefined(); expect(result.firstUserFingerprint).toBeUndefined();
+        expect(result.text).toBeUndefined();
+        expect((await f.run('inspect')).detail).toBe('terminal_operation');
+        expect((await f.run('deleteConversation')).detail).toBe('terminal_operation');
+      }
+      expect(f.send.clicks).toBe(1); expect(f.deepThink.clicks).toBe(0); expect(f.search.clicks).toBe(0);
+      expect(f.trigger.clicks).toBe(0); expect(f.confirm.clicks).toBe(0);
+    }
+  });
+
   test('mismatched first body or canonical route cannot be substituted after submission', async () => {
     for (const kind of ['body', 'route', 'hash']) {
       const f = fixture({ fresh: true }); const hash = await owned(f);

@@ -1886,6 +1886,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         case .deepseek:
             providerDetails = ["mode_toggle", "deepthink_control", "deepthink_control_label", "search_control", "search_control_label",
                 "mode_named_input", "mode_unbound", "search_selected", "deepthink_replaced", "search_replaced", "mode_choice_changed",
+                "first_root_hidden", "first_id_invalid", "first_container_children", "first_wrapper_children", "first_container_text", "first_root_text",
+                "first_not_submitted", "first_prompt_mismatch", "first_marker_invalid", "first_marker_mismatch", "first_marker_suffix", "first_changed_after_hash",
+                "first_pinned_node_changed", "first_pinned_hash_mismatch", "first_expected_hash_mismatch", "first_binding_not_authorized", "first_disappeared",
                 "delete_anchor", "delete_buttons"]
         default: return nil
         }

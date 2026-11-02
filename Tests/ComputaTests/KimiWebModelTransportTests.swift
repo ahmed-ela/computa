@@ -106,6 +106,36 @@ final class KimiWebModelTransportTests: XCTestCase {
         XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
     }
 
+    func testClaimedMenuClosesWaitForBothDOMAndARIAAcknowledgementsWithoutReplay() async throws {
+        for (scope, order) in [("more", "ariaFirst"), ("more", "domFirst"), ("main", "ariaFirst"), ("main", "domFirst")] {
+            let fixture = try Fixture(initialNestedModel: true); defer { fixture.shutdown() }
+            var configured = false
+            var observations: [String] = []
+            fixture.transport.setKimiDiscoveryProgressObserverForTesting { observations.append($0) }
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                if action == "inspect", !configured {
+                    configured = true
+                    _ = try? await self.evaluate(fixture.view, """
+                        kimiFixture.options.\(scope)CloseOrder = '\(order)';
+                        kimiFixture.options.closeAcknowledgementDelayMs = 250; return true;
+                        """)
+                }
+            }
+            let choices = try await fixture.transport.discoverModels(provider: "kimi")
+            XCTAssertEqual(choices, [choice]); XCTAssertTrue(configured)
+            let expected = scope == "more"
+                ? ["phase=moreClosing", "submenuPresent=\(order == "ariaFirst")", "submenuExpanded=\(order == "domFirst")"]
+                : ["phase=closing", "mainMenuPresent=\(order == "ariaFirst")", "mainExpanded=\(order == "domFirst")"]
+            XCTAssertTrue(observations.contains { row in expected.allSatisfy { row.contains($0) } }, "\(scope) \(order)")
+            let counts = try await evaluate(fixture.view,
+                "return [kimiFixture.counters.modelOpens,kimiFixture.counters.modelCloses,kimiFixture.counters.moreOpens,kimiFixture.counters.moreCloses,kimiFixture.counters.modelSelections,kimiFixture.counters.sends];") as? [Int]
+            XCTAssertEqual(counts, [1, 1, 1, 1, 0, 0])
+            try await assertMoreBoundaryEvents(fixture)
+            XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+            XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+        }
+    }
+
     func testSameBoundarySequenceAlsoSupportsPointerOnlySubmenuListeners() async throws {
         let fixture = try Fixture(initialNestedModel: true); defer { fixture.shutdown() }
         var configured = false

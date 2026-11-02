@@ -81,6 +81,17 @@ final class SavedAdapterFailureDiagnosticTests: XCTestCase {
         }
     }
 
+    @MainActor func testDeepSeekFirstUserFailureDetailsDoNotExposePromptTextOrRelaxOtherProviders() {
+        for detail in ["first_root_hidden", "first_id_invalid", "first_container_children", "first_wrapper_children", "first_container_text", "first_root_text", "first_not_submitted", "first_prompt_mismatch", "first_marker_invalid", "first_marker_mismatch", "first_marker_suffix", "first_changed_after_hash", "first_pinned_node_changed", "first_pinned_hash_mismatch", "first_expected_hash_mismatch", "first_binding_not_authorized", "first_disappeared"] {
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+                ["error": "conversation_changed", "detail": detail], provider: .deepseek, action: "inspect"),
+                "action=inspect error=conversation_changed detail=\(detail)")
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+                ["error": "conversation_changed", "detail": detail], provider: .qwen, action: "inspect"),
+                "action=inspect error=conversation_changed detail=other")
+        }
+    }
+
     @MainActor func testPrivateOrMalformedValuesNeverEnterTheDiagnosticAndOutputRemainsBounded() throws {
         let privateValues = ["PRIVATE_PAGE_CANARY", "https://private.invalid/?token=PRIVATE_PAGE_CANARY",
             "model_unverified\nPRIVATE_PAGE_CANARY", String(repeating: "PRIVATE_PAGE_CANARY", count: 512)]

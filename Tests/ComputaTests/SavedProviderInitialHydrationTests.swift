@@ -45,6 +45,76 @@ final class SavedProviderInitialHydrationTests: XCTestCase {
         }
     }
 
+    func testQwenDelayedOverlayWaitsForDOMChangeBeforeItsFirstVerifiedPickerClick() async throws {
+        let fixture = try Fixture(provider: "qwen", setup: Self.qwenInitialOverlay); defer { fixture.shutdown() }
+        var observedBlockedRead = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "inspect", !observedBlockedRead {
+                observedBlockedRead = true
+                let opens = try? await self.evaluate(fixture.view, "return qwenFixture.counts.modelOpens;")
+                XCTAssertEqual(opens as? Int, 0)
+                let blocked = try? await self.evaluate(fixture.view, """
+                    const t=document.querySelector('.wms-trigger'),r=t.getBoundingClientRect();
+                    return document.elementFromPoint(r.left+r.width/2,r.top+r.height/2)===document.getElementById('fixture-overlay');
+                    """)
+                XCTAssertEqual(blocked as? Bool, true)
+                _ = try? await self.evaluate(fixture.view, "setTimeout(()=>document.getElementById('fixture-overlay').remove(),100); return true;")
+            }
+        }
+        let choices = try await discover(fixture, provider: "qwen")
+        XCTAssertTrue(observedBlockedRead)
+        XCTAssertEqual(choices, ["Qwen3.7-Plus", "Qwen3.8-Max"])
+        let after = try await counts(fixture, provider: "qwen")
+        XCTAssertEqual(after, [0,0,0])
+        let opens = try await evaluate(fixture.view, "return qwenFixture.counts.modelOpens;")
+        XCTAssertEqual(opens as? Int, 1, "Discovery opens the picker only after the same retained target passes its hit test")
+        XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
+    func testQwenRetainedPickerReplacementDuringOcclusionFailsBeforeAnyClick() async throws {
+        let fixture = try Fixture(provider: "qwen", setup: Self.qwenInitialOverlay); defer { fixture.shutdown() }
+        var replaced = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "inspect", !replaced {
+                replaced = true
+                let opens = try? await self.evaluate(fixture.view, "return qwenFixture.counts.modelOpens;")
+                XCTAssertEqual(opens as? Int, 0)
+                _ = try? await self.evaluate(fixture.view, """
+                    setTimeout(()=>{const t=document.querySelector('.wms-trigger');t.replaceWith(t.cloneNode(true));
+                    document.getElementById('fixture-overlay').remove();},100);return true;
+                    """)
+            }
+        }
+        do { _ = try await discover(fixture, provider: "qwen"); XCTFail("A replacement cannot inherit the blocked target's readiness") }
+        catch {
+            XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptDocument))
+        }
+        XCTAssertTrue(replaced)
+        let after = try await counts(fixture, provider: "qwen")
+        XCTAssertEqual(after, [0,0,0])
+        let opens = try await evaluate(fixture.view, "return qwenFixture.counts.modelOpens;")
+        XCTAssertEqual(opens as? Int, 0)
+    }
+
+    func testQwenPermanentOverlayReachesOriginalPreparationDeadlineWithoutInput() async throws {
+        let fixture = try Fixture(provider: "qwen", setup: Self.qwenInitialOverlay); defer { fixture.shutdown() }
+        do { _ = try await discover(fixture, provider: "qwen"); XCTFail("An occluded target must never become ready") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .preparationDeadline) }
+        let after = try await counts(fixture, provider: "qwen")
+        XCTAssertEqual(after, [0,0,0])
+        let opens = try await evaluate(fixture.view, "return qwenFixture.counts.modelOpens;")
+        XCTAssertEqual(opens as? Int, 0)
+        XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
+    private static let qwenInitialOverlay = """
+        const overlay=document.createElement('div');overlay.id='fixture-overlay';
+        overlay.style.cssText='position:fixed;inset:0;z-index:2147483647;pointer-events:auto;background:white';
+        document.body.append(overlay);
+        """
+
     func testDuplicatePresentControlsAreRejectedWithoutHydrationOrInput() async throws {
         for provider in ["qwen", "deepseek"] {
             let fixture = try Fixture(provider: provider, setup: "const e=document.querySelector('textarea'); e.after(e.cloneNode(true));")
