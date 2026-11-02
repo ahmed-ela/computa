@@ -512,6 +512,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var loggedGroqComposerFailure = false
         var loggedGroqSendFailure = false
         var loggedGroqSendReveal = false
+        var loggedKimiAdapterFailure = false
         var quotaDiagnosticLog = QuotaDiagnosticLogBudget()
         var modelSelectionRequested = false
         var modelSelectionVerified = false
@@ -1657,6 +1658,40 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
     }
 
+    static func isKimiInitialHydrationObservation(_ observed: [String: Any]) -> Bool {
+        guard Set(observed.keys) == ["pending", "sessionLifecycle", "temporary", "composer"],
+              observed["sessionLifecycle"] as? String == "saved_conversation_delete" else { return false }
+        return [("pending", true), ("temporary", false), ("composer", false)].allSatisfy { key, expected in
+            guard let value = observed[key] as? NSNumber, CFGetTypeID(value) == CFBooleanGetTypeID() else { return false }
+            return value.boolValue == expected
+        }
+    }
+
+    private func canObserveKimiInitialHydration(_ session: Session) -> Bool {
+        session.provider == .kimi && sessions[session.token] === session && session.terminalFailure == nil && !Task.isCancelled
+            && session.state == "loading" && session.documentGeneration == nil
+            && !session.modelSelectionRequested && !session.modelSelectionVerified && session.modelEvidence == nil
+            && !session.savedDeleteReady && session.savedDeleteSubmission == nil && session.savedDeleteOperation == nil
+            && !session.temporaryRequested && !session.temporary && !session.submitted && !session.pendingSubmission
+            && session.sequence == 0 && session.acknowledgedSendSequence == 0
+            && session.firstUserFingerprint == nil && session.conversation == nil && session.conversationIdentity == nil
+            && browser.webView(for: session.tabID) === session.view && session.view.url == Provider.kimi.startURL
+    }
+
+    /// Fixed native identifiers only. Page prose, URLs, exception messages and
+    /// arbitrary detail fields never enter the diagnostic, even on failure.
+    static func kimiAdapterFailureDiagnostic(_ observed: [String: Any], action: String) -> String? {
+        guard let error = observed["error"] as? String else { return nil }
+        let actions = ["inspect", "discoverModels", "selectModel", "verifyModel", "prepare", "insert", "sendReady",
+            "submit", "stop", "deleteConversation", "selectConversationDeletion", "confirmConversationDeletion", "observeDeletedConversation"]
+        let errors = ["document_changed", "conversation_changed", "model_unverified", "model_mismatch", "model_unavailable",
+            "composer_unavailable", "prompt_not_inserted", "send_unavailable", "unsupported_response_format", "not_fresh"]
+        let details = ["composer", "send_control", "model_trigger", "model_label", "structure_limit", "owner_token",
+            "document_url", "unexpected_exception"]
+        let detail = observed["detail"] as? String
+        return "action=\(actions.contains(action) ? action : "other") error=\(errors.contains(error) ? error : "other") detail=\(detail.map { details.contains($0) ? $0 : "other" } ?? "absent")"
+    }
+
     private func observesLifecycle(_ observed: [String: Any], session: Session) -> Bool {
         switch session.provider.lifecycle {
         case .temporary:
@@ -2416,6 +2451,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         session.initialReadRetry = nil
         logInspection(observed, session: session)
         if session.state == "loading" {
+            if session.provider == .kimi, observed["pending"] as? Bool == true, observed["url"] == nil {
+                // This negative pre-binding observation carries no model,
+                // response, document or conversation authority. Existing DOM
+                // wakeups and the fixed preparation deadline bound the wait.
+                guard Self.isKimiInitialHydrationObservation(observed), canObserveKimiInitialHydration(session) else { throw Failure.notFresh }
+                return try snapshot(session)
+            }
             if session.provider == .groq, observed["pending"] as? Bool == true,
                observed["composer"] as? Bool == false, observed["url"] == nil {
                 // No URL, count or model evidence is admitted while the fresh
@@ -5585,6 +5627,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             Self.inspectionLog.error("productModeDiagnostic provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence) structure=\(safe, privacy: .public)")
         }
         if let error = observed["error"] as? String {
+            if provider == .kimi, !session.loggedKimiAdapterFailure,
+               let diagnostic = Self.kimiAdapterFailureDiagnostic(observed, action: action) {
+                session.loggedKimiAdapterFailure = true
+                Self.inspectionLog.error("adapterFailureDiagnostic version=1 provider=kimi \(diagnostic, privacy: .public) generationBound=\(session.documentGeneration != nil) sequence=\(session.sequence)")
+            }
             logClaudeRemountHostFailure(observed, session: session, action: action,
                                        generation: generation, allowsBlockedProvider: allowBlockedProvider)
             if ["temporary_mode_unavailable", "temporary_mode_unverified"].contains(error),
@@ -5807,6 +5854,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         if session.provider.lifecycle == .savedConversationDelete, !observesLifecycle(observed, session: session) {
             throw Failure.savedDeleteUnverified
+        }
+        if provider == .kimi, observed["pending"] as? Bool == true, observed["url"] == nil {
+            guard Self.isKimiInitialHydrationObservation(observed), action == "inspect",
+                  canObserveKimiInitialHydration(session), !allowBlockedProvider, !allowKimiCleanupInspection, savedDeleteOperation == nil,
+                  currentURL == url, currentURL == provider.startURL,
+                  ContinuousClock.now < evaluationDeadline else { throw Failure.notFresh }
+            return observed
         }
         if provider == .kimi, action == "submit" {
             guard enforceModel, !recheckModelAfterAwait, session.requiresSavedDelete, session.savedDeleteReady,

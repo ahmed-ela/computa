@@ -71,7 +71,8 @@ function computaProviderCore(request, provider, origin, actions) {
     });
     record.observer.observe(document.documentElement || document, { subtree: true, childList: true,
       characterData: true, attributes: true, attributeFilter: ['disabled', 'aria-disabled', 'aria-hidden', 'aria-busy',
-        'aria-label', 'aria-expanded', 'aria-controls', 'aria-selected', 'data-state', 'class', 'style', 'hidden', 'inert'] });
+        'aria-label', 'aria-expanded', 'aria-controls', 'aria-selected', 'data-state', 'class', 'style', 'hidden', 'inert',
+        ...(provider === 'kimi' ? ['role', 'contenteditable', 'data-lexical-editor', 'data-testid', 'aria-haspopup', 'id'] : [])] });
     globalThis[signalKey] = record;
   }
   return { uuid, fail, normalize, bodyText, choiceValid, equalChoice, physical, visible, enabled, nodes, unique, hit, hitFailure, context, assertContext, hash };
@@ -92,7 +93,7 @@ try {
   if (globalThis[key] === undefined) globalThis[key] = { owner: input.ownerToken,
     document, window, generation: input.documentGeneration, model: null, selection: null,
     prepared: null, inserted: null, submitted: false, first: null, provisional: null,
-    canonical: null, deletion: null, terminal: false };
+    canonical: null, deletion: null, initialControls: {}, initialReadComplete: false, terminal: false };
   const state = globalThis[key];
   kimiDraftState = state;
   const deletionActionNames = ['deleteConversation', 'selectConversationDeletion', 'confirmConversationDeletion', 'observeDeletedConversation'];
@@ -312,6 +313,43 @@ try {
   const fresh = () => !state.submitted && !state.first && !state.deletion && currentRoute().kind === 'fresh'
     && transcript().users.length === 0 && transcript().answers.length === 0 && composer().empty;
 
+  function initialHydrationPending() {
+    // A fresh document can finish navigation before its controls mount. This
+    // read-only signal grants no URL, count, model, lifecycle or Send proof.
+    // The native preparation deadline and existing DOM observer bound waiting.
+    if (input.action !== 'inspect' || cleanupInspection || state.initialReadComplete
+      || state.model || state.selection || state.prepared || state.inserted || state.submitted
+      || state.first || state.provisional || state.canonical || state.deletion || route.kind !== 'fresh') return false;
+    const reject = (error, detail) => { state.terminal = true; c.fail(error, detail); };
+    if (c.nodes(document, '.chat-content-item', 64).length) reject('not_fresh');
+    const control = (name, root, selector) => {
+      const candidates = c.nodes(root, selector);
+      if (candidates.length > 1) reject('document_changed', name);
+      const node = candidates[0] || null, prior = state.initialControls[name];
+      if (prior && prior !== node || node && (!c.visible(node) || authored(node))) reject('document_changed', name);
+      if (node) state.initialControls[name] = node;
+      return node;
+    };
+    const editor = control('composer', document, '.chat-input-editor[contenteditable="true"][role="textbox"][data-lexical-editor="true"]');
+    const send = control('send_control', document, 'div.send-button-container');
+    const trigger = control('model_trigger', document, 'div.current-model[data-testid="model-select-trigger"][aria-haspopup="menu"]');
+    if (editor) {
+      const scope = editor.closest('.chat-editor-input-wrap');
+      if (!scope || !c.visible(scope) || c.nodes(scope, '.chat-input-editor[contenteditable="true"]').length !== 1)
+        reject('composer_unavailable');
+      if (composerText(editor) !== '') reject('composer_not_empty');
+    }
+    const label = trigger ? control('model_label', trigger, '.model-name .name') : null;
+    if (trigger) {
+      const id = trigger.getAttribute('id'), controlled = trigger.getAttribute('aria-controls');
+      if (!id || !controlled || /\s/.test(id + controlled) || trigger.getAttribute('aria-expanded') !== 'false'
+        || label && label.children.length !== 0) reject('model_unverified');
+    }
+    if (visible(document, 'div.kimi-menu-positioner[role="menu"]').length) reject('model_unverified');
+    return !editor || !send || !trigger || !label;
+  }
+  if (initialHydrationPending()) return { pending: true, sessionLifecycle: 'saved_conversation_delete', temporary: false, composer: false };
+
   if (['discoverModels', 'selectModel'].includes(input.action)) {
     if (!fresh()) c.fail('not_fresh');
     if (input.action === 'selectModel' && !c.choiceValid(input.modelChoice)) c.fail('model_unverified');
@@ -400,6 +438,7 @@ try {
       conversationIdentity: null, deleteProof: deleteProof(op, record, true) };
   }
   const initial = read();
+  state.initialReadComplete = true;
   if (!Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.length || input.expectedUserCounts.length > 2
     || input.expectedUserCounts.some(value => ![0, 1].includes(value))
     || !input.expectedUserCounts.includes(initial.t.users.length)) c.fail('conversation_changed', 'user_count');
@@ -564,8 +603,10 @@ try {
     sequence: 1, outboundFingerprint } };
 } catch (error) {
   if (kimiDraftState && (!error?.computaAdapterFailure || kimiDraftState.deletion || kimiDraftState.submitted
-    && ['conversation_changed', 'document_changed', 'model_mismatch', 'model_unverified'].includes(error.error)))
+    && ['conversation_changed', 'document_changed', 'model_mismatch', 'model_unverified'].includes(error.error)
+    || error?.error === 'document_changed' && (kimiDraftState.initialReadComplete || kimiDraftState.model
+      || kimiDraftState.selection || kimiDraftState.prepared || kimiDraftState.inserted)))
     kimiDraftState.terminal = true;
   return error?.computaAdapterFailure ? { error: error.error, ...(error.detail ? { detail: error.detail } : {}) }
-    : { error: 'document_changed' };
+    : { error: 'document_changed', detail: 'unexpected_exception' };
 }

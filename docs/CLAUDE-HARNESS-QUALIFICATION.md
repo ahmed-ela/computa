@@ -1,9 +1,11 @@
 # Claude harness qualification
 
-Installed build382 uses source `58df7e22cf1d0ab06c94e8891228fd4576fc7863`.
-Its fresh Opus 3 marker passed, but the subsequent workflow and first-tool
-requests failed before tool dispatch. Candidate build383 adds a Claude-only
-response-presentation experiment; live validation is pending. Details are in
+Installed build383 uses source `bc9173ff7c6566b1d3dd074dfcf3801be7b895a7`.
+On build382, the fresh Opus 3 marker passed, but the subsequent workflow and
+first-tool requests failed before tool dispatch. Build383 adds a Claude-only
+response-presentation experiment; its live qualification remains pending.
+Candidate384 addresses Kimi startup discovery and does not establish a Claude
+qualification result. Details are in
 the November 2 results below. The four independently audited workflow passes were obtained
 on build380, source `e62bbbaf80018b4edbc027112af1d5636a048a4a`, and have not been
 reattributed to later builds:

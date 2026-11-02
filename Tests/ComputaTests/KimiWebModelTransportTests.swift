@@ -18,6 +18,81 @@ final class KimiWebModelTransportTests: XCTestCase {
         XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
     }
 
+    func testDiscoveryWaitsForInitialControlsWithoutBindingOrDispatchingEarly() async throws {
+        let fixture = try Fixture(initialControlsPending: true); defer { fixture.shutdown() }
+        var sawUnhydratedRead = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "inspect", !sawUnhydratedRead {
+                sawUnhydratedRead = true
+                let before = try? await self.evaluate(fixture.view, """
+                    const result = {empty:!document.querySelector('.current-model,.chat-input-editor,.send-button-container'),
+                        sends:kimiFixture.counters.sends, modelOpens:kimiFixture.counters.modelOpens,
+                        inputs:kimiFixture.counters.beforeInput};
+                    setTimeout(() => fixtureHydration.restore(), 100); return result;
+                    """) as? [String: Any]
+                XCTAssertEqual(before?["empty"] as? Bool, true)
+                XCTAssertEqual(before?["sends"] as? Int, 0)
+                XCTAssertEqual(before?["modelOpens"] as? Int, 0)
+                XCTAssertEqual(before?["inputs"] as? Int, 0)
+            }
+        }
+        let choices = try await fixture.transport.discoverModels(provider: "kimi")
+        XCTAssertTrue(sawUnhydratedRead)
+        XCTAssertEqual(choices, [choice])
+        let restored = try await evaluate(fixture.view, "return fixtureHydration.restored;") as? Bool
+        XCTAssertEqual(restored, true)
+        try await assertCounts(fixture, sends: 0, headers: 0, selections: 0, confirmations: 0)
+        XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
+    func testDiscoveryWakesWhenExistingEditorBecomesEditableWithoutChildMutation() async throws {
+        let fixture = try Fixture(initialEditorAttributePending: true); defer { fixture.shutdown() }
+        var sawPendingRead = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "inspect", !sawPendingRead {
+                sawPendingRead = true
+                let before = try? await self.evaluate(fixture.view, """
+                    const editor = document.querySelector('.chat-input-editor');
+                    const result = {exists:!!editor, editable:editor.hasAttribute('contenteditable'),
+                        sends:kimiFixture.counters.sends, modelOpens:kimiFixture.counters.modelOpens,
+                        inputs:kimiFixture.counters.beforeInput};
+                    setTimeout(() => fixtureHydration.restore(), 100); return result;
+                    """) as? [String: Any]
+                XCTAssertEqual(before?["exists"] as? Bool, true)
+                XCTAssertEqual(before?["editable"] as? Bool, false)
+                XCTAssertEqual(before?["sends"] as? Int, 0)
+                XCTAssertEqual(before?["modelOpens"] as? Int, 0)
+                XCTAssertEqual(before?["inputs"] as? Int, 0)
+            }
+        }
+        let choices = try await fixture.transport.discoverModels(provider: "kimi")
+        XCTAssertTrue(sawPendingRead)
+        XCTAssertEqual(choices, [choice])
+        let restored = try await evaluate(fixture.view, "return fixtureHydration.restored;") as? Bool
+        XCTAssertEqual(restored, true)
+        try await assertCounts(fixture, sends: 0, headers: 0, selections: 0, confirmations: 0)
+        XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
+    func testMissingControlsAfterReadyCannotReenterInitialHydration() async throws {
+        let fixture = try Fixture(); defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        _ = try await evaluate(fixture.view, "document.querySelector('.current-model').remove(); return true;")
+        do {
+            // Ready Poll is a cached native snapshot. Send's strict preparation
+            // must re-read the bound controls before any editor mutation.
+            _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic missing bound model controls")
+            XCTFail("A bound model cannot reset into initial hydration")
+        } catch let error as EmbeddedWebModelTransport.Failure {
+            XCTAssertEqual(error, .ownershipFailure(.javaScriptDocument))
+        }
+        try await assertCounts(fixture, sends: 0, headers: 0, selections: 0, confirmations: 0)
+        let insertions = try await evaluate(fixture.view, "return kimiFixture.counters.beforeInput;") as? Int
+        XCTAssertEqual(insertions, 0)
+    }
+
     func testServerReleasesKimiResponseOnlyWithItsNativeDurableDeletionReceipt() async throws {
         let fixture = try Fixture(); defer { fixture.shutdown() }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaKimiReceipt-\(UUID().uuidString)")
@@ -534,7 +609,7 @@ final class KimiWebModelTransportTests: XCTestCase {
         var createdID: UUID?
         private var retainedView: WKWebView?
         var view: WKWebView { retainedView! }
-        init() throws {
+        init(initialControlsPending: Bool = false, initialEditorAttributePending: Bool = false) throws {
             window = Window(contentRect: NSRect(x: 20, y: 20, width: 1024, height: 768), styleMask: [], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false; window.ignoresMouseEvents = true
             host = EmbeddedModelRenderContainer(session: browser); host.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
@@ -545,7 +620,31 @@ final class KimiWebModelTransportTests: XCTestCase {
                 let id = try self.browser.createUnloadedModelTabForTesting()
                 let view = try XCTUnwrap(self.browser.webView(for: id)); view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
                 self.createdID = id; self.retainedView = view
-                view.loadHTMLString(KimiFixturePage.html, baseURL: url)
+                let hydrationSetup = """
+                    <script>(() => {
+                      const controls = [...document.body.children].filter(node => node.tagName !== 'SCRIPT');
+                      for (const node of controls) node.remove();
+                      window.fixtureHydration = {restored:false, restore() {
+                        if (this.restored) throw new Error('Fixture controls already restored');
+                        this.restored = true;
+                        for (const node of controls) document.body.append(node);
+                      }};
+                    })();</script>
+                    """
+                let attributeSetup = """
+                    <script>(() => {
+                      const editor = document.querySelector('.chat-input-editor');
+                      editor.removeAttribute('contenteditable');
+                      window.fixtureHydration = {restored:false, restore() {
+                        if (this.restored) throw new Error('Fixture editor already restored');
+                        this.restored = true;
+                        editor.setAttribute('contenteditable', 'true');
+                      }};
+                    })();</script>
+                    """
+                let setup = initialControlsPending ? hydrationSetup : initialEditorAttributePending ? attributeSetup : ""
+                let html = KimiFixturePage.html.replacingOccurrences(of: "</body>", with: setup + "</body>")
+                view.loadHTMLString(html, baseURL: url)
                 return id
             })
         }

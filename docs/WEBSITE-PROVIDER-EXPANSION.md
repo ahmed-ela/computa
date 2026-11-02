@@ -1,9 +1,11 @@
 # Kimi, Qwen and DeepSeek website adapters
 
-Status: candidate build383 preparation, 2026-11-02 UTC. The installed app is
-0.8.0 (382). Candidate383 admits only Kimi's observed plain-chat Instant choice
-for a controlled installed pilot; that pilot and tool-use qualification remain
-pending. Qwen and DeepSeek have no enabled native website adapter yet.
+Status: candidate build384 preparation, 2026-11-02 UTC. Installed 0.8.0 (383),
+source `bc9173ff7c6566b1d3dd074dfcf3801be7b895a7`, failed Kimi's startup model
+discovery before any prompt. Kimi Instant therefore did not appear in the
+selector. Candidate384 addresses a reproduced initial-render failure path;
+installed recovery and tool-use qualification remain pending. Qwen and DeepSeek
+have no enabled native website adapter yet. PR #20 remains draft.
 
 The requested route is each provider's signed-in website in Computa's browser.
 Qwen's website is separate from Alibaba's existing Qwen 3.7 Flash API option.
@@ -100,6 +102,52 @@ passed before installation.
 
 ## Live observations
 
+### Build383 startup discovery and candidate384
+
+After build383 was signed and installed, Settings showed `Kimi: The owned model
+page or conversation changed (js_document_changed). No prompt was replayed.`
+The normal Kimi tab was signed in at its root page. No native prompt was sent;
+no Kimi choices were saved or exposed. The provider registry, snapshot bridge
+and frontend all recognize Kimi: the selector intentionally hides Website
+default and waits for concrete observed choices. The failure receipt is
+`work/new-website-providers-20261102/build383/kimi-discovery-failure383.json`.
+
+An offline reproduction removed each initial composer, Send control, model
+trigger or model label in turn. All four returned `document_changed` with a
+fixed structural detail that native code previously collapsed into the same
+`js_document_changed` reason. This reproduces the reported error class; it does
+not yet identify which control failed in the installed session.
+
+Candidate384 accepts only a metadata-only pending signal while the untouched,
+empty owned root is still mounting its first controls. It retains the existing
+DOM wakeups and preparation deadline; it adds no fixed delay or input retry.
+Any controls already seen are pinned. Duplicate or hidden controls, an existing
+draft or transcript, changed owner/document/route, replaced controls and missing
+controls after the first complete read or model claim still fail. Pending
+hydration cannot supply readiness, model, conversation or Send authority.
+Native diagnostics record only fixed action/error/detail identifiers; unexpected
+JavaScript exceptions expose a fixed enum rather than arbitrary exception text.
+
+The initial updated JavaScript suite passed 46 tests and 485 assertions, including
+partial mounting, eventual discovery, changed bindings, post-claim disappearance
+and no mutation while waiting. Native gate21 passed 46 tests: 13 saved-conversation
+contract, 21 real-WebKit and 12 existing transport cases. Gate20's one failing
+test had inspected a cached ready Poll snapshot after removing controls; it now
+exercises Send's strict pre-input reinspection and proves zero input/Send. This
+corrected the test boundary without relaxing production verification.
+
+The subsequent attribute-only mounting check extends Kimi's existing observer
+to the six selector attributes (`role`, `contenteditable`, `data-lexical-editor`,
+`data-testid`, `aria-haspopup`, `id`). They emit wakeups only. Groq's observer
+filter is unchanged. Kimi/Groq's focused JavaScript gate passed 109 tests and
+1,390 assertions, including the new signal test and exact shared-core prefixes.
+Final native gate22 passed 47 tests, including the real-WebKit case that restores
+only the existing editor's `contenteditable` attribute and completes discovery
+without input or Send. These overlapping fixture runs do not establish a live
+fix, successful installed discovery, a response or tool-use qualification.
+
+### Direct website observations before native qualification
+
 Kimi's approved test tab uses `https://www.kimi.ai/`. Its model menu offered
 K3.1 Pro, K2.8 Preview and Instant, plus K3 in the More models submenu. Two
 harmless Instant JSON marker requests returned the exact expected objects.
@@ -145,9 +193,10 @@ developer setting were restored after the approved two-message-per-provider scop
 
 ## Remaining gates
 
-1. Install candidate383 and verify Kimi Instant discovery, fresh replies and
-   exact saved-conversation deletion before qualifying browser, terminal and
-   file tasks. The provider catalog also drives automatic startup discovery.
+1. Build and install candidate384 after its passing native gate, then verify Kimi Instant
+   discovery, fresh replies and exact saved-conversation deletion before
+   qualifying browser, terminal and file tasks. The provider catalog also
+   drives automatic startup discovery; build383's discovery attempt failed.
 2. Finish Qwen's fixed adapter and native ownership/cleanup integration from
    the observed website controls; keep it outside public discovery meanwhile.
 3. Integrate DeepSeek's observed mode controls and scoped deletion chain, then

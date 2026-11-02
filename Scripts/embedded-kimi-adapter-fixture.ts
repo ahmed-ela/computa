@@ -124,6 +124,8 @@ export function adapterFixture(options: { delayedUser?: boolean; provisional?: b
   const f = kimiFixture(), { Node, document, body, window } = f;
   const fixturePrompt = options.outbound ?? prompt;
   const fixtureFingerprint = createHash('sha256').update(fixturePrompt.replace(/\r\n?/g, '\n').normalize('NFC').trim()).digest('hex');
+  const observers: { callback: () => void; attributes: string[]; active: boolean }[] = [], signals: unknown[] = [];
+  window.webkit = { messageHandlers: { computaChatGPTSignal: { postMessage: (value: unknown) => signals.push(value) } } };
   let hit: any, occluded: any = null, digestHook: (() => void) | undefined;
   Node.prototype.getBoundingClientRect = function () { hit = this; return { left: 10, top: 10, width: 100, height: 30 }; };
   document.elementFromPoint = () => hit === occluded ? body : hit;
@@ -233,7 +235,12 @@ export function adapterFixture(options: { delayedUser?: boolean; provisional?: b
       ...(['insert', 'submit'].includes(action) && !Object.hasOwn(overrides, 'savedSubmissionFingerprint') ? { savedSubmissionFingerprint: fixtureFingerprint } : {}),
     }, document, window, f.location, f.world,
     (node: any) => ({ visibility: node.values.visibility || 'visible', display: node.closest('[hidden]') ? 'none' : 'block' }),
-    class { observe() {} disconnect() {} },
+    class {
+      private record: typeof observers[number];
+      constructor(callback: () => void) { this.record = { callback, attributes: [], active: false }; observers.push(this.record); }
+      observe(_: unknown, options: { attributeFilter: string[] }) { this.record.attributes = options.attributeFilter; this.record.active = true; }
+      disconnect() { this.record.active = false; }
+    },
     { subtle: { digest: async (algorithm: string, bytes: Uint8Array) => {
       const value = await crypto.subtle.digest(algorithm, bytes); const hook = digestHook; digestHook = undefined; hook?.(); return value;
     } } });
@@ -257,6 +264,8 @@ export function adapterFixture(options: { delayedUser?: boolean; provisional?: b
   const operation = () => ({ id: '547dbbf5-8955-4b65-9b18-5a6e16c3cd7d', documentGeneration: generation,
     sequence: 1, firstUserFingerprint: fingerprint, conversationURL: canonical });
   return { ...f, run, select, submit, operation, send, sendIcon, remove, appendUser, finishResponse, settleInsertion,
+    observers, signals,
+    emitAttribute: (name: string) => { for (const observer of observers) if (observer.active && observer.attributes.includes(name)) observer.callback(); },
     onDigest: (hook: () => void) => { digestHook = hook; }, occlude: (node: any) => { occluded = node; },
     counts: () => ({ insertions, sends, confirms }),
     get messages() { return messages!; }, get response() { return response!; }, get box() { return box; },

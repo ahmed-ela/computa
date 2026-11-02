@@ -130,6 +130,40 @@ final class KimiSavedConversationTests: XCTestCase {
         XCTAssertFalse(KimiSubmissionAcknowledgement.matches(nil, owner: owner, generation: generation, fingerprint: fingerprint))
     }
 
+    @MainActor func testInitialHydrationAdmitsOnlyTheExactNegativeShape() {
+        let pending: [String: Any] = ["pending": true, "sessionLifecycle": "saved_conversation_delete",
+            "temporary": false, "composer": false]
+        XCTAssertTrue(EmbeddedWebModelTransport.isKimiInitialHydrationObservation(pending))
+        for (key, value) in [("pending", 1 as Any), ("temporary", 0 as Any), ("composer", 0 as Any),
+                             ("pending", false as Any), ("temporary", true as Any), ("composer", true as Any),
+                             ("sessionLifecycle", "explicit_clear" as Any), ("url", root.absoluteString as Any),
+                             ("responseCount", 0 as Any), ("text", "PRIVATE_PAGE_CANARY" as Any)] {
+            var changed = pending; changed[key] = value
+            XCTAssertFalse(EmbeddedWebModelTransport.isKimiInitialHydrationObservation(changed), key)
+        }
+        for key in pending.keys {
+            var missing = pending; missing.removeValue(forKey: key)
+            XCTAssertFalse(EmbeddedWebModelTransport.isKimiInitialHydrationObservation(missing), key)
+        }
+    }
+
+    @MainActor func testAdapterFailureDiagnosticUsesOnlyFixedIdentifiers() {
+        XCTAssertEqual(EmbeddedWebModelTransport.kimiAdapterFailureDiagnostic(
+            ["error": "document_changed", "detail": "model_trigger"], action: "inspect"),
+            "action=inspect error=document_changed detail=model_trigger")
+        XCTAssertEqual(EmbeddedWebModelTransport.kimiAdapterFailureDiagnostic(
+            ["error": "document_changed", "detail": "unexpected_exception"], action: "discoverModels"),
+            "action=discoverModels error=document_changed detail=unexpected_exception")
+        XCTAssertEqual(EmbeddedWebModelTransport.kimiAdapterFailureDiagnostic(
+            ["error": "PRIVATE_PAGE_CANARY", "detail": "https://private.invalid/?secret=PRIVATE_PAGE_CANARY",
+             "text": "PRIVATE_PAGE_CANARY"], action: "PRIVATE_PAGE_CANARY"),
+            "action=other error=other detail=other")
+        XCTAssertEqual(EmbeddedWebModelTransport.kimiAdapterFailureDiagnostic(
+            ["error": "document_changed"], action: "inspect"),
+            "action=inspect error=document_changed detail=absent")
+        XCTAssertNil(EmbeddedWebModelTransport.kimiAdapterFailureDiagnostic(["pending": true], action: "inspect"))
+    }
+
     func testKimiPilotAdmitsOnlyObservedInstantAndNeverAnImplicitDefault() throws {
         let choice = WebsiteModelChoice(provider: "kimi", key: "k28-instant", label: "Instant")
         XCTAssertTrue(choice.isValid); XCTAssertTrue(choice.isSelectable)

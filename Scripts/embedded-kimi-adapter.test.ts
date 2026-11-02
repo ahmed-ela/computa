@@ -11,6 +11,119 @@ describe('Kimi saved-conversation adapter', () => {
     expect(adapterSource).not.toContain('websiteChat');
   });
 
+  test('a not-yet-mounted fresh page emits only pending metadata then discovers the observed choice', async () => {
+    const f = adapterFixture();
+    const controls = [f.scope, f.send, f.trigger];
+    controls.forEach(f.remove);
+    const pending = { pending: true, sessionLifecycle: 'saved_conversation_delete', temporary: false, composer: false };
+    for (let read = 0; read < 3; read++) expect(await f.run()).toEqual(pending);
+    expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
+    expect(f.trigger.clicks).toBe(0);
+    for (const node of controls) { node.connected = true; f.body.append(node); }
+    const ready = await f.run();
+    expect(ready.pending).toBeUndefined(); expect(ready.composer).toBe(true);
+    expect(ready.modelEvidence).toBeNull(); expect(ready.firstUserVerified).toBe(false);
+    let discovered: any;
+    for (let read = 0; read < 4; read++) {
+      discovered = await f.run('discoverModels', { expectedModelChoice: undefined });
+      if (!discovered.pending) break;
+    }
+    expect(discovered.modelChoices).toEqual([instant]); expect(discovered.error).toBeUndefined();
+    expect(f.trigger.clicks).toBe(2); expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
+  });
+
+  test('partial initial controls may hydrate without publishing partial ownership or model evidence', async () => {
+    for (const missing of ['editor', 'send', 'trigger', 'triggerName'] as const) {
+      const f = adapterFixture(), node = f[missing], parent = node.parentElement!;
+      f.remove(node);
+      expect(await f.run()).toEqual({ pending: true, sessionLifecycle: 'saved_conversation_delete', temporary: false, composer: false });
+      node.connected = true; parent.append(node);
+      expect((await f.run()).composer).toBe(true); expect(f.trigger.clicks).toBe(0);
+      expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
+    }
+  });
+
+  test('attribute-only mounting wakes the owned initial read without granting any action authority', async () => {
+    const f = adapterFixture(); f.editor.removeAttribute('role');
+    expect((await f.run()).pending).toBe(true); expect(f.signals).toHaveLength(0);
+    for (const attribute of ['role', 'contenteditable', 'data-lexical-editor', 'data-testid', 'aria-haspopup', 'id'])
+      expect(f.observers[0].attributes).toContain(attribute);
+    f.editor.setAttribute('role', 'textbox'); f.emitAttribute('role');
+    expect(f.signals).toEqual([{ ownerToken: '9fe25e48-2e0b-46cb-84f7-7b4f32e1794f', kind: 'dom_changed' }]);
+    expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 }); expect(f.trigger.clicks).toBe(0);
+    const ready = await f.run(); expect(ready.composer).toBe(true); expect(ready.modelEvidence).toBeNull();
+    f.world.__computaModelOwner = marker; f.emitAttribute('data-lexical-editor');
+    expect(f.signals).toHaveLength(1);
+    expect((await f.run()).detail).toBe('owner_token'); expect(f.counts().sends).toBe(0);
+  });
+
+  test('initial waiting rejects duplicates, hidden controls, drafts and any transcript instead of treating them as loading', async () => {
+    for (const mutation of ['duplicate-editor', 'duplicate-send', 'duplicate-trigger', 'duplicate-label', 'hidden', 'draft', 'transcript']) {
+      const f = adapterFixture();
+      if (mutation === 'duplicate-editor') f.scope.append(f.editor.cloneNode(true));
+      else if (mutation === 'duplicate-send') f.body.append(f.send.cloneNode(true));
+      else if (mutation === 'duplicate-trigger') f.body.append(f.trigger.cloneNode(true));
+      else if (mutation === 'duplicate-label') f.triggerName.parentElement!.append(f.triggerName.cloneNode(true));
+      else if (mutation === 'hidden') f.editor.setAttribute('hidden', '');
+      else if (mutation === 'draft') f.setDraft('A prior unsent draft');
+      else f.installTranscript();
+      // A second missing control must not hide the invalid existing state.
+      if (!['duplicate-trigger', 'duplicate-label'].includes(mutation)) f.remove(f.trigger);
+      else f.remove(f.send);
+      const rejected = await f.run(); expect(rejected.error).toBeDefined(); expect(rejected.pending).toBeUndefined();
+      expect((await f.run()).detail).toBe('terminal_operation');
+      expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 }); expect(f.trigger.clicks).toBe(0);
+    }
+  });
+
+  test('initial waiting pins every seen control and never accepts replacement as late mounting', async () => {
+    for (const control of ['editor', 'send', 'trigger', 'triggerName'] as const) {
+      const f = adapterFixture(), missing = control === 'send' ? f.editor : f.send;
+      f.remove(missing); expect((await f.run()).pending).toBe(true);
+      const node = f[control], parent = node.parentElement!, replacement = node.cloneNode(true);
+      f.remove(node); parent.append(replacement);
+      expect((await f.run()).error).toBe('document_changed');
+      f.remove(replacement); node.connected = true; parent.append(node);
+      expect((await f.run()).detail).toBe('terminal_operation'); expect(f.counts().sends).toBe(0);
+    }
+  });
+
+  test('a complete initial read or a claimed model operation cannot revert to hydration', async () => {
+    for (const phase of ['read', 'model-open', 'selected', 'prepared']) {
+      const f = adapterFixture();
+      if (phase === 'read') expect((await f.run()).composer).toBe(true);
+      else if (phase === 'model-open') expect((await f.run('selectModel')).pending).toBe(true);
+      else { await f.select(); if (phase === 'prepared') await f.run('prepare'); }
+      f.remove(f.editor);
+      const rejected = await f.run(); expect(rejected.error).toBe('document_changed'); expect(rejected.pending).toBeUndefined();
+      f.editor.connected = true; f.scope.append(f.editor);
+      expect((await f.run()).detail).toBe('terminal_operation'); expect(f.counts().sends).toBe(0);
+    }
+  });
+
+  test('waiting cannot authorize mutation or bypass changed owner, generation or route', async () => {
+    for (const action of ['discoverModels', 'selectModel', 'prepare', 'insert', 'sendReady', 'submit']) {
+      const f = adapterFixture(); f.remove(f.editor);
+      expect((await f.run()).pending).toBe(true);
+      expect((await f.run(action)).error).toBeDefined(); expect(f.counts().sends).toBe(0); expect(f.trigger.clicks).toBe(0);
+    }
+    for (const mutation of ['owner', 'generation', 'route']) {
+      const f = adapterFixture(); f.remove(f.editor); expect((await f.run()).pending).toBe(true);
+      const overrides = mutation === 'owner' ? { ownerToken: marker }
+        : mutation === 'generation' ? { documentGeneration: marker } : {};
+      if (mutation === 'route') f.document.URL = canonical;
+      const rejected = await f.run('inspect', overrides);
+      expect(rejected.error).toBeDefined(); expect(rejected.pending).toBeUndefined(); expect(f.counts().sends).toBe(0);
+    }
+  });
+
+  test('unexpected adapter exceptions expose a fixed diagnostic enum without exception text', async () => {
+    const f = adapterFixture();
+    Object.defineProperty(f.editor, 'childNodes', { get() { throw new Error('Synthetic private value must not escape'); } });
+    expect(await f.run()).toEqual({ error: 'document_changed', detail: 'unexpected_exception' });
+    expect((await f.run()).detail).toBe('terminal_operation');
+  });
+
   test('observed selected model uses one open/close cycle and exports no guessed More model', async () => {
     const f = adapterFixture(), selected = await f.select();
     expect(selected.selected).toBe(true); expect(selected.modelEvidence.selected).toEqual(instant);
