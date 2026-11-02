@@ -255,7 +255,7 @@ pre { max-height: 240px; margin: 0; padding: 12px; overflow: auto; border: 1px s
 .model-option-label { display: inline-flex; min-width: 0; align-items: center; gap: 7px; vertical-align: middle; }
 .model-option-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model-provider-icon { display: inline-block; flex: 0 0 16px; width: 16px; height: 16px; background: currentColor; mask-size: contain; mask-repeat: no-repeat; mask-position: center; -webkit-mask-size: contain; -webkit-mask-repeat: no-repeat; -webkit-mask-position: center; }
-.model-provider-icon.provider-gemini { background: linear-gradient(25deg, #4c8df6 15%, #b677d5 65%, #e599ad); }
+.model-provider-icon-color { background: transparent; object-fit: contain; }
 .model-provider-icon.provider-claude { background: #d97757; }
 .model-provider-icon.provider-cerebras { background: #e97642; }
 .model-selector-content, .model-selector-submenu { z-index: 120; width: 220px; min-width: 180px; max-width: min(360px, calc(100vw - 24px)); max-height: min(360px, var(--radix-dropdown-menu-content-available-height, calc(100vh - 24px))); overflow-x: hidden; overflow-y: auto; padding: 4px; border: 1px solid var(--border-strong); border-radius: 9px; background: var(--surface-raised); color: var(--text); box-shadow: 0 12px 32px #0003, 0 2px 8px #0002; }

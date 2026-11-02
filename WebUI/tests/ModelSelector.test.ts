@@ -315,7 +315,6 @@ describe('website model selectors', () => {
     for (const [model, provider, asset] of [
       ['browser/chatgpt/choice/fast', 'chatgpt', 'openai'],
       ['api/openai/model/fixture', 'openai', 'openai'],
-      ['browser/gemini/choice/fast', 'gemini', 'gemini'],
       ['browser/claude/choice/fast', 'claude', 'claude'],
       ['browser/groq/choice/observed', 'groq', 'groq'],
       ['browser/kimi/choice/observed', 'kimi', 'kimi'],
@@ -337,6 +336,39 @@ describe('website model selectors', () => {
       // rather than Lucide's SVG implementation, are the contract here.
       expect(elements[0]?.attributes['aria-hidden']).toBe('true');
     }
+  });
+
+  test('official color marks stay local and Alibaba API branding remains distinct from Qwen website', async () => {
+    for (const [model, provider, asset] of [
+      ['browser/gemini/choice/fast', 'gemini', 'gemini.png'],
+      ['api/gemini/model/fixture', 'gemini', 'gemini.png'],
+      ['api/alibaba/model/cXdlbjMuNy1mbGFzaA', 'alibaba', 'alibaba-cloud.png'],
+    ]) {
+      const elements = await parsedElements(renderToStaticMarkup(h(ModelProviderIcon, { model })).html);
+      const mark = elements.find((element) => element.attributes['data-provider'] === provider);
+      expect(mark?.tag).toBe('img');
+      expect(mark?.attributes.src).toEndWith(`/providers/${asset}`);
+      expect(mark?.attributes.src).not.toMatch(/^https?:/);
+      expect(mark?.attributes).toMatchObject({ alt: '', 'aria-hidden': 'true', width: '16', height: '16' });
+      expect(mark?.attributes.class).toContain('model-provider-icon-color');
+      expect(mark?.attributes.style).toBeUndefined();
+    }
+    const qwen = renderToStaticMarkup(h(ModelProviderIcon, { model: 'browser/qwen/choice/observed' })).html;
+    expect(qwen).toContain('/providers/qwen.svg');
+    expect(qwen).not.toContain('alibaba-cloud');
+    const unsupported = renderToStaticMarkup(h(ModelProviderIcon, { model: 'browser/alibaba/choice/fixture' })).html;
+    expect(unsupported).not.toContain('alibaba-cloud');
+
+    const alibaba = { ...options[1], id: 'api/alibaba/model/cXdlbjMuNy1mbGFzaA', label: 'Alibaba / Qwen 3.7 Flash · API' };
+    const website = { ...options[1], id: 'browser/qwen/choice/observed', label: 'Qwen / Qwen3.7-Plus · Built-in browser' };
+    const html = renderToStaticMarkup(h(ModelSelector, {
+      options: [alibaba, website], model: alibaba.id, label: 'Task model', onSelect: () => {},
+    })).html;
+    expect(await renderedProviderGroups(html)).toEqual([
+      { name: 'Alibaba', icons: ['alibaba'], ids: [alibaba.id] },
+      { name: 'Qwen', icons: ['qwen'], ids: [website.id] },
+    ]);
+    expect((await textBySelector(html, '[data-submenu-content] .model-option-name'))).toEqual(['Qwen 3.7 Flash', 'Qwen3.7-Plus']);
   });
 
   test('busy tasks disable model input and discovery refresh reflects its state', async () => {

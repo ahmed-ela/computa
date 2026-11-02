@@ -1,16 +1,13 @@
 # Kimi, Qwen and DeepSeek website adapters
 
-Status: installed 0.8.0 (393), 2026-11-02 UTC, source
-`e39490152c7f463bb4c5b4382ba78cf0707a2f04`. All three fresh native marker
-checks failed and cleanup remains unconfirmed. Kimi Instant now passes selection
-and Send, then rejects first-message ownership; the failing predicate is unknown.
-DeepSeek's primary observation captured a complete composer/control replacement
-with Chat still selected and Search off. Qwen still rejects its post-Send route;
-a separate direct probe identified the exact `/c/new-chat` transition.
-No native answer or tool result was accepted. Candidate394 adds finite Kimi
-ownership reasons and a narrowly bound DeepSeek composer handoff; exact Qwen
-provisional-route support is integrated. The source gates passed; packaging and
-fresh installed qualification remain pending. PR #20 remains draft.
+Status: installed 0.8.0 (394), 2026-11-02 UTC, source
+`80b917bff6f38e30654a789c476c3801f9ebd748`. Fresh native markers remain
+unqualified: Kimi rejects the initial first-user root ID; Qwen passes the route
+transition then rejects the response scope; DeepSeek completes its response but
+fails saved-chat deletion. No failed Send was replayed and no tool workflow ran.
+The exact timing and cleanup failures are retained below. Candidate395 changes
+only provider icons/version: official Gemini four-color and Alibaba Cloud marks.
+Provider fixes remain under investigation. PR #20 remains draft.
 
 The requested route is each provider's signed-in website in Computa's browser.
 Qwen's website is separate from Alibaba's existing Qwen 3.7 Flash API option.
@@ -639,6 +636,31 @@ unstarted in this 393 marker set. Evidence is retained privately under
 `work/new-website-providers-20261102/build393/` in the three marker-capture
 summaries, `kimi-settled-first-user-probe.json` and
 `qwen-exact-new-chat-probe.json`.
+
+### Installed394 fresh native results
+
+Signed 0.8.0 (394) was installed, with its exact running executable and all
+artifact receipts matched to `80b917bff6f38e30654a789c476c3801f9ebd748`.
+The source checks passed 115 distinct native tests and 226 JavaScript/resource/
+version tests; installed outcomes remain separate:
+
+| Selection | Duration | Result |
+| --- | ---: | --- |
+| Kimi Instant | 2,627 ms | First-user ownership rejected as `first_root_id_invalid` |
+| Qwen3.7-Plus | 3,412 ms | Post-Send route progressed; initial answer rejected as `response_scope` |
+| DeepSeek Chat | 5,878 ms | Exact response completed; cleanup rejected at `selectConversationDeletion / delete_phase` |
+
+Kimi's primary error occurred 57 ms after its acknowledged Send. The ID was
+absent or not UUID-shaped; this does not yet prove its actual temporary format.
+Qwen's error occurred 456 ms after acknowledged Send and before first-body
+adoption. The existing compound response-scope predicate still needs a precise
+initial-DOM observation. DeepSeek accepted ownership/current Chat mode and
+observed completion at 13:17:54.209Z; its later deletion-stage error at
+13:17:55.974Z withheld release. It is not a native-final or cleanup pass.
+All three tasks retained failed/unconfirmed cleanup evidence. Qwen Max,
+DeepThink and tool workflows were not started. Fresh394 workflow fixtures remain
+prepared only. Evidence is private under the build394 marker-capture directories
+and `provider-live394.log`.
 
 ### Direct website observations before native qualification
 

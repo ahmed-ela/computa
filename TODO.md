@@ -40,23 +40,14 @@ Existing Chrome and native desktop tooling retain their separate behavior.
 
 - [ ] Add and qualify the three signed-in websites, separately from Alibaba's
   existing Qwen API integration. Kimi Instant, Qwen3.7-Plus/Qwen3.8-Max and
-  DeepSeek Chat/DeepThink are enabled for controlled pilots. Installed393
-  failed all three fresh native markers: Kimi Instant after Send at first-user
-  ownership (2,361 ms), Qwen Plus at its post-submit route (3,228 ms), and
-  DeepSeek Chat at the initial complete composer/control replacement (1,255 ms).
-  No native answer/tool result was accepted; all three cleanups are unconfirmed.
-  Kimi's settled saved page later showed the exact marker and valid body/ID
-  structure, but its failed-time predicate and full outbound comparison remain
-  unknown. DeepSeek's first negative packet shows old controls disconnected,
-  current Chat and Search off. A separate one-Send Qwen direct probe identified
-  `/c/new-chat` at 57 ms, canonical at 784 ms; that direct conversation was deleted
-  and developer settings restored. It is not a native response/cleanup pass.
-  Candidate394 adds finite Kimi reasons and a narrowly bound DeepSeek handoff;
-  exact Qwen provisional-route support is integrated. Source gates passed 115
-  distinct native and 226 JavaScript/resource/version tests. Packaging and fresh
-  installed qualification remain pending; browser/terminal/file tasks are unstarted.
-  Earlier bounded direct Kimi, Qwen Plus/Max and DeepSeek Chat/DeepThink markers
-  and manual deletion observations remain separate from native qualification.
+  DeepSeek Chat/DeepThink are enabled for controlled pilots. Installed394 still
+  fails qualification: Kimi rejects the first root ID; Qwen passes route promotion
+  then rejects response scope; DeepSeek verifies completion but fails saved-chat
+  deletion. All cleanup receipts remain unconfirmed, with no native final released.
+  Capture the precise initial DOM/deletion transition before changing acceptance.
+  Source gates passed 115 distinct native and 226 JavaScript/resource/version tests;
+  these do not replace live qualification. Qwen Max, DeepThink and browser/terminal/
+  file workflows remain unstarted. Candidate395 updates official provider icons.
   See the [implementation status](docs/WEBSITE-PROVIDER-EXPANSION.md).
 
 - [ ] Audit the remaining terminal website HTTP403/409 mappings against the
