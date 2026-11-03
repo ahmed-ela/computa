@@ -80,6 +80,74 @@ function computaProviderCore(request, provider, origin, actions) {
   return { uuid, fail, normalize, bodyText, choiceValid, equalChoice, physical, visible, enabled, nodes, unique, hit, hitFailure, context, assertContext, hash };
 }
 
+// Failure-only, bounded element metadata. No text values, HTML, DOM IDs,
+// arbitrary class/attribute strings, document-wide queries or page mutations.
+function computaSavedFailureTree(root, c, categories) {
+  const tags = new Set(['div', 'span', 'p', 'pre', 'code', 'header', 'svg', 'path', 'button', 'input', 'textarea', 'br', 'ul', 'ol', 'li', 'a', 'section', 'article']);
+  const known = new Set(categories.map(row => row[0]));
+  const category = node => categories.find(row => node.classList.contains(row[0]))?.[1] || 'other';
+  const tree = [], nodes = [], stack = root ? [{ node: root, parent: -1, depth: 0 }] : [];
+  let nodeLimitReached = false;
+  while (stack.length) {
+    if (tree.length >= 256) { nodeLimitReached = true; break; }
+    const { node, parent, depth } = stack.pop();
+    if (!node || node.nodeType !== 1) continue;
+    const kind = category(node), reasoningExcluded = kind === 'reasoning';
+    let unknownClassPresent = false, tokens = 0;
+    for (const name of node.classList) {
+      if (++tokens > 32) { unknownClassPresent = true; break; }
+      if (!known.has(name)) unknownClassPresent = true;
+    }
+    const total = reasoningExcluded ? 0 : node.children.length, childCountOverflow = total > 257;
+    const name = typeof node.tagName === 'string' ? node.tagName.toLowerCase() : 'other';
+    const interactive = ['button', 'input', 'textarea', 'a'].includes(name)
+      || ['role', 'tabindex', 'contenteditable', 'onclick', 'onkeydown'].some(key => node.getAttribute(key) !== null);
+    const index = tree.length;
+    tree.push({ parent, depth, tag: tags.has(name) ? name : 'other', category: kind,
+      unknownClassPresent, visible: c.visible(node), interactive,
+      elementChildCount: Math.min(total, 257), childCountOverflow, reasoningExcluded });
+    nodes.push(node);
+    if (reasoningExcluded) continue; // Never walk or read a reasoning subtree.
+    if (childCountOverflow || depth === 16 && total) nodeLimitReached = true;
+    if (depth === 16) continue;
+    // The stack itself is bounded as well as the emitted tree.
+    const budget = Math.max(0, 256 - tree.length - stack.length), take = Math.min(total, budget);
+    if (take < total) nodeLimitReached = true;
+    for (let i = take - 1; i >= 0; i--) stack.push({ node: node.children[i], parent: index, depth: depth + 1 });
+  }
+  return { tree, nodes, nodeLimitReached, category };
+}
+
+function computaSavedFirstBodyComparison(actual, expected) {
+  if (typeof actual !== 'string' || typeof expected !== 'string' || actual === expected) return null;
+  const limit = 180200, complete = actual.length <= limit && expected.length <= limit;
+  const result = { comparisonComplete: complete,
+    actualUTF16Length: Math.min(actual.length, limit + 1), expectedUTF16Length: Math.min(expected.length, limit + 1),
+    actualUTF8Length: 540601, expectedUTF8Length: 540601, commonPrefixLength: 0, commonSuffixLength: 0,
+    exactEqual: false, lfDelta: 0, crDelta: 0, nbspDelta: 0,
+    nfcEqual: false, crlfEqual: false, trimEqual: false, mismatchCategory: 'other' };
+  if (!complete) return result;
+  result.actualUTF8Length = new TextEncoder().encode(actual).length;
+  result.expectedUTF8Length = new TextEncoder().encode(expected).length;
+  const minimum = Math.min(actual.length, expected.length);
+  while (result.commonPrefixLength < minimum && actual[result.commonPrefixLength] === expected[result.commonPrefixLength]) result.commonPrefixLength++;
+  while (result.commonSuffixLength < minimum - result.commonPrefixLength
+    && actual[actual.length - 1 - result.commonSuffixLength] === expected[expected.length - 1 - result.commonSuffixLength]) result.commonSuffixLength++;
+  const counts = value => { const counts = [0, 0, 0]; for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i); if (code === 10) counts[0]++; else if (code === 13) counts[1]++; else if (code === 160) counts[2]++;
+  } return counts; };
+  const a = counts(actual), e = counts(expected);
+  [result.lfDelta, result.crDelta, result.nbspDelta] = a.map((value, i) => value - e[i]);
+  result.nfcEqual = actual.normalize('NFC') === expected.normalize('NFC');
+  result.crlfEqual = actual.replace(/\r\n?/g, '\n') === expected.replace(/\r\n?/g, '\n');
+  result.trimEqual = actual.trim() === expected.trim();
+  result.mismatchCategory = result.crlfEqual ? 'line_endings_only'
+    : actual.replace(/\s/g, '') === expected.replace(/\s/g, '') ? 'whitespace_only'
+    : expected.startsWith(actual) ? 'prefix_only' : expected.endsWith(actual) ? 'suffix_only'
+    : result.commonPrefixLength > 0 && result.commonSuffixLength > 0 ? 'internal' : 'other';
+  return result;
+}
+
 // Workspace extraction of Kimi's saved-chat protocol. DOM drivers supply only
 // provider semantics; this engine owns claims, identity, acknowledgement and
 // deletion stages. It does not register a provider or relax native admission.
@@ -119,7 +187,7 @@ async function computaSavedConversation(input, c, dom, config) {
     if (input.expectedConversation != null && input.expectedConversation !== state.canonical)
       c.fail('conversation_changed', 'conversation_url');
     const usesModes = config.selectionKind === 'mode';
-    const firstBindingFailure = (stage, reason) => {
+    const firstBindingFailure = (stage, reason, structure = null) => {
       // Diagnostic-only classification of an already rejected guard. Keep the
       // public category/detail and terminal behavior; never publish page data.
       let diagnostic;
@@ -129,7 +197,12 @@ async function computaSavedConversation(input, c, dom, config) {
       }
       try { c.fail('conversation_changed', 'first_user_message'); }
       catch (error) {
-        if (diagnostic && error?.computaAdapterFailure) error.qwenFirstUserBindingDiagnostic = diagnostic;
+        if (diagnostic && error?.computaAdapterFailure) {
+          error.qwenFirstUserBindingDiagnostic = diagnostic;
+          if (stage === 'initial_response_body' && diagnostic.reason === 'full_prompt_mismatch' && typeof structure === 'function') {
+            try { const packet = structure(); if (packet) error.adapterFailureStructure = packet; } catch { /* Preserve the original refusal. */ }
+          }
+        }
         throw error;
       }
     };
@@ -294,8 +367,16 @@ async function computaSavedConversation(input, c, dom, config) {
       validateInitialResponseIdentity(t);
       state.initialReadComplete = true;
       const terminalUI = !!state.first && !!evidence && !state.deletion && dom.completionCandidate(t.answer);
-      if (terminalUI && extracted.formatIssue && !cleanupInspection && !deletionActions.includes(input.action))
-        c.fail('unsupported_response_format', 'authored_source');
+      if (terminalUI && extracted.formatIssue && !cleanupInspection && !deletionActions.includes(input.action)) {
+        try { c.fail('unsupported_response_format', 'authored_source'); }
+        catch (error) {
+          if (input.action === 'inspect' && config.stateKey === '__computaDeepSeekSavedSessionV1' && error?.computaAdapterFailure
+            && typeof extracted.failureStructure === 'function') {
+            try { const packet = extracted.failureStructure(); if (packet) error.adapterFailureStructure = packet; } catch { /* Preserve the original refusal. */ }
+          }
+          throw error;
+        }
+      }
       const complete = terminalUI && extracted.finalMarkup && !!extracted.text.trim();
       return { t, form, output: { url: document.URL, sessionLifecycle: 'saved_conversation_delete', temporary: false,
         composer: c.enabled(form.editor), userCount: t.users.length, responseCount: t.answers.length,
@@ -486,7 +567,8 @@ async function computaSavedConversation(input, c, dom, config) {
             : !Array.isArray(input.expectedUserCounts) ? 'counts_not_array'
             : !input.expectedUserCounts.length ? 'counts_empty' : input.expectedUserCounts.length > 2 ? 'counts_limit'
             : input.expectedUserCounts.some(value => ![0, 1].includes(value)) ? 'counts_invalid'
-            : !input.expectedUserCounts.includes(1) ? 'one_user_not_expected' : 'predicate_changed');
+            : !input.expectedUserCounts.includes(1) ? 'one_user_not_expected' : 'predicate_changed',
+            () => dom.firstBodyFailureStructure(candidate.first, state.inserted.prompt));
         selectionEvidence();
         if (!state.responseIdentity) state.responseIdentity = { canonical: route.canonical,
           first: candidate.first, answer: candidate.pendingAnswer,
@@ -651,6 +733,10 @@ async function computaSavedConversation(input, c, dom, config) {
       || state.model || state.selection || state.mode || state.modeSelection || state.prepared || state.inserted)
       && ['conversation_changed', 'document_changed', 'model_mismatch', 'model_unverified', 'mode_mismatch', 'mode_unverified'].includes(error.error))) state.terminal = true;
     return error?.computaAdapterFailure ? { error: error.error, ...(error.detail ? { detail: error.detail } : {}),
+      ...(error.adapterFailureStructure && (config.stateKey === '__computaQwenSavedSessionV1'
+        && error.error === 'conversation_changed' && error.detail === 'first_user_message'
+        || config.stateKey === '__computaDeepSeekSavedSessionV1' && error.error === 'unsupported_response_format' && error.detail === 'authored_source')
+        ? { adapterFailureStructure: error.adapterFailureStructure } : {}),
       ...(config.selectionKind === 'mode' && error.error === 'conversation_changed' && error.detail === 'first_container_children'
         && error.firstContainerDiagnostic ? { firstContainerDiagnostic: error.firstContainerDiagnostic } : {}),
       ...(config.selectionKind === 'mode' && error.error === 'mode_unverified' && error.modeObservationDiagnostic
@@ -822,18 +908,41 @@ function computaDeepSeekDOM(c) {
   }
   function rawAnswer(answer) {
     if (!answer) return { text: '', finalMarkup: false, formatIssue: false };
-    const unsupported = () => ({ text: '', finalMarkup: false, formatIssue: true });
+    const unsupported = predicate => {
+      const result = { text: '', finalMarkup: false, formatIssue: true };
+      // Defer all diagnostic DOM reads until the engine is already rejecting
+      // this exact terminal inspect. Streaming/cleanup reads gain no new work.
+      Object.defineProperty(result, 'failureStructure', { value: () => {
+        const categories = [['ds-assistant-message-main-content', 'final'], ['_74c0879', 'reasoning'],
+          ['ds-markdown-paragraph', 'paragraph'], ['md-code-block', 'code_block'], ['md-code-block-banner-wrap', 'code_header'],
+          ['d813de27', 'code_language'], ['code-info-button-text', 'code_label'], ['_33882ae', 'code_corner_left'],
+          ['_28d7e84', 'code_corner_right'], ['token', 'syntax_token']];
+        const region = finals.length === 1 ? finals[0] : answer.root;
+        const captured = computaSavedFailureTree(region, c, categories);
+        let knownReasoningPresent = false;
+        for (let i = 0; i < Math.min(answer.root.children.length, 257); i++)
+          if (answer.root.children[i].classList.contains('_74c0879')) knownReasoningPresent = true;
+        const knownChromePresent = captured.tree.some(row => ['code_header', 'code_label', 'code_corner_left', 'code_corner_right'].includes(row.category));
+        return { version: 1, provider: 'deepseek', trigger: 'authored_source', predicate,
+          nodeLimitReached: captured.nodeLimitReached, nodeCount: captured.tree.length, tree: captured.tree,
+          finalCount: Math.min(finals.length, 257), finalCountOverflow: finals.length > 257,
+          knownReasoningPresent, knownReasoningExcluded: knownReasoningPresent,
+          knownChromePresent, knownChromeTextExcluded: true };
+      } });
+      return result;
+    };
     const finals = c.nodes(answer.root, '.ds-assistant-message-main-content');
     if (!finals.length) return { text: '', finalMarkup: false, formatIssue: false };
-    if (finals.length !== 1) return unsupported();
+    if (finals.length !== 1) return unsupported('final_count');
     const final = finals[0];
-    if (!c.visible(final) || !final.classList.contains('ds-markdown') || final.parentElement !== answer.root)
-      return unsupported();
+    if (!c.visible(final)) return unsupported('final_visibility');
+    if (!final.classList.contains('ds-markdown') || final.parentElement !== answer.root)
+      return unsupported('final_parent');
     const siblings = [...answer.root.children];
     if (siblings.some(node => node !== final && (!node.classList.contains('_74c0879') || siblings.indexOf(node) > siblings.indexOf(final)))
       || siblings.filter(node => node !== final).length > 1
       || [...answer.root.childNodes].some(node => node.nodeType === 3 && !/^\s*$/.test(node.textContent || '')))
-      return unsupported(); // The known reasoning sibling is never traversed/read.
+      return unsupported('sibling_scope'); // The known reasoning sibling is never traversed/read.
     const child = (parent, tag, cls) => {
       if (!c.visible(parent) || parent.children.length !== 1
         || [...parent.childNodes].some(node => node.nodeType === 3 && !/^\s*$/.test(node.textContent || ''))) return null;
@@ -842,43 +951,49 @@ function computaDeepSeekDOM(c) {
     };
     const paragraph = child(final, 'P', 'ds-markdown-paragraph');
     let literal = paragraph && child(paragraph, 'SPAN', null);
-    if (literal && literal.children.length) return unsupported();
+    if (literal && literal.children.length) return unsupported('literal_span_shape');
     if (!literal) {
       // The observed JSON fence is one PRE source, with syntax-highlight spans.
       // Read its whole literal text; never join paragraphs, choose one of
       // several blocks, repair JSON, or include reasoning/presentation labels.
       const block = child(final, 'DIV', 'md-code-block');
-      if (!block || block.children.length !== 4) return unsupported();
+      if (!block) return unsupported('paragraph_shape');
+      if (block.children.length !== 4) return unsupported('fence_child_count');
       const [header, pre, left, right] = block.children;
       const plainWhitespace = parent => [...parent.childNodes].every(node => node.nodeType !== 3 || /^\s*$/.test(node.textContent || ''));
       const labels = c.nodes(header, '.code-info-button-text');
       const languages = c.nodes(header, 'span.d813de27');
       const controls = c.nodes(header, '[role="button"]');
-      if (header.tagName !== 'DIV' || !header.classList.contains('md-code-block-banner-wrap') || !c.visible(header)
-        || languages.length !== 1 || languages[0].children.length || languages[0].textContent !== 'json'
+      if (header.tagName !== 'DIV' || !header.classList.contains('md-code-block-banner-wrap') || !c.visible(header))
+        return unsupported('header_shape');
+      if (languages.length !== 1 || languages[0].children.length || languages[0].textContent !== 'json'
         || labels.length !== 2 || labels[0].textContent !== 'Copy' || labels[1].textContent !== 'Download'
-        || labels.some(node => node.children.length || !c.visible(node))
-        || controls.length !== 2 || controls.some((node, index) => !node.contains(labels[index]) || !c.visible(node))
-        || header.textContent !== 'jsonCopyDownload' || !plainWhitespace(block)) return unsupported();
+        || labels.some(node => node.children.length || !c.visible(node))) return unsupported('header_labels');
+      if (controls.length !== 2 || controls.some((node, index) => !node.contains(labels[index]) || !c.visible(node)))
+        return unsupported('header_shape');
+      if (header.textContent !== 'jsonCopyDownload') return unsupported('header_labels');
+      if (!plainWhitespace(block)) return unsupported('header_shape');
       const corner = (node, cls) => node.tagName.toUpperCase() === 'SVG' && node.classList.contains('_9bc997d')
         && node.classList.contains(cls) && node.textContent === '' && node.children.length === 1
         && node.children[0].tagName.toUpperCase() === 'PATH' && node.children[0].children.length === 0;
       const noninteractive = node => ['role', 'tabindex', 'contenteditable', 'aria-hidden', 'onclick', 'onkeydown']
         .every(name => node.getAttribute(name) === null);
-      if (!corner(left, '_33882ae') || !corner(right, '_28d7e84') || pre.tagName !== 'PRE'
-        || ![final, block, pre].every(noninteractive)) return unsupported();
+      if (!corner(left, '_33882ae') || !corner(right, '_28d7e84')) return unsupported('corner_shape');
+      if (pre.tagName !== 'PRE') return unsupported('literal_span_shape');
+      if (![final, block, pre].every(noninteractive)) return unsupported('interactive_attribute');
       literal = child(pre, 'SPAN', null);
-      if (!literal) return unsupported();
-      let visited = 0;
+      if (!literal) return unsupported('literal_span_shape');
+      let visited = 0, spanPredicate = 'literal_span_shape';
       const literalSpans = node => {
-        if (++visited > 10_000) return false;
+        if (++visited > 10_000) { spanPredicate = 'node_limit'; return false; }
         if (node.nodeType === 3) return true;
-        if (node.nodeType !== 1 || node.tagName !== 'SPAN' || !c.visible(node) || !noninteractive(node)) return false;
+        if (node.nodeType !== 1 || node.tagName !== 'SPAN' || !c.visible(node)) return false;
+        if (!noninteractive(node)) { spanPredicate = 'interactive_attribute'; return false; }
         const cls = node.getAttribute('class') || '';
         if (cls !== '' && !/^token (punctuation|property|operator|string|number|boolean|null)$/.test(cls)) return false;
         return [...node.childNodes].every(literalSpans);
       };
-      if (!literalSpans(literal)) return unsupported();
+      if (!literalSpans(literal)) return unsupported(spanPredicate);
       literal = pre;
     }
     const text = literal.textContent;

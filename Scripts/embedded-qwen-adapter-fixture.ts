@@ -98,7 +98,7 @@ export function fixture(options: { completeOnSend?: boolean } = {}) {
   modalBody.append(notice); const buttons = new Node('DIV', { class: 'qwen-chat-v2-modal-footer-btns' });
   const cancel = new Node('BUTTON', { class: 'qwen-chat-v2-btn-plain' }, 'Cancel'), confirm = new Node('BUTTON', { class: 'qwen-chat-v2-btn-danger' }, 'Delete');
   buttons.append(cancel, confirm); dialog.append(title, modalBody, buttons);
-  const execute = new Function('input', 'document', 'window', 'globalThis', 'location', 'getComputedStyle', 'MutationObserver', core + '\n' + driver
+  const execute = new Function('input', 'document', 'window', 'globalThis', 'location', 'getComputedStyle', 'MutationObserver', core + '\n' + engine + '\n' + driver
     + '\nreturn computaQwenDOM(computaProviderCore(input,"qwen","https://chat.qwen.ai",["inspect"]));');
   const style = (node: Node) => ({ visibility: node.values.visibility || 'visible', display: node.closest('[hidden]') ? 'none' : 'block' });
   const observers: any[] = [], signals: any[] = [];

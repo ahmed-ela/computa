@@ -610,6 +610,67 @@ try {
     guard(); const now = transcript().first;
     return !!now && ['root', 'body', 'id', 'text'].every(key => now[key] === first[key]);
   }
+  // Finite structural metadata only, constructed at an existing terminal
+  // format rejection. It is never response text, ownership or model proof.
+  function authoredFailureStructure(trigger, answer, box, allMarkdowns, markdowns, knownReasoning) {
+    const tags = new Set(['div', 'span', 'p', 'pre', 'code', 'header', 'svg', 'path', 'button',
+      'input', 'textarea', 'br', 'ul', 'ol', 'li', 'a', 'section', 'article']);
+    const classes = [
+      ['segment-content-box', 'content_box'], ['markdown', 'markdown'],
+      ['markdown-container', 'markdown_container'], ['toolcall-flow', 'reasoning_flow'],
+      ['thinking-container', 'reasoning_container'], ['toolcall-rollup__part', 'reasoning_part'],
+      ['segment-code', 'segment_code'], ['syntax-highlighter', 'highlighter'],
+      ['segment-code-content', 'highlighter'], ['segment-code-header', 'code_header'],
+      ['segment-code-lang', 'code_language'], ['language-json', 'json_literal'],
+    ];
+    const allowedClasses = new Set([...classes.map(([name]) => name), 'toolcall-rollup',
+      'toolcall-rollup__flat', 'light', 'dark']);
+    const category = node => classes.find(([name]) => node.classList.contains(name))?.[1] || 'other';
+    const unknownClass = node => {
+      let count = 0;
+      for (const name of node.classList) {
+        if (++count > 32 || !allowedClasses.has(name)) return true;
+      }
+      return false;
+    };
+    const interactive = node => ['BUTTON', 'INPUT', 'TEXTAREA', 'SELECT', 'A'].includes(node.tagName)
+      || ['role', 'tabindex', 'onclick', 'onkeydown'].some(name => node.getAttribute(name) !== null)
+      || node.getAttribute('contenteditable') !== null && node.getAttribute('contenteditable') !== 'false';
+    const tree = [];
+    let nodeLimitReached = false;
+    const visit = (node, parent, depth) => {
+      if (tree.length >= 256) { nodeLimitReached = true; return; }
+      const index = tree.length, tag = node.tagName.toLowerCase();
+      const reasoningExcluded = knownReasoning(node), childCount = node.childElementCount;
+      tree.push({ parent, depth, tag: tags.has(tag) ? tag : 'other', category: category(node),
+        unknownClassPresent: unknownClass(node), visible: c.visible(node), interactive: interactive(node),
+        elementChildCount: Math.min(childCount, 257), childCountOverflow: childCount > 257, reasoningExcluded });
+      // No text-node reads and no traversal into a recognized reasoning region.
+      if (reasoningExcluded) return;
+      if (depth === 16) { if (childCount) nodeLimitReached = true; return; }
+      for (let i = 0; i < node.children.length; i++) {
+        if (tree.length === 256) { nodeLimitReached = true; break; }
+        if (node.children[i].nodeType === 1) visit(node.children[i], index, depth + 1);
+      }
+    };
+    visit(box, -1, 0);
+    const markdownCandidates = allMarkdowns.slice(0, 16).map(node => {
+      const ancestry = []; let current = node;
+      for (let i = 0; i < 4 && current; i++) {
+        ancestry.push(category(current));
+        if (current === box) { current = null; break; }
+        current = current.parentElement;
+      }
+      return { excludedReasoning: !markdowns.includes(node), visible: c.visible(node),
+        ancestry, ancestryTruncated: current !== null };
+    });
+    const excludedReasoningCount = allMarkdowns.length - markdowns.length;
+    return { version: 1, provider: 'kimi', trigger, nodeCount: tree.length, nodeLimitReached, tree,
+      markdownCount: Math.min(markdowns.length, 33), markdownCountOverflow: markdowns.length > 33,
+      excludedReasoningCount: Math.min(excludedReasoningCount, 33),
+      excludedReasoningCountOverflow: excludedReasoningCount > 33,
+      answerVisible: c.visible(answer), boxVisible: c.visible(box), markdownCandidates };
+  }
   function authoredText(answer) {
     if (!answer) return { text: '', finalMarkup: false };
     const box = one(c.nodes(answer, '.segment-content-box'), 'response_content');
@@ -620,14 +681,16 @@ try {
     // Apply the same existing reasoning exclusion before counting authored
     // markdown. A reasoning region may render its own markdown sibling; it is
     // already excluded by onlyLiteral below and is not another final source.
-    const markdowns = c.nodes(box, '.markdown').filter(node => {
+    const allMarkdowns = c.nodes(box, '.markdown');
+    const markdowns = allMarkdowns.filter(node => {
       const reasoning = node.closest('.toolcall-flow, .thinking-container');
       return !reasoning || !knownReasoning(reasoning);
     });
     // Reconstructing text from disjoint blocks can turn malformed site output
     // into a valid tool envelope. Unknown/prose/multiple-block source is kept
     // unaccepted; a terminal UI reports a format failure, never rescued JSON.
-    const full = detail => ({ text: '', finalMarkup: false, formatIssue: true, formatDetail: detail });
+    const full = detail => ({ text: '', finalMarkup: false, formatIssue: true, formatDetail: detail,
+      failureStructure: () => authoredFailureStructure(detail, answer, box, allMarkdowns, markdowns, knownReasoning) });
     if (markdowns.length !== 1) return full('authored_source_markdown_count');
     if (!c.visible(markdowns[0])) return full('authored_source_markdown_visibility');
     if (!markdowns[0].parentElement?.classList.contains('markdown-container')) return full('authored_source_markdown_scope');
@@ -672,8 +735,14 @@ try {
       && rails.length === 1 && icons.length === 5 && icons.every(c.enabled)
       && c.enabled(form.editor) && form.empty && form.sendIcon
       && t.answer.getAttribute('aria-busy') !== 'true' && !state.deletion;
-    if (terminalUI && extracted.formatIssue && !cleanupInspection && !deletionActionNames.includes(input.action))
-      c.fail('unsupported_response_format', extracted.formatDetail);
+    if (terminalUI && extracted.formatIssue && !cleanupInspection && !deletionActionNames.includes(input.action)) {
+      try { c.fail('unsupported_response_format', extracted.formatDetail); }
+      catch (error) {
+        try { error.adapterFailureStructure = extracted.failureStructure(); }
+        catch { /* Diagnostics must not replace or repair the original rejection. */ }
+        throw error;
+      }
+    }
     const complete = terminalUI && extracted.finalMarkup && !!extracted.text.trim();
     return { t, form, output: { url: document.URL, sessionLifecycle: 'saved_conversation_delete', temporary: false,
       composer: c.enabled(form.editor), userCount: t.users.length, responseCount: t.answers.length,
@@ -1030,6 +1099,8 @@ try {
     kimiDraftState.terminal = true;
   return error?.computaAdapterFailure ? { error: error.error, ...(error.detail ? { detail: error.detail } : {}),
     ...(error.error === 'model_unverified' && error.modelEvidenceDiagnostic
-      ? { modelEvidenceDiagnostic: error.modelEvidenceDiagnostic } : {}) }
+      ? { modelEvidenceDiagnostic: error.modelEvidenceDiagnostic } : {}),
+    ...(error.error === 'unsupported_response_format' && error.adapterFailureStructure
+      ? { adapterFailureStructure: error.adapterFailureStructure } : {}) }
     : { error: 'document_changed', detail: 'unexpected_exception' };
 }

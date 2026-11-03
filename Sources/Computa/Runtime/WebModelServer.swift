@@ -40,6 +40,8 @@ struct WebModelStartAdmission: Equatable, Sendable {
     let provider: String
     let modelID: String
     let parameters: Data
+    // Native-only optional sink; absent for ordinary test/custom admissions.
+    var adapterFailureDirectory: URL? = nil
 }
 
 /// Stopping inference and disposing its session remain cancellation operations.
@@ -1142,7 +1144,9 @@ actor WebModelServer {
                     let admission = WebModelStartAdmission(id: UUID(), inferenceID: inferenceID, taskID: taskID,
                         threadID: context.threadID, turnID: context.turnID, runtimeGeneration: context.runtimeGeneration,
                         preparationID: context.preparationID, transportGeneration: transportGeneration,
-                        provider: provider, modelID: request.model, parameters: startParameters)
+                        provider: provider, modelID: request.model, parameters: startParameters,
+                        adapterFailureDirectory: rejectedReplyDirectory?.deletingLastPathComponent()
+                            .appendingPathComponent(WebsiteAdapterFailureDiagnostic.directoryName))
                     claudeResponseStream?.revoke()
                     claudeResponseStream = nil
                     if provider == "claude", let task = UUID(uuidString: taskID),

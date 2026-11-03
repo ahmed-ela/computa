@@ -379,6 +379,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var claudeResponseStreamGeneration: UUID?
         var claudeResponseStreamArmAttempted = false
         var claudeResponseStreamCaptureAttempted = false
+        // Exact native attempt identity; never supplied by page JSON or wire Start.
+        var adapterFailureContext: WebsiteAdapterFailureDiagnostic.Context?
+        var adapterFailureDirectory: URL?
+        var adapterFailureCaptureAttempted = false
+        var adapterFailurePublication: WebsiteAdapterFailurePublication?
         let initialDocumentGeneration: UUID
         let created = ContinuousClock.now
         var state = "loading"
@@ -803,6 +808,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var initialCheckpointSettlementObserverForTesting: (@MainActor ([String: Any]) -> Void)?
     private var geminiPostBlockObserverForTesting: (@MainActor ([String: Any]) -> Void)?
     private var firstUserExpansionRouteCheckpointForTesting: (@MainActor (FirstUserExpansionRouteCheckpoint) async -> Void)?
+    private var adapterFailureBeforeCommitForTesting: (@MainActor () -> Void)?
+    func setAdapterFailureBeforeCommitForTesting(_ hook: @escaping @MainActor () -> Void) {
+        adapterFailureBeforeCommitForTesting = hook
+    }
     private var rendererFailureDiagnosticDefaultsForTesting: UserDefaults?
     private var rendererFailureDiagnosticSourceForTesting: String?
     private var rendererFailureDiagnosticSinkForTesting: ((Data) -> Void)?
@@ -1124,6 +1133,68 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         browser.revokeClaudeResponseStream(tabID: session.tabID, ownerToken: session.token)
     }
 
+    /// Persist finite rejected-read metadata before ordinary error cleanup.
+    /// No extra page read, action, proof update or public payload logging.
+    private func captureAdapterFailureStructure(_ session: Session, packet: WebsiteAdapterFailureDiagnostic.Packet,
+                                                error: String, detail: String, generation: UUID) async {
+        guard !Task.isCancelled, !session.adapterFailureCaptureAttempted,
+              let context = session.adapterFailureContext, let directory = session.adapterFailureDirectory,
+              !session.isDiscovery, !session.isRecoveryProbe, session.state == "running",
+              session.submitted, session.sequence == 1, session.acknowledgedSendSequence == 1,
+              context.provider == session.provider.rawValue, packet.provider == context.provider,
+              context.modelID == (session.modelChoice?.modelID ?? session.modeChoice?.requestID),
+              session.documentGeneration == generation,
+              session.savedDeleteSubmission?.generation == generation,
+              sessions[session.token] === session, finishingTasks[session.token] == nil,
+              browser.webView(for: session.tabID) === session.view,
+              browser.documentGeneration(for: session.tabID) == generation,
+              let token = UUID(uuidString: session.token) else { return }
+        session.adapterFailureCaptureAttempted = true
+        let deadline = ContinuousClock.now + .seconds(1)
+        let publication = WebsiteAdapterFailurePublication(deadline: deadline)
+        session.adapterFailurePublication = publication
+        defer { publication.revoke(); session.adapterFailurePublication = nil }
+        let binding = WebsiteAdapterFailureDiagnostic.Binding(sessionToken: token, documentGeneration: generation,
+            sequence: session.sequence, previousFirstBodyBound: session.firstUserFingerprint != nil,
+            priorModelSelectionVerified: session.modelSelectionVerified)
+        let capturedURL = session.view.url
+        let eligibility: @MainActor @Sendable () -> Bool = { [weak self, weak session] in
+            guard let self, let session else { return false }
+            #if DEBUG
+            let hook = self.adapterFailureBeforeCommitForTesting
+            self.adapterFailureBeforeCommitForTesting = nil
+            hook?()
+            #endif
+            return self.sessions[session.token] === session && self.finishingTasks[session.token] == nil
+                && session.adapterFailurePublication === publication
+                && session.adapterFailureContext == context && session.documentGeneration == generation
+                && session.state == "running" && session.submitted && session.sequence == 1 && session.acknowledgedSendSequence == 1
+                && context.modelID == (session.modelChoice?.modelID ?? session.modeChoice?.requestID)
+                && self.browser.webView(for: session.tabID) === session.view
+                && self.browser.documentGeneration(for: session.tabID) == generation
+                && session.view.url == capturedURL && session.savedDeleteSubmission?.generation == generation
+        }
+        let completion = EmbeddedScriptResult()
+        _ = try? await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
+                completion.install(continuation)
+                completion.setTimeout(Task.detached {
+                    do {
+                        try await Task.sleep(until: deadline)
+                        publication.revoke(); completion.complete(.success(Data()))
+                    } catch { }
+                })
+                Task.detached {
+                    _ = publication.publish(directory: directory, context: context, binding: binding,
+                        packet: packet, error: error, detail: detail, commitEligibility: eligibility)
+                    completion.complete(.success(Data()))
+                }
+            }
+        }, onCancel: {
+            publication.revoke(); completion.complete(.success(Data()))
+        })
+    }
+
     private func armClaudeResponseStream(_ session: Session, prompt: String, outbound: String) async {
         guard let lease = session.claudeResponseStream else { return }
         guard !session.claudeResponseStreamArmAttempted else {
@@ -1272,6 +1343,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         } catch {
             if let preparedTab { browser.closeTab(preparedTab) }
             throw error
+        }
+        if let admission, let directory = admission.adapterFailureDirectory,
+           let context = WebsiteAdapterFailureDiagnostic.Context(admission: admission),
+           context.modelID == (session.modelChoice?.modelID ?? session.modeChoice?.requestID) {
+            session.adapterFailureContext = context
+            session.adapterFailureDirectory = directory
         }
         let result = try snapshot(session)
         streamRetained = session.claudeResponseStream != nil
@@ -6149,6 +6226,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         try Task.checkCancellation()
         guard var observed = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw Failure.pageUnavailable }
+        let adapterFailureStructure = WebsiteAdapterFailureDiagnostic.remove(from: &observed,
+            provider: provider.rawValue, action: action)
         let kimiProgress = Self.removeKimiDiscoveryProgressDiagnostic(from: &observed, provider: provider, action: action)
         logKimiDiscoveryProgress(kimiProgress, session: session)
         // This immutable attempt diagnostic is stripped before response or
@@ -6219,6 +6298,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             Self.inspectionLog.error("productModeDiagnostic provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence) structure=\(safe, privacy: .public)")
         }
         if let error = observed["error"] as? String {
+            if !allowBlockedProvider, let packet = adapterFailureStructure,
+               let detail = observed["detail"] as? String {
+                await captureAdapterFailureStructure(session, packet: packet, error: error, detail: detail,
+                    generation: generation)
+            }
             if !session.loggedSavedAdapterFailure,
                let diagnostic = Self.savedAdapterFailureDiagnostic(observed, provider: provider, action: provider.selectionAdapterAction(action)) {
                 session.loggedSavedAdapterFailure = true
@@ -7425,6 +7509,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     private func finish(_ session: Session, cancel: Bool,
                         cleanupCause: WebModelCleanupCause = .cancelled) async -> Data {
+        session.adapterFailurePublication?.revoke()
         // Cleanup must finish its own fresh ownership proof even when its
         // caller is cancelled. Share one bounded cleanup task and receipt for
         // every provider; performFinish retains all provider ownership checks.

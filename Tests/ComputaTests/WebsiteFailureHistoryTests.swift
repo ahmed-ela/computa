@@ -3,6 +3,34 @@ import XCTest
 @testable import Computa
 
 final class WebsiteFailureHistoryTests: XCTestCase {
+    func testFiniteRejectedToolDiagnosisSurvivesRecreationWithoutReplyData() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaCodecFailureHistory-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = WebsiteModelChoice(provider: "groq", key: "qwen/qwen3.8-27b", label: "Qwen/Qwen3.8-27B").modelID
+        let task = UUID().uuidString, thread = UUID().uuidString
+        let failures: [WebModelResponseCodec.Failure] = [.unknownTool("PRIVATE_TOOL_CANARY"), .emptyReply,
+            .malformedEnvelope, .argumentsMustBeObject, .customInputMustBeString, .invalidBrowserReadArguments]
+        for failure in failures {
+            let turn = UUID().uuidString
+            let data = try WebModelServer.errorBody(for: failure)
+            let text = String(decoding: data, as: UTF8.self)
+            XCTAssertFalse(text.contains("PRIVATE_TOOL_CANARY"))
+            let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+                turnID: turn, modelID: model, diagnosticText: text))
+            XCTAssertTrue(WebsiteTurnFailureStore(directory: root).append(record))
+            XCTAssertEqual(try WebsiteTurnFailureStore(directory: root).load(threadID: thread).last, record)
+            let original = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            for mutation: [String: Any] in [["message": "PRIVATE_PAGE_CANARY"], ["retryable": false],
+                                           ["tool": "exec_command"], ["required_action": "retry"], ["param": "input"]] {
+                var changed = original, fields = try XCTUnwrap(original["error"] as? [String: Any])
+                mutation.forEach { fields[$0.key] = $0.value }; changed["error"] = fields
+                let altered = try JSONSerialization.data(withJSONObject: changed)
+                XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+                    turnID: turn, modelID: model, diagnosticText: String(decoding: altered, as: UTF8.self)))
+            }
+        }
+    }
+
     func testKimiUnsupportedLiteralResponseSurvivesStoreRecreationAndKeepsTheExactTurnFailed() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaKimiFormatHistory-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }

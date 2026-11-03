@@ -1,5 +1,30 @@
 # Groq website adapter qualification
 
+## Installed400 failure and candidate401 handoff
+
+Installed 0.8.0 (400), source `9d0c06f`, admitted the controlled Groq
+Qwen/Qwen3.8-27B workflow and received its first response after 4.27 seconds.
+The response requested `exec_command` before loading that schema and guessed
+`command` as its argument name. The unchanged codec rejected the unoffered tool;
+no local operation ran. The owned website transcript was cleared and its native
+cleanup receipt was saved. This establishes that the prior byte-budget blocker
+was passed, not workflow qualification. The exact rejected synthetic response
+is retained privately; no uncertain action was replayed.
+
+Candidate401 repeats the current callable names at the final response handoff
+and provides a concrete, current-revision loader example. Only available and
+allowed unloaded tools can be used in the example. Loader execution, current
+schemas, permissions and tool admission remain unchanged. It also fixes saved
+history for the codec's fixed `invalid_model_output` diagnoses: only exact native
+envelopes are retained, without arbitrary website prose, reply data or tool names.
+
+The initial focused gate passed 168 native tests covering prompt projection,
+loader scope, response parsing and durable failure history. The integrated
+candidate then passed 303 native tests and 330 JavaScript tests (19,172
+assertions), including the new saved-provider diagnostic path. These runs
+overlap and must not be added together. This candidate has not yet been
+installed or qualified live; fresh retesting remains required.
+
 ## Candidate400: Qwen-specific request admission
 
 Groq's exact `qwen/qwen3.8-27b` choice previously used the fallback 6,000-byte
@@ -37,6 +62,22 @@ remain pending at this checkpoint. This repairs a demonstrated local
 admission failure; it does not establish a live provider response, account quota,
 workflow completion or repeated reliability. Existing failed Groq tasks remain
 preserved, and no provider prompt was submitted during these offline checks.
+
+## Installed400 GPT-OSS 120B control
+
+A separate fresh combined workflow completed two inference envelopes: an initial
+schema-load request was rejected because it included page tools before browser
+binding, then a corrected request loaded the terminal schema. The third website
+inference failed 1.6 seconds after Send. Its finite counter evidence shows one
+previously bound user message disappearing: expected user count one, observed
+user count zero, answer count zero. The turn failed after 140.5 seconds, including
+the existing request pacing. No terminal, file-edit or browser action executed.
+
+The first two website transcripts were cleared; cleanup of the third remains
+unconfirmed. No prompt or uncertain action was replayed, and further Groq
+submissions are held while that failure is investigated. A prior, separate
+build367 direct probe showed HTTP413/token-limit rejection with a similar
+empty-transcript symptom; this does not establish build400's network cause.
 
 ## Compact tool loading candidate
 

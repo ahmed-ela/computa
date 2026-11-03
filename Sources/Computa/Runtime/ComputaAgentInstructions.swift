@@ -633,7 +633,7 @@ enum ComputaAgentInstructions {
     }
 
     static func groqResponseContract(currentBrowserHandoff: String, hasFunctions: Bool = true,
-                                    hasCustomTools: Bool = false) -> String {
+                                    hasCustomTools: Bool = false, currentToolHandoff: String = "") -> String {
         let functionShape = hasFunctions ? #"Function shape: {"type":"tool_calls","calls":[{"name":"offered_name","arguments":{}}]}. Replace name; required schema fields must be supplied ({} only if permitted)."# : ""
         let customShape = hasCustomTools ? #"Custom shape: {"type":"tool_calls","calls":[{"name":"offered_custom_name","input":"literal input"}]}. Replace placeholders; no arguments."# : ""
         return """
@@ -643,6 +643,7 @@ enum ComputaAgentInstructions {
         \(customShape)
         Use exact currently offered qualified names/schemas only; never infer missing schemas from history. Functions require arguments object/every required schema field; custom tools require literal input. Optional tool_calls.commentary is progress. Honor tool_choice/parallel/max-call limits; no tools→no call. No uncertain replay; verify matching outputs/exit and requested outcomes. Report actual blockers/governing refusal/uncertainty, never invented results.
         \(currentBrowserHandoff)
+        \(currentToolHandoff)
         END_COMPUTA_LOCAL_RESPONSE_HANDOFF.
         """
     }

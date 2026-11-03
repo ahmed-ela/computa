@@ -71,7 +71,8 @@ test('every authored-source branch emits a finite exact reason and no page conte
     if (reason === 'code_visibility') response.code.setAttribute('hidden','');
     if (reason === 'outside_content') f.part.append(new f.Node('P',{},'PRIVATE_CANARY'));
     const result = await f.run();
-    expect(result).toEqual({ error:'unsupported_response_format', detail:'authored_source_' + reason });
+    expect(result).toMatchObject({ error:'unsupported_response_format', detail:'authored_source_' + reason });
+    expect(result.adapterFailureStructure.trigger).toBe('authored_source_' + reason);
     expect(JSON.stringify(result)).not.toContain('PRIVATE_CANARY');
     expect(f.counts()).toEqual({ insertions:1, sends:1, confirms:0 });
   }
@@ -83,5 +84,5 @@ test('reasoning filtering does not repair malformed JSON or merge authored code 
   expect((await malformed.run()).text).toBe('{"type":"tool_calls",');
   const duplicate = adapterFixture(); await duplicate.submit(); reasoningMarkdown(duplicate);
   duplicate.response.markdown.append(duplicate.response.segment.cloneNode(true));
-  expect(await duplicate.run()).toEqual({ error:'unsupported_response_format', detail:'authored_source_json_count' });
+  expect(await duplicate.run()).toMatchObject({ error:'unsupported_response_format', detail:'authored_source_json_count' });
 });

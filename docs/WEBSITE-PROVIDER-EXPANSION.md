@@ -1,13 +1,29 @@
 # Kimi, Qwen and DeepSeek website adapters
 
-Status: installed 0.8.0 (394), 2026-11-02 UTC, source
-`80b917bff6f38e30654a789c476c3801f9ebd748`. Fresh native markers remain
-unqualified: Kimi rejects the initial first-user root ID; Qwen passes the route
-transition then rejects the response scope; DeepSeek completes its response but
-fails saved-chat deletion. No failed Send was replayed and no tool workflow ran.
-The exact timing and cleanup failures are retained below. Candidate395 changes
-only provider icons/version: official Gemini four-color and Alibaba Cloud marks.
-Provider fixes remain under investigation. PR #20 remains draft.
+Status: installed 0.8.0 (400), source `9d0c06f`. The fresh controlled
+native checks still fail independently: Kimi Instant stops at
+`authored_source_markdown_count`; Qwen3.7-Plus stops at
+`initial_response_body / full_prompt_mismatch`; DeepSeek Chat completes its
+first inference and one terminal read, then rejects the second response's
+literal source. Kimi and both DeepSeek inference sessions have verified deletion
+receipts. Qwen cleanup remains unconfirmed. No failed Send was replayed and no
+combined workflow passed. PR #20 remains draft.
+
+Candidate401 adds explicitly armed structural diagnostics at the existing
+rejections, before cleanup removes the page. The diagnostic path records only
+bounded counts, finite shape categories and comparison measurements. It neither
+accepts new response shapes nor supplies ownership, model or execution proof.
+This is preparation for the next root-cause observation, not a provider fix.
+The integrated candidate passed 303 native tests and 330 JavaScript tests
+(19,172 assertions). Native checks cover exact task/model identity, a later
+inference failing after an earlier success, capture before cleanup, page
+replacement during file preparation, one-shot publication and private storage.
+Two new fixture defects were corrected: Foundation's shortened `/var` path was
+replaced with the existing POSIX-realpath helper, and the expiry boundary uses
+an exact timestamp. Production checks and test assertions were unchanged.
+A separate normal-tab Kimi probe used `kimi.com`, while the adapter uses
+`kimi.ai`; that unsent, signed-out probe was cleaned up and is excluded from
+production-provider evidence.
 
 The requested route is each provider's signed-in website in Computa's browser.
 Qwen's website is separate from Alibaba's existing Qwen 3.7 Flash API option.
@@ -906,8 +922,9 @@ developer setting were restored after the approved two-message-per-provider scop
 
 ## Remaining gates
 
-1. Package/install gated candidate400, then run fresh bounded
-   Kimi and Qwen markers with exact selection, full-body ownership and deletion.
+1. Finish candidate401 structural-capture gates, package/install it, then run
+   fresh armed Kimi and Qwen markers with exact selection, full-body ownership
+   and deletion. Retain the original rejection and inspect its finite evidence.
 2. Use Qwen's finite stage/reason evidence to identify the actual failing guard;
    preserve the failed tasks and do not replay uncertain submissions.
 3. Verify both DeepSeek modes on complete browser/terminal/file workflows,

@@ -155,18 +155,41 @@ function computaDeepSeekDOM(c) {
   }
   function rawAnswer(answer) {
     if (!answer) return { text: '', finalMarkup: false, formatIssue: false };
-    const unsupported = () => ({ text: '', finalMarkup: false, formatIssue: true });
+    const unsupported = predicate => {
+      const result = { text: '', finalMarkup: false, formatIssue: true };
+      // Defer all diagnostic DOM reads until the engine is already rejecting
+      // this exact terminal inspect. Streaming/cleanup reads gain no new work.
+      Object.defineProperty(result, 'failureStructure', { value: () => {
+        const categories = [['ds-assistant-message-main-content', 'final'], ['_74c0879', 'reasoning'],
+          ['ds-markdown-paragraph', 'paragraph'], ['md-code-block', 'code_block'], ['md-code-block-banner-wrap', 'code_header'],
+          ['d813de27', 'code_language'], ['code-info-button-text', 'code_label'], ['_33882ae', 'code_corner_left'],
+          ['_28d7e84', 'code_corner_right'], ['token', 'syntax_token']];
+        const region = finals.length === 1 ? finals[0] : answer.root;
+        const captured = computaSavedFailureTree(region, c, categories);
+        let knownReasoningPresent = false;
+        for (let i = 0; i < Math.min(answer.root.children.length, 257); i++)
+          if (answer.root.children[i].classList.contains('_74c0879')) knownReasoningPresent = true;
+        const knownChromePresent = captured.tree.some(row => ['code_header', 'code_label', 'code_corner_left', 'code_corner_right'].includes(row.category));
+        return { version: 1, provider: 'deepseek', trigger: 'authored_source', predicate,
+          nodeLimitReached: captured.nodeLimitReached, nodeCount: captured.tree.length, tree: captured.tree,
+          finalCount: Math.min(finals.length, 257), finalCountOverflow: finals.length > 257,
+          knownReasoningPresent, knownReasoningExcluded: knownReasoningPresent,
+          knownChromePresent, knownChromeTextExcluded: true };
+      } });
+      return result;
+    };
     const finals = c.nodes(answer.root, '.ds-assistant-message-main-content');
     if (!finals.length) return { text: '', finalMarkup: false, formatIssue: false };
-    if (finals.length !== 1) return unsupported();
+    if (finals.length !== 1) return unsupported('final_count');
     const final = finals[0];
-    if (!c.visible(final) || !final.classList.contains('ds-markdown') || final.parentElement !== answer.root)
-      return unsupported();
+    if (!c.visible(final)) return unsupported('final_visibility');
+    if (!final.classList.contains('ds-markdown') || final.parentElement !== answer.root)
+      return unsupported('final_parent');
     const siblings = [...answer.root.children];
     if (siblings.some(node => node !== final && (!node.classList.contains('_74c0879') || siblings.indexOf(node) > siblings.indexOf(final)))
       || siblings.filter(node => node !== final).length > 1
       || [...answer.root.childNodes].some(node => node.nodeType === 3 && !/^\s*$/.test(node.textContent || '')))
-      return unsupported(); // The known reasoning sibling is never traversed/read.
+      return unsupported('sibling_scope'); // The known reasoning sibling is never traversed/read.
     const child = (parent, tag, cls) => {
       if (!c.visible(parent) || parent.children.length !== 1
         || [...parent.childNodes].some(node => node.nodeType === 3 && !/^\s*$/.test(node.textContent || ''))) return null;
@@ -175,43 +198,49 @@ function computaDeepSeekDOM(c) {
     };
     const paragraph = child(final, 'P', 'ds-markdown-paragraph');
     let literal = paragraph && child(paragraph, 'SPAN', null);
-    if (literal && literal.children.length) return unsupported();
+    if (literal && literal.children.length) return unsupported('literal_span_shape');
     if (!literal) {
       // The observed JSON fence is one PRE source, with syntax-highlight spans.
       // Read its whole literal text; never join paragraphs, choose one of
       // several blocks, repair JSON, or include reasoning/presentation labels.
       const block = child(final, 'DIV', 'md-code-block');
-      if (!block || block.children.length !== 4) return unsupported();
+      if (!block) return unsupported('paragraph_shape');
+      if (block.children.length !== 4) return unsupported('fence_child_count');
       const [header, pre, left, right] = block.children;
       const plainWhitespace = parent => [...parent.childNodes].every(node => node.nodeType !== 3 || /^\s*$/.test(node.textContent || ''));
       const labels = c.nodes(header, '.code-info-button-text');
       const languages = c.nodes(header, 'span.d813de27');
       const controls = c.nodes(header, '[role="button"]');
-      if (header.tagName !== 'DIV' || !header.classList.contains('md-code-block-banner-wrap') || !c.visible(header)
-        || languages.length !== 1 || languages[0].children.length || languages[0].textContent !== 'json'
+      if (header.tagName !== 'DIV' || !header.classList.contains('md-code-block-banner-wrap') || !c.visible(header))
+        return unsupported('header_shape');
+      if (languages.length !== 1 || languages[0].children.length || languages[0].textContent !== 'json'
         || labels.length !== 2 || labels[0].textContent !== 'Copy' || labels[1].textContent !== 'Download'
-        || labels.some(node => node.children.length || !c.visible(node))
-        || controls.length !== 2 || controls.some((node, index) => !node.contains(labels[index]) || !c.visible(node))
-        || header.textContent !== 'jsonCopyDownload' || !plainWhitespace(block)) return unsupported();
+        || labels.some(node => node.children.length || !c.visible(node))) return unsupported('header_labels');
+      if (controls.length !== 2 || controls.some((node, index) => !node.contains(labels[index]) || !c.visible(node)))
+        return unsupported('header_shape');
+      if (header.textContent !== 'jsonCopyDownload') return unsupported('header_labels');
+      if (!plainWhitespace(block)) return unsupported('header_shape');
       const corner = (node, cls) => node.tagName.toUpperCase() === 'SVG' && node.classList.contains('_9bc997d')
         && node.classList.contains(cls) && node.textContent === '' && node.children.length === 1
         && node.children[0].tagName.toUpperCase() === 'PATH' && node.children[0].children.length === 0;
       const noninteractive = node => ['role', 'tabindex', 'contenteditable', 'aria-hidden', 'onclick', 'onkeydown']
         .every(name => node.getAttribute(name) === null);
-      if (!corner(left, '_33882ae') || !corner(right, '_28d7e84') || pre.tagName !== 'PRE'
-        || ![final, block, pre].every(noninteractive)) return unsupported();
+      if (!corner(left, '_33882ae') || !corner(right, '_28d7e84')) return unsupported('corner_shape');
+      if (pre.tagName !== 'PRE') return unsupported('literal_span_shape');
+      if (![final, block, pre].every(noninteractive)) return unsupported('interactive_attribute');
       literal = child(pre, 'SPAN', null);
-      if (!literal) return unsupported();
-      let visited = 0;
+      if (!literal) return unsupported('literal_span_shape');
+      let visited = 0, spanPredicate = 'literal_span_shape';
       const literalSpans = node => {
-        if (++visited > 10_000) return false;
+        if (++visited > 10_000) { spanPredicate = 'node_limit'; return false; }
         if (node.nodeType === 3) return true;
-        if (node.nodeType !== 1 || node.tagName !== 'SPAN' || !c.visible(node) || !noninteractive(node)) return false;
+        if (node.nodeType !== 1 || node.tagName !== 'SPAN' || !c.visible(node)) return false;
+        if (!noninteractive(node)) { spanPredicate = 'interactive_attribute'; return false; }
         const cls = node.getAttribute('class') || '';
         if (cls !== '' && !/^token (punctuation|property|operator|string|number|boolean|null)$/.test(cls)) return false;
         return [...node.childNodes].every(literalSpans);
       };
-      if (!literalSpans(literal)) return unsupported();
+      if (!literalSpans(literal)) return unsupported(spanPredicate);
       literal = pre;
     }
     const text = literal.textContent;

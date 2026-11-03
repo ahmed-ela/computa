@@ -84,7 +84,7 @@ export function fixture(options: { fresh?: boolean; completeOnSend?: boolean } =
   group.append(cancel, confirm); dialog.append(title, notice, group);
   const world: any = {};
   const execute = new Function('input', 'document', 'window', 'globalThis', 'location', 'getComputedStyle', 'MutationObserver', 'HTMLTextAreaElement', 'InputEvent',
-    core + '\n' + driver + '\nreturn computaDeepSeekDOM(computaProviderCore(input,"deepseek","https://chat.deepseek.com",["inspect"]));');
+    core + '\n' + engine + '\n' + driver + '\nreturn computaDeepSeekDOM(computaProviderCore(input,"deepseek","https://chat.deepseek.com",["inspect"]));');
   const observers: any[] = [], signals: any[] = [];
   window.webkit = { messageHandlers: { computaChatGPTSignal: { postMessage: (value: any) => signals.push(value) } } };
   class Observer {

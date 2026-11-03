@@ -607,6 +607,117 @@ final class DeepSeekWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testArmedStructureSurvivesEarlierSuccessAndCapturesExactLaterFailureBeforeCleanup() async throws {
+        let diagnostic = try WebsiteAdapterFailureFixture(); defer { diagnostic.cleanup() }
+        try diagnostic.writeArm()
+        do {
+            let first = try Fixture(); defer { first.shutdown() }
+            let token = try await nativeDiagnosticStart(first, admission: diagnostic.admission)
+            _ = try await call(first, "webProviderSend", token, prompt: "Synthetic first successful marker")
+            _ = try await wait(first, token, state: "complete")
+            XCTAssertTrue(FileManager.default.fileExists(atPath: diagnostic.armURL.path))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: diagnostic.outputURL.path))
+            let finished = try await call(first, "webProviderFinish", token)
+            XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+        }
+        let failed = try Fixture(setup: DeepSeekFencedResponseFixture.setup(
+            DeepSeekFencedResponseFixture.observedBlock + "<p>PRIVATE_SYNTHETIC_EXTRA_PROSE</p>"))
+        defer { failed.shutdown() }
+        let admission = diagnostic.admission(inferenceID: UUID())
+        let token = try await nativeDiagnosticStart(failed, admission: admission)
+        _ = try await call(failed, "webProviderSend", token, prompt: "Synthetic second-inference structure failure")
+        do { _ = try await wait(failed, token, state: "complete"); XCTFail("Original rejection must remain") }
+        catch let failure as EmbeddedWebModelTransport.Failure { XCTAssertEqual(failure, .responseFormatUnavailable) }
+        // The view still exists, and cleanup has not been requested.
+        XCTAssertNotNil(failed.browser.webView(for: try XCTUnwrap(failed.createdID)))
+        let bytes = try Data(contentsOf: diagnostic.outputURL)
+        let record = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        XCTAssertEqual(record["inferenceID"] as? String, admission.inferenceID.uuidString.lowercased())
+        XCTAssertEqual(record["taskID"] as? String, admission.taskID)
+        XCTAssertEqual(record["sessionToken"] as? String, token.lowercased())
+        XCTAssertEqual(record["error"] as? String, "unsupported_response_format")
+        XCTAssertEqual(record["detail"] as? String, "authored_source")
+        XCTAssertEqual(record["responseAuthorityGranted"] as? Bool, false)
+        XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains("PRIVATE_SYNTHETIC_EXTRA_PROSE"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: diagnostic.armURL.path))
+        try await assertCounts(failed, sends: 1, headers: 0, selections: 0, confirmations: 0)
+        let finished = try await call(failed, "webProviderFinish", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+        try await assertCounts(failed, sends: 1, headers: 1, selections: 1, confirmations: 1)
+        XCTAssertEqual(try Data(contentsOf: diagnostic.outputURL), bytes)
+    }
+
+    func testWrongTaskAndWireStartCannotCaptureButKeepOriginalFailure() async throws {
+        for wire in [false, true] {
+            let diagnostic = try WebsiteAdapterFailureFixture(); defer { diagnostic.cleanup() }
+            var arm = diagnostic.arm(); if !wire { arm["taskID"] = UUID().uuidString.lowercased() }
+            try diagnostic.writeArm(arm)
+            let fixture = try Fixture(setup: DeepSeekFencedResponseFixture.setup(
+                DeepSeekFencedResponseFixture.observedBlock + "<p>PRIVATE_REJECTED_TEXT</p>"))
+            defer { fixture.shutdown() }
+            let token: String
+            if wire { token = try await start(fixture) }
+            else { token = try await nativeDiagnosticStart(fixture, admission: diagnostic.admission) }
+            _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic unarmed format failure")
+            do { _ = try await wait(fixture, token, state: "complete"); XCTFail("No diagnostic can admit a reply") }
+            catch let failure as EmbeddedWebModelTransport.Failure { XCTAssertEqual(failure, .responseFormatUnavailable) }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: diagnostic.outputURL.path))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: diagnostic.armURL.path))
+            try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+        }
+    }
+
+    func testDocumentReplacementDuringFilePreparationRevokesPublicationBeforeRename() async throws {
+        let diagnostic = try WebsiteAdapterFailureFixture(); defer { diagnostic.cleanup() }; try diagnostic.writeArm()
+        let fixture = try Fixture(setup: DeepSeekFencedResponseFixture.setup(
+            DeepSeekFencedResponseFixture.observedBlock + "<p>PRIVATE_REPLACED_DOCUMENT</p>"))
+        defer { fixture.shutdown() }
+        let token = try await nativeDiagnosticStart(fixture, admission: diagnostic.admission)
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic stale-document diagnostic")
+        var replaced = false
+        fixture.transport.setAdapterFailureBeforeCommitForTesting {
+            replaced = true
+            if let id = fixture.createdID { fixture.browser.stop(tabID: id) }
+        }
+        do { _ = try await wait(fixture, token, state: "complete"); XCTFail("Original format error must remain") }
+        catch let failure as EmbeddedWebModelTransport.Failure { XCTAssertEqual(failure, .responseFormatUnavailable) }
+        XCTAssertTrue(replaced)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: diagnostic.outputURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: diagnostic.armURL.path))
+        try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+    }
+
+    func testDiagnosticContextCannotClaimDifferentDeepSeekMode() async throws {
+        let diagnostic = try WebsiteAdapterFailureFixture(); defer { diagnostic.cleanup() }; try diagnostic.writeArm()
+        let fixture = try Fixture(setup: DeepSeekFencedResponseFixture.setup(
+            DeepSeekFencedResponseFixture.observedBlock + "<p>PRIVATE_MODE_MISMATCH</p>"))
+        defer { fixture.shutdown() }
+        let a = diagnostic.admission
+        // The native diagnostic must match the actual selection even if a
+        // caller's broad provider admission supplies another mode identifier.
+        let params = try JSONSerialization.data(withJSONObject: ["provider": "deepseek",
+            "modeChoice": WebsiteModeChoice(deepSeekMode: .deepthink).canonicalJSONString])
+        let mismatched = WebModelStartAdmission(id: a.id, inferenceID: a.inferenceID, taskID: a.taskID,
+            threadID: a.threadID, turnID: a.turnID, runtimeGeneration: a.runtimeGeneration,
+            preparationID: a.preparationID, transportGeneration: a.transportGeneration,
+            provider: a.provider, modelID: a.modelID, parameters: params, adapterFailureDirectory: diagnostic.directory)
+        let token = try await nativeDiagnosticStart(fixture, admission: mismatched)
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic differently selected mode")
+        do { _ = try await wait(fixture, token, state: "complete"); XCTFail("Original format error must remain") }
+        catch let failure as EmbeddedWebModelTransport.Failure { XCTAssertEqual(failure, .responseFormatUnavailable) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: diagnostic.outputURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: diagnostic.armURL.path))
+        try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+    }
+
+    private func nativeDiagnosticStart(_ fixture: Fixture, admission: WebModelStartAdmission) async throws -> String {
+        let data = try await fixture.transport.start(params: admission.parameters, admission: admission, authorization: nil)
+        let snapshot = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let token = try XCTUnwrap(snapshot["sessionToken"] as? String)
+        _ = try await wait(fixture, token, state: "ready")
+        return token
+    }
+
     private func start(_ fixture: Fixture, mode: WebsiteModeChoice.DeepSeekMode = .chat) async throws -> String {
         let choice = WebsiteModeChoice(deepSeekMode: mode)
         let data = try await fixture.transport.request(operation: "webProviderStart", params: JSONSerialization.data(withJSONObject:

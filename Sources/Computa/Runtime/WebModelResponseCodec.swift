@@ -422,7 +422,9 @@ enum WebModelResponseCodec {
                                        availability: browserToolAvailability)
             : currentBrowserHandoff(tools: offered, policy: policy, availability: browserToolAvailability)
         let responseContract = compactGroq ? ComputaAgentInstructions.groqResponseContract(currentBrowserHandoff: browserHandoff,
-            hasFunctions: offered.values.contains { !$0.isCustom }, hasCustomTools: !customNames.isEmpty)
+            hasFunctions: offered.values.contains { !$0.isCustom }, hasCustomTools: !customNames.isEmpty,
+            currentToolHandoff: try currentGroqToolHandoff(projection: groqToolCatalogProjection,
+                offeredNames: Set(offered.keys), allowedNames: policy.allowedNames))
             : ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames,
             includedInstructionText: includedInstructionText, responseFormat: usesRawJSONSource ? .rawJSON : isClaude ? .literalFencedJSON : .fencedJSON,
             singleActionRelay: isChatGPT,
@@ -480,6 +482,33 @@ enum WebModelResponseCodec {
         ```
         END_GROQ_NATIVE_TOOL_INVENTORY.
         """
+    }
+
+    /// Repeat the validated current selection at the final response boundary.
+    /// Inventory summaries are discovery data, not callable schemas. An exact
+    /// loader example avoids requiring the model to invent its first arguments.
+    private static func currentGroqToolHandoff(projection: GroqToolCatalog.Projection?,
+                                               offeredNames: Set<String>, allowedNames: Set<String>) throws -> String {
+        guard let projection else { return "" }
+        func json(_ value: Any) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: value,
+                options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
+        }
+        let callable = offeredNames.intersection(allowedNames)
+        var result = "Callable names for THIS response: \(try json(callable.sorted())). Other inventory names are not loaded schemas."
+        guard let loader = callable.sorted().first(where: {
+            $0 == GroqToolCatalog.name || $0 == "functions." + GroqToolCatalog.name
+        }) else { return result }
+        let unloaded = projection.inventory.filter {
+            $0.callable && $0.allowed && !projection.selectedNames.contains($0.name)
+        }.map(\.name).sorted()
+        guard let example = unloaded.first(where: { $0 == "exec_command" || $0 == "functions.exec_command" })
+            ?? unloaded.first else { return result }
+        let call: [String: Any] = ["type": "tool_calls", "calls": [["name": loader,
+            "arguments": ["catalog_revision": projection.revision, "names": [example]]]]]
+        result += " Before using an unloaded tool, request its schema with the loader alone and wait for the matching result. Do not call the unloaded tool in that response."
+        result += " Example only: if the task needs the tool named in this example, first return \(try json(call)). Then read its exact schema in the next request before supplying arguments. Choose needed available, allowed inventory names; loading does not execute them."
+        return result
     }
 
     private static func currentGroqBrowserHandoff(tools: [String: OfferedTool], policy: ToolPolicy,

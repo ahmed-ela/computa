@@ -189,6 +189,33 @@ function computaQwenDOM(c) {
     }
     return { users, answers, first: { root, container, body, id, text: body.textContent }, answer, pendingAnswer };
   }
+  function firstBodyFailureStructure(first, expected) {
+    const comparison = computaSavedFirstBodyComparison(first?.text, expected);
+    if (!comparison || !first?.container) return null;
+    const categories = [['chat-user-message-container', 'user_container'], ['chunked-text-renderer-root', 'chunk_root'], ['user-message-content', 'user_paragraph']];
+    const captured = computaSavedFailureTree(first.container, c, categories);
+    let direct = 0, visibleDirect = 0, descendant = 0, visibleDescendant = 0;
+    const paragraphs = [];
+    for (const node of captured.nodes) {
+      if (node === first.container || node.tagName !== 'P' || !node.classList.contains('user-message-content')) continue;
+      const isDirect = node.parentElement?.classList.contains('chunked-text-renderer-root') === true, isVisible = c.visible(node);
+      descendant++; if (isVisible) visibleDescendant++; if (isDirect) direct++; if (isDirect && isVisible) visibleDirect++;
+      if (paragraphs.length < 16) {
+        const ancestry = []; let parent = node.parentElement, reached = false;
+        while (parent && ancestry.length < 4) {
+          ancestry.push(captured.category(parent)); if (parent === first.container) { reached = true; break; }
+          parent = parent.parentElement;
+        }
+        paragraphs.push({ direct: isDirect, visible: isVisible, ancestry, ancestryTruncated: !reached });
+      }
+    }
+    return { version: 1, provider: 'qwen', trigger: 'full_prompt_mismatch',
+      nodeLimitReached: captured.nodeLimitReached, nodeCount: captured.tree.length, tree: captured.tree, comparison,
+      directParagraphCount: Math.min(direct, 33), visibleDirectParagraphCount: Math.min(visibleDirect, 33),
+      descendantParagraphCount: Math.min(descendant, 33), visibleDescendantParagraphCount: Math.min(visibleDescendant, 33),
+      paragraphCountOverflow: descendant > 33 || direct > 33, paragraphs };
+  }
+
   function completionCandidate(answer) {
     if (!answer) return false;
     const current = route(), form = composer();
@@ -305,6 +332,6 @@ function computaQwenDOM(c) {
     setter.call(form.editor, prompt);
     form.editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));
   }
-  return { initialResponseIdentityTranscript: () => transcript(true), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer,
+  return { firstBodyFailureStructure, initialResponseIdentityTranscript: () => transcript(true), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer,
     deletionTrigger, deletionMenu, deletionConfirmation, deletionObserved, insertLiteral };
 }

@@ -9,8 +9,9 @@ enum WebsitePrivateDiagnosticCapture {
         case request = "request.json"
         case rejectedReply = "rejected-reply.json"
         case claudeResponseMetadata = "response-metadata.json"
+        case adapterFailureStructure = "adapter-failure-structure.json"
 
-        var maximumBytes: Int { self == .claudeResponseMetadata ? 96 * 1_024 : 2_000_000 }
+        var maximumBytes: Int { self == .claudeResponseMetadata || self == .adapterFailureStructure ? 96 * 1_024 : 2_000_000 }
     }
 
     /// Holds the exact private directory opened during the single arm claim.
@@ -40,7 +41,7 @@ enum WebsitePrivateDiagnosticCapture {
                         maximumRecordBytes: Int, makeRecord: (Data) -> Data?,
                         isCurrent: () -> Bool = { true },
                         beforeArmClaim: (@Sendable () -> Void)? = nil) -> Bool {
-        guard let kind = Record(rawValue: outputName), kind != .claudeResponseMetadata,
+        guard let kind = Record(rawValue: outputName), kind != .claudeResponseMetadata, kind != .adapterFailureStructure,
               maximumRecordBytes > 0, maximumRecordBytes <= kind.maximumBytes else { return false }
         var record: Data?
         guard let claimed = claim(directory: directory, record: kind, maximumArmBytes: maximumArmBytes,
@@ -118,7 +119,7 @@ enum WebsitePrivateDiagnosticCapture {
     static func publish(_ record: Data, using claim: Claim, isCurrent: () -> Bool,
                         beforeRecordWrite: (() -> Void)? = nil,
                         beforeCommit: (() -> Void)? = nil,
-                        commit: (_ rename: () -> Bool) -> Bool) -> Bool {
+                        commit: (_ rename: @escaping @Sendable () -> Bool) -> Bool) -> Bool {
         guard !record.isEmpty, record.count <= claim.record.maximumBytes,
               claim.beginPublication(), isCurrent() else { return false }
         let directoryFD = claim.directoryFD, directory = claim.directory, directoryInfo = claim.directoryInfo
@@ -142,7 +143,7 @@ enum WebsitePrivateDiagnosticCapture {
         guard fstat(outputFD, &written) == 0, privateFile(written), written.st_size == record.count,
               fstatat(directoryFD, temporary, &temporaryInfo, AT_SYMLINK_NOFOLLOW) == 0,
               sameUnchangedFile(written, temporaryInfo),
-              commit({ renameatx_np(directoryFD, temporary, directoryFD, claim.record.rawValue, UInt32(RENAME_EXCL)) == 0 })
+              commit({ [claim] in renameatx_np(claim.directoryFD, temporary, claim.directoryFD, claim.record.rawValue, UInt32(RENAME_EXCL)) == 0 })
         else { return false }
         _ = fsync(directoryFD)
         return true

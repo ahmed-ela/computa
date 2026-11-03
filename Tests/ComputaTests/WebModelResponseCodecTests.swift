@@ -122,6 +122,51 @@ final class WebModelResponseCodecTests: XCTestCase {
         }
     }
 
+    func testGroqFinalHandoffShowsCallableSelectionAndExecutableLoaderExample() throws {
+        let command: [String: Any] = ["type": "function", "name": "exec_command",
+            "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]],
+                           "required": ["cmd"], "additionalProperties": false]]
+        for namespaced in [false, true] {
+            let prefix = namespaced ? "functions." : ""
+            let definitions = [groqLoaderDefinition, command]
+            let tools: [[String: Any]] = namespaced
+                ? [["type": "namespace", "name": "functions", "tools": definitions]] : definitions
+            var value: [String: Any] = ["model": "browser/groq", "input": "Read the fixture files.",
+                "tools": tools, "parallel_tool_calls": false]
+            let baseline = try compactGroqRequest(value)
+            let end = String(baseline.prompt.split(separator: "COMPUTA_LOCAL_RESPONSE_HANDOFF:").last!)
+            XCTAssertTrue(end.contains("Callable names for THIS response: [\"\(prefix)computa_load_tools\"]"))
+            let exampleStart = try XCTUnwrap(end.range(of: "first return "))
+            let exampleEnd = try XCTUnwrap(end.range(of: ". Then read", range: exampleStart.upperBound..<end.endIndex))
+            let example = String(end[exampleStart.upperBound..<exampleEnd.lowerBound])
+            XCTAssertNoThrow(try WebModelResponseCodec.parseEmbeddedReply(example, request: baseline))
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(example.utf8)) as? [String: Any])
+            let calls = try XCTUnwrap(json["calls"] as? [[String: Any]])
+            let arguments = try XCTUnwrap(calls.first?["arguments"] as? [String: Any])
+            XCTAssertEqual(calls.count, 1)
+            XCTAssertEqual(calls.first?["name"] as? String, prefix + GroqToolCatalog.name)
+            XCTAssertEqual(arguments["names"] as? [String], [prefix + "exec_command"])
+            let seed = try XCTUnwrap(baseline.groqToolCatalogSeed)
+            XCTAssertEqual(arguments["catalog_revision"] as? String, try GroqToolCatalog.baseline(for: seed).revision)
+            // Exact failure seen on build 400 remains invalid: no schema was loaded.
+            let rejected = "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"\(prefix)exec_command\",\"arguments\":{\"command\":\"ls\"}}]}"
+            XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(rejected, request: baseline))
+            let loaded = try compactGroqRequest(value, selected: [prefix + "exec_command"])
+            let loadedEnd = String(loaded.prompt.split(separator: "COMPUTA_LOCAL_RESPONSE_HANDOFF:").last!)
+            XCTAssertTrue(loadedEnd.contains("\"\(prefix)exec_command\""))
+            XCTAssertFalse(loadedEnd.contains("Example only:"))
+            // The relay codec checks tool admission and envelope shape. Native
+            // execution separately validates arguments against the exact schema.
+            let valid = "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"\(prefix)exec_command\",\"arguments\":{\"cmd\":\"ls\"}}]}"
+            XCTAssertNoThrow(try WebModelResponseCodec.parseEmbeddedReply(valid, request: loaded))
+            value["tool_choice"] = "none"
+            let none = try compactGroqRequest(value)
+            let noneEnd = String(none.prompt.split(separator: "COMPUTA_LOCAL_RESPONSE_HANDOFF:").last!)
+            XCTAssertTrue(noneEnd.contains("Callable names for THIS response: []"))
+            XCTAssertFalse(noneEnd.contains("Example only:"))
+        }
+    }
+
     func testGroqTrustedProjectionRestoresOnlyExactPinnedEngineLoaderBounds() throws {
         var engine = groqLoaderDefinition
         var schema = try XCTUnwrap(engine["parameters"] as? [String: Any])

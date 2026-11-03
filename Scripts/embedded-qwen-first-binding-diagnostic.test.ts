@@ -11,8 +11,10 @@ async function sent(pending=false) {
 }
 async function rejection(f:any,over:any,stage:string,reason:string){
  const before=f.mutations(),r=await f.run('inspect',over);expect(r.error).toBe('conversation_changed');expect(r.detail).toBe('first_user_message');
- expect(r.qwenFirstUserBindingDiagnostic).toEqual({version:1,stage,reason});expect(Object.keys(r).sort()).toEqual(['detail','error','qwenFirstUserBindingDiagnostic']);
- expect(JSON.stringify(r.qwenFirstUserBindingDiagnostic)).not.toContain('PRIVATE');expect(JSON.stringify(r).length).toBeLessThan(300);
+ expect(r.qwenFirstUserBindingDiagnostic).toEqual({version:1,stage,reason});const captured=stage==='initial_response_body'&&reason==='full_prompt_mismatch';
+ expect(Object.keys(r).sort()).toEqual([...(captured?['adapterFailureStructure']:[]),'detail','error','qwenFirstUserBindingDiagnostic']);
+ if(captured)expect(r.adapterFailureStructure.trigger).toBe('full_prompt_mismatch');
+ expect(JSON.stringify(r.qwenFirstUserBindingDiagnostic)).not.toContain('PRIVATE');expect(JSON.stringify(r.qwenFirstUserBindingDiagnostic).length).toBeLessThan(300);
  expect(f.world.__computaQwenSavedSessionV1.terminal).toBe(true);expect(f.mutations()).toBe(before);expect(f.send.clicks).toBe(1);
  expect((await f.run('inspect',over)).detail).toBe('terminal_operation');expect(f.send.clicks).toBe(1);
 }

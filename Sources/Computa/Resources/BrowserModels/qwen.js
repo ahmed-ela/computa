@@ -80,6 +80,74 @@ function computaProviderCore(request, provider, origin, actions) {
   return { uuid, fail, normalize, bodyText, choiceValid, equalChoice, physical, visible, enabled, nodes, unique, hit, hitFailure, context, assertContext, hash };
 }
 
+// Failure-only, bounded element metadata. No text values, HTML, DOM IDs,
+// arbitrary class/attribute strings, document-wide queries or page mutations.
+function computaSavedFailureTree(root, c, categories) {
+  const tags = new Set(['div', 'span', 'p', 'pre', 'code', 'header', 'svg', 'path', 'button', 'input', 'textarea', 'br', 'ul', 'ol', 'li', 'a', 'section', 'article']);
+  const known = new Set(categories.map(row => row[0]));
+  const category = node => categories.find(row => node.classList.contains(row[0]))?.[1] || 'other';
+  const tree = [], nodes = [], stack = root ? [{ node: root, parent: -1, depth: 0 }] : [];
+  let nodeLimitReached = false;
+  while (stack.length) {
+    if (tree.length >= 256) { nodeLimitReached = true; break; }
+    const { node, parent, depth } = stack.pop();
+    if (!node || node.nodeType !== 1) continue;
+    const kind = category(node), reasoningExcluded = kind === 'reasoning';
+    let unknownClassPresent = false, tokens = 0;
+    for (const name of node.classList) {
+      if (++tokens > 32) { unknownClassPresent = true; break; }
+      if (!known.has(name)) unknownClassPresent = true;
+    }
+    const total = reasoningExcluded ? 0 : node.children.length, childCountOverflow = total > 257;
+    const name = typeof node.tagName === 'string' ? node.tagName.toLowerCase() : 'other';
+    const interactive = ['button', 'input', 'textarea', 'a'].includes(name)
+      || ['role', 'tabindex', 'contenteditable', 'onclick', 'onkeydown'].some(key => node.getAttribute(key) !== null);
+    const index = tree.length;
+    tree.push({ parent, depth, tag: tags.has(name) ? name : 'other', category: kind,
+      unknownClassPresent, visible: c.visible(node), interactive,
+      elementChildCount: Math.min(total, 257), childCountOverflow, reasoningExcluded });
+    nodes.push(node);
+    if (reasoningExcluded) continue; // Never walk or read a reasoning subtree.
+    if (childCountOverflow || depth === 16 && total) nodeLimitReached = true;
+    if (depth === 16) continue;
+    // The stack itself is bounded as well as the emitted tree.
+    const budget = Math.max(0, 256 - tree.length - stack.length), take = Math.min(total, budget);
+    if (take < total) nodeLimitReached = true;
+    for (let i = take - 1; i >= 0; i--) stack.push({ node: node.children[i], parent: index, depth: depth + 1 });
+  }
+  return { tree, nodes, nodeLimitReached, category };
+}
+
+function computaSavedFirstBodyComparison(actual, expected) {
+  if (typeof actual !== 'string' || typeof expected !== 'string' || actual === expected) return null;
+  const limit = 180200, complete = actual.length <= limit && expected.length <= limit;
+  const result = { comparisonComplete: complete,
+    actualUTF16Length: Math.min(actual.length, limit + 1), expectedUTF16Length: Math.min(expected.length, limit + 1),
+    actualUTF8Length: 540601, expectedUTF8Length: 540601, commonPrefixLength: 0, commonSuffixLength: 0,
+    exactEqual: false, lfDelta: 0, crDelta: 0, nbspDelta: 0,
+    nfcEqual: false, crlfEqual: false, trimEqual: false, mismatchCategory: 'other' };
+  if (!complete) return result;
+  result.actualUTF8Length = new TextEncoder().encode(actual).length;
+  result.expectedUTF8Length = new TextEncoder().encode(expected).length;
+  const minimum = Math.min(actual.length, expected.length);
+  while (result.commonPrefixLength < minimum && actual[result.commonPrefixLength] === expected[result.commonPrefixLength]) result.commonPrefixLength++;
+  while (result.commonSuffixLength < minimum - result.commonPrefixLength
+    && actual[actual.length - 1 - result.commonSuffixLength] === expected[expected.length - 1 - result.commonSuffixLength]) result.commonSuffixLength++;
+  const counts = value => { const counts = [0, 0, 0]; for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i); if (code === 10) counts[0]++; else if (code === 13) counts[1]++; else if (code === 160) counts[2]++;
+  } return counts; };
+  const a = counts(actual), e = counts(expected);
+  [result.lfDelta, result.crDelta, result.nbspDelta] = a.map((value, i) => value - e[i]);
+  result.nfcEqual = actual.normalize('NFC') === expected.normalize('NFC');
+  result.crlfEqual = actual.replace(/\r\n?/g, '\n') === expected.replace(/\r\n?/g, '\n');
+  result.trimEqual = actual.trim() === expected.trim();
+  result.mismatchCategory = result.crlfEqual ? 'line_endings_only'
+    : actual.replace(/\s/g, '') === expected.replace(/\s/g, '') ? 'whitespace_only'
+    : expected.startsWith(actual) ? 'prefix_only' : expected.endsWith(actual) ? 'suffix_only'
+    : result.commonPrefixLength > 0 && result.commonSuffixLength > 0 ? 'internal' : 'other';
+  return result;
+}
+
 // Workspace extraction of Kimi's saved-chat protocol. DOM drivers supply only
 // provider semantics; this engine owns claims, identity, acknowledgement and
 // deletion stages. It does not register a provider or relax native admission.
@@ -119,7 +187,7 @@ async function computaSavedConversation(input, c, dom, config) {
     if (input.expectedConversation != null && input.expectedConversation !== state.canonical)
       c.fail('conversation_changed', 'conversation_url');
     const usesModes = config.selectionKind === 'mode';
-    const firstBindingFailure = (stage, reason) => {
+    const firstBindingFailure = (stage, reason, structure = null) => {
       // Diagnostic-only classification of an already rejected guard. Keep the
       // public category/detail and terminal behavior; never publish page data.
       let diagnostic;
@@ -129,7 +197,12 @@ async function computaSavedConversation(input, c, dom, config) {
       }
       try { c.fail('conversation_changed', 'first_user_message'); }
       catch (error) {
-        if (diagnostic && error?.computaAdapterFailure) error.qwenFirstUserBindingDiagnostic = diagnostic;
+        if (diagnostic && error?.computaAdapterFailure) {
+          error.qwenFirstUserBindingDiagnostic = diagnostic;
+          if (stage === 'initial_response_body' && diagnostic.reason === 'full_prompt_mismatch' && typeof structure === 'function') {
+            try { const packet = structure(); if (packet) error.adapterFailureStructure = packet; } catch { /* Preserve the original refusal. */ }
+          }
+        }
         throw error;
       }
     };
@@ -294,8 +367,16 @@ async function computaSavedConversation(input, c, dom, config) {
       validateInitialResponseIdentity(t);
       state.initialReadComplete = true;
       const terminalUI = !!state.first && !!evidence && !state.deletion && dom.completionCandidate(t.answer);
-      if (terminalUI && extracted.formatIssue && !cleanupInspection && !deletionActions.includes(input.action))
-        c.fail('unsupported_response_format', 'authored_source');
+      if (terminalUI && extracted.formatIssue && !cleanupInspection && !deletionActions.includes(input.action)) {
+        try { c.fail('unsupported_response_format', 'authored_source'); }
+        catch (error) {
+          if (input.action === 'inspect' && config.stateKey === '__computaDeepSeekSavedSessionV1' && error?.computaAdapterFailure
+            && typeof extracted.failureStructure === 'function') {
+            try { const packet = extracted.failureStructure(); if (packet) error.adapterFailureStructure = packet; } catch { /* Preserve the original refusal. */ }
+          }
+          throw error;
+        }
+      }
       const complete = terminalUI && extracted.finalMarkup && !!extracted.text.trim();
       return { t, form, output: { url: document.URL, sessionLifecycle: 'saved_conversation_delete', temporary: false,
         composer: c.enabled(form.editor), userCount: t.users.length, responseCount: t.answers.length,
@@ -486,7 +567,8 @@ async function computaSavedConversation(input, c, dom, config) {
             : !Array.isArray(input.expectedUserCounts) ? 'counts_not_array'
             : !input.expectedUserCounts.length ? 'counts_empty' : input.expectedUserCounts.length > 2 ? 'counts_limit'
             : input.expectedUserCounts.some(value => ![0, 1].includes(value)) ? 'counts_invalid'
-            : !input.expectedUserCounts.includes(1) ? 'one_user_not_expected' : 'predicate_changed');
+            : !input.expectedUserCounts.includes(1) ? 'one_user_not_expected' : 'predicate_changed',
+            () => dom.firstBodyFailureStructure(candidate.first, state.inserted.prompt));
         selectionEvidence();
         if (!state.responseIdentity) state.responseIdentity = { canonical: route.canonical,
           first: candidate.first, answer: candidate.pendingAnswer,
@@ -651,6 +733,10 @@ async function computaSavedConversation(input, c, dom, config) {
       || state.model || state.selection || state.mode || state.modeSelection || state.prepared || state.inserted)
       && ['conversation_changed', 'document_changed', 'model_mismatch', 'model_unverified', 'mode_mismatch', 'mode_unverified'].includes(error.error))) state.terminal = true;
     return error?.computaAdapterFailure ? { error: error.error, ...(error.detail ? { detail: error.detail } : {}),
+      ...(error.adapterFailureStructure && (config.stateKey === '__computaQwenSavedSessionV1'
+        && error.error === 'conversation_changed' && error.detail === 'first_user_message'
+        || config.stateKey === '__computaDeepSeekSavedSessionV1' && error.error === 'unsupported_response_format' && error.detail === 'authored_source')
+        ? { adapterFailureStructure: error.adapterFailureStructure } : {}),
       ...(config.selectionKind === 'mode' && error.error === 'conversation_changed' && error.detail === 'first_container_children'
         && error.firstContainerDiagnostic ? { firstContainerDiagnostic: error.firstContainerDiagnostic } : {}),
       ...(config.selectionKind === 'mode' && error.error === 'mode_unverified' && error.modeObservationDiagnostic
@@ -856,6 +942,33 @@ function computaQwenDOM(c) {
     }
     return { users, answers, first: { root, container, body, id, text: body.textContent }, answer, pendingAnswer };
   }
+  function firstBodyFailureStructure(first, expected) {
+    const comparison = computaSavedFirstBodyComparison(first?.text, expected);
+    if (!comparison || !first?.container) return null;
+    const categories = [['chat-user-message-container', 'user_container'], ['chunked-text-renderer-root', 'chunk_root'], ['user-message-content', 'user_paragraph']];
+    const captured = computaSavedFailureTree(first.container, c, categories);
+    let direct = 0, visibleDirect = 0, descendant = 0, visibleDescendant = 0;
+    const paragraphs = [];
+    for (const node of captured.nodes) {
+      if (node === first.container || node.tagName !== 'P' || !node.classList.contains('user-message-content')) continue;
+      const isDirect = node.parentElement?.classList.contains('chunked-text-renderer-root') === true, isVisible = c.visible(node);
+      descendant++; if (isVisible) visibleDescendant++; if (isDirect) direct++; if (isDirect && isVisible) visibleDirect++;
+      if (paragraphs.length < 16) {
+        const ancestry = []; let parent = node.parentElement, reached = false;
+        while (parent && ancestry.length < 4) {
+          ancestry.push(captured.category(parent)); if (parent === first.container) { reached = true; break; }
+          parent = parent.parentElement;
+        }
+        paragraphs.push({ direct: isDirect, visible: isVisible, ancestry, ancestryTruncated: !reached });
+      }
+    }
+    return { version: 1, provider: 'qwen', trigger: 'full_prompt_mismatch',
+      nodeLimitReached: captured.nodeLimitReached, nodeCount: captured.tree.length, tree: captured.tree, comparison,
+      directParagraphCount: Math.min(direct, 33), visibleDirectParagraphCount: Math.min(visibleDirect, 33),
+      descendantParagraphCount: Math.min(descendant, 33), visibleDescendantParagraphCount: Math.min(visibleDescendant, 33),
+      paragraphCountOverflow: descendant > 33 || direct > 33, paragraphs };
+  }
+
   function completionCandidate(answer) {
     if (!answer) return false;
     const current = route(), form = composer();
@@ -972,7 +1085,7 @@ function computaQwenDOM(c) {
     setter.call(form.editor, prompt);
     form.editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));
   }
-  return { initialResponseIdentityTranscript: () => transcript(true), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer,
+  return { firstBodyFailureStructure, initialResponseIdentityTranscript: () => transcript(true), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer,
     deletionTrigger, deletionMenu, deletionConfirmation, deletionObserved, insertLiteral };
 }
 
