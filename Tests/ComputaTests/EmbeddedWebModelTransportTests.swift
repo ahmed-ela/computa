@@ -1188,6 +1188,96 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testFreshMediumSubmitPrecheckRecoversIgnoredOpeningButRejectsTransientAcknowledgement() async throws {
+        let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/medium", label: "Medium")
+        for acknowledged in [false, true] {
+            let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
+            defer { fixture.transport.setBeforePageResultValidationForTesting(nil); fixture.shutdown() }
+            let started = try await startChoice(choice, in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            let ready = try await waitForState("ready", fixture.transport, token: token)
+            try assertChoiceEvidence(ready, choice: choice)
+            let initialSelections = try await evaluate(view, "return window.fixtureModelSelectionClicks;") as? Int
+            var readinessReturned = false, installed = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                if action == "insert" {
+                    // The fixture normalizes its editor asynchronously. Wait for that
+                    // real handoff so the interrupted opening belongs to submit.
+                    let enabled = try? await self.evaluate(view, """
+                        const send = document.querySelector('[data-testid="send-button"]');
+                        if (!send || !send.disabled) return !!send;
+                        return await new Promise(resolve => {
+                          const observer = new MutationObserver(() => {
+                            if (!send.disabled) { observer.disconnect(); clearTimeout(deadline); resolve(true); }
+                          });
+                          const deadline = setTimeout(() => { observer.disconnect(); resolve(false); }, 1000);
+                          observer.observe(send, {attributes:true, attributeFilter:['disabled']});
+                        });
+                        """)
+                    XCTAssertEqual(enabled as? Bool, true)
+                    return
+                }
+                if action == "sendReady" { readinessReturned = true; return }
+                // sendReady itself has a post-await model read. Interrupt only the next
+                // opening, after that proof and before the distinct native submit action.
+                guard readinessReturned, !installed, action == "verifyModel" else { return }
+                let prerequisites = try? await self.evaluate(view, """
+                    const pending = globalThis.__computaChatSubmissionState?.pending;
+                    const prior = pending?.firstInsertOpening, editor = document.getElementById('fixture-editor');
+                    // The editor has a presentation-only terminal LF. Its literal text is unchanged.
+                    return prior?.proved === true && prior.exactSubmitDraft === true
+                      && pending.readyForSubmitOpening === prior && prior.composer === editor
+                      && editor.innerText === prior.prompt + '\\n' && prior.editorValue === editor.innerText;
+                    """, world: WKContentWorld.world(name: "computa-chatgpt-model-v1"))
+                XCTAssertEqual(prerequisites as? Bool, true, "A verified, ready literal draft must precede submit")
+                let value = try? await self.evaluate(view, """
+                    const trigger = document.getElementById('fixture-model-trigger');
+                    if (!trigger || window.fixtureInputCount !== 1 || window.fixturePrompts.length !== 0) return false;
+                    window.fixtureSubmitPrecheckOpens = 0;
+                    trigger.addEventListener('click', function interrupt(event) {
+                      if (++window.fixtureSubmitPrecheckOpens === 2) {
+                        trigger.removeEventListener('click', interrupt, true);
+                        return;
+                      }
+                      event.stopImmediatePropagation();
+                      event.preventDefault();
+                      if (\(acknowledged)) {
+                        trigger.setAttribute('aria-expanded', 'true');
+                        trigger.setAttribute('aria-expanded', 'false');
+                      }
+                    }, true);
+                    return true;
+                    """)
+                installed = value as? Bool == true
+            }
+            let prompt = "Read the synthetic Medium submit fixture."
+            if acknowledged {
+                do {
+                    _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+                    XCTFail("A transient acknowledged opening cannot authorize another header click or Send")
+                } catch {
+                    XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelUnverified)
+                }
+            } else {
+                let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+                try assertRunningOrVerifiedChoice(sent, choice: choice)
+                let complete = try await waitForState("complete", fixture.transport, token: token)
+                try assertChoiceEvidence(complete, choice: choice)
+            }
+            XCTAssertTrue(installed)
+            let openings = try await evaluate(view, "return window.fixtureSubmitPrecheckOpens;") as? Int
+            XCTAssertEqual(openings, acknowledged ? 1 : 2)
+            try await assertChoiceLedger(view, insertions: 1, sends: acknowledged ? 0 : 1,
+                                         selections: XCTUnwrap(initialSelections))
+            let finish = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            // The denied precheck follows the native submission claim. Without a
+            // verified first user, the retained private tab cannot claim cleanup.
+            XCTAssertEqual(finish["cleanup"] as? String, acknowledged ? "failed" : "not_created")
+            try await assertHumanTabIntact(fixture, retaining: acknowledged ? fixture.createdTabs.last : nil)
+        }
+    }
+
     func testFirstInstantPreparedEditorReadinessAcceptsExactLongEditorClippedByItsScroller() async throws {
         let (fixture, view, token, choice) = try await readyInstantPrepareFixture(synchronousReadiness: true)
         defer {
@@ -6043,6 +6133,88 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let finish = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
         XCTAssertEqual(finish["cleanup"] as? String, "not_created")
         try await assertHumanTabIntact(fixture)
+    }
+
+    func testFreshProVerificationObservesDelayedMenuAfterAcknowledgedCloseWithoutAnotherClick() async throws {
+        let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/pro", label: "Pro")
+        for variant in ["correctPower", "wrongPower", "reattachedEditor"] {
+            let correctPower = variant != "wrongPower"
+            let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
+            defer { fixture.shutdown() }
+            let started = try await startChoice(choice, in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+            try await waitForFixture(view)
+            let world = WKContentWorld.world(name: "computa-chatgpt-model-v1")
+            _ = try await evaluate(view, """
+                const trigger = document.getElementById('fixture-model-trigger'), click = trigger.click;
+                window.fixtureVerifyOpens = 0;
+                trigger.click = function () {
+                  if (globalThis.__computaModelSelection?.completed !== true) return click.call(this);
+                  if (++window.fixtureVerifyOpens !== 1) return;
+                  if (\(variant == "reattachedEditor")) {
+                    const editor = document.getElementById('fixture-editor'), parent = editor.parentElement, next = editor.nextSibling;
+                    editor.remove(); parent.insertBefore(editor, next); trigger.dataset.fixtureEditorReattached = 'true';
+                  }
+                  trigger.setAttribute('aria-expanded', 'true');
+                  trigger.setAttribute('aria-expanded', 'false');
+                  trigger.dataset.fixtureFirstOpening = String(performance.now());
+                };
+                return true;
+                """, world: world)
+            // Deliver the synthetic page's own delayed mount through the native clock.
+            // A hidden WKWebView can throttle page timers beyond the 1,800ms read budget.
+            let mount = Task { @MainActor in
+                let deadline = ContinuousClock.now + .seconds(5)
+                while ContinuousClock.now < deadline {
+                    try Task.checkCancellation()
+                    let age = try await self.evaluate(view, """
+                        const mark = document.getElementById('fixture-model-trigger').dataset.fixtureFirstOpening;
+                        return mark === undefined ? -1 : Math.floor(performance.now() - Number(mark));
+                        """) as? Int ?? -1
+                    if age < 0 { try await Task.sleep(for: .milliseconds(15)); continue }
+                    try await Task.sleep(for: .milliseconds(max(0, 1_150 - age)))
+                    return try await self.evaluate(view, """
+                        const trigger = document.getElementById('fixture-model-trigger');
+                        const menu = window.fixtureChatPowerItem.closest('[role="menu"]');
+                        if (trigger.getAttribute('aria-expanded') !== 'false' || !menu ||
+                            menu.id !== trigger.getAttribute('aria-controls') ||
+                            menu.getAttribute('aria-labelledby') !== trigger.id) return false;
+                        document.body.appendChild(menu);
+                        window.fixtureShowPowerView();
+                        if (!\(correctPower)) window.fixtureChatPowerThumb.setAttribute('aria-valuenow','1');
+                        menu.style.display = 'block'; trigger.setAttribute('aria-expanded','true');
+                        window.fixtureModelUpdateHeader(); return true;
+                        """) as? Bool == true
+                }
+                throw FixtureFailure.timeout
+            }
+            defer { mount.cancel() }
+            do {
+                let ready = try await waitForState("ready", fixture.transport, token: token)
+                XCTAssertEqual(variant, "correctPower", "A different power or a reattached editor cannot grant the passive read")
+                try assertChoiceEvidence(ready, choice: choice)
+            } catch {
+                guard variant != "correctPower" else { throw error }
+                let failure = try XCTUnwrap(error as? EmbeddedWebModelTransport.Failure)
+                if variant == "reattachedEditor" { XCTAssertEqual(failure, .modelUnverified) }
+                else { XCTAssertTrue(failure == .modelUnverified || failure == .modelMismatch) }
+            }
+            let mounted = try await mount.value
+            XCTAssertTrue(mounted)
+            if variant == "reattachedEditor" {
+                let changed = try await evaluate(view, "return document.getElementById('fixture-model-trigger').dataset.fixtureEditorReattached === 'true';") as? Bool
+                XCTAssertEqual(changed, true, "The same physical editor was actually detached and reinserted")
+            }
+            let openings = try await evaluate(view, "return window.fixtureVerifyOpens;", world: world) as? Int
+            XCTAssertEqual(openings, 1, "Observing the late associated popup must not toggle the header again")
+            let activity = try await evaluate(view, "return [window.fixtureInputCount, window.fixturePrompts.length];") as? [Int]
+            XCTAssertEqual(activity, [0, 0])
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+            try await assertHumanTabIntact(fixture)
+        }
     }
 
     func testChatGPTClosingTransitionRecoversOneConsumedFreshOpeningWithoutFramesOrSendReplay() async throws {

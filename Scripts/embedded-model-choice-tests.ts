@@ -2935,10 +2935,10 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         await microtasks(); f.advanceTime(1_801); f.flush(); await microtasks(); f.flush(); return pending;
       };
       const arrows = (picker: any) => picker.powerItem.events.filter((event: any) => event.type === 'keydown' && event.key.startsWith('Arrow'));
-      const noSelection = (f: any, picker: any) => {
+      const noSelection = (f: any, picker: any, expectedDraft = '') => {
         expect(arrows(picker)).toHaveLength(0);
         expect(picker.familyOptions.every((node: any) => node.clicks === 0)).toBe(true);
-        expect(f.composer.textContent).toBe(''); expect(f.world.__computaModelFirstSubmitted).toBeUndefined();
+        expect(f.composer.textContent).toBe(expectedDraft); expect(f.world.__computaModelFirstSubmitted).toBeUndefined();
       };
       const closed = (picker: any, callback: () => void) => {
         const dismiss = picker.menu.onDispatch; let count = 0;
@@ -3359,13 +3359,12 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         x.f.advanceTime(801); x.f.flush(); await microtasks();
         expect((await x.expire()).error).toBeDefined(); expect(x.openings()).toBe(1); x.noReplay();
       });
-      const firstVerification = async (begin: (x:any) => void = () => {}) => {
-        const { f, picker } = setup(); const expected = choice('Medium');
+      const firstVerification = async (label = 'Medium') => {
+        const { f, picker } = setup(); picker.selected(label); const expected = choice(label);
         expect((await f.run('selectModel', { modelChoice: expected })).selected).toBe(true);
         const open = picker.trigger.onClick; let openings = 0;
         const root = {f, picker, expected, open, count: () => openings,
           request: {expectedModelChoice:expected, allowFirstChatVerificationOpening:true}};
-        begin(root);
         picker.trigger.onClick = () => { openings++; if (openings === 2) open(); };
         return root;
       };
@@ -3382,6 +3381,95 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect(x.count()).toBe(2); noSelection(x.f,x.picker);
         const again=x.f.run('verifyModel',x.request); expect((await expire(x.f,again)).error).toBe('model_unverified');
         expect(x.count()).toBe(3); noSelection(x.f,x.picker);
+      });
+      test('fresh Pro verification distinguishes an ignored initial opener from an acknowledged close', async () => {
+        for (const transient of [false, true]) {
+          const x = await firstVerification('Pro');
+          const checking = x.f.run('verifyModel', x.request);
+          await microtasks(); expect(x.count()).toBe(1);
+          if (transient) x.f.observers.forEach((observer:any) => observer.callback([
+            {type:'attributes',target:x.picker.trigger,attributeName:'aria-expanded',oldValue:'true'}
+          ]));
+          await tickVerification(x.f,901); await tickVerification(x.f,901);
+          const result=await checking;
+          if (transient) {
+            expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+            expect(result.modelDiagnostic.readStage).toBe('first_verification_acknowledged_closed');
+            expect(result.modelDiagnostic.readContext.recoveryEligible).toBe(true);
+            expect(result.modelDiagnostic.readAttempt.observedProof).toBe(false);
+            expect(result.modelDiagnostic.chatHeader.ordinal).toBe(4); expect(x.count()).toBe(1);
+          } else {
+            expect(result.modelEvidence.selected).toEqual(choice('Pro'));
+            expect(result.modelEvidence.chatSelection.power.key).toBe('pro'); expect(x.count()).toBe(2);
+          }
+          noSelection(x.f,x.picker);
+        }
+      });
+      test('fresh Pro verification waits passively for an acknowledged opener to finish rendering', async () => {
+        for (const variant of ['same_pro', 'closed', 'late', 'wrong_power', 'wrong_family', 'work', 'replaced', 'owner', 'route', 'draft', 'restored', 'busy']) {
+          const x=await firstVerification('Pro'), checking=x.f.run('verifyModel',x.request);
+          await microtasks(); expect(x.count()).toBe(1);
+          // The original header briefly acknowledged opening but the menu is still closed.
+          x.f.observers.forEach((o:any)=>o.callback([{type:'attributes',target:x.picker.trigger,attributeName:'aria-expanded',oldValue:'true'}]));
+          x.f.advanceTime(901); x.f.flush(); await microtasks(); expect(x.count()).toBe(1);
+          if (variant==='late') await tickVerification(x.f,901);
+          if (variant==='draft') x.f.composer.text='unrelated unsent draft';
+          if (variant==='busy') x.f.body.append(new Node('BUTTON',{'data-testid':'stop-button'}));
+          if (variant==='owner') x.f.world.__computaModelOwner='foreign';
+          if (variant==='route') x.f.document.URL='https://chatgpt.com/c/foreign-route';
+          if (variant==='wrong_power') x.picker.selected('High');
+          if (variant==='wrong_family') x.picker.selected('GPT-5.6 Sol');
+          if (variant==='work') { x.f.chatMode.values['aria-pressed']='false'; x.f.workMode.values['aria-pressed']='true'; }
+          if (variant==='replaced') x.f.composer.connected=false;
+          if (variant==='restored') x.f.observers.forEach((o:any)=>o.callback([{type:'characterData',target:x.f.composer}]));
+          if (variant!=='closed') {
+            // The website finishes mounting the original popup; the harness never toggles the trigger.
+            x.open();
+            x.f.observers.forEach((o:any)=>o.callback([{type:'childList',target:x.f.body,addedNodes:[x.picker.menu],removedNodes:[]}]));
+          }
+          await tickVerification(x.f,variant==='same_pro'?20:901);
+          const result=await checking;
+          if (variant==='same_pro') {
+            expect(result.error).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(x.expected);
+            expect(result.modelEvidence.chatSelection.family.key).toBe('GPT-6');
+            expect(result.modelEvidence.chatSelection.power.key).toBe('pro');
+          } else { expect(result.error,variant).toBeDefined(); expect(result.modelEvidence,variant).toBeUndefined(); }
+          expect(x.count(),variant).toBe(1); noSelection(x.f,x.picker,variant==='draft'?'unrelated unsent draft':'');
+        }
+      });
+      test('fresh verification remembers same-editor detach or transient draft before and after the acknowledged close', async () => {
+        for (const phase of ['before', 'after']) for (const kind of ['reinsert', 'draft']) {
+          const x = await firstVerification('Pro');
+          // Dispatch only to observers registered for the actual mutation target.
+          const registrations = new Map<any, any[]>();
+          const prototype = Object.getPrototypeOf(x.f.observers[0]), observe = prototype.observe;
+          prototype.observe = function (target:any, options:any) {
+            registrations.set(this, [...(registrations.get(this) || []), {target, options}]);
+            return observe.call(this, target, options);
+          };
+          const checking = x.f.run('verifyModel', x.request); await microtasks();
+          const editor = x.f.composer, parent = editor.parentElement;
+          const target = kind==='reinsert' ? parent : editor;
+          const records = kind==='reinsert' ? [
+            {type:'childList',target,removedNodes:[editor],addedNodes:[]},
+            {type:'childList',target,removedNodes:[],addedNodes:[editor]},
+          ] : [{type:'characterData',target}];
+          const change = () => {
+            for (const [observer, scopes] of registrations) {
+              if (scopes.some(({target: root,options}) => options[records[0].type] &&
+                  (root===target || options.subtree && (root===x.f.document || root.contains?.(target))))) observer.callback(records);
+            }
+          };
+          if (phase==='before') change();
+          x.f.observers.forEach((o:any)=>o.callback([{type:'attributes',target:x.picker.trigger,attributeName:'aria-expanded',oldValue:'true'}]));
+          x.f.advanceTime(901); x.f.flush(); await microtasks();
+          if (phase==='after') change();
+          x.open();
+          x.f.observers.forEach((o:any)=>o.callback([{type:'childList',target:x.f.body,addedNodes:[x.picker.menu],removedNodes:[]}]));
+          await tickVerification(x.f,30); const result=await checking;
+          expect(result.error,phase+' '+kind).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+          expect(x.count()).toBe(1); noSelection(x.f,x.picker);
+        }
       });
       test('fresh post-selection verification recognizes only the empty WebKit ProseMirror caret sentinel', async () => {
         for (const shape of ['sentinel', 'space', 'extra_line', 'image', 'hidden_draft', 'unmarked_br']) {
@@ -3448,9 +3536,9 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           expect(arrows(x.picker)).toHaveLength(0); expect(x.picker.familyOptions.every((node:any)=>node.clicks===0)).toBe(true);
         }
       });
-      const firstInsertOpening = async (behavior: 'ignore_once' | 'late' | 'never' = 'ignore_once', editorSuffix = '') => {
-        const { f, picker } = setup(); picker.selected('Instant');
-        const expected = choice('Instant');
+      const firstInsertOpening = async (behavior: 'ignore_once' | 'late' | 'never' = 'ignore_once', editorSuffix = '', label = 'Instant') => {
+        const { f, picker } = setup(); picker.selected(label);
+        const expected = choice(label);
         expect((await f.run('selectModel', { modelChoice: expected })).selected).toBe(true);
         expect((await f.run('prepare', { expectedModelChoice: expected })).prepared).toBe(true);
         const prompt = 'Synthetic literal first insert opening request\n\n' + markerLine;
@@ -3504,6 +3592,101 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           preparedInstantVerificationOpening:grant,...overrides});
         return {...x,grant,verify,calls:()=>calls};
       };
+      const preparedSubmit = async (label = 'Medium', skipReady = false) => {
+        const x = await firstInsertOpening('ignore_once', '', label);
+        await finishFirstInsertWait(x);
+        expect((await x.inserting).inserted).toBe(true);
+        x.picker.trigger.onClick = x.open;
+        if (!skipReady) expect((await x.f.run('sendReady', x.request)).sendReady).toBe(true);
+        let openings = 0;
+        x.picker.trigger.onClick = () => { if (++openings > 1) x.open(); };
+        return { ...x, request:{...x.request,expectedSubmissionProofs:[{sequence:1,fingerprint:x.pending.fingerprint}]}, openings: () => openings };
+      };
+      test('a layout LF never substitutes for the full literal submit draft', () => {
+        const source = readFileSync(new URL('../Sources/Computa/Resources/BrowserModels/chatgpt.js', import.meta.url), 'utf8');
+        const definition = source.slice(source.indexOf('function chatGPTExactSubmitDraft('), source.indexOf('function chatGPTSubmissionPins('));
+        const compare = new Function(definition + '\nreturn chatGPTExactSubmitDraft;')();
+        const text = (data: string) => ({nodeType:3, data});
+        const element = (tagName: string, childNodes: any[], attributes: string[] = []) =>
+          ({nodeType:1, tagName, childNodes, firstChild:childNodes[0], attributes, getAttributeNames:()=>attributes});
+        const br = element('BR', []);
+        const second = text('  two 🐢 ');
+        const span = element('SPAN', [second], ['data-line']);
+        const first = text(' one');
+        const prompt = first.data + '\n' + second.data;
+        const editor = (nodes: any[], cls = 'ProseMirror') => {
+          const p = element('P', nodes);
+          return {isConnected:true, getAttribute:()=> 'true', classList:{contains:(name:string)=>name===cls},
+            childNodes:[p], firstChild:p};
+        };
+        expect(compare(editor([first,br,second]), prompt+'\n', prompt)).toBe(true);
+        expect(compare(editor([first,br,span]), prompt+'\n', prompt)).toBe(true);
+        for (const nodes of [[first,br,span,br], [first,br,span,text('\n')], [first,br,text(second.data.trim())],
+          [first,br,element('BUTTON',[second])], [first,br,element('SPAN',[second],['hidden'])],
+          [first,br,element('SPAN',[span])], [first,br,element('BR',[],['class']),span],
+          Array(4097).fill(text(''))]) {
+          expect(compare(editor(nodes), prompt+'\n', prompt)).toBe(false);
+        }
+        expect(compare(editor([first,br,span], 'other'), prompt+'\n', prompt)).toBe(false);
+        expect(compare(editor([first,br,span]), prompt+'\n\n', prompt)).toBe(false);
+      });
+      test('fresh submit precheck recovers one unacknowledged opening for each exact Chat power before a single Send', async () => {
+        for (const label of ['Instant','Medium','High','Extra High','Pro']) {
+          const x = await preparedSubmit(label);
+          const request = x.f.run('submit', x.request);
+          await microtasks(); expect(x.openings(),label).toBe(1); expect(x.send.clicks).toBe(0);
+          await finishFirstInsertWait(x); await finishFirstInsertWait(x,100);
+          const result=await request; expect(result.submitted,label).toBe(true);
+          expect(x.send.clicks).toBe(1); expect(x.counts().insertions).toBe(1);
+          expect(x.picker.familyOptions.map((node:any) => node.clicks)).toEqual(x.familyBefore);
+          expect(arrows(x.picker)).toHaveLength(x.powerBefore);
+        }
+      });
+      test('fresh submit precheck cannot reopen after ambiguity, changed draft, selected power or prior dispatch', async () => {
+        for (const change of ['unready','native_hash','attempted','claimed','picked','foreign_owner','replaced_header','draft','transient_menu','transient_trigger','transient_draft','marker','prior','revoked','route','deadline','wrong_fresh_choice','never_opens']) {
+          const x = await preparedSubmit('Medium', change === 'unready');
+          if (change==='native_hash') x.request.expectedSubmissionProofs[0].fingerprint='0'.repeat(64);
+          const request = x.f.run('submit', x.request); await microtasks();
+          expect(x.openings(),change).toBe(1);
+          let second=0;
+          if (change==='wrong_fresh_choice' || change==='never_opens') x.picker.trigger.onClick=()=>{
+            second++; if (change==='wrong_fresh_choice') { x.picker.selected('High'); x.open(); }
+          };
+          if (change==='attempted') x.f.world.__computaModelFirstSubmitted=true;
+          if (change==='claimed') x.pending.phase='sent';
+          if (change==='picked') x.f.world.__computaChatPresetPin.invalidated=true;
+          if (change==='marker') x.pending.marker='foreign-marker';
+          if (change==='prior') x.pending.firstInsertOpening={...x.pending.firstInsertOpening};
+          if (change==='revoked') x.state.revoked=true;
+          if (change==='route') x.f.document.URL+='&foreign=1';
+          if (change==='transient_trigger') x.f.observers.forEach((o:any)=>o.callback([{type:'attributes',target:x.picker.trigger,attributeName:'aria-expanded',oldValue:'true'}]));
+          if (change==='foreign_owner') x.f.world.__computaModelOwner='not-the-owner';
+          if (change==='replaced_header') x.picker.trigger.connected=false;
+          if (change==='draft') x.f.composer.text+=' ';
+          if (change==='transient_menu' || change==='transient_draft') {
+            const records=change==='transient_menu' ? [{type:'childList',target:x.f.body,addedNodes:[],removedNodes:[new Node('DIV',{role:'menu'})]}]
+              : [{type:'characterData',target:x.f.composer}];
+            x.f.observers.forEach((o:any)=>o.callback(records));
+          }
+          await finishFirstInsertWait(x, change==='deadline' ? 1801 : 901); await finishFirstInsertWait(x,1100);
+          const result=await request;expect(result.error,change).toBeDefined();expect(x.send.clicks,change).toBe(0);
+          expect(x.openings(),change).toBe(1);expect(second,change).toBe(['wrong_fresh_choice','never_opens'].includes(change)?1:0);
+          expect(x.counts().insertions).toBe(1);
+        }
+      });
+      test('fresh submit precheck spends the only recovery and preserves a late first acknowledgement', async () => {
+        const late = await preparedSubmit();
+        const answer = late.f.run('submit',late.request); await microtasks();
+        late.f.advanceTime(700); late.open(); late.f.flush(); await microtasks(); late.f.flush();
+        expect((await answer).submitted).toBe(true); expect(late.send.clicks).toBe(1); expect(late.pending.firstSubmitOpening.recoveryClaimed).toBe(false);
+        const blocked = await preparedSubmit(); let clicks=0; blocked.picker.trigger.onClick=()=>{clicks++;};
+        const first=blocked.f.run('submit',blocked.request); await microtasks();
+        await finishFirstInsertWait(blocked); await finishFirstInsertWait(blocked,1000);
+        expect((await first).error).toBeDefined(); expect(clicks).toBe(2); expect(blocked.send.clicks).toBe(0);
+        const next=blocked.f.run('submit',blocked.request); await microtasks();
+        await finishFirstInsertWait(blocked); await finishFirstInsertWait(blocked,1000);
+        expect((await next).error).toBeDefined(); expect(clicks).toBe(3); expect(blocked.send.clicks).toBe(0);
+      });
       test('post-insert Instant verification reopens an unacknowledged header once and reads a fresh selection',async()=>{
         const x=await preparedVerification();
         const request=x.verify(); await microtasks();

@@ -527,7 +527,8 @@ enum APIModelResponseCodec {
         // Removing an active tool must not renumber its neighbours: historical
         // calls and current declarations share one stable provider identity.
         let historyByIdentity = Dictionary(uniqueKeysWithValues: historyTools.map { ($0.identity, $0) })
-        let tools = try parseTools(raw["tools"], naming: toolNaming).map { visible -> Tool in
+        let alibabaPatchGuidance = selection.provider.wireAPI == .chatCompletions && selection.provider.isAlibabaModelStudioInference
+        let tools = try parseTools(raw["tools"], naming: toolNaming, alibabaPatchGuidance: alibabaPatchGuidance).map { visible -> Tool in
             guard let original = historyByIdentity[visible.identity] else { throw Failure.invalidTool }
             return Tool(name: visible.name, namespace: visible.namespace, wireName: original.wireName,
                         custom: visible.custom, schema: visible.schema, description: visible.description)
@@ -683,7 +684,7 @@ enum APIModelResponseCodec {
         return stem + "__" + suffix
     }
 
-    private static func parseTools(_ value: Any?, naming: ToolNaming) throws -> [Tool] {
+    private static func parseTools(_ value: Any?, naming: ToolNaming, alibabaPatchGuidance: Bool = false) throws -> [Tool] {
         if absent(value) { return [] }
         guard let definitions = value as? [[String: Any]], definitions.count <= 256 else { throw Failure.invalidTool }
         var result: [Tool] = [], identities = Set<String>(), wireNames = Set<String>()
@@ -697,7 +698,20 @@ enum APIModelResponseCodec {
             if custom {
                 // Put the literal-input contract on the argument the provider fills,
                 // while preserving the complete native grammar in the description.
-                let inputDescription = "Literal native tool input. Follow the exact text or grammar contract in this function's description, including delimiters and newlines. Encode the contents once as this JSON string; do not add quoting, JSON, shell syntax or Markdown fences unless the native contract requires them."
+                var inputDescription = "Literal native tool input. Follow the exact text or grammar contract in this function's description, including delimiters and newlines. Encode the contents once as this JSON string; do not add quoting, JSON, shell syntax or Markdown fences unless the native contract requires them."
+                // Both bundled Rust apply_patch grammars use these update and footer rules.
+                // Describe the suffix on the string field; the engine still parses the original input.
+                if alibabaPatchGuidance, name == "apply_patch", namespace == nil || namespace == "functions",
+                   let format = definition["format"] as? [String: Any], format["type"] as? String == "grammar",
+                   format["syntax"] as? String == "lark", let grammar = format["definition"] as? String,
+                   grammar.utf8.count <= 16_384 {
+                    let rules = Set(grammar.split(separator: "\n"))
+                    if rules.contains(#"end_patch: "*** End Patch" LF?"#),
+                       rules.contains(#"change_context: ("@@" | "@@ " /(.+)/) LF"#),
+                       rules.contains(#"change_line: ("+" | "-" | " ") /(.*)/ LF"#) {
+                        inputDescription += " Before submitting an update patch, check its last lines. End the last nonempty hunk directly with *** End Patch on its own line. A bare @@ starts another hunk and cannot close the patch."
+                    }
+                }
                 schema = ["type": "object", "properties": ["input": ["type": "string", "description": inputDescription]], "required": ["input"], "additionalProperties": false]
             } else {
                 guard var parameters = definition["parameters"] as? [String: Any], parameters["type"] as? String == "object" else { throw Failure.invalidTool }

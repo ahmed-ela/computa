@@ -2794,6 +2794,45 @@ final class APIModelResponseCodecTests: XCTestCase {
         XCTAssertEqual(semanticOutput["namespace"] as? String, "editing")
         XCTAssertEqual(semanticOutput["input"] as? String, payload)
     }
+    func testAlibabaPatchInputExplainsTheTerminalHunkWithoutRepairingMalformedPayloads() throws {
+        let alibaba = APIProviderDefinition(id: "fixture", name: "Fixture",
+            baseURL: URL(string: "https://ws-fixture123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1")!,
+            wireAPI: .chatCompletions, models: provider.models)
+        let grammar = #"""
+        end_patch: "*** End Patch" LF?
+        change_context: ("@@" | "@@ " /(.+)/) LF
+        change_line: ("+" | "-" | " ") /(.*)/ LF
+        """#
+        let patch: [String: Any] = ["type": "custom", "name": "apply_patch",
+            "format": ["type": "grammar", "syntax": "lark", "definition": grammar]]
+        func guidance(_ selectedProvider: APIProviderDefinition, _ def: [String: Any]) throws -> String {
+            let req = try request(["tools": [def]], provider: selectedProvider, toolNaming: .semantic)
+            let fn = try XCTUnwrap(wireFunctions(req).first)
+            let params = try XCTUnwrap(fn["parameters"] as? [String: Any])
+            let properties = try XCTUnwrap(params["properties"] as? [String: [String: Any]])
+            return try XCTUnwrap(properties["input"]?["description"] as? String)
+        }
+        let footer = "A bare @@ starts another hunk"
+        XCTAssertTrue(try guidance(alibaba, patch).contains(footer))
+        XCTAssertFalse(try guidance(provider, patch).contains(footer))
+        let foreign: [String: Any] = ["type": "namespace", "name": "editing", "tools": [patch]]
+        XCTAssertFalse(try guidance(alibaba, foreign).contains(footer))
+        var other = patch
+        other["format"] = ["type": "text"]
+        XCTAssertFalse(try guidance(alibaba, other).contains(footer))
+        let prepared = try request(["tools": [patch]], provider: alibaba, toolNaming: .semantic)
+        let start = "*** Begin Patch\n*** Update File: fixture.py\n@@\n-old\n+new\n"
+        for suffix in ["@@", "@@\n*** End Patch", "*** End Patch"] {
+            let literal = start + suffix
+            let arguments = String(decoding: try JSONSerialization.data(withJSONObject: ["input": literal]), as: UTF8.self)
+            let call: [String: Any] = ["id": "example", "type": "function",
+                "function": ["name": prepared.tools[0].wireName, "arguments": arguments]]
+            let reply = try decode(["role": "assistant", "tool_calls": [call]], finish: "tool_calls", request: prepared)
+            let item = try XCTUnwrap((reply.response["output"] as? [[String: Any]])?.first)
+            XCTAssertEqual(item["input"] as? String, literal)
+        }
+    }
+
     func testCustomInputArgumentGuidancePreservesRawStringsAndNativeFunctionSchemas() throws {
         let ordinaryParameters: [String: Any] = ["type": "object", "properties": ["input": ["type": "string", "description": "Native function's own input contract"]], "required": ["input"], "additionalProperties": false]
         let custom: [String: Any] = ["type": "custom", "name": "literal_document", "format": ["type": "text"]]
