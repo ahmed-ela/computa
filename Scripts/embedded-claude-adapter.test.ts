@@ -19,7 +19,7 @@ function observedClaudeCodeBlock(f: ReturnType<typeof fixture>, raw: string, cap
   const label = new Element("DIV", { class: captionClasses }, "json");
   const pre = new Element("PRE"), code = new Element("CODE", {}, raw); pre.append(code);
   wrapper.append(container, label, pre); f.answer.append(wrapper);
-  Object.defineProperty(f.answer, "innerText", { get: () => "\uE056\njson\n" + raw });
+  Object.defineProperty(f.answer, "innerText", { configurable: true, get: () => "\uE056\njson\n" + raw });
   return { wrapper, container, control, content, icon, label, pre, code };
 }
 
@@ -47,6 +47,26 @@ function observedClaudeBanner(f: ReturnType<typeof fixture>, clock = "11:40 PM",
   container.append(warning, upgrade); f.body.append(container);
   return { container, warning, support, upgrade };
 }
+function observedClaudePause(f: ReturnType<typeof fixture>, family = "Opus 5", continuation = "Sonnet 4.6", observedDOM = true) {
+  // Saved direct379 DOM: warning SPAN, isolated CODE reason, and edit/retry text.
+  // The older AX-only shape remains an explicit compatibility fixture.
+  const surface = new Element("DIV", observedDOM ? { "data-testid": "asl3-stop-warning" } : {});
+  const paused = new Element(observedDOM ? "H4" : "SPAN", {}, "Paused");
+  const warning = new Element("SPAN", {}, `${family}'s safeguards flagged this message. This sometimes happens with safe, normal conversations.`);
+  const details = new Element(observedDOM ? "CODE" : "SPAN", {}, "[reasoning_extraction]");
+  const retry = new Element("BUTTON", {}, `${observedDOM ? "Edit and retry" : "Retry"} with ${family}`);
+  const fallback = new Element("BUTTON", {}, `Continue with ${continuation}`);
+  const paragraph = new Element("P"), reason = new Element("SPAN", {}, "Details: ");
+  paragraph.append(warning, new Element("#text", {}, " "), fallback, new Element("#text", {}, ", "),
+    new Element("BUTTON", {}, "send feedback"), new Element("#text", {}, ", or "), new Element("A", {}, "learn more"), new Element("#text", {}, "."));
+  reason.append(details); surface.append(paused, retry, paragraph, reason);
+  f.body.append(surface);
+  const finished = new Element("DIV", { "data-testid": "response-status-announcer", role: "status" }, "Claude finished the response");
+  f.body.append(finished);
+  return { surface, paused, warning, details, retry, fallback, finished };
+}
+const safeguardFailure = { error: "website_response_blocked", detail: "reasoning_extraction" };
+
 const freshQuotaReceipt = (f: ReturnType<typeof fixture>) => ({ error: "website_usage_limit", freshQuotaAbort: true,
   url: f.document.URL, userCount: 0, responseCount: 0 });
 
@@ -584,6 +604,266 @@ describe("embedded Claude fixed adapter", () => {
     f.toggle.disabled = true;
     expect(await f.run("enableTemporary")).toMatchObject({ error: "temporary_mode_unavailable" });
     expect(f.toggle.clicks).toBe(0);
+  });
+
+  test("Claude safeguard pause wins over finished and complete-looking responses without any action", async () => {
+    for (const action of ["inspect", "verifyModel", "enableTemporary", "prepare", "insert", "sendReady", "submit"]) {
+      const f = fixture(provider, { userPrompt: prompt }); await f.run();
+      const pause = observedClaudePause(f); f.stop.connected = true;
+      expect(await f.run(action, { prompt: outbound })).toEqual(safeguardFailure);
+      for (const control of [f.send, f.stop, f.toggle, f.exit, pause.retry, pause.fallback]) expect(control.clicks).toBe(0);
+      expect(f.composer.innerText).toBe("");
+    }
+  });
+
+  test("Claude safeguard family labels are validated and Retry must match the exact warning family", async () => {
+    for (const [family, next] of [["Opus 5", "Sonnet 4.6"], ["Opus 5.5", "Haiku 5.5"], ["Sonnet 4.6", "Opus 5"]]) {
+      const f = fixture(provider, { userPrompt: prompt }); await f.run(); observedClaudePause(f, family, next);
+      expect(await f.run()).toEqual(safeguardFailure);
+    }
+    for (const mutation of ["unknown_family", "mismatch_retry", "unknown_continuation", "same_continuation", "different_reason", "different_warning", "missing_pause", "missing_reason", "missing_retry", "missing_continuation", "duplicate_warning", "duplicate_retry", "disabled_retry"]) {
+      const f = fixture(provider, { userPrompt: prompt }); await f.run(); const p = observedClaudePause(f);
+      if (mutation === "unknown_family") { p.warning.text = p.warning.text.replace("Opus 5", "Unknown 5"); p.retry.text = "Retry with Unknown 5"; }
+      if (mutation === "mismatch_retry") p.retry.text = "Retry with Opus 5.5";
+      if (mutation === "unknown_continuation") p.fallback.values["aria-label"] = "Continue with External 4";
+      if (mutation === "same_continuation") p.fallback.values["aria-label"] = "Continue with Opus 5";
+      if (mutation === "different_reason") p.details.text = "[unknown_private_reason]";
+      if (mutation === "different_warning") p.warning.text += " Extra";
+      if (mutation === "missing_pause") p.paused.connected = false;
+      if (mutation === "missing_reason") p.details.connected = false;
+      if (mutation === "missing_retry") p.retry.connected = false;
+      if (mutation === "missing_continuation") p.fallback.connected = false;
+      if (mutation === "duplicate_warning") p.surface.append(p.warning.cloneNode(true));
+      if (mutation === "duplicate_retry") p.surface.append(p.retry.cloneNode(true));
+      if (mutation === "disabled_retry") p.retry.disabled = true;
+      expect((await f.run()).error, mutation).toBeUndefined();
+      expect(p.retry.clicks + p.fallback.clicks).toBe(0);
+    }
+  });
+
+  test("Claude safeguard observed CODE reason and both exact retry variants preserve the complete conjunction", async () => {
+    for (const observedDOM of [true, false]) {
+      const f = fixture(provider, { userPrompt: prompt }); await f.run();
+      const p = observedClaudePause(f, "Opus 5", "Sonnet 4.6", observedDOM);
+      expect(p.retry.getAttribute("aria-label")).toBeNull();
+      expect(await f.run()).toEqual(safeguardFailure);
+      expect(p.retry.clicks + p.fallback.clicks + f.stop.clicks + f.send.clicks).toBe(0);
+    }
+    for (const variant of ["legacy", "both", "duplicate_edit", "wrong_family", "suffix", "prefix", "wrong_case"]) {
+      const f = fixture(provider, { userPrompt: prompt }); await f.run(); const p = observedClaudePause(f);
+      if (variant === "legacy") p.retry.text = "Retry with Opus 5";
+      if (variant === "both") p.surface.append(new Element("BUTTON", {}, "Retry with Opus 5"));
+      if (variant === "duplicate_edit") p.surface.append(p.retry.cloneNode(true));
+      if (variant === "wrong_family") p.retry.text = "Edit and retry with Opus 5.5";
+      if (variant === "suffix") p.retry.text += " now";
+      if (variant === "prefix") p.retry.text = "Please " + p.retry.text;
+      if (variant === "wrong_case") p.retry.text = "Edit And Retry with Opus 5";
+      const result = await f.run();
+      if (variant === "legacy") expect(result).toEqual(safeguardFailure);
+      else expect(result.error, variant).toBeUndefined();
+      expect(p.retry.clicks + p.fallback.clicks + f.stop.clicks + f.send.clicks).toBe(0);
+    }
+  });
+
+  test("Claude safeguard CODE exception requires one exact visible token in the provider wrapper", async () => {
+    for (const mutation of ["missing_wrapper", "wrong_wrapper", "pre", "outer_code", "tooltip", "own_authored", "hidden", "aria_hidden", "inert", "display", "visibility", "split", "nested", "extra", "long", "empty", "duplicate"]) {
+      const f = fixture(provider, { userPrompt: prompt }); await f.run(); const p = observedClaudePause(f);
+      if (mutation === "missing_wrapper") delete p.surface.values["data-testid"];
+      if (mutation === "wrong_wrapper") p.surface.values["data-testid"] = "foreign-stop-warning";
+      if (["pre", "outer_code", "tooltip"].includes(mutation)) {
+        const parent = p.details.parentElement!; parent.children = parent.children.filter(node => node !== p.details);
+        const wrapper = new Element(mutation === "pre" ? "PRE" : mutation === "outer_code" ? "CODE" : "SPAN", mutation === "tooltip" ? { role: "tooltip" } : {});
+        wrapper.append(p.details); parent.append(wrapper);
+      }
+      if (mutation === "own_authored") p.details.values["data-message-author-role"] = "assistant";
+      if (mutation === "hidden") p.details.values.hidden = "";
+      if (mutation === "aria_hidden") p.details.values["aria-hidden"] = "true";
+      if (mutation === "inert") p.details.values.inert = "";
+      if (mutation === "display") p.details.values.display = "none";
+      if (mutation === "visibility") p.details.values.visibility = "hidden";
+      if (mutation === "split") { p.details.text = "[reasoning_"; p.details.append(new Element("#text", {}, "extraction]")); }
+      if (mutation === "nested") { p.details.text = ""; p.details.append(new Element("SPAN", {}, "[reasoning_extraction]")); }
+      if (mutation === "extra") p.details.text += " private-canary";
+      if (mutation === "long") p.details.text = "private-canary".repeat(1000);
+      if (mutation === "empty") p.details.text = "";
+      if (mutation === "duplicate") p.surface.append(p.details.cloneNode(true));
+      const result = await f.run(); expect(result.error, mutation).toBeUndefined();
+      expect(JSON.stringify(result)).not.toContain("private-canary");
+      expect(p.retry.clicks + p.fallback.clicks + f.stop.clicks + f.send.clicks).toBe(0);
+    }
+  });
+
+  test("Claude safeguard quotations in authored messages, tool code, editors and hidden UI never classify", async () => {
+    for (const location of ["user", "assistant", "tool_code", "editor", "hidden", "aria_hidden", "inert", "visibility", "display"]) {
+      const f = fixture(provider, { userPrompt: prompt }); const p = observedClaudePause(f);
+      f.body.children = f.body.children.filter(node => node !== p.surface);
+      if (location === "user") {
+        f.userBody!.text = prompt + "\n";
+        f.userBody!.append(p.surface, new Element("#text", {}, "\n\n" + markerLine));
+        f.world.__computaModelFirstPrompt = f.userBody!.innerText;
+      } else if (location === "assistant") f.answer.append(p.surface);
+      else if (location === "tool_code") { const pre = new Element("PRE"); pre.append(p.surface); f.body.append(pre); }
+      else if (location === "editor") f.composer.append(p.surface);
+      else {
+        if (location === "hidden") p.surface.values.hidden = "";
+        if (location === "aria_hidden") p.surface.values["aria-hidden"] = "true";
+        if (location === "inert") p.surface.values.inert = "";
+        if (location === "visibility") p.surface.values.visibility = "hidden";
+        if (location === "display") p.surface.values.display = "none";
+        f.body.append(p.surface);
+      }
+      expect((await f.run()).error, location).toBeUndefined();
+      expect(p.retry.clicks + p.fallback.clicks).toBe(0);
+    }
+  });
+
+  test("Claude safeguard scan is bounded and cannot leak unknown UI or turn a partial scan into a block", async () => {
+    const f = fixture(provider, { userPrompt: prompt }); await f.run();
+    for (let n = 0; n < 2100; n++) f.body.append(new Element("SPAN", {}, "private-canary"));
+    const p = observedClaudePause(f);
+    const result = await f.run(); expect(result.error).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain("private-canary"); expect(p.retry.clicks + p.fallback.clicks).toBe(0);
+    const g = fixture(provider, { userPrompt: prompt }); await g.run(); const q = observedClaudePause(g);
+    Object.defineProperty(q.surface, "childNodes", { get: () => { throw new Error("private-canary"); } });
+    const unavailable = await g.run(); expect(unavailable.error).toBeUndefined();
+    expect(JSON.stringify(unavailable)).not.toContain("private-canary"); expect(q.retry.clicks + q.fallback.clicks).toBe(0);
+  });
+
+  test("Claude safeguard cleanup retains ordinary exact first body and Incognito proof and never clicks", async () => {
+    const f = fixture(provider, { userPrompt: prompt }); const bound = await f.run(); const p = observedClaudePause(f);
+    f.stop.connected = true;
+    expect(await f.run("stop")).toMatchObject({ responseBlocked: true, busy: false, stopped: false, text: "", answerComplete: false,
+      temporary: true, firstUserVerified: true, firstUserFingerprint: bound.firstUserFingerprint, firstUserMarkerVerified: true });
+    for (const control of [f.send, f.stop, f.toggle, f.exit, p.retry, p.fallback]) expect(control.clicks).toBe(0);
+    const unbound = fixture(provider, { userPrompt: prompt }); observedClaudePause(unbound);
+    expect(await unbound.run()).toEqual(safeguardFailure); expect(unbound.world.__computaModelFirstProof).toBeUndefined();
+    expect(await unbound.run("stop")).toMatchObject({ error: "conversation_changed", detail: "first_user_message" });
+    for (const mutation of ["body", "owner", "temporary"]) {
+      const g = fixture(provider, { userPrompt: prompt }); await g.run(); const q = observedClaudePause(g);
+      if (mutation === "body") g.userBody!.text += " changed";
+      if (mutation === "owner") g.world.__computaModelOwner = "foreign";
+      if (mutation === "temporary") g.badge.connected = false;
+      expect((await g.run("stop")).error).toBeTruthy();
+      expect(q.retry.clicks + q.fallback.clicks + g.stop.clicks).toBe(0);
+    }
+  });
+
+  test("Claude safeguard cleanup cannot fall through to clickable Stop after the pause disappears", async () => {
+    const f = fixture(provider, { userPrompt: prompt }); await f.run(); const p = observedClaudePause(f);
+    expect(await f.run()).toEqual(safeguardFailure);
+    p.surface.connected = false; f.stop.connected = true;
+    expect(await f.run("stop", { requireClaudeSafeguardPause: true })).toEqual({ error: "model_unverified" });
+    expect(f.stop.clicks + p.retry.clicks + p.fallback.clicks).toBe(0);
+    // The new restriction changes only native's explicitly tagged read.
+    expect(await f.run("stop")).toMatchObject({ stopped: true }); expect(f.stop.clicks).toBe(1);
+  });
+
+  test("Claude safeguard arrival cannot replace fresh-page ownership rejection after model-proof await", async () => {
+    const f = fixture(provider), picker = installObservedModelPicker(f, provider, Element);
+    picker.selected("Opus 5"); let tracked = false, value: unknown;
+    Object.defineProperty(f.world, "__computaModelReadUI", { configurable: true,
+      get: () => value, set: next => {
+        value = next; if (tracked) return; tracked = true;
+        queueMicrotask(() => { observedClaudePause(f); f.world.__computaModelOwner = "foreign"; });
+      } });
+    const result = await f.run("inspect", { expectedModelChoice: { key: "Opus 5", label: "Opus 5" } });
+    expect(tracked).toBe(true); expect(result).toMatchObject({ error: "model_unverified" });
+    expect(result.detail).not.toBe("reasoning_extraction");
+    expect(f.send.clicks).toBe(0);
+  });
+
+  test("Claude safeguard arrival during the first-user digest aborts while ownership drift still wins", async () => {
+    for (const drift of [false, true]) {
+      const f = fixture(provider, { userPrompt: prompt }); await f.run();
+      let p: ReturnType<typeof observedClaudePause>;
+      f.onDigest(() => {
+        p = observedClaudePause(f);
+        if (drift) f.world.__computaModelOwner = "foreign";
+      });
+      const result = await f.run();
+      expect(result).toMatchObject(drift ? { error: "conversation_changed", detail: "first_user_message" } : safeguardFailure);
+      expect(p!.retry.clicks + p!.fallback.clicks + f.send.clicks).toBe(0);
+    }
+  });
+
+
+  function freshAccountLimit(f: ReturnType<typeof fixture>) {
+    const picker = installObservedModelPicker(f, provider, Element); picker.selected("Sonnet 5");
+    const usage = new Element("BUTTON", { "aria-haspopup": "dialog", "aria-label": "View usage limits · 100% used" });
+    const card = new Element("DIV"), heading = new Element("H3", {}, "You’ve reached your usage limit.");
+    const reset = new Element("P", {}, "Your limit resets at 8:20 AM. Turn on notifications and Claude will notify you then.");
+    const credits = new Element("P", {}, "Wait for the reset, or keep working now with usage credits, billed on top of your plan.");
+    const actions = new Element("DIV"), buttons = ["Get notified", "Get more usage", "Dismiss"].map(label => new Element("BUTTON", {}, label));
+    actions.append(...buttons); card.append(heading, reset, credits, actions); f.body.append(usage, card);
+    f.send.disabled = true;
+    return { usage, picker, card, heading, reset, credits, actions, buttons };
+  }
+
+  test("fresh account limit aborts each preflight action without using the picker, composer or notice", async () => {
+    for (const temporary of [false, true]) for (const action of ["inspect", "discoverModels", "selectModel", "modelDiagnostic",
+      "verifyModel", "enableTemporary", "prepare", "insert", "sendReady", "submit"]) {
+      const f = fixture(provider, { temporary }), surface = freshAccountLimit(f);
+      const observed = await f.run(action, { prompt: outbound, expectedModelChoice: { key: "Sonnet 5", label: "Sonnet 5" } });
+      expect(observed, action).toEqual(action === "inspect" ? freshQuotaReceipt(f) : { error: "website_usage_limit" });
+      for (const control of [...surface.buttons, surface.usage, surface.picker.trigger, f.send, f.stop, f.exit, f.toggle])
+        expect(control.clicks).toBe(0);
+      expect(f.composer.events).toEqual([]); expect(f.composer.innerText).toBe(""); expect(f.document.activeElement).toBeNull();
+    }
+  });
+
+  test("fresh account limit requires the exact new-chat controls, card, visible copy and unused composer", async () => {
+    for (const variation of ["partial-usage", "duplicate-usage", "hidden-usage", "not-popup", "open-picker", "missing-picker",
+      "permitted-send", "nonempty-draft", "changed-notice", "bad-clock", "no-card-controls", "disabled-offer", "credits-active", "meter-text-99", "additional-control",
+      "quoted-card", "in-editor", "hidden-text", "different-card", "authored-row", "alternate-author", "clipped", "chat-route", "submitted"]) {
+      const f = fixture(provider), { usage, picker, card, reset, credits, actions, buttons } = freshAccountLimit(f);
+      switch (variation) {
+        case "partial-usage": usage.values["aria-label"] = "View usage limits · 99% used"; break;
+        case "duplicate-usage": f.body.append(usage.cloneNode()); break;
+        case "hidden-usage": usage.values.hidden = ""; break;
+        case "not-popup": delete usage.values["aria-haspopup"]; break;
+        case "open-picker": picker.trigger.values["aria-expanded"] = "true"; break;
+        case "missing-picker": picker.trigger.connected = false; break;
+        case "permitted-send": f.send.disabled = false; break;
+        case "nonempty-draft": f.composer.text = "private draft"; break;
+        case "changed-notice": credits.text = credits.text.replace("usage credits", "model choices"); break;
+        case "bad-clock": reset.text = reset.text.replace("8:20 AM", "25:20 AM"); break;
+        case "no-card-controls": buttons[2].text = "Close"; buttons[0].text = "Notify me"; break;
+        case "disabled-offer": buttons[1].disabled = true; break;
+        case "credits-active": credits.text += " Your usage credits are enabled."; break;
+        case "meter-text-99": delete usage.values["aria-label"]; usage.text = "View usage limits · 99% used"; break;
+        case "additional-control": actions.append(new Element("BUTTON", {}, "Another action")); break;
+        case "quoted-card": card.tagName = "PRE"; break;
+        case "in-editor": f.body.children = f.body.children.filter(node => node !== card); f.composer.append(card); break;
+        case "hidden-text": credits.values.hidden = ""; break;
+        case "different-card": actions.children.pop(); f.body.append(buttons[2]); break;
+        case "authored-row": f.body.append(new Element("DIV", { "data-testid": "assistant-message", hidden: "" })); break;
+        case "alternate-author": f.body.append(new Element("DIV", { "data-message-author-role": "assistant" })); break;
+        case "clipped": card.append(...Array.from({ length: 97 }, () => new Element("SPAN"))); break;
+        case "chat-route": f.location.pathname = "/chat/other"; f.document.URL = f.origin + f.location.pathname; break;
+        case "submitted": f.world.__computaModelFirstSubmitted = true; break;
+      }
+      const result = await f.run();
+      expect(result.error, variation).not.toBe("website_usage_limit"); expect(result.freshQuotaAbort, variation).toBeUndefined();
+      expect(buttons.map(node => node.clicks)).toEqual([0, 0, 0]);
+    }
+  });
+
+  test("fresh account limit accepts the exact rendered meter with split reset time and varied auxiliary copy", async () => {
+    const f = fixture(provider), { usage, reset, credits, buttons } = freshAccountLimit(f);
+    delete usage.values["aria-label"]; usage.append(new Element("SPAN", {}, "View usage limits ·"), new Element("SPAN", {}, "100% used"));
+    reset.text = "Your limit resets at "; reset.append(new Element("STRONG", {}, "8:20 AM"), new Element("#text", {}, "."));
+    credits.text = "Wait for the reset, or keep working now with usage credits. See your billing settings for details.";
+    buttons[0].text = "Notify me"; f.composer.append(new Element("P")); f.composer.children[0].append(new Element("BR"));
+    expect(await f.run()).toEqual(freshQuotaReceipt(f));
+  });
+
+  test("fresh account limit cannot supersede lost ownership or establish quota cleanup", async () => {
+    const f = fixture(provider, { userPrompt: prompt }); await f.run(); freshAccountLimit(f);
+    f.userRoot!.parentElement!.children = []; f.userRoot!.connected = false;
+    expect(await f.run("inspect")).toMatchObject({ error: "conversation_changed", detail: "user_count" });
+    expect(await f.run("stop")).toMatchObject({ error: "conversation_changed", detail: "user_count" });
+    const fresh = fixture(provider, { temporary: false }); freshAccountLimit(fresh);
+    expect(await fresh.run("stop")).toMatchObject({ error: "temporary_mode_unverified" });
   });
 
   test("the exact quota popup reports its limit before any inference action or blocked control click", async () => {
@@ -1478,4 +1758,1060 @@ describe("embedded Claude fixed adapter", () => {
     expect(await pinned.run()).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
   });
 
+});
+
+describe("Claude isolated malformed JSON correction evidence", () => {
+  const raw = '{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf rejected-one"}}},{"name":"exec_command","arguments":{"cmd":"printf rejected-two"}}},{"name":"exec_command","arguments":{"cmd":"printf rejected-three"}}]}';
+  for (const scenario of ["extra_braces", "python_caption", "python_class", "multiple", "extra_code", "empty", "oversize", "utf8_oversize", "prose", "pre_control", "outside_button", "outside_input", "outside_role_button", "missing_caption", "unknown_control"]) {
+    test(`${scenario}: evidence never repairs or releases malformed source`, async () => {
+      const f = fixture("claude", { userPrompt: "Synthetic owned request" });
+      const literal = scenario === "empty" ? " " : scenario === "oversize" ? "x".repeat(220_001)
+        : scenario === "utf8_oversize" ? "é".repeat(110_001) : raw;
+      const b = observedClaudeCodeBlock(f, literal, claudeCodeCaptionClasses[1]);
+      if (scenario === "python_caption") b.label.text = "python";
+      if (scenario === "python_class") b.code.values.class = "language-python";
+      if (scenario === "multiple") { const pre = new Element("PRE"); pre.append(new Element("CODE", {}, raw)); f.answer.append(pre); }
+      if (scenario === "extra_code") f.answer.append(new Element("CODE", {}, " "));
+      if (scenario === "prose") f.answer.append(new Element("P", {}, "I cannot perform this request."));
+      if (scenario === "pre_control") b.pre.append(new Element("BUTTON", {}, "Authored control"));
+      if (scenario === "outside_button") f.answer.append(new Element("BUTTON"));
+      if (scenario === "outside_input") f.answer.append(new Element("INPUT"));
+      if (scenario === "outside_role_button") f.answer.append(new Element("DIV", { role: "button" }));
+      if (scenario === "missing_caption") b.label.values.hidden = "";
+      if (scenario === "unknown_control") b.icon.text = "Copy private prose";
+      // Override the fixture's provider-chrome renderer only to include every
+      // deliberately added test node; no source bytes are omitted by the assertion.
+      Object.defineProperty(f.answer, "innerText", { configurable: true, get: () => f.answer.textContent });
+      const rendered = f.answer.innerText.trim();
+      const result = await f.run("inspect"), evidence = result.completionEvidence.codeStructure;
+      expect(result.error).toBeUndefined(); expect(result.answerComplete).toBe(true);
+      expect(result.text).toBe(rendered.slice(0, 220_001));
+      expect(evidence.selectedExtraction).toBe("rendered_fallback");
+      expect(evidence.isolatedJSONCodeBlock).toBe(scenario === "multiple" || scenario === "oversize" ? null : scenario === "extra_braces");
+      if (!["multiple", "oversize"].includes(scenario)) expect(evidence.literalCodeValidJSON).toBe(false);
+      expect(() => JSON.parse(result.text)).toThrow();
+      expect(f.send.clicks).toBe(0);
+    });
+  }
+  test("unavailable isolation diagnostics preserve malformed JSON rejection and original text", async () => {
+    const f = fixture("claude", { userPrompt: "Synthetic owned request" });
+    const b = observedClaudeCodeBlock(f, raw, claudeCodeCaptionClasses[1]);
+    Object.defineProperty(b.code, "classList", { get: () => { throw new Error("Private diagnostic unavailable"); } });
+    const result = await f.run("inspect");
+    expect(result.error).toBeUndefined(); expect(result.text).toBe(f.answer.innerText.trim());
+    expect(result.completionEvidence.codeStructure).toMatchObject({ isolatedJSONCodeBlock: null,
+      literalCodeValidJSON: false, selectedExtraction: "rendered_fallback", extractionReason: "invalid_json" });
+    expect(f.send.clicks).toBe(0);
+  });
+  test("new diagnostic exceptions do not reject an otherwise valid literal envelope", async () => {
+    const literal = '{"type":"message","text":"I cannot perform this request."}';
+    const f = fixture("claude", { userPrompt: "Synthetic owned request" });
+    const b = observedClaudeCodeBlock(f, literal, claudeCodeCaptionClasses[1]);
+    Object.defineProperty(b.code, "classList", { get: () => { throw new Error("Private diagnostic unavailable"); } });
+    const result = await f.run("inspect");
+    expect(result.error).toBeUndefined(); expect(result.text).toBe(literal);
+    expect(result.completionEvidence.codeStructure).toMatchObject({ isolatedJSONCodeBlock: null,
+      literalCodeValidJSON: true, selectedExtraction: "raw_code", extractionReason: "accepted_literal_code" });
+    expect(f.send.clicks).toBe(0);
+  });
+  test("valid literal envelopes retain their original exact extraction", async () => {
+    for (const literal of ['{"type":"message","text":"I cannot perform this request."}', '{"type":"tool_calls","calls":[{"name":"browser_close","arguments":{}}]}']) {
+      const f = fixture("claude", { userPrompt: "Synthetic owned request" });
+      observedClaudeCodeBlock(f, literal, claudeCodeCaptionClasses[1]);
+      const result = await f.run("inspect");
+      expect(result.text).toBe(literal); expect(result.completionEvidence.codeStructure).toMatchObject({
+        literalCodeValidJSON: true, isolatedJSONCodeBlock: true, selectedExtraction: "raw_code", extractionReason: "accepted_literal_code" });
+      expect(f.send.clicks).toBe(0);
+    }
+  });
+});
+
+describe('Claude post-submit detached header settling', () => {
+  const expectedModelChoice = { key: 'Opus 5', label: 'Opus 5' };
+  const operationID = 'a909845c-2857-4b22-a66b-261b22281513';
+  const tickUntil = async (condition: () => boolean) => {
+    for (let count = 0; count < 100 && !condition(); count++) await Bun.sleep(1);
+    expect(condition()).toBe(true);
+  };
+  const currentHeader = (label = 'Opus 5') => {
+    const node = new Element('BUTTON', { 'aria-label': `Model: ${label} High`, 'aria-expanded': 'false', 'data-state': 'closed' });
+    node.append(new Element('SPAN', {}, label), new Element('SPAN', {}, 'High'));
+    return node;
+  };
+  const detached = async (action = 'inspect', prepare?: (f: ReturnType<typeof fixture>) => void,
+    overrides: Record<string, unknown> = {}, initialResponse = true) => {
+    const f = fixture('claude', { userPrompt: 'Bounded detached-header control', response: initialResponse });
+    const picker = installObservedModelPicker(f, 'claude', Element);
+    picker.selected('Opus 5');
+    const before = await f.run('inspect', { expectedModelChoice });
+    expect(before).toMatchObject({ firstUserVerified: true, modelEvidence: { selected: expectedModelChoice } });
+    expect(f.world.__computaClaudeLastModelTrigger.node).toBe(picker.trigger);
+    prepare?.(f);
+    picker.trigger.connected = false;
+    const clocks: any[] = []; let expire: () => void = () => {}, rejectClock: () => void = () => {};
+    f.window.webkit.messageHandlers.computaModelClock = { postMessage: (request: any) => {
+      clocks.push(request); return new Promise((resolve, reject) => {
+        expire = () => resolve(true); rejectClock = () => reject(new Error('synthetic clock failure'));
+      });
+    } };
+    let settled = false;
+    const pending = f.run(action, { expectedModelChoice, operationID, ...overrides }).then(result => { settled = true; return result; });
+    await tickUntil(() => clocks.length > 0 || settled);
+    expect(settled).toBe(false); expect(clocks).toHaveLength(1);
+    expect(clocks[0].milliseconds).toBeGreaterThan(0); expect(clocks[0].milliseconds).toBeLessThanOrEqual(1800);
+    expect(f.delays).toHaveLength(0);
+    const wake = () => { for (const observer of [...f.observers]) observer.callback([{ type: 'childList', target: f.body }]); };
+    const noActions = () => {
+      expect(f.send.clicks).toBe(0); expect(picker.trigger.clicks).toBe(0);
+      expect(picker.options.every((node: Element) => node.clicks === 0)).toBe(true);
+      expect(picker.menu.events).toHaveLength(0); expect(picker.nested!.events).toHaveLength(0);
+      expect(clocks).toHaveLength(1);
+    };
+    return { f, picker, before, pending, wake, noActions, clocks, expire: () => expire(), rejectClock: () => rejectClock() };
+  };
+
+  const emptyShell = (f: ReturnType<typeof fixture>) => {
+    f.response.replaceChildren(new Element('DIV')); f.controls.connected = false;
+    if (!f.article.parentElement) f.messages.append(f.article);
+  };
+  const pendingDetached = (overrides: Record<string, unknown> = {}) => detached('inspect', emptyShell,
+    { allowClaudeModelObservationPending: true, ...overrides }, false);
+
+  test('Claude safeguard pause observed during detached-header waiting wins pending and cannot be unlatched', async () => {
+    for (const transient of [false, true]) {
+      const x = await pendingDetached(), pause = observedClaudePause(x.f);
+      x.wake(); for (let tick = 0; tick < 12; tick++) await Promise.resolve();
+      if (transient) {
+        pause.surface.connected = false;
+        x.f.body.append(currentHeader()); x.wake();
+      } else x.expire();
+      const result = await x.pending;
+      expect(result).toEqual(safeguardFailure); expect(result.claudeModelObservationPending).toBeUndefined();
+      expect(result.text).toBeUndefined(); expect(pause.retry.clicks + pause.fallback.clicks).toBe(0); x.noActions();
+    }
+  });
+
+  test('Claude safeguard pause does not override ownership loss observed during the same wait', async () => {
+    const x = await pendingDetached(), pause = observedClaudePause(x.f);
+    x.f.world.__computaModelOwner = 'foreign'; x.wake(); x.expire();
+    const result = await x.pending;
+    expect(result).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
+    expect(pause.retry.clicks + pause.fallback.clicks).toBe(0); x.noActions();
+  });
+
+  test('Claude safeguard pause arriving at the final model-proof await withdraws completion', async () => {
+    const x = await detached(), replacement = currentHeader();
+    let tracked = false, trackedValue: any, pause: ReturnType<typeof observedClaudePause>;
+    Object.defineProperty(x.f.world, '__computaModelReadUI', { configurable: true,
+      get: () => trackedValue, set: value => {
+        trackedValue = value;
+        if (tracked) return;
+        tracked = true; queueMicrotask(() => { pause = observedClaudePause(x.f); });
+      } });
+    x.f.body.append(replacement); x.wake();
+    const result = await x.pending;
+    expect(tracked).toBe(true); expect(result).toEqual(safeguardFailure);
+    expect(result.text).toBeUndefined(); expect(result.answerComplete).toBeUndefined();
+    expect(pause!.retry.clicks + pause!.fallback.clicks).toBe(0); x.noActions();
+  });
+
+  test('Claude no-output pending expires only the existing read and later requires a fresh exact header', async () => {
+    for (const busy of [false, true]) {
+      const x = await pendingDetached(); x.f.stop.connected = busy;
+      x.expire(); const result = await x.pending;
+      expect(Object.keys(result).sort()).toEqual(['answerComplete', 'busy', 'claudeModelObservationPending', 'conversationIdentity',
+        'firstUserFingerprint', 'firstUserIdentity', 'firstUserMarkerVerified', 'firstUserVerified', 'interrupted',
+        'responseCount', 'temporary', 'text', 'url', 'userCount']);
+      expect(result).toEqual({ claudeModelObservationPending: true, url: x.f.document.URL, temporary: true,
+        conversationIdentity: null, userCount: 1, firstUserIdentity: x.before.firstUserIdentity,
+        firstUserFingerprint: x.before.firstUserFingerprint, firstUserVerified: true, firstUserMarkerVerified: true,
+        responseCount: 0, text: '', answerComplete: false, busy, interrupted: false });
+      expect(x.f.world.__computaModelFirstProof.fingerprint).toBe(x.before.firstUserFingerprint);
+      x.noActions();
+      const replacement = currentHeader(); x.f.body.append(replacement);
+      x.f.stop.connected = false; x.f.answer.connected = true; x.f.response.append(x.f.answer); x.f.controls.connected = true;
+      const completed = await x.f.run('inspect', { expectedModelChoice, allowClaudeModelObservationPending: true });
+      expect(completed).toMatchObject({ answerComplete: true, text: '{"type":"message","text":"OK"}',
+        firstUserFingerprint: x.before.firstUserFingerprint, modelEvidence: { selected: expectedModelChoice } });
+      expect(completed.claudeModelObservationPending).toBeUndefined(); expect(replacement.clicks).toBe(0); x.noActions();
+    }
+  });
+
+  test('Claude no-output pending requires strict permission, existing native binding and exact expected count', async () => {
+    for (const overrides of [{ allowClaudeModelObservationPending: undefined }, { allowClaudeModelObservationPending: false },
+      { allowClaudeModelObservationPending: 'true' }, { allowClaudeModelObservationPending: 1 },
+      { allowFirstUserBinding: true }, { allowFirstUserBinding: true, expectedFirstUserFingerprint: null },
+      { expectedUserCounts: [0, 1] }]) {
+      const x = await pendingDetached(overrides); x.expire(); const result = await x.pending;
+      expect(result.error).toBe('model_unverified'); expect(result.claudeModelObservationPending).toBeUndefined();
+      expect(result.modelDiagnostic.readStage).toBe('trigger_remount_timeout'); x.noActions();
+    }
+    const x = await detached('verifyModel', emptyShell, { allowClaudeModelObservationPending: true }, false);
+    x.expire(); const result = await x.pending;
+    expect(result.error).toBe('model_unverified'); expect(result.claudeModelObservationPending).toBeUndefined(); x.noActions();
+  });
+
+  test('Claude no-output pending never masks reply markup, alternative text, interrupted or blocked pages', async () => {
+    for (const mode of ['reply', 'hidden_reply', 'empty_reply_markup', 'alternative', 'deep', 'duplicate_root', 'interrupted', 'sign_in', 'quota', 'dialog']) {
+      const x = await pendingDetached();
+      if (['reply', 'hidden_reply', 'empty_reply_markup'].includes(mode)) {
+        x.f.response.append(x.f.answer);
+        if (mode === 'hidden_reply') x.f.answer.values.hidden = '';
+        if (mode === 'empty_reply_markup') x.f.answer.text = '';
+      }
+      if (mode === 'alternative') x.f.response.append(new Element('SECTION', {}, 'Alternative authored reply'));
+      if (mode === 'deep') {
+        let node = x.f.response;
+        for (let index = 0; index < 70; index++) { const child = new Element('DIV'); node.append(child); node = child; }
+      }
+      if (mode === 'duplicate_root') x.f.messages.append(new Element('DIV', { 'data-testid': 'assistant-message' }));
+      if (mode === 'interrupted') x.f.status.text = "Claude's response was interrupted.";
+      if (mode === 'sign_in') x.f.body.append(new Element('BUTTON', {}, 'Sign in'));
+      if (mode === 'quota') observedClaudeBanner(x.f);
+      if (mode === 'dialog') x.f.body.append(new Element('DIV', { role: 'dialog' }));
+      x.wake(); x.expire(); const result = await x.pending;
+      expect(result.error).toBe(mode === 'quota' ? 'website_usage_limit' : 'model_unverified');
+      expect(result.claudeModelObservationPending).toBeUndefined(); expect(result.text).toBeUndefined();
+      expect(result.modelEvidence).toBeUndefined(); x.noActions();
+    }
+  });
+
+  test('Claude no-output pending never converts clock rejection or restored wrong model into waiting', async () => {
+    for (const mode of ['clock', 'wrong_model', 'unknown_model', 'hidden_old_header']) {
+      const x = await pendingDetached();
+      if (mode === 'clock') x.rejectClock();
+      if (mode === 'wrong_model') { x.f.body.append(currentHeader('Sonnet 5')); x.wake(); }
+      if (mode === 'unknown_model') { x.f.body.append(currentHeader('Unknown 5')); x.wake(); }
+      if (mode === 'hidden_old_header') { x.picker.trigger.connected = true; x.picker.trigger.values.hidden = ''; x.expire(); }
+      const result = await x.pending;
+      expect(result.error).toBe(mode === 'wrong_model' ? 'model_mismatch' : 'model_unverified');
+      expect(result.claudeModelObservationPending).toBeUndefined(); expect(result.text).toBeUndefined(); x.noActions();
+    }
+  });
+
+  test('Claude no-output pending cannot unlatch observed rejection when the original context returns', async () => {
+    for (const mode of ['owner', 'body', 'model', 'popup']) {
+      const x = await pendingDetached(), owner = x.f.world.__computaModelOwner, body = x.f.userBody!.text;
+      const wrong = currentHeader('Sonnet 5'), popup = new Element('DIV', { role: 'dialog' });
+      if (mode === 'owner') x.f.world.__computaModelOwner = 'ffffffff-ffff-ffff-ffff-ffffffffffff';
+      if (mode === 'body') x.f.userBody!.text += ' foreign';
+      if (mode === 'model') x.f.body.append(wrong);
+      if (mode === 'popup') x.f.body.append(popup);
+      x.wake();
+      x.f.world.__computaModelOwner = owner; x.f.userBody!.text = body;
+      wrong.connected = false; popup.connected = false;
+      const result = await x.pending;
+      expect(result.error).toBe(mode === 'model' ? 'model_mismatch' : 'model_unverified');
+      expect(result.claudeModelObservationPending).toBeUndefined(); expect(result.text).toBeUndefined(); x.noActions();
+    }
+  });
+
+  test('Claude no-output pending latches transient semantic or traversal loss on delivered observations', async () => {
+    for (const mode of ['quota', 'sign_in', 'interrupted', 'reply', 'hidden_reply', 'empty_reply_markup',
+      'alternative', 'deep', 'unreadable']) {
+      const x = await pendingDetached();
+      let restore: () => void = () => {};
+      if (mode === 'quota') {
+        const banner = observedClaudeBanner(x.f); restore = () => { banner.container.connected = false; };
+      } else if (mode === 'sign_in') {
+        const signIn = new Element('BUTTON', {}, 'Sign in'); x.f.body.append(signIn);
+        restore = () => { signIn.connected = false; };
+      } else if (mode === 'interrupted') {
+        const text = x.f.status.text; x.f.status.text = "Claude's response was interrupted.";
+        restore = () => { x.f.status.text = text; };
+      } else if (['reply', 'hidden_reply', 'empty_reply_markup'].includes(mode)) {
+        x.f.answer.connected = true; x.f.response.append(x.f.answer);
+        if (mode === 'hidden_reply') x.f.answer.values.hidden = '';
+        if (mode === 'empty_reply_markup') x.f.answer.text = '';
+        restore = () => { x.f.response.replaceChildren(new Element('DIV')); };
+      } else if (mode === 'alternative') {
+        x.f.response.append(new Element('SECTION', {}, 'Alternative authored reply'));
+        restore = () => { x.f.response.replaceChildren(new Element('DIV')); };
+      } else if (mode === 'deep') {
+        let node = x.f.response;
+        for (let index = 0; index < 70; index++) { const child = new Element('DIV'); node.append(child); node = child; }
+        restore = () => { x.f.response.replaceChildren(new Element('DIV')); };
+      } else {
+        Object.defineProperty(x.f.response, 'childNodes', { configurable: true,
+          get: () => { throw new Error('synthetic unreadable traversal'); } });
+        restore = () => { delete (x.f.response as any).childNodes; };
+      }
+      x.wake(); // Deliver the failure while it exists, then remove its surface.
+      restore(); x.wake(); x.expire();
+      const result = await x.pending;
+      expect(result.error).toBe('model_unverified');
+      expect(result.claudeModelObservationPending).toBeUndefined();
+      expect(result.text).toBeUndefined(); expect(result.modelEvidence).toBeUndefined(); x.noActions();
+    }
+  });
+
+  test('Claude losing no-output eligibility does not reject a normally restored exact header and reply', async () => {
+    const x = await pendingDetached();
+    x.f.answer.connected = true; x.f.response.append(x.f.answer); x.f.controls.connected = true;
+    x.wake(); // A normal response revokes absence, not future positive proof.
+    const replacement = currentHeader(); x.f.body.append(replacement); x.wake();
+    const result = await x.pending;
+    expect(result).toMatchObject({ answerComplete: true, text: '{"type":"message","text":"OK"}',
+      firstUserFingerprint: x.before.firstUserFingerprint, modelEvidence: { selected: expectedModelChoice } });
+    expect(result.claudeModelObservationPending).toBeUndefined();
+    expect(replacement.clicks).toBe(0); x.noActions();
+  });
+
+  test('Claude no-output pending retains first-body, count, owner and mode rejection', async () => {
+    for (const mode of ['body', 'marker', 'owner', 'url', 'count', 'mode']) {
+      const x = await pendingDetached();
+      if (mode === 'body') x.f.userBody!.text = 'Changed ' + x.f.userBody!.text;
+      if (mode === 'marker') x.f.world.__computaModelFirstMarker = 'ffffffff-ffff-ffff-ffff-ffffffffffff';
+      if (mode === 'owner') x.f.world.__computaModelOwner = 'ffffffff-ffff-ffff-ffff-ffffffffffff';
+      if (mode === 'url') x.f.document.URL += '&foreign=true';
+      if (mode === 'count') x.f.appendUser('Foreign added message');
+      if (mode === 'mode') x.f.temporary(false);
+      x.wake(); const result = await x.pending;
+      expect(result.claudeModelObservationPending).toBeUndefined(); expect(result.error).toBe(mode === 'marker' ? 'model_unverified' : 'conversation_changed');
+      expect(result.text).toBeUndefined(); x.noActions();
+    }
+  });
+
+  test('Claude no-output pending cannot be used by editor, Send, selection or cleanup actions', async () => {
+    for (const action of ['prepare', 'insert', 'sendReady', 'submit', 'selectModel', 'discoverModels', 'stop']) {
+      const f = fixture('claude', { userPrompt: 'Bounded action control', response: false });
+      const picker = installObservedModelPicker(f, 'claude', Element); picker.selected('Opus 5');
+      const before = await f.run('inspect', { expectedModelChoice }); expect(before.firstUserVerified).toBe(true);
+      emptyShell(f); picker.trigger.connected = false;
+      const result = await f.run(action, { expectedModelChoice, allowClaudeModelObservationPending: true, prompt: 'Unsent' });
+      expect(result.claudeModelObservationPending).toBeUndefined(); expect(result.answerComplete).not.toBe(true);
+      expect(f.send.clicks).toBe(0); expect(picker.trigger.clicks).toBe(0); expect(f.composer.events).toHaveLength(0);
+    }
+  });
+
+  test('remount diagnostics distinguish streaming, complete and absent answer without admitting any of them', async () => {
+    for (const shape of ['streaming', 'complete', 'absent']) {
+      const x = await detached('inspect', f => {
+        f.answer.text = 'PRIVATE_REPLY_CANARY';
+        if (shape === 'streaming') { f.stop.connected = true; f.response.values['data-is-streaming'] = 'true'; }
+        if (shape === 'absent') f.answer.connected = false;
+      });
+      x.expire(); const result = await x.pending;
+      expect(result.error).toBe('model_unverified'); expect(result.text).toBeUndefined(); expect(result.modelEvidence).toBeUndefined();
+      const d = result.modelDiagnostic.remountObservation;
+      expect(Object.keys(d).sort()).toEqual(['elapsedMs', 'entry', 'kind', 'observations', 'surface', 'terminal']);
+      expect(d.kind).toBe('claude_remount_observation_v1');
+      expect(d.elapsedMs).toBeGreaterThanOrEqual(0); expect(d.elapsedMs).toBeLessThanOrEqual(10000);
+      expect(d.observations).toBeGreaterThanOrEqual(2); expect(d.observations).toBeLessThanOrEqual(1000);
+      expect(d.entry).toEqual(d.terminal);
+      expect(Object.keys(d.entry).sort()).toEqual(['answerComplete', 'busy', 'enabledCopies', 'interrupted', 'logicalAnswerCount', 'messageStreamingState', 'scopedCopies']);
+      expect(d.entry).toEqual({ logicalAnswerCount: shape === 'absent' ? 0 : 1,
+        busy: shape === 'streaming', interrupted: false, messageStreamingState: shape === 'absent' ? 'no_message' : shape === 'streaming' ? 'true' : 'false',
+        scopedCopies: shape === 'absent' ? 0 : 1, enabledCopies: shape === 'absent' ? 0 : 1,
+        answerComplete: shape === 'complete' });
+      expect(JSON.stringify(d)).not.toContain('PRIVATE_REPLY_CANARY');
+      expect(JSON.stringify(d).length).toBeLessThan(6000); x.noActions();
+    }
+  });
+
+  test('remount surface distinguishes missing, hidden and inert rendered reply subtrees', async () => {
+    for (const mode of ['missing', 'hidden_body', 'hidden_root', 'inert_root']) {
+      const x = await detached('inspect', f => {
+        if (mode === 'missing') f.response.replaceChildren(new Element('H2', {}, 'PRIVATE_HEADER'));
+        if (mode === 'hidden_body') f.answer.values.hidden = '';
+        if (mode === 'hidden_root') f.response.values.hidden = '';
+        if (mode === 'inert_root') f.response.values.inert = '';
+      });
+      x.expire(); const result = await x.pending, d = result.modelDiagnostic.remountObservation.surface;
+      expect(result.error).toBe('model_unverified'); expect(result.modelDiagnostic.readStage).toBe('trigger_remount_timeout');
+      expect(result.text).toBeUndefined(); expect(result.modelEvidence).toBeUndefined();
+      expect(d.kind).toBe('claude_remount_surface_v1');
+      expect(d.responseRoots).toMatchObject({ sampled: 1, truncated: false, shapesTruncated: false,
+        physical: mode === 'hidden_root' ? 0 : 1, visible: ['hidden_root', 'inert_root'].includes(mode) ? 0 : 1 });
+      expect(d.renderedReplies).toEqual({ sampled: mode === 'missing' ? 0 : 1, truncated: false,
+        physical: mode === 'inert_root' ? 1 : 0, visible: 0, enabled: 0 });
+      expect(d.replyTextNodes).toEqual(d.renderedReplies);
+      expect(d.responseRoots.shapes[0].children.some((child: any) => child.replyText)).toBe(mode !== 'missing');
+      expect(JSON.stringify(d)).not.toContain('PRIVATE_HEADER'); x.noActions();
+    }
+  });
+
+  test('remount surface records alternate direct children and only finite control categories', async () => {
+    const x = await detached('verifyModel', f => {
+      f.response.replaceChildren(new Element('SECTION', { role: 'region', class: 'PRIVATE_CLASS' }, 'PRIVATE_REPLY'),
+        new Element('PRIVATE-TAG', { role: 'PRIVATE_ROLE', 'data-testid': 'PRIVATE_TESTID', 'data-perf-reply-text': 'PRIVATE_ATTRIBUTE' }));
+      f.body.append(new Element('BUTTON', { 'aria-label': 'Model: PRIVATE_MODEL', hidden: '' }),
+        new Element('BUTTON', { 'aria-label': 'PRIVATE_CONTROL' }),
+        new Element('BUTTON', { 'aria-label': 'Model: Opus 5 High', hidden: '' }));
+      f.composer.disabled = true;
+      f.send.values['aria-disabled'] = 'true'; delete f.send.values['data-testid']; f.stop.connected = true;
+      Object.assign(f.document, { hidden: true, visibilityState: 'hidden', readyState: 'complete' });
+      Object.assign(f.window, { innerWidth: 1024, innerHeight: 768, scrollX: -4.5, scrollY: 12.9 });
+    });
+    x.expire(); const result = await x.pending, d = result.modelDiagnostic.remountObservation.surface;
+    expect(result.error).toBe('model_unverified'); expect(result.text).toBeUndefined();
+    expect(d.responseRoots.shapes[0].children).toEqual([
+      { tag: 'section', role: 'region', testID: 'absent', replyText: false, physical: true, visible: true,
+        textNodes: { utf16Units: 13, saturated: false, nodesVisited: 1, truncated: false } },
+      { tag: 'other', role: 'other', testID: 'other', replyText: true, physical: true, visible: true,
+        textNodes: { utf16Units: 0, saturated: false, nodesVisited: 0, truncated: false } }]);
+    expect(d.modelControls.prefix).toMatchObject({ sampled: 3, truncated: false, physical: 0, visible: 0, enabled: 0 });
+    expect(d.modelControls.labelKinds).toMatchObject({ recognized: 2, known_prefix_unrecognized: 1 });
+    expect(d.composers).toEqual({ sampled: 1, truncated: false, physical: 1, visible: 1, enabled: 0 });
+    expect(d.sendButtons.enabled).toBe(0); expect(d.stopButtons.enabled).toBe(1);
+    expect(d.document).toEqual({ hidden: true, visibility: 'hidden', ready: 'complete',
+      width: { value: 1024, saturated: false }, height: { value: 768, saturated: false },
+      scrollX: { value: -4, saturated: false }, scrollY: { value: 12, saturated: false } });
+    expect(JSON.stringify(d)).not.toContain('PRIVATE_'); x.noActions();
+  });
+
+  test('remount surface distinguishes empty placeholders from alternate text without reading text content', async () => {
+    for (const mode of ['empty', 'nonempty', 'long', 'deep']) {
+      const x = await detached('inspect', f => {
+        f.response.replaceChildren();
+        const child = new Element('SECTION'); f.response.append(child);
+        let leaf = child;
+        if (mode === 'deep') for (let index = 0; index < 80; index++) {
+          const next = new Element('DIV'); leaf.append(next); leaf = next;
+        }
+        if (mode !== 'empty') {
+          const text = new Element('#text', {}, mode === 'long' ? 'PRIVATE_TEXT_'.repeat(20000) : 'PRIVATE_TEXT_😀');
+          // Diagnostic must use CharacterData.length, never textContent/innerText.
+          Object.defineProperty(text, 'textContent', { get: () => { throw new Error('RAW_TEXT_READ'); } });
+          leaf.append(text);
+        }
+      });
+      x.expire(); const result = await x.pending, d = result.modelDiagnostic.remountObservation.surface;
+      expect(result.error).toBe('model_unverified'); expect(result.text).toBeUndefined();
+      const root = d.responseRoots.shapes[0], child = root.children[0];
+      for (const shape of [root, child]) {
+        expect(shape.textNodes).toMatchObject({ utf16Units: mode === 'long' ? 180201 : mode === 'nonempty' ? 15 : 0,
+          saturated: mode === 'long', truncated: mode === 'deep' });
+        expect(shape.textNodes.nodesVisited).toBeLessThanOrEqual(64);
+      }
+      expect(d.renderedReplies.sampled).toBe(0);
+      expect(JSON.stringify(d)).not.toContain('PRIVATE_TEXT'); expect(JSON.stringify(d)).not.toContain('RAW_TEXT_READ'); x.noActions();
+    }
+  });
+
+  test('remount surface is a failure-time reread and can describe a rejected replacement', async () => {
+    const x = await detached();
+    x.f.response.replaceChildren(new Element('DIV', { 'data-testid': 'message-actions' }));
+    x.f.body.append(currentHeader('Sonnet 5')); x.wake();
+    const result = await x.pending, d = result.modelDiagnostic.remountObservation.surface;
+    expect(result.error).toBe('model_mismatch'); expect(result.modelDiagnostic.readStage).toBe('trigger_remount_rejected');
+    expect(result.modelDiagnostic.remountObservation.entry.logicalAnswerCount).toBe(1);
+    expect(d.renderedReplies.sampled).toBe(0); expect(d.modelControls.prefix.visible).toBe(1);
+    expect(d.responseRoots.shapes[0].children[0].testID).toBe('message-actions');
+    expect(result.text).toBeUndefined(); expect(result.modelEvidence).toBeUndefined(); x.noActions();
+  });
+
+  test('remount surface exceptions preserve the original error, clock and no actions', async () => {
+    const x = await detached();
+    Object.defineProperty(x.f.document, 'hidden', { get: () => { throw new Error('PRIVATE_DIAGNOSTIC_FAILURE'); } });
+    x.expire(); const result = await x.pending;
+    expect(result.error).toBe('model_unverified'); expect(result.modelDiagnostic.readStage).toBe('trigger_remount_timeout');
+    expect(result.modelDiagnostic.remountObservation.surface).toBeNull();
+    expect(result.modelDiagnostic.remountObservation.terminal.answerComplete).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_DIAGNOSTIC_FAILURE'); x.noActions();
+  });
+
+  test('remount surface discards the inventory if ownership changes during the projection', async () => {
+    const x = await detached();
+    Object.defineProperty(x.f.document, 'hidden', { get: () => {
+      x.f.world.__computaModelOwner = 'PRIVATE_FOREIGN_OWNER'; return false;
+    } });
+    x.expire(); const result = await x.pending;
+    expect(result.error).toBe('conversation_changed'); expect(result.detail).toBe('first_user_message');
+    expect(result.text).toBeUndefined(); expect(result.modelEvidence).toBeUndefined(); x.noActions();
+  });
+
+  test('remount surface caps every inventory and shape and fits the existing native diagnostic budget', async () => {
+    const x = await detached('inspect', f => {
+      f.response.replaceChildren();
+      for (let root = 0; root < 70; root++) {
+        const node = root === 0 ? f.response : new Element('DIV', { 'data-testid': 'assistant-message' });
+        for (let child = 0; child < 10; child++) node.append(new Element('SECTION', {
+          role: 'presentation', 'data-testid': 'response-status-announcer', 'data-perf-reply-text': 'PRIVATE_VALUE', class: 'PRIVATE_CLASS' }));
+        if (root !== 0) f.messages.append(node);
+        f.body.append(new Element('BUTTON', { 'aria-label': 'Model: PRIVATE_' + root, hidden: '' }),
+          new Element('DIV', { 'data-testid': 'chat-input', contenteditable: 'true', role: 'textbox', hidden: '' }),
+          new Element('BUTTON', { 'aria-label': 'Send message', 'data-testid': 'chat-input-send', hidden: '' }),
+          new Element('BUTTON', { 'aria-label': 'Stop response', hidden: '' }));
+      }
+      Object.assign(f.document, { hidden: false, visibilityState: 'PRIVATE_VISIBILITY', readyState: 'PRIVATE_READY' });
+      Object.assign(f.window, { innerWidth: Infinity, innerHeight: 900000, scrollX: -900000, scrollY: NaN });
+    });
+    x.expire(); const result = await x.pending, d = result.modelDiagnostic.remountObservation.surface;
+    expect(result.error).toBe('model_unverified'); expect(result.text).toBeUndefined();
+    for (const sample of [d.composers, d.stopButtons, d.sendButtons, d.responseRoots, d.renderedReplies, d.replyTextNodes, d.modelControls.labeledScan])
+      expect(sample).toMatchObject({ sampled: 64, truncated: true });
+    expect(d.modelControls.prefix.truncated).toBe(true);
+    expect(d.responseRoots.shapesTruncated).toBe(true); expect(d.responseRoots.shapes).toHaveLength(2);
+    for (const root of d.responseRoots.shapes) { expect(root.childrenTruncated).toBe(true); expect(root.children).toHaveLength(6); }
+    expect(d.document).toMatchObject({ visibility: 'other', ready: 'other',
+      width: { value: null, saturated: false }, height: { value: 100000, saturated: true },
+      scrollX: { value: -100000, saturated: true }, scrollY: { value: null, saturated: false } });
+    expect(JSON.stringify(d)).not.toContain('PRIVATE_');
+    expect(new TextEncoder().encode(JSON.stringify(d)).length).toBeLessThan(6000);
+    expect(new TextEncoder().encode(JSON.stringify(result.modelDiagnostic)).length).toBeLessThan(16384);
+    x.noActions();
+  });
+
+  test('remount diagnostics preserve entry separately from the later completion reread', async () => {
+    const x = await detached('inspect', f => { f.stop.connected = true; f.response.values['data-is-streaming'] = 'true'; });
+    x.f.stop.connected = false; x.f.response.values['data-is-streaming'] = 'false'; x.wake();
+    x.expire(); const result = await x.pending;
+    expect(result.error).toBe('model_unverified'); expect(result.text).toBeUndefined();
+    expect(result.modelDiagnostic.remountObservation.entry).toMatchObject({ busy: true, answerComplete: false, messageStreamingState: 'true' });
+    expect(result.modelDiagnostic.remountObservation.terminal).toMatchObject({ busy: false, answerComplete: true, messageStreamingState: 'false' });
+    x.noActions();
+  });
+
+  test('remount diagnostic exceptions become unknown while the original timeout and actions are preserved', async () => {
+    for (const phase of ['entry', 'terminal']) {
+      const failRead = (f: ReturnType<typeof fixture>) => {
+        const original = f.response.getAttribute.bind(f.response);
+        f.response.getAttribute = name => { if (name === 'data-is-streaming') throw new Error('PRIVATE_DIAGNOSTIC_CANARY'); return original(name); };
+      };
+      const x = await detached('inspect', phase === 'entry' ? failRead : undefined);
+      if (phase === 'terminal') failRead(x.f);
+      x.expire(); const result = await x.pending;
+      expect(result.error).toBe('model_unverified'); expect(result.modelDiagnostic.readStage).toBe('trigger_remount_timeout');
+      expect(result.text).toBeUndefined(); expect(result.modelEvidence).toBeUndefined();
+      const d = result.modelDiagnostic.remountObservation;
+      expect(d.terminal).toBeNull();
+      if (phase === 'entry') expect(d.entry).toBeNull(); else expect(d.entry.answerComplete).toBe(true);
+      expect(JSON.stringify(d)).not.toContain('PRIVATE_DIAGNOSTIC_CANARY'); x.noActions();
+    }
+  });
+
+  test('remount diagnostics do not inspect completion after the original owned context is lost', async () => {
+    let reads = 0;
+    const x = await detached('inspect', f => {
+      const original = f.response.getAttribute.bind(f.response);
+      f.response.getAttribute = name => { if (name === 'data-is-streaming') reads++; return original(name); };
+    });
+    const entryReads = reads; expect(entryReads).toBeGreaterThan(0);
+    x.f.world.__computaModelOwner = 'PRIVATE_FOREIGN_OWNER'; x.wake();
+    const result = await x.pending;
+    expect(result.error).toBe('conversation_changed'); expect(result.detail).toBe('first_user_message');
+    expect(reads).toBe(entryReads); expect(result.text).toBeUndefined(); expect(result.modelEvidence).toBeUndefined();
+    x.noActions();
+  });
+
+  test('remount diagnostic elapsed time is bounded without extending the original clock', async () => {
+    const x = await detached(); const originalNow = Date.now, future = originalNow() + 30000;
+    try {
+      Date.now = () => future;
+      x.expire(); const result = await x.pending;
+      expect(result.error).toBe('model_unverified'); expect(result.modelDiagnostic.readStage).toBe('trigger_remount_timeout');
+      expect(result.modelDiagnostic.remountObservation.elapsedMs).toBe(10000);
+      expect(result.text).toBeUndefined(); x.noActions();
+    } finally { Date.now = originalNow; }
+  });
+
+  test('remount diagnostic enums and counters stay finite without copying page attributes', async () => {
+    const x = await detached('verifyModel', f => { f.response.values['data-is-streaming'] = 'PRIVATE_ATTRIBUTE_CANARY'; });
+    for (let i = 0; i < 1005; i++) x.wake();
+    x.expire(); const result = await x.pending;
+    expect(result.error).toBe('model_unverified'); expect(result.modelDiagnostic.remountObservation.observations).toBe(1000);
+    expect(result.modelDiagnostic.remountObservation.entry.messageStreamingState).toBe('other');
+    expect(result.modelDiagnostic.remountObservation.terminal.messageStreamingState).toBe('other');
+    expect(JSON.stringify(result.modelDiagnostic.remountObservation)).not.toContain('PRIVATE_ATTRIBUTE_CANARY');
+    expect(result.text).toBeUndefined(); x.noActions();
+  });
+
+  test('a new exact current header after Send supplies fresh proof without any picker or editor action', async () => {
+    for (const action of ['inspect', 'verifyModel']) {
+      const x = await detached(action), replacement = currentHeader(); x.f.body.append(replacement); x.wake();
+      const result = await x.pending;
+      expect(result).toMatchObject({ firstUserVerified: true, firstUserFingerprint: x.before.firstUserFingerprint,
+        modelEvidence: { selected: expectedModelChoice, verification: 'website_selection', source: 'model_picker_label' } });
+      if (action === 'inspect') expect(result).toMatchObject({ answerComplete: true, text: '{"type":"message","text":"OK"}' });
+      expect(result.modelDiagnostic?.remountObservation).toBeUndefined();
+      expect(x.f.world.__computaClaudeLastModelTrigger.node).toBe(replacement);
+      expect(replacement.clicks).toBe(0); x.noActions();
+      x.expire(); await Bun.sleep(0); x.noActions();
+    }
+  });
+
+  test('the old diagnostic node is never promoted and a missing replacement or rejected clock fails closed', async () => {
+    for (const kind of ['deadline', 'clock_rejected', 'header_after_deadline']) {
+      const x = await detached();
+      // Even a still-recognized old label cannot qualify a detached node.
+      expect(x.f.world.__computaClaudeLastModelTrigger.node.getAttribute('aria-label')).toContain('Opus 5');
+      if (kind === 'clock_rejected') x.rejectClock(); else x.expire();
+      if (kind === 'header_after_deadline') { await Promise.resolve(); await Promise.resolve(); x.f.body.append(currentHeader()); x.wake(); }
+      const result = await x.pending;
+      expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+      expect(result.modelDiagnostic.lastModelTrigger).toMatchObject({ connected: false, physical: false, visible: false });
+      x.noActions();
+    }
+  });
+
+  test('mismatch, unknown, disabled, ambiguous or open replacement controls never become model proof', async () => {
+    for (const kind of ['mismatch', 'unknown', 'disabled', 'duplicate', 'expanded']) {
+      const x = await detached(), replacement = currentHeader(kind === 'mismatch' ? 'Haiku 5.5' : 'Opus 5');
+      if (kind === 'unknown') replacement.values['aria-label'] = 'Model: unrecognized model';
+      if (kind === 'disabled') replacement.disabled = true;
+      if (kind === 'expanded') replacement.values['aria-expanded'] = 'true';
+      x.f.body.append(replacement); if (kind === 'duplicate') x.f.body.append(currentHeader()); x.wake();
+      const result = await x.pending;
+      expect(result.error).toBe(kind === 'mismatch' ? 'model_mismatch' : 'model_unverified');
+      expect(result.modelEvidence).toBeUndefined(); expect(replacement.clicks).toBe(0); x.noActions();
+    }
+  });
+
+  test('owner, route, first-user and foreign-popup negatives stay latched even if restored before the await resumes', async () => {
+    for (const kind of ['owner', 'route', 'frame', 'first_text', 'first_identity', 'first_count', 'submitted', 'first_marker', 'first_proof', 'temporary', 'foreign_menu', 'foreign_dialog', 'mismatch']) {
+      const x = await detached(), originalOwner = x.f.world.__computaModelOwner, originalURL = x.f.document.URL;
+      const originalText = x.f.userBody!.text, wrapper = x.f.userRoot!.parentElement!, originalID = wrapper.values.id;
+      const originalMessages = [...x.f.messages.children], originalTop = x.f.window.top;
+      const originalProof = x.f.world.__computaModelFirstProof, originalMarker = x.f.world.__computaModelFirstMarker;
+      const foreign = new Element('DIV', { role: kind === 'foreign_dialog' ? 'dialog' : 'menu' });
+      const wrong = currentHeader('Haiku 5.5');
+      if (kind === 'owner') x.f.world.__computaModelOwner = '00000000-0000-4000-8000-000000000009';
+      if (kind === 'route') x.f.document.URL = x.f.origin + '/chat/foreign?incognito';
+      if (kind === 'frame') x.f.window.top = {};
+      if (kind === 'submitted') x.f.world.__computaModelFirstSubmitted = false;
+      if (kind === 'first_marker') x.f.world.__computaModelFirstMarker = '00000000-0000-4000-8000-000000000009';
+      if (kind === 'first_proof') x.f.world.__computaModelFirstProof = { ...originalProof };
+      if (kind === 'first_text') x.f.userBody!.text += ' changed';
+      if (kind === 'first_identity') wrapper.values.id = 'foreign-first-message';
+      if (kind === 'first_count') x.f.messages.append(new Element('DIV', { 'data-testid': 'user-message' }, 'foreign'));
+      if (kind === 'temporary') x.f.badge.connected = false;
+      if (kind.startsWith('foreign_')) x.f.body.append(foreign);
+      if (kind === 'mismatch') x.f.body.append(wrong);
+      x.wake();
+      x.f.world.__computaModelOwner = originalOwner; x.f.document.URL = originalURL; x.f.window.top = originalTop;
+      x.f.world.__computaModelFirstSubmitted = true; x.f.world.__computaModelFirstMarker = originalMarker;
+      x.f.world.__computaModelFirstProof = originalProof;
+      x.f.userBody!.text = originalText; wrapper.values.id = originalID; x.f.badge.connected = true;
+      if (kind === 'first_count') x.f.messages.children = originalMessages;
+      foreign.connected = false; wrong.connected = false;
+      x.f.body.append(currentHeader()); x.wake();
+      const result = await x.pending;
+      expect(result.error).toBe(kind === 'mismatch' ? 'model_mismatch' : 'model_unverified');
+      expect(result.modelEvidence).toBeUndefined(); x.noActions();
+    }
+  });
+
+  test('a replacement losing proof before the ordinary loop cannot open a picker', async () => {
+    const x = await detached(), replacement = currentHeader();
+    let reads = 0;
+    const get = replacement.getAttribute.bind(replacement);
+    // The observer sees exact evidence; its last closed-state read invalidates
+    // the label before the independent ordinary read, without a DOM action.
+    replacement.getAttribute = (name: string) => {
+      const result = get(name);
+      if (name === 'data-state' && ++reads === 1) replacement.values['aria-label'] = 'Model: unknown';
+      return result;
+    };
+    x.f.body.append(replacement); x.wake();
+    const result = await x.pending;
+    expect(result.error).toBe('model_unverified'); expect(replacement.clicks).toBe(0); x.noActions();
+  });
+
+  test('final close await rechecks exact replacement, current proof and the original deadline', async () => {
+    for (const kind of ['detached', 'replaced', 'unknown', 'mismatch', 'disabled', 'menu', 'scan_limit', 'deadline']) {
+      const x = await detached(), replacement = currentHeader();
+      let tracked = false, mutated = false, trackedValue: any;
+      const realNow = Date.now;
+      Object.defineProperty(x.f.world, '__computaModelReadUI', { configurable: true,
+        get: () => trackedValue, set: value => {
+          trackedValue = value;
+          if (tracked) return;
+          tracked = true;
+          // Tracking happens in the ordinary fresh loop, immediately before
+          // closeOwned. A microtask runs only when its await actually yields.
+          queueMicrotask(() => {
+            mutated = true;
+            if (kind === 'detached') replacement.connected = false;
+            if (kind === 'replaced') { replacement.connected = false; x.f.body.append(currentHeader()); }
+            if (kind === 'unknown') replacement.values['aria-label'] = 'Model: unknown';
+            if (kind === 'mismatch') { replacement.values['aria-label'] = 'Model: Haiku 5.5 High'; replacement.children[0].text = 'Haiku 5.5'; }
+            if (kind === 'disabled') replacement.disabled = true;
+            if (kind === 'menu') {
+              replacement.values['aria-controls'] = 'late-owned-popup'; replacement.values['aria-expanded'] = 'true';
+              x.f.body.append(new Element('DIV', { role: 'menu', id: 'late-owned-popup' }));
+            }
+            if (kind === 'scan_limit') for (let i=0;i<256;i++) x.f.body.append(new Element('BUTTON', {'aria-label':'Unrelated control'}));
+            if (kind === 'deadline') Date.now = () => realNow() + 10_000;
+          });
+        } });
+      try {
+        x.f.body.append(replacement); x.wake();
+        const result = await x.pending;
+        expect(tracked).toBe(true); expect(mutated).toBe(true);
+        expect(result.error).toBe(kind === 'mismatch' ? 'model_mismatch' : 'model_unverified');
+        expect(result.text).toBeUndefined(); expect(replacement.clicks).toBe(0); x.noActions();
+        expect(x.f.body.querySelector('[id="late-owned-popup"]')?.events ?? []).toHaveLength(0);
+      } finally { Date.now = realNow; }
+    }
+  });
+
+  test('a saturated trigger scan cannot start or continue the detached-header wait', async () => {
+    const fillScan = (f: any) => {
+      const noise = new Element('DIV');
+      for (let i=0;i<256;i++) noise.append(new Element('BUTTON', {'aria-label':'Unrelated control'}));
+      noise.parentElement = f.body; f.body.children.unshift(noise);
+    };
+    const f = fixture('claude', {userPrompt:'Saturated scan control'}), picker = installObservedModelPicker(f, 'claude', Element);
+    picker.selected('Opus 5'); expect((await f.run('inspect', {expectedModelChoice})).error).toBeUndefined();
+    picker.trigger.connected = false; fillScan(f);
+    const before = await f.run('inspect', {expectedModelChoice});
+    expect(before.error).toBe('model_unverified'); expect(before.modelEvidence).toBeUndefined();
+    expect(before.modelDiagnostic.readStage).toBe('initial_observation');
+    expect(before.modelDiagnostic.lastModelTrigger.triggerScanAtLimit).toBe(true);
+    expect(f.delays).toHaveLength(0); expect(f.send.clicks).toBe(0); expect(picker.trigger.clicks).toBe(0);
+    const x = await detached(); fillScan(x.f); x.wake();
+    const during = await x.pending;
+    expect(during.error).toBe('model_unverified'); expect(during.modelEvidence).toBeUndefined();
+    expect(during.modelDiagnostic.readStage).toBe('trigger_remount_rejected');
+    expect(during.modelDiagnostic.lastModelTrigger.triggerScanAtLimit).toBe(true); x.noActions();
+  });
+
+  test('missing, malformed, foreign or unreadable remembered records cannot acquire waiting privilege', async () => {
+    for (const allowClaudeModelObservationPending of [false, true]) for (const kind of ['missing', 'primitive', 'extra_key', 'node_missing', 'node_forged', 'owner', 'document', 'url', 'node_getter', 'record_getter']) {
+      const f = fixture('claude', { userPrompt: 'Record scope control' }), picker = installObservedModelPicker(f, 'claude', Element);
+      picker.selected('Opus 5'); expect((await f.run('inspect', { expectedModelChoice })).error).toBeUndefined();
+      if (allowClaudeModelObservationPending) emptyShell(f);
+      picker.trigger.connected = false;
+      const record = f.world.__computaClaudeLastModelTrigger;
+      if (kind === 'missing') delete f.world.__computaClaudeLastModelTrigger;
+      if (kind === 'primitive') f.world.__computaClaudeLastModelTrigger = 'private poison';
+      if (kind === 'extra_key') record.unrecognized = true;
+      if (kind === 'node_missing') delete record.node;
+      if (kind === 'node_forged') record.node = { isConnected: false };
+      if (kind === 'owner') record.owner = '00000000-0000-4000-8000-000000000009';
+      if (kind === 'document') record.document = { URL: f.document.URL };
+      if (kind === 'url') record.url += '&foreign';
+      if (kind === 'node_getter') Object.defineProperty(record, 'node', { get: () => { throw new Error('private getter'); } });
+      if (kind === 'record_getter') Object.defineProperty(f.world, '__computaClaudeLastModelTrigger', { get: () => { throw new Error('private getter'); } });
+      const result = await f.run('inspect', { expectedModelChoice, allowClaudeModelObservationPending });
+      expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+      expect(result.claudeModelObservationPending).toBeUndefined();
+      expect(f.delays).toHaveLength(0); expect(f.send.clicks).toBe(0); expect(picker.trigger.clicks).toBe(0);
+    }
+  });
+
+  test('absence before Send or during selection and final verification does not acquire a new waiting privilege', async () => {
+    for (const action of ['inspect', 'verifyModel', 'prepare', 'selectModel']) {
+      const f = fixture('claude'), picker = installObservedModelPicker(f, 'claude', Element);
+      picker.selected('Opus 5'); picker.trigger.connected = false;
+      const result = await f.run(action, { expectedModelChoice, modelChoice: expectedModelChoice });
+      expect(result.error === 'model_unverified' || result.pending === true).toBe(true);
+      expect(f.delays).toHaveLength(0); expect(f.send.clicks).toBe(0);
+    }
+    const f = fixture('claude', { userPrompt: 'Final guard control' }), picker = installObservedModelPicker(f, 'claude', Element);
+    picker.selected('Opus 5'); let removed = false;
+    f.window.webkit.messageHandlers.computaModelDiagnostic = { postMessage: ({ phase }: any) => {
+      if (phase === 'final_model_guard') { picker.trigger.connected = false; removed = true; }
+    } };
+    const result = await f.run('inspect', { expectedModelChoice, operationID });
+    expect(removed).toBe(true); expect(result.error).toBe('model_unverified');
+    expect(f.delays).toHaveLength(0); expect(f.send.clicks).toBe(0);
+  });
+});
+
+
+describe('Claude early user-count failure diagnostics', () => {
+  const diagnostic = (result: any) => {
+    expect(result.error).toBe('conversation_changed'); expect(result.detail).toBe('user_count');
+    expect(result.text).toBeUndefined(); expect(result.firstUserVerified).toBeUndefined();
+    expect(result.modelEvidence).toBeUndefined();
+    const value = JSON.parse(result.debugStructure);
+    const keys = ['expectedCounts', 'kind', 'provider', 'userCount', 'userCountSaturated'];
+    if (value.kind === 'claude_missing_user_v1') keys.push('priorRoot', 'warningHook');
+    expect(Object.keys(value).sort()).toEqual(keys.sort());
+    expect(result.debugStructure.length).toBeLessThan(256);
+    return value;
+  };
+  test('zero and duplicate counts are captured at the unchanged guard, including a hidden sibling', async () => {
+    for (const count of [0, 2]) {
+      const f = fixture('claude', { userPrompt: 'PRIVATE_USER_COUNT_BODY' });
+      expect((await f.run()).firstUserVerified).toBe(true);
+      if (count === 0) {
+        f.messages.children = f.messages.children.filter(node => !node.contains(f.userRoot!));
+        f.userRoot!.connected = false;
+      }
+      else f.messages.append(new Element('DIV', { 'data-testid': 'user-message', hidden: '' }, 'PRIVATE_DUPLICATE_BODY'));
+      const original = f.document.querySelectorAll; let userReads = 0;
+      f.document.querySelectorAll = (selector: string) => { if (selector === '[data-testid="user-message"]') userReads++; return original(selector); };
+      Object.defineProperty(f.userRoot!, 'innerText', { get: () => { throw new Error('No body read allowed on count failure'); } });
+      const result = await f.run('inspect');
+      expect(diagnostic(result)).toEqual({ kind: count === 0 ? 'claude_missing_user_v1' : 'claude_user_count_v1',
+        provider: 'claude', userCount: count, userCountSaturated: false, expectedCounts: [1],
+        ...(count === 0 ? { priorRoot: 'detached', warningHook: 'none' } : {}) });
+      expect(userReads).toBe(1);
+      expect(result.debugStructure).not.toContain('PRIVATE_');
+      expect(f.send.clicks).toBe(0); expect(f.composer.events).toHaveLength(0); expect(f.toggle.clicks).toBe(0);
+    }
+  });
+  test('lost marker and warning-hook shape stay diagnostic, without scanning any page text or performing actions', async () => {
+    for (const kind of ['plain', 'warning', 'authored', 'lost-user', 'duplicate', 'hidden', 'outside', 'weak-gone', 'wrong-digest', 'wrong-marker', 'reader-error']) {
+      const f = fixture('claude', { userPrompt: 'PRIVATE_ROOT_BODY' });
+      expect((await f.run()).firstUserVerified).toBe(true);
+      const root = f.userRoot!, warning = new Element('DIV', {'data-testid': 'asl3-stop-warning'});
+      delete root.values['data-testid'];
+      if (kind === 'warning' || kind === 'duplicate' || kind === 'hidden') f.body.append(warning);
+      if (kind === 'authored') f.answer.append(warning);
+      if (kind === 'lost-user') root.append(warning);
+      if (kind === 'duplicate') f.body.append(warning.cloneNode(true));
+      if (kind === 'hidden') warning.values.hidden = '';
+      if (kind === 'outside') f.messages.children = f.messages.children.filter(node => !node.contains(root));
+      if (kind === 'weak-gone') f.world.__computaModelFirstProof.diagnosticRoot = {deref: () => undefined};
+      for (const node of [root, warning]) {
+        for (const name of ['innerText', 'textContent']) Object.defineProperty(node, name, {get: () => {
+          throw new Error('PRIVATE_TEXT_WAS_READ');
+        }});
+      }
+      if (kind === 'reader-error') {
+        const original = f.document.querySelectorAll;
+        f.document.querySelectorAll = (selector: string) => {
+          if (selector.includes('asl3-stop-warning')) throw new Error('PRIVATE_EXCEPTION');
+          return original(selector);
+        };
+      }
+      const overrides = kind === 'wrong-digest' ? {expectedFirstUserFingerprint: 'f'.repeat(64)}
+        : kind === 'wrong-marker' ? {expectedFirstUserMarker: 'PRIVATE_MARKER'} : {};
+      const result = await f.run('inspect', overrides), packet = diagnostic(result);
+      if (['wrong-digest','wrong-marker','reader-error'].includes(kind)) expect(packet.kind).toBe('claude_user_count_v1');
+      else {
+        expect(packet.priorRoot).toBe(kind === 'outside' ? 'outside_tree' : kind === 'weak-gone' ? 'unavailable' : 'marker_lost');
+        expect(packet.warningHook).toBe(kind === 'warning' ? 'single_visible' : kind === 'duplicate' ? 'ambiguous'
+          : ['authored','lost-user','hidden','weak-gone'].includes(kind) ? 'unverified' : 'none');
+      }
+      expect(result.debugStructure).not.toContain('PRIVATE'); expect(result.answerComplete).toBeUndefined();
+      expect(result.temporary).toBeUndefined(); expect(result.stopped).toBeUndefined();
+      expect(f.send.clicks).toBe(0); expect(f.toggle.clicks).toBe(0); expect(f.composer.events).toHaveLength(0);
+    }
+  });
+  test('nested user markers retain deduplication and allowed pending counts produce no failure diagnostic', async () => {
+    const bound = fixture('claude', { userPrompt: 'Bounded synthetic count fixture' });
+    const before = await bound.run();
+    bound.userRoot!.append(new Element('DIV', { 'data-testid': 'user-message' }));
+    const nested = await bound.run();
+    expect(nested.firstUserFingerprint).toBe(before.firstUserFingerprint); expect(nested.userCount).toBe(1);
+    expect(nested.error).toBeUndefined(); expect(nested.debugStructure).toBe('');
+    const fresh = fixture('claude');
+    const pending = await fresh.run('inspect', { expectedUserCounts: [0, 1] });
+    expect(pending.error).toBeUndefined(); expect(pending.userCount).toBe(0); expect(pending.debugStructure).toBe('');
+    expect(bound.send.clicks).toBe(0); expect(fresh.send.clicks).toBe(0);
+  });
+  test('malformed or unbounded expected-count inputs are unknown without copying them', async () => {
+    for (const expectedUserCounts of [undefined, 'PRIVATE_EXPECTED', [true], ['PRIVATE_EXPECTED'], [1.5], [-1], [1001], [1, 2, 3, 4]]) {
+      const f = fixture('claude'); const result = await f.run('inspect', { expectedUserCounts });
+      expect(diagnostic(result)).toEqual({ kind: 'claude_user_count_v1', provider: 'claude', userCount: 0,
+        userCountSaturated: false, expectedCounts: null });
+      expect(result.debugStructure).not.toContain('PRIVATE_'); expect(f.send.clicks).toBe(0);
+    }
+    const f = fixture('claude');
+    expect(diagnostic(await f.run('inspect', { expectedUserCounts: [] })).expectedCounts).toEqual([]);
+  });
+  test('large observed counts explicitly saturate instead of presenting the cap as exact', async () => {
+    const f = fixture('claude');
+    for (let i = 0; i < 1001; i++) f.messages.append(new Element('DIV', { 'data-testid': 'user-message' }));
+    expect(diagnostic(await f.run())).toEqual({ kind: 'claude_user_count_v1', provider: 'claude', userCount: 1000,
+      userCountSaturated: true, expectedCounts: [0] });
+    expect(f.send.clicks).toBe(0);
+  });
+  test('a throwing diagnostic input preserves the same rejection without leaking the exception', async () => {
+    const f = fixture('claude'); const expectedUserCounts = [1];
+    expectedUserCounts.every = () => { throw new Error('PRIVATE_DIAGNOSTIC_EXCEPTION'); };
+    expect(await f.run('inspect', { expectedUserCounts })).toEqual({ error: 'conversation_changed', detail: 'user_count' });
+    expect(f.send.clicks).toBe(0);
+  });
+});
+
+describe('native-turn Haiku 5.5 Incognito pilot', () => {
+  const choice = { key: 'Haiku 5.5', label: 'Haiku 5.5' };
+  const marker = '0949270b-f2a5-4ee0-8440-39ba7a4e4595';
+  const second = 'Full input with matched tool output.\n\nComputa session marker: ' + marker;
+  const pin = (sequence: number, value: string) => ({
+    sequence, fingerprint: new Bun.CryptoHasher('sha256').update(value.normalize('NFC').trim()).digest('hex'),
+  });
+  function setup() {
+    const f = fixture('claude'), picker = installObservedModelPicker(f, 'claude', Element);
+    picker.selected(choice.label);
+    const proofs = [pin(1, outbound), pin(2, second)];
+    function ordered(node: Element) {
+      Object.defineProperty(node, 'compareDocumentPosition', { value(other: Element) {
+        const elements = f.html.descendants();
+        return elements.includes(node) && elements.includes(other) && elements.indexOf(other) > elements.indexOf(node) ? 4 : 2;
+      } });
+    }
+    f.send.onClick = () => {
+      const root = f.appendUser(f.composer.innerText); ordered(root); f.composer.replaceChildren();
+    };
+    function answer(ordinal: number) {
+      const article = ordinal === 1 ? f.article : f.article.cloneNode(true);
+      const body = article.querySelector('[data-perf-reply-text]')!;
+      body.text = ordinal === 1 ? '{"type":"message","text":"first"}' : '{"type":"message","text":"second"}';
+      ordered(body); f.messages.append(article);
+    }
+    async function run(action: string, seq: number, users: number, extra: Record<string, unknown> = {}) {
+      const editor = ['insert','submit','sendReady'].includes(action);
+      const pins = proofs.slice(0, editor && action !== 'submit' ? seq - 1 : seq);
+      return await f.run(action, { claudeRetainedTurn: true, expectedModelChoice: choice,
+        expectedUserCounts: [users], expectedSubmissionProofs: pins,
+        submissionSequence: seq, submissionMarker: seq === 1 ? firstMarker : marker,
+        ...(editor ? {prompt: seq === 1 ? outbound : second} : {}), ...extra });
+    }
+    async function submitFirst() {
+      expect(await run('insert', 1, 0)).toMatchObject({inserted: true});
+      expect(await run('sendReady', 1, 0)).toMatchObject({sendReady: true});
+      expect(await run('submit', 1, 0)).toMatchObject({submitted: true});
+      answer(1);
+      expect(await run('inspect', 1, 1)).toMatchObject({submissionProof: proofs[0], answerComplete: true});
+    }
+    return { f, picker, proofs, run, answer, submitFirst };
+  }
+  test('two single Sends append separate exact users and scoped completed replies', async () => {
+    const { f, proofs, run, answer, submitFirst } = setup();
+    await submitFirst();
+    expect(await run('insert', 2, 1)).toMatchObject({inserted:true, submissionProof:proofs[0]});
+    expect(await run('sendReady', 2, 1)).toMatchObject({sendReady:true});
+    expect(await run('submit', 2, 1)).toMatchObject({submitted:true});
+    answer(2);
+    expect(await run('inspect', 2, 2)).toMatchObject({submissionProof:proofs[1], responseCount:2, answerComplete:true});
+    expect((await run('submit', 2, 2)).error).toBeDefined();
+    expect(f.send.clicks).toBe(2);
+  });
+  test('native uppercase marker and WebKit block spacing still require an exact literal editor', async () => {
+    for (const suffix of ['', '\n', '\n\n']) {
+      const { f, run } = setup(), upper = firstMarker.toUpperCase();
+      const input = {submissionMarker:upper, expectedFirstUserMarker:upper, prompt:prompt + '\n\nComputa session marker: ' + upper};
+      expect(await run('insert', 1, 0, input)).toMatchObject({inserted:true});
+      Object.defineProperty(f.composer, 'innerText', {get: () => input.prompt + suffix});
+      expect(await run('sendReady', 1, 0, input)).toMatchObject({sendReady:true});
+      f.composer.children[0].append(new Element('#text', {}, '\n'));
+      expect((await run('sendReady', 1, 0, input)).error).toBeDefined();
+      expect(f.send.clicks).toBe(0);
+    }
+  });
+  function providerAutoParagraph(f: ReturnType<typeof fixture>) {
+    const paragraph = f.composer.children[0];
+    const attributeFacts = Object.getOwnPropertyDescriptor(Element.prototype, 'attributes')!.get!;
+    paragraph.values.dir = 'auto';
+    Object.defineProperty(paragraph, 'attributes', {configurable:true, get: () =>
+      attributeFacts.call(paragraph).map((attribute: object) => ({...attribute, namespaceURI:null}))});
+    for (const node of [paragraph, ...paragraph.children.filter(child => child.tagName === 'BR')]) {
+      Object.defineProperty(node, 'namespaceURI', {configurable:true, value:'http://www.w3.org/1999/xhtml'});
+      Object.defineProperty(node, 'checkVisibility', {configurable:true, value:() => true});
+    }
+    return paragraph;
+  }
+  test('retained Haiku accepts the single auto-direction paragraph only with the complete original literal draft', async () => {
+    const {f, run, answer, proofs} = setup();
+    expect((await run('insert',1,0)).inserted).toBe(true);
+    const p = providerAutoParagraph(f);
+    expect(p.children.map(n => n.tagName === 'BR' ? '\n' : n.text).join('')).toBe(outbound);
+    expect((await run('sendReady',1,0)).sendReady).toBe(true);
+    expect((await run('submit',1,0)).submitted).toBe(true);
+    answer(1);
+    expect(await run('inspect',1,1)).toMatchObject({submissionProof:proofs[0], answerComplete:true});
+    expect((await run('submit',1,1)).submitted).not.toBe(true);
+    expect(f.send.clicks).toBe(1);
+  });
+  test('retained Haiku refuses altered direction, visibility, markup and fake rendered matches at readiness and submit', async () => {
+    for (const boundary of ['sendReady','submit']) {
+      for (const change of ['rtl','ltr','AUTO','empty','extraAttribute','foreignP','namespacedDir','hiddenP','hiddenBR',
+        'foreignBR','control','multiP','NBSP','appendedBreak','literalSubstitution','renderedSubstitution']) {
+        const {f,run}=setup();
+        expect((await run('insert',1,0)).inserted).toBe(true);
+        const p=providerAutoParagraph(f);
+        Object.defineProperty(f.composer,'innerText',{configurable:true,get:()=>outbound});
+        if (boundary==='submit') expect((await run('sendReady',1,0)).sendReady).toBe(true);
+        const br=p.children.find(n => n.tagName==='BR')!;
+        if (['rtl','ltr','AUTO','empty'].includes(change)) p.values.dir=change==='empty'?'':change;
+        if (change==='extraAttribute') p.values.title='auto';
+        if (change==='foreignP' || change==='foreignBR') Object.defineProperty(change==='foreignP'?p:br,'namespaceURI',{value:'urn:fixture'});
+        if (change==='namespacedDir') Object.defineProperty(p,'attributes',{get:()=>[{name:'dir',value:'auto',namespaceURI:'urn:fixture'}]});
+        if (change==='hiddenP' || change==='hiddenBR') Object.defineProperty(change==='hiddenP'?p:br,'checkVisibility',{value:()=>false});
+        if (change==='control') p.append(new Element('BUTTON'));
+        if (change==='multiP') f.composer.append(new Element('P',{},'another paragraph'));
+        if (change==='NBSP') {
+          const n=p.children.find(n=>n.text.includes('\u00a0'))!;
+          n.text=n.text.replace('\u00a0',' ');
+        }
+        if (change==='appendedBreak') p.append(new Element('BR'));
+        if (change==='literalSubstitution') p.children[0].text='wrong draft';
+        if (change==='renderedSubstitution') Object.defineProperty(f.composer,'innerText',{get:()=>outbound+'x'});
+        expect((await run(boundary,1,0)).error).toBeDefined();
+        expect(f.send.clicks).toBe(0);
+      }
+    }
+  });
+  test('only the first retained readiness rejection exposes the fixed editor reason', async () => {
+    for (const sequence of [1, 2]) {
+      const { f, run, submitFirst } = setup();
+      if (sequence === 2) await submitFirst();
+      expect(await run('insert', sequence, sequence - 1)).toMatchObject({inserted:true});
+      f.composer.children[0].values['data-example'] = 'private attribute value';
+      const failure = await run('sendReady', sequence, sequence - 1);
+      expect(failure).toMatchObject({error:'conversation_changed', detail:'submission_message'});
+      expect(failure.haikuFirstReadyReason).toBe(sequence === 1 ? 'editor_paragraph' : undefined);
+      expect(JSON.stringify(failure)).not.toContain('private attribute value');
+      expect((await run('submit', sequence, sequence - 1)).haikuFirstReadyReason).toBeUndefined();
+      expect(f.send.clicks).toBe(sequence - 1);
+    }
+  });
+  test('model-only verification cannot bind a newly rendered second user; inspection binds it once', async () => {
+    const { f, proofs, run, answer, submitFirst } = setup();
+    await submitFirst();
+    expect(await run('insert', 2, 1)).toMatchObject({inserted:true});
+    expect(await run('sendReady', 2, 1)).toMatchObject({sendReady:true});
+    expect(await run('submit', 2, 1)).toMatchObject({submitted:true});
+    answer(2);
+    expect(await run('verifyModel', 2, 2)).toMatchObject({error:'conversation_changed', detail:'submission_message'});
+    expect(await run('inspect', 2, 2)).toMatchObject({submissionProof:proofs[1], answerComplete:true});
+    expect(f.send.clicks).toBe(2);
+  });
+  test('native cleanup suppresses answer authority and can close an exactly owned yielded turn', async () => {
+    const { f, proofs, run, submitFirst } = setup();
+    await submitFirst();
+    const cleanup = await run('inspect', 1, 1, {expectedModelChoice: null, claudeRetainedCleanup: true});
+    expect(cleanup).toMatchObject({submissionProof: proofs[0], answerComplete:false, text:'', temporary:true});
+    f.answer.text += ' altered';
+    expect((await run('inspect', 1, 1, {expectedModelChoice: null, claudeRetainedCleanup: true})).error).toBeDefined();
+    expect(f.send.clicks).toBe(1);
+  });
+  test('losing the prior answer during the second submit ownership digest prevents the click', async () => {
+    const { f, run, submitFirst } = setup();
+    await submitFirst(); expect(await run('insert', 2, 1)).toMatchObject({inserted:true});
+    expect(await run('sendReady', 2, 1)).toMatchObject({sendReady:true});
+    f.onDigest(() => { f.answer.text = 'changed during proof'; });
+    expect((await run('submit', 2, 1)).error).toBeDefined();
+    expect(f.send.clicks).toBe(1);
+  });
+  test('an extra hidden assistant and a collision of native submission markers fail closed', async () => {
+    const { f, run, submitFirst } = setup();
+    await submitFirst();
+    expect((await run('insert', 2, 1, {submissionMarker:firstMarker, prompt:outbound})).error).toBeDefined();
+    const foreign = new Element('DIV', {'data-testid':'assistant-message', hidden:''}); f.messages.append(foreign);
+    expect((await run('insert', 2, 1)).error).toBeDefined();
+    expect(f.send.clicks).toBe(1);
+  });
+  for (const mutation of ['lost owner','changed model','same-label picker remounted','lost Incognito','changed answer','replaced answer','changed user','wrong digest','wrong draft']) {
+    test('refuses the next Send after ' + mutation, async () => {
+      const { f, picker, proofs, run, submitFirst } = setup();
+      await submitFirst(); expect(await run('insert', 2, 1)).toMatchObject({inserted:true});
+      expect(await run('sendReady', 2, 1)).toMatchObject({sendReady:true});
+      if (mutation === 'lost owner') f.world.__computaModelOwner = firstMarker;
+      if (mutation === 'changed model') picker.selected('Sonnet 5.5');
+      if (mutation === 'same-label picker remounted') {
+        const trigger = picker.trigger, parent = trigger.parentElement!, next = trigger.cloneNode(true);
+        const pos = parent.children.indexOf(trigger);
+        expect(pos).toBeGreaterThanOrEqual(0);
+        parent.children[pos] = next; next.parentElement = parent; trigger.parentElement = null; trigger.connected = false;
+        // The selector still displays the requested name on a different physical control.
+        expect(next.getAttribute('aria-label')).toBe(trigger.getAttribute('aria-label'));
+      }
+      if (mutation === 'lost Incognito') f.temporary(false);
+      if (mutation === 'changed answer') f.answer.text += ' altered';
+      if (mutation === 'replaced answer') f.response.replaceChildren(f.answer.cloneNode(true));
+      if (mutation === 'changed user') f.userBody!.text += ' altered';
+      if (mutation === 'wrong digest') proofs[0].fingerprint = proofs[1].fingerprint;
+      if (mutation === 'wrong draft') f.composer.replaceChildren(new Element('#text', {}, second + ' altered'));
+      expect((await run('submit', 2, 1)).error).toBeDefined();
+      expect(f.send.clicks).toBe(1);
+    });
+  }
 });

@@ -14,6 +14,8 @@ enum LocalModelCatalog {
     static let geminiBrowserModelID = "browser/gemini"
     static let claudeBrowserModelID = "browser/claude"
     static let groqBrowserModelID = "browser/groq"
+    static let kimiBrowserModelID = "browser/kimi"
+    static let qwenBrowserModelID = "browser/qwen"
     private static let visualGroundingModelIDs: Set<String> = [
         "lmstudio-community/Qwen3.5-9B-MLX-4bit",
         "lmstudio-community/Qwen3.5-4B-MLX-4bit",
@@ -68,10 +70,19 @@ enum LocalModelCatalog {
             detail: "3.06 GB model files. Fast, lower-memory default. Runs in Computa's headless MLX backend using existing local weights.",
             highMemory: false
         ),
-    ]
+    ] + ["kimi", "qwen"].filter { WebsiteModelCatalog.providers.contains($0) }.map { provider in
+        let label = WebsiteModelCatalog.providerLabel(provider)
+        return LocalModelOption(
+            id: "browser/" + provider,
+            label: "\(label) / Website default · Built-in browser",
+            detail: "Sign in to discover \(label) models. Each website inference uses a new saved conversation and verifies its deletion afterward; local history remains in Computa.",
+            highMemory: false, available: false
+        )
+    }
 
     static func option(for id: String) -> LocalModelOption? {
         options.first { $0.id == id } ?? WebsiteModelCatalog.choice(for: id).map { WebsiteModelCatalog.option(for: $0) }
+            ?? WebsiteModeChoice.parse(requestID: id).map { WebsiteModelCatalog.option(for: $0) }
     }
 
     static func webProvider(for id: String) -> String? {

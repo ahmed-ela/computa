@@ -1,0 +1,116 @@
+import Foundation
+import XCTest
+@testable import Computa
+
+@MainActor
+final class QwenFirstUserBindingDiagnosticTests: XCTestCase {
+    private let stages: [String: [String]] = [
+        "provisional_admission": ["action_not_inspect", "native_grant_missing", "cleanup_inspection", "insertion_missing", "preparation_missing", "send_missing", "model_missing", "selection_pending", "deletion_started", "binding_not_authorized", "expected_fingerprint_present", "marker_invalid", "marker_mismatch", "marker_suffix", "model_choice_mismatch", "submitted_fingerprint_invalid", "submitted_fingerprint_mismatch", "predicate_changed", "submission_unclaimed", "first_already_bound", "canonical_already_bound"],
+        "initial_response_admission": ["action_not_inspect", "native_grant_missing", "cleanup_inspection", "insertion_missing", "preparation_missing", "send_missing", "model_missing", "selection_pending", "deletion_started", "binding_not_authorized", "expected_fingerprint_present", "marker_invalid", "marker_mismatch", "marker_suffix", "model_choice_mismatch", "submitted_fingerprint_invalid", "submitted_fingerprint_mismatch", "predicate_changed"],
+        "initial_response_body": ["user_count", "answer_count", "first_missing", "full_prompt_mismatch", "counts_not_array", "counts_empty", "counts_limit", "counts_invalid", "one_user_not_expected", "predicate_changed"],
+        "initial_response_digest": ["hash_input_invalid", "submitted_fingerprint_mismatch"],
+        "binding_digest": ["hash_input_invalid"],
+        "display_scope": ["held_claim_ineligible", "display_grant_missing"],
+        "display_observation": ["user_count_expectation", "composer_not_ready", "initial_not_collapsed", "initial_empty_no_pending_answer", "initial_prefix_mismatch", "initial_length_mismatch", "recollapsed", "preview_prefix_mismatch", "preview_length_mismatch", "not_collapsed"],
+        "display_held": ["presentation_missing", "route_changed", "user_id_changed", "answer_id_changed", "pin_count_changed", "body_changed", "control_changed", "user_ancestry_changed", "answer_ancestry_changed"],
+        "display_completed": ["presentation_missing", "route_changed", "user_id_changed", "answer_id_changed", "pin_count_changed", "body_changed", "control_changed", "user_ancestry_changed", "answer_ancestry_changed", "recollapsed", "full_text_changed"],
+        "display_preclick": ["presentation_missing", "route_changed", "user_id_changed", "answer_id_changed", "pin_count_changed", "body_changed", "control_changed", "user_ancestry_changed", "answer_ancestry_changed", "not_collapsed", "preview_changed", "composer_not_empty", "composer_changed"],
+        "display_hit": ["disabled", "invalid_geometry", "outside_viewport", "occluded"],
+        "display_preclick_hit": ["disabled", "invalid_geometry", "outside_viewport", "occluded"],
+        "display_reveal_hit": ["disabled", "invalid_geometry", "outside_viewport", "occluded", "occluded_ancestor", "occluded_unrelated", "occluded_descendant", "occluded_none", "occluded_mixed", "scroll_failed"],
+        "display_settlement": ["render_binding_changed", "render_deadline"],
+        "binding": ["first_not_submitted", "first_prompt_mismatch", "first_marker_invalid", "first_marker_mismatch", "first_marker_suffix", "first_changed_after_hash", "first_pinned_node_changed", "first_pinned_hash_mismatch", "first_expected_hash_mismatch", "first_binding_not_authorized", "first_disappeared"],
+    ]
+    private func observation(_ stage: String = "binding", _ reason: String = "first_prompt_mismatch") -> [String: Any] {
+        ["error": "conversation_changed", "detail": "first_user_message",
+         "qwenFirstUserBindingDiagnostic": ["version": 1, "stage": stage, "reason": reason]]
+    }
+    func testEveryAllowedStageReasonAppearsOnlyInFiniteAdapterFailureMetadata() {
+        for (stage, reasons) in stages {
+            for reason in reasons {
+                var value = observation(stage, reason)
+                value["text"] = "PRIVATE_BODY"; value["url"] = "https://private.invalid/PRIVATE_ID"
+                let expected = "firstUserStage=\(stage) firstUserReason=\(reason)"
+                XCTAssertEqual(EmbeddedWebModelTransport.qwenFirstUserBindingDiagnostic(value, provider: .qwen), expected)
+                let log = EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(value, provider: .qwen, action: "inspect")
+                XCTAssertEqual(log, "action=inspect error=conversation_changed detail=first_user_message " + expected)
+                XCTAssertFalse(log?.contains("PRIVATE") ?? true); XCTAssertLessThan(log?.utf8.count ?? 1_000, 256)
+                for provider in EmbeddedWebModelTransport.Provider.allCases where provider != .qwen {
+                    XCTAssertNil(EmbeddedWebModelTransport.qwenFirstUserBindingDiagnostic(value, provider: provider))
+                }
+            }
+        }
+    }
+    func testCoverEvidenceIsFiniteAndRestrictedToRejectedQwenInspection() {
+        let good = ["phase":"settled", "probe":"grid", "clip":"reduced", "hits":"several", "scope":"composer", "anchor":"fixed"]
+        let bare = "firstUserStage=display_reveal_hit firstUserReason=occluded_unrelated"
+        func observe(_ cover: [String:Any], stage: String = "display_reveal_hit", reason: String = "occluded_unrelated",
+                     action: String = "inspect", provider: EmbeddedWebModelTransport.Provider = .qwen) -> String {
+            var row = observation(stage, reason); row["qwenDisplayCover"] = cover
+            return EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(row, provider: provider, action: action) ?? ""
+        }
+        XCTAssertTrue(observe(good).hasSuffix(bare + " displayCover phase=settled probe=grid clip=reduced hits=several scope=composer anchor=fixed"))
+        var witness = good; witness["phase"] = "revealed"; witness["probe"] = "witness"; witness["clip"] = "unmeasured"; witness["hits"] = "one"
+        XCTAssertTrue(observe(witness).contains("displayCover phase=revealed probe=witness"))
+        for key in good.keys {
+            var absent = good; absent.removeValue(forKey:key); XCTAssertTrue(observe(absent).hasSuffix(bare))
+            for bad: Any in [2, true, NSNull(), "PRIVATE", ["PRIVATE"]] {
+                var fields:[String:Any] = good; fields[key] = bad
+                XCTAssertTrue(observe(fields).hasSuffix(bare)); XCTAssertFalse(observe(fields).contains("PRIVATE"))
+            }
+        }
+        for (field, value) in [("clip","reduced"),("hits","several"),("scope","mixed"),("anchor","mixed"),("extra","PRIVATE")] {
+            var bad = witness; bad[field]=value; XCTAssertTrue(observe(bad).hasSuffix(bare))
+        }
+        XCTAssertFalse(observe(good, action:"submit").contains("displayCover"))
+        XCTAssertFalse(observe(good, provider:.deepseek).contains("displayCover"))
+        XCTAssertFalse(observe(good, reason:"occluded_ancestor").contains("displayCover"))
+        XCTAssertFalse(observe(good, stage:"display_settlement", reason:"render_deadline").contains("displayCover"))
+    }
+
+    func testCompletedDisplayUUIDChangePublishesOnlyFiniteRelationsForThatExactRejection() {
+        let facts = ["point":"id_candidate", "spelling":"different_uuid", "pins":"same", "body":"exact",
+                     "display":"expanded", "reply":"settled_now", "responseIdentity":"held"]
+        func summarize(_ extras: [String: Any], stage: String = "display_completed", reason: String = "user_id_changed") -> String? {
+            var row = observation(stage, reason)
+            row["qwenFirstUserBindingDiagnostic"] = ["version":1,"stage":stage,"reason":reason,"change":extras]
+            return EmbeddedWebModelTransport.qwenFirstUserBindingDiagnostic(row, provider: .qwen)
+        }
+        XCTAssertEqual(summarize(facts), "firstUserStage=display_completed firstUserReason=user_id_changed point=id_candidate spelling=different_uuid pins=same body=exact display=expanded reply=settled_now responseIdentity=held")
+        for key in facts.keys {
+            var unknown = facts; unknown[key] = "PRIVATE_IDENTIFIER"
+            XCTAssertNil(summarize(unknown))
+            unknown.removeValue(forKey: key); XCTAssertNil(summarize(unknown))
+        }
+        XCTAssertNil(summarize(facts.merging(["url":"PRIVATE_URL"]) { $1 }))
+        XCTAssertNil(summarize(facts, stage: "display_held"))
+        XCTAssertNil(summarize(facts, reason: "answer_id_changed"))
+    }
+
+    func testUnknownCrossStageMissingExtraAndMalformedFieldsCannotReachLogs() {
+        let base = observation()
+        let invalid: [[String: Any]] = [
+            ["version": 2, "stage": "binding", "reason": "first_prompt_mismatch"],
+            ["version": true, "stage": "binding", "reason": "first_prompt_mismatch"],
+            ["version": 1, "stage": "PRIVATE_STAGE", "reason": "first_prompt_mismatch"],
+            ["version": 1, "stage": "binding", "reason": "PRIVATE_REASON"],
+            ["version": 1, "stage": "binding", "reason": "full_prompt_mismatch"],
+            ["version": 1, "stage": "initial_response_body", "reason": "first_prompt_mismatch"],
+            ["version": 1, "stage": "binding"],
+            ["version": 1, "reason": "first_prompt_mismatch"],
+            ["version": 1, "stage": "binding", "reason": "first_prompt_mismatch", "text": "PRIVATE_BODY"],
+            ["version": 1, "stage": true, "reason": "first_prompt_mismatch"],
+            ["version": 1, "stage": "binding", "reason": NSNull()]
+        ]
+        for packet in invalid {
+            var value = base; value["qwenFirstUserBindingDiagnostic"] = packet
+            XCTAssertNil(EmbeddedWebModelTransport.qwenFirstUserBindingDiagnostic(value, provider: .qwen))
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(value, provider: .qwen, action: "inspect"),
+                           "action=inspect error=conversation_changed detail=first_user_message")
+        }
+        for (key, changed) in [("error", "document_changed"), ("detail", "response_scope")] {
+            var value = base; value[key] = changed
+            XCTAssertNil(EmbeddedWebModelTransport.qwenFirstUserBindingDiagnostic(value, provider: .qwen))
+        }
+    }
+}

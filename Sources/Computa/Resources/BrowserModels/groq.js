@@ -26,7 +26,7 @@ function computaProviderCore(request, provider, origin, actions) {
     if (values.length !== 1) fail(error, detail);
     return values[0];
   };
-  const hitFailure = node => {
+  const hitFailure = (node, testIntersection) => {
     if (!enabled(node)) return 'disabled';
     if (typeof node.getBoundingClientRect !== 'function' || typeof document.elementFromPoint !== 'function') return 'invalid_geometry';
     const r = node.getBoundingClientRect(), width = window.innerWidth, height = window.innerHeight;
@@ -38,6 +38,7 @@ function computaProviderCore(request, provider, origin, actions) {
     const left = Math.max(0, r.left), top = Math.max(0, r.top);
     const clippedRight = Math.min(width, right), clippedBottom = Math.min(height, bottom);
     if (clippedRight <= left || clippedBottom <= top) return 'outside_viewport';
+    if (testIntersection) return testIntersection(left, top, clippedRight, clippedBottom) ? null : 'occluded';
     const x = left + (clippedRight - left) / 2, y = top + (clippedBottom - top) / 2;
     return node.contains(document.elementFromPoint(x, y)) ? null : 'occluded';
   };
@@ -71,7 +72,10 @@ function computaProviderCore(request, provider, origin, actions) {
     });
     record.observer.observe(document.documentElement || document, { subtree: true, childList: true,
       characterData: true, attributes: true, attributeFilter: ['disabled', 'aria-disabled', 'aria-hidden', 'aria-busy',
-        'aria-label', 'aria-expanded', 'aria-controls', 'aria-selected', 'data-state', 'class', 'style', 'hidden', 'inert'] });
+        'aria-label', 'aria-expanded', 'aria-controls', 'aria-selected', 'data-state', 'class', 'style', 'hidden', 'inert',
+        ...(provider === 'kimi' ? ['role', 'contenteditable', 'data-lexical-editor', 'data-testid', 'aria-haspopup', 'id']
+          : provider === 'qwen' ? ['role', 'aria-haspopup', 'id']
+          : provider === 'deepseek' ? ['role', 'placeholder', 'aria-pressed'] : [])] });
     globalThis[signalKey] = record;
   }
   return { uuid, fail, normalize, bodyText, choiceValid, equalChoice, physical, visible, enabled, nodes, unique, hit, hitFailure, context, assertContext, hash };
@@ -79,6 +83,7 @@ function computaProviderCore(request, provider, origin, actions) {
 
 // Groq chat is a fresh explicit-clear session, never a temporary conversation.
 // The native transport owns lifecycle receipts, document generations and URLs.
+let groqUserCountDiagnostic = null;
 try {
   const actions = ['inspect', 'discoverModels', 'selectModel', 'modelDiagnostic', 'verifyModel',
     'prepare', 'insert', 'sendReady', 'submit', 'stop', 'clearTranscript', 'observeClearTranscript'];
@@ -109,16 +114,99 @@ try {
     && !['meta-llama/llama-prompt-guard-2-22m', 'meta-llama/llama-prompt-guard-2-86m',
       'openai/gpt-oss-safeguard-20b'].includes(choice.key)
     && !/(?:^|\/)(?:whisper|distil-whisper|playai-tts|canopylabs\/orpheus)(?:[-/]|$)/i.test(choice.key);
+  // The site's notification region was empty before the observed submission,
+  // then displayed this exact generic failure. Its copy supplies no HTTP status.
+  function notificationRegion(expected, failed = false) {
+    try {
+      const matches = document.querySelectorAll('[aria-label="Notifications alt+T"]');
+      if (matches.length !== 1) return null;
+      const region = matches[0];
+      if (!region.isConnected || !document.documentElement.contains(region) || expected && region !== expected
+        || region.closest('form, textarea, [contenteditable], [hidden], [inert], [aria-hidden="true"]')
+        || authored(region) || region.contains(state.prepared)) return null;
+      const stack = [region]; let visited = 0, messages = 0;
+      while (stack.length) {
+        const node = stack.pop();
+        if (++visited > 48) return null;
+        if (node.nodeType === 3) {
+          if (node.length > 96) return null;
+          const text = node.textContent.trim();
+          if (!text) continue;
+          if (!failed || text !== 'Something went wrong. Please, try again.' || ++messages > 1
+            || !c.visible(node.parentElement) || authored(node.parentElement)) return null;
+        } else if (node.nodeType === 1) {
+          if (node.childNodes.length + stack.length + visited > 48) return null;
+          for (const child of node.childNodes) stack.push(child);
+        } else return null;
+      }
+      return messages === (failed ? 1 : 0) ? region : null;
+    } catch { return null; }
+  }
+  function failUserCount(branch, users, answers) {
+    // Snapshot the arrays from this rejected evaluation; no transcript reread.
+    // Visibility is diagnostic only and unknown if its getters cannot be read.
+    try {
+      const visibleCount = nodes => { try { return nodes.filter(c.visible).length; } catch { return null; } };
+      const expected = input.expectedUserCounts;
+      const validExpected = Array.isArray(expected) && (expected.length === 1 && [0, 1].includes(expected[0])
+        || expected.length === 2 && expected[0] === 0 && expected[1] === 1);
+      const expectedUserCounts = validExpected ? [...expected] : null;
+      const submitted = state.submitted === true, first = state.first, editor = state.prepared;
+      const adapterFirstBound = !!first;
+      const flag = read => { try { const value = read(); return typeof value === 'boolean' ? value : null; } catch { return null; } };
+      const held = read => first ? flag(read) : null;
+      const preparedEditorConnected = editor ? flag(() => editor.isConnected) : null;
+      // Only compare the already-held editor and exact inserted string. A detached
+      // editor is unknown, not evidence that the current page restored its draft.
+      const preparedEditorDraftRestored = submitted && preparedEditorConnected === true
+        && typeof state.inserted === 'string' ? flag(() => { const value = editor.value; return typeof value === 'string' ? value === state.inserted : null; }) : null;
+      const boundNodes = {
+        rootConnected: held(() => first.root.isConnected), bodyConnected: held(() => first.body.isConnected),
+        parentConnected: held(() => first.parent.isConnected),
+        rootClassMatches: held(() => first.root.classList.contains('group/input')),
+        bodyClassMatches: held(() => first.body.classList.contains('line-clamp-5')),
+        rootParentMatches: held(() => first.root.parentElement === first.parent),
+        bodyWithinRoot: held(() => first.root.contains(first.body)),
+        rootInDocument: held(() => document.documentElement.contains(first.root)),
+        preparedEditorConnected, preparedEditorDraftRestored };
+      groqUserCountDiagnostic = { kind: 'groq_user_count_v2', action: input.action, branch,
+        userCount: users.length, answerCount: answers.length,
+        visibleUserCount: visibleCount(users), visibleAnswerCount: visibleCount(answers),
+        expectedUserCounts, submitted, adapterFirstBound, boundNodes };
+      if (input.action === 'inspect' && branch === 'expected_count' && expectedUserCounts?.length === 1
+        && expectedUserCounts[0] === 1 && users.length === 0 && answers.length === 0 && adapterFirstBound && submitted
+        && preparedEditorDraftRestored === true && boundNodes.rootConnected === false && boundNodes.bodyConnected === false
+        && boundNodes.parentConnected === false && boundNodes.rootInDocument === false && boundNodes.rootClassMatches === true
+        && boundNodes.bodyClassMatches === true && boundNodes.rootParentMatches === true && boundNodes.bodyWithinRoot === true
+        && state.emptyNotice && notificationRegion(state.emptyNotice, true))
+        groqUserCountDiagnostic.freshNotice = 'generic_error';
+    } catch { groqUserCountDiagnostic = null; }
+    c.fail('conversation_changed', 'user_count');
+  }
   function transcript() {
     const users = c.nodes(document, '[class*="group/input"]', 64).filter(node => token(node, 'group/input'));
     const answers = c.nodes(document, '.font-inter', 64).filter(node =>
       node.parentElement && token(node.parentElement, 'font-normal') && token(node.parentElement, 'text-base'));
-    if (users.length > 1 || answers.length > 1) c.fail('conversation_changed', 'user_count');
+    if (users.length > 1 || answers.length > 1)
+      failUserCount(users.length > 1 ? 'multiple_users' : 'multiple_answers', users, answers);
     let first = null, answer = null, block = null;
     if (users.length) {
       const root = users[0], wrappers = [...root.children].filter(node => node.tagName === 'DIV'
-        && node.children.length === 1 && token(node.children[0], 'line-clamp-5'));
+        && token(node.children[0], 'line-clamp-5'));
       const wrapper = c.unique(wrappers, 'conversation_changed', 'first_user_message'), body = wrapper.children[0];
+      // Long messages retain their complete leaf text and add this observed
+      // presentation control. Never expand it or hash the wrapper's chrome.
+      if (wrapper.children.length !== 1) {
+        const more = wrapper.children[1];
+        if (wrapper.children.length !== 2 || body.tagName !== 'DIV' || more.tagName !== 'SPAN'
+          || more.children.length !== 0 || more.textContent !== 'Show more'
+          || [...more.classList].length !== 2 || !token(more, 'text-primaryaccent') || !token(more, 'cursor-pointer')
+          || more.getAttribute('role') !== null || more.getAttribute('aria-label') !== null || !c.visible(more)
+          || c.nodes(root, '.line-clamp-5', 64).length !== 1
+          || ![...wrapper.childNodes].every(node => node === body || node === more
+            || node.nodeType === 3 && /^\s*$/.test(node.textContent || '')))
+          c.fail('conversation_changed', 'first_user_message');
+      }
       if (!c.visible(root) || !c.visible(body) || body.children.length > 0) c.fail('conversation_changed', 'first_user_message');
       const parent = root.parentElement;
       if (!token(parent, 'flex-col') || !token(parent, '[word-break:break-word]')) c.fail('conversation_changed', 'first_user_message');
@@ -128,7 +216,7 @@ try {
         if (block.parentElement !== parent || [...parent.children].indexOf(block) <= [...parent.children].indexOf(root)
           || !c.visible(answer) || !c.visible(block)) c.fail('conversation_changed', 'response_scope');
       }
-    } else if (answers.length) c.fail('conversation_changed', 'user_count');
+    } else if (answers.length) failUserCount('answer_without_user', users, answers);
     return { users, answers, first, answer, block };
   }
   function composer() {
@@ -309,7 +397,8 @@ try {
   if (!Array.isArray(input.expectedUserCounts) || input.expectedUserCounts.length < 1 || input.expectedUserCounts.length > 2
     || input.expectedUserCounts.some(value => !Number.isInteger(value) || value < 0 || value > 1)
     || input.expectedUserCounts.length === 2 && (input.expectedUserCounts[0] !== 0 || input.expectedUserCounts[1] !== 1)
-    || !input.expectedUserCounts.includes(initial.t.users.length)) c.fail('conversation_changed', 'user_count');
+    || !input.expectedUserCounts.includes(initial.t.users.length))
+    failUserCount('expected_count', initial.t.users, initial.t.answers);
   if (state.submitted && !initial.output.modelEvidence) c.fail('model_unverified');
   if (initial.t.first) {
     const first = initial.t.first, marker = input.expectedFirstUserMarker, markerLine = `Computa session marker: ${marker}`;
@@ -437,12 +526,15 @@ try {
   if (input.action === 'sendReady') return { ...initial.output, sendReady: ready, sendReadinessFailure,
     ...(state.sendReveal?.diagnostic ? { sendRevealDiagnostic: state.sendReveal.diagnostic } : {}) };
   if (!ready) c.fail('send_unavailable', sendReadinessFailure);
+  state.emptyNotice = notificationRegion(null);
   state.submitted = true;
   form.send.click();
   // This is the pre-click empty observation plus dispatch acknowledgment. It
   // cannot bind the newly appended user body or prove response completion.
   return { ...initial.output, submitted: true };
 } catch (error) {
-  if (error?.computaAdapterFailure === true) return { error: error.error, ...(error.detail ? { detail: error.detail } : {}) };
+  if (error?.computaAdapterFailure === true) return { error: error.error, ...(error.detail ? { detail: error.detail } : {}),
+    ...(error.error === 'conversation_changed' && error.detail === 'user_count' && groqUserCountDiagnostic
+      ? { groqUserCountDiagnostic } : {}) };
   throw error;
 }

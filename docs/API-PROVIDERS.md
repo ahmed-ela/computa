@@ -24,6 +24,64 @@ The adapter currently buffers a bounded provider response before forwarding Resp
 
 ## Validation
 
+### Alibaba Model Studio / Qwen3.7 Flash (November 1, 2026)
+
+A controlled installed-build370 marker failed before tool use with HTTP 400.
+The private capture classified the response as non-JSON. A bounded native
+URLSession comparison isolated the cause: a user-only request was accepted,
+while adding developer messages returned a single SSE error frame stating that
+the developer role was unsupported. Replacing those roles with system messages,
+including a later host instruction, was accepted without rearranging history.
+These 128-token probes establish request acceptance, not completed answers or
+tool-use qualification; they reached the deliberately small output limit.
+
+Build371 maps developer instructions to system messages only for validated
+Alibaba workspace Chat Completions endpoints. Original message order, text,
+user boundaries and completed tool history are preserved. Responses and other
+provider profiles retain their role contracts. The HTTP error boundary now
+recognizes one complete, bounded SSE error envelope, with existing redaction
+and no automatic retry; malformed, mixed or duplicate frames remain generic
+errors. This does not change success or tool-call validation.
+
+Discovered `qwen3.7-flash` and `qwen3.7-flash-2026-07-15` receive the documented
+1,000,000-token context metadata and user-image capability. Tool images remain
+disabled. No model is added unless returned by the provider. The endpoint and
+role contract are described in [Alibaba's Chat Completions reference](https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-openai-chat-completions);
+capacity is listed in the [Qwen3.7 Flash reference](https://www.alibabacloud.com/help/en/model-studio/qwen3-7-flash).
+
+The affected catalog, codec, HTTP, capture, settings, runtime-contract and server
+cohort passed 193 native tests. Installed build371 (`c7186ae`) returned an exact
+Qwen3.7 Flash marker in 3.707 seconds. Refreshing the catalog reused the saved
+Keychain credential and persisted the new metadata for both discovered IDs.
+
+The first combined workflow reached 13 native tool calls in 52.416 seconds.
+Independent audit verified the intended code edit, six passing tests, unchanged
+protected fixture files, the expected reference and one accepted browser form
+submission. The next API response failed `invalid_tool`; no model-issued tab
+close or final answer followed. This decoder error also covers malformed or
+duplicate call IDs and malformed tool fields, so its old wording does not prove
+an unknown name caused this case. The rejected guard was not retained. Computa
+reported automatic cleanup of the one task-created browser tab; the operator
+stopped the exact loopback fixture server and verified its listener was absent.
+That cleanup is separate from model completion. Full workflow qualification
+remains incomplete; no failed inference was replayed.
+
+Build372 adds finite diagnostics for each existing tool-identity and shape
+rejection. They identify the exact failed guard and wire format; a rejected
+Chat Completions name records only whether it exactly matches a declared wire,
+native or namespace-qualified name, or none. No provider name, call ID, argument
+or response text is logged. Error wording now covers malformed as well as
+unavailable calls. The same fatal rejection, atomic publication and correction
+eligibility remain in force. All 173 codec, server and correction tests passed,
+including rejected later calls in a batch and failures after the one permitted
+argument-correction request. This instrumentation does not establish the cause
+of the installed371 failure or qualify the combined workflow.
+
+Private evidence is retained in `work/alibaba-qwen37-20261101/` as
+`marker371-audit.json` and `workflow371b-audit.json`, and in the independent
+`qwen37-371-a` fixture audit. Credentials remain only in device-local Keychain;
+no account key or workspace endpoint is included in this repository.
+
 The API unit/contract suite covers both wire formats, actual pinned Open Responses schemas, SSE lifecycles, interleaved/custom/namespaced tools, schema references and unions, encrypted reasoning, stale native turns, cancellation, model discovery, redirects, credential admission races, unavailable selections, and secret-free metadata/error projections.
 
 Build127 preserves Foundation parser failures at the Chat JSON, Chat SSE and Responses JSON boundaries as typed `invalid_response` errors with the finite `json_parse` guard and native decode context. Previously these escaped as generic `unavailable` errors. Parser acceptance and correction eligibility are unchanged; no rejected batch can publish tools. The affected codec, server and correction cohort passed 94 tests. This reproduced classification fix does not attribute historical provider failures or establish live task reliability.

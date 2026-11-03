@@ -1134,6 +1134,153 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertTrue(window.firstResponder === input)
     }
 
+    /// Diagnostic experiment, not a provider qualification: use the production
+    /// host, model-owned configuration and one unchanged view/document. Only an
+    /// opaque sibling's exposure changes. No provider request or user tab exists.
+    func testModelOwnedRAFRemountCoveredVersusUncoveredUsesSameNativeDeadline() async throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_MODEL_RAF_DIAGNOSTIC"] == "1",
+            "Set COMPUTA_MODEL_RAF_DIAGNOSTIC=1 for the offline on-screen rendering diagnostic.")
+        guard let screen = NSScreen.main, screen.visibleFrame.width >= 1_024, screen.visibleFrame.height >= 768 else {
+            throw XCTSkip("RAF diagnostic is unperformed: an on-screen 1024x768 fixture viewport is unavailable")
+        }
+        let session = EmbeddedBrowserSession(persistent: false)
+        let frame = NSRect(x: screen.visibleFrame.minX, y: screen.visibleFrame.minY, width: 1_024, height: 768)
+        let window = ModelRAFProbePanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel],
+                                        backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.hidesOnDeactivate = false
+        window.ignoresMouseEvents = true
+        window.isFloatingPanel = false
+        let root = NSView(frame: NSRect(origin: .zero, size: frame.size))
+        window.contentView = root
+        let host = EmbeddedModelRenderContainer(session: session)
+        host.frame = root.bounds
+        root.addSubview(host)
+        session.installModelRenderHost(host)
+        let cover = ModelRAFProbeCover(frame: root.bounds)
+        root.addSubview(cover, positioned: .above, relativeTo: host)
+        let keyWindow = NSApplication.shared.keyWindow
+        let firstResponder = keyWindow?.firstResponder
+        let foregroundPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        defer { session.shutdown(); window.orderOut(nil); window.close() }
+        let id = try session.createUnloadedModelTabForTesting()
+        let view = try XCTUnwrap(session.webView(for: id))
+        XCTAssertEqual(view.configuration.preferences.inactiveSchedulingPolicy, .none)
+        XCTAssertFalse(view.configuration.websiteDataStore.isPersistent)
+        XCTAssertFalse(view.acceptsFirstResponder)
+        XCTAssertFalse(view.isInspectable)
+        XCTAssertTrue(session.humanTabs.isEmpty)
+        view.loadHTMLString("""
+            <!doctype html><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+            <style>html,body{margin:0;background:white;color:black}button{display:block}</style>
+            <main id="fixture-root"><button id="fixture-model">Synthetic model</button></main>
+            """, baseURL: URL(string: "https://raf-fixture.invalid/"))
+        window.orderFrontRegardless() // Non-key, mouse-ignoring fixture; never activate the application.
+        let loadDeadline = ContinuousClock.now + .seconds(10)
+        var loaded = false
+        while ContinuousClock.now < loadDeadline {
+            if !view.isLoading,
+               (try? await script(view, "return !!document.getElementById('fixture-model');")) == Data("true".utf8) {
+                loaded = true; break
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        guard loaded else { return XCTFail("Offline RAF fixture did not load") }
+        let generation = session.documentGeneration(for: id)
+        var observations: [[String: Any]] = []
+        // A final covered control exposes ordering/warmup effects without a new
+        // document, configuration, owner, native focus acquisition or provider call.
+        for covered in [true, false, true] {
+            cover.isHidden = !covered
+            window.displayIfNeeded()
+            await Task.yield()
+            let nativeBefore = session.modelDiagnosticSnapshot(tabID: id)
+            let nativeStart = ContinuousClock.now
+            let start = try await script(view, """
+                const root=document.getElementById('fixture-root');
+                const old=document.getElementById('fixture-model');
+                if(!root||!old||window.fixtureRAFProbe?.active)throw new Error('invalid fixture phase');
+                const p={active:true,start:performance.now(),frames:0,framesWithinDeadline:0,
+                  timers:0,timersWithinDeadline:0,mutations:0,remountElapsed:null,frame:null,timer:null,
+                  visibilityAtStart:document.visibilityState,hiddenAtStart:document.hidden};
+                window.fixtureRAFProbe=p;
+                p.observer=new MutationObserver(rs=>{p.mutations=Math.min(32,p.mutations+rs.length)});
+                p.observer.observe(root,{childList:true}); old.remove();
+                const step=()=>{if(!p.active)return; const elapsed=performance.now()-p.start;
+                  p.frames++;if(elapsed<=1800)p.framesWithinDeadline++;
+                  if(p.frames===2){const replacement=document.createElement('button');replacement.id='fixture-model';
+                    replacement.textContent='Synthetic model';root.append(replacement);p.remountElapsed=elapsed;}
+                  if(p.frames<8)p.frame=requestAnimationFrame(step);};
+                p.frame=requestAnimationFrame(step);
+                const tick=()=>{if(!p.active)return;p.timers++;if(performance.now()-p.start<=1800)p.timersWithinDeadline++;
+                  if(p.timers<18)p.timer=setTimeout(tick,100);};p.timer=setTimeout(tick,100);
+                return {width:innerWidth,height:innerHeight,oldConnected:old.isConnected};
+                """)
+            let initialParts = (ContinuousClock.now - nativeStart).components
+            let initialEvaluationUpperBoundMs = Int(ceil(Double(initialParts.seconds) * 1_000 + Double(initialParts.attoseconds) / 1e15))
+            let startState = try XCTUnwrap(JSONSerialization.jsonObject(with: start) as? [String: Any])
+            XCTAssertEqual(startState["width"] as? Int, 1_024)
+            XCTAssertEqual(startState["height"] as? Int, 768)
+            XCTAssertEqual(startState["oldConnected"] as? Bool, false)
+            // Native time is authoritative; webpage timer/rAF starvation cannot
+            // extend the 1.8s measurement or hang the observation interval.
+            try await Task.sleep(until: nativeStart + .milliseconds(1_800), clock: .continuous)
+            let nativeElapsed = ContinuousClock.now - nativeStart
+            let result = try await script(view, """
+                const p=window.fixtureRAFProbe;p.active=false;
+                cancelAnimationFrame(p.frame);clearTimeout(p.timer);p.observer.disconnect();
+                const r={frames:p.frames,framesWithinDeadline:p.framesWithinDeadline,timers:p.timers,
+                  timersWithinDeadline:p.timersWithinDeadline,mutations:p.mutations,
+                  remountElapsedMs:p.remountElapsed===null?null:Math.min(10000,Math.ceil(p.remountElapsed)),
+                  remountedWithinDeadline:p.remountElapsed!==null&&p.remountElapsed<=1800,
+                  visibilityAtStart:p.visibilityAtStart,visibilityAtEnd:document.visibilityState,
+                  hiddenAtStart:p.hiddenAtStart,hiddenAtEnd:document.hidden,width:innerWidth,height:innerHeight,
+                  networkResourceCount:performance.getEntriesByType('resource').length};
+                if(!document.getElementById('fixture-model')){const b=document.createElement('button');
+                  b.id='fixture-model';b.textContent='Synthetic model';document.getElementById('fixture-root').append(b);}
+                return r;
+                """)
+            let page = try XCTUnwrap(JSONSerialization.jsonObject(with: result) as? [String: Any])
+            let parts = nativeElapsed.components
+            let nativeMs = Int(Double(parts.seconds) * 1_000 + Double(parts.attoseconds) / 1e15)
+            let stable = view.superview === host && view.window === window && host.superview === root
+                && view.frame.size == NSSize(width: 1_024, height: 768)
+                && session.documentGeneration(for: id) == generation
+            let focusUnchanged = NSApplication.shared.keyWindow === keyWindow
+                && keyWindow?.firstResponder === firstResponder
+                && NSWorkspace.shared.frontmostApplication?.processIdentifier == foregroundPID
+            let exposedWindow = window.isVisible && window.occlusionState.contains(.visible)
+            // JS starts after native dispatch. Adding the full acknowledgement
+            // latency is a conservative upper bound, never a later deadline.
+            let remountedWithinNativeDeadline = (page["remountElapsedMs"] as? Int)
+                .map { $0 + initialEvaluationUpperBoundMs <= 1_800 } ?? false
+            let record: [String: Any] = ["covered": covered, "deadlineMs": 1_800,
+                "initialEvaluationUpperBoundMs": initialEvaluationUpperBoundMs,
+                "remountedWithinNativeDeadline": remountedWithinNativeDeadline,
+                "nativeElapsedMs": nativeMs, "nativeBefore": nativeBefore,
+                "nativeAfter": session.modelDiagnosticSnapshot(tabID: id), "page": page,
+                "sameViewHostDocument": stable, "focusUnchanged": focusUnchanged,
+                "windowExposed": exposedWindow, "coverOpaque": cover.isOpaque]
+            observations.append(record)
+            let encoded = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys])
+            print("OFFLINE_MODEL_RAF_PROBE " + String(decoding: encoded, as: UTF8.self))
+            XCTAssertTrue(stable)
+            XCTAssertTrue(focusUnchanged)
+            XCTAssertTrue(exposedWindow, "An occluded fixture window cannot distinguish opaque sibling coverage")
+            XCTAssertFalse(view.isHiddenOrHasHiddenAncestor)
+            XCTAssertEqual(page["networkResourceCount"] as? Int, 0)
+            XCTAssertEqual(page["width"] as? Int, 1_024)
+            XCTAssertEqual(page["height"] as? Int, 768)
+            XCTAssertLessThan(initialEvaluationUpperBoundMs, 1_800)
+            XCTAssertGreaterThanOrEqual(nativeMs, 1_800)
+            XCTAssertLessThan(nativeMs, 5_000)
+        }
+        XCTAssertEqual(observations.count, 3)
+        XCTAssertTrue(session.humanTabs.isEmpty)
+        // Frame/remount outcomes are measurements, not predetermined pass
+        // assertions. They do not establish Claude's implementation or cause.
+    }
+
     func testModelPresentationIsRejectedAndKeepsExactViewInPrivateBackingHost() throws {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }
@@ -2063,5 +2210,20 @@ private final class DiagnosticChildFrameFixture: NSObject, WKScriptMessageHandle
     var frame: WKFrameInfo?
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         if !message.frameInfo.isMainFrame, message.body as? String == "ready" { frame = message.frameInfo }
+    }
+}
+
+@MainActor
+private final class ModelRAFProbePanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+}
+
+@MainActor
+private final class ModelRAFProbeCover: NSView {
+    override var isOpaque: Bool { true }
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.windowBackgroundColor.setFill()
+        dirtyRect.fill()
     }
 }

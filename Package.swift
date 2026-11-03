@@ -24,7 +24,8 @@ let package = Package(
                 .copy("Resources/VisualGrounding"),
                 .copy("Resources/AgentRuntime"),
                 .copy("Resources/MLXServer"),
-                .copy("Resources/BrowserModels")
+                .copy("Resources/BrowserModels"),
+                .copy("Resources/Tokenizers")
             ]
         ),
         .testTarget(

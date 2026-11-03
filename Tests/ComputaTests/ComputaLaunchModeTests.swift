@@ -35,6 +35,10 @@ final class ComputaLaunchModeTests: XCTestCase {
             preferencesFactory: {
                 XCTFail("Test-host composition must not access production preferences")
                 return self.isolatedTestPreferences()
+            },
+            unreadCompletionStoreFactory: {
+                XCTFail("Test-host composition must not access the production unread store")
+                return nil
             }
         )
         await state.startRuntime()
@@ -54,12 +58,15 @@ final class ComputaLaunchModeTests: XCTestCase {
         preferences.set(AccessMode.fullAccess.rawValue, forKey: "HeyDash.accessMode")
         var runtimeConstructions = 0
         var preferenceReads = 0
+        var unreadStoreConstructions = 0
         let state = ComputaLaunchMode.application.makeState(
             runtimeFactory: { runtimeConstructions += 1; return runtime },
-            preferencesFactory: { preferenceReads += 1; return preferences }
+            preferencesFactory: { preferenceReads += 1; return preferences },
+            unreadCompletionStoreFactory: { unreadStoreConstructions += 1; return nil }
         )
         XCTAssertEqual(runtimeConstructions, 1)
         XCTAssertEqual(preferenceReads, 1)
+        XCTAssertEqual(unreadStoreConstructions, 1)
         XCTAssertEqual(state.accessMode, .fullAccess)
         await state.startRuntime()
         XCTAssertEqual(state.connectionState, .connected(provider: runtime.providerName))

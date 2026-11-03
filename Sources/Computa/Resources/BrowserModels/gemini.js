@@ -471,6 +471,28 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   let headerExpected = null, proofLocked = false, headerObserved = false, finalPowerState = null;
   let remount = null, remountClaimed = false;
   let prepareOpening = null, insertOpening = null, genericPowerRecheck = false;
+  let verifyObserver = null, verifyAcknowledged = false, passiveFirstVerification = null;
+  let draftObserver = null, draftChanged = false, firstVerificationEditor = null;
+  const invalidateDraft = () => { draftChanged = true; };
+  const recordDraftChanges = records => {
+    const composer = insertOpening?.composer || firstVerificationEditor;
+    if (!composer || !records.length) return;
+    if (records.length > 64) { draftChanged = true; return; }
+    for (const r of records) {
+      if (r.target === composer || composer.contains(r.target)) draftChanged = true;
+      if (r.type !== 'childList') continue;
+      if (r.addedNodes.length + r.removedNodes.length > 64) { draftChanged = true; return; }
+      for (const node of [...r.addedNodes, ...r.removedNodes]) {
+        if (node === composer || node.contains?.(composer) || node === trigger || node.contains?.(trigger)) draftChanged = true;
+        if (insertOpening && (['menu','listbox'].includes(node.getAttribute?.('role')) ||
+          node.querySelector?.('[role="menu"],[role="listbox"]'))) verifyAcknowledged = true;
+      }
+    }
+  };
+  const recordVerifyOpening = records => {
+    if (records.some(record => record.target === trigger && (record.attributeName === 'aria-expanded' && record.oldValue === 'true'
+      || record.attributeName === 'data-state' && record.oldValue === 'open'))) verifyAcknowledged = true;
+  };
   let headerReadiness = null, changingPowerHeader = null, changingPowerSlider = null;
   const tracked = new Map();
   const observeHeader = records => {
@@ -588,14 +610,14 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       throw failure('model_unverified');
     attempt.familyCloseAcknowledged = true;
   };
-  const readonlyOpeningSelectionIntact = (saved, current) => {
+  const readonlyOpeningSelectionIntact = (saved, current, spent = false) => {
     const pin = globalThis.__computaChatPresetPin;
     const choice = saved && websiteChatPresetChoice(saved.resolved.family, saved.resolved.power);
     return saved != null && !mutable && owned() && !selectionChanged && Date.now() < until
       && document.URL === request.expectedURL && location.pathname === '/'
       && saved.owner === owner && saved.document === originalDocument
       && globalThis.__computaModelSelection === saved.attempt && saved.attempt.started === true
-      && saved.attempt.completed === true && saved.recoveryClaimed !== true
+      && saved.attempt.completed === true && (spent ? saved.recoveryClaimed === true : saved.recoveryClaimed !== true)
       && websiteModelChoiceEqual(saved.attempt.choice, expected)
       && pin === saved.pin && pin?.owner === owner && pin.document === originalDocument
       && pin.invalidated !== true && !pin.provisionalHeader && pin.selection === saved.selection
@@ -610,9 +632,23 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       && chatGPTMessageRoots('user').length === 0 && chatGPTMessageRoots('assistant').length === 0
       && !!chatGPTProductModeProof() && chatGPTTemporaryVerified();
   };
-  const prepareOpeningIntact = current => readonlyOpeningSelectionIntact(prepareOpening, current)
-    && request.action === 'prepare' && context?.action === 'prepare' && context.scope === 'action_final_guard'
-    && globalThis.__computaChatFirstPrepareOpening === prepareOpening && !globalThis.__computaChatSubmissionState;
+  const prepareOpeningIntact = (current, opening = prepareOpening, allowAcknowledged = false) => {
+    if (!readonlyOpeningSelectionIntact(opening, current) || context?.action !== request.action
+      || context.scope !== 'action_final_guard' || globalThis.__computaChatSubmissionState) return false;
+    if (request.action === 'prepare') return globalThis.__computaChatFirstPrepareOpening === opening;
+    const composer = opening.composer;
+    recordVerifyOpening(verifyObserver?.takeRecords?.() || []);
+    recordDraftChanges(draftObserver?.takeRecords?.() || []);
+    return !draftChanged && request.action === 'verifyModel' && request.allowFirstChatVerificationOpening === true
+      && opening.attempt.firstVerificationOpening === opening && (allowAcknowledged || !verifyAcknowledged)
+      && composer && composer.isConnected && insertComposer(current) === composer && firstVerificationComposerEmpty(composer);
+  };
+  const passiveEditorIntact = (opening, current) => {
+    recordDraftChanges(draftObserver?.takeRecords?.() || []);
+    return !draftChanged && opening?.composer?.isConnected === true && firstVerificationComposerEmpty(opening.composer)
+      && globalThis.__computaChatSubmissionState == null && ![...document.querySelectorAll('button[data-testid="stop-button"],'
+        + 'button[aria-label="Stop streaming"],button[aria-label="Stop generating"],button[aria-label="Stop"]')].some(current.visible);
+  };
   const insertComposer = current => {
     const candidates = [...new Set(document.querySelectorAll('#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, '
       + '#prompt-textarea [contenteditable="true"], [contenteditable="true"][aria-label="Ask ChatGPT"], textarea[data-testid="prompt-textarea"]'))]
@@ -620,22 +656,47 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     return candidates.length === 1 ? candidates[0] : null;
   };
   const insertComposerValue = composer => composer instanceof HTMLTextAreaElement ? composer.value : composer?.innerText;
-  const insertOpeningIntact = current => {
-    const saved = insertOpening, state = saved?.state, record = saved?.record;
-    const composer = saved?.composer;
+  const firstVerificationComposerEmpty = composer => {
     const value = insertComposerValue(composer);
-    return readonlyOpeningSelectionIntact(saved, current)
-      && request.action === 'insert' && context?.action === 'insert' && context.scope === 'action_final_guard'
+    if (value === '') return composer instanceof HTMLTextAreaElement || composer.textContent === '' && !composer.childNodes.length;
+    // WebKit renders ProseMirror's sole empty-paragraph caret sentinel as one LF.
+    // Neither trimming a draft nor ignoring a second element proves emptiness.
+    if (value !== '\n' || composer instanceof HTMLTextAreaElement || composer.textContent !== ''
+      || composer.getAttribute('contenteditable') !== 'true' || !composer.classList.contains('ProseMirror')
+      || composer.childNodes.length !== 1) return false;
+    const paragraph = composer.childNodes[0], br = paragraph.childNodes?.[0];
+    return paragraph.tagName === 'P' && paragraph.childNodes.length === 1 && br?.tagName === 'BR'
+      && br.classList.contains('ProseMirror-trailingBreak') && !br.childNodes.length;
+  };
+  const insertOpeningIntact = (current, spent = false) => {
+    const saved = insertOpening, state = saved?.state, record = saved?.record, prior = saved?.insertProof;
+    const composer = saved?.composer, value = insertComposerValue(composer);
+    const grant = request.preparedInstantVerificationOpening;
+    const firstSubmit = request.action === 'submit';
+    if (prior) {
+      recordVerifyOpening(verifyObserver?.takeRecords?.() || []);
+      recordDraftChanges(draftObserver?.takeRecords?.() || []);
+      if (draftChanged || !spent && verifyAcknowledged || record.firstInsertOpening !== prior || prior.proved !== true) return false;
+      if (firstSubmit) {
+        if (record.firstSubmitOpening !== saved || record.readyForSubmitOpening !== prior || request.submissionSequence !== 1
+          || request.submissionMarker !== record.marker || request.prompt !== saved.prompt
+          || !prior.exactSubmitDraft || !chatGPTExactSubmitDraft(composer, value, request.prompt)
+          || globalThis.__computaModelLastSubmissionCount !== undefined) return false;
+      } else if (request.action !== 'verifyModel' || expected.key !== 'chat/latest/instant'
+        || !grant || typeof grant !== 'object' || Array.isArray(grant) || Object.keys(grant).sort().join(',') !== 'fingerprint,marker,sequence' || grant.sequence !== 1
+        || grant.marker !== record.marker || !/^[a-f0-9]{64}$/.test(grant.fingerprint) || grant.fingerprint !== record.fingerprint
+        || record.firstPreparedVerificationOpening !== saved) return false;
+    } else if (request.action !== 'insert' || record?.firstInsertOpening !== saved || request.submissionSequence !== 1
+      || record.marker !== request.submissionMarker || typeof request.prompt !== 'string' || request.prompt !== saved.prompt) return false;
+    return readonlyOpeningSelectionIntact(saved, current, spent)
+      && context?.action === request.action && context.scope === (firstSubmit ? 'action_precheck' : 'action_final_guard')
       && chatGPTSubmissionContext(state) && state.pending === record && state.lastVerified == null
-      && record.firstInsertOpening === saved && record.document === originalDocument && record.owner === owner
-      && record.sequence === 1 && request.submissionSequence === 1 && record.phase === 'prepared'
-      && record.marker === request.submissionMarker && record.marker === request.expectedFirstUserMarker
-      && record.root === null && record.body === null && record.expansionAttempted === false
-      && Array.isArray(request.expectedSubmissionProofs) && request.expectedSubmissionProofs.length === 0
-      && typeof request.prompt === 'string' && request.prompt === saved.prompt
+      && record.document === originalDocument && record.owner === owner && record.sequence === 1 && record.phase === 'prepared'
+      && record.marker === request.expectedFirstUserMarker && record.root === null && record.body === null && record.expansionAttempted === false
+      && Array.isArray(request.expectedSubmissionProofs) && (firstSubmit
+        ? request.expectedSubmissionProofs.length === 1 && chatGPTSubmissionPins(record) : request.expectedSubmissionProofs.length === 0)
       && record.canonical === saved.canonical && record.fingerprint === saved.fingerprint
-      && chatGPTSubmissionCanonical(request.prompt) === record.canonical
-      && globalThis.__computaModelFirstPrompt === request.prompt
+      && chatGPTSubmissionCanonical(saved.prompt) === record.canonical && globalThis.__computaModelFirstPrompt === saved.prompt
       && composer?.isConnected === true && insertComposer(current) === composer && current.enabled(composer)
       && value === saved.editorValue && chatGPTSubmissionCanonical(value) === record.canonical;
   };
@@ -680,17 +741,32 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       && attempt.postFamilyOpeningClaimed !== true;
     if (recoveryEligible) attempt.postFamilyOpeningClaimed = true;
     const completed = globalThis.__computaModelSelection;
-    if (!genericPowerRecheck && !mutable && request.action === 'prepare' && context?.scope === 'action_final_guard'
-      && completed?.completed === true && globalThis.__computaChatFirstPrepareOpening == null) {
-      // Spend the first prepare observation even when its opening succeeds.
-      // Later prepares cannot acquire a new recovery allowance.
+    const firstVerify = request.action === 'verifyModel' && request.allowFirstChatVerificationOpening === true;
+    if (!genericPowerRecheck && !mutable && context?.action === request.action && context.scope === 'action_final_guard'
+      && completed?.completed === true && (request.action === 'prepare' && globalThis.__computaChatFirstPrepareOpening == null
+        || firstVerify && completed.firstVerificationOpening == null)) {
+      // Claim only the first opening of this phase, including an acknowledged opening.
       const pin = globalThis.__computaChatPresetPin;
       prepareOpening = { owner, document: originalDocument, attempt: completed, pin, selection: pin?.selection, header: trigger,
         recoveryClaimed: false,
         resolved: { family: { ...pin?.selection?.family }, power: { ...pin?.selection?.power } } };
-      globalThis.__computaChatFirstPrepareOpening = prepareOpening;
+      if (firstVerify) {
+        completed.firstVerificationOpening = prepareOpening;
+        prepareOpening.composer = insertComposer(current);
+      } else globalThis.__computaChatFirstPrepareOpening = prepareOpening;
       current = drainOpeningEvidence();
       if (!prepareOpeningIntact(current)) prepareOpening = null;
+      else if (firstVerify) {
+        // A popup that briefly opened and dismissed was acknowledged; never reopen it.
+        // Observe the editor from before the click, including removal via its parent.
+        firstVerificationEditor = prepareOpening.composer;
+        draftObserver = new MutationObserver(recordDraftChanges);
+        draftObserver.observe(document.documentElement || document, {subtree:true,childList:true});
+        draftObserver.observe(firstVerificationEditor, {subtree:true,childList:true,characterData:true});
+        firstVerificationEditor.addEventListener?.('input', invalidateDraft, true);
+        verifyObserver = new MutationObserver(recordVerifyOpening);
+        verifyObserver.observe(trigger, { attributes: true, attributeOldValue: true, attributeFilter: ['aria-expanded', 'data-state'] });
+      }
     }
     const submission = globalThis.__computaChatSubmissionState, prepared = submission?.pending;
     if (!genericPowerRecheck && !mutable && request.action === 'insert' && context?.scope === 'action_final_guard'
@@ -703,17 +779,38 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         recoveryClaimed: false, state: submission, record: prepared, composer, editorValue: insertComposerValue(composer), prompt: request.prompt,
         canonical: prepared.canonical, fingerprint: prepared.fingerprint,
         resolved: { family: { ...pin?.selection?.family }, power: { ...pin?.selection?.power } } };
+      insertOpening.exactSubmitDraft = chatGPTExactSubmitDraft(composer, insertOpening.editorValue, request.prompt);
       prepared.firstInsertOpening = insertOpening;
       current = drainOpeningEvidence();
       if (!insertOpeningIntact(current)) insertOpening = null;
     }
+    const firstSubmit = request.action === 'submit' && context?.action === 'submit' && context.scope === 'action_precheck'
+      && prepared?.readyForSubmitOpening === prepared?.firstInsertOpening && prepared?.firstSubmitOpening == null;
+    const preparedVerify = !firstVerify && request.action === 'verifyModel' && request.preparedInstantVerificationOpening
+      && context?.action === 'verifyModel' && context.scope === 'action_final_guard' && prepared?.firstPreparedVerificationOpening == null;
+    if (!genericPowerRecheck && !mutable && (firstSubmit || preparedVerify) && prepared?.firstInsertOpening?.proved === true) {
+      // The just-proved insertion already identifies the physical editor, header,
+      // selected pair and exact draft. Consume the verification slot before the
+      // first opening, even when it succeeds, and never reconstruct those pins.
+      const prior = prepared.firstInsertOpening;
+      insertOpening = { ...prior, insertProof:prior, recoveryClaimed:false };
+      if (firstSubmit) prepared.firstSubmitOpening = insertOpening;
+      else prepared.firstPreparedVerificationOpening = insertOpening;
+      current = drainOpeningEvidence();
+      if (!insertOpeningIntact(current)) insertOpening = null;
+      else {
+        verifyObserver = new MutationObserver(recordVerifyOpening);
+        verifyObserver.observe(trigger, { attributes:true, attributeOldValue:true, attributeFilter:['aria-expanded','data-state'] });
+        draftObserver = new MutationObserver(recordDraftChanges);
+        draftObserver.observe(document.documentElement || document, {subtree:true,childList:true,characterData:true});
+        insertOpening.composer.addEventListener?.('input', invalidateDraft, true);
+      }
+    }
     if (cappedFirstInsert && Date.now() >= until) throw failure('model_unverified');
     primaryOpened = true; readStage = 'primary_open_requested';
     trigger.click();
-    const powerAcknowledged = () => {
-      const observed = websiteChatPickerState();
-      return observed.mode === 'power' || observed.mode === 'family' || observed.powerUnavailable;
-    };
+    const powerAcknowledged = (observed = websiteChatPickerState()) =>
+      observed.mode === 'power' || observed.mode === 'family' || observed.powerUnavailable;
     if (!genericPowerRecheck && (prepareOpening !== null || insertOpening !== null)) {
       const acknowledgementDeadline = Math.min(until, Date.now() + 900);
       let clockRejected = false;
@@ -722,12 +819,36 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       current = drainOpeningEvidence();
       // A delayed acknowledgement wins; never toggle an already opened menu.
       if (!acknowledged && !powerAcknowledged()) {
-        if (clockRejected || Date.now() < acknowledgementDeadline
-          || !(prepareOpening !== null ? prepareOpeningIntact(current) : insertOpeningIntact(current))) throw failure('model_unverified');
-        (prepareOpening || insertOpening).recoveryClaimed = true;
-        readStage = prepareOpening !== null ? 'prepare_open_recovery_requested' : 'insert_open_recovery_requested';
-        trigger.click();
-        current = await wait(powerAcknowledged);
+        if (clockRejected || Date.now() < acknowledgementDeadline) {
+          if (firstVerify) readStage = 'first_verification_clock_unconfirmed';
+          throw failure('model_unverified');
+        }
+        if (firstVerify) recordVerifyOpening(verifyObserver?.takeRecords?.() || []);
+        if (firstVerify && verifyAcknowledged) {
+          // The first click was acknowledged. Wait only for a popup associated with
+          // this exact trigger; do not toggle it again or prove a model from a closed header.
+          readStage = 'first_verification_acknowledged_closed';
+          if (!prepareOpeningIntact(current, prepareOpening, true) || !passiveEditorIntact(prepareOpening, current))
+            throw failure('model_unverified');
+          passiveFirstVerification = prepareOpening;
+          let drifted = false;
+          current = await wait(() => {
+            const observed = websiteChatPickerState();
+            if (!passiveEditorIntact(passiveFirstVerification, observed)
+              || !observed.topMenu && !prepareOpeningIntact(observed, passiveFirstVerification, true)) drifted = true;
+            return drifted || powerAcknowledged(observed);
+          });
+          if (drifted || Date.now() >= until) throw failure('model_unverified');
+        } else {
+          if (!(prepareOpening !== null ? prepareOpeningIntact(current) : insertOpeningIntact(current))) {
+            if (firstVerify) readStage = 'first_verification_recovery_guard_changed';
+            throw failure('model_unverified');
+          }
+          (prepareOpening || insertOpening).recoveryClaimed = true;
+          readStage = firstVerify || insertOpening?.insertProof ? 'primary_open_recovery_requested' : prepareOpening !== null ? 'prepare_open_recovery_requested' : 'insert_open_recovery_requested';
+          trigger.click();
+          current = await wait(powerAcknowledged);
+        }
       }
     } else if (recoveryEligible) {
       // Preserve the existing fresh post-family allowance within the original
@@ -1010,7 +1131,12 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       if (finalPowerState) websiteChatTrackPinnedControls(globalThis.__computaChatPresetPin, finalPowerState);
       websiteChatTrackPinnedHeader(globalThis.__computaChatPresetPin, trigger);
     }
+    if (passiveFirstVerification && (!passiveEditorIntact(passiveFirstVerification, final)
+      || !prepareOpeningIntact(final, passiveFirstVerification, true))) return failure('model_unverified');
     if (cappedFirstInsert && Date.now() >= until) return failure('model_unverified');
+    if (insertOpening?.insertProof && insertOpening.recoveryClaimed && !insertOpeningIntact(final, true))
+      return failure('model_unverified');
+    if (insertOpening && request.action === 'insert') insertOpening.proved = true;
     const provedPin = globalThis.__computaChatPresetPin;
     if (provedPin?.owner === owner && provedPin.document === originalDocument
       && provedPin.headerTrigger === trigger && provedPin.invalidated !== true
@@ -1020,6 +1146,9 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   } catch (error) {
     return error?.error ? error : failure('model_unverified');
   } finally {
+    verifyObserver?.disconnect?.();
+    draftObserver?.disconnect?.();
+    if (draftObserver) (insertOpening?.composer || firstVerificationEditor)?.removeEventListener?.('input', invalidateDraft, true);
     observer.disconnect?.();
     headerObserver.disconnect?.();
     if (owned() && (primaryOpened || secondaryOpened || closeAttempted)) {
@@ -1167,7 +1296,8 @@ function websiteModelPickerState(provider) {
       : provider === 'gemini' ? /^Open mode picker, currently (?:Gemini )?(?:[0-9]+(?:\.[0-9]+)? )?(?:Pro|Flash|Flash-Lite|Argon)$/.test(label)
         : /^Model: (?:Sonnet|Haiku|Opus|Fable) [0-9]+(?:\.[0-9]+)?(?: (?:Low|Medium|High|Extra|Extended|Max))?$/.test(label);
   };
-  const triggers = nodes('button[aria-label], [role="button"][aria-label]').filter(node => physical(node) && outside(node) && isTrigger(node));
+  const triggerScan = nodes('button[aria-label], [role="button"][aria-label]');
+  const triggers = triggerScan.filter(node => physical(node) && outside(node) && isTrigger(node));
   const triggerCandidates = nodes('button[aria-label], [role="button"][aria-label]').filter(node => physical(node) && outside(node)
     && /^(?:Select ChatGPT model(?:$|[ ,])|Open mode picker(?:$|[ ,])|Model: )/.test(websiteModelNormalize(node.getAttribute('aria-label'))));
   const trigger = triggers.length === 1 ? triggers[0] : null;
@@ -1217,6 +1347,12 @@ function websiteModelPickerState(provider) {
     const options = [...menu.querySelectorAll(selector)].slice(0, 128);
     for (const option of options) {
       if (!enabled(option) || !outside(option) || option.closest('[role="menu"], [role="listbox"], [role="dialog"]') !== menu) continue;
+      // An enabled menu action can advertise a model name without being a
+      // selectable model. Claude rows must expose an actual checked/selected state.
+      if (provider === 'claude') {
+        const state = option.getAttribute(option.getAttribute('role') === 'option' ? 'aria-selected' : 'aria-checked');
+        if (state !== 'true' && state !== 'false') continue;
+      }
       const upgrades = [option, ...option.querySelectorAll('span, div, button, a')].slice(0, 128)
         .some(node => physical(node) && /^(?:Upgrade|Upgrade to .+|Locked|Unavailable)$/.test(websiteModelNormalize(node.getAttribute('aria-label') || node.textContent)));
       // Purchase labels may use any element tag. Text must come from
@@ -1228,7 +1364,7 @@ function websiteModelPickerState(provider) {
       const purchaseLabel = node => {
         if (!purchaseScope(node)) return false;
         const aria = node.getAttribute('aria-label');
-        if (aria) return /^Buy credits$/.test(websiteModelNormalize(aria));
+        if (aria && /^Buy credits$/.test(websiteModelNormalize(aria))) return true;
         let remaining = 128, text = '', complete = true;
         const visit = (current, depth) => {
           if (!complete) return;
@@ -1280,7 +1416,128 @@ function websiteModelPickerState(provider) {
     ? checked[0].indicatorSelected ? 'selected_model_indicator' : 'checked_model_option' : 'model_picker_label' } : null;
   return { provider, trigger, triggerCount: triggers.length, triggerCandidates, topMenu, secondary, nestedMenu, menus, allMenus, physicalMenus, choices: duplicate ? [] : choices,
     controls: duplicate ? [] : controls, selected, evidence, duplicate, conflicting, indicatorInvalid, selectionAmbiguous,
-    navigationAmbiguous: secondaries.length > 1, physical, visible, enabled, family };
+    navigationAmbiguous: secondaries.length > 1, physical, visible, enabled, family, triggerScan, outside };
+}
+function websiteClaudeRememberModelTrigger(provider, trigger, owner, url) {
+  if (provider !== 'claude') return;
+  try {
+    if (!trigger || typeof owner !== 'string' || !/^[a-f0-9-]{36}$/i.test(owner)
+      || globalThis.__computaModelOwner !== owner || document.URL !== url) return;
+    // Reference written only after an existing positive proof, for diagnostics
+    // and detached-node wait eligibility. Never selection, response, action,
+    // or cleanup authority: a replacement still requires fresh current proof.
+    globalThis.__computaClaudeLastModelTrigger = { node: trigger, owner, document, url };
+  } catch { /* Diagnostics cannot change the already evaluated proof. */ }
+}
+function websiteClaudeModelTriggerDiagnostic(state) {
+  const empty = scope => ({ kind: 'claude_last_model_trigger_v1', scope,
+    connected: null, physical: null, visible: null, nodeKind: null, labelKind: null,
+    authored: null, inTriggerScan: null, triggerScanAtLimit: null });
+  try {
+    const record = globalThis.__computaClaudeLastModelTrigger;
+    if (!record) return empty('missing');
+    if (typeof record.owner !== 'string' || !/^[a-f0-9-]{36}$/i.test(record.owner)
+      || record.owner !== globalThis.__computaModelOwner || record.document !== document || record.url !== document.URL)
+      return empty('different_context');
+    const node = record.node;
+    if (!node || typeof node.getAttribute !== 'function' || typeof node.closest !== 'function') return empty('unavailable');
+    const raw = node.getAttribute('aria-label');
+    const label = typeof raw === 'string' && raw.length <= 512 ? websiteModelNormalize(raw) : null;
+    const labelKind = raw == null || label === '' ? 'missing'
+      : label?.startsWith('Model: ') && websiteModelSafeTriggerLabel(label) ? 'recognized'
+      : label?.startsWith('Model: ') ? 'known_prefix_unrecognized' : 'other';
+    return { kind: 'claude_last_model_trigger_v1', scope: 'same_context',
+      connected: node.isConnected === true, physical: state.physical(node), visible: state.visible(node),
+      nodeKind: node.tagName === 'BUTTON' ? 'button' : node.getAttribute('role') === 'button' ? 'role_button' : 'other',
+      labelKind, authored: !state.outside(node),
+      inTriggerScan: state.triggerScan.includes(node), triggerScanAtLimit: state.triggerScan.length === 256 };
+  } catch { return empty('unavailable'); }
+}
+// Failure-only structural inventory. These sampled DOM facts are not ownership,
+// model, completion or cleanup evidence. Never read text, arbitrary classes or
+// attribute values into the result; a failed read preserves the original error.
+function websiteClaudeRemountSurfaceDiagnostic(guard) {
+  try {
+    if (typeof guard !== 'function' || guard() !== true) return null;
+    const limit = 64;
+    const physical = node => !!node && node.isConnected === true && node.getClientRects().length > 0
+      && !['hidden', 'collapse'].includes(getComputedStyle(node).visibility);
+    const visible = node => physical(node) && !node.closest('[hidden], [inert], [aria-hidden="true"]');
+    const enabled = node => visible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true';
+    // Only fixed selector queries; do not enumerate the whole document or its text.
+    const scan = (selector, scope = document) => {
+      const matches = scope.querySelectorAll(selector), nodes = [];
+      for (let index = 0; index < Math.min(matches.length, limit); index++) nodes.push(matches[index]);
+      return { nodes, truncated: matches.length > limit };
+    };
+    const counts = sample => ({ sampled: sample.nodes.length, truncated: sample.truncated,
+      physical: sample.nodes.filter(physical).length, visible: sample.nodes.filter(visible).length,
+      enabled: sample.nodes.filter(enabled).length });
+    const number = (value, min = 0) => typeof value === 'number' && Number.isFinite(value)
+      ? { value: Math.max(min, Math.min(100_000, Math.trunc(value))), saturated: value < min || value > 100_000 }
+      : { value: null, saturated: false };
+    const enumValue = (value, allowed) => value == null ? 'unavailable' : allowed.includes(value) ? value : 'other';
+    // CharacterData.length supplies UTF-16 occupancy without concatenating or
+    // reading page text. Both traversal and sum are capped, including deep trees.
+    const textNodes = root => {
+      const stack = [{ node: root, index: 0 }];
+      let utf16Units = 0, saturated = false, nodesVisited = 0, truncated = false;
+      while (stack.length) {
+        const frame = stack.at(-1), children = frame.node.childNodes;
+        if (frame.index >= children.length) { stack.pop(); continue; }
+        if (nodesVisited === limit) { truncated = true; break; }
+        const child = children[frame.index++]; nodesVisited++;
+        if (child.nodeType === 3) {
+          const length = child.length;
+          if (!Number.isSafeInteger(length) || length < 0) throw new Error('text_length_unavailable');
+          saturated = saturated || utf16Units + length > 180_201;
+          utf16Units = Math.min(180_201, utf16Units + length);
+        } else if (child.nodeType === 1) stack.push({ node: child, index: 0 });
+      }
+      return { utf16Units, saturated, nodesVisited, truncated };
+    };
+    const shape = node => {
+      const tag = node.tagName?.toLowerCase(), role = node.getAttribute('role'), testID = node.getAttribute('data-testid');
+      return { tag: ['div', 'span', 'p', 'section', 'article', 'main', 'form', 'button', 'pre', 'code', 'h2', 'svg'].includes(tag) ? tag : 'other',
+        role: role === null ? 'absent' : ['article', 'group', 'main', 'log', 'feed', 'region', 'presentation', 'status', 'button', 'textbox'].includes(role) ? role : 'other',
+        testID: testID === null ? 'absent' : ['assistant-message', 'user-message', 'message-actions', 'action-bar-copy',
+          'response-status-announcer', 'chat-input', 'chat-input-send'].includes(testID) ? testID : 'other',
+        replyText: node.getAttribute('data-perf-reply-text') !== null,
+        physical: physical(node), visible: visible(node), textNodes: textNodes(node) };
+    };
+    const labeled = scan('button[aria-label], [role="button"][aria-label]');
+    const prefix = [], kinds = { recognized: 0, known_prefix_unrecognized: 0, other: 0 };
+    for (const node of labeled.nodes) {
+      const raw = node.getAttribute('aria-label');
+      // Limit normalization work; oversized labels can establish only a literal
+      // known prefix, never a recognized model. No label bytes leave this scope.
+      const label = typeof raw === 'string' && raw.length <= 512 ? websiteModelNormalize(raw) : null;
+      const knownPrefix = label?.startsWith('Model: ') || typeof raw === 'string' && raw.startsWith('Model: ');
+      const kind = knownPrefix ? label && websiteModelSafeTriggerLabel(label) ? 'recognized' : 'known_prefix_unrecognized' : 'other';
+      kinds[kind]++;
+      if (knownPrefix) prefix.push(node);
+    }
+    const roots = scan('[data-testid="assistant-message"]');
+    const rootSamples = roots.nodes.slice(0, 2).map(node => {
+      const children = node.children, samples = [];
+      for (let index = 0; index < Math.min(children.length, 6); index++) samples.push(shape(children[index]));
+      return { ...shape(node), childrenSampled: samples.length, childrenTruncated: children.length > 6, children: samples };
+    });
+    const result = { kind: 'claude_remount_surface_v1', scanLimit: limit,
+      document: { hidden: typeof document.hidden === 'boolean' ? document.hidden : null,
+        visibility: enumValue(document.visibilityState, ['visible', 'hidden', 'prerender']),
+        ready: enumValue(document.readyState, ['loading', 'interactive', 'complete']),
+        width: number(window.innerWidth), height: number(window.innerHeight),
+        scrollX: number(window.scrollX, -100_000), scrollY: number(window.scrollY, -100_000) },
+      composers: counts(scan('[data-testid="chat-input"][contenteditable="true"][role="textbox"]')),
+      stopButtons: counts(scan('button[aria-label="Stop response"]')),
+      sendButtons: counts(scan('button[aria-label="Send message"]')),
+      modelControls: { labeledScan: counts(labeled), labelKinds: kinds, prefix: counts({ nodes: prefix, truncated: labeled.truncated }) },
+      responseRoots: { ...counts(roots), shapesTruncated: roots.truncated || roots.nodes.length > 2, shapes: rootSamples },
+      renderedReplies: counts(scan('[data-testid="assistant-message"] [data-perf-reply-text]')),
+      replyTextNodes: counts(scan('[data-perf-reply-text]')) };
+    return guard() === true ? result : null;
+  } catch { return null; }
 }
 function websiteModelDiagnostic(state, readObservation = null) {
   const allowedTags = ['button', 'div', 'span', 'p', 'ul', 'li', 'dialog', 'section', 'svg', 'path', 'mat-icon'];
@@ -1346,7 +1603,10 @@ function websiteModelDiagnostic(state, readObservation = null) {
     diagnostic.readStage = readObservation.readStage;
     diagnostic.readAttempt = readObservation.readAttempt;
     diagnostic.readContext = readObservation.readContext;
+    if (state.provider === 'claude' && readObservation.remountObservation)
+      diagnostic.remountObservation = readObservation.remountObservation;
   }
+  if (state.provider === 'claude') diagnostic.lastModelTrigger = websiteClaudeModelTriggerDiagnostic(state);
   if (state.provider === 'chatgpt') {
     diagnostic.chatPower = state.powerDiagnostic;
     const pin = globalThis.__computaChatPresetPin;
@@ -1592,8 +1852,33 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
   const recovery = provider === 'chatgpt' && openingRecovery?.attempt?.clicked === true
     && openingRecovery.attempt.settled === true && openingRecovery.attempt.completed !== true
     && typeof openingRecovery.guard === 'function' ? openingRecovery : null;
-  const unchanged = () => window === window.top && document.URL === url && globalThis.__computaModelOwner === owner
-    && (!recovery || recovery.guard(false) === true);
+  const readDocument = document;
+  let claudeRemountStarted = false, claudeRemountTrigger = null, remountObservation = null;
+  const submittedReadIntact = () => {
+    try { return context.claudeSubmittedReadGuard() === true; } catch { return false; }
+  };
+  const unchanged = () => window === window.top && document === readDocument && document.URL === url && globalThis.__computaModelOwner === owner
+    && (!recovery || recovery.guard(false) === true) && (!claudeRemountStarted || submittedReadIntact());
+  const detachedClaudeTrigger = () => {
+    try {
+      const record = globalThis.__computaClaudeLastModelTrigger;
+      if (!record || typeof record !== 'object' || Object.keys(record).length !== 4
+        || !['node', 'owner', 'document', 'url'].every(key => Object.getOwnPropertyDescriptor(record, key)?.value !== undefined)
+        || record.owner !== owner || record.document !== readDocument || record.url !== url) return false;
+      const node = record.node;
+      return !!node && node.nodeType === 1 && typeof node.getAttribute === 'function'
+        && typeof node.closest === 'function' && node.isConnected === false;
+    } catch { return false; }
+  };
+  const remountProofError = current => {
+    if (Date.now() >= until || !unchanged() || current.trigger !== claudeRemountTrigger
+      || current.triggerScan.length >= 256 || current.triggerCount !== 1 || current.triggerCandidates.length !== 1 || current.triggerCandidates[0] !== current.trigger
+      || current.duplicate || current.conflicting || current.indicatorInvalid || current.selectionAmbiguous || current.navigationAmbiguous
+      || current.physicalMenus.length || current.allMenus.length || !current.enabled(current.trigger)
+      || ![null, 'false'].includes(current.trigger.getAttribute('aria-expanded'))
+      || ![null, 'closed'].includes(current.trigger.getAttribute('data-state')) || !current.evidence) return 'model_unverified';
+    return websiteModelChoiceEqual(current.evidence.selected, expected) ? null : 'model_mismatch';
+  };
   const until = recovery ? recovery.until : Date.now() + 1_800;
   let primaryOpened = false, secondaryOpened = false, closeAttempted = false, trigger = null, captured = null;
   const ownedMenus = new Set(), popupOwners = new Set(), ownedMenuIDs = new Set(), popupOwnerIDs = new Set();
@@ -1623,6 +1908,7 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
         selectionAttemptPresent: selectionPresent, selectionClicked: selectionPresent && selection.clicked === true,
         selectionSettled: selectionPresent && selection.settled === true, selectionCompleted: selectionPresent && selection.completed === true,
         recoveryEligible: !!recovery },
+      ...(remountObservation ? { remountObservation } : {}),
       readAttempt: { primaryOpened, secondaryOpened, closeAttempted, observedProof: !!captured,
         sameTrigger: !trigger || current.trigger === trigger, popupStillAssociated: !!current.topMenu } }),
       ...(captured ? { modelEvidence: captured } : {}) };
@@ -1668,6 +1954,9 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
   const closeOwned = async () => {
     const current = websiteModelPickerState(provider);
     if (!unchanged()) return false;
+    // This new read-only branch must never dismiss or open a popup, even if
+    // one appears after the replacement header was observed.
+    if (claudeRemountStarted) return remountProofError(current) === null;
     if (!trigger || current.trigger !== trigger || !current.physical(trigger) || trigger.disabled
       || trigger.getAttribute('aria-disabled') === 'true') return false;
     if (!current.topMenu) {
@@ -1686,9 +1975,96 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
     return waitForClosedPicker();
   };
   try {
+    // Claude can detach its model header after the acknowledged first Send.
+    // A bounded, action-free DOM wait may observe its replacement, but never
+    // promotes the remembered diagnostic node or a timer into model evidence.
+    if (provider === 'claude' && context?.scope === 'action_precheck'
+      && ['inspect', 'verifyModel'].includes(context.action) && typeof context.claudeSubmittedReadGuard === 'function'
+      && !state.trigger && state.triggerCount === 0 && state.triggerCandidates.length === 0
+      && state.triggerScan.length < 256 && detachedClaudeTrigger()) {
+      claudeRemountStarted = true;
+      readStage = 'trigger_remount_waiting';
+      let rejection = null;
+      // Losing absence eligibility is permanent for this read, but does not
+      // reject a later exact header with ordinary fresh positive proof.
+      let noOutputPendingEligible = input.allowClaudeModelObservationPending === true
+        && context.action === 'inspect' && typeof context.claudeNoOutputPending === 'function';
+      // Diagnostic rereads only. No extra observer, timer or action is installed,
+      // and these snapshots never supply model, ownership or completion proof.
+      const diagnosticStarted = Date.now();
+      let observations = 0;
+      const completionDiagnostic = () => {
+        try { return context.claudeRemountCompletionDiagnostic?.() ?? null; } catch { return null; }
+      };
+      const entry = completionDiagnostic();
+      const observeRemount = () => {
+        observations = Math.min(observations + 1, 1_000);
+        if (rejection) return true;
+        if (!unchanged()) { rejection = 'model_unverified'; return true; }
+        if (noOutputPendingEligible) {
+          try {
+            const absent = context.claudeNoOutputPending();
+            if (!absent || typeof absent.busy !== 'boolean') noOutputPendingEligible = false;
+          } catch { noOutputPendingEligible = false; }
+        }
+        const current = websiteModelPickerState(provider);
+        if (current.triggerScan.length >= 256 || current.duplicate || current.conflicting || current.indicatorInvalid || current.selectionAmbiguous
+          || current.navigationAmbiguous || current.physicalMenus.length || current.allMenus.length) {
+          rejection = 'model_unverified'; return true;
+        }
+        if (!current.trigger && current.triggerCount === 0 && current.triggerCandidates.length === 0) return false;
+        if (current.triggerCount !== 1 || current.triggerCandidates.length !== 1
+          || current.triggerCandidates[0] !== current.trigger || !current.enabled(current.trigger)
+          || ![null, 'false'].includes(current.trigger.getAttribute('aria-expanded'))
+          || ![null, 'closed'].includes(current.trigger.getAttribute('data-state')) || !current.evidence) {
+          rejection = 'model_unverified'; return true;
+        }
+        if (!websiteModelChoiceEqual(current.evidence.selected, expected)) {
+          rejection = 'model_mismatch'; return true;
+        }
+        // Identity is pinned only after this current node provides exact proof;
+        // the ordinary read below must independently observe it again.
+        if (claudeRemountTrigger && claudeRemountTrigger !== current.trigger) {
+          rejection = 'model_unverified'; return true;
+        }
+        claudeRemountTrigger = current.trigger;
+        return true;
+      };
+      const changed = await websiteModelWaitForChange(until, observeRemount, 'model_wait',
+        () => { rejection = 'model_unverified'; });
+      if (!changed || Date.now() >= until || !observeRemount() || rejection) {
+        // Only an expired absence observation may return no-output pending.
+        // The native permission and fresh semantic callback cannot convert a
+        // mismatch, clock error, popup or previously observed context loss.
+        if (changed === false && !rejection && !claudeRemountTrigger && noOutputPendingEligible
+          && input.allowClaudeModelObservationPending === true && context.scope === 'action_precheck'
+          && context.action === 'inspect' && typeof context.claudeNoOutputPending === 'function'
+          && unchanged() && detachedClaudeTrigger() && observeRemount() === false) {
+          let pending = null;
+          try { pending = context.claudeNoOutputPending(); } catch { /* Preserve failure. */ }
+          if (pending && typeof pending.busy === 'boolean' && !rejection
+            && unchanged() && detachedClaudeTrigger() && observeRemount() === false && !rejection && noOutputPendingEligible)
+            return { claudeModelObservationPending: true };
+        }
+        readStage = rejection ? 'trigger_remount_rejected' : 'trigger_remount_timeout';
+        try {
+          const elapsed = Date.now() - diagnosticStarted;
+          remountObservation = { kind: 'claude_remount_observation_v1',
+            elapsedMs: Number.isFinite(elapsed) ? Math.max(0, Math.min(10_000, Math.floor(elapsed))) : null,
+            observations, entry, terminal: completionDiagnostic(),
+            surface: websiteClaudeRemountSurfaceDiagnostic(context.claudeSubmittedReadGuard) };
+        } catch { /* Unavailable diagnostics cannot replace the original failure. */ }
+        return failure(rejection || 'model_unverified');
+      }
+      readStage = 'trigger_remount_observed';
+    }
     while (Date.now() < until) {
       if (!unchanged()) return recovery ? failure('model_unverified') : { error: 'document_changed', detail: 'owner_token' };
       state = websiteModelPickerState(provider);
+      if (claudeRemountStarted) {
+        const invalid = remountProofError(state);
+        if (invalid) return failure(invalid);
+      }
       trackOwnedMenus(state);
       websiteModelTrackReadUI(state);
       if (state.duplicate || state.conflicting || state.indicatorInvalid || state.selectionAmbiguous || state.navigationAmbiguous)
@@ -1699,9 +2075,16 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
         trigger = trigger || state.trigger;
         if (!(await closeOwned()) || !unchanged() || recovery && recovery.guard() !== true) return failure('model_unverified');
         const after = websiteModelPickerState(provider);
+        if (claudeRemountStarted) {
+          const invalid = remountProofError(after);
+          if (invalid) return failure(invalid);
+        }
         if (after.selected && !websiteModelChoiceEqual(after.selected, captured.selected)) return failure('model_mismatch');
-        return websiteModelChoiceEqual(captured.selected, expected) ? { modelEvidence: captured }
-          : { error: 'model_mismatch', modelEvidence: captured };
+        if (websiteModelChoiceEqual(captured.selected, expected)) {
+          websiteClaudeRememberModelTrigger(provider, trigger, owner, url);
+          return { modelEvidence: captured };
+        }
+        return { error: 'model_mismatch', modelEvidence: captured };
       }
       if (!state.trigger || state.triggerCount !== 1) return failure('model_unverified');
       if (trigger && trigger !== state.trigger) return failure('model_unverified');
@@ -1756,7 +2139,7 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
   } finally {
     // Close only a popup associated with this observation's exact controlled
     // trigger. This never selects a family or replays a failed editor operation.
-    if (unchanged() && trigger && !closeAttempted) {
+    if (!claudeRemountStarted && unchanged() && trigger && !closeAttempted) {
       const current = websiteModelPickerState(provider);
       if (current.topMenu && current.trigger === trigger && current.physical(trigger)
         && !trigger.disabled && trigger.getAttribute('aria-disabled') !== 'true') {
@@ -1774,7 +2157,18 @@ async function websiteClaudeCloseDiscoveryMenus(state, attempt, freshGuard) {
   const selected = state.selected, owned = [top, nested].filter(Boolean);
   const until = Date.now() + 1_800; // One shared deadline, including both distinct popups.
   const current = () => websiteModelPickerState('claude');
-  let invalidated = false;
+  let invalidated = false, catalog = null;
+  const controlsFor = (view, menu) => view.controls.filter(control =>
+    control.node.closest('[role="menu"], [role="listbox"], [role="dialog"]') === menu);
+  const eligibilityUnchanged = view => !catalog || catalog.every(snapshot => {
+    // A verified child dismissal may also close its parent. Only menus still
+    // physically present can contribute a later eligibility observation.
+    if (!view.physical(snapshot.menu)) return true;
+    if (!view.menus.includes(snapshot.menu)) return false;
+    const controls = controlsFor(view, snapshot.menu);
+    return controls.length === snapshot.controls.length && snapshot.controls.every(expected =>
+      controls.some(current => current.node === expected.node && websiteModelChoiceEqual(current.choice, expected.choice)));
+  });
   const unchanged = view => {
     const valid = window === window.top && document.URL === url
       && globalThis.__computaModelOwner === owner && globalThis.__computaModelFirstSubmitted !== true
@@ -1783,13 +2177,24 @@ async function websiteClaudeCloseDiscoveryMenus(state, attempt, freshGuard) {
       && view.trigger === trigger && view.triggerCount === 1 && view.enabled(trigger)
       && !view.duplicate && !view.conflicting && !view.indicatorInvalid && !view.selectionAmbiguous && !view.navigationAmbiguous
       && (selected ? websiteModelChoiceEqual(view.selected, selected) : view.selected == null)
-      && view.physicalMenus.every(menu => owned.includes(menu));
+      && view.physicalMenus.every(menu => owned.includes(menu)) && eligibilityUnchanged(view);
     // A wakeup can observe drift that is restored before the await resumes.
     // Its negative evidence remains decisive for this claimed close attempt.
     invalidated ||= !valid;
     return !invalidated;
   };
   try {
+    const initial = current();
+    if (Date.now() >= until || !unchanged(initial) || initial.topMenu !== top || initial.nestedMenu !== nested
+      || initial.secondary !== secondary || owned.some(menu => !initial.menus.includes(menu) || !initial.visible(menu))) return false;
+    // Earlier reads are provisional. Publish only this fresh, complete owned
+    // picker snapshot, then keep each still-open menu's eligibility unchanged
+    // throughout the existing guarded close. Never revive an accumulated row.
+    catalog = owned.map(menu => ({ menu, controls: controlsFor(initial, menu)
+      .map(control => ({ node: control.node, choice: { ...control.choice } })) }));
+    const choices = catalog.flatMap(snapshot => snapshot.controls.map(control => control.choice));
+    if (!choices.length || choices.length > 32 || choices.some((choice, index) =>
+      choices.some((other, otherIndex) => otherIndex !== index && websiteModelChoiceEqual(choice, other)))) return false;
     // A nested menu can consume Escape without closing its parent. Dismiss
     // each exact observed popup once, child first, with physical closure and
     // fresh context checks before the separate parent's dismissal.
@@ -1807,10 +2212,12 @@ async function websiteClaudeCloseDiscoveryMenus(state, attempt, freshGuard) {
       if (Date.now() >= until || !unchanged(after) || after.physical(menu)) return false;
     }
     const after = current();
-    return Date.now() < until && unchanged(after) && !after.topMenu && !after.nestedMenu
+    const closed = Date.now() < until && unchanged(after) && !after.topMenu && !after.nestedMenu
       && owned.every(menu => !after.physical(menu))
       && [null, 'false'].includes(trigger.getAttribute('aria-expanded'))
       && [null, 'closed'].includes(trigger.getAttribute('data-state'));
+    if (closed) attempt.choices = choices;
+    return closed;
   } catch { return false; }
 }
 async function websiteModelPickerAction(state, request, fresh, freshGuard = null) {

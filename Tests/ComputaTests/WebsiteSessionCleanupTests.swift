@@ -137,6 +137,43 @@ final class WebsiteSessionCleanupTests: XCTestCase {
         }
     }
 
+    func testPublicProvidersHaveDurableReceiptIdentitiesAndKimiTransactionsRoundTrip() throws {
+        for provider in WebsiteModelCatalog.providers {
+            XCTAssertNotNil(WebsiteSessionCleanupReceipt.Provider(rawValue: provider),
+                            "Public provider \(provider) must be representable in durable cleanup receipts")
+        }
+        let choice = WebsiteModelChoice(provider: "kimi", key: "k28-instant", label: "Instant")
+        let cases: [(WebsiteSessionCleanupReceipt.Outcome, WebsiteSessionCleanupReceipt.Reason, String?, Int)] = [
+            (.closed, .deleted, UUID().uuidString, 2),
+            (.unconfirmed, .cleanupUnverified, UUID().uuidString, 2),
+            (.unconfirmed, .cleanupUnverified, nil, 3),
+            (.noOwnedSession, .notCreated, nil, 4),
+        ]
+        let store = WebsiteSessionCleanupStore(directory: try directory())
+        for (outcome, reason, token, schema) in cases {
+            let receipt = WebsiteSessionCleanupReceipt(taskID: UUID().uuidString, threadID: UUID().uuidString,
+                turnID: UUID().uuidString, runtimeGeneration: UUID(), outcome: outcome, provider: .kimi,
+                route: .embedded, modelID: choice.modelID, reason: reason, trigger: .inference,
+                receiptSaved: true, inferenceID: UUID().uuidString, sessionToken: token)
+            XCTAssertEqual(receipt.schemaVersion, schema)
+            XCTAssertTrue(receipt.isValid)
+            let bytes = try JSONEncoder().encode(receipt)
+            XCTAssertEqual(try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self, from: bytes), receipt)
+            XCTAssertTrue(store.save(receipt))
+            XCTAssertTrue(store.save(receipt), "Exact persistence retry remains idempotent")
+            XCTAssertTrue(WebsiteSessionCleanupStore(directory: store.directory).latest().contains(receipt))
+            let mutations: [[String: Any]] = [["provider": "groq"], ["modelID": "browser/claude"],
+                                            ["reason": "transcript_cleared"]]
+            for mutation in mutations {
+                var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+                mutation.forEach { raw[$0.key] = $0.value }
+                let changed = try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self,
+                    from: JSONSerialization.data(withJSONObject: raw))
+                XCTAssertFalse(changed.isValid)
+            }
+        }
+    }
+
     func testGroqUnconfirmedReceiptRetainsExactProviderModelAndAttemptBinding() throws {
         let choice = WebsiteModelChoice(provider: "groq", key: "synthetic-model", label: "Synthetic model")
         let receipt = WebsiteSessionCleanupReceipt(taskID: UUID().uuidString, threadID: UUID().uuidString,
@@ -1178,6 +1215,24 @@ final class WebsiteSessionCleanupRuntimeTests: XCTestCase {
     }
 
     func testActualBundledEngineRestartPreservesPageInspectionFailureWithoutReplaying() async throws {
+        try await assertActualBundledEngineRestartPreservesPollFailure(.pageUnavailable)
+    }
+
+    func testActualBundledEngineRestartPreservesClaudeResponseBlockFailureWithoutReplaying() async throws {
+        try await assertActualBundledEngineRestartPreservesPollFailure(.responseBlocked(.claude))
+    }
+
+    func testOnlyVerifiedClaudeResponseBlockUsesTheNonretryableRequestStatus() {
+        typealias Failure = EmbeddedWebModelTransport.Failure
+        XCTAssertEqual(WebModelServer.errorPresentation(for: Failure.responseBlocked(.claude)).status, "400 Bad Request")
+        for failure in [Failure.responseBlocked(.chatgpt), .responseFailed(.claude), .pageUnavailable] {
+            XCTAssertEqual(WebModelServer.errorPresentation(for: failure).status, "500 Internal Server Error")
+        }
+        XCTAssertEqual(WebModelServer.errorPresentation(for: Failure.usageLimited(.claude)).status, "429 Too Many Requests")
+        XCTAssertEqual(WebModelServer.errorPresentation(for: WebModelServer.Failure.busy).status, "429 Too Many Requests")
+    }
+
+    private func assertActualBundledEngineRestartPreservesPollFailure(_ failure: EmbeddedWebModelTransport.Failure) async throws {
         let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("ComputaInspectionRestart-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
@@ -1188,7 +1243,7 @@ final class WebsiteSessionCleanupRuntimeTests: XCTestCase {
         config.protocolTracePath = root.appendingPathComponent("first-protocol.jsonl").path
         let prompt = "Synthetic café 🧭 inspection failure. Do not use tools."
         let taskID = UUID().uuidString, first = CodexAppServerRuntime(configuration: config)
-        let transport = CleanupReceiptTransport(pageUnavailableOnPoll: true), audit = CleanupRuntimeAudit(taskID: taskID)
+        let transport = CleanupReceiptTransport(pollFailure: failure), audit = CleanupRuntimeAudit(taskID: taskID)
         let observer = Task { for await event in first.events() { audit.receive(event) } }
         defer { observer.cancel() }
         await first.configureEmbeddedWebModelTransport(transport)
@@ -1196,20 +1251,60 @@ final class WebsiteSessionCleanupRuntimeTests: XCTestCase {
             _ = try await first.loadTasks()
             try await first.submit(prompt: prompt, toTaskID: taskID, modelID: "browser/claude")
             let deadline = ContinuousClock.now + .seconds(45)
-            while audit.status != .failed, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+            while (audit.status != .failed || !audit.receipts.contains { $0.trigger == .automatic && $0.outcome == .closed }),
+                  ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
             XCTAssertEqual(audit.status, .failed)
+            XCTAssertEqual(audit.errors.count, 1)
             let original = try XCTUnwrap(audit.errors.last)
             let originalObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(original.utf8)) as? [String: Any])
             let originalError = try XCTUnwrap(originalObject["error"] as? [String: Any])
-            XCTAssertEqual(originalError["code"] as? String, "browser_model_error")
-            XCTAssertEqual(originalError["message"] as? String, EmbeddedWebModelTransport.Failure.pageUnavailable.localizedDescription)
-            XCTAssertNil(originalError["retryable"])
+            let expected = try XCTUnwrap(JSONSerialization.jsonObject(with: WebModelServer.errorBody(for: failure)) as? [String: Any])
+            XCTAssertTrue(NSDictionary(dictionary: originalObject).isEqual(to: expected))
+            XCTAssertEqual(originalError["message"] as? String, failure.localizedDescription)
+            if case .responseBlocked = failure {
+                XCTAssertEqual(originalError["code"] as? String, "website_response_blocked")
+                XCTAssertEqual(originalError["retryable"] as? Bool, false)
+                XCTAssertEqual(originalError["required_action"] as? String, "inspect_website")
+            } else {
+                XCTAssertEqual(originalError["code"] as? String, "browser_model_error")
+                XCTAssertNil(originalError["retryable"])
+            }
             let automatic = try XCTUnwrap(audit.receipts.first { $0.trigger == .automatic && $0.outcome == .closed })
             let threadID = try XCTUnwrap(automatic.threadID), turnID = try XCTUnwrap(automatic.turnID)
+            XCTAssertTrue(automatic.receiptSaved)
+            let failureStore = WebsiteTurnFailureStore(directory: URL(fileURLWithPath: config.codexHomePath)
+                .appendingPathComponent("WebsiteTurnFailureStore-v1"))
+            let savedBeforeShutdown = try failureStore.load(threadID: threadID)
+            XCTAssertEqual(savedBeforeShutdown.count, 1, "The real terminal runtime path must save the diagnostic without test seeding")
+            XCTAssertEqual(savedBeforeShutdown.first?.taskID, taskID.lowercased())
+            XCTAssertEqual(savedBeforeShutdown.first?.threadID, threadID)
+            XCTAssertEqual(savedBeforeShutdown.first?.turnID, turnID)
+            XCTAssertEqual(savedBeforeShutdown.first?.modelID, "browser/claude")
             _ = await first.shutdown()
             let firstWire = try AppServerWireTrace.load(root.appendingPathComponent("first-protocol.jsonl"))
             XCTAssertTrue(firstWire.parseFailures.isEmpty)
+            XCTAssertEqual(firstWire.messages.filter { $0.direction == .clientToServer && $0.method == "turn/start" }.count, 1)
+            XCTAssertFalse(firstWire.messages.contains { $0.method == "item/tool/call" })
             XCTAssertFalse(firstWire.messages.contains { $0.direction == .clientToServer && $0.method == "thread/name/set" })
+            let completions = firstWire.messages.filter { $0.direction == .serverToClient && $0.method == "turn/completed" }
+            XCTAssertEqual(completions.count, 1)
+            let params = try XCTUnwrap(completions.first?.object["params"] as? [String: Any])
+            XCTAssertEqual((params["threadId"] as? String)?.lowercased(), threadID)
+            let turn = try XCTUnwrap(params["turn"] as? [String: Any])
+            XCTAssertEqual((turn["id"] as? String)?.lowercased(), turnID)
+            XCTAssertEqual(turn["status"] as? String, "failed")
+            let terminal = try XCTUnwrap(turn["error"] as? [String: Any])
+            let message = try XCTUnwrap(terminal["message"] as? String)
+            if case .responseBlocked(.claude) = failure {
+                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(message.utf8)) as? [String: Any])
+                XCTAssertTrue(NSDictionary(dictionary: body).isEqual(to: expected))
+                XCTAssertFalse(firstWire.messages.contains {
+                    $0.direction == .serverToClient && $0.method == "error"
+                        && ($0.object["params"] as? [String: Any])?["willRetry"] as? Bool == true
+                })
+            } else {
+                XCTAssertEqual(message, "We’re currently experiencing high demand, which may cause temporary errors.")
+            }
             var reloadConfig = config; reloadConfig.protocolTracePath = root.appendingPathComponent("reload-protocol.jsonl").path
             let reloadedRuntime = CodexAppServerRuntime(configuration: reloadConfig), inert = CleanupReceiptTransport()
             await reloadedRuntime.configureEmbeddedWebModelTransport(inert)
@@ -1232,15 +1327,20 @@ final class WebsiteSessionCleanupRuntimeTests: XCTestCase {
                 let saved = try WebsiteTurnFailureStore(directory: URL(fileURLWithPath: config.codexHomePath)
                     .appendingPathComponent("WebsiteTurnFailureStore-v1")).load(threadID: threadID)
                 XCTAssertEqual(saved.count, 1); XCTAssertEqual(saved.first?.turnID, turnID)
+                XCTAssertEqual(saved, savedBeforeShutdown, "Restart must preserve the exact record and identity")
                 let reloadedCalls = await inert.calls()
                 XCTAssertTrue(reloadedCalls.isEmpty, "Loading failed history cannot invoke any website operation")
                 _ = await reloadedRuntime.shutdown()
                 try assertUnnamedWebsiteThreadMetadata(in: root.appendingPathComponent("reload-protocol.jsonl"), threadID: threadID)
                 let reloadWire = try AppServerWireTrace.load(root.appendingPathComponent("reload-protocol.jsonl"))
+                XCTAssertTrue(reloadWire.parseFailures.isEmpty)
                 XCTAssertFalse(reloadWire.messages.contains { $0.direction == .clientToServer && $0.method == "turn/start" })
+                XCTAssertFalse(reloadWire.messages.contains { $0.method == "item/tool/call" })
             } catch { _ = await reloadedRuntime.shutdown(); throw error }
             let calls = await transport.calls()
+            XCTAssertEqual(calls.filter { $0.0 == "webProviderStart" }.count, 1)
             XCTAssertEqual(calls.filter { $0.0 == "webProviderSend" }.count, 1)
+            XCTAssertEqual(calls.filter { $0.0 == "webProviderPoll" }.count, 1)
         } catch { _ = await first.shutdown(); throw error }
     }
 
@@ -1452,6 +1552,67 @@ final class WebsiteSessionCleanupRuntimeTests: XCTestCase {
         } catch { _ = await runtime.shutdown(); throw error }
     }
 
+    func testFixedModelAndCleanupFailureReloadKeepsTheOriginalDiagnosticWithoutProviderReplay() async throws {
+        for selectionFailure in [true, false] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaFixedFailureReload-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+            let source = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent("Fixtures/WebsiteFailureCompletionAppServer.ts")
+            let fixture = root.appendingPathComponent("fixture.ts")
+            try FileManager.default.copyItem(at: source, to: fixture)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fixture.path)
+            var config = CodexAppServerRuntime.Configuration.externalLocalQwen
+            config.executable = .fixture(path: fixture.path); config.codexHomePath = root.path
+            config.workspacePath = root.path; config.model = "browser/claude"
+            let taskID = UUID().uuidString, runtime = CodexAppServerRuntime(configuration: config)
+            let transport = CleanupReceiptTransport(failFirstCleanup: !selectionFailure,
+                pollFailure: selectionFailure ? .modelUnverified : nil), audit = CleanupRuntimeAudit(taskID: taskID)
+            let observer = Task { for await event in runtime.events() { audit.receive(event) } }
+            defer { observer.cancel() }
+            await runtime.configureEmbeddedWebModelTransport(transport)
+            do {
+                _ = try await runtime.loadTasks()
+                try await runtime.submit(prompt: "Synthetic fixed failure reload fixture", toTaskID: taskID, modelID: "browser/claude")
+                let deadline = ContinuousClock.now + .seconds(15)
+                while audit.status != .failed, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+                XCTAssertEqual(audit.status, .failed)
+                let live = try XCTUnwrap(audit.errors.first)
+                let expectedError: any Error
+                if selectionFailure { expectedError = EmbeddedWebModelTransport.Failure.modelUnverified }
+                else { expectedError = WebModelServer.Failure.cleanupFailed }
+                let expected = try XCTUnwrap(JSONSerialization.jsonObject(with: WebModelServer.errorBody(for: expectedError)) as? [String: Any])
+                XCTAssertTrue(NSDictionary(dictionary: try XCTUnwrap(JSONSerialization.jsonObject(with: Data(live.utf8)) as? [String: Any])).isEqual(to: expected))
+                _ = await runtime.shutdown()
+                // The bundled engine serializes these HTTP 500 failures as
+                // generic high demand. Mirror that exact degraded durable
+                // history so the new runtime must use its typed local store.
+                let historyFile = root.appendingPathComponent("saved-fixture-thread.json")
+                var history = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: historyFile)) as? [String: Any])
+                var turns = try XCTUnwrap(history["turns"] as? [[String: Any]])
+                XCTAssertEqual(turns.count, 1)
+                turns[0]["error"] = ["message": "We’re currently experiencing high demand, which may cause temporary errors.",
+                    "codexErrorInfo": "internal_server_error"]
+                history["turns"] = turns
+                try JSONSerialization.data(withJSONObject: history).write(to: historyFile, options: .atomic)
+                let fresh = CodexAppServerRuntime(configuration: config), inert = CleanupReceiptTransport()
+                await fresh.configureEmbeddedWebModelTransport(inert)
+                do {
+                    let tasks = try await fresh.loadTasks(), restored = try XCTUnwrap(tasks.first)
+                    XCTAssertEqual(restored.status, .failed)
+                    let error = try XCTUnwrap(restored.entries.last { $0.title == "Agent error" })
+                    XCTAssertTrue(NSDictionary(dictionary: try XCTUnwrap(JSONSerialization.jsonObject(with: Data(error.body.utf8)) as? [String: Any])).isEqual(to: expected))
+                    XCTAssertFalse(error.body.contains("high demand"))
+                    let saved = try WebsiteTurnFailureStore(directory: root.appendingPathComponent("WebsiteTurnFailureStore-v1")).load(threadID: restored.id)
+                    XCTAssertEqual(saved.count, 1); XCTAssertEqual(saved.first?.turnID, error.turnID)
+                    let calls = await inert.calls(); XCTAssertTrue(calls.isEmpty)
+                    _ = await fresh.shutdown()
+                } catch { _ = await fresh.shutdown(); throw error }
+                let calls = await transport.calls(); XCTAssertEqual(calls.filter { $0.0 == "webProviderSend" }.count, 1)
+            } catch { _ = await runtime.shutdown(); throw error }
+        }
+    }
+
     func testFailedTurnAutomaticReceiptThenLiveReloadAndClaimedRecoveryNeverReplayInference() async throws {
         let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("ComputaCleanupRuntime-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1578,11 +1739,11 @@ private actor CleanupReceiptTransport: WebModelTransport {
     private var failFirstCleanup: Bool
     private let cleanupGate: CleanupReceiptGate?
     private let malformedReply: Bool
-    private let pageUnavailableOnPoll: Bool
+    private let pollFailure: EmbeddedWebModelTransport.Failure?
     init(failFirstCleanup: Bool = false, cleanupGate: CleanupReceiptGate? = nil, malformedReply: Bool = false,
-         pageUnavailableOnPoll: Bool = false) {
+         pollFailure: EmbeddedWebModelTransport.Failure? = nil) {
         self.failFirstCleanup = failFirstCleanup; self.cleanupGate = cleanupGate; self.malformedReply = malformedReply
-        self.pageUnavailableOnPoll = pageUnavailableOnPoll
+        self.pollFailure = pollFailure
     }
     func token() -> String { ownedToken }
     func calls() -> [(String, String)] { operations }
@@ -1596,7 +1757,7 @@ private actor CleanupReceiptTransport: WebModelTransport {
             switch operation {
             case "webProviderSend": result = ["state": "running"]
             case "webProviderPoll":
-                if pageUnavailableOnPoll { throw EmbeddedWebModelTransport.Failure.pageUnavailable }
+                if let pollFailure { throw pollFailure }
                 result = ["state": "complete", "text": malformedReply ? #"{"type":"tool_calls","calls":["# : "{\"type\":\"message\",\"text\":\"OK\"}"]
             case "webProviderFinish", "webProviderCancel":
                 if failFirstCleanup { failFirstCleanup = false; result = ["cleanup": "failed", "error": ["message": "PRIVATE_REPLY_CANARY"]] }

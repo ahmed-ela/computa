@@ -22,7 +22,7 @@ notes. See [distribution](DISTRIBUTION.md), [versioning](VERSIONING.md), and
    alpha of the same marketing version; every bump increases the Apple build.
 2. Include the version changes with the release changes in a pull request.
    Run the relevant checks, review the diff, and squash-merge it into the
-   default branch, currently `Macrouse`, only when its gates are satisfied.
+   default branch, `computa`, only when its gates are satisfied.
 3. Check out that merged default-branch commit in a clean checkout. Run
    `bun Scripts/version.ts check`. The alpha tag must identify this commit or
    another qualified ancestor of the current default branch.
@@ -90,7 +90,7 @@ gh release create "$computa_release_tag" \
   --title "Computa $computa_release_tag (alpha)" \
   --notes-file "$computa_release_notes"
 gh workflow run release-alpha.yml --repo ahmed-ela/computa \
-  --ref Macrouse --field tag="$computa_release_tag"
+  --ref computa --field tag="$computa_release_tag"
 ```
 
 The repository, [`ahmed-ela/computa`](https://github.com/ahmed-ela/computa), is

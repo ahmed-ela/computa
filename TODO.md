@@ -36,23 +36,60 @@ Source-bound offline and installed website-model results are recorded in the
 individual live provider/model checks and Qwen qualification remain separate.
 Existing Chrome and native desktop tooling retain their separate behavior.
 
+## Kimi, Qwen and DeepSeek website integrations
+
+- [ ] Add and qualify the three signed-in websites, separately from Alibaba's
+  existing Qwen API integration. Kimi Instant, Qwen3.7-Plus/Qwen3.8-Max and
+  DeepSeek Chat/DeepThink are enabled for controlled pilots. Installed394 still
+  fails qualification: Kimi rejects the first root ID; Qwen passes route promotion
+  then rejects response scope; DeepSeek verifies completion but fails saved-chat
+  deletion. All cleanup receipts remain unconfirmed, with no native final released.
+  Capture the precise initial DOM/deletion transition before changing acceptance.
+  Source gates passed 115 distinct native and 226 JavaScript/resource/version tests;
+  these do not replace live qualification. Qwen Max, DeepThink and browser/terminal/
+  file workflows remain unstarted. Candidate395 updates official provider icons.
+  See the [implementation status](docs/WEBSITE-PROVIDER-EXPANSION.md).
+
+- [ ] Audit the remaining terminal website HTTP403/409 mappings against the
+  bundled runtime's outer retry policy. Distinguish repeated HTTP attempts from
+  browser action replay; existing admission and ownership gates are separate.
+  Installed392 corrects the observed unexpected-page error presentation only.
+
 ## Claude website-model qualification
 
 - [ ] **Complete full Claude qualification — [issue #15](https://github.com/ahmed-ela/computa/issues/15).**
-  Full Claude qualification remains incomplete. Sonnet 5.5 on build353 and
-  Haiku 5.5 on build361 have bounded full-workflow passes. Build362's Sonnet 5
-  marker returned a refusal; its Sonnet 4.6 workflow stopped on duplicate code
-  blocks after passing code tests and browser submission. The newly discovered
-  Opus choices remain unqualified. Diagnose the
-  capability refusals and capture the earlier Haiku call-shape defect if it
-  recurs; verify the outstanding quota-cleanup case separately. Complete and
-  repeat fresh browser, terminal and file-editing fixtures for each available
-  model on the intended build, with exact selection/ownership, protected tests,
-  independently observed submission receipts, task-tab closure and durable
-  website cleanup. Preserve strict parsing and do not replay uncertain actions.
-  See the [qualification evidence](docs/CLAUDE-HARNESS-QUALIFICATION.md).
-  This is a future-work entry, not a qualification pass or an instruction to
-  restart Claude testing now.
+  Build380 (`e62bbbaf`) has independent full local workflow passes for
+  Sonnet 5.5, Haiku 5.5, Opus 5.5 and Opus 4.6. Haiku's pass includes three pre-edit failed
+  test commands; it is not an error-free tool run. A separate earlier Opus 4.6
+  run completed after a malformed reply and correction, but missing raw reply
+  evidence prevents its full transport audit. The fresh pass does not diagnose
+  that earlier response.
+  Opus 5's safeguard block remains unresolved. Build380 now has a live 2.905 s
+  typed-block/confirmed-cleanup check, but no accepted response or workflow.
+  Build381 fixes a separately reproduced loss of that specific error on history
+  reload. It does not repair provider acceptance or restore missing old records.
+  Build382 is installed. Its fresh Opus 3 exact marker passed, but a separate
+  full workflow and first-tool request failed before any tool dispatch. The
+  first-tool capture proved authored prose outside otherwise valid tool JSON;
+  the existing single correction also failed. Candidate383's Claude-only
+  literal first/last-line handoff is a presentation experiment awaiting live
+  validation, with strict parsing and correction limits unchanged.
+  The earlier Opus 3 manual probe proved that rendered raw
+  JSON loses punctuation while response Copy preserves the source. An offline
+  Copy-interception experiment passed bounded capture tests but exposed native
+  clipboard writers in other JavaScript worlds; it is not a production fix.
+  Preserve the
+  other models' refusals, format failures, eligibility limits and historical
+  unconfirmed cleanup. Fresh build380 tasks confirmed Sonnet 5/Sonnet 4.6 and
+  Opus 4.7/Opus 4.8 refusals with zero tool calls. Opus 3 again failed both
+  format attempts; both exact replies are now captured, without a demonstrated
+  parser defect. Further cases need a relevant compatibility change or
+  new eligibility evidence, exact model/ownership proof, protected tests,
+  independently observed receipts, task-tab closure and durable cleanup.
+  Keep strict parsing and existing correction limits; do not replay uncertain
+  actions or unchanged provider blocks. These bounded passes do not complete
+  all-model qualification or establish general reliability. See the
+  [qualification evidence](docs/CLAUDE-HARNESS-QUALIFICATION.md).
 
 ## Preserved runtime fixes — 29 September 2026
 

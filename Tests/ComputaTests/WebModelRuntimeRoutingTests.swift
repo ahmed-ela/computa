@@ -51,7 +51,20 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
                 XCTAssertTrue(names.contains("computer_v2_press"))
                 XCTAssertFalse(names.contains("computer_v2_capture"))
                 XCTAssertTrue(names.isDisjoint(with: ["computer_v2_tabs", "computer_v2_bind_tab", "computer_v2_create_workspace", "computer_v2_follow_link", "computer_v2_follow"]))
-                let toolBytes = try JSONSerialization.data(withJSONObject: tools, options: [.sortedKeys])
+                let compact = GroqToolCatalog.supports(modelID: model)
+                XCTAssertEqual(names.contains(GroqToolCatalog.name), compact)
+                XCTAssertEqual(GroqToolCatalog.isRegisteredLoader(tools), compact)
+                if compact {
+                    let registered = try XCTUnwrap(tools.first { $0["name"] as? String == GroqToolCatalog.name })
+                    XCTAssertEqual(registered as NSDictionary, GroqToolCatalog.specification as NSDictionary)
+                    let started = try requestResponseThreadID(root: root)
+                    XCTAssertTrue(GroqToolThreadRegistration.contains(codexHome: root.path,
+                        threadID: started, modelID: model))
+                }
+                // Every execution capability remains byte-identical; Groq adds
+                // only the separately registered read-only schema loader.
+                let toolBytes = try JSONSerialization.data(withJSONObject:
+                    tools.filter { $0["name"] as? String != GroqToolCatalog.name }, options: [.sortedKeys])
                 if let baselineTools { XCTAssertEqual(toolBytes, baselineTools) }
                 else { baselineTools = toolBytes }
                 let config = try XCTUnwrap(thread["config"] as? [String: Any])
@@ -90,7 +103,8 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
     }
 
     private var websiteModels: [String] {
-        [syntheticChatGPTModelID, LocalModelCatalog.geminiBrowserModelID, LocalModelCatalog.claudeBrowserModelID]
+        [syntheticChatGPTModelID, LocalModelCatalog.geminiBrowserModelID, LocalModelCatalog.claudeBrowserModelID,
+         LocalModelCatalog.groqBrowserModelID]
             + WebsiteModelCatalog.providers.map {
                 syntheticWebsiteChoice(provider: $0, key: "fixture-choice", label: "Fixture Choice").modelID
             }
@@ -100,6 +114,11 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
         let bytes = try Data(contentsOf: root.appendingPathComponent("request-\(method).json"))
         let request = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
         return try XCTUnwrap(request["params"] as? [String: Any])
+    }
+
+    private func requestResponseThreadID(root: URL) throws -> String {
+        let turn = try requestParameters("turn-start", root: root)
+        return try XCTUnwrap(turn["threadId"] as? String)
     }
 
     private func makeRuntime(modelID: String) throws -> (CodexAppServerRuntime, URL) {

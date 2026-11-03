@@ -58,6 +58,72 @@ final class APIProviderCatalogTests: XCTestCase {
         XCTAssertThrowsError(try APIProviderCatalog.validate(local.withModels([model, model])))
         XCTAssertThrowsError(try APIProviderCatalog.validate(local.withModels([APIModelDefinition(id: "fixture", name: "Fixture", contextWindow: 0)])))
     }
+    func testAlibabaInstructionCapabilityRequiresExactValidatedOfficialWorkspaceEndpoint() {
+        func provider(_ address: String, wire: APIProviderDefinition.WireAPI = .chatCompletions,
+                      id: String = "custom-label") -> APIProviderDefinition {
+            .init(id: id, name: "Custom label", baseURL: URL(string: address)!, wireAPI: wire, models: [])
+        }
+        for region in ["ap-southeast-1", "us-east-1", "cn-beijing", "cn-hongkong", "eu-central-1", "ap-northeast-1"] {
+            for ending in ["/compatible-mode/v1", ":443/compatible-mode/v1/"] {
+                let address = "https://ws-fixture123.\(region).maas.aliyuncs.com" + ending
+                let official = provider(address)
+                XCTAssertTrue(official.isAlibabaModelStudioInference, address)
+                XCTAssertEqual(official.chatCompletionsInstructionRole, .system, address)
+                let responses = provider(address, wire: .responses)
+                XCTAssertTrue(responses.isAlibabaModelStudioInference)
+                XCTAssertEqual(responses.chatCompletionsInstructionRole, .developer)
+            }
+        }
+        for address in [
+            "http://ws-fixture123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+            "https://ws-fixture123.ap-southeast-1.maas.aliyuncs.com:444/compatible-mode/v1",
+            "https://ws-fixture123.ap-southeast-1.maas.aliyuncs.com.evil.invalid/compatible-mode/v1",
+            "https://evil.ws-fixture123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+            "https://fixture123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+            "https://ws-fixture123.unknown-region.maas.aliyuncs.com/compatible-mode/v1",
+            "https://ws-fixture123.ap-southeast-1.maas.aliyuncs.com/v1",
+            "https://ws-fixture123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1//",
+            "https://ws-fixture123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/%76%31",
+            "https://ws-fixture123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1?query=fixture",
+            "https://ws-fixture123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1#fragment",
+            "https://user@ws-fixture123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+            "https://example.invalid/compatible-mode/v1"
+        ] {
+            let spoofed = provider(address, id: "alibaba")
+            XCTAssertFalse(spoofed.isAlibabaModelStudioInference, address)
+            XCTAssertEqual(spoofed.chatCompletionsInstructionRole, .developer, address)
+        }
+        let invalid = provider("https://ws-fixture123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1", id: "invalid provider")
+        XCTAssertFalse(invalid.isAlibabaModelStudioInference)
+        XCTAssertEqual(invalid.chatCompletionsInstructionRole, .developer)
+        XCTAssertEqual(APIProviderDefinition.cerebras.chatCompletionsInstructionRole, .developer)
+        let qwen = APIModelDefinition(id: "qwen-3.8-27b", name: "Qwen")
+        XCTAssertEqual(APIProviderCatalog.Selection(provider: .cerebras, model: qwen).chatCompletionsInstructionRole, .system)
+    }
+    func testAlibabaDiscoveryMetadataDoesNotInventAvailabilityOrExtendToOtherModelsOrEndpoints() {
+        let official = APIProviderDefinition(id: "arbitrary-name", name: "Custom provider",
+            baseURL: URL(string: "https://ws-fixture123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1")!,
+            wireAPI: .chatCompletions, models: [])
+        XCTAssertTrue(APIProviderCatalog.options(for: [official]).isEmpty)
+        for id in ["qwen3.7-flash", "qwen3.7-flash-2026-07-15"] {
+            let model = APIProviderCatalog.discoveredModel(id: id, provider: official)
+            XCTAssertEqual(model.id, id)
+            XCTAssertEqual(model.name, "Qwen3.7 Flash")
+            XCTAssertEqual(model.contextWindow, 1_000_000)
+            XCTAssertTrue(model.supportsImages)
+            XCTAssertFalse(model.supportsToolImages)
+            XCTAssertEqual(APIProviderCatalog.options(for: [official.withModels([model])]).map(\.id),
+                [APIProviderCatalog.appModelID(providerID: official.id, modelID: id)])
+            XCTAssertEqual(APIProviderCatalog.discoveredModel(id: id, name: "Explicit name", provider: official).name, "Explicit name")
+            let generic = APIProviderDefinition(id: "alibaba", name: "Alibaba", baseURL: URL(string: "https://example.invalid/compatible-mode/v1")!,
+                wireAPI: .chatCompletions, models: [])
+            XCTAssertEqual(APIProviderCatalog.discoveredModel(id: id, provider: generic), .init(id: id, name: id))
+        }
+        for id in ["qwen3.7-flash-future", "qwen3.7-plus", "qwen3.8-flash", "unrelated-model"] {
+            XCTAssertEqual(APIProviderCatalog.discoveredModel(id: id, provider: official), .init(id: id, name: id))
+        }
+        XCTAssertTrue(official.models.isEmpty)
+    }
     func testConfigurationPersistenceContainsNoCredentialAndInvalidCatalogCannotReplaceIt() throws {
         let preferences = isolatedTestPreferences(), model = APIModelDefinition(id: "fixture", name: "Fixture")
         let provider = APIProviderDefinition.cerebras.withModels([model])

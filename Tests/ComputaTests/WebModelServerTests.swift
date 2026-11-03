@@ -1,8 +1,349 @@
+import CryptoKit
 import Foundation
 import XCTest
 @testable import Computa
 
 final class WebModelServerTests: XCTestCase {
+    func testClaudeStreamGrantOnlyEntersExactNativeStartAndSurvivesFailureUntilCleanup() async throws {
+        for mode in ["capture", "unarmed", "ordinary", "history", "old_thread", "maintenance", "gemini", "send_failure", "start_failure"] {
+            // Resolve the existing temporary ancestor with realpath before
+            // creating the fixture; no-follow arm admission rejects aliases.
+            let root = try websiteBenchmarkTemporaryDirectory()
+                .appendingPathComponent("claude-stream-server-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let directory = root.appendingPathComponent(ClaudeResponseStreamDiagnostic.directoryName)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
+            let nonce = UUID(), task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased()
+            let turn = UUID().uuidString.lowercased(), preparation = UUID()
+            let choice = WebsiteModelChoice(provider: "claude", key: "Opus 3", label: "Opus 3")
+            let userText = ClaudeResponseStreamDiagnostic.syntheticUserText(nonce: nonce)
+            let formatter = ISO8601DateFormatter(); formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            let arm: [String: Any] = ["schemaVersion": 1, "provider": "claude", "purpose": ClaudeResponseStreamDiagnostic.purpose,
+                "nonce": nonce.uuidString.lowercased(), "modelID": choice.modelID,
+                "expiresAt": formatter.string(from: Date().addingTimeInterval(300)),
+                "userPromptSHA256": SHA256.hash(data: Data(userText.utf8)).map { String(format: "%02x", $0) }.joined()]
+            let armFile = directory.appendingPathComponent("arm.json")
+            if mode != "unarmed" {
+                try JSONSerialization.data(withJSONObject: arm).write(to: armFile)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: armFile.path)
+            }
+            func message(_ role: String, _ text: String) -> [String: Any] {
+                ["type": "message", "role": role, "content": [["type": "input_text", "text": text]]]
+            }
+            // Native engine requests have a developer prelude followed by the
+            // environment fragment and exact user/policy content. A bare wire
+            // user string intentionally cannot activate this diagnostic.
+            var input = [message("developer", "Synthetic native policy"),
+                message("user", "<environment_context><cwd>/tmp/computa-empty-fixture</cwd><shell>zsh</shell></environment_context>"),
+                message("user", (mode == "ordinary" ? "Hi" : userText) + "\n" + ComputaAgentInstructions.runtimeInteractionPolicy())]
+            if mode == "history" { input.insert(message("assistant", "Earlier response"), at: 2) }
+            let object: [String: Any] = ["model": mode == "gemini" ? "browser/gemini" : choice.modelID,
+                "input": input, "tools": [], "client_metadata": ["x-codex-turn-metadata":
+                    try websiteInferenceFixtureMetadata(taskID: task, threadID: thread, turnID: turn)]]
+            let bytes = try JSONSerialization.data(withJSONObject: object)
+            let preparedFixture = try WebModelResponseCodec.prepareRequest(bytes)
+            XCTAssertEqual(WebsiteSyntheticFirstRequest.matches(preparedFixture, expectedUserText: userText),
+                           !["ordinary", "history"].contains(mode), mode)
+            let base = FixtureWebModelTransport()
+            let observer = ClaudeStreamStartScopeTransport(base: WebsiteInferenceFixtureTransport(base, defaultClaudeChoice: choice),
+                failStart: mode == "start_failure", failSend: mode == "send_failure")
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self,
+                rejectedReplyDirectory: root.appendingPathComponent("rejected"), storageDirectory: root)
+            await server.configureEmbeddedTransport(observer)
+            try await server.prepareInferenceTurn(taskID: task, threadID: thread,
+                runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: preparation,
+                isMaintenance: mode == "maintenance", isNewThread: mode != "old_thread")
+            try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn,
+                runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: preparation)
+            do {
+                let response = try await server.infer(bytes, taskID: task)
+                XCTAssertFalse(["start_failure", "send_failure"].contains(mode))
+                XCTAssertEqual(try responseOutput(response).first?["type"] as? String, "message")
+            } catch {
+                XCTAssertTrue(["start_failure", "send_failure"].contains(mode), "\(mode): \(error)")
+                if case .providerFailed = error as? WebModelServer.Failure { }
+                else { XCTFail("The original provider error changed: \(error)") }
+            }
+            let expected = ["capture", "send_failure", "start_failure"].contains(mode)
+            var observation = await observer.observation()
+            XCTAssertEqual(observation.admitted, [expected], mode)
+            XCTAssertTrue(observation.contextsMatch, mode)
+            XCTAssertTrue(observation.startWireUnchanged, mode)
+            XCTAssertFalse(observation.leakedOutsideStart, mode)
+            XCTAssertEqual(observation.current, mode == "send_failure", mode)
+            if mode == "send_failure" { _ = await server.fixtureCancel(taskID: task) }
+            observation = await observer.observation()
+            XCTAssertFalse(observation.current, mode)
+            XCTAssertEqual(observation.currentAtFinish, ["capture", "send_failure"].contains(mode), mode)
+            XCTAssertEqual(FileManager.default.fileExists(atPath: armFile.path), mode != "unarmed" && !expected, mode)
+            let operations = await base.operations(), prompts = await base.sentPrompts()
+            XCTAssertEqual(prompts.count, mode == "start_failure" ? 0 : 1, mode)
+            XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, prompts.count, mode)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("response-metadata.json").path),
+                "A native grant alone never creates response evidence")
+        }
+    }
+
+    func testClaudeFirstCaptureIsScopedToFreshSendAndRevokedBeforePollOrAfterSendFailure() async throws {
+        for mode in ["capture", "unarmed", "deferred", "old_thread", "send_failure"] {
+            let f = try ClaudeFirstRequestCaptureFixture(now: Date()); defer { f.remove() }
+            if mode != "unarmed" { try f.arm() }
+            let choice = WebsiteModelChoice(provider: "claude", key: "Opus 5", label: "Opus 5")
+            let base = FixtureWebModelTransport(replyTexts: [#"{"type":"message","text":"I cannot perform this request."}"#])
+            let observer = ClaudeFirstCaptureScopeTransport(
+                base: WebsiteInferenceFixtureTransport(base, defaultClaudeChoice: choice),
+                captureAtSend: mode == "capture" || mode == "unarmed", failSend: mode == "send_failure")
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self,
+                rejectedReplyDirectory: f.root.appendingPathComponent("rejected"), storageDirectory: f.root)
+            await server.configureEmbeddedTransport(observer)
+            let task = f.context.taskID.uuidString.lowercased(), thread = f.context.threadID.uuidString.lowercased()
+            let turn = f.context.turnID.uuidString.lowercased(), preparation = f.context.preparationID
+            try await server.prepareInferenceTurn(taskID: task, threadID: thread,
+                runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: preparation,
+                isNewThread: mode != "old_thread")
+            try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn,
+                runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: preparation)
+            let prepared = try f.request()
+            var request = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.continuationRequest) as? [String: Any])
+            request["client_metadata"] = ["x-codex-turn-metadata": try websiteInferenceFixtureMetadata(taskID: task, threadID: thread, turnID: turn)]
+            do {
+                let response = try await server.infer(JSONSerialization.data(withJSONObject: request), taskID: task)
+                XCTAssertNotEqual(mode, "send_failure")
+                let output = try responseOutput(response)
+                XCTAssertEqual(output.count, 1); XCTAssertEqual(output[0]["type"] as? String, "message")
+                let content = try XCTUnwrap(output[0]["content"] as? [[String: Any]])
+                XCTAssertEqual(content.first?["text"] as? String, "I cannot perform this request.")
+            } catch { XCTAssertEqual(mode, "send_failure", "Unexpected inference failure: \(error)") }
+            let observation = await observer.observation()
+            XCTAssertEqual(observation.admitted, [mode != "old_thread"], mode)
+            XCTAssertEqual(observation.capturedAtSend, mode == "capture", mode)
+            let late = await observer.attemptLateCapture()
+            XCTAssertFalse(late, "Send return/error must revoke the saved scope: \(mode)")
+            XCTAssertFalse(observation.pollHadTaskLocal, mode)
+            XCTAssertFalse(observation.pollCaptured, "Scope must already be revoked before response polling: \(mode)")
+            // The native caller owns cleanup after an ordinary failed inference.
+            if mode == "send_failure" { _ = await server.fixtureCancel(taskID: task) }
+            let prompts = await base.sentPrompts(), operations = await base.operations()
+            XCTAssertEqual(prompts.count, 1, "Capture cannot add/replay Send")
+            XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1)
+            XCTAssertEqual(operations.filter { $0 == "webProviderFinish" || $0 == "webProviderCancel" }.count, 1)
+            let canonical = try canonicalRequest(in: XCTUnwrap(prompts.first))
+            XCTAssertEqual(canonical["input"] as? NSArray, f.input() as NSArray)
+            XCTAssertEqual(canonical["tools"] as? NSArray, request["tools"] as? NSArray)
+            XCTAssertEqual(f.exists(f.output), mode == "capture", mode)
+            if mode == "capture" {
+                let record = try f.record()
+                XCTAssertTrue((record["serverPrompt"] as? String)?.utf8.elementsEqual(try XCTUnwrap(prompts.first).utf8) == true)
+                XCTAssertEqual(record["taskID"] as? String, task)
+                XCTAssertEqual(record["turnID"] as? String, turn)
+            } else if mode != "unarmed" { XCTAssertTrue(f.exists(f.armFile), mode) }
+        }
+    }
+
+    func testGroqCatalogLoadsNextRequestOnlyUnderNativeTurnRegistration() async throws {
+        let label = "groq-native-catalog"
+        let task = websiteInferenceFixtureTaskID(label)
+        let thread = websiteInferenceFixtureTaskID(label + ":thread")
+        let turn = websiteInferenceFixtureTaskID(label + ":turn")
+        let preparation = UUID(uuidString: websiteInferenceFixtureTaskID(label + ":preparation"))!
+        let model = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
+        var loader = GroqToolCatalog.specification
+        loader["parameters"] = loader.removeValue(forKey: "inputSchema")
+        let fixtureTool: [String: Any] = ["type": "function", "name": "fixture_read",
+            "description": "Read the synthetic fixture", "parameters": ["type": "object", "properties": [:], "additionalProperties": false]]
+        var history: [[String: Any]] = [["role": "user", "content": "Read the synthetic fixture"]]
+        func requestData() throws -> Data {
+            try JSONSerialization.data(withJSONObject: ["model": model, "input": history, "tools": [loader, fixtureTool]])
+        }
+        let seed = try XCTUnwrap(WebModelResponseCodec.prepareRequest(requestData()).groqToolCatalogSeed)
+        let revision = try GroqToolCatalog.baseline(for: seed).revision
+        let args: [String: Any] = ["catalog_revision": revision, "names": ["fixture_read"]]
+        let firstReply = String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls",
+            "calls": [["name": GroqToolCatalog.name, "arguments": args]]]), as: UTF8.self)
+        let base = FixtureWebModelTransport(replyTexts: [firstReply,
+            #"{"type":"tool_calls","calls":[{"name":"fixture_read","arguments":{}}]}"#])
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base))
+        try await server.prepareInferenceTurn(taskID: task, threadID: thread,
+            runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: preparation,
+            isNewThread: true, isCompactToolThread: true)
+        let first = try responseOutput(await server.fixtureInfer(requestData(), taskID: label))
+        XCTAssertEqual(first.first?["name"] as? String, GroqToolCatalog.name)
+        let scope = GroqToolCatalog.Scope(taskID: task, threadID: thread, turnID: turn,
+            runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: preparation, modelID: model)
+        let receipt = try await server.loadGroqTools(scope: scope, arguments: JSONSerialization.data(withJSONObject: args))
+        history += first + [["type": "function_call_output", "call_id": try XCTUnwrap(first.first?["call_id"]),
+                             "output": String(decoding: receipt, as: UTF8.self)]]
+        let second = try responseOutput(await server.fixtureInfer(requestData(), taskID: label))
+        XCTAssertEqual(second.first?["name"] as? String, "fixture_read")
+        let prompts = await base.sentPrompts()
+        XCTAssertEqual(prompts.count, 2)
+        let initial = try canonicalRequest(in: prompts[0])
+        XCTAssertEqual((initial["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String }, [GroqToolCatalog.name])
+        let loaded = try canonicalRequest(in: prompts[1])
+        XCTAssertEqual(Set((loaded["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String } ?? []),
+                       [GroqToolCatalog.name, "fixture_read"])
+        XCTAssertEqual(loaded["input"] as? NSArray, history as NSArray)
+        _ = await server.fixtureFinish(taskID: label)
+        do {
+            _ = try await server.loadGroqTools(scope: scope, arguments: JSONSerialization.data(withJSONObject: args))
+            XCTFail("Retired turn loaded a schema")
+        } catch { XCTAssertEqual(WebModelServer.errorPresentation(for: error).code, "native_turn_mismatch") }
+    }
+
+    func testGroqPromptBudgetRejectsBeforeWebsiteStart() async throws {
+        let base = FixtureWebModelTransport()
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base))
+        let data = try JSONSerialization.data(withJSONObject: [
+            "model": syntheticWebsiteModelID("groq"), "input": String(repeating: "size ", count: 7_000), "tools": []
+        ])
+        do {
+            _ = try await server.fixtureInfer(data, taskID: "groq-over-budget")
+            XCTFail("An oversized request reached the website")
+        } catch {
+            XCTAssertEqual(WebModelServer.errorPresentation(for: error).code, "website_prompt_budget_exceeded")
+        }
+        let operations = await base.operations()
+        XCTAssertTrue(operations.isEmpty)
+    }
+
+    func testGroqOversizedSchemaLoadRetainsPriorSelectionAndCanContinue() async throws {
+        let label = "groq-load-too-large"
+        let model = syntheticWebsiteModelID("groq")
+        var loader = GroqToolCatalog.specification
+        loader["parameters"] = loader.removeValue(forKey: "inputSchema")
+        let small: [String: Any] = ["type": "function", "name": "fixture_small", "description": "Read a small fixture",
+            "parameters": ["type": "object", "properties": [:], "additionalProperties": false]]
+        var large = small
+        large["name"] = "fixture_large"
+        large["description"] = String(repeating: "capacity ", count: 7_000)
+        var history: [[String: Any]] = [["role": "user", "content": "Read the synthetic fixture; do not perform external actions."]]
+        func data() throws -> Data {
+            try JSONSerialization.data(withJSONObject: ["model": model, "input": history,
+                "tools": [loader, small, large], "parallel_tool_calls": false])
+        }
+        let seed = try XCTUnwrap(WebModelResponseCodec.prepareRequest(data()).groqToolCatalogSeed)
+        let revision = try GroqToolCatalog.baseline(for: seed).revision
+        func arguments(_ name: String) throws -> Data {
+            try JSONSerialization.data(withJSONObject: ["catalog_revision": revision, "names": [name]])
+        }
+        func proposal(_ name: String) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [[
+                "name": GroqToolCatalog.name, "arguments": try JSONSerialization.jsonObject(with: arguments(name))]]]), as: UTF8.self)
+        }
+        let base = FixtureWebModelTransport(replyTexts: [try proposal("fixture_small"), try proposal("fixture_large"),
+            #"{"type":"tool_calls","calls":[{"name":"fixture_small","arguments":{}}]}"#])
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base))
+        let scope = GroqToolCatalog.Scope(taskID: websiteInferenceFixtureTaskID(label),
+            threadID: websiteInferenceFixtureTaskID(label + ":thread"), turnID: websiteInferenceFixtureTaskID(label + ":turn"),
+            runtimeGeneration: websiteInferenceFixtureGeneration,
+            preparationID: UUID(uuidString: websiteInferenceFixtureTaskID(label + ":preparation"))!, modelID: model)
+        try await server.prepareInferenceTurn(taskID: scope.taskID, threadID: scope.threadID,
+            runtimeGeneration: scope.runtimeGeneration, preparationID: scope.preparationID, isCompactToolThread: true)
+        let first = try responseOutput(await server.fixtureInfer(data(), taskID: label))
+        let receipt = try await server.loadGroqTools(scope: scope, arguments: arguments("fixture_small"))
+        history += first + [["type": "function_call_output", "call_id": try XCTUnwrap(first.first?["call_id"]),
+                             "output": String(decoding: receipt, as: UTF8.self)]]
+        let second = try responseOutput(await server.fixtureInfer(data(), taskID: label))
+        let callsBefore = await base.operations()
+        do {
+            _ = try await server.loadGroqTools(scope: scope, arguments: arguments("fixture_large"))
+            XCTFail("An oversized selection must not strand the next request")
+        } catch { XCTAssertEqual(error as? GroqToolCatalog.Failure, .selectionTooLarge) }
+        let callsAfter = await base.operations()
+        XCTAssertEqual(callsBefore, callsAfter, "Schema preflight must not open or send to the provider")
+        history += second + [["type": "function_call_output", "call_id": try XCTUnwrap(second.first?["call_id"]),
+                              "output": GroqToolCatalog.Failure.selectionTooLarge.localizedDescription]]
+        let third = try responseOutput(await server.fixtureInfer(data(), taskID: label))
+        XCTAssertEqual(third.first?["name"] as? String, "fixture_small", "The prior usable selection survives rejection")
+        let prompts = await base.sentPrompts()
+        XCTAssertEqual(prompts.count, 3)
+        let final = try canonicalRequest(in: prompts[2])
+        XCTAssertEqual(final["input"] as? NSArray, history as NSArray)
+        XCTAssertEqual(Set((final["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String } ?? []),
+                       [GroqToolCatalog.name, "fixture_small"])
+        XCTAssertEqual(final["parallel_tool_calls"] as? Bool, false)
+        let issues = await server.fixtureFinish(taskID: label)
+        XCTAssertTrue(issues.isEmpty)
+    }
+
+    func testGroqLoaderReservesEstimatedHistoryWithoutRaisingFinalBudget() async throws {
+        let label = "groq-load-history-reserve", model = syntheticWebsiteModelID("groq")
+        var loader = GroqToolCatalog.specification
+        loader["parameters"] = loader.removeValue(forKey: "inputSchema")
+        func request(_ repeats: Int) throws -> Data {
+            let tool: [String: Any] = ["type": "function", "name": "fixture_edge",
+                "description": String(repeating: "capacity ", count: repeats),
+                "parameters": ["type": "object", "properties": [:], "additionalProperties": false]]
+            return try JSONSerialization.data(withJSONObject: ["model": model, "input": "Read the synthetic fixture",
+                                                               "tools": [loader, tool]])
+        }
+        func projected(_ repeats: Int) throws -> (Data, GroqToolCatalog.Projection, Int) {
+            let data = try request(repeats)
+            let seed = try XCTUnwrap(WebModelResponseCodec.prepareRequest(data).groqToolCatalogSeed)
+            let base = try GroqToolCatalog.baseline(for: seed)
+            let selection = GroqToolCatalog.Projection(revision: base.revision, inventory: base.inventory,
+                selectedNames: base.selectedNames.union(["fixture_edge"]))
+            let prompt = try WebModelResponseCodec.prepareRequest(data, groqToolCatalogProjection: selection).prompt
+            return (data, selection, try GroqBodyTokenCounter.tokenCount(prompt))
+        }
+        let target = WebModelResponseCodec.groqMaximumBodyTokens - WebModelServer.groqLoaderHistoryReserve + 1
+        var low = 0, high = 7_000
+        while low < high {
+            let middle = (low + high) / 2
+            if try projected(middle).2 < target { low = middle + 1 } else { high = middle }
+        }
+        let (data, selection, count) = try projected(low)
+        XCTAssertGreaterThanOrEqual(count, target)
+        XCTAssertLessThanOrEqual(count, WebModelResponseCodec.groqMaximumBodyTokens,
+                                "This case fits final admission but not the estimated pending load-history allowance")
+        let args = try JSONSerialization.data(withJSONObject: ["catalog_revision": selection.revision, "names": ["fixture_edge"]])
+        let reply = String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [[
+            "name": GroqToolCatalog.name, "arguments": try JSONSerialization.jsonObject(with: args)]]]), as: UTF8.self)
+        let base = FixtureWebModelTransport(replyTexts: [reply])
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base))
+        let scope = GroqToolCatalog.Scope(taskID: websiteInferenceFixtureTaskID(label),
+            threadID: websiteInferenceFixtureTaskID(label + ":thread"), turnID: websiteInferenceFixtureTaskID(label + ":turn"),
+            runtimeGeneration: websiteInferenceFixtureGeneration,
+            preparationID: UUID(uuidString: websiteInferenceFixtureTaskID(label + ":preparation"))!, modelID: model)
+        try await server.prepareInferenceTurn(taskID: scope.taskID, threadID: scope.threadID,
+            runtimeGeneration: scope.runtimeGeneration, preparationID: scope.preparationID, isCompactToolThread: true)
+        _ = try await server.fixtureInfer(data, taskID: label)
+        do {
+            _ = try await server.loadGroqTools(scope: scope, arguments: args)
+            XCTFail("The pending loader history estimate must also fit")
+        } catch { XCTAssertEqual(error as? GroqToolCatalog.Failure, .selectionTooLarge) }
+        let prompts = await base.sentPrompts()
+        XCTAssertEqual(prompts.count, 1)
+        let initial = try canonicalRequest(in: prompts[0])
+        XCTAssertEqual((initial["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String }, [GroqToolCatalog.name])
+        let issues = await server.fixtureFinish(taskID: label)
+        XCTAssertTrue(issues.isEmpty)
+    }
+
+    func testGroqPacingCancellationNeverSendsWaitingRequest() async throws {
+        let base = FixtureWebModelTransport()
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        await server.setGroqSubmissionIntervalForTesting(.seconds(3_600))
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base))
+        let data = try JSONSerialization.data(withJSONObject: ["model": syntheticWebsiteModelID("groq"), "input": String(repeating: "hi ", count: 1_500), "tools": []])
+        _ = try await server.fixtureInfer(data, taskID: "groq-paced-first")
+        let waiting = Task { try await server.fixtureInfer(data, taskID: "groq-paced-second") }
+        addTeardownBlock { waiting.cancel() }
+        try await waitForFixtureCondition {
+            await base.operations().filter { $0 == "webProviderStart" }.count == 2
+        }
+        _ = await server.fixtureCancel(taskID: "groq-paced-second")
+        do { _ = try await waiting.value; XCTFail("Cancelled paced request completed") }
+        catch {}
+        let operations = await base.operations()
+        XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1)
+    }
+
     private func browserAvailabilityRequest(provider: String = "chatgpt", input: [[String: Any]]) throws -> Data {
         let tools = EmbeddedBrowserTools.definitions().map { definition in
             var value = definition
@@ -16,7 +357,7 @@ final class WebModelServerTests: XCTestCase {
     func testBrowserCatalogReprojectsOnlyAfterAdmittedInferenceAndPreservesContinuation() async throws {
         let unboundNames = Set(["browser_tabs", "browser_open", "browser_bind"])
         let boundNames = Set(EmbeddedBrowserTools.definitions().compactMap { $0["name"] as? String })
-        for provider in WebsiteModelCatalog.providers {
+        for provider in namedWebsiteModelProviders {
             let state = WebsiteBrowserAvailabilityFixture()
             let base = FixtureWebModelTransport(replyTexts: [
                 #"{"type":"tool_calls","calls":[{"name":"browser_open","arguments":{"url":"https://example.invalid/"}}]}"#,
@@ -27,7 +368,10 @@ final class WebModelServerTests: XCTestCase {
             await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
             var history: [[String: Any]] = [["role": "user", "content": "Read the synthetic page"]]
             var submittedHistories: [NSArray] = []
-            let states: [EmbeddedBrowserToolAvailability] = [.unbound, .bound, .unbound]
+            // Legacy Groq threads retain full registration. Their bound full
+            // catalog exceeds its new budget; new compact threads are covered
+            // separately by the native load/next-request regression.
+            let states: [EmbeddedBrowserToolAvailability] = provider == "groq" ? [.unbound] : [.unbound, .bound, .unbound]
             for (index, availability) in states.enumerated() {
                 await state.set(availability)
                 submittedHistories.append(history as NSArray)
@@ -40,8 +384,17 @@ final class WebModelServerTests: XCTestCase {
                                           "output": "Exact synthetic result-\(index)"]]
                 }
             }
+            if provider == "groq" {
+                await state.set(.bound)
+                do {
+                    _ = try await server.fixtureInfer(browserAvailabilityRequest(provider: provider, input: history), taskID: provider)
+                    XCTFail("Legacy full catalog crossed the Groq budget")
+                } catch {
+                    XCTAssertEqual(WebModelServer.errorPresentation(for: error).code, "website_prompt_budget_exceeded")
+                }
+            }
             let prompts = await base.sentPrompts()
-            XCTAssertEqual(prompts.count, 3)
+            XCTAssertEqual(prompts.count, states.count)
             for (index, prompt) in prompts.enumerated() {
                 let object = try canonicalRequest(in: prompt)
                 let tools = try XCTUnwrap(object["tools"] as? [[String: Any]])
@@ -49,7 +402,7 @@ final class WebModelServerTests: XCTestCase {
                 XCTAssertEqual(object["input"] as? NSArray, submittedHistories[index])
             }
             let queries = await state.queries()
-            XCTAssertEqual(queries.count, 3)
+            XCTAssertEqual(queries.count, states.count + (provider == "groq" ? 1 : 0))
             XCTAssertEqual(Set(queries.map(\.taskID)), [websiteInferenceFixtureTaskID(provider)])
             XCTAssertEqual(Set(queries.map(\.threadID)), [websiteInferenceFixtureTaskID(provider + ":thread")])
             XCTAssertEqual(Set(queries.map(\.turnID)), [websiteInferenceFixtureTaskID(provider + ":turn")])
@@ -715,6 +1068,260 @@ final class WebModelServerTests: XCTestCase {
         }
     }
 
+    func testDeepSeekPendingRemountContractWithholdsProofAndRejectsMalformedSnapshots() async throws {
+        try await verifyPendingSavedFirstBodyContract(provider: "deepseek")
+    }
+
+    func testQwenPendingProvisionalRouteWithholdsProofAndRejectsMalformedSnapshots() async throws {
+        try await verifyPendingSavedFirstBodyContract(provider: "qwen")
+    }
+
+    func testQwenPendingInitialResponseIdentityWithholdsProofAndRejectsMalformedSnapshots() async throws {
+        try await verifyPendingSavedFirstBodyContract(provider: "qwen", qwenReason: "qwen_initial_response_identity_v1")
+    }
+
+    func testQwenPendingDisplayExpansionWithholdsProofAndRejectsMalformedSnapshots() async throws {
+        try await verifyPendingSavedFirstBodyContract(provider: "qwen", qwenReason: "qwen_first_body_expansion_v1")
+    }
+
+    private func verifyPendingSavedFirstBodyContract(provider: String, qwenReason: String = "qwen_initial_provisional_route_v1") async throws {
+        for mutation in PendingSavedFirstBodyMutation.allCases {
+            let label = provider + "-pending-first-body-" + mutation.rawValue
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(label + UUID().uuidString)
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+            let base = FixtureWebModelTransport(cleanupResult: "deleted")
+            let transport = PendingSavedFirstBodyFixtureTransport(base: base, provider: provider, mutation: mutation, qwenReason: qwenReason)
+            await server.configureEmbeddedTransport(transport)
+            let data = try turnRequest(input: [["role": "user", "content": "Observe the synthetic first body without replay"]],
+                model: syntheticWebsiteModelID(provider))
+            do {
+                let response = try await server.fixtureInfer(data, taskID: label)
+                XCTAssertEqual(mutation, .none, "Malformed negative observation must not publish output")
+                XCTAssertTrue(String(decoding: response, as: UTF8.self).contains("OK"))
+            } catch {
+                if mutation == .missingFinalSelection {
+                    guard case .modelUnverified? = error as? WebModelServer.Failure else {
+                        XCTFail("Expected final positive selection proof rejection: \(error)"); continue
+                    }
+                } else {
+                    guard case .invalidRequest? = error as? WebModelServer.Failure else {
+                        XCTFail("Expected strict pending rejection for \(mutation): \(error)"); continue
+                    }
+                    XCTAssertNotEqual(mutation, .none)
+                }
+            }
+            let journal = try turnJournal(root: root, task: label)
+            if mutation != .none {
+                XCTAssertFalse(journal.contains { ["complete", "release_verified"].contains($0["phase"] as? String ?? "") })
+            }
+            let operations = await base.operations()
+            XCTAssertEqual(operations.filter { $0 == "webProviderStart" }.count, 1)
+            XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1)
+            XCTAssertEqual(operations.filter { $0 == "webProviderPoll" }.count,
+                mutation == .none || mutation == .missingFinalSelection ? 1 : 0)
+        }
+    }
+
+    func testDeepSeekPendingRemountCannotRenewServerDeadline() async throws {
+        try await verifyPendingSavedFirstBodyDeadline(provider: "deepseek")
+    }
+
+    func testQwenPendingProvisionalRouteCannotRenewServerDeadline() async throws {
+        try await verifyPendingSavedFirstBodyDeadline(provider: "qwen")
+    }
+
+    func testQwenPendingInitialResponseIdentityCannotRenewServerDeadline() async throws {
+        try await verifyPendingSavedFirstBodyDeadline(provider: "qwen", qwenReason: "qwen_initial_response_identity_v1")
+    }
+
+    func testQwenPendingDisplayExpansionCannotRenewServerDeadline() async throws {
+        try await verifyPendingSavedFirstBodyDeadline(provider: "qwen", qwenReason: "qwen_first_body_expansion_v1")
+    }
+
+    private func verifyPendingSavedFirstBodyDeadline(provider: String, qwenReason: String = "qwen_initial_provisional_route_v1") async throws {
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        let base = FixtureWebModelTransport(cleanupResult: "deleted")
+        let transport = PendingSavedFirstBodyFixtureTransport(base: base, provider: provider, repeatPending: true, qwenReason: qwenReason)
+        await server.configureEmbeddedTransport(transport)
+        await server.setTimeoutsForTesting(readiness: .seconds(2), response: .milliseconds(150))
+        let data = try turnRequest(input: [["role": "user", "content": "Bound synthetic missing first body"]],
+            model: syntheticWebsiteModelID(provider))
+        do {
+            _ = try await server.fixtureInfer(data, taskID: provider + "-pending-first-body-deadline")
+            XCTFail("Repeated negative observations must not extend the absolute deadline")
+        } catch {
+            guard case .deadline? = error as? WebModelServer.Failure else { return XCTFail("Expected deadline: \(error)") }
+        }
+        let count = await transport.pendingPolls(), changed = await transport.waitDeadlineChanged()
+        XCTAssertGreaterThan(count, 0); XCTAssertFalse(changed)
+        let operations = await base.operations()
+        XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1)
+        XCTAssertFalse(operations.contains("webProviderPoll"))
+    }
+
+    func testClaudePendingModelPollsKeepProvedSubmissionButWithholdCompletionUntilFreshProof() async throws {
+        for pendingCount in [1, 3] {
+            let label = "claude-pending-restored-\(pendingCount)"
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(label + UUID().uuidString)
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+            let base = FixtureWebModelTransport()
+            let gate = WebListenerStartupGate()
+            let transport = PendingClaudeModelFixtureTransport(base: base, pendingCount: pendingCount, finalGate: gate)
+            await server.configureEmbeddedTransport(transport)
+            await server.setTimeoutsForTesting(readiness: .seconds(2), response: .seconds(3))
+            let data = try turnRequest(input: [["role": "user", "content": "Wait for the exact fresh Claude proof"]],
+                model: PendingClaudeModelFixtureTransport.choice.modelID)
+            let inference = Task { try await server.fixtureInfer(data, taskID: label) }
+            addTeardownBlock { inference.cancel(); await gate.resume() }
+            try await gate.waitUntilEntered()
+
+            let pending = try turnJournal(root: root, task: label)
+            XCTAssertEqual(pending.compactMap { $0["phase"] as? String },
+                ["start_requested", "started", "submission_verified"])
+            let submission = try XCTUnwrap(pending.last)
+            XCTAssertNotNil(submission["modelEvidence"])
+            XCTAssertEqual(submission["responseCount"] as? Int, 0)
+            XCTAssertNil(submission["submissionProofPolicy"])
+            XCTAssertNil(submission["submittedPromptFingerprint"], "Pending polls cannot manufacture final fresh-submission proof")
+            let beforeFinal = await base.operations()
+            XCTAssertEqual(beforeFinal, ["webProviderStart", "webProviderSend"])
+            let observedPending = await transport.pendingPolls()
+            XCTAssertEqual(observedPending, pendingCount)
+            let pendingReceipts = await server.latestCleanupReceipts()
+            XCTAssertTrue(pendingReceipts.isEmpty)
+
+            await gate.resume()
+            let response = try await inference.value
+            try await gate.requireHealthy()
+            XCTAssertTrue(String(decoding: response, as: UTF8.self).contains("OK"))
+            XCTAssertFalse(String(decoding: response, as: UTF8.self).contains("modelVerificationPending"))
+            let journal = try turnJournal(root: root, task: label)
+            XCTAssertEqual(journal.compactMap { $0["phase"] as? String },
+                ["start_requested", "started", "submission_verified", "complete", "release_verified"])
+            for record in journal.suffix(2) {
+                XCTAssertEqual(record["submissionProofPolicy"] as? String, "fresh_session_submission_v1")
+                XCTAssertEqual(record["responseCount"] as? Int, 1)
+                XCTAssertNotNil(record["modelEvidence"])
+                XCTAssertEqual((record["submittedPromptFingerprint"] as? String)?.count, 64)
+            }
+            let operations = await base.operations()
+            XCTAssertEqual(operations, ["webProviderStart", "webProviderSend", "webProviderPoll", "webProviderFinish"])
+            let receipts = await server.latestCleanupReceipts()
+            XCTAssertEqual(receipts.count, 1)
+            XCTAssertEqual(receipts.first?.outcome, .closed)
+            XCTAssertEqual(receipts.first?.receiptSaved, true)
+        }
+    }
+
+    func testClaudePendingModelContractRejectsMalformedUnboundOrChangedProofWithoutReplay() async throws {
+        for mutation in PendingClaudeModelMutation.allCases where mutation != .none {
+            let label = "claude-pending-invalid-" + mutation.rawValue
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(label + UUID().uuidString)
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+            let base = FixtureWebModelTransport()
+            let transport = PendingClaudeModelFixtureTransport(base: base, mutation: mutation)
+            await server.configureEmbeddedTransport(transport)
+            await server.setTimeoutsForTesting(readiness: .seconds(2), response: .seconds(2))
+            let data = try turnRequest(input: [["role": "user", "content": "Reject synthetic contradictory pending proof"]],
+                model: PendingClaudeModelFixtureTransport.choice.modelID)
+            do {
+                _ = try await server.fixtureInfer(data, taskID: label)
+                XCTFail("Malformed pending or restored-final proof published output: \(mutation)")
+            } catch {
+                if mutation == .missingFinalModel {
+                    guard case .modelUnverified? = error as? WebModelServer.Failure else {
+                        XCTFail("Expected missing model proof rejection for \(mutation): \(error)"); continue
+                    }
+                } else {
+                    guard case .invalidRequest? = error as? WebModelServer.Failure else {
+                        XCTFail("Expected strict snapshot rejection for \(mutation): \(error)"); continue
+                    }
+                }
+            }
+            let journal = try turnJournal(root: root, task: label)
+            XCTAssertEqual(journal.filter { $0["phase"] as? String == "submission_verified" }.count,
+                mutation == .initialUnboundPending ? 0 : 1, mutation.rawValue)
+            XCTAssertFalse(journal.contains { ["complete", "release_verified"].contains($0["phase"] as? String ?? "") }, mutation.rawValue)
+            let operations = await base.operations()
+            XCTAssertEqual(operations.filter { $0 == "webProviderStart" }.count, 1, mutation.rawValue)
+            XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1, mutation.rawValue)
+            XCTAssertEqual(operations.filter { $0 == "webProviderPoll" }.count,
+                mutation == .missingFinalModel || mutation == .missingFinalFreshProof ? 1 : 0, mutation.rawValue)
+            let pendingPolls = await transport.pendingPolls()
+            XCTAssertEqual(pendingPolls, mutation == .initialUnboundPending ? 0 : 1,
+                "Reach the pending boundary after any ordinary output observation: \(mutation)")
+            XCTAssertFalse(operations.contains("webProviderFinish"), mutation.rawValue)
+            _ = await server.fixtureCancel(taskID: label)
+            let afterCancel = await base.operations()
+            XCTAssertEqual(afterCancel.filter { $0 == "webProviderSend" }.count, 1, "No correction or replay: \(mutation)")
+        }
+    }
+
+    func testClaudePendingModelPollsCannotRenewTheAbsoluteResponseDeadline() async throws {
+        let label = "claude-pending-deadline"
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(label + UUID().uuidString)
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+        let base = FixtureWebModelTransport()
+        let transport = PendingClaudeModelFixtureTransport(base: base, repeatPending: true)
+        await server.configureEmbeddedTransport(transport)
+        await server.setTimeoutsForTesting(readiness: .seconds(2), response: .milliseconds(150))
+        let data = try turnRequest(input: [["role": "user", "content": "Bound repeated empty pending observations"]],
+            model: PendingClaudeModelFixtureTransport.choice.modelID)
+        do {
+            _ = try await server.fixtureInfer(data, taskID: label)
+            XCTFail("Repeated pending observations extended the response deadline")
+        } catch {
+            guard case .deadline? = error as? WebModelServer.Failure else { return XCTFail("Expected response deadline: \(error)") }
+        }
+        let pendingCount = await transport.pendingPolls()
+        XCTAssertGreaterThan(pendingCount, 0)
+        let deadlineChanged = await transport.waitDeadlineChanged()
+        XCTAssertFalse(deadlineChanged)
+        let journal = try turnJournal(root: root, task: label)
+        XCTAssertEqual(journal.compactMap { $0["phase"] as? String }, ["start_requested", "started", "submission_verified", "failed"])
+        _ = await server.fixtureCancel(taskID: label)
+        let operations = await base.operations()
+        XCTAssertEqual(operations, ["webProviderStart", "webProviderSend", "webProviderCancel"])
+    }
+
+    func testClaudePendingModelCancellationWithholdsOutputAndClosesOnlySubmittedLease() async throws {
+        let label = "claude-pending-cancel"
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(label + UUID().uuidString)
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+        let base = FixtureWebModelTransport()
+        let gate = WebListenerStartupGate()
+        let transport = PendingClaudeModelFixtureTransport(base: base, repeatPending: true, waitGate: gate)
+        await server.configureEmbeddedTransport(transport)
+        await server.setTimeoutsForTesting(readiness: .seconds(2), response: .seconds(3))
+        let data = try turnRequest(input: [["role": "user", "content": "Cancel while the exact Claude model proof is pending"]],
+            model: PendingClaudeModelFixtureTransport.choice.modelID)
+        let inference = Task { try await server.fixtureInfer(data, taskID: label) }
+        addTeardownBlock { inference.cancel(); await gate.resume() }
+        try await gate.waitUntilEntered()
+        let before = try turnJournal(root: root, task: label)
+        XCTAssertEqual(before.compactMap { $0["phase"] as? String }, ["start_requested", "started", "submission_verified"])
+        inference.cancel()
+        let stopping = Task { await server.fixtureCancel(taskID: label) }
+        for _ in 0..<100 {
+            if await server.isRetiringForTesting(taskID: websiteInferenceFixtureTaskID(label)) { break }
+            await Task.yield()
+        }
+        await gate.resume()
+        let issues = await stopping.value
+        XCTAssertTrue(issues.isEmpty)
+        do { _ = try await inference.value; XCTFail("Cancelled pending proof published output") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        try await gate.requireHealthy()
+        let operations = await base.operations()
+        XCTAssertEqual(operations, ["webProviderStart", "webProviderSend", "webProviderCancel"])
+        let receipts = await server.latestCleanupReceipts()
+        XCTAssertEqual(receipts.count, 1)
+        XCTAssertEqual(receipts.first?.outcome, .closed)
+        XCTAssertEqual(receipts.first?.receiptSaved, true)
+        let journal = try turnJournal(root: root, task: label)
+        XCTAssertFalse(journal.contains { $0["phase"] as? String == "complete" })
+    }
+
     func testInspectorArmIsNativeContextBoundChatGPTOnlyAndDoesNotEnterResponseOrOperations() async throws {
         for provider in ["chatgpt", "gemini"] {
             let arm = try InspectorArmFixture(); defer { arm.remove() }; try arm.arm()
@@ -841,7 +1448,7 @@ final class WebModelServerTests: XCTestCase {
     }
 
     func testConcreteWebsiteChoicesAreVerifiedAgainForEachFreshInference() async throws {
-        for provider in WebsiteModelCatalog.providers {
+        for provider in namedWebsiteModelProviders {
             let choice = syntheticWebsiteChoice(provider: provider, key: "fixture-fast", label: "Fixture Fast")
             let transport = ChoiceWebModelTransport()
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
@@ -860,10 +1467,12 @@ final class WebModelServerTests: XCTestCase {
     }
 
     func testChoiceAndProviderSwitchesStartOnlyAfterThePriorInferenceClosure() async throws {
-        for oldProvider in WebsiteModelCatalog.providers {
-            for newProvider in WebsiteModelCatalog.providers {
+        for oldProvider in namedWebsiteModelProviders {
+            for newProvider in namedWebsiteModelProviders {
                 let old = syntheticWebsiteChoice(provider: oldProvider, key: "fixture-old", label: "Fixture Old")
                 let new = syntheticWebsiteChoice(provider: newProvider, key: "fixture-new", label: "Fixture New")
+                // A one-choice Kimi pilot still exercises fresh-inference
+                // retirement. Other pairs exercise choice/provider changes.
                 let transport = ChoiceWebModelTransport()
                 let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
                 await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
@@ -928,7 +1537,7 @@ final class WebModelServerTests: XCTestCase {
     }
 
     func testConcreteWebsiteChoiceRejectsWrongSelectionAtEveryAdmittedSnapshotWithoutReplay() async throws {
-        for provider in WebsiteModelCatalog.providers {
+        for provider in namedWebsiteModelProviders {
             for point in ChoiceSnapshotPoint.allCases {
                 for mutation in [ChoiceEvidenceMutation.wrongSelectedKey, .wrongSelectedLabel] {
                     let choice = syntheticWebsiteChoice(provider: provider, key: "fixture-fast", label: "Fixture Fast")
@@ -975,7 +1584,7 @@ final class WebModelServerTests: XCTestCase {
     }
 
     func testContradictoryResponseModelCannotBeAdmittedEvenWhenPickerStillMatches() async throws {
-        for provider in WebsiteModelCatalog.providers {
+        for provider in namedWebsiteModelProviders {
             let choice = syntheticWebsiteChoice(provider: provider, key: "fixture-fast", label: "Fixture Fast")
             let transport = ChoiceWebModelTransport(point: .complete, mutation: .wrongResponse)
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
@@ -1046,7 +1655,11 @@ final class WebModelServerTests: XCTestCase {
                 let prompts = await transport.sentPrompts()
                 let actual = try canonicalRequest(in: XCTUnwrap(prompts.last))
                 var expected = object
-                expected["client_metadata"] = ["x-codex-turn-metadata": try websiteInferenceFixtureMetadata(taskID: provider, turnID: "composition-\(iteration)")]
+                // Website presentation preserves the complete task/history,
+                // while native API transport and correlation stay local.
+                expected.removeValue(forKey: "stream")
+                XCTAssertNil(actual["stream"])
+                XCTAssertNil(actual["client_metadata"])
                 XCTAssertEqual(actual as NSDictionary, expected as NSDictionary)
             }
             let operations = await transport.operations()
@@ -1742,6 +2355,97 @@ final class WebModelServerTests: XCTestCase {
         XCTAssertFalse(finalOperations.contains("webProviderSend"))
     }
 
+    #if !COMPUTA_QUALIFY_RETAINED_HAIKU
+    func testOrdinaryNamedHaikuClosesEachVerifiedRoundBeforeToolOrFinal() async throws {
+        let choice = WebsiteModelChoice(provider: "claude", key: "Haiku 5.5", label: "Haiku 5.5")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let transport = FixtureWebModelTransport(replyTexts: [
+            #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"first"}}]}"#,
+            #"{"type":"message","text":"Verified fresh output"}"#], fixedChoice: choice)
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        let task = "ordinary-haiku"
+        let input = [["role":"user","content":"Read the synthetic value"]]
+        let first = try await server.fixtureInfer(turnRequest(input:input, model:choice.modelID), taskID:task)
+        let items = try responseOutput(first)
+        let id = try XCTUnwrap(items.first?["call_id"] as? String)
+        let firstReceipts = await server.latestCleanupReceipts()
+        XCTAssertEqual(firstReceipts.count, 1)
+        XCTAssertTrue(try XCTUnwrap(firstReceipts.first).receiptSaved)
+        let result: [String:Any] = ["type":"function_call_output","call_id":id,"output":"Verified fresh output"]
+        let next = try await server.fixtureInfer(turnRequest(input:input + items + [result], model:choice.modelID), taskID:task)
+        let final = try responseOutput(next)
+        XCTAssertEqual((final.first?["content"] as? [[String:Any]])?.first?["text"] as? String, "Verified fresh output")
+        let journal = try turnJournal(root:root,task:task)
+        let expected = ["start_requested","started","submission_verified","complete","release_verified"]
+        XCTAssertEqual(journal.compactMap { $0["phase"] as? String }, expected + expected)
+        let releases = journal.filter { $0["phase"] as? String == "release_verified" }
+        XCTAssertEqual(Set(releases.compactMap { $0["sessionToken"] as? String }).count, 2)
+        XCTAssertTrue(releases.allSatisfy { $0["modelID"] as? String == choice.modelID })
+        let receipts = try WebsiteSessionCleanupStore(directory: root.appendingPathComponent("cleanup"))
+            .transactionRecords(for: websiteInferenceFixtureTaskID(task), turnID: websiteInferenceFixtureTaskID(task + ":turn"))
+        XCTAssertEqual(receipts.count, 2)
+        XCTAssertTrue(receipts.allSatisfy { $0.outcome == .closed && $0.receiptSaved })
+    }
+    #endif
+
+    #if DEBUG || COMPUTA_QUALIFY_RETAINED_HAIKU
+    func testNamedHaikuRetainsOneIncognitoLeaseOnlyForMatchedToolRounds() async throws {
+        let choice = WebsiteModelChoice(provider: "claude", key: "Haiku 5.5", label: "Haiku 5.5")
+        for end in ["final", "cancel", "unmatched"] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            let base = FixtureWebModelTransport(replyTexts: [
+                #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"first"}}]}"#,
+                #"{"type":"message","text":"Observed the result"}"#], fixedChoice: choice)
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+            #if DEBUG && !COMPUTA_QUALIFY_RETAINED_HAIKU
+            await server.retainHaikuConversationForTesting()
+            #endif
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base))
+            let input = [["role": "user", "content": "Read a synthetic nonce"]]
+            let task = "haiku-" + end
+            let first = try await server.fixtureInfer(turnRequest(input: input, model: choice.modelID), taskID: task)
+            let items = try responseOutput(first)
+            let callID = try XCTUnwrap(items.first?["call_id"] as? String)
+            let yielded = try turnJournal(root: root, task: task)
+            XCTAssertEqual(yielded.last?["phase"] as? String, "yield_verified")
+            let receiptsBefore = await server.latestCleanupReceipts()
+            XCTAssertTrue(receiptsBefore.isEmpty)
+            if end == "cancel" {
+                let issues = await server.fixtureCancel(taskID: task)
+                XCTAssertTrue(issues.isEmpty)
+            } else {
+                let result: [String: Any] = ["type": "function_call_output",
+                    "call_id": end == "unmatched" ? "other" : callID, "output": "Observed nonce 91"]
+                let next: [[String: Any]] = input + items + [result]
+                if end == "unmatched" {
+                    do {
+                        _ = try await server.fixtureInfer(turnRequest(input: next, model: choice.modelID), taskID: task)
+                        XCTFail("A different call ID cannot release a second Send")
+                    } catch {}
+                    _ = await server.fixtureCancel(taskID: task)
+                } else {
+                    _ = try await server.fixtureInfer(turnRequest(input: next, model: choice.modelID), taskID: task)
+                    let prompts = await base.sentPrompts()
+                    XCTAssertEqual((try canonicalRequest(in: XCTUnwrap(prompts.last)))["input"] as? NSArray, next as NSArray)
+                    let transcript = try turnJournal(root: root, task: task)
+                    XCTAssertEqual(Set(transcript.compactMap { $0["sessionToken"] as? String }).count, 1)
+                    XCTAssertEqual(transcript.last?["phase"] as? String, "release_verified")
+                }
+            }
+            let ops = await base.operations()
+            XCTAssertEqual(ops.filter { $0 == "webProviderStart" }.count, 1)
+            XCTAssertEqual(ops.filter { $0 == "webProviderSend" }.count, end == "final" ? 2 : 1)
+            XCTAssertEqual(ops.filter { ["webProviderFinish", "webProviderCancel"].contains($0) }.count, 1)
+            let receipts = await server.latestCleanupReceipts()
+            XCTAssertEqual(receipts.count, 1)
+            XCTAssertEqual(receipts.first?.outcome, .closed)
+            XCTAssertEqual(receipts.first?.receiptSaved, true)
+        }
+    }
+
+    #endif
+
     func testClaudeRoutesEachInferenceToANewClosedSession() async throws {
         let transport = FixtureWebModelTransport()
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
@@ -1778,19 +2482,19 @@ final class WebModelServerTests: XCTestCase {
         _ = await server.shutdown()
     }
 
-    func testEveryWebsiteUsesEmbeddedTransportAndClosesBeforeShutdown() async throws {
+    func testEveryNamedWebsiteUsesEmbeddedTransportAndClosesBeforeShutdown() async throws {
         let embedded = FixtureWebModelTransport()
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
         await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(embedded, defaultChatChoice: syntheticChatGPTChoice))
-        for provider in WebsiteModelCatalog.providers {
+        for provider in namedWebsiteModelProviders {
             let input = Data("{\"model\":\"\(syntheticWebsiteModelID(provider))\",\"input\":\"Say OK\",\"tools\":[],\"stream\":true}".utf8)
             let result = try await server.fixtureInfer(input, taskID: provider)
             XCTAssertTrue(String(decoding: result, as: UTF8.self).contains("response.completed"))
         }
         let providers = await embedded.startedProviders()
-        XCTAssertEqual(providers, WebsiteModelCatalog.providers)
+        XCTAssertEqual(providers, namedWebsiteModelProviders)
         let prompts = await embedded.sentPrompts()
-        XCTAssertEqual(prompts.count, WebsiteModelCatalog.providers.count)
+        XCTAssertEqual(prompts.count, namedWebsiteModelProviders.count)
         for (provider, prompt) in zip(providers, prompts) {
             XCTAssertEqual(try canonicalRequest(in: prompt)["model"] as? String, syntheticWebsiteModelID(provider),
                            "Website routing must preserve its requested browser model, without API substitution")
@@ -1798,13 +2502,13 @@ final class WebModelServerTests: XCTestCase {
         let issues = await server.shutdown()
         XCTAssertTrue(issues.isEmpty)
         let operations = await embedded.operations()
-        XCTAssertEqual(operations.filter { $0 == "webProviderFinish" }.count, WebsiteModelCatalog.providers.count)
+        XCTAssertEqual(operations.filter { $0 == "webProviderFinish" }.count, namedWebsiteModelProviders.count)
         XCTAssertFalse(operations.contains("webProviderCancel"))
     }
 
-    func testEveryEmbeddedProviderRejectsMalformedOrHeaderPrefixedRepliesInsteadOfFinalSuccess() async throws {
+    func testEveryNamedEmbeddedProviderRejectsMalformedOrHeaderPrefixedRepliesInsteadOfFinalSuccess() async throws {
         let tool = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf fixture"}}]}"#
-        for provider in WebsiteModelCatalog.providers {
+        for provider in namedWebsiteModelProviders {
             for response in ["\u{E056}\njson\n" + tool,
                              #"{"type":"message","text":"Observed "Fixture marker value""}"#,
                              "The command completed.\n{\"type\":\"tool_calls\",\"calls\":["] {
@@ -1818,7 +2522,7 @@ final class WebModelServerTests: XCTestCase {
                     XCTFail("A malformed embedded reply must not return final success or tool events: \(stream.count) bytes")
                 } catch {
                     guard case let .malformedReply(diagnostic) = error as? WebModelServer.Failure else {
-                        return XCTFail("Expected a finite malformed-reply diagnostic")
+                        return XCTFail("Expected a finite malformed-reply diagnostic for \(provider), received \(error.localizedDescription)")
                     }
                     XCTAssertEqual(diagnostic.reason, .invalidJSON)
                     XCTAssertEqual(diagnostic.utf8Bytes, response.utf8.count)
@@ -1835,13 +2539,13 @@ final class WebModelServerTests: XCTestCase {
         }
     }
 
-    func testEveryEmbeddedProviderPreservesTheSharedToolHandoffAndMatchingContinuation() async throws {
+    func testEveryNamedEmbeddedProviderPreservesTheSharedToolHandoffAndMatchingContinuation() async throws {
         let tools: [[String: Any]] = [["type": "namespace", "name": "functions", "tools": [
             ["type": "function", "name": "exec_command", "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]]]],
             ["type": "function", "name": "write_stdin", "parameters": ["type": "object", "properties": ["session_id": ["type": "integer"]]]],
         ]]]
         let developer = ComputaAgentInstructions.developerInstructions()
-        for provider in WebsiteModelCatalog.providers {
+        for provider in namedWebsiteModelProviders {
             let transport = FixtureWebModelTransport(replyTexts: [
                 #"{"type":"tool_calls","calls":[{"name":"functions.exec_command","arguments":{"cmd":"printf fixture"}}]}"#,
                 #"{"type":"message","text":"Observed fixture output"}"#,
@@ -1878,11 +2582,14 @@ final class WebModelServerTests: XCTestCase {
             for (prompt, raw) in zip(prompts, [first, next]) {
                 let actual = try canonicalRequest(in: prompt)
                 var expected = try XCTUnwrap(JSONSerialization.jsonObject(with: raw) as? [String: Any])
-                expected["client_metadata"] = ["x-codex-turn-metadata": try websiteInferenceFixtureMetadata(taskID: provider)]
+                expected.removeValue(forKey: "stream")
+                XCTAssertNil(actual["stream"])
+                XCTAssertNil(actual["client_metadata"])
                 XCTAssertEqual(actual as NSDictionary, expected as NSDictionary)
                 XCTAssertTrue(prompt.contains("Local command execution is offered as: functions.exec_command."))
                 XCTAssertTrue(prompt.contains("Exact currently offered local function names: functions.exec_command, functions.write_stdin\nExact currently offered custom names: (none)"))
-                XCTAssertTrue(prompt.hasSuffix("Exact-OK message:\n{\"type\":\"message\",\"text\":\"OK\"}\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
+                let literalBoundary = ["claude", "kimi"].contains(provider) ? "\n" + ComputaAgentInstructions.literalFencedResponseBoundary : ""
+                XCTAssertTrue(prompt.hasSuffix("Exact-OK message:\n{\"type\":\"message\",\"text\":\"OK\"}\(literalBoundary)\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."), "\(provider) handoff suffix")
             }
             let providers = await transport.startedProviders()
             XCTAssertEqual(providers, provider == "gemini" ? [provider] : [provider, provider])
@@ -1913,7 +2620,7 @@ final class WebModelServerTests: XCTestCase {
     }
 
     func testExplicitTranscriptCleanupIsAcceptedOnlyForTheOwnedGroqLease() async throws {
-        for provider in WebsiteModelCatalog.providers {
+        for provider in namedWebsiteModelProviders {
             let transport = FixtureWebModelTransport(cleanupResult: "transcript_cleared")
             let root = FileManager.default.temporaryDirectory.appendingPathComponent("computa-cleanup-lifecycle-" + UUID().uuidString)
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
@@ -1942,6 +2649,7 @@ final class WebModelServerTests: XCTestCase {
             let journal = try turnJournal(root: root, task: provider)
             XCTAssertFalse(journal.isEmpty)
             let expectedMode = provider == "groq" ? "explicit_clear_per_inference"
+                : ["kimi", "qwen"].contains(provider) ? "saved_conversation_delete_per_inference"
                 : provider == "gemini" ? "temporary_conversation_per_turn" : "temporary_conversation_per_inference"
             for record in journal {
                 XCTAssertEqual(record["transactionMode"] as? String, expectedMode)
@@ -2060,7 +2768,8 @@ final class WebModelServerTests: XCTestCase {
     func testExternalWebsiteGatesAreFiniteHTTPFailuresWithoutInferenceRetriesOrToolOutput() async throws {
         for (model, failure, code, action) in externalGateCases {
             for point in [DiagnosticFailurePoint.start, .readinessPoll, .sendThrown, .responsePoll] {
-                let transport = ExternalGateWebModelTransport(point: point, failure: failure)
+                let transport = ExternalGateWebModelTransport(point: point, failure: failure,
+                    modelChoice: model == syntheticQwenChoice.modelID ? syntheticQwenChoice : nil)
                 let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
                 await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
                 let endpoint = try await server.start().appendingPathComponent("responses")
@@ -2075,7 +2784,7 @@ final class WebModelServerTests: XCTestCase {
                 urlRequest.setValue(try await bindWebsiteInferenceFixtureTurn(server, taskID: "external-gate-task"), forHTTPHeaderField: "X-Computa-Task-ID")
                 urlRequest.setValue(try websiteInferenceFixtureMetadata(taskID: "external-gate-task"), forHTTPHeaderField: "x-codex-turn-metadata")
                 let (data, response) = try await URLSession.shared.data(for: urlRequest)
-                let expectedStatus = code == "website_usage_limit" ? 429 : (code == "unexpected_website_page" ? 500 : 403)
+                let expectedStatus = code == "website_usage_limit" ? 429 : (code == "unexpected_website_page" ? 400 : 403)
                 XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, expectedStatus)
                 let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
                 let error = try XCTUnwrap(body["error"] as? [String: Any])
@@ -2085,6 +2794,12 @@ final class WebModelServerTests: XCTestCase {
                 XCTAssertEqual(error["code"] as? String, code)
                 XCTAssertEqual(error["retryable"] as? Bool, false)
                 XCTAssertEqual(error["required_action"] as? String, action)
+                if code == "unexpected_website_page" {
+                    XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 400,
+                        "The pinned runtime must take InvalidRequest, not its retryable 409 UnexpectedStatus or generic 500 branch")
+                    XCTAssertEqual(error["type"] as? String, "model_error")
+                    XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("high demand"))
+                }
                 XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("response.completed"))
                 XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("function_call"))
                 XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("https://"))
@@ -2205,7 +2920,9 @@ final class WebModelServerTests: XCTestCase {
         [("browser/gemini", .humanVerificationRequired(.gemini), "website_verification_required", "complete_website_verification"),
          (syntheticChatGPTModelID, .signInRequired, "sign_in_required", "sign_in"),
          ("browser/claude", .usageLimited(.claude), "website_usage_limit", "wait_for_quota_reset"),
-         (syntheticChatGPTModelID, .unexpectedPage(.chatgpt), "unexpected_website_page", "inspect_website")]
+         (syntheticChatGPTModelID, .unexpectedPage(.chatgpt), "unexpected_website_page", "inspect_website"),
+         (WebsiteModelChoice(provider: "qwen", key: "Qwen3.7-Plus", label: "Qwen3.7-Plus").modelID,
+          .unexpectedPage(.qwen), "unexpected_website_page", "inspect_website")]
     }
 
     func testCleanupPreservesSafeReasonAndRetriesOnlyTheOwnedToken() async throws {
@@ -2558,10 +3275,11 @@ private actor ExternalGateWebModelTransport: WebModelTransport {
     private let token = UUID().uuidString
     private let point: DiagnosticFailurePoint
     private let failure: EmbeddedWebModelTransport.Failure
+    private let modelChoice: WebsiteModelChoice?
     private var ledger: [String] = []
 
-    init(point: DiagnosticFailurePoint, failure: EmbeddedWebModelTransport.Failure) {
-        self.point = point; self.failure = failure
+    init(point: DiagnosticFailurePoint, failure: EmbeddedWebModelTransport.Failure, modelChoice: WebsiteModelChoice? = nil) {
+        self.point = point; self.failure = failure; self.modelChoice = modelChoice
     }
 
     func operations() -> [String] { ledger }
@@ -2582,7 +3300,14 @@ private actor ExternalGateWebModelTransport: WebModelTransport {
         case "webProviderFinish", "webProviderCancel": response = ["cleanup": "not_created"]
         default: throw WebModelServer.Failure.invalidRequest
         }
-        return try JSONSerialization.data(withJSONObject: syntheticPreparedWebsiteSnapshot(response))
+        var snapshot = syntheticPreparedWebsiteSnapshot(response)
+        if ["ready", "running", "complete"].contains(snapshot["state"] as? String ?? ""),
+           let modelChoice, modelChoice.provider == "qwen", snapshot["modelEvidence"] == nil {
+            // Explicit synthetic fixture selection; never infer proof from a request ID.
+            snapshot["modelEvidence"] = ["selected": ["key": modelChoice.key, "label": modelChoice.label],
+                "source": "model_picker_label", "verification": "website_selection"]
+        }
+        return try JSONSerialization.data(withJSONObject: snapshot)
     }
 }
 
@@ -2725,6 +3450,7 @@ private actor FixtureWebModelTransport: WebModelTransport {
     private let cleanupDelay: Bool
     private let startGate: WebListenerStartupGate?
     private var tokens = Set<String>()
+    private var tokenProviders: [String: String] = [:]
     private var prompts: [String] = []
     private var replyTexts: [String]
     private let fixedChoice: WebsiteModelChoice?
@@ -2744,16 +3470,20 @@ private actor FixtureWebModelTransport: WebModelTransport {
     func request(operation: String, params: Data) async throws -> Data {
         ledger.append(operation)
         var response: [String: Any]
+        let currentProvider: String?
         if operation == "webProviderStart" {
             if let startGate { await startGate.pause() }
             let object = try JSONSerialization.jsonObject(with: params) as! [String: String]
             guard let provider = object["provider"] else { throw WebModelServer.Failure.invalidRequest }
             providers.append(provider)
             let token = UUID().uuidString; tokens.insert(token)
+            tokenProviders[token] = provider
+            currentProvider = provider
             response = ["sessionToken": token, "state": "ready"]
         } else {
             let object = try JSONSerialization.jsonObject(with: params) as! [String: String]
             guard let token = object["sessionToken"], tokens.contains(token) else { throw WebModelServer.Failure.invalidRequest }
+            currentProvider = tokenProviders[token]
             switch operation {
             case "webProviderSend":
                 prompts.append(try XCTUnwrap(object["prompt"]))
@@ -2764,11 +3494,22 @@ private actor FixtureWebModelTransport: WebModelTransport {
             case "webProviderFinish", "webProviderCancel":
                 if cleanupDelay { try await Task.sleep(for: .milliseconds(30)) }
                 if cleanupFailsOnce { cleanupFailsOnce = false; response = ["cleanup": "failed"] }
-                else { tokens.remove(token); response = ["cleanup": cleanupResult] }
+                else { tokens.remove(token); tokenProviders.removeValue(forKey: token); response = ["cleanup": cleanupResult] }
             default: throw WebModelServer.Failure.invalidRequest
             }
         }
-        if let choice = fixedChoice, ["ready", "running", "complete"].contains(response["state"] as? String ?? "") {
+        // Fixed synthetic menus, independent of the requested model. Concrete
+        // Groq and Kimi requests still require their exact observed choice;
+        // never reflect the request or repair contradictory evidence from
+        // ChoiceWebModelTransport.
+        let providerFixtureChoice: WebsiteModelChoice?
+        switch currentProvider {
+        case "groq": providerFixtureChoice = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B")
+        case "kimi": providerFixtureChoice = syntheticKimiChoice
+        case "qwen": providerFixtureChoice = syntheticQwenChoice
+        default: providerFixtureChoice = nil
+        }
+        if let choice = fixedChoice ?? providerFixtureChoice, ["ready", "running", "complete"].contains(response["state"] as? String ?? "") {
             response["modelEvidence"] = ["selected": ["key": choice.key, "label": choice.label],
                 "source": "selected_model_indicator", "verification": "website_selection"]
         }
@@ -3093,6 +3834,221 @@ private actor ChatContextSidecarFixtureTransport: WebModelTransport {
     }
 }
 
+private enum PendingSavedFirstBodyMutation: String, CaseIterable, Sendable {
+    case none, numericFlag, falseFlag, text, modeEvidence, modelEvidence, complete, wrongReason, wrongProvider
+    case wrongGeneration, wrongPrompt, firstFingerprint, responseCount, wrongSequence, extraContext, extraField
+    case numericTemporary, initialUnbound, previousBody, missingFinalSelection
+}
+
+/// Synthetic saved-provider negative receipt, outside the normal proof adapter.
+/// Separate WebKit fixtures exercise the actual route and detached DOM paths.
+private actor PendingSavedFirstBodyFixtureTransport: WebModelTransport {
+    private let base: WebsiteInferenceFixtureTransport
+    private let provider: String
+    private let mutation: PendingSavedFirstBodyMutation
+    private let repeatPending: Bool
+    private let qwenReason: String
+    private var pending: Data?
+    private var emitted = 0
+    private var waitDeadline: ContinuousClock.Instant?
+    private var deadlineChanged = false
+    init(base: FixtureWebModelTransport, provider: String, mutation: PendingSavedFirstBodyMutation = .none, repeatPending: Bool = false, qwenReason: String = "qwen_initial_provisional_route_v1") {
+        self.base = WebsiteInferenceFixtureTransport(base); self.provider = provider; self.mutation = mutation; self.repeatPending = repeatPending; self.qwenReason = qwenReason
+    }
+    func pendingPolls() -> Int { emitted }
+    func waitDeadlineChanged() -> Bool { deadlineChanged }
+    func changeRevision(sessionToken: String) -> UInt64? { UInt64(emitted) }
+    func waitForChange(sessionToken: String, after revision: UInt64, until deadline: ContinuousClock.Instant) async throws -> UInt64? {
+        if let waitDeadline { deadlineChanged = deadlineChanged || waitDeadline != deadline }
+        else { waitDeadline = deadline }
+        try Task.checkCancellation()
+        if repeatPending { try await Task.sleep(for: .milliseconds(1)) }
+        return UInt64(emitted)
+    }
+    func request(operation: String, params: Data) async throws -> Data {
+        if operation == "webProviderPoll", let pending, repeatPending || emitted == 0 {
+            emitted += 1; return pending
+        }
+        let bytes = try await base.request(operation: operation, params: params)
+        var value = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        if ["ready", "running", "complete"].contains(value["state"] as? String ?? "") {
+            value["sessionLifecycle"] = "saved_conversation_delete"; value["temporary"] = false
+            if provider == "deepseek" {
+                value["modeEvidence"] = ["selected": ["key": "chat", "label": "Chat"],
+                    "source": "website_mode_toggle", "backendModel": NSNull(), "search": false] as [String: Any]
+            }
+        }
+        if operation == "webProviderSend" {
+            let input = try XCTUnwrap(JSONSerialization.jsonObject(with: params) as? [String: String])
+            let prompt = try XCTUnwrap(input["prompt"]), token = try XCTUnwrap(value["sessionToken"] as? String)
+            var context = try XCTUnwrap(value["modelProofContext"] as? [String: Any])
+            if mutation != .previousBody { context["firstUserFingerprint"] = "" }
+            value["modelProofContext"] = context
+            context["firstUserFingerprint"] = ""
+            context["submittedPromptFingerprint"] = SHA256.hash(data: Data(prompt.utf8)).map { String(format: "%02x", $0) }.joined()
+            var packet: [String: Any] = ["provider": provider, "sessionToken": token, "state": "running", "text": "", "sequence": 1,
+                "sessionLifecycle": "saved_conversation_delete", "temporary": false,
+                "modelVerificationPending": true, "modelVerificationPendingReason": provider == "deepseek"
+                    ? "deepseek_initial_composer_remount_v1" : qwenReason]
+            switch mutation {
+            case .numericFlag: packet["modelVerificationPending"] = 1
+            case .falseFlag: packet["modelVerificationPending"] = false
+            case .text: packet["text"] = "Synthetic text must not escape"
+            case .modeEvidence: packet["modeEvidence"] = value["modeEvidence"] ?? NSNull()
+            case .modelEvidence: packet["modelEvidence"] = NSNull()
+            case .complete: packet["state"] = "complete"
+            case .wrongReason: packet["modelVerificationPendingReason"] = "unknown"
+            case .wrongProvider: packet["provider"] = provider == "deepseek" ? "qwen" : "deepseek"
+            case .wrongGeneration: context["documentGeneration"] = UUID().uuidString
+            case .wrongPrompt: context["submittedPromptFingerprint"] = String(repeating: "0", count: 64)
+            case .firstFingerprint: context["firstUserFingerprint"] = String(repeating: "a", count: 64)
+            case .responseCount: context["responseCount"] = 1
+            case .wrongSequence: context["sequence"] = 2
+            case .extraContext: context["unexpected"] = true
+            case .extraField: packet["unexpected"] = true
+            case .numericTemporary: packet["temporary"] = 0
+            case .none, .initialUnbound, .previousBody, .missingFinalSelection: break
+            }
+            packet["pendingSubmissionContext"] = context
+            pending = try JSONSerialization.data(withJSONObject: packet)
+            if mutation == .initialUnbound { return try XCTUnwrap(pending) }
+        }
+        if operation == "webProviderPoll", mutation == .missingFinalSelection {
+            value.removeValue(forKey: provider == "deepseek" ? "modeEvidence" : "modelEvidence")
+        }
+        return try JSONSerialization.data(withJSONObject: value)
+    }
+}
+
+private enum PendingClaudeModelMutation: String, CaseIterable, Sendable {
+    case none, falseFlag, numberFlag, stringFlag, nullFlag, missingReason, unknownReason, reasonWithoutFlag
+    case initialUnboundPending, wrongToken, wrongGeneration, wrongFirstFingerprint, wrongSubmittedFingerprint
+    case wrongSequence, wrongContextSequence, wrongBaseline, wrongResponseCount, missingContext, missingContextField, extraContextKey
+    case modelEvidence, proofContext, completionEvidence, freshProof, wrongProvider, missingCapability, wrongCapability
+    case extraKey, text, completeWithPending, missingFinalModel, missingFinalFreshProof
+    case previousResponseCount, previousRunningText
+}
+
+/// Mutates outside the normal synthetic proof adapter, so omitted or malformed
+/// pending/final fields cannot be repaired before reaching the server.
+private actor PendingClaudeModelFixtureTransport: WebModelTransport {
+    static let choice = WebsiteModelChoice(provider: "claude", key: "Opus 5", label: "Opus 5")
+    private let base: WebsiteInferenceFixtureTransport
+    private let mutation: PendingClaudeModelMutation
+    private let pendingCount: Int
+    private let repeatPending: Bool
+    private let finalGate: WebListenerStartupGate?
+    private let waitGate: WebListenerStartupGate?
+    private var pending: Data?
+    private var previousRunning: Data?
+    private var emittedPending = 0
+    private var firstWaitDeadline: ContinuousClock.Instant?
+    private var changedDeadline = false
+
+    init(base: FixtureWebModelTransport, mutation: PendingClaudeModelMutation = .none,
+         pendingCount: Int = 1, repeatPending: Bool = false,
+         finalGate: WebListenerStartupGate? = nil, waitGate: WebListenerStartupGate? = nil) {
+        self.base = WebsiteInferenceFixtureTransport(base, defaultClaudeChoice: Self.choice)
+        self.mutation = mutation; self.pendingCount = pendingCount; self.repeatPending = repeatPending
+        self.finalGate = finalGate; self.waitGate = waitGate
+    }
+
+    func pendingPolls() -> Int { emittedPending }
+    func waitDeadlineChanged() -> Bool { changedDeadline }
+    func changeRevision(sessionToken: String) -> UInt64? { UInt64(emittedPending) }
+    func waitForChange(sessionToken: String, after revision: UInt64, until deadline: ContinuousClock.Instant) async throws -> UInt64? {
+        if let firstWaitDeadline { changedDeadline = changedDeadline || firstWaitDeadline != deadline }
+        else { firstWaitDeadline = deadline }
+        if let waitGate { await waitGate.pause() }
+        try Task.checkCancellation()
+        if repeatPending { try await Task.sleep(for: .milliseconds(1)) }
+        return UInt64(emittedPending)
+    }
+
+    func request(operation: String, params: Data) async throws -> Data {
+        if operation == "webProviderPoll", let previousRunning {
+            self.previousRunning = nil
+            return previousRunning
+        }
+        if operation == "webProviderPoll", let pending {
+            if repeatPending || emittedPending < pendingCount {
+                emittedPending += 1
+                return pending
+            }
+            if let finalGate { await finalGate.pause() }
+            try Task.checkCancellation()
+        }
+        let bytes = try await base.request(operation: operation, params: params)
+        var value = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        if operation == "webProviderSend" {
+            let input = try XCTUnwrap(JSONSerialization.jsonObject(with: params) as? [String: String])
+            let prompt = try XCTUnwrap(input["prompt"])
+            let context = try XCTUnwrap(value["modelProofContext"] as? [String: Any])
+            let token = try XCTUnwrap(value["sessionToken"] as? String)
+            var pendingContext = context
+            pendingContext["submittedPromptFingerprint"] = SHA256.hash(data: Data(prompt.utf8))
+                .map { String(format: "%02x", $0) }.joined()
+            var observation: [String: Any] = ["provider": "claude", "sessionToken": token,
+                "state": "running", "text": "", "sequence": 1, "modelVerificationPending": true,
+                "modelVerificationPendingReason": "claude_detached_header_v1",
+                "freshSessionSubmissionCapability": "fresh_session_submission_v1", "pendingSubmissionContext": pendingContext]
+            switch mutation {
+            case .falseFlag: observation["modelVerificationPending"] = false
+            case .numberFlag: observation["modelVerificationPending"] = 1
+            case .stringFlag: observation["modelVerificationPending"] = "true"
+            case .nullFlag: observation["modelVerificationPending"] = NSNull()
+            case .missingReason: observation.removeValue(forKey: "modelVerificationPendingReason")
+            case .unknownReason: observation["modelVerificationPendingReason"] = "unknown_pending_reason"
+            case .reasonWithoutFlag: observation.removeValue(forKey: "modelVerificationPending")
+            case .wrongToken: observation["sessionToken"] = UUID().uuidString
+            case .wrongGeneration: pendingContext["documentGeneration"] = UUID().uuidString
+            case .wrongFirstFingerprint: pendingContext["firstUserFingerprint"] = String(repeating: "0", count: 64)
+            case .wrongSubmittedFingerprint: pendingContext["submittedPromptFingerprint"] = String(repeating: "0", count: 64)
+            case .wrongSequence: observation["sequence"] = 2
+            case .wrongContextSequence: pendingContext["sequence"] = 2
+            case .wrongBaseline: pendingContext["baselineResponseCount"] = 1
+            case .wrongResponseCount: pendingContext["responseCount"] = 1
+            case .missingContextField: pendingContext.removeValue(forKey: "submittedPromptFingerprint")
+            case .extraContextKey: pendingContext["unexpected"] = true
+            case .modelEvidence: observation["modelEvidence"] = value["modelEvidence"]
+            case .proofContext: observation["modelProofContext"] = context
+            case .completionEvidence: observation["completionEvidence"] = ["codeStructure": [:]]
+            case .freshProof: observation["freshSessionSubmissionProof"] = pendingContext
+            case .wrongProvider: observation["provider"] = "chatgpt"
+            case .missingCapability: observation.removeValue(forKey: "freshSessionSubmissionCapability")
+            case .wrongCapability: observation["freshSessionSubmissionCapability"] = "unknown_capability"
+            case .extraKey: observation["unexpected"] = true
+            case .text: observation["text"] = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"must never execute"}}]}"#
+            case .completeWithPending: observation["state"] = "complete"
+            case .none, .initialUnboundPending, .missingContext, .missingFinalModel, .missingFinalFreshProof,
+                 .previousResponseCount, .previousRunningText: break
+            }
+            if mutation == .missingContext { observation.removeValue(forKey: "pendingSubmissionContext") }
+            else { observation["pendingSubmissionContext"] = pendingContext }
+            pending = try JSONSerialization.data(withJSONObject: observation)
+            if mutation == .initialUnboundPending { return try XCTUnwrap(pending) }
+            if mutation == .previousResponseCount {
+                // The normal proved Send observes an answer before the later
+                // empty pending snapshot tries to erase that observation.
+                var observed = context
+                observed["responseCount"] = 1
+                value["modelProofContext"] = observed
+            } else if mutation == .previousRunningText {
+                // Exercise the ordinary running-poll path independently of
+                // the Send snapshot. This text is never a completed reply.
+                var observed = value
+                observed["text"] = "SYNTHETIC_PARTIAL_OUTPUT_MUST_NOT_BE_FORGOTTEN"
+                previousRunning = try JSONSerialization.data(withJSONObject: observed)
+            }
+        }
+        if operation == "webProviderPoll", value["state"] as? String == "complete" {
+            if mutation == .missingFinalModel { value.removeValue(forKey: "modelEvidence") }
+            if mutation == .missingFinalFreshProof { value.removeValue(forKey: "freshSessionSubmissionProof") }
+        }
+        return try JSONSerialization.data(withJSONObject: value)
+    }
+}
+
 private enum PendingChatModelMutation: String, CaseIterable, Sendable {
     case none, ready, evidence, proofContext, text, completionEvidence, falseFlag, missingContext, wrongSequence, complete, missingFinalModel
 }
@@ -3154,5 +4110,80 @@ private actor SyntheticCaptureNoninterferenceTransport: WebModelTransport {
     func request(operation: String, params: Data) async throws -> Data {
         if operation == "webProviderSend" { admitted.append(WebsiteBenchmarkCaptureLease.current != nil) }
         return try await base.request(operation: operation, params: params)
+    }
+}
+
+private actor ClaudeStreamStartScopeTransport: WebModelTransport {
+    private let base: any WebModelTransport
+    private let failStart: Bool, failSend: Bool
+    private var grant: ClaudeResponseStreamLease?
+    private var admitted: [Bool] = []
+    private var contextsMatch = true, startWireUnchanged = true, leakedOutsideStart = false, currentAtFinish = false
+    init(base: any WebModelTransport, failStart: Bool, failSend: Bool) {
+        self.base = base; self.failStart = failStart; self.failSend = failSend
+    }
+    func observation() -> (admitted: [Bool], contextsMatch: Bool, startWireUnchanged: Bool,
+                            leakedOutsideStart: Bool, current: Bool, currentAtFinish: Bool) {
+        (admitted, contextsMatch, startWireUnchanged, leakedOutsideStart, grant?.isCurrent ?? false, currentAtFinish)
+    }
+    func start(params: Data, admission: WebModelStartAdmission, authorization: ChatGPTRequestMetadataLease?) async throws -> Data {
+        grant = ClaudeResponseStreamLease.current; admitted.append(grant != nil)
+        if let grant {
+            contextsMatch = grant.matches(context: .init(taskID: try XCTUnwrap(UUID(uuidString: admission.taskID)),
+                threadID: try XCTUnwrap(UUID(uuidString: admission.threadID)), turnID: try XCTUnwrap(UUID(uuidString: admission.turnID)),
+                runtimeGeneration: admission.runtimeGeneration, preparationID: admission.preparationID,
+                inferenceID: admission.inferenceID, modelID: admission.modelID))
+        }
+        let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: params) as? [String: String])
+        startWireUnchanged = Set(fields.keys).isSubset(of: ["provider", "modelChoice"]) && params == admission.parameters
+        if failStart { throw WebModelServer.Failure.providerFailed }
+        return try await base.start(params: params, admission: admission, authorization: authorization)
+    }
+    func request(operation: String, params: Data) async throws -> Data {
+        if ClaudeResponseStreamLease.current != nil { leakedOutsideStart = true }
+        if operation == "webProviderFinish" || operation == "webProviderCancel" {
+            currentAtFinish = grant?.isCurrent ?? false
+            grant?.revoke()
+        }
+        let bytes = try await base.request(operation: operation, params: params)
+        if operation == "webProviderSend", failSend { throw WebModelServer.Failure.providerFailed }
+        return bytes
+    }
+
+
+}
+
+private actor ClaudeFirstCaptureScopeTransport: WebModelTransport {
+    private let base: any WebModelTransport
+    private let captureAtSend: Bool, failSend: Bool
+    private var scope: ClaudeRequestCapture.FirstRequestScope?
+    private var prompt = "", token = ""
+    private let marker = UUID().uuidString.lowercased(), generation = UUID()
+    private var admitted: [Bool] = []
+    private var capturedAtSend = false, pollHadTaskLocal = false, pollCaptured = false
+    init(base: any WebModelTransport, captureAtSend: Bool, failSend: Bool) {
+        self.base = base; self.captureAtSend = captureAtSend; self.failSend = failSend
+    }
+    func observation() -> (admitted: [Bool], capturedAtSend: Bool, pollHadTaskLocal: Bool, pollCaptured: Bool) {
+        (admitted, capturedAtSend, pollHadTaskLocal, pollCaptured)
+    }
+    func attemptLateCapture() -> Bool {
+        scope?.capture(prompt: prompt, outbound: prompt + "\n\nComputa session marker: " + marker,
+            modelID: ClaudeRequestCapture.firstRequestModel, sessionToken: token,
+            documentGeneration: generation, marker: marker, nativeFirstFresh: true) ?? false
+    }
+    func request(operation: String, params: Data) async throws -> Data {
+        if operation == "webProviderSend" {
+            scope = ClaudeRequestCapture.firstRequest; admitted.append(scope != nil)
+            let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: params) as? [String: String])
+            prompt = try XCTUnwrap(fields["prompt"]); token = try XCTUnwrap(fields["sessionToken"])
+            if captureAtSend { capturedAtSend = attemptLateCapture() }
+        } else if operation == "webProviderPoll" {
+            pollHadTaskLocal = ClaudeRequestCapture.firstRequest != nil
+            pollCaptured = attemptLateCapture()
+        }
+        let response = try await base.request(operation: operation, params: params)
+        if operation == "webProviderSend", failSend { throw WebModelServer.Failure.providerFailed }
+        return response
     }
 }

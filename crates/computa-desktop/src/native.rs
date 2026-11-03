@@ -792,6 +792,11 @@ impl Host {
     }
     fn native_event(&mut self, event: NativeControlEvent) {
         match event {
+            NativeControlEvent::ShowSettings => {
+                if !self.controls.interaction_blocked() && !self.closing {
+                    self.action(NativeAction::ShowSettings);
+                }
+            }
             NativeControlEvent::AccessModeChanged(mode) => {
                 if self.controls.interaction_blocked() || self.closing {
                     return;

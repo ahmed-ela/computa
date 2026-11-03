@@ -32,12 +32,16 @@ struct WebsiteTurnFailureStore: Sendable {
 
         private static func canonicalDiagnostic(_ text: String, modelID: String) -> String? {
             guard text.utf8.count <= 8_192, let provider = WebModelServer.provider(for: modelID),
+                  provider != "deepseek" || WebsiteModeChoice.parse(requestID: modelID) != nil,
                   let webProvider = EmbeddedWebModelTransport.Provider(rawValue: provider),
                   let supplied = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
                   let error = supplied["error"] as? [String: Any], let code = error["code"] as? String else { return nil }
-            // These fixed local errors have no retry metadata. Only their
-            // exact generated envelopes can pass the canonical equality below.
-            if code != "browser_model_error" && code != "unsupported_website_response" && code != "website_turn_limit" {
+            // Legacy fixed errors have no retry metadata. The saved-chat
+            // adapters' distinct unsupported-response envelope does, and must retain a real Bool.
+            // Exact generated envelopes still pass canonical equality below.
+            let savedLiteralSource = ["kimi", "qwen", "deepseek"].contains(provider)
+            if code != "browser_model_error" && code != "website_turn_limit" && code != "invalid_model_output"
+                && (code != "unsupported_website_response" || savedLiteralSource) {
                 guard let retryable = error["retryable"] as? NSNumber, CFGetTypeID(retryable) == CFBooleanGetTypeID(),
                       retryable.boolValue == false else { return nil }
             }
@@ -48,10 +52,47 @@ struct WebsiteTurnFailureStore: Sendable {
                       let reason = WebModelServer.NativeBrowserFailure(rawValue: rawReason), reason.code == code,
                       !reason.requiresChatGPT || provider == "chatgpt" else { return nil }
                 nativeError = reason
-            case "browser_model_error": nativeError = EmbeddedWebModelTransport.Failure.pageUnavailable
+            case "browser_model_error":
+                // Several finite native failures share this legacy wire code.
+                // Match the complete generated envelope, never arbitrary prose
+                // or a code-only guess, before retaining the exact diagnosis.
+                let fixedFailures: [any Error] = [
+                    EmbeddedWebModelTransport.Failure.pageUnavailable,
+                    EmbeddedWebModelTransport.Failure.modelUnverified,
+                    EmbeddedWebModelTransport.Failure.modelMismatch,
+                    EmbeddedWebModelTransport.Failure.editorFailure("composer_not_empty"),
+                    WebModelServer.Failure.modelUnverified,
+                    WebModelServer.Failure.modelMismatch,
+                    WebModelServer.Failure.cleanupFailed,
+                ]
+                guard let fixed = fixedFailures.first(where: { failure in
+                    guard let bytes = try? WebModelServer.errorBody(for: failure),
+                          let envelope = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { return false }
+                    return NSDictionary(dictionary: supplied).isEqual(to: envelope)
+                }) else { return nil }
+                nativeError = fixed
+            case "invalid_model_output":
+                // The codec emits fixed messages without reply text or tool
+                // names. Preserve only complete native envelopes, including
+                // their legacy absence of retry metadata.
+                let fixedFailures: [WebModelResponseCodec.Failure] = [
+                    .emptyReply, .malformedEnvelope, .unknownTool(""),
+                    .unsupportedCallFields, .argumentsMustBeObject, .customInputMustBeString, .invalidBrowserReadArguments,
+                ]
+                guard let fixed = fixedFailures.first(where: { failure in
+                    guard let bytes = try? WebModelServer.errorBody(for: failure),
+                          let envelope = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { return false }
+                    return NSDictionary(dictionary: supplied).isEqual(to: envelope)
+                }) else { return nil }
+                nativeError = fixed
             case "unsupported_website_response":
-                guard provider == "chatgpt" else { return nil }
-                nativeError = WebModelResponseCodec.Failure.unsupportedWebsiteResponse
+                if provider == "chatgpt" {
+                    nativeError = WebModelResponseCodec.Failure.unsupportedWebsiteResponse
+                } else if savedLiteralSource {
+                    // These fixed adapters' unreadable literal source is a
+                    // terminal turn diagnosis, not arbitrary provider prose.
+                    nativeError = EmbeddedWebModelTransport.Failure.responseFormatUnavailable
+                } else { return nil }
             case "website_turn_limit": nativeError = WebModelServer.Failure.turnLimit
             case "malformed_website_reply":
                 guard let rawReason = error["reason"] as? String,
@@ -61,19 +102,27 @@ struct WebsiteTurnFailureStore: Sendable {
                 nativeError = WebModelServer.Failure.malformedReply(.init(reason: reason, utf8Bytes: Int(count), fenced: fenced.boolValue))
             case "website_verification_required": nativeError = EmbeddedWebModelTransport.Failure.humanVerificationRequired(webProvider)
             case "sign_in_required": nativeError = EmbeddedWebModelTransport.Failure.signInRequired
+            case "local_website_session_capacity": nativeError = EmbeddedWebModelTransport.Failure.capacity
             case "website_usage_limit": nativeError = EmbeddedWebModelTransport.Failure.usageLimited(webProvider)
+            case "website_response_blocked":
+                // Only Claude currently emits this finite native classification.
+                // Preserve its exact terminal warning across history reloads;
+                // page text and retry metadata still fail canonical equality.
+                guard provider == "claude" else { return nil }
+                nativeError = EmbeddedWebModelTransport.Failure.responseBlocked(.claude)
             case "unexpected_website_page": nativeError = EmbeddedWebModelTransport.Failure.unexpectedPage(webProvider)
             case "website_ownership_unverified":
                 guard let rawReason = error["ownership_reason"] as? String,
-                      let reason = EmbeddedWebModelTransport.OwnershipReason(rawValue: rawReason) else { return nil }
+                      let reason = EmbeddedWebModelTransport.OwnershipReason(rawValue: rawReason),
+                      ![.groqDraftRestored, .groqReportedSubmissionError].contains(reason) || provider == "groq" else { return nil }
                 nativeError = EmbeddedWebModelTransport.Failure.ownershipFailure(reason)
             case "website_continuation_unverified":
                 guard provider == "gemini", let rawReason = error["reason"] as? String,
                       let reason = WebsiteTurnContinuation.Failure(rawValue: rawReason) else { return nil }
                 nativeError = reason
             case "product_mode_unverified":
-                nativeError = error["message"] as? String == WebModelServer.Failure.productModeUnverified.localizedDescription
-                    ? WebModelServer.Failure.productModeUnverified : EmbeddedWebModelTransport.Failure.productModeUnverified
+                guard provider == "chatgpt" else { return nil }
+                nativeError = EmbeddedWebModelTransport.Failure.productModeUnverified
             default: return nil
             }
             guard let native = try? WebModelServer.errorBody(for: nativeError),
@@ -83,6 +132,14 @@ struct WebsiteTurnFailureStore: Sendable {
                 // message shipped. Retain saved diagnostics without admitting
                 // arbitrary prose, new fields, retry metadata or provider gates.
                 legacyError["message"] = "\(webProvider.displayName)'s website usage limit has been reached. After your account's limit resets, refresh website models before retrying."
+                var legacy = expected
+                legacy["error"] = legacyError
+                if NSDictionary(dictionary: supplied).isEqual(to: legacy) { expected = legacy }
+            }
+            if code == "product_mode_unverified", var legacyError = expected["error"] as? [String: Any] {
+                // Preserve the exact older action and message as one historical envelope.
+                legacyError["message"] = "ChatGPT normal Chat mode could not be verified. No response was accepted and no prompt was replayed. Refresh website models before retrying."
+                legacyError["required_action"] = "refresh_website_models"
                 var legacy = expected
                 legacy["error"] = legacyError
                 if NSDictionary(dictionary: supplied).isEqual(to: legacy) { expected = legacy }

@@ -156,7 +156,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
     });
 
     if (provider === 'claude') test('discovery never retries an uncertain popup dismissal or dismisses a changed parent', async () => {
-      for (const failure of ['ignored_child', 'ignored_parent', 'lost_ack', 'owner', 'url', 'model', 'user', 'parent', 'foreign_menu']) {
+      for (const failure of ['ignored_child', 'ignored_parent', 'lost_ack', 'owner', 'url', 'model', 'user', 'parent', 'foreign_menu', 'foreign_dialog']) {
         const { f, picker } = setup();
         const originalURL = f.document.URL, originalOwner = f.world.__computaModelOwner;
         if (failure === 'ignored_parent') picker.menu.onDispatch = () => {};
@@ -174,6 +174,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
             f.body.append(new Node('DIV', { role: 'menu', id: 'model-picker-menu', 'aria-labelledby': 'model-picker-button' }));
           }
           if (failure === 'foreign_menu') f.body.append(new Node('DIV', { role: 'menu', id: 'unrelated' }));
+          if (failure === 'foreign_dialog') f.body.append(new Node('DIV', { role: 'dialog' }));
         };
         expect((await f.run('discoverModels')).pending).toBe(true);
         expect((await f.run('discoverModels')).pending).toBe(true);
@@ -291,6 +292,277 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       }
     });
 
+    if (provider === 'claude') {
+      const choice = (label: string) => ({ key: label, label });
+      const setup = () => {
+        const f = make();
+        const picker = installObservedModelPicker(f, 'claude', Node);
+        const fable = picker.add(picker.menu, 'Fable 5.1', '');
+        const opus = picker.add(picker.menu, 'Opus 5.5', '');
+        const oldOpus = picker.add(picker.nested, 'Opus 4.6', '');
+        return { f, picker, fable, opus, oldOpus };
+      };
+      const advance = async (f: any) => {
+        for (let index = 0; index < 6; index++) {
+          const result = await f.run('discoverModels');
+          if (!result.pending) return result;
+        }
+        throw new Error('Synthetic discovery exceeded six reads');
+      };
+      const noActions = (x: ReturnType<typeof setup>) => {
+        expect(x.picker.options.every((row: any) => row.clicks === 0)).toBe(true);
+        expect(x.f.composer.textContent).toBe('');
+        expect(x.f.send.clicks).toBe(0);
+      };
+      const distinctClose = (x: ReturnType<typeof setup>, afterChild: () => void = () => {}) => {
+        const events: string[] = [], parentClose = x.picker.menu.onDispatch!;
+        x.picker.nested!.onDispatch = (event: any) => {
+          if (event.type !== 'keydown' || event.key !== 'Escape') return;
+          events.push('child');
+          x.picker.nested!.values.hidden = '';
+          afterChild();
+        };
+        x.picker.menu.onDispatch = (event: any) => {
+          if (event.type !== 'keydown' || event.key !== 'Escape') return;
+          events.push('parent'); parentClose(event);
+        };
+        return events;
+      };
+
+      describe('Claude current discovery eligibility', () => {
+        for (const drift of ['purchase_label', 'purchase_role', 'disabled', 'removed']) {
+          test(`revalidation removes a primary choice that becomes ${drift} while More models opens`, async () => {
+            const x = setup();
+            const openNested = x.picker.secondary!.onClick!;
+            x.picker.secondary!.onClick = () => {
+              // This callback occurs after the primary choices were accumulated,
+              // before the next ordinary discovery read sees both associated menus.
+              openNested();
+              if (drift === 'purchase_label' || drift === 'purchase_role')
+                x.fable.append(new Node('P', {}, 'Buy credits'));
+              if (drift === 'purchase_role') {
+                x.fable.values.role = 'menuitem';
+                delete x.fable.values['aria-checked'];
+              }
+              if (drift === 'disabled') x.fable.values['aria-disabled'] = 'true';
+              if (drift === 'removed') x.fable.connected = false;
+            };
+            const result = await advance(x.f);
+            expect(result.error).toBeUndefined();
+            expect(result.modelChoices).toContainEqual(choice('Opus 5.5'));
+            expect(result.modelChoices).toContainEqual(choice('Opus 4.6'));
+            noActions(x);
+            expect(result.modelChoices).not.toContainEqual(choice('Fable 5.1'));
+          });
+        }
+
+        for (const drift of ['purchase_label', 'purchase_role', 'disabled', 'removed', 'replacement']) {
+          test(`eligibility ${drift} during child dismissal fails without parent Escape or catalog publication`, async () => {
+            const x = setup();
+            const events = distinctClose(x, () => {
+              if (drift === 'purchase_label' || drift === 'purchase_role') x.fable.append(new Node('P', {}, 'Buy credits'));
+              if (drift === 'purchase_role') { x.fable.values.role = 'menuitem'; delete x.fable.values['aria-checked']; }
+              if (drift === 'disabled') x.fable.values['aria-disabled'] = 'true';
+              if (drift === 'removed' || drift === 'replacement') x.fable.connected = false;
+              if (drift === 'replacement') x.picker.add(x.picker.menu, 'Fable 5.1', '');
+            });
+            const result = await advance(x.f);
+            expect(result.error).toBe('model_unverified'); expect(result.modelChoices).toBeUndefined();
+            expect(events).toEqual(['child']);
+            await x.f.run('discoverModels');
+            expect(events).toEqual(['child']);
+            expect(x.picker.trigger.clicks).toBe(1); expect(x.picker.secondary!.clicks).toBe(1); noActions(x);
+          });
+        }
+
+        test('new hidden or inert purchase labels do not change ordinary eligibility during close', async () => {
+          const x = setup();
+          const events = distinctClose(x, () => {
+            for (const values of [{ 'aria-hidden': 'true' }, { inert: '' }]) {
+              const wrapper = new Node('SECTION'); wrapper.append(new Node('P', values, 'Buy credits')); x.opus.append(wrapper);
+            }
+          });
+          const result = await advance(x.f);
+          expect(result.error).toBeUndefined(); expect(result.modelChoices).toContainEqual(choice('Opus 5.5'));
+          expect(result.modelChoices).toContainEqual(choice('Opus 4.6'));
+          expect(events).toEqual(['child', 'parent']); noActions(x);
+        });
+      });
+    }
+
+    if (provider === 'claude') {
+      const expectedModelChoice = { key: 'Opus 5', label: 'Opus 5' };
+      const prompt = 'Offline synthetic display marker\n\n' + markerLine;
+      async function submitted() {
+        const { f, picker } = setup();
+        picker.add(picker.nested, 'Opus 5');
+        let selection: any;
+        for (let index = 0; index < 5; index++) {
+          selection = await f.run('selectModel', { modelChoice: expectedModelChoice });
+          if (selection.selected) break;
+        }
+        expect(selection.selected).toBe(true);
+        expect((await f.run('insert', { expectedModelChoice, prompt })).inserted).toBe(true);
+        expect((await f.run('submit', { expectedModelChoice, prompt })).submitted).toBe(true);
+        f.messages.append(f.article);
+        const before = await f.run('inspect', { expectedModelChoice });
+        expect(before.firstUserVerified).toBe(true);
+        expect(before.modelEvidence.selected).toEqual(expectedModelChoice);
+        expect(f.send.clicks).toBe(1);
+        return { f, picker, before, triggerClicks: picker.trigger.clicks, waits: f.delays.length };
+      }
+
+      // Expire only the new detached-header wait. The native clock is a negative
+      // deadline, never restored model evidence or permission to retry Send.
+      async function expiredDetachedRead(x: any) {
+        const clocks: any[] = [];
+        x.f.window.webkit.messageHandlers.computaModelClock = { postMessage: (request: any) => { clocks.push(request); return Promise.resolve(true); } };
+        const result = await x.f.run('inspect', { expectedModelChoice, operationID: 'b90afc30-7aee-411e-b8b4-4efeafceddb1' });
+        expect(clocks).toHaveLength(1); expect(clocks[0].milliseconds).toBeGreaterThan(0); expect(clocks[0].milliseconds).toBeLessThanOrEqual(1800);
+        return result;
+      }
+
+      describe('Claude post-submission header diagnostics', () => {
+        for (const variant of ['detached', 'display_none', 'visibility_hidden', 'aria_label_removed', 'new_label_prefix', 'nonbutton_layout', 'scan_cap']) {
+          test(`${variant} retains zero-trigger rejection with only detached-header bounded settling`, async () => {
+            const x = await submitted();
+            if (variant === 'detached') x.picker.trigger.connected = false;
+            if (variant === 'display_none') x.picker.trigger.values.hidden = '';
+            if (variant === 'visibility_hidden') x.picker.trigger.values.visibility = 'hidden';
+            if (variant === 'aria_label_removed') delete x.picker.trigger.values['aria-label'];
+            if (variant === 'new_label_prefix') x.picker.trigger.values['aria-label'] = 'Selected model Opus 5';
+            if (variant === 'nonbutton_layout') x.picker.trigger.tagName = 'DIV';
+            if (variant === 'scan_cap') {
+              const noise = new Node('DIV');
+              for (let i = 0; i < 256; i++) noise.append(new Node('BUTTON', { 'aria-label': 'Synthetic unrelated control' }));
+              noise.parentElement = x.f.body; x.f.body.children.unshift(noise);
+            }
+            const result = variant === 'detached' ? await expiredDetachedRead(x) : await x.f.run('inspect', { expectedModelChoice });
+            expect(result.error).toBe('model_unverified');
+            expect(result.modelDiagnostic).toMatchObject({ trigger: null, triggerCount: 0, triggerCandidates: [],
+              readStage: variant === 'detached' ? 'trigger_remount_timeout' : 'initial_observation', readContext: { scope: 'action_precheck', action: 'inspect' },
+              readAttempt: { observedProof: false, primaryOpened: false, secondaryOpened: false, closeAttempted: false } });
+            expect(result.modelEvidence).toBeUndefined();
+            const facts = result.modelDiagnostic.lastModelTrigger;
+            expect(facts.scope).toBe('same_context');
+            expect(facts.connected).toBe(variant !== 'detached');
+            expect(facts.physical).toBe(!['detached', 'display_none', 'visibility_hidden'].includes(variant));
+            expect(facts.labelKind).toBe(variant === 'aria_label_removed' ? 'missing' : variant === 'new_label_prefix' ? 'other' : 'recognized');
+            expect(facts.nodeKind).toBe(variant === 'nonbutton_layout' ? 'other' : 'button');
+            expect(facts.inTriggerScan).toBe(!['aria_label_removed', 'nonbutton_layout', 'scan_cap'].includes(variant));
+            expect(facts.triggerScanAtLimit).toBe(variant === 'scan_cap');
+            expect(JSON.stringify(facts).length).toBeLessThan(400);
+            expect(result.text).toBeUndefined();
+            expect(x.f.delays.length).toBe(x.waits);
+            expect(x.f.send.clicks).toBe(1); expect(x.picker.trigger.clicks).toBe(x.triggerClicks);
+          });
+        }
+        for (const variant of ['disabled', 'inert', 'unknown_effort_suffix']) {
+          test(`${variant} alone differs from the retained zero-candidate observation`, async () => {
+            const x = await submitted();
+            if (variant === 'disabled') x.picker.trigger.disabled = true;
+            if (variant === 'inert') x.picker.trigger.values.inert = '';
+            if (variant === 'unknown_effort_suffix') x.picker.trigger.values['aria-label'] = 'Model: Opus 5 Unobserved';
+            const result = await x.f.run('inspect', { expectedModelChoice });
+            expect(result.error).toBe('model_unverified');
+            expect(result.modelDiagnostic.triggerCandidates.length).toBe(1);
+            expect(result.modelDiagnostic.triggerCount).toBe(variant === 'unknown_effort_suffix' ? 0 : 1);
+            expect(x.f.send.clicks).toBe(1); expect(x.picker.trigger.clicks).toBe(x.triggerClicks);
+          });
+        }
+        test('an expired detached read is terminal; later exact proof is independently recomputed', async () => {
+          const x = await submitted();
+          x.picker.trigger.connected = false;
+          const missing = await expiredDetachedRead(x);
+          expect(missing.error).toBe('model_unverified');
+          expect(missing.modelEvidence).toBeUndefined();
+          expect(x.f.delays.length).toBe(x.waits);
+          // Offline later read only, not an authorized app/provider retry.
+          x.picker.trigger.connected = true;
+          const restored = await x.f.run('inspect', { expectedModelChoice });
+          expect(restored.error).toBeUndefined(); expect(restored.firstUserVerified).toBe(true);
+          expect(restored.firstUserFingerprint).toBe(x.before.firstUserFingerprint);
+          expect(restored.modelEvidence.selected).toEqual(expectedModelChoice);
+          expect(x.f.send.clicks).toBe(1); expect(x.picker.trigger.clicks).toBe(x.triggerClicks);
+        });
+        test('restoration with a different model cannot use the cached selection', async () => {
+          const x = await submitted();
+          x.picker.trigger.connected = false;
+          expect((await expiredDetachedRead(x)).error).toBe('model_unverified');
+          x.picker.trigger.connected = true; x.picker.selected('Sonnet 5');
+          const mismatch = await x.f.run('inspect', { expectedModelChoice });
+          expect(mismatch.error).toBe('model_mismatch'); expect(mismatch.text).toBeUndefined();
+          expect(x.f.send.clicks).toBe(1); expect(x.picker.trigger.clicks).toBe(x.triggerClicks);
+        });
+      });
+
+      const shared = "const input = { provider: 'claude' };\n" + readFileSync(new URL('./embedded-model-choice-helper.js', import.meta.url), 'utf8');
+      const diagnose = new Function('globalThis', 'document', 'state', shared + '\nreturn websiteClaudeModelTriggerDiagnostic(state);');
+      const remember = new Function('globalThis', 'document', 'provider', 'trigger', 'owner', 'url', shared + '\nwebsiteClaudeRememberModelTrigger(provider, trigger, owner, url);');
+      const privateOwner = 'f33c8869-a5d3-4b9d-b29e-7b6f591a8e30';
+      function rawFixture() {
+        const node = new Node('BUTTON', {'aria-label':'Model: Opus 5 High'});
+        const document = {URL:'https://claude.ai/new?incognito'};
+        const world:any = {__computaModelOwner:privateOwner};
+        const state = {physical:() => true, visible:() => true, outside:() => true, triggerScan:[node]};
+        return {node, document, world, state};
+      }
+      describe('finite diagnostic projection and noninterference', () => {
+        test('no recorded current proof preserves unknown rather than false/zero', () => {
+          const x = rawFixture(), output = diagnose(x.world,x.document,x.state);
+          expect(output.scope).toBe('missing');
+          expect(Object.values(output).filter(v => v === null).length).toBe(8);
+        });
+        for (const drift of ['owner','document','URL']) test(`${drift} does not disclose or borrow another context's node`, () => {
+          const x = rawFixture(); remember(x.world,x.document,'claude',x.node,privateOwner,x.document.URL);
+          if(drift==='owner') x.world.__computaModelOwner='foreign-owner';
+          if(drift==='document') x.world.__computaClaudeLastModelTrigger.document={URL:x.document.URL};
+          if(drift==='URL') x.document.URL+='&changed';
+          const output=diagnose(x.world,x.document,x.state);
+          expect(output.scope).toBe('different_context'); expect(output.connected).toBeNull(); expect(output.labelKind).toBeNull();
+        });
+        test('hostile values never serialize raw labels, roles, IDs, content or oversized strings', () => {
+          const x=rawFixture();remember(x.world,x.document,'claude',x.node,privateOwner,x.document.URL);
+          x.node.tagName='PRIVATE_TAG';x.node.values.role='PRIVATE_ROLE';x.node.values.id='PRIVATE_ID';x.node.text='PRIVATE_BODY';
+          for(const label of ['PRIVATE_SECRET', 'x'.repeat(100000), 'Model: PRIVATE_SECRET', 'Select ChatGPT model']) {
+            x.node.values['aria-label']=label;
+            const output=diagnose(x.world,x.document,x.state), serialized=JSON.stringify(output);
+            expect(Object.keys(output).sort()).toEqual(['kind','scope','connected','physical','visible','nodeKind','labelKind','authored','inTriggerScan','triggerScanAtLimit'].sort());
+            expect(serialized).not.toContain('PRIVATE');expect(serialized.length).toBeLessThan(400);
+            expect(['other','known_prefix_unrecognized']).toContain(output.labelKind);expect(output.nodeKind).toBe('other');
+          }
+        });
+        test('diagnostic collection exceptions remain finite unknowns', () => {
+          const x=rawFixture();remember(x.world,x.document,'claude',x.node,privateOwner,x.document.URL);
+          x.node.getAttribute=() => {throw new Error('PRIVATE_ERROR');};
+          const output=diagnose(x.world,x.document,x.state);
+          expect(output.scope).toBe('unavailable');expect(output.connected).toBeNull();expect(JSON.stringify(output)).not.toContain('PRIVATE');
+        });
+        test('record write exceptions cannot alter successful inspection or add actions', async () => {
+          const x=await submitted();
+          Object.defineProperty(x.f.world,'__computaClaudeLastModelTrigger',{configurable:true,get:()=>undefined,set:()=>{throw new Error('PRIVATE_ERROR');}});
+          const result=await x.f.run('inspect',{expectedModelChoice});
+          expect(result.error).toBeUndefined();expect(result.firstUserVerified).toBe(true);expect(result.modelEvidence.selected).toEqual(expectedModelChoice);
+          expect(x.f.send.clicks).toBe(1);expect(x.picker.trigger.clicks).toBe(x.triggerClicks);
+        });
+        test('forged diagnostic state cannot promote missing model evidence or emit a response', async () => {
+          const x=await submitted();
+          x.f.world.__computaClaudeLastModelTrigger={owner:privateOwner,document:x.f.document,url:x.f.document.URL,node:x.picker.trigger};
+          x.picker.trigger.connected=false;
+          const result=await expiredDetachedRead(x);
+          expect(result.error).toBe('model_unverified');expect(result.modelEvidence).toBeUndefined();expect(result.text).toBeUndefined();
+          expect(x.f.send.clicks).toBe(1);expect(x.picker.trigger.clicks).toBe(x.triggerClicks);
+        });
+        test('other providers cannot acquire a Claude diagnostic reference', () => {
+          for (const other of ['chatgpt', 'gemini']) {
+            const x = rawFixture();
+            remember(x.world, x.document, other, x.node, privateOwner, x.document.URL);
+            expect(x.world.__computaClaudeLastModelTrigger).toBeUndefined();
+          }
+        });
+      });
+    }
+
     if (provider === 'claude') test('discovery excludes credits-gated rows without excluding enabled Opus choices', async () => {
       const { f, picker } = setup();
       const fable = picker.add(picker.menu, 'Fable 5.1', 'For your toughest challenges');
@@ -319,6 +591,36 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       expect(opus.clicks).toBe(0);
     });
 
+
+    if (provider === 'claude') test('Claude choices require an owned selectable row and can include entitled Fable', async () => {
+      for (const attributes of [
+        { role: 'menuitem' }, { role: 'menuitemradio' }, { role: 'radio', 'aria-checked': 'mixed' },
+        { role: 'option', 'aria-checked': 'false' }, { role: 'option', 'aria-selected': 'invalid' },
+      ]) {
+        const { f, picker } = setup();
+        const unavailable = picker.add(picker.menu, 'Fable 5.1', '');
+        delete unavailable.values['aria-checked'];
+        Object.assign(unavailable.values, attributes);
+        const action = picker.add(picker.nested, 'Opus 5', '', { role: 'menuitem' });
+        const entitled = picker.add(picker.nested, 'Fable 5', '', { role: 'radio', 'aria-checked': 'false' });
+        const option = picker.add(picker.menu, 'Haiku 5.5', '', { role: 'option', 'aria-selected': 'false' });
+        const found = await advance(f, 'discoverModels');
+        expect(found.error).toBeUndefined();
+        expect(found.modelChoices).not.toContainEqual(choice('Fable 5.1'));
+        expect(found.modelChoices).not.toContainEqual(choice('Opus 5'));
+        expect(found.modelChoices).toContainEqual(choice('Fable 5'));
+        expect(found.modelChoices).toContainEqual(choice('Haiku 5.5'));
+        expect([unavailable, action, entitled, option].every(o => o.clicks === 0)).toBe(true);
+        const selected = await advance(f, 'selectModel', { modelChoice: choice('Fable 5.1') });
+        expect(selected.error).toBe('model_unavailable');
+        expect(unavailable.clicks).toBe(0); expect(f.send.clicks).toBe(0);
+      }
+      const { f, picker } = setup();
+      const genuine = picker.add(picker.nested, 'Fable 5', '', { role: 'menuitemradio', 'aria-checked': 'false' });
+      const result = await advance(f, 'selectModel', { modelChoice: choice('Fable 5') });
+      expect(result.selected).toBe(true); expect(result.modelEvidence.selected).toEqual(choice('Fable 5'));
+      expect(genuine.clicks).toBe(1); expect(f.send.clicks).toBe(0);
+    });
 
     if (provider === 'claude') test('Claude purchase exclusion reads exact visible labels on any element tag', async () => {
       for (const tag of ['P', 'LABEL', 'SMALL', 'STRONG', 'EM', 'CREDITS-LABEL']) {
@@ -399,6 +701,25 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       const result = await advance(f, 'discoverModels');
       expect(result.error).toBeUndefined(); expect(result.modelChoices).not.toContainEqual(choice('Fable 5.1'));
       expect(fable.clicks).toBe(0); expect(f.composer.textContent).toBe(''); expect(f.send.clicks).toBe(0);
+    });
+
+    if (provider === 'claude') test('Claude reads the exact visible purchase label independently of a different accessible name', async () => {
+      for (const variant of ['explicit', 'split', 'accessibleOnly', 'hidden', 'foreign', 'footer', 'creditRequirementOnly', 'entitled']) {
+        const { f, picker } = setup();
+        const row = picker.add(picker.menu, 'Fable 5.1', '');
+        const offer = new Node('BUTTON', { 'aria-label': variant === 'accessibleOnly' ? 'Buy credits' : 'Billing details' },
+          variant === 'split' ? 'Buy ' : variant === 'accessibleOnly' ? 'Details' : 'Buy credits');
+        if (variant === 'split') offer.append(new Node('STRONG', {}, 'credits'));
+        if (variant === 'hidden') offer.values.hidden = '';
+        if (variant !== 'entitled') row.append(new Node('SPAN', {}, 'Requires usage credits'));
+        if (variant === 'footer') picker.menu.append(new Node('P', {}, 'Model access uses usage credits billed separately.'));
+        if (variant === 'foreign') picker.menu.append(offer);
+        else if (!['footer','creditRequirementOnly','entitled'].includes(variant)) row.append(offer);
+        const result = await advance(f, 'discoverModels');
+        expect(result.error).toBeUndefined();
+        expect(result.modelChoices.some((item: any) => item.key === 'Fable 5.1')).toBe(!['explicit','split','accessibleOnly'].includes(variant));
+        expect(row.clicks).toBe(0); expect(offer.clicks).toBe(0); expect(f.send.clicks).toBe(0);
+      }
     });
 
     if (provider === 'claude') test('Claude hidden fragments and truncated descendants cannot manufacture purchase text', async () => {
@@ -1366,6 +1687,46 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           };
           const result = await f.run('inspect', expansionInput); rejected(result);
           expect(JSON.parse(result.debugStructure).productProofFailure).toBe(kind === 'records' ? 'mutation_overflow' : 'mutation_scan_overflow');
+          expect(f.world.__computaModelFirstProof).toBeUndefined(); noSend(f, picker, send);
+        }
+      });
+
+      test('indexed child subtrees keep the last Work control and charge repeated historical edges', async () => {
+        for (const kind of ['work_tail', 'repeated_edges', 'overlapping_labels']) {
+          const { f, picker, expand, send, prompt } = await collapsed();
+          expand.onClick = () => {
+            f.userBody.text = prompt;
+            const branch = new Node('DIV');
+            const siblings = Array.from({ length: 1_400 }, () => new Node('SPAN'));
+            branch.append(...siblings);
+            const row = new Node('DIV');
+            row.append(branch);
+            let records;
+            if (kind === 'work_tail') {
+              const work = new Node('BUTTON', { 'aria-pressed': 'false' }, 'Work');
+              branch.append(work);
+              records = [{ type: 'childList', target: f.modeGroup, addedNodes: [row], removedNodes: [] },
+                { type: 'childList', target: row, addedNodes: [branch], removedNodes: [] },
+                { type: 'attributes', target: work, attributeName: 'aria-pressed', oldValue: 'true' }];
+            } else if (kind === 'repeated_edges') {
+              records = Array.from({ length: 24 }, (_, index) => ({ type: 'childList', target: branch,
+                addedNodes: index % 2 ? siblings : [], removedNodes: index % 2 ? [] : siblings }));
+            } else {
+              // Each range shares the same sparse label list. Reading its
+              // candidates repeatedly still consumes the batch's work budget.
+              const roots = [new Node('DIV')];
+              for (let i = 0; i < 35; i++) {
+                const child = new Node('DIV'); roots[roots.length - 1].append(child); roots.push(child);
+              }
+              roots[roots.length - 1].append(...Array.from({ length: 1_000 },
+                () => new Node('SPAN', { 'aria-label': 'Unrelated label' })));
+              records = roots.map(root => ({ type: 'childList', target: f.userBody, addedNodes: [root], removedNodes: [] }));
+            }
+            productRecords(f, records);
+          };
+          const result = await f.run('inspect', expansionInput); rejected(result);
+          expect(JSON.parse(result.debugStructure).productProofFailure)
+            .toBe(kind === 'work_tail' ? 'work_selected' : 'mutation_scan_overflow');
           expect(f.world.__computaModelFirstProof).toBeUndefined(); noSend(f, picker, send);
         }
       });
@@ -2623,10 +2984,10 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         await microtasks(); f.advanceTime(1_801); f.flush(); await microtasks(); f.flush(); return pending;
       };
       const arrows = (picker: any) => picker.powerItem.events.filter((event: any) => event.type === 'keydown' && event.key.startsWith('Arrow'));
-      const noSelection = (f: any, picker: any) => {
+      const noSelection = (f: any, picker: any, expectedDraft = '') => {
         expect(arrows(picker)).toHaveLength(0);
         expect(picker.familyOptions.every((node: any) => node.clicks === 0)).toBe(true);
-        expect(f.composer.textContent).toBe(''); expect(f.world.__computaModelFirstSubmitted).toBeUndefined();
+        expect(f.composer.textContent).toBe(expectedDraft); expect(f.world.__computaModelFirstSubmitted).toBeUndefined();
       };
       const closed = (picker: any, callback: () => void) => {
         const dismiss = picker.menu.onDispatch; let count = 0;
@@ -3047,9 +3408,186 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         x.f.advanceTime(801); x.f.flush(); await microtasks();
         expect((await x.expire()).error).toBeDefined(); expect(x.openings()).toBe(1); x.noReplay();
       });
-      const firstInsertOpening = async (behavior: 'ignore_once' | 'late' | 'never' = 'ignore_once', editorSuffix = '') => {
-        const { f, picker } = setup(); picker.selected('Instant');
-        const expected = choice('Instant');
+      const firstVerification = async (label = 'Medium') => {
+        const { f, picker } = setup(); picker.selected(label); const expected = choice(label);
+        expect((await f.run('selectModel', { modelChoice: expected })).selected).toBe(true);
+        const open = picker.trigger.onClick; let openings = 0;
+        const root = {f, picker, expected, open, count: () => openings,
+          request: {expectedModelChoice:expected, allowFirstChatVerificationOpening:true}};
+        picker.trigger.onClick = () => { openings++; if (openings === 2) open(); };
+        return root;
+      };
+      const tickVerification = async (f:any, ms:number) => {
+        await microtasks(); f.advanceTime(ms); f.flush(); await microtasks(); f.flush(); await microtasks();
+      };
+      test('fresh post-selection verification recovers one lost opening and proves the complete selected family and power', async () => {
+        const x=await firstVerification(), checking=x.f.run('verifyModel',x.request);
+        await tickVerification(x.f,901); await tickVerification(x.f,901);
+        const result=await checking;
+        expect(result.error).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(x.expected);
+        expect(result.modelEvidence.chatSelection.family.key).toBe('GPT-6');
+        expect(result.modelEvidence.chatSelection.power.key).toBe('medium');
+        expect(x.count()).toBe(2); noSelection(x.f,x.picker);
+        const again=x.f.run('verifyModel',x.request); expect((await expire(x.f,again)).error).toBe('model_unverified');
+        expect(x.count()).toBe(3); noSelection(x.f,x.picker);
+      });
+      test('fresh Pro verification distinguishes an ignored initial opener from an acknowledged close', async () => {
+        for (const transient of [false, true]) {
+          const x = await firstVerification('Pro');
+          const checking = x.f.run('verifyModel', x.request);
+          await microtasks(); expect(x.count()).toBe(1);
+          if (transient) x.f.observers.forEach((observer:any) => observer.callback([
+            {type:'attributes',target:x.picker.trigger,attributeName:'aria-expanded',oldValue:'true'}
+          ]));
+          await tickVerification(x.f,901); await tickVerification(x.f,901);
+          const result=await checking;
+          if (transient) {
+            expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+            expect(result.modelDiagnostic.readStage).toBe('first_verification_acknowledged_closed');
+            expect(result.modelDiagnostic.readContext.recoveryEligible).toBe(true);
+            expect(result.modelDiagnostic.readAttempt.observedProof).toBe(false);
+            expect(result.modelDiagnostic.chatHeader.ordinal).toBe(4); expect(x.count()).toBe(1);
+          } else {
+            expect(result.modelEvidence.selected).toEqual(choice('Pro'));
+            expect(result.modelEvidence.chatSelection.power.key).toBe('pro'); expect(x.count()).toBe(2);
+          }
+          noSelection(x.f,x.picker);
+        }
+      });
+      test('fresh Pro verification waits passively for an acknowledged opener to finish rendering', async () => {
+        for (const variant of ['same_pro', 'closed', 'late', 'wrong_power', 'wrong_family', 'work', 'replaced', 'owner', 'route', 'draft', 'restored', 'busy']) {
+          const x=await firstVerification('Pro'), checking=x.f.run('verifyModel',x.request);
+          await microtasks(); expect(x.count()).toBe(1);
+          // The original header briefly acknowledged opening but the menu is still closed.
+          x.f.observers.forEach((o:any)=>o.callback([{type:'attributes',target:x.picker.trigger,attributeName:'aria-expanded',oldValue:'true'}]));
+          x.f.advanceTime(901); x.f.flush(); await microtasks(); expect(x.count()).toBe(1);
+          if (variant==='late') await tickVerification(x.f,901);
+          if (variant==='draft') x.f.composer.text='unrelated unsent draft';
+          if (variant==='busy') x.f.body.append(new Node('BUTTON',{'data-testid':'stop-button'}));
+          if (variant==='owner') x.f.world.__computaModelOwner='foreign';
+          if (variant==='route') x.f.document.URL='https://chatgpt.com/c/foreign-route';
+          if (variant==='wrong_power') x.picker.selected('High');
+          if (variant==='wrong_family') x.picker.selected('GPT-5.6 Sol');
+          if (variant==='work') { x.f.chatMode.values['aria-pressed']='false'; x.f.workMode.values['aria-pressed']='true'; }
+          if (variant==='replaced') x.f.composer.connected=false;
+          if (variant==='restored') x.f.observers.forEach((o:any)=>o.callback([{type:'characterData',target:x.f.composer}]));
+          if (variant!=='closed') {
+            // The website finishes mounting the original popup; the harness never toggles the trigger.
+            x.open();
+            x.f.observers.forEach((o:any)=>o.callback([{type:'childList',target:x.f.body,addedNodes:[x.picker.menu],removedNodes:[]}]));
+          }
+          await tickVerification(x.f,variant==='same_pro'?20:901);
+          const result=await checking;
+          if (variant==='same_pro') {
+            expect(result.error).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(x.expected);
+            expect(result.modelEvidence.chatSelection.family.key).toBe('GPT-6');
+            expect(result.modelEvidence.chatSelection.power.key).toBe('pro');
+          } else { expect(result.error,variant).toBeDefined(); expect(result.modelEvidence,variant).toBeUndefined(); }
+          expect(x.count(),variant).toBe(1); noSelection(x.f,x.picker,variant==='draft'?'unrelated unsent draft':'');
+        }
+      });
+      test('fresh verification remembers same-editor detach or transient draft before and after the acknowledged close', async () => {
+        for (const phase of ['before', 'after']) for (const kind of ['reinsert', 'draft']) {
+          const x = await firstVerification('Pro');
+          // Dispatch only to observers registered for the actual mutation target.
+          const registrations = new Map<any, any[]>();
+          const prototype = Object.getPrototypeOf(x.f.observers[0]), observe = prototype.observe;
+          prototype.observe = function (target:any, options:any) {
+            registrations.set(this, [...(registrations.get(this) || []), {target, options}]);
+            return observe.call(this, target, options);
+          };
+          const checking = x.f.run('verifyModel', x.request); await microtasks();
+          const editor = x.f.composer, parent = editor.parentElement;
+          const target = kind==='reinsert' ? parent : editor;
+          const records = kind==='reinsert' ? [
+            {type:'childList',target,removedNodes:[editor],addedNodes:[]},
+            {type:'childList',target,removedNodes:[],addedNodes:[editor]},
+          ] : [{type:'characterData',target}];
+          const change = () => {
+            for (const [observer, scopes] of registrations) {
+              if (scopes.some(({target: root,options}) => options[records[0].type] &&
+                  (root===target || options.subtree && (root===x.f.document || root.contains?.(target))))) observer.callback(records);
+            }
+          };
+          if (phase==='before') change();
+          x.f.observers.forEach((o:any)=>o.callback([{type:'attributes',target:x.picker.trigger,attributeName:'aria-expanded',oldValue:'true'}]));
+          x.f.advanceTime(901); x.f.flush(); await microtasks();
+          if (phase==='after') change();
+          x.open();
+          x.f.observers.forEach((o:any)=>o.callback([{type:'childList',target:x.f.body,addedNodes:[x.picker.menu],removedNodes:[]}]));
+          await tickVerification(x.f,30); const result=await checking;
+          expect(result.error,phase+' '+kind).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+          expect(x.count()).toBe(1); noSelection(x.f,x.picker);
+        }
+      });
+      test('fresh post-selection verification recognizes only the empty WebKit ProseMirror caret sentinel', async () => {
+        for (const shape of ['sentinel', 'space', 'extra_line', 'image', 'hidden_draft', 'unmarked_br']) {
+          const x = await firstVerification();
+          const editor = x.f.composer;
+          editor.values.class = 'ProseMirror';
+          const paragraph = new Node('P');
+          const br = new Node('BR', shape === 'unmarked_br' ? {} : { class: 'ProseMirror-trailingBreak' });
+          paragraph.append(br); editor.append(paragraph);
+          if (shape === 'space') paragraph.text = ' ';
+          if (shape === 'extra_line') editor.append(new Node('P'));
+          if (shape === 'image') paragraph.append(new Node('IMG'));
+          if (shape === 'hidden_draft') editor.append(new Node('SPAN', { hidden: '' }, 'unsent draft'));
+          Object.defineProperty(editor, 'innerText', { get: () => shape === 'hidden_draft' ? '' : '\n' });
+          const checking = x.f.run('verifyModel', x.request);
+          await tickVerification(x.f, 901); await tickVerification(x.f, 901);
+          const result = await checking;
+          if (shape === 'sentinel') {
+            expect(result.error).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(x.expected);
+            expect(x.count()).toBe(2);
+          } else {
+            expect(result.error, shape).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+            expect(x.count(), shape).toBe(1);
+          }
+        }
+      });
+      test('fresh post-selection verification accepts a late first open without a second click', async () => {
+        const x=await firstVerification(), checking=x.f.run('verifyModel',x.request);
+        await microtasks(); expect(x.count()).toBe(1); x.f.advanceTime(850); x.open();
+        x.f.observers.forEach((o:any)=>o.callback([{type:'childList',target:x.f.body,addedNodes:[x.picker.menu],removedNodes:[]}]));
+        await microtasks(); await tickVerification(x.f,51);
+        const result=await checking; expect(result.error).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(x.expected);
+        expect(x.count()).toBe(1); noSelection(x.f,x.picker);
+      });
+      test('fresh post-selection verification rejects the wrong checked family after a valid second opening', async () => {
+        const x=await firstVerification(); let openings=0;
+        x.picker.trigger.onClick=()=>{ if(++openings===2) { x.picker.selected('GPT-5.6 Sol'); x.open(); } };
+        const checking=x.f.run('verifyModel',x.request); await tickVerification(x.f,901); await tickVerification(x.f,901);
+        const result=await checking;
+        expect(result.error).toBe('model_mismatch'); expect(result.modelEvidence).toBeUndefined();
+        expect(openings).toBe(2); noSelection(x.f,x.picker);
+      });
+      test('fresh post-selection verification stops at two unanswered openings within the original deadline', async () => {
+        const x=await firstVerification(); let openings=0; x.picker.trigger.onClick=()=>{openings++};
+        const checking=x.f.run('verifyModel',x.request); await tickVerification(x.f,901);
+        expect(openings).toBe(2); await tickVerification(x.f,901);
+        const result=await checking; expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+        expect(openings).toBe(2); noSelection(x.f,x.picker);
+      });
+      test('fresh post-selection verification never reopens after acknowledgment, pin, owner, draft, or submission drift', async () => {
+        for(const variant of ['opened_closed','owner','pin','wrong_model','draft','post_submit','no_native_grant']) {
+          const x=await firstVerification();
+          if(variant==='no_native_grant') x.request.allowFirstChatVerificationOpening=false;
+          if(variant==='post_submit') x.f.world.__computaModelFirstSubmitted=true;
+          const checking=x.f.run('verifyModel',x.request); await microtasks();
+          if(variant==='opened_closed') x.f.observers.forEach((o:any)=>o.callback([{type:'attributes',target:x.picker.trigger,attributeName:'aria-expanded',oldValue:'true'}]));
+          if(variant==='owner') x.f.world.__computaModelOwner='foreign-owner-token';
+          if(variant==='pin') x.picker.trigger.connected=false;
+          if(variant==='wrong_model') x.picker.selected('High');
+          if(variant==='draft') x.f.composer.text='different draft';
+          await tickVerification(x.f,901); await tickVerification(x.f,901);
+          const result=await checking; expect(result.error,variant).toBeDefined(); expect(result.modelEvidence).toBeUndefined();
+          expect(x.count(),variant).toBeLessThanOrEqual(1);
+          expect(arrows(x.picker)).toHaveLength(0); expect(x.picker.familyOptions.every((node:any)=>node.clicks===0)).toBe(true);
+        }
+      });
+      const firstInsertOpening = async (behavior: 'ignore_once' | 'late' | 'never' = 'ignore_once', editorSuffix = '', label = 'Instant') => {
+        const { f, picker } = setup(); picker.selected(label);
+        const expected = choice(label);
         expect((await f.run('selectModel', { modelChoice: expected })).selected).toBe(true);
         expect((await f.run('prepare', { expectedModelChoice: expected })).prepared).toBe(true);
         const prompt = 'Synthetic literal first insert opening request\n\n' + markerLine;
@@ -3091,6 +3629,153 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect(x.picker.familyOptions.map((node: any) => node.clicks)).toEqual(x.familyBefore);
         expect(x.f.world.__computaModelFirstSubmitted).toBeUndefined();
       };
+      const preparedVerification = async () => {
+        const x=await firstInsertOpening();
+        await finishFirstInsertWait(x);
+        expect((await x.inserting).inserted).toBe(true);
+        expect(x.pending.firstInsertOpening.proved).toBe(true);
+        let calls=0;
+        x.picker.trigger.onClick=()=>{calls++; if(calls===2)x.open();};
+        const grant={sequence:1,marker:firstMarker,fingerprint:x.pending.fingerprint};
+        const verify=(overrides={})=>x.f.run('verifyModel',{expectedModelChoice:x.expected,expectedSubmissionProofs:[],
+          preparedInstantVerificationOpening:grant,...overrides});
+        return {...x,grant,verify,calls:()=>calls};
+      };
+      const preparedSubmit = async (label = 'Medium', skipReady = false) => {
+        const x = await firstInsertOpening('ignore_once', '', label);
+        await finishFirstInsertWait(x);
+        expect((await x.inserting).inserted).toBe(true);
+        x.picker.trigger.onClick = x.open;
+        if (!skipReady) expect((await x.f.run('sendReady', x.request)).sendReady).toBe(true);
+        let openings = 0;
+        x.picker.trigger.onClick = () => { if (++openings > 1) x.open(); };
+        return { ...x, request:{...x.request,expectedSubmissionProofs:[{sequence:1,fingerprint:x.pending.fingerprint}]}, openings: () => openings };
+      };
+      test('a layout LF never substitutes for the full literal submit draft', () => {
+        const source = readFileSync(new URL('../Sources/Computa/Resources/BrowserModels/chatgpt.js', import.meta.url), 'utf8');
+        const definition = source.slice(source.indexOf('function chatGPTExactSubmitDraft('), source.indexOf('function chatGPTSubmissionPins('));
+        const compare = new Function(definition + '\nreturn chatGPTExactSubmitDraft;')();
+        const text = (data: string) => ({nodeType:3, data});
+        const element = (tagName: string, childNodes: any[], attributes: string[] = []) =>
+          ({nodeType:1, tagName, childNodes, firstChild:childNodes[0], attributes, getAttributeNames:()=>attributes});
+        const br = element('BR', []);
+        const second = text('  two 🐢 ');
+        const span = element('SPAN', [second], ['data-line']);
+        const first = text(' one');
+        const prompt = first.data + '\n' + second.data;
+        const editor = (nodes: any[], cls = 'ProseMirror') => {
+          const p = element('P', nodes);
+          return {isConnected:true, getAttribute:()=> 'true', classList:{contains:(name:string)=>name===cls},
+            childNodes:[p], firstChild:p};
+        };
+        expect(compare(editor([first,br,second]), prompt+'\n', prompt)).toBe(true);
+        expect(compare(editor([first,br,span]), prompt+'\n', prompt)).toBe(true);
+        for (const nodes of [[first,br,span,br], [first,br,span,text('\n')], [first,br,text(second.data.trim())],
+          [first,br,element('BUTTON',[second])], [first,br,element('SPAN',[second],['hidden'])],
+          [first,br,element('SPAN',[span])], [first,br,element('BR',[],['class']),span],
+          Array(4097).fill(text(''))]) {
+          expect(compare(editor(nodes), prompt+'\n', prompt)).toBe(false);
+        }
+        expect(compare(editor([first,br,span], 'other'), prompt+'\n', prompt)).toBe(false);
+        expect(compare(editor([first,br,span]), prompt+'\n\n', prompt)).toBe(false);
+      });
+      test('fresh submit precheck recovers one unacknowledged opening for each exact Chat power before a single Send', async () => {
+        for (const label of ['Instant','Medium','High','Extra High','Pro']) {
+          const x = await preparedSubmit(label);
+          const request = x.f.run('submit', x.request);
+          await microtasks(); expect(x.openings(),label).toBe(1); expect(x.send.clicks).toBe(0);
+          await finishFirstInsertWait(x); await finishFirstInsertWait(x,100);
+          const result=await request; expect(result.submitted,label).toBe(true);
+          expect(x.send.clicks).toBe(1); expect(x.counts().insertions).toBe(1);
+          expect(x.picker.familyOptions.map((node:any) => node.clicks)).toEqual(x.familyBefore);
+          expect(arrows(x.picker)).toHaveLength(x.powerBefore);
+        }
+      });
+      test('fresh submit precheck cannot reopen after ambiguity, changed draft, selected power or prior dispatch', async () => {
+        for (const change of ['unready','native_hash','attempted','claimed','picked','foreign_owner','replaced_header','draft','transient_menu','transient_trigger','transient_draft','marker','prior','revoked','route','deadline','wrong_fresh_choice','never_opens']) {
+          const x = await preparedSubmit('Medium', change === 'unready');
+          if (change==='native_hash') x.request.expectedSubmissionProofs[0].fingerprint='0'.repeat(64);
+          const request = x.f.run('submit', x.request); await microtasks();
+          expect(x.openings(),change).toBe(1);
+          let second=0;
+          if (change==='wrong_fresh_choice' || change==='never_opens') x.picker.trigger.onClick=()=>{
+            second++; if (change==='wrong_fresh_choice') { x.picker.selected('High'); x.open(); }
+          };
+          if (change==='attempted') x.f.world.__computaModelFirstSubmitted=true;
+          if (change==='claimed') x.pending.phase='sent';
+          if (change==='picked') x.f.world.__computaChatPresetPin.invalidated=true;
+          if (change==='marker') x.pending.marker='foreign-marker';
+          if (change==='prior') x.pending.firstInsertOpening={...x.pending.firstInsertOpening};
+          if (change==='revoked') x.state.revoked=true;
+          if (change==='route') x.f.document.URL+='&foreign=1';
+          if (change==='transient_trigger') x.f.observers.forEach((o:any)=>o.callback([{type:'attributes',target:x.picker.trigger,attributeName:'aria-expanded',oldValue:'true'}]));
+          if (change==='foreign_owner') x.f.world.__computaModelOwner='not-the-owner';
+          if (change==='replaced_header') x.picker.trigger.connected=false;
+          if (change==='draft') x.f.composer.text+=' ';
+          if (change==='transient_menu' || change==='transient_draft') {
+            const records=change==='transient_menu' ? [{type:'childList',target:x.f.body,addedNodes:[],removedNodes:[new Node('DIV',{role:'menu'})]}]
+              : [{type:'characterData',target:x.f.composer}];
+            x.f.observers.forEach((o:any)=>o.callback(records));
+          }
+          await finishFirstInsertWait(x, change==='deadline' ? 1801 : 901); await finishFirstInsertWait(x,1100);
+          const result=await request;expect(result.error,change).toBeDefined();expect(x.send.clicks,change).toBe(0);
+          expect(x.openings(),change).toBe(1);expect(second,change).toBe(['wrong_fresh_choice','never_opens'].includes(change)?1:0);
+          expect(x.counts().insertions).toBe(1);
+        }
+      });
+      test('fresh submit precheck spends the only recovery and preserves a late first acknowledgement', async () => {
+        const late = await preparedSubmit();
+        const answer = late.f.run('submit',late.request); await microtasks();
+        late.f.advanceTime(700); late.open(); late.f.flush(); await microtasks(); late.f.flush();
+        expect((await answer).submitted).toBe(true); expect(late.send.clicks).toBe(1); expect(late.pending.firstSubmitOpening.recoveryClaimed).toBe(false);
+        const blocked = await preparedSubmit(); let clicks=0; blocked.picker.trigger.onClick=()=>{clicks++;};
+        const first=blocked.f.run('submit',blocked.request); await microtasks();
+        await finishFirstInsertWait(blocked); await finishFirstInsertWait(blocked,1000);
+        expect((await first).error).toBeDefined(); expect(clicks).toBe(2); expect(blocked.send.clicks).toBe(0);
+        const next=blocked.f.run('submit',blocked.request); await microtasks();
+        await finishFirstInsertWait(blocked); await finishFirstInsertWait(blocked,1000);
+        expect((await next).error).toBeDefined(); expect(clicks).toBe(3); expect(blocked.send.clicks).toBe(0);
+      });
+      test('post-insert Instant verification reopens an unacknowledged header once and reads a fresh selection',async()=>{
+        const x=await preparedVerification();
+        const request=x.verify(); await microtasks();
+        expect(x.calls()).toBe(1); await finishFirstInsertWait(x);
+        const result=await request;
+        expect(result.error).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(x.expected);
+        expect(x.calls()).toBe(2); noFirstInsertReplay(x);
+        const repeat=x.verify(); await microtasks(); await finishFirstInsertWait(x,1801);
+        expect((await repeat).error).toBeDefined(); expect(x.calls()).toBe(3); noFirstInsertReplay(x);
+      });
+      test('post-insert Instant verification refuses changed draft, missing grant, transient open-close and expired budget',async()=>{
+        for(const change of ['raw_draft','pending','sent','hash','marker','no_grant','record','picker','late','transient','removed_menu','restored_text','fresh_selection','no_prior','sequence']) {
+          const x=await preparedVerification();
+          const grant={...x.grant}; if(change==='hash')grant.fingerprint='0'.repeat(64); if(change==='marker')grant.marker='bad'; if(change==='sequence')grant.sequence=2;
+          if(change==='no_prior')x.pending.firstInsertOpening=null;
+          let changedSelectionOpenings=0;
+          const read=x.verify({preparedInstantVerificationOpening:change==='no_grant'?null:grant});
+          await microtasks(); expect(x.calls()).toBe(1);
+          if(change==='raw_draft')x.f.composer.text+='\n';
+          if(change==='pending')x.state.pending={...x.pending};
+          if(change==='sent')x.pending.phase='send_claimed';
+          if(change==='record')x.pending.firstInsertOpening={...x.pending.firstInsertOpening};
+          if(change==='picker')x.f.world.__computaChatPresetPin.invalidated=true;
+          if(change==='removed_menu'||change==='restored_text'){
+            const records=change==='removed_menu' ? [{type:'childList',target:x.f.body,addedNodes:[],removedNodes:[new Node('DIV',{role:'menu'})]}]
+              : [{type:'characterData',target:x.f.composer}];
+            x.f.observers.forEach((o:any)=>o.callback(records));
+          }
+          if(change==='fresh_selection') {
+            x.picker.trigger.onClick=()=>{changedSelectionOpenings++; x.picker.selected('High'); x.open();};
+          }
+          if(change==='transient'){
+            const records=[{type:'attributes',target:x.picker.trigger,attributeName:'aria-expanded',oldValue:'true'}];
+            x.f.observers.forEach((o:any)=>o.callback(records));
+          }
+          await finishFirstInsertWait(x,change==='late'?1801:901);
+          await finishFirstInsertWait(x,901);
+          const result=await read; expect(result.error,change).toBeDefined(); expect(x.calls(),change).toBe(1); expect(changedSelectionOpenings).toBe(change==='fresh_selection'?1:0); noFirstInsertReplay(x);
+        }
+      });
       test('first insert final guard recovers one ignored opening after exactly one literal insertion', async () => {
         const x = await firstInsertOpening();
         await finishFirstInsertWait(x);
@@ -4762,6 +5447,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       const serialized = JSON.stringify(result.modelDiagnostic);
       expect(serialized).not.toContain('PRIVATE'); expect(serialized).not.toContain('Computa session marker');
       expect(serialized.length).toBeLessThanOrEqual(8192);
+      if (provider !== 'claude') expect(result.modelDiagnostic.lastModelTrigger).toBeUndefined();
     });
   });
 }

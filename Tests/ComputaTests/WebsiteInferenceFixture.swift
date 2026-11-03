@@ -8,12 +8,35 @@ import XCTest
 let websiteInferenceFixtureGeneration = UUID(uuidString: "10913cbc-442d-4d04-b1a5-b372df40c52c")!
 let syntheticChatGPTChoice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/medium", label: "Medium")
 let syntheticChatGPTModelID = syntheticChatGPTChoice.modelID
+// Named-model protocol matrices keep typed website behavior modes separate.
+// DeepSeek is covered by explicit mode-evidence and real server/receipt fixtures.
+let namedWebsiteModelProviders = WebsiteModelCatalog.providers.filter { $0 != "deepseek" }
+let syntheticQwenChoice = WebsiteModelChoice(provider: "qwen", key: "Qwen3.7-Plus", label: "Qwen3.7-Plus")
+// Kimi's current plain-chat pilot admits one observed choice. Fixtures must not
+// invent a second choice or use its intentionally unsupported website default.
+let syntheticKimiChoice = WebsiteModelChoice(provider: "kimi", key: "k28-instant", label: "Instant")
 
 func syntheticWebsiteModelID(_ provider: String) -> String {
-    provider == "chatgpt" ? syntheticChatGPTModelID : "browser/" + provider
+    if provider == "kimi" { return syntheticKimiChoice.modelID }
+    if provider == "qwen" { return syntheticQwenChoice.modelID }
+    if provider == "deepseek" { return WebsiteModeChoice(deepSeekMode: .chat).requestID }
+    if provider == "groq" {
+        return WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
+    }
+    return provider == "chatgpt" ? syntheticChatGPTModelID : "browser/" + provider
 }
 
 func syntheticWebsiteChoice(provider: String, key: String, label: String) -> WebsiteModelChoice {
+    if provider == "kimi" { return syntheticKimiChoice }
+    if provider == "qwen" {
+        let name = key.contains("new") ? "Qwen3.8-Max" : "Qwen3.7-Plus"
+        return WebsiteModelChoice(provider: provider, key: name, label: name)
+    }
+    if provider == "groq" {
+        return WebsiteModelChoice(provider: provider,
+            key: key.contains("new") ? "openai/gpt-oss-20b" : "openai/gpt-oss-120b",
+            label: key.contains("new") ? "GPT OSS 20B" : "GPT OSS 120B")
+    }
     guard provider == "chatgpt" else { return WebsiteModelChoice(provider: provider, key: key, label: label) }
     let power: WebsiteModelChoice.ChatGPTPower = key.contains("old") ? .instant : key.contains("new") ? .high : .medium
     return WebsiteModelChoice(provider: provider, key: power.modelKey, label: power.label)
@@ -39,6 +62,7 @@ func makeWebsiteInferenceFixtureServer(testCase: XCTestCase, rejectedReplyDirect
     let root = storageDirectory ?? FileManager.default.temporaryDirectory.appendingPathComponent("computa-website-inference-fixture-" + UUID().uuidString)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     let server = WebModelServer(rejectedReplyDirectory: rejectedReplyDirectory)
+    await server.setGroqSubmissionIntervalForTesting(.zero)
     await server.configureEvidenceDirectory(root.appendingPathComponent("evidence"))
     await server.configureCleanupReceipts(directory: root.appendingPathComponent("cleanup"),
         runtimeGeneration: websiteInferenceFixtureGeneration) { _ in }
@@ -114,6 +138,7 @@ actor WebsiteInferenceFixtureTransport: WebModelTransport {
     private let defaultGeminiChoice: WebsiteModelChoice?
     private let defaultClaudeChoice: WebsiteModelChoice?
     private var hasExplicitChoice: [String: Bool] = [:]
+    private var retainedHaiku = Set<String>()
     init(_ base: any WebModelTransport, defaultChatChoice: WebsiteModelChoice? = nil,
          defaultGeminiChoice: WebsiteModelChoice? = WebsiteModelChoice(provider: "gemini", key: "fixture-default-flash", label: "Fixture Default Flash"),
          defaultClaudeChoice: WebsiteModelChoice? = nil) {
@@ -129,7 +154,14 @@ actor WebsiteInferenceFixtureTransport: WebModelTransport {
     func waitForChange(sessionToken: String, after revision: UInt64, until deadline: ContinuousClock.Instant) async throws -> UInt64? {
         try await base.waitForChange(sessionToken: sessionToken, after: revision, until: deadline)
     }
+    func start(params: Data, admission: WebModelStartAdmission, authorization: ChatGPTRequestMetadataLease?) async throws -> Data {
+        authorization?.revoke()
+        return try await project("webProviderStart", params, retainHaiku: admission.retainClaudeTurn)
+    }
     func request(operation: String, params: Data) async throws -> Data {
+        try await project(operation, params, retainHaiku: false)
+    }
+    private func project(_ operation: String, _ params: Data, retainHaiku: Bool) async throws -> Data {
         let bytes = try await base.request(operation: operation, params: params)
         guard var snapshot = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
               let input = try JSONSerialization.jsonObject(with: params) as? [String: String] else { return bytes }
@@ -137,6 +169,9 @@ actor WebsiteInferenceFixtureTransport: WebModelTransport {
             generations[token] = UUID().uuidString.lowercased()
             providers[token] = input["provider"]
             hasExplicitChoice[token] = input["modelChoice"] != nil
+            if retainHaiku, input["modelChoice"].flatMap(WebsiteModelChoice.parse)?.supportsClaudeTurnPilot == true {
+                retainedHaiku.insert(token)
+            }
             sequences[token] = 0
             baselines[token] = 0
             completedCounts[token] = 0
@@ -154,10 +189,10 @@ actor WebsiteInferenceFixtureTransport: WebModelTransport {
         }
         // This synthetic transport explicitly attests only its own serialized
         // Send bytes. Real WebKit must independently verify the rendered body.
-        if let token, ["gemini", "chatgpt"].contains(providers[token] ?? ""), snapshot["turnContinuationCapability"] == nil {
+        if let token, retainedHaiku.contains(token) || ["gemini", "chatgpt"].contains(providers[token] ?? ""), snapshot["turnContinuationCapability"] == nil {
             snapshot["turnContinuationCapability"] = "per_submission_ownership_v1"
         }
-        if let token, providers[token] == "claude", hasExplicitChoice[token] == true,
+        if let token, providers[token] == "claude", !retainedHaiku.contains(token), hasExplicitChoice[token] == true,
            snapshot["freshSessionSubmissionCapability"] == nil {
             snapshot["freshSessionSubmissionCapability"] = "fresh_session_submission_v1"
         }
@@ -190,7 +225,7 @@ actor WebsiteInferenceFixtureTransport: WebModelTransport {
                     "sequence": sequences[token, default: 1], "baselineResponseCount": baselines[token, default: 0],
                     "responseCount": snapshot["state"] as? String == "complete" ? completedCounts[token, default: 1] : baselines[token, default: 0],
                     "firstUserFingerprint": fingerprint]
-                if providers[token] == "gemini" || providers[token] == "chatgpt" {
+                if retainedHaiku.contains(token) || providers[token] == "gemini" || providers[token] == "chatgpt" {
                     var context = snapshot["modelProofContext"] as! [String: Any]
                     context["submittedPromptFingerprint"] = submittedFingerprints[token, default: ""]
                     snapshot["modelProofContext"] = context
@@ -198,7 +233,7 @@ actor WebsiteInferenceFixtureTransport: WebModelTransport {
             }
         }
         if snapshot["state"] as? String == "complete", let token,
-           providers[token] == "claude", hasExplicitChoice[token] == true,
+           providers[token] == "claude", !retainedHaiku.contains(token), hasExplicitChoice[token] == true,
            snapshot["freshSessionSubmissionProof"] == nil,
            let context = snapshot["modelProofContext"] as? [String: Any],
            let document = context["documentGeneration"], let sequence = context["sequence"],
@@ -219,6 +254,7 @@ actor WebsiteInferenceFixtureTransport: WebModelTransport {
             baselines.removeValue(forKey: token)
             completedCounts.removeValue(forKey: token)
             submittedFingerprints.removeValue(forKey: token)
+            retainedHaiku.remove(token)
         }
         return try JSONSerialization.data(withJSONObject: snapshot)
     }

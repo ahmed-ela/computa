@@ -22,7 +22,8 @@ enum ComputaLaunchMode: Equatable {
     @MainActor
     func makeState(
         runtimeFactory: () -> any AgentRuntimeClient = { CodexAppServerRuntime(configuration: .localQwen) },
-        preferencesFactory: () -> UserDefaults = { .standard }
+        preferencesFactory: () -> UserDefaults = { .standard },
+        unreadCompletionStoreFactory: () -> ChatUnreadCompletionStore? = { .applicationDefault }
     ) -> AppState {
         switch self {
         case .application:
@@ -31,6 +32,7 @@ enum ComputaLaunchMode: Equatable {
             // the privileged app UI remains in its separate WebView.
             let browser = EmbeddedBrowserSession(defaults: preferences)
             return AppState(tasks: [], runtime: runtimeFactory(), preferences: preferences,
+                            unreadCompletionStore: unreadCompletionStoreFactory(),
                             browserSession: browser)
         case .testHost:
             // A unique suite prevents even incidental test-host state changes

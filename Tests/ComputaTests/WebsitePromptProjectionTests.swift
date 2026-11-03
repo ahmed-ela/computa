@@ -3,6 +3,38 @@ import XCTest
 @testable import Computa
 
 final class WebsitePromptProjectionTests: XCTestCase {
+    func testAPIOnlyOmissionRemovesExactlyTheDeclaredTopLevelFieldsAtEveryPosition() throws {
+        let omitted = ["include", "reasoning", "client_metadata", "prompt_cache_key", "metadata", "safety_identifier",
+            "stream", "stream_options", "store", "background", "service_tier"]
+        for key in omitted {
+            let member = "\"\(key)\":{\"private_transport_value\":true}"
+            for source in ["{\(member),\"input\":\"task\",\"tools\":[]}",
+                           "{\"input\":\"task\",\(member),\"tools\":[]}",
+                           "{\"input\":\"task\",\"tools\":[],\(member)}"] {
+                XCTAssertEqual(WebsitePromptProjection.omittingAPIOnlyTopLevelFields(source), #"{"input":"task","tools":[]}"#, key)
+            }
+        }
+        let members = omitted.map { "\"\($0)\":null" }.joined(separator: ",")
+        XCTAssertEqual(WebsitePromptProjection.omittingAPIOnlyTopLevelFields("{" + members + "}"), "{}")
+        XCTAssertEqual(WebsitePromptProjection.omittingAPIOnlyTopLevelFields("{\"input\":\"task\"," + members + "}"), #"{"input":"task"}"#)
+    }
+
+    func testAPIOnlyOmissionPreservesNestedNamesAndEveryRetainedLexeme() throws {
+        let source = #"{"reasoning":{"summary":"auto"},"input":[{"role":"user","content":"reasoning.encrypted_content, \"reasoning\": { }, \\u005f café 🌍"},{"type":"function_call_output","output":"private_CANARY include client_metadata"}],"\u0072easoning":null,"tools":[{"parameters":{"properties":{"reasoning":{"type":"string"},"include":{"enum":["reasoning.encrypted_content"]}}},"number":9007199254740993,"fraction":1.2300e-4}],"foreign":-0.00e+12,"foreign":true,"metadata":{"removed":true}}"#
+        let expected = #"{"input":[{"role":"user","content":"reasoning.encrypted_content, \"reasoning\": { }, \\u005f café 🌍"},{"type":"function_call_output","output":"private_CANARY include client_metadata"}],"tools":[{"parameters":{"properties":{"reasoning":{"type":"string"},"include":{"enum":["reasoning.encrypted_content"]}}},"number":9007199254740993,"fraction":1.2300e-4}],"foreign":-0.00e+12,"foreign":true}"#
+        let projected = WebsitePromptProjection.omittingAPIOnlyTopLevelFields(source)
+        XCTAssertEqual(Data(projected.utf8), Data(expected.utf8))
+        XCTAssertNoThrow(try JSONSerialization.jsonObject(with: Data(projected.utf8)))
+    }
+
+    func testAPIOnlyOmissionIsByteIdenticalWhenAbsentAndLeavesOtherControlsUntouched() {
+        for source in [" {} \n", #" { "input" : "\u0061", "temperature":1.0,"max_output_tokens":1024,"max_tool_calls":2,"text":{"verbosity":"low"},"unknown":{"metadata":true} } "#] {
+            XCTAssertEqual(Data(WebsitePromptProjection.omittingAPIOnlyTopLevelFields(source).utf8), Data(source.utf8))
+        }
+        let source = "\u{FEFF} { \"metadata\":null, \"input\" : \"task\" } \n"
+        XCTAssertEqual(WebsitePromptProjection.omittingAPIOnlyTopLevelFields(source), "\u{FEFF} { \"input\" : \"task\" } \n")
+    }
+
     func testCompactionPreservesLexemesEscapesDuplicateKeysAndLiteralWhitespace() throws {
         let source = #"""
           {

@@ -1,0 +1,577 @@
+{
+  "reference": "tiktoken 0.12.0 o200k_harmony.encode_ordinary",
+  "cases": [
+    {
+      "name": "empty",
+      "text": "",
+      "tokens": 0,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "greeting",
+      "text": "Hello, world!",
+      "tokens": 4,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "contractions",
+      "text": "I'm you're he'll she'd we've THEY'RE can't WHO'S it's I'LL",
+      "tokens": 14,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "long-s",
+      "text": "it's it'\u017f IT'\u017f it'\u017fomething",
+      "tokens": 11,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "digits",
+      "text": "0123456789 12345678901 \uff10\uff11\uff12\u0663\u0664\u0665 \u00b2\u2167",
+      "tokens": 19,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "whitespace",
+      "text": " \t\r\n\r   \n\u0085\u00a0\u2028\u2029\u2003  ",
+      "tokens": 12,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "controls",
+      "text": "a\u0000b\u0001\u001b\u007f\r\nc",
+      "tokens": 8,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "special-text",
+      "text": "<|start|>assistant<|channel|>analysis<|message|><|endoftext|><|return|><|im_end|>",
+      "tokens": 32,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "fences",
+      "text": "```json\n{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"exec_command\",\"arguments\":{\"cmd\":\"pwd\"}}]}\n```",
+      "tokens": 25,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "arabic",
+      "text": "\u0645\u0631\u062d\u0628\u064b\u0627 \u0628\u0627\u0644\u0639\u0627\u0644\u0645\u060c \u0643\u064a\u0641 \u062d\u0627\u0644\u0643 \u0627\u0644\u064a\u0648\u0645\u061f",
+      "tokens": 11,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "cjk",
+      "text": "\u4f60\u597d\u4e16\u754c\u3002\u65e5\u672c\u8a9e\u306e\u30c6\u30b9\u30c8\u3001\ud55c\uae00 \ud14c\uc2a4\ud2b8\uc785\ub2c8\ub2e4.",
+      "tokens": 14,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "indic",
+      "text": "\u0928\u092e\u0938\u094d\u0924\u0947 \u0926\u0941\u0928\u093f\u092f\u093e \u0c95\u0ca8\u0ccd\u0ca8\u0ca1 \u0ba4\u0bae\u0bbf\u0bb4\u0bcd \u0c24\u0c46\u0c32\u0c41\u0c17\u0c41 \u09ac\u09be\u0982\u09b2\u09be",
+      "tokens": 9,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "accents",
+      "text": "caf\u00e9 cafe\u0301 na\u00efve \u00c5 A\u030a",
+      "tokens": 9,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "emoji",
+      "text": "\ud83d\udc69\ud83c\udffd\u200d\ud83d\udcbb\ud83e\uddd1\u200d\ud83d\ude80\ud83c\udff3\ufe0f\u200d\ud83c\udf08 \ud83c\uddfa\ud83c\uddf3\ud83d\ude42\ud83d\ude43",
+      "tokens": 26,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "non-bmp",
+      "text": "\ud801\udc00\ud801\udc28\ud800\udf48\ud80c\udc00 \ud835\udc9c\ud835\udccf \ud835\udfd9\ud835\udfda\ud835\udfdb",
+      "tokens": 33,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "direction",
+      "text": "abc\u202eDEF\u202c \u200e\u0627\u0644\u0639\u0631\u0628\u064a\u0629\u200f",
+      "tokens": 8,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "punctuation",
+      "text": "///\\\\//!!!??...---___+++===\r\n/",
+      "tokens": 12,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "word-end",
+      "text": "HELLOgoodbye English\n  trailing   ",
+      "tokens": 9,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "unicode-other",
+      "text": "\u0378\udbff\udfff\ufdd0\ufeff\ufffd",
+      "tokens": 11,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "tulu",
+      "text": "A\ud804\udf80\ud804\udf81z 123 \ud804\udf80's",
+      "tokens": 18,
+      "allowsUnicodeCategoryMismatch": true
+    },
+    {
+      "name": "gurung",
+      "text": "A\ud818\udd00\ud818\udd01z 123 \ud818\udd00's",
+      "tokens": 18,
+      "allowsUnicodeCategoryMismatch": true
+    },
+    {
+      "name": "ol-onal",
+      "text": "A\ud839\uddd0\ud839\uddd1z 123 \ud839\uddd0's",
+      "tokens": 18,
+      "allowsUnicodeCategoryMismatch": true
+    },
+    {
+      "name": "beria",
+      "text": "A\ud81b\udea0\ud81b\udea1z 123 \ud81b\udea0's",
+      "tokens": 19,
+      "allowsUnicodeCategoryMismatch": true
+    },
+    {
+      "name": "cyrillic-new",
+      "text": "A\u1c89\u1c8az 123 \u1c89's",
+      "tokens": 15,
+      "allowsUnicodeCategoryMismatch": true
+    },
+    {
+      "name": "tod-hri",
+      "text": "A\ud801\uddc0\ud801\uddc1z 123 \ud801\uddc0's",
+      "tokens": 18,
+      "allowsUnicodeCategoryMismatch": true
+    },
+    {
+      "name": "unassigned",
+      "text": "A\ud884\udf50\ud884\udf51z 123 \ud884\udf50's",
+      "tokens": 18,
+      "allowsUnicodeCategoryMismatch": true
+    },
+    {
+      "name": "random-0",
+      "text": "\u0915Xc5 \u0915\n1[\u4e2d'0 \u03b1[\u200d\u03b1\u0915a8\u091511\ud83d\ude425\u0915\u03b19XX\ud83d\ude42\u00e9\u00a0X\u200d\u00e9Z{856Z\u4e2dY\u00a0{\ud83d\ude42\u00e9'[12Z0\u0915\n\ud83d\ude42'9\u00a0[\u4e2d\u0645b1'\nb5'[1}`9\u00e98\u09153\u0301XcY0}8\u00a0\u0301\t[5\u200d\u00e95\u0301\u0301\u200dZ\n4b1]\u00e9\u00e9[}5X\u200d\u200d3\u0416'\u0301\u4e2d\u200d\u0416\u06452\u03013\ud83d\ude427\u041662\u00a0a\n[\ud83d\ude42c823\ud83d\ude4249c2 08\u00a02\u041686Y\u0915\u4e2d96c93Y2\u0416\u00a0a\u0416\u00a0\u09159a\u00e91154\u4e2db'92 ]31\u4e2d\u00e989\u03b1661\u09155\ud83d\ude42\u0915\u0301\u0301}3\t82\u200dcb\ud83d\ude428\u200d\tc\u0301}\t{\u0645\u0915 c\t\u00e9\u0915aXa]a9",
+      "tokens": 193,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-1",
+      "text": "19\u0915\u0301\t\ud83d\ude42Y'\n\u03b10\u0416]a4[X\u00a04a5]Y175\u0416a841XY1'4[]19\u03b1\u00a0\u0416\u0416Z}6\t\u00e9'\n6\u0301\n5\n}`[3\u00e9]\t9{\u00a0\na71{0\u03010X2 \u03010Y\u03b14Y}0\u03b1ZaZ\u03b1c4 {\u0301X\u0645[\u00a0\u00e99{2\t'\u4e2d\ud83d\ude42c\u4e2d]'\u4e2db\u04164a0b5\u0301\ud83d\ude42\u03b1\u00a06\u4e2d1\ud83d\ude4258]",
+      "tokens": 113,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-2",
+      "text": "[ZbX}[`]Z\u00a0\t9\u4e2d\u064519\u00a0\u0301\u03011 1\u0416\u0645\u4e2d\u0416Z\u0416{\u0915\u0915\u0416\u0301\t7ZZZ813[\u03b1{\u200d\u200d2\n{{\u0645\u00e957\u0416\u09150[[X \u00a0\u00e9\u00a0`\u0416Z{\n681\u200d6[{'c8a]\u200d\ud83d\ude42\u03b1746\u00a0}a\u00a0\u0416\u4e2d\t30X5c5882 }8\t[\u0301}Z`\u0301\u0416{]`\u0645\u0645`1\u0645{}YZ\u00e9}\u0645`[Y2{a\u200d2c5Y\ud83d\ude42\u200d\u03b1\u0915]\u0416\u0301\u00a0\t'\u0301\u00a0\u03b1b'\ud83d\ude422\u03b1Y\u200dcbZY\u00e9Z2\nc2\u00e9\t9{ab\n\u09153a\u0416\u0645}",
+      "tokens": 158,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-3",
+      "text": "6a36\n0a\u4e2d {\u200d\u03b11\u00a02Z`'`1\u0915\u00e9{X\u0645920\u0915]\u00a0]3\u200dc{{84`212[\u03017']b\u4e2d\t2\u03b16\n\u03b1aa}X3\n\nc45\u00a0X8\u00a03]a\u09154\u0645'[\n\u4e2dc\u06456a\t\u00e98'\u030152\ud83d\ude42Y\u00e9X\u4e2d9\u4e2d0c\u200d35a`\u03b1\u03016\u03b1\u0915\u0915b\ud83d\ude42Z3 \u00e993\u03018b\tX{\u0645Z\u09159\u0915\u200d\u0915X\u03b1 '2Y\u09151c\u00a09Y\u4e2db{\u0915}\t\u4e2dZ\u0416 0221\u00a0'\u00a05X\u09151\u00e9\u0645",
+      "tokens": 146,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-4",
+      "text": "{\u0301cY90\u03b1\u0416Y\u00e9Z9\u00a0\u0301X\u04164[Y\u04161\u00a0\u0301\u0645\u00e9c0\n4\t1Xc[\t'a}6 1\u00e9a [9 }'430b99\u041663a\ud83d\ude425c6\n\u0915\u4e2dc\ud83d\ude42}\n\u0645\ud83d\ude42\u0915973Y9\u0915\u03b1\u03b1\u00a02\u0645\t`36 \u03b1`\u06452\u03018635c\u09154\u03b10237 \u00e914Z\t\u03019\u0301\u03b14`a2a{\u0645}'50'Xb\u200d\t\ud83d\ude42\u4e2d\t[a\u0301'\u200d\u00a0\ud83d\ude42\u0915\u00e9\u200d7}[\u4e2d\u0301[\u00e9\u0645\ud83d\ude42cbY2[b'\u09158X`a'\u00a0\n0\u200d\u03b1c\u200d\u00a0\u00e9643492\ud83d\ude425\u200d][}2 ",
+      "tokens": 158,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-5",
+      "text": "4aZ\u00e9Zb5\u00a02}YXc\ud83d\ude42\u200d'\ud83d\ude42\t7012\u0915\t\u0645\u041686Z1]}[b\u03b1\u06456\u4e2d\u03013\n\ud83d\ude42cY\ud83d\ude42\ud83d\ude42aca17c0\u4e2d\u03b16X2\u200d\ud83d\ude429  6\u00e9]'32\ud83d\ude42\u4e2d\u00e90X{\ud83d\ude4293\u00e96Z \n4\u03b1\u00e99\u4e2d7\u00a0a4a1Z5b81\u0301'\u04164\n\t\u03b129\u00a03[ 1\u03b19X\u00e93Y8\ud83d\ude42cc[1Y9\ud83d\ude42\u0915",
+      "tokens": 114,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-6",
+      "text": "Y8bY53}6ac\u200d3[000X\u00a09{`42\u00a0\u200d\u03015\ta\u0416}251X]\u03b1\t3}[7Xb\u00e9 6b'\u200d\u4e2d\u4e2d \tY`\u00e9\u03b1\u200d\n'7c{\u00a0\u06450\u0915\u04160b3}\u0645X2ZY}\u06453[\ud83d\ude42\u09151\t{Y\u200db[\u200d\u03b1c\t\u0645\u0416`\n\u06457\u03b1\t\u0915a1}[\u00a0[{\u4e2d'3\n\n\u0416\u0416`7} \u030100`'829\u09150c]7\u00a08716}5'28b`Z\u03015'\u0416[[5 \u03b1\u00e9[3\u03b17\u4e2dc'c}7\u04167`",
+      "tokens": 147,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-7",
+      "text": "`9['\u03011\u0915\u041683}}\u0645}Y`'\u00a0{\u041617\u03b1Y''[\u0416\u00a0\u0301a'\u200d 7`7{Z\u03b1 \tY\ud83d\ude4285`8\u0301'Z`\u00a0\ud83d\ude42}a\u00a021X6\u0915c\u4e2d3\u00a0}Y\ud83d\ude42\u00e9138[]\u0416\u4e2da[\u200d'c2}\u03b1\u00a0\n1\u0301X\u00e9\u00a0\u03010\u00e9}\u200dX\u0915Yb[\t\t}\t`']\ud83d\ude42\u200d4\ud83d\ude422Y1Z014a4\u00e97204c\u04161 \u4e2d\t]b77Z02\ud83d\ude42[\u00a0\u200d1[[6\ud83d\ude4290{8[a4\u00e9\u0645\t a[\u00a0]\u0301",
+      "tokens": 142,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-8",
+      "text": "\u0301``\ud83d\ude4276'\u06452\u00a0\u0301848\ud83d\ude42\u00a034\u04169\u0645\u200d\u4e2d\u0301\u00a0\u0915'4 5Zaa\u03b1572{]2\u0416\ud83d\ude42\u03b1`0\u00a0531]\u041631\u0915b4\u00a0Y3{{`8c3\u0915Y8b\u00a0X`\tZ89c5Z\ud83d\ude421\u03b14\u0416\u0416`\u03b1\u4e2dY\u4e2da'580a \u00e9\u0301b\n1\n 7\u4e2d\u03b1\n578{a \ud83d\ude42\u03b1]\u00a04\u0645b[[3 \u200dZ\u03b1]45[`c{105",
+      "tokens": 112,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-9",
+      "text": "55Y{\u0416\u0915'9\u0416'\n\u4e2d\u0301\u200d1",
+      "tokens": 13,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-10",
+      "text": "536\u4e2d\t 24b2697X\u200d\u4e2d\u00a048\u00e9\u06450[{41]\u03b1c]\u06456[4\u0416019[32",
+      "tokens": 30,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-11",
+      "text": "\u03b1}b`{\na\u200d{26[5 2c\u200d}`\u0416\u00e9\t\u00e9a\n]'\n\t\u4e2d\u03b1\u03b10\u00a09Y86\u0301Z6'5050\u0645cbbcb[a\u00e98}' 79Z]4\t]`3[6\u03b10",
+      "tokens": 59,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-12",
+      "text": "2\u03b1\u00a0X\ud83d\ude42a\u0915[]6X[\u4e2d7\u03012\u0301\ud83d\ude42XYX'\u06452c89\t7'719]0\ud83d\ude42  \u00a02\u4e2d\u03018\u00a0b{\u4e2d\u091545][Y1074{27a2}6c0Z\u03b1\ud83d\ude427\u0645\u00e9\u0915]\u4e2d\u09151\u4e2d\u0645c\t\nXb\u041681\ud83d\ude421a6X`\u0301\u04161]38\u00e91}4\u0416\u0645b[9\u0416\n25\ud83d\ude42\t\u0301\u00a0686\t{0{7\u00a00\u00a086a526'\u200d8]\u200da0\t\u4e2d48\n{``7\nY'3Y\u00e9]Y\u00e9X\ud83d\ude42\u0645\n \u03014}`a{\u0915\n\u03b1`b[8{78\u4e2da`\u4e2d",
+      "tokens": 159,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-13",
+      "text": "''1`5\n\n{\ud83d\ude42\u030165cb\u4e2d\u0915\t\t\ud83d\ude42\u0645\u00e99c7\u0416ca\u200d\n\ud83d\ude42\u0915\u0645\u09152b8X]`[\ud83d\ude42\t[\ud83d\ude42Z``'X{\u03b16a \u0645\t\u03b1\u200d\u00e99\u030193\ud83d\ude42Y\u03014c`570\u200d\u0416\u00e9\u0645a\u0301046 \u0645Y[}ac]\u0915`cb14\u0301\n\u03b1b\u03b1",
+      "tokens": 84,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-14",
+      "text": "3'77Y{'Y\u0915b`[431\ud83d\ude423aY\u0301a\ud83d\ude42\u0915\u00a0\u06456\u0416\u03b1[6c7[1`]5Z X7a\tY]\u03b12a\t763c73} \ud83d\ude42'{'8\ud83d\ude42cc'9`3\u0915\u200d'\u4e2dZ{\u03b15\u0915]3\u00e9\u00e9Z`\u03019}a]47\u041613 }\u0301cc0Y`cY\ud83d\ude42Z8\u200d[\u03b17647\t\u4e2d\u00a0'\u0915Z{5\u0915\u0416\u0416c\u06456'5[\t\u06451c\ud83d\ude42\t\t\u0645{3[b7\u00e9\u0301\u4e2d9}0",
+      "tokens": 130,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-15",
+      "text": "4\u0645}}c\u00a0}XY8{\u4e2d9[{7\u00e9\u03b1'\t}\t4`Y7\u200d\u00e9` 7b\t8b{`6c\n9'1\u4e2d}\t\u200d\n69c4\u4e2dc \u0416\u064599\u03018b\n\u0915\ud83d\ude42}'c8447\u4e2d986Z'\u4e2d4`\u0416\u00e9\u03b1\ud83d\ude42X\t\u03014a'`\u0416\u00e938\u00e9\u03b1b\u03b10[7\u064593\u064591\u0301Xa\t[X\t\u0915a1[3\u00a0c\u0416'08b]83`a Z`2\ud83d\ude42{\u200d\u00e9'865b\t\u0301\u0645X\ud83d\ude42' b\u00a0'8\n\ud83d\ude42\ud83d\ude42Z\u00a0[\u00e9\t4\u4e2dbc\u06450\u06452[[]\ud83d\ude427\nZ86X30\u03015XX]}8\u03b1b\u0416\u0915\t5Z}7\u03018]\n\u0915\u4e2d29\ud83d\ude42`X29]} \ud83d\ude429\u00e936Z\u0301\u0915X\u064514{ \n 5\u03b14\u200d\u091508[Z",
+      "tokens": 205,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-16",
+      "text": "8\u0416{\u0416X\u06456XbZ\u200d\u0645`\u00e9\u00e9\u0645\u00a0\ud83d\ude42\u0645X 9\n{a\u0301\u0645 {[\u030105\n]48{\u04161\ud83d\ude42}X]{\ud83d\ude42X\u4e2d9[\u03b16\tYX\u03b12\u00a0\u0301480'2\u00a02\u4e2dY\u03010a\u04160}\u200d8\u03b1\u0915\u00a08c4'\u00e9c`]602\t]7}b{}\t\u00e973}\u0645\t\ud83d\ude4216{4\u09158aa\u03b1\u03b1a\u00a081{\u4e2d9\u200d\n7b\u0915\u0915[X\u0915\u03b1\u03b111\u00a0}\u00a08\u0301[\u091500\u03b1'6\u0915\nc3}\u00e96\u09155[\u200d3\u00e9\u4e2d[\u09152",
+      "tokens": 143,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-17",
+      "text": "X\u0915\u0915Y5\t\u0301}7\u03b1bc",
+      "tokens": 11,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-18",
+      "text": "{c\u4e2d\u00e9\u0301b\u00a0{[\u0416X \u03b1 \u0301\u03b11\u0416a }\u00a06[\u4e2d5\u0301}a\u200da\u00e9]\u06450\n\ud83d\ude42a\u00a07\u00e91\ud83d\ude4279 6\u0915ab\ud83d\ude42}2c3\u00e9\u0301\u0915{b\ud83d\ude42Z7c5\u00e99409Y\n0\u091592\u0645\ud83d\ude4294 \u03b1Y1{Z9\u200d`c59bY5Z0{1\u00e992c7\u09154\ud83d\ude42Z8]\u0301\u03b11\ud83d\ude42Z24{2\u091553Y1b3{a}9Y}]256\u03b1c\n5\ud83d\ude421b45[]\ud83d\ude427Z]7``\t1\t`\u04168]\u00e9Z8\u0301Y0173c\nX]\u00e92X\n9\u00e9c''08]75\ud83d\ude423\u00a0'4",
+      "tokens": 168,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-19",
+      "text": "4\u4e2d\ud83d\ude42Z[\u4e2d37a2cX\u4e2d\u03b1{`ccX\u0301\u00a0'\u0416\u0416\u00a0'{\u4e2d\n1X]\ud83d\ude4277\u200d[c\u4e2d``c\u00e9a2\u03013\u04163X42\tZ\u0301b\u200d9X'\u0915{}455`Y \ud83d\ude42\u4e2d\u00a0}[4567\u4e2d\u4e2d\u00a0\u0915'\u0301}\ud83d\ude42707\u200d2Z49'}\u00a0\t\u0416{95\n52\u200d \ud83d\ude42'c\u4e2d[\u0301\u0915\n\u03017\u0915\u00a07\u0301\t}\t037aa\u0301c\u4e2d2\ud83d\ude42Z\u030190`\u0416\u0416\n\u03b1]Y0\u041687\u200d3\u03b1\u00e9\n4Z8\u00e9aX1\ud83d\ude42 \u0915Z3\u4e2d\u4e2d\n\u0301\u04168'5\u0301{']\u0301\u00a0Z `Xb0'\u0915Y\u200d1'[`\u0915\u00a0\n6{a\u0301 `\u0915[\ud83d\ude42[37}\u00e991\u0645[49Yc9\u0645",
+      "tokens": 186,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-20",
+      "text": "1c1\u0416\tXZYbb]\u200d\u03017\u0645XZ\t98\u06455\n\ud83d\ude4263\u0915\t\n\n[\tX\u0915 \t'5\u0416`\u091565\u0301{\u0915\u00e9\u0416\t\t\u200d0\nc\t70`3\u00e9\u0416\t\u091597\ud83d\ude42\u0301\ud83d\ude42Z`\u200d5\u00e9\u00e9\u0645`}\u00a0\u0301\u03019b\u00a0\t}3\u00e9\u00e94[92\u200d6\n",
+      "tokens": 81,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-21",
+      "text": "[a\u09157\u0416\u00a0Yc\u0301`'\u0915`]\ud83d\ude423\u00e92\u0301[\u03b1c8{\ud83d\ude42X99}]b17\t81b3a9\u200d293\t'\ud83d\ude4242Z0\t2\u4e2d\u030153{4Y\t3c]Y'X\u00a0}\t`03}\u200d`XY47\u00e9\u0416`\u00e9\u03b1\ncc0b`\u00a0\u03b1\ud83d\ude42\t}b0 65\u0645` a\u0301{\ud83d\ude42]\u09151\u0301\n51`4\u4e2d\n}\tc\u200dbc\u200da36\u00e93\n\u0645\u0915'\u0915X\u0645b`c}\u0301925\u00a0\u00a0\u06456\u09150}97c ]c56\u200d0\n00\u200d6\t \n}15163\u0416\u0301}9\u0301[ \u00e9XZ\u4e2d\u4e2d\u0645\t\u200d}X\n\u0915}\t6\tb0`3}`97`40 \n\u200d882\u0915\u0416\u0416 }",
+      "tokens": 181,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-22",
+      "text": "]26`\n3Y\u200d8`\t9\u0645\u06454`\u00e91\u0915{\t7\u0915\u200d\n74a}}ab\u00e9X\ud83d\ude423\u200d\u03b1Y63b{\u0301`96c[aZ ]2\u0301c\u0301\u030185[\u0301[\u00a0\u00a0\u0416\n11\u0301\t\u0645\ud83d\ude42\nc2b\u4e2d\ud83d\ude426\u0416]\u06459Y}'32\u0301\n1\t]XY\u03013`c\u03017{[5c3X}\ud83d\ude42\ud83d\ude42\u03013Y{[\u03b1\u0915\u0645`\u00a05}`\t\u200d}\t8\t\u4e2d \u4e2d\t3c\u03017\u04160\u06457\u00e96\t{\u03b15b7\u0301\ud83d\ude426X{\n9\u0645\u00a0 `62\n0\n\u200d}]\t8 6{\u00e96\u0645'\n\t61b\t\u00e92\u00a0\u0645\u0301YcX[\u03013\u00a0\u200d0",
+      "tokens": 175,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-23",
+      "text": "51Y4 }\u041618\u00e965\u200d\ud83d\ude42'c'\u03015\u03011\u04168\u0645c\t8\u04161[\ud83d\ude42}\u200d\u00a0a{X\u200dYb\u03b12\u03b1bX\u0645b7\u00e9\u03b14[9c\n6Y`{9ZZc'ZYcY`b2`a\u4e2d\u200d63Yc1Z742{\n\ud83d\ude423\u200d\t4`6\u03b1Z\u04169}3[Y1a6\u0915\u00e9\u0416\ud83d\ude42\u0416\n\ud83d\ude4251 Z\n''\u03013\ud83d\ude42ba{8\t]\u03b1\u200d\n\u03b1c}\u03b1a `\t0abZ]15aX1\u0301}\u0416\u0915a\n\u00a01]1\u0915\ud83d\ude421Ycc0'1\u03b15a 6\u0416{8\u200d\u4e2d`9\n[\ud83d\ude42a2] c\u0645521\u00e9\u0915 \t\t 8a\u0915Z}b'Y\ud83d\ude427\u0915}4306X\u00a0\u03b1Xbb4]\u00e93}7\u0645\u200d",
+      "tokens": 200,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-24",
+      "text": "155\u0301\u0301}\u00a0}]\u0301Y7{4\u00e9\n\u00e9b'{}8\ud83d\ude42''Z[\n0`80\u0416\u200d[8\u00e9{\ud83d\ude4280\u0645\u064549`}",
+      "tokens": 35,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-25",
+      "text": "'YZ3Y\t\u200d]759c4c8\u0915618\u200d4}Z'7\u0416\u0645\tY[]{\n9\u0645Xa\n[ 8\u09157353\u03019a\u00a06\u00a0}16\n\u0301'8\u00a0\u4e2d}c60{5 5a\u03b1282X\u03b1\u4e2dbcb\u00e9'172\u06456Y\u03b1\t2`ccaYb8Z\u0645\u00a02\u0645\n6}6'0Y\t{\u4e2d7\n21\t}7\u0416X]00'9''c26Y}'8[4Y\u00e93\u0301}b\u0915Y\u0301]\u04160''4{0\u4e2d94\u041638944b\u200d \ud83d\ude42a\u4e2d\u03b19 \t\u0416Z]Y69c}9\u03016\u0645\t\t5`\t409Y'c\u091516\u4e2d\u00a0",
+      "tokens": 166,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-26",
+      "text": "\u0645\u03b19Z\u0915\u200d]a3c8c5\u00e9\u0416\n\u0915\u04163c]1{c\u00e9b4008Y\ud83d\ude42'\u200d\n\u03b1\t39b\u0645{\ud83d\ude42Y\u00e94]\n]Z1\ud83d\ude42\u0915}\u4e2d\u0645\u00e9\n\ud83d\ude42\tcc\u00a0\u0416{\u00a0  \u00e92a2\u0645\u4e2d73 2Y\u200d1\u00a098}{\u4e2d\n{23\ud83d\ude421[\u00e95Y`X{0Y07\u00a0Y7 {59{9}\u00e94}\u00a0\u0645b0\u00a0\n\u00a0\u0301\u0416c}]`\u200d7\u03b1aY\u00e9[\u200d{5{\u4e2d'}4b[0\t3\u0645a\u091552\u200d7Z6\nY`85\u4e2d0\u0915a\ud83d\ude4211\t[2a84\u091529\u00a0\u03b1\u4e2d0`\u4e2d\u0416`Y\u03b1\u0416`c5b\u0915Z\u0645\nb61\u06454b`\u0301X]3]2\u4e2d6\u4e2dX",
+      "tokens": 193,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-27",
+      "text": "3}\u0416\u0915\u030131 b'a{\u0645\u00e905b`'\u09154\u00a0\u200dZ\u4e2d[\u0301X\u00a01a\u4e2d\u03b1\n2a5Y\u030134a]\u4e2d1b\u0915\u00a0\u03b1Y\ud83d\ude423\tb71b`b}9\u03014`Y1`{c\u4e2d4'5'\u0301Y\u4e2d6\n5\u00e9X\u200dc\u0301[]\u0416 5X\u00e9Xabc]\u03b12",
+      "tokens": 89,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-28",
+      "text": "\u0301}\u0915237\u00a0\u0416\u0416 \u0915\u4e2dZ54aX\t35`\ud83d\ude42b2{1cY8]X 3Z79\u4e2d\u03b10\u0416277\u0301\u0416\n5`\u0301aYb5}Y\u200dX }'\u0301a6[8\u00e9\u0915\u0645\u200d'XYYY6\u00a0\u03b1Zc}\u09153}2755\t{\u00a0]Z\u03b1\u4e2d32a[2[4\u0645\u200d\u200dY\u200d96\u00e9\u0416'aXX4\u03018\u200d'\u4e2d`\u00e9ZX\u00e94\u03012]b1c]087{Z\u200d'}a{Y16}8\u0915`55}\nb{57{Y\n\u00a0}Z'4656{{\n\u4e2d7ZZ ]\u0416Z\u0416{'{",
+      "tokens": 153,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-29",
+      "text": "bc\u04168\nX\u4e2d\ud83d\ude42 b2'8\nYZ \u200d7\t4`\u00a0\ud83d\ude420\u00a0\u0915b0{\u4e2d48b63958\t3ZY]1 a\u200d\u0645 \u03013]\u00a0a{\u03b1ca\ud83d\ude42ac3\u0915}1\u03013\u4e2d0}}XZ`[7\u200d`\u0915}`[\u0416bZ32X3`\u03b1\u4e2d'a\u03b1\u0645\u00a0\u0416\u0301\u200dXa\ud83d\ude428Y\u0645]212\u200dc\n\u4e2d0\ud83d\ude424b{ \u4e2d88}Y4\t\u0915}\u4e2d5\u00e9\u0645]c\u0301\u00e9\u00a0\u09159]\t7\u4e2d\u03b1b'12\u03b1Z\u200dYa0\u00a0\u200d799}8Z4Z44\u0416'78\u0301\u00a07}\u0301bc\u03b1\u0416\t8\u06451\u200d Z\u091535\u200d\t\u00a095\ud83d\ude420{'9ZZ\nc{c'\u0915\ud83d\ude428}\u03b1a5\n\u0301\u0915 X\t0 4'b2",
+      "tokens": 191,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-30",
+      "text": "\nZ\u09156]\u04164bX\u00e9Z\u4e2d\u0301\u0645Z'\ud83d\ude42\na\n'`\n\u00a0Y\ud83d\ude42 \u041607X\u0915c 6a402\u03b1X[5\tYY\u200d1Y2}\u4e2d\u0416Z'\u0645`\ud83d\ude42X{1'2\t76794298\u00a026`5Y8\u0416671`X\u0645X729\u03016[]\u03011 \n\u0915\u0915\u00e94057\u03b101\u03012\u00e9913}9\u200d}XY\u00e9\u03b1Y4 1203}\n}6`7[0`\u0301\u04161b\u4e2d\u0915a1a\u09151Z'ac\u0301}72\u00e9\u00a0X",
+      "tokens": 130,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-31",
+      "text": "{\u09159\u00e9 [83\u0915\t94 {7YZ]6\u00e9b947\u00e9Z9\u00e9\u200d\u04161 1\ud83d\ude42\n\u00e92\u200d\u00a057530'85\u03b1\u00e9cZXX3]5157\u00e9\u00e9\nY\u0645\ud83d\ude423c}\u0301a{\u0915Y{`5\u0301]\u00a0\u04168c0\u0301Y\u00a0`1 \u00a0Z1\t8\ud83d\ude42\u00a034\u0645'} \ud83d\ude424\u00a0{Z1Z17\u00e9Y3\u200d853\u091559\u200d\ud83d\ude42{\u200d\u0915c8c\n\u0915}c'}\u00a00\u03b1c6\u00e9c\u0915a6\u0301Za ZZ]`5]7\u03b17\u06458\u200d\u04166Y`2Yc\t5c a[\u0915c\u03b1b\u0915\u0915\u03b1\ud83d\ude42{1\u00e9\u4e2d\u200d`b6\n\ud83d\ude42\u00a0a8\n}Z\u200d{ 7\ud83d\ude42\u03b1\ud83d\ude42Z'[3]'43",
+      "tokens": 181,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-32",
+      "text": "8407\u4e2db\u0645\u03b1\u4e2d\u4e2d\ud83d\ude424[ \u0645Y]\t{\ud83d\ude42\u0416\u0301\u0416\u06458ZbZ39Z\u0645Z\u03b17\u00e9\u00e913YX\u00a0\u4e2d9X60\u03018 \u0915'Y]c\u0416X \n{b2\u4e2d30\u4e2d3\u0915`c2c\t\t\ud83d\ude42\u00e90c\n77{3\u00e96\u03016\u0915\t\ud83d\ude42\ud83d\ude427\u4e2d}]] [3\u200d[`\ud83d\ude42[8]{]\ud83d\ude42 \ud83d\ude426\u00a0\u03b18{\n'9\u03b1\u00e96`58]\u0645[a `7a2Zb3\u0416\u00e92 \u0301\ud83d\ude42\u4e2d[0]534\u200db\u00a0 Y\u4e2d a`67\u00e9a [Z{X'c\u0915\u03b1\u03b1c\ud83d\ude42\u200d\u0301\u0645\n3\ud83d\ude42\u0915c]7Xa0\u041670]3\u0301\u0645}1\u200d\u0301c['{3c\tY2ZaX\ud83d\ude42Z\tZ4\u0301{\u4e2d'}c\ud83d\ude423\u0915'{YX\u200d3]\u00e9X",
+      "tokens": 199,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-33",
+      "text": "'9\u200d\u03b1\u200d8\t\n\n \ud83d\ude42b \ud83d\ude421\u03b1\u00a0\u00a0479a \u0301b24c0'1Z\ud83d\ude42``\u030138`7Z0YY`{\u0645312b\t\u0645}{77}Y\t\n751'c\ud83d\ude424X36 a}\u4e2d\u0915\u00e91\ud83d\ude42}YXY\u06455 2\tX\nX41\u03b1\u00a0\u0915``\u00a0 }\u03b15X\u200d3\n0 b Y",
+      "tokens": 86,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-34",
+      "text": "4\u4e2d\ud83d\ude42\u0416\n11417\u00e9\u030158`Z\u00a0X1\u0915Z\u00e9a]\u4e2d{Z\u0915c\t4Y12X\ud83d\ude42Y8\u00e90\u00e9\u4e2dZ\n\u0645]c\u064592\u04161\u0645\u06452]\u00a0Y\u06456\u030134\n \t{[}2\n5\u00a0{\u03b1\u0416[b12}\u06451\u00e94][\u00a0 Ya\u03b17{61c}X5Y822Z`5[c\t\t\u4e2d\u200dca\u06452\u0645\t\tc2cY1c\u0416\u00e98a\u0416Y\u00e958a{\u00a0\u00e9X91\u0301\u00a0\n6\u00a0{Y\u00a0\u200d'5Y\u03b1\u00e9]\u0416\u200d4Y\u0915\u00a0{9}X`\ud83d\ude42ZX\u0301Z\u4e2dY}\t\u030119\n Y\ud83d\ude42\u0645[\u03b199\u03b1\u0416\u4e2d\n6X03{\u06458\ud83d\ude426\u0645 \t\u200d0Z\u00e9\u4e2d\u09157\u0301\u0416Y2\u0416{[c`5\u0416Y\u03010a]4 \u4e2db88",
+      "tokens": 206,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-35",
+      "text": "cb\u4e2d\u0416Yb\ud83d\ude42{b9cZY[\u00e9\n540'1\u0301\ud83d\ude42}6Z'9Z\u00a0\u03014c\t2\ud83d\ude42`{\u4e2d[}\ud83d\ude420\u00e9{82Yb\u200d]7X448[\ud83d\ude42\u4e2dX\u0416\u0915\u0645 8\u200d\u0645\u4e2d3\tZ{82Z9'Z\u0416 \ud83d\ude42 \u030111c\u0301b]aXX5167\u0301]\t2c{ \u4e2d\t7\u03b1Z7",
+      "tokens": 94,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-36",
+      "text": "a] 0]ZX\u06454\t\u200d\u0645Z{[4b7  {Z\u0645\n c6\u4e2d\u0645 X0cZ\u0301\u200db\u200d\u4e2d\u0915a6b55Zb\u00a0\u00e9\u03b1[65]62\ud83d\ude42\u4e2d7 \u00a0\u0915[\u0915\u0301560`2\u0301\u0645\u00e9\u0645Y{`\u09150\n\u00a04Z00Z\u06450[\u0416\u4e2d`\n`\u0416\ud83d\ude42\u0645{\u0416]5\u00e9\u0416`\ud83d\ude4272`0321`X",
+      "tokens": 100,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-37",
+      "text": "\na9\n\u0416\u4e2d\u0416\u04161Y\u00e9\u00a0 Z5]`8Y\u0416Y\u00e9{]2b\u200dZ'}Y}Y]{b\u00e9\n93c8\u03b1Z\u00e96'9}44\u0301[9'6\u03018`6c\u064532[2\u200d XX]\u00a0[b\u0416\t3\u0915Z\u00e98`]\u0915]\u0301\u00a0[`Z77`Y\t5Z {}\u4e2d[\u0416]1\u4e2dc7YcY4b\u200d\u00a0 \u00a056\u091502\u00a048748  9aba\u4e2d836\u06456[\ud83d\ude42'\u0301\u00a0{[7]5ab7`50]84\t4",
+      "tokens": 134,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-38",
+      "text": "\t4356\t}1c2\u03014\n",
+      "tokens": 11,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-39",
+      "text": "\u09150\u00a0\t\u09150]\t\u0416{ XZ\u200d\u0645\u00e90\ud83d\ude42}\ud83d\ude4243\u06454\u200dY \u0915\u0416\ud83d\ude423\n\ud83d\ude42\u091543\u00e90'`\u0301b\u00a07c\t5a\ud83d\ude42\u4e2d\u00a0`cY\u4e2d\u00e9\t\u03b184\ud83d\ude42`\u200d6\u03b1\u200d7\ud83d\ude42'\u200d\u0645X04\u030137c42\u06456}\u0301b3\u03b15\ud83d\ude42 ]\u04160\u0301{\n[\u09156\u0416}]\u0416{\u091533[}13\n5ca58XY0c{\u00e9a\u03b1{7\u4e2d]\n6\u00a02280[\u04168",
+      "tokens": 120,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-40",
+      "text": "15\u06455\u0416\u03b1Y]Z\u03b11\u200dX\u00e98\u00e9{\u0301'\u00e9]\u0416{4\u4e2d\u4e2d5} 43\u0301][} 4a\u09158\u00e9Y9 `b2{7\n60[ \u0416\u200d1\u03017\u200d\u0645\u4e2d\t]\u00e9276\u00e9\u00e91}\u00e9455Z{8b5\u03b1b\t['\n76{`Y5\u4e2d\u03b16X`2\u0915\u0915\u03b1Zc8} [\n\u03b1\ud83d\ude4215\u06455\u200d7",
+      "tokens": 101,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-41",
+      "text": "\t3X18\u04161]`\u4e2d\u00a0\u03b166\ud83d\ude42\u0645}6X\u00a0\ud83d\ude42\u0645\u0301c\u4e2d\u041662\u0915X4\ud83d\ude42\u200d\u0301\u4e2d4]9[\u0416\n\ud83d\ude42[9\u03b1'\u0301{b\u0416\u4e2d\u06454'b\u0915\n95\ud83d\ude4223 \u0915b}\t}\u200d 0\t\u00a0\t945\u00e9\u4e2d[a7b5'96{66Y2b4\u00a0\u0416Xa\u091588{c\u03b1\u03b1{\u00e9{92\u4e2d}\n\u200dZY\n1}8\ud83d\ude42\u00e9\t3 Z1\u0301 \u0301]3]\t\u04166\u0915\u00e9\ud83d\ude426][258`\tXa'7\u0416]X\u03b1`aYa Yc0[}\u04169c{c\u200d[{\u00e9\u00a0\u03015\u0301X\u00a0\u00e9\u00a0`Z6Y\u4e2d\u00e9\u0416\u0301[ aa`\u4e2dXY'c9\t",
+      "tokens": 174,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-42",
+      "text": "3 1 {\u03b1X'[Xc\u00a01]\n8\u00a01\u00a0\n\n\u00a09\u03b13Y\u03b10aZ`\u0645\ud83d\ude42\u4e2dc[2[[1\n{1\t 6\u00a0]\u200d8\tY\u04161[7a9\u03018\u00a0\u0645\u03b1bY7`2\u200d\u00e9]cb\ud83d\ude4230\u03b1\t8\u4e2d4\u4e2d[1\u0416\u03b16\u4e2d\u4e2dY\u4e2d\u03b11]b55]1\ud83d\ude423Z\ud83d\ude42\u200d\u041695\ud83d\ude42099c\u04164 4\u0301\u03013\u0915bZ\u4e2d5 `9\u04168\u4e2d[1{\t\u0915\u4e2d6Za\u0915\u00e9146a\u0301\u0915{`{]2\u0915]a`2\u4e2dXZ\u200dc}['08`\u0915X7}5`'\tcb\u200d\u0301",
+      "tokens": 159,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-43",
+      "text": "{2\u0915\u0915\u4e2d\n11[X\nZ1\u041660\u064590'5\n4\n9['1\u0301\u00e9Z5X515\u00a043\u030137]b\u00a0}\u00a0cb6\u200d8\u0915'4{6\tX83ac\u00e9\u00a08751\u00e9a1\u03b1}{Yba9Y5cYZ]4}\u0416\u09152\u0915[a\u0645]\u06450\n\u0645'33\u00a07\n\u0416\u4e2da]93``b{5\u0645\u0645\ud83d\ude42Y0\u0301\u041677  29abZ4X\u0301\u03016b}`\u00e9\n4]0}\u03b1\u00a0Z14[681a'09b\u0645b\u03b1c bc\u200dYbc'7b\u03b1b{[\u0416Z7\u0301['X33\u03013\u0416 9\u0301\n2b\u00a0'\u00e9\ud83d\ude42][\u03b1\ud83d\ude42\u00a0\u4e2d`6\u00a0\u4e2d7  8\n9\u0416\u0301\ud83d\ude42\ud83d\ude42\u091519\u00e9X'\u0416\u0416'}b]Z86Yb\ud83d\ude42X",
+      "tokens": 197,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-44",
+      "text": "`1\u0645\u00e9c\n\u0645'3\u03b1X}\u4e2dY9\u0915\u4e2d\u00e9\u03b1c\u0416\u00a0\ud83d\ude42` b6\u0416\u00e9{\u00e92\u4e2d\nb\u03b1[4\u0416Z6\t\ud83d\ude42985Z\u4e2d\u09158a`0\u0416{b \n]\u0915 6`\u200d\u0915}ZZ",
+      "tokens": 62,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-45",
+      "text": "\u03b14'1\u00a0\t9a{\u03b1\u200d\u00a0Z2789\u00e9]a\u4e2d}` `]{Z58\u03b1\u200d\u03012'Y7Z8`\u0645{a\u03b1\u06457\u4e2d\u00a0\u00e9b\u09150[[\u00e9 [[4XY\u0301\u0301[98\u0301}a\u00e9\u200d\u03b1\n'\u00a0\u0915ab}b}`\u00e9\u0301{3b2\t9c\u00a0[\u0301750\ud83d\ude42'3\u0301\u00a0\u0416\t479Y\u200db ca5\u03b1\u4e2d`\u200d\u4e2d0\u091569a23934[a5\tY\u0301\u0915[\u00a067b6]'7\u03b1\u0915\u0301\u091511Z1Y9[2\t[\u200d\u00a04\u03b18\u0645 3\u200d\u041686X4\u0301X\u4e2db6]7[01\u4e2d\u4e2d\u00a0\u03b1Z[X2X\u200d\u00e9",
+      "tokens": 162,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-46",
+      "text": "\n\u200d\u03b1\u4e2d1\t6\u06453\u00e9'{49'\u06451X`\u03b1Y`1Y \t2\u00e9\u0915",
+      "tokens": 27,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-47",
+      "text": "a{]5\u4e2d718ac}0\u0301`}\u0915aZ2}53\u0645a`\u04166X2\u200d9b\u4e2d\u0416\n \u06453 \u0645\t'\u00a0b80\nc4\u4e2d\u03b1\u00a0[Y4\ud83d\ude42[c14{a9\t3`\u0301\n23X\t\n6 Z\u0301' \u04160\u0915\u00e9b\u4e2dX\u00a070c'[[41\u0301X[\u03b1\u0645a\u091534b\nX1\tZ[\ud83d\ude42\u03b11]\u0416008 4\u00a0\u03b1\u0301\u00a0\u200d\u0416\u200d4\u09153\u0301",
+      "tokens": 110,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-48",
+      "text": "5\u0645 1Xb28{0c\u0645Y1\u0301\u0301`X]b921\ud83d\ude42a9577",
+      "tokens": 24,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-49",
+      "text": "\u03b1b76[c'\u200d870]6\u0301[65}11 Z\u0915 3{`\t6\t\u00a0 c\nZ}3[b\u0645[Xa[X'\u04160[[[1\u0645197`\u0915\u200d\u0416b\u03b1\u06458]'\u4e2d0\u03b1",
+      "tokens": 54,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-50",
+      "text": "}053X4Y73\u00e9} }\u04168XYc3\u00a0b 6`b2\ud83d\ude42Z'9\t7\u09159X'a\u00a07\u4e2d\ud83d\ude428c4\u00a062]40]6\u00a06ca{\n\u200d\u00a0\u0645\u0301\u00e9\u03017Y[\u00a0\u4e2d3\u00a068\u4e2d\u200d`X]\ud83d\ude42\u00e9c\u03b120\u03b11\u06455\n\u0416cX8\ud83d\ude42\u200d\u0416 cZ15{a31\u4e2d'a 1``9\u00a056cb6X",
+      "tokens": 100,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-51",
+      "text": "01\ud83d\ude425Xa4\u4e2d 3X\u09159X\n[\u200da0\u0301'\u0645\u200d}9\u06452X\u0645}32c\u00a0{\t3\u200dX \u0915\u0645{Y\u06459[\u0645] \u200d74\ud83d\ude427656\u0645{4}}X8\u0301X}{\u06459\u4e2d\n]4Yc5327\u0301\tZ2]\nX\u0416\ud83d\ude4258\u0416854\u200d\u03b1\u0301}\n\u0416]]\u0416cYc'8a\u0645`Z\u0915X}b\u06458}c{}85 \t\u03013a\u0645\u03b1X aZ7523b\u00e99\u00a0\u4e2d2\ud83d\ude426 \u0915\ud83d\ude423 cX\u03b1\u0301\u4e2da\tZ{\ud83d\ude42\u0301\n7Ya1\u200dY'}c\u03b125Z{6\t6\n\u0645\u0416 8\u0645\u06451]{2\u09153Y\u00e9",
+      "tokens": 165,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-52",
+      "text": "0[7a\u03b19`b5`\u0301\u4e2dZ8\u0915\u09153[\ud83d\ude42`\n6772\u0915\u04162['\u00a07 \t ]\nYc9\u06451'ca\ud83d\ude42XX\u03b1a\u0301\u4e2d{6X\u0645cX7\u04165c99\n636Y\ud83d\ude4226\u0416\u00e92]6\u03b11'\ud83d\ude42\u03b1\u200d1\u03b1{}{Y8\ud83d\ude42bX2\na\u0915c9\u4e2dY\u0416\ud83d\ude427\tb{\nca95X\u200d]\u03b19c'\u4e2d566\u0301]8c\u0301]5`107\u00a0a\u00e95}47]Z\u4e2d1'81\ta7\u03b1Z8\u0416\t[\u0416\t",
+      "tokens": 133,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-53",
+      "text": "'\ud83d\ude427`\t701[]\u0915b\ud83d\ude4241\u0416\u200dY\u00a0\u04164a2\u03b161\u0915\ud83d\ude42\u0301b63[]7`\ud83d\ude426\ud83d\ude421\u00e9Ya9}c\t\u0416\ud83d\ude42\t\n{\u00e9\ud83d\ude42\u0915``\u00e9 \u0915acc{47a\u091544\u0915\ud83d\ude423Z[ \u00e906632\u03b1b2\nY127c4]a['\u0645X\u0645[\u00a0X9c1YZc93\u0915\ud83d\ude42 ZZ\u4e2d] \u03b1`\u0301\u200d\t07\u0915[b\u03b1[0\u03b1594{\u09155{\u00e99\n\t4\u0301\t6\u0915}`Za3\ud83d\ude425\u200d\u0301\t\ud83d\ude42\ud83d\ude423[`\u06453b\u00a00\ud83d\ude422c\u03b1`2a4\u03b1\u0645\u4e2d\u0301a\u200dbX\u0915\u00e9b",
+      "tokens": 152,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-54",
+      "text": "0\u03b168\t5\u0416\t0\n\u0301\t525\u0915\u200d0[c87b\u00a0X8489\u03b1\n33a\u04168[9\ud83d\ude420\u4e2d\tZ",
+      "tokens": 34,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-55",
+      "text": "83'4'\n3 \u00a001\u200d}`\u0416\u0301c84\n\u4e2d0 53\n\u0915\u03b1b5Y5 b\n''7\u4e2d\u00e9X571\u0645\u4e2d\u200d2c\ud83d\ude42\u0915\n}Y9b 2XZ8X\u03b111Y]\u0915\u0915c\ud83d\ude42\u00a05Y Y}Xba\tZY\u0915]{\u0416c5\ud83d\ude422\u200db\u0915a\u00a0`\u4e2d6\ud83d\ude42\u09155\u200d5\u03018`5 \ud83d\ude42c\u0915\u04162Y 14\u200d8ac9\u200d\u4e2d\t]{`b{\u00a0]Xc452\t\u04165",
+      "tokens": 119,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-56",
+      "text": "\u0301\u00a0\u03b1Z\t\u0645\u0645\u0645\u200d\u0645\u00a0\u00e9 \u00e962}]c\u09150\u200d4\u200d\u0416\n7Yba69\u030127\t3YY64Y9\ud83d\ude423\u09152]50'1Yc[7\u200d]ZY6\u04169`][Z{\u00a017\u0645{[c\u0301}Z9\u0301\u0416'\u00e92[\u09153Y\u0915\ud83d\ude42}{\t\u03b1]\u0416Z6\u0301`993cZ5`4\u0915\ud83d\ude42c\t] \u064542]4`\u0301a\u0915`b[\ud83d\ude42\n\u0301Z{8c\u00e9 1Xb5[\u03013083\u00a0Z\u00a0\u0645]\u4e2d6\u03b16\n\u0416][}\u0416\u200d92\t8\u00a0\u00a06\u00a04'\u0645Z '1\u00e91\nZ\nX1\u03b1{'1]8`c\t\u04168X9\u0301\u200dY\u0915\ud83d\ude42'\u0645429{]\u00a0 a[\u0915X\t\u03b12\t}30``26Y`2\u03010",
+      "tokens": 198,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-57",
+      "text": "\u0416'3\nX133\u4e2d2\u0915\u00a0{]5]6Y\u4e2d\u00a053{9\u00e9\u00a07 6\u00a0b0\u0416Y7\ud83d\ude42\u4e2d 6[\u00e9273\u03b1'8}\ud83d\ude42Y\u0645{{Z\ud83d\ude42\u0915500\n{\u03b1\t\u0915\u06451\t5\u04163 5\tb\u4e2d1 9\n{\u200d{\u09152\u00a0\u0645X\u0301 0`15`'04\u0301b \u00e91a1\u00e9'2\u200d]7\u200d \u0915\u4e2d8c6\n 9 \u03b1YY77\ud83d\ude42\u03014\n\t\t\u0645\u0645a\ud83d\ude420Z\u00a0 a\u4e2d20\t\u0416b\u064589\u06454'\ud83d\ude42",
+      "tokens": 134,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-58",
+      "text": "c1\u09152074\u03b1XZac\u200d8\u0915cc4\u00a0`a\u0645Y{Ya\u03010]\u06458a'8'\u0645437\u00a0{9\u0915\u0645 `\u03b1\u04163X\u03b1['[8",
+      "tokens": 45,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-59",
+      "text": "X2\u4e2d9\n3\u00e9X  b`][\u0301\u0301\u0915Y\u4e2d\u0915\u03019\u0416\u00a044\u00a0\u0915`\u041615Z}YY]\t9[\u09153'7\n[9Y1]2\u03b1\u00a0\u00a0[2\n\t2a\u09154\u4e2d`[\tZ92\u00e9b\u0301\u4e2d\u0301'ac{'2c\ud83d\ude422'1\u4e2d6\u0416\n\u200d\u4e2d09\ud83d\ude427a1\u03b1\u200d\u0416\u0645\u00a0[\u03b1750 \u03b1}\t02\u0416Z1\n72\t\u4e2d\tb\u4e2dac\ud83d\ude42[\u00a0X2}\u0416\u0416X\t \ud83d\ude425\u200da573\u0915XZ]\u041604'\u4e2d\u00a0Z [\t]Z0c\u4e2d'1Z6\u200daY]{\u00e9b]\u00e9\u0301[\u03b1\u00e947",
+      "tokens": 154,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-60",
+      "text": "Z\u0301a5'Z}5Z7]1\u0915\u03b1\u0645b1\u0301X0]Y",
+      "tokens": 22,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-61",
+      "text": "Z\u03b1\ud83d\ude422Y[9a\u00e9{\u09150\u04169X\n5`\u0416\u200dY{[\n86\u06451Z\u064592\u0301]9]\u00a0]\ud83d\ude424a101\u03b1\t7[56b\u200d\u0645\u03015c0\u00a0 ",
+      "tokens": 53,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-62",
+      "text": "a65\u00e9[81\u064561X0\u00e9\u0301}\u0416a\u00e9\u00e9Y\n4Y7]c\u0301`Y]`0'67]1\u09159\u4e2d]Z\u4e2d{\u0645 ]41{\u0301\t\u200d4\u200d\t8Y[\u0645\u00e93`\u200dZ}\u06456Xa55a9\u04161\u0416\u200d\u00a0X9\u4e2d6{\u00a0\ud83d\ude423\u00e9\u03b1\u4e2d\u4e2d\u06456\ud83d\ude42\u4e2d48[4`\ud83d\ude420{\u03b1Xa8\u00e9Z[8\u200d5cY\u0416aZ  5\t3b\tX5`a\u00e9\u03b1\ud83d\ude42Y1a72\u200d7\u00a0 \u200dcZ5\u03b1\u00e9\u0416\ud83d\ude4262\u0915\ud83d\ude42\n\u00e9377{c\ud83d\ude422\t\u09150\u00e9\ud83d\ude423X]b6b\u03b1a4\u00e9\u091589a96'\u0915[\u00a000XZ'a\u00a06\ud83d\ude4259590\u4e2d{Y5\ud83d\ude425Y\u09156\nY",
+      "tokens": 188,
+      "allowsUnicodeCategoryMismatch": false
+    },
+    {
+      "name": "random-63",
+      "text": "Y{bb \tYb\u0301\u00a0\u00e93 607\u200d`\u0416'\u200d\u0915Xb\u0301\tZ[\u0416\ud83d\ude42[9{Y\ud83d\ude42}\u0301}c5b{51\ud83d\ude42 Y\u4e2d\ud83d\ude4249}\u03b1\u200d\ud83d\ude42}\u03b1`X\ud83d\ude42\u4e2d\u0301{{\u06450}b0\u200d2\u03b1\u0645Z\u0645\u00a08Z b\u00e9{\u03b1}\u0416c4c'\u0301Y1c\u00e9{\u00e9cc4{b2cb[8 \u00a0\t\n0\u00e9Z4\u04165\u200d`[0a47]\u06457\u091593\u0416\ud83d\ude42YXZ}b{0]5 1`\u4e2d}7]\u0645c\u4e2db 4c\u0915\u0416\u0645\u200d\u064549",
+      "tokens": 141,
+      "allowsUnicodeCategoryMismatch": false
+    }
+  ],
+  "recipes": [
+    {
+      "name": "long-word",
+      "unit": "antidisestablishmentarianism",
+      "repetitions": 4096,
+      "tokens": 24576
+    },
+    {
+      "name": "long-punctuation",
+      "unit": "!?",
+      "repetitions": 32768,
+      "tokens": 16386
+    },
+    {
+      "name": "long-space",
+      "unit": " ",
+      "repetitions": 262144,
+      "tokens": 2048
+    },
+    {
+      "name": "long-unicode",
+      "unit": "\u4f60\u597d\ud83d\ude42 caf\u00e9\u0301\n",
+      "repetitions": 5000,
+      "tokens": 25000
+    },
+    {
+      "name": "long-contraction",
+      "unit": "'\u017f!",
+      "repetitions": 12000,
+      "tokens": 24001
+    }
+  ]
+}

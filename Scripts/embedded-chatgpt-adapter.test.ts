@@ -593,6 +593,30 @@ function markedChatComposerFixture() {
 }
 
 describe('ChatGPT explicit Chat composer provenance', () => {
+  test('initial missing Chat proof reports only the form and exact control predicates that decided it', async () => {
+    type F = ReturnType<typeof markedChatComposerFixture>;
+    const cases: [Partial<Record<'form' | 'editor' | 'picker', string>>, (f: F) => void][] = [
+      [{ form: 'chat_marker' }, f => { delete f.form.values['data-chatgpt-composer']; }],
+      [{ form: 'thread_marker' }, f => { delete f.form.values['data-thread-find-composer']; }],
+      [{ form: 'placement' }, f => { f.form.values['data-composer-placement']='PRIVATE_CANARY'; }],
+      [{ editor: 'no_exact_match' }, f => { f.composer.values['aria-label']='PRIVATE_CANARY'; }],
+      [{ picker: 'no_exact_match' }, f => { f.picker.trigger.values['aria-label']='PRIVATE_CANARY'; }],
+      [{ picker: 'outside_form' }, f => { f.body.append(f.picker.trigger); }],
+      [{ picker: 'multiple' }, f => { f.form.append(new Element('BUTTON',{...f.picker.trigger.values})); }],
+      [{ form: 'chat_marker', picker: 'no_exact_match' }, f => {
+        delete f.form.values['data-chatgpt-composer']; f.picker.trigger.values['aria-label']='PRIVATE_CANARY'; }],
+    ];
+    for (const [changed,mutate] of cases) {
+      const f=markedChatComposerFixture(); mutate(f); const r=await f.inspect();
+      expect(r.error).toBe('product_mode_unverified');
+      expect(r.productModeDiagnostic.markerInputs).toEqual({ form:'matches', editor:'owned', picker:'owned', ...changed });
+      expect(JSON.stringify(r.productModeDiagnostic)).not.toContain('PRIVATE_CANARY');
+      expect(f.chatMode.clicks).toBe(0); expect(f.picker.trigger.clicks).toBe(0); expect(f.composer.events).toEqual([]);
+      expect(f.world.__computaChatProductMode).toBeUndefined();
+    }
+    expect((await markedChatComposerFixture().inspect()).chatModeReady).toBe(true);
+  });
+
   const successor = (f: ReturnType<typeof markedChatComposerFixture>, keepHidden = true) => {
     const old = f.form, form = new Element('FORM', { ...old.values });
     const editor = new Element('DIV', { ...f.composer.values });

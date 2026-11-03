@@ -10,13 +10,10 @@ final class WebModelRejectedReplyCaptureTests: XCTestCase {
             #"{"name":"exec_command","arguments":null}"#,
             #"{"name":"exec_command","arguments":[]}"#,
             #"{"name":"exec_command"}"#,
-            #"{"name":"exec_command","arguments":{"cmd":"printf private"},"extra":true}"#,
         ]
         let invalidCustoms = [
             #"{"name":"apply_patch","input":{"patch":"private"}}"#,
             #"{"name":"apply_patch","input":null}"#,
-            #"{"name":"apply_patch","arguments":{}}"#,
-            #"{"name":"apply_patch","input":"private literal patch","extra":true}"#,
         ]
         for stream in [false, true] {
             for call in invalidFunctions {
@@ -24,6 +21,20 @@ final class WebModelRejectedReplyCaptureTests: XCTestCase {
             }
             for call in invalidCustoms {
                 try await assertCallShapeFailure(call, custom: true, mode: "exact_task", stream: stream)
+            }
+        }
+    }
+
+    func testUnsupportedCallFieldsRejectEntireBatchWithoutCorrectionOrDispatch() async throws {
+        for call in [
+            #"{"name":"exec_command","arguments":{"cmd":"printf private"},"private-extra":true}"#,
+            #"{"name":"apply_patch","input":"private literal patch","private-extra":true}"#,
+            #"{"name":"apply_patch","arguments":{}}"#
+        ] {
+            let reply = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf private"}},"# + call + "]}"
+            for stream in [false, true] {
+                try await assertRejectedReplyFailure(reply, expected: .unsupportedCallFields,
+                    reason: "unsupported_call_fields", mode: "exact_task", stream: stream)
             }
         }
     }
@@ -38,12 +49,64 @@ final class WebModelRejectedReplyCaptureTests: XCTestCase {
     }
 
     private func assertCallShapeFailure(_ invalidCall: String, custom: Bool, mode: String, stream: Bool) async throws {
+        let reply = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf reply-only-private"}},"# + invalidCall + "]}"
+        try await assertRejectedReplyFailure(reply,
+            expected: custom ? .customInputMustBeString : .argumentsMustBeObject,
+            reason: custom ? "invalid_custom_call_shape" : "invalid_function_call_shape", mode: mode, stream: stream)
+    }
+
+    func testBrowserReadAndEmptyReplyFailuresCaptureExactlyWithoutReleaseOrCorrection() async throws {
+        let calls = [
+            #"{"name":"browser_read","arguments":{"cursor":null}}"#,
+            #"{"name":"browser_continue","arguments":{"cursor":""}}"#,
+            #"{"name":"browser_continue","arguments":{"cursor":"issued","view":"all"}}"#,
+        ]
+        for stream in [false, true] {
+            for call in calls {
+                try await assertRejectedReplyFailure(browserReply(call), expected: .invalidBrowserReadArguments,
+                    reason: "invalid_browser_read_arguments", mode: "exact_task", stream: stream,
+                    additionalTools: browserTools())
+            }
+            for reply in [" \t\n\u{00a0}\r\n", ""] {
+                try await assertRejectedReplyFailure(reply, expected: reply.isEmpty ? nil : .emptyReply,
+                    reason: "empty_reply", mode: "exact_task", stream: stream)
+            }
+        }
+    }
+
+    func testBrowserReadAndEmptyReplyCaptureFailuresPreserveOriginalRejection() async throws {
+        for mode in ["no_arm", "other_task", "unsafe_arm", "unconfigured", "existing_record"] {
+            try await assertRejectedReplyFailure(browserReply(#"{"name":"browser_read","arguments":{"cursor":null}}"#),
+                expected: .invalidBrowserReadArguments, reason: "invalid_browser_read_arguments",
+                mode: mode, stream: true, additionalTools: browserTools())
+            for reply in [" \t\r\n", ""] {
+                try await assertRejectedReplyFailure(reply, expected: reply.isEmpty ? nil : .emptyReply,
+                    reason: "empty_reply", mode: mode, stream: true)
+            }
+        }
+    }
+
+    private func browserReply(_ call: String) -> String {
+        #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf reply-only-private"}},"# + call + "]}"
+    }
+
+    private func browserTools() throws -> [[String: Any]] {
+        try ["browser_read", "browser_continue"].map { name in
+            var tool = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name })
+            tool["parameters"] = tool.removeValue(forKey: "inputSchema")
+            tool["type"] = "function"
+            return tool
+        }
+    }
+
+    // A nil codec failure denotes the pre-existing providerFailed error for a
+    // literal empty snapshot string, before the codec is entered.
+    private func assertRejectedReplyFailure(_ reply: String, expected: WebModelResponseCodec.Failure?,
+        reason: String, mode: String, stream: Bool, additionalTools: [[String: Any]] = []) async throws {
         let fixture = try Fixture(); defer { fixture.remove() }
         let task = UUID(), thread = UUID(), turn = UUID()
         let choice = WebsiteModelChoice(provider: "claude", key: "Haiku 5.5", label: "Haiku 5.5")
-        let expected: WebModelResponseCodec.Failure = custom ? .customInputMustBeString : .argumentsMustBeObject
-        let reason = custom ? "invalid_custom_call_shape" : "invalid_function_call_shape"
-        let label = "\(reason)/\(mode)/stream=\(stream): \(invalidCall)"
+        let label = "\(reason)/\(mode)/stream=\(stream): \(reply.debugDescription)"
         if mode != "no_arm" { try fixture.arm(mode == "other_task" ? UUID() : task) }
         if mode == "unsafe_arm" {
             try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: fixture.armFile.path)
@@ -51,9 +114,8 @@ final class WebModelRejectedReplyCaptureTests: XCTestCase {
         let oldRecord = Data("previous private evidence must remain unchanged".utf8)
         if mode == "existing_record" { try fixture.writeArm(oldRecord, to: fixture.output) }
         let armBefore = try fixture.exists(fixture.armFile) ? Data(contentsOf: fixture.armFile) : nil
-        let reply = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf reply-only-private"}},"# + invalidCall + "]}"
         // Even diagnostic metadata eligible for invalid-JSON correction cannot
-        // turn a parsed call-shape failure into a corrective inference.
+        // turn these rejected replies into a corrective inference.
         let metadata: [String: Any] = ["preCount": 1, "codeCount": 1, "literalCodeValidJSON": true,
             "literalCodeKnownEnvelopeType": "tool_calls", "selectedExtraction": "rendered_fallback",
             "extractionReason": "outside_content", "unknown": "metadata-content-secret"]
@@ -65,16 +127,23 @@ final class WebModelRejectedReplyCaptureTests: XCTestCase {
         let input = try encoded(["model": choice.modelID, "input": "request-only-secret", "stream": stream,
             "tools": [["type": "function", "name": "exec_command", "description": "schema-only-secret",
                        "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]], "required": ["cmd"]]],
-                      ["type": "custom", "name": "apply_patch", "format": ["type": "text"]]]])
+                      ["type": "custom", "name": "apply_patch", "format": ["type": "text"]]] + additionalTools])
         var released: Data?
         do {
             released = try await server.fixtureInfer(input, taskID: task.uuidString,
                 threadID: thread.uuidString, turnID: turn.uuidString)
             XCTFail("The entire reply must remain rejected: \(label)")
         } catch {
-            XCTAssertEqual(error as? WebModelResponseCodec.Failure, expected, label)
-            XCTAssertEqual(error.localizedDescription, expected.localizedDescription, label)
-            XCTAssertEqual(WebModelServer.errorPresentation(for: error).code, "invalid_model_output", label)
+            if let expected {
+                XCTAssertEqual(error as? WebModelResponseCodec.Failure, expected, label)
+                XCTAssertEqual(error.localizedDescription, expected.localizedDescription, label)
+                XCTAssertEqual(WebModelServer.errorPresentation(for: error).code, "invalid_model_output", label)
+            } else {
+                guard case .providerFailed = error as? WebModelServer.Failure else {
+                    XCTFail("The original providerFailed error must survive capture: \(label): \(error)"); return
+                }
+                XCTAssertEqual(error.localizedDescription, WebModelServer.Failure.providerFailed.localizedDescription, label)
+            }
         }
         XCTAssertNil(released, "Neither streaming bytes nor the earlier valid tool call may be released: \(label)")
         let beforeCleanup = await transport.operations()
@@ -223,6 +292,77 @@ final class WebModelRejectedReplyCaptureTests: XCTestCase {
         let cleanup = await server.fixtureFinish(taskID: task.uuidString)
         XCTAssertTrue(cleanup.isEmpty)
         _ = await server.shutdown()
+    }
+
+    func testValidRefusalsAndEmptyMessageDoNotCaptureOrCorrect() async throws {
+        let refusal = "I cannot help with that request."
+        for (reply, text) in [(refusal, refusal),
+                              (#"{"type":"message","text":"I cannot help with that request."}"#, refusal),
+                              (#"{"type":"message","text":""}"#, "")] {
+            let fixture = try Fixture(); defer { fixture.remove() }
+            let task = UUID(), choice = WebsiteModelChoice(provider: "claude", key: "Haiku 5.5", label: "Haiku 5.5")
+            try fixture.arm(task)
+            let arm = try Data(contentsOf: fixture.armFile)
+            let transport = RejectedReplyTransport(reply: reply)
+            let storage = fixture.root.appendingPathComponent("state")
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self,
+                rejectedReplyDirectory: fixture.directory, storageDirectory: storage)
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultClaudeChoice: choice))
+            let input = try encoded(["model": choice.modelID, "input": "request-only-secret", "tools": [], "stream": false])
+            let bytes = try await server.fixtureInfer(input, taskID: task.uuidString)
+            let response = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+            let output = try XCTUnwrap(response["output"] as? [[String: Any]])
+            XCTAssertEqual(output.count, 1)
+            XCTAssertEqual(output.first?["type"] as? String, "message")
+            let content = try XCTUnwrap(output.first?["content"] as? [[String: Any]])
+            XCTAssertEqual(content.first?["text"] as? String, text)
+            XCTAssertFalse(fixture.exists(fixture.output))
+            XCTAssertEqual(try Data(contentsOf: fixture.armFile), arm)
+            XCTAssertFalse(fixture.exists(storage.appendingPathComponent("evidence/format-corrections-v1")))
+            let operations = await transport.operations()
+            XCTAssertEqual(operations, ["webProviderStart", "webProviderSend", "webProviderPoll", "webProviderFinish"])
+            let cleanup = await server.fixtureFinish(taskID: task.uuidString)
+            XCTAssertTrue(cleanup.isEmpty)
+            _ = await server.shutdown()
+        }
+    }
+
+    func testMissingTextAndUnverifiedSnapshotsDoNotCaptureRejectedReply() async throws {
+        for mutation in RejectedReplySnapshotMutationTransport.Mutation.allCases {
+            let fixture = try Fixture(); defer { fixture.remove() }
+            let task = UUID(), choice = WebsiteModelChoice(provider: "claude", key: "Haiku 5.5", label: "Haiku 5.5")
+            try fixture.arm(task)
+            let arm = try Data(contentsOf: fixture.armFile)
+            // Without the outer mutation, this exact whitespace would be captured.
+            let transport = RejectedReplyTransport(reply: " \t\r\n")
+            let storage = fixture.root.appendingPathComponent("state")
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self,
+                rejectedReplyDirectory: fixture.directory, storageDirectory: storage)
+            let prepared = WebsiteInferenceFixtureTransport(transport, defaultClaudeChoice: choice)
+            await server.configureEmbeddedTransport(RejectedReplySnapshotMutationTransport(base: prepared, mutation: mutation))
+            let input = try encoded(["model": choice.modelID, "input": "request-only-secret", "tools": [], "stream": true])
+            var released: Data?
+            do {
+                released = try await server.fixtureInfer(input, taskID: task.uuidString)
+                XCTFail("An invalid snapshot must remain rejected: \(mutation)")
+            } catch {
+                switch (mutation, error as? WebModelServer.Failure) {
+                case (.missingText, .providerFailed), (.nonStringText, .providerFailed),
+                     (.oppositeStartPolicy, .invalidRequest), (.invalidProof, .invalidRequest), (.invalidModel, .modelUnverified): break
+                default: XCTFail("Unexpected rejection for \(mutation): \(error)")
+                }
+            }
+            XCTAssertNil(released)
+            XCTAssertFalse(fixture.exists(fixture.output))
+            XCTAssertEqual(try Data(contentsOf: fixture.armFile), arm)
+            XCTAssertFalse(fixture.exists(storage.appendingPathComponent("evidence/format-corrections-v1")))
+            let operations = await transport.operations()
+            let expected = mutation == .oppositeStartPolicy ? ["webProviderStart"] : ["webProviderStart", "webProviderSend", "webProviderPoll"]
+            XCTAssertEqual(operations, expected, "Unexpected operation sequence for \(mutation)")
+            let cleanup = await server.fixtureFinish(taskID: task.uuidString)
+            XCTAssertTrue(cleanup.isEmpty)
+            _ = await server.shutdown()
+        }
     }
 
     func testUnofferedToolKeepsOriginalRejectionAndCapturesOnlyWithExactTaskArm() async throws {
@@ -545,6 +685,46 @@ private actor RejectedReplyTransport: WebModelTransport {
         default: throw CocoaError(.featureUnsupported)
         }
         return try JSONSerialization.data(withJSONObject: syntheticPreparedWebsiteSnapshot(value))
+    }
+}
+
+// Mutate only after the fixture has supplied its normal proof, so it cannot
+// repair the deliberately invalid completed snapshot before the server sees it.
+private struct RejectedReplySnapshotMutationTransport: WebModelTransport {
+    enum Mutation: CaseIterable, Sendable { case oppositeStartPolicy, missingText, nonStringText, invalidProof, invalidModel }
+    let base: any WebModelTransport
+    let mutation: Mutation
+    func start(params: Data, admission: WebModelStartAdmission,
+               authorization: ChatGPTRequestMetadataLease?) async throws -> Data {
+        let bytes = try await base.start(params: params, admission: admission, authorization: authorization)
+        guard mutation == .oppositeStartPolicy else { return bytes }
+        var snapshot = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        if admission.retainClaudeTurn {
+            snapshot.removeValue(forKey: "turnContinuationCapability")
+            snapshot["freshSessionSubmissionCapability"] = "fresh_session_submission_v1"
+        } else {
+            snapshot.removeValue(forKey: "freshSessionSubmissionCapability")
+            snapshot["turnContinuationCapability"] = "per_submission_ownership_v1"
+        }
+        return try JSONSerialization.data(withJSONObject: snapshot)
+    }
+
+    func request(operation: String, params: Data) async throws -> Data {
+        let bytes = try await base.request(operation: operation, params: params)
+        guard operation == "webProviderPoll",
+              var snapshot = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+              snapshot["state"] as? String == "complete" else { return bytes }
+        switch mutation {
+        case .oppositeStartPolicy: return bytes
+        case .missingText: snapshot.removeValue(forKey: "text")
+        case .nonStringText: snapshot["text"] = 42
+        case .invalidProof:
+            var context = snapshot["modelProofContext"] as? [String: Any] ?? [:]
+            context["firstUserFingerprint"] = "invalid"
+            snapshot["modelProofContext"] = context
+        case .invalidModel: snapshot.removeValue(forKey: "modelEvidence")
+        }
+        return try JSONSerialization.data(withJSONObject: snapshot)
     }
 }
 

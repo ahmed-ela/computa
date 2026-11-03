@@ -77,6 +77,7 @@ final class APIProviderHTTPClient: @unchecked Sendable {
     struct RequestProjectionExpectation: Sendable {
         let wireAPI: APIProviderDefinition.WireAPI
         let supported: Bool
+        private let expectedHostRole: String
         private let host: Data?
         private let userInputs: [Data]
         let userInputRevision: Int?
@@ -86,6 +87,7 @@ final class APIProviderHTTPClient: @unchecked Sendable {
              userInputRevision: Int?, checkpointRevision: Int?) {
             wireAPI = provider.wireAPI
             supported = !(provider.wireAPI == .chatCompletions && provider.isCerebrasInference && modelID == "qwen-3.8-27b")
+            expectedHostRole = provider.wireAPI == .chatCompletions ? provider.chatCompletionsInstructionRole.rawValue : "developer"
             host = hostMessage.map { Data($0.utf8) }; self.userInputs = userInputs.map { Data($0.utf8) }
             self.userInputRevision = userInputRevision; self.checkpointRevision = checkpointRevision
         }
@@ -104,11 +106,12 @@ final class APIProviderHTTPClient: @unchecked Sendable {
                       let value = part["text"] as? String else { return nil }
                 return Data(value.utf8)
             }
-            var hostExact: Bool?, hostRole: Bool?, usersExact: Bool?, userRoles: Bool?
+            var hostExact: Bool?, hostRole: Bool?, hostRoleMatches: Bool?, usersExact: Bool?, userRoles: Bool?
             if supported, let messages {
                 let hostIndex = messages.count - userInputs.count - 1
                 hostExact = host != nil && hostIndex >= 0 && text(messages[hostIndex]) == host
                 hostRole = hostIndex >= 0 && messages[hostIndex]["role"] as? String == "developer"
+                hostRoleMatches = hostIndex >= 0 && messages[hostIndex]["role"] as? String == expectedHostRole
                 let tail = Array(messages.suffix(userInputs.count))
                 usersExact = tail.count == userInputs.count && zip(tail, userInputs).allSatisfy { text($0.0) == $0.1 }
                 userRoles = tail.count == userInputs.count && tail.allSatisfy { $0["role"] as? String == "user" }
@@ -119,6 +122,7 @@ final class APIProviderHTTPClient: @unchecked Sendable {
                 userInputRevision: userInputRevision, checkpointRevision: checkpointRevision,
                 hostExpected: host != nil, activeInputCount: userInputs.count,
                 hostBytesAtExpectedPosition: hostExact, hostRoleIsDeveloper: hostRole,
+                expectedHostRole: expectedHostRole, hostRoleMatchesExpected: hostRoleMatches,
                 activeInputBytesAtTail: usersExact, activeInputRolesAreUser: userRoles)
         }
     }
@@ -136,6 +140,8 @@ final class APIProviderHTTPClient: @unchecked Sendable {
         let activeInputCount: Int
         let hostBytesAtExpectedPosition: Bool?
         let hostRoleIsDeveloper: Bool?
+        let expectedHostRole: String
+        let hostRoleMatchesExpected: Bool?
         let activeInputBytesAtTail: Bool?
         let activeInputRolesAreUser: Bool?
     }
@@ -269,7 +275,8 @@ final class APIProviderHTTPClient: @unchecked Sendable {
     /// arbitrary vendor text never enters the normal error or model transcript.
     static func rateLimitFailure(body: Data) -> Failure {
         guard body.count <= 16_384,
-              let object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] else { return .rateLimited }
+              let object = ((try? JSONSerialization.jsonObject(with: body)) as? [String: Any])
+                ?? singleErrorSSEObject(body) else { return .rateLimited }
         let value = object["error"] ?? object
         let fields = value as? [String: Any]
         for key in ["code", "type"] {
@@ -287,13 +294,22 @@ final class APIProviderHTTPClient: @unchecked Sendable {
     /// values, paths, credentials, or request data. Unknown formats stay generic.
     static func rejectedRequest(status: Int, body: Data) -> Failure {
         if status == 413 { return .contextLimit }
-        guard [400, 422].contains(status), body.count <= 16_384,
-              let object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] else { return .invalidRequest }
+        guard [400, 422].contains(status), body.count <= 16_384 else { return .invalidRequest }
+        let sse = singleErrorSSEObject(body)
+        guard let object = ((try? JSONSerialization.jsonObject(with: body)) as? [String: Any]) ?? sse else { return .invalidRequest }
         let envelope = object["error"] ?? object
         let error: [String: Any]
         if let fields = envelope as? [String: Any] { error = fields }
         else if let message = envelope as? String { error = ["message": message] }
         else { return .invalidRequest }
+        // This exact role validation is observed on Alibaba Chat Completions.
+        // A prose mention, different code/type, conflicting param or duplicate
+        // JSON key must not turn arbitrary vendor text into a parameter finding.
+        if Set(error.keys) == ["code", "param", "message", "type"],
+           error["code"] as? String == "invalid_parameter_error",
+           error["type"] as? String == "invalid_request_error", error["param"] is NSNull,
+           error["message"] as? String == "developer is not one of ['system', 'assistant', 'user', 'tool', 'function']",
+           sse != nil || APIModelCorrectionJSON.isUnambiguous(body) { return .invalidMessages }
         let codes = [error["code"] as? String, error["type"] as? String].compactMap { $0 }.filter { $0.utf8.count <= 128 }
         if codes.contains(where: { ["context_length_exceeded", "context_window_exceeded", "context_limit_exceeded", "max_tokens_exceeded"].contains($0) }) { return .contextLimit }
         let parameters: [(String, Failure)] = [
@@ -330,6 +346,39 @@ final class APIProviderHTTPClient: @unchecked Sendable {
         return .invalidRequest
     }
 
+    /// HTTP errors sometimes use one SSE data frame instead of a JSON body.
+    /// Accept only that bounded, complete error envelope, never stream fragments,
+    /// comments, success frames, DONE, unknown fields or mixed/multiple events.
+    /// This is used only by error classification/private diagnostics, not success
+    /// decoding, and does not authorize another request.
+    private static func singleErrorSSEObject(_ body: Data) -> [String: Any]? {
+        guard body.count <= 16_384, let text = String(data: body, encoding: .utf8) else { return nil }
+        let normalized = text.replacingOccurrences(of: "\r\n", with: "\n")
+        guard !normalized.contains("\r") else { return nil }
+        let lines = normalized.components(separatedBy: "\n")
+        guard lines.count == 3, lines[1].isEmpty, lines[2].isEmpty,
+              lines[0].hasPrefix("data:") else { return nil }
+        var payload = lines[0].dropFirst(5)
+        if payload.first == " " { payload = payload.dropFirst() }
+        let bytes = Data(payload.utf8)
+        guard APIModelCorrectionJSON.isUnambiguous(bytes),
+              let object = (try? JSONSerialization.jsonObject(with: bytes)) as? [String: Any],
+              Set(object.keys) == ["error"] || Set(object.keys) == ["error", "id"],
+              let error = object["error"] as? [String: Any],
+              Set(error.keys) == ["code", "param", "message", "type"],
+              let message = error["message"] as? String, !message.isEmpty, message.utf8.count <= 4_096,
+              let code = error["code"] as? String, !code.isEmpty, code.utf8.count <= 128,
+              let type = error["type"] as? String, !type.isEmpty, type.utf8.count <= 128 else { return nil }
+        if !(error["param"] is NSNull) {
+            guard let param = error["param"] as? String, param.utf8.count <= 256 else { return nil }
+        }
+        if let id = object["id"] {
+            guard let id = id as? String, !id.isEmpty, id.utf8.count <= 256,
+                  !id.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return nil }
+        }
+        return object
+    }
+
     /// Created only for an explicitly armed request. Never copies arbitrary response
     /// objects: validation input/ctx, headers, and request content have no output path.
     static func rejectionDiagnostic(status: Int, body: Data, modelID: String?, key: String, requestBody: Data? = nil) -> RejectionDiagnostic {
@@ -351,11 +400,12 @@ final class APIProviderHTTPClient: @unchecked Sendable {
             .init(message: clean(object["message"] ?? object["msg"]), type: clean(object["type"]), code: clean(object["code"]), param: clean(object["param"]))
         }
         var shape = "non_json", projected: RejectionDiagnostic.Fields?, details: [RejectionDiagnostic.Fields] = []
+        let sse = status >= 400 ? singleErrorSSEObject(body) : nil
         if body.count > 16_384 { shape = "oversized" }
-        else if let raw = try? JSONSerialization.jsonObject(with: body, options: [.fragmentsAllowed]) {
+        else if let raw = (try? JSONSerialization.jsonObject(with: body, options: [.fragmentsAllowed])) ?? sse {
             var value: Any = raw
             if let object = raw as? [String: Any] {
-                if let wrapped = object["error"] { value = wrapped; shape = "wrapped" }
+                if let wrapped = object["error"] { value = wrapped; shape = sse == nil ? "wrapped" : "sse_wrapped" }
                 else { shape = "bare" }
             } else { shape = "other_json" }
             if let object = value as? [String: Any] {

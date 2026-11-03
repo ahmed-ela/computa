@@ -18,7 +18,7 @@ enum APIModelResponseCodec {
             case .invalidRequest: "The API inference request is invalid."
             case .unsupportedParameter: "The API adapter does not support a requested parameter."
             case .unsupportedModality: "The selected API model does not support this input attachment."
-            case .invalidTool: "The API response used an unknown or unavailable tool."
+            case .invalidTool: "An API tool definition or call was malformed or unavailable."
             case .invalidArguments: "The API response contained invalid tool arguments. No tool from this response was executed."
             case .invalidHistory: "The API tool history is incomplete or inconsistent."
             case .invalidResponse: "The API provider returned an invalid response. No tool from this response was executed."
@@ -81,6 +81,87 @@ enum APIModelResponseCodec {
         observe?(guardID)
         return .invalidResponse
     }
+    /// Only the fatal tool-call guard is retained. Provider names, IDs, values,
+    /// call contents and catalog entries never enter this observation.
+    struct InvalidToolDiagnostic: Codable, Equatable, Sendable {
+        enum NameMatch: String, Codable, Sendable {
+            case wireName = "wire_name", nativeName = "native_name", qualifiedName = "qualified_name", none
+        }
+        enum OfferedNameShape: String, Codable, Sendable {
+            case doubled = "double_offered_wire", digestPrefix = "stem_digest_prefix"
+            case otherSuffix = "stem_other_suffix", ambiguousStem = "ambiguous_stem", noMatch = "no_shape_match"
+        }
+        enum Guard: String, Codable, Sendable, CaseIterable {
+            case chatCallType = "chat_call_type", chatCallIDType = "chat_call_id_type"
+            case chatCallIDSyntax = "chat_call_id_syntax", chatCallIDHistory = "chat_call_id_history"
+            case chatCallIDDuplicate = "chat_call_id_duplicate", chatFunctionType = "chat_function_type"
+            case chatNameType = "chat_name_type", chatNameNotAllowed = "chat_name_not_allowed"
+            case chatNameNotDeclared = "chat_name_not_declared", chatArgumentsType = "chat_arguments_type"
+            case sseToolType = "sse_tool_type"
+            case responsesNameType = "responses_name_type", responsesNameNotDeclared = "responses_name_not_declared"
+            case responsesToolType = "responses_tool_type", responsesNameNotAllowed = "responses_name_not_allowed"
+            case responsesCallIDType = "responses_call_id_type", responsesCallIDSyntax = "responses_call_id_syntax"
+            case responsesCallIDHistory = "responses_call_id_history", responsesCallIDDuplicate = "responses_call_id_duplicate"
+            case responsesCallCount = "responses_call_count", responsesRequiredCall = "responses_required_call"
+        }
+        let format: InvalidResponseDiagnostic.Format
+        let guardID: Guard
+        /// Exact relation to the current declared catalog, never authorization.
+        /// Absent for every guard that did not validate a disallowed chat name.
+        var nameMatch: NameMatch? = nil
+        var offeredNameShape: OfferedNameShape? = nil
+        var isConsistent: Bool {
+            guard nameMatch == nil || guardID == .chatNameNotAllowed else { return false }
+            guard offeredNameShape == nil || nameMatch == .some(.none) else { return false }
+            switch guardID {
+            case .chatCallType, .chatCallIDType, .chatCallIDSyntax, .chatCallIDHistory, .chatCallIDDuplicate,
+                 .chatFunctionType, .chatNameType, .chatNameNotAllowed, .chatNameNotDeclared, .chatArgumentsType:
+                return format == .chatJSON || format == .chatSSE
+            case .sseToolType: return format == .chatSSE
+            case .responsesNameType, .responsesNameNotDeclared, .responsesToolType, .responsesNameNotAllowed,
+                 .responsesCallIDType, .responsesCallIDSyntax, .responsesCallIDHistory, .responsesCallIDDuplicate,
+                 .responsesCallCount, .responsesRequiredCall:
+                return format == .responsesJSON
+            }
+        }
+    }
+    private typealias InvalidToolObserver = (InvalidToolDiagnostic.Guard, InvalidToolDiagnostic.NameMatch?) -> Void
+    private static func invalidTool(_ guardID: InvalidToolDiagnostic.Guard, _ observe: InvalidToolObserver?,
+                                    nameMatch: InvalidToolDiagnostic.NameMatch? = nil) -> Failure {
+        observe?(guardID, nameMatch)
+        return .invalidTool
+    }
+    // Shape of a rejected spelling against the offered semantic_v2 catalog. A
+    // doubled assembled value does not identify which stream deltas produced it.
+    private static func offeredNameShape(_ name: String, allowedNames: Set<String>) -> InvalidToolDiagnostic.OfferedNameShape? {
+        // Declared wire names are at most 64 ASCII bytes; two whole names fit.
+        guard name.utf8.prefix(129).count <= 128 else { return nil }
+        guard name.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) ||
+            (48...57).contains($0) || $0 == 95 || $0 == 45 }) else { return .noMatch }
+        if allowedNames.contains(where: { name == $0 + $0 }) { return .doubled }
+        var match: InvalidToolDiagnostic.OfferedNameShape?
+        for wire in allowedNames {
+            // semanticToolName appends "__" and exactly 24 hex digits.
+            let stemAndSeparator = wire.dropLast(24)
+            guard name.hasPrefix(stemAndSeparator) else { continue }
+            let suffix = name.dropFirst(stemAndSeparator.count)
+            guard suffix.count <= 24, suffix.utf8.allSatisfy({ (65...90).contains($0) ||
+                (97...122).contains($0) || (48...57).contains($0) }) else { continue }
+            if match != nil { return .ambiguousStem }
+            match = suffix.count < 24 && wire.suffix(24).hasPrefix(suffix) ? .digestPrefix : .otherSuffix
+        }
+        return match ?? .noMatch
+    }
+
+    private static func diagnosticNameMatch(_ name: String, tools: [Tool]) -> InvalidToolDiagnostic.NameMatch {
+        if tools.contains(where: { $0.wireName == name }) { return .wireName }
+        if tools.contains(where: { $0.name == name }) { return .nativeName }
+        if tools.contains(where: { tool in
+            guard let namespace = tool.namespace else { return false }
+            return namespace + "." + tool.name == name
+        }) { return .qualifiedName }
+        return .none
+    }
     /// Preserve the exact Foundation parser/options. Only parser failure is
     /// reclassified; parsed nonobject/root-shape guards remain at their callers.
     private static func responseJSONValue(_ data: Data, observe: InvalidResponseObserver?) throws -> Any {
@@ -105,6 +186,7 @@ enum APIModelResponseCodec {
         let custom: Bool
         let schema: [String: Any]
         let description: String
+        var patchProjection: AlibabaPatchProjection? = nil
         var browserWaitHistoricalSchemas: [[String: Any]]? = nil
         var identity: String { (namespace ?? "") + "\u{0}" + name }
     }
@@ -387,10 +469,11 @@ enum APIModelResponseCodec {
             guard var messages = body["messages"] as? [[String: Any]] else { throw Failure.invalidRequest }
             let maintenance = try removeMaintenanceTail(from: &messages)
             // Preserve the provider's template after adding trusted host text.
-            // Qwen requires its system instructions in one opening message;
+            // Cerebras Qwen requires its system instructions in one opening message;
             // merely mapping developer to system would create a late system
             // message and revive the provider's wrong_api_format rejection.
-            let role = original.provider.isCerebrasInference && original.model.id == "qwen-3.8-27b" ? "system" : "developer"
+            let role = APIProviderCatalog.Selection(provider: original.provider, model: original.model)
+                .chatCompletionsInstructionRole.rawValue
             messages.append(["role": role, "content": text])
             messages += userInputs.map { ["role": "user", "content": $0] }
             if let maintenance { messages.append(maintenance) }
@@ -445,10 +528,12 @@ enum APIModelResponseCodec {
         // Removing an active tool must not renumber its neighbours: historical
         // calls and current declarations share one stable provider identity.
         let historyByIdentity = Dictionary(uniqueKeysWithValues: historyTools.map { ($0.identity, $0) })
-        let tools = try parseTools(raw["tools"], naming: toolNaming).map { visible -> Tool in
+        let alibabaPatchGuidance = selection.provider.wireAPI == .chatCompletions && selection.provider.isAlibabaModelStudioInference
+        let typedPatch = alibabaPatchGuidance && selection.model.id == "qwen3.7-flash"
+        let tools = try parseTools(raw["tools"], naming: toolNaming, alibabaPatchGuidance: alibabaPatchGuidance, typedPatch: typedPatch).map { visible -> Tool in
             guard let original = historyByIdentity[visible.identity] else { throw Failure.invalidTool }
             return Tool(name: visible.name, namespace: visible.namespace, wireName: original.wireName,
-                        custom: visible.custom, schema: visible.schema, description: visible.description)
+                        custom: visible.custom, schema: visible.schema, description: visible.description, patchProjection: visible.patchProjection)
         }
         var allowed = Set(tools.map(\.wireName)), required = false
         var wireChoice: Any = "auto"
@@ -467,7 +552,9 @@ enum APIModelResponseCodec {
         let limit = try integer(raw["max_tool_calls"], default: 64, range: 1...128)
         let maximumCalls = parallel ? limit : 1
         let configuration = try responseConfiguration(raw, parallel: parallel)
-        let history = try messages(raw, tools: historyTools, selection: selection, threadID: threadID, capsules: capsules, toolNaming: toolNaming)
+        let usesCompiledPatch = tools.contains { $0.patchProjection != nil && allowed.contains($0.wireName) }
+        let history = try messages(raw, tools: historyTools, selection: selection, threadID: threadID, capsules: capsules,
+            toolNaming: toolNaming, usesCompiledPatch: usesCompiledPatch)
         var body: [String: Any]
         if selection.provider.wireAPI == .responses {
             body = raw
@@ -601,7 +688,7 @@ enum APIModelResponseCodec {
         return stem + "__" + suffix
     }
 
-    private static func parseTools(_ value: Any?, naming: ToolNaming) throws -> [Tool] {
+    private static func parseTools(_ value: Any?, naming: ToolNaming, alibabaPatchGuidance: Bool = false, typedPatch: Bool = false) throws -> [Tool] {
         if absent(value) { return [] }
         guard let definitions = value as? [[String: Any]], definitions.count <= 256 else { throw Failure.invalidTool }
         var result: [Tool] = [], identities = Set<String>(), wireNames = Set<String>()
@@ -611,11 +698,27 @@ enum APIModelResponseCodec {
             if !absent(definition["description"]), !(definition["description"] is String) { throw Failure.invalidTool }
             if !absent(definition["strict"]), strictBool(definition["strict"]) == nil { throw Failure.invalidTool }
             let custom = type == "custom"
+            let projection = typedPatch ? AlibabaPatchProjection.matching(definition, namespace: namespace) : nil
             let schema: [String: Any]
-            if custom {
+            if let projection {
+                schema = projection.schema
+            } else if custom {
                 // Put the literal-input contract on the argument the provider fills,
                 // while preserving the complete native grammar in the description.
-                let inputDescription = "Literal native tool input. Follow the exact text or grammar contract in this function's description, including delimiters and newlines. Encode the contents once as this JSON string; do not add quoting, JSON, shell syntax or Markdown fences unless the native contract requires them."
+                var inputDescription = "Literal native tool input. Follow the exact text or grammar contract in this function's description, including delimiters and newlines. Encode the contents once as this JSON string; do not add quoting, JSON, shell syntax or Markdown fences unless the native contract requires them."
+                // Both bundled Rust apply_patch grammars use these update and footer rules.
+                // Describe the suffix on the string field; the engine still parses the original input.
+                if alibabaPatchGuidance, name == "apply_patch", namespace == nil || namespace == "functions",
+                   let format = definition["format"] as? [String: Any], format["type"] as? String == "grammar",
+                   format["syntax"] as? String == "lark", let grammar = format["definition"] as? String,
+                   grammar.utf8.count <= 16_384 {
+                    let rules = Set(grammar.split(separator: "\n"))
+                    if rules.contains(#"end_patch: "*** End Patch" LF?"#),
+                       rules.contains(#"change_context: ("@@" | "@@ " /(.+)/) LF"#),
+                       rules.contains(#"change_line: ("+" | "-" | " ") /(.*)/ LF"#) {
+                        inputDescription += " For an update, every @@ header needs at least one following source line (space, + or - prefix). Close the patch with *** End Patch. Example decoded update tail with sample lines:\n@@\n-old\n+new\n*** End Patch"
+                    }
+                }
                 schema = ["type": "object", "properties": ["input": ["type": "string", "description": inputDescription]], "required": ["input"], "additionalProperties": false]
             } else {
                 guard var parameters = definition["parameters"] as? [String: Any], parameters["type"] as? String == "object" else { throw Failure.invalidTool }
@@ -626,10 +729,15 @@ enum APIModelResponseCodec {
                 if parameters["additionalProperties"] == nil, parameters["properties"] != nil { parameters["additionalProperties"] = false }
                 schema = parameters
             }
-            let description = custom ? try customToolDescription(definition) : (definition["description"] as? String ?? "")
+            let description: String
+            if projection != nil {
+                description = AlibabaPatchProjection.description
+            } else {
+                description = custom ? try customToolDescription(definition) : (definition["description"] as? String ?? "")
+            }
             let wireName = naming == .legacy ? "computa_tool_\(result.count)" : semanticToolName(name: name, namespace: namespace)
             let tool = Tool(name: name, namespace: namespace, wireName: wireName, custom: custom,
-                            schema: schema, description: description,
+                            schema: schema, description: description, patchProjection: projection,
                             browserWaitHistoricalSchemas: ComputaModelToolCatalog.browserWaitDefinitionVariants(
                                 definition, namespace: namespace)?.historical)
             // Validate the complete catalog before filtering, so a collision
@@ -678,7 +786,7 @@ enum APIModelResponseCodec {
 
     private struct History { let messages: [[String: Any]]; let callIDs: Set<String> }
     private static func messages(_ raw: [String: Any], tools: [Tool], selection: APIProviderCatalog.Selection,
-                                 threadID: String, capsules: APIReasoningCapsules, toolNaming: ToolNaming) throws -> History {
+                                 threadID: String, capsules: APIReasoningCapsules, toolNaming: ToolNaming, usesCompiledPatch: Bool) throws -> History {
         var messages: [[String: Any]] = [], seen = Set<String>(), pending = Set<String>(), pendingCustom = Set<String>()
         // Native compaction deliberately offers no tools while retaining completed
         // calls/results. Their display-only aliases cannot recover declaration
@@ -720,7 +828,7 @@ enum APIModelResponseCodec {
                 }
             case "message":
                 guard let originalRole = item["role"] as? String, ["system", "developer", "user", "assistant"].contains(originalRole) else { throw Failure.invalidHistory }
-                let role = selection.provider.isCerebrasInference && selection.model.id == "qwen-3.8-27b" && originalRole == "developer" ? "system" : originalRole
+                let role = originalRole == "developer" ? selection.chatCompletionsInstructionRole.rawValue : originalRole
                 if selection.provider.isCerebrasInference, role != "user", containsImage(item["content"]) { throw Failure.unsupportedModality }
                 if role == "assistant", assistant == nil {
                     assistant = ["role": role, "content": try content(item["content"], images: selection.model.supportsImages, cerebras: selection.provider.isCerebrasInference)]
@@ -731,7 +839,11 @@ enum APIModelResponseCodec {
                         assistant = ["role": role, "content": try content(item["content"], images: selection.model.supportsImages, cerebras: selection.provider.isCerebrasInference)]
                         assistantIsFinal = item["phase"] as? String == "final_answer"
                     }
-                    else { messages.append(["role": role, "content": try content(item["content"], images: selection.model.supportsImages, cerebras: selection.provider.isCerebrasInference)]) }
+                    else {
+                        let project = originalRole == "developer" && usesCompiledPatch
+                        messages.append(["role": role, "content": try content(item["content"], images: selection.model.supportsImages,
+                            cerebras: selection.provider.isCerebrasInference, projectPatchInstructions: project)])
+                    }
                 }
             case "function_call", "custom_tool_call":
                 guard let id = item["call_id"] as? String, validCallID(id), seen.insert(id).inserted,
@@ -840,15 +952,19 @@ enum APIModelResponseCodec {
         }
         return items
     }
-    private static func content(_ value: Any?, images: Bool, cerebras: Bool) throws -> Any {
-        if let string = value as? String { guard string.utf8.count <= maximumText else { throw Failure.invalidRequest }; return string }
+    private static func content(_ value: Any?, images: Bool, cerebras: Bool, projectPatchInstructions: Bool = false) throws -> Any {
+        func present(_ text: String) -> String {
+            projectPatchInstructions ? AlibabaPatchProjection.projectedDeveloperText(text) : text
+        }
+        if let string = value as? String { guard string.utf8.count <= maximumText else { throw Failure.invalidRequest }; return present(string) }
         guard let parts = value as? [[String: Any]], parts.count <= 2_048 else { throw Failure.invalidHistory }
         var converted: [[String: Any]] = [], text = "", imagePresent = false
         for part in parts {
             switch part["type"] as? String {
             case "input_text", "output_text", "text":
                 guard let value = part["text"] as? String else { throw Failure.invalidHistory }
-                text += value; converted.append(["type": "text", "text": value])
+                let projected = present(value)
+                text += projected; converted.append(["type": "text", "text": projected])
             case "input_image":
                 guard images, let url = part["image_url"] as? String,
                       url.hasPrefix("data:image/") || URL(string: url)?.scheme == "https" else { throw Failure.unsupportedModality }
@@ -878,19 +994,23 @@ enum APIModelResponseCodec {
 
     static func decodeForCorrection(_ result: APIProviderHTTPClient.Result, request: Request,
                                     onArgumentRejection: ((ArgumentValidationDiagnostic) -> Void)? = nil,
-                                    onInvalidResponse: ((InvalidResponseDiagnostic) -> Void)? = nil) throws -> DecodeOutcome {
+                                    onInvalidResponse: ((InvalidResponseDiagnostic) -> Void)? = nil,
+                                    onInvalidTool: ((InvalidToolDiagnostic) -> Void)? = nil) throws -> DecodeOutcome {
         let format: InvalidResponseDiagnostic.Format = request.provider.wireAPI == .responses ? .responsesJSON
             : (result.contentType.contains("text/event-stream") ? .chatSSE : .chatJSON)
         let observeResponseGuard: InvalidResponseObserver? = onInvalidResponse.map { callback in
             { guardID in callback(.init(format: format, guardID: guardID)) }
         }
-        if request.provider.wireAPI == .responses { return .reply(try decodeResponses(result.body, request: request, observe: observeResponseGuard)) }
+        let observeToolGuard: InvalidToolObserver? = onInvalidTool.map { callback in
+            { guardID, nameMatch in callback(.init(format: format, guardID: guardID, nameMatch: nameMatch)) }
+        }
+        if request.provider.wireAPI == .responses { return .reply(try decodeResponses(result.body, request: request, observe: observeResponseGuard, observeTool: observeToolGuard)) }
         let envelope: [String: Any], textDeltas: [String], argumentDeltas: [[String]]
         let rawCorrectionEligible: Bool, envelopeShapeValid: Bool, unambiguousJSON: Bool, streamShapeAndUsageValid: Bool
         let envelopeRejection: ArgumentValidationDiagnostic.EnvelopeRejection?
         let jsonRejection: APIModelCorrectionJSON.RejectionDiagnostic?
         if result.contentType.contains("text/event-stream") {
-            let assembled = try assembleChatStream(result.body, cerebras: request.provider.isCerebrasInference, diagnostics: onArgumentRejection != nil, observe: observeResponseGuard)
+            let assembled = try assembleChatStream(result.body, cerebras: request.provider.isCerebrasInference, diagnostics: onArgumentRejection != nil, observe: observeResponseGuard, observeTool: observeToolGuard)
             envelope = assembled.object; textDeltas = assembled.text; argumentDeltas = assembled.arguments
             rawCorrectionEligible = assembled.correctionEligible
             envelopeShapeValid = assembled.envelopeShapeValid; unambiguousJSON = assembled.unambiguousJSON
@@ -931,10 +1051,27 @@ enum APIModelResponseCodec {
         var callIDs = request.historyCallIDs
         var validatedCalls: [(id: String, tool: Tool, arguments: String)] = []
         for call in calls {
-            guard call["type"] as? String == "function", let id = call["id"] as? String, validCallID(id), callIDs.insert(id).inserted,
-                  let function = call["function"] as? [String: Any], let wireName = function["name"] as? String,
-                  request.allowedTools.contains(wireName), let tool = request.tools.first(where: { $0.wireName == wireName }),
-                  let arguments = function["arguments"] as? String else { throw Failure.invalidTool }
+            // Keep the original short-circuit order and insertion point. Each
+            // failed guard emits one finite label, then the same fatal error.
+            guard call["type"] as? String == "function" else { throw invalidTool(.chatCallType, observeToolGuard) }
+            guard let id = call["id"] as? String else { throw invalidTool(.chatCallIDType, observeToolGuard) }
+            guard validCallID(id) else { throw invalidTool(.chatCallIDSyntax, observeToolGuard) }
+            guard callIDs.insert(id).inserted else {
+                throw invalidTool(request.historyCallIDs.contains(id) ? .chatCallIDHistory : .chatCallIDDuplicate, observeToolGuard)
+            }
+            guard let function = call["function"] as? [String: Any] else { throw invalidTool(.chatFunctionType, observeToolGuard) }
+            guard let wireName = function["name"] as? String else { throw invalidTool(.chatNameType, observeToolGuard) }
+            guard request.allowedTools.contains(wireName) else {
+                if let onInvalidTool {
+                    let match = diagnosticNameMatch(wireName, tools: request.tools)
+                    let shape = match == .none && request.toolNaming == .semantic && request.provider.isAlibabaModelStudioInference
+                        ? offeredNameShape(wireName, allowedNames: request.allowedTools) : nil
+                    onInvalidTool(.init(format: format, guardID: .chatNameNotAllowed, nameMatch: match, offeredNameShape: shape))
+                }
+                throw Failure.invalidTool
+            }
+            guard let tool = request.tools.first(where: { $0.wireName == wireName }) else { throw invalidTool(.chatNameNotDeclared, observeToolGuard) }
+            guard let arguments = function["arguments"] as? String else { throw invalidTool(.chatArgumentsType, observeToolGuard) }
             validatedCalls.append((id, tool, arguments))
         }
         var parsedArguments: [[String: Any]] = [], argumentsRejected = false
@@ -1004,7 +1141,7 @@ enum APIModelResponseCodec {
                            finalTextSource: calls.isEmpty ? finalTextSource(text, response: resource) : nil))
     }
 
-    private static func decodeResponses(_ data: Data, request: Request, observe: InvalidResponseObserver?) throws -> Reply {
+    private static func decodeResponses(_ data: Data, request: Request, observe: InvalidResponseObserver?, observeTool: InvalidToolObserver?) throws -> Reply {
         guard let raw = try responseJSONValue(data, observe: observe) as? [String: Any], raw["object"] as? String == "response",
               raw["status"] as? String == "completed", absent(raw["error"]), absent(raw["incomplete_details"]),
               let original = raw["output"] as? [[String: Any]], !original.isEmpty else { throw Failure.incompleteResponse }
@@ -1016,10 +1153,15 @@ enum APIModelResponseCodec {
             switch type {
             case "function_call", "custom_tool_call":
                 guard absent(value["status"]) || value["status"] as? String == "completed" else { throw Failure.incompleteResponse }
-                guard let name = value["name"] as? String,
-                      let tool = request.tools.first(where: { $0.name == name && $0.namespace == value["namespace"] as? String }),
-                      tool.custom == (type == "custom_tool_call"), request.allowedTools.contains(tool.wireName),
-                      let callID = value["call_id"] as? String, validCallID(callID), ids.insert(callID).inserted else { throw Failure.invalidTool }
+                guard let name = value["name"] as? String else { throw invalidTool(.responsesNameType, observeTool) }
+                guard let tool = request.tools.first(where: { $0.name == name && $0.namespace == value["namespace"] as? String }) else { throw invalidTool(.responsesNameNotDeclared, observeTool) }
+                guard tool.custom == (type == "custom_tool_call") else { throw invalidTool(.responsesToolType, observeTool) }
+                guard request.allowedTools.contains(tool.wireName) else { throw invalidTool(.responsesNameNotAllowed, observeTool) }
+                guard let callID = value["call_id"] as? String else { throw invalidTool(.responsesCallIDType, observeTool) }
+                guard validCallID(callID) else { throw invalidTool(.responsesCallIDSyntax, observeTool) }
+                guard ids.insert(callID).inserted else {
+                    throw invalidTool(request.historyCallIDs.contains(callID) ? .responsesCallIDHistory : .responsesCallIDDuplicate, observeTool)
+                }
                 if tool.custom {
                     guard let input = value["input"] as? String else { throw Failure.invalidArguments }
                     _ = try validatedArguments(String(decoding: try json(["input": input]), as: UTF8.self), tool: tool)
@@ -1047,7 +1189,8 @@ enum APIModelResponseCodec {
             default: throw invalidResponse(.responsesItemType, observe)
             }
         }
-        guard count <= request.maximumCalls, !request.requiredTool || count > 0 else { throw Failure.invalidTool }
+        guard count <= request.maximumCalls else { throw invalidTool(.responsesCallCount, observeTool) }
+        guard !request.requiredTool || count > 0 else { throw invalidTool(.responsesRequiredCall, observeTool) }
         let resource = response(id: "resp_" + UUID().uuidString, request: request, output: output, text: text,
                                 usage: try usage(raw["usage"], responses: true, observe: observe))
         return Reply(response: resource, textDeltas: text.isEmpty ? [] : [text], argumentDeltas: [],
@@ -1123,7 +1266,7 @@ enum APIModelResponseCodec {
         }
     }
 
-    private static func assembleChatStream(_ data: Data, cerebras: Bool, diagnostics: Bool = false, observe: InvalidResponseObserver?) throws -> ChatStream {
+    private static func assembleChatStream(_ data: Data, cerebras: Bool, diagnostics: Bool = false, observe: InvalidResponseObserver?, observeTool: InvalidToolObserver?) throws -> ChatStream {
         guard let string = String(data: data, encoding: .utf8) else { throw invalidResponse(.sseUTF8, observe) }
         var done = false, model: String?, id: String?, role: String?, finish: String?, usage: Any?
         var text: [String] = [], reasoning = "", calls: [Int: (id: String, name: String, arguments: [String])] = [:]
@@ -1182,7 +1325,7 @@ enum APIModelResponseCodec {
                     let index = try responseInteger(row["index"], default: -1, range: 0...127, guardID: .sseToolIndex, observe: observe)
                     var call = calls[index] ?? (id: "", name: "", arguments: [])
                     if let value = row["id"] as? String { guard call.id.isEmpty else { throw invalidResponse(.sseRepeatedCallID, observe) }; call.id = value }
-                    if let type = row["type"] as? String { guard type == "function" else { throw Failure.invalidTool } }
+                    if let type = row["type"] as? String { guard type == "function" else { throw invalidTool(.sseToolType, observeTool) } }
                     if let function = row["function"] as? [String: Any] {
                         if let value = function["name"] as? String { call.name += value }
                         if let value = function["arguments"] as? String { call.arguments.append(value) }
@@ -1486,6 +1629,9 @@ enum APIModelResponseCodec {
         guard let value = try? JSONSerialization.jsonObject(with: data) else {
             onRejection?(.invalidJSON); throw Failure.invalidArguments
         }
+        if tool.patchProjection != nil, !APIModelCorrectionJSON.isUnambiguous(data) {
+            onRejection?(.invalidJSON); throw Failure.invalidArguments
+        }
         guard let object = value as? [String: Any] else {
             onRejection?(.nonObject); throw Failure.invalidArguments
         }
@@ -1511,6 +1657,12 @@ enum APIModelResponseCodec {
                 onSchemaMismatch(violation)
             }
             onRejection?(.schemaMismatch); throw Failure.invalidArguments
+        }
+        if let projection = tool.patchProjection {
+            guard let patch = projection.compile(object, byteLimit: maximumText) else {
+                onRejection?(.schemaMismatch); throw Failure.invalidArguments
+            }
+            return ["input":patch]
         }
         return object
     }

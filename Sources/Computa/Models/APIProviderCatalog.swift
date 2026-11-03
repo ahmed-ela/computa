@@ -26,6 +26,7 @@ struct APIModelDefinition: Codable, Equatable, Sendable {
 
 struct APIProviderDefinition: Codable, Equatable, Sendable {
     enum WireAPI: String, Codable, CaseIterable, Sendable { case chatCompletions, responses }
+    enum ChatCompletionsInstructionRole: String, Sendable { case developer, system }
     let id: String
     let name: String
     let baseURL: URL
@@ -43,6 +44,24 @@ struct APIProviderDefinition: Codable, Equatable, Sendable {
             && ["/v1", "/v1/"].contains(URLComponents(url: baseURL, resolvingAgainstBaseURL: false)?.percentEncodedPath ?? "")
     }
 
+    /// Endpoint identity never follows the editable provider name or ID.
+    var isAlibabaModelStudioInference: Bool {
+        guard (try? APIProviderCatalog.validate(self)) != nil,
+              baseURL.scheme == "https", baseURL.port == nil || baseURL.port == 443,
+              let host = baseURL.host?.lowercased(),
+              host.range(of: #"^ws-[a-z0-9]+\.(ap-southeast-1|us-east-1|cn-beijing|cn-hongkong|eu-central-1|ap-northeast-1)\.maas\.aliyuncs\.com$"#,
+                         options: .regularExpression) != nil,
+              ["/compatible-mode/v1", "/compatible-mode/v1/"].contains(
+                URLComponents(url: baseURL, resolvingAgainstBaseURL: false)?.percentEncodedPath ?? "") else { return false }
+        return true
+    }
+
+    /// Model Studio accepts system instructions but rejects the developer role
+    /// on its Chat Completions API. Native Responses keeps its own role contract.
+    var chatCompletionsInstructionRole: ChatCompletionsInstructionRole {
+        wireAPI == .chatCompletions && isAlibabaModelStudioInference ? .system : .developer
+    }
+
     func withModels(_ models: [APIModelDefinition]) -> Self {
         Self(id: id, name: name, baseURL: baseURL, wireAPI: wireAPI, models: models)
     }
@@ -57,6 +76,11 @@ enum APIProviderCatalog {
     struct Selection: Equatable, Sendable {
         let provider: APIProviderDefinition
         let model: APIModelDefinition
+
+        var chatCompletionsInstructionRole: APIProviderDefinition.ChatCompletionsInstructionRole {
+            provider.wireAPI == .chatCompletions && provider.isCerebrasInference && model.id == "qwen-3.8-27b"
+                ? .system : provider.chatCompletionsInstructionRole
+        }
 
         var reasoningHistoryPolicy: ReasoningHistoryPolicy {
             // GPT-OSS Harmony retains analysis during tool cycles, but discards it
@@ -133,6 +157,10 @@ enum APIProviderCatalog {
     }
     /// Metadata only: this never adds a model unless the provider actually lists it.
     static func discoveredModel(id: String, name: String? = nil, provider: APIProviderDefinition) -> APIModelDefinition {
+        if provider.isAlibabaModelStudioInference, ["qwen3.7-flash", "qwen3.7-flash-2026-07-15"].contains(id) {
+            return APIModelDefinition(id: id, name: name ?? "Qwen3.7 Flash", contextWindow: 1_000_000,
+                                      supportsImages: true, supportsToolImages: false)
+        }
         if provider.isCerebrasInference, id == "qwen-3.8-27b" {
             return APIModelDefinition(id: id, name: name ?? "Qwen3.8 27B", contextWindow: 65_536,
                                       supportsImages: true, supportsToolImages: false)

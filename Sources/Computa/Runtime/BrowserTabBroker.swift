@@ -2535,7 +2535,9 @@ actor BrowserTabSessionBroker {
             "SCOPE captured rows only; not site results/relevance/absence. *_utf8=exact fragments; href_fragment=not_navigable. Defaults enabled=true settable=false actions=[]. Only shown refs authorize input."
         ]
         if omittedInputNodeCount > 0 {
-            lines.append("VIEW \(readViewName(read.view)) omitted_input_nodes=\(omittedInputNodeCount) basis=captured_view_and_query. Read overview/all without cursor/query for controls before an access-block claim.")
+            lines.append("VIEW \(readViewName(read.view)) omitted_input_nodes=\(omittedInputNodeCount) basis=captured_view_and_query. Get fresh action refs with overview/all without query/cursor.")
+        } else if read.view == .overview {
+            lines.append("VIEW overview. Use refs for links/search; content=text.")
         } else if read.view != .all {
             lines.append("VIEW \(readViewName(read.view)) omits kinds; content=text; all=toolbars.")
         }
