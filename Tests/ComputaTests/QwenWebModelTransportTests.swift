@@ -415,6 +415,30 @@ final class QwenWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testSplitAuthoredRunsPreserveInterveningTextAndVerifiedDeletion() async throws {
+        let fixture = try Fixture(setup: "qwenFixture.options.holdResponse=true")
+        defer { fixture.shutdown() }
+        let token = try await start(fixture, label: "Qwen3.7-Plus")
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Read the synthetic split response.")
+        _ = try await evaluate(fixture.view, #"""
+            qwenFixture.completeResponse();
+            const paragraph = document.querySelector('.qwen-markdown-paragraph');
+            const first = paragraph.firstElementChild, second = first.cloneNode(true);
+            first.firstElementChild.textContent = '{"type":"message",';
+            second.firstElementChild.textContent = '"text":"split fixture"}';
+            paragraph.append(document.createTextNode('\n\t'), second);
+            return true;
+            """#)
+        let complete = try await wait(fixture, token, state: "complete")
+        XCTAssertEqual(complete["text"] as? String, "{\"type\":\"message\",\n\t\"text\":\"split fixture\"}")
+        let proof = try XCTUnwrap(complete["modelEvidence"] as? [String: Any])
+        let selected = try XCTUnwrap(proof["selected"] as? [String: Any])
+        XCTAssertEqual(selected["label"] as? String, "Qwen3.7-Plus")
+        let finished = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+        try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+    }
+
     func testInitialEmptyResponseIDWaitsWithoutProofAndIDOnlyMutationWakesStrictReadForBothModels() async throws {
         for label in ["Qwen3.7-Plus", "Qwen3.8-Max"] {
             let fixture = try Fixture(setup: "qwenFixture.options.holdResponseIdentity=true")

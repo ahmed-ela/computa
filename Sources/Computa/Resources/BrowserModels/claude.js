@@ -2690,7 +2690,76 @@ function modelUsageLimitSurfaces() {
   } catch { modelLastUsageLimitObservation = null; }
   return surfaces;
 }
-function modelUsageLimited() { return modelUsageLimitSurfaces().length > 0; }
+// This signed-in account card was observed on an empty new chat. It can only
+// abort preflight. It never supplies the physical Incognito proof used by Stop.
+function modelFreshAccountUsageLimited() {
+  try {
+    if (input.action === 'stop' || !/^https:\/\/claude\.ai\/new\/?(?:\?incognito)?$/.test(document.URL)
+      || input.expectedFirstUserFingerprint != null || globalThis.__computaModelFirstSubmitted !== undefined
+      || globalThis.__computaModelFirstProof !== undefined || globalThis.__computaModelFirstPrompt !== undefined
+      || input.expectedUserCounts?.length !== 1 || input.expectedUserCounts[0] !== 0) return false;
+    const authored = '[data-testid="user-message"], [data-testid="assistant-message"], [data-perf-reply-text], [data-message-author-role], [data-markdown-text-style], [data-turn], [data-user-message-bubble], model-response, user-query';
+    const excluded = authored + ', [contenteditable], [role="textbox"], textarea, input, pre, code, [role="tooltip"], nav, aside, [role="navigation"], [role="menu"], [role="listbox"]';
+    const one = nodes => nodes.length === 1 ? nodes[0] : null;
+    const buttons = document.querySelectorAll('button');
+    if (buttons.length > 256 || document.querySelectorAll(authored).length) return false;
+    const chrome = [...buttons].filter(node => modelVisible(node) && !node.closest(excluded));
+    const popup = node => ['true', 'menu', 'dialog', 'listbox'].includes(node.getAttribute('aria-haspopup'))
+      && node.getAttribute('aria-expanded') !== 'true' && modelEnabled(node);
+    // Read only short, visible text nodes in the candidate card or button. A
+    // clipped scan or a quoted/editor subtree cannot contribute any fragment.
+    const words = (root, skipButtons) => {
+      const parts = [], stack = [root]; let visited = 0, length = 0;
+      while (stack.length) {
+        const node = stack.pop();
+        if (++visited > 96) return null;
+        if (node.nodeType === 3) {
+          length += node.length;
+          if (length > 512 || !modelVisible(node.parentElement)) return null;
+          parts.push(node.textContent);
+        } else if (node.nodeType === 1) {
+          if (node.closest(excluded)) return null;
+          if (skipButtons && node.tagName === 'BUTTON') continue;
+          const children = node.childNodes;
+          if (visited + stack.length + children.length > 96) return null;
+          for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
+        }
+      }
+      return modelQuotaLabel(parts.join(' ')).replace(/ ([.,])/g, '$1');
+    };
+    const label = node => node.getAttribute('aria-label') ?? words(node, false);
+    const usage = one(chrome.filter(node => popup(node) && label(node) === 'View usage limits · 100% used'));
+    if (!usage) return false;
+    const picker = one(chrome.filter(node => popup(node) && /^Model: /.test(websiteModelSafeTriggerLabel(node.getAttribute('aria-label')) || '')));
+    const send = one(chrome.filter(node => node.getAttribute('data-testid') === 'chat-input-send' && node.getAttribute('aria-label') === 'Send message'));
+    const editor = one(document.querySelectorAll('[data-testid="chat-input"][contenteditable="true"][role="textbox"]'));
+    if (!picker || !send || modelEnabled(send) || !modelVisible(editor) || editor.parentElement?.closest(excluded)) return false;
+    const empty = editor.childNodes.length === 0 || editor.childNodes.length === 1 && editor.childNodes[0].tagName === 'P'
+      && (editor.childNodes[0].childNodes.length === 0 || editor.childNodes[0].childNodes.length === 1 && editor.childNodes[0].childNodes[0].tagName === 'BR');
+    if (!empty) return false;
+    const enabled = chrome.filter(modelEnabled).map(node => ({ node, name: label(node) }));
+    const named = name => enabled.filter(item => item.name === name).map(item => item.node);
+    const offer = one(named('Get more usage')), dismiss = named('Dismiss'), notify = named('Get notified');
+    if (!offer || dismiss.length > 1 || notify.length > 1 || !(dismiss.length || notify.length)) return false;
+    const controls = [offer, ...dismiss, ...notify];
+    let card = controls[0].parentElement;
+    for (let depth = 0; card && depth < 8; depth++, card = card.parentElement) {
+      if (['BODY', 'HTML'].includes(card.tagName) || [usage, picker, send, editor].some(node => card.contains(node))) return false;
+      if (!controls.every(node => card.contains(node))) continue;
+      const count = card.querySelectorAll('button, a, [role="button"], textarea, input, [contenteditable], [role="switch"]').length;
+      if (!modelVisible(card) || card.closest(excluded) || count < controls.length || count > 3
+        || card.querySelectorAll('[aria-checked="true"], [aria-pressed="true"], input, [role="switch"]').length) return false;
+      const copy = words(card, true);
+      // The provider offers credits as an alternative. Notification and pricing
+      // copy can change; a banner saying that credits are already active is different.
+      if (copy && /^You[’']ve reached your usage limit\. Your limit resets at (?:[1-9]|1[0-2]):[0-5][0-9] (?:AM|PM)\./.test(copy)
+        && /(?:^|\. )Wait for the reset, or keep working now with usage credits[.,]/.test(copy)
+        && !/\b(?:active|enabled|using)\b/i.test(copy)) return true;
+    }
+  } catch { /* An unknown account surface cannot establish a limit. */ }
+  return false;
+}
+function modelUsageLimited() { return modelUsageLimitSurfaces().length > 0 || modelFreshAccountUsageLimited(); }
 function modelQuotaDiagnostic() {
   const boundary = '[data-testid="assistant-message"], [data-testid="user-message"]';
   const tags = ['a', 'button', 'div', 'span', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'section', 'main', 'body', 'html', 'dialog'];

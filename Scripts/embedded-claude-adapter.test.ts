@@ -786,6 +786,86 @@ describe("embedded Claude fixed adapter", () => {
     }
   });
 
+
+  function freshAccountLimit(f: ReturnType<typeof fixture>) {
+    const picker = installObservedModelPicker(f, provider, Element); picker.selected("Sonnet 5");
+    const usage = new Element("BUTTON", { "aria-haspopup": "dialog", "aria-label": "View usage limits · 100% used" });
+    const card = new Element("DIV"), heading = new Element("H3", {}, "You’ve reached your usage limit.");
+    const reset = new Element("P", {}, "Your limit resets at 8:20 AM. Turn on notifications and Claude will notify you then.");
+    const credits = new Element("P", {}, "Wait for the reset, or keep working now with usage credits, billed on top of your plan.");
+    const actions = new Element("DIV"), buttons = ["Get notified", "Get more usage", "Dismiss"].map(label => new Element("BUTTON", {}, label));
+    actions.append(...buttons); card.append(heading, reset, credits, actions); f.body.append(usage, card);
+    f.send.disabled = true;
+    return { usage, picker, card, heading, reset, credits, actions, buttons };
+  }
+
+  test("fresh account limit aborts each preflight action without using the picker, composer or notice", async () => {
+    for (const temporary of [false, true]) for (const action of ["inspect", "discoverModels", "selectModel", "modelDiagnostic",
+      "verifyModel", "enableTemporary", "prepare", "insert", "sendReady", "submit"]) {
+      const f = fixture(provider, { temporary }), surface = freshAccountLimit(f);
+      const observed = await f.run(action, { prompt: outbound, expectedModelChoice: { key: "Sonnet 5", label: "Sonnet 5" } });
+      expect(observed, action).toEqual(action === "inspect" ? freshQuotaReceipt(f) : { error: "website_usage_limit" });
+      for (const control of [...surface.buttons, surface.usage, surface.picker.trigger, f.send, f.stop, f.exit, f.toggle])
+        expect(control.clicks).toBe(0);
+      expect(f.composer.events).toEqual([]); expect(f.composer.innerText).toBe(""); expect(f.document.activeElement).toBeNull();
+    }
+  });
+
+  test("fresh account limit requires the exact new-chat controls, card, visible copy and unused composer", async () => {
+    for (const variation of ["partial-usage", "duplicate-usage", "hidden-usage", "not-popup", "open-picker", "missing-picker",
+      "permitted-send", "nonempty-draft", "changed-notice", "bad-clock", "no-card-controls", "disabled-offer", "credits-active", "meter-text-99", "additional-control",
+      "quoted-card", "in-editor", "hidden-text", "different-card", "authored-row", "alternate-author", "clipped", "chat-route", "submitted"]) {
+      const f = fixture(provider), { usage, picker, card, reset, credits, actions, buttons } = freshAccountLimit(f);
+      switch (variation) {
+        case "partial-usage": usage.values["aria-label"] = "View usage limits · 99% used"; break;
+        case "duplicate-usage": f.body.append(usage.cloneNode()); break;
+        case "hidden-usage": usage.values.hidden = ""; break;
+        case "not-popup": delete usage.values["aria-haspopup"]; break;
+        case "open-picker": picker.trigger.values["aria-expanded"] = "true"; break;
+        case "missing-picker": picker.trigger.connected = false; break;
+        case "permitted-send": f.send.disabled = false; break;
+        case "nonempty-draft": f.composer.text = "private draft"; break;
+        case "changed-notice": credits.text = credits.text.replace("usage credits", "model choices"); break;
+        case "bad-clock": reset.text = reset.text.replace("8:20 AM", "25:20 AM"); break;
+        case "no-card-controls": buttons[2].text = "Close"; buttons[0].text = "Notify me"; break;
+        case "disabled-offer": buttons[1].disabled = true; break;
+        case "credits-active": credits.text += " Your usage credits are enabled."; break;
+        case "meter-text-99": delete usage.values["aria-label"]; usage.text = "View usage limits · 99% used"; break;
+        case "additional-control": actions.append(new Element("BUTTON", {}, "Another action")); break;
+        case "quoted-card": card.tagName = "PRE"; break;
+        case "in-editor": f.body.children = f.body.children.filter(node => node !== card); f.composer.append(card); break;
+        case "hidden-text": credits.values.hidden = ""; break;
+        case "different-card": actions.children.pop(); f.body.append(buttons[2]); break;
+        case "authored-row": f.body.append(new Element("DIV", { "data-testid": "assistant-message", hidden: "" })); break;
+        case "alternate-author": f.body.append(new Element("DIV", { "data-message-author-role": "assistant" })); break;
+        case "clipped": card.append(...Array.from({ length: 97 }, () => new Element("SPAN"))); break;
+        case "chat-route": f.location.pathname = "/chat/other"; f.document.URL = f.origin + f.location.pathname; break;
+        case "submitted": f.world.__computaModelFirstSubmitted = true; break;
+      }
+      const result = await f.run();
+      expect(result.error, variation).not.toBe("website_usage_limit"); expect(result.freshQuotaAbort, variation).toBeUndefined();
+      expect(buttons.map(node => node.clicks)).toEqual([0, 0, 0]);
+    }
+  });
+
+  test("fresh account limit accepts the exact rendered meter with split reset time and varied auxiliary copy", async () => {
+    const f = fixture(provider), { usage, reset, credits, buttons } = freshAccountLimit(f);
+    delete usage.values["aria-label"]; usage.append(new Element("SPAN", {}, "View usage limits ·"), new Element("SPAN", {}, "100% used"));
+    reset.text = "Your limit resets at "; reset.append(new Element("STRONG", {}, "8:20 AM"), new Element("#text", {}, "."));
+    credits.text = "Wait for the reset, or keep working now with usage credits. See your billing settings for details.";
+    buttons[0].text = "Notify me"; f.composer.append(new Element("P")); f.composer.children[0].append(new Element("BR"));
+    expect(await f.run()).toEqual(freshQuotaReceipt(f));
+  });
+
+  test("fresh account limit cannot supersede lost ownership or establish quota cleanup", async () => {
+    const f = fixture(provider, { userPrompt: prompt }); await f.run(); freshAccountLimit(f);
+    f.userRoot!.parentElement!.children = []; f.userRoot!.connected = false;
+    expect(await f.run("inspect")).toMatchObject({ error: "conversation_changed", detail: "user_count" });
+    expect(await f.run("stop")).toMatchObject({ error: "conversation_changed", detail: "user_count" });
+    const fresh = fixture(provider, { temporary: false }); freshAccountLimit(fresh);
+    expect(await fresh.run("stop")).toMatchObject({ error: "temporary_mode_unverified" });
+  });
+
   test("the exact quota popup reports its limit before any inference action or blocked control click", async () => {
     for (const action of ["inspect", "enableTemporary", "prepare", "insert", "sendReady", "submit"]) {
       const f = fixture(provider, { userPrompt: prompt }); await f.run();

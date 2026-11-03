@@ -1,9 +1,8 @@
 # Kimi, Qwen and DeepSeek website adapters
 
-Qwen Plus returned its first exact direct answer on installed build 410,
-with verified model selection and deletion. It listed the fixture directory and read three
-files in the separate invoice workflow before response extraction stopped.
-[Installed build 410 results](#installed-build-410-2026-11-03)
+Qwen Plus and Max have each returned an exact direct answer with verified
+website selection and deletion. Their file-and-browser workflows still stop at
+response extraction. [Installed build 411 results](#installed-build-411-2026-11-03)
 
 ### Build 400 checkpoint (2026-11-03 UTC)
 
@@ -1135,6 +1134,16 @@ live tasks across seven model choices:
 | Groq Qwen3.8-27B | Four read-only commands succeeded. Its third submission reverted to the draft. All three requests fit the local budget. Two transcripts cleared and final cleanup was unconfirmed. |
 | Groq GPT OSS 120B | Two tool-schema requests were rejected and one terminal command ran. The website showed an error and restored the fourth submission. Three transcripts cleared and final cleanup was unconfirmed. |
 
+
+### Installed build 411 (2026-11-03)
+
+| Model | Live result |
+| --- | --- |
+| Qwen3.8-Max | Returned the exact direct answer in 19.270 seconds. Model selection and deletion were verified. The separate invoice run rejected the first website response before a tool ran. The conversation was deleted. |
+| Qwen3.7-Plus | Read the README and source file. The next answer's paragraph had at least two direct elements where the extractor expected one. Their tags and contents were not captured. Both website conversations were deleted. |
+| Kimi Instant | The fresh marker task stopped before verified submission. Opening Kimi in a separate normal tab showed a draft containing the earlier build 410 test's unique fixture ID and a Computa session marker. The draft was left in place. |
+| Groq GPT OSS 20B | The invoice request fit the 6,000-token local budget at 4,255 tokens. Groq displayed an error and restored the draft. The same model answered a short arithmetic question correctly in the ordinary browser. The failed request's HTTP status was not captured. |
+| Claude Sonnet 5 | The parcel question stopped after submission when the verified user row disappeared. The normal signed-in page subsequently showed 100% usage and an 8:20 a.m. Eastern reset. |
 
 ## Remaining gates
 

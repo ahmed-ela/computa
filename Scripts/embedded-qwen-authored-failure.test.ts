@@ -23,7 +23,7 @@ const checks: [string, string, number, (f: Page) => void][] = [
   ['custom', 'count', 0, f => { f.phase.replaceChildren(); }],
   ['markdown', 'mixed_text', 0, f => { f.phase.children[0].text = 'SYNTHETIC_PRIVATE'; }],
   ['paragraph', 'tag', 0, f => { f.markdown.replaceChildren(new f.Node('PRE', {class:'SYNTHETIC_CLASS'})); }],
-  ['span', 'count', 2, f => { f.paragraph.append(new f.Node('A')); }],
+  ['span', 'tag', 0, f => { f.paragraph.append(new f.Node('A')); }],
   ['literal', 'class', 0, f => { f.literal.setAttribute('class','SYNTHETIC_UNKNOWN'); }],
   ['literal', 'hidden', 0, f => { f.literal.setAttribute('hidden',''); }],
   ['literal_contents', 'count', 1, f => { f.literal.append(new f.Node('CODE')); }],
@@ -75,5 +75,78 @@ test('a literal stays byte exact and a foreign selection or document never recei
     const rejected = await page.run('inspect',overrides);
     expect(rejected.error).toBeDefined();
     expect(rejected.adapterFailureStructure).toBeUndefined();
+  }
+});
+
+function appendRun(f: Page, text: string) {
+  const run = new f.Node('SPAN', {class:'qwen-markdown-text'});
+  const leaf = new f.Node('SPAN', {class:'qwen-markdown-text-node'}, text);
+  run.append(leaf);
+  f.paragraph.append(run);
+  return {run, leaf};
+}
+
+test('complete Qwen Plus and Max preserve every literal byte across adjacent inert runs', async () => {
+  for (const selected of [plus, max]) {
+    const f = await submitted(selected);
+    const encoded = JSON.stringify({type:'tool_calls', calls:[{name:'exec_command',arguments:{cmd:'printf "%s" "escaped\\path"'}}]});
+    f.literal.text = encoded.slice(0, 6);
+    appendRun(f, encoded.slice(6, 21));
+    appendRun(f, encoded.slice(21));
+    f.paragraph.setAttribute('dir', 'ltr');
+    f.paragraph.text = '\n  ';
+    const result = await f.run('inspect', {expectedModelChoice:choice(selected)});
+    expect(result.text).toBe('\n  ' + encoded);
+    expect(result.answerComplete).toBe(true);
+    expect(result.modelEvidence.selected).toEqual(choice(selected));
+    expect(result.adapterFailureStructure).toBeUndefined();
+    expect(f.send.clicks).toBe(1);
+    expect(f.more.clicks).toBe(0);
+  }
+});
+
+test('split text retains invalid protocol and does not infer completion', () => {
+  const f = fixture({completeOnSend:false});
+  f.mountConversation(false);
+  f.literal.text = 'An authored introduction ';
+  appendRun(f, raw);
+  const dom = f.read(), answer = dom.transcript().answer;
+  expect(dom.rawAnswer(answer)).toEqual({text:'An authored introduction ' + raw, finalMarkup:true, formatIssue:false});
+  expect(dom.completionCandidate(answer)).toBe(false);
+  expect(f.mutations()).toBe(0);
+});
+
+test('a second component cannot import foreign markup, controls, hidden text or siblings', async () => {
+  const scenarios = ['link','code','runClass','leafClass','runEvent','leafRole','leafEditable','runHidden',
+    'leafHidden','paragraphButton','foreignControl','nestedLeaf','secondLeaf','runText','paragraphText','reasoning','excessRuns'];
+  for (const kind of scenarios) {
+    const f = await submitted(plus);
+    const {run,leaf} = appendRun(f, 'PRIVATE_SYNTHETIC');
+    if (kind === 'link' || kind === 'code') {
+      run.detach();
+      f.paragraph.append(new f.Node(kind === 'link' ? 'A' : 'CODE', {}, 'PRIVATE_SYNTHETIC'));
+    } else if (kind === 'runClass') run.setAttribute('class','qwen-markdown-text foreign');
+    else if (kind === 'leafClass') leaf.setAttribute('class','qwen-markdown-code');
+    else if (kind === 'runEvent') run.setAttribute('onclick','PRIVATE_SYNTHETIC');
+    else if (kind === 'leafRole') leaf.setAttribute('role','button');
+    else if (kind === 'leafEditable') leaf.setAttribute('contenteditable','true');
+    else if (kind === 'runHidden') run.setAttribute('hidden','');
+    else if (kind === 'leafHidden') leaf.setAttribute('aria-hidden','true');
+    else if (kind === 'paragraphButton') f.paragraph.setAttribute('role','button');
+    else if (kind === 'foreignControl') f.paragraph.append(new f.Node('BUTTON'));
+    else if (kind === 'nestedLeaf') leaf.append(new f.Node('SPAN',{},'PRIVATE_SYNTHETIC'));
+    else if (kind === 'secondLeaf') run.append(new f.Node('SPAN',{class:'qwen-markdown-text-node'},'PRIVATE_SYNTHETIC'));
+    else if (kind === 'runText') run.text = 'PRIVATE_SYNTHETIC';
+    else if (kind === 'paragraphText') f.paragraph.text = 'PRIVATE_SYNTHETIC';
+    else if (kind === 'reasoning') run.setAttribute('class','qwen-chat-thinking-tool-status-card-wraper');
+    else for (let i = 0; i < 63; i++) appendRun(f,'');
+    const before = f.mutations();
+    const result = await f.run('inspect',{expectedModelChoice:choice(plus)});
+    expect(result.error, kind).toBe('unsupported_response_format');
+    expect(result.detail, kind).toBe('authored_source');
+    expect(result.text, kind).toBeUndefined();
+    expect(Object.keys(result.adapterFailureStructure).sort()).toEqual(['count','provider','reason','stage','trigger','version']);
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_SYNTHETIC');
+    expect(f.mutations()).toBe(before);
   }
 });

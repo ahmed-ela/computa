@@ -60,6 +60,7 @@ struct WebsiteTurnFailureStore: Sendable {
                     EmbeddedWebModelTransport.Failure.pageUnavailable,
                     EmbeddedWebModelTransport.Failure.modelUnverified,
                     EmbeddedWebModelTransport.Failure.modelMismatch,
+                    EmbeddedWebModelTransport.Failure.editorFailure("composer_not_empty"),
                     WebModelServer.Failure.modelUnverified,
                     WebModelServer.Failure.modelMismatch,
                     WebModelServer.Failure.cleanupFailed,

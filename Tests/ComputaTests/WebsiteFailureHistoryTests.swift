@@ -421,6 +421,7 @@ final class WebsiteFailureHistoryTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let failures: [any Error] = [EmbeddedWebModelTransport.Failure.pageUnavailable,
             EmbeddedWebModelTransport.Failure.modelUnverified, EmbeddedWebModelTransport.Failure.modelMismatch,
+            EmbeddedWebModelTransport.Failure.editorFailure("composer_not_empty"),
             WebModelServer.Failure.modelUnverified, WebModelServer.Failure.modelMismatch, WebModelServer.Failure.cleanupFailed]
         let models = [syntheticChatGPTModelID, "browser/claude", "browser/gemini", "browser/groq",
             WebsiteModelChoice(provider: "kimi", key: "k28-instant", label: "Instant").modelID,
