@@ -308,27 +308,35 @@ enum ComputaAgentInstructions {
     *** End Patch
     """#
 
-    static let codeEditing = """
-    For authorized code work, inspect relevant files and existing changes first.
-    Use exec_command for relevant reads, searches and tests; prefer the
-    offered apply_patch for targeted edits, creation, deletion and moves. Copy
-    observed paths exactly, preserving spaces without adding leading whitespace.
-    Use observed absolute paths in patch file headers. Relative patch paths resolve
-    from the native thread's working directory; an exec_command workdir or shell
-    cd changes only that command, not apply_patch's directory.
+    static let codeEditing = codeEditing(patchInput: nativePatchInput)
+
+    private static func codeEditing(patchInput: String) -> String {
+        """
+        For authorized code work, inspect relevant files and existing changes first.
+        Use exec_command for relevant reads, searches and tests; prefer the
+        offered apply_patch for targeted edits, creation, deletion and moves. Copy
+        observed paths exactly, preserving spaces without adding leading whitespace.
+        Use observed absolute paths in patch file headers. Relative patch paths resolve
+        from the native thread's working directory; an exec_command workdir or shell
+        cd changes only that command, not apply_patch's directory.
+        \(patchInput)
+        Preserve unrelated user edits, credentials and generated files. Do not commit,
+        push, discard changes or rewrite history unless authorized. Run appropriate
+        checks. A failed patch can have partially applied changes: inspect its actual
+        result before retrying. Do not replay uncertain mutations. Explain what changed
+        and what verification passed or remains blocked. The app's review pane displays
+        recorded patches and available Git differences; a proposed patch or diff alone
+        does not prove successful execution.
+        """
+    }
+
+    private static let nativePatchInput = """
     Patch input is literal text, not a shell command or Markdown fence. Follow the
     offered grammar. An update has this envelope (replace the sample absolute path
     and lines with observed file context):
     \(patchUpdateExample)
     The first line is exactly *** Begin Patch, with no filename or colon. Put
     paths only in file headers; finish with exactly one *** End Patch line.
-    Preserve unrelated user edits, credentials and generated files. Do not commit,
-    push, discard changes or rewrite history unless authorized. Run appropriate
-    checks. A failed patch can have partially applied changes: inspect its actual
-    result before retrying. Do not replay uncertain mutations. Explain what changed
-    and what verification passed or remains blocked. The app's review pane displays
-    recorded patches and available Git differences; a proposed patch or diff alone
-    does not prove successful execution.
     """
 
     /// Refresh the repair/dependency decision after retained history, without
@@ -414,9 +422,11 @@ enum ComputaAgentInstructions {
     \(browserFormSubmission)
     """
 
-    static func developerInstructions(referenceTools: Bool = true, embeddedBrowserTools: Bool = false) -> String {
+    static func developerInstructions(referenceTools: Bool = true, embeddedBrowserTools: Bool = false,
+                                      compiledPatchInput: String? = nil) -> String {
         let computer = referenceTools ? nativeScope : nativeLegacyScope
-        return computer + "\n\n" + ordinaryRequests + "\n\n" + capabilityEvidence + "\n\n" + finalResponse + "\n\n" + taskCompletion + "\n\n" + diagnosticEvidence + "\n\n" + codeEditing + "\n\n" + codeRepairProgress + "\n\n" + patchExecutionChecks + "\n\n" + commandLine
+        let edit = compiledPatchInput.map { codeEditing(patchInput: $0) } ?? codeEditing
+        return computer + "\n\n" + ordinaryRequests + "\n\n" + capabilityEvidence + "\n\n" + finalResponse + "\n\n" + taskCompletion + "\n\n" + diagnosticEvidence + "\n\n" + edit + "\n\n" + codeRepairProgress + "\n\n" + patchExecutionChecks + "\n\n" + commandLine
             + (embeddedBrowserTools ? "\n\n" + builtInBrowser : "")
     }
 
@@ -1002,6 +1012,7 @@ enum ComputaAgentInstructions {
             responseFormatInstructions = """
             Return exactly one raw JSON object. Do not use Markdown fences
             or code blocks.
+            Inside JSON string values, spell backticks as \\u0060 and asterisks as \\u002a when they form Markdown code or emphasis. Preserve the decoded text exactly.
             Examples below are complete raw response objects.
             """
             responseTask = "Generate Computa's next JSON response object. This website does not execute calls."

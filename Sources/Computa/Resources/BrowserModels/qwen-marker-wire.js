@@ -348,13 +348,20 @@ function observeSiteCatalog(config) {
   function refuse(why){wire=null;error??=why}
   function scoped(){return !retired && Date.now()<config.expiresAt && location.origin===config.origin && window===window.top}
   function valid(){return scoped()&&!error && native.open===wrapped && native.send===sendOriginal}
+  const catalogErrors=new Set(['catalog_accessor','catalog_mime','catalog_ambiguous','catalog_missing','catalog_size',
+    'catalog_binding','catalog_send_unobserved','catalog_not_done','catalog_final_url','catalog_non_200','catalog_response_type']);
   function checkHeldResponse(req) {
     const read = key => {
       if(Object.hasOwn(req,key) || typeof xhrGet[key]!=='function')throw Error('catalog_accessor');
       return Reflect.apply(xhrGet[key],req,[]);
     };
-    if(!valid() || !submitted || req!==held || read('readyState')!==4 || read('responseURL')!==url ||
-       read('status')!==200 || !['','text'].includes(read('responseType')))throw Error('catalog_response');
+    // The first failed check is diagnostic only. Never read responseText from a failed XHR.
+    if(!valid() || req!==held)throw Error('catalog_binding');
+    if(!submitted)throw Error('catalog_send_unobserved');
+    if(read('readyState')!==4)throw Error('catalog_not_done');
+    if(read('responseURL')!==url)throw Error('catalog_final_url');
+    if(read('status')!==200)throw Error('catalog_non_200');
+    if(!['','text'].includes(read('responseType')))throw Error('catalog_response_type');
     if(Reflect.apply(getHeader,req,['content-type'])?.split(';')[0]?.toLowerCase()!=='application/json')throw Error('catalog_mime');
   }
   function wrapped(verb,path,async,...rest) {
@@ -382,7 +389,7 @@ function observeSiteCatalog(config) {
           checkHeldResponse(req);
           // Defer materialization until native verified the picker and resource timing proves the decoded size.
           received=true;
-        }catch(e){refuse(['catalog_accessor','catalog_response','catalog_mime','catalog_ambiguous','catalog_missing','catalog_size'].includes(e.message)?e.message:'catalog_shape')}
+        }catch(e){refuse(catalogErrors.has(e.message)?e.message:'catalog_shape')}
       },{once:true}]);
     }catch{if(matching)refuse('catalog_request')}
     return result;
@@ -407,7 +414,7 @@ function observeSiteCatalog(config) {
       if(Object.hasOwn(held,'responseText'))throw Error('catalog_accessor');
       wire=matchCatalogTuple(Reflect.apply(xhrGet.responseText,held,[]),config.visibleModel);
     } catch(e) {
-      refuse(['catalog_accessor','catalog_response','catalog_mime','catalog_ambiguous','catalog_missing','catalog_size'].includes(e.message)?e.message:'catalog_shape');
+      refuse(catalogErrors.has(e.message)?e.message:'catalog_shape');
     }
     return wire;
   }

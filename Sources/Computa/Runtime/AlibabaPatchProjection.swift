@@ -28,8 +28,33 @@ enum AlibabaPatchProjection: Sendable, Equatable {
     }
 
     static let description = """
-        Edit files with ordered operations. For add, provide source lines without prefixes. For update, each hunk has one or more literal lines beginning with a space (keep), + (add), or - (remove). Preserve whitespace after the prefix. An optional anchor locates the hunk. Use an empty anchor for an unnamed hunk. Later hunks require an anchor. Set end_of_file to true only to anchor the last hunk at EOF. To move a file, use move_to in an update with at least one hunk. Computa emits the patch control lines. Earlier native custom calls in history show the exact original patch as input.
+        Supply operations as a JSON array of operation objects, including for one file. For add, provide source lines without prefixes. For update, each hunk has one or more literal lines beginning with a space (keep), + (add), or - (remove). Preserve whitespace after the prefix. An optional anchor locates the hunk. Use an empty anchor for an unnamed hunk. Later hunks require an anchor. Set end_of_file to true only to anchor the last hunk at EOF. To move a file, use move_to in an update with at least one hunk. Computa emits the patch control lines. Earlier native custom calls in history show the exact original patch as input.
         """
+
+    // This representation applies only to a current allowed, recognized native
+    // patch. It never rewrites user text, previous calls, or partial host policy.
+    static let argumentDirections = """
+        Supply an arguments object whose operations field is a JSON array of operation objects, even for one edit.
+        An example update is {"operations":[{"update":"file.py","hunks":[{"lines":["-old","+new"]}]}]}.
+        Replace the sample path and lines with observed source. Computa compiles the native patch headers and @@ hunk markers.
+        Each update line includes its actual space, + or - prefix. The native grammar checks below describe the compiled patch.
+        """
+
+    private static let developerVariants: [Data: String] = {
+        var result: [Data: String] = [:]
+        for references in [false, true] {
+            for browser in [false, true] {
+                let original = ComputaAgentInstructions.developerInstructions(referenceTools: references, embeddedBrowserTools: browser)
+                result[Data(original.utf8)] = ComputaAgentInstructions.developerInstructions(referenceTools: references,
+                    embeddedBrowserTools: browser, compiledPatchInput: argumentDirections)
+            }
+        }
+        return result
+    }()
+
+    static func projectedDeveloperText(_ text: String) -> String {
+        developerVariants[Data(text.utf8)] ?? text
+    }
 
     var schema: [String: Any] {
         func object(_ properties: [String: Any], _ required: [String]) -> [String: Any] {

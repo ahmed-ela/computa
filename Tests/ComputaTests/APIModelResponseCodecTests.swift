@@ -3729,6 +3729,55 @@ final class APIModelResponseCodecTests: XCTestCase {
         return ["type": "custom", "name": "apply_patch", "description": "The `apply_patch` tool can be used to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.", "format": ["type": "grammar", "syntax": "lark", "definition": grammar]]
     }
 
+    func testAlibabaTypedPatchReplacesOnlyExactHostDeveloperBlockWhenCallable() throws {
+        let native = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
+        XCTAssertTrue(ComputaAgentInstructions.groqNativePolicyIsCurrent, "The four original host policy variants must retain their exact bytes")
+        let directions = AlibabaPatchProjection.argumentDirections
+        let input: [[String: Any]] = [
+            ["role": "developer", "content": [["type": "input_text", "text": native], ["type": "input_text", "text": "KEEP"]]],
+            ["role": "user", "content": native],
+            ["role": "developer", "content": "quoted: " + native],
+        ]
+        func decoded(_ p: APIProviderDefinition, tool: [String: Any], choice: String = "auto") throws -> [String] {
+            let r = try request(["input": input, "tools": [tool], "tool_choice": choice], provider: p)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: r.body) as? [String: Any])
+            return try XCTUnwrap(body["messages"] as? [[String: Any]]).compactMap { $0["content"] as? String }
+        }
+        let actual = try decoded(typedPatchProvider(), tool: nativePatch())
+        let converted = try XCTUnwrap(actual.first { $0.contains(directions) })
+        XCTAssertFalse(converted.contains("The first line is exactly *** Begin Patch"))
+        XCTAssertTrue(converted.contains("A failed patch can have partially applied changes"))
+        XCTAssertTrue(converted.hasSuffix("KEEP"))
+        XCTAssertTrue(actual.contains(native))
+        XCTAssertTrue(actual.contains("quoted: " + native))
+        var foreign = nativePatch()
+        foreign["description"] = "Unrecognized grammar owner"
+        for messages in [try decoded(typedPatchProvider(), tool: nativePatch(), choice: "none"),
+                         try decoded(typedPatchProvider(model: "other"), tool: nativePatch()),
+                         try decoded(typedPatchProvider(), tool: foreign)] {
+            XCTAssertTrue(messages.contains(native + "KEEP"))
+            XCTAssertFalse(messages.contains(where: { $0.contains(directions) }))
+        }
+    }
+
+    func testTypedLocalPatchDistinguishesOperationsTypeFromItemSchemaRejectionWithoutRepair() throws {
+        let req = try request(["tools": [nativePatch()]], provider: typedPatchProvider(), toolNaming: .semantic)
+        for value: Any in ["serialized", ["update": "file.py"], NSNull(), 4, true] {
+            let arguments = String(decoding: try JSONSerialization.data(withJSONObject: ["operations": value]), as: UTF8.self)
+            let detail = try XCTUnwrap(rejectedDetails(req, arguments: arguments).first)
+            XCTAssertEqual(detail.constraint, .typeMismatch)
+            XCTAssertEqual(detail.path, [.property("operations")])
+            XCTAssertThrowsError(try APIModelResponseCodec.decode(correctionResult(req, arguments: arguments), request: req))
+        }
+        let nested = try XCTUnwrap(rejectedDetails(req, arguments: #"{"operations":[{"update":"file.py","hunks":"wrong"}]}"#).first)
+        XCTAssertEqual(nested.constraint, .schemaMismatch)
+        let example = #"{"operations":[{"update":"file.py","hunks":[{"lines":["-old","+new"]}]}]}"#
+        XCTAssertTrue(AlibabaPatchProjection.argumentDirections.contains(example))
+        let decoded = try APIModelResponseCodec.decode(correctionResult(req, arguments: example), request: req)
+        let item = try XCTUnwrap((decoded.response["output"] as? [[String: Any]])?.first)
+        XCTAssertEqual(item["input"] as? String, "*** Begin Patch\n*** Update File: file.py\n-old\n+new\n*** End Patch")
+    }
+
     func testCurrentAlibabaBundledPatchCompilesEveryOperationWithLiteralSourceAndEnvironment() throws {
         let operations: [[String: Any]] = [
             ["add": "new 🐈", "lines": ["", "@@", "*** End Patch", "\ttrailing  "]],

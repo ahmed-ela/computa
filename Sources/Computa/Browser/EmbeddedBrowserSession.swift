@@ -942,6 +942,7 @@ final class EmbeddedBrowserSession {
         guard qwenMarkerCurrent(entry, probe, view:view, owner:owner, generation:generation),
               view.url?.absoluteString == "https://chat.qwen.ai/" else { return }
         if let tag, ["ready","catalog_not_seen","catalog_pending","catalog_path_unverified","catalog_missing","catalog_ambiguous",
+            "catalog_binding","catalog_send_unobserved","catalog_not_done","catalog_final_url","catalog_non_200","catalog_response_type",
             "catalog_size","catalog_request","catalog_response","catalog_reused","catalog_accessor","catalog_mime","catalog_shape","stream_unavailable"].contains(tag) {
             probe.prepareResult = tag
         }

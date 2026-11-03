@@ -412,6 +412,25 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         }
     }
 
+    func testRawJSONSpellingPreservesMarkdownLiteralsInAnOfferedToolCall() throws {
+        let model = WebsiteModelChoice(provider: "qwen", key: "Qwen3.8-Max", label: "Qwen3.8-Max").modelID
+        let request = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
+            "model": model, "input": "fixture", "tools": [["type": "function", "name": "exec_command",
+                "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]], "required": ["cmd"]]]]
+        ]))
+        let wire = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"rg -F '\u0060item\u0060 \u002a\u002arequired\u002a\u002a'"}}]}"#
+        guard case let .toolCalls(calls) = try WebModelResponseCodec.parseEmbeddedReply(wire, request: request) else {
+            return XCTFail("expected one native function call")
+        }
+        XCTAssertEqual(calls.count, 1)
+        let call = try XCTUnwrap(calls.first)
+        XCTAssertEqual(call.name, "exec_command")
+        let arguments = try JSONSerialization.jsonObject(with: Data(call.argumentsJSON.utf8)) as? [String: String]
+        XCTAssertEqual(arguments, ["cmd": "rg -F '`item` **required**'"])
+        XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(
+            wire.replacingOccurrences(of: "exec_command", with: "missing_tool"), request: request))
+    }
+
     func testWebsiteResponseExamplesDescribeSelectedSerializationWithoutNestedRequestFences() throws {
         let fencedInstructions = """
         Return exactly one fenced JSON code block labelled json.
@@ -420,6 +439,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let rawInstructions = """
         Return exactly one raw JSON object. Do not use Markdown fences
         or code blocks.
+        Inside JSON string values, spell backticks as \\u0060 and asterisks as \\u002a when they form Markdown code or emphasis. Preserve the decoded text exactly.
         Examples below are complete raw response objects.
         """
         for includeTools in [false, true] {

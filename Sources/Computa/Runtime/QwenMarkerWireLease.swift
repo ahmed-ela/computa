@@ -18,6 +18,7 @@ final class QwenMarkerWireLease: @unchecked Sendable {
     private static let outcomes: Set<String> = [
         "wire_equal", "after_done", "answer_limit", "byte_limit", "catalog_accessor",
         "catalog_ambiguous", "catalog_mime", "catalog_missing", "catalog_not_seen", "catalog_path_unverified",
+        "catalog_binding", "catalog_send_unobserved", "catalog_not_done", "catalog_final_url", "catalog_non_200", "catalog_response_type",
         "catalog_pending", "catalog_request", "catalog_response", "catalog_reused", "catalog_shape",
         "catalog_size", "choice", "delta", "duplicate_key", "early_terminal",
         "empty", "event_limit", "fetch_rejected", "frame_limit", "http",

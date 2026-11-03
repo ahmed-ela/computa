@@ -28,6 +28,13 @@ import XCTest
         }
     }
 
+    func testRejectedCatalogPreservesNativeMarkerAndDeletionAndReportsOnlyFirstFailedCheck() async throws {
+        for (label, stage) in [("Qwen3.7-Plus", "catalog_non_200"), ("Qwen3.8-Max", "catalog_final_url"),
+                               ("Qwen3.7-Plus", "catalog_response_type"), ("Qwen3.8-Max", "catalog_not_done")] {
+            try await run(label: label, disposition: stage)
+        }
+    }
+
     func testFailedSavedDeletionWithholdsWireComparison() async throws {
         try await run(label:"Qwen3.8-Max", disposition:"cleanup_unconfirmed")
     }
@@ -132,8 +139,11 @@ import XCTest
         window.XMLHttpRequest=class extends EventTarget {
           open(method,url){this.path=new URL(url,location.href).href;}
           send(){timing=performance.now();this.dispatchEvent(new Event('loadend'));}
-          get readyState(){return 4} get responseURL(){return this.path} get status(){return 200}
-          get responseType(){return ''} get responseText(){return JSON.stringify({data:rows})}
+          get readyState(){return QDISPOSITION==='catalog_not_done'?3:4}
+          get responseURL(){return QDISPOSITION==='catalog_final_url'?this.path+'alternate':this.path}
+          get status(){return QDISPOSITION==='catalog_non_200'?403:200}
+          get responseType(){return QDISPOSITION==='catalog_response_type'?'arraybuffer':''}
+          get responseText(){if(QDISPOSITION.startsWith('catalog_'))throw Error('unscoped catalog read');return JSON.stringify({data:rows})}
           getResponseHeader(key){return key==='content-type'?'application/json':null}
         };
         Object.defineProperty(performance,'getEntriesByName',{value:(path,kind)=>timing && kind==='resource'?[{

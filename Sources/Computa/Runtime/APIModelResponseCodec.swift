@@ -552,7 +552,9 @@ enum APIModelResponseCodec {
         let limit = try integer(raw["max_tool_calls"], default: 64, range: 1...128)
         let maximumCalls = parallel ? limit : 1
         let configuration = try responseConfiguration(raw, parallel: parallel)
-        let history = try messages(raw, tools: historyTools, selection: selection, threadID: threadID, capsules: capsules, toolNaming: toolNaming)
+        let usesCompiledPatch = tools.contains { $0.patchProjection != nil && allowed.contains($0.wireName) }
+        let history = try messages(raw, tools: historyTools, selection: selection, threadID: threadID, capsules: capsules,
+            toolNaming: toolNaming, usesCompiledPatch: usesCompiledPatch)
         var body: [String: Any]
         if selection.provider.wireAPI == .responses {
             body = raw
@@ -784,7 +786,7 @@ enum APIModelResponseCodec {
 
     private struct History { let messages: [[String: Any]]; let callIDs: Set<String> }
     private static func messages(_ raw: [String: Any], tools: [Tool], selection: APIProviderCatalog.Selection,
-                                 threadID: String, capsules: APIReasoningCapsules, toolNaming: ToolNaming) throws -> History {
+                                 threadID: String, capsules: APIReasoningCapsules, toolNaming: ToolNaming, usesCompiledPatch: Bool) throws -> History {
         var messages: [[String: Any]] = [], seen = Set<String>(), pending = Set<String>(), pendingCustom = Set<String>()
         // Native compaction deliberately offers no tools while retaining completed
         // calls/results. Their display-only aliases cannot recover declaration
@@ -837,7 +839,11 @@ enum APIModelResponseCodec {
                         assistant = ["role": role, "content": try content(item["content"], images: selection.model.supportsImages, cerebras: selection.provider.isCerebrasInference)]
                         assistantIsFinal = item["phase"] as? String == "final_answer"
                     }
-                    else { messages.append(["role": role, "content": try content(item["content"], images: selection.model.supportsImages, cerebras: selection.provider.isCerebrasInference)]) }
+                    else {
+                        let project = originalRole == "developer" && usesCompiledPatch
+                        messages.append(["role": role, "content": try content(item["content"], images: selection.model.supportsImages,
+                            cerebras: selection.provider.isCerebrasInference, projectPatchInstructions: project)])
+                    }
                 }
             case "function_call", "custom_tool_call":
                 guard let id = item["call_id"] as? String, validCallID(id), seen.insert(id).inserted,
@@ -946,15 +952,19 @@ enum APIModelResponseCodec {
         }
         return items
     }
-    private static func content(_ value: Any?, images: Bool, cerebras: Bool) throws -> Any {
-        if let string = value as? String { guard string.utf8.count <= maximumText else { throw Failure.invalidRequest }; return string }
+    private static func content(_ value: Any?, images: Bool, cerebras: Bool, projectPatchInstructions: Bool = false) throws -> Any {
+        func present(_ text: String) -> String {
+            projectPatchInstructions ? AlibabaPatchProjection.projectedDeveloperText(text) : text
+        }
+        if let string = value as? String { guard string.utf8.count <= maximumText else { throw Failure.invalidRequest }; return present(string) }
         guard let parts = value as? [[String: Any]], parts.count <= 2_048 else { throw Failure.invalidHistory }
         var converted: [[String: Any]] = [], text = "", imagePresent = false
         for part in parts {
             switch part["type"] as? String {
             case "input_text", "output_text", "text":
                 guard let value = part["text"] as? String else { throw Failure.invalidHistory }
-                text += value; converted.append(["type": "text", "text": value])
+                let projected = present(value)
+                text += projected; converted.append(["type": "text", "text": projected])
             case "input_image":
                 guard images, let url = part["image_url"] as? String,
                       url.hasPrefix("data:image/") || URL(string: url)?.scheme == "https" else { throw Failure.unsupportedModality }
