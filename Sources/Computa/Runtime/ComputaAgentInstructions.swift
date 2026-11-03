@@ -1009,10 +1009,13 @@ enum ComputaAgentInstructions {
                 responseBoundary = ""
             }
         case .rawJSON:
+            let spelling = exampleNames.isEmpty
+                ? #"Inside JSON string values, spell backticks as \u0060 and asterisks as \u002a when they form Markdown code or emphasis. Preserve the decoded text exactly."#
+                : #"In JSON use \u0060 for Markdown backticks and \u002a for asterisks. Example path value (use yours): "report-\u0060x\u0060-\u002a\u002ay\u002a\u002a.txt""#
             responseFormatInstructions = """
             Return exactly one raw JSON object. Do not use Markdown fences
             or code blocks.
-            Inside JSON string values, spell backticks as \\u0060 and asterisks as \\u002a when they form Markdown code or emphasis. Preserve the decoded text exactly.
+            \(spelling)
             Examples below are complete raw response objects.
             """
             responseTask = "Generate Computa's next JSON response object. This website does not execute calls."

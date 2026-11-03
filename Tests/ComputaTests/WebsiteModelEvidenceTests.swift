@@ -61,7 +61,8 @@ final class WebsiteModelEvidenceTests: XCTestCase {
             let error = try XCTUnwrap(object["error"] as? [String: Any])
             XCTAssertEqual(error["code"] as? String, "product_mode_unverified")
             XCTAssertEqual(error["retryable"] as? Bool, false)
-            XCTAssertEqual(error["required_action"] as? String, "refresh_website_models")
+            XCTAssertEqual(error["required_action"] as? String, "inspect_website")
+            XCTAssertEqual(error["message"] as? String, "Computa could not verify normal Chat mode. Open chatgpt.com in Computa’s browser and check that you’re signed in. When the requested model is visible in Chat, start a new task.")
             XCTAssertTrue(error["param"] is NSNull)
         }
     }
@@ -88,6 +89,12 @@ final class WebsiteModelEvidenceTests: XCTestCase {
         for provider in WebsiteModelCatalog.providers {
             let expected = WebsiteModelChoice(provider: provider, key: "fixture-fast", label: "Fixture Fast")
             let raw = selection(expected)
+            if provider == "deepseek" {
+                XCTAssertThrowsError(try WebsiteModelEvidence.parse(raw, provider: provider, expected: expected)) { error in
+                    XCTAssertEqual(error as? WebsiteModelEvidence.Failure, .unverified)
+                }
+                continue
+            }
             let evidence = try WebsiteModelEvidence.parse(raw, provider: provider, expected: expected)
             XCTAssertEqual(evidence.selected.key, expected.key)
             XCTAssertEqual(evidence.selected.label, expected.label)

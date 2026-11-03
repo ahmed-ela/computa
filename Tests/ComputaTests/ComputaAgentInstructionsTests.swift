@@ -412,6 +412,46 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         }
     }
 
+    func testQwenCopyablePathValueIsFreshScopedAndDecodesExactly() throws {
+        let history = #"Prior user-supplied JSON stays literal: "file-\u0060x\u0060""#
+        let example = #"In JSON use \u0060 for Markdown backticks and \u002a for asterisks. Example path value (use yours): "#
+        let literal = "report-`x`-**y**.txt"
+        let tool: [String: Any] = ["type": "function", "name": "read_file", "parameters": [
+            "type": "object", "properties": ["path": ["type": "string"]], "required": ["path"]]]
+        let input = [["role": "user", "content": history]]
+        for key in ["Qwen3.7-Plus", "Qwen3.8-Max"] {
+            let model = WebsiteModelChoice(provider: "qwen", key: key, label: key).modelID
+            let original = try JSONSerialization.data(withJSONObject: ["model": model, "input": input, "tools": [tool]])
+            let req = try WebModelResponseCodec.prepareRequest(original)
+            XCTAssertEqual(req.continuationRequest, original)
+            XCTAssertLessThan(req.prompt.utf8.count, WebModelResponseCodec.maximumPromptBytes)
+            let end = try XCTUnwrap(req.prompt.range(of: "END_COMPLETE_RESPONSES_REQUEST_JSON."))
+            let handoff = req.prompt[end.upperBound...]
+            let examples = handoff.split(separator: "\n").filter { $0.hasPrefix(example) }
+            XCTAssertEqual(examples.count, 1)
+            let scalar = String(try XCTUnwrap(examples.first).dropFirst(example.count))
+            XCTAssertEqual(scalar, #""report-\u0060x\u0060-\u002a\u002ay\u002a\u002a.txt""#)
+            XCTAssertEqual(try JSONDecoder().decode(String.self, from: Data(scalar.utf8)), literal)
+            let wire = #"{"type":"tool_calls","calls":[{"name":"read_file","arguments":{"path":\#(scalar)}}]}"#
+            guard case let .toolCalls(calls) = try WebModelResponseCodec.parseEmbeddedReply(wire, request: req) else {
+                return XCTFail("Expected the offered synthetic file read")
+            }
+            XCTAssertEqual(calls.count, 1)
+            let call = try XCTUnwrap(calls.first)
+            XCTAssertEqual(call.name, "read_file")
+            XCTAssertEqual(try JSONDecoder().decode([String:String].self, from: Data(call.argumentsJSON.utf8)), ["path": literal])
+            XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(wire.replacingOccurrences(of: "read_file", with: "absent"), request: req))
+            for extra: [String: Any] in [[:], ["tools": [tool], "tool_choice": "none"]] {
+                let body: [String: Any] = ["model": model, "input": input]
+                let other = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: body.merging(extra) { _, b in b }))
+                XCTAssertFalse(other.prompt.contains(example))
+            }
+        }
+        for fmt: ComputaAgentInstructions.WebResponseFormat in [.fencedJSON, .literalFencedJSON] {
+            XCTAssertFalse(ComputaAgentInstructions.webResponseContract(offeredToolNames: ["read_file"], responseFormat: fmt).contains(example))
+        }
+    }
+
     func testRawJSONSpellingPreservesMarkdownLiteralsInAnOfferedToolCall() throws {
         let model = WebsiteModelChoice(provider: "qwen", key: "Qwen3.8-Max", label: "Qwen3.8-Max").modelID
         let request = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
@@ -436,13 +476,16 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         Return exactly one fenced JSON code block labelled json.
         Examples below are JSON contents; put one inside that code block.
         """
-        let rawInstructions = """
+        let rawWithoutTools = """
         Return exactly one raw JSON object. Do not use Markdown fences
         or code blocks.
         Inside JSON string values, spell backticks as \\u0060 and asterisks as \\u002a when they form Markdown code or emphasis. Preserve the decoded text exactly.
         Examples below are complete raw response objects.
         """
         for includeTools in [false, true] {
+            let rawInstructions = includeTools ? rawWithoutTools.replacingOccurrences(
+                of: #"Inside JSON string values, spell backticks as \u0060 and asterisks as \u002a when they form Markdown code or emphasis. Preserve the decoded text exactly."#,
+                with: #"In JSON use \u0060 for Markdown backticks and \u002a for asterisks. Example path value (use yours): "report-\u0060x\u0060-\u002a\u002ay\u002a\u002a.txt""#) : rawWithoutTools
             let names = includeTools ? ["relay.browser_read", "relay.apply_patch"] : []
             let customNames: Set<String> = includeTools ? ["relay.apply_patch"] : []
             let examples = [#"{"type":"message","text":"OK"}"#] + (includeTools ? [

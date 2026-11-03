@@ -100,7 +100,7 @@ actor WebModelServer {
             case .preparationDeadline: "The website did not become ready before the 45-second preparation deadline. This website inference was not submitted."
             case .deadline: "The website did not finish its response before the five-minute deadline."
             case .cleanupFailed: "The web conversation cleanup could not be verified. Its local transcript has been retained."
-            case .productModeUnverified: "ChatGPT normal Chat mode could not be verified. No response was accepted and no prompt was replayed. Refresh website models before retrying."
+            case .productModeUnverified: EmbeddedWebModelTransport.Failure.productModeUnverified.errorDescription
             case .modelUnverified: "The website's selected model could not be verified. No response was accepted and no prompt was replayed."
             case .modelMismatch: "The website selected or reported a different model. No response was accepted and no prompt was replayed."
             case .modelNotFound: "The requested website model is not supported. Choose a model from Computa's selector."
@@ -2596,7 +2596,7 @@ actor WebModelServer {
         }
         if case .productModeUnverified = error as? Failure {
             fields["retryable"] = false
-            fields["required_action"] = "refresh_website_models"
+            fields["required_action"] = EmbeddedWebModelTransport.Failure.productModeUnverified.requiredAction
         }
         if case let .malformedReply(diagnostic) = error as? Failure {
             fields["code"] = "malformed_website_reply"

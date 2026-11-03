@@ -308,7 +308,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .responseRenderingFailed, .responseFormatUnavailable: "inspect_website"
             case .responseStreamFailed: "inspect_website"
             case .unexpectedPage: "inspect_website"
-            case .productModeUnverified: "refresh_website_models"
+            case .productModeUnverified: "inspect_website"
             case .explicitClearUnverified, .savedDeleteUnverified: "inspect_website"
             case .ownershipFailure: "inspect_website"
             default: nil
@@ -349,7 +349,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .submissionObservationPending: "The submitted message is still appearing on the model page."
             case .modelUnverified: "The website's selected model could not be verified. No prompt was replayed. Refresh the website models and retry."
             case .modelMismatch: "The website changed or reported a different model. Its response was not accepted, and no prompt was replayed."
-            case .productModeUnverified: "ChatGPT normal Chat mode could not be verified. No response was accepted and no prompt was replayed. Refresh website models before retrying."
+            case .productModeUnverified: "Computa could not verify normal Chat mode. Open chatgpt.com in Computa’s browser and check that you’re signed in. When the requested model is visible in Chat, start a new task."
             case .modelUnavailable: "That model is not available in the website's current account. Refresh the website models and choose an available model."
             case .discoveryCleanupFailed: "The model menu session could not be closed. Restart Computa to refresh website models."
             case .responseTooLarge: "The website's response exceeded the local browser transport limit."

@@ -398,12 +398,13 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertTrue(unbound.prompt.contains("Supplied URL: first load " + prefix + "browser_open."))
             XCTAssertTrue(unbound.prompt.contains("Existing human tab with an observed tab_id: first load " + prefix + "browser_bind."))
             XCTAssertTrue(unbound.prompt.contains("Loading schemas executes no task tools."))
-            XCTAssertTrue(unbound.prompt.contains("After successful entry, check the new catalog_revision for permitted fill/click tools"))
+            XCTAssertTrue(unbound.prompt.contains("Shell HTTP cannot verify browser state. After entry check catalog_revision for reads/actions"))
             let openReply = "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"\(prefix)browser_open\",\"arguments\":{\"url\":\"http://localhost:62341/\"}}]}"
             XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(openReply, request: unbound), "Guidance grants no unloaded schema authority")
             let (entryLoaded, _) = try request(.unbound, selected: [prefix + "browser_open"])
             XCTAssertTrue(entryLoaded.prompt.contains("Supplied URL: call " + prefix + "browser_open."))
             XCTAssertNoThrow(try WebModelResponseCodec.parseEmbeddedReply(openReply, request: entryLoaded))
+            XCTAssertTrue(entryLoaded.prompt.contains("Shell HTTP cannot verify browser state."))
             let (bothEntries, _) = try request(.unbound, selected: [prefix + "browser_open", prefix + "browser_bind"])
             XCTAssertTrue(bothEntries.prompt.contains("Supplied URL: call " + prefix + "browser_open. Existing human tab with an observed tab_id: call " + prefix + "browser_bind."))
             let (onlyBinding, _) = try request(.unbound, selected: [prefix + "browser_bind"])
@@ -426,7 +427,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             }.map(\.name))
             XCTAssertEqual(try loaderNames(entryLoaded), choices, "Already loaded tools remain loadable with a replacement selection")
             XCTAssertFalse(bound.prompt.contains("Page tools require successful"))
-            XCTAssertFalse(bound.prompt.contains("After successful entry, check the new catalog_revision for permitted fill/click tools"))
+            XCTAssertFalse(bound.prompt.contains("Shell HTTP cannot verify browser state. After entry check catalog_revision for reads/actions"))
             XCTAssertTrue(bound.prompt.contains("Current browser state: native page bound."))
             for prepared in [unbound, entryLoaded, bound] {
                 XCTAssertEqual(prepared.continuationRequest, raw)
@@ -478,7 +479,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             let request = try WebModelResponseCodec.prepareRequest(raw, browserToolAvailability: availability,
                 groqToolCatalogProjection: GroqToolCatalog.baseline(for: seed))
             XCTAssertFalse(request.prompt.contains("Page tools require successful"))
-            XCTAssertFalse(request.prompt.contains("After successful entry, check the new catalog_revision for permitted fill/click tools"))
+            XCTAssertFalse(request.prompt.contains("Shell HTTP cannot verify browser state. After entry check catalog_revision for reads/actions"))
             XCTAssertEqual(request.continuationRequest, raw)
         }
     }

@@ -600,7 +600,7 @@ enum WebModelResponseCodec {
                     : "Existing human tab with an observed tab_id: \(use) \(name)."
             }
             return "Current browser state: unbound. " + routes.joined(separator: " ")
-                + " Loading schemas executes no task tools. After successful entry, check the new catalog_revision for permitted fill/click tools. Empty tabs do not prove denied access."
+                + " Loading schemas executes no task tools. Shell HTTP cannot verify browser state. After entry check catalog_revision for reads/actions. Empty tabs do not prove denial."
         }
         let allowed = tools.filter { policy.allowedNames.contains($0.key) && $0.value.nativeBrowserBit != 0 }
         guard !allowed.isEmpty else { return "" }

@@ -184,6 +184,43 @@ final class WebsiteFailureHistoryTests: XCTestCase {
         }
     }
 
+    func testChatProductInspectionPreservesOnlyExactCurrentAndHistoricalFailures() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ChatProduct-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let task = UUID().uuidString, thread = UUID().uuidString
+        let model = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant").modelID
+        func text(_ fields: [String: Any]) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: ["error": fields],
+                options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
+        }
+        func make(_ fields: [String: Any], for modelID: String) throws -> WebsiteTurnFailureStore.Record? {
+            WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: UUID().uuidString,
+                modelID: modelID, diagnosticText: try text(fields))
+        }
+        let generated = try WebModelServer.errorBody(for: EmbeddedWebModelTransport.Failure.productModeUnverified)
+        let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: generated) as? [String: Any])
+        let new = try XCTUnwrap(envelope["error"] as? [String: Any])
+        let old = new.merging(["message": "ChatGPT normal Chat mode could not be verified. No response was accepted and no prompt was replayed. Refresh website models before retrying.",
+            "required_action": "refresh_website_models"]) { _, prior in prior }
+        let store = WebsiteTurnFailureStore(directory: directory)
+        var saved: [WebsiteTurnFailureStore.Record] = []
+        for fields in [old, new] {
+            let record = try XCTUnwrap(try make(fields, for: model))
+            XCTAssertEqual(record.diagnosticText, try text(fields))
+            XCTAssertTrue(store.append(record))
+            saved.append(record)
+            XCTAssertNil(try make(fields, for: "browser/claude"))
+            XCTAssertNil(try make(fields, for: "api/alibaba/model/fixture"))
+            for edits: [String: Any] in [["retryable": true], ["retryable": 0], ["message": "PRIVATE_CANARY"],
+                ["code": "invalid_product"], ["extra": "PRIVATE_CANARY"]] {
+                XCTAssertNil(try make(fields.merging(edits) { _, v in v }, for: model))
+            }
+        }
+        XCTAssertNil(try make(new.merging(["required_action": "refresh_website_models"]) { _, v in v }, for: model))
+        XCTAssertNil(try make(old.merging(["required_action": "inspect_website"]) { _, v in v }, for: model))
+        XCTAssertEqual(try WebsiteTurnFailureStore(directory: directory).load(threadID: thread), saved)
+    }
+
     func testQuotaRecoveryMessageUsesAvailableRestartPathAndPreservesExactLegacyHistory() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaQuotaHistory-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }

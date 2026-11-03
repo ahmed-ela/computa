@@ -121,8 +121,8 @@ struct WebsiteTurnFailureStore: Sendable {
                       let reason = WebsiteTurnContinuation.Failure(rawValue: rawReason) else { return nil }
                 nativeError = reason
             case "product_mode_unverified":
-                nativeError = error["message"] as? String == WebModelServer.Failure.productModeUnverified.localizedDescription
-                    ? WebModelServer.Failure.productModeUnverified : EmbeddedWebModelTransport.Failure.productModeUnverified
+                guard provider == "chatgpt" else { return nil }
+                nativeError = EmbeddedWebModelTransport.Failure.productModeUnverified
             default: return nil
             }
             guard let native = try? WebModelServer.errorBody(for: nativeError),
@@ -132,6 +132,14 @@ struct WebsiteTurnFailureStore: Sendable {
                 // message shipped. Retain saved diagnostics without admitting
                 // arbitrary prose, new fields, retry metadata or provider gates.
                 legacyError["message"] = "\(webProvider.displayName)'s website usage limit has been reached. After your account's limit resets, refresh website models before retrying."
+                var legacy = expected
+                legacy["error"] = legacyError
+                if NSDictionary(dictionary: supplied).isEqual(to: legacy) { expected = legacy }
+            }
+            if code == "product_mode_unverified", var legacyError = expected["error"] as? [String: Any] {
+                // Preserve the exact older action and message as one historical envelope.
+                legacyError["message"] = "ChatGPT normal Chat mode could not be verified. No response was accepted and no prompt was replayed. Refresh website models before retrying."
+                legacyError["required_action"] = "refresh_website_models"
                 var legacy = expected
                 legacy["error"] = legacyError
                 if NSDictionary(dictionary: supplied).isEqual(to: legacy) { expected = legacy }
