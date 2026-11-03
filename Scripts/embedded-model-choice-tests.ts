@@ -592,6 +592,36 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
     });
 
 
+    if (provider === 'claude') test('Claude choices require an owned selectable row and can include entitled Fable', async () => {
+      for (const attributes of [
+        { role: 'menuitem' }, { role: 'menuitemradio' }, { role: 'radio', 'aria-checked': 'mixed' },
+        { role: 'option', 'aria-checked': 'false' }, { role: 'option', 'aria-selected': 'invalid' },
+      ]) {
+        const { f, picker } = setup();
+        const unavailable = picker.add(picker.menu, 'Fable 5.1', '');
+        delete unavailable.values['aria-checked'];
+        Object.assign(unavailable.values, attributes);
+        const action = picker.add(picker.nested, 'Opus 5', '', { role: 'menuitem' });
+        const entitled = picker.add(picker.nested, 'Fable 5', '', { role: 'radio', 'aria-checked': 'false' });
+        const option = picker.add(picker.menu, 'Haiku 5.5', '', { role: 'option', 'aria-selected': 'false' });
+        const found = await advance(f, 'discoverModels');
+        expect(found.error).toBeUndefined();
+        expect(found.modelChoices).not.toContainEqual(choice('Fable 5.1'));
+        expect(found.modelChoices).not.toContainEqual(choice('Opus 5'));
+        expect(found.modelChoices).toContainEqual(choice('Fable 5'));
+        expect(found.modelChoices).toContainEqual(choice('Haiku 5.5'));
+        expect([unavailable, action, entitled, option].every(o => o.clicks === 0)).toBe(true);
+        const selected = await advance(f, 'selectModel', { modelChoice: choice('Fable 5.1') });
+        expect(selected.error).toBe('model_unavailable');
+        expect(unavailable.clicks).toBe(0); expect(f.send.clicks).toBe(0);
+      }
+      const { f, picker } = setup();
+      const genuine = picker.add(picker.nested, 'Fable 5', '', { role: 'menuitemradio', 'aria-checked': 'false' });
+      const result = await advance(f, 'selectModel', { modelChoice: choice('Fable 5') });
+      expect(result.selected).toBe(true); expect(result.modelEvidence.selected).toEqual(choice('Fable 5'));
+      expect(genuine.clicks).toBe(1); expect(f.send.clicks).toBe(0);
+    });
+
     if (provider === 'claude') test('Claude purchase exclusion reads exact visible labels on any element tag', async () => {
       for (const tag of ['P', 'LABEL', 'SMALL', 'STRONG', 'EM', 'CREDITS-LABEL']) {
         const { f, picker } = setup();

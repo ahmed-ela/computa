@@ -1347,6 +1347,12 @@ function websiteModelPickerState(provider) {
     const options = [...menu.querySelectorAll(selector)].slice(0, 128);
     for (const option of options) {
       if (!enabled(option) || !outside(option) || option.closest('[role="menu"], [role="listbox"], [role="dialog"]') !== menu) continue;
+      // An enabled menu action can advertise a model name without being a
+      // selectable model. Claude rows must expose an actual checked/selected state.
+      if (provider === 'claude') {
+        const state = option.getAttribute(option.getAttribute('role') === 'option' ? 'aria-selected' : 'aria-checked');
+        if (state !== 'true' && state !== 'false') continue;
+      }
       const upgrades = [option, ...option.querySelectorAll('span, div, button, a')].slice(0, 128)
         .some(node => physical(node) && /^(?:Upgrade|Upgrade to .+|Locked|Unavailable)$/.test(websiteModelNormalize(node.getAttribute('aria-label') || node.textContent)));
       // Purchase labels may use any element tag. Text must come from

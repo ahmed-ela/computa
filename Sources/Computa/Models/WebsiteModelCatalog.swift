@@ -125,7 +125,8 @@ enum WebsiteModelCatalog {
     // The pilot exposes only observed Plus/Max names and typed Chat/DeepThink modes.
     static let knownProviders = ["chatgpt", "gemini", "claude", "groq", "kimi", "qwen", "deepseek"]
     static let maximumChoicesPerProvider = 32
-    static let preferenceKey = "Computa.websiteModelChoices.v3-chat-latest-power"
+    static let preferenceKey = "Computa.websiteModelChoices.v4-claude-selectable-rows"
+    static let priorSelectableRowsPreferenceKey = "Computa.websiteModelChoices.v3-chat-latest-power"
     static let priorPreferenceKey = "Computa.websiteModelChoices.v2-chat-product"
     static let legacyPreferenceKey = "Computa.websiteModelChoices.v1"
 
@@ -269,10 +270,9 @@ enum WebsiteModelCatalog {
     }
 
     static func load(from preferences: UserDefaults) -> [WebsiteModelChoice] {
-        let storedKey = preferences.data(forKey: preferenceKey) != nil ? preferenceKey
-            : preferences.data(forKey: priorPreferenceKey) != nil ? priorPreferenceKey : legacyPreferenceKey
-        let legacy = storedKey != preferenceKey
-        guard let data = preferences.data(forKey: storedKey), data.count <= 100 * 1_024,
+        let keys = [preferenceKey, priorSelectableRowsPreferenceKey, priorPreferenceKey, legacyPreferenceKey]
+        guard let storedKey = keys.first(where: { preferences.object(forKey: $0) != nil }),
+              let data = preferences.data(forKey: storedKey), data.count <= 100 * 1_024,
               let choices = try? JSONDecoder().decode([WebsiteModelChoice].self, from: data),
               choices.count <= knownProviders.count * maximumChoicesPerProvider else { return [] }
         for provider in knownProviders {
@@ -284,10 +284,16 @@ enum WebsiteModelCatalog {
         guard choices.allSatisfy(\.isValid) else { return [] }
         // Validate the complete stored catalog first: retiring a choice must
         // not hide duplicate or malformed entries from cache validation.
-        // Earlier catalogs did not bind an automatic latest family to a Chat
-        // power preset. Retire only those provider entries until fresh discovery.
-        let selectable = choices.filter { providers.contains($0.provider) && $0.isObservedChoice && (!legacy || $0.provider != "chatgpt") }
-        if legacy || selectable.count != choices.count { save(selectable, to: preferences) }
+        // Pre-v4 Claude catalogs do not prove selectable row semantics. Leave
+        // that provider missing for normal idle discovery. v3 already bound Chat
+        // presets to a family. Saved task/default identities are independent.
+        let legacyChat = storedKey == priorPreferenceKey || storedKey == legacyPreferenceKey
+        let selectable = choices.filter { choice in
+            providers.contains(choice.provider) && choice.isObservedChoice
+                && (choice.provider != "claude" || storedKey == preferenceKey)
+                && (choice.provider != "chatgpt" || !legacyChat)
+        }
+        if storedKey != preferenceKey || selectable.count != choices.count { save(selectable, to: preferences) }
         return selectable
     }
 

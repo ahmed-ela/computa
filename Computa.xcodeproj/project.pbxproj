@@ -315,6 +315,7 @@
 		D803D74C30D5A794EE834B55 /* EmbeddedBrowserPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44F25EB52B3B26A78F516312 /* EmbeddedBrowserPane.swift */; };
 		D89FB4BC10E751F2F597D4D4 /* ApplicationWindowReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F57DE9C1BF8BA7CFB6677E9 /* ApplicationWindowReader.swift */; };
 		D9083954D2673B2074E3BA8A /* FileEditingHarnessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDEC391C1ED23BF3D36E9CD8 /* FileEditingHarnessTests.swift */; };
+		D92ACF250015DBF8F57B9048 /* AlibabaPatchProjection.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB96E4C7F8899BDC12CF3C84 /* AlibabaPatchProjection.swift */; };
 		DA736AFE98099DEC7BE61528 /* DeepSeekWebsiteResponseFormatTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B981A6E4D6E3B47ED2EE9894 /* DeepSeekWebsiteResponseFormatTests.swift */; };
 		DB3F476F4EBA6C7E794F14FE /* ClaudeRemountHostDiagnostic.swift in Sources */ = {isa = PBXBuildFile; fileRef = F18DA940E6CB5B03D91F8EA0 /* ClaudeRemountHostDiagnostic.swift */; };
 		DB56DCA2F383E7E4847E0F03 /* KimiSavedConversationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75DD5955AD548B2F4BA21B21 /* KimiSavedConversationTests.swift */; };
@@ -641,6 +642,7 @@
 		AA67FEE11E1A3587FD30DDF9 /* WebsiteAdapterFailureDiagnostic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebsiteAdapterFailureDiagnostic.swift; sourceTree = "<group>"; };
 		AAB9A1D6388FA24A373196B7 /* ComputerReadContinuation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerReadContinuation.swift; sourceTree = "<group>"; };
 		AB4C454F06A1E556F1149BEB /* AppStateActivityMetadataTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStateActivityMetadataTests.swift; sourceTree = "<group>"; };
+		AB96E4C7F8899BDC12CF3C84 /* AlibabaPatchProjection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlibabaPatchProjection.swift; sourceTree = "<group>"; };
 		ABC62492D67B3C28BD3551B5 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
 		ABF5C281ACC343DCDEE1E730 /* BrowserModels */ = {isa = PBXFileReference; lastKnownFileType = folder; name = BrowserModels; path = Sources/Computa/Resources/BrowserModels; sourceTree = SOURCE_ROOT; };
 		AD52F76B1A23C797CB0EE69F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -1214,6 +1216,7 @@
 				180DED41FB7570A657C2CDCB /* AgentRPCError.swift */,
 				8BA929501A16AF2B78762C9A /* AgentRuntimeClient.swift */,
 				82DC4319AF98CB2BCF5CCEAE /* AgentRuntimeIsolation.swift */,
+				AB96E4C7F8899BDC12CF3C84 /* AlibabaPatchProjection.swift */,
 				FFB61A1B3822A7EAF955F5F7 /* APIModelCorrection.swift */,
 				A041224196F3831CD2DE579E /* APIModelResponseCodec.swift */,
 				60F7CF5CCC2F2C60532816E0 /* APIModelServer.swift */,
@@ -1518,6 +1521,7 @@
 				DD89D605A49EB2484532ACB1 /* AgentRPCError.swift in Sources */,
 				17C4C5FC2A9E192400BDEA67 /* AgentRuntimeClient.swift in Sources */,
 				65F36B8D26627B47E7B46A52 /* AgentRuntimeIsolation.swift in Sources */,
+				D92ACF250015DBF8F57B9048 /* AlibabaPatchProjection.swift in Sources */,
 				313642298F3DEA3591700C2C /* AppModels.swift in Sources */,
 				7127C2BA1818FA2536F56FC1 /* AppReviewState.swift in Sources */,
 				78DB98B497E6ADD4476463A9 /* AppServerFileChanges.swift in Sources */,

@@ -41,13 +41,13 @@ final class ChatGPTChatSelectionTests: XCTestCase {
         }
     }
 
-    func testPriorCacheDropsOnlyChatEntriesAndDoesNotInventFreshAvailability() throws {
+    func testPriorCacheDropsUnprovenChatAndClaudeEntriesAndDoesNotInventAvailability() throws {
         for oldKey in [WebsiteModelCatalog.priorPreferenceKey, WebsiteModelCatalog.legacyPreferenceKey] {
             let preferences = isolatedTestPreferences()
-            let others = [WebsiteModelChoice(provider: "gemini", key: "3.1 Pro", label: "3.1 Pro"),
-                          WebsiteModelChoice(provider: "claude", key: "Sonnet 5.5", label: "Sonnet 5.5")]
+            let others = [WebsiteModelChoice(provider: "gemini", key: "3.1 Pro", label: "3.1 Pro")]
+            let claude = WebsiteModelChoice(provider: "claude", key: "Sonnet 5.5", label: "Sonnet 5.5")
             let old = WebsiteModelChoice(provider: "chatgpt", key: "GPT-6", label: "GPT-6")
-            preferences.set(try JSONEncoder().encode([old, preset(.medium)] + others), forKey: oldKey)
+            preferences.set(try JSONEncoder().encode([old, preset(.medium), claude] + others), forKey: oldKey)
             XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), others)
             let saved = try XCTUnwrap(preferences.data(forKey: WebsiteModelCatalog.preferenceKey))
             XCTAssertEqual(try JSONDecoder().decode([WebsiteModelChoice].self, from: saved), others)

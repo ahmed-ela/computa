@@ -3696,4 +3696,154 @@ final class APIModelResponseCodecTests: XCTestCase {
         }
     }
 
+    private func typedPatchProvider(model: String = "qwen3.7-flash", base: String = "https://ws-fixture123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1") -> APIProviderDefinition {
+        .init(id: "fixture", name: "Fixture", baseURL: URL(string: base)!, wireAPI: .chatCompletions, models: [.init(id: model, name: "Fixture")])
+    }
+
+    // Exact grammar fixtures emitted by codex-rs/core/src/tools/handlers/apply_patch_spec.rs.
+    private func nativePatch(environments: Bool = false) -> [String: Any] {
+        var grammar = #"""
+        start: begin_patch hunk+ end_patch
+        begin_patch: "*** Begin Patch" LF
+        end_patch: "*** End Patch" LF?
+
+        hunk: add_hunk | delete_hunk | update_hunk
+        add_hunk: "*** Add File: " filename LF add_line+
+        delete_hunk: "*** Delete File: " filename LF
+        update_hunk: "*** Update File: " filename LF change_move? change?
+
+        filename: /(.+)/
+        add_line: "+" /(.*)/ LF -> line
+
+        change_move: "*** Move to: " filename LF
+        change: (change_context | change_line)+ eof_line?
+        change_context: ("@@" | "@@ " /(.+)/) LF
+        change_line: ("+" | "-" | " ") /(.*)/ LF
+        eof_line: "*** End of File" LF
+
+        %import common.LF
+        """# + "\n"
+        if environments {
+            grammar = grammar.replacingOccurrences(of: "start: begin_patch hunk+ end_patch", with: "start: begin_patch environment_id? hunk+ end_patch\nenvironment_id: \"*** Environment ID: \" filename LF")
+        }
+        return ["type": "custom", "name": "apply_patch", "description": "The `apply_patch` tool can be used to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.", "format": ["type": "grammar", "syntax": "lark", "definition": grammar]]
+    }
+
+    func testCurrentAlibabaBundledPatchCompilesEveryOperationWithLiteralSourceAndEnvironment() throws {
+        let operations: [[String: Any]] = [
+            ["add": "new 🐈", "lines": ["", "@@", "*** End Patch", "\ttrailing  "]],
+            ["delete": "obsolete"], ["update": "file", "move_to": "moved", "hunks": [
+                ["lines": [" first", "-old", "+new  "]], ["anchor": "def example():", "lines": [" ", "+@@", "-*** Delete File: another"]],
+                ["anchor": "", "lines": ["+end"]]], "end_of_file": true],
+        ]
+        for scoped in [false, true] {
+            let patch = nativePatch(environments: scoped)
+            let wrapped: [String: Any] = scoped ? ["type": "namespace", "name": "functions", "tools": [patch]] : patch
+            let req = try request(["tools": [wrapped]], provider: typedPatchProvider(), toolNaming: .semantic)
+            let fn = try XCTUnwrap(wireFunctions(req).first)
+            let properties = try XCTUnwrap((fn["parameters"] as? [String: Any])?["properties"] as? [String: Any])
+            XCTAssertNotNil(properties["operations"]); XCTAssertEqual(properties["environment_id"] != nil, scoped)
+            XCTAssertNil(properties["input"]); XCTAssertTrue((fn["description"] as? String)?.contains("Computa emits") == true)
+            var arguments: [String: Any] = ["operations": operations]
+            if scoped { arguments["environment_id"] = "workspace-A" }
+            let text = String(decoding: try JSONSerialization.data(withJSONObject: arguments), as: UTF8.self)
+            let reply = try APIModelResponseCodec.decode(correctionResult(req, arguments: text), request: req)
+            let item = try XCTUnwrap((reply.response["output"] as? [[String: Any]])?.first)
+            XCTAssertEqual(item["type"] as? String, "custom_tool_call"); XCTAssertEqual(item["name"] as? String, "apply_patch")
+            XCTAssertEqual(item["namespace"] as? String, scoped ? "functions" : nil)
+            let expected = "*** Begin Patch\n" + (scoped ? "*** Environment ID: workspace-A\n" : "") +
+                "*** Add File: new 🐈\n+\n+@@\n+*** End Patch\n+\ttrailing  \n*** Delete File: obsolete\n*** Update File: file\n*** Move to: moved\n first\n-old\n+new  \n@@ def example():\n \n+@@\n-*** Delete File: another\n@@\n+end\n*** End of File\n*** End Patch"
+            XCTAssertEqual(Data(try XCTUnwrap(item["input"] as? String).utf8), Data(expected.utf8))
+        }
+    }
+
+    func testAlibabaTypedPatchRejectsEmptyHunkAmbiguousOperationsAndHeaderInjectionAtomically() throws {
+        let req = try request(["tools": [nativePatch()]], provider: typedPatchProvider(), toolNaming: .semantic)
+        let invalid: [[String: Any]] = [
+            ["input": "*** Begin Patch\n*** End Patch"], ["operations": []],
+            ["operations": [["update":"f","hunks":[["anchor":"","lines":["+good"]],["anchor":"","lines":[]]]]]],
+            ["operations": [["add":"f","lines":[]]]], ["operations": [["add":"f","delete":"x","lines":["a"]]]],
+            ["operations": [["delete":"a\n*** Delete File: b"]]], ["operations": [["add":"f","lines":["a\rb"]]]],
+            ["operations": [["delete":"f "]]], ["operations": [["add":"f","lines":["bad\u{0}"]]]],
+            ["operations": [["update":"f","move_to":"x\ny","hunks":[["lines":["-line"]]]]]],
+            ["operations": [["update":"f","hunks":[["lines":["@@"]]]]]],
+            ["operations": [["update":"f","hunks":[["lines":[" first"]],["lines":[" next"]]]]]],
+            ["operations": [["update":"f","hunks":[["anchor":"trailing ", "lines":[" line"]]]]]],
+            ["operations": [["update":"f","end_of_file":false,"hunks":[["lines":[" line"]]]]]],
+            ["environment_id":"unoffered","operations":[["delete":"f"]]],
+        ]
+        let validSibling: [String: Any] = ["type":"function", "id":"sibling", "function":["name":req.tools[0].wireName,"arguments":#"{"operations":[{"delete":"sibling"}]}"#]]
+        var texts = try invalid.map { String(decoding: try JSONSerialization.data(withJSONObject: $0), as: UTF8.self) }
+        texts.append(#"{"operations":[{"delete":"f","delete":"different"}]}"#)
+        for text in texts {
+            let result = try correctionResult(req, arguments: text, additionalCalls: [validSibling])
+            guard case .argumentsRejected = try APIModelResponseCodec.decodeForCorrection(result, request: req) else {
+                return XCTFail("A malformed operation must never release even a valid sibling")
+            }
+            XCTAssertThrowsError(try APIModelResponseCodec.decode(result, request: req))
+        }
+        let max = 34
+        XCTAssertNil(AlibabaPatchProjection.local.compile(["operations":[["delete":String(repeating:"x",count:max)]]], byteLimit: max))
+    }
+
+    func testAlibabaTypedPatchScopeAndRawHistoricalCallsIncludingFailuresRemainExact() throws {
+        let bundled = nativePatch(), alibaba = typedPatchProvider()
+        var drift = bundled, foreignDescription = bundled, deferred = bundled
+        deferred["defer_loading"] = true
+        var grammar = try XCTUnwrap(drift["format"] as? [String: Any]); grammar["definition"] = (grammar["definition"] as! String) + " "
+        drift["format"] = grammar; foreignDescription["description"] = "Unrelated tool"
+        let foreignNamespace: [String: Any] = ["type":"namespace","name":"editing","tools":[bundled]]
+        for (tool, p) in [(drift, alibaba), (foreignDescription, alibaba), (foreignNamespace, alibaba), (deferred, alibaba),
+                          (bundled, typedPatchProvider(model:"other")), (bundled, typedPatchProvider(base:"https://example.invalid/v1"))] {
+            let r = try request(["tools":[tool]], provider:p, toolNaming:.semantic)
+            let properties = try XCTUnwrap(r.tools.first?.schema["properties"] as? [String: Any])
+            XCTAssertNotNil(properties["input"]); XCTAssertNil(properties["operations"])
+        }
+        let rejected = "*** Begin Patch\n*** Update File: fixture\n@@\n-old\n+new  \n@@"
+        let history: [[String: Any]] = [["role":"user","content":"Synthetic test"],
+            ["type":"custom_tool_call","call_id":"raw-first","name":"apply_patch","input":rejected],
+            ["type":"custom_tool_call_output","call_id":"raw-first","output":"native tool failure: missing footer"],
+            ["role":"user","content":"Continue using the current schema"]]
+        let r = try request(["tools":[bundled],"input":history], provider:alibaba, toolNaming:.semantic)
+        XCTAssertNotNil((r.tools[0].schema["properties"] as? [String: Any])?["operations"])
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with:r.body) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        let c = try XCTUnwrap(messages.compactMap { $0["tool_calls"] as? [[String: Any]] }.first?.first)
+        let args = try XCTUnwrap((c["function"] as? [String: Any])?["arguments"] as? String)
+        let raw = try XCTUnwrap(JSONSerialization.jsonObject(with:Data(args.utf8)) as? [String: String])
+        XCTAssertEqual(Set(raw.keys), ["input"]); XCTAssertEqual(Data(try XCTUnwrap(raw["input"]).utf8), Data(rejected.utf8))
+        XCTAssertEqual(messages.first { $0["tool_call_id"] as? String == "raw-first" }?["content"] as? String, "native tool failure: missing footer")
+    }
+    func testAlibabaTypedPatchStreamingReleasesOnlyCompiledInputAndHonorsTheCurrentPolicy() throws {
+        let patch = nativePatch(), p = typedPatchProvider()
+        let prepared = try request(["tools":[patch]], provider:p, toolNaming:.semantic)
+        let fragments = [#"{"operations":["#, #"{"add":"new","lines":[""]}]}"#]
+        let chunks: [[String: Any]] = [
+            ["choices":[["index":0,"delta":["role":"assistant","tool_calls":[["index":0,"id":"fresh","type":"function","function":["name":prepared.tools[0].wireName,"arguments":fragments[0]]]]],"finish_reason":NSNull()]]],
+            ["choices":[["index":0,"delta":["tool_calls":[["index":0,"function":["arguments":fragments[1]]]]],"finish_reason":NSNull()]]],
+            ["choices":[["index":0,"delta":[:],"finish_reason":"tool_calls"]]],
+            ["choices":[],"usage":["prompt_tokens":5,"completion_tokens":4,"total_tokens":9]]]
+        var upstream = Data()
+        for chunk in chunks {
+            let object = chunk.merging(["id":"stream-fixture","model":p.models[0].id]) { first, _ in first }
+            upstream.append(Data("data: ".utf8))
+            upstream.append(try JSONSerialization.data(withJSONObject: object))
+            upstream.append(Data("\n\n".utf8))
+        }
+        let unfinished = APIProviderHTTPClient.Result(body:upstream, contentType:"text/event-stream")
+        XCTAssertThrowsError(try APIModelResponseCodec.decode(unfinished, request:prepared))
+        upstream.append(Data("data: [DONE]\n\n".utf8))
+        let result = APIProviderHTTPClient.Result(body:upstream, contentType:"text/event-stream")
+        let reply = try APIModelResponseCodec.decode(result, request:prepared)
+        let bytes = try APIModelResponseCodec.encode(reply, stream:true)
+        let events = try String(decoding: bytes, as: UTF8.self).components(separatedBy:"\n").compactMap { line -> [String: Any]? in
+            guard line.hasPrefix("data: "), line != "data: [DONE]" else { return nil }
+            return try XCTUnwrap(JSONSerialization.jsonObject(with:Data(line.dropFirst(6).utf8)) as? [String: Any])
+        }
+        let expected = "*** Begin Patch\n*** Add File: new\n+\n*** End Patch"
+        XCTAssertEqual(events.filter { $0["type"] as? String == "response.custom_tool_call_input.delta" }.compactMap { $0["delta"] as? String }, [expected])
+        XCTAssertEqual(events.filter { $0["type"] as? String == "response.custom_tool_call_input.done" }.compactMap { $0["input"] as? String }, [expected])
+        let denied = try request(["tools":[patch],"tool_choice":"none"], provider:p, toolNaming:.semantic)
+        XCTAssertThrowsError(try APIModelResponseCodec.decode(result, request:denied)) { XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool) }
+    }
 }

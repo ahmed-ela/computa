@@ -54,17 +54,34 @@ final class WebsiteModelCatalogTests: XCTestCase {
         }
     }
 
-    func testPriorCatalogDropsOnlyUnprovenChatGPTChoicesBeforeGuardedRefresh() throws {
+    func testPriorCatalogDropsUnprovenChatGPTAndClaudeChoicesBeforeGuardedRefresh() throws {
         let preferences = isolatedTestPreferences()
         let normalLabelAlsoOfferedInWork = WebsiteModelChoice(provider: "chatgpt", key: "GPT-5.5", label: "GPT-5.5")
         let others = [WebsiteModelChoice(provider: "gemini", key: "3.1 Pro", label: "3.1 Pro"),
                       WebsiteModelChoice(provider: "claude", key: "Sonnet 5.5", label: "Sonnet 5.5")]
         preferences.set(try JSONEncoder().encode([normalLabelAlsoOfferedInWork] + others), forKey: WebsiteModelCatalog.legacyPreferenceKey)
-        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), others)
+        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), [others[0]])
         XCTAssertNotNil(preferences.data(forKey: WebsiteModelCatalog.preferenceKey))
         WebsiteModelCatalog.save([normalLabelAlsoOfferedInWork] + others, to: preferences)
         XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), others,
                        "A family-only choice no longer proves a Chat power preset")
+    }
+
+    func testV3ClaudeRequiresFreshRowsWhileChatPresetsAndOtherProvidersSurvive() throws {
+        let preferences = isolatedTestPreferences()
+        let fable = WebsiteModelChoice(provider: "claude", key: "Fable 5.1", label: "Fable 5.1")
+        let opus = WebsiteModelChoice(provider: "claude", key: "Opus 5", label: "Opus 5")
+        let others = [WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/medium", label: "Medium"),
+                      WebsiteModelChoice(provider: "groq", key: "test", label: "Test")]
+        let prior = try JSONEncoder().encode([fable, opus] + others)
+        preferences.set(prior, forKey: WebsiteModelCatalog.priorSelectableRowsPreferenceKey)
+        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), others)
+        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), others)
+        XCTAssertEqual(preferences.data(forKey: WebsiteModelCatalog.priorSelectableRowsPreferenceKey), prior)
+        XCTAssertEqual(WebsiteModelCatalog.choice(for: fable.modelID), fable)
+        XCTAssertEqual(WebsiteModelCatalog.option(for: fable, available: false).available, false)
+        WebsiteModelCatalog.save(others + [fable, opus], to: preferences)
+        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), others + [fable, opus])
     }
 
     func testLegacyCatalogValidationCannotBeHiddenByProductMigration() throws {
