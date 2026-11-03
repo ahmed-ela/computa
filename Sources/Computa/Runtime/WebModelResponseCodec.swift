@@ -588,14 +588,14 @@ enum WebModelResponseCodec {
                                                   entryTools: [String: OfferedTool],
                                                   availability: EmbeddedBrowserToolAvailability?) -> String {
         if availability == .unbound, !entryTools.isEmpty {
-            let bind = entryTools.first { $0.value.name == "browser_bind" }.map {
-                " \($0.key) needs this turn's observed tab_id."
-            } ?? ""
+            let routes = entryTools.map { name, tool in
+                tool.name == "browser_open" ? "\(name) for a supplied URL" : "\(name) with this turn's observed tab_id"
+            }.sorted().joined(separator: " or ")
             let direct = entryTools.keys.filter { tools[$0] != nil && policy.allowedNames.contains($0) }.sorted()
             let entryUse = direct.isEmpty
-                ? "Load only the chosen entry schema, then call it"
-                : "Already callable: \(direct.joined(separator: ", ")). Call the matching route directly; load only a chosen entry schema that is absent"
-            return "Current browser state: unbound. Page tools require successful \(entryTools.keys.sorted().joined(separator: " or ")). \(entryUse); loading alone does not bind.\(bind) Wait for matching output, then use the next request's refreshed inventory and catalog_revision for callable page tools. Empty tabs do not prove denied access."
+                ? "Load the chosen entry schema before calling it."
+                : "Call \(direct.joined(separator: ", ")) directly. Load missing entry schemas first."
+            return "Current browser state: unbound. Page tools require successful \(routes). \(entryUse) Loading alone does not bind. After entry, find permitted fill/click actions in the next request's refreshed inventory and catalog_revision. Empty tabs do not prove denied access."
         }
         let allowed = tools.filter { policy.allowedNames.contains($0.key) && $0.value.nativeBrowserBit != 0 }
         guard !allowed.isEmpty else { return "" }
@@ -962,11 +962,37 @@ enum WebModelResponseCodec {
         return String(decoding: result, as: UTF8.self)
     }
 
+    /// Observes a rejection at its original validation guard; contains no page values.
+    enum RejectedCallShape: String {
+        case functionUsedInput = "function_used_input", customUsedArguments = "custom_used_arguments"
+        case functionMissingArguments = "function_missing_arguments", customMissingInput = "custom_missing_input"
+        case functionExtraKeys = "function_extra_keys", customExtraKeys = "custom_extra_keys"
+        case argumentsString = "arguments_string", argumentsArray = "arguments_array"
+        case argumentsNull = "arguments_null", argumentsScalar = "arguments_scalar"
+        case customInputNotString = "custom_input_not_string"
+
+        static func classify(_ call: [String: Any], custom: Bool) -> Self {
+            let field = custom ? "input" : "arguments"
+            let keys = Set(call.keys)
+            if keys == ["name", custom ? "arguments" : "input"] { return custom ? .customUsedArguments : .functionUsedInput }
+            if keys == ["name"] { return custom ? .customMissingInput : .functionMissingArguments }
+            if keys != ["name", field] { return custom ? .customExtraKeys : .functionExtraKeys }
+            if custom { return .customInputNotString }
+            switch call[field] {
+            case is String: return .argumentsString
+            case is [Any]: return .argumentsArray
+            case is NSNull: return .argumentsNull
+            default: return .argumentsScalar
+            }
+        }
+    }
+
     /// ChatGPT must use the complete envelope: native website cards can mix
     /// controls and suggestions into rendered prose. Other providers retain
     /// ordinary-text compatibility; prose never grants an action. Never extract
     /// or repair a call hidden inside surrounding text.
-    static func parseEmbeddedReply(_ text: String, request: Request) throws -> Reply {
+    static func parseEmbeddedReply(_ text: String, request: Request,
+                                   onRejectedCall: ((RejectedCallShape, Bool) -> Void)? = nil) throws -> Reply {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw Failure.emptyReply }
         if trimmed.rangeOfCharacter(from: CharacterSet(charactersIn: "{}")) == nil,
@@ -977,7 +1003,7 @@ enum WebModelResponseCodec {
             guard !request.requiresEmbeddedEnvelope else { throw Failure.unsupportedWebsiteResponse }
             return try validated(.message(text), request: request)
         }
-        return try parseReply(text, request: request, requireEnvelope: true)
+        return try parseReply(text, request: request, requireEnvelope: true, onRejectedCall: onRejectedCall)
     }
 
     static func malformedEmbeddedReplyDiagnostic(_ text: String, request: Request) -> MalformedEnvelopeDiagnostic? {
@@ -990,7 +1016,8 @@ enum WebModelResponseCodec {
 
     /// Generic callers keep ordinary-text compatibility. Strict envelope
     /// callers never repair or extract JSON.
-    static func parseReply(_ text: String, request: Request, requireEnvelope: Bool = false) throws -> Reply {
+    static func parseReply(_ text: String, request: Request, requireEnvelope: Bool = false,
+                           onRejectedCall: ((RejectedCallShape, Bool) -> Void)? = nil) throws -> Reply {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw Failure.emptyReply }
         let candidate = removingJSONFence(trimmed)
@@ -1020,6 +1047,7 @@ enum WebModelResponseCodec {
             if let commentary = envelope["commentary"], !(commentary is String) {
                 throw Failure.malformedEnvelope
             }
+            let singleUncommentedCall = calls.count == 1 && envelope["commentary"] == nil
             let validated = try calls.map { call -> ToolCall in
                 guard let offeredName = call["name"] as? String, !offeredName.isEmpty else {
                     throw Failure.malformedEnvelope
@@ -1028,11 +1056,13 @@ enum WebModelResponseCodec {
                 guard request.toolPolicy.allowedNames.contains(offeredName) else { throw Failure.rejectedToolChoice }
                 if tool.isCustom {
                     guard Set(call.keys) == ["name", "input"], let input = call["input"] as? String else {
+                        onRejectedCall?(.classify(call, custom: true), singleUncommentedCall)
                         throw Failure.customInputMustBeString
                     }
                     return ToolCall(name: tool.name, argumentsJSON: "", namespace: tool.namespace, customInput: input)
                 }
                 guard Set(call.keys) == ["name", "arguments"], let arguments = call["arguments"] as? [String: Any] else {
+                    onRejectedCall?(.classify(call, custom: false), singleUncommentedCall)
                     throw Failure.argumentsMustBeObject
                 }
                 let encoded = try JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys, .withoutEscapingSlashes])

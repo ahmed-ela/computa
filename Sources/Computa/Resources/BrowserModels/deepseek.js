@@ -388,9 +388,22 @@ async function computaSavedConversation(input, c, dom, config) {
         || first.root !== held.first.root || first.container !== held.first.container
         || first.body !== held.first.body || first.id !== held.first.id || first.text !== held.first.text
         || first.root.parentElement !== held.userTurn || held.userTurn.parentElement !== held.outer
-        || answer.root !== held.answer.root || answer.content !== held.answer.content
+        || answer.root !== held.answer.root || held.answer.content !== null && answer.content !== held.answer.content
         || answer.root.parentElement !== held.answer.turn || held.answer.turn.parentElement !== held.outer)
         c.fail('conversation_changed', 'response_scope');
+      if (held.fromEmptyContainer) {
+        if (!state.first) {
+          const form = dom.composer();
+          if (!form.empty || !c.enabled(form.editor) || form.editor !== held.answer.editor
+            || form.scope !== held.answer.composerScope) c.fail('conversation_changed', 'response_scope');
+        }
+        if (answer.content && c.nodes(answer.root, '.chat-response-message', 2).length !== 1
+          || held.answerID !== undefined && held.answerID !== t.answer?.id) c.fail('conversation_changed', 'response_scope');
+        // The first observed physical container and then its first valid UUID
+        // become permanent pins. Disappearance or substitution is terminal.
+        if (answer.content) held.answer.content = answer.content;
+        if (t.answer) held.answerID = t.answer.id;
+      }
     }
     // Compare existing physical pins in their original order. Report only the
     // first failing group; no selector, attribute, text or hit test is reread.
@@ -571,9 +584,10 @@ async function computaSavedConversation(input, c, dom, config) {
         catch (error) {
           if (input.action === 'inspect' && error?.computaAdapterFailure && typeof extracted.failureStructure === 'function') {
             try {
-              const max = config.stateKey === '__computaQwenSavedSessionV1'
-                && c.equalChoice(evidence.selected, { key: 'Qwen3.8-Max', label: 'Qwen3.8-Max' });
-              if (max || config.stateKey === '__computaDeepSeekSavedSessionV1')
+              const qwenChoice = config.stateKey === '__computaQwenSavedSessionV1'
+                && c.equalChoice(evidence.selected, input.expectedModelChoice)
+                && ['Qwen3.7-Plus', 'Qwen3.8-Max'].some(label => c.equalChoice(evidence.selected, { key: label, label }));
+              if (qwenChoice || config.stateKey === '__computaDeepSeekSavedSessionV1')
                 error.adapterFailureStructure = extracted.failureStructure();
             } catch { /* Preserve the original refusal. */ }
           }
@@ -757,7 +771,12 @@ async function computaSavedConversation(input, c, dom, config) {
         || !/^[a-f0-9]{64}$/.test(state.submittedFingerprint || '')
         || input.savedSubmissionFingerprint !== state.submittedFingerprint)
         firstBindingFailure('initial_response_admission', () => initialFirstAdmissionReason(false));
-      const candidate = dom.initialResponseIdentityTranscript();
+      const initialResponse = () => {
+        const canObserveEmpty = config.firstEmptyContainerChoice && c.equalChoice(state.model.choice, config.firstEmptyContainerChoice)
+          && !state.firstDisplay && !state.firstDisplayWitness && (!state.responseIdentity || state.responseIdentity.answer.content === null);
+        return dom.initialResponseIdentityTranscript(canObserveEmpty ? state.inserted.prompt : null);
+      };
+      const candidate = initialResponse();
       validateInitialResponseIdentity(candidate, 'id_candidate');
       if (observeFirstDisplay(candidate)) return { qwenFirstBodyExpansionPending: true, url: document.URL,
         sessionLifecycle: 'saved_conversation_delete', temporary: false };
@@ -775,14 +794,14 @@ async function computaSavedConversation(input, c, dom, config) {
             : !input.expectedUserCounts.includes(1) ? 'one_user_not_expected' : 'predicate_changed',
             () => dom.firstBodyFailureStructure(candidate.first, state.inserted.prompt));
         checkFirstDisplaySelection('id_before_hash');
-        if (!state.responseIdentity) state.responseIdentity = { canonical: route.canonical,
+        if (!state.responseIdentity) state.responseIdentity = { canonical: route.canonical, fromEmptyContainer: candidate.pendingAnswer.content === null,
           first: candidate.first, answer: candidate.pendingAnswer,
           userTurn: candidate.first.root.parentElement, outer: candidate.pendingAnswer.outer };
         let fingerprint;
         try { fingerprint = await c.hash(c.bodyText(candidate.first.text)); }
         catch (error) { tagFirstBodyHashFailure(error, 'initial_response_digest'); throw error; }
         guard();
-        const current = dom.initialResponseIdentityTranscript();
+        const current = initialResponse();
         validateInitialResponseIdentity(current, 'id_digest_check');
         checkFirstDisplaySelection('id_after_hash');
         if (fingerprint !== state.submittedFingerprint) firstBindingFailure('initial_response_digest', 'submitted_fingerprint_mismatch');

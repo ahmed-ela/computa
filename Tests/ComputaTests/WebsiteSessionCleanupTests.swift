@@ -1222,6 +1222,16 @@ final class WebsiteSessionCleanupRuntimeTests: XCTestCase {
         try await assertActualBundledEngineRestartPreservesPollFailure(.responseBlocked(.claude))
     }
 
+    func testOnlyVerifiedClaudeResponseBlockUsesTheNonretryableRequestStatus() {
+        typealias Failure = EmbeddedWebModelTransport.Failure
+        XCTAssertEqual(WebModelServer.errorPresentation(for: Failure.responseBlocked(.claude)).status, "400 Bad Request")
+        for failure in [Failure.responseBlocked(.chatgpt), .responseFailed(.claude), .pageUnavailable] {
+            XCTAssertEqual(WebModelServer.errorPresentation(for: failure).status, "500 Internal Server Error")
+        }
+        XCTAssertEqual(WebModelServer.errorPresentation(for: Failure.usageLimited(.claude)).status, "429 Too Many Requests")
+        XCTAssertEqual(WebModelServer.errorPresentation(for: WebModelServer.Failure.busy).status, "429 Too Many Requests")
+    }
+
     private func assertActualBundledEngineRestartPreservesPollFailure(_ failure: EmbeddedWebModelTransport.Failure) async throws {
         let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("ComputaInspectionRestart-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1276,6 +1286,25 @@ final class WebsiteSessionCleanupRuntimeTests: XCTestCase {
             XCTAssertEqual(firstWire.messages.filter { $0.direction == .clientToServer && $0.method == "turn/start" }.count, 1)
             XCTAssertFalse(firstWire.messages.contains { $0.method == "item/tool/call" })
             XCTAssertFalse(firstWire.messages.contains { $0.direction == .clientToServer && $0.method == "thread/name/set" })
+            let completions = firstWire.messages.filter { $0.direction == .serverToClient && $0.method == "turn/completed" }
+            XCTAssertEqual(completions.count, 1)
+            let params = try XCTUnwrap(completions.first?.object["params"] as? [String: Any])
+            XCTAssertEqual((params["threadId"] as? String)?.lowercased(), threadID)
+            let turn = try XCTUnwrap(params["turn"] as? [String: Any])
+            XCTAssertEqual((turn["id"] as? String)?.lowercased(), turnID)
+            XCTAssertEqual(turn["status"] as? String, "failed")
+            let terminal = try XCTUnwrap(turn["error"] as? [String: Any])
+            let message = try XCTUnwrap(terminal["message"] as? String)
+            if case .responseBlocked(.claude) = failure {
+                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(message.utf8)) as? [String: Any])
+                XCTAssertTrue(NSDictionary(dictionary: body).isEqual(to: expected))
+                XCTAssertFalse(firstWire.messages.contains {
+                    $0.direction == .serverToClient && $0.method == "error"
+                        && ($0.object["params"] as? [String: Any])?["willRetry"] as? Bool == true
+                })
+            } else {
+                XCTAssertEqual(message, "We’re currently experiencing high demand, which may cause temporary errors.")
+            }
             var reloadConfig = config; reloadConfig.protocolTracePath = root.appendingPathComponent("reload-protocol.jsonl").path
             let reloadedRuntime = CodexAppServerRuntime(configuration: reloadConfig), inert = CleanupReceiptTransport()
             await reloadedRuntime.configureEmbeddedWebModelTransport(inert)

@@ -42,7 +42,7 @@ enum QwenFixturePage {
   const userID = '902f136d-bddf-4078-a667-030715aeff87';
   const answerID = '413e8269-7ba8-476b-84f3-c400e8bed55c';
   const canonical = 'https://chat.qwen.ai/c/' + conversationID;
-  const options = { delayUser: false, holdRoot: false, holdProvisional: false, useProvisional: false, holdResponse: false, holdResponseIdentity: false, firstLongMessageDisplay: false, menuDelayMs: 0,
+  const options = { delayUser: false, holdRoot: false, holdProvisional: false, useProvisional: false, holdResponse: false, holdResponseIdentity: false, holdResponseContainer: false, firstLongMessageDisplay: false, menuDelayMs: 0,
     dialogDelayMs: 0, canonicalDelayMs: 0, retainHistoryLink: false, modelCloseOrder: "simultaneous", modelOptionCloseOrder: "simultaneous",
     reply: '{"type":"message","text":"Synthetic Qwen native reply"}' };
   const counts = { input: 0, sends: 0, displayClicks: 0, modelOpens: 0, modelCloses: 0, modelSelections: 0, headerOpens: 0, deleteSelections: 0, confirmations: 0 };
@@ -151,7 +151,8 @@ enum QwenFixturePage {
     const root = node('div', { class: 'qwen-chat-message qwen-chat-message-assistant' });
     assistant = node('div', { class: 'chat-response-message', id: 'chat-response-message-' });
     assistant.append(node('div', { class: 'response-loading' }));
-    root.append(assistant); answerTurn.append(root); turn.append(answerTurn);
+    if (!options.holdResponseContainer) root.append(assistant);
+    answerTurn.append(root); turn.append(answerTurn);
   }
   function completeResponse() {
     if (!turn || assistant?.querySelector('.phase-answer')) return;
@@ -191,6 +192,7 @@ enum QwenFixturePage {
   });
   window.qwenFixture = { options, counts, canonicalize, appendUser, completeResponse,
     revealPreview: () => { userBody.textContent = sent.slice(0, 10240); },
+    mountResponseContainer: () => document.querySelector('.qwen-chat-message-assistant').append(assistant),
     settleResponseIdentity: () => { assistant.id = "chat-response-message-" + answerID; },
     finishPickerClose: closePicker, finishOptionClose: closePicker,
     pickerState: () => ({ pending: pickerClosePending, optionPending: optionClosePending, expanded: trigger.getAttribute('aria-expanded'), visible: !picker.hidden }),

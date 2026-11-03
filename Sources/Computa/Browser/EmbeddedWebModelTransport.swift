@@ -2281,7 +2281,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 }
         case .qwen:
             providerDetails = ["model_trigger", "model_label", "model_menu", "stop_control", "stop_conversation",
-                "response_actions", "response_container", "delete_cancel", "delete_confirm",
+                "response_actions", "response_container", "response_container_empty", "response_container_multiple",
+                "response_container_hidden", "delete_cancel", "delete_confirm",
                 "initial_picker_not_closed", "initial_model_label", "initial_menu_present", "picker_expanded_invalid",
                 "picker_menu_shape", "picker_menu_collapsed", "picker_menu_missing", "picker_menu_binding", "picker_menu_replaced",
                 "model_choice_invalid", "model_option_disabled", "model_selected_invalid", "model_selected_contradiction",
@@ -5921,18 +5922,27 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if provider == .groq {
             guard provider.acceptsGroqModelQuery(url, expectedKey: session.modelChoice?.key) else { throw Failure.modelMismatch }
         }
+        func routeBefore(_ reason: SavedConversationRoutes.Rejection) -> Failure {
+            if provider == .kimi {
+                Self.inspectionLog.error("savedRouteRejection version=1 provider=kimi stage=before reason=\(reason.rawValue, privacy: .public)")
+            }
+            return .ownershipFailure(.routeBefore)
+        }
         if provider.savedConversationPolicy != nil, savedDeleteOperation == nil {
-            guard session.savedRoutes?.observe(url, submitted: session.submitted) == true else { throw Failure.ownershipFailure(.routeBefore) }
+            let decision = session.savedRoutes?.observation(of: url, submitted: session.submitted) ?? .rejected(.trackerMissing)
+            if case .rejected(let reason) = decision { throw routeBefore(reason) }
         }
         if let pinned = session.qwenPendingFirstBody?.canonicalURL, pinned != url {
             throw Failure.ownershipFailure(.routeBefore)
         }
         let context = provider.routeContext(url.absoluteString)
-        if let pinned = session.routeContext, context != pinned { throw Failure.ownershipFailure(.routeBefore) }
+        if let pinned = session.routeContext, context != pinned { throw routeBefore(.pinnedContextChanged) }
         let current = provider.conversationURL(url.absoluteString)
         let promotion = provider.isLocalConversation(session.conversation) && current != nil
             && current != session.conversation && !provider.isLocalConversation(current) && !session.promoted
-        if let owned = session.conversation, current != owned, !promotion, savedDeleteOperation == nil { throw Failure.ownershipFailure(.routeBefore) }
+        if let owned = session.conversation, current != owned, !promotion, savedDeleteOperation == nil {
+            throw routeBefore(current == nil ? .ownedConversationMissing : .ownedConversationChanged)
+        }
         if current != nil, !session.submitted { throw Failure.notFresh }
         let expectedCounts: [Int] = action == "submit" ? [session.confirmedUsers]
             : session.pendingSubmission ? [session.confirmedUsers, session.sequence] : [session.confirmedUsers]

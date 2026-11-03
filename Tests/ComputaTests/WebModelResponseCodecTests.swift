@@ -395,14 +395,14 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertEqual(choices, ["browser_bind", "browser_open", "browser_tabs"].map { prefix + $0 })
             let discovery = try XCTUnwrap(unboundInventory["inventory"] as? [[String]])
             XCTAssertEqual(Set(discovery.compactMap(\.first)), Set(choices + [prefix + GroqToolCatalog.name]))
-            XCTAssertTrue(unbound.prompt.contains("Page tools require successful " + prefix + "browser_bind" + " or " + prefix + "browser_open"))
-            XCTAssertTrue(unbound.prompt.contains("Load only the chosen entry schema, then call it"))
-            XCTAssertTrue(unbound.prompt.contains("loading alone does not bind"))
-            XCTAssertTrue(unbound.prompt.contains("next request's refreshed inventory and catalog_revision"))
+            XCTAssertTrue(unbound.prompt.contains("Page tools require successful " + prefix + "browser_bind with this turn's observed tab_id or " + prefix + "browser_open for a supplied URL"))
+            XCTAssertTrue(unbound.prompt.contains("Load the chosen entry schema before calling it."))
+            XCTAssertTrue(unbound.prompt.contains("Loading alone does not bind."))
+            XCTAssertTrue(unbound.prompt.contains("After entry, find permitted fill/click actions in the next request's refreshed inventory and catalog_revision"))
             let openReply = "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"\(prefix)browser_open\",\"arguments\":{\"url\":\"http://localhost:62341/\"}}]}"
             XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(openReply, request: unbound), "Guidance grants no unloaded schema authority")
             let (entryLoaded, _) = try request(.unbound, selected: [prefix + "browser_open"])
-            XCTAssertTrue(entryLoaded.prompt.contains("Already callable: " + prefix + "browser_open. Call the matching route directly"))
+            XCTAssertTrue(entryLoaded.prompt.contains("Call " + prefix + "browser_open directly. Load missing entry schemas first."))
             XCTAssertNoThrow(try WebModelResponseCodec.parseEmbeddedReply(openReply, request: entryLoaded))
             XCTAssertThrowsError(try request(.unbound, selected: [prefix + "browser_read"]))
             let (bound, boundProjection) = try request(.bound, selected: [prefix + "browser_read"])
@@ -417,6 +417,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             }.map(\.name))
             XCTAssertEqual(try loaderNames(entryLoaded), choices, "Already loaded tools remain loadable with a replacement selection")
             XCTAssertFalse(bound.prompt.contains("Page tools require successful"))
+            XCTAssertFalse(bound.prompt.contains("After entry, find permitted fill/click actions"))
             XCTAssertTrue(bound.prompt.contains("Current browser state: native page bound."))
             for prepared in [unbound, entryLoaded, bound] {
                 XCTAssertEqual(prepared.continuationRequest, raw)
@@ -436,8 +437,8 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertEqual(Set(policyInventory.keys), ["catalog_revision", "loaded", "inventory"])
             let policyRows = try XCTUnwrap(policyInventory["inventory"] as? [[String]])
             XCTAssertEqual(Set(policyRows.compactMap(\.first)), [prefix + GroqToolCatalog.name, prefix + "browser_open"])
-            XCTAssertTrue(policyRequest.prompt.contains("Page tools require successful " + prefix + "browser_open" + "."))
-            XCTAssertFalse(policyRequest.prompt.contains(prefix + "browser_bind needs this turn's observed tab_id"))
+            XCTAssertTrue(policyRequest.prompt.contains("Page tools require successful " + prefix + "browser_open for a supplied URL."))
+            XCTAssertFalse(policyRequest.prompt.contains(prefix + "browser_bind with this turn's observed tab_id"))
             XCTAssertEqual(policyRequest.continuationRequest, restrictedData)
             XCTAssertEqual(try loaderNames(policyRequest), [prefix + "browser_open"])
             let policyDisplay = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(policyRequest.prompt[try requestRange(in: policyRequest)].utf8)) as? [String: Any])
@@ -468,6 +469,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             let request = try WebModelResponseCodec.prepareRequest(raw, browserToolAvailability: availability,
                 groqToolCatalogProjection: GroqToolCatalog.baseline(for: seed))
             XCTAssertFalse(request.prompt.contains("Page tools require successful"))
+            XCTAssertFalse(request.prompt.contains("After entry, find permitted fill/click actions"))
             XCTAssertEqual(request.continuationRequest, raw)
         }
     }
@@ -1949,6 +1951,74 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertEqual(completed["end_turn"] as? Bool, false)
             let output = try XCTUnwrap(completed["output"] as? [[String: Any]])
             XCTAssertEqual(output.first?["call_id"] as? String, done["call_id"] as? String)
+        }
+    }
+
+    func testRejectedCallShapeClassifiesClosedCategoriesWithoutChangingRejection() throws {
+        typealias Shape = WebModelResponseCodec.RejectedCallShape
+        let prepared = try request(tools: [function, ["type": "custom", "name": "apply_patch"]], model: "web-gemini")
+        let examples: [(Bool, [String: Any], Shape)] = [
+            (false, ["input": "private"], .functionUsedInput),
+            (false, [:], .functionMissingArguments),
+            (false, ["arguments": [:], "private-extra-key": 1], .functionExtraKeys),
+            (false, ["arguments": "{}"], .argumentsString),
+            (false, ["arguments": ["private"]], .argumentsArray),
+            (false, ["arguments": NSNull()], .argumentsNull),
+            (false, ["arguments": true], .argumentsScalar),
+            (false, ["arguments": 4], .argumentsScalar),
+            (true, ["arguments": [:]], .customUsedArguments),
+            (true, [:], .customMissingInput),
+            (true, ["input": "private", "extra": "private"], .customExtraKeys),
+            (true, ["input": ["private"]], .customInputNotString)
+        ]
+        for (custom, fields, expected) in examples {
+            var call = fields
+            call["name"] = custom ? "apply_patch" : "computer_v2_snapshot"
+            let raw = try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [call]])
+            var shapes: [Shape] = []
+            XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(String(decoding: raw, as: UTF8.self), request: prepared) {
+                XCTAssertTrue($1)
+                shapes.append($0)
+            }) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, custom ? .customInputMustBeString : .argumentsMustBeObject)
+            }
+            XCTAssertEqual(shapes, [expected])
+        }
+    }
+
+    func testRejectedCallShapeIsDiagnosticOnlyForOriginalGuardAndWholeBatch() throws {
+        let prepared = try request(tools: [function], model: "web-gemini")
+        let good: [String: Any] = ["name": "computer_v2_snapshot", "arguments": ["view": "content"]]
+        let bad: [String: Any] = ["name": "computer_v2_snapshot", "arguments": "private"]
+        let unoffered: [String: Any] = ["name": "unoffered", "arguments": "private"]
+        for envelope: [String: Any] in [
+            ["type": "tool_calls", "calls": [good, bad]],
+            ["type": "tool_calls", "calls": [bad], "commentary": "private"]
+        ] {
+            let raw = try JSONSerialization.data(withJSONObject: envelope)
+            var seen = 0
+            XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(String(decoding: raw, as: UTF8.self), request: prepared) {
+                XCTAssertEqual($0, .argumentsString)
+                XCTAssertFalse($1)
+                seen += 1
+            }) { XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .argumentsMustBeObject) }
+            XCTAssertEqual(seen, 1)
+        }
+        func parse(_ call: [String: Any], request: WebModelResponseCodec.Request) throws -> WebModelResponseCodec.Reply {
+            let raw = try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [call]])
+            return try WebModelResponseCodec.parseEmbeddedReply(String(decoding: raw, as: UTF8.self), request: request) { _, _ in
+                XCTFail("No shape observation is possible outside the original argument/input guard")
+            }
+        }
+        _ = try parse(good, request: prepared)
+        XCTAssertThrowsError(try parse(unoffered, request: prepared)) {
+            XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .unknownTool("unoffered"))
+        }
+        let denied = try JSONSerialization.data(withJSONObject: [
+            "model": "web-gemini", "input": "test", "tools": [function], "tool_choice": "none"
+        ])
+        XCTAssertThrowsError(try parse(bad, request: WebModelResponseCodec.prepareRequest(denied))) {
+            XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .rejectedToolChoice)
         }
     }
 

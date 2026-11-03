@@ -1425,7 +1425,10 @@ actor WebModelServer {
                         responseProfile?.mark(.codecStart)
                         do {
                             defer { responseProfile?.mark(.codecEnd) }
-                            reply = try WebModelResponseCodec.parseEmbeddedReply(text, request: request)
+                            reply = try WebModelResponseCodec.parseEmbeddedReply(text, request: request) { shape, singleUncommentedCall in
+                                guard provider == "gemini" else { return }
+                                Self.promptLog.info("rejectedCallShape version=1 provider=gemini inference=\(inferenceID.uuidString.lowercased(), privacy: .public) reason=\(shape.rawValue, privacy: .public) singleUncommentedCall=\(singleUncommentedCall, privacy: .public)")
+                            }
                         } catch {
                             let diagnostic = WebModelResponseCodec.malformedEmbeddedReplyDiagnostic(text, request: request)
                             if let diagnostic {
@@ -2428,6 +2431,10 @@ actor WebModelServer {
                 return .init(status: "403 Forbidden", type: "model_error", code: failure.diagnosticCode!)
             case .usageLimited:
                 return .init(status: "429 Too Many Requests", type: "too_many_requests", code: failure.diagnosticCode!)
+            // This verified provider stop is terminal. The bundled engine preserves
+            // its inspection action on 400 and replaces a 500 with generic high demand.
+            case .responseBlocked(.claude):
+                return .init(status: "400 Bad Request", type: "model_error", code: failure.diagnosticCode!)
             case .ownershipFailure(.groqDraftRestored), .ownershipFailure(.groqReportedSubmissionError):
                 return .init(status: "400 Bad Request", type: "model_error", code: "website_ownership_unverified")
             case .capacity: return .init(status: "400 Bad Request", type: "invalid_request", code: failure.diagnosticCode!)

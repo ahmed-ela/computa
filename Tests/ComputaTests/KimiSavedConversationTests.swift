@@ -42,6 +42,32 @@ final class KimiSavedConversationTests: XCTestCase {
         XCTAssertFalse(state.observe(URL(string: canonical.absoluteString.replacingOccurrences(of: "11111111", with: "22221111"))!, submitted: true))
     }
 
+    func testRejectedRouteObservationDistinguishesShapeOrderingAndIdentityWithoutMutatingPins() {
+        var routes = SavedConversationRoutes(policy: .kimi)
+        func reject(_ url: URL, submitted: Bool = true, _ reason: SavedConversationRoutes.Rejection) {
+            let prior = routes
+            XCTAssertEqual(routes.observation(of: url, submitted: submitted), .rejected(reason))
+            XCTAssertEqual(routes.last, prior.last)
+            XCTAssertEqual(routes.provisional, prior.provisional)
+            XCTAssertEqual(routes.canonical, prior.canonical)
+        }
+        reject(URL(string: "https://www.kimi.ai/not-a-chat")!, .routeUnrecognized)
+        reject(canonical, submitted: false, .nonfreshBeforeSend)
+        XCTAssertTrue(routes.observe(root, submitted: false))
+        XCTAssertTrue(routes.observe(provisional, submitted: true))
+        XCTAssertTrue(routes.observe(provisional, submitted: true))
+        reject(root, .regressedToFresh)
+        reject(root, submitted: false, .lineageBeforeSend)
+        reject(URL(string: provisional.absoluteString.components(separatedBy: "?")[0])!, .provisionalURLChanged)
+        reject(URL(string: provisional.absoluteString.replacingOccurrences(of: "p111", with: "pabc"))!, .provisionalIdentityChanged)
+        XCTAssertTrue(routes.observe(canonical, submitted: true))
+        reject(root, .regressedToFresh)
+        reject(provisional, .regressedToProvisional)
+        reject(URL(string: canonical.absoluteString + "?chat_enter_method=home")!, .canonicalURLChanged)
+        reject(URL(string: canonical.absoluteString.replacingOccurrences(of: "11111111", with: "22221111"))!, .canonicalIdentityChanged)
+        XCTAssertTrue(routes.observe(canonical, submitted: true))
+    }
+
     func testDirectCanonicalPromotionIsAllowedButDoesNotAllowAnotherChat() {
         var state = SavedConversationRoutes(policy: .kimi)
         XCTAssertTrue(state.observe(canonical, submitted: true))

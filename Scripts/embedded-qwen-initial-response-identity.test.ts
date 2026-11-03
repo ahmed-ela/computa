@@ -2,9 +2,9 @@ import { describe, expect, test } from 'bun:test';
 import { fixture, choice, prompt, marker, generation, ownerToken, fingerprint, conversationID, answerID, userID, raw } from './embedded-qwen-adapter-fixture';
 const canonical = 'https://chat.qwen.ai/c/' + conversationID;
 const receipt = { qwenInitialResponseIdentityPending: true, url: canonical, sessionLifecycle: 'saved_conversation_delete', temporary: false };
-async function sent() {
+async function sent(model = choice()) {
   const f = fixture({ completeOnSend: false });
-  for (let i=0;i<8;i++) { const r=await f.run('selectModel',{modelChoice:choice()}); expect(r.error).toBeUndefined(); if(r.selected)break; }
+  for (let i=0;i<8;i++) { const r=await f.run('selectModel',{modelChoice:model}); expect(r.error).toBeUndefined(); if(r.selected)break; }
   expect((await f.run('prepare')).prepared).toBe(true);
   expect((await f.run('insert',{prompt})).inserted).toBe(true);
   expect((await f.run('sendReady',{prompt})).sendReady).toBe(true);
@@ -12,7 +12,7 @@ async function sent() {
   expect((await f.run('submit',{prompt,savedSubmissionFingerprint:hash})).submissionAcknowledgement).toEqual({ownerToken,documentGeneration:generation,sequence:1,outboundFingerprint:hash});
   f.phase.detach(); const loading=new f.Node('DIV',{class:'response-loading'});f.answer.append(loading);
   f.answer.setAttribute('id','chat-response-message-');
-  const grant={allowQwenInitialResponseIdentity:true,expectedModelChoice:choice(),savedSubmissionFingerprint:hash};
+  const grant={allowQwenInitialResponseIdentity:true,expectedModelChoice:model,savedSubmissionFingerprint:hash};
   const settle=()=>{ f.answer.setAttribute('id','chat-response-message-'+answerID);loading.detach();f.flow.append(f.phase);f.complete(); };
   return {f,hash,grant,loading,settle};
 }
@@ -93,5 +93,82 @@ describe('Qwen initial empty assistant identity',()=>{
  test('empty ID after a bound first body remains a terminal failure',async()=>{
   const {f,grant,settle,hash}=await sent();settle();expect((await f.run('inspect',grant)).firstUserVerified).toBe(true);
   f.answer.setAttribute('id','chat-response-message-');const r=await f.run('inspect',{...grant,expectedFirstUserFingerprint:hash,allowFirstUserBinding:false});expect(r.error).toBeDefined();expect(r.text).toBeUndefined();
+ });
+});
+
+describe('Qwen Max initial assistant root without a mounted response container', () => {
+ const max = choice('Qwen3.8-Max');
+ test('exact full first body, same root, then first container, UUID and exact response', async () => {
+  const {f, hash, grant, settle} = await sent(max);
+  f.answer.detach();
+  const before = f.mutations();
+  expect(await f.run('inspect', grant)).toEqual(receipt);
+  expect(await f.run('inspect', grant)).toEqual(receipt);
+  expect(f.world.__computaQwenSavedSessionV1.first).toBeNull();
+  expect(f.mutations()).toBe(before);
+  f.answerRoot.append(f.answer);
+  expect(await f.run('inspect', grant)).toEqual(receipt);
+  settle();
+  const result = await f.run('inspect', grant);
+  expect(result.firstUserFingerprint).toBe(hash);
+  expect(result.modelEvidence.selected).toEqual(max);
+  expect(result.answerComplete).toBe(true);
+  expect(result.text).toBe(raw);
+  expect(f.send.clicks).toBe(1);
+ });
+ test('ambiguous, hidden, nonempty, foreign or ungranted roots cannot enter pending', async () => {
+  for (const change of ['two-visible','one-hidden','mixed','foreign-text','element','body','wrong-outer','no-stop','other-model','no-grant']) {
+   const {f, grant} = await sent(change === 'other-model' ? choice() : max);
+   if (change === 'two-visible' || change === 'mixed') {
+    const other = f.answer.cloneNode(true);
+    if (change === 'mixed') other.values.hidden = '';
+    f.answerRoot.append(other);
+   } else if (change === 'one-hidden') f.answer.setAttribute('hidden','');
+   else f.answer.detach();
+   if (change === 'foreign-text') f.answerRoot.text = 'unbound';
+   if (change === 'element') f.answerRoot.append(new f.Node('DIV'));
+   if (change === 'body') f.userBody.text = prompt.slice(0,-1);
+   if (change === 'wrong-outer') f.body.append(f.answerRoot.parentElement!);
+   if (change === 'no-stop') f.stop.detach();
+   const result = await f.run('inspect', change === 'no-grant' ? {} : grant);
+   expect(result.error, change).toBeDefined();
+   if (['two-visible','mixed'].includes(change)) expect(result.detail, change).toBe('response_container_multiple');
+   if (change === 'one-hidden') expect(result.detail).toBe('response_container_hidden');
+   if (['foreign-text','element','body','no-stop','other-model'].includes(change)) expect(result.detail, change).toBe('response_container_empty');
+   expect(result.qwenInitialResponseIdentityPending).toBeUndefined();
+   expect(result.text).toBeUndefined();
+   expect(f.send.clicks).toBe(1);
+  }
+ });
+ test('first-root pins survive hash awaits and cannot migrate, regress or grant cleanup', async () => {
+  for (const change of ['replaced-root','lost-root','changed-user','changed-id','changed-choice','draft','route','owner','removal','replacement','settled-id','cleanup']) {
+   const {f, grant, settle} = await sent(max);
+   f.answer.detach();
+   expect(await f.run('inspect', grant)).toEqual(receipt);
+   if (['removal','replacement','settled-id'].includes(change)) {
+    f.answerRoot.append(f.answer);
+    expect(await f.run('inspect', grant)).toEqual(receipt);
+    if (change === 'settled-id') { settle(); expect((await f.run('inspect',grant)).answerComplete).toBe(true); f.answer.setAttribute('id', 'chat-response-message-'+generation); }
+    else { f.answer.detach(); if (change === 'replacement') f.answerRoot.append(f.answer.cloneNode(true)); }
+   } else if (change !== 'cleanup') {
+    f.beforeDigest(() => {
+     if (change === 'replaced-root' || change === 'lost-root') {
+      const parent = f.answerRoot.parentElement!;
+      f.answerRoot.detach();
+      if (change === 'replaced-root') parent.append(f.answerRoot.cloneNode(true));
+     }
+     if (change === 'changed-user') f.userBody.text += ' different';
+     if (change === 'changed-id') f.userContainer.setAttribute('data-msg-id', generation);
+     if (change === 'changed-choice') f.modelName.text = 'Qwen3.7-Plus';
+     if (change === 'draft') f.editor.value = 'new draft';
+     if (change === 'route') f.document.URL = 'https://chat.qwen.ai/c/' + generation;
+     if (change === 'owner') f.world.__computaModelOwner = generation;
+    });
+   }
+   const result = await f.run('inspect', change === 'cleanup' ? {...grant, savedCleanupInspection:true} : grant);
+   expect(result.error, change).toBeDefined();
+   expect(result.text).toBeUndefined();expect(result.completionEvidence).toBeUndefined();expect(f.more.clicks).toBe(0);
+   expect(f.send.clicks).toBe(1);
+  }
  });
 });

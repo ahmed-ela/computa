@@ -183,7 +183,7 @@ function computaQwenDOM(c) {
       throw error;
     }
   }
-  function transcript(allowInitialResponseIdentity = false) {
+  function transcript(allowInitialResponseIdentity = false, emptyContainerPrompt = null) {
     const users = c.nodes(document, '.qwen-chat-message.qwen-chat-message-user', 2);
     const answers = c.nodes(document, '.qwen-chat-message.qwen-chat-message-assistant', 2);
     if (users.length > 1 || answers.length > 1 || answers.length > users.length) c.fail('conversation_changed', 'user_count');
@@ -199,27 +199,38 @@ function computaQwenDOM(c) {
     let answer = null, pendingAnswer = null;
     if (answers.length) {
       const node = answers[0], answerTurn = node.parentElement;
-      const content = one(visible(node, '.chat-response-message'), 'response_container');
-      const answerID = content.getAttribute('id')?.replace(/^chat-response-message-/, '');
-      if (!c.visible(node) || (!c.uuid(answerID) && !(allowInitialResponseIdentity && answerID === ''))
-        || content.getAttribute('id') !== 'chat-response-message-' + answerID
-        || answerID === id || !answerTurn?.classList.contains('qwen-chat-message-select-turn-message')
-        || answerTurn.parentElement !== turn.parentElement
-        || [...turn.parentElement.children].indexOf(answerTurn) <= [...turn.parentElement.children].indexOf(turn))
-        c.fail('conversation_changed', 'response_scope');
-      if (answerID === '') {
-        // The observed first response mounts this exact prefix before its UUID.
-        // This is an internal negative candidate, never an answer. Default
-        // transcript reads, completion and cleanup retain strict UUID checks.
+      const containers = c.nodes(node, '.chat-response-message'), displayed = containers.filter(c.visible);
+      const ordered = () => c.visible(node) && answerTurn?.classList.contains('qwen-chat-message-select-turn-message')
+        && answerTurn.parentElement === turn.parentElement
+        && [...turn.parentElement.children].indexOf(answerTurn) > [...turn.parentElement.children].indexOf(turn);
+      if (emptyContainerPrompt !== null && !containers.length) {
+        // A physically empty, visible first assistant root is only a negative
+        // observation. A hidden container, rendered preview, or nonempty shell
+        // cannot enter this path. No output or ownership proof is available.
         const form = composer();
-        if (!form.empty || !c.enabled(form.editor) || !form.stop
-          || c.nodes(content, '.response-loading', 2).length !== 1
-          || c.nodes(content, '.response-message-content.phase-answer', 1).length
-          || c.nodes(content, '.response-message-footer-actions', 1).length)
+        if (!ordered() || node.childNodes.length !== 0 || body.textContent !== emptyContainerPrompt
+          || !form.empty || !c.enabled(form.editor) || !form.stop) c.fail('document_changed', 'response_container_empty');
+        pendingAnswer = { root: node, content: null, turn: answerTurn, outer: turn.parentElement, editor: form.editor, composerScope: form.scope };
+      } else {
+        if (emptyContainerPrompt !== null && containers.length !== 1 || allowInitialResponseIdentity && displayed.length !== 1)
+          c.fail('document_changed', !containers.length ? 'response_container_empty'
+            : containers.length > 1 ? 'response_container_multiple' : 'response_container_hidden');
+        const content = one(displayed, 'response_container');
+        const answerID = content.getAttribute('id')?.replace(/^chat-response-message-/, '');
+        if (!ordered() || (!c.uuid(answerID) && !(allowInitialResponseIdentity && answerID === ''))
+          || content.getAttribute('id') !== 'chat-response-message-' + answerID || answerID === id)
           c.fail('conversation_changed', 'response_scope');
-        pendingAnswer = { root: node, content, turn: answerTurn, outer: turn.parentElement };
-      } else answer = { root: node, content, id: answerID };
-
+        if (answerID === '') {
+          // The observed first response mounts this exact prefix before its UUID.
+          const form = composer();
+          if (!form.empty || !c.enabled(form.editor) || !form.stop
+            || c.nodes(content, '.response-loading', 2).length !== 1
+            || c.nodes(content, '.response-message-content.phase-answer', 1).length
+            || c.nodes(content, '.response-message-footer-actions', 1).length)
+            c.fail('conversation_changed', 'response_scope');
+          pendingAnswer = { root: node, content, turn: answerTurn, outer: turn.parentElement };
+        } else answer = { root: node, content, id: answerID };
+      }
     }
     return { users, answers, first: { root, container, body, id, text: body.textContent }, answer, pendingAnswer };
   }
@@ -539,6 +550,6 @@ function computaQwenDOM(c) {
     setter.call(form.editor, prompt);
     form.editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));
   }
-  return { rejectSelectionBinding, firstDisplayReplacement, watchDisplayRender, displayHitFailure, firstBodyPresentation, firstBodyFailureStructure, initialResponseIdentityTranscript: () => transcript(true), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer,
+  return { rejectSelectionBinding, firstDisplayReplacement, watchDisplayRender, displayHitFailure, firstBodyPresentation, firstBodyFailureStructure, initialResponseIdentityTranscript: emptyContainerPrompt => transcript(true, emptyContainerPrompt), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer,
     deletionTrigger, deletionMenu, deletionConfirmation, deletionObserved, insertLiteral };
 }

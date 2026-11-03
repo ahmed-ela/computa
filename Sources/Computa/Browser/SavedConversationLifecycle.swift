@@ -64,22 +64,57 @@ struct SavedConversationRoutes {
     private(set) var provisional: String?
     private(set) var canonical: String?
 
+    enum Rejection: String {
+        case trackerMissing = "tracker_missing"
+        case routeUnrecognized = "route_unrecognized"
+        case nonfreshBeforeSend = "nonfresh_before_send"
+        case lineageBeforeSend = "lineage_before_send"
+        case regressedToFresh = "regressed_to_fresh"
+        case regressedToProvisional = "regressed_to_provisional"
+        case provisionalIdentityChanged = "provisional_identity_changed"
+        case provisionalURLChanged = "provisional_url_changed"
+        case canonicalIdentityChanged = "canonical_identity_changed"
+        case canonicalURLChanged = "canonical_url_changed"
+        case pinnedContextChanged = "pinned_context_changed"
+        case ownedConversationMissing = "owned_conversation_missing"
+        case ownedConversationChanged = "owned_conversation_changed"
+    }
+
+    enum Observation: Equatable {
+        case accepted
+        case rejected(Rejection)
+    }
+
     mutating func observe(_ url: URL, submitted: Bool) -> Bool {
-        guard let route = SavedConversationRoute(url, policy: policy) else { return false }
-        if !submitted { return route == .fresh && provisional == nil && canonical == nil }
-        if url == last { return true }
+        observation(of: url, submitted: submitted) == .accepted
+    }
+
+    /// A rejected observation never changes any pin. The finite reason describes
+    /// the original decision without storing the observed URL or identity.
+    mutating func observation(of url: URL, submitted: Bool) -> Observation {
+        guard let route = SavedConversationRoute(url, policy: policy) else { return .rejected(.routeUnrecognized) }
+        if !submitted {
+            guard route == .fresh else { return .rejected(.nonfreshBeforeSend) }
+            return provisional == nil && canonical == nil ? .accepted : .rejected(.lineageBeforeSend)
+        }
+        if url == last { return .accepted }
         switch route {
         case .fresh:
-            guard provisional == nil, canonical == nil else { return false }
+            guard provisional == nil, canonical == nil else { return .rejected(.regressedToFresh) }
         case .provisional(let path):
-            guard canonical == nil, provisional == nil else { return false }
+            guard canonical == nil else { return .rejected(.regressedToProvisional) }
+            if let provisional {
+                return .rejected(path == provisional ? .provisionalURLChanged : .provisionalIdentityChanged)
+            }
             provisional = path
         case .canonical(let value):
-            guard canonical == nil else { return false }
+            if let canonical {
+                return .rejected(value == canonical ? .canonicalURLChanged : .canonicalIdentityChanged)
+            }
             canonical = value
         }
         last = url
-        return true
+        return .accepted
     }
 }
 

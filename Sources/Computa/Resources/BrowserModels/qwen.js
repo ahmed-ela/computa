@@ -388,9 +388,22 @@ async function computaSavedConversation(input, c, dom, config) {
         || first.root !== held.first.root || first.container !== held.first.container
         || first.body !== held.first.body || first.id !== held.first.id || first.text !== held.first.text
         || first.root.parentElement !== held.userTurn || held.userTurn.parentElement !== held.outer
-        || answer.root !== held.answer.root || answer.content !== held.answer.content
+        || answer.root !== held.answer.root || held.answer.content !== null && answer.content !== held.answer.content
         || answer.root.parentElement !== held.answer.turn || held.answer.turn.parentElement !== held.outer)
         c.fail('conversation_changed', 'response_scope');
+      if (held.fromEmptyContainer) {
+        if (!state.first) {
+          const form = dom.composer();
+          if (!form.empty || !c.enabled(form.editor) || form.editor !== held.answer.editor
+            || form.scope !== held.answer.composerScope) c.fail('conversation_changed', 'response_scope');
+        }
+        if (answer.content && c.nodes(answer.root, '.chat-response-message', 2).length !== 1
+          || held.answerID !== undefined && held.answerID !== t.answer?.id) c.fail('conversation_changed', 'response_scope');
+        // The first observed physical container and then its first valid UUID
+        // become permanent pins. Disappearance or substitution is terminal.
+        if (answer.content) held.answer.content = answer.content;
+        if (t.answer) held.answerID = t.answer.id;
+      }
     }
     // Compare existing physical pins in their original order. Report only the
     // first failing group; no selector, attribute, text or hit test is reread.
@@ -571,9 +584,10 @@ async function computaSavedConversation(input, c, dom, config) {
         catch (error) {
           if (input.action === 'inspect' && error?.computaAdapterFailure && typeof extracted.failureStructure === 'function') {
             try {
-              const max = config.stateKey === '__computaQwenSavedSessionV1'
-                && c.equalChoice(evidence.selected, { key: 'Qwen3.8-Max', label: 'Qwen3.8-Max' });
-              if (max || config.stateKey === '__computaDeepSeekSavedSessionV1')
+              const qwenChoice = config.stateKey === '__computaQwenSavedSessionV1'
+                && c.equalChoice(evidence.selected, input.expectedModelChoice)
+                && ['Qwen3.7-Plus', 'Qwen3.8-Max'].some(label => c.equalChoice(evidence.selected, { key: label, label }));
+              if (qwenChoice || config.stateKey === '__computaDeepSeekSavedSessionV1')
                 error.adapterFailureStructure = extracted.failureStructure();
             } catch { /* Preserve the original refusal. */ }
           }
@@ -757,7 +771,12 @@ async function computaSavedConversation(input, c, dom, config) {
         || !/^[a-f0-9]{64}$/.test(state.submittedFingerprint || '')
         || input.savedSubmissionFingerprint !== state.submittedFingerprint)
         firstBindingFailure('initial_response_admission', () => initialFirstAdmissionReason(false));
-      const candidate = dom.initialResponseIdentityTranscript();
+      const initialResponse = () => {
+        const canObserveEmpty = config.firstEmptyContainerChoice && c.equalChoice(state.model.choice, config.firstEmptyContainerChoice)
+          && !state.firstDisplay && !state.firstDisplayWitness && (!state.responseIdentity || state.responseIdentity.answer.content === null);
+        return dom.initialResponseIdentityTranscript(canObserveEmpty ? state.inserted.prompt : null);
+      };
+      const candidate = initialResponse();
       validateInitialResponseIdentity(candidate, 'id_candidate');
       if (observeFirstDisplay(candidate)) return { qwenFirstBodyExpansionPending: true, url: document.URL,
         sessionLifecycle: 'saved_conversation_delete', temporary: false };
@@ -775,14 +794,14 @@ async function computaSavedConversation(input, c, dom, config) {
             : !input.expectedUserCounts.includes(1) ? 'one_user_not_expected' : 'predicate_changed',
             () => dom.firstBodyFailureStructure(candidate.first, state.inserted.prompt));
         checkFirstDisplaySelection('id_before_hash');
-        if (!state.responseIdentity) state.responseIdentity = { canonical: route.canonical,
+        if (!state.responseIdentity) state.responseIdentity = { canonical: route.canonical, fromEmptyContainer: candidate.pendingAnswer.content === null,
           first: candidate.first, answer: candidate.pendingAnswer,
           userTurn: candidate.first.root.parentElement, outer: candidate.pendingAnswer.outer };
         let fingerprint;
         try { fingerprint = await c.hash(c.bodyText(candidate.first.text)); }
         catch (error) { tagFirstBodyHashFailure(error, 'initial_response_digest'); throw error; }
         guard();
-        const current = dom.initialResponseIdentityTranscript();
+        const current = initialResponse();
         validateInitialResponseIdentity(current, 'id_digest_check');
         checkFirstDisplaySelection('id_after_hash');
         if (fingerprint !== state.submittedFingerprint) firstBindingFailure('initial_response_digest', 'submitted_fingerprint_mismatch');
@@ -1152,7 +1171,7 @@ function computaQwenDOM(c) {
       throw error;
     }
   }
-  function transcript(allowInitialResponseIdentity = false) {
+  function transcript(allowInitialResponseIdentity = false, emptyContainerPrompt = null) {
     const users = c.nodes(document, '.qwen-chat-message.qwen-chat-message-user', 2);
     const answers = c.nodes(document, '.qwen-chat-message.qwen-chat-message-assistant', 2);
     if (users.length > 1 || answers.length > 1 || answers.length > users.length) c.fail('conversation_changed', 'user_count');
@@ -1168,27 +1187,38 @@ function computaQwenDOM(c) {
     let answer = null, pendingAnswer = null;
     if (answers.length) {
       const node = answers[0], answerTurn = node.parentElement;
-      const content = one(visible(node, '.chat-response-message'), 'response_container');
-      const answerID = content.getAttribute('id')?.replace(/^chat-response-message-/, '');
-      if (!c.visible(node) || (!c.uuid(answerID) && !(allowInitialResponseIdentity && answerID === ''))
-        || content.getAttribute('id') !== 'chat-response-message-' + answerID
-        || answerID === id || !answerTurn?.classList.contains('qwen-chat-message-select-turn-message')
-        || answerTurn.parentElement !== turn.parentElement
-        || [...turn.parentElement.children].indexOf(answerTurn) <= [...turn.parentElement.children].indexOf(turn))
-        c.fail('conversation_changed', 'response_scope');
-      if (answerID === '') {
-        // The observed first response mounts this exact prefix before its UUID.
-        // This is an internal negative candidate, never an answer. Default
-        // transcript reads, completion and cleanup retain strict UUID checks.
+      const containers = c.nodes(node, '.chat-response-message'), displayed = containers.filter(c.visible);
+      const ordered = () => c.visible(node) && answerTurn?.classList.contains('qwen-chat-message-select-turn-message')
+        && answerTurn.parentElement === turn.parentElement
+        && [...turn.parentElement.children].indexOf(answerTurn) > [...turn.parentElement.children].indexOf(turn);
+      if (emptyContainerPrompt !== null && !containers.length) {
+        // A physically empty, visible first assistant root is only a negative
+        // observation. A hidden container, rendered preview, or nonempty shell
+        // cannot enter this path. No output or ownership proof is available.
         const form = composer();
-        if (!form.empty || !c.enabled(form.editor) || !form.stop
-          || c.nodes(content, '.response-loading', 2).length !== 1
-          || c.nodes(content, '.response-message-content.phase-answer', 1).length
-          || c.nodes(content, '.response-message-footer-actions', 1).length)
+        if (!ordered() || node.childNodes.length !== 0 || body.textContent !== emptyContainerPrompt
+          || !form.empty || !c.enabled(form.editor) || !form.stop) c.fail('document_changed', 'response_container_empty');
+        pendingAnswer = { root: node, content: null, turn: answerTurn, outer: turn.parentElement, editor: form.editor, composerScope: form.scope };
+      } else {
+        if (emptyContainerPrompt !== null && containers.length !== 1 || allowInitialResponseIdentity && displayed.length !== 1)
+          c.fail('document_changed', !containers.length ? 'response_container_empty'
+            : containers.length > 1 ? 'response_container_multiple' : 'response_container_hidden');
+        const content = one(displayed, 'response_container');
+        const answerID = content.getAttribute('id')?.replace(/^chat-response-message-/, '');
+        if (!ordered() || (!c.uuid(answerID) && !(allowInitialResponseIdentity && answerID === ''))
+          || content.getAttribute('id') !== 'chat-response-message-' + answerID || answerID === id)
           c.fail('conversation_changed', 'response_scope');
-        pendingAnswer = { root: node, content, turn: answerTurn, outer: turn.parentElement };
-      } else answer = { root: node, content, id: answerID };
-
+        if (answerID === '') {
+          // The observed first response mounts this exact prefix before its UUID.
+          const form = composer();
+          if (!form.empty || !c.enabled(form.editor) || !form.stop
+            || c.nodes(content, '.response-loading', 2).length !== 1
+            || c.nodes(content, '.response-message-content.phase-answer', 1).length
+            || c.nodes(content, '.response-message-footer-actions', 1).length)
+            c.fail('conversation_changed', 'response_scope');
+          pendingAnswer = { root: node, content, turn: answerTurn, outer: turn.parentElement };
+        } else answer = { root: node, content, id: answerID };
+      }
     }
     return { users, answers, first: { root, container, body, id, text: body.textContent }, answer, pendingAnswer };
   }
@@ -1508,7 +1538,7 @@ function computaQwenDOM(c) {
     setter.call(form.editor, prompt);
     form.editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));
   }
-  return { rejectSelectionBinding, firstDisplayReplacement, watchDisplayRender, displayHitFailure, firstBodyPresentation, firstBodyFailureStructure, initialResponseIdentityTranscript: () => transcript(true), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer,
+  return { rejectSelectionBinding, firstDisplayReplacement, watchDisplayRender, displayHitFailure, firstBodyPresentation, firstBodyFailureStructure, initialResponseIdentityTranscript: emptyContainerPrompt => transcript(true, emptyContainerPrompt), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer,
     deletionTrigger, deletionMenu, deletionConfirmation, deletionObserved, insertLiteral };
 }
 
@@ -1519,6 +1549,7 @@ try {
   const c = computaProviderCore(input, 'qwen', 'https://chat.qwen.ai', actions);
   return await computaSavedConversation(input, c, computaQwenDOM(c), {
     stateKey: '__computaQwenSavedSessionV1', origin: 'https://chat.qwen.ai', initialProvisionalRoute: true, initialResponseIdentity: true,
+    firstEmptyContainerChoice: { key: 'Qwen3.8-Max', label: 'Qwen3.8-Max' },
     deferDisplayUntilAnswer: ['Qwen3.7-Plus', 'Qwen3.8-Max'].map(label => ({ key: label, label }))
   });
 } catch (error) {

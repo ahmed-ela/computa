@@ -450,6 +450,55 @@ final class QwenWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testMaxFirstAssistantRootWaitsForContainerAndRejectsReplacementAndDuplicates() async throws {
+        for scenario in ["mount", "duplicate", "removeMounted", "replaceRoot"] {
+            let fixture = try Fixture(setup: "qwenFixture.options.holdResponseIdentity=true; qwenFixture.options.holdResponseContainer=true;")
+            defer { fixture.shutdown() }
+            let token = try await start(fixture, label: "Qwen3.8-Max")
+            _ = try await call(fixture, "webProviderSend", token, prompt: "Identify this synthetic code.")
+            let initial = try await call(fixture, "webProviderPoll", token)
+            XCTAssertEqual(initial["modelVerificationPendingReason"] as? String, "qwen_initial_response_identity_v1", scenario)
+            XCTAssertNil(initial["modelEvidence"])
+            XCTAssertNil(initial["completionEvidence"])
+            let ctx = try XCTUnwrap(initial["pendingSubmissionContext"] as? [String: Any])
+            XCTAssertEqual(ctx["firstUserFingerprint"] as? String, "")
+            XCTAssertEqual(ctx["responseCount"] as? Int, 0)
+            let mutation = scenario == "replaceRoot"
+                ? "const old=document.querySelector('.qwen-chat-message-assistant'); old.replaceWith(old.cloneNode(false));"
+                : "qwenFixture.mountResponseContainer();"
+            _ = try await evaluate(fixture.view, mutation + " return true;")
+            if scenario == "mount" || scenario == "removeMounted" {
+                let pending = try await call(fixture, "webProviderPoll", token)
+                XCTAssertEqual(pending["modelVerificationPendingReason"] as? String, "qwen_initial_response_identity_v1")
+                XCTAssertNil(pending["completionEvidence"])
+            }
+            if scenario == "mount" {
+                _ = try await evaluate(fixture.view, "qwenFixture.settleResponseIdentity(); qwenFixture.completeResponse(); return true;")
+                let complete = try await wait(fixture, token, state: "complete")
+                XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Synthetic Qwen native reply"}"#)
+                let finished = try await call(fixture, "webProviderFinish", token)
+                XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+                try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+                continue
+            }
+            if scenario == "duplicate" {
+                _ = try await evaluate(fixture.view, "const a=document.querySelector('.chat-response-message'); a.after(a.cloneNode(true)); return true;")
+            } else if scenario == "removeMounted" {
+                _ = try await evaluate(fixture.view, "document.querySelector('.chat-response-message').remove(); return true;")
+            }
+            do {
+                _ = try await call(fixture, "webProviderPoll", token)
+                XCTFail("Poll must refuse " + scenario)
+            } catch {
+                let reason: EmbeddedWebModelTransport.OwnershipReason = scenario == "replaceRoot" ? .javaScriptConversation : .javaScriptDocument
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(reason), scenario)
+            }
+            let finished = try await call(fixture, "webProviderFinish", token)
+            XCTAssertEqual(finished["cleanup"] as? String, "failed")
+            try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+        }
+    }
+
     func testObservedPlaceholderWithholdsModelAndAnswerUntilExactCanonicalBodyForBothModels() async throws {
         for label in ["Qwen3.7-Plus", "Qwen3.8-Max"] {
             let fixture = try Fixture(setup: "qwenFixture.options.useProvisional=true; qwenFixture.options.holdProvisional=true")

@@ -81,6 +81,32 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
         XCTAssertEqual(ledger.filter { $0.operation == "webProviderSend" }.count, 2)
     }
 
+    func testGeminiFunctionArgumentRejectionIsTerminalAndCannotReleaseOrResend() async throws {
+        let root = try canonicalFormatCorrectionFixtureRoot()
+        let choice = WebsiteModelChoice(provider: "gemini", key: "3.5 Flash-Lite", label: "3.5 Flash-Lite")
+        let malformed = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":"{}"}]}"#
+        let transport = FormatCorrectionFixtureTransport(replies: [malformed, valid], geminiChoice: choice)
+        let server = try await makeServer(storageDirectory: root)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        var payload = try XCTUnwrap(JSONSerialization.jsonObject(with: request()) as? [String: Any])
+        payload["model"] = choice.modelID
+        let bytes = try JSONSerialization.data(withJSONObject: payload)
+        let task = "gemini-shape-terminal"
+        do {
+            _ = try await server.fixtureInfer(bytes, taskID: task)
+            XCTFail("An invalid function call cannot be returned")
+        } catch {
+            XCTAssertEqual(error as? WebModelResponseCodec.Failure, .argumentsMustBeObject)
+        }
+        let finish = await server.fixtureFinish(taskID: task)
+        XCTAssertTrue(finish.isEmpty)
+        let ledger = await transport.ledger()
+        XCTAssertEqual(ledger.map(\.operation), ["webProviderStart", "webProviderSend", "webProviderPoll", "webProviderFinish"])
+        let journal = try transactionJournal(root: root, task: task)
+        XCTAssertFalse(journal.contains { ["complete", "yield_verified", "release_verified"].contains($0["phase"] as? String ?? "") })
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("evidence/format-corrections-v1").path))
+    }
+
     func testChatInvalidJSONClosesOriginalBeforeOneFreshFormatCorrection() async throws {
         let root = try canonicalFormatCorrectionFixtureRoot()
         let base = FormatCorrectionFixtureTransport(replies: [malformed, valid])
@@ -665,6 +691,7 @@ actor FormatCorrectionFixtureTransport: WebModelTransport {
     private var sentPrompts: [String] = []
     private var replies: [String]
     private var active: [String: String] = [:]
+    private let geminiChoice: WebsiteModelChoice?
     private let cleanupFails: Bool
     private let cleanupDelay: Duration
     private let mismatchesSecondModel: Bool
@@ -681,7 +708,8 @@ actor FormatCorrectionFixtureTransport: WebModelTransport {
     init(replies: [String], cleanupFails: Bool = false, cleanupDelay: Duration = .zero, mismatchesSecondModel: Bool = false,
          secondResponseMutation: String? = nil, firstSendDelay: Duration = .zero, secondStartDelay: Duration = .zero,
          pollFailures: [Int: EmbeddedWebModelTransport.Failure] = [:], firstSendMutation: String? = nil,
-         earlyRendererFailureOperation: String? = nil) {
+         earlyRendererFailureOperation: String? = nil, geminiChoice: WebsiteModelChoice? = nil) {
+        self.geminiChoice = geminiChoice
         self.replies = replies; self.cleanupFails = cleanupFails; self.cleanupDelay = cleanupDelay
         self.mismatchesSecondModel = mismatchesSecondModel
         self.secondResponseMutation = secondResponseMutation
@@ -736,6 +764,10 @@ actor FormatCorrectionFixtureTransport: WebModelTransport {
             }
         }
         var prepared = syntheticPreparedWebsiteSnapshot(snapshot)
+        if let choice = geminiChoice, ["ready","running","complete"].contains(prepared["state"] as? String ?? "") {
+            prepared.removeValue(forKey: "productModeEvidence")
+            prepared["modelEvidence"] = ["selected":["key":choice.key,"label":choice.label],"source":"selected_model_indicator","verification":"website_selection"]
+        }
         if operation == "webProviderSend", sentPrompts.count == 1, firstSendMutation == "proof" {
             prepared["modelProofContext"] = ["submittedPromptFingerprint": String(repeating: "0", count: 64)]
         }

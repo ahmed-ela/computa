@@ -1,9 +1,9 @@
 # Kimi, Qwen and DeepSeek website adapters
 
-On installed build 409, ChatGPT Instant completed the invoice fixture with all
-six tests passing and a verified browser receipt. Qwen Max and Gemini Flash-Lite
-returned their exact markers and released their owned sessions.
-[Installed build 409 results](#installed-build-409-2026-11-03)
+Qwen Plus returned its first exact direct answer on installed build 410,
+with verified model selection and deletion. It listed the fixture directory and read three
+files in the separate invoice workflow before response extraction stopped.
+[Installed build 410 results](#installed-build-410-2026-11-03)
 
 ### Build 400 checkpoint (2026-11-03 UTC)
 
@@ -1119,6 +1119,22 @@ which authored-response check failed and a bounded count. Kimi's handoff asks
 for one JSON block with its explanation inside the message. For Groq, repeated
 loader history can reference earlier identical fields if a full request exceeds
 the token budget. The full canonical history and budget still govern dispatch.
+
+### Installed build 410 (2026-11-03)
+
+The source passed 429 native tests and 1,517 JavaScript tests. The signed installation was used for eight
+live tasks across seven model choices:
+
+| Website model | Observed result |
+| --- | --- |
+| Qwen3.7-Plus | Exact direct answer in 28.848 seconds with verified deletion. Four successful read-only commands in the invoice task. The third response failed the authored-text check before any edit. All three sessions were deleted. |
+| Qwen3.8-Max | The first inspection after verified submission rejected the response container. No final or confirmed deletion. Its recorded error did not distinguish zero visible containers from multiple containers. |
+| Claude Opus 4.8 | The verified user row disappeared after submission of an ordinary returns-desk question. No answer or confirmed cleanup. A contemporaneous HTTP 429 POST could not be tied to the exact prompt. |
+| Kimi Instant | A same-document navigation preceded the route check failure. No edit, final or confirmed cleanup. The exact transition was not recorded. |
+| Groq GPT OSS 20B | Declined the invoice task because it considered the page actions unavailable. Zero native tool calls. Its website transcript cleared. |
+| Groq Qwen3.8-27B | Four read-only commands succeeded. Its third submission reverted to the draft. All three requests fit the local budget. Two transcripts cleared and final cleanup was unconfirmed. |
+| Groq GPT OSS 120B | Two tool-schema requests were rejected and one terminal command ran. The website showed an error and restored the fourth submission. Three transcripts cleared and final cleanup was unconfirmed. |
+
 
 ## Remaining gates
 

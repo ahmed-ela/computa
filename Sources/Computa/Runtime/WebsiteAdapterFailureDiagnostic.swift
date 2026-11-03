@@ -7,7 +7,12 @@ import Foundation
 enum WebsiteAdapterFailureDiagnostic {
     static let directoryName = "WebsiteAdapterFailureDiagnostics-v1"
     static let purpose = "synthetic_adapter_failure_structure_v1"
-    static let qwenMaxAuthoredPurpose = "synthetic_qwen_max_authored_source_v1"
+    // A dedicated opt-in for each exact selection. Past generic or sibling-model
+    // arms cannot authorize publishing a new diagnostic.
+    private static let qwenAuthoredPurposes = [
+        WebsiteModelChoice(provider: "qwen", key: "Qwen3.8-Max", label: "Qwen3.8-Max").modelID: "synthetic_qwen_max_authored_source_v1",
+        WebsiteModelChoice(provider: "qwen", key: "Qwen3.7-Plus", label: "Qwen3.7-Plus").modelID: "synthetic_qwen_plus_authored_source_v1"
+    ]
     static let maximumArmBytes = 4_096
     static let maximumPacketBytes = 80 * 1_024
     static let maximumLifetime: TimeInterval = 600
@@ -187,8 +192,13 @@ enum WebsiteAdapterFailureDiagnostic {
         return value.boolValue
     }
 
-    static func validateArm(_ data: Data, context: Context, now: Date, qwenMaxAuthored: Bool = false) -> Arm? {
-        let expectedPurpose = qwenMaxAuthored ? qwenMaxAuthoredPurpose : purpose
+    fileprivate static func capturePurpose(for packet: Packet, context: Context, binding: Binding) -> String? {
+        guard packet.provider == context.provider, binding.sequence == 1 else { return nil }
+        guard packet.provider == "qwen", packet.trigger == "authored_source" else { return purpose }
+        return binding.priorModelSelectionVerified ? qwenAuthoredPurposes[context.modelID] : nil
+    }
+
+    static func validateArm(_ data: Data, context: Context, now: Date, expectedPurpose: String = purpose) -> Arm? {
         guard !data.isEmpty, data.count <= maximumArmBytes, APIModelCorrectionJSON.isUnambiguous(data),
               let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               Set(value.keys) == ["schemaVersion", "purpose", "nonce", "taskID", "threadID", "turnID", "provider", "modelID", "expiresAt"],
@@ -228,17 +238,14 @@ final class WebsiteAdapterFailurePublication: @unchecked Sendable {
                  beforeCommit: (() -> Void)? = nil,
                  commitEligibility: (@MainActor @Sendable () -> Bool)? = nil) -> Bool {
         let started = ContinuousClock.now
-        let qwenMaxAuthored = packet.provider == "qwen" && packet.trigger == "authored_source"
-        guard packet.provider == context.provider, binding.sequence == 1,
-              !qwenMaxAuthored ||
-                  (binding.priorModelSelectionVerified && context.modelID == WebsiteModelChoice(provider: "qwen", key: "Qwen3.8-Max", label: "Qwen3.8-Max").modelID),
+        guard let purpose = WebsiteAdapterFailureDiagnostic.capturePurpose(for: packet, context: context, binding: binding),
               lock.withLock({ guard active, !attempted, started < deadline else { return false }; attempted = true; return true }),
               let structure = try? JSONSerialization.jsonObject(with: packet.data),
               WebsiteAdapterFailureDiagnostic.sanitize(structure, provider: context.provider, error: error, detail: detail) != nil else { return false }
         var arm: WebsiteAdapterFailureDiagnostic.Arm?
         guard let claim = WebsitePrivateDiagnosticCapture.claim(directory: directory, record: .adapterFailureStructure,
             maximumArmBytes: WebsiteAdapterFailureDiagnostic.maximumArmBytes, validate: { bytes in
-                guard let parsed = WebsiteAdapterFailureDiagnostic.validateArm(bytes, context: context, now: now, qwenMaxAuthored: qwenMaxAuthored) else { return false }
+                guard let parsed = WebsiteAdapterFailureDiagnostic.validateArm(bytes, context: context, now: now, expectedPurpose: purpose) else { return false }
                 arm = parsed
                 self.lock.withLock {
                     self.deadline = min(self.deadline, started + .milliseconds(Int64(parsed.expiry.timeIntervalSince(now) * 1_000)))
@@ -246,7 +253,7 @@ final class WebsiteAdapterFailurePublication: @unchecked Sendable {
                 return true
             }, isCurrent: { self.isCurrent }, beforeArmClaim: beforeArmClaim), let arm else { return false }
         let record: [String: Any] = [
-            "schemaVersion": 1, "purpose": qwenMaxAuthored ? WebsiteAdapterFailureDiagnostic.qwenMaxAuthoredPurpose : WebsiteAdapterFailureDiagnostic.purpose,
+            "schemaVersion": 1, "purpose": purpose,
             "nonce": arm.nonce.uuidString.lowercased(), "capturedAt": WebsiteAdapterFailureDiagnostic.formatter().string(from: now),
             "evidenceClass": "rejected_adapter_structure_only", "automaticReplay": false,
             "taskID": context.taskID.uuidString.lowercased(), "threadID": context.threadID.uuidString.lowercased(),

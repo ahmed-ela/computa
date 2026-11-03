@@ -48,12 +48,20 @@ final class WebsiteAdapterFailureDiagnosticTests: XCTestCase {
         XCTAssertNil(D.sanitize(valid, provider: "qwen", error: "conversation_changed", detail: "first_user_message"))
     }
 
-    func testQwenAuthoredSourcePublicationRequiresExactMaxSelectionAndSingleBoundArm() throws {
+    func testQwenAuthoredSourcePublicationRequiresExactNamedSelectionAndDedicatedSingleBoundArm() throws {
         let packet = try XCTUnwrap(D.sanitize(qwenAuthoredFailure, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"))
-        for scenario in ["matching", "plus", "no_arm", "historical_arm", "first_user_failure", "foreign_turn", "unverified_model", "revoked_generation", "wrong_sequence"] {
+        let max = "Qwen3.8-Max", plus = "Qwen3.7-Plus"
+        let maxPurpose = "synthetic_qwen_max_authored_source_v1", plusPurpose = "synthetic_qwen_plus_authored_source_v1"
+        let cases = [(max, maxPurpose, "matching"), (plus, plusPurpose, "matching"),
+                     (plus, maxPurpose, "wrong_purpose"), (max, plusPurpose, "wrong_purpose"),
+                     (plus, plusPurpose, "foreign_model")]
+        let failures = ["no_arm", "historical_arm", "first_user_failure", "foreign_turn", "unverified_model",
+                        "revoked_generation", "wrong_sequence"]
+        for (label, purpose, scenario) in cases + failures.map({ (plus, plusPurpose, $0) })
+            + failures.map({ (max, maxPurpose, $0) }) {
             let f = try WebsiteAdapterFailureFixture()
             defer { f.cleanup() }
-            let a = f.admission, label = scenario == "plus" ? "Qwen3.7-Plus" : "Qwen3.8-Max"
+            let a = f.admission
             let choice = WebsiteModelChoice(provider: "qwen", key: label, label: label)
             let context = try XCTUnwrap(D.Context(admission: WebModelStartAdmission(id: a.id, inferenceID: a.inferenceID,
                 taskID: a.taskID, threadID: a.threadID, turnID: a.turnID, runtimeGeneration: a.runtimeGeneration,
@@ -61,7 +69,10 @@ final class WebsiteAdapterFailureDiagnosticTests: XCTestCase {
                 parameters: Data(), adapterFailureDirectory: f.directory)))
             var arm = f.arm()
             arm["provider"] = "qwen"; arm["modelID"] = choice.modelID
-            if scenario != "historical_arm" { arm["purpose"] = D.qwenMaxAuthoredPurpose }
+            if scenario != "historical_arm" { arm["purpose"] = purpose }
+            if scenario == "foreign_model" {
+                arm["modelID"] = WebsiteModelChoice(provider: "qwen", key: max, label: max).modelID
+            }
             if scenario == "foreign_turn" { arm["turnID"] = UUID().uuidString.lowercased() }
             if scenario != "no_arm" { try f.writeArm(arm) }
             let binding = D.Binding(sessionToken: f.binding.sessionToken, documentGeneration: f.binding.documentGeneration,
@@ -85,14 +96,14 @@ final class WebsiteAdapterFailureDiagnosticTests: XCTestCase {
             }
             XCTAssertFalse(publish())
             let record = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: f.outputURL)) as? [String: Any])
-            XCTAssertEqual(record["purpose"] as? String, D.qwenMaxAuthoredPurpose)
+            XCTAssertEqual(record["purpose"] as? String, purpose)
             XCTAssertEqual(record["documentGeneration"] as? String, binding.documentGeneration.uuidString.lowercased())
             XCTAssertEqual(record["inferenceID"] as? String, context.inferenceID.uuidString.lowercased())
             XCTAssertEqual(record["automaticReplay"] as? Bool, false)
             XCTAssertEqual(record["responseAuthorityGranted"] as? Bool, false)
             XCTAssertEqual(record["currentFirstBodyProofGranted"] as? Bool, false)
             let finite = try XCTUnwrap(record["structure"] as? [String: Any])
-            XCTAssertEqual(Set(finite.keys), Set(qwenAuthoredFailure.keys))
+            XCTAssertEqual(finite as NSDictionary, qwenAuthoredFailure as NSDictionary)
         }
     }
 

@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { fixture, choice, fingerprint, prompt, raw } from './embedded-qwen-adapter-fixture';
 
 type Page = ReturnType<typeof fixture>;
-const max = 'Qwen3.8-Max';
+const max = 'Qwen3.8-Max', plus = 'Qwen3.7-Plus';
 
 async function submitted(label = max, complete = true) {
   const f = fixture({ completeOnSend: complete });
@@ -30,13 +30,13 @@ const checks: [string, string, number, (f: Page) => void][] = [
   ['outside', 'scope', 0, f => { f.flow.append(new f.Node('STRONG',{},'SYNTHETIC_PRIVATE')); }],
   ['outside', 'node_limit', 0, f => { for(let i=0;i<10001;i++) f.flow.append(new f.Node('DIV')); }]
 ];
-for (const [stage, reason, count, mutate] of checks) {
-  test(`Max terminal failure reports only ${stage}/${reason} and saturated arity`, async () => {
-    const f = await submitted();
+for (const model of [max, plus]) for (const [stage, reason, count, mutate] of checks) {
+  test(`${model} terminal failure reports only ${stage}/${reason} and saturated arity`, async () => {
+    const f = await submitted(model);
     expect((await f.run('inspect')).firstUserVerified).toBe(true);
     mutate(f);
     const clicks = f.mutations();
-    const r = await f.run('inspect', { expectedModelChoice: choice(max) });
+    const r = await f.run('inspect', { expectedModelChoice: choice(model) });
     expect(r).toEqual({error:'unsupported_response_format',detail:'authored_source',adapterFailureStructure:{
       version:1,provider:'qwen',trigger:'authored_source',stage,reason,count
     }});
@@ -45,14 +45,19 @@ for (const [stage, reason, count, mutate] of checks) {
   });
 }
 
-test('Plus shares the original rejection, and Max streaming and cleanup return no structure or answer', async () => {
-  for (const kind of ['plus','stream','cleanup']) {
-    const f = await submitted(kind === 'plus' ? 'Qwen3.7-Plus' : max, kind !== 'stream');
+test('missing exact selection, another model, streaming and cleanup cannot emit an authored-source packet', async () => {
+  for (const kind of ['missingChoice', 'other', 'stream', 'cleanup']) {
+    const model = kind === 'other' ? 'Qwen3.8-Omni-Flash' : plus;
+    const f = await submitted(model, kind !== 'stream');
     expect((await f.run('inspect')).firstUserVerified).toBe(true);
     f.paragraph.append(new f.Node('A'));
-    const r = await f.run('inspect', kind === 'cleanup' ? {savedCleanupInspection:true} : {});
-    if (kind === 'plus') expect(r).toEqual({error:'unsupported_response_format',detail:'authored_source'});
-    else { expect(r.error).toBeUndefined(); expect(r.text).toBe(''); expect(r.answerComplete).toBe(false); }
+    const r = await f.run('inspect', {
+      ...(kind === 'missingChoice' ? {} : {expectedModelChoice: choice(model)}),
+      ...(kind === 'cleanup' ? {savedCleanupInspection:true} : {})
+    });
+    if (kind === 'stream' || kind === 'cleanup') {
+      expect(r.error).toBeUndefined(); expect(r.text).toBe(''); expect(r.answerComplete).toBe(false);
+    } else expect(r).toEqual({error:'unsupported_response_format',detail:'authored_source'});
     expect(r.adapterFailureStructure).toBeUndefined();
     expect(f.send.clicks).toBe(1);
   }
