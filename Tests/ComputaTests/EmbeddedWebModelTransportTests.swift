@@ -3873,6 +3873,26 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testMissingChatMarkerPredicatesHaveAClosedDiagnosticOnlySchema() throws {
+        let marker: [String: Any] = ["version": 1, "activeForms": 1, "candidateOverflow": false, "recognized": false,
+                                    "enabled": false, "proofSource": NSNull()]
+        let base: [String: Any] = ["kind": "chatgpt_product_mode_structure", "groupCount": 0, "groupVisible": false,
+            "recognized": false, "contradictory": false, "chat": NSNull(), "work": NSNull(), "proofPresent": false,
+            "proofInvalidated": false, "chatClickClaimed": false, "markerDiagnostic": marker]
+        let parts = ["form": "matches", "editor": "owned", "picker": "no_exact_match"]
+        let raw = base.merging(["markerInputs": parts]) { _, new in new }
+        let encoded = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedProductModeDiagnostic(raw))
+        let value = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any])
+        XCTAssertEqual(value["markerInputs"] as? [String: String], parts)
+        for corrupt: [String: Any] in [["markerInputs": parts.merging(["picker": "PRIVATE_CANARY"]) { _, new in new }],
+            ["markerInputs": parts.merging(["text": "PRIVATE_CANARY"]) { _, new in new }], ["groupCount": 1],
+            ["markerDiagnostic": marker.merging(["activeForms": 2]) { _, new in new }],
+            ["markerDiagnostic": marker.merging(["recognized": true]) { _, new in new }]] {
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedProductModeDiagnostic(raw.merging(corrupt) { _, new in new }))
+        }
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedProductModeDiagnostic(base))
+    }
+
     func testProductComposerMarkerDiagnosticsHaveClosedFiniteShape() throws {
         let base: [String: Any] = ["kind": "chatgpt_product_mode_structure", "groupCount": 0,
             "groupVisible": false, "recognized": false, "contradictory": false,
@@ -5255,10 +5275,20 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         defer { fixture.shutdown() }
         for _ in 0..<4 { _ = try await call(fixture.transport, "webProviderStart", ["provider": "claude"]) }
         let originalTabs = fixture.createdTabs
-        for (label, retained) in [("Haiku 5.5", true), ("Sonnet 5.5", false)] {
+        #if COMPUTA_QUALIFY_RETAINED_HAIKU
+        let namedPolicies = [("Haiku 5.5", true), ("Sonnet 5.5", false)]
+        #elseif DEBUG
+        let namedPolicies = [("Haiku 5.5", false), ("Haiku 5.5", true), ("Sonnet 5.5", false)]
+        #else
+        let namedPolicies = [("Haiku 5.5", false), ("Sonnet 5.5", false)]
+        #endif
+        for (label, retained) in namedPolicies {
             let choice = WebsiteModelChoice(provider: "claude", key: label, label: label)
             let root = FileManager.default.temporaryDirectory.appendingPathComponent("ClaudeBeforeStart-" + UUID().uuidString)
             let server = try await makePrecreationFixtureServer(storageDirectory: root)
+            #if DEBUG && !COMPUTA_QUALIFY_RETAINED_HAIKU
+            if retained { await server.retainHaikuConversationForTesting() }
+            #endif
             let transport = PrecreationFixtureTransport(native: fixture.transport, mutation: "unchanged")
             await server.configureEmbeddedTransport(transport)
             let request = try JSONSerialization.data(withJSONObject: ["model": choice.modelID, "input": "Synthetic read", "tools": []] as [String: Any])

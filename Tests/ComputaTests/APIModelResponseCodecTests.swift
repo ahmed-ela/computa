@@ -3771,11 +3771,11 @@ final class APIModelResponseCodecTests: XCTestCase {
         }
         let nested = try XCTUnwrap(rejectedDetails(req, arguments: #"{"operations":[{"update":"file.py","hunks":"wrong"}]}"#).first)
         XCTAssertEqual(nested.constraint, .schemaMismatch)
-        let example = #"{"operations":[{"update":"file.py","hunks":[{"lines":["-old","+new"]}]}]}"#
+        let example = #"{"operations":[{"update":"/absolute/path/file.py","hunks":[{"lines":["-old","+new"]}]}]}"#
         XCTAssertTrue(AlibabaPatchProjection.argumentDirections.contains(example))
         let decoded = try APIModelResponseCodec.decode(correctionResult(req, arguments: example), request: req)
         let item = try XCTUnwrap((decoded.response["output"] as? [[String: Any]])?.first)
-        XCTAssertEqual(item["input"] as? String, "*** Begin Patch\n*** Update File: file.py\n-old\n+new\n*** End Patch")
+        XCTAssertEqual(item["input"] as? String, "*** Begin Patch\n*** Update File: /absolute/path/file.py\n-old\n+new\n*** End Patch")
     }
 
     func testCurrentAlibabaBundledPatchCompilesEveryOperationWithLiteralSourceAndEnvironment() throws {

@@ -2355,6 +2355,41 @@ final class WebModelServerTests: XCTestCase {
         XCTAssertFalse(finalOperations.contains("webProviderSend"))
     }
 
+    #if !COMPUTA_QUALIFY_RETAINED_HAIKU
+    func testOrdinaryNamedHaikuClosesEachVerifiedRoundBeforeToolOrFinal() async throws {
+        let choice = WebsiteModelChoice(provider: "claude", key: "Haiku 5.5", label: "Haiku 5.5")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let transport = FixtureWebModelTransport(replyTexts: [
+            #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"first"}}]}"#,
+            #"{"type":"message","text":"Verified fresh output"}"#], fixedChoice: choice)
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        let task = "ordinary-haiku"
+        let input = [["role":"user","content":"Read the synthetic value"]]
+        let first = try await server.fixtureInfer(turnRequest(input:input, model:choice.modelID), taskID:task)
+        let items = try responseOutput(first)
+        let id = try XCTUnwrap(items.first?["call_id"] as? String)
+        let firstReceipts = await server.latestCleanupReceipts()
+        XCTAssertEqual(firstReceipts.count, 1)
+        XCTAssertTrue(try XCTUnwrap(firstReceipts.first).receiptSaved)
+        let result: [String:Any] = ["type":"function_call_output","call_id":id,"output":"Verified fresh output"]
+        let next = try await server.fixtureInfer(turnRequest(input:input + items + [result], model:choice.modelID), taskID:task)
+        let final = try responseOutput(next)
+        XCTAssertEqual((final.first?["content"] as? [[String:Any]])?.first?["text"] as? String, "Verified fresh output")
+        let journal = try turnJournal(root:root,task:task)
+        let expected = ["start_requested","started","submission_verified","complete","release_verified"]
+        XCTAssertEqual(journal.compactMap { $0["phase"] as? String }, expected + expected)
+        let releases = journal.filter { $0["phase"] as? String == "release_verified" }
+        XCTAssertEqual(Set(releases.compactMap { $0["sessionToken"] as? String }).count, 2)
+        XCTAssertTrue(releases.allSatisfy { $0["modelID"] as? String == choice.modelID })
+        let receipts = try WebsiteSessionCleanupStore(directory: root.appendingPathComponent("cleanup"))
+            .transactionRecords(for: websiteInferenceFixtureTaskID(task), turnID: websiteInferenceFixtureTaskID(task + ":turn"))
+        XCTAssertEqual(receipts.count, 2)
+        XCTAssertTrue(receipts.allSatisfy { $0.outcome == .closed && $0.receiptSaved })
+    }
+    #endif
+
+    #if DEBUG || COMPUTA_QUALIFY_RETAINED_HAIKU
     func testNamedHaikuRetainsOneIncognitoLeaseOnlyForMatchedToolRounds() async throws {
         let choice = WebsiteModelChoice(provider: "claude", key: "Haiku 5.5", label: "Haiku 5.5")
         for end in ["final", "cancel", "unmatched"] {
@@ -2363,6 +2398,9 @@ final class WebModelServerTests: XCTestCase {
                 #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"first"}}]}"#,
                 #"{"type":"message","text":"Observed the result"}"#], fixedChoice: choice)
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+            #if DEBUG && !COMPUTA_QUALIFY_RETAINED_HAIKU
+            await server.retainHaikuConversationForTesting()
+            #endif
             await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base))
             let input = [["role": "user", "content": "Read a synthetic nonce"]]
             let task = "haiku-" + end
@@ -2405,6 +2443,8 @@ final class WebModelServerTests: XCTestCase {
             XCTAssertEqual(receipts.first?.receiptSaved, true)
         }
     }
+
+    #endif
 
     func testClaudeRoutesEachInferenceToANewClosedSession() async throws {
         let transport = FixtureWebModelTransport()

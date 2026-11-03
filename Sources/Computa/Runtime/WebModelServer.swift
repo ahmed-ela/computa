@@ -557,9 +557,19 @@ actor WebModelServer {
             reason: reason, trigger: trigger, inferenceID: session?.inferenceID.uuidString.lowercased(),
             sessionToken: session?.token)
     }
+    // Retained Haiku needs a separate internally built qualification artifact.
+    #if COMPUTA_QUALIFY_RETAINED_HAIKU
+    private var qualifiesRetainedHaiku = true
+    #else
+    private var qualifiesRetainedHaiku = false
+    #endif
     #if DEBUG
     private var beforeListenerStartForTesting: (@Sendable () async -> Void)?
     private var retainsChatGPTConversationForTesting = false
+
+    func retainHaikuConversationForTesting() {
+        qualifiesRetainedHaiku = true
+    }
 
     func retainChatGPTConversationForTesting() {
         retainsChatGPTConversationForTesting = true
@@ -1124,7 +1134,7 @@ actor WebModelServer {
                               !closed.ambiguousHandoff else { throw Failure.inferenceContextRequired }
                         try closed.continuation.validate(next: request)
                     }
-                    let retainClaudeTurn = !context.isMaintenance && choice?.supportsClaudeTurnPilot == true
+                    let retainClaudeTurn = qualifiesRetainedHaiku && !context.isMaintenance && choice?.supportsClaudeTurnPilot == true
                     let provesNativeContinuation = Self.requiresNativeContinuationProof(provider: provider) || retainClaudeTurn
                     let provesFreshSessionSubmission = provider == "claude" && choice != nil && !retainClaudeTurn
                     if provesNativeContinuation || provesFreshSessionSubmission { try WebsiteTurnContinuation.validateRequest(request) }

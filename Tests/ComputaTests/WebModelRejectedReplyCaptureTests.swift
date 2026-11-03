@@ -348,7 +348,7 @@ final class WebModelRejectedReplyCaptureTests: XCTestCase {
             } catch {
                 switch (mutation, error as? WebModelServer.Failure) {
                 case (.missingText, .providerFailed), (.nonStringText, .providerFailed),
-                     (.freshOnlyStart, .invalidRequest), (.invalidProof, .invalidRequest), (.invalidModel, .modelUnverified): break
+                     (.oppositeStartPolicy, .invalidRequest), (.invalidProof, .invalidRequest), (.invalidModel, .modelUnverified): break
                 default: XCTFail("Unexpected rejection for \(mutation): \(error)")
                 }
             }
@@ -357,7 +357,7 @@ final class WebModelRejectedReplyCaptureTests: XCTestCase {
             XCTAssertEqual(try Data(contentsOf: fixture.armFile), arm)
             XCTAssertFalse(fixture.exists(storage.appendingPathComponent("evidence/format-corrections-v1")))
             let operations = await transport.operations()
-            let expected = mutation == .freshOnlyStart ? ["webProviderStart"] : ["webProviderStart", "webProviderSend", "webProviderPoll"]
+            let expected = mutation == .oppositeStartPolicy ? ["webProviderStart"] : ["webProviderStart", "webProviderSend", "webProviderPoll"]
             XCTAssertEqual(operations, expected, "Unexpected operation sequence for \(mutation)")
             let cleanup = await server.fixtureFinish(taskID: task.uuidString)
             XCTAssertTrue(cleanup.isEmpty)
@@ -691,16 +691,21 @@ private actor RejectedReplyTransport: WebModelTransport {
 // Mutate only after the fixture has supplied its normal proof, so it cannot
 // repair the deliberately invalid completed snapshot before the server sees it.
 private struct RejectedReplySnapshotMutationTransport: WebModelTransport {
-    enum Mutation: CaseIterable, Sendable { case freshOnlyStart, missingText, nonStringText, invalidProof, invalidModel }
+    enum Mutation: CaseIterable, Sendable { case oppositeStartPolicy, missingText, nonStringText, invalidProof, invalidModel }
     let base: any WebModelTransport
     let mutation: Mutation
     func start(params: Data, admission: WebModelStartAdmission,
                authorization: ChatGPTRequestMetadataLease?) async throws -> Data {
         let bytes = try await base.start(params: params, admission: admission, authorization: authorization)
-        guard mutation == .freshOnlyStart else { return bytes }
+        guard mutation == .oppositeStartPolicy else { return bytes }
         var snapshot = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
-        snapshot.removeValue(forKey: "turnContinuationCapability")
-        snapshot["freshSessionSubmissionCapability"] = "fresh_session_submission_v1"
+        if admission.retainClaudeTurn {
+            snapshot.removeValue(forKey: "turnContinuationCapability")
+            snapshot["freshSessionSubmissionCapability"] = "fresh_session_submission_v1"
+        } else {
+            snapshot.removeValue(forKey: "freshSessionSubmissionCapability")
+            snapshot["turnContinuationCapability"] = "per_submission_ownership_v1"
+        }
         return try JSONSerialization.data(withJSONObject: snapshot)
     }
 
@@ -710,7 +715,7 @@ private struct RejectedReplySnapshotMutationTransport: WebModelTransport {
               var snapshot = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
               snapshot["state"] as? String == "complete" else { return bytes }
         switch mutation {
-        case .freshOnlyStart: return bytes
+        case .oppositeStartPolicy: return bytes
         case .missingText: snapshot.removeValue(forKey: "text")
         case .nonStringText: snapshot["text"] = 42
         case .invalidProof:

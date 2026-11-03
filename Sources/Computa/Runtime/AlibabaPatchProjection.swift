@@ -35,8 +35,8 @@ enum AlibabaPatchProjection: Sendable, Equatable {
     // patch. It never rewrites user text, previous calls, or partial host policy.
     static let argumentDirections = """
         Supply an arguments object whose operations field is a JSON array of operation objects, even for one edit.
-        An example update is {"operations":[{"update":"file.py","hunks":[{"lines":["-old","+new"]}]}]}.
-        Replace the sample path and lines with observed source. Computa compiles the native patch headers and @@ hunk markers.
+        An example update is {"operations":[{"update":"/absolute/path/file.py","hunks":[{"lines":["-old","+new"]}]}]}.
+        Use the observed absolute target path for each operation, even after a terminal command used a different workdir. Replace the sample lines with observed source. Computa compiles the native patch headers and @@ hunk markers.
         Each update line includes its actual space, + or - prefix. The native grammar checks below describe the compiled patch.
         """
 

@@ -9,6 +9,26 @@ import XCTest
 final class DeepSeekWebModelTransportTests: XCTestCase {
     private let world = WKContentWorld.world(name: "computa-chatgpt-model-v1")
 
+    func testCanonicalDeepSeekSignInIsAnAbortOnlyRoute() throws {
+        let provider = EmbeddedWebModelTransport.Provider.deepseek
+        let url = try XCTUnwrap(URL(string: "https://chat.deepseek.com/sign_in"))
+        let failure = try XCTUnwrap(provider.blockingFailure(for: url))
+        XCTAssertEqual(failure, .signInRequired)
+        XCTAssertEqual(failure.requiredAction, "sign_in")
+        XCTAssertFalse(provider.accepts(url.absoluteString))
+        XCTAssertFalse(provider.acceptsUnboundStart(url))
+        XCTAssertFalse(provider.acceptsUntouchedSignIn(url))
+        XCTAssertNil(provider.savedConversationRoute(url))
+        XCTAssertNil(EmbeddedWebModelTransport.Provider.qwen.blockingFailure(for: url))
+        for raw in ["http://chat.deepseek.com/sign_in", "https://chat.deepseek.com.evil.test/sign_in",
+                    "https://user@chat.deepseek.com/sign_in", "https://chat.deepseek.com:8443/sign_in",
+                    "https://chat.deepseek.com/sign_in/next", "https://chat.deepseek.com/sign_in?next=/",
+                    "https://chat.deepseek.com/sign_in#other", "https://chat.deepseek.com/%73ign_in",
+                    "https://chat.deepseek.com/a/chat/s/sign_in"] {
+            XCTAssertNil(provider.blockingFailure(for: URL(string: raw)), raw)
+        }
+    }
+
     func testServerReleasesBothModeStreamsWithHonestProofAndDurableOwnedDeletion() async throws {
         for mode in WebsiteModeChoice.DeepSeekMode.allCases {
             let fixture = try Fixture(); defer { fixture.shutdown() }

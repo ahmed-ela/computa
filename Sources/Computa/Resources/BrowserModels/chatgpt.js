@@ -4233,23 +4233,41 @@ function chatGPTProductModeStateUnprofiled() {
   const forms = [...document.querySelectorAll('form[data-chatgpt-composer], form[data-thread-find-composer]')];
   const activeForms = forms.length <= 64 ? forms.filter(node => physical(node) && !node.closest(boundary)) : [];
   const markedForm = activeForms.length === 1 ? activeForms[0] : null;
-  const markerShape = node => !!node && node.tagName?.toLowerCase() === 'form'
-    && node.getAttribute('data-chatgpt-composer') === '' && node.getAttribute('data-thread-find-composer') === 'true'
-    && ['home', 'thread'].includes(node.getAttribute('data-composer-placement'));
+  const formIssue = node => {
+    if (!node || node.tagName?.toLowerCase() !== 'form') return 'form';
+    if (node.getAttribute('data-chatgpt-composer') !== '') return 'chat_marker';
+    if (node.getAttribute('data-thread-find-composer') !== 'true') return 'thread_marker';
+    if (!['home', 'thread'].includes(node.getAttribute('data-composer-placement'))) return 'placement';
+    return null;
+  };
+  const markerShape = node => formIssue(node) === null;
   const editorCandidates = markedForm ? [...document.querySelectorAll('[contenteditable="true"][role="textbox"][aria-label="Ask ChatGPT"]')] : [];
   const triggerCandidates = markedForm ? [...document.querySelectorAll('button[aria-label="Select ChatGPT model"]')] : [];
   const editors = editorCandidates.length <= 64 ? editorCandidates.filter(node => physical(node) && !node.closest(boundary)) : [];
   const triggers = triggerCandidates.length <= 64 ? triggerCandidates.filter(node => physical(node) && !node.closest(boundary)) : [];
   const markedEditor = editors.length === 1 && editors[0].closest('form') === markedForm ? editors[0] : null;
   const markedTrigger = triggers.length === 1 && triggers[0].closest('form') === markedForm ? triggers[0] : null;
-  const markerRecognized = markerShape(markedForm) && visible(markedForm) && visible(markedEditor) && visible(markedTrigger);
+  const firstFormIssue = formIssue(markedForm);
+  const markerRecognized = firstFormIssue === null && visible(markedForm) && visible(markedEditor) && visible(markedTrigger);
+  const markerInputs = () => {
+    if (groups.length || !markedForm || markerRecognized) return {};
+    const control = (raw, physical, owned) => {
+      if (!raw.length) return 'no_exact_match';
+      if (raw.length > 64) return 'overflow';
+      if (!physical.length) return 'no_physical_match';
+      if (physical.length > 1) return 'multiple';
+      return owned ? 'owned' : 'outside_form';
+    };
+    return { markerInputs: { form: firstFormIssue || 'matches',
+      editor: control(editorCandidates, editors, markedEditor), picker: control(triggerCandidates, triggers, markedTrigger) } };
+  };
   const markerReady = markerRecognized && enabled(markedEditor) && enabled(markedTrigger);
   return { group, groups, chat: chat[0] || null, work: work[0] || null, recognized, chatSelected, workSelected,
     ready: recognized && enabled(chat[0]) && enabled(work[0]),
     contradictory: groups.length > 1 || !!group && (!recognized || workSelected === true), physical, visible, enabled,
     outside: node => !!node && node.nodeType === 1 && !node.closest(boundary),
     namedGroup: node => !!node && node.nodeType === 1 && !node.closest(boundary) && labelledGroup(node),
-    labelledGroup, markedForm, markedEditor, markedTrigger, markerRecognized, markerReady, markerShape,
+    labelledGroup, markedForm, markedEditor, markedTrigger, markerRecognized, markerReady, markerShape, markerInputs,
     markerActiveForms: Math.min(activeForms.length, 16),
     markerCandidateOverflow: forms.length > 64 || editorCandidates.length > 64 || triggerCandidates.length > 64,
     modeControl: (node, trackedGroup = false) => !!node && node.nodeType === 1 && (trackedGroup || !node.closest(boundary)) && label(node) === 'Work'
@@ -4265,6 +4283,7 @@ function chatGPTProductModeDiagnostic(state) {
   return { kind: 'chatgpt_product_mode_structure', groupCount: Math.min(state.groups.length, 16),
     groupVisible: state.visible(state.group), recognized: state.recognized, contradictory: state.contradictory,
     chat: control(state.chat), work: control(state.work),
+    ...state.markerInputs(),
     markerDiagnostic: { version: 1, activeForms: state.markerActiveForms, candidateOverflow: state.markerCandidateOverflow,
       recognized: state.markerRecognized, enabled: state.markerReady,
       proofSource: ['composer_mode_control', 'chat_composer_marker'].includes(globalThis.__computaChatProductMode?.source)

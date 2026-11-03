@@ -201,6 +201,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 return .signInRequired
             }
             guard url.host == host else { return nil }
+            if self == .deepseek, url.absoluteString == "https://chat.deepseek.com/sign_in" {
+                return .signInRequired
+            }
             let authRoots = self == .chatgpt ? ["/auth", "/login"] : self == .claude ? ["/login", "/signup"]
                 : self == .groq ? ["/authenticate"] : ["/signin"]
             if authRoots.contains(where: { url.path == $0 || url.path.hasPrefix($0 + "/") }) {
@@ -7689,7 +7692,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     static func sanitizedProductModeDiagnostic(_ raw: Any?) -> String? {
         let required: Set<String> = ["kind", "groupCount", "groupVisible", "recognized", "contradictory", "chat", "work",
                                      "proofPresent", "proofInvalidated", "chatClickClaimed"]
-        let optional = Set(productProofDiagnosticKeys).union(["markerDiagnostic"])
+        let optional = Set(productProofDiagnosticKeys).union(["markerDiagnostic", "markerInputs"])
         guard let value = raw as? [String: Any],
               required.isSubset(of: Set(value.keys)), Set(value.keys).isSubset(of: required.union(optional)),
               value["kind"] as? String == "chatgpt_product_mode_structure",
@@ -7722,6 +7725,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 projected["proofSource"] = source
             }
             safe["markerDiagnostic"] = projected
+        }
+        if let rawInputs = value["markerInputs"] {
+            let controlStates = ["no_exact_match", "no_physical_match", "multiple", "overflow", "owned", "outside_form"]
+            guard count.intValue == 0, let marker = safe["markerDiagnostic"] as? [String: Any],
+                  marker["activeForms"] as? Int == 1, marker["recognized"] as? Bool == false,
+                  let inputs = rawInputs as? [String: String], Set(inputs.keys) == ["form", "editor", "picker"],
+                  let form = inputs["form"], ["form", "chat_marker", "thread_marker", "placement", "matches"].contains(form),
+                  let editor = inputs["editor"], controlStates.contains(editor),
+                  let picker = inputs["picker"], controlStates.contains(picker) else { return nil }
+            safe["markerInputs"] = inputs
         }
         guard let productDiagnostic = sanitizedProductProofDiagnostic(value) else { return nil }
         safe.merge(productDiagnostic) { _, projected in projected }
