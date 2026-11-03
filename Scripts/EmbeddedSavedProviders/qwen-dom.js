@@ -223,10 +223,68 @@ function computaQwenDOM(c) {
     }
     return { users, answers, first: { root, container, body, id, text: body.textContent }, answer, pendingAnswer };
   }
+  // One rendering opportunity after a scroll. Callbacks only invalidate or
+  // wake native inspection; they can never operate the button themselves.
+  function watchDisplayRender(pins, protectedText, editor, blockers, wake) {
+    if (!window.requestAnimationFrame || !window.cancelAnimationFrame || !window.setTimeout || !window.clearTimeout
+      || !window.performance?.now || !window.addEventListener || !editor.addEventListener) return null;
+    const deadline = window.performance.now() + 300;
+    let status = 'waiting', frame = 0, timer = 0;
+    const events = [[editor,'input'], [editor,'change'], [window,'pagehide'], [window,'popstate'], [window,'hashchange']];
+    if (window.navigation?.addEventListener) events.push([window.navigation,'currententrychange']);
+    const disconnect = () => {
+      window.cancelAnimationFrame(frame); window.clearTimeout(timer); observer.disconnect();
+      events.forEach(([node, key]) => node.removeEventListener(key, invalidate, true));
+    };
+    const stop = reason => {
+      if (status !== 'waiting' && status !== 'ready') return;
+      status = reason; disconnect(); wake();
+    };
+    const invalidate = () => stop('render_binding_changed');
+    const ready = () => {
+      if (status === 'waiting' && window.performance.now() < deadline) { status = 'ready'; wake(); }
+    };
+    const checkChanges = records => {
+      // Replacing and restoring even an equal-looking pinned node, message or
+      // picker label between reads must not give the pending action authority.
+      if (records.length > 128 || records.some(r =>
+        protectedText.some(n => n === r.target || n.contains(r.target))
+        || r.type === 'attributes' && pins.includes(r.target)
+        || r.type === 'childList' && (r.removedNodes.length > 64
+          || Array.from(r.removedNodes).some(n => pins.some(p => n === p || n.contains?.(p)))))) { invalidate(); return; }
+      // Hidden WebKit views can suspend animation frames. Removing an actual
+      // intercepting element is another layout change worth a fresh native read.
+      if (records.some(r => r.type === 'childList' && Array.from(r.removedNodes).some(n =>
+        blockers.some(b => n === b || n.contains?.(b))))) ready();
+    };
+    const observer = new MutationObserver(checkChanges);
+    const current = () => {
+      if (status === 'waiting' || status === 'ready') {
+        checkChanges(observer.takeRecords());
+        if (window.performance.now() >= deadline) stop('render_deadline');
+      }
+      return status;
+    };
+    try {
+      observer.observe(document.documentElement, {subtree:true,childList:true,characterData:true,attributes:true,
+        attributeFilter:['id','data-msg-id','data-chat-id','class','role','disabled','hidden','inert','aria-hidden',
+          'aria-disabled','aria-label','aria-expanded','aria-selected','aria-haspopup','contenteditable']});
+      events.forEach(([node,key]) => node.addEventListener(key, invalidate, true));
+      timer = window.setTimeout(() => stop('render_deadline'), 300);
+      frame = window.requestAnimationFrame(() => {
+        if (current() !== 'waiting') return;
+        frame = window.requestAnimationFrame(() => {
+          if (current() === 'waiting') ready();
+        });
+      });
+    } catch { disconnect(); return null; }
+    return { current, consume() { disconnect(); status = 'consumed'; } };
+  }
+
   // A clipped display button can have a covered center and an exposed edge.
   // Find one actual pointer target, then require the same viewport point on the
   // same pinned button after the caller revalidates the transcript and choice.
-  function displayHitFailure(control, point, classifyOcclusion = false) {
+  function displayHitFailure(control, point, classifyOcclusion = false, blockers = null) {
     let blocker = null;
     const reason = c.hitFailure(control, (left, top, right, bottom) => {
       const ownsPoint = (x, y) => {
@@ -236,6 +294,7 @@ function computaQwenDOM(c) {
         if (inside && hit.closest('button, a, input, select, textarea, [role], [tabindex], [contenteditable]') === control) return true;
         if (classifyOcclusion) {
           const kind = !hit ? 'none' : inside ? 'descendant' : hit.contains(control) ? 'ancestor' : 'unrelated';
+          if (kind === 'unrelated' && blockers && !blockers.includes(hit)) blockers.push(hit);
           blocker = !blocker || blocker === kind ? kind : 'mixed';
         }
         return false;
@@ -423,6 +482,6 @@ function computaQwenDOM(c) {
     setter.call(form.editor, prompt);
     form.editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));
   }
-  return { rejectSelectionBinding, firstDisplayReplacement, displayHitFailure, firstBodyPresentation, firstBodyFailureStructure, initialResponseIdentityTranscript: () => transcript(true), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer,
+  return { rejectSelectionBinding, firstDisplayReplacement, watchDisplayRender, displayHitFailure, firstBodyPresentation, firstBodyFailureStructure, initialResponseIdentityTranscript: () => transcript(true), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer,
     deletionTrigger, deletionMenu, deletionConfirmation, deletionObserved, insertLiteral };
 }

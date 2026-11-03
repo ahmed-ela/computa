@@ -107,6 +107,7 @@ export function fixture(options: { completeOnSend?: boolean } = {}) {
     options: any; disconnected = false;
     constructor(public callback: () => void) { observers.push(this); }
     observe(_root: any, options: any) { this.options = options; }
+    takeRecords() { return []; }
     disconnect() { this.disconnected = true; }
   }
   const notifyAttribute = (name: string) => {

@@ -67,6 +67,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
         }
         let prompts = await base.prompts()
         XCTAssertEqual(prompts.count, 2, "Only the first action and one rejected inference; no correction")
+        XCTAssertFalse(prompts[1].contains(WebModelServer.claudeMatchedOutputNote))
         let canonical = try XCTUnwrap(JSONSerialization.jsonObject(with: canonicalRequestBytes(in: prompts[1])) as? [String: Any])
         let retained = try XCTUnwrap(canonical["input"] as? [[String: Any]])
         XCTAssertEqual(retained.count, 3)

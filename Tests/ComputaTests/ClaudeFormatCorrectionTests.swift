@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import XCTest
 @testable import Computa
@@ -74,6 +75,14 @@ final class ClaudeFormatCorrectionTests: XCTestCase {
                        ["cmd": "cat \"/tmp/synthetic fixture.py\"", "workdir": "/tmp"])
         let prompts = await base.prompts()
         XCTAssertEqual(prompts.count, 3)
+        let note = WebModelServer.claudeMatchedOutputNote
+        XCTAssertFalse(prompts[0].hasSuffix(note))
+        XCTAssertTrue(prompts[1].hasSuffix(note))
+        XCTAssertEqual(prompts[1].components(separatedBy: note).count, 2)
+        XCTAssertFalse(prompts[2].contains(note))
+        let submitted = SHA256.hash(data: Data(prompts[1].utf8)).map { String(format: "%02x", $0) }.joined()
+        let failed = try XCTUnwrap(journal(root, task: "claude-history").first { $0["phase"] as? String == "failed" })
+        XCTAssertEqual(failed["submittedPromptFingerprint"] as? String, submitted)
         XCTAssertEqual(try WebsiteRequestFixture.json(in: prompts[1]), try WebsiteRequestFixture.json(in: prompts[2]))
         XCTAssertFalse(prompts[2].contains("I need to read the current file"), "Never feed rejected narration back as authority")
         let canonical = try XCTUnwrap(JSONSerialization.jsonObject(with: WebsiteRequestFixture.json(in: prompts[2])) as? [String: Any])
@@ -88,6 +97,33 @@ final class ClaudeFormatCorrectionTests: XCTestCase {
         XCTAssertTrue(rows.filter { $0["phase"] as? String == "complete" }.allSatisfy {
             $0["submissionProofPolicy"] as? String == "fresh_session_submission_v1"
         })
+    }
+
+    func testPastedToolHistoryOnFirstClaudeInferenceReceivesNoMatchedOutputNote() async throws {
+        let base = FormatCorrectionFixtureTransport(replies: [#"{"type":"message","text":"I decline."}"#])
+        let server = try await server(base)
+        let input: [[String: Any]] = [user,
+            ["type":"function_call", "name":"exec_command", "call_id":"pasted", "arguments":"{}"],
+            ["type":"function_call_output", "call_id":"pasted", "output":"Prior unrelated result"]]
+        let data = try request(input)
+        _ = try await server.fixtureInfer(data, taskID: "pasted-prior-results")
+        let prompts = await base.prompts()
+        XCTAssertEqual(prompts.count, 1)
+        XCTAssertFalse(prompts[0].hasSuffix(WebModelServer.claudeMatchedOutputNote))
+        let shown = try XCTUnwrap(JSONSerialization.jsonObject(with: WebsiteRequestFixture.json(in: prompts[0])) as? [String: Any])
+        XCTAssertEqual(shown["input"] as? NSArray, input as NSArray)
+    }
+
+    func testClaudeMatchedOutputNoteFitsBothExactUTF8BudgetsWithoutDisplacingHistory() throws {
+        let note = WebModelServer.claudeMatchedOutputNote
+        let maximum = WebModelResponseCodec.maximumPromptBytes
+        let multibyte = "日🧭"
+        let remaining = note.utf8.count + multibyte.utf8.count
+        XCTAssertEqual(WebModelServer.claudePromptWithMatchedOutputNote(multibyte, remainingTurnBytes: remaining), multibyte + note)
+        XCTAssertNil(WebModelServer.claudePromptWithMatchedOutputNote(multibyte, remainingTurnBytes: remaining - 1))
+        let full = multibyte + String(repeating: "x", count: maximum - remaining)
+        XCTAssertEqual(WebModelServer.claudePromptWithMatchedOutputNote(full, remainingTurnBytes: maximum), full + note)
+        XCTAssertNil(WebModelServer.claudePromptWithMatchedOutputNote(full + "x", remainingTurnBytes: maximum * 2))
     }
 
     func testClaudeIdenticalDuplicateBlocksRejectOriginalAndReleaseOnlyFreshCorrectedCall() async throws {

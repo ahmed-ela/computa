@@ -18,6 +18,7 @@ final class QwenFirstUserBindingDiagnosticTests: XCTestCase {
         "display_hit": ["disabled", "invalid_geometry", "outside_viewport", "occluded"],
         "display_preclick_hit": ["disabled", "invalid_geometry", "outside_viewport", "occluded"],
         "display_reveal_hit": ["disabled", "invalid_geometry", "outside_viewport", "occluded", "occluded_ancestor", "occluded_unrelated", "occluded_descendant", "occluded_none", "occluded_mixed", "scroll_failed"],
+        "display_settlement": ["render_binding_changed", "render_deadline"],
         "binding": ["first_not_submitted", "first_prompt_mismatch", "first_marker_invalid", "first_marker_mismatch", "first_marker_suffix", "first_changed_after_hash", "first_pinned_node_changed", "first_pinned_hash_mismatch", "first_expected_hash_mismatch", "first_binding_not_authorized", "first_disappeared"],
     ]
     private func observation(_ stage: String = "binding", _ reason: String = "first_prompt_mismatch") -> [String: Any] {
@@ -40,6 +41,25 @@ final class QwenFirstUserBindingDiagnosticTests: XCTestCase {
             }
         }
     }
+    func testCompletedDisplayUUIDChangePublishesOnlyFiniteRelationsForThatExactRejection() {
+        let facts = ["point":"id_candidate", "spelling":"different_uuid", "pins":"same", "body":"exact",
+                     "display":"expanded", "reply":"settled_now", "responseIdentity":"held"]
+        func summarize(_ extras: [String: Any], stage: String = "display_completed", reason: String = "user_id_changed") -> String? {
+            var row = observation(stage, reason)
+            row["qwenFirstUserBindingDiagnostic"] = ["version":1,"stage":stage,"reason":reason,"change":extras]
+            return EmbeddedWebModelTransport.qwenFirstUserBindingDiagnostic(row, provider: .qwen)
+        }
+        XCTAssertEqual(summarize(facts), "firstUserStage=display_completed firstUserReason=user_id_changed point=id_candidate spelling=different_uuid pins=same body=exact display=expanded reply=settled_now responseIdentity=held")
+        for key in facts.keys {
+            var unknown = facts; unknown[key] = "PRIVATE_IDENTIFIER"
+            XCTAssertNil(summarize(unknown))
+            unknown.removeValue(forKey: key); XCTAssertNil(summarize(unknown))
+        }
+        XCTAssertNil(summarize(facts.merging(["url":"PRIVATE_URL"]) { $1 }))
+        XCTAssertNil(summarize(facts, stage: "display_held"))
+        XCTAssertNil(summarize(facts, reason: "answer_id_changed"))
+    }
+
     func testUnknownCrossStageMissingExtraAndMalformedFieldsCannotReachLogs() {
         let base = observation()
         let invalid: [[String: Any]] = [

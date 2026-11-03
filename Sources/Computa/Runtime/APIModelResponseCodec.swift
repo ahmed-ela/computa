@@ -87,6 +87,10 @@ enum APIModelResponseCodec {
         enum NameMatch: String, Codable, Sendable {
             case wireName = "wire_name", nativeName = "native_name", qualifiedName = "qualified_name", none
         }
+        enum OfferedNameShape: String, Codable, Sendable {
+            case doubled = "double_offered_wire", digestPrefix = "stem_digest_prefix"
+            case otherSuffix = "stem_other_suffix", ambiguousStem = "ambiguous_stem", noMatch = "no_shape_match"
+        }
         enum Guard: String, Codable, Sendable, CaseIterable {
             case chatCallType = "chat_call_type", chatCallIDType = "chat_call_id_type"
             case chatCallIDSyntax = "chat_call_id_syntax", chatCallIDHistory = "chat_call_id_history"
@@ -105,8 +109,10 @@ enum APIModelResponseCodec {
         /// Exact relation to the current declared catalog, never authorization.
         /// Absent for every guard that did not validate a disallowed chat name.
         var nameMatch: NameMatch? = nil
+        var offeredNameShape: OfferedNameShape? = nil
         var isConsistent: Bool {
             guard nameMatch == nil || guardID == .chatNameNotAllowed else { return false }
+            guard offeredNameShape == nil || nameMatch == .some(.none) else { return false }
             switch guardID {
             case .chatCallType, .chatCallIDType, .chatCallIDSyntax, .chatCallIDHistory, .chatCallIDDuplicate,
                  .chatFunctionType, .chatNameType, .chatNameNotAllowed, .chatNameNotDeclared, .chatArgumentsType:
@@ -125,6 +131,28 @@ enum APIModelResponseCodec {
         observe?(guardID, nameMatch)
         return .invalidTool
     }
+    // Shape of a rejected spelling against the offered semantic_v2 catalog. A
+    // doubled assembled value does not identify which stream deltas produced it.
+    private static func offeredNameShape(_ name: String, allowedNames: Set<String>) -> InvalidToolDiagnostic.OfferedNameShape? {
+        // Declared wire names are at most 64 ASCII bytes; two whole names fit.
+        guard name.utf8.prefix(129).count <= 128 else { return nil }
+        guard name.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) ||
+            (48...57).contains($0) || $0 == 95 || $0 == 45 }) else { return .noMatch }
+        if allowedNames.contains(where: { name == $0 + $0 }) { return .doubled }
+        var match: InvalidToolDiagnostic.OfferedNameShape?
+        for wire in allowedNames {
+            // semanticToolName appends "__" and exactly 24 hex digits.
+            let stemAndSeparator = wire.dropLast(24)
+            guard name.hasPrefix(stemAndSeparator) else { continue }
+            let suffix = name.dropFirst(stemAndSeparator.count)
+            guard suffix.count <= 24, suffix.utf8.allSatisfy({ (65...90).contains($0) ||
+                (97...122).contains($0) || (48...57).contains($0) }) else { continue }
+            if match != nil { return .ambiguousStem }
+            match = suffix.count < 24 && wire.suffix(24).hasPrefix(suffix) ? .digestPrefix : .otherSuffix
+        }
+        return match ?? .noMatch
+    }
+
     private static func diagnosticNameMatch(_ name: String, tools: [Tool]) -> InvalidToolDiagnostic.NameMatch {
         if tools.contains(where: { $0.wireName == name }) { return .wireName }
         if tools.contains(where: { $0.name == name }) { return .nativeName }
@@ -1000,8 +1028,13 @@ enum APIModelResponseCodec {
             guard let function = call["function"] as? [String: Any] else { throw invalidTool(.chatFunctionType, observeToolGuard) }
             guard let wireName = function["name"] as? String else { throw invalidTool(.chatNameType, observeToolGuard) }
             guard request.allowedTools.contains(wireName) else {
-                throw invalidTool(.chatNameNotAllowed, observeToolGuard,
-                    nameMatch: onInvalidTool == nil ? nil : diagnosticNameMatch(wireName, tools: request.tools))
+                if let onInvalidTool {
+                    let match = diagnosticNameMatch(wireName, tools: request.tools)
+                    let shape = match == .none && request.toolNaming == .semantic && request.provider.isAlibabaModelStudioInference
+                        ? offeredNameShape(wireName, allowedNames: request.allowedTools) : nil
+                    onInvalidTool(.init(format: format, guardID: .chatNameNotAllowed, nameMatch: match, offeredNameShape: shape))
+                }
+                throw Failure.invalidTool
             }
             guard let tool = request.tools.first(where: { $0.wireName == wireName }) else { throw invalidTool(.chatNameNotDeclared, observeToolGuard) }
             guard let arguments = function["arguments"] as? String else { throw invalidTool(.chatArgumentsType, observeToolGuard) }

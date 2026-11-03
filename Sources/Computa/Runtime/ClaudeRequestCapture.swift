@@ -161,21 +161,21 @@ enum ClaudeRequestCapture {
 
     @discardableResult
     static func capture(directory: URL?, context: Context, request: WebModelResponseCodec.Request,
-                        prompt: String, now: Date = Date()) -> Bool {
+                        prompt: String, includesMatchedOutputNote: Bool = false, now: Date = Date()) -> Bool {
         capture(directory: directory, context: context, request: request, prompt: prompt,
-                now: now, beforeArmClaim: nil)
+                includesMatchedOutputNote: includesMatchedOutputNote, now: now, beforeArmClaim: nil)
     }
 
     #if DEBUG
     static func capture(directory: URL?, context: Context, request: WebModelResponseCodec.Request,
                         prompt: String, now: Date, beforeArmClaimForTesting: @escaping @Sendable () -> Void) -> Bool {
         capture(directory: directory, context: context, request: request, prompt: prompt,
-                now: now, beforeArmClaim: beforeArmClaimForTesting)
+                includesMatchedOutputNote: false, now: now, beforeArmClaim: beforeArmClaimForTesting)
     }
     #endif
 
     private static func capture(directory: URL?, context: Context, request: WebModelResponseCodec.Request,
-                                prompt: String, now: Date, beforeArmClaim: (@Sendable () -> Void)?) -> Bool {
+                                prompt: String, includesMatchedOutputNote: Bool, now: Date, beforeArmClaim: (@Sendable () -> Void)?) -> Bool {
         let started = ContinuousClock.now
         guard !Task.isCancelled, let directory, context.modelID == request.model,
               let selection = WebsiteModelCatalog.inferenceSelection(for: request.model),
@@ -210,7 +210,7 @@ enum ClaudeRequestCapture {
                     guard value["threadID"] as? String == context.threadID.uuidString.lowercased(),
                           value["userPromptSHA256"] as? String == sha256(Data(syntheticExecUserText(nonce: nonce).utf8)),
                           let marker = value["resultMarker"] as? String,
-                          prompt.utf8.elementsEqual(request.prompt.utf8),
+                          prompt.utf8.elementsEqual((includesMatchedOutputNote ? request.prompt + WebModelServer.claudeMatchedOutputNote : request.prompt).utf8),
                           let matched = syntheticExecResult(request, context: context, nonce: nonce, marker: marker) else { return nil }
                     exec = matched
                 } else { exec = nil }

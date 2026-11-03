@@ -1565,6 +1565,89 @@ final class APIModelResponseCodecTests: XCTestCase {
         }
     }
 
+    func testAlibabaSemanticRejectedNamesHaveFiniteShapesWithoutAdmissionOrRetention() throws {
+        let alibaba = APIProviderDefinition(id: "fixture", name: "Fixture",
+            baseURL: URL(string: "https://ws-fixture123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1")!,
+            wireAPI: .chatCompletions, models: provider.models)
+        let prepared = try request(provider: alibaba, toolNaming: .semantic)
+        let wire = prepared.tools[0].wireName, stem = String(wire.dropLast(24))
+        typealias Diagnostic = APIModelResponseCodec.InvalidToolDiagnostic
+        func reject(_ name: String, _ req: APIModelResponseCodec.Request, expectedMatch: Diagnostic.NameMatch = .none,
+                    shape: Diagnostic.OfferedNameShape?) throws {
+            let call: [String: Any] = ["id":"PRIVATE_CALL", "type":"function", "function":["name":name,"arguments":"{}"]]
+            let reply = try correctionResult(req, changes:["choices":[["index":0,"finish_reason":"tool_calls",
+                "message":["role":"assistant","tool_calls":[call]]]]])
+            var events: [Diagnostic] = []
+            XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(reply, request:req, onInvalidTool:{events.append($0)})) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
+            }
+            XCTAssertEqual(events, [.init(format:.chatJSON, guardID:.chatNameNotAllowed, nameMatch:expectedMatch, offeredNameShape:shape)])
+            let encoded = try JSONEncoder().encode(XCTUnwrap(events.first))
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with:encoded) as? [String:Any])
+            XCTAssertEqual(Set(object.keys), shape == nil ? ["format","guardID","nameMatch"] : ["format","guardID","nameMatch","offeredNameShape"])
+            XCTAssertFalse(String(decoding:encoded,as:UTF8.self).contains("PRIVATE"))
+            XCTAssertFalse(String(decoding:encoded,as:UTF8.self).contains(wire))
+        }
+        try reject(String(wire.dropLast()), prepared, shape:.digestPrefix)
+        try reject(stem, prepared, shape:.digestPrefix)
+        try reject(stem + "z" + String(repeating:"a",count:23), prepared, shape:.otherSuffix)
+        try reject(wire + wire, prepared, shape:.doubled)
+        try reject("PRIVATE_UNKNOWN", prepared, shape:.noMatch)
+        try reject("readSomething__abcdef", prepared, shape:.noMatch)
+        try reject(wire + "_", prepared, shape:.noMatch)
+        try reject(String(repeating:"x",count:129), prepared, shape:nil)
+        try reject("files.read", prepared, expectedMatch:.qualifiedName, shape:nil)
+        try reject("read", prepared, expectedMatch:.nativeName, shape:nil)
+        for chunks in [[wire + wire], [wire, wire], [String(wire.prefix(4)), String(wire.dropFirst(4))]] {
+            var stream = Data()
+            for (index, value) in chunks.enumerated() {
+                var delta: [String: Any] = ["index":0, "function":["name":value]]
+                if index == 0 {
+                    delta["id"] = "PRIVATE_STREAM"; delta["type"] = "function"
+                    delta["function"] = ["name":value,"arguments":#"{"path":"safe"}"#]
+                }
+                var messageDelta: [String: Any] = ["tool_calls": [delta]]
+                if index == 0 { messageDelta["role"] = "assistant" }
+                let row: [String: Any] = ["id":"synthetic-stream","object":"chat.completion.chunk","model":prepared.model.id,
+                    "choices":[["index":0,"delta":messageDelta, "finish_reason": index + 1 == chunks.count ? "tool_calls" : NSNull()]]]
+                stream.append(Data("data: ".utf8)); stream.append(try JSONSerialization.data(withJSONObject:row)); stream.append(Data("\n\n".utf8))
+            }
+            stream.append(Data("data: [DONE]\n\n".utf8))
+            let reply = APIProviderHTTPClient.Result(body:stream, contentType:"text/event-stream")
+            var observed: [Diagnostic] = []
+            if chunks.joined() == wire {
+                guard case .reply = try APIModelResponseCodec.decodeForCorrection(reply,request:prepared,onInvalidTool:{observed.append($0)}) else {
+                    return XCTFail("Valid split delta must remain accepted")
+                }
+                XCTAssertTrue(observed.isEmpty)
+            } else {
+                XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(reply,request:prepared,onInvalidTool:{observed.append($0)})) {
+                    XCTAssertEqual($0 as? APIModelResponseCodec.Failure,.invalidTool)
+                }
+                XCTAssertEqual(observed,[.init(format:.chatSSE,guardID:.chatNameNotAllowed,nameMatch:.some(.none),offeredNameShape:.doubled)])
+                let diagnostic = try XCTUnwrap(observed.first)
+                let line = try XCTUnwrap(APIModelServer.failureDiagnostic(APIModelResponseCodec.Failure.invalidTool,
+                    stage: .decode, toolDiagnostic: .init(validation: diagnostic, attempt: 1)))
+                let entry = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+                let tool = try XCTUnwrap(entry["tool_validation"] as? [String: Any])
+                let validation = try XCTUnwrap(tool["validation"] as? [String: Any])
+                XCTAssertEqual(validation["offeredNameShape"] as? String, Diagnostic.OfferedNameShape.doubled.rawValue)
+                XCTAssertFalse(line.contains(wire))
+                XCTAssertFalse(line.contains("PRIVATE_STREAM"))
+            }
+        }
+        let excluded = toolDiagnosticRequest(prepared,allowed:[])
+        try reject(wire, excluded, expectedMatch:.wireName, shape:nil)
+        try reject(String(wire.dropLast()), excluded, shape:.noMatch)
+        try reject(wire + wire, try request(toolNaming:.semantic), shape:nil)
+        try reject(wire + wire, try request(provider:alibaba, toolNaming:.legacy), shape:nil)
+        let duplicates = try request(["tools":[["type":"namespace","name":"visible","tools":[function]],
+            ["type":"namespace","name":"other","tools":[function]]]], provider:alibaba, toolNaming:.semantic)
+        try reject(String(duplicates.tools[0].wireName.dropLast()), duplicates, shape:.ambiguousStem)
+        XCTAssertFalse(Diagnostic(format:.chatJSON,guardID:.chatNameNotAllowed,nameMatch:.nativeName,offeredNameShape:.doubled).isConsistent)
+        XCTAssertFalse(Diagnostic(format:.chatJSON,guardID:.chatNameType,nameMatch:.some(.none),offeredNameShape:.doubled).isConsistent)
+    }
+
     func testToolGuardObservationDoesNotChangeSuccessCorrectionOrOtherFailures() throws {
         let prepared = try request()
         var diagnostics: [APIModelResponseCodec.InvalidToolDiagnostic] = []

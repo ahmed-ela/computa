@@ -1790,16 +1790,23 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    private func groqUnknownBoundNodeDiagnostic() -> [String: Any] {
+        Dictionary(uniqueKeysWithValues: ["rootConnected", "bodyConnected", "parentConnected", "rootClassMatches",
+            "bodyClassMatches", "rootParentMatches", "bodyWithinRoot", "rootInDocument",
+            "preparedEditorConnected", "preparedEditorDraftRestored"].map { ($0, NSNull() as Any) })
+    }
+
     func testGroqUserCountDiagnosticIsFiniteBranchBoundAndRejectsPrivateOrMalformedFields() throws {
-        let base: [String: Any] = ["kind": "groq_user_count_v1", "action": "inspect", "branch": "multiple_users",
+        let base: [String: Any] = ["kind": "groq_user_count_v2", "action": "inspect", "branch": "multiple_users",
             "userCount": 2, "answerCount": 0, "visibleUserCount": 1, "visibleAnswerCount": 0,
-            "expectedUserCounts": [1], "submitted": true, "adapterFirstBound": true]
+            "expectedUserCounts": [1], "submitted": true, "adapterFirstBound": true,
+            "boundNodes": groqUnknownBoundNodeDiagnostic()]
         func project(_ value: [String: Any], provider: EmbeddedWebModelTransport.Provider = .groq,
                      action: String = "inspect") -> String? {
             EmbeddedWebModelTransport.sanitizedGroqUserCountDiagnostic(value, provider: provider, action: action)
         }
         let encoded = try XCTUnwrap(project(base))
-        XCTAssertLessThanOrEqual(encoded.utf8.count, 512)
+        XCTAssertLessThanOrEqual(encoded.utf8.count, 1_024)
         let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any])
         XCTAssertEqual(Set(decoded.keys), Set(base.keys))
         XCTAssertEqual(decoded["userCount"] as? Int, 2)
@@ -1835,14 +1842,15 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         maximum["userCount"] = 64; maximum["answerCount"] = 64
         maximum["visibleUserCount"] = 64; maximum["visibleAnswerCount"] = 64
         maximum["expectedUserCounts"] = [0, 1]; maximum["action"] = "observeClearTranscript"
-        XCTAssertLessThanOrEqual(try XCTUnwrap(project(maximum, action: "observeClearTranscript")).utf8.count, 512)
+        XCTAssertLessThanOrEqual(try XCTUnwrap(project(maximum, action: "observeClearTranscript")).utf8.count, 1_024)
     }
 
     func testGroqUserCountDiagnosticPreservesExactRejectionBranchSemantics() throws {
         func value(_ branch: String, users: Int, answers: Int, expected: Any = [1]) -> [String: Any] {
-            ["kind": "groq_user_count_v1", "action": "inspect", "branch": branch,
+            ["kind": "groq_user_count_v2", "action": "inspect", "branch": branch,
              "userCount": users, "answerCount": answers, "visibleUserCount": users, "visibleAnswerCount": answers,
-             "expectedUserCounts": expected, "submitted": true, "adapterFirstBound": true]
+             "expectedUserCounts": expected, "submitted": true, "adapterFirstBound": true,
+             "boundNodes": groqUnknownBoundNodeDiagnostic()]
         }
         func accepts(_ raw: [String: Any]) -> Bool {
             EmbeddedWebModelTransport.sanitizedGroqUserCountDiagnostic(raw, provider: .groq, action: "inspect") != nil
@@ -1859,6 +1867,48 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             value("expected_count", users: 1, answers: 1), value("expected_count", users: 0, answers: 0, expected: [0, 1])] {
             XCTAssertFalse(accepts(invalid))
         }
+    }
+
+    func testGroqBoundNodeDiagnosticIsFiniteAndCannotClaimRestorationFromAnUnboundEditor() throws {
+        var nodes = groqUnknownBoundNodeDiagnostic()
+        let base: [String: Any] = ["kind": "groq_user_count_v2", "action": "inspect", "branch": "expected_count",
+            "userCount": 0, "answerCount": 0, "visibleUserCount": 0, "visibleAnswerCount": 0,
+            "expectedUserCounts": [1], "submitted": true, "adapterFirstBound": true]
+        func project(_ nodes: [String: Any], bound: Bool = true, submitted: Bool = true) -> String? {
+            var value = base; value["boundNodes"] = nodes; value["adapterFirstBound"] = bound; value["submitted"] = submitted
+            return EmbeddedWebModelTransport.sanitizedGroqUserCountDiagnostic(value, provider: .groq, action: "inspect")
+        }
+        XCTAssertNotNil(project(nodes))
+        XCTAssertNotNil(project(nodes, bound: false, submitted: false))
+        for key in nodes.keys {
+            for flag in [true, false] {
+                var valid = nodes; valid[key] = flag
+                if key == "preparedEditorDraftRestored" { valid["preparedEditorConnected"] = true }
+                XCTAssertNotNil(project(valid), key)
+            }
+            for badValue: Any in [0, 1, "PRIVATE", [true], ["text": "PRIVATE"]] {
+                var bad = nodes; bad[key] = badValue; XCTAssertNil(project(bad), key)
+            }
+            var missing = nodes; missing.removeValue(forKey: key); XCTAssertNil(project(missing), key)
+        }
+        var extra = nodes; extra["text"] = "PRIVATE"; XCTAssertNil(project(extra))
+        for key in nodes.keys where !key.hasPrefix("preparedEditor") {
+            var bad = nodes; bad[key] = false; XCTAssertNil(project(bad, bound: false), key)
+        }
+        for connected: Any in [false, NSNull()] {
+            for restored in [true, false] {
+                var bad = nodes; bad["preparedEditorConnected"] = connected; bad["preparedEditorDraftRestored"] = restored
+                XCTAssertNil(project(bad))
+            }
+        }
+        nodes["preparedEditorConnected"] = true; nodes["preparedEditorDraftRestored"] = true
+        XCTAssertNil(project(nodes, bound: false, submitted: false))
+        let encoded = try XCTUnwrap(project(nodes))
+        XCTAssertLessThanOrEqual(encoded.utf8.count, 1_024)
+        let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any])
+        let roundTrip = try XCTUnwrap(decoded["boundNodes"] as? [String: Any])
+        XCTAssertEqual(roundTrip["preparedEditorDraftRestored"] as? Bool, true)
+        XCTAssertTrue(roundTrip["rootConnected"] is NSNull)
     }
 
     func testUserCountDiagnosticProjectionIsFiniteAndRejectsForeignOrMalformedFields() throws {
@@ -4982,6 +5032,74 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         Data(#"{"model":"browser/claude","input":"Synthetic precreation check; no tools.","tools":[]}"#.utf8)
     }
 
+    func testLocalCapacityBeforeReservationRecordsNoOwnedSessionAndPreservesActiveHandles() async throws {
+        let fixture = try Fixture(page: Self.providerPage(.claude)); defer { fixture.shutdown() }
+        for _ in 0..<4 { _ = try await call(fixture.transport, "webProviderStart", ["provider": "claude"]) }
+        let server = try await makePrecreationFixtureServer()
+        await server.configureEmbeddedTransport(fixture.transport)
+        do {
+            _ = try await server.fixtureInfer(precreationRequest, taskID: "local-capacity")
+            XCTFail("Four active sessions must prevent another inference")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .capacity) }
+        let observed = await server.latestCleanupReceipts()
+        let receipt = try XCTUnwrap(observed.last)
+        XCTAssertTrue(receipt.isPrecreationRejectionLinked); XCTAssertTrue(receipt.receiptSaved)
+        XCTAssertEqual(receipt.outcome, .noOwnedSession); XCTAssertNil(receipt.sessionToken)
+        XCTAssertEqual(receipt.taskID, websiteInferenceFixtureTaskID("local-capacity"))
+        let issues = await server.fixtureFinish(taskID: "local-capacity")
+        XCTAssertTrue(issues.isEmpty)
+        XCTAssertEqual(fixture.createdTabs.count, 4)
+        XCTAssertTrue(fixture.createdTabs.allSatisfy { fixture.browser.webView(for: $0) != nil })
+
+        let failure = EmbeddedWebModelTransport.Failure.capacity
+        XCTAssertEqual(WebModelServer.errorPresentation(for: failure).status, "400 Bad Request")
+        let body = try WebModelServer.errorBody(for: failure)
+        let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let error = try XCTUnwrap(envelope["error"] as? [String: Any])
+        XCTAssertEqual(error["code"] as? String, "local_website_session_capacity")
+        XCTAssertEqual(error["required_action"] as? String, "free_local_website_session")
+        XCTAssertEqual(error["retryable"] as? Bool, false)
+        XCTAssertNotNil(WebsiteTurnFailureStore.Record.make(taskID: receipt.taskID, threadID: try XCTUnwrap(receipt.threadID),
+            turnID: try XCTUnwrap(receipt.turnID), modelID: "browser/claude", diagnosticText: String(decoding: body, as: UTF8.self)))
+    }
+
+    func testFailedCleanupRetainsFourExtraHandlesWithoutResumingOrEvictingThem() async throws {
+        let browser = EmbeddedBrowserSession(persistent: false, maximumTabs: 12)
+        let fixture = try Fixture(page: Self.providerPage(.claude), browser: browser); defer { fixture.shutdown() }
+        func start() async throws -> String {
+            let result = try await call(fixture.transport, "webProviderStart", ["provider": "claude"])
+            return try XCTUnwrap(result["sessionToken"] as? String)
+        }
+        var retained: [String] = []
+        for _ in 0..<4 {
+            let token = try await start(), id = try XCTUnwrap(fixture.createdTabs.last)
+            browser.stop(tabID: id)
+            let result = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(result["cleanup"] as? String, "failed")
+            retained.append(token)
+        }
+        let old = try XCTUnwrap(retained.first)
+        for operation in ["webProviderPoll", "webProviderSend"] {
+            var fields = ["sessionToken": old]
+            if operation == "webProviderSend" { fields["prompt"] = "No input is permitted" }
+            do { _ = try await call(fixture.transport, operation, fields); XCTFail("Cleanup-only handle resumed") }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .staleSession) }
+        }
+        var active: [String] = []
+        for _ in 0..<4 { active.append(try await start()) }
+        XCTAssertEqual(fixture.createdTabs.count, 8)
+        do { _ = try await start(); XCTFail("A ninth inference handle must never be acquired") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .capacity) }
+        let healthy = try XCTUnwrap(active.last)
+        _ = try await waitForState("ready", fixture.transport, token: healthy)
+        let closed = try await call(fixture.transport, "webProviderFinish", ["sessionToken": healthy])
+        XCTAssertEqual(closed["cleanup"] as? String, "not_created")
+        _ = try await start()
+        let retry = try await call(fixture.transport, "webProviderCancel", ["sessionToken": old])
+        XCTAssertEqual(retry["cleanup"] as? String, "failed")
+        XCTAssertTrue(fixture.createdTabs.prefix(4).allSatisfy { browser.webView(for: $0) != nil })
+    }
+
     func testNativePrecreationQuotaRejectionHasExactNoSessionReceiptWithoutClosingOldFailure() async throws {
         let (fixture, oldToken, oldID) = try await precreationQuotaFixture()
         defer { fixture.shutdown() }
@@ -5127,6 +5245,21 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertNotNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdTabs.last)))
     }
 
+    func testCapacityErrorAfterNativeSessionAcquisitionCannotCertifyAbsence() async throws {
+        let fixture = try Fixture(page: Self.providerPage(.claude)); defer { fixture.shutdown() }
+        let server = try await makePrecreationFixtureServer()
+        await server.configureEmbeddedTransport(PrecreationFixtureTransport(native: fixture.transport, mutation: "after_capacity"))
+        do { _ = try await server.fixtureInfer(precreationRequest, taskID: "owned-capacity"); XCTFail() }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .capacity) }
+        let issues = await server.fixtureFinish(taskID: "owned-capacity")
+        XCTAssertEqual(issues, [WebModelServer.Failure.startOwnershipUnconfirmed.localizedDescription])
+        let observed = await server.latestCleanupReceipts()
+        let receipt = try XCTUnwrap(observed.last)
+        XCTAssertEqual(receipt.schemaVersion, 3); XCTAssertEqual(receipt.outcome, .unconfirmed)
+        XCTAssertEqual(fixture.createdTabs.count, 1)
+        XCTAssertNotNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdTabs.last)))
+    }
+
     @MainActor
     private final class PrecreationFixtureTransport: WebModelTransport {
         let native: EmbeddedWebModelTransport
@@ -5160,6 +5293,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             do {
                 let result = try await native.start(params: params, admission: changed, authorization: authorization)
                 if mutation == "after_session" { throw EmbeddedWebModelTransport.Failure.usageLimited(.claude) }
+                if mutation == "after_capacity" { throw EmbeddedWebModelTransport.Failure.capacity }
                 return result
             } catch let rejection as EmbeddedWebModelTransport.PrecreationRejection {
                 saved = rejection

@@ -123,11 +123,28 @@ try {
       const validExpected = Array.isArray(expected) && (expected.length === 1 && [0, 1].includes(expected[0])
         || expected.length === 2 && expected[0] === 0 && expected[1] === 1);
       const expectedUserCounts = validExpected ? [...expected] : null;
-      const submitted = state.submitted === true, adapterFirstBound = !!state.first;
-      groqUserCountDiagnostic = { kind: 'groq_user_count_v1', action: input.action, branch,
+      const submitted = state.submitted === true, first = state.first, editor = state.prepared;
+      const adapterFirstBound = !!first;
+      const flag = read => { try { const value = read(); return typeof value === 'boolean' ? value : null; } catch { return null; } };
+      const held = read => first ? flag(read) : null;
+      const preparedEditorConnected = editor ? flag(() => editor.isConnected) : null;
+      // Only compare the already-held editor and exact inserted string. A detached
+      // editor is unknown, not evidence that the current page restored its draft.
+      const preparedEditorDraftRestored = submitted && preparedEditorConnected === true
+        && typeof state.inserted === 'string' ? flag(() => { const value = editor.value; return typeof value === 'string' ? value === state.inserted : null; }) : null;
+      const boundNodes = {
+        rootConnected: held(() => first.root.isConnected), bodyConnected: held(() => first.body.isConnected),
+        parentConnected: held(() => first.parent.isConnected),
+        rootClassMatches: held(() => first.root.classList.contains('group/input')),
+        bodyClassMatches: held(() => first.body.classList.contains('line-clamp-5')),
+        rootParentMatches: held(() => first.root.parentElement === first.parent),
+        bodyWithinRoot: held(() => first.root.contains(first.body)),
+        rootInDocument: held(() => document.documentElement.contains(first.root)),
+        preparedEditorConnected, preparedEditorDraftRestored };
+      groqUserCountDiagnostic = { kind: 'groq_user_count_v2', action: input.action, branch,
         userCount: users.length, answerCount: answers.length,
         visibleUserCount: visibleCount(users), visibleAnswerCount: visibleCount(answers),
-        expectedUserCounts, submitted, adapterFirstBound };
+        expectedUserCounts, submitted, adapterFirstBound, boundNodes };
     } catch { groqUserCountDiagnostic = null; }
     c.fail('conversation_changed', 'user_count');
   }

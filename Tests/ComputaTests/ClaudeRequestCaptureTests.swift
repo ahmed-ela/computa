@@ -282,6 +282,19 @@ final class ClaudeRequestCaptureTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: f.output), saved)
     }
 
+    func testSyntheticExecCaptureRequiresExactHostSelectedNoteAndOtherwiseOrdinaryArm() throws {
+        let f = try Fixture(); defer { f.remove() }
+        let request = try f.execRequest()
+        let annotated = request.prompt + WebModelServer.claudeMatchedOutputNote
+        try f.arm(f.execFields())
+        XCTAssertFalse(f.capture(request, prompt: annotated))
+        XCTAssertFalse(ClaudeRequestCapture.capture(directory: f.directory, context: f.context, request: request,
+            prompt: annotated + "x", includesMatchedOutputNote: true, now: f.now))
+        XCTAssertTrue(ClaudeRequestCapture.capture(directory: f.directory, context: f.context, request: request,
+            prompt: annotated, includesMatchedOutputNote: true, now: f.now))
+        XCTAssertEqual(try f.record()["prompt"] as? String, annotated)
+    }
+
     func testSyntheticExecRejectsFirstRequestPrivateHistoryAndUnlinkedOrAuthoredResults() throws {
         let f = try Fixture(); defer { f.remove() }
         let base = f.execHistory(), call = base[base.count - 2], output = base[base.count - 1]

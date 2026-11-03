@@ -5,6 +5,13 @@ import { groqChoice, groqFixture, groqGeneration, groqMarker, groqPrompt } from 
 const clearedOperation = (f: ReturnType<typeof groqFixture>) => ({ id: '4e40e8a4-876e-4433-90ab-a40b68063177',
   documentGeneration: groqGeneration, sequence: 1, firstUserFingerprint: f.fingerprint });
 
+const unknownBoundNodes = () => ({ rootConnected: null, bodyConnected: null, parentConnected: null,
+  rootClassMatches: null, bodyClassMatches: null, rootParentMatches: null, bodyWithinRoot: null,
+  rootInDocument: null, preparedEditorConnected: null, preparedEditorDraftRestored: null });
+const removedBoundNodes = () => ({ rootConnected: false, bodyConnected: false, parentConnected: true,
+  rootClassMatches: true, bodyClassMatches: true, rootParentMatches: false, bodyWithinRoot: true,
+  rootInDocument: false, preparedEditorConnected: true, preparedEditorDraftRestored: false });
+
 const appendObservedShowMore = (f: ReturnType<typeof groqFixture>) => {
   const control = new f.Node('SPAN', { class: 'text-primaryaccent cursor-pointer' }, 'Show more');
   f.f.userBody.parentElement.append(control);
@@ -499,10 +506,10 @@ describe('Groq fixed fresh-session adapter', () => {
       };
       const result = await f.run();
       expect(result).toEqual({ error: 'conversation_changed', detail: 'user_count', groqUserCountDiagnostic: {
-        kind: 'groq_user_count_v1', action: 'inspect', branch: scenario.branch,
+        kind: 'groq_user_count_v2', action: 'inspect', branch: scenario.branch,
         userCount: scenario.users, answerCount: scenario.answers,
         visibleUserCount: scenario.visibleUsers, visibleAnswerCount: scenario.visibleAnswers,
-        expectedUserCounts: [0], submitted: false, adapterFirstBound: false } });
+        expectedUserCounts: [0], submitted: false, adapterFirstBound: false, boundNodes: unknownBoundNodes() } });
       expect(JSON.stringify(result)).not.toContain('PRIVATE');
       expect([userQueries, answerQueries]).toEqual([1, 1]);
       expect(f.f.sendCount).toBe(0); expect(f.f.clearCount).toBe(0); expect(f.f.pickerOpens).toBe(1);
@@ -519,8 +526,67 @@ describe('Groq fixed fresh-session adapter', () => {
     const bound = await f.run(); expect(bound.firstUserVerified).toBe(true);
     user.remove();
     expect(await f.run()).toEqual({ error: 'conversation_changed', detail: 'user_count', groqUserCountDiagnostic: {
-      kind: 'groq_user_count_v1', action: 'inspect', branch: 'expected_count', userCount: 0, answerCount: 0,
-      visibleUserCount: 0, visibleAnswerCount: 0, expectedUserCounts: [1], submitted: true, adapterFirstBound: true } });
+      kind: 'groq_user_count_v2', action: 'inspect', branch: 'expected_count', userCount: 0, answerCount: 0,
+      visibleUserCount: 0, visibleAnswerCount: 0, expectedUserCounts: [1], submitted: true, adapterFirstBound: true, boundNodes: removedBoundNodes() } });
+    expect(f.f.sendCount).toBe(1); expect(f.f.clearCount).toBe(0);
+  });
+
+  test('bound-row diagnostic distinguishes exact draft restoration without reading message text or dispatching', async () => {
+    for (const draft of [groqPrompt, groqPrompt + ' ', '']) {
+      const f = groqFixture(); f.f.delayResponse = true; await f.submit(); await f.run();
+      f.f.user.remove(); f.f.editor.value = draft;
+      Object.defineProperty(f.f.userBody, 'textContent', { get() { throw new Error('PRIVATE BODY'); } });
+      const observed = await f.run();
+      expect(observed.error).toBe('conversation_changed'); expect(observed.detail).toBe('user_count');
+      expect(observed.groqUserCountDiagnostic.boundNodes).toEqual({ ...removedBoundNodes(),
+        preparedEditorDraftRestored: draft === groqPrompt });
+      expect(JSON.stringify(observed)).not.toContain('PRIVATE'); expect(JSON.stringify(observed)).not.toContain(groqPrompt);
+      expect(f.f.sendCount).toBe(1); expect(f.f.clearCount).toBe(0);
+    }
+  });
+
+  test('bound-row diagnostic distinguishes a connected node whose original class no longer matches', async () => {
+    const f = groqFixture(); f.f.delayResponse = true; await f.submit(); await f.run();
+    f.f.user.values.class = 'PRIVATE NEW CLASS'; f.f.userBody.values.class = 'PRIVATE NEW BODY CLASS';
+    const observed = await f.run();
+    expect(observed.error).toBe('conversation_changed'); expect(observed.detail).toBe('user_count');
+    expect(observed.groqUserCountDiagnostic.boundNodes).toEqual({ rootConnected: true, bodyConnected: true,
+      parentConnected: true, rootClassMatches: false, bodyClassMatches: false, rootParentMatches: true,
+      bodyWithinRoot: true, rootInDocument: true, preparedEditorConnected: true, preparedEditorDraftRestored: false });
+    expect(JSON.stringify(observed)).not.toContain('PRIVATE');
+    expect(f.f.sendCount).toBe(1); expect(f.f.clearCount).toBe(0);
+  });
+
+  test('bound-row diagnostic cannot claim restored draft from the disconnected held editor', async () => {
+    const f = groqFixture(); f.f.delayResponse = true; await f.submit(); await f.run();
+    f.f.turn.remove(); f.f.editor.value = groqPrompt; f.f.editor.remove();
+    // This branch rejects before looking for a replacement composer.
+    for (let i = 0; i < 2; i++) f.body.append(new f.Node('DIV', { class: 'group/input' }));
+    const observed = await f.run();
+    expect(observed.error).toBe('conversation_changed'); expect(observed.detail).toBe('user_count');
+    expect(observed.groqUserCountDiagnostic.branch).toBe('multiple_users');
+    expect(observed.groqUserCountDiagnostic.boundNodes).toEqual({ ...removedBoundNodes(), parentConnected: false,
+      rootParentMatches: true, preparedEditorConnected: false, preparedEditorDraftRestored: null });
+    expect(f.f.sendCount).toBe(1); expect(f.f.clearCount).toBe(0);
+  });
+
+  test('bound-row diagnostic preserves unknown getters and does not reread transcript selectors', async () => {
+    const f = groqFixture(); f.f.delayResponse = true; await f.submit(); await f.run(); f.f.user.remove();
+    Object.defineProperty(f.f.user, 'classList', { get() { throw new Error('PRIVATE CLASS'); } });
+    Object.defineProperty(f.f.editor, 'value', { get() { throw new Error('PRIVATE VALUE'); } });
+    // Reject before composer, so throwing current editor getters cannot become the authority error.
+    for (let i = 0; i < 2; i++) f.body.append(new f.Node('DIV', { class: 'group/input' }));
+    let userQueries = 0, answerQueries = 0; const query = f.document.querySelectorAll;
+    f.document.querySelectorAll = (selector: string) => {
+      if (selector === '[class*="group/input"]') userQueries++;
+      if (selector === '.font-inter') answerQueries++;
+      return query(selector);
+    };
+    const observed = await f.run();
+    expect(observed.error).toBe('conversation_changed'); expect(observed.detail).toBe('user_count');
+    expect(observed.groqUserCountDiagnostic.boundNodes).toEqual({ ...removedBoundNodes(),
+      rootClassMatches: null, preparedEditorDraftRestored: null });
+    expect(JSON.stringify(observed)).not.toContain('PRIVATE'); expect([userQueries, answerQueries]).toEqual([1, 1]);
     expect(f.f.sendCount).toBe(1); expect(f.f.clearCount).toBe(0);
   });
 

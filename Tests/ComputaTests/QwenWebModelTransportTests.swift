@@ -189,7 +189,7 @@ final class QwenWebModelTransportTests: XCTestCase {
             XCTAssertEqual(hits, [true, !fullyCovered])
             if fullyCovered {
                 do {
-                    _ = try await call(fixture, "webProviderPoll", token)
+                    _ = try await wait(fixture, token, state: "complete")
                     XCTFail("A covering link cannot authorize expansion")
                 } catch {
                     XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser))
@@ -207,7 +207,8 @@ final class QwenWebModelTransportTests: XCTestCase {
     }
 
     func testLongDisplayScrollRevealsClippedOrCoveredControlWithoutCrossingPersistentOverlay() async throws {
-        for layout in ["overflow", "fixedHeader", "fullCover"] {
+        for layout in ["overflow", "fixedHeader", "renderReveal", "renderReplacement", "fullCover"] {
+            let deferred = ["renderReveal", "renderReplacement", "fullCover"].contains(layout)
             let fixture = try Fixture(setup: "qwenFixture.options.firstLongMessageDisplay=true; qwenFixture.options.holdResponseIdentity=true;")
             defer { fixture.shutdown() }
             let token = try await start(fixture)
@@ -223,8 +224,16 @@ final class QwenWebModelTransportTests: XCTestCase {
                   area.scrollTo({top:control.getBoundingClientRect().top-area.getBoundingClientRect().top-8,behavior:'instant'});
                   const cover = document.createElement('a');
                   cover.href = '#foreign';
-                  cover.style.cssText = 'position:fixed;left:32px;top:80px;width:440px;height:\(layout == "fullCover" ? 180 : 64)px;z-index:5';
+                  cover.style.cssText = 'position:fixed;left:32px;top:80px;width:440px;height:\(deferred ? 180 : 64)px;z-index:5';
                   document.body.append(cover);
+                  if (['renderReveal','renderReplacement'].includes('\(layout)')) {
+                    window.qwenReleaseCover = () => {
+                      if (area.scrollTop === window.qwenPriorScroll) return false;
+                      if ('\(layout)' === 'renderReplacement') control.replaceWith(control.cloneNode(true));
+                      cover.remove();
+                      return true;
+                    };
+                  }
                 }
                 const box = control.getBoundingClientRect();
                 const points=[.125,.5,.875];
@@ -235,25 +244,55 @@ final class QwenWebModelTransportTests: XCTestCase {
                   '\(layout)' === 'overflow' ? box.top>port.bottom : box.top>=port.top && box.bottom<port.top+64];
                 """) as? [Bool]
             XCTAssertEqual(blocked, [true,true,true,true], layout)
-            if layout == "fullCover" {
+            let pending = try await call(fixture, "webProviderPoll", token)
+            XCTAssertEqual(pending["modelVerificationPendingReason"] as? String, "qwen_first_body_expansion_v1", layout)
+            let provisional = try XCTUnwrap(pending["pendingSubmissionContext"] as? [String: Any])
+            XCTAssertEqual(provisional["firstUserFingerprint"] as? String, "", layout)
+            if deferred {
+                let initialClicks = try await evaluate(fixture.view, "return qwenFixture.counts.displayClicks;") as? Int
+                XCTAssertEqual(initialClicks, 0, layout)
+                if layout != "fullCover" {
+                    // A separate site update removes the verified blocker after the negative
+                    // receipt. A hidden model tab may never deliver requestAnimationFrame.
+                    let removed = try await evaluate(fixture.view, "return window.qwenReleaseCover();") as? Bool
+                    XCTAssertEqual(removed, true, layout)
+                }
+            }
+            let refused = ["renderReplacement", "fullCover"].contains(layout)
+            if refused {
                 do {
-                    _ = try await call(fixture, "webProviderPoll", token)
-                    XCTFail("Persistent foreign overlay cannot authorize a click")
+                    _ = try await wait(fixture, token, state: "complete")
+                    XCTFail("Persistent cover or a replaced button cannot authorize a click")
                 } catch {
                     XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser))
                 }
-            } else {
-                let pending = try await call(fixture, "webProviderPoll", token)
-                XCTAssertEqual(pending["modelVerificationPendingReason"] as? String, "qwen_first_body_expansion_v1", layout)
-                let context = try XCTUnwrap(pending["pendingSubmissionContext"] as? [String: Any])
-                XCTAssertEqual(context["firstUserFingerprint"] as? String, "", layout)
+            } else if layout == "renderReveal" {
+                let deadline = ContinuousClock.now + .seconds(2)
+                while ContinuousClock.now < deadline {
+                    let revision = try await fixture.transport.changeRevision(sessionToken: token)
+                    _ = try await call(fixture, "webProviderPoll", token)
+                    let clicks = try await evaluate(fixture.view, "return qwenFixture.counts.displayClicks;") as? Int
+                    if clicks == 1 { break }
+                    _ = try await fixture.transport.waitForChange(sessionToken: token, after: try XCTUnwrap(revision), until: deadline)
+                }
             }
             let result = try await evaluate(fixture.view, """
                 return [document.querySelector('#transcript').scrollTop !== window.qwenPriorScroll,
-                  qwenFixture.counts.displayClicks === \(layout == "fullCover" ? 0 : 1), !location.hash];
+                  qwenFixture.counts.displayClicks === \(refused ? 0 : 1), !location.hash];
                 """) as? [Bool]
             XCTAssertEqual(result, [true,true,true], layout)
-            try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+            if layout == "renderReveal" {
+                _ = try await evaluate(fixture.view, "qwenFixture.settleResponseIdentity(); qwenFixture.completeResponse(); return true;")
+                let complete = try await wait(fixture, token, state: "complete")
+                let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+                XCTAssertEqual((proof["firstUserFingerprint"] as? String)?.count, 64)
+                XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Synthetic Qwen native reply"}"#)
+                let finished = try await call(fixture, "webProviderFinish", token)
+                XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+                try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+            } else {
+                try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+            }
         }
     }
 

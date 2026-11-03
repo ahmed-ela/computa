@@ -274,6 +274,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
         var diagnosticCode: String? {
             switch self {
+            case .capacity: "local_website_session_capacity"
             case .humanVerificationRequired: "website_verification_required"
             case .signInRequired: "sign_in_required"
             case .usageLimited: "website_usage_limit"
@@ -293,6 +294,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
         var requiredAction: String? {
             switch self {
+            case .capacity: "free_local_website_session"
             case .humanVerificationRequired: "complete_website_verification"
             case .signInRequired: "sign_in"
             case .usageLimited: "wait_for_quota_reset"
@@ -323,7 +325,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .invalidRequest: "The built-in browser model request could not be validated."
             case .turnLimit: "The website turn limit was reached. Earlier actions may have completed. Review their results before continuing; no prompt or action was replayed."
             case .unsupportedProvider: "That model provider is not supported in the built-in browser."
-            case .capacity: "Finish an existing website-model task before opening another session. If failed sessions remain retained, restart Computa to free local capacity; their website cleanup remains unconfirmed."
+            case .capacity: "Computa’s local website-session slots are full. Finish an active website task or retry cleanup for a paused task. Restarting Computa frees retained local slots. Unconfirmed website cleanup stays recorded."
             case .cookieMaintenancePending: "ChatGPT's previous browser session is still closing. Wait briefly before starting another task."
             case .staleSession: "The owned browser model session is no longer available."
             case .documentChanged: "The owned model page or conversation changed. No prompt was replayed."
@@ -409,6 +411,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let created = ContinuousClock.now
         var state = "loading"
         var terminalFailure: Failure?
+        var retainedForCleanup = false
+        var inFlightInferenceRequests = 0
         struct SavedChatSubmissionFailure {
             let generation: UUID
             let sequence: Int
@@ -657,6 +661,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private let createTab: @MainActor (URL) throws -> UUID
     private let isolatesChatGPTInference: Bool
     private var pendingInferenceStarts = 0
+    private static let maximumActiveInferences = 4
+    private static let maximumAdditionalCleanupHandles = 4
+    private var occupiedInferenceSlots: Int {
+        var owned = 0, cleanupOnly = 0
+        for session in sessions.values where !session.isDiscovery {
+            owned += 1
+            if session.retainedForCleanup && session.inFlightInferenceRequests == 0 { cleanupOnly += 1 }
+        }
+        // Excess cleanup handles still occupy ordinary slots. Keep unresolved
+        // profile preparations charged until their real callbacks have drained.
+        return owned - min(cleanupOnly, Self.maximumAdditionalCleanupHandles)
+            + pendingInferenceStarts + browser.failedChatGPTInferenceCookiePreparationCount
+    }
     private let world = WKContentWorld.world(name: "computa-chatgpt-model-v1")
     private var sessions: [String: Session] = [:]
     private var finishingTasks: [String: Task<Data, Never>] = [:]
@@ -1330,13 +1347,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         synchronizeProviderGate(provider)
         if let gate = providerGates[provider] {
-            // This is the sole mint point. Do not move below any reservation,
+            // Typed no-session rejections are valid only before reservation,
             // prewarm acquisition, cookie-profile creation, or createSession.
             if let admission { throw PrecreationRejection(admission: admission, failure: gate.failure) }
             throw gate.failure
         }
-        let pending = pendingInferenceStarts + browser.failedChatGPTInferenceCookiePreparationCount
-        guard sessions.values.filter({ !$0.isDiscovery }).count + pending < 4 else { throw Failure.capacity }
+        guard occupiedInferenceSlots < Self.maximumActiveInferences else {
+            if let admission { throw PrecreationRejection(admission: admission, failure: .capacity) }
+            throw Failure.capacity
+        }
         guard script(for: provider) != nil else { throw Failure.pageUnavailable }
         pendingInferenceStarts += 1
         defer { pendingInferenceStarts -= 1 }
@@ -1395,14 +1414,18 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard ["webProviderPoll", "webProviderSend", "webProviderFinish", "webProviderCancel"].contains(operation),
               Set(values.keys) == expectedKeys || operation == "webProviderCancel" && Set(values.keys) == cancellationKeys,
               let token = values["sessionToken"] else { throw Failure.staleSession }
-        if ["webProviderFinish", "webProviderCancel"].contains(operation) {
+        let isCleanup = operation == "webProviderFinish" || operation == "webProviderCancel"
+        if isCleanup {
             if let task = finishingTasks[token] { return await task.value }
             if let closed = closedSessions[token], ContinuousClock.now - closed.created < .seconds(3_600) { return closed.receipt }
         }
         guard let session = sessions[token] else { throw Failure.staleSession }
-        if !["webProviderFinish", "webProviderCancel"].contains(operation), let failure = session.terminalFailure {
-            throw failure
+        if !isCleanup {
+            if let failure = session.terminalFailure { throw failure }
+            guard !session.retainedForCleanup, finishingTasks[token] == nil else { throw Failure.staleSession }
+            session.inFlightInferenceRequests += 1
         }
+        defer { if !isCleanup { session.inFlightInferenceRequests -= 1 } }
         do {
             switch operation {
             case "webProviderFinish", "webProviderCancel":
@@ -1719,10 +1742,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         closedSessions = closedSessions.filter { ContinuousClock.now - $0.value.created < .seconds(3_600) }
         synchronizeProviderGate(provider)
         if !isRecoveryProbe, let gate = providerGates[provider] { throw gate.failure }
-        let admitted = sessions.values.filter { $0.isDiscovery == isDiscovery }.count
-        let pending = pendingInferenceStarts + browser.failedChatGPTInferenceCookiePreparationCount
-        let capacity = admitted + (isDiscovery ? 0 : pending)
-        guard capacity < (isDiscovery ? 1 : 4) || reservedStart && !isDiscovery && capacity <= 4 else { throw Failure.capacity }
+        if isDiscovery {
+            guard !sessions.values.contains(where: \.isDiscovery) else { throw Failure.capacity }
+        } else {
+            // The synchronous owner already charged this reservation. A later
+            // failure cannot attest that this invocation acquired no resources.
+            let occupiedAfterAcquisition = occupiedInferenceSlots + (reservedStart ? 0 : 1)
+            guard occupiedAfterAcquisition <= Self.maximumActiveInferences else { throw Failure.capacity }
+        }
         guard script(for: provider) != nil else { throw Failure.pageUnavailable }
         let id: UUID
         if let preparedTab { id = preparedTab }
@@ -1966,7 +1993,6 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard provider == .qwen, observed["error"] as? String == "conversation_changed",
               observed["detail"] as? String == "first_user_message",
               let packet = observed["qwenFirstUserBindingDiagnostic"] as? [String: Any],
-              Set(packet.keys) == ["version", "stage", "reason"],
               ComputerToolArgumentContract.exactInt64(packet["version"]) == 1,
               let stage = packet["stage"] as? String, let reason = packet["reason"] as? String else { return nil }
         let reasons: [String: Set<String>] = [
@@ -1983,10 +2009,28 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             "display_hit": ["disabled", "invalid_geometry", "outside_viewport", "occluded"],
             "display_preclick_hit": ["disabled", "invalid_geometry", "outside_viewport", "occluded"],
             "display_reveal_hit": ["disabled", "invalid_geometry", "outside_viewport", "occluded", "occluded_ancestor", "occluded_unrelated", "occluded_descendant", "occluded_none", "occluded_mixed", "scroll_failed"],
+            "display_settlement": ["render_binding_changed", "render_deadline"],
             "binding": ["first_not_submitted", "first_prompt_mismatch", "first_marker_invalid", "first_marker_mismatch", "first_marker_suffix", "first_changed_after_hash", "first_pinned_node_changed", "first_pinned_hash_mismatch", "first_expected_hash_mismatch", "first_binding_not_authorized", "first_disappeared"],
         ]
         guard reasons[stage]?.contains(reason) == true else { return nil }
-        return "firstUserStage=\(stage) firstUserReason=\(reason)"
+        let message = "firstUserStage=\(stage) firstUserReason=\(reason)"
+        if Set(packet.keys) == ["version", "stage", "reason"] { return message }
+        guard stage == "display_completed", reason == "user_id_changed",
+              Set(packet.keys) == ["version", "stage", "reason", "change"],
+              let facts = packet["change"] as? [String: Any] else { return nil }
+        let fields: [(String, Set<String>)] = [
+            ("point", ["ordinary_read", "id_candidate", "id_digest_check", "body_digest_check"]),
+            ("spelling", ["different_uuid", "case_only"]), ("pins", ["same", "changed"]),
+            ("body", ["exact", "changed"]), ("display", ["expanded", "collapsed"]),
+            ("reply", ["pending", "settled_now", "stable", "changed"]), ("responseIdentity", ["held", "absent"])
+        ]
+        guard facts.count == fields.count else { return nil }
+        var result = message
+        for (key, allowed) in fields {
+            guard let value = facts[key] as? String, allowed.contains(value) else { return nil }
+            result += " \(key)=\(value)"
+        }
+        return result
     }
 
     /// Finite failure-only Qwen first-user predicates. This cannot grant
@@ -2389,7 +2433,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     private func preparationFailure(_ session: Session) -> Failure {
         let diagnostic = browser.modelDiagnosticSnapshot(tabID: session.tabID)
-        Self.inspectionLog.error("preparationTimeout provider=\(session.provider.rawValue, privacy: .public) \(diagnostic, privacy: .public)")
+        let navigation = browser.modelNavigationDiagnostic(tabID: session.tabID, view: session.view)?.logDescription
+            ?? EmbeddedBrowserSession.ModelNavigationDiagnostic.unknownLogDescription
+        Self.inspectionLog.error("preparationTimeout provider=\(session.provider.rawValue, privacy: .public) \(navigation, privacy: .public) \(diagnostic, privacy: .public)")
         return .preparationDeadline
     }
 
@@ -4014,18 +4060,18 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     /// supplies lineage, response, retry or cleanup authority.
     static func sanitizedGroqUserCountDiagnostic(_ raw: Any?, provider: Provider, action: String) -> String? {
         let keys: Set<String> = ["kind", "action", "branch", "userCount", "answerCount", "visibleUserCount",
-            "visibleAnswerCount", "expectedUserCounts", "submitted", "adapterFirstBound"]
+            "visibleAnswerCount", "expectedUserCounts", "submitted", "adapterFirstBound", "boundNodes"]
         let actions: Set<String> = ["inspect", "discoverModels", "selectModel", "modelDiagnostic", "verifyModel",
             "prepare", "insert", "sendReady", "submit", "stop", "clearTranscript", "observeClearTranscript"]
         guard provider == .groq, actions.contains(action), let value = raw as? [String: Any],
-              Set(value.keys) == keys, value["kind"] as? String == "groq_user_count_v1",
+              Set(value.keys) == keys, value["kind"] as? String == "groq_user_count_v2",
               value["action"] as? String == action, let branch = value["branch"] as? String,
               ["multiple_users", "multiple_answers", "answer_without_user", "expected_count"].contains(branch),
               let users = ComputerToolArgumentContract.exactInt64(value["userCount"]), (0...64).contains(users),
               let answers = ComputerToolArgumentContract.exactInt64(value["answerCount"]), (0...64).contains(answers),
               let submitted = firstUserDiagnosticBool(value["submitted"]),
               let bound = firstUserDiagnosticBool(value["adapterFirstBound"]), !bound || submitted else { return nil }
-        var safe: [String: Any] = ["kind": "groq_user_count_v1", "action": action, "branch": branch,
+        var safe: [String: Any] = ["kind": "groq_user_count_v2", "action": action, "branch": branch,
             "userCount": users, "answerCount": answers, "submitted": submitted, "adapterFirstBound": bound]
         for (key, total) in [("visibleUserCount", users), ("visibleAnswerCount", answers)] {
             if value[key] is NSNull { safe[key] = NSNull(); continue }
@@ -4048,7 +4094,21 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard users <= 1, answers <= 1, users != 0 || answers == 0,
                   expected == nil || expected?.contains(users) == false else { return nil }
         }
-        guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), bytes.count <= 512 else { return nil }
+        let lineageFlags = ["rootConnected", "bodyConnected", "parentConnected", "rootClassMatches",
+            "bodyClassMatches", "rootParentMatches", "bodyWithinRoot", "rootInDocument"]
+        let nodeFlags = lineageFlags + ["preparedEditorConnected", "preparedEditorDraftRestored"]
+        guard let rawNodes = value["boundNodes"] as? [String: Any], Set(rawNodes.keys) == Set(nodeFlags) else { return nil }
+        var nodes: [String: Any] = [:]
+        for key in nodeFlags {
+            if rawNodes[key] is NSNull { nodes[key] = NSNull(); continue }
+            guard let flag = firstUserDiagnosticBool(rawNodes[key]) else { return nil }
+            nodes[key] = flag
+        }
+        guard bound || lineageFlags.allSatisfy({ nodes[$0] is NSNull }),
+              nodes["preparedEditorDraftRestored"] is NSNull
+                || submitted && nodes["preparedEditorConnected"] as? Bool == true else { return nil }
+        safe["boundNodes"] = nodes
+        guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), bytes.count <= 1_024 else { return nil }
         return String(decoding: bytes, as: UTF8.self)
     }
 
@@ -7620,6 +7680,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         finishingTasks[session.token] = work
         let result = await work.value
         finishingTasks.removeValue(forKey: session.token)
+        if !session.isDiscovery, sessions[session.token] === session {
+            // performFinish removes closed handles. Remaining handles retain
+            // their exact cleanup authority and may never start another Send.
+            session.retainedForCleanup = true
+        }
         if session.state == "finished" {
             while closedSessions.count >= 16 || closedSessions.values.reduce(0, { $0 + $1.receipt.count }) + result.count > 16 * 1_024 * 1_024 {
                 guard let oldest = closedSessions.min(by: { $0.value.created < $1.value.created })?.key else { break }

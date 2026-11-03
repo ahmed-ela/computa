@@ -1,13 +1,18 @@
 # Kimi, Qwen and DeepSeek website adapters
 
-Status: installed 0.8.0 (400), source `9d0c06f`. The fresh controlled
-native checks still fail independently: Kimi Instant stops at
-`authored_source_markdown_count`; Qwen3.7-Plus stops at
-`initial_response_body / full_prompt_mismatch`; DeepSeek Chat completes its
-first inference and one terminal read, then rejects the second response's
-literal source. Kimi and both DeepSeek inference sessions have verified deletion
-receipts. Qwen cleanup remains unconfirmed. No failed Send was replayed and no
-combined workflow passed. PR #20 remains draft.
+The latest live checkpoint used Computa 0.8.0 (407). Five model selections
+completed the invoice and browser workflow on that build. Qwen Plus and Max
+still lacked a verified answer and deletion receipt. [Installed build 407 results](#installed-build-407-2026-11-03)
+
+### Build 400 checkpoint (2026-11-03 UTC)
+
+On installed build 400, source `9d0c06f`, Kimi Instant stopped at
+`authored_source_markdown_count` and Qwen3.7-Plus stopped at
+`initial_response_body / full_prompt_mismatch`. DeepSeek Chat completed its
+first inference and one terminal read, then rejected the second response's
+literal source. Kimi and both DeepSeek inference sessions had verified deletion
+receipts. Qwen cleanup was unconfirmed. None of those build 400 runs completed
+the combined workflow. PR #20 was in draft at this checkpoint.
 
 Candidate401 adds explicitly armed structural diagnostics at the existing
 rejections, before cleanup removes the page. The diagnostic path records only
@@ -999,14 +1004,57 @@ scrolls that button into view once, rechecks the conversation and model, and
 requires the same exposed point immediately before clicking. The WebKit tests
 cover a scrollable container, a fixed header and a persistent overlay.
 
+### Installed build 407 (2026-11-03)
+
+ChatGPT Medium, GPT-6 Pro, Claude Sonnet 5.5, Claude Opus 5.5 and Claude
+Opus 4.6 each completed one invoice workflow. Each edited only the designated
+function, passed six independent tests, submitted the form once, returned the
+receipt and explicitly closed the task tab. The journals verified the selected
+model and recorded temporary-session closure after every inference.
+
+| Model | Native tool calls | Verified website-session closures |
+| --- | ---: | ---: |
+| ChatGPT Medium | 12 | 13 |
+| ChatGPT GPT-6 Pro | 9 | 10 |
+| Claude Sonnet 5.5 | 8 | 9 |
+| Claude Opus 5.5 | 11 | 10 |
+| Claude Opus 4.6 | 10 | 8 |
+
+Haiku 5.5 ran the unchanged baseline tests twice and read the local source.
+Both test commands exited 1. It then described the terminal results as pasted
+text and declined to continue. All four temporary sessions closed. The case
+ended without an edit or form receipt. Opus 3 reached verified website
+submission, then the native terminal reported high demand. The case recorded
+zero tool calls, no final answer and unconfirmed automatic cleanup.
+
+Gemini recovered its four picker choices after a signed-in browser visit.
+Flash-Lite and Flash returned exact zero-tool markers with confirmed cleanup.
+Pro timed out during preparation before Send. The independent Argon run
+encountered website verification again. Qwen Plus still found an unrelated
+element over the Expand button after scrolling. Max reached expanded text,
+then stopped on a changed user-message ID. Neither Qwen task had a verified
+answer or deletion receipt.
+
+Groq GPT OSS 120B requested six schemas in its first loader call. The limit
+was four, and several page controls required a bound tab. On the next
+inference the user-message count dropped to zero after submission. Ownership
+verification stopped the run, and clearing the second transcript was
+unconfirmed.
+
+Groq GPT OSS 20B stopped at local session admission with `provider_capacity`.
+The journal recorded a start request and failure before the transport acquired
+a session token or verified website submission. The native client surfaced
+HTTP 429. The case recorded zero tool calls, no final answer and an automatic
+cleanup receipt with outcome `unconfirmed`.
+
 ## Remaining gates
 
 1. Check each installed model with a fresh task. Verify the response and
    site-selected model or mode, then check the cleanup receipt.
 2. Use Qwen's finite stage/reason evidence to identify the actual failing guard;
    preserve the failed tasks and do not replay uncertain submissions.
-3. Verify both DeepSeek modes on complete browser/terminal/file workflows,
-   including streaming completion and the observed literal response shapes.
+3. Repeat the passing combined workflows on fresh tasks. First passes
+   establish that the workflow can complete on the tested installation.
 4. Preserve negative coverage for foreign routes/models, outside prose,
    partial/repeated remounts, uncertain Send and delayed/unconfirmed deletion.
 5. Record each installed selection's actual outputs, protected fixture tests,

@@ -247,9 +247,54 @@ enum WebModelResponseCodec {
         }
     }
 
+    enum GroqDirectToolSet {
+        case standard, essential, loadedOnly
+
+        fileprivate func includes(_ tool: OfferedTool, availability: EmbeddedBrowserToolAvailability?) -> Bool {
+            guard self != .loadedOnly, tool.namespace == nil || tool.namespace == "functions" else { return false }
+            if tool.nativeBrowserBit != 0 {
+                switch (availability, tool.name) {
+                case (.unbound, "browser_open"), (.bound, "browser_read"), (.bound, "browser_click"): return true
+                case (.bound, "browser_fill"), (.bound, "browser_close"): return self == .standard
+                default: return false
+                }
+            }
+            guard availability != .bound else { return false }
+            if tool.isCustom { return self == .standard && tool.name == "apply_patch" }
+            return tool.name == "exec_command"
+        }
+    }
+
+    /// Model state and the read-only loader retain their selected schemas.
+    /// Direct tools are an inference-local presentation over that selection.
+    static func prepareBudgetedGroqRequest(_ data: Data, availability: EmbeddedBrowserToolAvailability?,
+                                           projection: GroqToolCatalog.Projection, model: String) throws -> (request: Request, units: Int) {
+        let choices: [GroqDirectToolSet] = groqPromptBudgetUsesExactTokenizer(model: model)
+            ? [.standard, .essential, .loadedOnly] : [.loadedOnly]
+        for choice in choices {
+            do {
+                let request = try prepareRequest(data, browserToolAvailability: availability,
+                    groqToolCatalogProjection: projection, groqDirectTools: choice)
+                guard request.model == model,
+                      let units = try validateGroqPromptBudget(model: model, prompt: request.prompt) else {
+                    throw Failure.invalidTools
+                }
+                return (request, units)
+            } catch let failure as Failure {
+                switch failure {
+                case .promptTooLarge, .groqPromptBudgetExceeded:
+                    if choice == .loadedOnly { throw failure }
+                default: throw failure
+                }
+            }
+        }
+        throw Failure.invalidTools
+    }
+
     static func prepareRequest(_ data: Data,
                                browserToolAvailability: EmbeddedBrowserToolAvailability? = nil,
-                               groqToolCatalogProjection: GroqToolCatalog.Projection? = nil) throws -> Request {
+                               groqToolCatalogProjection: GroqToolCatalog.Projection? = nil,
+                               groqDirectTools: GroqDirectToolSet = .loadedOnly) throws -> Request {
         // Reject before expanding a large JSON body into prompt storage.
         guard data.count <= maximumPromptBytes else {
             throw Failure.promptTooLarge(actualBytes: data.count, maximumBytes: maximumPromptBytes)
@@ -344,9 +389,19 @@ enum WebModelResponseCodec {
                 toolChoiceJSON: try JSONSerialization.data(withJSONObject: object["tool_choice"] ?? "auto",
                     options: [.fragmentsAllowed, .sortedKeys, .withoutEscapingSlashes]))
         } else { groqToolCatalogSeed = nil }
-        if let selection = groqToolCatalogProjection {
+        let displayProjection: GroqToolCatalog.Projection?
+        if let loaded = groqToolCatalogProjection {
             guard let seed = groqToolCatalogSeed else { throw Failure.invalidTools }
-            try GroqToolCatalog.validate(selection, for: seed)
+            try GroqToolCatalog.validate(loaded, for: seed)
+            var direct = Set<String>()
+            if groqDirectTools != .loadedOnly, !loaded.selectedNames.isDisjoint(with: [GroqToolCatalog.name, "functions." + GroqToolCatalog.name]) {
+                direct = Set(offered.filter { name, tool in
+                    policy.allowedNames.contains(name) && groqDirectTools.includes(tool, availability: browserToolAvailability)
+                }.keys)
+            }
+            let selection = GroqToolCatalog.Projection(revision: loaded.revision, inventory: loaded.inventory,
+                                                       selectedNames: loaded.selectedNames.union(direct))
+            displayProjection = selection
             schemas = schemas.compactMap { definition in
                 if definition["type"] as? String == "namespace", let namespace = definition["name"] as? String,
                    let children = definition["tools"] as? [[String: Any]] {
@@ -367,11 +422,11 @@ enum WebModelResponseCodec {
             policy = .init(allowedNames: policy.allowedNames.intersection(offered.keys),
                            requiresCall: policy.requiresCall, mode: policy.mode)
             guard !policy.requiresCall || !policy.allowedNames.isEmpty else { throw Failure.invalidToolChoice }
-        }
+        } else { displayProjection = nil }
         let configuration = try responseConfiguration(object, schemas: schemas, parallel: parallel)
         let customNames = Set(offered.filter { $0.value.isCustom }.keys)
         let includedInstructionText = trustedInstructionText(in: object)
-        let compactGroq = isGroq && groqToolCatalogProjection != nil
+        let compactGroq = isGroq && displayProjection != nil
         var groqDomains = Set<ComputaAgentInstructions.GroqInstructionDomain>()
         for tool in offered.values where tool.namespace == nil || tool.namespace == "functions" {
             if tool.nativeBrowserBit != 0 {
@@ -390,7 +445,7 @@ enum WebModelResponseCodec {
             ? [ComputaAgentInstructions.groqRuntimeContract,
                ComputaAgentInstructions.groqNativeSupplement(includedInstructionText: includedInstructionText,
                                                             needsBrowser: requiresBrowserToolAvailability, domains: groqDomains),
-               try groqToolCatalogProjection.map(groqCatalogNotice)].compactMap { $0 }.joined(separator: "\n\n")
+               try displayProjection.map(groqCatalogNotice)].compactMap { $0 }.joined(separator: "\n\n")
             : [ComputaAgentInstructions.webInferenceContract(offeredFunctions: offered.mapValues(\.name),
             customToolNames: customNames, includedInstructionText: includedInstructionText, compactNativeContext: isChatGPT,
             deduplicateNativeContext: isClaude || isGroq),
@@ -405,7 +460,7 @@ enum WebModelResponseCodec {
         let fullDisplaySource = toolDefinitionsChanged
             ? String(decoding: try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
             : originalJSON
-        let taskDisplaySource = try groqToolCatalogProjection.map {
+        let taskDisplaySource = try displayProjection.map {
             try groqTrustedNativeProjection(originalJSON, object: object, schemas: $0.displaySchemas(schemas), domains: groqDomains)
         } ?? fullDisplaySource
         // API response/transport controls are validated above and retained in
@@ -430,7 +485,7 @@ enum WebModelResponseCodec {
             : currentBrowserHandoff(tools: offered, policy: policy, availability: browserToolAvailability)
         let responseContract = compactGroq ? ComputaAgentInstructions.groqResponseContract(currentBrowserHandoff: browserHandoff,
             hasFunctions: offered.values.contains { !$0.isCustom }, hasCustomTools: !customNames.isEmpty,
-            currentToolHandoff: try currentGroqToolHandoff(projection: groqToolCatalogProjection,
+            currentToolHandoff: try currentGroqToolHandoff(projection: displayProjection,
                 offeredNames: Set(offered.keys), allowedNames: policy.allowedNames))
             : ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames,
             includedInstructionText: includedInstructionText, responseFormat: responseFormat,
@@ -477,15 +532,13 @@ enum WebModelResponseCodec {
         }), as: UTF8.self)
         let revision = String(decoding: try encoder.encode(projection.revision), as: UTF8.self)
         let loaded = String(decoding: try encoder.encode(projection.selectedNames.sorted()), as: UTF8.self)
-        let unavailable = String(decoding: try encoder.encode(projection.inventory.filter { !$0.callable }.map(\.name)), as: UTF8.self)
-        let denied = String(decoding: try encoder.encode(projection.inventory.filter { $0.callable && !$0.allowed }.map(\.name)), as: UTF8.self)
         let loader = projection.inventory.first { $0.name == GroqToolCatalog.name || $0.name == "functions." + GroqToolCatalog.name }?.name
             ?? GroqToolCatalog.name
         return """
         GROQ_NATIVE_TOOL_INVENTORY:
-        Catalog rows [name,purpose,kind] describe available, allowed tools. Load 1–4 choices from names.items with \(loader) and the current catalog_revision. Loading replaces optional selections and executes nothing. Only the next request after a matching receipt exposes the exact schemas. Never infer arguments or batch loading with execution.
+        Catalog rows [name,purpose,kind] list the tools available for this request. Tools under loaded have callable schemas now. To use another tool, load its exact name with \(loader) and the current catalog_revision. Load up to four names at once. Loading replaces optional selections and executes nothing. Wait for the next request's schema before calling a newly loaded tool.
         ```
-        {"catalog_revision":\(revision),"loaded":\(loaded),"unavailable":\(unavailable),"denied":\(denied),"inventory":\(entries)}
+        {"catalog_revision":\(revision),"loaded":\(loaded),"inventory":\(entries)}
         ```
         END_GROQ_NATIVE_TOOL_INVENTORY.
         """
@@ -506,6 +559,9 @@ enum WebModelResponseCodec {
         guard let loader = callable.sorted().first(where: {
             $0 == GroqToolCatalog.name || $0 == "functions." + GroqToolCatalog.name
         }) else { return result }
+        if callable.count > 1 {
+            return result + " Use a directly callable schema for the next needed action. Load other schemas only when needed."
+        }
         let unloaded = projection.loaderChoices.filter { !projection.selectedNames.contains($0) }
         guard let example = unloaded.first(where: { $0 == "exec_command" || $0 == "functions.exec_command" })
             ?? unloaded.first else { return result }
@@ -523,7 +579,7 @@ enum WebModelResponseCodec {
             let bind = entryTools.first { $0.value.name == "browser_bind" }.map {
                 " \($0.key) needs this turn's observed tab_id."
             } ?? ""
-            return "Current browser state: unbound. Page tools require successful \(entryTools.keys.sorted().joined(separator: " or ")). Load its schema if needed, then execute it; loading alone does not bind.\(bind) Wait for matching output, then use the next request's refreshed inventory and catalog_revision to load page tools. Empty tabs do not prove denied access."
+            return "Current browser state: unbound. Page tools require successful \(entryTools.keys.sorted().joined(separator: " or ")). Load its schema if needed, then execute it; loading alone does not bind.\(bind) Wait for matching output, then use the next request's refreshed inventory and catalog_revision for callable page tools. Empty tabs do not prove denied access."
         }
         let allowed = tools.filter { policy.allowedNames.contains($0.key) && $0.value.nativeBrowserBit != 0 }
         guard !allowed.isEmpty else { return "" }

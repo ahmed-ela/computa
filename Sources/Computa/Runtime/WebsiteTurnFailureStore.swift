@@ -101,6 +101,7 @@ struct WebsiteTurnFailureStore: Sendable {
                 nativeError = WebModelServer.Failure.malformedReply(.init(reason: reason, utf8Bytes: Int(count), fenced: fenced.boolValue))
             case "website_verification_required": nativeError = EmbeddedWebModelTransport.Failure.humanVerificationRequired(webProvider)
             case "sign_in_required": nativeError = EmbeddedWebModelTransport.Failure.signInRequired
+            case "local_website_session_capacity": nativeError = EmbeddedWebModelTransport.Failure.capacity
             case "website_usage_limit": nativeError = EmbeddedWebModelTransport.Failure.usageLimited(webProvider)
             case "website_response_blocked":
                 // Only Claude currently emits this finite native classification.

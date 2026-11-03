@@ -510,3 +510,187 @@ test('no scroll is attempted for an ineligible view or foreign preview', async (
     expect(result.error).toBeDefined(); expect([scrolls,control.clicks,f.send.clicks]).toEqual([0,0,1]);
   }
 });
+
+async function renderSettlement(model = 'Qwen3.7-Plus') {
+  const session = await sent(model);
+  const {f, control, render} = session;
+  const foreign = new f.Node('A',{href:'#foreign'});
+  f.body.append(foreign); f.userBody.text = preview; control.onClick = render;
+  const frames = new Map<number, () => void>(), timers = new Map<number, () => void>();
+  const editorEvents = new Map<string, () => void>(), windowEvents = new Map<string, () => void>();
+  const events = (listeners: Map<string, () => void>) => ({
+    addEventListener: (name: string, callback: () => void) => listeners.set(name, callback),
+    removeEventListener: (name: string) => listeners.delete(name)
+  });
+  let serial = 0;
+  const observed = {now:0, scrolls:0, exposed:false, points:0, pointRead:() => {}};
+  Object.assign(f.window, events(windowEvents), {
+    performance: {now:() => observed.now},
+    requestAnimationFrame: (run: () => void) => { frames.set(++serial,run); return serial; },
+    cancelAnimationFrame: (id: number) => frames.delete(id),
+    setTimeout: (run: () => void, delay: number) => { expect(delay).toBe(300); timers.set(++serial,run); return serial; },
+    clearTimeout: (id: number) => timers.delete(id)
+  });
+  Object.assign(f.editor, events(editorEvents));
+  Object.assign(control, { scrollIntoView() { observed.scrolls++; } });
+  control.getBoundingClientRect = () => ({left:16,top:120,width:120,height:32});
+  const original = f.document.elementFromPoint;
+  f.document.elementFromPoint = (x:number,y:number) => {
+    if (y < 120) return original(x,y);
+    observed.points++; observed.pointRead();
+    return observed.exposed ? control : foreign;
+  };
+  const frame = () => {
+    const ready = [...frames.values()]; frames.clear(); ready.forEach(callback => callback());
+  };
+  return {...session, observed, foreign, frames, timers, editorEvents, windowEvents, frame};
+}
+
+test('one post-scroll render wakes a fresh granted read before a single revalidated display click', async () => {
+  for (const model of ['Qwen3.7-Plus','Qwen3.8-Max']) {
+    const {f,control,inspect,hash,settleID,observed,frames,timers,editorEvents,frame} = await renderSettlement(model);
+    expect(await inspect()).toEqual(pending);
+    expect([observed.scrolls,observed.points,control.clicks,frames.size]).toEqual([1,18,0,1]);
+    observed.exposed = true;
+    expect(await inspect()).toEqual(pending);
+    frame(); expect(await inspect()).toEqual(pending);
+    expect([observed.points,control.clicks]).toEqual([18,0]);
+    const signals = f.signals.length;
+    frame(); expect(f.signals.length).toBe(signals+1);
+    expect([observed.points,control.clicks]).toEqual([18,0]);
+    expect(await inspect()).toEqual(pending);
+    expect([observed.scrolls,observed.points,control.clicks,frames.size,timers.size,editorEvents.size]).toEqual([1,20,1,0,0,0]);
+    expect(await inspect()).toEqual(idPending); settleID();
+    const result = await inspect({allowQwenFirstBodyExpansion:false});
+    expect(result.firstUserVerified).toBe(true); expect(result.firstUserFingerprint).toBe(hash);
+    expect(result.answerComplete).toBe(true); expect(f.send.clicks).toBe(1);
+  }
+});
+
+test('persistent coverage, late frames, elapsed deadline, or loss of the final point never click', async () => {
+  for (const fault of ['persistent','late_frames','one_frame','deadline_at_hit','witness_lost','first_witness_lost']) {
+    const {f,control,inspect,observed,foreign,frames,timers,frame} = await renderSettlement();
+    if (fault === 'first_witness_lost') {
+      observed.pointRead = () => { observed.exposed = observed.points === 10; };
+    } else {
+      expect(await inspect()).toEqual(pending);
+      if (fault === 'late_frames') { observed.now = 301; frame(); }
+      if (fault === 'one_frame') { frame(); [...timers.values()].forEach(end => end()); }
+      frame(); frame();
+      observed.exposed = fault !== 'persistent';
+      if (fault === 'deadline_at_hit') observed.pointRead = () => { observed.now = 300; };
+      if (fault === 'witness_lost') observed.pointRead = () => { observed.exposed = observed.points === 19; };
+    }
+    const result = await inspect();
+    expect(result.error,fault).toBe('conversation_changed');
+    expect(result.qwenFirstUserBindingDiagnostic).toEqual(
+      ['late_frames','one_frame','deadline_at_hit'].includes(fault) ? {version:1,stage:'display_settlement',reason:'render_deadline'}
+        : {version:1,stage:'display_reveal_hit',reason:'occluded_unrelated'});
+    expect((await inspect()).detail).toBe('terminal_operation');
+    expect([observed.scrolls,control.clicks,foreign.clicks,f.send.clicks,frames.size,timers.size]).toEqual([1,0,0,1,0,0]);
+  }
+});
+
+test('the render grant cannot bridge a changed selection, message, ID, route, composer or native grant', async () => {
+  for (const fault of ['user_id','answer_id','preview','empty','body','control','answer','model','picker','editor',
+    'typed','route','grant','restore_input','restore_node','restore_label','restore_id','navigate']) {
+    const {f,control,chunk,settleID,inspect,observed,frame,frames,timers,editorEvents,windowEvents} = await renderSettlement();
+    expect(await inspect()).toEqual(pending); observed.exposed = true;
+    if (fault === 'user_id') f.userContainer.setAttribute('data-msg-id', answerID);
+    if (fault === 'answer_id') settleID();
+    if (fault === 'preview') f.userBody.text = 'X'+preview.slice(1);
+    if (fault === 'empty') f.userBody.text = '';
+    if (fault === 'body') { const next = new f.Node('P', {...f.userBody.values},preview); f.userBody.detach(); chunk.append(next); }
+    if (fault === 'control') {control.detach(); chunk.append(new f.Node('BUTTON',{...control.values}));}
+    if (fault === 'answer') f.answer.detach();
+    if (fault === 'model') f.modelName.text='Qwen3.8-Max';
+    if (fault === 'picker') f.openPicker();
+    if (fault === 'editor') { f.editor.detach(); f.scope.append(new (f.editor.constructor as any)('TEXTAREA',{...f.editor.values})); }
+    if (fault === 'typed') f.editor.value='draft';
+    if (fault === 'route') f.document.URL='https://chat.qwen.ai/';
+    if (fault === 'restore_input') editorEvents.get('input')!();
+    if (fault === 'navigate') windowEvents.get('popstate')!();
+    if (fault === 'restore_node') f.observers.at(-1).callback([{type:'childList',target:chunk,removedNodes:[control]}]);
+    if (fault === 'restore_label') f.observers.at(-1).callback([{type:'characterData',target:f.modelName}]);
+    if (fault === 'restore_id') f.observers.at(-1).takeRecords=()=>[{type:'attributes',target:f.root}];
+    frame(); frame();
+    const result = await inspect(fault === 'grant' ? {allowQwenFirstBodyExpansion:false} : {});
+    expect(result.error,fault).toBeDefined(); expect(result.firstUserVerified).toBeUndefined();
+    expect([observed.scrolls,control.clicks,f.send.clicks]).toEqual([1,0,1]);
+    // A navigation can bypass the adapter's outer catch. Its local watch still expires.
+    if (fault !== 'route') expect([frames.size,timers.size],fault).toEqual([0,0]);
+  }
+});
+
+test('a hidden view can settle only on removal of an actual blocker, with an independent fresh hit required', async () => {
+  for (const change of ['removed','unrelated','still_covered','also_replaced','too_late']) {
+    const {f,control,chunk,inspect,foreign,observed} = await renderSettlement();
+    expect(await inspect()).toEqual(pending);
+    const observer = f.observers.at(-1);
+    const childRemoval = (target: unknown, removed: unknown) => ({type:'childList',target,removedNodes:[removed]});
+    if (change === 'too_late') observed.now = 300;
+    const records = [childRemoval(f.body,change === 'unrelated' ? new f.Node('SPAN') : foreign)];
+    if (change === 'also_replaced') records.push(childRemoval(chunk,control));
+    observer.callback(records);
+    observed.exposed = change !== 'still_covered';
+    const result = await inspect();
+    if (change === 'unrelated') {
+      expect(result).toEqual(pending); expect(observed.points).toBe(18);
+    } else if (change === 'removed') {
+      expect(result).toEqual(pending); expect(observed.points).toBe(20);
+    } else {
+      expect(result.error,change).toBe('conversation_changed');
+      expect(result.qwenFirstUserBindingDiagnostic.reason).toBe(change === 'too_late' ? 'render_deadline'
+        : change === 'also_replaced' ? 'render_binding_changed' : 'occluded_unrelated');
+    }
+    expect([control.clicks,observed.scrolls,f.send.clicks]).toEqual([change === 'removed' ? 1 : 0,1,1]);
+  }
+});
+
+test('completed display UUID changes stay terminal even when every other user pin and the full prompt match', async () => {
+  for (const shape of ['case_only','different_uuid','reply_settled','body_changed','pin_changed','recollapsed','during_digest']) {
+    const {f, control, chunk, render, settleID, inspect} = await sent('Qwen3.8-Max');
+    f.userBody.text = preview; control.onClick = render; expect(await inspect()).toEqual(pending);
+    const old = f.userContainer.getAttribute('data-msg-id')!;
+    const changed = shape === 'case_only' ? old.toUpperCase() : 'eb61e1c6-f2a0-4b7e-b356-3d3aaa1af374';
+    const replace = () => f.userContainer.setAttribute('data-msg-id',changed);
+    if (shape === 'during_digest') {
+      f.beforeDigest(replace);
+    } else {
+      expect(await inspect()).toEqual(idPending); replace();
+    }
+    if (shape === 'reply_settled') settleID();
+    if (shape === 'body_changed') f.userBody.text='private unrelated content';
+    if (shape === 'pin_changed') {
+      const fresh = new f.Node('P', {...f.userBody.values}, prompt);
+      f.userBody.detach(); chunk.children.unshift(fresh); fresh.parentElement=chunk;
+    }
+    if (shape === 'recollapsed') {
+      chunk.setAttribute('class', chunk.getAttribute('class')+' is-collapsed'); control.setAttribute('aria-label','Expand');
+    }
+    const result=await inspect();
+    expect(result).toMatchObject({error:'conversation_changed',detail:'first_user_message'});
+    expect(result.firstUserVerified).toBeUndefined();expect(result.text).toBeUndefined();
+    expect(result.qwenFirstUserBindingDiagnostic).toEqual({version:1,stage:'display_completed',reason:'user_id_changed',change:{
+      point:shape==='during_digest'?'id_digest_check':'id_candidate',spelling:shape==='case_only'?'case_only':'different_uuid',
+      pins:shape==='pin_changed'?'changed':'same',body:shape==='body_changed'?'changed':'exact',display:shape==='recollapsed'?'collapsed':'expanded',
+      reply:shape==='reply_settled'?'settled_now':'pending',responseIdentity:'held'
+    }});
+    const diagnostic=JSON.stringify(result.qwenFirstUserBindingDiagnostic);
+    for(const secret of [old,changed,'private unrelated content',marker,answerID,conversationID]) expect(diagnostic).not.toContain(secret);
+    expect(f.world.__computaQwenSavedSessionV1.first).toBeNull();
+    expect(control.clicks).toBe(1);expect(f.send.clicks).toBe(1);
+  }
+});
+
+test('stable answer UUID and unchanged full bytes cannot legitimize a changed user UUID during the final hash', async()=>{
+  const {f,control,render,settleID,inspect}=await sent('Qwen3.8-Max');
+  settleID(); f.userBody.text=preview;control.onClick=render;
+  expect(await inspect()).toEqual(pending);
+  f.beforeDigest(()=>f.userContainer.setAttribute('data-msg-id','494d93fb-ad37-43ab-868d-5dade1cdc4b1'));
+  const result=await inspect();
+  expect(result).toMatchObject({error:'conversation_changed',detail:'first_user_message',qwenFirstUserBindingDiagnostic:{
+    version:1,stage:'display_completed',reason:'user_id_changed',change:{point:'body_digest_check',spelling:'different_uuid',
+      pins:'same',body:'exact',display:'expanded',reply:'stable',responseIdentity:'absent'}}});
+  expect(result.firstUserVerified).toBeUndefined();expect(result.text).toBeUndefined();expect(control.clicks).toBe(1);expect(f.send.clicks).toBe(1);
+});

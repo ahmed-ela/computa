@@ -120,6 +120,9 @@ async function computaSavedConversation(input, c, dom, config) {
       catch (error) {
         if (diagnostic && error?.computaAdapterFailure) {
           error.qwenFirstUserBindingDiagnostic = diagnostic;
+          if (stage === 'display_completed' && diagnostic.reason === 'user_id_changed' && typeof structure === 'function') {
+            try { diagnostic.change = structure(); } catch { /* Never replace the ownership rejection. */ }
+          }
           if (stage === 'initial_response_body' && diagnostic.reason === 'full_prompt_mismatch' && typeof structure === 'function') {
             try { const packet = structure(); if (packet) error.adapterFailureStructure = packet; } catch { /* Preserve the original refusal. */ }
           }
@@ -270,15 +273,24 @@ async function computaSavedConversation(input, c, dom, config) {
     }
     function sameFirst(first) {
       const current = dom.transcript();
-      validateInitialResponseIdentity(current);
+      validateInitialResponseIdentity(current, 'body_digest_check');
       const now = current.first;
       return !!first && !!now && first.root === now.root && first.body === now.body
         && first.container === now.container && first.id === now.id && first.text === now.text;
     }
-    function validateInitialResponseIdentity(t) {
+    function validateInitialResponseIdentity(t, readPoint) {
       if (state.firstDisplay?.complete && !state.first) {
         const view = dom.firstBodyPresentation(t);
-        requireSameFirstDisplay(view, 'display_completed');
+        requireSameFirstDisplay(view, 'display_completed', () => {
+          // Only evaluated after rejecting two unequal, strictly validated user IDs.
+          const held = state.firstDisplay;
+          const reply = held.answerID === null ? (view.answerID === null ? 'pending' : 'settled_now')
+            : held.answerID === view.answerID ? 'stable' : 'changed';
+          return { point: readPoint, spelling: held.userID.toLowerCase() === view.userID.toLowerCase() ? 'case_only' : 'different_uuid',
+            pins: held.pins.length === view.pins.length && held.pins.every((node, index) => node === view.pins[index]) ? 'same' : 'changed',
+            body: t.first.text === state.inserted.prompt ? 'exact' : 'changed', display: view.collapsed ? 'collapsed' : 'expanded',
+            reply, responseIdentity: state.responseIdentity ? 'held' : 'absent' };
+        });
         if (view.collapsed) firstBindingFailure('display_completed', 'recollapsed');
         if (t.first.text !== state.inserted.prompt) firstBindingFailure('display_completed', 'full_text_changed');
         if (view.answerID !== null) state.firstDisplay.answerID = view.answerID;
@@ -296,12 +308,12 @@ async function computaSavedConversation(input, c, dom, config) {
     }
     // Compare existing physical pins in their original order. Report only the
     // first failing group; no selector, attribute, text or hit test is reread.
-    function requireSameFirstDisplay(view, stage) {
+    function requireSameFirstDisplay(view, stage, rejectedIdentityFacts = null) {
       const held = state.firstDisplay;
       const reject = reason => firstBindingFailure(stage, reason);
       if (!view) reject('presentation_missing');
       if (held.canonical !== dom.route().canonical) reject('route_changed');
-      if (held.userID !== view.userID) reject('user_id_changed');
+      if (held.userID !== view.userID) firstBindingFailure(stage, 'user_id_changed', rejectedIdentityFacts);
       if (held.answerID !== null && held.answerID !== view.answerID) reject('answer_id_changed');
       if (held.pins.length !== view.pins.length) reject('pin_count_changed');
       const i = held.pins.findIndex((node, i) => node !== view.pins[i]);
@@ -343,12 +355,18 @@ async function computaSavedConversation(input, c, dom, config) {
       if (!form.empty || !c.enabled(form.editor)) reject('composer_not_ready');
       const text = t.first.text;
       const preview = text.length === previewLength && prompt.startsWith(text);
+      const settlement = held?.settlement;
+      const renderFailure = reason => firstBindingFailure('display_settlement', reason);
+      if (settlement && (view.answerID !== settlement.answerID || form.editor !== settlement.editor
+        || form.scope !== settlement.scope || !view.collapsed || text !== settlement.text
+        || state.model !== settlement.model || state.inserted !== settlement.inserted || state.send !== settlement.send))
+        renderFailure('render_binding_changed');
       if (!held && !view.collapsed) reject('initial_not_collapsed');
       if (!held && !preview && (text !== '' || !t.pendingAnswer)) {
         reject(text === '' ? 'initial_empty_no_pending_answer' : text.length === previewLength ? 'initial_prefix_mismatch' : 'initial_length_mismatch');
       }
       const claim = held || (state.firstDisplay = { ...view, canonical: route.canonical, clicked: false, sawExpanded: false, complete: false });
-      checkFirstDisplaySelection(claim.clicked ? 'display_after_click' : 'display_before_click', !claim.clicked && view.collapsed);
+      checkFirstDisplaySelection(claim.clicked ? 'display_after_click' : 'display_before_click', !settlement && !claim.clicked && view.collapsed);
       if (claim.sawExpanded && view.collapsed) reject('recollapsed');
       if (!view.collapsed) claim.sawExpanded = true;
       if (view.answerID !== null) claim.answerID = view.answerID;
@@ -365,34 +383,66 @@ async function computaSavedConversation(input, c, dom, config) {
         const current = dom.initialResponseIdentityTranscript(), currentView = dom.firstBodyPresentation(current);
         checkFirstDisplaySelection('display_preclick');
         requireSameFirstDisplay(currentView, 'display_preclick');
+        if ((settlement || claim.scrolled) && currentView.answerID !== view.answerID) renderFailure('render_binding_changed');
+        if (settlement) {
+          const picker = dom.picker();
+          if (picker.trigger !== settlement.trigger || picker.name !== settlement.name) renderFailure('render_binding_changed');
+        }
         if (!currentView.collapsed) firstBindingFailure('display_preclick', 'not_collapsed');
         if (current.first.text !== text) firstBindingFailure('display_preclick', 'preview_changed');
         const currentForm = dom.composer();
         if (!currentForm.empty) firstBindingFailure('display_preclick', 'composer_not_empty');
-        if (currentForm.editor !== form.editor || !c.enabled(currentForm.editor)) firstBindingFailure('display_preclick', 'composer_changed');
+        if (currentForm.editor !== form.editor || currentForm.scope !== form.scope || !c.enabled(currentForm.editor)) firstBindingFailure('display_preclick', 'composer_changed');
         return currentView.control;
       };
       const point = {};
-      let hit = dom.displayHitFailure(view.control, point);
+      if (settlement) {
+        checkedControl();
+        const status = settlement.watch.current();
+        if (status === 'waiting') return true;
+        if (status !== 'ready') renderFailure(status);
+      }
+      let hit = dom.displayHitFailure(view.control, point, !!settlement);
+      if (settlement && hit !== null) firstBindingFailure('display_reveal_hit', hit);
       if ((hit === 'occluded' || hit === 'outside_viewport') && !claim.scrolled && typeof view.control.scrollIntoView === 'function') {
         const control = checkedControl();
         claim.scrolled = true;
-        // This reveal changes only the scroll position. Immediate geometry
-        // after an instant scroll must expose the still-pinned button itself.
+        // Scroll changes presentation only. A usable hit must come from the pinned control.
         try { control.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' }); }
         catch { firstBindingFailure('display_reveal_hit', 'scroll_failed'); }
-        hit = dom.displayHitFailure(checkedControl(), point, true);
+        const blockers = [];
+        hit = dom.displayHitFailure(checkedControl(), point, true, blockers);
+        if (hit === 'occluded_unrelated') {
+          const picker = dom.picker();
+          const wake = () => {
+            if (state.terminal || !c.context() || state.firstDisplay !== claim) return;
+            try { window.webkit?.messageHandlers?.computaChatGPTSignal?.postMessage({ownerToken:input.ownerToken,kind:'dom_changed'}); }
+            catch { /* The native deadline still applies. */ }
+          };
+          const watch = dom.watchDisplayRender([...view.pins, form.editor, form.scope, picker.trigger, picker.name],
+            [t.first.body, picker.name], form.editor, blockers, wake);
+          if (watch) {
+            claim.settlement = { watch, answerID:view.answerID, editor:form.editor, scope:form.scope, trigger:picker.trigger, name:picker.name, text,
+              model:state.model, inserted:state.inserted, send:state.send };
+            return true;
+          }
+        }
         if (hit !== null) firstBindingFailure('display_reveal_hit', hit);
       } else if (hit !== null) firstBindingFailure('display_hit', hit);
       const currentHit = dom.displayHitFailure(checkedControl(), point, claim.scrolled === true);
       if (currentHit !== null) firstBindingFailure(claim.scrolled ? 'display_reveal_hit' : 'display_preclick_hit', currentHit);
+      if (settlement) {
+        const status = settlement.watch.current();
+        if (status !== 'ready') renderFailure(status);
+        settlement.watch.consume(); delete claim.settlement;
+      }
       claim.clicked = true;
       view.control.click();
       return true;
     }
     function read() {
       const t = dom.transcript(), form = dom.composer(), evidence = selectionEvidence(false), extracted = dom.rawAnswer(t.answer);
-      validateInitialResponseIdentity(t);
+      validateInitialResponseIdentity(t, 'ordinary_read');
       state.initialReadComplete = true;
       const terminalUI = !!state.first && !!evidence && !state.deletion && dom.completionCandidate(t.answer);
       if (terminalUI && extracted.formatIssue && !cleanupInspection && !deletionActions.includes(input.action)) {
@@ -583,7 +633,7 @@ async function computaSavedConversation(input, c, dom, config) {
         || input.savedSubmissionFingerprint !== state.submittedFingerprint)
         firstBindingFailure('initial_response_admission', () => initialFirstAdmissionReason(false));
       const candidate = dom.initialResponseIdentityTranscript();
-      validateInitialResponseIdentity(candidate);
+      validateInitialResponseIdentity(candidate, 'id_candidate');
       if (observeFirstDisplay(candidate)) return { qwenFirstBodyExpansionPending: true, url: document.URL,
         sessionLifecycle: 'saved_conversation_delete', temporary: false };
       if (candidate.pendingAnswer) {
@@ -608,7 +658,7 @@ async function computaSavedConversation(input, c, dom, config) {
         catch (error) { tagFirstBodyHashFailure(error, 'initial_response_digest'); throw error; }
         guard();
         const current = dom.initialResponseIdentityTranscript();
-        validateInitialResponseIdentity(current);
+        validateInitialResponseIdentity(current, 'id_digest_check');
         checkFirstDisplaySelection('id_after_hash');
         if (fingerprint !== state.submittedFingerprint) firstBindingFailure('initial_response_digest', 'submitted_fingerprint_mismatch');
         if (current.pendingAnswer) return { qwenInitialResponseIdentityPending: true, url: document.URL,
@@ -764,6 +814,10 @@ async function computaSavedConversation(input, c, dom, config) {
     if (state && (!error?.computaAdapterFailure || state.deletion || (state.submitted || state.initialReadComplete
       || state.model || state.selection || state.mode || state.modeSelection || state.prepared || state.inserted)
       && ['conversation_changed', 'document_changed', 'model_mismatch', 'model_unverified', 'mode_mismatch', 'mode_unverified'].includes(error.error))) state.terminal = true;
+    if (state?.terminal && state.firstDisplay?.settlement) {
+      state.firstDisplay.settlement.watch.consume();
+      delete state.firstDisplay.settlement;
+    }
     return error?.computaAdapterFailure ? { error: error.error, ...(error.detail ? { detail: error.detail } : {}),
       ...(error.adapterFailureStructure && (config.stateKey === '__computaQwenSavedSessionV1'
         && error.error === 'conversation_changed' && error.detail === 'first_user_message'
