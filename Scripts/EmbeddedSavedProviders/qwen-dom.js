@@ -425,24 +425,40 @@ function computaQwenDOM(c) {
     if (!answer) return { text: '', finalMarkup: false, formatIssue: false };
     const flows = c.nodes(answer.content, '.chat-response-message-render-flow');
     if (!flows.length) return { text: '', finalMarkup: false, formatIssue: false };
-    const unsupported = () => ({ text: '', finalMarkup: false, formatIssue: true });
-    if (flows.length !== 1 || !c.visible(flows[0])) return unsupported();
+    // Capture the first ordinary rejection without another DOM read. Only the
+    // owned terminal Max inspect can request this finite diagnostic.
+    const unsupported = (stage, reason, count = 0) => {
+      const result = { text: '', finalMarkup: false, formatIssue: true };
+      Object.defineProperty(result, 'failureStructure', { value: () => ({
+        version: 1, provider: 'qwen', trigger: 'authored_source', stage, reason, count: Math.min(count, 2)
+      }) });
+      return result;
+    };
+    if (flows.length !== 1) return unsupported('flow', 'count', flows.length);
+    if (!c.visible(flows[0])) return unsupported('flow', 'hidden');
     const flow = flows[0], phases = c.nodes(flow, '.response-message-content.phase-answer');
     if (!phases.length) return { text: '', finalMarkup: false, formatIssue: false };
-    if (phases.length !== 1 || !phases[0].classList.contains('t2t')) return unsupported();
+    if (phases.length !== 1) return unsupported('phase', 'count', phases.length);
+    if (!phases[0].classList.contains('t2t')) return unsupported('phase', 'class');
     const phase = phases[0];
-    const child = (parent, tag, cls) => {
-      if (!c.visible(parent) || parent.children.length !== 1
-        || [...parent.childNodes].some(node => node.nodeType === 3 && !/^\s*$/.test(node.textContent || ''))) return null;
-      const node = parent.children[0];
-      return node.tagName === tag && node.classList.contains(cls) && c.visible(node) ? node : null;
-    };
-    const custom = child(phase, 'DIV', 'custom-qwen-markdown');
-    const markdown = custom && child(custom, 'DIV', 'qwen-markdown');
-    const paragraph = markdown && child(markdown, 'DIV', 'qwen-markdown-paragraph');
-    const span = paragraph && child(paragraph, 'SPAN', 'qwen-markdown-text');
-    const literal = span && child(span, 'SPAN', 'qwen-markdown-text-node');
-    if (!literal || literal.children.length !== 0) return unsupported();
+    let literal = phase;
+    for (const [stage, tag, cls] of [
+      ['custom', 'DIV', 'custom-qwen-markdown'], ['markdown', 'DIV', 'qwen-markdown'],
+      ['paragraph', 'DIV', 'qwen-markdown-paragraph'], ['span', 'SPAN', 'qwen-markdown-text'],
+      ['literal', 'SPAN', 'qwen-markdown-text-node']
+    ]) {
+      if (!c.visible(literal)) return unsupported(stage, 'parent_hidden');
+      const count = literal.children.length;
+      if (count !== 1) return unsupported(stage, 'count', count);
+      if ([...literal.childNodes].some(node => node.nodeType === 3 && !/^\s*$/.test(node.textContent || '')))
+        return unsupported(stage, 'mixed_text');
+      literal = literal.children[0];
+      if (literal.tagName !== tag) return unsupported(stage, 'tag');
+      if (!literal.classList.contains(cls)) return unsupported(stage, 'class');
+      if (!c.visible(literal)) return unsupported(stage, 'hidden');
+    }
+    const literalChildren = literal.children.length;
+    if (literalChildren !== 0) return unsupported('literal_contents', 'count', literalChildren);
     let budget = 10_000;
     const onlyAuthoredSource = node => {
       if (--budget < 0) return false;
@@ -454,7 +470,7 @@ function computaQwenDOM(c) {
       if (node.parentElement === flow && node.classList.contains('qwen-chat-thinking-tool-status-card-wraper')) return true;
       return [...node.childNodes].every(onlyAuthoredSource);
     };
-    if (!onlyAuthoredSource(flow)) return unsupported();
+    if (!onlyAuthoredSource(flow)) return unsupported('outside', budget < 0 ? 'node_limit' : 'scope');
     const text = literal.textContent;
     if (typeof text !== 'string' || new TextEncoder().encode(text).length > 220_000) c.fail('response_too_large');
     // Return the whole source even when it is invalid JSON. Monaco/fences,

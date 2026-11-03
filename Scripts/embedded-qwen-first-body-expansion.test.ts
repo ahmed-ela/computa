@@ -33,13 +33,21 @@ async function sent(model = 'Qwen3.7-Plus', outbound = prompt) {
   return { f, chunk, control, render, hash, settleID, grant, inspect };
 }
 
+async function sentWithSettledAnswer(model = 'Qwen3.7-Plus') {
+  const session = await sent(model);
+  session.settleID();
+  return session;
+}
+
 test('empty pending, exact collapsed preview, one display click, exact full proof after response ID settles', async () => {
   const { f, control, render, settleID, inspect, hash } = await sent();
   expect(await inspect()).toEqual(pending); expect(await inspect()).toEqual(pending); expect(control.clicks).toBe(0);
   f.userBody.text = preview; control.onClick = render;
+  expect(await inspect()).toEqual(pending); expect(control.clicks).toBe(0);
+  settleID(); expect(await inspect()).toEqual(pending); expect(control.clicks).toBe(0);
   expect(await inspect()).toEqual(pending); expect(control.clicks).toBe(1);
-  expect(await inspect()).toEqual(idPending); expect(f.world.__computaQwenSavedSessionV1.first).toBeNull();
-  settleID(); const result = await inspect({allowQwenFirstBodyExpansion:false}); expect(result.firstUserVerified).toBe(true); expect(result.firstUserFingerprint).toBe(hash);
+  expect(f.world.__computaQwenSavedSessionV1.first).toBeNull();
+  const result = await inspect(); expect(result.firstUserVerified).toBe(true); expect(result.firstUserFingerprint).toBe(hash);
   expect(result.answerComplete).toBe(true); expect(control.clicks).toBe(1); expect(f.send.clicks).toBe(1); expect(f.more.clicks).toBe(0);
 });
 
@@ -62,7 +70,7 @@ test('missing grants, wrong native bindings and cleanup inspection never click o
 
 test('foreign preview, unsupported length, wrong/duplicate/hidden/occluded controls remain terminal', async () => {
   for (const kind of ['different','short','long','normalized','name','label-case','extra','class','wrapper','disabled','occluded','type','form','href-form','popover','unknown-target','aria-controls','aria-expanded','nested-link','dialog','unmarked']) {
-    const { f, chunk, control, inspect } = await sent(); f.userBody.text = preview;
+    const { f, chunk, control, inspect } = await sentWithSettledAnswer(); f.userBody.text = preview;
     if (kind === 'different') f.userBody.text='?'+preview.slice(1);
     if (kind === 'short') f.userBody.text=preview.slice(1);
     if (kind === 'long') f.userBody.text=prompt.slice(0,10241);
@@ -98,8 +106,8 @@ test('empty read pins physical targets and cannot rebind on a matching preview o
     if(kind==='answer'){const p=f.answerRoot.parentElement!;f.answerRoot.detach();p.append(f.answerRoot.cloneNode(true));}
     if(kind==='model')f.modelName.text='Qwen3.8-Max';
     if(kind==='url')f.document.URL='https://chat.qwen.ai/c/'+generation;
-    if(kind==='id')f.userContainer.setAttribute('data-msg-id',generation);
-    if(kind==='empty-after-id'){settleID(); f.userBody.text=''; expect(await inspect()).toEqual(pending); f.answer.setAttribute('id','chat-response-message-');}
+    if(kind==='id'){settleID(); expect(await inspect()).toEqual(pending); f.userContainer.setAttribute('data-msg-id',generation);}
+    if(kind==='empty-after-id'){settleID(); expect(await inspect()).toEqual(pending); f.userBody.text=''; f.answer.setAttribute('id','chat-response-message-');}
     const r=kind==='not-inspect'?await f.run('stop',grant):await inspect(kind==='consumed-grant'?{allowQwenFirstBodyExpansion:false}:{});
     expect(r.error,kind).toBeDefined();expect(control.clicks).toBe(0);expect(f.send.clicks).toBe(1);
   }
@@ -131,7 +139,7 @@ test('ordinary complete first body uses existing strict ownership without a disp
 
 
 test('after the expanded transition, returning to collapsed preview cannot resume the display claim', async () => {
-  const { f, chunk, control, inspect } = await sent(); f.userBody.text=preview;
+  const { f, chunk, control, inspect } = await sentWithSettledAnswer(); f.userBody.text=preview;
   expect(await inspect()).toEqual(pending);
   chunk.setAttribute('class',chunkClass); control.setAttribute('aria-label','Collapse');
   expect(await inspect()).toEqual(pending);
@@ -148,8 +156,8 @@ test('Max must match its own previously selected model and receives the same str
   expect(complete.firstUserFingerprint).toBe(hash); expect(control.clicks).toBe(1);
 });
 
-test('late UUID cannot change during the final digest after completed display handed off to ID-only waiting', async () => {
-  const { f, control, render, settleID, inspect } = await sent(); f.userBody.text = preview; control.onClick=render;
+test('a choice outside the exact deferral allowlist retains its strict ID-only digest gate', async () => {
+  const { f, control, render, settleID, inspect } = await sent('Qwen3.8-Omni-Flash'); f.userBody.text = preview; control.onClick=render;
   expect(await inspect()).toEqual(pending); expect(await inspect()).toEqual(idPending); settleID();
   f.beforeDigest(()=>f.answer.setAttribute('id','chat-response-message-'+generation));
   const failed=await inspect({allowQwenFirstBodyExpansion:false});
@@ -179,7 +187,7 @@ test('a connected replacement, open picker or changed label still fails before a
 });
 
 test('a remount during the single expansion is identified after click and never repeats it', async () => {
-  const { f, control, render, inspect } = await sent();
+  const { f, control, render, inspect } = await sentWithSettledAnswer();
   f.userBody.text=preview; control.onClick=()=>{render();remountPicker(f,true);};
   expect(await inspect()).toEqual(pending);
   const r=await inspect(); expect(r.qwenSelectionBinding).toBe('display_after_click/trigger_detached');
@@ -196,11 +204,10 @@ test('model changed after digest is distinguished from the earlier display obser
 });
 
 test('only the first exact expanded body commits its detached-picker replacement', async () => {
-  for (const firstRead of ['empty', 'preview', 'before-remount']) {
+  for (const firstRead of ['empty', 'preview']) {
     const label = firstRead === 'preview' ? 'Qwen3.8-Max' : 'Qwen3.7-Plus';
     const { f, control, render, settleID, inspect, hash } = await sent(label);
     const state = f.world.__computaQwenSavedSessionV1, pickerClicks = f.trigger.clicks;
-    if (firstRead === 'before-remount') expect(await inspect()).toEqual(pending);
     const replacement = remountPicker(f, true);
     if (firstRead === 'empty') {
       expect(await inspect()).toEqual(pending);
@@ -208,14 +215,11 @@ test('only the first exact expanded body commits its detached-picker replacement
     }
     f.userBody.text = preview; control.onClick = render;
     expect(await inspect()).toEqual(pending);
-    if (label === 'Qwen3.8-Max') {
-      expect(control.clicks).toBe(0); settleID(); expect(await inspect()).toEqual(pending);
-      expect(control.clicks).toBe(0); expect(await inspect()).toEqual(pending);
-    } else expect(await inspect()).toEqual(idPending);
+    expect(control.clicks).toBe(0); settleID(); expect(await inspect()).toEqual(pending);
+    expect(control.clicks).toBe(0); expect(await inspect()).toEqual(pending);
     expect(state.model.trigger).toBe(f.trigger); expect(state.first).toBeNull();
-    if (label !== 'Qwen3.8-Max') settleID();
     f.beforeDigest(() => { expect(state.model.trigger).toBe(f.trigger); expect(state.first).toBeNull(); });
-    const result = await inspect({ allowQwenFirstBodyExpansion: label === 'Qwen3.8-Max' });
+    const result = await inspect();
     expect(result).toMatchObject({ firstUserVerified: true, firstUserFingerprint: hash,
       modelEvidence: { selected: choice(label) }, answerComplete: true });
     expect(state.model.trigger).toBe(replacement);
@@ -263,7 +267,7 @@ test('a detached picker alone cannot authorize any first-body, selection or dele
 test('the same replacement and message must survive every wait and both digest boundaries', async () => {
   for (const kind of ['empty-replacement', 'original-returns', 'label-node', 'wrong-tail', 'response-id-digest', 'full-digest',
     'digest-label', 'digest-body', 'digest-owner', 'digest-url', 'cleanup-while-held']) {
-    const { f, control, render, inspect, settleID } = await sent();
+    const { f, control, render, inspect, settleID } = await sent(kind === 'response-id-digest' ? 'Qwen3.8-Omni-Flash' : 'Qwen3.7-Plus');
     const replacement = remountPicker(f, true);
     const remount = () => { replacement.detach(); remountPicker(f, true); };
     expect(await inspect()).toEqual(pending);
@@ -272,11 +276,13 @@ test('the same replacement and message must survive every wait and both digest b
     if (kind === 'empty-replacement') remount();
     else {
       control.onClick = render;
+      if (kind !== 'response-id-digest') {
+        settleID(); expect(await inspect()).toEqual(pending); expect(control.clicks).toBe(0);
+      }
       expect(await inspect()).toEqual(pending);
       if (kind === 'original-returns') { f.trigger.setAttribute('hidden', ''); f.body.append(f.trigger); }
       if (kind === 'label-node') { const name = replacement.children[0] as typeof f.modelName; name.detach(); replacement.append(new f.Node('DIV', { ...name.values }, name.text)); }
       if (kind === 'wrong-tail') f.userBody.text = prompt.slice(0, -1) + '!';
-      if (kind !== 'response-id-digest') settleID();
       if (kind === 'response-id-digest' || kind === 'full-digest') f.beforeDigest(remount);
       if (kind === 'digest-label') f.beforeDigest(() => { replacement.children[0].text = 'Qwen3.8-Max'; });
       if (kind === 'digest-body') f.beforeDigest(() => { f.userBody.text += '!'; });
@@ -306,7 +312,7 @@ test('a short exact first body cannot authorize a detached picker even with both
 
 test('Qwen display failures report the original hit decision with no repeated geometry check or action', async () => {
   for (const which of [1, 2]) for (const reason of ['outside_viewport', 'invalid_geometry', 'occluded']) {
-    const {f, control, inspect} = await sent();
+    const {f, control, inspect} = await sentWithSettledAnswer();
     f.userBody.text = preview;
     let checks = 0;
     const rect = control.getBoundingClientRect.bind(control);
@@ -356,7 +362,7 @@ test('Qwen rejects replaced display pins and invalid first preview with only fin
 test('a clipped Qwen display button needs the same exposed point before its sole click', async () => {
   for (const model of ['Qwen3.7-Plus', 'Qwen3.8-Max']) {
     const { f, control, inspect, render, settleID, hash } = await sent(model);
-    if (model === 'Qwen3.8-Max') settleID();
+    settleID();
     const icon = new f.Node('SPAN');
     control.append(icon); control.onClick = render; f.userBody.text = preview;
     control.getBoundingClientRect = () => ({ left: -70, top: 70, width: 100, height: 32 });
@@ -371,8 +377,7 @@ test('a clipped Qwen display button needs the same exposed point before its sole
     expect(await inspect()).toEqual(pending);
     expect(points).toEqual([[15,86], [3.75,86], [3.75,86]]);
     expect(control.clicks).toBe(1);
-    if (model !== 'Qwen3.8-Max') { expect(await inspect()).toEqual(idPending); settleID(); }
-    const verified = await inspect({allowQwenFirstBodyExpansion:model === 'Qwen3.8-Max'});
+    const verified = await inspect();
     expect(verified.firstUserFingerprint).toBe(hash);
     expect(verified.answerComplete).toBe(true); expect(f.send.clicks).toBe(1);
   }
@@ -380,7 +385,7 @@ test('a clipped Qwen display button needs the same exposed point before its sole
 
 test('Qwen refuses full coverage, a lost hit point, a moved target, and nested interactive hits', async () => {
   for (const kind of ['foreign', 'no_hit', 'covered_after', 'moved', 'nested_role', 'replaced']) {
-    const { f, chunk, control, inspect } = await sent();
+    const { f, chunk, control, inspect } = await sentWithSettledAnswer();
     const foreign = new f.Node('A', {href: '/foreign'}); f.document.body.append(foreign);
     const child = new f.Node('SPAN', {role:'button'}); control.append(child);
     let measurements = 0;
@@ -422,7 +427,7 @@ test('one normal scroll can reveal only the exact pinned preview control', async
   for (const model of ['Qwen3.7-Plus', 'Qwen3.8-Max']) {
     for (const before of ['occluded', 'outside_viewport']) {
       const {f, control, render, inspect, hash, settleID} = await sent(model);
-      if (model === 'Qwen3.8-Max') settleID();
+      settleID();
       f.userBody.text = preview; control.onClick = render;
       let scrolls = 0;
       const original = f.document.elementFromPoint;
@@ -440,8 +445,7 @@ test('one normal scroll can reveal only the exact pinned preview control', async
       expect(await inspect()).toEqual(pending);
       expect(points.slice(-2)).toEqual([[70,116],[70,116]]);
       expect(scrolls).toBe(1); expect(control.clicks).toBe(1);
-      if (model !== 'Qwen3.8-Max') { expect(await inspect()).toEqual(idPending); settleID(); }
-      const result = await inspect({allowQwenFirstBodyExpansion:model === 'Qwen3.8-Max'});
+        const result = await inspect();
       expect(result.firstUserVerified).toBe(true); expect(result.firstUserFingerprint).toBe(hash);
       expect(result.answerComplete).toBe(true); expect(f.send.clicks).toBe(1);
       expect(scrolls).toBe(1); expect(control.clicks).toBe(1);
@@ -451,7 +455,7 @@ test('one normal scroll can reveal only the exact pinned preview control', async
 
 test('scroll-induced changes and persistent occlusion cannot dispatch a display click', async () => {
   for (const kind of ['ancestor','unrelated','none','descendant','mixed','scroll_failed','covered_again','control_changed','preview_changed','model','route','composer_changed']) {
-    const {f, chunk, control, inspect} = await sent();
+    const {f, chunk, control, inspect} = await sentWithSettledAnswer();
     f.userBody.text = preview;
     const foreign = new f.Node('A', {href:'/other'}); f.document.body.append(foreign);
     const nestedRole = new f.Node('SPAN', {role:'link'}); control.append(nestedRole);
@@ -504,7 +508,7 @@ test('scroll-induced changes and persistent occlusion cannot dispatch a display 
 
 test('no scroll is attempted for an ineligible view or foreign preview', async () => {
   for (const kind of ['disabled','invalid_geometry','wrong_preview','cleanup']) {
-    const {f, control, inspect} = await sent();
+    const {f, control, inspect} = await sentWithSettledAnswer();
     let scrolls = 0;
     Object.assign(control, {scrollIntoView() { scrolls++; }});
     f.userBody.text = kind === 'wrong_preview' ? 'x' + preview.slice(1) : preview;
@@ -516,7 +520,7 @@ test('no scroll is attempted for an ineligible view or foreign preview', async (
 });
 
 async function renderSettlement(model = 'Qwen3.7-Plus') {
-  const session = await sent(model);
+  const session = await sentWithSettledAnswer(model);
   const {f, control, render} = session;
   const foreign = new f.Node('A',{href:'#foreign'});
   f.body.append(foreign); f.userBody.text = preview; control.onClick = render;
@@ -552,8 +556,7 @@ async function renderSettlement(model = 'Qwen3.7-Plus') {
 
 test('one post-scroll render wakes a fresh granted read before a single revalidated display click', async () => {
   for (const model of ['Qwen3.7-Plus','Qwen3.8-Max']) {
-    const {f,control,inspect,hash,settleID,observed,frames,timers,editorEvents,frame} = await renderSettlement(model);
-    if (model === 'Qwen3.8-Max') settleID();
+    const {f,control,inspect,hash,observed,frames,timers,editorEvents,frame} = await renderSettlement(model);
     expect(await inspect()).toEqual(pending);
     expect([observed.scrolls,observed.points,control.clicks,frames.size]).toEqual([1,18,0,1]);
     observed.exposed = true;
@@ -565,8 +568,7 @@ test('one post-scroll render wakes a fresh granted read before a single revalida
     expect([observed.points,control.clicks]).toEqual([18,0]);
     expect(await inspect()).toEqual(pending);
     expect([observed.scrolls,observed.points,control.clicks,frames.size,timers.size,editorEvents.size]).toEqual([1,20,1,0,0,0]);
-    if (model !== 'Qwen3.8-Max') { expect(await inspect()).toEqual(idPending); settleID(); }
-    const result = await inspect({allowQwenFirstBodyExpansion:model === 'Qwen3.8-Max'});
+    const result = await inspect();
     expect(result.firstUserVerified).toBe(true); expect(result.firstUserFingerprint).toBe(hash);
     expect(result.answerComplete).toBe(true); expect(f.send.clicks).toBe(1);
   }
@@ -638,10 +640,10 @@ test('only terminal unrelated hits describe the actual final grid or same-point 
 test('the render grant cannot bridge a changed selection, message, ID, route, composer or native grant', async () => {
   for (const fault of ['user_id','answer_id','preview','empty','body','control','answer','model','picker','editor',
     'typed','route','grant','restore_input','restore_node','restore_label','restore_id','navigate']) {
-    const {f,control,chunk,settleID,inspect,observed,frame,frames,timers,editorEvents,windowEvents} = await renderSettlement();
+    const {f,control,chunk,inspect,observed,frame,frames,timers,editorEvents,windowEvents} = await renderSettlement();
     expect(await inspect()).toEqual(pending); observed.exposed = true;
     if (fault === 'user_id') f.userContainer.setAttribute('data-msg-id', answerID);
-    if (fault === 'answer_id') settleID();
+    if (fault === 'answer_id') f.answer.setAttribute('id','chat-response-message-'+generation);
     if (fault === 'preview') f.userBody.text = 'X'+preview.slice(1);
     if (fault === 'empty') f.userBody.text = '';
     if (fault === 'body') { const next = new f.Node('P', {...f.userBody.values},preview); f.userBody.detach(); chunk.append(next); }
@@ -691,9 +693,9 @@ test('a hidden view can settle only on removal of an actual blocker, with an ind
   }
 });
 
-test('completed display UUID changes stay terminal even when every other user pin and the full prompt match', async () => {
+test('on the unlisted choice, completed display UUID changes stay terminal with exact physical pins and full prompt', async () => {
   for (const shape of ['case_only','different_uuid','reply_settled','body_changed','pin_changed','recollapsed','during_digest']) {
-    const {f, control, chunk, render, settleID, inspect} = await sent('Qwen3.7-Plus');
+    const {f, control, chunk, render, settleID, inspect} = await sent('Qwen3.8-Omni-Flash');
     f.userBody.text = preview; control.onClick = render; expect(await inspect()).toEqual(pending);
     const old = f.userContainer.getAttribute('data-msg-id')!;
     const changed = shape === 'case_only' ? old.toUpperCase() : 'eb61e1c6-f2a0-4b7e-b356-3d3aaa1af374';
@@ -739,9 +741,9 @@ test('stable answer UUID and unchanged full bytes cannot legitimize a changed us
   expect(result.firstUserVerified).toBeUndefined();expect(result.text).toBeUndefined();expect(control.clicks).toBe(1);expect(f.send.clicks).toBe(1);
 });
 
-test('Max first binds a real UUID pair after its optimistic long preview, before one display action', async () => {
+for (const model of ['Qwen3.7-Plus', 'Qwen3.8-Max']) test(model + ' waits for the first real pair before expanding or binding a long preview', async () => {
   for (const transition of ['stable','new_user_and_answer','case_only','remounted_picker']) {
-    const { f, control, render, inspect, hash, settleID } = await sent('Qwen3.8-Max');
+    const { f, control, render, inspect, hash, settleID } = await sent(model);
     const state = f.world.__computaQwenSavedSessionV1;
     if (transition === 'remounted_picker') remountPicker(f, true);
     expect(await inspect()).toEqual(pending);
@@ -759,15 +761,15 @@ test('Max first binds a real UUID pair after its optimistic long preview, before
     expect(await inspect()).toEqual(pending); expect(control.clicks).toBe(1);
     const result=await inspect();
     expect(result).toMatchObject({firstUserVerified:true,firstUserFingerprint:hash,answerComplete:true,
-      modelEvidence:{selected:choice('Qwen3.8-Max')}});
+      modelEvidence:{selected:choice(model)}});
     expect(state.first.id).toBe(stable); expect(f.send.clicks).toBe(1); expect(f.more.clicks).toBe(0);
   }
 });
 
-test('Max optimistic preview cannot bridge foreign nodes, text, choices, routes, grants, or actions', async () => {
+for (const model of ['Qwen3.7-Plus', 'Qwen3.8-Max']) test(model + ' optimistic preview cannot bridge foreign nodes, text, choices, routes, grants, or actions', async () => {
   for (const fault of ['body','answer','control','preview','empty','wrong_length','external_expand','change_choice','remount_picker','composer',
     'editor','double_user','route','user_not_uuid','same_user_answer','missing_grant','marker','hash','cleanup','delete','cancel']) {
-    const { f, chunk, control, render, inspect, settleID } = await sent('Qwen3.8-Max');
+    const { f, chunk, control, render, inspect, settleID } = await sent(model);
     f.userBody.text=preview; control.onClick=render;
     expect(await inspect()).toEqual(pending);
     if (fault === 'body') { const fresh=new f.Node('P',{...f.userBody.values},preview); f.userBody.detach();chunk.children.unshift(fresh);fresh.parentElement=chunk; }
@@ -777,7 +779,7 @@ test('Max optimistic preview cannot bridge foreign nodes, text, choices, routes,
     if (fault === 'empty') f.userBody.text='';
     if (fault === 'wrong_length') f.userBody.text=preview.slice(0,-1);
     if (fault === 'external_expand') render();
-    if (fault === 'change_choice') f.modelName.text='Qwen3.7-Plus';
+    if (fault === 'change_choice') f.modelName.text=model==='Qwen3.7-Plus'?'Qwen3.8-Max':'Qwen3.7-Plus';
     if (fault === 'remount_picker') remountPicker(f,true);
     if (fault === 'composer') f.editor.value='foreign draft';
     if (fault === 'editor') { const e=new (f.editor.constructor as any)('TEXTAREA',{...f.editor.values}); f.editor.detach(); f.scope.append(e); }
@@ -794,9 +796,9 @@ test('Max optimistic preview cannot bridge foreign nodes, text, choices, routes,
   }
 });
 
-test('Max refuses any UUID disagreement after first genuine pair, including a changed ID during the final digest', async () => {
+for (const model of ['Qwen3.7-Plus', 'Qwen3.8-Max']) test(model + ' refuses any UUID disagreement after its first genuine pair, including during the final digest', async () => {
   for (const phase of ['pair','answer','expanded','digest']) {
-    const {f, control, render, inspect, settleID} = await sent('Qwen3.8-Max');
+    const {f, control, render, inspect, settleID} = await sent(model);
     f.userBody.text=preview; control.onClick=render; expect(await inspect()).toEqual(pending);
     settleID(); expect(await inspect()).toEqual(pending);
     const changeUser=()=>f.userContainer.setAttribute('data-msg-id','494d93fb-ad37-43ab-868d-5dade1cdc4b1');

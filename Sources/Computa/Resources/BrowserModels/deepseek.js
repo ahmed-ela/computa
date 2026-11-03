@@ -459,14 +459,14 @@ async function computaSavedConversation(input, c, dom, config) {
       if (!held && !preview && (text !== '' || !t.pendingAnswer)) {
         reject(text === '' ? 'initial_empty_no_pending_answer' : text.length === previewLength ? 'initial_prefix_mismatch' : 'initial_length_mismatch');
       }
-      // On Max, the user UUID displayed beside an empty answer ID may belong
+      // On these Qwen choices, the user UUID beside an empty answer ID may belong
       // only to the optimistic rendering. Keep the original physical turn, but
       // acquire neither message identity nor expansion authority in that phase.
       const witnessControls = optimistic || held?.settledPair;
       if (witnessControls && (form.editor !== witnessControls.editor || form.scope !== witnessControls.scope
         || state.inserted !== witnessControls.inserted || state.send !== witnessControls.send || state.model !== witnessControls.model))
         reject('composer_not_ready');
-      if (!held && (optimistic || t.pendingAnswer && c.equalChoice(state.model.choice, config.deferDisplayUntilAnswer))) {
+      if (!held && (optimistic || t.pendingAnswer && config.deferDisplayUntilAnswer?.some(choice => c.equalChoice(state.model.choice, choice)))) {
         const witness = optimistic || (state.firstDisplayWitness = { pins:view.pins, canonical:route.canonical,
           editor:form.editor, scope:form.scope, inserted:state.inserted, send:state.send, model:state.model });
         if (witness.sawPreview && !preview) reject('preview_prefix_mismatch');
@@ -569,9 +569,13 @@ async function computaSavedConversation(input, c, dom, config) {
       if (terminalUI && extracted.formatIssue && !cleanupInspection && !deletionActions.includes(input.action)) {
         try { c.fail('unsupported_response_format', 'authored_source'); }
         catch (error) {
-          if (input.action === 'inspect' && config.stateKey === '__computaDeepSeekSavedSessionV1' && error?.computaAdapterFailure
-            && typeof extracted.failureStructure === 'function') {
-            try { const packet = extracted.failureStructure(); if (packet) error.adapterFailureStructure = packet; } catch { /* Preserve the original refusal. */ }
+          if (input.action === 'inspect' && error?.computaAdapterFailure && typeof extracted.failureStructure === 'function') {
+            try {
+              const max = config.stateKey === '__computaQwenSavedSessionV1'
+                && c.equalChoice(evidence.selected, { key: 'Qwen3.8-Max', label: 'Qwen3.8-Max' });
+              if (max || config.stateKey === '__computaDeepSeekSavedSessionV1')
+                error.adapterFailureStructure = extracted.failureStructure();
+            } catch { /* Preserve the original refusal. */ }
           }
           throw error;
         }
@@ -942,7 +946,8 @@ async function computaSavedConversation(input, c, dom, config) {
     return error?.computaAdapterFailure ? { error: error.error, ...(error.detail ? { detail: error.detail } : {}),
       ...(error.adapterFailureStructure && (config.stateKey === '__computaQwenSavedSessionV1'
         && error.error === 'conversation_changed' && error.detail === 'first_user_message'
-        || config.stateKey === '__computaDeepSeekSavedSessionV1' && error.error === 'unsupported_response_format' && error.detail === 'authored_source')
+        || ['__computaQwenSavedSessionV1', '__computaDeepSeekSavedSessionV1'].includes(config.stateKey)
+          && error.error === 'unsupported_response_format' && error.detail === 'authored_source')
         ? { adapterFailureStructure: error.adapterFailureStructure } : {}),
       ...(config.selectionKind === 'mode' && error.error === 'conversation_changed' && error.detail === 'first_container_children'
         && error.firstContainerDiagnostic ? { firstContainerDiagnostic: error.firstContainerDiagnostic } : {}),

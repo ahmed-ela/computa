@@ -459,14 +459,14 @@ async function computaSavedConversation(input, c, dom, config) {
       if (!held && !preview && (text !== '' || !t.pendingAnswer)) {
         reject(text === '' ? 'initial_empty_no_pending_answer' : text.length === previewLength ? 'initial_prefix_mismatch' : 'initial_length_mismatch');
       }
-      // On Max, the user UUID displayed beside an empty answer ID may belong
+      // On these Qwen choices, the user UUID beside an empty answer ID may belong
       // only to the optimistic rendering. Keep the original physical turn, but
       // acquire neither message identity nor expansion authority in that phase.
       const witnessControls = optimistic || held?.settledPair;
       if (witnessControls && (form.editor !== witnessControls.editor || form.scope !== witnessControls.scope
         || state.inserted !== witnessControls.inserted || state.send !== witnessControls.send || state.model !== witnessControls.model))
         reject('composer_not_ready');
-      if (!held && (optimistic || t.pendingAnswer && c.equalChoice(state.model.choice, config.deferDisplayUntilAnswer))) {
+      if (!held && (optimistic || t.pendingAnswer && config.deferDisplayUntilAnswer?.some(choice => c.equalChoice(state.model.choice, choice)))) {
         const witness = optimistic || (state.firstDisplayWitness = { pins:view.pins, canonical:route.canonical,
           editor:form.editor, scope:form.scope, inserted:state.inserted, send:state.send, model:state.model });
         if (witness.sawPreview && !preview) reject('preview_prefix_mismatch');
@@ -569,9 +569,13 @@ async function computaSavedConversation(input, c, dom, config) {
       if (terminalUI && extracted.formatIssue && !cleanupInspection && !deletionActions.includes(input.action)) {
         try { c.fail('unsupported_response_format', 'authored_source'); }
         catch (error) {
-          if (input.action === 'inspect' && config.stateKey === '__computaDeepSeekSavedSessionV1' && error?.computaAdapterFailure
-            && typeof extracted.failureStructure === 'function') {
-            try { const packet = extracted.failureStructure(); if (packet) error.adapterFailureStructure = packet; } catch { /* Preserve the original refusal. */ }
+          if (input.action === 'inspect' && error?.computaAdapterFailure && typeof extracted.failureStructure === 'function') {
+            try {
+              const max = config.stateKey === '__computaQwenSavedSessionV1'
+                && c.equalChoice(evidence.selected, { key: 'Qwen3.8-Max', label: 'Qwen3.8-Max' });
+              if (max || config.stateKey === '__computaDeepSeekSavedSessionV1')
+                error.adapterFailureStructure = extracted.failureStructure();
+            } catch { /* Preserve the original refusal. */ }
           }
           throw error;
         }
@@ -942,7 +946,8 @@ async function computaSavedConversation(input, c, dom, config) {
     return error?.computaAdapterFailure ? { error: error.error, ...(error.detail ? { detail: error.detail } : {}),
       ...(error.adapterFailureStructure && (config.stateKey === '__computaQwenSavedSessionV1'
         && error.error === 'conversation_changed' && error.detail === 'first_user_message'
-        || config.stateKey === '__computaDeepSeekSavedSessionV1' && error.error === 'unsupported_response_format' && error.detail === 'authored_source')
+        || ['__computaQwenSavedSessionV1', '__computaDeepSeekSavedSessionV1'].includes(config.stateKey)
+          && error.error === 'unsupported_response_format' && error.detail === 'authored_source')
         ? { adapterFailureStructure: error.adapterFailureStructure } : {}),
       ...(config.selectionKind === 'mode' && error.error === 'conversation_changed' && error.detail === 'first_container_children'
         && error.firstContainerDiagnostic ? { firstContainerDiagnostic: error.firstContainerDiagnostic } : {}),
@@ -1389,24 +1394,40 @@ function computaQwenDOM(c) {
     if (!answer) return { text: '', finalMarkup: false, formatIssue: false };
     const flows = c.nodes(answer.content, '.chat-response-message-render-flow');
     if (!flows.length) return { text: '', finalMarkup: false, formatIssue: false };
-    const unsupported = () => ({ text: '', finalMarkup: false, formatIssue: true });
-    if (flows.length !== 1 || !c.visible(flows[0])) return unsupported();
+    // Capture the first ordinary rejection without another DOM read. Only the
+    // owned terminal Max inspect can request this finite diagnostic.
+    const unsupported = (stage, reason, count = 0) => {
+      const result = { text: '', finalMarkup: false, formatIssue: true };
+      Object.defineProperty(result, 'failureStructure', { value: () => ({
+        version: 1, provider: 'qwen', trigger: 'authored_source', stage, reason, count: Math.min(count, 2)
+      }) });
+      return result;
+    };
+    if (flows.length !== 1) return unsupported('flow', 'count', flows.length);
+    if (!c.visible(flows[0])) return unsupported('flow', 'hidden');
     const flow = flows[0], phases = c.nodes(flow, '.response-message-content.phase-answer');
     if (!phases.length) return { text: '', finalMarkup: false, formatIssue: false };
-    if (phases.length !== 1 || !phases[0].classList.contains('t2t')) return unsupported();
+    if (phases.length !== 1) return unsupported('phase', 'count', phases.length);
+    if (!phases[0].classList.contains('t2t')) return unsupported('phase', 'class');
     const phase = phases[0];
-    const child = (parent, tag, cls) => {
-      if (!c.visible(parent) || parent.children.length !== 1
-        || [...parent.childNodes].some(node => node.nodeType === 3 && !/^\s*$/.test(node.textContent || ''))) return null;
-      const node = parent.children[0];
-      return node.tagName === tag && node.classList.contains(cls) && c.visible(node) ? node : null;
-    };
-    const custom = child(phase, 'DIV', 'custom-qwen-markdown');
-    const markdown = custom && child(custom, 'DIV', 'qwen-markdown');
-    const paragraph = markdown && child(markdown, 'DIV', 'qwen-markdown-paragraph');
-    const span = paragraph && child(paragraph, 'SPAN', 'qwen-markdown-text');
-    const literal = span && child(span, 'SPAN', 'qwen-markdown-text-node');
-    if (!literal || literal.children.length !== 0) return unsupported();
+    let literal = phase;
+    for (const [stage, tag, cls] of [
+      ['custom', 'DIV', 'custom-qwen-markdown'], ['markdown', 'DIV', 'qwen-markdown'],
+      ['paragraph', 'DIV', 'qwen-markdown-paragraph'], ['span', 'SPAN', 'qwen-markdown-text'],
+      ['literal', 'SPAN', 'qwen-markdown-text-node']
+    ]) {
+      if (!c.visible(literal)) return unsupported(stage, 'parent_hidden');
+      const count = literal.children.length;
+      if (count !== 1) return unsupported(stage, 'count', count);
+      if ([...literal.childNodes].some(node => node.nodeType === 3 && !/^\s*$/.test(node.textContent || '')))
+        return unsupported(stage, 'mixed_text');
+      literal = literal.children[0];
+      if (literal.tagName !== tag) return unsupported(stage, 'tag');
+      if (!literal.classList.contains(cls)) return unsupported(stage, 'class');
+      if (!c.visible(literal)) return unsupported(stage, 'hidden');
+    }
+    const literalChildren = literal.children.length;
+    if (literalChildren !== 0) return unsupported('literal_contents', 'count', literalChildren);
     let budget = 10_000;
     const onlyAuthoredSource = node => {
       if (--budget < 0) return false;
@@ -1418,7 +1439,7 @@ function computaQwenDOM(c) {
       if (node.parentElement === flow && node.classList.contains('qwen-chat-thinking-tool-status-card-wraper')) return true;
       return [...node.childNodes].every(onlyAuthoredSource);
     };
-    if (!onlyAuthoredSource(flow)) return unsupported();
+    if (!onlyAuthoredSource(flow)) return unsupported('outside', budget < 0 ? 'node_limit' : 'scope');
     const text = literal.textContent;
     if (typeof text !== 'string' || new TextEncoder().encode(text).length > 220_000) c.fail('response_too_large');
     // Return the whole source even when it is invalid JSON. Monaco/fences,
@@ -1498,7 +1519,7 @@ try {
   const c = computaProviderCore(input, 'qwen', 'https://chat.qwen.ai', actions);
   return await computaSavedConversation(input, c, computaQwenDOM(c), {
     stateKey: '__computaQwenSavedSessionV1', origin: 'https://chat.qwen.ai', initialProvisionalRoute: true, initialResponseIdentity: true,
-    deferDisplayUntilAnswer: { key: 'Qwen3.8-Max', label: 'Qwen3.8-Max' }
+    deferDisplayUntilAnswer: ['Qwen3.7-Plus', 'Qwen3.8-Max'].map(label => ({ key: label, label }))
   });
 } catch (error) {
   return error?.computaAdapterFailure ? { error: error.error, ...(error.detail ? { detail: error.detail } : {}) }

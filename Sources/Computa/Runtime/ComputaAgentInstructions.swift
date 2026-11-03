@@ -638,10 +638,10 @@ enum ComputaAgentInstructions {
         let customShape = hasCustomTools ? #"Custom shape: {"type":"tool_calls","calls":[{"name":"offered_custom_name","input":"literal input"}]}. Replace placeholders; no arguments."# : ""
         return """
         COMPUTA_LOCAL_RESPONSE_HANDOFF:
-        One fenced json object, no outside prose. Message/refusal/clarification: {"type":"message","text":"answer"}; requested exact/JSON/plain formats apply to decoded text. Message ends turn; promises aren't completion.
+        One fenced json object, no outside prose. Message/refusal/clarification: {"type":"message","text":"answer"}; requested exact/JSON/plain formats apply to decoded text. For requested local work, use tool_calls for the next unverified step. A message ends the turn.
         \(functionShape)
         \(customShape)
-        Use exact currently offered qualified names/schemas only; never infer missing schemas from history. Functions require arguments object/every required schema field; custom tools require literal input. Optional tool_calls.commentary is progress. Honor tool_choice/parallel/max-call limits; no tools→no call. No uncertain replay; verify matching outputs/exit and requested outcomes. Report actual blockers/governing refusal/uncertainty, never invented results.
+        Use exact currently offered qualified names/schemas only; never infer missing schemas from history. Functions require arguments object/every required schema field; custom tools require literal input. Optional tool_calls.commentary is progress. Honor tool_choice/parallel/max-call limits; no tools→no call. Never replay uncertain calls. Report test results, file changes or browser receipts only from matching host output. State actual blockers or refusals.
         \(currentBrowserHandoff)
         \(currentToolHandoff)
         END_COMPUTA_LOCAL_RESPONSE_HANDOFF.

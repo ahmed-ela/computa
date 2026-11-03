@@ -3,6 +3,31 @@ import XCTest
 @testable import Computa
 
 final class GroqToolCatalogTests: XCTestCase {
+    func testBudgetRejectionHintsUseOnlyTheExactAdmittedOfferAndCurrentPolicy() throws {
+        var catalog = GroqToolCatalog()
+        let scope = makeScope()
+        let seed = try makeSeed(allowed: [GroqToolCatalog.name, "exec_command", "foreign.patch"])
+        let initial = try catalog.prepare(scope: scope, seed: seed)
+        // First four read actions used exec; later direct-schema selection can change
+        // at identical catalog revision as the request's history fills the budget.
+        for (requested, offered, expected) in [
+            (["foreign.patch", "exec_command"], ["exec_command", "private_other"], GroqToolCatalog.Failure.budgetWithOfferedSchemas(["exec_command"])),
+            (["exec_command"], ["exec_command"], .budgetWithOfferedSchemas(["exec_command"])),
+            (["exec_command"], [], .selectionTooLarge)
+        ] {
+            var staged = catalog
+            let load = try staged.previewLoad(scope: scope, arguments: args(initial, requested), lastOfferedNames: Set(offered))
+            XCTAssertEqual(load.budgetFailure, expected)
+            XCTAssertFalse(load.budgetFailure.localizedDescription.contains("private_other"))
+            XCTAssertEqual(try catalog.prepare(scope: scope, seed: seed), initial)
+        }
+        for names in [["exec_command", "browser_tabs"], ["exec_command", "private_other"]] {
+            XCTAssertThrowsError(try catalog.previewLoad(scope: scope, arguments: args(initial,names), lastOfferedNames: Set(names))) { error in
+                guard case .unavailableSelection = error as? GroqToolCatalog.Failure else { return XCTFail("Invalid membership") }
+            }
+        }
+    }
+
     func testLoaderRecognizesOnlyExactNativeDeclarationAndNamespace() throws {
         let loader = canonicalLoader()
         XCTAssertTrue(GroqToolCatalog.isRegisteredLoader([loader]))

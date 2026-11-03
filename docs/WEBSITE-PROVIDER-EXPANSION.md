@@ -1,8 +1,9 @@
 # Kimi, Qwen and DeepSeek website adapters
 
-On installed Computa 0.8.0 (408), Alibaba Qwen3.7 Flash completed the invoice
-workflow after correcting three rejected patches. Seven other cases stopped
-early. A separate ninth task observed an HTTP 429 on a Sonnet 5.5 marker. [Installed build 408 results](#installed-build-408-2026-11-03)
+On installed build 409, ChatGPT Instant completed the invoice fixture with all
+six tests passing and a verified browser receipt. Qwen Max and Gemini Flash-Lite
+returned their exact markers and released their owned sessions.
+[Installed build 409 results](#installed-build-409-2026-11-03)
 
 ### Build 400 checkpoint (2026-11-03 UTC)
 
@@ -1090,7 +1091,34 @@ missing user row. Their HTTP responses were not captured.
   identifies eligible requested tools already offered and those requiring a
   loader call. The four-name limit still rejects the whole request.
 
-Fresh installed runs are needed to measure the effect of these changes.
+### Installed build 409 (2026-11-03)
+
+- ChatGPT Instant completed the invoice task in 67.49 seconds. Its patch passed
+  all six tests, and the task submitted the printed reference once, read the
+  receipt and closed its browser tab. All nine model sessions closed.
+- Qwen Max returned an exact marker and deleted that conversation. Its invoice
+  task rejected the authored response before executing a tool. Deletion was
+  confirmed about one second after the error. Plus stopped when the site's
+  provisional user ID changed while the same user and answer nodes remained.
+- Groq 120B loaded three tool schemas, then its site restored the submitted
+  draft and showed an error. Groq 20B reported work without a single host
+  tool call. Groq Qwen 27B read files four times, then its next request needed
+  6,073 body tokens, above the 6,000-token budget. None completed the fixture.
+- Gemini's normal tab loaded its composer and Computa cleared the previous
+  checkpoint. A fresh 3.5 Flash-Lite task returned the exact requested marker
+  and closed its owned session. Its subsequent invoice task returned tool
+  arguments that failed the JSON-object check. It ended in 10.201 seconds
+  before any host tool ran. The earlier Google challenge did not recur during
+  these two tasks.
+
+### Candidate build 410
+
+Qwen Plus uses the same initial settled-pair check as Max. A later identity
+change still stops the task. An explicitly armed Max diagnostic can record
+which authored-response check failed and a bounded count. Kimi's handoff asks
+for one JSON block with its explanation inside the message. For Groq, repeated
+loader history can reference earlier identical fields if a full request exceeds
+the token budget. The full canonical history and budget still govern dispatch.
 
 ## Remaining gates
 

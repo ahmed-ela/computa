@@ -269,12 +269,18 @@ enum WebModelResponseCodec {
     /// Direct tools are an inference-local presentation over that selection.
     static func prepareBudgetedGroqRequest(_ data: Data, availability: EmbeddedBrowserToolAvailability?,
                                            projection: GroqToolCatalog.Projection, model: String) throws -> (request: Request, units: Int) {
-        let choices: [GroqDirectToolSet] = groqPromptBudgetUsesExactTokenizer(model: model)
+        let exact = groqPromptBudgetUsesExactTokenizer(model: model)
+        let choices: [GroqDirectToolSet] = exact
             ? [.standard, .essential, .loadedOnly] : [.loadedOnly]
-        for choice in choices {
+        // Keep every previously admissible rendering. Only the final exact-token
+        // fallback may show byte-identical historical loader fields by reference.
+        let attempts = choices.map { ($0, false) } + (exact ? [(.loadedOnly, true)] : [])
+        var fullHistoryFailure: Failure?
+        for (index, attempt) in attempts.enumerated() {
+            let (choice, compactHistory) = attempt
             do {
                 let request = try prepareRequest(data, browserToolAvailability: availability,
-                    groqToolCatalogProjection: projection, groqDirectTools: choice)
+                    groqToolCatalogProjection: projection, groqDirectTools: choice, compactGroqLoaderHistory: compactHistory)
                 guard request.model == model,
                       let units = try validateGroqPromptBudget(model: model, prompt: request.prompt) else {
                     throw Failure.invalidTools
@@ -283,7 +289,9 @@ enum WebModelResponseCodec {
             } catch let failure as Failure {
                 switch failure {
                 case .promptTooLarge, .groqPromptBudgetExceeded:
-                    if choice == .loadedOnly { throw failure }
+                    if compactHistory { throw fullHistoryFailure ?? failure }
+                    if choice == .loadedOnly { fullHistoryFailure = failure }
+                    if index == attempts.count - 1 { throw failure }
                 default: throw failure
                 }
             }
@@ -294,7 +302,8 @@ enum WebModelResponseCodec {
     static func prepareRequest(_ data: Data,
                                browserToolAvailability: EmbeddedBrowserToolAvailability? = nil,
                                groqToolCatalogProjection: GroqToolCatalog.Projection? = nil,
-                               groqDirectTools: GroqDirectToolSet = .loadedOnly) throws -> Request {
+                               groqDirectTools: GroqDirectToolSet = .loadedOnly,
+                               compactGroqLoaderHistory: Bool = false) throws -> Request {
         // Reject before expanding a large JSON body into prompt storage.
         guard data.count <= maximumPromptBytes else {
             throw Failure.promptTooLarge(actualBytes: data.count, maximumBytes: maximumPromptBytes)
@@ -311,9 +320,10 @@ enum WebModelResponseCodec {
         let isChatGPT = provider == "chatgpt", isClaude = provider == "claude", isGroq = provider == "groq"
         // DeepSeek's JSON code block preserves the literal PRE text, including
         // backslashes in patch inputs. Its ordinary paragraph renders Markdown.
+        // Kimi also requires all authored content to be inside its single JSON block.
         let responseFormat: ComputaAgentInstructions.WebResponseFormat = switch provider {
         case "qwen": .rawJSON
-        case "claude", "deepseek": .literalFencedJSON
+        case "claude", "deepseek", "kimi": .literalFencedJSON
         default: .fencedJSON
         }
         guard object["input"] is String || object["input"] is [Any] else {
@@ -460,8 +470,9 @@ enum WebModelResponseCodec {
         let fullDisplaySource = toolDefinitionsChanged
             ? String(decoding: try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
             : originalJSON
+        var usesLoaderReferences = false
         let taskDisplaySource = try displayProjection.map {
-            try groqTrustedNativeProjection(originalJSON, object: object, schemas: $0.displaySchemas(schemas), domains: groqDomains)
+            try groqTrustedNativeProjection(originalJSON, object: object, schemas: $0.displaySchemas(schemas), domains: groqDomains, compactLoaderHistory: compactGroqLoaderHistory, usesLoaderReferences: &usesLoaderReferences)
         } ?? fullDisplaySource
         // API response/transport controls are validated above and retained in
         // the canonical request. They must not become website instructions to
@@ -478,6 +489,7 @@ enum WebModelResponseCodec {
         // The eight fence bytes count toward admission and ownership fingerprints.
         let framedRequestJSON = (isChatGPT || isClaude || isGroq) ? "```\n" + displayJSON + "\n```" : displayJSON
         let requestContext = compactGroq ? ComputaAgentInstructions.groqRequestContext
+            + (usesLoaderReferences ? "\nIn loader arguments and outputs, a $ref object repeats the exact earlier input field at its JSON pointer." : "")
             : ComputaAgentInstructions.requestContext(compactLiteralJSON: isGroq)
         let browserHandoff = compactGroq
             ? currentGroqBrowserHandoff(tools: offered, policy: policy, entryTools: groqEntryTools,
@@ -560,7 +572,7 @@ enum WebModelResponseCodec {
             $0 == GroqToolCatalog.name || $0 == "functions." + GroqToolCatalog.name
         }) else { return result }
         if callable.count > 1 {
-            return result + " Use a directly callable schema for the next needed action. Load other schemas only when needed."
+            return result + " Call listed tools directly. Do not load them again. Request only missing schemas."
         }
         let unloaded = projection.loaderChoices.filter { !projection.selectedNames.contains($0) }
         guard let example = unloaded.first(where: { $0 == "exec_command" || $0 == "functions.exec_command" })
@@ -674,7 +686,8 @@ enum WebModelResponseCodec {
     /// keys fail closed rather than choosing which contract to present.
     private static func groqTrustedNativeProjection(_ source: String, object: [String: Any],
                                                      schemas: [[String: Any]],
-                                                     domains: Set<ComputaAgentInstructions.GroqInstructionDomain>) throws -> String {
+                                                     domains: Set<ComputaAgentInstructions.GroqInstructionDomain>,
+                                                     compactLoaderHistory: Bool, usesLoaderReferences: inout Bool) throws -> String {
         var replacements: [[GroqJSONPath]: (String, String)] = [:]
         func consider(_ value: Any?, at path: [GroqJSONPath]) {
             guard let text = value as? String else { return }
@@ -692,6 +705,40 @@ enum WebModelResponseCodec {
                 consider(part["text"], at: path + [.index(partIndex), .key("text")])
             }
         }
+        // References exist only in the website display. Preserve the call, its
+        // ID, position, and complete native payload; refer only to an identical
+        // preceding loader field of the same kind. Skip ambiguous history.
+        let input = compactLoaderHistory ? (object["input"] as? [[String: Any]] ?? []) : []
+        var loaderIDs = Set<String>(), callIDs = Set<String>(), outputIDs = Set<String>()
+        var referenceFields = [Int: String]()
+        var unambiguous = true
+        for (index, item) in input.prefix(2048).enumerated() {
+            guard let id = item["call_id"] as? String, id.hasPrefix("call_"), (6...256).contains(id.utf8.count),
+                  id.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0)
+                      || (48...57).contains($0) || $0 == 45 || $0 == 95 }) else { continue }
+            switch item["type"] as? String {
+            case "function_call", "custom_tool_call":
+                guard callIDs.insert(id).inserted, !outputIDs.contains(id) else { unambiguous = false; continue }
+                let name = item["name"] as? String, namespace = item["namespace"] as? String
+                let isLoader = item["namespace"] == nil && (name == GroqToolCatalog.name || name == "functions." + GroqToolCatalog.name)
+                    || namespace == "functions" && name == GroqToolCatalog.name
+                if item["type"] as? String == "function_call" && isLoader {
+                    loaderIDs.insert(id)
+                    referenceFields[index] = "arguments"
+                }
+            case "function_call_output", "custom_tool_call_output":
+                guard outputIDs.insert(id).inserted else { unambiguous = false; continue }
+                if loaderIDs.contains(id) {
+                    if item["type"] as? String == "function_call_output" { referenceFields[index] = "output" }
+                    else { unambiguous = false }
+                }
+            default: continue
+            }
+        }
+        if input.count > 2048 || !unambiguous || !loaderIDs.isSubset(of: outputIDs) || referenceFields.contains(where: { input[$0.key][$0.value] as? String == nil }) {
+            referenceFields.removeAll()
+        }
+        var earlier = [String: [Data: Int]]()
         let projectedTools = try JSONSerialization.data(withJSONObject: schemas, options: [.sortedKeys, .withoutEscapingSlashes])
         let bytes = Array(source.utf8)
         var position = 0, edits: [(Range<Int>, Data)] = []
@@ -730,6 +777,18 @@ enum WebModelResponseCodec {
                     guard Data(try decoded(range).utf8) == Data(replacement.0.utf8) else { throw ScanFailure.ambiguous }
                     let encoded = try groqCompactEncodedNativeString(Data(bytes[range]), decoded: replacement.0, domains: domains)
                     edits.append((range, encoded))
+                } else if path.count == 3, path[0] == .key("input"), case let .index(index) = path[1],
+                          case let .key(field) = path[2], referenceFields[index] == field,
+                          (100...4098).contains(range.count) {
+                    let literal = Data(bytes[range])
+                    if let source = earlier[field]?[literal] {
+                        // field is either "arguments" or "output" and source is a native index.
+                        let pointer = Data("{\"$ref\":\"#/input/\(source)/\(field)\"}".utf8)
+                        edits.append((range, pointer))
+                        usesLoaderReferences = true
+                    } else if (earlier[field]?.count ?? 0) < 64 {
+                        earlier[field, default: [:]][literal] = index
+                    }
                 }
             case 123:
                 position += 1; whitespace()

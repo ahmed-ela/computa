@@ -61,6 +61,7 @@ struct GroqToolCatalog: Sendable {
     enum Failure: Error, LocalizedError, Equatable {
         case invalidCatalog, invalidScope, staleRevision, invalidArguments, unavailableTool, selectionTooLarge
         case tooManyNames(count: Int, direct: [String], loadable: [String], ineligible: Int)
+        case budgetWithOfferedSchemas([String])
         case unavailableSelection(unavailable: [String], denied: [String], unknownCount: Int)
         var errorDescription: String? {
             switch self {
@@ -73,8 +74,10 @@ struct GroqToolCatalog: Sendable {
             case .unavailableTool: "A requested tool is not currently callable and allowed. No tool was loaded or executed."
             case let .unavailableSelection(unavailable, denied, unknownCount):
                 "No tool was loaded or executed. Requested catalog names (data): unavailable=\(Self.namesJSON(unavailable)), denied=\(Self.namesJSON(denied)), unknown_count=\(unknownCount). Choose only callable, allowed names from the current inventory and load their exact schemas before use."
+            case let .budgetWithOfferedSchemas(names):
+                "Load exceeds budget. No change or execution. Previously offered: \(Self.namesJSON(names)). Call directly if still listed."
             case .selectionTooLarge:
-                "These schemas do not fit the current Groq request budget plus the estimated loader-history allowance. Previous selection retained; request fewer or smaller schemas. No tool was loaded or executed."
+                "Schema load exceeds budget including loader history. No change or execution. Choose another fitting schema or a shorter task."
             }
         }
 
@@ -225,7 +228,16 @@ struct GroqToolCatalog: Sendable {
         return projection
     }
 
+    struct LoadPreview {
+        let receipt: Data
+        let budgetFailure: Failure
+    }
+
     mutating func load(scope: Scope, arguments: Data, lastOfferedNames: Set<String> = []) throws -> Data {
+        try previewLoad(scope: scope, arguments: arguments, lastOfferedNames: lastOfferedNames).receipt
+    }
+
+    mutating func previewLoad(scope: Scope, arguments: Data, lastOfferedNames: Set<String>) throws -> LoadPreview {
         try Self.validateScope(scope)
         guard var state = states[scope.taskID], state.scope == scope else { throw Failure.invalidScope }
         guard arguments.count <= 4_096,
@@ -267,7 +279,10 @@ struct GroqToolCatalog: Sendable {
                                        "available": "next_request", "execution": false] as [String: Any])
         state.projection = projection
         states[scope.taskID] = state
-        return receipt
+        // Exact names reached this point only after every requested name passed
+        // the current revision and availability checks. The next offer can change.
+        let direct = requested.intersection(lastOfferedNames).sorted()
+        return LoadPreview(receipt: receipt, budgetFailure: direct.isEmpty ? .selectionTooLarge : .budgetWithOfferedSchemas(direct))
     }
 
     mutating func remove(taskID: String) { states.removeValue(forKey: taskID) }

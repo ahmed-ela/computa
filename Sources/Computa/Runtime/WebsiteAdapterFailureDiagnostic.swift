@@ -7,6 +7,7 @@ import Foundation
 enum WebsiteAdapterFailureDiagnostic {
     static let directoryName = "WebsiteAdapterFailureDiagnostics-v1"
     static let purpose = "synthetic_adapter_failure_structure_v1"
+    static let qwenMaxAuthoredPurpose = "synthetic_qwen_max_authored_source_v1"
     static let maximumArmBytes = 4_096
     static let maximumPacketBytes = 80 * 1_024
     static let maximumLifetime: TimeInterval = 600
@@ -79,6 +80,24 @@ enum WebsiteAdapterFailureDiagnostic {
                   candidates(value["markdownCandidates"], categories: kimiCategories, kind: "excludedReasoning") else { return nil }
             categories = kimiCategories
         case "qwen":
+            if error == "unsupported_response_format", detail == "authored_source", trigger == detail {
+                guard Set(value.keys) == ["version", "provider", "trigger", "stage", "reason", "count"],
+                      let stage = value["stage"] as? String, let reason = value["reason"] as? String,
+                      let count = integer(value["count"], 0...2), reason == "count" || count == 0 else { return nil }
+                switch stage {
+                case "flow", "phase":
+                    guard reason == "count" ? count == 2 : reason == (stage == "flow" ? "hidden" : "class") else { return nil }
+                case "custom", "markdown", "paragraph", "span", "literal":
+                    guard reason == "count" ? count != 1 : ["parent_hidden", "mixed_text", "tag", "class", "hidden"].contains(reason) else { return nil }
+                case "literal_contents":
+                    guard reason == "count", count > 0 else { return nil }
+                case "outside":
+                    guard ["scope", "node_limit"].contains(reason) else { return nil }
+                default: return nil
+                }
+                guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]) else { return nil }
+                return Packet(provider: provider, trigger: trigger, data: data)
+            }
             guard error == "conversation_changed", detail == "first_user_message", trigger == "full_prompt_mismatch",
                   Set(value.keys) == common.union(["comparison", "directParagraphCount", "visibleDirectParagraphCount", "descendantParagraphCount", "visibleDescendantParagraphCount", "paragraphCountOverflow", "paragraphs"]),
                   comparison(value["comparison"]), let overflow = boolean(value["paragraphCountOverflow"]),
@@ -168,11 +187,12 @@ enum WebsiteAdapterFailureDiagnostic {
         return value.boolValue
     }
 
-    static func validateArm(_ data: Data, context: Context, now: Date) -> Arm? {
+    static func validateArm(_ data: Data, context: Context, now: Date, qwenMaxAuthored: Bool = false) -> Arm? {
+        let expectedPurpose = qwenMaxAuthored ? qwenMaxAuthoredPurpose : purpose
         guard !data.isEmpty, data.count <= maximumArmBytes, APIModelCorrectionJSON.isUnambiguous(data),
               let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               Set(value.keys) == ["schemaVersion", "purpose", "nonce", "taskID", "threadID", "turnID", "provider", "modelID", "expiresAt"],
-              integer(value["schemaVersion"], 1...1) == 1, value["purpose"] as? String == purpose,
+              integer(value["schemaVersion"], 1...1) == 1, value["purpose"] as? String == expectedPurpose,
               value["taskID"] as? String == context.taskID.uuidString.lowercased(),
               value["threadID"] as? String == context.threadID.uuidString.lowercased(),
               value["turnID"] as? String == context.turnID.uuidString.lowercased(),
@@ -208,14 +228,17 @@ final class WebsiteAdapterFailurePublication: @unchecked Sendable {
                  beforeCommit: (() -> Void)? = nil,
                  commitEligibility: (@MainActor @Sendable () -> Bool)? = nil) -> Bool {
         let started = ContinuousClock.now
+        let qwenMaxAuthored = packet.provider == "qwen" && packet.trigger == "authored_source"
         guard packet.provider == context.provider, binding.sequence == 1,
+              !qwenMaxAuthored ||
+                  (binding.priorModelSelectionVerified && context.modelID == WebsiteModelChoice(provider: "qwen", key: "Qwen3.8-Max", label: "Qwen3.8-Max").modelID),
               lock.withLock({ guard active, !attempted, started < deadline else { return false }; attempted = true; return true }),
               let structure = try? JSONSerialization.jsonObject(with: packet.data),
               WebsiteAdapterFailureDiagnostic.sanitize(structure, provider: context.provider, error: error, detail: detail) != nil else { return false }
         var arm: WebsiteAdapterFailureDiagnostic.Arm?
         guard let claim = WebsitePrivateDiagnosticCapture.claim(directory: directory, record: .adapterFailureStructure,
             maximumArmBytes: WebsiteAdapterFailureDiagnostic.maximumArmBytes, validate: { bytes in
-                guard let parsed = WebsiteAdapterFailureDiagnostic.validateArm(bytes, context: context, now: now) else { return false }
+                guard let parsed = WebsiteAdapterFailureDiagnostic.validateArm(bytes, context: context, now: now, qwenMaxAuthored: qwenMaxAuthored) else { return false }
                 arm = parsed
                 self.lock.withLock {
                     self.deadline = min(self.deadline, started + .milliseconds(Int64(parsed.expiry.timeIntervalSince(now) * 1_000)))
@@ -223,7 +246,7 @@ final class WebsiteAdapterFailurePublication: @unchecked Sendable {
                 return true
             }, isCurrent: { self.isCurrent }, beforeArmClaim: beforeArmClaim), let arm else { return false }
         let record: [String: Any] = [
-            "schemaVersion": 1, "purpose": WebsiteAdapterFailureDiagnostic.purpose,
+            "schemaVersion": 1, "purpose": qwenMaxAuthored ? WebsiteAdapterFailureDiagnostic.qwenMaxAuthoredPurpose : WebsiteAdapterFailureDiagnostic.purpose,
             "nonce": arm.nonce.uuidString.lowercased(), "capturedAt": WebsiteAdapterFailureDiagnostic.formatter().string(from: now),
             "evidenceClass": "rejected_adapter_structure_only", "automaticReplay": false,
             "taskID": context.taskID.uuidString.lowercased(), "threadID": context.threadID.uuidString.lowercased(),

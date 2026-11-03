@@ -225,6 +225,9 @@ final class QwenWebModelTransportTests: XCTestCase {
             return [button.contains(document.elementFromPoint(139,176)), button.contains(document.elementFromPoint(158,176))];
             """) as? [Bool]
         XCTAssertEqual(initial, [true, false])
+        let pair = try await call(fixture, "webProviderPoll", token)
+        XCTAssertEqual(pair["modelVerificationPendingReason"] as? String, "qwen_first_body_expansion_v1")
+        XCTAssertNil(pair["modelProofContext"])
         _ = try await call(fixture, "webProviderPoll", token)
         let clicks = try await evaluate(fixture.view, "return qwenFixture.counts.displayClicks;") as? Int
         XCTAssertEqual(clicks, 1)
@@ -339,22 +342,19 @@ final class QwenWebModelTransportTests: XCTestCase {
             let prompt = String(repeating: "Literal Qwen disclosure fixture 👋 日本語\n", count: 600)
             _ = try await call(fixture, "webProviderSend", token, prompt: prompt)
             let display = "qwen_first_body_expansion_v1"
-            let steps: [(String, String, Int)]
-            if label == "Qwen3.8-Max" {
-                steps = [("return true;", display, 0), ("qwenFixture.revealPreview(); return true;", display, 0),
-                         ("""
-                          document.querySelector('.chat-user-message-container').setAttribute('data-msg-id','494d93fb-ad37-43ab-868d-5dade1cdc4b1');
-                          qwenFixture.settleResponseIdentity(); return true;
-                          """, display, 0), ("return true;", display, 1)]
-            } else {
-                steps = [("return true;", display, 0), ("qwenFixture.revealPreview(); return true;", display, 1),
-                         ("return true;", "qwen_initial_response_identity_v1", 1)]
-            }
-            for (stage, reason, clicks) in steps {
+            let steps: [(String, Int)] = [
+                ("return true;", 0), ("qwenFixture.revealPreview(); return true;", 0),
+                ("""
+                 document.querySelector('.chat-user-message-container').setAttribute('data-msg-id','494d93fb-ad37-43ab-868d-5dade1cdc4b1');
+                 qwenFixture.settleResponseIdentity(); return true;
+                 """, 0),
+                ("return true;", 1)
+            ]
+            for (stage, clicks) in steps {
                 _ = try await evaluate(fixture.view, stage)
                 let pending = try await call(fixture, "webProviderPoll", token)
                 XCTAssertEqual(pending["state"] as? String, "running")
-                XCTAssertEqual(pending["modelVerificationPendingReason"] as? String, reason)
+                XCTAssertEqual(pending["modelVerificationPendingReason"] as? String, display, label)
                 XCTAssertEqual(pending["text"] as? String, "")
                 XCTAssertNil(pending["modelEvidence"])
                 XCTAssertNil(pending["modelProofContext"])
@@ -364,7 +364,6 @@ final class QwenWebModelTransportTests: XCTestCase {
                 let observed = try await evaluate(fixture.view, "return qwenFixture.counts.displayClicks;") as? Int
                 XCTAssertEqual(observed, clicks)
             }
-            _ = try await evaluate(fixture.view, "qwenFixture.settleResponseIdentity(); return true;")
             let settled = try await call(fixture, "webProviderPoll", token)
             XCTAssertNil(settled["modelVerificationPending"])
             let context = try XCTUnwrap(settled["modelProofContext"] as? [String: Any])
@@ -382,31 +381,38 @@ final class QwenWebModelTransportTests: XCTestCase {
         }
     }
 
-    func testMaxRefusesChangedUserAfterFirstSettledPairWithoutExpandingOrDeleting() async throws {
-        let fixture = try Fixture(setup: "qwenFixture.options.firstLongMessageDisplay=true; qwenFixture.options.holdResponseIdentity=true;")
-        defer { fixture.shutdown() }
-        let token = try await start(fixture, label: "Qwen3.8-Max")
-        _ = try await call(fixture, "webProviderSend", token, prompt: String(repeating: "Max exact fixture ", count: 900))
-        for step in ["qwenFixture.revealPreview(); return true;", "qwenFixture.settleResponseIdentity(); return true;"] {
-            _ = try await evaluate(fixture.view, step)
-            let pending = try await call(fixture, "webProviderPoll", token)
-            XCTAssertEqual(pending["modelVerificationPendingReason"] as? String, "qwen_first_body_expansion_v1")
-            XCTAssertNil(pending["modelEvidence"])
-            XCTAssertEqual(pending["text"] as? String, "")
+    func testBothModelsRefuseChangedUserOrAnswerAfterFirstSettledPairWithoutExpandingOrDeleting() async throws {
+        for label in ["Qwen3.7-Plus", "Qwen3.8-Max"] {
+            for field in ["user", "answer"] {
+                let fixture = try Fixture(setup: "qwenFixture.options.firstLongMessageDisplay=true; qwenFixture.options.holdResponseIdentity=true;")
+                defer { fixture.shutdown() }
+                let token = try await start(fixture, label: label)
+                _ = try await call(fixture, "webProviderSend", token, prompt: String(repeating: "Synthetic settled pair ", count: 750))
+                for step in ["qwenFixture.revealPreview(); return true;", "qwenFixture.settleResponseIdentity(); return true;"] {
+                    _ = try await evaluate(fixture.view, step)
+                    let pending = try await call(fixture, "webProviderPoll", token)
+                    XCTAssertEqual(pending["modelVerificationPendingReason"] as? String, "qwen_first_body_expansion_v1", label)
+                    XCTAssertNil(pending["modelEvidence"])
+                    XCTAssertNil(pending["modelProofContext"])
+                    XCTAssertEqual(pending["text"] as? String, "")
+                }
+                let change = field == "user"
+                    ? "document.querySelector('.chat-user-message-container').setAttribute('data-msg-id','494d93fb-ad37-43ab-868d-5dade1cdc4b1')"
+                    : "document.querySelector('.chat-response-message').id='chat-response-message-494d93fb-ad37-43ab-868d-5dade1cdc4b1'"
+                _ = try await evaluate(fixture.view, change + "; return true;")
+                do {
+                    _ = try await call(fixture, "webProviderPoll", token)
+                    XCTFail("\(label) must refuse a changed settled \(field) identity")
+                } catch {
+                    XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser))
+                }
+                let finished = try await call(fixture, "webProviderFinish", token)
+                XCTAssertEqual(finished["cleanup"] as? String, "failed")
+                let clicks = try await evaluate(fixture.view, "return qwenFixture.counts.displayClicks;") as? Int
+                XCTAssertEqual(clicks, 0)
+                try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+            }
         }
-        _ = try await evaluate(fixture.view, """
-            document.querySelector('.chat-user-message-container').setAttribute('data-msg-id','494d93fb-ad37-43ab-868d-5dade1cdc4b1');
-            return true;
-            """)
-        do {
-            _ = try await call(fixture, "webProviderPoll", token)
-            XCTFail("A second user UUID cannot replace an already pinned pair")
-        } catch {
-            XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser))
-        }
-        let clicks = try await evaluate(fixture.view, "return qwenFixture.counts.displayClicks;") as? Int
-        XCTAssertEqual(clicks, 0)
-        try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
     }
 
     func testInitialEmptyResponseIDWaitsWithoutProofAndIDOnlyMutationWakesStrictReadForBothModels() async throws {

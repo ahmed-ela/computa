@@ -3,6 +3,62 @@ import XCTest
 @testable import Computa
 
 final class WebModelResponseCodecTests: XCTestCase {
+    func testGroqReferencesOnlyIdenticalHistoricalLoaderFieldsWithoutChangingTheCanonicalRequest() throws {
+        let model = WebsiteModelChoice(provider: "groq", key: "qwen/qwen3.8-27b", label: "Qwen/Qwen3.8-27B").modelID
+        let args = #"{"catalog_revision":""# + String(repeating: "d", count: 64) + #"","names":["exec_command"]}"#
+        let refusal = String(repeating: "Example historical refusal. ", count: 6)
+        var history: [[String: Any]] = [["role":"user","content":"Read the invoice fixture."]]
+        for (i,name) in ["exec_command","exec_command","exec_command","exec_command",GroqToolCatalog.name,GroqToolCatalog.name].enumerated() {
+            history += [["type":"function_call","name":name,"arguments":args,"call_id":"call_\(i)"],
+                        ["type":"function_call_output","output":refusal,"call_id":"call_\(i)"]]
+        }
+        func render(_ input: [[String: Any]], compress: Bool) throws -> (Data, WebModelResponseCodec.Request, [[String:Any]]) {
+            let data = try JSONSerialization.data(withJSONObject:["model":model,"input":input,"tools":[groqLoaderDefinition]],options:[.sortedKeys,.withoutEscapingSlashes])
+            let seed = try XCTUnwrap(WebModelResponseCodec.prepareRequest(data).groqToolCatalogSeed)
+            let request = try WebModelResponseCodec.prepareRequest(data, groqToolCatalogProjection: GroqToolCatalog.baseline(for:seed), compactGroqLoaderHistory:compress)
+            let range = try requestRange(in:request)
+            let parsed = try XCTUnwrap(JSONSerialization.jsonObject(with:Data(request.prompt[range].utf8)) as? [String:Any])
+            return (data,request,try XCTUnwrap(parsed["input"] as? [[String:Any]]))
+        }
+        let (_,original,actual) = try render(history,compress:false)
+        let (_,compressed,items) = try render(history,compress:true)
+        XCTAssertEqual(original.continuationRequest,compressed.continuationRequest)
+        XCTAssertEqual(original.offeredToolNames,compressed.offeredToolNames)
+        XCTAssertEqual(actual[11]["arguments"] as? String,args)
+        XCTAssertEqual(items[11]["arguments"] as? [String:String],["$ref":"#/input/9/arguments"])
+        XCTAssertEqual(items[12]["output"] as? [String:String],["$ref":"#/input/10/output"])
+        for i in 0...10 { XCTAssertEqual(items[i] as NSDictionary,actual[i] as NSDictionary) }
+        var restored = items
+        restored[11]["arguments"] = items[9]["arguments"]; restored[12]["output"] = items[10]["output"]
+        XCTAssertEqual(restored as NSArray,history as NSArray)
+        // Exercise the released entry point with a calibrated full-history
+        // request just beyond the original cap. No schemas or turns are removed.
+        func padded(_ padding: Int) throws -> (Data, Int, GroqToolCatalog.Projection) {
+            var input = history
+            input[0]["content"] = String(repeating: " token", count: padding)
+            let (data, raw, _) = try render(input, compress:false)
+            let seed = try XCTUnwrap(WebModelResponseCodec.prepareRequest(data).groqToolCatalogSeed)
+            return try (data, QwenBodyTokenCounter.tokenCount(raw.prompt), GroqToolCatalog.baseline(for:seed))
+        }
+        let empty = try padded(0)
+        let (atCap, units, projection) = try padded(6003 - empty.1)
+        XCTAssertGreaterThan(units, WebModelResponseCodec.groqMaximumBodyTokens)
+        let fitted = try WebModelResponseCodec.prepareBudgetedGroqRequest(atCap, availability:nil, projection:projection, model:model)
+        XCTAssertLessThanOrEqual(fitted.units,WebModelResponseCodec.groqMaximumBodyTokens)
+        XCTAssertTrue(fitted.request.prompt.contains("#/input/9/arguments"))
+        var ambiguous = history; ambiguous[11]["call_id"]="call_4"
+        XCTAssertFalse(try render(ambiguous,compress:true).1.prompt.contains("#/input/"))
+        var foreign = history; foreign[9]["namespace"] = "foreign"; foreign[11]["namespace"] = "foreign"
+        XCTAssertFalse(try render(foreign,compress:true).1.prompt.contains("#/input/"))
+        var qualified = history; qualified[9]["namespace"] = "functions"; qualified[11]["namespace"] = "functions"
+        XCTAssertNotNil(try render(qualified,compress:true).2[11]["arguments"] as? [String:String])
+        var unicodeID = history; unicodeID[11]["call_id"] = "call_K"; unicodeID[12]["call_id"] = "call_K"
+        XCTAssertFalse(try render(unicodeID,compress:true).1.prompt.contains("#/input/"))
+        XCTAssertFalse(try render(history+[history[12]],compress:true).1.prompt.contains("#/input/"))
+        var withObject = history; withObject[10]["output"]=["$ref":"#/input/0/output"]
+        XCTAssertTrue(try render(withObject,compress:true).2[11]["arguments"] is String)
+    }
+
     func testGroqDirectSchemasFollowCurrentBindingAndNeverGrantForeignOrDeniedTools() throws {
         let model = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
         let browser = EmbeddedBrowserTools.definitions().map { native in
@@ -572,7 +628,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertEqual(suffix.contains("Return exactly one fenced JSON code block labelled json."), !rawJSON, model)
             XCTAssertEqual(suffix.contains("Examples below are JSON contents; put one inside that code block."), !rawJSON, model)
             XCTAssertTrue(suffix.contains("Exact currently offered local function names: computer_v2_snapshot"), model)
-            let boundary = ["claude", "deepseek"].contains(LocalModelCatalog.webProvider(for: model) ?? "")
+            let boundary = ["claude", "deepseek", "kimi"].contains(LocalModelCatalog.webProvider(for: model) ?? "")
                 ? ComputaAgentInstructions.literalFencedResponseBoundary + "\n" : ""
             XCTAssertTrue(suffix.hasSuffix("{\"type\":\"message\",\"text\":\"OK\"}\n" + boundary + "END_COMPUTA_LOCAL_RESPONSE_HANDOFF."), model)
         }
@@ -1633,7 +1689,7 @@ final class WebModelResponseCodecTests: XCTestCase {
         }
     }
 
-    func testClaudeLiteralHandoffPreservesRequestAndRejectsAuthoredIntroduction() throws {
+    func testLiteralHandoffPreservesRequestAndRejectsAuthoredIntroduction() throws {
         let tool: [String: Any] = ["type": "function", "name": "exec_command",
             "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]],
                            "required": ["cmd"], "additionalProperties": false]]
@@ -1641,17 +1697,19 @@ final class WebModelResponseCodecTests: XCTestCase {
         let fenced = "```json\n" + call + "\n```"
         let boundary = ComputaAgentInstructions.literalFencedResponseBoundary
         let claudeChoice = WebsiteModelChoice(provider: "claude", key: "Opus 3", label: "Opus 3").modelID
-        for model in ["browser/chatgpt", "browser/gemini", "browser/groq", "browser/claude", claudeChoice] {
+        let kimiChoice = WebsiteModelChoice(provider: "kimi", key: "k28-instant", label: "Instant").modelID
+        let literalModels = ["browser/claude", claudeChoice, "browser/kimi", kimiChoice, "browser/deepseek/mode/chat"]
+        for model in ["browser/chatgpt", "browser/gemini", "browser/groq"] + literalModels {
             let original = try JSONSerialization.data(withJSONObject: [
                 "model": model, "input": "Use the terminal to print the fixture token.",
                 "tools": [tool], "tool_choice": "auto", "parallel_tool_calls": false,
             ])
             let request = try WebModelResponseCodec.prepareRequest(original)
-            let claude = model == "browser/claude" || model == claudeChoice
-            XCTAssertEqual(request.prompt.contains(boundary), claude, model)
+            let needsLiteralBoundary = literalModels.contains(model)
+            XCTAssertEqual(request.prompt.contains(boundary), needsLiteralBoundary, model)
             XCTAssertEqual(request.continuationRequest, original)
             try assertContiguousRequestValues(original, in: request)
-            if claude {
+            if needsLiteralBoundary {
                 XCTAssertEqual(request.prompt.components(separatedBy: boundary).count - 1, 1)
                 XCTAssertTrue(request.prompt.hasSuffix(boundary + "\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
                 XCTAssertEqual(try WebModelResponseCodec.parseEmbeddedReply(fenced, request: request),
@@ -1794,7 +1852,7 @@ final class WebModelResponseCodecTests: XCTestCase {
                        ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(request.offeredToolNames), customToolNames: request.customToolNames,
                            includedInstructionText: includedInstructionText,
                            responseFormat: LocalModelCatalog.webProvider(for: request.model) == "qwen" ? .rawJSON
-                               : ["claude", "deepseek"].contains(LocalModelCatalog.webProvider(for: request.model) ?? "") ? .literalFencedJSON : .fencedJSON,
+                               : ["claude", "deepseek", "kimi"].contains(LocalModelCatalog.webProvider(for: request.model) ?? "") ? .literalFencedJSON : .fencedJSON,
                            singleActionRelay: request.singleActionRelay,
                            currentBrowserHandoff: expectedCurrentBrowserHandoff,
                            allowedToolNames: expectedAllowedToolNames),
@@ -2976,7 +3034,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertFalse(first.currentUserInstructions.contains(latestRequest), "The locator must not duplicate user content")
             try assertUserPayloadAppearsOnce(latestRequest, in: first)
             XCTAssertTrue(first.prompt.hasSuffix(ComputaAgentInstructions.webResponseContract(offeredToolNames: ["computer_v2_snapshot"],
-                responseFormat: provider == "qwen" ? .rawJSON : ["claude", "deepseek"].contains(provider) ? .literalFencedJSON : .fencedJSON,
+                responseFormat: provider == "qwen" ? .rawJSON : ["claude", "deepseek", "kimi"].contains(provider) ? .literalFencedJSON : .fencedJSON,
                 singleActionRelay: first.singleActionRelay)))
             let nextInput = input + [
                 ["type": "function_call", "name": "computer_v2_snapshot", "arguments": "{}", "call_id": "current_extra"],

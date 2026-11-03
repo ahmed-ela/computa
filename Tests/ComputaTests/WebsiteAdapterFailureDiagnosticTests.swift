@@ -19,6 +19,83 @@ final class WebsiteAdapterFailureDiagnosticTests: XCTestCase {
         }
     }
 
+    private var qwenAuthoredFailure: [String: Any] {
+        ["version": 1, "provider": "qwen", "trigger": "authored_source", "stage": "paragraph", "reason": "tag", "count": 0]
+    }
+
+    func testQwenAuthoredSourceRejectsForeignOrImpossibleFieldsAndStripsEveryObservation() {
+        func sanitized(_ value: [String: Any]) -> D.Packet? {
+            D.sanitize(value, provider: "qwen", error: "unsupported_response_format", detail: "authored_source")
+        }
+        let valid = qwenAuthoredFailure
+        XCTAssertNotNil(sanitized(valid))
+        for (key, value) in [("stage", "PRIVATE_TAG"), ("reason", "PRIVATE_CLASS"), ("text", "PRIVATE_BODY"),
+                             ("count", true), ("count", 0.5), ("count", 3), ("count", 1)] as [(String, Any)] {
+            var bad = valid; bad[key] = value
+            XCTAssertNil(sanitized(bad))
+        }
+        for (stage, reason, count) in [("flow", "count", 1), ("phase", "scope", 0), ("markdown", "count", 1),
+                                      ("literal_contents", "count", 0), ("outside", "count", 2)] {
+            var bad = valid; bad["stage"] = stage; bad["reason"] = reason; bad["count"] = count
+            XCTAssertNil(sanitized(bad))
+        }
+        for action in ["inspect", "deleteConversation", "submit"] {
+            var observed: [String: Any] = ["error": "unsupported_response_format", "detail": "authored_source", "adapterFailureStructure": valid]
+            XCTAssertEqual(D.remove(from: &observed, provider: "qwen", action: action) != nil, action == "inspect")
+            XCTAssertEqual(Set(observed.keys), ["error", "detail"])
+        }
+        XCTAssertNil(D.sanitize(valid, provider: "deepseek", error: "unsupported_response_format", detail: "authored_source"))
+        XCTAssertNil(D.sanitize(valid, provider: "qwen", error: "conversation_changed", detail: "first_user_message"))
+    }
+
+    func testQwenAuthoredSourcePublicationRequiresExactMaxSelectionAndSingleBoundArm() throws {
+        let packet = try XCTUnwrap(D.sanitize(qwenAuthoredFailure, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"))
+        for scenario in ["matching", "plus", "no_arm", "historical_arm", "first_user_failure", "foreign_turn", "unverified_model", "revoked_generation", "wrong_sequence"] {
+            let f = try WebsiteAdapterFailureFixture()
+            defer { f.cleanup() }
+            let a = f.admission, label = scenario == "plus" ? "Qwen3.7-Plus" : "Qwen3.8-Max"
+            let choice = WebsiteModelChoice(provider: "qwen", key: label, label: label)
+            let context = try XCTUnwrap(D.Context(admission: WebModelStartAdmission(id: a.id, inferenceID: a.inferenceID,
+                taskID: a.taskID, threadID: a.threadID, turnID: a.turnID, runtimeGeneration: a.runtimeGeneration,
+                preparationID: a.preparationID, transportGeneration: a.transportGeneration, provider: "qwen", modelID: choice.modelID,
+                parameters: Data(), adapterFailureDirectory: f.directory)))
+            var arm = f.arm()
+            arm["provider"] = "qwen"; arm["modelID"] = choice.modelID
+            if scenario != "historical_arm" { arm["purpose"] = D.qwenMaxAuthoredPurpose }
+            if scenario == "foreign_turn" { arm["turnID"] = UUID().uuidString.lowercased() }
+            if scenario != "no_arm" { try f.writeArm(arm) }
+            let binding = D.Binding(sessionToken: f.binding.sessionToken, documentGeneration: f.binding.documentGeneration,
+                sequence: scenario == "wrong_sequence" ? 2 : 1, previousFirstBodyBound: false, priorModelSelectionVerified: scenario != "unverified_model")
+            let publication = WebsiteAdapterFailurePublication(deadline: .now + .seconds(5))
+            if scenario == "revoked_generation" { publication.revoke() }
+            let firstUserFailure = scenario == "first_user_failure"
+            let error = firstUserFailure ? "conversation_changed" : "unsupported_response_format"
+            let detail = firstUserFailure ? "first_user_message" : "authored_source"
+            let selectedPacket = firstUserFailure
+                ? try XCTUnwrap(D.sanitize(WebsiteAdapterFailureFixture.packet("qwen"), provider: "qwen", error: error, detail: detail))
+                : packet
+            func publish() -> Bool {
+                publication.publish(directory: f.directory, context: context, binding: binding, packet: selectedPacket, error: error, detail: detail)
+            }
+            XCTAssertEqual(publish(), scenario == "matching", scenario)
+            XCTAssertEqual(FileManager.default.fileExists(atPath: f.outputURL.path), scenario == "matching", scenario)
+            guard scenario == "matching" else {
+                XCTAssertEqual(FileManager.default.fileExists(atPath: f.armURL.path), scenario != "no_arm", scenario)
+                continue
+            }
+            XCTAssertFalse(publish())
+            let record = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: f.outputURL)) as? [String: Any])
+            XCTAssertEqual(record["purpose"] as? String, D.qwenMaxAuthoredPurpose)
+            XCTAssertEqual(record["documentGeneration"] as? String, binding.documentGeneration.uuidString.lowercased())
+            XCTAssertEqual(record["inferenceID"] as? String, context.inferenceID.uuidString.lowercased())
+            XCTAssertEqual(record["automaticReplay"] as? Bool, false)
+            XCTAssertEqual(record["responseAuthorityGranted"] as? Bool, false)
+            XCTAssertEqual(record["currentFirstBodyProofGranted"] as? Bool, false)
+            let finite = try XCTUnwrap(record["structure"] as? [String: Any])
+            XCTAssertEqual(Set(finite.keys), Set(qwenAuthoredFailure.keys))
+        }
+    }
+
     func testRemovalIsUnconditionalAndNeverAddsProof() throws {
         for action in ["inspect", "submit", "deleteConversation"] {
             let packets: [Any] = [WebsiteAdapterFailureFixture.packet(), ["text": "PRIVATE_BODY"]]

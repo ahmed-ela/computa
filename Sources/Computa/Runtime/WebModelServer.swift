@@ -485,25 +485,25 @@ actor WebModelServer {
         // Preview on a value copy. An over-budget schema selection returns a
         // normal read-only tool error, leaving the prior usable selection intact.
         var candidate = groqToolCatalog
-        let receipt = try candidate.load(scope: scope, arguments: arguments, lastOfferedNames: current.lastOfferedNames)
+        let load = try candidate.previewLoad(scope: scope, arguments: arguments, lastOfferedNames: current.lastOfferedNames)
         let projection = try candidate.prepare(scope: scope, seed: current.seed)
         do {
             let preview = try WebModelResponseCodec.prepareRequest(current.canonicalRequest,
                 browserToolAvailability: current.browserAvailability, groqToolCatalogProjection: projection)
             guard let units = try WebModelResponseCodec.validateGroqPromptBudget(model: preview.model, prompt: preview.prompt),
                   units <= WebModelResponseCodec.groqMaximumBodyTokens - Self.groqLoaderHistoryReserve else {
-                throw GroqToolCatalog.Failure.selectionTooLarge
+                throw load.budgetFailure
             }
         } catch let failure as WebModelResponseCodec.Failure {
             switch failure {
             case .promptTooLarge, .groqPromptBudgetExceeded, .groqPromptByteBudgetExceeded:
-                throw GroqToolCatalog.Failure.selectionTooLarge
+                throw load.budgetFailure
             default: throw failure
             }
         }
         try Task.checkCancellation()
         groqToolCatalog = candidate
-        return receipt
+        return load.receipt
     }
 
     func registerCleanupTurn(taskID: String, threadID: String?, turnID: String?) {
