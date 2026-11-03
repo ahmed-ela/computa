@@ -471,6 +471,11 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   let headerExpected = null, proofLocked = false, headerObserved = false, finalPowerState = null;
   let remount = null, remountClaimed = false;
   let prepareOpening = null, insertOpening = null, genericPowerRecheck = false;
+  let verifyObserver = null, verifyAcknowledged = false;
+  const recordVerifyOpening = records => {
+    if (records.some(record => record.target === trigger && (record.attributeName === 'aria-expanded' && record.oldValue === 'true'
+      || record.attributeName === 'data-state' && record.oldValue === 'open'))) verifyAcknowledged = true;
+  };
   let headerReadiness = null, changingPowerHeader = null, changingPowerSlider = null;
   const tracked = new Map();
   const observeHeader = records => {
@@ -610,9 +615,16 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       && chatGPTMessageRoots('user').length === 0 && chatGPTMessageRoots('assistant').length === 0
       && !!chatGPTProductModeProof() && chatGPTTemporaryVerified();
   };
-  const prepareOpeningIntact = current => readonlyOpeningSelectionIntact(prepareOpening, current)
-    && request.action === 'prepare' && context?.action === 'prepare' && context.scope === 'action_final_guard'
-    && globalThis.__computaChatFirstPrepareOpening === prepareOpening && !globalThis.__computaChatSubmissionState;
+  const prepareOpeningIntact = current => {
+    if (!readonlyOpeningSelectionIntact(prepareOpening, current) || context?.action !== request.action
+      || context.scope !== 'action_final_guard' || globalThis.__computaChatSubmissionState) return false;
+    if (request.action === 'prepare') return globalThis.__computaChatFirstPrepareOpening === prepareOpening;
+    const composer = prepareOpening.composer;
+    recordVerifyOpening(verifyObserver?.takeRecords?.() || []);
+    return request.action === 'verifyModel' && request.allowFirstChatVerificationOpening === true
+      && prepareOpening.attempt.firstVerificationOpening === prepareOpening && !verifyAcknowledged
+      && composer && composer.isConnected && insertComposer(current) === composer && firstVerificationComposerEmpty(composer);
+  };
   const insertComposer = current => {
     const candidates = [...new Set(document.querySelectorAll('#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, '
       + '#prompt-textarea [contenteditable="true"], [contenteditable="true"][aria-label="Ask ChatGPT"], textarea[data-testid="prompt-textarea"]'))]
@@ -620,6 +632,18 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     return candidates.length === 1 ? candidates[0] : null;
   };
   const insertComposerValue = composer => composer instanceof HTMLTextAreaElement ? composer.value : composer?.innerText;
+  const firstVerificationComposerEmpty = composer => {
+    const value = insertComposerValue(composer);
+    if (value === '') return composer instanceof HTMLTextAreaElement || composer.textContent === '' && !composer.childNodes.length;
+    // WebKit renders ProseMirror's sole empty-paragraph caret sentinel as one LF.
+    // Neither trimming a draft nor ignoring a second element proves emptiness.
+    if (value !== '\n' || composer instanceof HTMLTextAreaElement || composer.textContent !== ''
+      || composer.getAttribute('contenteditable') !== 'true' || !composer.classList.contains('ProseMirror')
+      || composer.childNodes.length !== 1) return false;
+    const paragraph = composer.childNodes[0], br = paragraph.childNodes?.[0];
+    return paragraph.tagName === 'P' && paragraph.childNodes.length === 1 && br?.tagName === 'BR'
+      && br.classList.contains('ProseMirror-trailingBreak') && !br.childNodes.length;
+  };
   const insertOpeningIntact = current => {
     const saved = insertOpening, state = saved?.state, record = saved?.record;
     const composer = saved?.composer;
@@ -680,17 +704,26 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       && attempt.postFamilyOpeningClaimed !== true;
     if (recoveryEligible) attempt.postFamilyOpeningClaimed = true;
     const completed = globalThis.__computaModelSelection;
-    if (!genericPowerRecheck && !mutable && request.action === 'prepare' && context?.scope === 'action_final_guard'
-      && completed?.completed === true && globalThis.__computaChatFirstPrepareOpening == null) {
-      // Spend the first prepare observation even when its opening succeeds.
-      // Later prepares cannot acquire a new recovery allowance.
+    const firstVerify = request.action === 'verifyModel' && request.allowFirstChatVerificationOpening === true;
+    if (!genericPowerRecheck && !mutable && context?.action === request.action && context.scope === 'action_final_guard'
+      && completed?.completed === true && (request.action === 'prepare' && globalThis.__computaChatFirstPrepareOpening == null
+        || firstVerify && completed.firstVerificationOpening == null)) {
+      // Claim only the first opening of this phase, including an acknowledged opening.
       const pin = globalThis.__computaChatPresetPin;
       prepareOpening = { owner, document: originalDocument, attempt: completed, pin, selection: pin?.selection, header: trigger,
         recoveryClaimed: false,
         resolved: { family: { ...pin?.selection?.family }, power: { ...pin?.selection?.power } } };
-      globalThis.__computaChatFirstPrepareOpening = prepareOpening;
+      if (firstVerify) {
+        completed.firstVerificationOpening = prepareOpening;
+        prepareOpening.composer = insertComposer(current);
+      } else globalThis.__computaChatFirstPrepareOpening = prepareOpening;
       current = drainOpeningEvidence();
       if (!prepareOpeningIntact(current)) prepareOpening = null;
+      else if (firstVerify) {
+        // A popup that briefly opened and dismissed was acknowledged; never reopen it.
+        verifyObserver = new MutationObserver(recordVerifyOpening);
+        verifyObserver.observe(trigger, { attributes: true, attributeOldValue: true, attributeFilter: ['aria-expanded', 'data-state'] });
+      }
     }
     const submission = globalThis.__computaChatSubmissionState, prepared = submission?.pending;
     if (!genericPowerRecheck && !mutable && request.action === 'insert' && context?.scope === 'action_final_guard'
@@ -725,7 +758,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         if (clockRejected || Date.now() < acknowledgementDeadline
           || !(prepareOpening !== null ? prepareOpeningIntact(current) : insertOpeningIntact(current))) throw failure('model_unverified');
         (prepareOpening || insertOpening).recoveryClaimed = true;
-        readStage = prepareOpening !== null ? 'prepare_open_recovery_requested' : 'insert_open_recovery_requested';
+        readStage = firstVerify ? 'primary_open_recovery_requested' : prepareOpening !== null ? 'prepare_open_recovery_requested' : 'insert_open_recovery_requested';
         trigger.click();
         current = await wait(powerAcknowledged);
       }
@@ -1020,6 +1053,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   } catch (error) {
     return error?.error ? error : failure('model_unverified');
   } finally {
+    verifyObserver?.disconnect?.();
     observer.disconnect?.();
     headerObserver.disconnect?.();
     if (owned() && (primaryOpened || secondaryOpened || closeAttempted)) {

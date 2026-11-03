@@ -226,12 +226,19 @@ function computaQwenDOM(c) {
   // A clipped display button can have a covered center and an exposed edge.
   // Find one actual pointer target, then require the same viewport point on the
   // same pinned button after the caller revalidates the transcript and choice.
-  function displayHitFailure(control, point) {
-    return c.hitFailure(control, (left, top, right, bottom) => {
+  function displayHitFailure(control, point, classifyOcclusion = false) {
+    let blocker = null;
+    const reason = c.hitFailure(control, (left, top, right, bottom) => {
       const ownsPoint = (x, y) => {
         const hit = document.elementFromPoint(x, y);
-        return hit === control || (control.contains(hit) &&
-          hit.closest('button, a, input, select, textarea, [role], [tabindex], [contenteditable]') === control);
+        if (hit === control) return true;
+        const inside = control.contains(hit);
+        if (inside && hit.closest('button, a, input, select, textarea, [role], [tabindex], [contenteditable]') === control) return true;
+        if (classifyOcclusion) {
+          const kind = !hit ? 'none' : inside ? 'descendant' : hit.contains(control) ? 'ancestor' : 'unrelated';
+          blocker = !blocker || blocker === kind ? kind : 'mixed';
+        }
+        return false;
       };
       if (point.x !== undefined) {
         return left < point.x && point.x < right && top < point.y && point.y < bottom && ownsPoint(point.x, point.y);
@@ -243,6 +250,7 @@ function computaQwenDOM(c) {
       }
       return false;
     });
+    return reason === 'occluded' && blocker ? 'occluded_' + blocker : reason;
   }
   // The long user message has a display-only toggle inside this exact chunk.
   // A missing/ambiguous shape is never an invitation to click another button.

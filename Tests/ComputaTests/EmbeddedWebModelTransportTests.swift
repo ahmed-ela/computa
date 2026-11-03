@@ -5783,6 +5783,37 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testFirstChatPostSelectionVerificationRecoversOneIgnoredOpeningBeforePrompt() async throws {
+        let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/medium", label: "Medium")
+        let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
+        defer { fixture.shutdown() }
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+        try await waitForFixture(view)
+        let world = WKContentWorld.world(name: "computa-chatgpt-model-v1")
+        _ = try await evaluate(view, """
+            window.fixturePostSelectionOpens = 0;
+            const trigger = document.getElementById('fixture-model-trigger');
+            const click = trigger.click;
+            trigger.click = function () {
+              if (globalThis.__computaModelSelection?.completed === true && ++window.fixturePostSelectionOpens === 1) return;
+              return click.call(this);
+            };
+            return true;
+            """, world: world)
+        let ready = try await waitForState("ready", fixture.transport, token: token)
+        try assertChoiceEvidence(ready, choice: choice)
+        let openings = try await evaluate(view, "return window.fixturePostSelectionOpens;", world: world) as? Int
+        XCTAssertEqual(openings, 2)
+        let sends = try await evaluate(view, "return window.fixturePrompts.length;") as? Int
+        XCTAssertEqual(sends, 0)
+        let finish = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finish["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testChatGPTClosingTransitionRecoversOneConsumedFreshOpeningWithoutFramesOrSendReplay() async throws {
         let choice = Self.fixtureChoice(.chatgpt)
         let previousKeyWindow = NSApplication.shared.keyWindow

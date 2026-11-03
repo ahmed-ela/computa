@@ -413,3 +413,100 @@ test('Qwen refuses full coverage, a lost hit point, a moved target, and nested i
     expect([control.clicks, child.clicks, foreign.clicks, f.send.clicks, f.more.clicks]).toEqual([0,0,0,1,0]);
   }
 });
+
+test('one normal scroll can reveal only the exact pinned preview control', async () => {
+  for (const model of ['Qwen3.7-Plus', 'Qwen3.8-Max']) {
+    for (const before of ['occluded', 'outside_viewport']) {
+      const {f, control, render, inspect, hash, settleID} = await sent(model);
+      f.userBody.text = preview; control.onClick = render;
+      let scrolls = 0;
+      const original = f.document.elementFromPoint;
+      const points: number[][] = [];
+      control.getBoundingClientRect = () => ({left:20, top:scrolls ? 100 : before === 'occluded' ? 300 : 900, width:100, height:32});
+      f.document.elementFromPoint = (x: number, y: number) => {
+        if (y < 100) return original(x, y);
+        points.push([x, y]);
+        return scrolls ? control : f.document.body;
+      };
+      Object.assign(control, {scrollIntoView(options: unknown) {
+        scrolls++; expect(options).toEqual({block:'center', inline:'nearest', behavior:'instant'});
+        expect(control.clicks).toBe(0);
+      }});
+      expect(await inspect()).toEqual(pending);
+      expect(points.slice(-2)).toEqual([[70,116],[70,116]]);
+      expect(scrolls).toBe(1); expect(control.clicks).toBe(1);
+      expect(await inspect()).toEqual(idPending);
+      settleID();
+      const result = await inspect({allowQwenFirstBodyExpansion:false});
+      expect(result.firstUserVerified).toBe(true); expect(result.firstUserFingerprint).toBe(hash);
+      expect(result.answerComplete).toBe(true); expect(f.send.clicks).toBe(1);
+      expect(scrolls).toBe(1); expect(control.clicks).toBe(1);
+    }
+  }
+});
+
+test('scroll-induced changes and persistent occlusion cannot dispatch a display click', async () => {
+  for (const kind of ['ancestor','unrelated','none','descendant','mixed','scroll_failed','covered_again','control_changed','preview_changed','model','route','composer_changed']) {
+    const {f, chunk, control, inspect} = await sent();
+    f.userBody.text = preview;
+    const foreign = new f.Node('A', {href:'/other'}); f.document.body.append(foreign);
+    const nestedRole = new f.Node('SPAN', {role:'link'}); control.append(nestedRole);
+    const original = f.document.elementFromPoint;
+    let scrolls = 0, measurements = 0, afterHits = 0;
+    control.getBoundingClientRect = () => {
+      measurements++;
+      return {left:10, top:110, width:100,height:32};
+    };
+    f.document.elementFromPoint = (x: number, y: number) => {
+      if (y < 110) return original(x, y);
+      if (!scrolls) return f.document.body;
+      afterHits++;
+      if (kind === 'covered_again') return measurements === 2 ? control : foreign;
+      if (kind === 'ancestor') return chunk;
+      if (kind === 'none') return null;
+      if (kind === 'descendant') return nestedRole;
+      if (kind === 'mixed') return afterHits === 1 ? null : foreign;
+      return foreign;
+    };
+    Object.assign(control, {scrollIntoView() {
+      scrolls++;
+      if (kind === 'scroll_failed') throw Error('PRIVATE_FAILURE');
+      if (kind === 'control_changed') { control.detach(); chunk.append(new f.Node('BUTTON', {...control.values})); }
+      if (kind === 'preview_changed') f.userBody.text = 'z' + preview.slice(1);
+      if (kind === 'route') f.document.URL = 'https://chat.qwen.ai/';
+      if (kind === 'model') f.modelName.text = 'Qwen3.8-Max';
+      if (kind === 'composer_changed') {
+        const replacement = new (f.editor.constructor as any)('TEXTAREA', {...f.editor.values});
+        f.editor.detach(); f.scope.append(replacement);
+      }
+    }});
+    const result = await inspect();
+    expect(result.error, kind).toBeDefined(); expect(result.firstUserVerified).toBeUndefined();
+    expect(result.modelEvidence).toBeUndefined(); expect(JSON.stringify(result)).not.toContain('PRIVATE');
+    const classified = ['ancestor','unrelated','none','descendant','mixed'];
+    if (classified.includes(kind) || kind === 'covered_again' || kind === 'scroll_failed') {
+      const reason = kind === 'covered_again' ? 'occluded_unrelated' : kind === 'scroll_failed' ? kind : 'occluded_' + kind;
+      expect(result.qwenFirstUserBindingDiagnostic).toEqual({version:1,stage:'display_reveal_hit',reason});
+      expect(afterHits).toBe(kind === 'covered_again' ? 2 : kind === 'scroll_failed' ? 0 : 9);
+    } else {
+      expect(afterHits).toBe(0);
+    }
+    if (['control_changed','preview_changed','composer_changed'].includes(kind))
+      expect(result.qwenFirstUserBindingDiagnostic?.reason, kind + JSON.stringify(result)).toBe(kind);
+    if (kind !== 'route') expect((await inspect()).detail).toBe('terminal_operation');
+    expect([scrolls,control.clicks,foreign.clicks,f.send.clicks,f.more.clicks]).toEqual([1,0,0,1,0]);
+  }
+});
+
+test('no scroll is attempted for an ineligible view or foreign preview', async () => {
+  for (const kind of ['disabled','invalid_geometry','wrong_preview','cleanup']) {
+    const {f, control, inspect} = await sent();
+    let scrolls = 0;
+    Object.assign(control, {scrollIntoView() { scrolls++; }});
+    f.userBody.text = kind === 'wrong_preview' ? 'x' + preview.slice(1) : preview;
+    if (kind === 'disabled') control.disabled = true;
+    if (kind === 'invalid_geometry') control.getBoundingClientRect = () => ({left:0,top:0,width:0,height:50});
+    const result = await inspect(kind === 'cleanup' ? {savedCleanupInspection:true} : {});
+    expect(result.error).toBeDefined(); expect([scrolls,control.clicks,f.send.clicks]).toEqual([0,0,1]);
+  }
+});

@@ -36,6 +36,26 @@ struct GroqToolCatalog: Sendable {
         let revision: String
         let inventory: [Entry]
         let selectedNames: Set<String>
+
+        var discoverable: [Entry] { inventory.filter { $0.callable && $0.allowed } }
+        var loaderChoices: [String] {
+            discoverable.map(\.name).filter { $0 != GroqToolCatalog.name && $0 != "functions." + GroqToolCatalog.name }
+        }
+
+        /// Constrain only the website's displayed loader schema. Native registration,
+        /// canonical history, response configuration and executor checks keep the originals.
+        func displaySchemas(_ schemas: [[String: Any]]) -> [[String: Any]] {
+            let choices = loaderChoices
+            return schemas.map { tool in
+                if tool["type"] as? String == "namespace" {
+                    guard tool["name"] as? String == "functions", let children = tool["tools"] as? [[String: Any]] else { return tool }
+                    var result = tool
+                    result["tools"] = children.map { GroqToolCatalog.restoringRegisteredLoaderBounds($0, namespace: "functions", choices: choices) }
+                    return result
+                }
+                return GroqToolCatalog.restoringRegisteredLoaderBounds(tool, choices: choices)
+            }
+        }
     }
 
     enum Failure: Error, LocalizedError, Equatable {
@@ -65,13 +85,20 @@ struct GroqToolCatalog: Sendable {
     static var specification: [String: Any] {
         ["type": "function", "name": name,
          "description": "Load exact schemas for 1–4 inventory names for the next request. Read-only; executes nothing. Replaces the previous loaded selection. Use the current catalog_revision.",
-         "inputSchema": argumentSchema]
+         "inputSchema": argumentSchema()]
     }
 
-    private static var argumentSchema: [String: Any] {
-        ["type": "object", "properties": [
+    private static func argumentSchema(choices: [String]? = nil) -> [String: Any] {
+        let items: Any
+        if let choices {
+            // minItems is one. A false items schema admits no names when none can load.
+            items = choices.isEmpty ? false as Any : ["enum": choices] as Any
+        } else {
+            items = ["type": "string"]
+        }
+        return ["type": "object", "properties": [
             "catalog_revision": ["type": "string"],
-            "names": ["type": "array", "items": ["type": "string"],
+            "names": ["type": "array", "items": items,
                       "minItems": 1, "maxItems": maximumLoadedTools, "uniqueItems": true],
         ], "required": ["catalog_revision", "names"], "additionalProperties": false]
     }
@@ -81,7 +108,7 @@ struct GroqToolCatalog: Sendable {
     // representation omits maxItems and uniqueItems. Accept only this exact
     // reviewed projection alongside the complete native declaration.
     private static var engineArgumentSchema: [String: Any] {
-        var schema = argumentSchema
+        var schema = argumentSchema()
         var properties = schema["properties"] as! [String: Any]
         var names = properties["names"] as! [String: Any]
         names.removeValue(forKey: "maxItems")
@@ -93,13 +120,13 @@ struct GroqToolCatalog: Sendable {
 
     private static func matchesRegisteredSchema(_ schema: [String: Any]) -> Bool {
         guard let bytes = try? encoded(schema) else { return false }
-        return bytes == (try? encoded(argumentSchema)) || bytes == (try? encoded(engineArgumentSchema))
+        return bytes == (try? encoded(argumentSchema())) || bytes == (try? encoded(engineArgumentSchema))
     }
 
     /// Called only for the server's admitted native compact presentation. This
     /// restores loader bounds lost by the pinned engine; it never edits the
     /// original request/history or normalizes any other tool's contract.
-    static func restoringRegisteredLoaderBounds(_ definition: [String: Any], namespace: String? = nil) -> [String: Any] {
+    static func restoringRegisteredLoaderBounds(_ definition: [String: Any], namespace: String? = nil, choices: [String]? = nil) -> [String: Any] {
         guard namespace == nil || namespace == "functions",
               definition["type"] as? String == "function", definition["name"] as? String == name else { return definition }
         let keys = ["parameters", "inputSchema"].filter { definition[$0] != nil }
@@ -107,7 +134,7 @@ struct GroqToolCatalog: Sendable {
             (definition[key] as? [String: Any]).map(matchesRegisteredSchema) == true
         }) else { return definition }
         var result = definition
-        for key in keys { result[key] = argumentSchema }
+        for key in keys { result[key] = argumentSchema(choices: choices) }
         return result
     }
 

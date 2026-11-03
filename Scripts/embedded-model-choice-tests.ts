@@ -3319,6 +3319,95 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         x.f.advanceTime(801); x.f.flush(); await microtasks();
         expect((await x.expire()).error).toBeDefined(); expect(x.openings()).toBe(1); x.noReplay();
       });
+      const firstVerification = async (begin: (x:any) => void = () => {}) => {
+        const { f, picker } = setup(); const expected = choice('Medium');
+        expect((await f.run('selectModel', { modelChoice: expected })).selected).toBe(true);
+        const open = picker.trigger.onClick; let openings = 0;
+        const root = {f, picker, expected, open, count: () => openings,
+          request: {expectedModelChoice:expected, allowFirstChatVerificationOpening:true}};
+        begin(root);
+        picker.trigger.onClick = () => { openings++; if (openings === 2) open(); };
+        return root;
+      };
+      const tickVerification = async (f:any, ms:number) => {
+        await microtasks(); f.advanceTime(ms); f.flush(); await microtasks(); f.flush(); await microtasks();
+      };
+      test('fresh post-selection verification recovers one lost opening and proves the complete selected family and power', async () => {
+        const x=await firstVerification(), checking=x.f.run('verifyModel',x.request);
+        await tickVerification(x.f,901); await tickVerification(x.f,901);
+        const result=await checking;
+        expect(result.error).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(x.expected);
+        expect(result.modelEvidence.chatSelection.family.key).toBe('GPT-6');
+        expect(result.modelEvidence.chatSelection.power.key).toBe('medium');
+        expect(x.count()).toBe(2); noSelection(x.f,x.picker);
+        const again=x.f.run('verifyModel',x.request); expect((await expire(x.f,again)).error).toBe('model_unverified');
+        expect(x.count()).toBe(3); noSelection(x.f,x.picker);
+      });
+      test('fresh post-selection verification recognizes only the empty WebKit ProseMirror caret sentinel', async () => {
+        for (const shape of ['sentinel', 'space', 'extra_line', 'image', 'hidden_draft', 'unmarked_br']) {
+          const x = await firstVerification();
+          const editor = x.f.composer;
+          editor.values.class = 'ProseMirror';
+          const paragraph = new Node('P');
+          const br = new Node('BR', shape === 'unmarked_br' ? {} : { class: 'ProseMirror-trailingBreak' });
+          paragraph.append(br); editor.append(paragraph);
+          if (shape === 'space') paragraph.text = ' ';
+          if (shape === 'extra_line') editor.append(new Node('P'));
+          if (shape === 'image') paragraph.append(new Node('IMG'));
+          if (shape === 'hidden_draft') editor.append(new Node('SPAN', { hidden: '' }, 'unsent draft'));
+          Object.defineProperty(editor, 'innerText', { get: () => shape === 'hidden_draft' ? '' : '\n' });
+          const checking = x.f.run('verifyModel', x.request);
+          await tickVerification(x.f, 901); await tickVerification(x.f, 901);
+          const result = await checking;
+          if (shape === 'sentinel') {
+            expect(result.error).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(x.expected);
+            expect(x.count()).toBe(2);
+          } else {
+            expect(result.error, shape).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+            expect(x.count(), shape).toBe(1);
+          }
+        }
+      });
+      test('fresh post-selection verification accepts a late first open without a second click', async () => {
+        const x=await firstVerification(), checking=x.f.run('verifyModel',x.request);
+        await microtasks(); expect(x.count()).toBe(1); x.f.advanceTime(850); x.open();
+        x.f.observers.forEach((o:any)=>o.callback([{type:'childList',target:x.f.body,addedNodes:[x.picker.menu],removedNodes:[]}]));
+        await microtasks(); await tickVerification(x.f,51);
+        const result=await checking; expect(result.error).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(x.expected);
+        expect(x.count()).toBe(1); noSelection(x.f,x.picker);
+      });
+      test('fresh post-selection verification rejects the wrong checked family after a valid second opening', async () => {
+        const x=await firstVerification(); let openings=0;
+        x.picker.trigger.onClick=()=>{ if(++openings===2) { x.picker.selected('GPT-5.6 Sol'); x.open(); } };
+        const checking=x.f.run('verifyModel',x.request); await tickVerification(x.f,901); await tickVerification(x.f,901);
+        const result=await checking;
+        expect(result.error).toBe('model_mismatch'); expect(result.modelEvidence).toBeUndefined();
+        expect(openings).toBe(2); noSelection(x.f,x.picker);
+      });
+      test('fresh post-selection verification stops at two unanswered openings within the original deadline', async () => {
+        const x=await firstVerification(); let openings=0; x.picker.trigger.onClick=()=>{openings++};
+        const checking=x.f.run('verifyModel',x.request); await tickVerification(x.f,901);
+        expect(openings).toBe(2); await tickVerification(x.f,901);
+        const result=await checking; expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+        expect(openings).toBe(2); noSelection(x.f,x.picker);
+      });
+      test('fresh post-selection verification never reopens after acknowledgment, pin, owner, draft, or submission drift', async () => {
+        for(const variant of ['opened_closed','owner','pin','wrong_model','draft','post_submit','no_native_grant']) {
+          const x=await firstVerification();
+          if(variant==='no_native_grant') x.request.allowFirstChatVerificationOpening=false;
+          if(variant==='post_submit') x.f.world.__computaModelFirstSubmitted=true;
+          const checking=x.f.run('verifyModel',x.request); await microtasks();
+          if(variant==='opened_closed') x.f.observers.forEach((o:any)=>o.callback([{type:'attributes',target:x.picker.trigger,attributeName:'aria-expanded',oldValue:'true'}]));
+          if(variant==='owner') x.f.world.__computaModelOwner='foreign-owner-token';
+          if(variant==='pin') x.picker.trigger.connected=false;
+          if(variant==='wrong_model') x.picker.selected('High');
+          if(variant==='draft') x.f.composer.text='different draft';
+          await tickVerification(x.f,901); await tickVerification(x.f,901);
+          const result=await checking; expect(result.error,variant).toBeDefined(); expect(result.modelEvidence).toBeUndefined();
+          expect(x.count(),variant).toBeLessThanOrEqual(1);
+          expect(arrows(x.picker)).toHaveLength(0); expect(x.picker.familyOptions.every((node:any)=>node.clicks===0)).toBe(true);
+        }
+      });
       const firstInsertOpening = async (behavior: 'ignore_once' | 'late' | 'never' = 'ignore_once', editorSuffix = '') => {
         const { f, picker } = setup(); picker.selected('Instant');
         const expected = choice('Instant');

@@ -443,19 +443,32 @@ async function computaSavedConversation(input, c, dom, config) {
       if (!preview) reject(text.length === previewLength ? 'preview_prefix_mismatch' : 'preview_length_mismatch');
       if (claim.clicked) return true; // Same preview during the one local display transition.
       if (!view.collapsed) reject('not_collapsed');
+      const checkedControl = () => {
+        guard();
+        const current = dom.initialResponseIdentityTranscript(), currentView = dom.firstBodyPresentation(current);
+        checkFirstDisplaySelection('display_preclick');
+        requireSameFirstDisplay(currentView, 'display_preclick');
+        if (!currentView.collapsed) firstBindingFailure('display_preclick', 'not_collapsed');
+        if (current.first.text !== text) firstBindingFailure('display_preclick', 'preview_changed');
+        const currentForm = dom.composer();
+        if (!currentForm.empty) firstBindingFailure('display_preclick', 'composer_not_empty');
+        if (currentForm.editor !== form.editor || !c.enabled(currentForm.editor)) firstBindingFailure('display_preclick', 'composer_changed');
+        return currentView.control;
+      };
       const point = {};
-      const hit = dom.displayHitFailure(view.control, point);
-      if (hit !== null) firstBindingFailure('display_hit', hit);
-      guard();
-      const current = dom.initialResponseIdentityTranscript();
-      const currentView = dom.firstBodyPresentation(current);
-      checkFirstDisplaySelection('display_preclick');
-      requireSameFirstDisplay(currentView, 'display_preclick');
-      if (!currentView.collapsed) firstBindingFailure('display_preclick', 'not_collapsed');
-      if (current.first.text !== text) firstBindingFailure('display_preclick', 'preview_changed');
-      if (!dom.composer().empty) firstBindingFailure('display_preclick', 'composer_not_empty');
-      const currentHit = dom.displayHitFailure(currentView.control, point);
-      if (currentHit !== null) firstBindingFailure('display_preclick_hit', currentHit);
+      let hit = dom.displayHitFailure(view.control, point);
+      if ((hit === 'occluded' || hit === 'outside_viewport') && !claim.scrolled && typeof view.control.scrollIntoView === 'function') {
+        const control = checkedControl();
+        claim.scrolled = true;
+        // This reveal changes only the scroll position. Immediate geometry
+        // after an instant scroll must expose the still-pinned button itself.
+        try { control.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' }); }
+        catch { firstBindingFailure('display_reveal_hit', 'scroll_failed'); }
+        hit = dom.displayHitFailure(checkedControl(), point, true);
+        if (hit !== null) firstBindingFailure('display_reveal_hit', hit);
+      } else if (hit !== null) firstBindingFailure('display_hit', hit);
+      const currentHit = dom.displayHitFailure(checkedControl(), point, claim.scrolled === true);
+      if (currentHit !== null) firstBindingFailure(claim.scrolled ? 'display_reveal_hit' : 'display_preclick_hit', currentHit);
       claim.clicked = true;
       view.control.click();
       return true;
@@ -1084,12 +1097,19 @@ function computaQwenDOM(c) {
   // A clipped display button can have a covered center and an exposed edge.
   // Find one actual pointer target, then require the same viewport point on the
   // same pinned button after the caller revalidates the transcript and choice.
-  function displayHitFailure(control, point) {
-    return c.hitFailure(control, (left, top, right, bottom) => {
+  function displayHitFailure(control, point, classifyOcclusion = false) {
+    let blocker = null;
+    const reason = c.hitFailure(control, (left, top, right, bottom) => {
       const ownsPoint = (x, y) => {
         const hit = document.elementFromPoint(x, y);
-        return hit === control || (control.contains(hit) &&
-          hit.closest('button, a, input, select, textarea, [role], [tabindex], [contenteditable]') === control);
+        if (hit === control) return true;
+        const inside = control.contains(hit);
+        if (inside && hit.closest('button, a, input, select, textarea, [role], [tabindex], [contenteditable]') === control) return true;
+        if (classifyOcclusion) {
+          const kind = !hit ? 'none' : inside ? 'descendant' : hit.contains(control) ? 'ancestor' : 'unrelated';
+          blocker = !blocker || blocker === kind ? kind : 'mixed';
+        }
+        return false;
       };
       if (point.x !== undefined) {
         return left < point.x && point.x < right && top < point.y && point.y < bottom && ownsPoint(point.x, point.y);
@@ -1101,6 +1121,7 @@ function computaQwenDOM(c) {
       }
       return false;
     });
+    return reason === 'occluded' && blocker ? 'occluded_' + blocker : reason;
   }
   // The long user message has a display-only toggle inside this exact chunk.
   // A missing/ambiguous shape is never an invitation to click another button.

@@ -9,6 +9,18 @@ final class WebModelResponseCodecTests: XCTestCase {
         return definition
     }
 
+    private func displayedLoader(choices: [String]) throws -> [String: Any] {
+        var loader = groqLoaderDefinition
+        var schema = try XCTUnwrap(loader["parameters"] as? [String: Any])
+        var properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+        var names = try XCTUnwrap(properties["names"] as? [String: Any])
+        names["items"] = choices.isEmpty ? false as Any : ["enum": choices] as Any
+        properties["names"] = names
+        schema["properties"] = properties
+        loader["parameters"] = schema
+        return loader
+    }
+
     private func compactGroqRequest(_ value: [String: Any], selected: Set<String>? = nil) throws -> WebModelResponseCodec.Request {
         let raw = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes])
         let initial = try WebModelResponseCodec.prepareRequest(raw)
@@ -51,6 +63,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertFalse(legacy.prompt.contains("COMPUTA_NATIVE_POLICY_COMPACT_V1:"), label)
             let displayed = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(request.prompt[try requestRange(in: request)].utf8)) as? [String: Any])
             var expected = original
+            expected["tools"] = [try displayedLoader(choices: [])]
             if eligible {
                 let compact = prefix + ComputaAgentInstructions.groqCompactNativeInstructions(referenceTools: true, embeddedBrowserTools: true, domains: []) + suffix
                 if instructions != nil { expected["instructions"] = compact }
@@ -106,7 +119,9 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply("{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"\(prefix)foreign\",\"arguments\":{\"x\":\"aaa\"}}]}", request: baseline))
             let loaded = try compactGroqRequest(value, selected: [prefix + "foreign", prefix + "literal"])
             let display = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(loaded.prompt[try requestRange(in: loaded)].utf8)) as? [String: Any])
-            XCTAssertEqual(display["tools"] as? NSArray, tools as NSArray)
+            let presented = [try displayedLoader(choices: [prefix + "foreign", prefix + "literal"]), foreign, custom]
+            let expected: [[String: Any]] = namespace ? [["type": "namespace", "name": "functions", "tools": presented]] : presented
+            XCTAssertEqual(display["tools"] as? NSArray, expected as NSArray)
             XCTAssertEqual(loaded.offeredToolNames, [prefix + GroqToolCatalog.name, prefix + "foreign", prefix + "literal"])
             var selected = value
             selected["tool_choice"] = ["type": "function", "name": prefix + "foreign"]
@@ -188,7 +203,9 @@ final class WebModelResponseCodecTests: XCTestCase {
             let ordinaryDisplay = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(ordinary.prompt[try requestRange(in: ordinary)].utf8)) as? [String: Any])
             XCTAssertEqual(ordinaryDisplay["tools"] as? NSArray, tools as NSArray, "Untrusted presentation must not restore constraints")
             let display = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(compact.prompt[try requestRange(in: compact)].utf8)) as? [String: Any])
-            let expected: [[String: Any]] = namespace ? [["type": "namespace", "name": "functions", "tools": [groqLoaderDefinition]]] : [groqLoaderDefinition]
+            // With only the loader registered, no valid item can be loaded.
+            let expectedLoader = try displayedLoader(choices: [])
+            let expected: [[String: Any]] = namespace ? [["type": "namespace", "name": "functions", "tools": [expectedLoader]]] : [expectedLoader]
             XCTAssertEqual(display["tools"] as? NSArray, expected as NSArray)
             XCTAssertEqual(display["input"] as? NSArray, history as NSArray)
             XCTAssertEqual(display["tool_choice"] as? String, "auto")
@@ -222,6 +239,21 @@ final class WebModelResponseCodecTests: XCTestCase {
             let end = try XCTUnwrap(request.runtimeInstructions.range(of: "\n```", range: start.upperBound..<request.runtimeInstructions.endIndex))
             return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(request.runtimeInstructions[start.upperBound..<end.lowerBound].utf8)) as? [String: Any])
         }
+        func loaderNames(_ request: WebModelResponseCodec.Request) throws -> [String] {
+            let data = Data(request.prompt[try requestRange(in: request)].utf8)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let tools = try XCTUnwrap(object["tools"] as? [[String: Any]])
+            let children = tools.first?["tools"] as? [[String: Any]] ?? tools
+            let loader = try XCTUnwrap(children.first { $0["name"] as? String == GroqToolCatalog.name })
+            let schema = try XCTUnwrap(loader["parameters"] as? [String: Any])
+            let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+            let names = try XCTUnwrap(properties["names"] as? [String: Any])
+            let items = try XCTUnwrap(names["items"] as? [String: Any])
+            XCTAssertEqual(names["minItems"] as? Int, 1)
+            XCTAssertEqual(names["maxItems"] as? Int, 4)
+            XCTAssertEqual(names["uniqueItems"] as? Bool, true)
+            return try XCTUnwrap(items["enum"] as? [String])
+        }
         for namespace in [false, true] {
             let prefix = namespace ? "functions." : ""
             let definitions = [groqLoaderDefinition] + native
@@ -243,6 +275,10 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertEqual(unbound.offeredToolNames, [prefix + GroqToolCatalog.name])
             XCTAssertTrue((unboundInventory["unavailable"] as? [String] ?? []).contains(prefix + "browser_read"))
             XCTAssertEqual(unboundInventory["denied"] as? [String], [])
+            let choices = try loaderNames(unbound)
+            XCTAssertEqual(choices, ["browser_bind", "browser_open", "browser_tabs"].map { prefix + $0 })
+            let discovery = try XCTUnwrap(unboundInventory["inventory"] as? [[String]])
+            XCTAssertEqual(Set(discovery.compactMap(\.first)), Set(choices + [prefix + GroqToolCatalog.name]))
             XCTAssertTrue(unbound.prompt.contains("Page tools require successful " + prefix + "browser_bind" + " or " + prefix + "browser_open"))
             XCTAssertTrue(unbound.prompt.contains("loading alone does not bind"))
             XCTAssertTrue(unbound.prompt.contains("next request's refreshed inventory and catalog_revision"))
@@ -256,6 +292,11 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertThrowsError(try WebModelResponseCodec.prepareRequest(raw, browserToolAvailability: .bound,
                 groqToolCatalogProjection: unboundProjection), "An old unbound catalog cannot replace refreshed native state")
             XCTAssertFalse((try inventory(bound)["unavailable"] as? [String] ?? []).contains(prefix + "browser_read"))
+            XCTAssertTrue(try loaderNames(bound).contains(prefix + "browser_read"))
+            XCTAssertEqual(try loaderNames(bound), boundProjection.inventory.filter {
+                $0.callable && $0.allowed && $0.name != prefix + GroqToolCatalog.name
+            }.map(\.name))
+            XCTAssertEqual(try loaderNames(entryLoaded), choices, "Already loaded tools remain loadable with a replacement selection")
             XCTAssertFalse(bound.prompt.contains("Page tools require successful"))
             XCTAssertTrue(bound.prompt.contains("Current browser state: native page bound."))
             for prepared in [unbound, entryLoaded, bound] {
@@ -278,6 +319,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertTrue(policyRequest.prompt.contains("Page tools require successful " + prefix + "browser_open" + "."))
             XCTAssertFalse(policyRequest.prompt.contains(prefix + "browser_bind needs this turn's observed tab_id"))
             XCTAssertEqual(policyRequest.continuationRequest, restrictedData)
+            XCTAssertEqual(try loaderNames(policyRequest), [prefix + "browser_open"])
             let policyDisplay = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(policyRequest.prompt[try requestRange(in: policyRequest)].utf8)) as? [String: Any])
             XCTAssertEqual(policyDisplay["tool_choice"] as? NSDictionary, restricted["tool_choice"] as? NSDictionary)
         }

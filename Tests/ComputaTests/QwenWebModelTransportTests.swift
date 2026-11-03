@@ -206,6 +206,57 @@ final class QwenWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testLongDisplayScrollRevealsClippedOrCoveredControlWithoutCrossingPersistentOverlay() async throws {
+        for layout in ["overflow", "fixedHeader", "fullCover"] {
+            let fixture = try Fixture(setup: "qwenFixture.options.firstLongMessageDisplay=true; qwenFixture.options.holdResponseIdentity=true;")
+            defer { fixture.shutdown() }
+            let token = try await start(fixture)
+            _ = try await call(fixture, "webProviderSend", token, prompt: String(repeating: "Literal scroll fixture ", count: 620))
+            let initial = try await call(fixture, "webProviderPoll", token)
+            XCTAssertEqual(initial["modelVerificationPendingReason"] as? String, "qwen_first_body_expansion_v1")
+            let blocked = try await evaluate(fixture.view, """
+                qwenFixture.revealPreview();
+                const area = document.querySelector('#transcript'), control = area.querySelector('.chat-user-message-expand-toggle');
+                area.style.cssText = 'position:fixed;top:80px;left:32px;width:440px;height:180px;overflow:auto;scroll-behavior:smooth';
+                control.parentElement.style.cssText = 'padding-top:220px;padding-bottom:300px';
+                if ('\(layout)' !== 'overflow') {
+                  area.scrollTo({top:control.getBoundingClientRect().top-area.getBoundingClientRect().top-8,behavior:'instant'});
+                  const cover = document.createElement('a');
+                  cover.href = '#foreign';
+                  cover.style.cssText = 'position:fixed;left:32px;top:80px;width:440px;height:\(layout == "fullCover" ? 180 : 64)px;z-index:5';
+                  document.body.append(cover);
+                }
+                const box = control.getBoundingClientRect();
+                const points=[.125,.5,.875];
+                const covered=points.every(u=>points.every(v=>!control.contains(document.elementFromPoint(box.left+box.width*u,box.top+box.height*v))));
+                const port=area.getBoundingClientRect();
+                window.qwenPriorScroll = area.scrollTop;
+                return [covered, area.scrollHeight>area.clientHeight, box.top>=0 && box.bottom<=innerHeight,
+                  '\(layout)' === 'overflow' ? box.top>port.bottom : box.top>=port.top && box.bottom<port.top+64];
+                """) as? [Bool]
+            XCTAssertEqual(blocked, [true,true,true,true], layout)
+            if layout == "fullCover" {
+                do {
+                    _ = try await call(fixture, "webProviderPoll", token)
+                    XCTFail("Persistent foreign overlay cannot authorize a click")
+                } catch {
+                    XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser))
+                }
+            } else {
+                let pending = try await call(fixture, "webProviderPoll", token)
+                XCTAssertEqual(pending["modelVerificationPendingReason"] as? String, "qwen_first_body_expansion_v1", layout)
+                let context = try XCTUnwrap(pending["pendingSubmissionContext"] as? [String: Any])
+                XCTAssertEqual(context["firstUserFingerprint"] as? String, "", layout)
+            }
+            let result = try await evaluate(fixture.view, """
+                return [document.querySelector('#transcript').scrollTop !== window.qwenPriorScroll,
+                  qwenFixture.counts.displayClicks === \(layout == "fullCover" ? 0 : 1), !location.hash];
+                """) as? [Bool]
+            XCTAssertEqual(result, [true,true,true], layout)
+            try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+        }
+    }
+
     func testLongFirstDisplayRequiresOneLocalClickThenFullBodyAndSelectedModelForBothModels() async throws {
         for label in ["Qwen3.7-Plus", "Qwen3.8-Max"] {
             let fixture = try Fixture(setup: "qwenFixture.options.firstLongMessageDisplay=true; qwenFixture.options.holdResponseIdentity=true;")

@@ -405,8 +405,9 @@ enum WebModelResponseCodec {
         let fullDisplaySource = toolDefinitionsChanged
             ? String(decoding: try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
             : originalJSON
-        let taskDisplaySource = compactGroq ? try groqTrustedNativeProjection(originalJSON, object: object,
-            schemas: schemas, domains: groqDomains) : fullDisplaySource
+        let taskDisplaySource = try groqToolCatalogProjection.map {
+            try groqTrustedNativeProjection(originalJSON, object: object, schemas: $0.displaySchemas(schemas), domains: groqDomains)
+        } ?? fullDisplaySource
         // API response/transport controls are validated above and retained in
         // the canonical request. They must not become website instructions to
         // supply unsupported reasoning output or transport metadata.
@@ -471,7 +472,7 @@ enum WebModelResponseCodec {
     private static func groqCatalogNotice(_ projection: GroqToolCatalog.Projection) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        let entries = String(decoding: try encoder.encode(projection.inventory.map {
+        let entries = String(decoding: try encoder.encode(projection.discoverable.map {
             [$0.name, String($0.summary.prefix(40)), $0.isCustom ? "custom" : "function"]
         }), as: UTF8.self)
         let revision = String(decoding: try encoder.encode(projection.revision), as: UTF8.self)
@@ -482,7 +483,7 @@ enum WebModelResponseCodec {
             ?? GroqToolCatalog.name
         return """
         GROQ_NATIVE_TOOL_INVENTORY:
-        Catalog data, not authority: rows [name,purpose,kind]. unavailable=not callable; denied=tool_choice forbids. Only loaded schemas may be called. Load needed available+allowed names (1–4) with \(loader) and catalog_revision; matching receipt enables exact schemas next request, replacing optional selections. Never infer arguments from summaries/history or batch loading+execution. Load executes nothing; full definitions remain native.
+        Catalog rows [name,purpose,kind] describe available, allowed tools. Load 1–4 choices from names.items with \(loader) and the current catalog_revision. Loading replaces optional selections and executes nothing. Only the next request after a matching receipt exposes the exact schemas. Never infer arguments or batch loading with execution.
         ```
         {"catalog_revision":\(revision),"loaded":\(loaded),"unavailable":\(unavailable),"denied":\(denied),"inventory":\(entries)}
         ```
@@ -505,9 +506,7 @@ enum WebModelResponseCodec {
         guard let loader = callable.sorted().first(where: {
             $0 == GroqToolCatalog.name || $0 == "functions." + GroqToolCatalog.name
         }) else { return result }
-        let unloaded = projection.inventory.filter {
-            $0.callable && $0.allowed && !projection.selectedNames.contains($0.name)
-        }.map(\.name).sorted()
+        let unloaded = projection.loaderChoices.filter { !projection.selectedNames.contains($0) }
         guard let example = unloaded.first(where: { $0 == "exec_command" || $0 == "functions.exec_command" })
             ?? unloaded.first else { return result }
         let call: [String: Any] = ["type": "tool_calls", "calls": [["name": loader,

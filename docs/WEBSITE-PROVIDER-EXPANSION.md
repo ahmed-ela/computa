@@ -978,6 +978,27 @@ the response instructions now distinguish the page receipt from the close
 acknowledgment. ChatGPT Instant completed the same workflow including an
 explicit close after recovering from an indentation error in its first edit.
 
+### Installed workflow results and build 407 changes (2026-11-03)
+
+DeepSeek DeepThink on build 403, DeepSeek Chat on 404, and ChatGPT High and
+Extra High on 406 each completed one fresh invoice fixture. Each edited the
+designated file, passed six tests, submitted the reference once, returned the
+receipt and explicitly closed its task tab. The provider journals confirmed
+the selected mode or preset throughout each run.
+
+ChatGPT Medium on 405 completed three inferences. On the next fresh tab, the picker
+opening was never acknowledged before submission. Build 407 allows one more opening
+attempt on that same verified, untouched composer and still requires the
+selected family and power. Groq GPT OSS 120B on 404 requested page tools before
+binding a tab. Its compact schema now lists the exact tool names the current
+catalog revision can load.
+
+Qwen Plus and Max on 406 both failed before expanding the first message.
+Every sampled point on the verified Expand button was covered. Build 407
+scrolls that button into view once, rechecks the conversation and model, and
+requires the same exposed point immediately before clicking. The WebKit tests
+cover a scrollable container, a fixed header and a persistent overlay.
+
 ## Remaining gates
 
 1. Check each installed model with a fresh task. Verify the response and
