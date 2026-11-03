@@ -189,6 +189,34 @@ function computaQwenDOM(c) {
     }
     return { users, answers, first: { root, container, body, id, text: body.textContent }, answer, pendingAnswer };
   }
+  // The long user message has a display-only toggle inside this exact chunk.
+  // A missing/ambiguous shape is never an invitation to click another button.
+  function firstBodyPresentation(transcript) {
+    const { first, pendingAnswer, answer } = transcript;
+    const response = pendingAnswer || answer;
+    if (!first || !response || transcript.users.length !== 1 || transcript.answers.length !== 1
+      || visible(document, '[role="dialog"], [aria-modal="true"]', 32).length) return null;
+    const { body, container, root } = first;
+    const chunk = body.parentElement;
+    if (!chunk?.classList.contains('chunked-text-renderer-root-with-expand') || chunk.children.length !== 2
+      || chunk.children[0] !== body || !container.contains(chunk) || !c.visible(chunk)) return null;
+    const control = chunk.children[1];
+    const collapsed = chunk.classList.contains('is-collapsed');
+    if (control.tagName !== 'BUTTON' || !control.classList.contains('chat-user-message-expand-toggle')
+      || !control.classList.contains('chat-user-message-expand-toggle-pc')
+      || control.getAttribute('aria-label') !== (collapsed ? 'Expand' : 'Collapse')
+      || !c.enabled(control) || control.closest('form, a, [contenteditable="true"]')
+      || control.querySelector('a, button, input, select, textarea, [contenteditable="true"]')
+      || ['form', 'formaction', 'popovertarget', 'commandfor', 'aria-controls', 'aria-expanded'].some(name => control.getAttribute(name) !== null)
+      || ![null, 'button'].includes(control.getAttribute('type'))) return null;
+    const pins = [body, control];
+    for (let node = chunk; node !== root; node = node.parentElement) {
+      if (!node || pins.length > 16) return null;
+      pins.push(node);
+    }
+    pins.push(root, root.parentElement, root.parentElement.parentElement, response.root, response.root.parentElement, response.content);
+    return { pins, control, collapsed, userID: first.id, answerID: answer?.id || null };
+  }
   function firstBodyFailureStructure(first, expected) {
     const comparison = computaSavedFirstBodyComparison(first?.text, expected);
     if (!comparison || !first?.container) return null;
@@ -332,6 +360,6 @@ function computaQwenDOM(c) {
     setter.call(form.editor, prompt);
     form.editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));
   }
-  return { firstBodyFailureStructure, initialResponseIdentityTranscript: () => transcript(true), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer,
+  return { firstBodyPresentation, firstBodyFailureStructure, initialResponseIdentityTranscript: () => transcript(true), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer,
     deletionTrigger, deletionMenu, deletionConfirmation, deletionObserved, insertLiteral };
 }

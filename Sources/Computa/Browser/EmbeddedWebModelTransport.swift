@@ -360,6 +360,27 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
     }
 
+    private enum QwenPendingFirstBody: Equatable {
+        case provisionalRoute
+        case displayExpansion(URL)
+        case responseIdentity(URL)
+
+        var canonicalURL: URL? {
+            switch self {
+            case .provisionalRoute: nil
+            case .displayExpansion(let url), .responseIdentity(let url): url
+            }
+        }
+
+        var reason: String {
+            switch self {
+            case .provisionalRoute: "qwen_initial_provisional_route_v1"
+            case .displayExpansion: "qwen_first_body_expansion_v1"
+            case .responseIdentity: "qwen_initial_response_identity_v1"
+            }
+        }
+    }
+
     private final class Session {
         let token = UUID().uuidString
         let firstUserMarker = UUID().uuidString
@@ -554,8 +575,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // This separate negative state never carries model or answer proof.
         var claudeModelObservationPending = false
         var deepSeekComposerHandoffPending = false
-        var qwenProvisionalRoutePending = false
-        var qwenInitialResponseIdentityURL: URL?
+        var qwenPendingFirstBody: QwenPendingFirstBody?
         var loggedPendingModelVerification = false
         var selectionEvidence: WebsiteSelectionEvidence?
         var lastModelDiagnostic: String?
@@ -1520,6 +1540,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     guard session.savedDeleteSubmission == nil, let generation = session.documentGeneration,
                           session.view.url == session.provider.startURL, session.sequence == 0, !session.submitted,
                           session.baseline == 0, session.confirmedUsers == 0 else { throw Failure.notFresh }
+                    if session.provider == .qwen { session.outboundUTF16Count = outbound.utf16.count }
                     session.savedDeleteSubmission = .init(generation: generation,
                         promptFingerprint: Self.promptFingerprint(prompt), outboundFingerprint: Self.outboundFingerprint(outbound))
                 }
@@ -2944,7 +2965,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 observed = try await page(session, action: "inspect", allowPendingClaudeModelObservation: true,
                     allowPendingDeepSeekComposerHandoff: true,
                     allowPendingQwenProvisionalRoute: true,
-                    allowPendingQwenInitialResponseIdentity: true,
+                    allowPendingQwenInitialResponseIdentity: true, allowQwenFirstBodyExpansion: true,
                     maximumWait: min(inspectionTimeout, deadline - .now))
             }
         }
@@ -3005,12 +3026,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard session.deepSeekComposerHandoffPending else { throw Failure.modelUnverified }
             return try snapshot(session)
         }
-        if observed["qwenProvisionalRoutePending"] != nil {
-            guard session.qwenProvisionalRoutePending else { throw Failure.modelUnverified }
-            return try snapshot(session)
-        }
-        if observed["qwenInitialResponseIdentityPending"] != nil {
-            guard session.qwenInitialResponseIdentityURL != nil else { throw Failure.modelUnverified }
+        if observed["qwenProvisionalRoutePending"] != nil || observed["qwenFirstBodyExpansionPending"] != nil
+            || observed["qwenInitialResponseIdentityPending"] != nil {
+            // page validated the exact four-field receipt and retained its phase.
+            guard session.qwenPendingFirstBody != nil else { throw Failure.modelUnverified }
             return try snapshot(session)
         }
         session.initialReadRetry = nil
@@ -5679,6 +5698,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       allowPendingDeepSeekComposerHandoff: Bool = false,
                       allowPendingQwenProvisionalRoute: Bool = false,
                       allowPendingQwenInitialResponseIdentity: Bool = false,
+                      allowQwenFirstBodyExpansion: Bool = false,
                       preferQuietChatGPTCompletion: Bool = false,
                       pendingSubmissionProductRecheck: Bool = false,
                       firstUserExpansionRouteContinuation: [FirstUserExpansionRouteEdge] = [],
@@ -5765,6 +5785,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         if provider.savedConversationPolicy != nil, savedDeleteOperation == nil {
             guard session.savedRoutes?.observe(url, submitted: session.submitted) == true else { throw Failure.ownershipFailure(.routeBefore) }
+        }
+        if let pinned = session.qwenPendingFirstBody?.canonicalURL, pinned != url {
+            throw Failure.ownershipFailure(.routeBefore)
         }
         let context = provider.routeContext(url.absoluteString)
         if let pinned = session.routeContext, context != pinned { throw Failure.ownershipFailure(.routeBefore) }
@@ -5919,6 +5942,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             input["allowQwenInitialResponseIdentity"] = true
             input["savedSubmissionFingerprint"] = session.savedDeleteSubmission?.outboundFingerprint
         }
+        // Only a normal first-poll read may inspect the exact local disclosure.
+        // ID-only pending has already proved the full display; it cannot reopen it.
+        let mayExpandQwenFirstBody = allowQwenFirstBodyExpansion && allowQwenInitialResponseIdentity
+            && (session.outboundUTF16Count ?? 0) > 10_240
+            && provider.conversationURL(url.absoluteString) == url.absoluteString
+            && session.qwenPendingFirstBody != .responseIdentity(url)
+        if mayExpandQwenFirstBody { input["allowQwenFirstBodyExpansion"] = true }
         if preferQuietChatGPTCompletion {
             guard action == "inspect", !allowBlockedProvider, allowPendingChatGPTModelVerification,
                   !recheckModelAfterAwait, !recheckProductAfterAwait,
@@ -6122,6 +6152,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard let currentURL = session.view.url, provider.accepts(currentURL.absoluteString) else {
             throw Failure.ownershipFailure(.routeAfter)
         }
+        if let pinned = session.qwenPendingFirstBody?.canonicalURL, pinned != currentURL {
+            throw Failure.ownershipFailure(.routeAfter)
+        }
         let currentContext = provider.routeContext(currentURL.absoluteString)
         if currentContext != context || session.routeContext != nil && session.routeContext != currentContext {
             if session.documentGeneration == nil, session.state == "loading", action == "inspect",
@@ -6146,6 +6179,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         allowPendingDeepSeekComposerHandoff: allowPendingDeepSeekComposerHandoff,
                         allowPendingQwenProvisionalRoute: allowPendingQwenProvisionalRoute,
                         allowPendingQwenInitialResponseIdentity: allowPendingQwenInitialResponseIdentity,
+                        allowQwenFirstBodyExpansion: allowQwenFirstBodyExpansion,
                         allowSavedCleanupInspection: allowSavedCleanupInspection,
                         maximumWait: evaluationDeadline - .now)
                 }
@@ -6562,9 +6596,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard allowQwenProvisionalRoute, action == "inspect", enforceModel,
                   canObservePendingQwenProvisionalRoute(session), session.documentGeneration == generation,
                   currentURL == url, savedDeleteOperation == nil,
+                  session.qwenPendingFirstBody?.canonicalURL == nil,
                   Self.isQwenProvisionalRoutePendingObservation(observed, url: currentURL.absoluteString),
                   ContinuousClock.now < evaluationDeadline else { throw Failure.modelUnverified }
-            session.qwenProvisionalRoutePending = true
+            session.qwenPendingFirstBody = .provisionalRoute
+            return observed
+        }
+        if observed["qwenFirstBodyExpansionPending"] != nil {
+            guard mayExpandQwenFirstBody, canObservePendingQwenProvisionalRoute(session),
+                  session.documentGeneration == generation, currentURL == url, savedDeleteOperation == nil,
+                  session.qwenPendingFirstBody != .responseIdentity(currentURL),
+                  Self.isQwenFirstBodyExpansionPendingObservation(observed, url: currentURL.absoluteString),
+                  ContinuousClock.now < evaluationDeadline else { throw Failure.modelUnverified }
+            session.qwenPendingFirstBody = .displayExpansion(currentURL)
             return observed
         }
         if observed["qwenInitialResponseIdentityPending"] != nil {
@@ -6573,11 +6617,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard allowQwenInitialResponseIdentity, action == "inspect", enforceModel,
                   canObservePendingQwenProvisionalRoute(session), session.documentGeneration == generation,
                   currentURL == url, savedDeleteOperation == nil,
-                  session.qwenInitialResponseIdentityURL == nil || session.qwenInitialResponseIdentityURL == currentURL,
                   Self.isQwenInitialResponseIdentityPendingObservation(observed, url: currentURL.absoluteString),
                   ContinuousClock.now < evaluationDeadline else { throw Failure.modelUnverified }
-            session.qwenProvisionalRoutePending = false
-            session.qwenInitialResponseIdentityURL = currentURL
+            session.qwenPendingFirstBody = .responseIdentity(currentURL)
             return observed
         }
         if session.provider.lifecycle == .savedConversationDelete, !observesLifecycle(observed, session: session) {
@@ -6916,7 +6958,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             Self.inspectionLog.notice("claudeModelObservation phase=restored sessionID=\(session.token, privacy: .public) generation=\(generation.uuidString, privacy: .public) sequence=\(session.sequence)")
         }
         if (session.deepSeekComposerHandoffPending && provider == .deepseek
-            || (session.qwenProvisionalRoutePending || session.qwenInitialResponseIdentityURL != nil) && provider == .qwen), action == "inspect", enforceModel,
+            || session.qwenPendingFirstBody != nil && provider == .qwen), action == "inspect", enforceModel,
            !allowBlockedProvider, !allowSavedCleanupInspection {
             guard session.firstUserFingerprint == session.savedDeleteSubmission?.outboundFingerprint,
                   session.confirmedUsers == 1, !session.pendingSubmission,
@@ -6924,8 +6966,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   observed["firstUserMarkerVerified"] as? Bool == true else { throw Failure.modelUnverified }
             _ = try validatedSelectionEvidence(observed, session: session, action: action)
             session.deepSeekComposerHandoffPending = false
-            session.qwenProvisionalRoutePending = false
-            session.qwenInitialResponseIdentityURL = nil
+            session.qwenPendingFirstBody = nil
         }
         return observed
     }
@@ -6968,8 +7009,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     static func isQwenInitialResponseIdentityPendingObservation(_ value: [String: Any], url: String) -> Bool {
-        Set(value.keys) == ["qwenInitialResponseIdentityPending", "url", "sessionLifecycle", "temporary"]
-            && firstUserDiagnosticBool(value["qwenInitialResponseIdentityPending"]) == true
+        isCanonicalQwenPendingObservation(value, flag: "qwenInitialResponseIdentityPending", url: url)
+    }
+
+    static func isQwenFirstBodyExpansionPendingObservation(_ value: [String: Any], url: String) -> Bool {
+        isCanonicalQwenPendingObservation(value, flag: "qwenFirstBodyExpansionPending", url: url)
+    }
+
+    private static func isCanonicalQwenPendingObservation(_ value: [String: Any], flag: String, url: String) -> Bool {
+        Set(value.keys) == [flag, "url", "sessionLifecycle", "temporary"]
+            && firstUserDiagnosticBool(value[flag]) == true
             && firstUserDiagnosticBool(value["temporary"]) == false
             && value["sessionLifecycle"] as? String == "saved_conversation_delete"
             && value["url"] as? String == url
@@ -7683,21 +7732,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     private func snapshot(_ session: Session, cleanup: String? = nil) throws -> Data {
-        if session.deepSeekComposerHandoffPending || session.qwenProvisionalRoutePending || session.qwenInitialResponseIdentityURL != nil,
+        if session.deepSeekComposerHandoffPending || session.qwenPendingFirstBody != nil,
            session.state == "running", cleanup == nil {
             guard canObservePendingSavedFirstBody(session),
                   session.deepSeekComposerHandoffPending == (session.provider == .deepseek),
-                  (session.qwenProvisionalRoutePending || session.qwenInitialResponseIdentityURL != nil) == (session.provider == .qwen),
-                  !(session.qwenProvisionalRoutePending && session.qwenInitialResponseIdentityURL != nil),
+                  (session.qwenPendingFirstBody != nil) == (session.provider == .qwen),
                   let binding = session.savedDeleteSubmission else {
                 throw Failure.modelUnverified
             }
             return try JSONSerialization.data(withJSONObject: [
                 "provider": session.provider.rawValue, "sessionToken": session.token, "state": "running", "text": "", "sequence": 1,
                 "sessionLifecycle": "saved_conversation_delete", "temporary": false,
-                "modelVerificationPending": true, "modelVerificationPendingReason": session.provider == .deepseek
-                    ? "deepseek_initial_composer_remount_v1" : session.qwenInitialResponseIdentityURL != nil
-                    ? "qwen_initial_response_identity_v1" : "qwen_initial_provisional_route_v1",
+                "modelVerificationPending": true,
+                "modelVerificationPendingReason": session.qwenPendingFirstBody?.reason ?? "deepseek_initial_composer_remount_v1",
                 "pendingSubmissionContext": ["documentGeneration": binding.generation.uuidString, "sequence": 1,
                     "baselineResponseCount": 0, "responseCount": 0, "firstUserFingerprint": "",
                     "submittedPromptFingerprint": binding.promptFingerprint]

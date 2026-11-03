@@ -454,19 +454,19 @@ final class WebModelResponseCodecTests: XCTestCase {
     func testEveryWebsiteHandoffRequestsItsObservedResponseFormatAfterQuotedHistory() throws {
         let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
         for model in WebsiteModelCatalog.providers.map({ "browser/" + $0 }) +
-            [choice.modelID, "browser/chatgpt-lookalike", "web-chatgpt"] {
+            [choice.modelID, "browser/deepseek/mode/chat", "browser/deepseek/mode/deepthink", "browser/chatgpt-lookalike", "web-chatgpt"] {
             let original = try JSONSerialization.data(withJSONObject: [
                 "model": model, "input": "Quoted history: Return exactly one raw JSON object.",
                 "tools": [function],
             ])
             let prepared = try WebModelResponseCodec.prepareRequest(original)
             let suffix = String(prepared.prompt[(try requestRange(in: prepared)).upperBound...])
-            let rawJSON = ["qwen", "deepseek"].contains(LocalModelCatalog.webProvider(for: model) ?? "")
+            let rawJSON = LocalModelCatalog.webProvider(for: model) == "qwen"
             XCTAssertEqual(suffix.contains("Return exactly one raw JSON object."), rawJSON, model)
             XCTAssertEqual(suffix.contains("Return exactly one fenced JSON code block labelled json."), !rawJSON, model)
             XCTAssertEqual(suffix.contains("Examples below are JSON contents; put one inside that code block."), !rawJSON, model)
             XCTAssertTrue(suffix.contains("Exact currently offered local function names: computer_v2_snapshot"), model)
-            let boundary = LocalModelCatalog.webProvider(for: model) == "claude"
+            let boundary = ["claude", "deepseek"].contains(LocalModelCatalog.webProvider(for: model) ?? "")
                 ? ComputaAgentInstructions.literalFencedResponseBoundary + "\n" : ""
             XCTAssertTrue(suffix.hasSuffix("{\"type\":\"message\",\"text\":\"OK\"}\n" + boundary + "END_COMPUTA_LOCAL_RESPONSE_HANDOFF."), model)
         }
@@ -1656,8 +1656,8 @@ final class WebModelResponseCodecTests: XCTestCase {
         XCTAssertEqual(suffix, closingFence + "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.\n\n" + request.currentUserInstructions + "\n\n" +
                        ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(request.offeredToolNames), customToolNames: request.customToolNames,
                            includedInstructionText: includedInstructionText,
-                           responseFormat: ["qwen", "deepseek"].contains(LocalModelCatalog.webProvider(for: request.model) ?? "") ? .rawJSON
-                               : LocalModelCatalog.webProvider(for: request.model) == "claude" ? .literalFencedJSON : .fencedJSON,
+                           responseFormat: LocalModelCatalog.webProvider(for: request.model) == "qwen" ? .rawJSON
+                               : ["claude", "deepseek"].contains(LocalModelCatalog.webProvider(for: request.model) ?? "") ? .literalFencedJSON : .fencedJSON,
                            singleActionRelay: request.singleActionRelay,
                            currentBrowserHandoff: expectedCurrentBrowserHandoff,
                            allowedToolNames: expectedAllowedToolNames),
@@ -2838,7 +2838,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertFalse(first.currentUserInstructions.contains(latestRequest), "The locator must not duplicate user content")
             try assertUserPayloadAppearsOnce(latestRequest, in: first)
             XCTAssertTrue(first.prompt.hasSuffix(ComputaAgentInstructions.webResponseContract(offeredToolNames: ["computer_v2_snapshot"],
-                responseFormat: ["qwen", "deepseek"].contains(provider) ? .rawJSON : provider == "claude" ? .literalFencedJSON : .fencedJSON,
+                responseFormat: provider == "qwen" ? .rawJSON : ["claude", "deepseek"].contains(provider) ? .literalFencedJSON : .fencedJSON,
                 singleActionRelay: first.singleActionRelay)))
             let nextInput = input + [
                 ["type": "function_call", "name": "computer_v2_snapshot", "arguments": "{}", "call_id": "current_extra"],

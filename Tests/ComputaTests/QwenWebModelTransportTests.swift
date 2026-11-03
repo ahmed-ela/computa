@@ -124,22 +124,90 @@ final class QwenWebModelTransportTests: XCTestCase {
     }
 
     func testInitialResponseIdentityReceiptIsNegativeOnlyAndCanonicalOnly() {
+        assertCanonicalNegativeReceipt("qwenInitialResponseIdentityPending",
+            validate: EmbeddedWebModelTransport.isQwenInitialResponseIdentityPendingObservation)
+    }
+
+    func testFirstBodyExpansionReceiptIsNegativeOnlyAndCanonicalOnly() {
+        assertCanonicalNegativeReceipt("qwenFirstBodyExpansionPending",
+            validate: EmbeddedWebModelTransport.isQwenFirstBodyExpansionPendingObservation)
+    }
+
+    private func assertCanonicalNegativeReceipt(_ flag: String, validate: ([String: Any], String) -> Bool) {
         let url = "https://chat.qwen.ai/c/11111111-abcd-4333-8444-555555555555"
-        let valid: [String: Any] = ["qwenInitialResponseIdentityPending": true, "url": url,
+        let valid: [String: Any] = [flag: true, "url": url,
             "sessionLifecycle": "saved_conversation_delete", "temporary": false]
-        XCTAssertTrue(EmbeddedWebModelTransport.isQwenInitialResponseIdentityPendingObservation(valid, url: url))
-        for (key, value) in [("qwenInitialResponseIdentityPending", 1 as Any), ("temporary", 0 as Any),
-            ("qwenInitialResponseIdentityPending", false as Any), ("sessionLifecycle", "temporary" as Any),
+        XCTAssertTrue(validate(valid, url))
+        for (key, value) in [(flag, 1 as Any), ("temporary", 0 as Any),
+            (flag, false as Any), ("sessionLifecycle", "temporary" as Any),
             ("text", "" as Any), ("modelEvidence", NSNull() as Any), ("answerComplete", false as Any),
             ("firstUserFingerprint", "" as Any), ("userCount", 0 as Any)] {
             var changed = valid; changed[key] = value
-            XCTAssertFalse(EmbeddedWebModelTransport.isQwenInitialResponseIdentityPendingObservation(changed, url: url), key)
+            XCTAssertFalse(validate(changed, url), key)
         }
         for other in ["https://chat.qwen.ai/", "https://chat.qwen.ai/c/new-chat", url + "/", url + "?", url + "#",
             url.replacingOccurrences(of: "abcd", with: "ABCD"), url.replacingOccurrences(of: "ai/", with: "ai:443/")] {
             var changed = valid; changed["url"] = other
-            XCTAssertFalse(EmbeddedWebModelTransport.isQwenInitialResponseIdentityPendingObservation(changed, url: other))
-            XCTAssertFalse(EmbeddedWebModelTransport.isQwenInitialResponseIdentityPendingObservation(valid, url: other))
+            XCTAssertFalse(validate(changed, other))
+            XCTAssertFalse(validate(valid, other))
+        }
+    }
+
+    func testUnverifiedLongDisplayCannotExpandOrDeleteDuringCleanup() async throws {
+        let fixture = try Fixture(setup: "qwenFixture.options.firstLongMessageDisplay=true; qwenFixture.options.holdResponseIdentity=true;")
+        defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        _ = try await call(fixture, "webProviderSend", token, prompt: String(repeating: "Synthetic long pending message ", count: 600))
+        let pending = try await call(fixture, "webProviderPoll", token)
+        XCTAssertEqual(pending["modelVerificationPendingReason"] as? String, "qwen_first_body_expansion_v1")
+        _ = try await evaluate(fixture.view, "qwenFixture.revealPreview(); return true;")
+        let finished = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "failed")
+        let clicks = try await evaluate(fixture.view, "return qwenFixture.counts.displayClicks;") as? Int
+        XCTAssertEqual(clicks, 0)
+        try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+    }
+
+    func testLongFirstDisplayRequiresOneLocalClickThenFullBodyAndSelectedModelForBothModels() async throws {
+        for label in ["Qwen3.7-Plus", "Qwen3.8-Max"] {
+            let fixture = try Fixture(setup: "qwenFixture.options.firstLongMessageDisplay=true; qwenFixture.options.holdResponseIdentity=true;")
+            defer { fixture.shutdown() }
+            let token = try await start(fixture, label: label)
+            let prompt = String(repeating: "Literal Qwen disclosure fixture 👋 日本語\n", count: 600)
+            _ = try await call(fixture, "webProviderSend", token, prompt: prompt)
+            for (stage, reason, clicks) in [
+                ("return true;", "qwen_first_body_expansion_v1", 0),
+                ("qwenFixture.revealPreview(); return true;", "qwen_first_body_expansion_v1", 1),
+                ("return true;", "qwen_initial_response_identity_v1", 1)
+            ] {
+                _ = try await evaluate(fixture.view, stage)
+                let pending = try await call(fixture, "webProviderPoll", token)
+                XCTAssertEqual(pending["state"] as? String, "running")
+                XCTAssertEqual(pending["modelVerificationPendingReason"] as? String, reason)
+                XCTAssertEqual(pending["text"] as? String, "")
+                XCTAssertNil(pending["modelEvidence"])
+                XCTAssertNil(pending["modelProofContext"])
+                XCTAssertNil(pending["completionEvidence"])
+                let context = try XCTUnwrap(pending["pendingSubmissionContext"] as? [String: Any])
+                XCTAssertEqual(context["firstUserFingerprint"] as? String, "")
+                let observed = try await evaluate(fixture.view, "return qwenFixture.counts.displayClicks;") as? Int
+                XCTAssertEqual(observed, clicks)
+            }
+            _ = try await evaluate(fixture.view, "qwenFixture.settleResponseIdentity(); return true;")
+            let settled = try await call(fixture, "webProviderPoll", token)
+            XCTAssertNil(settled["modelVerificationPending"])
+            let context = try XCTUnwrap(settled["modelProofContext"] as? [String: Any])
+            XCTAssertEqual((context["firstUserFingerprint"] as? String)?.count, 64)
+            _ = try await evaluate(fixture.view, "qwenFixture.completeResponse(); return true;")
+            let complete = try await wait(fixture, token, state: "complete")
+            XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Synthetic Qwen native reply"}"#)
+            let choice = WebsiteModelChoice(provider: "qwen", key: label, label: label)
+            _ = try WebsiteModelEvidence.parse(complete["modelEvidence"], provider: "qwen", expected: choice)
+            let finished = try await call(fixture, "webProviderFinish", token)
+            XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+            let clicks = try await evaluate(fixture.view, "return qwenFixture.counts.displayClicks;") as? Int
+            XCTAssertEqual(clicks, 1)
+            try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
         }
     }
 

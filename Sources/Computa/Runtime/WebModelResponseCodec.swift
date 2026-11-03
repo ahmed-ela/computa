@@ -264,7 +264,13 @@ enum WebModelResponseCodec {
         }
         let provider = LocalModelCatalog.webProvider(for: model)
         let isChatGPT = provider == "chatgpt", isClaude = provider == "claude", isGroq = provider == "groq"
-        let usesRawJSONSource = provider == "qwen" || provider == "deepseek"
+        // DeepSeek's JSON code block preserves the literal PRE text, including
+        // backslashes in patch inputs. Its ordinary paragraph renders Markdown.
+        let responseFormat: ComputaAgentInstructions.WebResponseFormat = switch provider {
+        case "qwen": .rawJSON
+        case "claude", "deepseek": .literalFencedJSON
+        default: .fencedJSON
+        }
         guard object["input"] is String || object["input"] is [Any] else {
             throw Failure.missingInput
         }
@@ -426,7 +432,7 @@ enum WebModelResponseCodec {
             currentToolHandoff: try currentGroqToolHandoff(projection: groqToolCatalogProjection,
                 offeredNames: Set(offered.keys), allowedNames: policy.allowedNames))
             : ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames,
-            includedInstructionText: includedInstructionText, responseFormat: usesRawJSONSource ? .rawJSON : isClaude ? .literalFencedJSON : .fencedJSON,
+            includedInstructionText: includedInstructionText, responseFormat: responseFormat,
             singleActionRelay: isChatGPT,
             currentBrowserHandoff: browserHandoff,
             allowedToolNames: policy.allowedNames)

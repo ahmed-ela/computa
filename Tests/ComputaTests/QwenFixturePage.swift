@@ -15,6 +15,7 @@ enum QwenFixturePage {
   textarea { display: block; box-sizing: border-box; width: 100%; height: 140px; }
   .qwen-chat-message-select-turn { margin-bottom: 240px; }
   .user-message-content { white-space: pre-wrap; max-height: 120px; overflow: auto; }
+  .chunked-text-renderer-root-with-expand .user-message-content { min-height: 16px; }
   .chat-menu-trigger { position: fixed; right: 20px; top: 20px; z-index: 3; }
   [role=menu], [role=dialog] { position: fixed; right: 30px; top: 85px; max-width: 440px; z-index: 4; }
   .chat-response-message { padding: 12px; }
@@ -41,10 +42,10 @@ enum QwenFixturePage {
   const userID = '902f136d-bddf-4078-a667-030715aeff87';
   const answerID = '413e8269-7ba8-476b-84f3-c400e8bed55c';
   const canonical = 'https://chat.qwen.ai/c/' + conversationID;
-  const options = { delayUser: false, holdRoot: false, holdProvisional: false, useProvisional: false, holdResponse: false, holdResponseIdentity: false, menuDelayMs: 0,
+  const options = { delayUser: false, holdRoot: false, holdProvisional: false, useProvisional: false, holdResponse: false, holdResponseIdentity: false, firstLongMessageDisplay: false, menuDelayMs: 0,
     dialogDelayMs: 0, canonicalDelayMs: 0, retainHistoryLink: false, modelCloseOrder: "simultaneous", modelOptionCloseOrder: "simultaneous",
     reply: '{"type":"message","text":"Synthetic Qwen native reply"}' };
-  const counts = { input: 0, sends: 0, modelOpens: 0, modelCloses: 0, modelSelections: 0, headerOpens: 0, deleteSelections: 0, confirmations: 0 };
+  const counts = { input: 0, sends: 0, displayClicks: 0, modelOpens: 0, modelCloses: 0, modelSelections: 0, headerOpens: 0, deleteSelections: 0, confirmations: 0 };
   const editor = document.querySelector('textarea'), sendScope = document.querySelector('.chat-prompt-send-button');
   const trigger = document.querySelector('.wms-trigger'), modelName = trigger.querySelector('.wms-trigger__text');
   const picker = document.querySelector('.wms-list'), rows = [...picker.querySelectorAll('[role=option]')];
@@ -97,6 +98,18 @@ enum QwenFixturePage {
     const chunk = node('div', { class: 'chunked-text-renderer-root' });
     userBody = node('p', { class: 'user-message-content whitespace-pre-wrap' }, sent);
     chunk.append(userBody); container.append(chunk); root.append(container); userTurn.append(root); turn.append(userTurn); transcript.append(turn);
+    if (options.firstLongMessageDisplay) {
+      chunk.classList.add('chunked-text-renderer-root-with-expand', 'is-collapsed');
+      userBody.textContent = '';
+      const control = node('button', { class: 'chat-user-message-expand-toggle chat-user-message-expand-toggle-pc', 'aria-label': 'Expand' }, 'Expand');
+      chunk.append(control);
+      control.addEventListener('click', () => {
+        counts.displayClicks++;
+        chunk.classList.remove('is-collapsed');
+        control.setAttribute('aria-label', 'Collapse');
+        userBody.textContent = sent;
+      });
+    }
     header = node('div', { class: 'chat-menu-trigger' });
     const more = node('button', { 'aria-label': 'More' }, 'More'); header.append(more); document.body.append(header);
     ownHistory = node('a', { href: canonical, 'data-chat-id': conversationID }, 'Synthetic Qwen chat'); history.append(ownHistory);
@@ -177,6 +190,7 @@ enum QwenFixturePage {
     } else if (!options.holdRoot) delayed(options.canonicalDelayMs, canonicalize);
   });
   window.qwenFixture = { options, counts, canonicalize, appendUser, completeResponse,
+    revealPreview: () => { userBody.textContent = sent.slice(0, 10240); },
     settleResponseIdentity: () => { assistant.id = "chat-response-message-" + answerID; },
     finishPickerClose: closePicker, finishOptionClose: closePicker,
     pickerState: () => ({ pending: pickerClosePending, optionPending: optionClosePending, expanded: trigger.getAttribute('aria-expanded'), visible: !picker.hidden }),

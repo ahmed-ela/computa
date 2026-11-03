@@ -91,6 +91,9 @@ async function computaSavedConversation(input, c, dom, config) {
     guard();
     if (state.terminal) c.fail('conversation_changed', 'terminal_operation');
     const cleanupInspection = input.action === 'inspect' && input.savedCleanupInspection === true;
+    if (state.firstDisplay && !state.first && (input.action !== 'inspect' || cleanupInspection
+      || !state.firstDisplay.complete && input.allowQwenFirstBodyExpansion !== true || input.allowQwenInitialResponseIdentity !== true))
+      c.fail('conversation_changed', 'first_user_message');
     const route = dom.route();
     if (!state.submitted && route.kind !== 'fresh') c.fail('not_fresh');
     if (state.submitted && !state.deletion?.confirmAcknowledged) {
@@ -269,6 +272,12 @@ async function computaSavedConversation(input, c, dom, config) {
         && first.container === now.container && first.id === now.id && first.text === now.text;
     }
     function validateInitialResponseIdentity(t) {
+      if (state.firstDisplay?.complete && !state.first) {
+        const view = dom.firstBodyPresentation(t);
+        if (!sameFirstDisplay(view) || view.collapsed || t.first.text !== state.inserted.prompt)
+          c.fail('conversation_changed', 'first_user_message');
+        if (view.answerID !== null) state.firstDisplay.answerID = view.answerID;
+      }
       const held = state.responseIdentity;
       if (!held) return;
       const first = t.first, answer = t.pendingAnswer || t.answer;
@@ -279,6 +288,60 @@ async function computaSavedConversation(input, c, dom, config) {
         || answer.root !== held.answer.root || answer.content !== held.answer.content
         || answer.root.parentElement !== held.answer.turn || held.answer.turn.parentElement !== held.outer)
         c.fail('conversation_changed', 'response_scope');
+    }
+    function sameFirstDisplay(view) {
+      const held = state.firstDisplay;
+      return !!view && held.canonical === dom.route().canonical && held.userID === view.userID
+        && (held.answerID === null || held.answerID === view.answerID)
+        && held.pins.length === view.pins.length && held.pins.every((node, i) => node === view.pins[i]);
+    }
+    // An empty body can only wait. A complete exact observed preview can spend
+    // one local display claim. Neither path exposes model output or grants ownership.
+    function observeFirstDisplay(t) {
+      const prompt = state.inserted.prompt;
+      const previewLength = 10_240;
+      const held = state.firstDisplay;
+      // The completed presentation was revalidated above. An ID-only receipt can
+      // continue without a new display grant and can never spend another click.
+      if (held?.complete) return false;
+      if (!held && (state.responseIdentity || !t.first || t.first.text === prompt || prompt.length <= previewLength)) return false;
+      if (input.allowQwenFirstBodyExpansion !== true) {
+        if (held) c.fail('conversation_changed', 'first_user_message');
+        return false;
+      }
+      const view = dom.firstBodyPresentation(t);
+      if (!view && !held) return false; // Ordinary full-body mismatch follows.
+      const reject = () => c.fail('conversation_changed', 'first_user_message');
+      if (!view || held && !sameFirstDisplay(view)) reject();
+      if (!Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.length || input.expectedUserCounts.length > 2
+        || input.expectedUserCounts.some(value => ![0, 1].includes(value)) || !input.expectedUserCounts.includes(1)) reject();
+      const form = dom.composer();
+      if (!form.empty || !c.enabled(form.editor)) reject();
+      selectionEvidence();
+      const text = t.first.text;
+      const preview = text.length === previewLength && prompt.startsWith(text);
+      if (!held && (!view.collapsed || !preview && (text !== '' || !t.pendingAnswer))) reject();
+      const claim = held || (state.firstDisplay = { ...view, canonical: route.canonical, clicked: false, sawExpanded: false, complete: false });
+      if (claim.sawExpanded && view.collapsed) reject();
+      if (!view.collapsed) claim.sawExpanded = true;
+      if (view.answerID !== null) claim.answerID = view.answerID;
+      if (!view.collapsed && text === prompt && claim.clicked) {
+        claim.complete = true;
+        return false; // Continue through exact first-body/hash/marker/response-ID verification.
+      }
+      if (view.collapsed && text === '' && !claim.clicked) return true;
+      if (!preview) reject();
+      if (claim.clicked) return true; // Same preview during the one local display transition.
+      if (!view.collapsed || !c.hit(view.control)) reject();
+      guard();
+      const current = dom.initialResponseIdentityTranscript();
+      const currentView = dom.firstBodyPresentation(current);
+      selectionEvidence();
+      if (!sameFirstDisplay(currentView) || !currentView.collapsed || current.first.text !== text
+        || !dom.composer().empty || !c.hit(view.control)) reject();
+      claim.clicked = true;
+      view.control.click();
+      return true;
     }
     function read() {
       const t = dom.transcript(), form = dom.composer(), evidence = selectionEvidence(false), extracted = dom.rawAnswer(t.answer);
@@ -474,6 +537,8 @@ async function computaSavedConversation(input, c, dom, config) {
         firstBindingFailure('initial_response_admission', () => initialFirstAdmissionReason(false));
       const candidate = dom.initialResponseIdentityTranscript();
       validateInitialResponseIdentity(candidate);
+      if (observeFirstDisplay(candidate)) return { qwenFirstBodyExpansionPending: true, url: document.URL,
+        sessionLifecycle: 'saved_conversation_delete', temporary: false };
       if (candidate.pendingAnswer) {
         if (candidate.users.length !== 1 || candidate.answers.length !== 1 || !candidate.first
           || candidate.first.text !== state.inserted.prompt || !Array.isArray(input.expectedUserCounts)
@@ -535,6 +600,7 @@ async function computaSavedConversation(input, c, dom, config) {
       try { fingerprint = await c.hash(c.bodyText(initial.t.first.text)); }
       catch (error) { tagFirstBodyHashFailure(error, 'binding_digest'); throw error; }
       guard(); if (!sameFirst(initial.t.first)) firstFailure('first_changed_after_hash');
+      if (state.firstDisplay && fingerprint !== state.submittedFingerprint) firstFailure('first_pinned_hash_mismatch');
       if (state.modeHandoff && !state.modeHandoff.committed) commitInitialModeHandoff(initial.t.first, fingerprint);
       selectionEvidence();
       if (state.first) {

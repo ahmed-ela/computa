@@ -1911,10 +1911,11 @@ actor WebModelServer {
             } else if session.provider == "deepseek" || session.provider == "qwen" {
                 // Only the acknowledged initial saved-chat Send may wait for
                 // its exact first body: a complete DeepSeek composer replacement
-                // or Qwen's exact provisional route or initial empty response ID.
+                // or Qwen's provisional route, first display expansion, or initial empty response ID.
                 // This grants no selection, first-body, response or cleanup proof.
                 let expectedReasons = session.provider == "deepseek"
-                    ? ["deepseek_initial_composer_remount_v1"] : ["qwen_initial_provisional_route_v1", "qwen_initial_response_identity_v1"]
+                    ? ["deepseek_initial_composer_remount_v1"] : ["qwen_initial_provisional_route_v1",
+                        "qwen_first_body_expansion_v1", "qwen_initial_response_identity_v1"]
                 let selectionMatches = session.provider == "deepseek"
                     ? session.modeChoice != nil && session.modelChoice == nil
                     : session.modeChoice == nil && session.modelChoice != nil

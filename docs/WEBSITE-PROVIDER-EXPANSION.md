@@ -920,6 +920,36 @@ completion check and native harness qualification remain pending. Existing human
 conversations were untouched. All three provider Inspector settings and Safari's
 developer setting were restored after the approved two-message-per-provider scope.
 
+### Long Qwen messages and literal tool replies (2026-11-03)
+
+Build 401 rejected a Qwen3.7-Plus first message because its visible paragraph
+was empty. In a separate normal-tab test, Qwen answered a 62,805-character
+synthetic prompt with the exact requested marker. Once settled, the paragraph
+contained only the first 10,240 characters. Clicking its adjacent **Expand**
+button once exposed the full prompt in the same paragraph; its SHA-256 matched
+the pre-submit draft. The button became **Collapse**. The normal-tab observer
+stopped during the initial route change, so it did not time the empty phase.
+The test conversation was deleted and the empty home page verified.
+
+Build 402 uses that display control only after an acknowledged first submission,
+on the bound Qwen conversation, with an exact preview of the submitted text.
+An empty paragraph can wait within the original deadline. Neither an empty
+paragraph nor a preview proves ownership. The normal full-message, selection
+and response checks still run after expansion. Plus and Max need separate live
+qualification.
+
+A fresh DeepSeek Chat task on build 401 ran three terminal calls, then returned
+a patch envelope containing unescaped quotes. The strict parser rejected it
+before the patch could run. Both website sessions have saved deletion receipts.
+The record does not distinguish malformed model output from Markdown rendering.
+Build 402 requests the site's supported literal JSON code block so the reader
+can preserve backslashes; it does not repair invalid JSON or infer a call type.
+
+Kimi Instant's reader now excludes the same known reasoning subtrees when
+counting Markdown regions as it excludes when extracting the final source.
+Unknown final markup still fails closed. A normal-tab fenced marker passed;
+it did not reproduce the native task's unknown final leaf.
+
 ## Remaining gates
 
 1. Finish candidate401 structural-capture gates, package/install it, then run

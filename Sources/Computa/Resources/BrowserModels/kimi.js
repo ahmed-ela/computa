@@ -678,13 +678,15 @@ try {
       && (node.classList.contains('toolcall-flow') || node.classList.contains('thinking-container'))
       && node.parentElement?.classList.contains('toolcall-rollup__part')
       && !node.closest('.markdown');
-    // Apply the same existing reasoning exclusion before counting authored
-    // markdown. A reasoning region may render its own markdown sibling; it is
-    // already excluded by onlyLiteral below and is not another final source.
+    // Match onlyLiteral's subtree exclusion: an inner reasoning-like wrapper
+    // must not mask an already recognized outer reasoning region. Keep the
+    // same exact predicate; no new classes or authored regions are excluded.
     const allMarkdowns = c.nodes(box, '.markdown');
     const markdowns = allMarkdowns.filter(node => {
-      const reasoning = node.closest('.toolcall-flow, .thinking-container');
-      return !reasoning || !knownReasoning(reasoning);
+      for (let parent = node.parentElement; parent && parent !== box; parent = parent.parentElement) {
+        if (knownReasoning(parent)) return false;
+      }
+      return true;
     });
     // Reconstructing text from disjoint blocks can turn malformed site output
     // into a valid tool envelope. Unknown/prose/multiple-block source is kept
