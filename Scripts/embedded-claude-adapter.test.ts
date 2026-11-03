@@ -2619,3 +2619,132 @@ describe('Claude early user-count failure diagnostics', () => {
     expect(f.send.clicks).toBe(0);
   });
 });
+
+describe('native-turn Haiku 5.5 Incognito pilot', () => {
+  const choice = { key: 'Haiku 5.5', label: 'Haiku 5.5' };
+  const marker = '0949270b-f2a5-4ee0-8440-39ba7a4e4595';
+  const second = 'Full input with matched tool output.\n\nComputa session marker: ' + marker;
+  const pin = (sequence: number, value: string) => ({
+    sequence, fingerprint: new Bun.CryptoHasher('sha256').update(value.normalize('NFC').trim()).digest('hex'),
+  });
+  function setup() {
+    const f = fixture('claude'), picker = installObservedModelPicker(f, 'claude', Element);
+    picker.selected(choice.label);
+    const proofs = [pin(1, outbound), pin(2, second)];
+    function ordered(node: Element) {
+      Object.defineProperty(node, 'compareDocumentPosition', { value(other: Element) {
+        const elements = f.html.descendants();
+        return elements.includes(node) && elements.includes(other) && elements.indexOf(other) > elements.indexOf(node) ? 4 : 2;
+      } });
+    }
+    f.send.onClick = () => {
+      const root = f.appendUser(f.composer.innerText); ordered(root); f.composer.replaceChildren();
+    };
+    function answer(ordinal: number) {
+      const article = ordinal === 1 ? f.article : f.article.cloneNode(true);
+      const body = article.querySelector('[data-perf-reply-text]')!;
+      body.text = ordinal === 1 ? '{"type":"message","text":"first"}' : '{"type":"message","text":"second"}';
+      ordered(body); f.messages.append(article);
+    }
+    async function run(action: string, seq: number, users: number, extra: Record<string, unknown> = {}) {
+      const editor = ['insert','submit','sendReady'].includes(action);
+      const pins = proofs.slice(0, editor && action !== 'submit' ? seq - 1 : seq);
+      return await f.run(action, { claudeRetainedTurn: true, expectedModelChoice: choice,
+        expectedUserCounts: [users], expectedSubmissionProofs: pins,
+        submissionSequence: seq, submissionMarker: seq === 1 ? firstMarker : marker,
+        ...(editor ? {prompt: seq === 1 ? outbound : second} : {}), ...extra });
+    }
+    async function submitFirst() {
+      expect(await run('insert', 1, 0)).toMatchObject({inserted: true});
+      expect(await run('sendReady', 1, 0)).toMatchObject({sendReady: true});
+      expect(await run('submit', 1, 0)).toMatchObject({submitted: true});
+      answer(1);
+      expect(await run('inspect', 1, 1)).toMatchObject({submissionProof: proofs[0], answerComplete: true});
+    }
+    return { f, picker, proofs, run, answer, submitFirst };
+  }
+  test('two single Sends append separate exact users and scoped completed replies', async () => {
+    const { f, proofs, run, answer, submitFirst } = setup();
+    await submitFirst();
+    expect(await run('insert', 2, 1)).toMatchObject({inserted:true, submissionProof:proofs[0]});
+    expect(await run('sendReady', 2, 1)).toMatchObject({sendReady:true});
+    expect(await run('submit', 2, 1)).toMatchObject({submitted:true});
+    answer(2);
+    expect(await run('inspect', 2, 2)).toMatchObject({submissionProof:proofs[1], responseCount:2, answerComplete:true});
+    expect((await run('submit', 2, 2)).error).toBeDefined();
+    expect(f.send.clicks).toBe(2);
+  });
+  test('native uppercase marker and WebKit block spacing still require an exact literal editor', async () => {
+    for (const suffix of ['', '\n', '\n\n']) {
+      const { f, run } = setup(), upper = firstMarker.toUpperCase();
+      const input = {submissionMarker:upper, expectedFirstUserMarker:upper, prompt:prompt + '\n\nComputa session marker: ' + upper};
+      expect(await run('insert', 1, 0, input)).toMatchObject({inserted:true});
+      Object.defineProperty(f.composer, 'innerText', {get: () => input.prompt + suffix});
+      expect(await run('sendReady', 1, 0, input)).toMatchObject({sendReady:true});
+      f.composer.children[0].append(new Element('#text', {}, '\n'));
+      expect((await run('sendReady', 1, 0, input)).error).toBeDefined();
+      expect(f.send.clicks).toBe(0);
+    }
+  });
+  test('model-only verification cannot bind a newly rendered second user; inspection binds it once', async () => {
+    const { f, proofs, run, answer, submitFirst } = setup();
+    await submitFirst();
+    expect(await run('insert', 2, 1)).toMatchObject({inserted:true});
+    expect(await run('sendReady', 2, 1)).toMatchObject({sendReady:true});
+    expect(await run('submit', 2, 1)).toMatchObject({submitted:true});
+    answer(2);
+    expect(await run('verifyModel', 2, 2)).toMatchObject({error:'conversation_changed', detail:'submission_message'});
+    expect(await run('inspect', 2, 2)).toMatchObject({submissionProof:proofs[1], answerComplete:true});
+    expect(f.send.clicks).toBe(2);
+  });
+  test('native cleanup suppresses answer authority and can close an exactly owned yielded turn', async () => {
+    const { f, proofs, run, submitFirst } = setup();
+    await submitFirst();
+    const cleanup = await run('inspect', 1, 1, {expectedModelChoice: null, claudeRetainedCleanup: true});
+    expect(cleanup).toMatchObject({submissionProof: proofs[0], answerComplete:false, text:'', temporary:true});
+    f.answer.text += ' altered';
+    expect((await run('inspect', 1, 1, {expectedModelChoice: null, claudeRetainedCleanup: true})).error).toBeDefined();
+    expect(f.send.clicks).toBe(1);
+  });
+  test('losing the prior answer during the second submit ownership digest prevents the click', async () => {
+    const { f, run, submitFirst } = setup();
+    await submitFirst(); expect(await run('insert', 2, 1)).toMatchObject({inserted:true});
+    expect(await run('sendReady', 2, 1)).toMatchObject({sendReady:true});
+    f.onDigest(() => { f.answer.text = 'changed during proof'; });
+    expect((await run('submit', 2, 1)).error).toBeDefined();
+    expect(f.send.clicks).toBe(1);
+  });
+  test('an extra hidden assistant and a collision of native submission markers fail closed', async () => {
+    const { f, run, submitFirst } = setup();
+    await submitFirst();
+    expect((await run('insert', 2, 1, {submissionMarker:firstMarker, prompt:outbound})).error).toBeDefined();
+    const foreign = new Element('DIV', {'data-testid':'assistant-message', hidden:''}); f.messages.append(foreign);
+    expect((await run('insert', 2, 1)).error).toBeDefined();
+    expect(f.send.clicks).toBe(1);
+  });
+  for (const mutation of ['lost owner','changed model','same-label picker remounted','lost Incognito','changed answer','replaced answer','changed user','wrong digest','wrong draft']) {
+    test('refuses the next Send after ' + mutation, async () => {
+      const { f, picker, proofs, run, submitFirst } = setup();
+      await submitFirst(); expect(await run('insert', 2, 1)).toMatchObject({inserted:true});
+      expect(await run('sendReady', 2, 1)).toMatchObject({sendReady:true});
+      if (mutation === 'lost owner') f.world.__computaModelOwner = firstMarker;
+      if (mutation === 'changed model') picker.selected('Sonnet 5.5');
+      if (mutation === 'same-label picker remounted') {
+        const trigger = picker.trigger, parent = trigger.parentElement!, next = trigger.cloneNode(true);
+        const pos = parent.children.indexOf(trigger);
+        expect(pos).toBeGreaterThanOrEqual(0);
+        parent.children[pos] = next; next.parentElement = parent; trigger.parentElement = null; trigger.connected = false;
+        // The selector still displays the requested name on a different physical control.
+        expect(next.getAttribute('aria-label')).toBe(trigger.getAttribute('aria-label'));
+      }
+      if (mutation === 'lost Incognito') f.temporary(false);
+      if (mutation === 'changed answer') f.answer.text += ' altered';
+      if (mutation === 'replaced answer') f.response.replaceChildren(f.answer.cloneNode(true));
+      if (mutation === 'changed user') f.userBody!.text += ' altered';
+      if (mutation === 'wrong digest') proofs[0].fingerprint = proofs[1].fingerprint;
+      if (mutation === 'wrong draft') f.composer.replaceChildren(new Element('#text', {}, second + ' altered'));
+      expect((await run('submit', 2, 1)).error).toBeDefined();
+      expect(f.send.clicks).toBe(1);
+    });
+  }
+});

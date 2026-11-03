@@ -709,7 +709,7 @@ enum APIModelResponseCodec {
                     if rules.contains(#"end_patch: "*** End Patch" LF?"#),
                        rules.contains(#"change_context: ("@@" | "@@ " /(.+)/) LF"#),
                        rules.contains(#"change_line: ("+" | "-" | " ") /(.*)/ LF"#) {
-                        inputDescription += " Before submitting an update patch, check its last lines. End the last nonempty hunk directly with *** End Patch on its own line. A bare @@ starts another hunk and cannot close the patch."
+                        inputDescription += " For an update, every @@ header needs at least one following source line (space, + or - prefix). Close the patch with *** End Patch. Example decoded update tail with sample lines:\n@@\n-old\n+new\n*** End Patch"
                     }
                 }
                 schema = ["type": "object", "properties": ["input": ["type": "string", "description": inputDescription]], "required": ["input"], "additionalProperties": false]

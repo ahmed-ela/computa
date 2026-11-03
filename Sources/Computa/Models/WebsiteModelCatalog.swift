@@ -33,6 +33,10 @@ struct WebsiteModelChoice: Codable, Equatable, Sendable {
         return ChatGPTPower.allCases.first { key == $0.modelKey }
     }
 
+    var supportsClaudeTurnPilot: Bool {
+        provider == "claude" && key == "Haiku 5.5" && label == "Haiku 5.5"
+    }
+
     var isRetired: Bool {
         if provider == "kimi" { return key != "k28-instant" || label != "Instant" }
         // Observed Plus/Max are staged for a native pilot. Omni remains

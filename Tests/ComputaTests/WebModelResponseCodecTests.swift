@@ -1710,7 +1710,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             let needsLiteralBoundary = literalModels.contains(model)
             XCTAssertEqual(request.prompt.contains(boundary), needsLiteralBoundary, model)
             XCTAssertEqual(request.continuationRequest, original)
-            try assertContiguousRequestValues(original, in: request)
+            try assertContiguousRequestValues(original, in: request, expectsFunctionLayout: model == claudeChoice)
             if needsLiteralBoundary {
                 XCTAssertEqual(request.prompt.components(separatedBy: boundary).count - 1, 1)
                 XCTAssertTrue(request.prompt.hasSuffix(boundary + "\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
@@ -1806,6 +1806,7 @@ final class WebModelResponseCodecTests: XCTestCase {
     private func assertContiguousRequestValues(_ original: Data, in request: WebModelResponseCodec.Request,
                                                 includedInstructionText: [String] = [],
                                                 expectedToolDefinitions: [[String: Any]]? = nil,
+                                                expectsFunctionLayout: Bool = false,
                                                 expectedCurrentBrowserHandoff: String = "",
                                                 expectedAllowedToolNames: Set<String>? = nil,
                                                 file: StaticString = #filePath, line: UInt = #line) throws -> String {
@@ -1856,6 +1857,7 @@ final class WebModelResponseCodecTests: XCTestCase {
                            responseFormat: LocalModelCatalog.webProvider(for: request.model) == "qwen" ? .rawJSON
                                : ["claude", "deepseek", "kimi"].contains(LocalModelCatalog.webProvider(for: request.model) ?? "") ? .literalFencedJSON : .fencedJSON,
                            singleActionRelay: request.singleActionRelay,
+                           illustrateFunctionArguments: expectsFunctionLayout,
                            currentBrowserHandoff: expectedCurrentBrowserHandoff,
                            allowedToolNames: expectedAllowedToolNames),
                        "The fresh response contract and current names follow every complete request", file: file, line: line)
@@ -3862,6 +3864,41 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertThrowsError(try WebModelResponseCodec.parseReply(text, request: prepared)) {
                 XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .malformedEnvelope)
             }
+        }
+    }
+
+    func testOpus3ShowsInertFunctionLayoutOnlyForAnAllowedFunction() throws {
+        let opus = WebsiteModelChoice(provider: "claude", key: "Opus 3", label: "Opus 3").modelID
+        let other = WebsiteModelChoice(provider: "claude", key: "Opus 4.6", label: "Opus 4.6").modelID
+        let tools: [[String: Any]] = [["type": "namespace", "name": "fixture", "tools": [
+            ["type": "function", "name": "lookup", "parameters": ["type": "object",
+                "properties": ["query": ["type": "string"]], "required": ["query"]]],
+            ["type": "custom", "name": "literal"]
+        ]]]
+        let request = try controlledRequest(["model": opus], tools: tools)
+        let lines = request.prompt.components(separatedBy: "\n")
+        let intro = try XCTUnwrap(lines.firstIndex { $0.hasPrefix("Function call layout.") })
+        let example = lines[intro + 1]
+        let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(example.utf8)) as? [String: Any])
+        let call = try XCTUnwrap((envelope["calls"] as? [[String: Any]])?.first)
+        XCTAssertTrue(call["name"] is NSNull)
+        XCTAssertEqual(call["arguments"] as? [String: String], ["sample_field": "sample value"])
+        XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(example, request: request))
+        let valid = #"{"type":"tool_calls","calls":[{"name":"fixture.lookup","arguments":{"query":"today"}}]}"#
+        XCTAssertEqual(try WebModelResponseCodec.parseEmbeddedReply(valid, request: request),
+                       .toolCalls([.init(name: "lookup", argumentsJSON: #"{"query":"today"}"#, namespace: "fixture")]))
+        let flat = #"{"type":"tool_calls","calls":[{"name":"fixture.lookup","query":"today"}]}"#
+        XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(flat, request: request)) {
+            XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .unsupportedCallFields)
+        }
+        let customOnly: [String: Any] = ["type": "custom", "name": "literal"]
+        for excluded in [
+            try controlledRequest(["model": other], tools: tools),
+            try controlledRequest(["model": opus, "tool_choice": "none"], tools: tools),
+            try controlledRequest(["model": opus], tools: [customOnly]),
+            try controlledRequest(["model": opus], tools: [])
+        ] {
+            XCTAssertFalse(excluded.prompt.contains("Function call layout."))
         }
     }
 

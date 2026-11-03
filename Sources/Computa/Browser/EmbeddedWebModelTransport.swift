@@ -523,10 +523,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         var freshSubmissionBinding: FreshSubmissionBinding?
         var freshSubmissionCompletion: FreshSubmissionCompletion?
-        var supportsFreshSessionSubmission: Bool { provider == .claude && !isDiscovery }
+        var retainsClaudeTurn = false
+        var supportsFreshSessionSubmission: Bool { provider == .claude && !isDiscovery && !retainsClaudeTurn }
         var submittedUTF8Count = 0
-        var usesSubmissionOwnership: Bool { !isDiscovery && (provider == .gemini || provider == .chatgpt) }
-        var usesBoundedTurn: Bool { usesSubmissionOwnership && provider == .chatgpt }
+        var usesSubmissionOwnership: Bool { !isDiscovery && (provider == .gemini || provider == .chatgpt || retainsClaudeTurn) }
+        var usesBoundedTurn: Bool { usesSubmissionOwnership && (provider == .chatgpt || retainsClaudeTurn) }
         var loggedGroqUserCountDiagnostic = false
         var confirmedUsers = 0
         var pendingSubmission = false
@@ -1387,6 +1388,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             if let preparedTab { browser.closeTab(preparedTab) }
             throw error
         }
+        session.retainsClaudeTurn = admission?.retainClaudeTurn == true && provider == .claude
+            && choice?.supportsClaudeTurnPilot == true && admission?.modelID == choice?.modelID
         if let admission, let directory = admission.adapterFailureDirectory,
            let context = WebsiteAdapterFailureDiagnostic.Context(admission: admission),
            context.modelID == (session.modelChoice?.modelID ?? session.modeChoice?.requestID) {
@@ -1471,6 +1474,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         throw Failure.ownershipFailure(.javaScriptSubmission)
                     }
                     let preflight = try await page(session, action: "inspect")
+                    if session.retainsClaudeTurn {
+                        guard preflight["answerComplete"] as? Bool == true, preflight["busy"] as? Bool == false,
+                              preflight["interrupted"] as? Bool == false, count(preflight, "responseCount") == binding.sequence,
+                              let answer = preflight["text"] as? String, answer.utf8.elementsEqual(session.response.utf8)
+                        else { throw Failure.ownershipFailure(.javaScriptSubmission) }
+                    }
                     guard preflight["temporary"] as? Bool == true,
                           count(preflight, "userCount") == binding.sequence,
                           preflight["submissionOwnershipCapability"] as? String == Self.turnContinuationCapability,
@@ -3400,8 +3409,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                 session.candidateSince = nil
                             }
                         }
-                        if currentAnswerVerified, session.supportsFreshSessionSubmission,
-                           session.sequence == 1, session.modelChoice != nil {
+                        if currentAnswerVerified, (session.supportsFreshSessionSubmission && session.sequence == 1 || session.retainsClaudeTurn),
+                           session.modelChoice != nil {
                             // The adapter's final model await rechecks the same
                             // answer and first user synchronously. Do not reuse
                             // an older answer across native model-only awaits.
@@ -6143,6 +6152,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if provider == .chatgpt, session.firstBodyReadRecoveryActive {
             input["suppressFirstUserExpansionClaim"] = true
         }
+        if session.retainsClaudeTurn {
+            input["claudeRetainedTurn"] = true
+            if allowBlockedProvider, ["inspect", "stop"].contains(action) { input["claudeRetainedCleanup"] = true }
+        }
         if session.usesSubmissionOwnership {
             // Only already-dispatched bindings authorize a detached-message
             // inspection. A prepared, unsent body cannot supply this pin.
@@ -7369,10 +7382,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             // A native await can cross a model change without navigation. Read
             // the fixed proof again, rather than accepting the earlier result.
             if recheck, action != "verifyModel" {
-                // The first Send can render its user message before native
-                // acknowledges it. Only inspect may bind that exact lineage;
-                // a fresh model-only read cannot acquire an unbound message.
-                let freshAction = session.pendingSubmission && session.firstUserFingerprint == nil ? "inspect" : "verifyModel"
+                // A Send can render its user before native returns its acknowledgment.
+                // Only inspection can bind that exact message. On a retained Haiku
+                // turn the first user's proof does not cover a later submitted user.
+                let unboundHaikuSubmission = session.retainsClaudeTurn && session.sequence > 1
+                    && session.currentSubmission?.sequence == session.sequence && !session.currentSubmissionVerified
+                    && (action != "submit" || observed["submitted"] as? Bool == true)
+                let needsUserInspection = session.pendingSubmission && (session.firstUserFingerprint == nil || unboundHaikuSubmission)
+                let freshAction = needsUserInspection ? "inspect" : "verifyModel"
                 // This branch requires fresh positive evidence below; a deferred
                 // continuity read cannot satisfy that contract. The ordinary
                 // pending branch above remains available for running responses.

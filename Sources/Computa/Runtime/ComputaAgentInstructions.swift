@@ -938,6 +938,7 @@ enum ComputaAgentInstructions {
                                     includedInstructionText: [String] = [],
                                     responseFormat: WebResponseFormat = .fencedJSON,
                                     singleActionRelay: Bool = false,
+                                    illustrateFunctionArguments: Bool = false,
                                     currentBrowserHandoff: String = "",
                                     allowedToolNames: Set<String>? = nil) -> String {
         let currentNames = Set(offeredToolNames)
@@ -967,6 +968,13 @@ enum ComputaAgentInstructions {
             return #"{"type":"tool_calls","calls":[{"name":\#(encodedName),"input":\#(encodedInput)}]}"#
         }
         var callExamples: [String] = []
+        if illustrateFunctionArguments && !functionNames.isDisjoint(with: exampleNames) {
+            // A null name makes this example inert even if copied verbatim.
+            callExamples.append("""
+            Function call layout. Replace null with an offered function name and replace the sample field and value with that function's actual parameters. Put every parameter inside arguments. Request only operations whose inputs you already know, then wait for their results before proposing dependent steps.
+            {"type":"tool_calls","calls":[{"name":null,"arguments":{"sample_field":"sample value"}}]}
+            """)
+        }
         if let name = customNames.intersection(exampleNames).sorted().first {
             let instruction = isPatchName(name)
                 ? "Custom apply_patch example: replace the sample path/lines with observed file context; no arguments."

@@ -504,6 +504,8 @@ enum WebModelResponseCodec {
             : ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames,
             includedInstructionText: includedInstructionText, responseFormat: responseFormat,
             singleActionRelay: isChatGPT,
+            illustrateFunctionArguments: isClaude && WebsiteModelCatalog.choice(for: model) ==
+                WebsiteModelChoice(provider: "claude", key: "Opus 3", label: "Opus 3"),
             currentBrowserHandoff: browserHandoff,
             allowedToolNames: policy.allowedNames)
         let prompt = """

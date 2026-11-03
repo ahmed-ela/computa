@@ -2355,6 +2355,57 @@ final class WebModelServerTests: XCTestCase {
         XCTAssertFalse(finalOperations.contains("webProviderSend"))
     }
 
+    func testNamedHaikuRetainsOneIncognitoLeaseOnlyForMatchedToolRounds() async throws {
+        let choice = WebsiteModelChoice(provider: "claude", key: "Haiku 5.5", label: "Haiku 5.5")
+        for end in ["final", "cancel", "unmatched"] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            let base = FixtureWebModelTransport(replyTexts: [
+                #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"first"}}]}"#,
+                #"{"type":"message","text":"Observed the result"}"#], fixedChoice: choice)
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base))
+            let input = [["role": "user", "content": "Read a synthetic nonce"]]
+            let task = "haiku-" + end
+            let first = try await server.fixtureInfer(turnRequest(input: input, model: choice.modelID), taskID: task)
+            let items = try responseOutput(first)
+            let callID = try XCTUnwrap(items.first?["call_id"] as? String)
+            let yielded = try turnJournal(root: root, task: task)
+            XCTAssertEqual(yielded.last?["phase"] as? String, "yield_verified")
+            let receiptsBefore = await server.latestCleanupReceipts()
+            XCTAssertTrue(receiptsBefore.isEmpty)
+            if end == "cancel" {
+                let issues = await server.fixtureCancel(taskID: task)
+                XCTAssertTrue(issues.isEmpty)
+            } else {
+                let result: [String: Any] = ["type": "function_call_output",
+                    "call_id": end == "unmatched" ? "other" : callID, "output": "Observed nonce 91"]
+                let next: [[String: Any]] = input + items + [result]
+                if end == "unmatched" {
+                    do {
+                        _ = try await server.fixtureInfer(turnRequest(input: next, model: choice.modelID), taskID: task)
+                        XCTFail("A different call ID cannot release a second Send")
+                    } catch {}
+                    _ = await server.fixtureCancel(taskID: task)
+                } else {
+                    _ = try await server.fixtureInfer(turnRequest(input: next, model: choice.modelID), taskID: task)
+                    let prompts = await base.sentPrompts()
+                    XCTAssertEqual((try canonicalRequest(in: XCTUnwrap(prompts.last)))["input"] as? NSArray, next as NSArray)
+                    let transcript = try turnJournal(root: root, task: task)
+                    XCTAssertEqual(Set(transcript.compactMap { $0["sessionToken"] as? String }).count, 1)
+                    XCTAssertEqual(transcript.last?["phase"] as? String, "release_verified")
+                }
+            }
+            let ops = await base.operations()
+            XCTAssertEqual(ops.filter { $0 == "webProviderStart" }.count, 1)
+            XCTAssertEqual(ops.filter { $0 == "webProviderSend" }.count, end == "final" ? 2 : 1)
+            XCTAssertEqual(ops.filter { ["webProviderFinish", "webProviderCancel"].contains($0) }.count, 1)
+            let receipts = await server.latestCleanupReceipts()
+            XCTAssertEqual(receipts.count, 1)
+            XCTAssertEqual(receipts.first?.outcome, .closed)
+            XCTAssertEqual(receipts.first?.receiptSaved, true)
+        }
+    }
+
     func testClaudeRoutesEachInferenceToANewClosedSession() async throws {
         let transport = FixtureWebModelTransport()
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
@@ -2497,8 +2548,8 @@ final class WebModelServerTests: XCTestCase {
                 XCTAssertEqual(actual as NSDictionary, expected as NSDictionary)
                 XCTAssertTrue(prompt.contains("Local command execution is offered as: functions.exec_command."))
                 XCTAssertTrue(prompt.contains("Exact currently offered local function names: functions.exec_command, functions.write_stdin\nExact currently offered custom names: (none)"))
-                let literalBoundary = provider == "claude" ? "\n" + ComputaAgentInstructions.literalFencedResponseBoundary : ""
-                XCTAssertTrue(prompt.hasSuffix("Exact-OK message:\n{\"type\":\"message\",\"text\":\"OK\"}\(literalBoundary)\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
+                let literalBoundary = ["claude", "kimi"].contains(provider) ? "\n" + ComputaAgentInstructions.literalFencedResponseBoundary : ""
+                XCTAssertTrue(prompt.hasSuffix("Exact-OK message:\n{\"type\":\"message\",\"text\":\"OK\"}\(literalBoundary)\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."), "\(provider) handoff suffix")
             }
             let providers = await transport.startedProviders()
             XCTAssertEqual(providers, provider == "gemini" ? [provider] : [provider, provider])

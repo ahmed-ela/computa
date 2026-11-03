@@ -3152,6 +3152,132 @@ function modelClaudeNoOutputPending(guard) {
     return { busy: current.busy };
   } catch { return null; }
 }
+// The native turn lease is restricted to the exact named Haiku pilot. Keep
+// physical message pins in this isolated document only, through its final close.
+const haikuFailure = { error: 'conversation_changed', detail: 'submission_message' };
+const haikuCapability = { submissionOwnershipCapability: 'per_submission_ownership_v1' };
+const haikuExactChoice = choice => choice?.key === 'Haiku 5.5' && choice.label === 'Haiku 5.5';
+const haikuRaw = node => node?.innerText;
+function haikuContext(turn) {
+  return globalThis.__computaClaudeTurn === turn && turn.owner === input.ownerToken && turn.document === document && window === window.top
+    && globalThis.__computaModelOwner === turn.owner && document.URL === input.expectedURL
+    && (!turn.url || turn.url === document.URL) && modelTemporaryVerified();
+}
+function haikuPicker() {
+  if (!haikuExactChoice(input.expectedModelChoice)) return null;
+  const picker = websiteModelPickerState('claude');
+  return picker.triggerCount === 1 && !picker.physicalMenus.length && !picker.conflicting && !picker.duplicate
+    && haikuExactChoice(picker.evidence?.selected) ? picker.trigger : null;
+}
+function haikuTranscript(turn) {
+  if (!haikuContext(turn)) return null;
+  const users = modelUserRoots(), completion = modelCompletionObservation(), answers = completion.answers;
+  const rows = turn.rows;
+  const messages = document.querySelectorAll('[data-testid="assistant-message"]');
+  const rawUsers = document.querySelectorAll('[data-testid="user-message"]');
+  if (rawUsers.length !== users.length || users.length > rows.length || answers.length > users.length || messages.length !== answers.length
+    || answers.some((answer, i) => answer.closest('[data-testid="assistant-message"]') !== messages[i])) return null;
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i], user = users[i], answer = answers[i];
+    if (row.user && row.user !== user || row.answer && row.answer !== answer) return null;
+    if (user && (!row.sent || !user.isConnected || !modelVisible(user) || haikuRaw(user) !== row.outbound
+        || i && answers[i-1]?.compareDocumentPosition(user) !== 4)) return null;
+    if (answer && (!answer.isConnected || user.compareDocumentPosition(answer) !== 4)) return null;
+    if (row.answer && (answer.closest('[data-testid="assistant-message"]') !== row.message
+        || answer.closest('[role="article"]') !== row.article
+        || row.message.getAttribute('data-is-streaming') !== 'false'
+        || modelResponseText(answer, modelResponseExtraction(answer)) !== row.text)) return null;
+  }
+  return { users, completion };
+}
+// Check the exact authored text of the one ProseMirror paragraph we inserted.
+// WebKit may render block spacing after that paragraph; it is never removed
+// from a user-message echo, and an authored extra newline still fails.
+function haikuExactEditor(composer, prompt) {
+  const rendered = composer.innerText;
+  if (rendered !== prompt && rendered !== prompt + '\n' && rendered !== prompt + '\n\n') return false;
+  const paragraph = composer.childNodes.length === 1 && composer.childNodes[0];
+  if (!composer.classList.contains('ProseMirror') || !paragraph || paragraph.tagName !== 'P'
+    || paragraph.attributes.length || !paragraph.childNodes.length || paragraph.childNodes.length > 8_192) return false;
+  let offset = 0;
+  for (const node of paragraph.childNodes) {
+    const text = node.nodeType === 3 ? node.textContent
+      : node.tagName === 'BR' && !node.attributes.length && !node.childNodes.length ? '\n' : null;
+    if (text === null || !prompt.startsWith(text, offset)) return false;
+    offset += text.length;
+  }
+  return offset === prompt.length;
+}
+function haikuDraft(action, composer, prompt) {
+  let turn = globalThis.__computaClaudeTurn;
+  const seq = input.submissionSequence, marker = input.submissionMarker;
+  if (!Number.isInteger(seq) || seq < 1 || seq > 16 || typeof marker !== 'string'
+    || !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(marker)
+    || !prompt.endsWith('\n\nComputa session marker: ' + marker)) return false;
+  if (!turn && action === 'insert' && seq === 1 && marker === input.expectedFirstUserMarker) {
+    turn = { owner: input.ownerToken, document, url: null, rows: [] };
+    globalThis.__computaClaudeTurn = turn;
+  }
+  if (!turn) return false;
+  const captured = haikuTranscript(turn), trigger = haikuPicker(), prior = turn.rows[seq-2];
+  if (!captured || !trigger || captured.users.length !== seq-1
+      || captured.completion.answers.length !== seq-1 || captured.completion.busy || captured.completion.interrupted
+      || (seq > 1 && (!prior?.answer || !captured.completion.answerComplete
+        || captured.completion.answer !== prior.answer || captured.completion.message !== prior.message
+        || captured.completion.article !== prior.article || captured.completion.copy !== prior.copy
+        || captured.completion.actionBar !== prior.actionBar || prior.completedPicker !== trigger
+        || !input.expectedSubmissionProofs?.some(pin => pin.sequence === seq-1 && pin.fingerprint === prior.fingerprint)))) return false;
+  if (action === 'insert') {
+    if (turn.rows.length !== seq-1 || turn.rows.some(row => row.marker === marker)) return false;
+    turn.rows.push({ marker, outbound: prompt, composer, trigger, sent: false });
+    return true;
+  }
+  const row = turn.rows[seq-1];
+  if (turn.rows.length !== seq || !row || row.sent || row.composer !== composer || row.trigger !== trigger
+    || row.outbound !== prompt || row.marker !== marker || !composer.isConnected || !haikuExactEditor(composer, prompt)) return false;
+  if (action === 'submit') row.sent = true; // Claim once before dispatch, including an uncertain acknowledgment.
+  return true;
+}
+async function haikuRead(observed) {
+  if (observed.error) return observed;
+  const turn = globalThis.__computaClaudeTurn;
+  if (!turn) return observed.userCount || input.action === 'submit' ? haikuFailure : observed;
+  if (input.action === 'submit') return observed.submitted === true && haikuContext(turn)
+    ? { ...observed, ...haikuCapability } : haikuFailure;
+  const view = haikuTranscript(turn);
+  if (!view) return haikuFailure;
+  const count = view.users.length, row = turn.rows[count-1];
+  if (!count) return { ...observed, ...haikuCapability };
+  const user = view.users[count-1], pin = input.expectedSubmissionProofs?.find(pin => pin.sequence === count);
+  const cleanup = input.claudeRetainedCleanup === true && ['inspect', 'stop'].includes(input.action);
+  if (!row || !pin || !cleanup && !haikuPicker()) return haikuFailure;
+  if (!row.user) {
+    if (input.action !== 'inspect' || !row.sent || row.fingerprint) return haikuFailure;
+    const canonical = row.outbound.replace(/\r\n?/g, '\n').normalize('NFC').trim();
+    const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonical));
+    const digest = [...new Uint8Array(bytes)].map(b => b.toString(16).padStart(2,'0')).join('');
+    const after = haikuTranscript(turn);
+    if (digest !== pin.fingerprint || !after || after.users.length !== count || after.users[count-1] !== user
+      || !cleanup && !haikuPicker() || !observed.firstUserVerified) return haikuFailure;
+    row.user = user; row.fingerprint = digest; turn.url ??= document.URL;
+  }
+  if (pin.fingerprint !== row.fingerprint) return haikuFailure;
+  const proof = { ...haikuCapability, submissionProof: { sequence: count, fingerprint: row.fingerprint } };
+  if (cleanup) return { ...observed, ...proof, text: '', answerComplete: false };
+  if (observed.answerComplete === true) {
+    if (!row.answer && input.action !== 'inspect') return haikuFailure;
+    const current = modelCompletionObservation();
+    const picker = haikuPicker();
+    if (!picker || !current.answerComplete || current.answers.length !== count || !current.answer || !current.copy
+      || !['answer', 'message', 'article', 'actionBar', 'copy'].every(key => current[key] === view.completion[key]) || (row.answer && row.answer !== current.answer)
+      || modelResponseText(current.answer, modelResponseExtraction(current.answer)) !== observed.text
+      || !haikuTranscript(turn)) return haikuFailure;
+    if (!row.answer) Object.assign(row, { answer: current.answer, message: current.message, article: current.article,
+      copy: current.copy, actionBar: current.actionBar, completedPicker: picker, text: observed.text });
+  }
+  return { ...observed, ...proof };
+}
+
 let completionSnapshot = null, claudePendingCheck = null;
 async function providerPageAction() {
   websiteModelDiagnosticPhase('page_action');
@@ -3267,6 +3393,11 @@ async function providerPageAction() {
   if (action === 'stop') {
     if (safeguardsPaused) return { ...state, responseBlocked: true, busy: false, stopped: false, text: '', answerComplete: false };
     if (usageLimited) return { ...state, usageLimited: true, busy: false, stopped: false };
+    if (input.claudeRetainedTurn === true && modelEnabled(stop)) {
+      const turn = globalThis.__computaClaudeTurn, count = turn?.rows.length, last = turn?.rows.at(-1);
+      if (input.claudeRetainedCleanup !== true || !last?.user || haikuTranscript(turn)?.users.length !== count
+        || !input.expectedSubmissionProofs?.some(pin => pin.sequence === count && pin.fingerprint === last.fingerprint)) return haikuFailure;
+    }
     if (modelEnabled(stop)) stop.click();
     return { ...state, stopped: !!stop };
   }
@@ -3282,6 +3413,7 @@ async function providerPageAction() {
   if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 180_000) return { error: 'prompt_not_inserted' };
   if (action === 'insert') {
     if (value?.trim()) return { error: 'composer_not_empty' };
+    if (input.claudeRetainedTurn === true && !haikuDraft('insert', composer, prompt)) return haikuFailure;
     if (ownedUserCount === 0) {
       if (globalThis.__computaModelFirstSubmitted || typeof expectedFirstUserMarker !== 'string'
         || !/^[a-f0-9-]{36}$/i.test(expectedFirstUserMarker)
@@ -3324,11 +3456,15 @@ async function providerPageAction() {
   }
   const send = modelFind(['button[data-testid="chat-input-send"][aria-label="Send message"]']);
   const sendUnobstructed = !modelVisibleDialog(true) && (!modelVisibleDialog() || websiteModelHitTestTarget(send));
-  if (action === 'sendReady') return { ...state, sendReady: modelEnabled(send) && sendUnobstructed };
+  if (action === 'sendReady') {
+    if (input.claudeRetainedTurn === true && !haikuDraft('sendReady', composer, prompt)) return haikuFailure;
+    return { ...state, sendReady: modelEnabled(send) && sendUnobstructed };
+  }
   if (!modelEnabled(send) || !sendUnobstructed) return { error: 'send_unavailable' };
   if (globalThis.__computaModelLastSubmissionCount !== undefined
     && ownedUserCount <= globalThis.__computaModelLastSubmissionCount)
     return { error: 'conversation_changed', detail: 'user_count' };
+  if (input.claudeRetainedTurn === true && !haikuDraft('submit', composer, prompt)) return haikuFailure;
   if (ownedUserCount === 0) {
     if (globalThis.__computaModelFirstSubmitted || globalThis.__computaModelFirstPrompt !== prompt
       || !prompt.endsWith(`\n\nComputa session marker: ${expectedFirstUserMarker}`))
@@ -3403,10 +3539,12 @@ if (firstSnapshot) {
       proof.diagnosticRoot = new WeakRef(firstSnapshot.root);
   } catch { /* Diagnostics cannot affect a verified submission or response. */ }
   // Submit intentionally exposes its acknowledgment only, as in the native contract.
-  if (input.action === 'submit') return observed;
-  return { ...observed, firstUserVerified: true, firstUserFingerprint, firstUserMarkerVerified: true };
+  if (input.action === 'submit') return input.claudeRetainedTurn === true ? haikuRead(observed) : observed;
+  const verified = { ...observed, firstUserVerified: true, firstUserFingerprint, firstUserMarkerVerified: true };
+  return input.claudeRetainedTurn === true ? haikuRead(verified) : verified;
 }
 if (observed.freshQuotaAbort === true) return observed;
 if (pauseContextIntact() && !modelOwnershipRejected(observed) && input.action !== 'stop' && modelSafeguardsPaused())
   return modelSafeguardFailure();
-return { ...observed, firstUserVerified: false, firstUserFingerprint: null };
+const fresh = { ...observed, firstUserVerified: false, firstUserFingerprint: null };
+return input.claudeRetainedTurn === true ? haikuRead(fresh) : fresh;

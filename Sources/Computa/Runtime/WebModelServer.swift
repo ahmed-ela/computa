@@ -42,6 +42,7 @@ struct WebModelStartAdmission: Equatable, Sendable {
     let parameters: Data
     // Native-only optional sink; absent for ordinary test/custom admissions.
     var adapterFailureDirectory: URL? = nil
+    var retainClaudeTurn = false
 }
 
 /// Stopping inference and disposing its session remain cancellation operations.
@@ -1049,6 +1050,9 @@ actor WebModelServer {
             return current
         }
         attempts: while true {
+            // A named Haiku Start can be rejected before a token exists. Its
+            // failure belongs to the same turn policy as the journaled request.
+            var requestedClaudeTurnScope: Bool?
             var correctionCandidate: (reason: WebsiteModelFormatCorrectionStore.Reason, session: Session,
                 deadline: ContinuousClock.Instant, evidence: WebsiteSelectionEvidence?, snapshot: [String: Any]?)?
             do {
@@ -1081,7 +1085,12 @@ actor WebModelServer {
                             throw Failure.turnLimit
                         }
                     }
-                    prompt = request.prompt
+                    if previous.provider == "claude", !context.isMaintenance,
+                       let annotated = Self.claudePromptWithMatchedOutputNote(request.prompt,
+                         remainingTurnBytes: Self.maximumTurnPromptUTF8Bytes - previous.cumulativePromptUTF8Count) {
+                        prompt = annotated
+                        includesClaudeOutputNote = true
+                    } else { prompt = request.prompt }
                     try recordTransactionEvidence(taskID: taskID, inferenceID: inferenceID, context: context,
                         provider: provider, modelID: request.model, sessionToken: previous.token, phase: "continuation_requested",
                         sequence: previous.sequence + 1, baseline: completedCount, turnScoped: previous.retainsConversation)
@@ -1112,10 +1121,11 @@ actor WebModelServer {
                               !closed.ambiguousHandoff else { throw Failure.inferenceContextRequired }
                         try closed.continuation.validate(next: request)
                     }
-                    let provesNativeContinuation = Self.requiresNativeContinuationProof(provider: provider)
-                    let provesFreshSessionSubmission = provider == "claude" && choice != nil
+                    let retainClaudeTurn = !context.isMaintenance && choice?.supportsClaudeTurnPilot == true
+                    let provesNativeContinuation = Self.requiresNativeContinuationProof(provider: provider) || retainClaudeTurn
+                    let provesFreshSessionSubmission = provider == "claude" && choice != nil && !retainClaudeTurn
                     if provesNativeContinuation || provesFreshSessionSubmission { try WebsiteTurnContinuation.validateRequest(request) }
-                    if provider == "chatgpt" || provesFreshSessionSubmission {
+                    if provider == "chatgpt" || provider == "claude" && choice != nil {
                         guard (closed?.turnInferenceCount ?? 0) < Self.maximumTurnInferences,
                               request.prompt.utf8.count <= Self.maximumTurnPromptUTF8Bytes - (closed?.cumulativePromptUTF8Count ?? 0)
                         else { throw Failure.turnLimit }
@@ -1142,9 +1152,10 @@ actor WebModelServer {
                         guard choice == nil else { throw Failure.invalidRequest }
                         params["modeChoice"] = modeChoice.canonicalJSONString
                     }
+                    if provider == "claude" { requestedClaudeTurnScope = retainClaudeTurn }
                     try recordTransactionEvidence(taskID: taskID, inferenceID: inferenceID, context: context,
                         provider: provider, modelID: request.model, sessionToken: nil, phase: "start_requested",
-                        turnScoped: retainsConversation(provider: provider))
+                        turnScoped: retainClaudeTurn || retainsConversation(provider: provider))
                     notCreatedStartReceipts.removeValue(forKey: taskID)
                     unresolvedStartAttempts[taskID] = UnresolvedStartAttempt(inferenceID: inferenceID, context: context,
                         provider: provider, modelID: request.model)
@@ -1163,7 +1174,7 @@ actor WebModelServer {
                         preparationID: context.preparationID, transportGeneration: transportGeneration,
                         provider: provider, modelID: request.model, parameters: startParameters,
                         adapterFailureDirectory: rejectedReplyDirectory?.deletingLastPathComponent()
-                            .appendingPathComponent(WebsiteAdapterFailureDiagnostic.directoryName))
+                            .appendingPathComponent(WebsiteAdapterFailureDiagnostic.directoryName), retainClaudeTurn: retainClaudeTurn)
                     claudeResponseStream?.revoke()
                     claudeResponseStream = nil
                     if provider == "claude", let task = UUID(uuidString: taskID),
@@ -1213,7 +1224,7 @@ actor WebModelServer {
                         context: context, transportGeneration: transportGeneration,
                         provesNativeContinuation: provesNativeContinuation,
                         provesFreshSessionSubmission: provesFreshSessionSubmission,
-                        retainsConversation: retainsConversation(provider: provider))
+                        retainsConversation: retainClaudeTurn || retainsConversation(provider: provider))
                     session.requestMetadata = requestMetadata
                     session.resolvedSelection = correctionSource?.resolvedSelection ?? closed?.resolvedSelection
                     session.turnInferenceCount = correctionSource?.turnInferenceCount ?? closed?.turnInferenceCount ?? 0
@@ -1236,7 +1247,8 @@ actor WebModelServer {
                     if provider == "chatgpt", advertised != nil,
                        advertised as? String != "per_submission_ownership_v1" { throw Failure.invalidRequest }
                     if session.provesNativeContinuation {
-                        guard reply["turnContinuationCapability"] as? String == "per_submission_ownership_v1" else { throw Failure.invalidRequest }
+                        guard reply["turnContinuationCapability"] as? String == "per_submission_ownership_v1",
+                              !retainClaudeTurn || reply["freshSessionSubmissionCapability"] == nil && reply["freshSessionSubmissionProof"] == nil else { throw Failure.invalidRequest }
                         try WebsiteTurnContinuation.validateRequest(request)
                     }
                     if session.provesFreshSessionSubmission {
@@ -1642,7 +1654,7 @@ actor WebModelServer {
                         secondSessionToken: second.flatMap { UUID(uuidString: $0.token) }, outcome: outcome)
                     failedClosedHandoffs.insert(taskID)
                 }
-                if let lease, lease.usesVerifiedHistory, !lease.retainsConversation,
+                if let lease, lease.usesVerifiedHistory, (!lease.retainsConversation || lease.provider == "claude"),
                    !lease.submittedPromptFingerprint.isEmpty {
                     failedClosedHandoffs.insert(taskID)
                 }
@@ -1683,7 +1695,8 @@ actor WebModelServer {
                         provider: provider, modelID: request.model, sessionToken: lease?.token,
                         phase: error is CancellationError ? "cancelled" : "failed",
                         errorCode: Self.errorPresentation(for: error).code,
-                        sequence: lease?.sequence ?? 0, baseline: lease?.baselineResponseCount ?? 0, turnScoped: lease?.retainsConversation,
+                        sequence: lease?.sequence ?? 0, baseline: lease?.baselineResponseCount ?? 0,
+                        turnScoped: lease?.retainsConversation ?? requestedClaudeTurnScope,
                         submissionDiagnostic: (try? requireCurrentContext()) != nil ? submissionDiagnostic : nil)
                 }
                 throw error
@@ -2029,7 +2042,7 @@ actor WebModelServer {
             } else if snapshot["freshSessionSubmissionProof"] != nil {
                 throw Failure.invalidRequest
             }
-        } else if session.provider != "claude",
+        } else if session.provider != "claude" || session.provesNativeContinuation,
                   snapshot["freshSessionSubmissionCapability"] != nil || snapshot["freshSessionSubmissionProof"] != nil {
             throw Failure.invalidRequest
         }

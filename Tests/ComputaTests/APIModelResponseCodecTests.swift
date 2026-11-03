@@ -2812,7 +2812,7 @@ final class APIModelResponseCodecTests: XCTestCase {
             let properties = try XCTUnwrap(params["properties"] as? [String: [String: Any]])
             return try XCTUnwrap(properties["input"]?["description"] as? String)
         }
-        let footer = "A bare @@ starts another hunk"
+        let footer = "@@\n-old\n+new\n*** End Patch"
         XCTAssertTrue(try guidance(alibaba, patch).contains(footer))
         XCTAssertFalse(try guidance(provider, patch).contains(footer))
         let foreign: [String: Any] = ["type": "namespace", "name": "editing", "tools": [patch]]
@@ -2822,7 +2822,8 @@ final class APIModelResponseCodecTests: XCTestCase {
         XCTAssertFalse(try guidance(alibaba, other).contains(footer))
         let prepared = try request(["tools": [patch]], provider: alibaba, toolNaming: .semantic)
         let start = "*** Begin Patch\n*** Update File: fixture.py\n@@\n-old\n+new\n"
-        for suffix in ["@@", "@@\n*** End Patch", "*** End Patch"] {
+        for suffix in ["@@", "@@\n*** End Patch", "*** End Patch", "*** End of File\n*** End Patch",
+                       "@@ named anchor\n literal context\n*** End Patch", "+@@\n*** End Patch"] {
             let literal = start + suffix
             let arguments = String(decoding: try JSONSerialization.data(withJSONObject: ["input": literal]), as: UTF8.self)
             let call: [String: Any] = ["id": "example", "type": "function",

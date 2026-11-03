@@ -138,6 +138,7 @@ actor WebsiteInferenceFixtureTransport: WebModelTransport {
     private let defaultGeminiChoice: WebsiteModelChoice?
     private let defaultClaudeChoice: WebsiteModelChoice?
     private var hasExplicitChoice: [String: Bool] = [:]
+    private var retainedHaiku = Set<String>()
     init(_ base: any WebModelTransport, defaultChatChoice: WebsiteModelChoice? = nil,
          defaultGeminiChoice: WebsiteModelChoice? = WebsiteModelChoice(provider: "gemini", key: "fixture-default-flash", label: "Fixture Default Flash"),
          defaultClaudeChoice: WebsiteModelChoice? = nil) {
@@ -153,7 +154,14 @@ actor WebsiteInferenceFixtureTransport: WebModelTransport {
     func waitForChange(sessionToken: String, after revision: UInt64, until deadline: ContinuousClock.Instant) async throws -> UInt64? {
         try await base.waitForChange(sessionToken: sessionToken, after: revision, until: deadline)
     }
+    func start(params: Data, admission: WebModelStartAdmission, authorization: ChatGPTRequestMetadataLease?) async throws -> Data {
+        authorization?.revoke()
+        return try await project("webProviderStart", params, retainHaiku: admission.retainClaudeTurn)
+    }
     func request(operation: String, params: Data) async throws -> Data {
+        try await project(operation, params, retainHaiku: false)
+    }
+    private func project(_ operation: String, _ params: Data, retainHaiku: Bool) async throws -> Data {
         let bytes = try await base.request(operation: operation, params: params)
         guard var snapshot = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
               let input = try JSONSerialization.jsonObject(with: params) as? [String: String] else { return bytes }
@@ -161,6 +169,9 @@ actor WebsiteInferenceFixtureTransport: WebModelTransport {
             generations[token] = UUID().uuidString.lowercased()
             providers[token] = input["provider"]
             hasExplicitChoice[token] = input["modelChoice"] != nil
+            if retainHaiku, input["modelChoice"].flatMap(WebsiteModelChoice.parse)?.supportsClaudeTurnPilot == true {
+                retainedHaiku.insert(token)
+            }
             sequences[token] = 0
             baselines[token] = 0
             completedCounts[token] = 0
@@ -178,10 +189,10 @@ actor WebsiteInferenceFixtureTransport: WebModelTransport {
         }
         // This synthetic transport explicitly attests only its own serialized
         // Send bytes. Real WebKit must independently verify the rendered body.
-        if let token, ["gemini", "chatgpt"].contains(providers[token] ?? ""), snapshot["turnContinuationCapability"] == nil {
+        if let token, retainedHaiku.contains(token) || ["gemini", "chatgpt"].contains(providers[token] ?? ""), snapshot["turnContinuationCapability"] == nil {
             snapshot["turnContinuationCapability"] = "per_submission_ownership_v1"
         }
-        if let token, providers[token] == "claude", hasExplicitChoice[token] == true,
+        if let token, providers[token] == "claude", !retainedHaiku.contains(token), hasExplicitChoice[token] == true,
            snapshot["freshSessionSubmissionCapability"] == nil {
             snapshot["freshSessionSubmissionCapability"] = "fresh_session_submission_v1"
         }
@@ -214,7 +225,7 @@ actor WebsiteInferenceFixtureTransport: WebModelTransport {
                     "sequence": sequences[token, default: 1], "baselineResponseCount": baselines[token, default: 0],
                     "responseCount": snapshot["state"] as? String == "complete" ? completedCounts[token, default: 1] : baselines[token, default: 0],
                     "firstUserFingerprint": fingerprint]
-                if providers[token] == "gemini" || providers[token] == "chatgpt" {
+                if retainedHaiku.contains(token) || providers[token] == "gemini" || providers[token] == "chatgpt" {
                     var context = snapshot["modelProofContext"] as! [String: Any]
                     context["submittedPromptFingerprint"] = submittedFingerprints[token, default: ""]
                     snapshot["modelProofContext"] = context
@@ -222,7 +233,7 @@ actor WebsiteInferenceFixtureTransport: WebModelTransport {
             }
         }
         if snapshot["state"] as? String == "complete", let token,
-           providers[token] == "claude", hasExplicitChoice[token] == true,
+           providers[token] == "claude", !retainedHaiku.contains(token), hasExplicitChoice[token] == true,
            snapshot["freshSessionSubmissionProof"] == nil,
            let context = snapshot["modelProofContext"] as? [String: Any],
            let document = context["documentGeneration"], let sequence = context["sequence"],
@@ -243,6 +254,7 @@ actor WebsiteInferenceFixtureTransport: WebModelTransport {
             baselines.removeValue(forKey: token)
             completedCounts.removeValue(forKey: token)
             submittedFingerprints.removeValue(forKey: token)
+            retainedHaiku.remove(token)
         }
         return try JSONSerialization.data(withJSONObject: snapshot)
     }

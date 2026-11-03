@@ -5250,6 +5250,52 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             turnID: try XCTUnwrap(receipt.turnID), modelID: "browser/claude", diagnosticText: String(decoding: body, as: UTF8.self)))
     }
 
+    func testClaudeCapacityBeforeStartRetainsRequestedPolicyWithoutSessionOrSend() async throws {
+        let fixture = try Fixture(page: Self.providerPage(.claude))
+        defer { fixture.shutdown() }
+        for _ in 0..<4 { _ = try await call(fixture.transport, "webProviderStart", ["provider": "claude"]) }
+        let originalTabs = fixture.createdTabs
+        for (label, retained) in [("Haiku 5.5", true), ("Sonnet 5.5", false)] {
+            let choice = WebsiteModelChoice(provider: "claude", key: label, label: label)
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("ClaudeBeforeStart-" + UUID().uuidString)
+            let server = try await makePrecreationFixtureServer(storageDirectory: root)
+            let transport = PrecreationFixtureTransport(native: fixture.transport, mutation: "unchanged")
+            await server.configureEmbeddedTransport(transport)
+            let request = try JSONSerialization.data(withJSONObject: ["model": choice.modelID, "input": "Synthetic read", "tools": []] as [String: Any])
+            let taskID = UUID().uuidString.lowercased(), turnID = UUID().uuidString.lowercased()
+            do {
+                _ = try await server.fixtureInfer(request, taskID: taskID, turnID: turnID)
+                XCTFail("A full local browser cannot start this request")
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .capacity) }
+            let receipts = await server.latestCleanupReceipts()
+            XCTAssertEqual(receipts.count, 1)
+            let receipt = try XCTUnwrap(receipts.first)
+            XCTAssertEqual(receipt.taskID, taskID)
+            XCTAssertEqual(receipt.turnID, turnID)
+            XCTAssertTrue(receipt.isPrecreationRejectionLinked && receipt.receiptSaved)
+            XCTAssertEqual(receipt.outcome, .noOwnedSession)
+            let pending = await server.fixtureFinish(taskID: taskID)
+            XCTAssertTrue(pending.isEmpty)
+            XCTAssertEqual(transport.operations, ["start"])
+            XCTAssertEqual(fixture.createdTabs, originalTabs)
+            let file = root.appendingPathComponent("evidence/transactions/\(taskID)/\(turnID).jsonl")
+            let rows = try Data(contentsOf: file).split(separator: 10).map {
+                try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0)) as? [String: Any])
+            }
+            XCTAssertEqual(rows.compactMap { $0["phase"] as? String }, ["start_requested", "failed"])
+            XCTAssertEqual(rows.last?["errorCode"] as? String, "local_website_session_capacity")
+            for row in rows {
+                XCTAssertEqual(row["inferenceID"] as? String, receipt.inferenceID)
+                XCTAssertEqual(row["transactionPolicyEstablished"] as? Bool, true)
+                XCTAssertEqual(row["transactionVersion"] as? Int, retained ? 2 : 1)
+                XCTAssertEqual(row["transactionMode"] as? String, retained ? "temporary_conversation_per_turn" : "temporary_conversation_per_inference")
+                XCTAssertEqual(row["sequence"] as? Int, 0)
+                XCTAssertNil(row["sessionToken"])
+                XCTAssertNil(row["modelEvidence"])
+            }
+        }
+    }
+
     func testFailedCleanupRetainsFourExtraHandlesWithoutResumingOrEvictingThem() async throws {
         let browser = EmbeddedBrowserSession(persistent: false, maximumTabs: 12)
         let fixture = try Fixture(page: Self.providerPage(.claude), browser: browser); defer { fixture.shutdown() }
@@ -5476,7 +5522,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 transportGeneration: mutation == "transportGeneration" ? UUID() : a.transportGeneration,
                 provider: mutation == "provider" ? "gemini" : a.provider,
                 modelID: mutation == "modelID" ? "browser/gemini" : a.modelID,
-                parameters: mutation == "parameters" ? Data("{}".utf8) : a.parameters)
+                parameters: mutation == "parameters" ? Data("{}".utf8) : a.parameters, retainClaudeTurn: a.retainClaudeTurn)
             do {
                 let result = try await native.start(params: params, admission: changed, authorization: authorization)
                 if mutation == "after_session" { throw EmbeddedWebModelTransport.Failure.usageLimited(.claude) }
@@ -12290,6 +12336,91 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             fixture.transport.setBeforePageResultValidationForTesting(nil)
             XCTAssertFalse(actions.contains("insert")); XCTAssertFalse(actions.contains("submit"))
             XCTAssertFalse(f.exists(f.output)); XCTAssertTrue(f.exists(f.armFile))
+        }
+    }
+
+    func testRetainedHaikuInspectsSynchronousSecondUserBeforeReturningFromSend() async throws {
+        let choice = WebsiteModelChoice(provider: "claude", key: "Haiku 5.5", label: "Haiku 5.5")
+        for corrupt in [false, true] {
+            var phase = "setup"
+            do {
+                var page = Self.modelChoicePage(.claude).replacingOccurrences(of: "Sonnet 4.6", with: choice.label)
+                // Model the site's serialization of the ProseMirror document, not the
+                // editor's outer block margin, which WebKit includes in innerText.
+                page = page.replacingOccurrences(of: "const prompt = editor.innerText;", with:
+                    #"const prompt = Array.from(editor.firstElementChild.childNodes, n => n.nodeType === 3 ? n.data : n.tagName === 'BR' ? '\n' : 'unexpected-element').join('');"#)
+                page = page.replacingOccurrences(of: "body.textContent = '{\"type\":\"message\",\"text\":\"Fixture reply\"}';",
+                    with: #"body.textContent = JSON.stringify({type: 'message', text: 'Round ' + window.fixturePrompts.length});"#)
+                if corrupt {
+                    page = page.replacingOccurrences(of: "user.textContent = prompt;",
+                        with: "user.textContent = window.fixturePrompts.length === 2 ? 'foreign' + prompt : prompt;")
+                }
+                let fixture = try Fixture(page: page)
+                defer { fixture.shutdown() }
+                let params = try JSONSerialization.data(withJSONObject: ["provider": "claude",
+                    "modelChoice": try XCTUnwrap(choice.canonicalJSONString)])
+                let admission = WebModelStartAdmission(id: UUID(), inferenceID: UUID(), taskID: UUID().uuidString,
+                    threadID: UUID().uuidString, turnID: UUID().uuidString, runtimeGeneration: UUID(),
+                    preparationID: UUID(), transportGeneration: UUID(), provider: "claude", modelID: choice.modelID,
+                    parameters: params, retainClaudeTurn: true)
+                phase = "admitted start"
+                let data = try await fixture.transport.start(params: params, admission: admission, authorization: nil)
+                let opened = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+                let token = try XCTUnwrap(opened["sessionToken"] as? String)
+                let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+                phase = "initial readiness"
+                _ = try await waitForState("ready", fixture.transport, token: token)
+                phase = "first Send"
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Read nonce"])
+                phase = "first completion"
+                let first = try await waitForState("complete", fixture.transport, token: token)
+                let firstContext = try XCTUnwrap(first["modelProofContext"] as? [String: Any])
+                XCTAssertEqual(first["text"] as? String, #"{"type":"message","text":"Round 1"}"#)
+                phase = "second Send"
+                let secondPrompt = "Observed exit 0 and nonce 91"
+                var actions: [String] = []
+                var synchronousCount: Int?
+                fixture.transport.setBeforePageResultValidationForTesting { action in
+                    actions.append(action)
+                    if action == "submit" {
+                        synchronousCount = try? await self.evaluate(view,
+                            #"return document.querySelectorAll('[data-testid="user-message"]').length;"#) as? Int
+                    }
+                }
+                do {
+                    _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": secondPrompt])
+                    if corrupt { XCTFail("A substituted synchronous echo cannot bind") }
+                } catch {
+                    guard corrupt else { XCTFail("Second Send failed: \(error); actions=\(actions), synchronousUsers=\(String(describing: synchronousCount))"); return }
+                    XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptSubmission))
+                }
+                fixture.transport.setBeforePageResultValidationForTesting(nil)
+                XCTAssertEqual(synchronousCount, 2)
+                let submit = try XCTUnwrap(actions.firstIndex(of: "submit"))
+                XCTAssertEqual(actions.dropFirst(submit + 1).first, "inspect")
+                try await assertChoiceLedger(view, insertions: 2, sends: 2, selections: 1)
+                phase = "terminal cleanup"
+                if !corrupt {
+                    let completed = try await waitForState("complete", fixture.transport, token: token)
+                    let context = try XCTUnwrap(completed["modelProofContext"] as? [String: Any])
+                    XCTAssertEqual(completed["sequence"] as? Int, 2)
+                    XCTAssertEqual(context["baselineResponseCount"] as? Int, 1)
+                    XCTAssertEqual(context["responseCount"] as? Int, 2)
+                    XCTAssertEqual(context["firstUserFingerprint"] as? String, firstContext["firstUserFingerprint"] as? String)
+                    XCTAssertEqual(context["submittedPromptFingerprint"] as? String, EmbeddedWebModelTransport.promptFingerprint(secondPrompt))
+                    XCTAssertEqual(completed["text"] as? String, #"{"type":"message","text":"Round 2"}"#)
+                    let closed = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+                    XCTAssertEqual(closed["cleanup"] as? String, "not_created")
+                    try await assertHumanTabIntact(fixture)
+                } else {
+                    let closed = try await call(fixture.transport, "webProviderCancel", ["sessionToken": token])
+                    XCTAssertEqual(closed["cleanup"] as? String, "failed")
+                    try await assertHumanTabIntact(fixture, retaining: XCTUnwrap(fixture.createdTabs.last))
+                }
+            } catch {
+                XCTFail("Retained Haiku fixture failed at \(phase) (substituted=\(corrupt), pid=\(ProcessInfo.processInfo.processIdentifier)): \(String(reflecting: error))")
+                return
+            }
         }
     }
 
