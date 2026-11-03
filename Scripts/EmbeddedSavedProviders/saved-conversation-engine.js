@@ -826,7 +826,20 @@ async function computaSavedConversation(input, c, dom, config) {
       if (now.kind !== 'fresh' && now.canonical !== record.conversationURL) c.fail('conversation_changed', 'delete_route');
       return pending(op, record);
     }
-    if (input.action === 'inspect') return initial.output;
+    if (input.action === 'inspect') {
+      const out = initial.output, choice = input.expectedModelChoice;
+      // Metadata for a separately armed native marker comparison. Ordinary acceptance precedes it.
+      if (input.qwenSyntheticMarkerComparison === true && key === '__computaQwenSavedSessionV1'
+        && !cleanupInspection && !state.deletion && !input.allowFirstUserBinding && route.kind === 'canonical'
+        && c.equalChoice(out.modelEvidence?.selected, choice)
+        && ['Qwen3.7-Plus','Qwen3.8-Max'].some(label => c.equalChoice(choice, {key:label, label}))
+        && out.answerComplete && out.firstUserVerified && out.firstUserMarkerVerified
+        && out.userCount === 1 && out.responseCount === 1 && c.uuid(initial.t.answer?.id)
+        && out.firstUserFingerprint === input.expectedFirstUserFingerprint
+        && out.firstUserFingerprint === state.submittedFingerprint)
+        out.qwenShadowResponseID = initial.t.answer.id;
+      return out;
+    }
     const evidence = selectionEvidence();
     if (usesModes && input.action === 'verifyMode') return { ...initial.output, modeEvidence: evidence };
     if (input.action === 'verifyModel') {

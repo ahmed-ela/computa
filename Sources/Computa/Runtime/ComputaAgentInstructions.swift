@@ -971,7 +971,7 @@ enum ComputaAgentInstructions {
         if illustrateFunctionArguments && !functionNames.isDisjoint(with: exampleNames) {
             // A null name makes this example inert even if copied verbatim.
             callExamples.append("""
-            Function call layout. Replace null with an offered function name and replace the sample field and value with that function's actual parameters. Put every parameter inside arguments. Request only operations whose inputs you already know, then wait for their results before proposing dependent steps.
+            Function call layout. Request just the next operation in calls. Use only name and arguments on the entry. Replace null with one offered function name and put its actual parameters inside arguments. Wait for its matching output before choosing the next action.
             {"type":"tool_calls","calls":[{"name":null,"arguments":{"sample_field":"sample value"}}]}
             """)
         }

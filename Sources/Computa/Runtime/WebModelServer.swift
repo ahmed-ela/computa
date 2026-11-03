@@ -952,7 +952,8 @@ actor WebModelServer {
         // a session, transport retains the grant through its ordinary cleanup,
         // including failures whose cleanup happens after this method throws.
         var claudeResponseStream: ClaudeResponseStreamLease?
-        defer { claudeResponseStream?.revoke() }
+        var qwenMarkerWire: QwenMarkerWireLease?
+        defer { claudeResponseStream?.revoke(); qwenMarkerWire?.revoke() }
         // Claim this handoff before any suspension. A duplicate request cannot
         // reuse a claim, including after validation, Send or persistence fails.
         var yielded = yieldedTurns.removeValue(forKey: taskID)
@@ -1188,10 +1189,18 @@ actor WebModelServer {
                             request: request, isNewThread: context.isNewThread, isMaintenance: context.isMaintenance,
                             isFirstInference: firstNativeInference, hasCorrectionTicket: correctionTicket != nil)
                     }
+                    if provider == "qwen" {
+                        qwenMarkerWire = QwenMarkerWireLease.consume(directory: rejectedReplyDirectory?.deletingLastPathComponent()
+                            .appendingPathComponent(QwenMarkerWireLease.directoryName), admission: admission, request: request,
+                            isNewThread: context.isNewThread, isMaintenance: context.isMaintenance,
+                            isFirstInference: firstNativeInference, hasCorrectionTicket: correctionTicket != nil)
+                    }
                     let reply: [String: Any]
                     do {
                         let data = try await ClaudeResponseStreamLease.$current.withValue(claudeResponseStream) {
-                            try await transport.start(params: startParameters, admission: admission, authorization: requestMetadata)
+                            try await QwenMarkerWireLease.$current.withValue(qwenMarkerWire) {
+                                try await transport.start(params: startParameters, admission: admission, authorization: requestMetadata)
+                            }
                         }
                         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw Failure.invalidRequest }
                         reply = object
@@ -1532,6 +1541,12 @@ actor WebModelServer {
                             if !session.usesVerifiedHistory {
                                 try recordEvidence(evidence, snapshot: value, taskID: taskID, inferenceID: inferenceID,
                                     session: session, phase: "release_verified", cleanupAttemptID: closed.receipt.attemptID)
+                            }
+                            if let qwenMarkerWire, session.sequence == 1, session.baselineResponseCount == 0,
+                               session.completedResponseCount == 1, case .model(let proof) = evidence,
+                               let document = session.documentGeneration, let first = session.firstUserFingerprint {
+                                _ = qwenMarkerWire.publishAfterRelease(reply: reply, model: proof.selected,
+                                    generation: document, firstFingerprint: first, receipt: closed.receipt)
                             }
                             if let continuation {
                                 closedTurns[taskID] = ClosedTurn(inferenceID: inferenceID, context: context, continuation: continuation,

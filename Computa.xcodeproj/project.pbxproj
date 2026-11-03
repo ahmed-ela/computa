@@ -92,6 +92,7 @@
 		3833C1B8AA00C60D46F7E347 /* ChatGPTResponseCompletionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D13431716C9B4F16CE2300F /* ChatGPTResponseCompletionTests.swift */; };
 		3964502DD821FBD240F47AD1 /* SavedProviderServerFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = E07B60221BC2AB742076F0C5 /* SavedProviderServerFixture.swift */; };
 		3A8A82E7E12917FE54B77857 /* ChatGPTInspectorLease.swift in Sources */ = {isa = PBXBuildFile; fileRef = F04A5BFBEC4DCAE8ACA8B9B4 /* ChatGPTInspectorLease.swift */; };
+		3A95DE658D774DE42308EAC8 /* QwenMarkerWireLeaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 806333C3F7486E71D7551BF9 /* QwenMarkerWireLeaseTests.swift */; };
 		3ABD450DAF1F6701B099C578 /* RolloutPrimitiveTrace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60DDB99B2FEA1123FEE6090A /* RolloutPrimitiveTrace.swift */; };
 		3CAC4322CC875EF41AA51A30 /* ClaudeResponseStreamBrowserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B5B0EB253DB8C799C9BC5AB /* ClaudeResponseStreamBrowserTests.swift */; };
 		3CDD01FEF3A3C1948CF65997 /* FixtureBunExecutable.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0A9052E0D10A790EBBBEB9 /* FixtureBunExecutable.swift */; };
@@ -149,6 +150,7 @@
 		600E5F4B2D01BEBE9FC67F4A /* APIModelResponseCodecTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5BE919447557F3E4AB92CF5 /* APIModelResponseCodecTests.swift */; };
 		60849B222731A95EF68EA877 /* WebModelRejectedReplyCaptureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A113B403A68C9C6E6E4DCC03 /* WebModelRejectedReplyCaptureTests.swift */; };
 		60ED317F8B31B2A9103F50D2 /* WebModelServerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1544C8B2C1C2F25040B8EEFA /* WebModelServerTests.swift */; };
+		61799E8B83373552D5B0109E /* QwenMarkerWireLease.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1BCB9A8704753D1C1689899 /* QwenMarkerWireLease.swift */; };
 		62BFD090BE5BFFD964D7CA2B /* RunningApplicationBindingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB8EE1E846FC687ACF8E935A /* RunningApplicationBindingTests.swift */; };
 		63003F13426BE7E4FFC2DBC2 /* EmbeddedBrowserTabTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 900A9A870A8117FA479012B2 /* EmbeddedBrowserTabTransportTests.swift */; };
 		64876AE0D27C477F9E632A7D /* WebsitePrivateDiagnosticCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3DDA076DE2F56F9964B9CEB /* WebsitePrivateDiagnosticCapture.swift */; };
@@ -234,6 +236,7 @@
 		98B5440191DE937C7F9A8C74 /* ClaudeResponseStreamLeaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1535B07CB2087B5DE7CE0855 /* ClaudeResponseStreamLeaseTests.swift */; };
 		996A2C7621590FF87C1D81FF /* AgentRuntime in Resources */ = {isa = PBXBuildFile; fileRef = BF808ACB4144D2E6C0B045A9 /* AgentRuntime */; };
 		9A772F7D0C8DB2A1C5F1E517 /* SafeFixtureTelemetryQuery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 302292C7E364011C637969D0 /* SafeFixtureTelemetryQuery.swift */; };
+		9A95C06024611BBA54304247 /* QwenMarkerWireTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9CC25A3C229E61C09EB4677 /* QwenMarkerWireTransportTests.swift */; };
 		9AE1C5C31D417E7AD7362DDA /* NativeFailureEvidenceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D349D9B72ACC1F6DAD7D32C5 /* NativeFailureEvidenceStore.swift */; };
 		9C12E462C34B7B44696B5836 /* SemanticObservationProgressTrackerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D76B36A73A9EA135D14FFBC /* SemanticObservationProgressTrackerTests.swift */; };
 		9C1C08FF47F7F14A02BF23E8 /* FixtureBunExecutableTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CBD355FCCEA070C8807969A /* FixtureBunExecutableTests.swift */; };
@@ -575,6 +578,7 @@
 		7F0124CED30FBDDF3815F946 /* WebBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebBridge.swift; sourceTree = "<group>"; };
 		7F384BB88373C5E38851CDD0 /* ApprovalResolutionResult.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalResolutionResult.swift; sourceTree = "<group>"; };
 		803C8D207765A4C936743F71 /* GPTOSSReasoningHistoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPTOSSReasoningHistoryTests.swift; sourceTree = "<group>"; };
+		806333C3F7486E71D7551BF9 /* QwenMarkerWireLeaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenMarkerWireLeaseTests.swift; sourceTree = "<group>"; };
 		80D166FD23427249D47DF4C7 /* ComputaApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputaApp.swift; sourceTree = "<group>"; };
 		810E674411B7AD436F8A6AD9 /* NativeBackgroundAccessibility.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBackgroundAccessibility.swift; sourceTree = "<group>"; };
 		81902606DE7C3AC9E2AFD98F /* ComputerTaskScopeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerTaskScopeTests.swift; sourceTree = "<group>"; };
@@ -633,6 +637,7 @@
 		A874417A728CCE0D6B3E53AF /* ReadOnlyForegroundVerifierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadOnlyForegroundVerifierTests.swift; sourceTree = "<group>"; };
 		A92540E890A78F5A2F583D6F /* KimiModelEvidenceDiagnosticTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KimiModelEvidenceDiagnosticTests.swift; sourceTree = "<group>"; };
 		A9BACB9F489FCE038AAD83BD /* SavedConversationLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavedConversationLifecycle.swift; sourceTree = "<group>"; };
+		A9CC25A3C229E61C09EB4677 /* QwenMarkerWireTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenMarkerWireTransportTests.swift; sourceTree = "<group>"; };
 		AA67FEE11E1A3587FD30DDF9 /* WebsiteAdapterFailureDiagnostic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebsiteAdapterFailureDiagnostic.swift; sourceTree = "<group>"; };
 		AAB9A1D6388FA24A373196B7 /* ComputerReadContinuation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerReadContinuation.swift; sourceTree = "<group>"; };
 		AB4C454F06A1E556F1149BEB /* AppStateActivityMetadataTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStateActivityMetadataTests.swift; sourceTree = "<group>"; };
@@ -650,6 +655,7 @@
 		B10C1788C1E9C867D02C298F /* Version.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Version.xcconfig; sourceTree = "<group>"; };
 		B11D73577D99E9F497E3FDC3 /* WebsiteModelCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebsiteModelCatalog.swift; sourceTree = "<group>"; };
 		B19A16BAD8B266D357964FCC /* HeadlessMLXServerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeadlessMLXServerTests.swift; sourceTree = "<group>"; };
+		B1BCB9A8704753D1C1689899 /* QwenMarkerWireLease.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenMarkerWireLease.swift; sourceTree = "<group>"; };
 		B2EAD838187EBF925E339CE2 /* WebsiteJournalRetentionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebsiteJournalRetentionStore.swift; sourceTree = "<group>"; };
 		B5F5F4B81E1ADB664D0E53E5 /* EmbeddedBrowserSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmbeddedBrowserSession.swift; sourceTree = "<group>"; };
 		B6211CC66B5E5DB62FA63990 /* QwenBodyTokenCounter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenBodyTokenCounter.swift; sourceTree = "<group>"; };
@@ -1036,6 +1042,8 @@
 				29F31A9304374822C5ED10CF /* QwenFirstUserBindingDiagnosticTests.swift */,
 				4798B99A3E70CB476BBA3936 /* QwenFirstUserDiagnosticTests.swift */,
 				C2AB0B180967306BCE155B9C /* QwenFixturePage.swift */,
+				806333C3F7486E71D7551BF9 /* QwenMarkerWireLeaseTests.swift */,
+				A9CC25A3C229E61C09EB4677 /* QwenMarkerWireTransportTests.swift */,
 				AEB9F53205DD536D4D1AA71E /* QwenSavedConversationTests.swift */,
 				1BCAF560FF3720AF2281DA6A /* QwenWebModelTransportTests.swift */,
 				5E992C84A6007CEC758328E3 /* QwenWebsiteFailureHistoryTests.swift */,
@@ -1252,6 +1260,7 @@
 				B6609EB0A1F75DF77B891244 /* NativePostActionImageObservation.swift */,
 				5635965F258DD6A44C493667 /* OwnedChildProcess.swift */,
 				B6211CC66B5E5DB62FA63990 /* QwenBodyTokenCounter.swift */,
+				B1BCB9A8704753D1C1689899 /* QwenMarkerWireLease.swift */,
 				DF7681D4B3BCEAE52EDD4F06 /* SemanticObservationProgressTracker.swift */,
 				846FA93B2FC7D0D52CA7922B /* VisualGroundingClient.swift */,
 				5D9D945FD323228508CAD1DE /* WebModelResponseCodec.swift */,
@@ -1584,6 +1593,7 @@
 				B76706945E7382F3CA9302BA /* NativeRuntimeStatusBar.swift in Sources */,
 				95FA9DE469A37EF1A4AD8561 /* OwnedChildProcess.swift in Sources */,
 				9D3479F5E0E709B68A7ABA8D /* QwenBodyTokenCounter.swift in Sources */,
+				61799E8B83373552D5B0109E /* QwenMarkerWireLease.swift in Sources */,
 				F5B708616483F4854FDB72FF /* RuntimeContext.swift in Sources */,
 				E8156E08F38DA32C5962D5FB /* SampleData.swift in Sources */,
 				3121E45C97A86777527E0441 /* SavedConversationLifecycle.swift in Sources */,
@@ -1764,6 +1774,8 @@
 				F8D0BD6EF3E94E5008B500DA /* QwenFirstUserBindingDiagnosticTests.swift in Sources */,
 				CB317D693F3BB81F81EE8201 /* QwenFirstUserDiagnosticTests.swift in Sources */,
 				CFA7AD38FE9ABF69AFE3152E /* QwenFixturePage.swift in Sources */,
+				3A95DE658D774DE42308EAC8 /* QwenMarkerWireLeaseTests.swift in Sources */,
+				9A95C06024611BBA54304247 /* QwenMarkerWireTransportTests.swift in Sources */,
 				CA5B74350C0AC72BE3F52D1F /* QwenSavedConversationTests.swift in Sources */,
 				54687909BAFEF2F6948D5E02 /* QwenWebModelTransportTests.swift in Sources */,
 				8312EC03A5765E39ACE0180D /* QwenWebsiteFailureHistoryTests.swift in Sources */,

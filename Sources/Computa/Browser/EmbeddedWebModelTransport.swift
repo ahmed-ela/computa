@@ -402,6 +402,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let view: WKWebView
         // Passive synthetic metadata only. Neither this lease nor its snapshot
         // can supply model, ownership, completion or response text evidence.
+        var qwenMarkerWire: QwenMarkerWireLease?
+        var qwenMarkerTurn: String?
         var claudeResponseStream: ClaudeResponseStreamLease?
         var claudeResponseStreamGeneration: UUID?
         var claudeResponseStreamArmAttempted = false
@@ -1106,7 +1108,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     func start(params: Data, admission: WebModelStartAdmission,
                authorization: ChatGPTRequestMetadataLease?) async throws -> Data {
         var admitted = false
-        defer { if !admitted { ClaudeResponseStreamLease.current?.revoke() } }
+        defer { if !admitted { ClaudeResponseStreamLease.current?.revoke(); QwenMarkerWireLease.current?.revoke() } }
         guard admission.parameters == params,
               let values = try JSONSerialization.jsonObject(with: params) as? [String: String],
               let selection = WebsiteModelCatalog.inferenceSelection(for: admission.modelID),
@@ -1122,6 +1124,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     func startWithRequestMetadata(params: Data, authorization: ChatGPTRequestMetadataLease) async throws -> Data {
+        QwenMarkerWireLease.current?.revoke()
         ClaudeResponseStreamLease.current?.revoke()
         guard let values = try JSONSerialization.jsonObject(with: params) as? [String: String],
               values["provider"] == "chatgpt" else { authorization.revoke(); throw Failure.invalidRequest }
@@ -1237,6 +1240,59 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         })
     }
 
+    private func qwenMarkerForm(_ session: Session, _ observation: [String: Any]) -> (user: String, answer: String, chat: String)? {
+        guard let lease = session.qwenMarkerWire, let choice = session.modelChoice,
+              let generation = session.documentGeneration, session.provider == .qwen, session.savedDeleteReady,
+              session.submitted, session.acknowledgedSendSequence == 1, session.sequence == 1, !session.pendingSubmission,
+              sessions[session.token] === session, browser.webView(for: session.tabID) === session.view,
+              browser.documentGeneration(for: session.tabID) == generation,
+              lease.matches(view: ObjectIdentifier(session.view), ownerToken: session.token, generation: generation),
+              let canonical = session.view.url?.absoluteString, canonical == observation["url"] as? String,
+              let chat = session.view.url?.lastPathComponent, canonical == "https://chat.qwen.ai/c/" + chat,
+              let first = session.firstUserFingerprint, first == session.savedDeleteSubmission?.outboundFingerprint,
+              first == observation["firstUserFingerprint"] as? String, observation["firstUserVerified"] as? Bool == true,
+              observation["firstUserMarkerVerified"] as? Bool == true, observation["busy"] as? Bool == false,
+              observation["interrupted"] as? Bool == false, observation["answerComplete"] as? Bool == true,
+              count(observation,"responseCount") == 1, count(observation,"userCount") == 1,
+              let proof = try? WebsiteSelectionEvidence.parse(snapshot:observation, intent:.model(choice)),
+              session.selectionEvidence?.isSameResolvedSelection(as: proof) == true,
+              let user = observation["firstUserIdentity"] as? String,
+              let answer = observation["qwenShadowResponseID"] as? String,
+              [chat,user,answer].allSatisfy({ UUID(uuidString:$0)?.uuidString.lowercased() == $0 }),
+              Set([chat,user,answer]).count == 3 else { return nil }
+        return (user,answer,chat)
+    }
+
+    private func prepareQwenMarker(_ session: Session, prompt: String, outbound: String) async {
+        guard let lease = session.qwenMarkerWire else { return }
+        guard lease.isCurrent, lease.matchesPrompt(prompt), session.provider == .qwen, session.savedDeleteReady,
+              !session.isDiscovery, !session.isRecoveryProbe, session.state == "ready", session.sequence == 0,
+              !session.submitted, session.baseline == 0, session.confirmedUsers == 0, session.firstUserFingerprint == nil,
+              session.modelSelectionVerified, let choice = session.modelChoice, let turn = session.qwenMarkerTurn,
+              let generation = session.documentGeneration, sessions[session.token] === session,
+              browser.webView(for: session.tabID) === session.view, browser.documentGeneration(for: session.tabID) == generation,
+              session.view.url?.absoluteString == "https://chat.qwen.ai/",
+              outbound.utf8.elementsEqual((prompt + "\n\nComputa session marker: " + session.firstUserMarker).utf8) else {
+            lease.revoke(); return
+        }
+        await browser.prepareQwenMarker(tabID:session.tabID, view:session.view, owner:session.token, turn:turn,
+            label:choice.label, generation:generation, outbound:outbound, fingerprint:Self.outboundFingerprint(outbound))
+    }
+
+    private func compareQwenMarker(_ session: Session, observed: [String: Any], response: String) async -> String? {
+        guard let form = qwenMarkerForm(session,observed), let lease = session.qwenMarkerWire,
+              let generation = session.documentGeneration, let turn = session.qwenMarkerTurn, let label = session.modelChoice?.label,
+              response.utf8.count <= 1_024, (observed["text"] as? String)?.utf8.elementsEqual(response.utf8) == true,
+              let data = response.data(using:.utf8), APIModelCorrectionJSON.isUnambiguous(data),
+              let envelope = (try? JSONSerialization.jsonObject(with:data)) as? [String:String],
+              envelope == ["type":"message","text":lease.expectedMarker] else { return nil }
+        return await browser.finishQwenMarker(tabID:session.tabID, view:session.view, owner:session.token, generation:generation,
+            packet:["turn":turn,"generation":generation.uuidString.lowercased(),"visibleModel":label,
+                    "chat":form.chat,"user":form.user,"response":form.answer,"expectedWireText":response,
+                    "exactFirstBody":true,"completionControls":true,"singleOwnedAssistant":true,"visibleAnswerPhases":1,
+                    "documentCurrent":true,"submissionVerified":true,"promptBound":true])
+    }
+
     private func armClaudeResponseStream(_ session: Session, prompt: String, outbound: String) async {
         guard let lease = session.claudeResponseStream else { return }
         guard !session.claudeResponseStreamArmAttempted else {
@@ -1310,6 +1366,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     private func start(_ values: [String: String], requestMetadata: ChatGPTRequestMetadataLease? = nil,
                        admission: WebModelStartAdmission? = nil) async throws -> Data {
+        let qwenCandidate = QwenMarkerWireLease.current
+        var qwenRetained = false
+        defer { if !qwenRetained { qwenCandidate?.revoke() } }
         let streamCandidate = ClaudeResponseStreamLease.current
         var streamRetained = false
         defer { if !streamRetained { streamCandidate?.revoke() } }
@@ -1331,6 +1390,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard provider.usesWebsiteModes ? choice == nil && modeChoice != nil : modeChoice == nil else { throw Failure.invalidRequest }
         guard provider != .chatgpt || choice?.chatGPTPower != nil else { throw Failure.invalidRequest }
         guard provider.lifecycle == .temporary || choice != nil || modeChoice != nil else { throw Failure.invalidRequest }
+        let qwenLease = provider == .qwen && choice != nil && admission.map({ qwenCandidate?.matches(admission:$0) == true }) == true ? qwenCandidate : nil
         let claudeResponseStream: ClaudeResponseStreamLease?
         if let candidate = streamCandidate, provider == .claude, choice != nil,
            let admission, admission.provider == provider.rawValue, admission.modelID == choice?.modelID,
@@ -1382,7 +1442,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         do {
             try Task.checkCancellation()
             session = try createSession(provider: provider, choice: choice, modeChoice: modeChoice, isDiscovery: false,
-                requestMetadata: requestMetadata, claudeResponseStream: claudeResponseStream,
+                requestMetadata: requestMetadata, claudeResponseStream: claudeResponseStream, qwenMarker: qwenLease,
                 preparedTab: preparedTab, reservedStart: true)
         } catch {
             if let preparedTab { browser.closeTab(preparedTab) }
@@ -1396,7 +1456,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             session.adapterFailureContext = context
             session.adapterFailureDirectory = directory
         }
+        session.qwenMarkerWire = qwenLease
+        session.qwenMarkerTurn = qwenLease == nil ? nil : admission?.turnID
         let result = try snapshot(session)
+        qwenRetained = session.qwenMarkerWire?.isCurrent == true
         streamRetained = session.claudeResponseStream != nil
         return result
     }
@@ -1409,7 +1472,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                  onChatSubmissionFailure: (@Sendable (ChatSubmissionFailureDiagnostic) -> Void)?) async throws -> Data {
         // The wire protocol has no authority to acquire this native diagnostic,
         // including malformed Start requests that fail before decoding.
-        if operation == "webProviderStart" { ClaudeResponseStreamLease.current?.revoke() }
+        if operation == "webProviderStart" { ClaudeResponseStreamLease.current?.revoke(); QwenMarkerWireLease.current?.revoke() }
         guard let values = try JSONSerialization.jsonObject(with: params) as? [String: String] else {
             throw Failure.invalidRequest
         }
@@ -1523,6 +1586,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // Failed/expired instrumentation is discarded without changing
                 // insertion, Send, model verification or their error handling.
                 await armClaudeResponseStream(session, prompt: prompt, outbound: outbound)
+                if session.qwenMarkerWire != nil { await prepareQwenMarker(session, prompt:prompt, outbound:outbound) }
                 if let benchmark = WebsiteBenchmarkCaptureLease.current, prepareFirstInstantInInsert,
                    canPrepareFirstInstantInInsert(session), session.provider == .chatgpt,
                    let choice = session.modelChoice, choice.key == "chat/latest/instant",
@@ -1750,7 +1814,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     private func createSession(provider: Provider, choice: WebsiteModelChoice?, modeChoice: WebsiteModeChoice? = nil, isDiscovery: Bool,
                                isRecoveryProbe: Bool = false, requestMetadata: ChatGPTRequestMetadataLease? = nil,
-                               claudeResponseStream: ClaudeResponseStreamLease? = nil,
+                               claudeResponseStream: ClaudeResponseStreamLease? = nil, qwenMarker: QwenMarkerWireLease? = nil,
                                preparedTab: UUID? = nil, reservedStart: Bool = false) throws -> Session {
         closedSessions = closedSessions.filter { ContinuousClock.now - $0.value.created < .seconds(3_600) }
         synchronizeProviderGate(provider)
@@ -1766,6 +1830,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard script(for: provider) != nil else { throw Failure.pageUnavailable }
         let id: UUID
         if let preparedTab { id = preparedTab }
+        else if let qwenMarker, let choice, provider == .qwen, !isDiscovery, !isRecoveryProbe {
+            id = try browser.createQwenMarkerTab(url:provider.startURL(choice:choice), label:choice.label, lease:qwenMarker)
+        }
         else if let claudeResponseStream, provider == .claude, !isDiscovery, !isRecoveryProbe {
             id = try browser.createModelTab(url: provider.startURL(choice: choice), claudeResponseStream: claudeResponseStream)
         }
@@ -3431,6 +3498,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             }
                         }
                         if currentAnswerVerified, session.requiresExplicitClear || session.requiresSavedDelete {
+                            // Make the optional page-world comparison before the already-required final independent DOM
+                            // read. Never stage a result across changed ordinary selection, answer bytes or message IDs.
+                            var wireTag: String?
+                            if session.qwenMarkerWire?.isCurrent == true, session.turnStarted + responseTimeout - .now > .seconds(2) {
+                                wireTag = await compareQwenMarker(session, observed:observed, response:response)
+                            }
                             // Saved/cleared sessions' native model recheck also yields. Its model
                             // identity alone cannot preserve an older completed
                             // answer across changed text or resumed streaming.
@@ -3453,6 +3526,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                     ? session.savedDeleteSubmission?.outboundFingerprint == session.firstUserFingerprint
                                         && session.conversation != nil
                                     : session.explicitClearSubmission?.outboundFingerprint == session.firstUserFingerprint)
+                            if currentAnswerVerified, let wireTag, let before = qwenMarkerForm(session,observed),
+                               let after = qwenMarkerForm(session,final), before == after, let generation = session.documentGeneration {
+                                _ = session.qwenMarkerWire?.stage(wireTag, view:ObjectIdentifier(session.view), ownerToken:session.token, generation:generation)
+                            }
                             completionObservation = final
                             if !currentAnswerVerified {
                                 session.completionCandidate = false
@@ -6011,6 +6088,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             "allowSubmissionExpansion": provider == .chatgpt && ["inspect", "verifyModel"].contains(action)
                 && session.pendingSubmission && session.sequence > 1,
         ]
+        if session.qwenMarkerWire?.isCurrent == true, provider == .qwen, action == "inspect", !allowSavedCleanupInspection,
+           savedDeleteOperation == nil, session.firstUserFingerprint != nil, !session.pendingSubmission {
+            input["qwenSyntheticMarkerComparison"] = true
+        }
         if requireClaudeSafeguardPause { input["requireClaudeSafeguardPause"] = true }
         if allowSavedCleanupInspection {
             guard let policy = provider.savedConversationPolicy else { throw Failure.invalidRequest }
@@ -8310,6 +8391,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return String(decoding: data, as: UTF8.self)
     }
 
+    static func sanitizedHaikuFirstReadyReason(_ value: Any?) -> String? {
+        guard let reason = value as? String, reason.utf8.count <= 18,
+              ["editor_rendered", "editor_paragraph", "editor_node", "editor_text", "marker", "turn", "transcript",
+               "picker", "prior_state", "row", "composer_pin", "picker_pin", "draft_binding", "composer_detached",
+               "final_transcript"].contains(reason) else { return nil }
+        return reason
+    }
+
     private func logSubmissionFailure(_ session: Session, action: String, stage: SubmissionNativeStage, observed: [String: Any]) {
         guard session.usesSubmissionOwnership else { return }
         // Native Send is claimed before the click. These fields deliberately
@@ -8323,6 +8412,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             "capabilityMatches": observed["submissionOwnershipCapability"] as? String == Self.turnContinuationCapability,
             "proofPresent": observed["submissionProof"] != nil]
         if session.provider == .chatgpt { context["provider"] = "chatgpt" }
+        if session.retainsClaudeTurn, action == "sendReady", stage == .adapterRejected,
+           session.sequence == 0, session.confirmedUsers == 0, session.preparedSubmission?.sequence == 1,
+           session.currentSubmission == nil, !session.submitted, !session.pendingSubmission,
+           let reason = Self.sanitizedHaikuFirstReadyReason(observed["haikuFirstReadyReason"]) {
+            context["haikuFirstReadyReason"] = reason
+        }
         if let data = try? JSONSerialization.data(withJSONObject: context, options: .sortedKeys), data.count <= 1_024 {
             let encoded = String(decoding: data, as: UTF8.self)
             Self.inspectionLog.error("submissionNative \(encoded, privacy: .public)")

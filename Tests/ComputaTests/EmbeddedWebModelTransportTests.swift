@@ -12339,6 +12339,49 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testRetainedHaikuFirstReadyRefusesDecoratedDraftWithoutSendAndClosesOnlyUnsubmittedView() async throws {
+        let choice = WebsiteModelChoice(provider: "claude", key: "Haiku 5.5", label: "Haiku 5.5")
+        let page = Self.modelChoicePage(.claude).replacingOccurrences(of: "Sonnet 4.6", with: choice.label)
+        let fixture = try Fixture(page: page)
+        defer { fixture.shutdown() }
+        let params = try JSONSerialization.data(withJSONObject: ["provider": "claude",
+            "modelChoice": try XCTUnwrap(choice.canonicalJSONString)])
+        let admission = WebModelStartAdmission(id: UUID(), inferenceID: UUID(), taskID: UUID().uuidString,
+            threadID: UUID().uuidString, turnID: UUID().uuidString, runtimeGeneration: UUID(), preparationID: UUID(),
+            transportGeneration: UUID(), provider: "claude", modelID: choice.modelID, parameters: params, retainClaudeTurn: true)
+        let data = try await fixture.transport.start(params: params, admission: admission, authorization: nil)
+        let opened = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let token = try XCTUnwrap(opened["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        var observations: [String] = []
+        fixture.transport.setSubmissionDiagnosticsObserverForTesting { event, value in
+            if event == "submissionNative" { observations.append(value) }
+        }
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "insert" {
+                _ = try? await self.evaluate(view, "document.querySelector('#fixture-editor p').setAttribute('data-example', '');return true;")
+            }
+        }
+        do {
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Synthetic draft canary"])
+            XCTFail("The decorated first draft must not authorize Send")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptSubmission)) }
+        let record = try XCTUnwrap(observations.first)
+        let native = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(record.utf8)) as? [String: Any])
+        XCTAssertEqual(native["haikuFirstReadyReason"] as? String, "editor_paragraph")
+        XCTAssertEqual(native["action"] as? String, "sendReady"); XCTAssertEqual(native["sendClaimed"] as? Bool, false)
+        XCTAssertFalse(record.contains("canary")); XCTAssertEqual(observations.count, 1)
+        let sends = try await evaluate(view, "return window.fixturePrompts.length;")
+        XCTAssertEqual(sends as? Int, 0)
+        let closure = try await call(fixture.transport, "webProviderCancel", ["sessionToken": token])
+        XCTAssertEqual(closure["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+        for rejected: Any in ["editor_paragraph_canary", "EDITOR_PARAGRAPH", "", 1, ["picker": true] as [String: Bool]] {
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedHaikuFirstReadyReason(rejected))
+        }
+    }
+
     func testRetainedHaikuInspectsSynchronousSecondUserBeforeReturningFromSend() async throws {
         let choice = WebsiteModelChoice(provider: "claude", key: "Haiku 5.5", label: "Haiku 5.5")
         for corrupt in [false, true] {

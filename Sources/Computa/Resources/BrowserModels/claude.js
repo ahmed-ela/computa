@@ -3155,6 +3155,12 @@ function modelClaudeNoOutputPending(guard) {
 // The native turn lease is restricted to the exact named Haiku pilot. Keep
 // physical message pins in this isolated document only, through its final close.
 const haikuFailure = { error: 'conversation_changed', detail: 'submission_message' };
+// Attach one fixed reason to the existing first-readiness rejection. This never rereads the page.
+function haikuDraftRejected(reason) {
+  if (input.claudeRetainedTurn === true && input.action === 'sendReady' && input.submissionSequence === 1)
+    haikuFailure.haikuFirstReadyReason = reason;
+  return false;
+}
 const haikuCapability = { submissionOwnershipCapability: 'per_submission_ownership_v1' };
 const haikuExactChoice = choice => choice?.key === 'Haiku 5.5' && choice.label === 'Haiku 5.5';
 const haikuRaw = node => node?.innerText;
@@ -3195,46 +3201,53 @@ function haikuTranscript(turn) {
 // from a user-message echo, and an authored extra newline still fails.
 function haikuExactEditor(composer, prompt) {
   const rendered = composer.innerText;
-  if (rendered !== prompt && rendered !== prompt + '\n' && rendered !== prompt + '\n\n') return false;
+  if (rendered !== prompt && rendered !== prompt + '\n' && rendered !== prompt + '\n\n') return haikuDraftRejected('editor_rendered');
   const paragraph = composer.childNodes.length === 1 && composer.childNodes[0];
   if (!composer.classList.contains('ProseMirror') || !paragraph || paragraph.tagName !== 'P'
-    || paragraph.attributes.length || !paragraph.childNodes.length || paragraph.childNodes.length > 8_192) return false;
+    || paragraph.attributes.length || !paragraph.childNodes.length || paragraph.childNodes.length > 8_192) return haikuDraftRejected('editor_paragraph');
   let offset = 0;
   for (const node of paragraph.childNodes) {
     const text = node.nodeType === 3 ? node.textContent
       : node.tagName === 'BR' && !node.attributes.length && !node.childNodes.length ? '\n' : null;
-    if (text === null || !prompt.startsWith(text, offset)) return false;
+    if (text === null) return haikuDraftRejected('editor_node');
+    if (!prompt.startsWith(text, offset)) return haikuDraftRejected('editor_text');
     offset += text.length;
   }
-  return offset === prompt.length;
+  return offset === prompt.length || haikuDraftRejected('editor_text');
 }
 function haikuDraft(action, composer, prompt) {
   let turn = globalThis.__computaClaudeTurn;
   const seq = input.submissionSequence, marker = input.submissionMarker;
   if (!Number.isInteger(seq) || seq < 1 || seq > 16 || typeof marker !== 'string'
     || !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(marker)
-    || !prompt.endsWith('\n\nComputa session marker: ' + marker)) return false;
+    || !prompt.endsWith('\n\nComputa session marker: ' + marker)) return haikuDraftRejected('marker');
   if (!turn && action === 'insert' && seq === 1 && marker === input.expectedFirstUserMarker) {
     turn = { owner: input.ownerToken, document, url: null, rows: [] };
     globalThis.__computaClaudeTurn = turn;
   }
-  if (!turn) return false;
+  if (!turn) return haikuDraftRejected('turn');
   const captured = haikuTranscript(turn), trigger = haikuPicker(), prior = turn.rows[seq-2];
-  if (!captured || !trigger || captured.users.length !== seq-1
+  if (!captured) return haikuDraftRejected('transcript');
+  if (!trigger) return haikuDraftRejected('picker');
+  if (captured.users.length !== seq-1
       || captured.completion.answers.length !== seq-1 || captured.completion.busy || captured.completion.interrupted
       || (seq > 1 && (!prior?.answer || !captured.completion.answerComplete
         || captured.completion.answer !== prior.answer || captured.completion.message !== prior.message
         || captured.completion.article !== prior.article || captured.completion.copy !== prior.copy
         || captured.completion.actionBar !== prior.actionBar || prior.completedPicker !== trigger
-        || !input.expectedSubmissionProofs?.some(pin => pin.sequence === seq-1 && pin.fingerprint === prior.fingerprint)))) return false;
+        || !input.expectedSubmissionProofs?.some(pin => pin.sequence === seq-1 && pin.fingerprint === prior.fingerprint)))) return haikuDraftRejected('prior_state');
   if (action === 'insert') {
     if (turn.rows.length !== seq-1 || turn.rows.some(row => row.marker === marker)) return false;
     turn.rows.push({ marker, outbound: prompt, composer, trigger, sent: false });
     return true;
   }
   const row = turn.rows[seq-1];
-  if (turn.rows.length !== seq || !row || row.sent || row.composer !== composer || row.trigger !== trigger
-    || row.outbound !== prompt || row.marker !== marker || !composer.isConnected || !haikuExactEditor(composer, prompt)) return false;
+  if (turn.rows.length !== seq || !row || row.sent) return haikuDraftRejected('row');
+  if (row.composer !== composer) return haikuDraftRejected('composer_pin');
+  if (row.trigger !== trigger) return haikuDraftRejected('picker_pin');
+  if (row.outbound !== prompt || row.marker !== marker) return haikuDraftRejected('draft_binding');
+  if (!composer.isConnected) return haikuDraftRejected('composer_detached');
+  if (!haikuExactEditor(composer, prompt)) return false;
   if (action === 'submit') row.sent = true; // Claim once before dispatch, including an uncertain acknowledgment.
   return true;
 }
@@ -3245,7 +3258,10 @@ async function haikuRead(observed) {
   if (input.action === 'submit') return observed.submitted === true && haikuContext(turn)
     ? { ...observed, ...haikuCapability } : haikuFailure;
   const view = haikuTranscript(turn);
-  if (!view) return haikuFailure;
+  if (!view) {
+    haikuDraftRejected('final_transcript');
+    return haikuFailure;
+  }
   const count = view.users.length, row = turn.rows[count-1];
   if (!count) return { ...observed, ...haikuCapability };
   const user = view.users[count-1], pin = input.expectedSubmissionProofs?.find(pin => pin.sequence === count);

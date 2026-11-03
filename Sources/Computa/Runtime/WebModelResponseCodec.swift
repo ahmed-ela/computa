@@ -592,14 +592,15 @@ enum WebModelResponseCodec {
                                                   entryTools: [String: OfferedTool],
                                                   availability: EmbeddedBrowserToolAvailability?) -> String {
         if availability == .unbound, !entryTools.isEmpty {
-            let routes = entryTools.map { name, tool in
-                tool.name == "browser_open" ? "\(name) for a supplied URL" : "\(name) with this turn's observed tab_id"
-            }.sorted().joined(separator: " or ")
-            let direct = entryTools.keys.filter { tools[$0] != nil && policy.allowedNames.contains($0) }.sorted()
-            let entryUse = direct.isEmpty
-                ? "Load the chosen entry schema before calling it."
-                : "Call \(direct.joined(separator: ", ")) directly. Load missing entry schemas first."
-            return "Current browser state: unbound. Page tools require successful \(routes). \(entryUse) Loading alone does not bind. After entry, find permitted fill/click actions in the next request's refreshed inventory and catalog_revision. Empty tabs do not prove denied access."
+            // Present the supplied URL route first, then a previously observed human tab.
+            let routes = entryTools.sorted { ($0.value.name, $0.key) > ($1.value.name, $1.key) }.map { name, tool in
+                let use = tools[name] != nil && policy.allowedNames.contains(name) ? "call" : "first load"
+                return tool.name == "browser_open"
+                    ? "Supplied URL: \(use) \(name)."
+                    : "Existing human tab with an observed tab_id: \(use) \(name)."
+            }
+            return "Current browser state: unbound. " + routes.joined(separator: " ")
+                + " Loading schemas executes no task tools. After successful entry, check the new catalog_revision for permitted fill/click tools. Empty tabs do not prove denied access."
         }
         let allowed = tools.filter { policy.allowedNames.contains($0.key) && $0.value.nativeBrowserBit != 0 }
         guard !allowed.isEmpty else { return "" }

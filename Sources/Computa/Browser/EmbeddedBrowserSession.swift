@@ -227,6 +227,7 @@ final class EmbeddedBrowserSession {
                                             expiry: Task<Void, Never>)?
         #endif
         var requestMetadataDiagnostic: RequestMetadataDiagnostic?
+        var qwenMarkerProbe: QwenMarkerProbe?
         var claudeResponseStreamDiagnostic: ClaudeResponseStreamDiagnosticState?
         // Stop removes the page observer, but close must still revoke this exact
         // lease after transport's pre-cleanup persistence attempt.
@@ -719,6 +720,7 @@ final class EmbeddedBrowserSession {
         removeResponseCompletionObserver(entry)
         revokeRequestMetadata(entry)
         revokeClaudeResponseStream(entry)
+        removeQwenMarker(entry)
         let postBlockObservation = entry.geminiPostBlockObservation
         entry.geminiPostBlockObservation = nil
         revokeModelInspector(entry, reason: isShutdown ? .shutdown : .closed)
@@ -808,6 +810,7 @@ final class EmbeddedBrowserSession {
         entry.pendingCacheAdmission = nil
         entry.delegate.cancelCacheAdmission()
         revokeResponseCompletion(entry)
+        removeQwenMarker(entry)
         revokeClaudeResponseStream(entry)
         revokeModelInspector(entry, reason: .navigation)
         resetModelNavigationDiagnostic(entry)
@@ -843,6 +846,148 @@ final class EmbeddedBrowserSession {
 
     /// This observes one explicitly armed synthetic inference. It never supplies
     /// response text, ownership, provider completion or tool-dispatch authority.
+    @MainActor private final class QwenMarkerProbe {
+        let lease: QwenMarkerWireLease
+        let key = "__computaQwenMarker_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        let secret = UUID().uuidString
+        let script: WKUserScript
+        var initialStart = false
+        var initialPreparation = false
+        var canonical: String?
+        var reachedProvisional = false
+        var generation: UUID?
+        var prepareResult: String?
+        var expiry: Task<Void, Never>?
+
+        init?(lease: QwenMarkerWireLease, label: String) {
+            self.lease = lease
+            let duration = min(60_000, lease.remainingMilliseconds)
+            let config: [String: Any] = ["origin":"https://chat.qwen.ai", "key":key, "secret":secret, "visibleModel":label,
+                "expiresAt":Date().timeIntervalSince1970 * 1_000 + Double(duration)]
+            guard duration > 0, let source = EmbeddedBrowserSession.rendererDiagnosticSource(named: "qwen-marker-wire"),
+                  source.components(separatedBy: "__COMPUTA_QWEN_MARKER_CONFIG__").count == 2,
+                  let json = try? JSONSerialization.data(withJSONObject: config) else { return nil }
+            script = .init(source: source.replacingOccurrences(of: "__COMPUTA_QWEN_MARKER_CONFIG__", with: String(decoding: json, as: UTF8.self)),
+                           injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page)
+        }
+        func allows(_ url: URL) -> Bool {
+            let raw = url.absoluteString
+            if let canonical { return raw == canonical }
+            if raw == "https://chat.qwen.ai/" { return !reachedProvisional }
+            guard generation != nil else { return false }
+            if raw == "https://chat.qwen.ai/c/new-chat" { reachedProvisional = true; return true }
+            guard let id = UUID(uuidString: url.lastPathComponent), raw == "https://chat.qwen.ai/c/" + id.uuidString.lowercased() else { return false }
+            canonical = raw
+            return true
+        }
+    }
+
+    func createQwenMarkerTab(url: URL, label: String, lease: QwenMarkerWireLease) throws -> UUID {
+        let id = try createModelTab(initialURL: nil)
+        do {
+            if url.absoluteString == "https://chat.qwen.ai/", let entry = entries[id], entry.isModelOwned, !entry.isToolOwned,
+               entry.view.url == nil, !entry.view.isLoading, entry.modelChanges == nil,
+               let probe = QwenMarkerProbe(lease: lease, label: label), lease.claim(view: ObjectIdentifier(entry.view)) {
+                entry.qwenMarkerProbe = probe
+                entry.view.configuration.userContentController.addUserScript(probe.script)
+                probe.expiry = Task { @MainActor [weak self, weak probe] in
+                    guard let probe else { return }
+                    do { try await Task.sleep(for: .milliseconds(min(60_000, lease.remainingMilliseconds))) } catch { return }
+                    if let self, let current = self.entries[id], current.qwenMarkerProbe === probe { self.removeQwenMarker(current) }
+                }
+            } else { lease.revoke() }
+            try navigate(tabID: id, to: url)
+            return id
+        } catch { closeTab(id); lease.revoke(); throw error }
+    }
+
+    private func removeQwenMarker(_ entry: Entry, preserveStagedLease: Bool = false) {
+        guard let probe = entry.qwenMarkerProbe else { return }
+        entry.qwenMarkerProbe = nil
+        probe.expiry?.cancel()
+        let controller = entry.view.configuration.userContentController
+        if controller.userScripts.contains(where: { $0 === probe.script }) {
+            let surviving = controller.userScripts.filter { $0 !== probe.script }
+            controller.removeAllUserScripts(); surviving.forEach(controller.addUserScript)
+        }
+        if let url = entry.view.url, url.scheme == "https", url.host == "chat.qwen.ai", url.port == nil,
+           url.user == nil, url.password == nil, probe.generation == nil || probe.generation == entry.tab.documentGeneration {
+            entry.view.callAsyncJavaScript("if (location.origin===origin && document.URL===url) { try { window[key]?.(secret,'retire',null) } catch {} } return null",
+                arguments: ["origin":"https://chat.qwen.ai","url":url.absoluteString,"key":probe.key,"secret":probe.secret],
+                in:nil, in:.page, completionHandler:nil)
+        }
+        if !preserveStagedLease { probe.lease.revoke() }
+    }
+
+    private func qwenMarkerCurrent(_ entry: Entry, _ probe: QwenMarkerProbe, view: WKWebView, owner: String, generation: UUID) -> Bool {
+        !isShutdown && !Task.isCancelled && entries[entry.tab.id] === entry && entry.qwenMarkerProbe === probe
+            && entry.isModelOwned && !entry.isToolOwned && entry.view === view && entry.modelChanges?.ownerToken == owner
+            && entry.modelSignalOriginHost == "chat.qwen.ai" && entry.tab.documentGeneration == generation
+            && probe.generation == generation && probe.initialStart && view.url.map(probe.allows) == true
+            && probe.lease.matches(view: ObjectIdentifier(view), ownerToken: owner, generation: generation)
+    }
+
+    func prepareQwenMarker(tabID: UUID, view: WKWebView, owner: String, turn: String, label: String,
+                           generation: UUID, outbound: String, fingerprint: String) async {
+        guard let entry = entries[tabID], let probe = entry.qwenMarkerProbe,
+              entry.isModelOwned, !entry.isToolOwned, entry.view === view, entry.modelChanges?.ownerToken == owner,
+              entry.modelSignalOriginHost == "chat.qwen.ai", entry.tab.documentGeneration == generation,
+              view.url?.absoluteString == "https://chat.qwen.ai/", probe.initialStart, probe.generation == nil,
+              probe.lease.bind(view: ObjectIdentifier(view), ownerToken: owner, generation: generation, outboundFingerprint: fingerprint)
+        else { return }
+        probe.generation = generation
+        guard qwenMarkerCurrent(entry, probe, view:view, owner:owner, generation:generation) else { removeQwenMarker(entry); return }
+        let tag = await callQwenMarker(probe, view:view, command:"prepare", packet:["turn":turn,"generation":generation.uuidString.lowercased(),
+            "visibleModel":label,"pickerVerified":true,"prompt":outbound])
+        guard qwenMarkerCurrent(entry, probe, view:view, owner:owner, generation:generation),
+              view.url?.absoluteString == "https://chat.qwen.ai/" else { return }
+        if let tag, ["ready","catalog_not_seen","catalog_pending","catalog_path_unverified","catalog_missing","catalog_ambiguous",
+            "catalog_size","catalog_request","catalog_response","catalog_reused","catalog_accessor","catalog_mime","catalog_shape","stream_unavailable"].contains(tag) {
+            probe.prepareResult = tag
+        }
+    }
+
+    func finishQwenMarker(tabID: UUID, view: WKWebView, owner: String, generation: UUID, packet: [String: Any]) async -> String? {
+        guard let entry = entries[tabID], let probe = entry.qwenMarkerProbe,
+              qwenMarkerCurrent(entry, probe, view:view, owner:owner, generation:generation),
+              let canonical = probe.canonical, canonical == view.url?.absoluteString, let prepared = probe.prepareResult else { return nil }
+        let tag: String?
+        if prepared == "ready" { tag = await callQwenMarker(probe, view:view, command:"finish", packet:packet) }
+        else { tag = prepared }
+        guard qwenMarkerCurrent(entry, probe, view:view, owner:owner, generation:generation),
+              view.url?.absoluteString == canonical else { return nil }
+        removeQwenMarker(entry, preserveStagedLease:true)
+        return tag
+    }
+
+    private func callQwenMarker(_ probe: QwenMarkerProbe, view: WKWebView, command: String, packet: [String: Any]) async -> String? {
+        guard let url = view.url?.absoluteString, probe.lease.isCurrent else { return nil }
+        let deadline = ContinuousClock.now + .milliseconds(min(750, probe.lease.remainingMilliseconds))
+        let result = EmbeddedScriptResult()
+        let bytes: Data? = try? await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                result.install(continuation)
+                result.setTimeout(Task {
+                    do { try await Task.sleep(until: deadline) } catch { return }
+                    result.complete(.failure(Failure.tabClosed))
+                })
+                guard result.isPending, !Task.isCancelled, ContinuousClock.now < deadline else {
+                    result.complete(.failure(CancellationError())); return
+                }
+                view.callAsyncJavaScript("""
+                    if(document.URL!==url || typeof window[key]!=='function')return null;
+                    const r=window[key](secret,command,packet);
+                    return r && Object.keys(r).length===1 && typeof r.stage==='string' && r.stage.length<=48 ? r.stage : null;
+                    """, arguments:["url":url,"key":probe.key,"secret":probe.secret,"command":command,"packet":packet], in:nil, in:.page) { reply in
+                    if case .success(let value) = reply, let tag = value as? String, tag.utf8.count <= 48 {
+                        result.complete(.success(Data(tag.utf8)))
+                    } else { result.complete(.failure(Failure.tabClosed)) }
+                }
+            }
+        } onCancel: { result.complete(.failure(CancellationError())) }
+        return ContinuousClock.now < deadline ? bytes.map { String(decoding:$0,as:UTF8.self) } : nil
+    }
+
     private final class ClaudeResponseStreamDiagnosticState {
         let authorization: ClaudeResponseStreamLease
         let key: String
@@ -2830,6 +2975,11 @@ final class EmbeddedBrowserSession {
         entry.pendingConversationAdmission = nil
         revokeResponseCompletion(entry)
         if entry.requestMetadataDiagnostic?.generation != nil { revokeRequestMetadata(entry) }
+        if let probe = entry.qwenMarkerProbe {
+            if claudeInitialStart && !probe.initialStart { probe.initialStart = true }
+            else if !probe.initialPreparation && !probe.initialStart && entry.view.url == nil && entry.navigation == nil { probe.initialPreparation = true }
+            else { removeQwenMarker(entry) }
+        }
         if let diagnostic = entry.claudeResponseStreamDiagnostic {
             if claudeInitialStart, !diagnostic.initialNavigationStarted {
                 // The one initial owned navigation injects the dormant script.
@@ -2880,6 +3030,7 @@ final class EmbeddedBrowserSession {
 
     private func refresh(_ id: UUID, view: WKWebView, committedNavigation: Bool = false) {
         guard let entry = entries[id], entry.view === view else { return }
+        if let probe = entry.qwenMarkerProbe, let url = view.url, !probe.allows(url) { removeQwenMarker(entry) }
         if let diagnostic = entry.claudeResponseStreamDiagnostic, view.url != nil,
            !claudeResponseStreamRouteCurrent(entry, diagnostic: diagnostic) { revokeClaudeResponseStream(entry) }
         if entry.responseCompletion != nil, !Self.responseCompletionURLAllowed(view.url) { revokeResponseCompletion(entry) }
@@ -3175,6 +3326,7 @@ final class EmbeddedBrowserSession {
               entry.modelCommittedGeneration != entry.tab.documentGeneration,
               entry.modelFinishedGeneration != entry.tab.documentGeneration,
               entry.modelFailedGeneration != entry.tab.documentGeneration else { return }
+        removeQwenMarker(entry)
         entry.serverRedirectObservedInCurrentNavigation = true
         emitGeminiPostBlockNativeEvent(entry, .redirected)
     }
@@ -3234,6 +3386,7 @@ final class EmbeddedBrowserSession {
     fileprivate func terminated(_ view: WKWebView, tabID: UUID) {
         guard let entry = entries[tabID], entry.view === view else { return }
         revokeResponseCompletion(entry)
+        removeQwenMarker(entry)
         revokeClaudeResponseStream(entry)
         revokeModelInspector(entry, reason: .navigation)
         resetModelNavigationDiagnostic(entry)

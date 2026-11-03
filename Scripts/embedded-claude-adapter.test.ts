@@ -2686,6 +2686,20 @@ describe('native-turn Haiku 5.5 Incognito pilot', () => {
       expect(f.send.clicks).toBe(0);
     }
   });
+  test('only the first retained readiness rejection exposes the fixed editor reason', async () => {
+    for (const sequence of [1, 2]) {
+      const { f, run, submitFirst } = setup();
+      if (sequence === 2) await submitFirst();
+      expect(await run('insert', sequence, sequence - 1)).toMatchObject({inserted:true});
+      f.composer.children[0].values['data-example'] = 'private attribute value';
+      const failure = await run('sendReady', sequence, sequence - 1);
+      expect(failure).toMatchObject({error:'conversation_changed', detail:'submission_message'});
+      expect(failure.haikuFirstReadyReason).toBe(sequence === 1 ? 'editor_paragraph' : undefined);
+      expect(JSON.stringify(failure)).not.toContain('private attribute value');
+      expect((await run('submit', sequence, sequence - 1)).haikuFirstReadyReason).toBeUndefined();
+      expect(f.send.clicks).toBe(sequence - 1);
+    }
+  });
   test('model-only verification cannot bind a newly rendered second user; inspection binds it once', async () => {
     const { f, proofs, run, answer, submitFirst } = setup();
     await submitFirst();

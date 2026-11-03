@@ -10,8 +10,12 @@ enum WebsitePrivateDiagnosticCapture {
         case rejectedReply = "rejected-reply.json"
         case claudeResponseMetadata = "response-metadata.json"
         case adapterFailureStructure = "adapter-failure-structure.json"
+        case qwenMarkerWire = "marker-wire.json"
 
-        var maximumBytes: Int { self == .claudeResponseMetadata || self == .adapterFailureStructure ? 96 * 1_024 : 2_000_000 }
+        var maximumBytes: Int {
+            if self == .qwenMarkerWire { return 4_096 }
+            return self == .claudeResponseMetadata || self == .adapterFailureStructure ? 96 * 1_024 : 2_000_000
+        }
     }
 
     /// Holds the exact private directory opened during the single arm claim.
@@ -41,7 +45,7 @@ enum WebsitePrivateDiagnosticCapture {
                         maximumRecordBytes: Int, makeRecord: (Data) -> Data?,
                         isCurrent: () -> Bool = { true },
                         beforeArmClaim: (@Sendable () -> Void)? = nil) -> Bool {
-        guard let kind = Record(rawValue: outputName), kind != .claudeResponseMetadata, kind != .adapterFailureStructure,
+        guard let kind = Record(rawValue: outputName), kind == .request || kind == .rejectedReply,
               maximumRecordBytes > 0, maximumRecordBytes <= kind.maximumBytes else { return false }
         var record: Data?
         guard let claimed = claim(directory: directory, record: kind, maximumArmBytes: maximumArmBytes,

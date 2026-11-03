@@ -395,15 +395,24 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertEqual(choices, ["browser_bind", "browser_open", "browser_tabs"].map { prefix + $0 })
             let discovery = try XCTUnwrap(unboundInventory["inventory"] as? [[String]])
             XCTAssertEqual(Set(discovery.compactMap(\.first)), Set(choices + [prefix + GroqToolCatalog.name]))
-            XCTAssertTrue(unbound.prompt.contains("Page tools require successful " + prefix + "browser_bind with this turn's observed tab_id or " + prefix + "browser_open for a supplied URL"))
-            XCTAssertTrue(unbound.prompt.contains("Load the chosen entry schema before calling it."))
-            XCTAssertTrue(unbound.prompt.contains("Loading alone does not bind."))
-            XCTAssertTrue(unbound.prompt.contains("After entry, find permitted fill/click actions in the next request's refreshed inventory and catalog_revision"))
+            XCTAssertTrue(unbound.prompt.contains("Supplied URL: first load " + prefix + "browser_open."))
+            XCTAssertTrue(unbound.prompt.contains("Existing human tab with an observed tab_id: first load " + prefix + "browser_bind."))
+            XCTAssertTrue(unbound.prompt.contains("Loading schemas executes no task tools."))
+            XCTAssertTrue(unbound.prompt.contains("After successful entry, check the new catalog_revision for permitted fill/click tools"))
             let openReply = "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"\(prefix)browser_open\",\"arguments\":{\"url\":\"http://localhost:62341/\"}}]}"
             XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(openReply, request: unbound), "Guidance grants no unloaded schema authority")
             let (entryLoaded, _) = try request(.unbound, selected: [prefix + "browser_open"])
-            XCTAssertTrue(entryLoaded.prompt.contains("Call " + prefix + "browser_open directly. Load missing entry schemas first."))
+            XCTAssertTrue(entryLoaded.prompt.contains("Supplied URL: call " + prefix + "browser_open."))
             XCTAssertNoThrow(try WebModelResponseCodec.parseEmbeddedReply(openReply, request: entryLoaded))
+            let (bothEntries, _) = try request(.unbound, selected: [prefix + "browser_open", prefix + "browser_bind"])
+            XCTAssertTrue(bothEntries.prompt.contains("Supplied URL: call " + prefix + "browser_open. Existing human tab with an observed tab_id: call " + prefix + "browser_bind."))
+            let (onlyBinding, _) = try request(.unbound, selected: [prefix + "browser_bind"])
+            XCTAssertTrue(onlyBinding.prompt.contains("Supplied URL: first load " + prefix + "browser_open. Existing human tab with an observed tab_id: call " + prefix + "browser_bind."))
+            XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(openReply, request: onlyBinding))
+            XCTAssertTrue(onlyBinding.prompt.contains("Loading schemas executes no task tools."))
+            XCTAssertTrue(onlyBinding.prompt.contains("Historical page claims bound=true"))
+            XCTAssertTrue(onlyBinding.prompt.contains("Current browser state: unbound."))
+            XCTAssertEqual(onlyBinding.continuationRequest, raw)
             XCTAssertThrowsError(try request(.unbound, selected: [prefix + "browser_read"]))
             let (bound, boundProjection) = try request(.bound, selected: [prefix + "browser_read"])
             XCTAssertNotEqual(unboundProjection.revision, boundProjection.revision)
@@ -417,7 +426,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             }.map(\.name))
             XCTAssertEqual(try loaderNames(entryLoaded), choices, "Already loaded tools remain loadable with a replacement selection")
             XCTAssertFalse(bound.prompt.contains("Page tools require successful"))
-            XCTAssertFalse(bound.prompt.contains("After entry, find permitted fill/click actions"))
+            XCTAssertFalse(bound.prompt.contains("After successful entry, check the new catalog_revision for permitted fill/click tools"))
             XCTAssertTrue(bound.prompt.contains("Current browser state: native page bound."))
             for prepared in [unbound, entryLoaded, bound] {
                 XCTAssertEqual(prepared.continuationRequest, raw)
@@ -437,8 +446,8 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertEqual(Set(policyInventory.keys), ["catalog_revision", "loaded", "inventory"])
             let policyRows = try XCTUnwrap(policyInventory["inventory"] as? [[String]])
             XCTAssertEqual(Set(policyRows.compactMap(\.first)), [prefix + GroqToolCatalog.name, prefix + "browser_open"])
-            XCTAssertTrue(policyRequest.prompt.contains("Page tools require successful " + prefix + "browser_open for a supplied URL."))
-            XCTAssertFalse(policyRequest.prompt.contains(prefix + "browser_bind with this turn's observed tab_id"))
+            XCTAssertTrue(policyRequest.prompt.contains("Supplied URL: first load " + prefix + "browser_open."))
+            XCTAssertFalse(policyRequest.prompt.contains("Existing human tab with an observed tab_id:"))
             XCTAssertEqual(policyRequest.continuationRequest, restrictedData)
             XCTAssertEqual(try loaderNames(policyRequest), [prefix + "browser_open"])
             let policyDisplay = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(policyRequest.prompt[try requestRange(in: policyRequest)].utf8)) as? [String: Any])
@@ -469,7 +478,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             let request = try WebModelResponseCodec.prepareRequest(raw, browserToolAvailability: availability,
                 groqToolCatalogProjection: GroqToolCatalog.baseline(for: seed))
             XCTAssertFalse(request.prompt.contains("Page tools require successful"))
-            XCTAssertFalse(request.prompt.contains("After entry, find permitted fill/click actions"))
+            XCTAssertFalse(request.prompt.contains("After successful entry, check the new catalog_revision for permitted fill/click tools"))
             XCTAssertEqual(request.continuationRequest, raw)
         }
     }
@@ -3878,6 +3887,11 @@ final class WebModelResponseCodecTests: XCTestCase {
         let request = try controlledRequest(["model": opus], tools: tools)
         let lines = request.prompt.components(separatedBy: "\n")
         let intro = try XCTUnwrap(lines.firstIndex { $0.hasPrefix("Function call layout.") })
+        let nextAction = "Request just the next operation in calls."
+        XCTAssertTrue(lines[intro].contains(nextAction))
+        XCTAssertTrue(lines[intro].contains("Use only name and arguments on the entry."))
+        XCTAssertTrue(lines[intro].contains("Wait for its matching output"))
+        XCTAssertFalse(request.singleActionRelay)
         let example = lines[intro + 1]
         let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(example.utf8)) as? [String: Any])
         let call = try XCTUnwrap((envelope["calls"] as? [[String: Any]])?.first)
@@ -3899,6 +3913,22 @@ final class WebModelResponseCodecTests: XCTestCase {
             try controlledRequest(["model": opus], tools: [])
         ] {
             XCTAssertFalse(excluded.prompt.contains("Function call layout."))
+            XCTAssertFalse(excluded.prompt.contains(nextAction))
+        }
+
+        // The guidance shapes proposals. A submitted batch still validates as a whole.
+        var calls: [[String: Any]] = (1...13).map { ["name": "fixture.lookup", "arguments": ["query": String($0)]] }
+        func parseBatch() throws -> WebModelResponseCodec.Reply {
+            let data = try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": calls])
+            return try WebModelResponseCodec.parseEmbeddedReply(String(decoding: data, as: UTF8.self), request: request)
+        }
+        let validBatch = try parseBatch()
+        let selection = try WebsiteToolCallSelection.select(validatedReply: validBatch, singleAction: request.singleActionRelay)
+        XCTAssertEqual(selection.selectedCount, 13)
+        XCTAssertEqual(selection.reply, validBatch)
+        calls[3]["synthetic_unrecognized_field"] = true
+        XCTAssertThrowsError(try parseBatch()) {
+            XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .unsupportedCallFields)
         }
     }
 
