@@ -174,8 +174,46 @@ function computaDeepSeekDOM(c) {
       return node.tagName === tag && (!cls || node.classList.contains(cls)) && c.visible(node) ? node : null;
     };
     const paragraph = child(final, 'P', 'ds-markdown-paragraph');
-    const literal = paragraph && child(paragraph, 'SPAN', null);
-    if (!literal || literal.children.length) return unsupported();
+    let literal = paragraph && child(paragraph, 'SPAN', null);
+    if (literal && literal.children.length) return unsupported();
+    if (!literal) {
+      // The observed JSON fence is one PRE source, with syntax-highlight spans.
+      // Read its whole literal text; never join paragraphs, choose one of
+      // several blocks, repair JSON, or include reasoning/presentation labels.
+      const block = child(final, 'DIV', 'md-code-block');
+      if (!block || block.children.length !== 4) return unsupported();
+      const [header, pre, left, right] = block.children;
+      const plainWhitespace = parent => [...parent.childNodes].every(node => node.nodeType !== 3 || /^\s*$/.test(node.textContent || ''));
+      const labels = c.nodes(header, '.code-info-button-text');
+      const languages = c.nodes(header, 'span.d813de27');
+      const controls = c.nodes(header, '[role="button"]');
+      if (header.tagName !== 'DIV' || !header.classList.contains('md-code-block-banner-wrap') || !c.visible(header)
+        || languages.length !== 1 || languages[0].children.length || languages[0].textContent !== 'json'
+        || labels.length !== 2 || labels[0].textContent !== 'Copy' || labels[1].textContent !== 'Download'
+        || labels.some(node => node.children.length || !c.visible(node))
+        || controls.length !== 2 || controls.some((node, index) => !node.contains(labels[index]) || !c.visible(node))
+        || header.textContent !== 'jsonCopyDownload' || !plainWhitespace(block)) return unsupported();
+      const corner = (node, cls) => node.tagName.toUpperCase() === 'SVG' && node.classList.contains('_9bc997d')
+        && node.classList.contains(cls) && node.textContent === '' && node.children.length === 1
+        && node.children[0].tagName.toUpperCase() === 'PATH' && node.children[0].children.length === 0;
+      const noninteractive = node => ['role', 'tabindex', 'contenteditable', 'aria-hidden', 'onclick', 'onkeydown']
+        .every(name => node.getAttribute(name) === null);
+      if (!corner(left, '_33882ae') || !corner(right, '_28d7e84') || pre.tagName !== 'PRE'
+        || ![final, block, pre].every(noninteractive)) return unsupported();
+      literal = child(pre, 'SPAN', null);
+      if (!literal) return unsupported();
+      let visited = 0;
+      const literalSpans = node => {
+        if (++visited > 10_000) return false;
+        if (node.nodeType === 3) return true;
+        if (node.nodeType !== 1 || node.tagName !== 'SPAN' || !c.visible(node) || !noninteractive(node)) return false;
+        const cls = node.getAttribute('class') || '';
+        if (cls !== '' && !/^token (punctuation|property|operator|string|number|boolean|null)$/.test(cls)) return false;
+        return [...node.childNodes].every(literalSpans);
+      };
+      if (!literalSpans(literal)) return unsupported();
+      literal = pre;
+    }
     const text = literal.textContent;
     if (typeof text !== 'string' || new TextEncoder().encode(text).length > 220_000) c.fail('response_too_large');
     return { text, finalMarkup: true, formatIssue: false }; // Whole bytes, including malformed JSON.

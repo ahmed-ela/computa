@@ -45,7 +45,7 @@ enum DeepSeekFixturePage {
     dialogDelayMs: 0, holdDeletionMenu: false, holdDialog: false, menuWakeupMs: 0,
     deleteMenuMutation: 'none', retainHistoryLink: false, inertSearch: false, inertDeepThink: false,
     searchDelayMs: 0, deepThinkDelayMs: 0, firstUserSiblingKind: 'none',
-    reply: '{"type":"message","text":"Synthetic DeepSeek native reply"}' };
+    answerHTML: null, reply: '{"type":"message","text":"Synthetic DeepSeek native reply"}' };
   const counters = { inputs: 0, sends: 0, deepThinkClicks: 0, searchClicks: 0, historyOpens: 0,
     deleteSelections: 0, confirmations: 0, earlySends: 0,
     menuWakeups: 0, prematureConfirmations: 0 };
@@ -171,8 +171,14 @@ enum DeepSeekFixturePage {
       answer = node('div', { class: 'ds-message' });
       if (selected(deepThink)) answer.append(node('div', { class: '_74c0879' }, 'Synthetic separate status'));
       const final = node('div', { class: 'ds-markdown ds-assistant-message-main-content' });
-      const paragraph = node('p', { class: 'ds-markdown-paragraph' });
-      literal = node('span', {}, options.reply); paragraph.append(literal); final.append(paragraph);
+      if (typeof options.answerHTML === 'string') {
+        // Synthetic observed fixture only; this never runs in provider content.
+        final.innerHTML = options.answerHTML;
+        literal = final.querySelector('pre');
+      } else {
+        const paragraph = node('p', { class: 'ds-markdown-paragraph' });
+        literal = node('span', {}, options.reply); paragraph.append(literal); final.append(paragraph);
+      }
       answer.append(final); answerTurn.append(answer); transcript.append(answerTurn);
     } else literal.textContent = options.reply;
     if (!rail || !rail.isConnected) {

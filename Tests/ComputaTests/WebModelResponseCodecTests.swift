@@ -285,7 +285,7 @@ final class WebModelResponseCodecTests: XCTestCase {
         let prepared = try WebModelResponseCodec.prepareRequest(raw)
         XCTAssertEqual(prepared.continuationRequest, raw)
         XCTAssertThrowsError(try WebModelResponseCodec.validateGroqPromptBudget(model: prepared.model, prompt: prepared.prompt))
-        let qwen = WebsiteModelChoice(provider: "groq", key: "qwen/qwen3.8-27b", label: "Qwen").modelID
+        let qwen = WebsiteModelChoice(provider: "groq", key: "qwen/unknown-unpinned", label: "Qwen").modelID
         for unknown in ["browser/groq", qwen] {
             XCTAssertFalse(WebModelResponseCodec.groqPromptBudgetUsesExactTokenizer(model: unknown))
             XCTAssertEqual(try WebModelResponseCodec.validateGroqPromptBudget(model: unknown, prompt: String(repeating: "x", count: 6_000)), 6_000)

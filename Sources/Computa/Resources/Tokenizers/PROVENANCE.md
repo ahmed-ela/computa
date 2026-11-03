@@ -42,3 +42,47 @@ This is a pinned, tested body tokenizer, not a claim that every provider/model
 uses these ranks or that every future ICU version is equivalent. The 256 KiB
 UTF-8 input bound, bounded resource reads and uncached heap-based merges also
 apply to adversarial text; rejected inputs are never truncated.
+
+
+# Qwen3.8-27B ordinary-text tokenization data
+
+`qwen38_27b.bpe` contains the exact ordered merge pairs and initial byte-token
+IDs derived from Qwen's tokenizer. It is used only for Groq's exact concrete
+model ID `qwen/qwen3.8-27b`; GPT-OSS keeps its existing counter and unrecognized
+models keep conservative byte admission. No account limit is inferred from a
+model's context window. The existing 6,000-body-token limit and 2,000-token
+website/output reserve are unchanged.
+
+- Official model binding: https://console.groq.com/docs/model/qwen/qwen3.8-27b
+- Published API rate summary: https://console.groq.com/docs/rate-limits (8K free-tier
+  TPM for this model; account-specific and website accounting can differ).
+- Source: https://huggingface.co/Qwen/Qwen3.8-27B/resolve/366a23fd246985933964e9d21ac63eb3a93190ab/tokenizer.json
+- Upstream tokenizer SHA-256: `0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3`
+- Derived merge bytes: 2,972,084; SHA-256: `aa63aeccd2e3fb859f833668cab09e4dded9727ac39e2ba3f61473ab82c5c5d3`
+- Vocabulary entries: 248,044; ordered merge rules: 247,587.
+- The adjacent `LICENSE.Qwen` is the upstream Apache 2.0 license.
+
+Qwen uses NFC normalization, its own Unicode pretokenizer, and ranked-pair BPE.
+Counting follows that normalization without modifying the outgoing prompt.
+Literal added-special-token spellings remain ordinary text; no chat template or
+hidden website framing is included. The merge table must retain both operands:
+some rules refer to later-ranked products, and a concatenated-vocabulary
+approximation is not interchangeable with these pair rules. Ties select the
+leftmost pair, and every newly adjacent pair is reconsidered.
+
+`qwen38_unicode_categories.json` records four Unicode classes from pinned
+Hugging Face `tokenizers` 0.22.1 (its Rust/Oniguruma implementation), using every
+valid Unicode scalar. SHA-256: `d8e75a39fcbe309c6ea801446570b8a80b0067a14945e0c5d30d868cb1dcdac9`;
+17,798 bytes and 1,152 disjoint ranges. A current ICU category disagreement
+fails closed. Case-folded contraction letters are explicit. NFC and token-count
+parity cover decomposed text, multilingual input, whitespace, controls, literal
+special-token spellings, deterministic randomized strings and merge samples.
+
+`Scripts/generate-qwen-body-token-fixtures.py --tokenizer-json PATH` regenerates
+the merge table, categories and 598 public parity fixtures offline from that
+exact source file and reference-library version. It performs no downloads.
+Resources are bundled, hash-checked and bounded before use; startup performs no
+network request. User input and results are not cached. Unknown or corrupted
+resources, unsupported Unicode categories, cancellation or oversized input do
+not return an estimated count. This is local ordinary-text admission, not proof
+of provider-side token accounting or an account-wide quota guarantee.

@@ -613,24 +613,34 @@ try {
   function authoredText(answer) {
     if (!answer) return { text: '', finalMarkup: false };
     const box = one(c.nodes(answer, '.segment-content-box'), 'response_content');
-    const markdowns = c.nodes(box, '.markdown');
     const knownReasoning = node => node.nodeType === 1
       && (node.classList.contains('toolcall-flow') || node.classList.contains('thinking-container'))
       && node.parentElement?.classList.contains('toolcall-rollup__part')
       && !node.closest('.markdown');
+    // Apply the same existing reasoning exclusion before counting authored
+    // markdown. A reasoning region may render its own markdown sibling; it is
+    // already excluded by onlyLiteral below and is not another final source.
+    const markdowns = c.nodes(box, '.markdown').filter(node => {
+      const reasoning = node.closest('.toolcall-flow, .thinking-container');
+      return !reasoning || !knownReasoning(reasoning);
+    });
     // Reconstructing text from disjoint blocks can turn malformed site output
     // into a valid tool envelope. Unknown/prose/multiple-block source is kept
     // unaccepted; a terminal UI reports a format failure, never rescued JSON.
-    const full = () => ({ text: '', finalMarkup: false, formatIssue: true });
-    if (markdowns.length !== 1 || !c.visible(markdowns[0])
-      || !markdowns[0].parentElement?.classList.contains('markdown-container')) return full();
+    const full = detail => ({ text: '', finalMarkup: false, formatIssue: true, formatDetail: detail });
+    if (markdowns.length !== 1) return full('authored_source_markdown_count');
+    if (!c.visible(markdowns[0])) return full('authored_source_markdown_visibility');
+    if (!markdowns[0].parentElement?.classList.contains('markdown-container')) return full('authored_source_markdown_scope');
     const markdown = markdowns[0], codes = c.nodes(markdown, 'code.language-json');
-    if (codes.length !== 1) return full();
+    if (codes.length !== 1) return full('authored_source_json_count');
     const code = codes[0], pre = code.parentElement, highlighter = pre?.parentElement, segment = highlighter?.parentElement;
-    if (pre?.tagName !== 'PRE' || !pre.classList.contains('language-json') || pre.children.length !== 1
-      || highlighter?.tagName !== 'DIV' || !highlighter.classList.contains('syntax-highlighter')
-      || !highlighter.classList.contains('segment-code-content') || segment?.parentElement !== markdown
-      || !segment.classList.contains('segment-code') || ![code, pre, highlighter, segment].every(c.visible)) return full();
+    if (pre?.tagName !== 'PRE' || !pre.classList.contains('language-json') || pre.children.length !== 1)
+      return full('authored_source_pre_shape');
+    if (highlighter?.tagName !== 'DIV' || !highlighter.classList.contains('syntax-highlighter')
+      || !highlighter.classList.contains('segment-code-content')) return full('authored_source_highlighter_shape');
+    if (segment?.parentElement !== markdown || !segment.classList.contains('segment-code'))
+      return full('authored_source_segment_scope');
+    if (![code, pre, highlighter, segment].every(c.visible)) return full('authored_source_code_visibility');
     // Only the observed fenced-code header is presentation chrome. Anything
     // authored outside the literal code remains in full text for codec rejection.
     const headers = c.nodes(segment, 'header.segment-code-header');
@@ -649,7 +659,7 @@ try {
       if (['INPUT', 'TEXTAREA', 'BUTTON'].includes(node.tagName) || node.getAttribute('contenteditable') === 'true') return false;
       return [...node.childNodes].every(onlyLiteral);
     };
-    if (!onlyLiteral(box)) return full();
+    if (!onlyLiteral(box)) return full('authored_source_outside_content');
     return { text: (code.textContent || '').slice(0, 220_001), finalMarkup: true };
   }
   function read() {
@@ -663,7 +673,7 @@ try {
       && c.enabled(form.editor) && form.empty && form.sendIcon
       && t.answer.getAttribute('aria-busy') !== 'true' && !state.deletion;
     if (terminalUI && extracted.formatIssue && !cleanupInspection && !deletionActionNames.includes(input.action))
-      c.fail('unsupported_response_format', 'authored_source');
+      c.fail('unsupported_response_format', extracted.formatDetail);
     const complete = terminalUI && extracted.finalMarkup && !!extracted.text.trim();
     return { t, form, output: { url: document.URL, sessionLifecycle: 'saved_conversation_delete', temporary: false,
       composer: c.enabled(form.editor), userCount: t.users.length, responseCount: t.answers.length,

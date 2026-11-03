@@ -13,15 +13,15 @@ enum WebModelResponseCodec {
 
     static func groqPromptBudgetUsesExactTokenizer(model: String) -> Bool {
         guard let choice = WebsiteModelCatalog.choice(for: model), choice.provider == "groq" else { return false }
-        return ["openai/gpt-oss-120b", "openai/gpt-oss-20b"].contains(choice.key)
+        return ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"].contains(choice.key)
     }
 
     @discardableResult
     static func validateGroqPromptBudget(model: String, prompt: String) throws -> Int? {
         guard LocalModelCatalog.webProvider(for: model) == "groq" else { return nil }
         guard groqPromptBudgetUsesExactTokenizer(model: model) else {
-            // No GPT-OSS tokenizer claim for Qwen, unknown choices or an unpinned
-            // website default. A byte allowance is deliberately conservative.
+            // Unknown choices and an unpinned website default retain the
+            // conservative byte allowance; they cannot borrow another tokenizer.
             let bytes = prompt.utf8.count
             guard bytes <= groqMaximumBodyTokens else {
                 throw Failure.groqPromptByteBudgetExceeded(actualBytes: bytes, maximumBytes: groqMaximumBodyTokens,
@@ -30,7 +30,13 @@ enum WebModelResponseCodec {
             return bytes
         }
         let count: Int
-        do { count = try GroqBodyTokenCounter.tokenCount(prompt) }
+        do {
+            if WebsiteModelCatalog.choice(for: model)?.key == "qwen/qwen3.8-27b" {
+                count = try QwenBodyTokenCounter.tokenCount(prompt)
+            } else {
+                count = try GroqBodyTokenCounter.tokenCount(prompt)
+            }
+        }
         catch is CancellationError { throw CancellationError() }
         catch { throw Failure.groqTokenCounterUnavailable }
         guard count <= groqMaximumBodyTokens else {

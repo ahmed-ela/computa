@@ -804,8 +804,8 @@ and cleanup envelopes instead of silently losing them and restoring a generic
 engine error. Unknown prose and extra metadata remain rejected, and failed
 persistence is reported. It passed 55 focused native tests, including cold
 runtime restoration without provider replay. Previously lost diagnoses are not
-guessed from generic historical errors. Build399 installation and live provider
-results are still pending.
+guessed from generic historical errors. Build399 was subsequently installed;
+its fresh provider results are recorded below.
 
 The integrated399 source passed 123 distinct native adapter/diagnostic tests
 and 324 JavaScript/version tests (9,857 assertions). The native Kimi regression
@@ -813,6 +813,51 @@ verifies a first-trigger replacement through exact Instant selection, canonical
 reply and once-only deletion, and rejects second/canonical replacements without
 replaying Send. The separate 55-test history gate still matches its unchanged
 implementation/test files; these are separate results, not duplicate counts.
+
+### Installed399 results and candidate400 (2026-11-02)
+
+Signed build399, source `972bca697ed8b3dc0441e2ed9f7ec1675e683a36`, has
+matching source, signed-package, installation and process receipts. These fresh
+controlled tasks were each dispatched once:
+
+| Selection / task | Duration | Result |
+| --- | ---: | --- |
+| Kimi Instant / marker | 17,078 ms | Exact selection/submission verified, then `unsupported_website_response` / `authored_source`; no final or tools; saved deleted-session receipt |
+| Qwen3.7-Plus / marker | 3,890 ms | Exact selection/submission verified, then `website_ownership_unverified` / `first_user_message`; no final or tools; cleanup unconfirmed |
+| DeepSeek Chat / combined workflow | 17,100 ms | Four successful terminal reads across two completed inferences; third reply rejected as invalid JSON (867 bytes); no edits, tests, browser receipt or final; saved-session deletions recorded |
+| DeepSeek DeepThink / combined workflow | 7,200 ms | `unsupported_website_response` before any tool or final; fixture unchanged and no browser receipt; cleanup journal records saved deletion |
+
+Kimi passed the earlier initial model-trigger gate, but the broad authored-source
+error did not identify its exact failed format predicate. Candidate400 applies
+the existing exclusion of recognized reasoning regions consistently before
+counting authored markdown, and emits finite reasons for each format guard.
+Unknown regions, multiple authored sources, outside prose and changed ownership
+remain rejected. This is not a live diagnosis of the uncaptured failed body.
+
+Qwen's prior DOM-predicate diagnostic did not identify the shared-engine guard
+that rejected this task. Candidate400 adds failure-only stage/reason tags for
+provisional and initial-response admission, complete-body hashing and pinned
+first-user binding. Native exact-key and stage/reason allowlists reject arbitrary
+text. The original error/detail, ownership predicates and terminal behavior are
+unchanged. The root cause remains unknown until a fresh bounded capture identifies
+it; no speculative ownership relaxation is included.
+
+DeepSeek's failed workflow supplied no rejected-reply capture. A separate bounded
+direct observation then showed one complete JSON code block rendered as a PRE
+with syntax-highlight spans and a `json`/Copy/Download header. The old reader
+accepted only the observed raw paragraph shape. Candidate400 adds that exact
+single code-block source, verifies its complete surrounding structure and reads
+the entire PRE text. It does not join blocks, remove authored prose, repair JSON,
+accept a partial response or change model/ownership/completion/deletion checks.
+The direct observation establishes this missing format support; it does not
+reconstruct the earlier failed reply or qualify the workflow.
+
+The recorded399 failures and the two historical398 DeepSeek marker passes remain
+separate. Build400's integrated gate passed 264 native tests and 338 JavaScript tests
+(10,930 assertions). It has not been installed or tested against a live provider. Fresh exact selections,
+complete workflow outputs and durable cleanup are still required. The private
+matrix retains the original 27 cached choices plus the separate Gemini block;
+no catalog refresh or broad provider reliability claim was made.
 
 ### Direct website observations before native qualification
 
@@ -861,13 +906,13 @@ developer setting were restored after the approved two-message-per-provider scop
 
 ## Remaining gates
 
-1. Install the gated Kimi initial empty-ID wait and require a fresh native
-   Instant reply and durable deletion without weakening full-body ownership.
-2. Resolve Qwen's initial answer identity transition and use DeepSeek's finite
-   cleanup diagnostics to identify its failing predicate; require fresh native
-   responses and cleanup without replay for both providers.
-3. Verify DeepSeek's completion signal while an actual response is still streaming.
-4. Preserve negative fixtures for foreign routes/models, partial/repeated remounts,
-   uncertain Send, lost ownership and delayed/unconfirmed deletion.
-5. Record each installed selection's actual browser, terminal and file results
-   with durable cleanup. Fixture passes and direct markers are separate evidence.
+1. Package/install gated candidate400, then run fresh bounded
+   Kimi and Qwen markers with exact selection, full-body ownership and deletion.
+2. Use Qwen's finite stage/reason evidence to identify the actual failing guard;
+   preserve the failed tasks and do not replay uncertain submissions.
+3. Verify both DeepSeek modes on complete browser/terminal/file workflows,
+   including streaming completion and the observed literal response shapes.
+4. Preserve negative coverage for foreign routes/models, outside prose,
+   partial/repeated remounts, uncertain Send and delayed/unconfirmed deletion.
+5. Record each installed selection's actual outputs, protected fixture tests,
+   accepted browser receipt and durable cleanup; repeat coverage separately.

@@ -119,6 +119,48 @@ async function computaSavedConversation(input, c, dom, config) {
     if (input.expectedConversation != null && input.expectedConversation !== state.canonical)
       c.fail('conversation_changed', 'conversation_url');
     const usesModes = config.selectionKind === 'mode';
+    const firstBindingFailure = (stage, reason) => {
+      // Diagnostic-only classification of an already rejected guard. Keep the
+      // public category/detail and terminal behavior; never publish page data.
+      let diagnostic;
+      if (config.stateKey === '__computaQwenSavedSessionV1') {
+        try { diagnostic = { version: 1, stage, reason: typeof reason === 'function' ? reason() : reason }; }
+        catch { /* Diagnostic reads cannot replace the original refusal. */ }
+      }
+      try { c.fail('conversation_changed', 'first_user_message'); }
+      catch (error) {
+        if (diagnostic && error?.computaAdapterFailure) error.qwenFirstUserBindingDiagnostic = diagnostic;
+        throw error;
+      }
+    };
+    const initialFirstAdmissionReason = provisional => {
+      if (input.action !== 'inspect') return 'action_not_inspect';
+      if (input[provisional ? 'allowQwenProvisionalRoute' : 'allowQwenInitialResponseIdentity'] !== true) return 'native_grant_missing';
+      if (cleanupInspection) return 'cleanup_inspection';
+      if (provisional && !state.submitted) return 'submission_unclaimed';
+      if (!state.inserted) return 'insertion_missing';
+      if (!state.prepared) return 'preparation_missing';
+      if (!state.send) return 'send_missing';
+      if (!state.model) return 'model_missing';
+      if (state.selection) return 'selection_pending';
+      if (provisional && state.first) return 'first_already_bound';
+      if (provisional && state.canonical) return 'canonical_already_bound';
+      if (state.deletion) return 'deletion_started';
+      if (input.allowFirstUserBinding !== true) return 'binding_not_authorized';
+      if (input.expectedFirstUserFingerprint != null) return 'expected_fingerprint_present';
+      if (!c.uuid(input.expectedFirstUserMarker)) return 'marker_invalid';
+      if (input.expectedFirstUserMarker !== state.inserted.marker) return 'marker_mismatch';
+      if (!state.inserted.prompt.endsWith(`\n\nComputa session marker: ${input.expectedFirstUserMarker}`)) return 'marker_suffix';
+      if (!c.equalChoice(input.expectedModelChoice, state.model.choice)) return 'model_choice_mismatch';
+      if (!/^[a-f0-9]{64}$/.test(state.submittedFingerprint || '')) return 'submitted_fingerprint_invalid';
+      if (input.savedSubmissionFingerprint !== state.submittedFingerprint) return 'submitted_fingerprint_mismatch';
+      return 'predicate_changed';
+    };
+    const tagFirstBodyHashFailure = (error, stage) => {
+      if (config.stateKey === '__computaQwenSavedSessionV1' && error?.computaAdapterFailure
+        && error.error === 'conversation_changed' && error.detail === 'first_user_message')
+        error.qwenFirstUserBindingDiagnostic = { version: 1, stage, reason: 'hash_input_invalid' };
+    };
     const pickerHit = (node, stage) => {
       const reason = c.hitFailure(node);
       if (reason) c.fail('model_unverified', stage + '_' + reason);
@@ -412,7 +454,7 @@ async function computaSavedConversation(input, c, dom, config) {
         || !c.equalChoice(input.expectedModelChoice, state.model.choice)
         || !/^[a-f0-9]{64}$/.test(state.submittedFingerprint || '')
         || input.savedSubmissionFingerprint !== state.submittedFingerprint)
-        c.fail('conversation_changed', 'first_user_message');
+        firstBindingFailure('provisional_admission', () => initialFirstAdmissionReason(true));
       guard();
       return { qwenProvisionalRoutePending: true, url: document.URL,
         sessionLifecycle: 'saved_conversation_delete', temporary: false };
@@ -430,7 +472,7 @@ async function computaSavedConversation(input, c, dom, config) {
         || !c.equalChoice(input.expectedModelChoice, state.model.choice)
         || !/^[a-f0-9]{64}$/.test(state.submittedFingerprint || '')
         || input.savedSubmissionFingerprint !== state.submittedFingerprint)
-        c.fail('conversation_changed', 'first_user_message');
+        firstBindingFailure('initial_response_admission', () => initialFirstAdmissionReason(false));
       const candidate = dom.initialResponseIdentityTranscript();
       validateInitialResponseIdentity(candidate);
       if (candidate.pendingAnswer) {
@@ -438,17 +480,25 @@ async function computaSavedConversation(input, c, dom, config) {
           || candidate.first.text !== state.inserted.prompt || !Array.isArray(input.expectedUserCounts)
           || !input.expectedUserCounts.length || input.expectedUserCounts.length > 2
           || input.expectedUserCounts.some(value => ![0, 1].includes(value)) || !input.expectedUserCounts.includes(1))
-          c.fail('conversation_changed', 'first_user_message');
+          firstBindingFailure('initial_response_body', () => candidate.users.length !== 1 ? 'user_count'
+            : candidate.answers.length !== 1 ? 'answer_count' : !candidate.first ? 'first_missing'
+            : candidate.first.text !== state.inserted.prompt ? 'full_prompt_mismatch'
+            : !Array.isArray(input.expectedUserCounts) ? 'counts_not_array'
+            : !input.expectedUserCounts.length ? 'counts_empty' : input.expectedUserCounts.length > 2 ? 'counts_limit'
+            : input.expectedUserCounts.some(value => ![0, 1].includes(value)) ? 'counts_invalid'
+            : !input.expectedUserCounts.includes(1) ? 'one_user_not_expected' : 'predicate_changed');
         selectionEvidence();
         if (!state.responseIdentity) state.responseIdentity = { canonical: route.canonical,
           first: candidate.first, answer: candidate.pendingAnswer,
           userTurn: candidate.first.root.parentElement, outer: candidate.pendingAnswer.outer };
-        const fingerprint = await c.hash(c.bodyText(candidate.first.text));
+        let fingerprint;
+        try { fingerprint = await c.hash(c.bodyText(candidate.first.text)); }
+        catch (error) { tagFirstBodyHashFailure(error, 'initial_response_digest'); throw error; }
         guard();
         const current = dom.initialResponseIdentityTranscript();
         validateInitialResponseIdentity(current);
         selectionEvidence();
-        if (fingerprint !== state.submittedFingerprint) c.fail('conversation_changed', 'first_user_message');
+        if (fingerprint !== state.submittedFingerprint) firstBindingFailure('initial_response_digest', 'submitted_fingerprint_mismatch');
         if (current.pendingAnswer) return { qwenInitialResponseIdentityPending: true, url: document.URL,
           sessionLifecycle: 'saved_conversation_delete', temporary: false };
         // The same nodes may settle during hashing. Re-enter the ordinary
@@ -461,7 +511,7 @@ async function computaSavedConversation(input, c, dom, config) {
       c.fail('conversation_changed', 'user_count');
     // Diagnostic-only mode detail: Qwen retains its existing detail and both
     // providers retain all exact body, marker, identity and fingerprint gates.
-    const firstFailure = detail => c.fail('conversation_changed', usesModes ? detail : 'first_user_message');
+    const firstFailure = detail => usesModes ? c.fail('conversation_changed', detail) : firstBindingFailure('binding', detail);
     if (config.initialModeHandoff === true && !state.first
       && (state.modeHandoff || state.submitted && initial.output.modeEvidence == null
         && state.prepared?.scope.isConnected === false && state.prepared.editor.isConnected === false
@@ -481,7 +531,9 @@ async function computaSavedConversation(input, c, dom, config) {
       if (input.expectedFirstUserMarker !== state.inserted.marker) firstFailure('first_marker_mismatch');
       if (!state.inserted.prompt.endsWith(`\n\nComputa session marker: ${input.expectedFirstUserMarker}`)) firstFailure('first_marker_suffix');
       if (route.kind !== 'canonical') return { ...initial.output, ownershipPending: true, text: '', answerComplete: false };
-      const fingerprint = await c.hash(c.bodyText(initial.t.first.text));
+      let fingerprint;
+      try { fingerprint = await c.hash(c.bodyText(initial.t.first.text)); }
+      catch (error) { tagFirstBodyHashFailure(error, 'binding_digest'); throw error; }
       guard(); if (!sameFirst(initial.t.first)) firstFailure('first_changed_after_hash');
       if (state.modeHandoff && !state.modeHandoff.committed) commitInitialModeHandoff(initial.t.first, fingerprint);
       selectionEvidence();
@@ -605,7 +657,10 @@ async function computaSavedConversation(input, c, dom, config) {
         ? { modeObservationDiagnostic: error.modeObservationDiagnostic } : {}),
       ...(config.stateKey === '__computaQwenSavedSessionV1' && error.error === 'conversation_changed'
         && error.detail === 'first_user_message' && error.qwenFirstUserDiagnostic
-        ? { qwenFirstUserDiagnostic: error.qwenFirstUserDiagnostic } : {}) }
+        ? { qwenFirstUserDiagnostic: error.qwenFirstUserDiagnostic } : {}),
+      ...(config.stateKey === '__computaQwenSavedSessionV1' && error.error === 'conversation_changed'
+        && error.detail === 'first_user_message' && error.qwenFirstUserBindingDiagnostic
+        ? { qwenFirstUserBindingDiagnostic: error.qwenFirstUserBindingDiagnostic } : {}) }
       : { error: 'document_changed' };
   }
 }
@@ -786,8 +841,46 @@ function computaDeepSeekDOM(c) {
       return node.tagName === tag && (!cls || node.classList.contains(cls)) && c.visible(node) ? node : null;
     };
     const paragraph = child(final, 'P', 'ds-markdown-paragraph');
-    const literal = paragraph && child(paragraph, 'SPAN', null);
-    if (!literal || literal.children.length) return unsupported();
+    let literal = paragraph && child(paragraph, 'SPAN', null);
+    if (literal && literal.children.length) return unsupported();
+    if (!literal) {
+      // The observed JSON fence is one PRE source, with syntax-highlight spans.
+      // Read its whole literal text; never join paragraphs, choose one of
+      // several blocks, repair JSON, or include reasoning/presentation labels.
+      const block = child(final, 'DIV', 'md-code-block');
+      if (!block || block.children.length !== 4) return unsupported();
+      const [header, pre, left, right] = block.children;
+      const plainWhitespace = parent => [...parent.childNodes].every(node => node.nodeType !== 3 || /^\s*$/.test(node.textContent || ''));
+      const labels = c.nodes(header, '.code-info-button-text');
+      const languages = c.nodes(header, 'span.d813de27');
+      const controls = c.nodes(header, '[role="button"]');
+      if (header.tagName !== 'DIV' || !header.classList.contains('md-code-block-banner-wrap') || !c.visible(header)
+        || languages.length !== 1 || languages[0].children.length || languages[0].textContent !== 'json'
+        || labels.length !== 2 || labels[0].textContent !== 'Copy' || labels[1].textContent !== 'Download'
+        || labels.some(node => node.children.length || !c.visible(node))
+        || controls.length !== 2 || controls.some((node, index) => !node.contains(labels[index]) || !c.visible(node))
+        || header.textContent !== 'jsonCopyDownload' || !plainWhitespace(block)) return unsupported();
+      const corner = (node, cls) => node.tagName.toUpperCase() === 'SVG' && node.classList.contains('_9bc997d')
+        && node.classList.contains(cls) && node.textContent === '' && node.children.length === 1
+        && node.children[0].tagName.toUpperCase() === 'PATH' && node.children[0].children.length === 0;
+      const noninteractive = node => ['role', 'tabindex', 'contenteditable', 'aria-hidden', 'onclick', 'onkeydown']
+        .every(name => node.getAttribute(name) === null);
+      if (!corner(left, '_33882ae') || !corner(right, '_28d7e84') || pre.tagName !== 'PRE'
+        || ![final, block, pre].every(noninteractive)) return unsupported();
+      literal = child(pre, 'SPAN', null);
+      if (!literal) return unsupported();
+      let visited = 0;
+      const literalSpans = node => {
+        if (++visited > 10_000) return false;
+        if (node.nodeType === 3) return true;
+        if (node.nodeType !== 1 || node.tagName !== 'SPAN' || !c.visible(node) || !noninteractive(node)) return false;
+        const cls = node.getAttribute('class') || '';
+        if (cls !== '' && !/^token (punctuation|property|operator|string|number|boolean|null)$/.test(cls)) return false;
+        return [...node.childNodes].every(literalSpans);
+      };
+      if (!literalSpans(literal)) return unsupported();
+      literal = pre;
+    }
     const text = literal.textContent;
     if (typeof text !== 'string' || new TextEncoder().encode(text).length > 220_000) c.fail('response_too_large');
     return { text, finalMarkup: true, formatIssue: false }; // Whole bytes, including malformed JSON.

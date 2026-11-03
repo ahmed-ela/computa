@@ -1,5 +1,43 @@
 # Groq website adapter qualification
 
+## Candidate400: Qwen-specific request admission
+
+Groq's exact `qwen/qwen3.8-27b` choice previously used the fallback 6,000-byte
+allowance because only GPT-OSS had a verified local tokenizer. An offline
+reproduction using the current codec and native instructions, with retained
+synthetic fixture tool schemas, produced a 12,771-byte initial request containing
+only 2,787 ordinary Qwen tokens. All eight initial/post-tabs variants were
+rejected by the byte gate although they contained 2,692–4,877 Qwen tokens.
+
+Candidate400 adds a counter for Qwen's pinned tokenizer, selected only for that
+exact provider/model key. It preserves the 6,000-body-token limit, 2,000-token
+website/output reserve, pacing, loader admission and complete outgoing request
+bytes. Unknown models retain conservative byte admission. The tokenizer uses
+NFC only inside counting, the model's Unicode split rules and exact ranked-pair
+BPE; literal added-special-token spellings remain ordinary text. Corrupt or
+missing resources, unsupported Unicode categories, cancellation and oversized
+input fail closed. No startup download or credential access is introduced.
+
+The model binding, immutable tokenizer revision, Apache 2.0 license, derived
+resource hashes and offline regeneration command are recorded in
+`Sources/Computa/Resources/Tokenizers/PROVENANCE.md`. Published API limits are
+not proof of this signed-in website account's allowance; provider framing,
+manual usage and changed limits can still produce a quota error.
+
+Private validation passed 147 native tests, including existing GPT-OSS, catalog
+and response-codec regressions. A final same-source parity check passed 598 public
+reference examples plus eight private current-request fixtures. Independent
+review checked every initial byte-token ID and all 247,587 merge rules against
+the pinned source. The implementation did not change after that native gate;
+the eight captured synthetic requests were kept out of repository fixtures.
+
+The integrated400 gate passed 264 native tests and 338 JavaScript tests
+(10,930 assertions). Installation and a fresh Groq Qwen marker/tool workflow
+remain pending at this checkpoint. This repairs a demonstrated local
+admission failure; it does not establish a live provider response, account quota,
+workflow completion or repeated reliability. Existing failed Groq tasks remain
+preserved, and no provider prompt was submitted during these offline checks.
+
 ## Compact tool loading candidate
 
 New Groq chats register the read-only `computa_load_tools` tool alongside the

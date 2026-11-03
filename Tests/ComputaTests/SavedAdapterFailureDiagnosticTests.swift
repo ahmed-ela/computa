@@ -70,6 +70,26 @@ final class SavedAdapterFailureDiagnosticTests: XCTestCase {
         }
     }
 
+    @MainActor func testKimiAuthoredSourceReasonsRemainFiniteAndProviderScoped() {
+        for suffix in ["markdown_count", "markdown_visibility", "markdown_scope", "json_count", "pre_shape",
+                       "highlighter_shape", "segment_scope", "code_visibility", "outside_content"] {
+            let detail = "authored_source_" + suffix
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+                ["error": "unsupported_response_format", "detail": detail, "text": "PRIVATE_PAGE_CANARY"],
+                provider: .kimi, action: "inspect"),
+                "action=inspect error=unsupported_response_format detail=\(detail)")
+            for provider in [EmbeddedWebModelTransport.Provider.qwen, .deepseek] {
+                XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+                    ["error": "unsupported_response_format", "detail": detail], provider: provider, action: "inspect"),
+                    "action=inspect error=unsupported_response_format detail=other")
+            }
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
+                ["error": "unsupported_response_format", "detail": detail + " PRIVATE_PAGE_CANARY"],
+                provider: .kimi, action: "inspect"),
+                "action=inspect error=unsupported_response_format detail=other")
+        }
+    }
+
     @MainActor func testKimiInitialModelRemountDiagnosticsRemainFiniteAndProviderScoped() {
         for detail in ["initial_model_remount_unbound", "initial_model_remount_changed",
                        "initial_model_remount_first_changed", "initial_model_remount_fingerprint"] {

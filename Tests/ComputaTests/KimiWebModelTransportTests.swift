@@ -1261,6 +1261,74 @@ final class KimiWebModelTransportTests: XCTestCase {
         XCTAssertNotNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
     }
 
+    func testReasoningMarkdownIsNotAnotherFinalSourceAndExactReplyStillRequiresCompletion() async throws {
+        let fixture = try Fixture(); defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        _ = try await evaluate(fixture.view, "kimiFixture.options.holdResponse = true; return true;")
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic reasoning plus final literal response")
+        let count = try await evaluate(fixture.view, """
+            kimiFixture.canonicalize();
+            const part = document.querySelector('.chat-content-item-assistant .toolcall-rollup__part');
+            const thinking = document.createElement('div'); thinking.className = 'thinking-container';
+            const container = document.createElement('div'); container.className = 'markdown-container';
+            const markdown = document.createElement('div'); markdown.className = 'markdown';
+            markdown.textContent = 'PRIVATE_REASONING_CANARY'; container.append(markdown); thinking.append(container); part.append(thinking);
+            return document.querySelectorAll('.chat-content-item-assistant .markdown').length;
+            """) as? Int
+        XCTAssertEqual(count, 2)
+        let running = try await call(fixture, "webProviderPoll", token)
+        XCTAssertEqual(running["state"] as? String, "running")
+        _ = try await evaluate(fixture.view, "kimiFixture.completeResponse(); return true;")
+        let complete = try await wait(fixture, token, state: "complete")
+        XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Offline Kimi fixture reply"}"#)
+        let context = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+        XCTAssertEqual(context["responseCount"] as? Int, 1)
+        XCTAssertEqual((context["firstUserFingerprint"] as? String)?.count, 64)
+        let selected = try WebsiteModelEvidence.parse(complete["modelEvidence"], provider: "kimi", expected: choice)
+        XCTAssertEqual(selected.selected.key, choice.key)
+        XCTAssertEqual(selected.selected.label, choice.label)
+        let finished = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+        try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+        try await assertInsertionCounts(fixture, settlements: 1, sends: 1)
+        XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
+    func testReasoningLikeAuthoredContentAndAmbiguousFinalMarkdownCannotPublishOrReplay() async throws {
+        for kind in ["unknown", "inside-final", "extra-final", "outside-prose"] {
+            let fixture = try Fixture(); defer { fixture.shutdown() }
+            let token = try await start(fixture)
+            _ = try await evaluate(fixture.view, "kimiFixture.options.holdResponse = true; return true;")
+            let prompt = "Synthetic rejected final source"
+            _ = try await call(fixture, "webProviderSend", token, prompt: prompt)
+            _ = try await evaluate(fixture.view, """
+                kimiFixture.canonicalize();
+                const final = document.querySelector('.chat-content-item-assistant .markdown');
+                const part = document.querySelector('.chat-content-item-assistant .toolcall-rollup__part');
+                const wrapper = document.createElement('div');
+                wrapper.className = '\(kind)' === 'unknown' ? 'unknown-widget' : 'thinking-container';
+                const markdown = document.createElement('div'); markdown.className = 'markdown'; markdown.textContent = 'PRIVATE_AUTHORED_CANARY';
+                wrapper.append(markdown);
+                if ('\(kind)' === 'inside-final') final.append(wrapper);
+                else if ('\(kind)' === 'extra-final') final.parentElement.append(final.cloneNode(true));
+                else if ('\(kind)' === 'outside-prose') { const p = document.createElement('p'); p.textContent = 'PRIVATE_AUTHORED_CANARY'; final.parentElement.append(p); }
+                else part.append(wrapper);
+                kimiFixture.completeResponse(); return true;
+                """)
+            do { _ = try await call(fixture, "webProviderPoll", token); XCTFail("Authored ambiguity must not publish a partial response") }
+            catch let error as EmbeddedWebModelTransport.Failure { XCTAssertEqual(error, .responseFormatUnavailable) }
+            let finished = try await call(fixture, "webProviderFinish", token)
+            XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+            do { _ = try await call(fixture, "webProviderSend", token, prompt: prompt); XCTFail("Format failure must not replay Send") }
+            catch { XCTAssertNotNil(error as? EmbeddedWebModelTransport.Failure) }
+            try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+            try await assertInsertionCounts(fixture, settlements: 1, sends: 1)
+            XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+            XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+        }
+    }
+
     func testFormatFailurePublishesNoPartialJSONButOwnedCleanupRemainsPossible() async throws {
         let fixture = try Fixture(); defer { fixture.shutdown() }
         let token = try await start(fixture)

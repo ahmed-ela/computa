@@ -152,6 +152,79 @@ final class DeepSeekWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testObservedJSONFenceInRealWebKitPreservesBothModesOwnershipAndDeletion() async throws {
+        for mode in WebsiteModeChoice.DeepSeekMode.allCases {
+            let fixture = try Fixture(setup: DeepSeekFencedResponseFixture.setup()); defer { fixture.shutdown() }
+            let token = try await start(fixture, mode: mode)
+            _ = try await call(fixture, "webProviderSend", token, prompt: "Read the synthetic observed JSON fence")
+            let complete = try await wait(fixture, token, state: "complete")
+            XCTAssertEqual(complete["text"] as? String, DeepSeekFencedResponseFixture.observedReply)
+            let expected = WebsiteModeChoice(deepSeekMode: mode)
+            XCTAssertEqual(try WebsiteModeEvidence.parse(complete["modeEvidence"], provider: "deepseek", expected: expected).selected, expected)
+            let raw = try XCTUnwrap(complete["text"] as? String)
+            let request = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: ["model": expected.requestID, "input": "Synthetic fence test"]))
+            XCTAssertEqual(try WebModelResponseCodec.parseEmbeddedReply(raw, request: request), .message("FORMAT399-DEEPSEEK-A"))
+            let tags = try await evaluate(fixture.view, "return [...document.querySelector('.md-code-block').children].map(n=>n.tagName);") as? [String]
+            XCTAssertEqual(tags, ["DIV", "PRE", "svg", "svg"])
+            let finished = try await call(fixture, "webProviderFinish", token)
+            XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+            try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+        }
+    }
+
+    func testWholeFencedToolJSONPreservesEscapesWhitespaceAndParserRejection() async throws {
+        let command = "printf \"quoted\"\nnext\tline <tag> & café"
+        let valid = String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [["name": "exec_command", "arguments": ["cmd": command]]]], options: [.prettyPrinted, .sortedKeys]), as: UTF8.self)
+        let variants = [valid, valid + "\nPRIVATE_PROSE", #"{"type":"message","text":"unterminated}"#]
+        for (index, payload) in variants.enumerated() {
+            let whitespace = " \t\n", expectedText = whitespace + payload + whitespace
+            let fixture = try Fixture(setup: DeepSeekFencedResponseFixture.setup(DeepSeekFencedResponseFixture.literal(payload, whitespace: whitespace)))
+            defer { fixture.shutdown() }
+            let token = try await start(fixture)
+            _ = try await call(fixture, "webProviderSend", token, prompt: "Read the synthetic literal fence")
+            let complete = try await wait(fixture, token, state: "complete")
+            let actual = try XCTUnwrap(complete["text"] as? String)
+            XCTAssertEqual(actual, expectedText)
+            let request = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
+                "model": WebsiteModeChoice(deepSeekMode: .chat).requestID, "input": "Synthetic tool JSON",
+                "tools": [[
+                    "type": "function", "name": "exec_command",
+                    "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]], "required": ["cmd"]]
+                ]]
+            ] as [String: Any]))
+            if index == 0 {
+                guard case let .toolCalls(calls) = try WebModelResponseCodec.parseEmbeddedReply(actual, request: request) else { return XCTFail("Expected exact tool calls") }
+                XCTAssertEqual(calls.count, 1); XCTAssertEqual(calls[0].name, "exec_command")
+                let arguments = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(calls[0].argumentsJSON.utf8)) as? [String: Any])
+                XCTAssertEqual(arguments["cmd"] as? String, command)
+            } else { XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(actual, request: request)) }
+            let finished = try await call(fixture, "webProviderFinish", token)
+            XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+            try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+        }
+    }
+
+    func testFencedSourceExtraProseUnknownSyntaxHiddenAndInteractiveRootsCannotReleaseAnswer() async throws {
+        let base = DeepSeekFencedResponseFixture.observedBlock
+        let variants = [base + "<p>PRIVATE_PROSE</p>", base + base,
+            base.replacingOccurrences(of: ">json</span>", with: ">javascript</span>"),
+            base.replacingOccurrences(of: "token punctuation", with: "token keyword"),
+            base.replacingOccurrences(of: "<pre>", with: "<pre hidden>"),
+            base.replacingOccurrences(of: "<pre>", with: "<pre contenteditable=\"true\">"),
+            base.replacingOccurrences(of: "<pre>", with: "<pre role=\"button\">"),
+            base.replacingOccurrences(of: "<pre>", with: "<pre tabindex=\"0\">"),
+            base.replacingOccurrences(of: "<pre><span>", with: "<pre><span role=\"button\">"),
+            base.replacingOccurrences(of: "md-code-block md-code-block-light\"", with: "md-code-block md-code-block-light\" contenteditable=\"true\"")]
+        for (index, markup) in variants.enumerated() {
+            let fixture = try Fixture(setup: DeepSeekFencedResponseFixture.setup(markup)); defer { fixture.shutdown() }
+            let token = try await start(fixture)
+            _ = try await call(fixture, "webProviderSend", token, prompt: "Read only the synthetic unsupported fence")
+            do { _ = try await wait(fixture, token, state: "complete"); XCTFail("Unsupported fence must not release response: \(index)") }
+            catch let failure as EmbeddedWebModelTransport.Failure { XCTAssertEqual(failure, .responseFormatUnavailable, "\(index)") }
+            try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+        }
+    }
+
     func testReadOnlyModeDiscoveryDoesNotChangeSearchOrDeepThink() async throws {
         let fixture = try Fixture(); defer { fixture.shutdown() }
         let modes = try await fixture.transport.discoverModes(provider: "deepseek")

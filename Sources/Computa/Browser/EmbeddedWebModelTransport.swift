@@ -1862,6 +1862,27 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return observed["error"] as? String == (detail == "first_body_count" ? "document_changed" : "conversation_changed")
     }
 
+    /// Failure-only shared-engine tags. Pairwise allowlists prevent arbitrary
+    /// adapter text from reaching logs; no tag participates in ownership proof.
+    static func qwenFirstUserBindingDiagnostic(_ observed: [String: Any], provider: Provider) -> String? {
+        guard provider == .qwen, observed["error"] as? String == "conversation_changed",
+              observed["detail"] as? String == "first_user_message",
+              let packet = observed["qwenFirstUserBindingDiagnostic"] as? [String: Any],
+              Set(packet.keys) == ["version", "stage", "reason"],
+              ComputerToolArgumentContract.exactInt64(packet["version"]) == 1,
+              let stage = packet["stage"] as? String, let reason = packet["reason"] as? String else { return nil }
+        let reasons: [String: Set<String>] = [
+            "provisional_admission": ["action_not_inspect", "native_grant_missing", "cleanup_inspection", "insertion_missing", "preparation_missing", "send_missing", "model_missing", "selection_pending", "deletion_started", "binding_not_authorized", "expected_fingerprint_present", "marker_invalid", "marker_mismatch", "marker_suffix", "model_choice_mismatch", "submitted_fingerprint_invalid", "submitted_fingerprint_mismatch", "predicate_changed", "submission_unclaimed", "first_already_bound", "canonical_already_bound"],
+            "initial_response_admission": ["action_not_inspect", "native_grant_missing", "cleanup_inspection", "insertion_missing", "preparation_missing", "send_missing", "model_missing", "selection_pending", "deletion_started", "binding_not_authorized", "expected_fingerprint_present", "marker_invalid", "marker_mismatch", "marker_suffix", "model_choice_mismatch", "submitted_fingerprint_invalid", "submitted_fingerprint_mismatch", "predicate_changed"],
+            "initial_response_body": ["user_count", "answer_count", "first_missing", "full_prompt_mismatch", "counts_not_array", "counts_empty", "counts_limit", "counts_invalid", "one_user_not_expected", "predicate_changed"],
+            "initial_response_digest": ["hash_input_invalid", "submitted_fingerprint_mismatch"],
+            "binding_digest": ["hash_input_invalid"],
+            "binding": ["first_not_submitted", "first_prompt_mismatch", "first_marker_invalid", "first_marker_mismatch", "first_marker_suffix", "first_changed_after_hash", "first_pinned_node_changed", "first_pinned_hash_mismatch", "first_expected_hash_mismatch", "first_binding_not_authorized", "first_disappeared"],
+        ]
+        guard reasons[stage]?.contains(reason) == true else { return nil }
+        return "firstUserStage=\(stage) firstUserReason=\(reason)"
+    }
+
     /// Finite failure-only Qwen first-user predicates. This cannot grant
     /// ownership, replace an error category, or relax first-message binding.
     static func qwenFirstUserDiagnostic(_ observed: [String: Any], provider: Provider) -> String? {
@@ -2072,6 +2093,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 "option_close_binding", "option_close_selection",
                 "initial_model_remount_unbound", "initial_model_remount_changed",
                 "initial_model_remount_first_changed", "initial_model_remount_fingerprint",
+                "authored_source_markdown_count", "authored_source_markdown_visibility", "authored_source_markdown_scope",
+                "authored_source_json_count", "authored_source_pre_shape", "authored_source_highlighter_shape",
+                "authored_source_segment_scope", "authored_source_code_visibility", "authored_source_outside_content",
                 "editor_hit_disabled", "editor_hit_invalid_geometry", "editor_hit_outside_viewport", "editor_hit_ancestor_limit",
                 "editor_hit_ancestor_changed", "editor_hit_outside_clip", "editor_hit_occluded",
                 "more_binding", "more_row_shape", "more_checked_count", "more_selected_label",
@@ -2109,7 +2133,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         default: return nil
         }
         let details = commonDetails + providerDetails, detail = observed["detail"] as? String
-        return "action=\(actions.contains(action) ? action : "other") error=\(errors.contains(error) ? error : "other") detail=\(detail.map { details.contains($0) ? $0 : "other" } ?? "absent")"
+        let firstBinding = qwenFirstUserBindingDiagnostic(observed, provider: provider).map { " " + $0 } ?? ""
+        return "action=\(actions.contains(action) ? action : "other") error=\(errors.contains(error) ? error : "other") detail=\(detail.map { details.contains($0) ? $0 : "other" } ?? "absent")" + firstBinding
     }
 
     // Preserve the existing Kimi diagnostic entry point for its focused tests.
