@@ -2686,6 +2686,59 @@ describe('native-turn Haiku 5.5 Incognito pilot', () => {
       expect(f.send.clicks).toBe(0);
     }
   });
+  function providerAutoParagraph(f: ReturnType<typeof fixture>) {
+    const paragraph = f.composer.children[0];
+    const attributeFacts = Object.getOwnPropertyDescriptor(Element.prototype, 'attributes')!.get!;
+    paragraph.values.dir = 'auto';
+    Object.defineProperty(paragraph, 'attributes', {configurable:true, get: () =>
+      attributeFacts.call(paragraph).map((attribute: object) => ({...attribute, namespaceURI:null}))});
+    for (const node of [paragraph, ...paragraph.children.filter(child => child.tagName === 'BR')]) {
+      Object.defineProperty(node, 'namespaceURI', {configurable:true, value:'http://www.w3.org/1999/xhtml'});
+      Object.defineProperty(node, 'checkVisibility', {configurable:true, value:() => true});
+    }
+    return paragraph;
+  }
+  test('retained Haiku accepts the single auto-direction paragraph only with the complete original literal draft', async () => {
+    const {f, run, answer, proofs} = setup();
+    expect((await run('insert',1,0)).inserted).toBe(true);
+    const p = providerAutoParagraph(f);
+    expect(p.children.map(n => n.tagName === 'BR' ? '\n' : n.text).join('')).toBe(outbound);
+    expect((await run('sendReady',1,0)).sendReady).toBe(true);
+    expect((await run('submit',1,0)).submitted).toBe(true);
+    answer(1);
+    expect(await run('inspect',1,1)).toMatchObject({submissionProof:proofs[0], answerComplete:true});
+    expect((await run('submit',1,1)).submitted).not.toBe(true);
+    expect(f.send.clicks).toBe(1);
+  });
+  test('retained Haiku refuses altered direction, visibility, markup and fake rendered matches at readiness and submit', async () => {
+    for (const boundary of ['sendReady','submit']) {
+      for (const change of ['rtl','ltr','AUTO','empty','extraAttribute','foreignP','namespacedDir','hiddenP','hiddenBR',
+        'foreignBR','control','multiP','NBSP','appendedBreak','literalSubstitution','renderedSubstitution']) {
+        const {f,run}=setup();
+        expect((await run('insert',1,0)).inserted).toBe(true);
+        const p=providerAutoParagraph(f);
+        Object.defineProperty(f.composer,'innerText',{configurable:true,get:()=>outbound});
+        if (boundary==='submit') expect((await run('sendReady',1,0)).sendReady).toBe(true);
+        const br=p.children.find(n => n.tagName==='BR')!;
+        if (['rtl','ltr','AUTO','empty'].includes(change)) p.values.dir=change==='empty'?'':change;
+        if (change==='extraAttribute') p.values.title='auto';
+        if (change==='foreignP' || change==='foreignBR') Object.defineProperty(change==='foreignP'?p:br,'namespaceURI',{value:'urn:fixture'});
+        if (change==='namespacedDir') Object.defineProperty(p,'attributes',{get:()=>[{name:'dir',value:'auto',namespaceURI:'urn:fixture'}]});
+        if (change==='hiddenP' || change==='hiddenBR') Object.defineProperty(change==='hiddenP'?p:br,'checkVisibility',{value:()=>false});
+        if (change==='control') p.append(new Element('BUTTON'));
+        if (change==='multiP') f.composer.append(new Element('P',{},'another paragraph'));
+        if (change==='NBSP') {
+          const n=p.children.find(n=>n.text.includes('\u00a0'))!;
+          n.text=n.text.replace('\u00a0',' ');
+        }
+        if (change==='appendedBreak') p.append(new Element('BR'));
+        if (change==='literalSubstitution') p.children[0].text='wrong draft';
+        if (change==='renderedSubstitution') Object.defineProperty(f.composer,'innerText',{get:()=>outbound+'x'});
+        expect((await run(boundary,1,0)).error).toBeDefined();
+        expect(f.send.clicks).toBe(0);
+      }
+    }
+  });
   test('only the first retained readiness rejection exposes the fixed editor reason', async () => {
     for (const sequence of [1, 2]) {
       const { f, run, submitFirst } = setup();

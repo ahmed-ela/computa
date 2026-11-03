@@ -3210,11 +3210,19 @@ function haikuExactEditor(composer, prompt) {
   if (rendered !== prompt && rendered !== prompt + '\n' && rendered !== prompt + '\n\n') return haikuDraftRejected('editor_rendered');
   const paragraph = composer.childNodes.length === 1 && composer.childNodes[0];
   if (!composer.classList.contains('ProseMirror') || !paragraph || paragraph.tagName !== 'P'
-    || paragraph.attributes.length || !paragraph.childNodes.length || paragraph.childNodes.length > 8_192) return haikuDraftRejected('editor_paragraph');
+    || !paragraph.childNodes.length || paragraph.childNodes.length > 8_192) return haikuDraftRejected('editor_paragraph');
+  // The provider reconciles its single literal paragraph with dir=auto after input.
+  const autoDirection = paragraph.attributes.length === 1 && paragraph.getAttribute('dir') === 'auto';
+  if (paragraph.attributes.length && (!autoDirection || paragraph.namespaceURI !== 'http://www.w3.org/1999/xhtml'
+    || paragraph.attributes[0].namespaceURI !== null || !modelVisible(paragraph)
+    || !paragraph.checkVisibility?.({ opacityProperty: true, visibilityProperty: true, contentVisibilityAuto: true })))
+    return haikuDraftRejected('editor_paragraph');
   let offset = 0;
   for (const node of paragraph.childNodes) {
     const text = node.nodeType === 3 ? node.textContent
-      : node.tagName === 'BR' && !node.attributes.length && !node.childNodes.length ? '\n' : null;
+      : node.tagName === 'BR' && !node.attributes.length && !node.childNodes.length
+        && (!autoDirection || node.namespaceURI === paragraph.namespaceURI && modelVisible(node)
+          && node.checkVisibility?.({ opacityProperty: true, visibilityProperty: true, contentVisibilityAuto: true })) ? '\n' : null;
     if (text === null) return haikuDraftRejected('editor_node');
     if (!prompt.startsWith(text, offset)) return haikuDraftRejected('editor_text');
     offset += text.length;

@@ -12360,7 +12360,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
         fixture.transport.setBeforePageResultValidationForTesting { action in
             if action == "insert" {
-                _ = try? await self.evaluate(view, "document.querySelector('#fixture-editor p').setAttribute('data-example', '');return true;")
+                _ = try? await self.evaluate(view, "const p=document.querySelector('#fixture-editor p');p.setAttribute('dir','auto');p.setAttribute('data-example','');return true;")
             }
         }
         do {
@@ -12384,7 +12384,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
 
     func testRetainedHaikuInspectsSynchronousSecondUserBeforeReturningFromSend() async throws {
         let choice = WebsiteModelChoice(provider: "claude", key: "Haiku 5.5", label: "Haiku 5.5")
-        for corrupt in [false, true] {
+        for (corrupt, siteDirection) in [(false, false), (true, false), (false, true), (true, true)] {
             var phase = "setup"
             do {
                 var page = Self.modelChoicePage(.claude).replacingOccurrences(of: "Sonnet 4.6", with: choice.label)
@@ -12394,6 +12394,17 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                     #"const prompt = Array.from(editor.firstElementChild.childNodes, n => n.nodeType === 3 ? n.data : n.tagName === 'BR' ? '\n' : 'unexpected-element').join('');"#)
                 page = page.replacingOccurrences(of: "body.textContent = '{\"type\":\"message\",\"text\":\"Fixture reply\"}';",
                     with: #"body.textContent = JSON.stringify({type: 'message', text: 'Round ' + window.fixturePrompts.length});"#)
+                if siteDirection {
+                    // Observed reconciled editor: the sole HTML paragraph has only dir=auto.
+                    page = page.replacingOccurrences(of: "window.fixtureInputCount++; send.disabled = true;", with: """
+                        window.fixtureInputCount++; send.disabled = true;
+                        const p = editor.firstElementChild;
+                        if (editor.childNodes.length === 1 && p?.tagName === 'P') {
+                            p.setAttribute('dir', 'auto');
+                            window.fixtureDirectedDrafts = (window.fixtureDirectedDrafts || 0) + 1;
+                        }
+                        """)
+                }
                 if corrupt {
                     page = page.replacingOccurrences(of: "user.textContent = prompt;",
                         with: "user.textContent = window.fixturePrompts.length === 2 ? 'foreign' + prompt : prompt;")
@@ -12442,6 +12453,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 let submit = try XCTUnwrap(actions.firstIndex(of: "submit"))
                 XCTAssertEqual(actions.dropFirst(submit + 1).first, "inspect")
                 try await assertChoiceLedger(view, insertions: 2, sends: 2, selections: 1)
+                if siteDirection {
+                    let count = try await evaluate(view, "return window.fixtureDirectedDrafts;")
+                    XCTAssertEqual(count as? Int, 2)
+                }
                 phase = "terminal cleanup"
                 if !corrupt {
                     let completed = try await waitForState("complete", fixture.transport, token: token)
