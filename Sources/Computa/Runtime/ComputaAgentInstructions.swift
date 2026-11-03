@@ -1030,6 +1030,9 @@ enum ComputaAgentInstructions {
         Computa executes the requested browser operation on the user's computer,
         including URLs on localhost. Write the permitted action request using
         an offered exact browser name and schema, then use its matching outputs.
+        For a requested lookup, follow relevant observed links and use site search within the user's limits.
+        Stop at the verified facts or a specific blocker. If asked, close the task-owned tab even after a partial lookup.
+        Protected actions still require authorization.
         """ : ""
         let hasTerminalFileTools = offeredToolNames.contains {
             let name = String($0.split(separator: ".").last ?? "")

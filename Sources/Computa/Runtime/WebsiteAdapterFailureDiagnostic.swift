@@ -95,7 +95,8 @@ enum WebsiteAdapterFailureDiagnostic {
                 case "custom", "markdown", "paragraph", "span", "literal":
                     guard reason == "count" ? count != 1 : ["parent_hidden", "mixed_text", "tag", "class", "hidden"].contains(reason) else { return nil }
                 case "phase_set":
-                    guard count == 2, ["multiple_text_bearing", "one_text_others_empty", "all_empty", "media", "hidden", "other_content", "over_limit"].contains(reason) else { return nil }
+                    guard count == 2, ["multiple_text_bearing", "one_text_others_empty", "all_empty", "media", "hidden", "other_content",
+                                       "over_limit", "phase_count_limit", "child_count_limit", "node_visit_limit"].contains(reason) else { return nil }
                 case "span_limit":
                     guard count == 2, ["escape", "bidi", "decorated", "other", "ordinary_prefix"].contains(reason) else { return nil }
                 case "inline":

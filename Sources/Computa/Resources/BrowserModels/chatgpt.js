@@ -1364,7 +1364,7 @@ function websiteModelPickerState(provider) {
       const purchaseLabel = node => {
         if (!purchaseScope(node)) return false;
         const aria = node.getAttribute('aria-label');
-        if (aria) return /^Buy credits$/.test(websiteModelNormalize(aria));
+        if (aria && /^Buy credits$/.test(websiteModelNormalize(aria))) return true;
         let remaining = 128, text = '', complete = true;
         const visit = (current, depth) => {
           if (!complete) return;
@@ -5900,7 +5900,23 @@ async function providerPageAction(input, readLineageFingerprint = null) {
       const structureStarted = chatGPTSyncWorkStart();
       try { debugStructure = chatGPTStructure(visible); } finally { chatGPTSyncWorkEnd(2, structureStarted); }
     }
-    return { ...state, signIn, ...(includeDebugStructure ? { debugStructure } : {}),
+    // A private cold-start observation. It proves only an empty, untouched editor in
+    // this document and cannot authorize mode changes, insertion or Send.
+    let untouchedInitialRoot;
+    if (input.checkUntouchedChatRoot === true) {
+      const editors = document.querySelectorAll('#prompt-textarea[contenteditable="true"],textarea#prompt-textarea,#prompt-textarea [contenteditable="true"],[contenteditable="true"][aria-label="Ask ChatGPT"],textarea[data-testid="prompt-textarea"]');
+      const matches = editors.length <= 8 ? Array.from(editors).filter(visible) : [];
+      const p = composer?.childNodes.length === 1 ? composer.firstChild : null;
+      const br = p?.childNodes.length === 1 ? p.firstChild : null;
+      const blank = composer instanceof HTMLTextAreaElement ? composer.value === ''
+        : composer?.isContentEditable && composer.classList.contains('ProseMirror') && (composer.childNodes.length === 0 ||
+            p?.tagName === 'P' && !p.attributes.length && (p.childNodes.length === 0 ||
+              br?.tagName === 'BR' && br.attributes.length === 1 && br.getAttribute('class') === 'ProseMirror-trailingBreak' && !br.childNodes.length));
+      untouchedInitialRoot = document.URL === 'https://chatgpt.com/' && !signIn && !temporary && matches.length === 1
+        && matches[0] === composer && enabled(composer) && !!blank && !stop && !interrupted && !responseLoadFailed && !conversationIdentity
+        && userCount === 0 && answers.length === 0 && !globalThis.__computaModelFirstSubmitted && !globalThis.__computaModelTemporaryRequested;
+    }
+    return { ...state, signIn, ...(untouchedInitialRoot === undefined ? {} : { untouchedInitialRoot }), ...(includeDebugStructure ? { debugStructure } : {}),
       ...(resourceTimingDiagnostic ? { resourceTimingDiagnostic } : {}) };
   }
   if (action === "enableTemporary") {

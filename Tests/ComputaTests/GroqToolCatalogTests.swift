@@ -302,9 +302,9 @@ final class GroqToolCatalogTests: XCTestCase {
         let unknown = "unknown_DO_NOT_ECHO_or_execute"
         let cases: [([String], GroqToolCatalog.Failure)] = [
             (["exec_command", "browser_read", "browser_close"],
-             .unavailableSelection(unavailable: ["browser_close", "browser_read"], denied: [], unknownCount: 0)),
+             .unavailableSelection(unavailable: ["browser_close", "browser_read"], denied: [], unknownCount: 0, direct: [], loadable: ["exec_command"])),
             (["browser_read", "fixture_denied", unknown],
-             .unavailableSelection(unavailable: ["browser_read"], denied: ["fixture_denied"], unknownCount: 1)),
+             .unavailableSelection(unavailable: ["browser_read"], denied: ["fixture_denied"], unknownCount: 1, direct: [], loadable: [])),
         ]
         for (names, expected) in cases {
             do {
@@ -316,9 +316,38 @@ final class GroqToolCatalogTests: XCTestCase {
                 XCTAssertTrue(message.contains("No tool was loaded or executed"))
                 XCTAssertTrue(message.contains("current inventory"))
                 XCTAssertFalse(message.contains(unknown))
-                XCTAssertFalse(message.contains("exec_command"), "Do not label an allowed requested tool as an offender")
+                XCTAssertFalse(message.components(separatedBy: "Eligible requested names")[0].contains("exec_command"))
             }
             XCTAssertEqual(try catalog.prepare(scope: scope, seed: seed), accepted)
+        }
+    }
+
+    func testMixedBrowserSelectionSeparatesCurrentlyOfferedFromLoadableAndPreservesPriorSelection() throws {
+        let loader = GroqToolCatalog.name
+        let prior = ["computer_v2_open", "computer_v2_read_page", "computer_v2_fill", "computer_v2_press"]
+        let requested = ["browser_open", "browser_read", "browser_click", "browser_fill"]
+        let definitions = [canonicalLoader()] + (prior + requested).map(function)
+        let seed = GroqToolCatalog.Seed(registeredDefinitionsJSON: try encode(definitions),
+            callableNames: Set(prior + [loader, "browser_open"]), allowedNames: Set(prior + requested + [loader]),
+            preloadNames: [], toolChoiceJSON: try encode("auto"))
+        var catalog = GroqToolCatalog()
+        let scope = makeScope()
+        let initial = try catalog.prepare(scope: scope, seed: seed)
+        _ = try catalog.load(scope: scope, arguments: args(initial, prior))
+        let before = try catalog.prepare(scope: scope, seed: seed)
+        for browserOpenOffered in [true, false] {
+            let offered = Set(prior + [loader] + (browserOpenOffered ? ["browser_open"] : []))
+            let expected = GroqToolCatalog.Failure.unavailableSelection(
+                unavailable: ["browser_click", "browser_fill", "browser_read"], denied: [], unknownCount: 0,
+                direct: browserOpenOffered ? ["browser_open"] : [], loadable: browserOpenOffered ? [] : ["browser_open"])
+            XCTAssertThrowsError(try catalog.previewLoad(scope: scope, arguments: args(before, requested), lastOfferedNames: offered)) { error in
+                XCTAssertEqual(error as? GroqToolCatalog.Failure, expected)
+                let message = error.localizedDescription
+                XCTAssertTrue(message.contains(browserOpenOffered ? #"call existing schemas directly=["browser_open"]"#
+                                                               : #"load other schemas by exact name=["browser_open"]"#))
+                XCTAssertFalse(prior.contains(where: message.contains))
+            }
+            XCTAssertEqual(try catalog.prepare(scope: scope, seed: seed), before)
         }
     }
 

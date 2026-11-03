@@ -730,8 +730,10 @@ async function computaSavedConversation(input, c, dom, config) {
     }
     let initial = read();
     if (!Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.length || input.expectedUserCounts.length > 2
-      || input.expectedUserCounts.some(value => ![0, 1].includes(value)) || !input.expectedUserCounts.includes(initial.t.users.length))
+      || input.expectedUserCounts.some(value => ![0, 1].includes(value)) || !input.expectedUserCounts.includes(initial.t.users.length)) {
+      if (dom.rejectUserCount) dom.rejectUserCount('expected', initial.t.users, initial.t.answers);
       c.fail('conversation_changed', 'user_count');
+    }
     // Diagnostic-only mode detail: Qwen retains its existing detail and both
     // providers retain all exact body, marker, identity and fingerprint gates.
     const firstFailure = detail => usesModes ? c.fail('conversation_changed', detail) : firstBindingFailure('binding', detail);
@@ -898,6 +900,9 @@ async function computaSavedConversation(input, c, dom, config) {
         || ['__computaQwenSavedSessionV1', '__computaDeepSeekSavedSessionV1'].includes(config.stateKey)
           && error.error === 'unsupported_response_format' && error.detail === 'authored_source')
         ? { adapterFailureStructure: error.adapterFailureStructure } : {}),
+      ...(config.stateKey === '__computaQwenSavedSessionV1' && input.action === 'inspect' && state?.submitted
+        && input.savedCleanupInspection !== true && error.error === 'conversation_changed' && error.detail === 'user_count' && error.qwenCountFailure
+        ? { qwenCountFailure: { ...error.qwenCountFailure, adapterFirstBound: !!state?.first } } : {}),
       ...(config.selectionKind === 'mode' && error.error === 'conversation_changed' && error.detail === 'first_container_children'
         && error.firstContainerDiagnostic ? { firstContainerDiagnostic: error.firstContainerDiagnostic } : {}),
       ...(config.selectionKind === 'mode' && error.error === 'mode_unverified' && error.modeObservationDiagnostic

@@ -4,6 +4,27 @@ import XCTest
 
 @MainActor
 final class QwenFirstUserDiagnosticTests: XCTestCase {
+    func testUserCountFieldsDistinguishBothGuardsAndRejectUntrustedOrInconsistentCounts() {
+        func fields(_ site: String, _ users: Any, _ answers: Any, _ expected: [Int],
+                    _ confirmed: Int, _ pending: Bool, _ extra: [String: Any] = [:]) -> String? {
+            var packet: [String: Any] = ["site": site, "users": users, "answers": answers, "adapterFirstBound": !pending]
+            for (key, value) in extra { packet[key] = value }
+            return EmbeddedWebModelTransport.qwenCountFailureFields(packet, expected: expected, confirmed: confirmed, pending: pending)
+        }
+        XCTAssertEqual(fields("expected", 0, 0, [1], 1, false),
+            "countSite=expected users=0 answers=0 expectedUsers=1 nativeConfirmed=1 nativePending=false adapterFirstBound=true")
+        XCTAssertEqual(fields("transcript", 2, 1, [0, 1], 0, true),
+            "countSite=transcript users=2 answers=1 expectedUsers=0,1 nativeConfirmed=0 nativePending=true adapterFirstBound=false")
+        XCTAssertNil(fields("expected", 1, 1, [1], 1, false))
+        XCTAssertNil(fields("expected", 2, 1, [1], 1, false))
+        XCTAssertNil(fields("transcript", 1, 1, [1], 1, false))
+        XCTAssertNil(fields("transcript", 3, 1, [1], 1, false))
+        XCTAssertNil(fields("transcript", true, 2, [1], 1, false))
+        XCTAssertNil(fields("unknown", 0, 0, [1], 1, false))
+        XCTAssertNil(fields("transcript", 2, 0, [0, 1], 1, false))
+        XCTAssertNil(fields("transcript", 2, 0, [0, 1], 0, true, ["raw": "SYNTHETIC_PRIVATE"]))
+    }
+
     private let predicates = [("root_hidden", "rootVisible"), ("message_id_invalid", "messageIDValid"),
         ("chat_id_mismatch", "chatIDMatches"), ("turn_class_missing", "turnClassMatches"), ("outer_class_missing", "outerClassMatches")]
 

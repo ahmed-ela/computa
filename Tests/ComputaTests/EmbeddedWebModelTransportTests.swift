@@ -12339,6 +12339,133 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testInitialChatRootRecoveryRequiresObservedNamedChatColdOrdinaryView() {
+        for power in WebsiteModelChoice.ChatGPTPower.allCases {
+            let label = power == .pro ? "GPT-6 Pro" : power.label
+            let choice = WebsiteModelChoice(provider:"chatgpt",key:power.modelKey,label:label)
+            XCTAssertTrue(EmbeddedWebModelTransport.permitsInitialChatRootRead(choice,warm:false,diagnostics:false))
+            XCTAssertFalse(EmbeddedWebModelTransport.permitsInitialChatRootRead(choice,warm:true,diagnostics:false))
+            XCTAssertFalse(EmbeddedWebModelTransport.permitsInitialChatRootRead(choice,warm:false,diagnostics:true))
+        }
+        let canonicalPro = WebsiteModelChoice(provider:"chatgpt",key:"chat/latest/pro",label:"Pro")
+        XCTAssertTrue(EmbeddedWebModelTransport.permitsInitialChatRootRead(canonicalPro,warm:false,diagnostics:false))
+        for choice: WebsiteModelChoice? in [nil, WebsiteModelChoice(provider:"chatgpt",key:"Pro",label:"Pro"),
+                                           WebsiteModelChoice(provider:"chatgpt",key:"work/latest/high",label:"High"),
+                                           WebsiteModelChoice(provider:"chatgpt",key:"chat/latest/medium",label:"High"),
+                                           WebsiteModelChoice(provider:"claude",key:"Medium",label:"Medium")] {
+            XCTAssertFalse(EmbeddedWebModelTransport.permitsInitialChatRootRead(choice,warm:false,diagnostics:false))
+        }
+    }
+
+    func testColdNamedChatInitialReadWaitsForOneCommittedFreshRootWithoutReplayingAnAction() async throws {
+        for variant in ["same", "medium", "draft", "foreign", "path", "redirect", "secondRoot", "afterAction"] {
+            let sleeping = Self.page.replacingOccurrences(of: "id=\"fixture-chat-mode\"", with: "id=\"fixture-chat-mode\" disabled")
+                .replacingOccurrences(of: "id=\"fixture-work-mode\"", with: "id=\"fixture-work-mode\" disabled")
+            let old = Self.modelChoicePage(.chatgpt, basePage: sleeping)
+            let fixture = try Fixture(page: old, isolatedInference: true)
+            defer { fixture.shutdown() }
+            let acceptsReplacement = variant == "same" || variant == "medium"
+            let choice = variant == "medium" ? WebsiteModelChoice(provider:"chatgpt",key:"chat/latest/medium",label:"Medium")
+                : WebsiteModelChoice(provider:"chatgpt",key:"chat/latest/pro",label:"GPT-6 Pro")
+            let start = try await call(fixture.transport, "webProviderStart",
+                ["provider":"chatgpt", "modelChoice":try XCTUnwrap(choice.canonicalJSONString)])
+            let token = try XCTUnwrap(start["sessionToken"] as? String), view = try XCTUnwrap(fixture.isolatedViews.first)
+            try await waitForFixture(view)
+            let initial = try await call(fixture.transport, "webProviderPoll", ["sessionToken":token])
+            XCTAssertEqual(initial["state"] as? String,"loading")
+            let original = try XCTUnwrap(view.navigationDelegate)
+            let gate = InitialRootResponseGate(original)
+            view.navigationDelegate = gate
+            defer { gate.release(); view.navigationDelegate = original }
+            if variant == "afterAction" {
+                _ = try await evaluate(view,"document.getElementById('fixture-chat-mode').disabled=false;document.getElementById('fixture-work-mode').disabled=false;return true")
+            }
+            let replacement = variant == "draft" ? old + "<script>document.querySelector('#fixture-editor').textContent='a local draft';</script>" : old
+            let target = URL(string:variant=="foreign" ? "https://example.test/" : variant=="path" ? "https://chatgpt.com/?unverified=1" : "https://chatgpt.com/")!
+            var observedProvisional = false, fired = false
+            var actions:[String]=[]
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                actions.append(action)
+                if fired {return}
+                if variant == "afterAction" ? action == "inspect" : action != "inspect" { return }
+                fired=true
+                let navigation=view.loadHTMLString(replacement,baseURL:target)
+                for _ in 0..<150 {
+                    if gate.started && !gate.committed {
+                        observedProvisional=true;break
+                    }
+                    try? await Task.sleep(for:.milliseconds(2))
+                }
+                if variant=="redirect" {
+                    original.webView?(view,didReceiveServerRedirectForProvisionalNavigation:navigation)
+                }
+                Task { @MainActor in
+                    try? await Task.sleep(for:.milliseconds(60))
+                    if variant=="secondRoot" {
+                        view.loadHTMLString(replacement,baseURL:target)
+                        try? await Task.sleep(for:.milliseconds(60))
+                    }
+                    gate.release()
+                }
+            }
+            do {
+                let read = try await call(fixture.transport,"webProviderPoll",["sessionToken":token])
+                XCTAssertTrue(acceptsReplacement,variant)
+                XCTAssertEqual(read["state"] as? String,"loading","A recovered observation must not authorize sending")
+            } catch {
+                XCTAssertFalse(acceptsReplacement,"Pristine replacement should have produced another ordinary read: \(error)")
+                let failure=error as? EmbeddedWebModelTransport.Failure
+                if variant=="foreign" {XCTAssertTrue(failure == .ownershipFailure(.documentGenerationAfter) || failure == .unexpectedPage(.chatgpt))}
+                else {XCTAssertEqual(failure,.ownershipFailure(.documentGenerationAfter),variant)}
+            }
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            XCTAssertTrue(fired,variant);XCTAssertTrue(observedProvisional,variant)
+            XCTAssertFalse(actions.contains("insert"));XCTAssertFalse(actions.contains("submit"))
+            if acceptsReplacement {
+                XCTAssertEqual(actions,["inspect","inspect"])
+                _ = try await evaluate(view,"document.getElementById('fixture-chat-mode').disabled=false;document.getElementById('fixture-work-mode').disabled=false;return true")
+                _ = try await waitForState("ready",fixture.transport,token:token)
+                _ = try await call(fixture.transport,"webProviderSend",["sessionToken":token,"prompt":"hi"])
+                let result = try await waitForState("complete",fixture.transport,token:token)
+                let proof = try XCTUnwrap(result["modelEvidence"] as? [String:Any])
+                XCTAssertEqual((proof["selected"] as? [String:String])?["key"], choice.key)
+                let product = try XCTUnwrap(result["productModeEvidence"] as? [String:String])
+                XCTAssertEqual(product["mode"],"chat")
+                XCTAssertEqual(product["temporaryTransition"],"acknowledged")
+                XCTAssertEqual(result["state"] as? String,"complete")
+                let sends = try await evaluate(view,"return window.fixturePrompts.length;")
+                XCTAssertEqual(sends as? Int,1)
+                let cleanup = try await call(fixture.transport,"webProviderFinish",["sessionToken":token])
+                XCTAssertEqual(cleanup["cleanup"] as? String,"not_created")
+            }
+
+        }
+    }
+
+    // Preserve the actual delegate events but delay forwarding commit/finish until the stale read returns.
+    @MainActor private final class InitialRootResponseGate: NSObject, WKNavigationDelegate {
+        let original: any WKNavigationDelegate
+        var started=false, committed=false
+        var held=true
+        var events:[@MainActor () -> Void]=[]
+        init(_ original: any WKNavigationDelegate) {self.original=original}
+        func release(){held=false;let pending=events;events=[];for event in pending {event()} }
+        func webView(_ view: WKWebView, decidePolicyFor action: WKNavigationAction,
+                     decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy)->Void) {
+            original.webView?(view,decidePolicyFor:action,decisionHandler:decisionHandler)
+        }
+        func webView(_ view: WKWebView, decidePolicyFor response: WKNavigationResponse,
+                     decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy)->Void) {
+            original.webView?(view,decidePolicyFor:response,decisionHandler:decisionHandler)
+        }
+        func webView(_ v:WKWebView,didStartProvisionalNavigation n:WKNavigation!){original.webView?(v,didStartProvisionalNavigation:n);started=true}
+        func webView(_ v:WKWebView,didReceiveServerRedirectForProvisionalNavigation n:WKNavigation!){original.webView?(v,didReceiveServerRedirectForProvisionalNavigation:n)}
+        func webView(_ v:WKWebView,didCommit n:WKNavigation!){let send: @MainActor @Sendable () -> Void = { self.original.webView?(v,didCommit:n);self.committed=true };if held{events.append(send)}else{send()}}
+        func webView(_ v:WKWebView,didFinish n:WKNavigation!){let send: @MainActor @Sendable () -> Void = { self.original.webView?(v,didFinish:n);return };if held{events.append(send)}else{send()}}
+        func webView(_ v:WKWebView,didFail n:WKNavigation!,withError e:any Error){original.webView?(v,didFail:n,withError:e)}
+        func webView(_ v:WKWebView,didFailProvisionalNavigation n:WKNavigation!,withError e:any Error){original.webView?(v,didFailProvisionalNavigation:n,withError:e)}
+    }
+
     func testRetainedHaikuFirstReadyRefusesDecoratedDraftWithoutSendAndClosesOnlyUnsubmittedView() async throws {
         let choice = WebsiteModelChoice(provider: "claude", key: "Haiku 5.5", label: "Haiku 5.5")
         let page = Self.modelChoicePage(.claude).replacingOccurrences(of: "Sonnet 4.6", with: choice.label)

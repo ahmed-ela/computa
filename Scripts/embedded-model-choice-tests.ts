@@ -703,6 +703,25 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       expect(fable.clicks).toBe(0); expect(f.composer.textContent).toBe(''); expect(f.send.clicks).toBe(0);
     });
 
+    if (provider === 'claude') test('Claude reads the exact visible purchase label independently of a different accessible name', async () => {
+      for (const variant of ['explicit', 'split', 'accessibleOnly', 'hidden', 'foreign', 'footer', 'creditRequirementOnly', 'entitled']) {
+        const { f, picker } = setup();
+        const row = picker.add(picker.menu, 'Fable 5.1', '');
+        const offer = new Node('BUTTON', { 'aria-label': variant === 'accessibleOnly' ? 'Buy credits' : 'Billing details' },
+          variant === 'split' ? 'Buy ' : variant === 'accessibleOnly' ? 'Details' : 'Buy credits');
+        if (variant === 'split') offer.append(new Node('STRONG', {}, 'credits'));
+        if (variant === 'hidden') offer.values.hidden = '';
+        if (variant !== 'entitled') row.append(new Node('SPAN', {}, 'Requires usage credits'));
+        if (variant === 'footer') picker.menu.append(new Node('P', {}, 'Model access uses usage credits billed separately.'));
+        if (variant === 'foreign') picker.menu.append(offer);
+        else if (!['footer','creditRequirementOnly','entitled'].includes(variant)) row.append(offer);
+        const result = await advance(f, 'discoverModels');
+        expect(result.error).toBeUndefined();
+        expect(result.modelChoices.some((item: any) => item.key === 'Fable 5.1')).toBe(!['explicit','split','accessibleOnly'].includes(variant));
+        expect(row.clicks).toBe(0); expect(offer.clicks).toBe(0); expect(f.send.clicks).toBe(0);
+      }
+    });
+
     if (provider === 'claude') test('Claude hidden fragments and truncated descendants cannot manufacture purchase text', async () => {
       for (const values of [{ 'aria-hidden': 'true' }, { inert: '' }]) {
         const { f, picker } = setup();

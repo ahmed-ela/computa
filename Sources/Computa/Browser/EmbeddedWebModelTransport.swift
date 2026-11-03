@@ -402,6 +402,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let view: WKWebView
         // Passive synthetic metadata only. Neither this lease nor its snapshot
         // can supply model, ownership, completion or response text evidence.
+        var groqOwnedStatus: GroqOwnedStatusLease?
         var qwenMarkerWire: QwenMarkerWireLease?
         var qwenMarkerTurn: String?
         var claudeResponseStream: ClaudeResponseStreamLease?
@@ -563,6 +564,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var completionCandidate = false
         var candidateSince: ContinuousClock.Instant?
         var initialReadRetry: ContinuousClock.Instant?
+        var coldNamedChatRootRead = false
+        var priorEmptyRootGeneration: UUID?
+        var initialRootActionDispatched = false
+        var initialRootReplacementSpent = false
         var initialReadFailures = 0
         var lastInspection: InspectionSignature?
         var loggedStructure = false
@@ -1263,6 +1268,31 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return (user,answer,chat)
     }
 
+    func observeGroqStatus(sessionToken:String,lease:GroqOwnedStatusLease) async -> GroqOwnedStatusLease.Observation? {
+        guard let session=sessions[sessionToken],session.groqOwnedStatus===lease,let generation=session.documentGeneration,
+              let first=session.firstUserFingerprint,let submission=session.explicitClearSubmission else{return nil}
+        func stillBound()->Bool {
+            guard case .model(let proof)?=session.selectionEvidence,proof.selected.key==GroqOwnedStatusLease.choice.key,
+                  proof.selected.label==GroqOwnedStatusLease.choice.label else {return false}
+            return !Task.isCancelled && sessions[sessionToken]===session && session.groqOwnedStatus===lease
+                && session.provider == .groq && !session.isDiscovery && !session.isRecoveryProbe && !session.temporary
+                && session.explicitClearReady && session.modelChoice==GroqOwnedStatusLease.choice && session.modelSelectionVerified
+                && browser.webView(for:session.tabID)===session.view
+                && session.documentGeneration==generation && browser.documentGeneration(for:session.tabID)==generation
+                && session.view.url==submission.url && submission.url==session.provider.startURL(choice:session.modelChoice)
+                && session.submitted && !session.pendingSubmission && session.sequence==1 && session.acknowledgedSendSequence==1
+                && session.confirmedUsers==1 && session.baseline==0 && session.firstUserFingerprint==first
+                && first==submission.outboundFingerprint && submission.generation==generation && session.explicitClearOperation==nil
+        }
+        guard lease.isCurrent,stillBound(),let value=await browser.groqStatusResult(session.tabID,view:session.view,owner:sessionToken,
+            generation:generation,fingerprint:first),stillBound() else{return nil}
+        #if DEBUG
+        await beforePageResultValidationForTesting?("groqOwnedStatusObserved")
+        #endif
+        guard stillBound() else{return nil}
+        return .init(stage:value,sessionToken:sessionToken,generation:generation)
+    }
+
     private func prepareQwenMarker(_ session: Session, prompt: String, outbound: String) async {
         guard let lease = session.qwenMarkerWire else { return }
         guard lease.isCurrent, lease.matchesPrompt(prompt), session.provider == .qwen, session.savedDeleteReady,
@@ -1366,6 +1396,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     private func start(_ values: [String: String], requestMetadata: ChatGPTRequestMetadataLease? = nil,
                        admission: WebModelStartAdmission? = nil) async throws -> Data {
+        let groqCandidate=GroqOwnedStatusLease.current
+        var groqRetained=false
+        defer {if !groqRetained {groqCandidate?.revoke()}}
         let qwenCandidate = QwenMarkerWireLease.current
         var qwenRetained = false
         defer { if !qwenRetained { qwenCandidate?.revoke() } }
@@ -1390,6 +1423,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard provider.usesWebsiteModes ? choice == nil && modeChoice != nil : modeChoice == nil else { throw Failure.invalidRequest }
         guard provider != .chatgpt || choice?.chatGPTPower != nil else { throw Failure.invalidRequest }
         guard provider.lifecycle == .temporary || choice != nil || modeChoice != nil else { throw Failure.invalidRequest }
+        let groqLease = provider == .groq && choice==GroqOwnedStatusLease.choice && admission != nil && groqCandidate?.admission==admission ? groqCandidate : nil
         let qwenLease = provider == .qwen && choice != nil && admission.map({ qwenCandidate?.matches(admission:$0) == true }) == true ? qwenCandidate : nil
         let claudeResponseStream: ClaudeResponseStreamLease?
         if let candidate = streamCandidate, provider == .claude, choice != nil,
@@ -1425,6 +1459,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         pendingInferenceStarts += 1
         defer { pendingInferenceStarts -= 1 }
         let preparedTab: UUID?
+        var coldNamedChatRootRead = false
         if provider == .chatgpt, isolatesChatGPTInference {
             let admit: @MainActor () throws -> Void = {
                 self.synchronizeProviderGate(provider)
@@ -1435,6 +1470,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             // its explicitly authorized diagnostic path always stays cold.
             let warmTab = requestMetadata == nil
                 ? try await browser.takePrewarmedChatGPTInferenceTab(until: .now + .seconds(2), admit: admit) : nil
+            coldNamedChatRootRead = Self.permitsInitialChatRootRead(choice, warm: warmTab != nil, diagnostics: requestMetadata != nil)
             if let warmTab { preparedTab = warmTab }
             else { preparedTab = try await browser.createChatGPTInferenceTab(requestMetadata: requestMetadata, admit: admit) }
         } else { preparedTab = nil }
@@ -1442,12 +1478,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         do {
             try Task.checkCancellation()
             session = try createSession(provider: provider, choice: choice, modeChoice: modeChoice, isDiscovery: false,
-                requestMetadata: requestMetadata, claudeResponseStream: claudeResponseStream, qwenMarker: qwenLease,
+                requestMetadata: requestMetadata, claudeResponseStream: claudeResponseStream, qwenMarker: qwenLease, groqStatus:groqLease,
                 preparedTab: preparedTab, reservedStart: true)
         } catch {
             if let preparedTab { browser.closeTab(preparedTab) }
             throw error
         }
+        session.coldNamedChatRootRead = coldNamedChatRootRead
         session.retainsClaudeTurn = admission?.retainClaudeTurn == true && provider == .claude
             && choice?.supportsClaudeTurnPilot == true && admission?.modelID == choice?.modelID
         if let admission, let directory = admission.adapterFailureDirectory,
@@ -1456,6 +1493,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             session.adapterFailureContext = context
             session.adapterFailureDirectory = directory
         }
+        session.groqOwnedStatus=groqLease
+        groqRetained=groqLease?.isCurrent==true
         session.qwenMarkerWire = qwenLease
         session.qwenMarkerTurn = qwenLease == nil ? nil : admission?.turnID
         let result = try snapshot(session)
@@ -1586,6 +1625,17 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // Failed/expired instrumentation is discarded without changing
                 // insertion, Send, model verification or their error handling.
                 await armClaudeResponseStream(session, prompt: prompt, outbound: outbound)
+                if let lease=session.groqOwnedStatus,lease.matches(prompt),session.provider == .groq,session.explicitClearReady,
+                   session.modelChoice==GroqOwnedStatusLease.choice,session.modelSelectionVerified,case .model(let selected)?=session.selectionEvidence,
+                   selected.selected.key==GroqOwnedStatusLease.choice.key,selected.selected.label==GroqOwnedStatusLease.choice.label,
+                   session.state=="ready",session.sequence==0,!session.submitted,session.baseline==0,session.confirmedUsers==0,
+                   session.firstUserFingerprint==nil,let generation=session.documentGeneration,
+                   sessions[session.token]===session,browser.webView(for:session.tabID)===session.view,
+                   browser.documentGeneration(for:session.tabID)==generation,session.view.url==session.provider.startURL(choice:session.modelChoice),
+                   outbound.utf8.elementsEqual((prompt + "\n\nComputa session marker: " + session.firstUserMarker).utf8) {
+                    await browser.prepareGroqStatus(session.tabID,view:session.view,owner:session.token,generation:generation,
+                        outbound:outbound,fingerprint:Self.outboundFingerprint(outbound))
+                }
                 if session.qwenMarkerWire != nil { await prepareQwenMarker(session, prompt:prompt, outbound:outbound) }
                 if let benchmark = WebsiteBenchmarkCaptureLease.current, prepareFirstInstantInInsert,
                    canPrepareFirstInstantInInsert(session), session.provider == .chatgpt,
@@ -1814,7 +1864,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     private func createSession(provider: Provider, choice: WebsiteModelChoice?, modeChoice: WebsiteModeChoice? = nil, isDiscovery: Bool,
                                isRecoveryProbe: Bool = false, requestMetadata: ChatGPTRequestMetadataLease? = nil,
-                               claudeResponseStream: ClaudeResponseStreamLease? = nil, qwenMarker: QwenMarkerWireLease? = nil,
+                               claudeResponseStream: ClaudeResponseStreamLease? = nil, qwenMarker: QwenMarkerWireLease? = nil, groqStatus:GroqOwnedStatusLease? = nil,
                                preparedTab: UUID? = nil, reservedStart: Bool = false) throws -> Session {
         closedSessions = closedSessions.filter { ContinuousClock.now - $0.value.created < .seconds(3_600) }
         synchronizeProviderGate(provider)
@@ -1830,7 +1880,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard script(for: provider) != nil else { throw Failure.pageUnavailable }
         let id: UUID
         if let preparedTab { id = preparedTab }
-        else if let qwenMarker, let choice, provider == .qwen, !isDiscovery, !isRecoveryProbe {
+        else if let groqStatus,provider == .groq,choice==GroqOwnedStatusLease.choice,!isDiscovery,!isRecoveryProbe {
+            id=try browser.createGroqStatusTab(url:provider.startURL(choice:choice),lease:groqStatus)
+        } else if let qwenMarker, let choice, provider == .qwen, !isDiscovery, !isRecoveryProbe {
             id = try browser.createQwenMarkerTab(url:provider.startURL(choice:choice), label:choice.label, lease:qwenMarker)
         }
         else if let claudeResponseStream, provider == .claude, !isDiscovery, !isRecoveryProbe {
@@ -2069,6 +2121,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     /// Failure-only shared-engine tags. Pairwise allowlists prevent arbitrary
     /// adapter text from reaching logs; no tag participates in ownership proof.
+    /// Count evidence can describe an existing terminal rejection but cannot supply ownership or cleanup proof.
+    static func qwenCountFailureFields(_ raw: Any?, expected: [Int], confirmed: Int, pending: Bool) -> String? {
+        guard let value = raw as? [String: Any], Set(value.keys) == ["site", "users", "answers", "adapterFirstBound"],
+              let site = value["site"] as? String, let users = ComputerToolArgumentContract.exactInt64(value["users"]),
+              let answers = ComputerToolArgumentContract.exactInt64(value["answers"]), (0...2).contains(users), (0...2).contains(answers),
+              let bound = firstUserDiagnosticBool(value["adapterFirstBound"]), (0...1).contains(confirmed),
+              expected == (pending ? [confirmed, 1] : [confirmed]), Set(expected).count == expected.count else { return nil }
+        let invalidTranscript = users > 1 || answers > 1 || answers > users
+        guard site == "transcript" && invalidTranscript || site == "expected" && !invalidTranscript && !expected.contains(Int(users)) else { return nil }
+        let expectedCounts = expected.map(String.init).joined(separator: ",")
+        return "countSite=\(site) users=\(users) answers=\(answers) expectedUsers=\(expectedCounts) nativeConfirmed=\(confirmed) nativePending=\(pending) adapterFirstBound=\(bound)"
+    }
+
     static func qwenFirstUserBindingDiagnostic(_ observed: [String: Any], provider: Provider, inspectCover: Bool = false) -> String? {
         guard provider == .qwen, observed["error"] as? String == "conversation_changed",
               observed["detail"] as? String == "first_user_message",
@@ -5638,6 +5703,22 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         session.provider == .gemini && hasUntouchedInferenceState(session)
     }
 
+    static func permitsInitialChatRootRead(_ choice: WebsiteModelChoice?, warm: Bool, diagnostics: Bool) -> Bool {
+        // Pro's versioned picker label maps to the canonical "Pro" request.
+        // Eligibility uses the named Chat request policy; the ordinary picker still proves the family.
+        !warm && !diagnostics && choice?.chatGPTPower != nil && choice?.isSelectable == true
+    }
+
+    private func onlyInitialChatReads(_ session: Session) -> Bool {
+        session.coldNamedChatRootRead && !session.initialRootActionDispatched && session.state == "loading"
+            && !session.isDiscovery && !session.isRecoveryProbe && session.sequence == 0 && session.baseline == 0
+            && !session.submitted && !session.pendingSubmission && session.confirmedUsers == 0 && session.observedResponseCount == 0
+            && session.acknowledgedSendSequence == 0 && !session.temporaryRequested && !session.temporary && !session.chatModeRequested
+            && !session.modelSelectionRequested && !session.modelSelectionVerified && session.selectionEvidence == nil
+            && session.productModeEvidence == nil && session.preparedSubmission == nil
+            && session.firstUserFingerprint == nil && session.conversation == nil && session.terminalFailure == nil
+    }
+
     private func hasUntouchedInferenceState(_ session: Session) -> Bool {
         !session.isDiscovery && !session.isRecoveryProbe
             && !session.providerAdapterEverDispatched && session.sequence == 0
@@ -5933,6 +6014,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       explicitClearOperation: Session.ExplicitClearOperation? = nil,
                       savedDeleteOperation: Session.SavedDeleteOperation? = nil,
                       allowSavedCleanupInspection: Bool = false,
+                      replacingInitialRootFrom: UUID? = nil,
                       maximumWait: Duration = .seconds(10)) async throws -> [String: Any] {
         if allowSavedCleanupInspection {
             guard session.provider.savedConversationPolicy != nil, action == "inspect", allowBlockedProvider, enforceModel,
@@ -5991,8 +6073,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if !allowBlockedProvider { try checkProviderGate(session) }
         guard browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }
         try rejectWebsiteBlocker(session, action: action, phase: "before")
+        func mayInspectReplacement(_ generation: UUID) -> Bool {
+            guard let from = replacingInitialRootFrom, session.documentGeneration == from, action == "inspect",
+                  onlyInitialChatReads(session), session.initialRootReplacementSpent else { return false }
+            return browser.initialChatRootTransition(tabID: session.tabID, view: session.view, owner: session.token,
+                                                     from: from, to: generation) == .settled
+        }
         guard let generation = browser.documentGeneration(for: session.tabID),
-              session.documentGeneration == nil || session.documentGeneration == generation else {
+              session.documentGeneration == nil || session.documentGeneration == generation || mayInspectReplacement(generation) else {
             throw Failure.ownershipFailure(.documentGenerationBefore)
         }
         let provider = session.provider
@@ -6032,6 +6120,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if current != nil, !session.submitted { throw Failure.notFresh }
         let expectedCounts: [Int] = action == "submit" ? [session.confirmedUsers]
             : session.pendingSubmission ? [session.confirmedUsers, session.sequence] : [session.confirmedUsers]
+        let qwenCountDispatch = provider == .qwen && action == "inspect" && !allowBlockedProvider
+            && session.state == "running" && session.sequence == 1 && session.acknowledgedSendSequence == 1
+            ? (confirmed: session.confirmedUsers, pending: session.pendingSubmission) : nil
         // Cleanup also inspects pending lineage. It may verify an already
         // rendered message, but must never acquire expansion-click authority.
         let allowFirstUserExpansion = provider == .chatgpt && action == "inspect" && !allowBlockedProvider
@@ -6088,6 +6179,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             "allowSubmissionExpansion": provider == .chatgpt && ["inspect", "verifyModel"].contains(action)
                 && session.pendingSubmission && session.sequence > 1,
         ]
+        if action == "inspect", onlyInitialChatReads(session), !allowBlockedProvider {
+            input["checkUntouchedChatRoot"] = true
+        }
         if session.qwenMarkerWire?.isCurrent == true, provider == .qwen, action == "inspect", !allowSavedCleanupInspection,
            savedDeleteOperation == nil, session.firstUserFingerprint != nil, !session.pendingSubmission {
             input["qwenSyntheticMarkerComparison"] = true
@@ -6350,6 +6444,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             Double(remaining.seconds) * 1_000 + Double(remaining.attoseconds) / 1e15))
                         pageInput["evaluationDeadlineEpochMilliseconds"] = Int64((epochMilliseconds + remainingMilliseconds).rounded(.down))
                     }
+                    if session.coldNamedChatRootRead, action != "inspect" { session.initialRootActionDispatched = true }
                     session.providerAdapterEverDispatched = true
                     session.view.callAsyncJavaScript(script, arguments: ["input": pageInput], in: nil, in: world) { reply in
                         switch reply {
@@ -6398,6 +6493,35 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }
         try rejectWebsiteBlocker(session, action: action, phase: "after")
         guard browser.documentGeneration(for: session.tabID) == generation else {
+            if action == "inspect", !allowBlockedProvider, onlyInitialChatReads(session),
+               !session.initialRootReplacementSpent, url.absoluteString == "https://chatgpt.com/",
+               session.documentGeneration == generation, session.priorEmptyRootGeneration == generation,
+               let next = browser.documentGeneration(for: session.tabID),
+               browser.initialChatRootTransition(tabID: session.tabID, view: session.view, owner: session.token, from: generation, to: next) == .provisional {
+                session.initialRootReplacementSpent = true
+                let limit = min(evaluationDeadline, session.created + preparationTimeout, ContinuousClock.now + .seconds(3))
+                while ContinuousClock.now < limit {
+                    try Task.checkCancellation()
+                    guard sessions[session.token] === session, onlyInitialChatReads(session) else { break }
+                    let revision = try browser.modelChangeRevision(for: session.tabID)
+                    guard let state = browser.initialChatRootTransition(tabID: session.tabID, view: session.view, owner: session.token,
+                                                                        from: generation, to: next) else { break }
+                    if state == .settled {
+                        // The earlier document remains bound until the entire new, read-only observation succeeds.
+                        let fresh = try await page(session, action: "inspect", enforceModel: enforceModel,
+                                                   replacingInitialRootFrom: generation, maximumWait: limit - .now)
+                        guard ContinuousClock.now < limit, sessions[session.token] === session, session.documentGeneration == generation,
+                              onlyInitialChatReads(session), fresh["untouchedInitialRoot"] as? Bool == true,
+                              session.priorEmptyRootGeneration == next,
+                              browser.initialChatRootTransition(tabID: session.tabID, view: session.view, owner: session.token,
+                                                                from: generation, to: next) == .settled else { break }
+                        session.documentGeneration = next
+                        return fresh
+                    }
+                    _ = try await browser.waitForModelChange(tabID: session.tabID, after: revision, until: limit)
+                }
+                throw Failure.ownershipFailure(.documentGenerationAfter)
+            }
             // Readiness may redirect before any document has been bound. Discard
             // this obsolete read; subsequent reads may bind the final ready page.
             if session.documentGeneration == nil, session.state == "loading",
@@ -6548,6 +6672,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // to inference state. Unknown fields/values cannot become log content.
         let completionDiagnostic = Self.completionMatchDiagnostic(observed.removeValue(forKey: "terminalCompletionDiagnostic"))
         let userCountDiagnostic = Self.sanitizedUserCountDiagnostic(observed.removeValue(forKey: "userCountDiagnostic"), action: action)
+        let qwenCountFailure = observed.removeValue(forKey: "qwenCountFailure")
         let groqCountRejection = Self.groqCountRejection(
             observed.removeValue(forKey: "groqUserCountDiagnostic"), provider: provider, action: action)
         if provider == .chatgpt, action == "inspect" {
@@ -6595,6 +6720,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             if !session.loggedSavedAdapterFailure,
                let diagnostic = Self.savedAdapterFailureDiagnostic(observed, provider: provider, action: provider.selectionAdapterAction(action)) {
                 session.loggedSavedAdapterFailure = true
+                if let dispatch = qwenCountDispatch, error == "conversation_changed", observed["detail"] as? String == "user_count",
+                   let counts = Self.qwenCountFailureFields(qwenCountFailure, expected: expectedCounts,
+                       confirmed: dispatch.confirmed, pending: dispatch.pending) {
+                    Self.inspectionLog.error("qwenCountFailure version=1 \(counts, privacy: .public)")
+                }
                 Self.inspectionLog.error("adapterFailureDiagnostic version=1 provider=\(provider.rawValue, privacy: .public) \(diagnostic, privacy: .public) generationBound=\(session.documentGeneration != nil) sequence=\(session.sequence)")
                 if let structure = Self.qwenFirstUserDiagnostic(observed, provider: provider) {
                     Self.inspectionLog.error("firstUserDiagnostic version=1 provider=qwen action=\(action == "inspect" ? "inspect" : "other", privacy: .public) sequence=\(session.sequence) structure=\(structure, privacy: .public)")
@@ -7235,6 +7365,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             _ = try validatedSelectionEvidence(observed, session: session, action: action)
             session.deepSeekComposerHandoffPending = false
             session.qwenPendingFirstBody = nil
+        }
+        if action == "inspect", onlyInitialChatReads(session) {
+            session.priorEmptyRootGeneration = observed["untouchedInitialRoot"] as? Bool == true ? generation : nil
         }
         return observed
     }

@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 
@@ -10,10 +11,11 @@ enum WebsitePrivateDiagnosticCapture {
         case rejectedReply = "rejected-reply.json"
         case claudeResponseMetadata = "response-metadata.json"
         case adapterFailureStructure = "adapter-failure-structure.json"
+        case groqOwnedStatus = "owned-status.json"
         case qwenMarkerWire = "marker-wire.json"
 
         var maximumBytes: Int {
-            if self == .qwenMarkerWire { return 4_096 }
+            if self == .qwenMarkerWire || self == .groqOwnedStatus { return 4_096 }
             return self == .claudeResponseMetadata || self == .adapterFailureStructure ? 96 * 1_024 : 2_000_000
         }
     }
@@ -222,5 +224,71 @@ enum WebsitePrivateDiagnosticCapture {
             }
             return true
         }
+    }
+}
+
+/// Optional content-free outcome for an opted-in, synthetic first Groq 20B inference.
+/// Native lease identity, the selected model and first submission must survive until publication.
+final class GroqOwnedStatusLease: @unchecked Sendable {
+    @TaskLocal static var current: GroqOwnedStatusLease?
+    static let directoryName = "GroqOwnedStatus-v1"
+    static let purpose = "groq_20b_synthetic_status_v1"
+    static let choice = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-20b", label: "GPT OSS 20B")
+    static func userText(_ nonce: UUID) -> String {
+        "Return exactly GROQSTATUS" + nonce.uuidString.replacingOccurrences(of:"-",with:"") + " and nothing else. Do not call any tools."
+    }
+    static let stages: Set<String> = ["no_matching_fetch_observed", "matched_fetch_unsettled", "http_2xx_opened", "http_401", "http_403", "http_413", "http_429", "http_other_non_2xx", "transport_rejected", "ambiguous"]
+    private let file: WebsitePrivateDiagnosticCapture.Claim
+    let admission: WebModelStartAdmission
+    let deadline: ContinuousClock.Instant
+    private let promptHash: String
+    private let lock = NSLock()
+    private var active = true
+    var isCurrent: Bool { lock.withLock { active && ContinuousClock.now < deadline } }
+    func revoke() { lock.withLock { active = false } }
+    static func digest(_ input: String) -> String { SHA256.hash(data:Data(input.utf8)).map { String(format:"%02x",$0) }.joined() }
+    func matches(_ prompt: String) -> Bool { isCurrent && Self.digest(prompt) == promptHash }
+    private init(_ file: WebsitePrivateDiagnosticCapture.Claim, _ admission: WebModelStartAdmission, _ deadline: ContinuousClock.Instant, _ prompt: String) {
+        self.file=file; self.admission=admission; self.deadline=deadline; promptHash=Self.digest(prompt)
+    }
+    static func consume(directory: URL?, admission: WebModelStartAdmission, request: WebModelResponseCodec.Request,
+                        first: Bool, now: Date = Date()) -> GroqOwnedStatusLease? {
+        guard first, !Task.isCancelled, let directory, admission.provider == "groq", admission.modelID == choice.modelID,
+              request.model == admission.modelID, [admission.taskID,admission.threadID,admission.turnID].allSatisfy({ UUID(uuidString:$0)?.uuidString.lowercased()==$0 }) else { return nil }
+        let started=ContinuousClock.now
+        var deadline: ContinuousClock.Instant?
+        guard let file=WebsitePrivateDiagnosticCapture.claim(directory:directory,record:.groqOwnedStatus,maximumArmBytes:4096,validate:{ data in
+            guard APIModelCorrectionJSON.isUnambiguous(data), let v=try? JSONSerialization.jsonObject(with:data) as? [String:String],
+                  Set(v.keys)==["purpose","nonce","modelID","userPromptSHA256","expiresAt"], v["purpose"]==purpose,v["modelID"]==choice.modelID,
+                  let raw=v["nonce"], let id=UUID(uuidString:raw),id.uuidString.lowercased()==raw,
+                  let exp=v["expiresAt"],exp.utf8.count==24 else { return false }
+            let fmt=ISO8601DateFormatter();fmt.formatOptions=[.withInternetDateTime,.withFractionalSeconds]
+            let user=userText(id)
+            guard let end=fmt.date(from:exp),fmt.string(from:end)==exp,(0...600).contains(end.timeIntervalSince(now)),end>now,
+                  v["userPromptSHA256"]==digest(user), WebsiteSyntheticFirstRequest.matches(request,expectedUserText:user) else {return false}
+            deadline=started + .seconds(end.timeIntervalSince(now));return true
+        },isCurrent:{ !Task.isCancelled && (deadline.map { ContinuousClock.now < $0 } ?? false) }),let deadline else{return nil}
+        return .init(file,admission,deadline,request.prompt)
+    }
+    struct Observation: Sendable {
+        let stage: String
+        let sessionToken: String
+        let generation: UUID
+    }
+    // Called synchronously on the server after it has rejoined this exact current inference.
+    func publish(_ observation: Observation, trigger: String) {
+        let stage=observation.stage, owner=observation.sessionToken, generation=observation.generation
+        guard !Task.isCancelled, isCurrent, Self.stages.contains(stage),
+              ["response_deadline","groq_draft_restored","groq_reported_submission_error"].contains(trigger),
+              let session=UUID(uuidString:owner) else{return}
+        let v:[String:Any]=["schemaVersion":1,"purpose":Self.purpose,"provider":"groq","modelID":admission.modelID,
+            "taskID":admission.taskID,"threadID":admission.threadID,"turnID":admission.turnID,
+            "inferenceID":admission.inferenceID.uuidString.lowercased(),"preparationID":admission.preparationID.uuidString.lowercased(),
+            "runtimeGeneration":admission.runtimeGeneration.uuidString.lowercased(),"session":session.uuidString.lowercased(),
+            "documentGeneration":generation.uuidString.lowercased(),"trigger":trigger,"stage":stage,"evidenceClass":"page_world_observation"]
+        guard let bytes=try? JSONSerialization.data(withJSONObject:v,options:[.sortedKeys]) else{return}
+        _=WebsitePrivateDiagnosticCapture.publish(bytes,using:file,isCurrent:{ !Task.isCancelled && self.isCurrent },commit:{ rename in
+            self.lock.withLock { !Task.isCancelled && self.active && ContinuousClock.now < self.deadline && rename() }
+        })
     }
 }

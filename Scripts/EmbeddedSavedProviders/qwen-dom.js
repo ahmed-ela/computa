@@ -183,10 +183,18 @@ function computaQwenDOM(c) {
       throw error;
     }
   }
+  // Attach only the counts already used by the failed guard. Never re-query or change the rejection.
+  function rejectUserCount(site, users, answers) {
+    try { c.fail('conversation_changed', 'user_count'); }
+    catch (error) {
+      if (error?.computaAdapterFailure) error.qwenCountFailure = { site, users: users.length, answers: answers.length };
+      throw error;
+    }
+  }
   function transcript(allowInitialResponseIdentity = false, emptyContainerPrompt = null) {
     const users = c.nodes(document, '.qwen-chat-message.qwen-chat-message-user', 2);
     const answers = c.nodes(document, '.qwen-chat-message.qwen-chat-message-assistant', 2);
-    if (users.length > 1 || answers.length > 1 || answers.length > users.length) c.fail('conversation_changed', 'user_count');
+    if (users.length > 1 || answers.length > 1 || answers.length > users.length) rejectUserCount('transcript', users, answers);
     if (!users.length) return { users, answers, first: null, answer: null };
     const current = route();
     if (!current.id) c.fail('conversation_changed', 'conversation_url');
@@ -450,7 +458,7 @@ function computaQwenDOM(c) {
     const flow = flows[0], phases = c.nodes(flow, '.response-message-content.phase-answer');
     if (!phases.length) return { text: '', finalMarkup: false, formatIssue: false };
     if (phases.length !== 1) return unsupported('phase_set', () => {
-      if (phases.length > 3) return 'over_limit';
+      if (phases.length > 3) return 'phase_count_limit';
       // Count only structurally empty branches and physically visible,
       // text-bearing leaves. Never inspect the value of a text node.
       const wrapper = phase => phase.parentElement;
@@ -473,7 +481,8 @@ function computaQwenDOM(c) {
         const stack = [[p, 0]];
         while (stack.length) {
           const [node, depth] = stack.pop();
-          if (--budget < 0 || node.childNodes.length > 32) return 'over_limit';
+          if (--budget < 0) return 'node_visit_limit';
+          if (node.childNodes.length > 32) return 'child_count_limit';
           if (invisible(node)) return 'hidden';
           if (['IMG','PICTURE','VIDEO','AUDIO','IFRAME','OBJECT','CANVAS'].includes(node.tagName)
             || node.tagName === 'A' && node.getAttribute('download') !== null) return 'media';
@@ -718,6 +727,6 @@ function computaQwenDOM(c) {
     setter.call(form.editor, prompt);
     form.editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));
   }
-  return { rejectSelectionBinding, firstDisplayReplacement, watchDisplayRender, displayHitFailure, firstBodyPresentation, firstBodyFailureStructure, initialResponseIdentityTranscript: emptyContainerPrompt => transcript(true, emptyContainerPrompt), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer,
+  return { rejectUserCount, rejectSelectionBinding, firstDisplayReplacement, watchDisplayRender, displayHitFailure, firstBodyPresentation, firstBodyFailureStructure, initialResponseIdentityTranscript: emptyContainerPrompt => transcript(true, emptyContainerPrompt), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer,
     deletionTrigger, deletionMenu, deletionConfirmation, deletionObserved, insertLiteral };
 }

@@ -952,6 +952,8 @@ actor WebModelServer {
         // a session, transport retains the grant through its ordinary cleanup,
         // including failures whose cleanup happens after this method throws.
         var claudeResponseStream: ClaudeResponseStreamLease?
+        var groqOwnedStatus: GroqOwnedStatusLease?
+        defer { groqOwnedStatus?.revoke() }
         var qwenMarkerWire: QwenMarkerWireLease?
         defer { claudeResponseStream?.revoke(); qwenMarkerWire?.revoke() }
         // Claim this handoff before any suspension. A duplicate request cannot
@@ -1189,6 +1191,11 @@ actor WebModelServer {
                             request: request, isNewThread: context.isNewThread, isMaintenance: context.isMaintenance,
                             isFirstInference: firstNativeInference, hasCorrectionTicket: correctionTicket != nil)
                     }
+                    if provider == "groq" {
+                        groqOwnedStatus=GroqOwnedStatusLease.consume(directory:rejectedReplyDirectory?.deletingLastPathComponent()
+                            .appendingPathComponent(GroqOwnedStatusLease.directoryName),admission:admission,request:request,
+                            first:context.isNewThread && !context.isMaintenance && firstNativeInference && correctionTicket==nil)
+                    }
                     if provider == "qwen" {
                         qwenMarkerWire = QwenMarkerWireLease.consume(directory: rejectedReplyDirectory?.deletingLastPathComponent()
                             .appendingPathComponent(QwenMarkerWireLease.directoryName), admission: admission, request: request,
@@ -1199,7 +1206,9 @@ actor WebModelServer {
                     do {
                         let data = try await ClaudeResponseStreamLease.$current.withValue(claudeResponseStream) {
                             try await QwenMarkerWireLease.$current.withValue(qwenMarkerWire) {
-                                try await transport.start(params: startParameters, admission: admission, authorization: requestMetadata)
+                                try await GroqOwnedStatusLease.$current.withValue(groqOwnedStatus) {
+                                    try await transport.start(params: startParameters, admission: admission, authorization: requestMetadata)
+                                }
                             }
                         }
                         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw Failure.invalidRequest }
@@ -1652,6 +1661,25 @@ actor WebModelServer {
                     }
                 } catch { terminalError = error }
                 let error = terminalError
+                if let diagnostic=groqOwnedStatus,diagnostic.isCurrent,let lease,lease.modelID==diagnostic.admission.modelID,
+                   let local=lease.transport as? EmbeddedWebModelTransport,
+                   (try? requireCurrentContext(includeResponseDeadline:false)) != nil {
+                    let cause:String?
+                    if let native=error as? EmbeddedWebModelTransport.Failure {
+                        switch native {
+                        case .deadline: cause="response_deadline"
+                        case .ownershipFailure(.groqReportedSubmissionError):cause="groq_reported_submission_error"
+                        case .ownershipFailure(.groqDraftRestored):cause="groq_draft_restored"
+                        default:cause=nil
+                        }
+                    } else if let server=error as? Failure, case .deadline=server {cause="response_deadline"}
+                    else{cause=nil}
+                    if let cause, let observation=await local.observeGroqStatus(sessionToken:lease.token,lease:diagnostic),
+                       (try? requireCurrentContext(includeResponseDeadline:false)) != nil, sessions[taskID]?.token==lease.token,
+                       observation.sessionToken==lease.token,diagnostic.admission.inferenceID==inferenceID {
+                        diagnostic.publish(observation,trigger:cause)
+                    }
+                }
                 if let correctionTicket, let correctionStore, !correctionFinished {
                     let second = inferenceID == correctionTicket.secondInferenceID ? lease : nil
                     let outcome: WebsiteModelFormatCorrectionStore.Outcome

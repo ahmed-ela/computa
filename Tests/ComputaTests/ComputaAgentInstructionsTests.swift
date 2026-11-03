@@ -1433,6 +1433,20 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         XCTAssertTrue(text.contains("offered page continuation tool with next_cursor"))
     }
 
+    func testLookupScopeAndRequestedClosureReachBrowserCapableHandoffs() {
+        let lookup = "follow relevant observed links and use site search within the user's limits"
+        let close = "task-owned tab even after a partial lookup"
+        let web = ComputaAgentInstructions.webResponseContract(offeredToolNames: ["browser_read","browser_click","browser_close"])
+        XCTAssertTrue(web.contains(lookup))
+        XCTAssertTrue(web.contains(close))
+        XCTAssertTrue(web.contains("Protected actions still require authorization"))
+        XCTAssertTrue(web.contains("never replay input"))
+        for unavailable in [ComputaAgentInstructions.webResponseContract(offeredToolNames: ["exec_command"]),
+                            ComputaAgentInstructions.webResponseContract(offeredToolNames: ["browser_read"], customToolNames: ["browser_read"])] {
+            XCTAssertFalse(unavailable.contains(lookup))
+        }
+    }
+
     func testBrowserLifecycleContractSurvivesNativeAndFreshWebsiteHandoffs() {
         // Prompt-contract coverage, not a claim that a model will obey it live.
         let browser = ComputaAgentInstructions.builtInBrowser

@@ -305,7 +305,7 @@ test('Qwen long-paragraph limit describes only the first structurally atypical s
 });
 
 test('multiple Qwen answer phases are refused with bounded structural facts and no projected response', async () => {
-  for (const kind of ['multiple_text_bearing','one_text_others_empty','all_empty','hidden','media','other_content','over_limit']) {
+  for (const kind of ['multiple_text_bearing','one_text_others_empty','all_empty','hidden','media','other_content','phase_count_limit','child_count_limit','node_visit_limit']) {
     const f = await submitted(max);
     const shell = f.phase.parentElement!.cloneNode(true), second = shell.children[0];
     f.flow.append(shell);
@@ -314,7 +314,17 @@ test('multiple Qwen answer phases are refused with bounded structural facts and 
     if (kind === 'hidden') second.values.hidden='';
     if (kind === 'media') second.replaceChildren(new f.Node('IMG', {src:'PRIVATE_FIXTURE'}));
     if (kind === 'other_content') second.replaceChildren(new f.Node('A', {},'PRIVATE_FIXTURE'));
-    if (kind === 'over_limit') f.flow.append(shell.cloneNode(true),shell.cloneNode(true));
+    if (kind === 'phase_count_limit') f.flow.append(shell.cloneNode(true), shell.cloneNode(true));
+    if (kind === 'child_count_limit' || kind === 'node_visit_limit') {
+      // Each run contains one leaf. Two 32-run branches exceed the visit budget
+      // without reaching the width limit, whereas 33 direct runs trip width.
+      for (const phase of [f.phase, second]) {
+        const paragraph = phase.children[0].children[0].children[0];
+        const run = paragraph.children[0];
+        const width = kind === 'child_count_limit' ? 33 : 32;
+        for (let i = 1; i < width; i++) paragraph.append(run.cloneNode(true));
+      }
+    }
     const mutations = f.mutations();
     const result = await f.run('inspect',{expectedModelChoice:choice(max)});
     expect(result.error,kind).toBe('unsupported_response_format');
@@ -324,6 +334,25 @@ test('multiple Qwen answer phases are refused with bounded structural facts and 
     expect(result.answerComplete).toBeUndefined();
     expect(JSON.stringify(result)).not.toContain('PRIVATE');
     expect(f.mutations()).toBe(mutations);
+    expect(f.send.clicks).toBe(1);
+  }
+});
+
+test('Qwen count rejections identify the deciding guard without rereading or replaying the Send', async () => {
+  for (const [kind, site, users, answers, bound] of [
+    ['duplicate_user','transcript',2,1,false], ['duplicate_answer','transcript',1,2,false],
+    ['orphan_answer','transcript',0,1,false], ['disappeared_after_binding','expected',0,0,true]
+  ] as const) {
+    const f = await submitted(plus);
+    if (bound) expect((await f.run('inspect')).firstUserVerified).toBe(true);
+    if (kind === 'duplicate_user') f.root.parentElement!.append(f.root.cloneNode(true));
+    else if (kind === 'duplicate_answer') f.answerRoot.parentElement!.append(f.answerRoot.cloneNode(true));
+    else { f.root.detach(); if (bound) f.answerRoot.detach(); }
+    const result = await f.run('inspect', { expectedUserCounts:bound?[1]:[0,1] });
+    expect(result).toEqual({error:'conversation_changed', detail:'user_count',
+      qwenCountFailure:{site, users, answers, adapterFirstBound:bound}});
+    expect(f.send.clicks).toBe(1);
+    expect((await f.run('inspect')).error).toBe('conversation_changed');
     expect(f.send.clicks).toBe(1);
   }
 });

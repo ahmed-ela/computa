@@ -1364,7 +1364,7 @@ function websiteModelPickerState(provider) {
       const purchaseLabel = node => {
         if (!purchaseScope(node)) return false;
         const aria = node.getAttribute('aria-label');
-        if (aria) return /^Buy credits$/.test(websiteModelNormalize(aria));
+        if (aria && /^Buy credits$/.test(websiteModelNormalize(aria))) return true;
         let remaining = 128, text = '', complete = true;
         const visit = (current, depth) => {
           if (!complete) return;

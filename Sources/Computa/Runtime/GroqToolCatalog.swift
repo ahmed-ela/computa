@@ -62,7 +62,7 @@ struct GroqToolCatalog: Sendable {
         case invalidCatalog, invalidScope, staleRevision, invalidArguments, unavailableTool, selectionTooLarge
         case tooManyNames(count: Int, direct: [String], loadable: [String], ineligible: Int)
         case budgetWithOfferedSchemas([String])
-        case unavailableSelection(unavailable: [String], denied: [String], unknownCount: Int)
+        case unavailableSelection(unavailable: [String], denied: [String], unknownCount: Int, direct: [String], loadable: [String])
         var errorDescription: String? {
             switch self {
             case .invalidCatalog: "The registered tool catalog could not be verified. No tool was loaded or executed."
@@ -72,8 +72,8 @@ struct GroqToolCatalog: Sendable {
             case let .tooManyNames(count, direct, loadable, ineligible):
                 "Requested \(count) names; the limit is four. No tool was loaded or executed. Eligible matches from this request (up to four): call existing schemas directly=\(Self.namesJSON(direct)); load other schemas by exact name=\(Self.namesJSON(loadable)). Ineligible requested names=\(ineligible). Check the current inventory before choosing a tool."
             case .unavailableTool: "A requested tool is not currently callable and allowed. No tool was loaded or executed."
-            case let .unavailableSelection(unavailable, denied, unknownCount):
-                "No tool was loaded or executed. Requested catalog names (data): unavailable=\(Self.namesJSON(unavailable)), denied=\(Self.namesJSON(denied)), unknown_count=\(unknownCount). Choose only callable, allowed names from the current inventory and load their exact schemas before use."
+            case let .unavailableSelection(unavailable, denied, unknownCount, direct, loadable):
+                "No tool was loaded or executed. Rejected requested names (unavailable=\(Self.namesJSON(unavailable)), denied=\(Self.namesJSON(denied)), unknown_count=\(unknownCount)). Eligible requested names in the current inventory (call existing schemas directly=\(Self.namesJSON(direct)), load other schemas by exact name=\(Self.namesJSON(loadable)))."
             case let .budgetWithOfferedSchemas(names):
                 "Load exceeds budget. No change or execution. Previously offered: \(Self.namesJSON(names)). Call directly if still listed."
             case .selectionTooLarge:
@@ -255,22 +255,22 @@ struct GroqToolCatalog: Sendable {
               requested.isDisjoint(with: loaderNames) else {
             throw Failure.unavailableTool
         }
-        if names.count > Self.maximumLoadedTools {
-            // No partial load. Only suggest authorized inventory names; report which had
-            // schemas in the actual admitted request, including its budget fallback.
-            let eligible = requested.intersection(state.seed.callableNames).intersection(state.seed.allowedNames)
+        let eligible = requested.intersection(state.seed.callableNames).intersection(state.seed.allowedNames)
+        if names.count > Self.maximumLoadedTools || eligible != requested {
+            // Never partially load. The last admitted offer distinguishes direct schemas from
+            // other eligible names, including when the budget excluded default direct schemas.
             let direct = Array(eligible.intersection(lastOfferedNames).sorted().prefix(Self.maximumLoadedTools))
             let loadable = Array(eligible.subtracting(lastOfferedNames).sorted().prefix(Self.maximumLoadedTools - direct.count))
-            throw Failure.tooManyNames(count: names.count, direct: direct, loadable: loadable,
-                                       ineligible: names.count - eligible.count)
-        }
-        guard requested.isSubset(of: state.seed.callableNames.intersection(state.seed.allowedNames)) else {
+            if names.count > Self.maximumLoadedTools {
+                throw Failure.tooManyNames(count: names.count, direct: direct, loadable: loadable,
+                                           ineligible: names.count - eligible.count)
+            }
             let registered = Set(baseline.inventory.map(\.name))
             let knownRequested = requested.intersection(registered)
             throw Failure.unavailableSelection(
                 unavailable: knownRequested.subtracting(state.seed.callableNames).sorted(),
                 denied: knownRequested.intersection(state.seed.callableNames).subtracting(state.seed.allowedNames).sorted(),
-                unknownCount: requested.subtracting(registered).count)
+                unknownCount: requested.subtracting(registered).count, direct: direct, loadable: loadable)
         }
         let projection = Projection(revision: baseline.revision, inventory: baseline.inventory,
                                     selectedNames: baseline.selectedNames.union(requested))

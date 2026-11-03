@@ -79,7 +79,7 @@ final class WebsiteAdapterFailureDiagnosticTests: XCTestCase {
     }
 
     func testQwenPhaseSetDiagnosticIsFixedAndRequiresMultiplePhases() {
-        for reason in ["multiple_text_bearing", "one_text_others_empty", "all_empty", "media", "hidden", "other_content", "over_limit", "PRIVATE"] {
+        for reason in ["multiple_text_bearing", "one_text_others_empty", "all_empty", "media", "hidden", "other_content", "over_limit", "phase_count_limit", "child_count_limit", "node_visit_limit", "PRIVATE"] {
             for count in [0, 1, 2] {
                 var packet = qwenAuthoredFailure
                 packet["stage"] = "phase_set"

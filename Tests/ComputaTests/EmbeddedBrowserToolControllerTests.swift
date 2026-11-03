@@ -2334,7 +2334,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             let links = try await call(controller, "browser_read", ["view": "links"])
             let lines = links.split(separator: "\n")
             XCTAssertTrue(lines[1].hasPrefix("READ view=links"))
-            XCTAssertTrue(links.contains("VIEW links omitted_input_nodes=2 basis=captured_view_and_query. Read overview/all without cursor/query for controls before an access-block claim."))
+            XCTAssertTrue(links.contains("VIEW links omitted_input_nodes=2 basis=captured_view_and_query. Get fresh action refs with overview/all without query/cursor."))
             XCTAssertTrue(links.contains("not site results/relevance/absence"))
             XCTAssertFalse(links.contains("label=\"Check flight\"")); XCTAssertFalse(links.contains("label=\"Flight number\""))
             if !hasLink { XCTAssertTrue(links.contains("no_matches=1")) }
