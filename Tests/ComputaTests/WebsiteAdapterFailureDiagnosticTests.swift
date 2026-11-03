@@ -48,6 +48,49 @@ final class WebsiteAdapterFailureDiagnosticTests: XCTestCase {
         XCTAssertNil(D.sanitize(valid, provider: "qwen", error: "conversation_changed", detail: "first_user_message"))
     }
 
+    func testQwenInlineDiagnosticAcceptsOnlyFixedCategoriesAndZeroCount() {
+        for reason in ["escape", "bidi", "decorated", "other", "escape_json"] {
+            var packet = qwenAuthoredFailure
+            packet["stage"] = "inline"
+            packet["reason"] = reason
+            func accepts(_ value: [String: Any]) -> Bool {
+                D.sanitize(value, provider: "qwen", error: "unsupported_response_format", detail: "authored_source") != nil
+            }
+            XCTAssertTrue(accepts(packet))
+            for (key, value) in [("reason", "private_class" as Any), ("count", 1), ("text", "private_text")] {
+                var invalid = packet
+                invalid[key] = value
+                XCTAssertFalse(accepts(invalid))
+            }
+        }
+    }
+
+    func testQwenLongParagraphDiagnosticRequiresSaturatedCountAndClosedPrefixCategory() {
+        for reason in ["escape", "bidi", "decorated", "other", "ordinary_prefix", "PRIVATE", "escape_json"] {
+            for count in [0, 1, 2] {
+                var packet = qwenAuthoredFailure
+                packet["stage"] = "span_limit"
+                packet["reason"] = reason
+                packet["count"] = count
+                let result = D.sanitize(packet, provider: "qwen", error: "unsupported_response_format", detail: "authored_source")
+                XCTAssertEqual(result != nil, count == 2 && !["PRIVATE", "escape_json"].contains(reason))
+            }
+        }
+    }
+
+    func testQwenPhaseSetDiagnosticIsFixedAndRequiresMultiplePhases() {
+        for reason in ["multiple_text_bearing", "one_text_others_empty", "all_empty", "media", "hidden", "other_content", "over_limit", "PRIVATE"] {
+            for count in [0, 1, 2] {
+                var packet = qwenAuthoredFailure
+                packet["stage"] = "phase_set"
+                packet["reason"] = reason
+                packet["count"] = count
+                XCTAssertEqual(D.sanitize(packet, provider: "qwen", error: "unsupported_response_format", detail: "authored_source") != nil,
+                               count == 2 && reason != "PRIVATE")
+            }
+        }
+    }
+
     func testQwenAuthoredSourcePublicationRequiresExactNamedSelectionAndDedicatedSingleBoundArm() throws {
         let packet = try XCTUnwrap(D.sanitize(qwenAuthoredFailure, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"))
         let max = "Qwen3.8-Max", plus = "Qwen3.7-Plus"

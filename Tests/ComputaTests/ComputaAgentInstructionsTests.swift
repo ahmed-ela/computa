@@ -149,7 +149,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         }
         let response = ComputaAgentInstructions.groqResponseContract(currentBrowserHandoff: "exact current native binding")
         for rule in ["Message/refusal/clarification", "exact currently offered qualified name", "required schema field",
-                     "custom tools require literal", "Never replay uncertain calls", "only from matching host output",
+                     "Custom entries contain only name and input", "Computa supplies call IDs and metadata", "Never replay uncertain calls", "only from matching host output",
                      "tool_calls for the next unverified step", "max-call", "exact current native binding"] {
             XCTAssertTrue(response.contains(rule), rule)
         }
@@ -1808,7 +1808,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             let handoff = try assertRequestValuesAndHandoff(original, request: request,
                 expectedAllowedToolNames: choice == "none" ? [] : nil)
             XCTAssertTrue(handoff.contains("Custom tools accept literal string input, not JSON object arguments"))
-            XCTAssertTrue(handoff.contains("Do not include arguments on a custom call"))
+            XCTAssertTrue(handoff.contains("Custom entry keys are name and input only."))
+            XCTAssertTrue(handoff.contains("Computa supplies call IDs and metadata."))
             XCTAssertTrue(handoff.contains("Exact currently offered custom names: relay.apply_patch"))
             XCTAssertFalse(handoff.contains("functions.apply_patch"))
             let envelope = try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [["name": "relay.apply_patch", "input": patch]]])
@@ -1816,7 +1817,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                 XCTAssertEqual(try WebModelResponseCodec.parseReply(String(decoding: envelope, as: UTF8.self), request: request, requireEnvelope: true),
                                .toolCalls([.init(name: "apply_patch", argumentsJSON: "", namespace: "relay", customInput: patch)]))
                 XCTAssertThrowsError(try WebModelResponseCodec.parseReply(#"{"type":"tool_calls","calls":[{"name":"relay.apply_patch","arguments":{"patch":"text"}}]}"#, request: request, requireEnvelope: true)) {
-                    XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .customInputMustBeString)
+                    XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .unsupportedCallFields)
                 }
             } else {
                 XCTAssertThrowsError(try WebModelResponseCodec.parseReply(String(decoding: envelope, as: UTF8.self), request: request, requireEnvelope: true)) {
@@ -2021,7 +2022,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                         return (String(line), object)
                     }
                     let expectedExamples = Set([customs.intersection(allowed).sorted().first].compactMap { $0 })
-                    XCTAssertEqual(handoff.contains("Function calls: type tool_calls, calls array"),
+                    XCTAssertEqual(handoff.contains("Function entry keys are name and arguments only."),
                                    !functions.intersection(allowed).isEmpty)
                     XCTAssertFalse(handoff.contains(#""arguments":{}"#))
                     var exampleNames = Set<String>()

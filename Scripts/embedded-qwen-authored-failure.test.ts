@@ -17,13 +17,13 @@ async function submitted(label = max, complete = true) {
 const checks: [string, string, number, (f: Page) => void][] = [
   ['flow', 'count', 2, f => { f.right.append(f.flow.cloneNode(true), f.flow.cloneNode(true)); }],
   ['flow', 'hidden', 0, f => { f.flow.setAttribute('hidden', ''); }],
-  ['phase', 'count', 2, f => { f.flow.append(f.phase.cloneNode(true)); }],
+  ['phase_set', 'other_content', 2, f => { f.flow.append(f.phase.cloneNode(true)); }],
   ['phase', 'class', 0, f => { f.phase.setAttribute('class', 'response-message-content phase-answer'); }],
   ['custom', 'parent_hidden', 0, f => { f.phase.setAttribute('hidden', ''); }],
   ['custom', 'count', 0, f => { f.phase.replaceChildren(); }],
   ['markdown', 'mixed_text', 0, f => { f.phase.children[0].text = 'SYNTHETIC_PRIVATE'; }],
   ['paragraph', 'tag', 0, f => { f.markdown.replaceChildren(new f.Node('PRE', {class:'SYNTHETIC_CLASS'})); }],
-  ['span', 'tag', 0, f => { f.paragraph.append(new f.Node('A')); }],
+  ['inline', 'other', 0, f => { f.paragraph.append(new f.Node('A')); }],
   ['literal', 'class', 0, f => { f.literal.setAttribute('class','SYNTHETIC_UNKNOWN'); }],
   ['literal', 'hidden', 0, f => { f.literal.setAttribute('hidden',''); }],
   ['literal_contents', 'count', 1, f => { f.literal.append(new f.Node('CODE')); }],
@@ -148,5 +148,182 @@ test('a second component cannot import foreign markup, controls, hidden text or 
     expect(Object.keys(result.adapterFailureStructure).sort()).toEqual(['count','provider','reason','stage','trigger','version']);
     expect(JSON.stringify(result)).not.toContain('PRIVATE_SYNTHETIC');
     expect(f.mutations()).toBe(before);
+  }
+});
+
+function renderJSONEscapes(f: Page, source: string) {
+  f.paragraph.replaceChildren();
+  f.paragraph.setAttribute('dir', 'ltr');
+  const escapes = [];
+  let end = 0;
+  for (const match of source.matchAll(/\\["\\/]/g)) {
+    if (match.index > end) appendRun(f, source.slice(end, match.index));
+    const element = new f.Node('SPAN', {class:'qwen-markdown-escape',dir:'ltr'}, match[0][1]);
+    f.paragraph.append(element);
+    escapes.push(element);
+    end = match.index + 2;
+  }
+  if (end < source.length) appendRun(f, source.slice(end));
+  return escapes;
+}
+
+test('exact Qwen JSON escapes preserve the original tool envelope and its argument bytes', async () => {
+  const argumentsJSON = JSON.stringify({path:'a\\b', note:'"quoted"\nline'});
+  const wire = JSON.stringify({type:'tool_calls',calls:[{name:'exec_command',arguments:{cmd:argumentsJSON}}]});
+  for (const model of [plus, max]) {
+    const f = await submitted(model);
+    const escapes = renderJSONEscapes(f, wire);
+    expect(escapes.length).toBeGreaterThan(1);
+    expect(f.paragraph.textContent).not.toBe(wire);
+    const result = await f.run('inspect', {expectedModelChoice:choice(model)});
+    expect(result.error).toBeUndefined();
+    expect(result.text).toBe(wire);
+    expect(JSON.parse(result.text).calls[0].arguments.cmd).toBe(argumentsJSON);
+    expect(result.answerComplete).toBe(true);
+    expect(result.modelEvidence.selected).toEqual(choice(model));
+    expect(f.send.clicks).toBe(1);
+  }
+  const f = fixture();
+  f.mountConversation(false);
+  const escapedSlash = String.raw`{"type":"final","text":"a\/b"}`;
+  renderJSONEscapes(f, escapedSlash);
+  const dom = f.read();
+  expect(dom.rawAnswer(dom.transcript().answer).text).toBe(escapedSlash);
+  expect(dom.completionCandidate(dom.transcript().answer)).toBe(false);
+});
+
+test('Qwen rejects noncanonical escape structures and reports only a finite category', async () => {
+  const cases: [string,string,(f:Page, leaf:InstanceType<Page['Node']>)=>void][] = [
+    ['wrongDir','escape', (_,e)=>e.setAttribute('dir','rtl')],
+    ['extraAttr','escape', (_,e)=>e.setAttribute('title','PRIVATE_ANNOTATION')],
+    ['hidden','escape', (_,e)=>e.setAttribute('hidden','')],
+    ['extraText','escape', (_,e)=>{e.text='PRIVATE_TEXT'}],
+    ['nested','escape', (f,e)=>e.append(new f.Node('SPAN'))],
+    ['paragraphDir','scope', (f)=>f.paragraph.setAttribute('dir','auto')],
+    ['parentDecoration','escape', (f)=>f.markdown.setAttribute('class','qwen-markdown foreign')],
+    ['whitespaceSibling','escape', (f)=>{f.paragraph.text=' ';}],
+    ['badPunctuation','escape', (_,e)=>{e.text='*'}],
+    ['spoofClass','other', (_,e)=>e.setAttribute('class','qwen-markdown-escape forged')],
+    ['bidi','bidi', (_,e)=>e.setAttribute('class','qwen-markdown-bidi-ltr')],
+    ['rich','decorated', (f,e)=>{e.detach(); f.paragraph.append(new f.Node('STRONG',{class:'qwen-markdown-strong'},'PRIVATE_RICH'));}],
+    ['reflected','other', (_,e)=>e.setAttribute('class','PRIVATE_CLASS')],
+    ['invalidJSON','escape_json', f=>{f.paragraph.children[0].children[0].text='prose ';}],
+    ['untaggedEscape','escape_json', f=>{f.paragraph.children[0].children[0].text=String.raw`{"a":"left\\`;}],
+  ];
+  for (const [name,kind,mutate] of cases) {
+    const f = await submitted(plus);
+    const [leaf] = renderJSONEscapes(f, String.raw`{"a":"x\"y"}`);
+    mutate(f,leaf);
+    const result = await f.run('inspect',{expectedModelChoice:choice(plus)});
+    expect(result.error,name).toBe('unsupported_response_format');
+    expect(result.detail,name).toBe('authored_source');
+    expect(result.adapterFailureStructure,name).toEqual({version:1,provider:'qwen',trigger:'authored_source',stage:kind === 'scope' ? 'outside' : 'inline',reason:kind,count:0});
+    expect(result.text,name).toBeUndefined();
+    expect(JSON.stringify(result),name).not.toContain('PRIVATE');
+    expect(f.send.clicks,name).toBe(1);
+  }
+});
+
+
+test('a directional leaf beside a plain leaf stays rejected and reports bidi for both paragraph profiles', async () => {
+  for (const multiple of [false,true]) {
+    const f = await submitted(plus);
+    if (multiple) appendRun(f, 'retained suffix');
+    f.literal.parentElement!.append(new f.Node('SPAN',{class:'qwen-markdown-bidi-ltr',dir:'ltr'},'PRIVATE_DIRECTIONAL'));
+    const result = await f.run('inspect',{expectedModelChoice:choice(plus)});
+    expect(result.error).toBe('unsupported_response_format');
+    expect(result.adapterFailureStructure).toEqual({version:1,provider:'qwen',trigger:'authored_source',stage:'inline',reason:'bidi',count:0});
+    expect(result.text).toBeUndefined();
+    expect(f.send.clicks).toBe(1);
+  }
+});
+
+function renderManyRuns(f: Page, count: number) {
+  const source = JSON.stringify({type:'message',text:'q'.repeat(count)});
+  f.paragraph.replaceChildren();
+  f.paragraph.setAttribute('dir','ltr');
+  for (let i = 0; i < count; i++) appendRun(f, i < count - 1 ? source[i] : source.slice(i));
+  return source;
+}
+
+test('bounded complete Qwen paragraphs with 65 through 256 real runs preserve the entire JSON', async () => {
+  for (const count of [65,255,256]) {
+    const f = await submitted(plus);
+    const source = renderManyRuns(f,count);
+    const result = await f.run('inspect',{expectedModelChoice:choice(plus)});
+    expect(result.error,count).toBeUndefined();
+    expect(result.answerComplete).toBe(true);
+    expect(result.text).toBe(source);
+    expect(f.send.clicks).toBe(1);
+  }
+  const f = await submitted(plus);
+  const cmd = ('"fixture" and backslash \\\\ ').repeat(21);
+  const source = JSON.stringify({type:'tool_calls',calls:[{name:'exec_command',arguments:{cmd}}]});
+  const escapes = renderJSONEscapes(f,source);
+  expect(escapes.length).toBeGreaterThan(64);
+  expect(f.paragraph.children.length).toBeLessThanOrEqual(256);
+  const result = await f.run('inspect',{expectedModelChoice:choice(plus)});
+  expect(result.error).toBeUndefined();
+  expect(result.text).toBe(source);
+  expect(result.modelEvidence.selected).toEqual(choice(plus));
+  expect(f.send.clicks).toBe(1);
+});
+
+test('a late invalid sibling, malformed large envelope and oversized bytes cannot qualify', async () => {
+  for (const kind of ['last','malformed','bytes']) {
+    const f = await submitted(plus);
+    renderManyRuns(f,256);
+    const end = f.paragraph.children[255].children[0];
+    if (kind === 'last') end.setAttribute('class','FOREIGN_PRIVATE_CLASS');
+    if (kind === 'malformed') end.text = 'missing end';
+    if (kind === 'bytes') end.text = '日'.repeat(74_000) + '"}';
+    const result = await f.run('inspect',{expectedModelChoice:choice(plus)});
+    expect(result.error,kind).toBe(kind==='bytes'?'response_too_large':'unsupported_response_format');
+    expect(result.text).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain('PRIVATE');
+    expect(f.send.clicks).toBe(1);
+  }
+});
+
+test('Qwen long-paragraph limit describes only the first structurally atypical sampled run', async () => {
+  for (const kind of ['ordinary_prefix','escape','bidi','decorated','other']) {
+    const f = await submitted(plus);
+    renderManyRuns(f,257);
+    const target = f.paragraph.children[kind === 'ordinary_prefix' ? 64 : 63];
+    if (kind === 'bidi') target.children[0].setAttribute('class','qwen-markdown-bidi-ltr');
+    else if (kind === 'escape') target.setAttribute('class','qwen-markdown-escape');
+    else if (kind === 'decorated') {
+      target.tagName='A'; target.setAttribute('class','qwen-markdown-link');
+    } else target.setAttribute('class','PRIVATE_UNRECOGNIZED_CLASS');
+    const result = await f.run('inspect',{expectedModelChoice:choice(plus)});
+    expect(result.error,kind).toBe('unsupported_response_format');
+    expect(result.adapterFailureStructure,kind).toEqual({version:1,provider:'qwen',trigger:'authored_source',stage:'span_limit',reason:kind,count:2});
+    expect(result.text).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain('PRIVATE');
+    expect(f.send.clicks).toBe(1);
+  }
+});
+
+test('multiple Qwen answer phases are refused with bounded structural facts and no projected response', async () => {
+  for (const kind of ['multiple_text_bearing','one_text_others_empty','all_empty','hidden','media','other_content','over_limit']) {
+    const f = await submitted(max);
+    const shell = f.phase.parentElement!.cloneNode(true), second = shell.children[0];
+    f.flow.append(shell);
+    if (kind === 'one_text_others_empty' || kind === 'all_empty') second.replaceChildren();
+    if (kind === 'all_empty') f.phase.replaceChildren();
+    if (kind === 'hidden') second.values.hidden='';
+    if (kind === 'media') second.replaceChildren(new f.Node('IMG', {src:'PRIVATE_FIXTURE'}));
+    if (kind === 'other_content') second.replaceChildren(new f.Node('A', {},'PRIVATE_FIXTURE'));
+    if (kind === 'over_limit') f.flow.append(shell.cloneNode(true),shell.cloneNode(true));
+    const mutations = f.mutations();
+    const result = await f.run('inspect',{expectedModelChoice:choice(max)});
+    expect(result.error,kind).toBe('unsupported_response_format');
+    expect(result.detail).toBe('authored_source');
+    expect(result.adapterFailureStructure,kind).toEqual({version:1,provider:'qwen',trigger:'authored_source',stage:'phase_set',reason:kind,count:2});
+    expect(result.text).toBeUndefined();
+    expect(result.answerComplete).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain('PRIVATE');
+    expect(f.mutations()).toBe(mutations);
+    expect(f.send.clicks).toBe(1);
   }
 });

@@ -197,6 +197,7 @@ enum WebModelResponseCodec {
         case malformedEnvelope
         case unsupportedWebsiteResponse
         case unknownTool(String)
+        case unsupportedCallFields
         case argumentsMustBeObject
         case customInputMustBeString
         case invalidParameter(String)
@@ -235,6 +236,7 @@ enum WebModelResponseCodec {
             case .malformedEnvelope: "The website returned a malformed model response envelope. No tool calls from this reply were dispatched."
             case .unsupportedWebsiteResponse: "ChatGPT returned website content outside the required response envelope. Computa cannot verify a native website card or action. This reply was not accepted or retried, and no local tool calls from it were dispatched."
             case .unknownTool: "The website requested an unoffered tool. No tool calls from this reply were dispatched."
+            case .unsupportedCallFields: "A website tool call included an unsupported field. Function entries allow only name and arguments. Custom entries allow only name and input. Computa supplies call IDs and metadata. No tool calls from this reply were dispatched."
             case .argumentsMustBeObject: "Web model tool arguments must be a JSON object. No tool calls from this reply were dispatched."
             case .customInputMustBeString: "A custom tool needs literal string input and no function arguments. No tool calls from this reply were dispatched."
             case let .invalidParameter(parameter): "The web model request contains an invalid \(parameter) parameter. No prompt was submitted."
@@ -1054,14 +1056,18 @@ enum WebModelResponseCodec {
                 }
                 guard let tool = request.tools[offeredName] else { throw Failure.unknownTool(offeredName) }
                 guard request.toolPolicy.allowedNames.contains(offeredName) else { throw Failure.rejectedToolChoice }
+                guard Set(call.keys).isSubset(of: ["name", tool.isCustom ? "input" : "arguments"]) else {
+                    onRejectedCall?(.classify(call, custom: tool.isCustom), singleUncommentedCall)
+                    throw Failure.unsupportedCallFields
+                }
                 if tool.isCustom {
-                    guard Set(call.keys) == ["name", "input"], let input = call["input"] as? String else {
+                    guard let input = call["input"] as? String else {
                         onRejectedCall?(.classify(call, custom: true), singleUncommentedCall)
                         throw Failure.customInputMustBeString
                     }
                     return ToolCall(name: tool.name, argumentsJSON: "", namespace: tool.namespace, customInput: input)
                 }
-                guard Set(call.keys) == ["name", "arguments"], let arguments = call["arguments"] as? [String: Any] else {
+                guard let arguments = call["arguments"] as? [String: Any] else {
                     onRejectedCall?(.classify(call, custom: false), singleUncommentedCall)
                     throw Failure.argumentsMustBeObject
                 }

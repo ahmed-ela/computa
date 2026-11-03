@@ -10,13 +10,10 @@ final class WebModelRejectedReplyCaptureTests: XCTestCase {
             #"{"name":"exec_command","arguments":null}"#,
             #"{"name":"exec_command","arguments":[]}"#,
             #"{"name":"exec_command"}"#,
-            #"{"name":"exec_command","arguments":{"cmd":"printf private"},"extra":true}"#,
         ]
         let invalidCustoms = [
             #"{"name":"apply_patch","input":{"patch":"private"}}"#,
             #"{"name":"apply_patch","input":null}"#,
-            #"{"name":"apply_patch","arguments":{}}"#,
-            #"{"name":"apply_patch","input":"private literal patch","extra":true}"#,
         ]
         for stream in [false, true] {
             for call in invalidFunctions {
@@ -24,6 +21,20 @@ final class WebModelRejectedReplyCaptureTests: XCTestCase {
             }
             for call in invalidCustoms {
                 try await assertCallShapeFailure(call, custom: true, mode: "exact_task", stream: stream)
+            }
+        }
+    }
+
+    func testUnsupportedCallFieldsRejectEntireBatchWithoutCorrectionOrDispatch() async throws {
+        for call in [
+            #"{"name":"exec_command","arguments":{"cmd":"printf private"},"private-extra":true}"#,
+            #"{"name":"apply_patch","input":"private literal patch","private-extra":true}"#,
+            #"{"name":"apply_patch","arguments":{}}"#
+        ] {
+            let reply = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf private"}},"# + call + "]}"
+            for stream in [false, true] {
+                try await assertRejectedReplyFailure(reply, expected: .unsupportedCallFields,
+                    reason: "unsupported_call_fields", mode: "exact_task", stream: stream)
             }
         }
     }

@@ -1445,6 +1445,9 @@ actor WebModelServer {
                             } else if case .unsupportedWebsiteResponse = error as? WebModelResponseCodec.Failure {
                                 captureRejectedReply(text, diagnostic: .unsupportedWebsiteResponse, taskID: taskID,
                                     inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
+                            } else if case .unsupportedCallFields = error as? WebModelResponseCodec.Failure {
+                                captureRejectedReply(text, diagnostic: .unsupportedCallFields, taskID: taskID,
+                                    inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
                             } else if case .argumentsMustBeObject = error as? WebModelResponseCodec.Failure {
                                 captureRejectedReply(text, diagnostic: .invalidFunctionCallShape, taskID: taskID,
                                     inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
@@ -1790,8 +1793,7 @@ actor WebModelServer {
         case malformed(WebModelResponseCodec.MalformedEnvelopeDiagnostic)
         case unofferedTool
         case unsupportedWebsiteResponse
-        // These codec failures cover both field sets and value types; the
-        // diagnostic must not infer which predicate failed without the reply.
+        case unsupportedCallFields
         case invalidFunctionCallShape
         case invalidCustomCallShape
         case invalidBrowserReadArguments
@@ -1816,6 +1818,8 @@ actor WebModelServer {
             diagnosticFields = ["reason": "unoffered_tool", "utf8Bytes": text.utf8.count]
         case .unsupportedWebsiteResponse:
             diagnosticFields = ["reason": "unsupported_website_response", "utf8Bytes": text.utf8.count]
+        case .unsupportedCallFields:
+            diagnosticFields = ["reason": "unsupported_call_fields", "utf8Bytes": text.utf8.count]
         case .invalidFunctionCallShape:
             diagnosticFields = ["reason": "invalid_function_call_shape", "utf8Bytes": text.utf8.count]
         case .invalidCustomCallShape:

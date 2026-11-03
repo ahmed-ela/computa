@@ -9,7 +9,7 @@ final class WebsiteFailureHistoryTests: XCTestCase {
         let model = WebsiteModelChoice(provider: "groq", key: "qwen/qwen3.8-27b", label: "Qwen/Qwen3.8-27B").modelID
         let task = UUID().uuidString, thread = UUID().uuidString
         let failures: [WebModelResponseCodec.Failure] = [.unknownTool("PRIVATE_TOOL_CANARY"), .emptyReply,
-            .malformedEnvelope, .argumentsMustBeObject, .customInputMustBeString, .invalidBrowserReadArguments]
+            .malformedEnvelope, .unsupportedCallFields, .argumentsMustBeObject, .customInputMustBeString, .invalidBrowserReadArguments]
         for failure in failures {
             let turn = UUID().uuidString
             let data = try WebModelServer.errorBody(for: failure)

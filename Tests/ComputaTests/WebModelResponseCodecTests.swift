@@ -1980,7 +1980,11 @@ final class WebModelResponseCodecTests: XCTestCase {
                 XCTAssertTrue($1)
                 shapes.append($0)
             }) {
-                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, custom ? .customInputMustBeString : .argumentsMustBeObject)
+                let failure: WebModelResponseCodec.Failure = switch expected {
+                case .functionExtraKeys, .customExtraKeys, .functionUsedInput, .customUsedArguments: .unsupportedCallFields
+                default: custom ? .customInputMustBeString : .argumentsMustBeObject
+                }
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, failure)
             }
             XCTAssertEqual(shapes, [expected])
         }
@@ -3850,7 +3854,7 @@ final class WebModelResponseCodecTests: XCTestCase {
         for text in [#"{"type":"tool_calls","calls":[{"name":"computer_v2_snapshot","arguments":{},"input":"ambiguous"}]}"#,
                      #"{"type":"tool_calls","calls":[{"name":"computer_v2_snapshot","arguments":{},"unexpected":true}]}"#] {
             XCTAssertThrowsError(try WebModelResponseCodec.parseReply(text, request: prepared)) {
-                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .argumentsMustBeObject)
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .unsupportedCallFields)
             }
         }
         for text in [#"{"type":"message","text":"done","calls":[]}"#,

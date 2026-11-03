@@ -441,7 +441,7 @@ function computaQwenDOM(c) {
     const unsupported = (stage, reason, count = 0) => {
       const result = { text: '', finalMarkup: false, formatIssue: true };
       Object.defineProperty(result, 'failureStructure', { value: () => ({
-        version: 1, provider: 'qwen', trigger: 'authored_source', stage, reason, count: Math.min(count, 2)
+        version: 1, provider: 'qwen', trigger: 'authored_source', stage, reason: typeof reason === 'function' ? reason() : reason, count: Math.min(count, 2)
       }) });
       return result;
     };
@@ -449,15 +449,99 @@ function computaQwenDOM(c) {
     if (!c.visible(flows[0])) return unsupported('flow', 'hidden');
     const flow = flows[0], phases = c.nodes(flow, '.response-message-content.phase-answer');
     if (!phases.length) return { text: '', finalMarkup: false, formatIssue: false };
-    if (phases.length !== 1) return unsupported('phase', 'count', phases.length);
+    if (phases.length !== 1) return unsupported('phase_set', () => {
+      if (phases.length > 3) return 'over_limit';
+      // Count only structurally empty branches and physically visible,
+      // text-bearing leaves. Never inspect the value of a text node.
+      const wrapper = phase => phase.parentElement;
+      if (!phases.every(p => wrapper(p)?.tagName === 'DIV' && wrapper(p).parentElement === flow
+        && wrapper(p).childNodes.length === 1 && wrapper(p).attributes.length === 0)
+        || new Set(phases.map(wrapper)).size !== phases.length) return 'other_content';
+      const invisible = node => {
+        const style = getComputedStyle(node);
+        return node.closest('[hidden], [inert], [aria-hidden="true"]') || style.display === 'none'
+          || style.visibility !== 'visible' || style.opacity === '0';
+      };
+      if (phases.some(p => invisible(wrapper(p)))) return 'hidden';
+      const tags = ['DIV','DIV','DIV','DIV','SPAN','SPAN'];
+      const classes = [['response-message-content t2t phase-answer'], ['custom-qwen-markdown'],
+        ['qwen-markdown','qwen-markdown qwen-markdown-loose'], ['qwen-markdown-paragraph'],
+        ['qwen-markdown-text'], ['qwen-markdown-text-node']];
+      let branches = 0, budget = 96;
+      for (const p of phases) {
+        let hasText = false;
+        const stack = [[p, 0]];
+        while (stack.length) {
+          const [node, depth] = stack.pop();
+          if (--budget < 0 || node.childNodes.length > 32) return 'over_limit';
+          if (invisible(node)) return 'hidden';
+          if (['IMG','PICTURE','VIDEO','AUDIO','IFRAME','OBJECT','CANVAS'].includes(node.tagName)
+            || node.tagName === 'A' && node.getAttribute('download') !== null) return 'media';
+          const cls = node.getAttribute('class');
+          if (node.tagName !== tags[depth] || !classes[depth]?.includes(cls)
+            || node.attributes.length > (depth === 3 ? 2 : 1)
+            || node.attributes.length === 2 && node.getAttribute('dir') !== 'ltr') return 'other_content';
+          if ((depth < 3 || depth === 4) && node.children.length > 1) return 'other_content';
+          for (const child of node.childNodes) {
+            if (child.nodeType === 3 && depth === 5) {
+              if (child.length) {
+                if (!c.visible(node)) return 'hidden';
+                hasText = true;
+              }
+            } else if (child.nodeType === 1 && depth < 5) stack.push([child, depth + 1]);
+            else return 'other_content';
+          }
+        }
+        if (hasText) branches++;
+      }
+      return branches >= 2 ? 'multiple_text_bearing' : branches === 1 ? 'one_text_others_empty' : 'all_empty';
+    }, phases.length);
     if (!phases[0].classList.contains('t2t')) return unsupported('phase', 'class');
     const phase = phases[0];
-    // Only repeated copies of the ordinary inert text-run shape can share a
-    // source. Validate every child, then return the whole paragraph's DOM text,
-    // including inter-run whitespace. Never join a selection of matching leaves.
+    // The site renders escapes as sibling tokens and removes their leading
+    // backslash. Only the three punctuation escapes allowed in JSON have a
+    // unique inverse here. Never infer a missing escape from malformed JSON.
+    const inlineKind = node => {
+      const cls = node.getAttribute('class');
+      switch (node.tagName) {
+      case 'SPAN':
+        if (cls === 'qwen-markdown-escape') return 'escape';
+        if (cls === 'qwen-markdown-bidi-ltr') return 'bidi';
+        break;
+      case 'STRONG': if (cls === 'qwen-markdown-strong') return 'decorated'; break;
+      case 'EM': if (cls === 'qwen-markdown-em') return 'decorated'; break;
+      case 'DEL': if (cls === 'qwen-markdown-del') return 'decorated'; break;
+      case 'CODE': if (cls === 'qwen-markdown-codespan') return 'decorated'; break;
+      case 'A': if (cls === 'qwen-markdown-link') return 'decorated'; break;
+      }
+      return 'other';
+    };
+    // Describe only a fixed prefix on a hard-limit refusal. This observer
+    // runs only when the already rejected, owned failure packet is requested.
+    const prefixKind = runs => {
+      for (let i = 0; i < Math.min(runs.length, 64); i++) {
+        const run = runs[i];
+        if (run.tagName !== 'SPAN' || run.getAttribute('class') !== 'qwen-markdown-text') return inlineKind(run);
+        for (let j = 0; j < Math.min(run.children.length, 4); j++) {
+          const leaf = run.children[j];
+          if (leaf.tagName !== 'SPAN' || leaf.getAttribute('class') !== 'qwen-markdown-text-node') return inlineKind(leaf);
+        }
+        if (run.children.length !== 1) return 'other';
+      }
+      return 'ordinary_prefix';
+    };
+    const childCountIssue = (node, stage) => {
+      const count = node.children.length;
+      if (stage === 'literal' && count > 1 && count <= 64) {
+        const atypical = [...node.children].find(el => el.tagName !== 'SPAN' || el.getAttribute('class') !== 'qwen-markdown-text-node');
+        if (atypical) return unsupported('inline', inlineKind(atypical));
+      }
+      return unsupported(stage, 'count', count);
+    };
+    let projected = null;
     function checkSplitParagraph(paragraph) {
       const count = paragraph.children.length;
-      if (count > 64) return unsupported('span', 'count', count);
+      if (count > 256) return unsupported('span_limit', () => prefixKind(paragraph.children), count);
       // Restrict this additional shape to the known passive markdown ancestry.
       if (paragraph.getAttribute('class') !== 'qwen-markdown-paragraph') return unsupported('span', 'class');
       for (let ancestor = paragraph; ancestor !== phase.parentElement; ancestor = ancestor.parentElement) {
@@ -466,25 +550,56 @@ function computaQwenDOM(c) {
       }
       const layoutOnly = node => node.nodeType === 1 || node.nodeType === 3 && /^\s*$/.test(node.textContent);
       const plain = (node, cls, stage) => {
-        if (node.tagName !== 'SPAN') return unsupported(stage, 'tag');
-        if (node.getAttribute('class') !== cls) return unsupported(stage, 'class');
+        if (node.tagName !== 'SPAN' || node.getAttribute('class') !== cls) return unsupported('inline', inlineKind(node));
         if (!c.visible(node)) return unsupported(stage, 'hidden');
         if (node.attributes.length !== 1) return unsupported('outside', 'scope');
       };
       if (paragraph.childNodes.length > 2 * count + 1) return unsupported('outside', 'node_limit');
       if (![...paragraph.childNodes].every(layoutOnly)) return unsupported('span', 'mixed_text');
+      const escapes = new Set();
       for (const run of paragraph.children) {
+        if (run.tagName === 'SPAN' && run.getAttribute('class') === 'qwen-markdown-escape') {
+          if (run.attributes.length !== 2 || run.getAttribute('dir') !== 'ltr' || !c.visible(run)
+            || run.childNodes.length !== 1 || run.childNodes[0].nodeType !== 3
+            || run.childNodes[0].length !== 1 || !['"', '\\', '/'].includes(run.childNodes[0].textContent)) return unsupported('inline', 'escape');
+          escapes.add(run);
+          continue;
+        }
         const runIssue = plain(run, 'qwen-markdown-text', 'span');
         if (runIssue) return runIssue;
-        if (run.children.length !== 1) return unsupported('literal', 'count', run.children.length);
+        if (run.children.length !== 1) return childCountIssue(run, 'literal');
         if (run.childNodes.length > 3) return unsupported('outside', 'node_limit');
         if (![...run.childNodes].every(layoutOnly)) return unsupported('literal', 'mixed_text');
         const leaf = run.children[0], leafIssue = plain(leaf, 'qwen-markdown-text-node', 'literal');
         if (leafIssue) return leafIssue;
         if (leaf.children.length) return unsupported('literal_contents', 'count', leaf.children.length);
+        if (count > 64 && leaf.childNodes.length !== 1) return unsupported('inline', 'other');
         if (leaf.childNodes.length > 64) return unsupported('outside', 'node_limit');
         if (![...leaf.childNodes].every(node => node.nodeType === 3)) return unsupported('outside', 'scope');
       }
+      if (!escapes.size && count <= 64) return;
+      const markdown = paragraph.parentElement, custom = markdown.parentElement;
+      if (custom.getAttribute('class') !== 'custom-qwen-markdown'
+        || !['qwen-markdown', 'qwen-markdown qwen-markdown-loose'].includes(markdown.getAttribute('class'))
+        || !['phase-answer', 'response-message-content', 't2t'].every(cls => phase.classList.contains(cls))
+        || [...phase.classList].length !== 3 || paragraph.getAttribute('dir') !== 'ltr'
+        || paragraph.childNodes.length !== count) return unsupported('inline', 'escape');
+      const positions = [];
+      let source = '';
+      for (const run of paragraph.children) {
+        const escaped = escapes.has(run), leaf = escaped ? run : run.children[0];
+        if (run.childNodes.length !== 1 || leaf.childNodes.length !== 1 || leaf.childNodes[0].nodeType !== 3)
+          return unsupported('inline', 'other');
+        const value = leaf.childNodes[0];
+        if (!value.length) return unsupported('inline', 'other');
+        if (source.length + (escaped ? 1 : 0) + value.length > 220_000) c.fail('response_too_large');
+        if (escaped) {
+          positions.push(source.length);
+          source += '\\';
+        }
+        source += value.textContent;
+      }
+      projected = { source, positions };
     }
     let literal = phase, splitParagraph = null;
     for (const [stage, tag, cls] of [
@@ -500,7 +615,7 @@ function computaQwenDOM(c) {
         splitParagraph = literal;
         break;
       }
-      if (count !== 1) return unsupported(stage, 'count', count);
+      if (count !== 1) return childCountIssue(literal, stage);
       if ([...literal.childNodes].some(node => node.nodeType === 3 && !/^\s*$/.test(node.textContent || '')))
         return unsupported(stage, 'mixed_text');
       literal = literal.children[0];
@@ -522,8 +637,21 @@ function computaQwenDOM(c) {
       return [...node.childNodes].every(onlyAuthoredSource);
     };
     if (!onlyAuthoredSource(flow)) return unsupported('outside', budget < 0 ? 'node_limit' : 'scope');
-    const text = (splitParagraph || literal).textContent;
+    const text = projected?.source ?? (splitParagraph || literal).textContent;
     if (typeof text !== 'string' || new TextEncoder().encode(text).length > 220_000) c.fail('response_too_large');
+    if (projected) {
+      // Every such punctuation pair must correspond to exactly one escape token.
+      // Return the original spelling and leave the protocol/schema decision to the codec.
+      let index = 0;
+      for (const match of text.matchAll(/\\["\\/]/g)) {
+        if (projected.positions[index++] !== match.index) return unsupported('inline', 'escape_json');
+      }
+      if (index !== projected.positions.length) return unsupported('inline', 'escape_json');
+      try {
+        const envelope = JSON.parse(text);
+        if (envelope === null || typeof envelope !== 'object' || Array.isArray(envelope)) return unsupported('inline', 'escape_json');
+      } catch { return unsupported('inline', 'escape_json'); }
+    }
     // Return the whole source even when it is invalid JSON. Monaco/fences,
     // additional prose blocks and unrelated siblings never become a repaired
     // protocol object; the ordinary codec independently validates raw bytes.

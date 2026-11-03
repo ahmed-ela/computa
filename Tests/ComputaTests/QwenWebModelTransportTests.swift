@@ -415,6 +415,46 @@ final class QwenWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testExactMarkdownEscapesPreserveFunctionArgumentsAndCodecAuthority() async throws {
+        let fixture = try Fixture(setup: "qwenFixture.options.holdResponse=true")
+        defer { fixture.shutdown() }
+        let selected = WebsiteModelChoice(provider: "qwen", key: "Qwen3.7-Plus", label: "Qwen3.7-Plus")
+        let token = try await start(fixture, label: selected.label)
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Read the synthetic escaped fixture.")
+        _ = try await evaluate(fixture.view, #"""
+            qwenFixture.completeResponse();
+            const p = document.querySelector('.qwen-markdown-paragraph'), first = p.firstElementChild;
+            p.dir = 'ltr';
+            first.firstElementChild.textContent = '{"type":"tool_calls","calls":[{"name":"example","arguments":{"text":"before';
+            const escape = document.createElement('span');
+            escape.className = 'qwen-markdown-escape';
+            escape.dir = 'ltr';
+            escape.textContent = '"';
+            const end = first.cloneNode(true);
+            end.firstElementChild.textContent = 'after"}}]}';
+            p.append(escape, end);
+            return true;
+            """#)
+        let complete = try await wait(fixture, token, state: "complete")
+        let source = try XCTUnwrap(complete["text"] as? String)
+        XCTAssertEqual(source, #"{"type":"tool_calls","calls":[{"name":"example","arguments":{"text":"before\"after"}}]}"#)
+        let tool: [String: Any] = ["type": "function", "name": "example",
+            "parameters": ["type": "object", "properties": ["text": ["type": "string"]]]]
+        func parse(with tools: [[String: Any]]) throws -> WebModelResponseCodec.Reply {
+            let data = try JSONSerialization.data(withJSONObject: ["model": selected.modelID, "input": "fixture", "tools": tools])
+            return try WebModelResponseCodec.parseEmbeddedReply(source, request: WebModelResponseCodec.prepareRequest(data))
+        }
+        guard case .toolCalls(let calls) = try parse(with: [tool]) else { return XCTFail("Expected offered function") }
+        let parsed = try XCTUnwrap(calls.first)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(parsed.name, "example")
+        let arguments = try JSONSerialization.jsonObject(with: Data(parsed.argumentsJSON.utf8)) as? [String: String]
+        XCTAssertEqual(arguments, ["text": "before\"after"])
+        XCTAssertThrowsError(try parse(with: []))
+        let finish = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(finish["cleanup"] as? String, "deleted")
+    }
+
     func testSplitAuthoredRunsPreserveInterveningTextAndVerifiedDeletion() async throws {
         let fixture = try Fixture(setup: "qwenFixture.options.holdResponse=true")
         defer { fixture.shutdown() }

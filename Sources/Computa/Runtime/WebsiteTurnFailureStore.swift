@@ -77,7 +77,7 @@ struct WebsiteTurnFailureStore: Sendable {
                 // their legacy absence of retry metadata.
                 let fixedFailures: [WebModelResponseCodec.Failure] = [
                     .emptyReply, .malformedEnvelope, .unknownTool(""),
-                    .argumentsMustBeObject, .customInputMustBeString, .invalidBrowserReadArguments,
+                    .unsupportedCallFields, .argumentsMustBeObject, .customInputMustBeString, .invalidBrowserReadArguments,
                 ]
                 guard let fixed = fixedFailures.first(where: { failure in
                     guard let bytes = try? WebModelServer.errorBody(for: failure),

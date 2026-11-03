@@ -88,12 +88,18 @@ enum WebsiteAdapterFailureDiagnostic {
             if error == "unsupported_response_format", detail == "authored_source", trigger == detail {
                 guard Set(value.keys) == ["version", "provider", "trigger", "stage", "reason", "count"],
                       let stage = value["stage"] as? String, let reason = value["reason"] as? String,
-                      let count = integer(value["count"], 0...2), reason == "count" || count == 0 else { return nil }
+                      let count = integer(value["count"], 0...2), reason == "count" || ["span_limit", "phase_set"].contains(stage) || count == 0 else { return nil }
                 switch stage {
                 case "flow", "phase":
                     guard reason == "count" ? count == 2 : reason == (stage == "flow" ? "hidden" : "class") else { return nil }
                 case "custom", "markdown", "paragraph", "span", "literal":
                     guard reason == "count" ? count != 1 : ["parent_hidden", "mixed_text", "tag", "class", "hidden"].contains(reason) else { return nil }
+                case "phase_set":
+                    guard count == 2, ["multiple_text_bearing", "one_text_others_empty", "all_empty", "media", "hidden", "other_content", "over_limit"].contains(reason) else { return nil }
+                case "span_limit":
+                    guard count == 2, ["escape", "bidi", "decorated", "other", "ordinary_prefix"].contains(reason) else { return nil }
+                case "inline":
+                    guard ["escape", "bidi", "decorated", "other", "escape_json"].contains(reason) else { return nil }
                 case "literal_contents":
                     guard reason == "count", count > 0 else { return nil }
                 case "outside":
