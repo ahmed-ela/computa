@@ -950,11 +950,23 @@ counting Markdown regions as it excludes when extracting the final source.
 Unknown final markup still fails closed. A normal-tab fenced marker passed;
 it did not reproduce the native task's unknown final leaf.
 
+On installed build 402, Qwen Plus verified its selection at submission and
+failed the subsequent selection check. No answer was accepted and deletion
+was unconfirmed. Build 403 records which picker condition failed in the local
+log without recording page content.
+
+A fresh DeepSeek Chat workflow on build 402 opened the local browser fixture,
+patched the file and passed all six tests. A later call returned its arguments
+as a quoted JSON string. The decoder rejected the entire reply before
+dispatch, and the fixture received no form submission. History uses the Open
+Responses wire format for previous calls. The website prompt now specifies
+the object form required for a new function call and shows the custom tool
+name before its literal patch text.
+
 ## Remaining gates
 
-1. Finish candidate401 structural-capture gates, package/install it, then run
-   fresh armed Kimi and Qwen markers with exact selection, full-body ownership
-   and deletion. Retain the original rejection and inspect its finite evidence.
+1. Check each installed model with a fresh task. Verify the response and
+   site-selected model or mode, then check the cleanup receipt.
 2. Use Qwen's finite stage/reason evidence to identify the actual failing guard;
    preserve the failed tasks and do not replay uncertain submissions.
 3. Verify both DeepSeek modes on complete browser/terminal/file workflows,

@@ -425,7 +425,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             let names = includeTools ? ["relay.browser_read", "relay.apply_patch"] : []
             let customNames: Set<String> = includeTools ? ["relay.apply_patch"] : []
             let examples = [#"{"type":"message","text":"OK"}"#] + (includeTools ? [
-                #"{"calls":[{"input":"*** Begin Patch\n*** Update File: /absolute/observed/file.py\n@@\n def label():\n-    return \"old\\\\path\"\n+    return \"new\\\\path\"\n # Other code stays unchanged.\n*** End Patch","name":"relay.apply_patch"}],"type":"tool_calls"}"#,
+                #"{"type":"tool_calls","calls":[{"name":"relay.apply_patch","input":"*** Begin Patch\n*** Update File: /absolute/observed/file.py\n@@\n def label():\n-    return \"old\\\\path\"\n+    return \"new\\\\path\"\n # Other code stays unchanged.\n*** End Patch"}]}"#,
             ] : [])
             for included in [[], [ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)]] {
                 let defaultContract = ComputaAgentInstructions.webResponseContract(offeredToolNames: names,
@@ -1760,7 +1760,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             let request = try WebModelResponseCodec.prepareRequest(original)
             let handoff = try assertRequestValuesAndHandoff(original, request: request)
             XCTAssertTrue(handoff.contains("Exact currently offered local function names: relay.exec_command, relay.write_stdin\n"))
-            let boundary = provider == "claude" ? ComputaAgentInstructions.literalFencedResponseBoundary + "\n" : ""
+            let boundary = ["claude", "deepseek"].contains(provider) ? ComputaAgentInstructions.literalFencedResponseBoundary + "\n" : ""
             XCTAssertTrue(handoff.hasSuffix("{\"type\":\"message\",\"text\":\"OK\"}\n" + boundary + "END_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
             XCTAssertFalse(handoff.contains("obsolete.exec_command"))
             XCTAssertFalse(handoff.contains("functions.exec_command"))
@@ -2092,7 +2092,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                     XCTAssertEqual(request.offeredToolNames, names)
                     XCTAssertFalse(handoff.contains(#""arguments":{}"#))
                     XCTAssertFalse(handoff.contains(user))
-                    XCTAssertEqual(handoff.contains("Include required schema fields; empty arguments must satisfy the schema."),
+                    XCTAssertEqual(handoff.contains("History can encode arguments as strings. Return an object with its required fields."),
                                    !allowed.isEmpty)
                     let functionExamples = handoff.split(separator: "\n").compactMap { line in
                         (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any]
@@ -2158,7 +2158,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let handoff = ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(request.offeredToolNames),
             customToolNames: request.customToolNames,
             includedInstructionText: includedInstructionText,
-            responseFormat: LocalModelCatalog.webProvider(for: request.model) == "claude" ? .literalFencedJSON : .fencedJSON,
+            responseFormat: LocalModelCatalog.webProvider(for: request.model) == "qwen" ? .rawJSON
+                : ["claude", "deepseek"].contains(LocalModelCatalog.webProvider(for: request.model) ?? "") ? .literalFencedJSON : .fencedJSON,
             singleActionRelay: request.singleActionRelay,
             allowedToolNames: expectedAllowedToolNames)
         let closingFence = ["chatgpt", "claude", "groq"].contains(LocalModelCatalog.webProvider(for: request.model) ?? "") ? "\n```" : ""

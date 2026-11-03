@@ -952,17 +952,19 @@ enum ComputaAgentInstructions {
         // executable empty-object example. The complete schemas remain in
         // the request; prose explains the envelope without inventing values.
         let functionContract = functionNames.intersection(exampleNames).isEmpty ? "" : """
-        Function calls: type tool_calls, calls array, each with name and arguments.
-        Include required schema fields; empty arguments must satisfy the schema.
+        Function calls: type tool_calls, calls array. Each entry needs name and arguments.
+        History can encode arguments as strings. Return an object with its required fields.
         """
         // Custom examples use only the current catalog and policy. The JSON
         // encoder preserves literal names/input correctly.
         func customToolExample(_ name: String) -> String {
-            let call: [String: Any] = ["name": name,
-                "input": isPatchName(name) ? patchUpdateExample : "literal input\nwith \"quotes\" and \\backslash"]
-            let value: [String: Any] = ["type": "tool_calls", "calls": [call]]
-            guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]) else { return "" }
-            return String(decoding: data, as: UTF8.self)
+            let input = isPatchName(name) ? patchUpdateExample : "literal input\nwith \"quotes\" and \\backslash"
+            // Put the envelope kind and tool name before the potentially long literal.
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .withoutEscapingSlashes
+            guard let nameData = try? encoder.encode(name), let inputData = try? encoder.encode(input) else { return "" }
+            let encodedName = String(decoding: nameData, as: UTF8.self), encodedInput = String(decoding: inputData, as: UTF8.self)
+            return #"{"type":"tool_calls","calls":[{"name":\#(encodedName),"input":\#(encodedInput)}]}"#
         }
         var callExamples: [String] = []
         if let name = customNames.intersection(exampleNames).sorted().first {

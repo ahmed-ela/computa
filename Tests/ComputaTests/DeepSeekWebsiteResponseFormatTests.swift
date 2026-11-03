@@ -3,18 +3,23 @@ import XCTest
 @testable import Computa
 
 final class DeepSeekWebsiteResponseFormatTests: XCTestCase {
-    func testRawModeEnvelopePreservesToolsAndWholeResponseRejection() throws {
+    func testLiteralFencedModePromptPreservesToolsAndWholeResponseRejection() throws {
         for mode in WebsiteModeChoice.DeepSeekMode.allCases {
             let choice = WebsiteModeChoice(deepSeekMode: mode)
             let raw = try requestData(choice)
             let request = try WebModelResponseCodec.prepareRequest(raw)
             XCTAssertEqual(request.continuationRequest, raw)
             XCTAssertEqual(request.offeredToolNames, ["exec_command"])
-            XCTAssertTrue(request.prompt.contains("Return exactly one raw JSON object."))
+            XCTAssertTrue(request.prompt.contains("Return exactly one fenced JSON code block labelled json."))
+            XCTAssertTrue(request.prompt.contains(ComputaAgentInstructions.literalFencedResponseBoundary))
             XCTAssertTrue(request.prompt.contains("This website does not execute calls."))
             XCTAssertEqual(WebsiteModelCatalog.inferenceSelection(for: choice.requestID)?.modeChoice, choice)
             let valid = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf fixture"}}]}"#
             XCTAssertNoThrow(try WebModelResponseCodec.parseEmbeddedReply(valid, request: request))
+            let quoted = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":"{\"cmd\":\"printf fixture\"}"}]}"#
+            XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(quoted, request: request)) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .argumentsMustBeObject)
+            }
             for invalid in ["Intro\n" + valid, valid + "\nAfterword",
                             valid.replacingOccurrences(of: "exec_command", with: "unoffered_tool")] {
                 XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(invalid, request: request))

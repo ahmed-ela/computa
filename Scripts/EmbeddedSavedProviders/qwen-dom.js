@@ -43,6 +43,18 @@ function computaQwenDOM(c) {
     // wake this read; native retains its original preparation deadline.
     return !!editor && !!trigger && !!name && c.hit(trigger);
   }
+  function rejectSelectionBinding(stage, reason, previousTrigger = null) {
+    // The original error/detail remain the public outcome. A disconnected old
+    // trigger explains one kind of identity change without accepting a new one.
+    try { c.fail('model_unverified', 'selection_binding'); }
+    catch (error) {
+      try {
+        if (reason === 'trigger_replaced' && previousTrigger?.isConnected === false) reason = 'trigger_detached';
+        error.qwenSelectionBinding = stage + '/' + reason;
+      } catch { /* A diagnostic read cannot replace the rejection. */ }
+      throw error;
+    }
+  }
   function picker(closing = null, selecting = null) {
     const trigger = one(visible(document, 'div.wms-trigger[role="button"][aria-label="Select Model"][aria-haspopup="listbox"]')
       .filter(node => !authored(node)), 'model_trigger');
@@ -53,23 +65,31 @@ function computaQwenDOM(c) {
     if (menu && (!menu.classList.contains('wms-list') || menu.getAttribute('aria-label') !== 'Models')) c.fail('model_unverified', 'picker_menu_shape');
     const label = c.normalize(name.textContent), expanded = trigger.getAttribute('aria-expanded');
     if (closing) {
-      if (closing.trigger !== trigger || !closing.menu || !closing.checked || !c.choiceValid(closing.choice)
-        || label !== closing.choice.label) c.fail('model_unverified', 'selection_binding');
+      if (closing.trigger !== trigger) rejectSelectionBinding('closing', 'trigger_replaced', closing.trigger);
+      if (!closing.menu) rejectSelectionBinding('closing', 'previous_menu_missing');
+      if (!closing.checked) rejectSelectionBinding('closing', 'previous_checked_missing');
+      if (!c.choiceValid(closing.choice)) rejectSelectionBinding('closing', 'choice_invalid');
+      if (label !== closing.choice.label) rejectSelectionBinding('closing', 'label_changed');
       if (menu) {
         if (menu !== closing.menu) c.fail('model_unverified', 'picker_menu_replaced');
         const rows = rowsInMenu(menu, label), checked = rows.find(row => row.selected);
-        if (checked.node !== closing.checked || !c.equalChoice(checked.choice, closing.choice)
-          || rows.length !== closing.choices.length
-          || rows.some((row, index) => !c.equalChoice(row.choice, closing.choices[index])))
-          c.fail('model_unverified', 'selection_binding');
+        if (checked.node !== closing.checked) rejectSelectionBinding('closing', 'checked_node_changed');
+        if (!c.equalChoice(checked.choice, closing.choice)) rejectSelectionBinding('closing', 'checked_choice_changed');
+        if (rows.length !== closing.choices.length) rejectSelectionBinding('closing', 'row_count_changed');
+        if (rows.some((row, index) => !c.equalChoice(row.choice, closing.choices[index])))
+          rejectSelectionBinding('closing', 'row_choices_changed');
       }
     }
     if (selecting) {
       const option = selecting.option;
-      if (selecting.trigger !== trigger || !selecting.menu || !option?.node || !option.previous?.node
-        || !c.choiceValid(selecting.target) || !c.choiceValid(option.previous.choice)
-        || label !== selecting.target.label && label !== option.previous.choice.label)
-        c.fail('model_unverified', 'selection_binding');
+      if (selecting.trigger !== trigger) rejectSelectionBinding('selecting', 'trigger_replaced', selecting.trigger);
+      if (!selecting.menu) rejectSelectionBinding('selecting', 'previous_menu_missing');
+      if (!option?.node) rejectSelectionBinding('selecting', 'option_missing');
+      if (!option.previous?.node) rejectSelectionBinding('selecting', 'previous_option_missing');
+      if (!c.choiceValid(selecting.target)) rejectSelectionBinding('selecting', 'target_invalid');
+      if (!c.choiceValid(option.previous.choice)) rejectSelectionBinding('selecting', 'previous_choice_invalid');
+      if (label !== selecting.target.label && label !== option.previous.choice.label)
+        rejectSelectionBinding('selecting', 'label_changed');
       if (menu) {
         if (menu !== selecting.menu) c.fail('model_unverified', 'picker_menu_replaced');
         // Label and checked-row acknowledgement may settle independently, but
@@ -78,9 +98,11 @@ function computaQwenDOM(c) {
         const target = rows.find(row => c.equalChoice(row.choice, selecting.target));
         const checkedNode = c.equalChoice(checked.choice, selecting.target) ? option.node
           : c.equalChoice(checked.choice, option.previous.choice) ? option.previous.node : null;
-        if (target?.node !== option.node || checked.node !== checkedNode || rows.length !== option.choices.length
-          || rows.some((row, index) => !c.equalChoice(row.choice, option.choices[index])))
-          c.fail('model_unverified', 'selection_binding');
+        if (target?.node !== option.node) rejectSelectionBinding('selecting', 'target_node_changed');
+        if (checked.node !== checkedNode) rejectSelectionBinding('selecting', 'checked_node_changed');
+        if (rows.length !== option.choices.length) rejectSelectionBinding('selecting', 'row_count_changed');
+        if (rows.some((row, index) => !c.equalChoice(row.choice, option.choices[index])))
+          rejectSelectionBinding('selecting', 'row_choices_changed');
       }
     }
     // A claimed close may settle ARIA and physical visibility separately. The
@@ -360,6 +382,6 @@ function computaQwenDOM(c) {
     setter.call(form.editor, prompt);
     form.editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));
   }
-  return { firstBodyPresentation, firstBodyFailureStructure, initialResponseIdentityTranscript: () => transcript(true), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer,
+  return { rejectSelectionBinding, firstBodyPresentation, firstBodyFailureStructure, initialResponseIdentityTranscript: () => transcript(true), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer,
     deletionTrigger, deletionMenu, deletionConfirmation, deletionObserved, insertLiteral };
 }

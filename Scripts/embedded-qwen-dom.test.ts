@@ -113,3 +113,29 @@ describe('Qwen observed DOM driver', () => {
     expect(f.mutations()).toBe(0);
   });
 });
+
+test('in-flight picker-close and option-selection failures keep selection_binding and distinct finite reasons', () => {
+  const f = fixture(); f.openPicker(); const dom = f.read();
+  const rows = dom.modelRows(f.modelMenu), checked = rows.find((r: any) => r.selected);
+  const choices = rows.map((r: any) => r.choice);
+  const closing = {trigger:f.trigger,menu:f.modelMenu,checked:checked.node,choice:checked.choice,choices};
+  const selecting = {trigger:f.trigger,menu:f.modelMenu,target:checked.choice,option:{node:checked.node,previous:checked,choices}};
+  const detached = new f.Node('DIV'); detached.detach();
+  function rejected(close: any, select: any, tag: string) {
+    let error: any; try { dom.picker(close,select); } catch(caught) { error=caught; }
+    expect(error).toMatchObject({error:'model_unverified',detail:'selection_binding',qwenSelectionBinding:tag});
+  }
+  for (const [key,value,reason] of [
+    ['trigger',detached,'trigger_detached'],['menu',null,'previous_menu_missing'],['checked',null,'previous_checked_missing'],
+    ['choice',{},'choice_invalid'],['choice',choices[1],'label_changed'],['checked',rows[1].node,'checked_node_changed'],
+    ['choices',choices.slice(1),'row_count_changed'],['choices',[choices[0],choices[2],choices[1]],'row_choices_changed'],
+  ] as const) rejected({...closing,[key]:value},null,'closing/'+reason);
+  for(const [key,value,reason] of [
+    ['trigger',detached,'trigger_detached'],['menu',null,'previous_menu_missing'],['target',{},'target_invalid'],
+    ['option',null,'option_missing'],['option',{...selecting.option,previous:null},'previous_option_missing'],
+    ['option',{...selecting.option,previous:{...checked,choice:{}}},'previous_choice_invalid'],
+    ['option',{...selecting.option,node:rows[1].node},'target_node_changed'],
+    ['option',{...selecting.option,choices:choices.slice(1)},'row_count_changed'],
+    ['option',{...selecting.option,choices:[choices[0],choices[2],choices[1]]},'row_choices_changed'],
+  ] as const) rejected(null,{...selecting,[key]:value},'selecting/'+reason);
+});

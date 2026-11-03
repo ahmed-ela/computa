@@ -2232,7 +2232,30 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         let details = commonDetails + providerDetails, detail = observed["detail"] as? String
         let firstBinding = qwenFirstUserBindingDiagnostic(observed, provider: provider).map { " " + $0 } ?? ""
-        return "action=\(actions.contains(action) ? action : "other") error=\(errors.contains(error) ? error : "other") detail=\(detail.map { details.contains($0) ? $0 : "other" } ?? "absent")" + firstBinding
+        return "action=\(actions.contains(action) ? action : "other") error=\(errors.contains(error) ? error : "other") detail=\(detail.map { details.contains($0) ? $0 : "other" } ?? "absent")" + firstBinding + qwenSelectionBindingDiagnostic(observed, provider: provider)
+    }
+
+    private static func qwenSelectionBindingDiagnostic(_ observed: [String: Any], provider: Provider) -> String {
+        guard provider == .qwen, observed["error"] as? String == "model_unverified",
+              observed["detail"] as? String == "selection_binding",
+              let value = observed["qwenSelectionBinding"] as? String, value.utf8.count <= 64 else { return "" }
+        let parts = value.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 2 else { return "" }
+        let stage = String(parts[0]), reason = String(parts[1])
+        let reasons: [String]
+        switch stage {
+        case "closing":
+            reasons = ["trigger_replaced", "trigger_detached", "previous_menu_missing", "previous_checked_missing", "choice_invalid",
+                       "label_changed", "checked_node_changed", "checked_choice_changed", "row_count_changed", "row_choices_changed"]
+        case "selecting":
+            reasons = ["trigger_replaced", "trigger_detached", "previous_menu_missing", "option_missing", "previous_option_missing",
+                       "target_invalid", "previous_choice_invalid", "label_changed", "target_node_changed", "checked_node_changed",
+                       "row_count_changed", "row_choices_changed"]
+        case "bound", "display_before_click", "display_preclick", "display_after_click", "id_before_hash", "id_after_hash", "body_after_hash":
+            reasons = ["selection_pending", "choice_unbound", "picker_open", "trigger_replaced", "trigger_detached", "label_changed"]
+        default: return ""
+        }
+        return reasons.contains(reason) ? " selectionStage=\(stage) selectionReason=\(reason)" : ""
     }
 
     // Preserve the existing Kimi diagnostic entry point for its focused tests.

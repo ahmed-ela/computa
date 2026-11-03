@@ -250,7 +250,7 @@ async function computaSavedConversation(input, c, dom, config) {
       return dom.picker(closing, selecting);
     };
     let modeObservationDiagnostic = null;
-    function selectionEvidence(required = true) {
+    function selectionEvidence(required = true, stage = 'bound') {
       if (usesModes) {
         modeObservationDiagnostic = null;
         const controls = dom.modeControls(), selected = state.mode?.choice;
@@ -298,7 +298,11 @@ async function computaSavedConversation(input, c, dom, config) {
       const p = picker(), selected = state.model?.choice;
       if (state.selection?.stage === 'selected' || !selected || !p.closed
         || p.trigger !== state.model.trigger || p.label !== selected.label) {
-        if (required) c.fail('model_unverified', 'selection_binding');
+        if (required) {
+          const reason = state.selection?.stage === 'selected' ? 'selection_pending' : !selected ? 'choice_unbound'
+            : !p.closed ? 'picker_open' : p.trigger !== state.model.trigger ? 'trigger_replaced' : 'label_changed';
+          dom.rejectSelectionBinding(stage, reason, state.model?.trigger);
+        }
         return null;
       }
       if (input.expectedModelChoice != null && !c.equalChoice(selected, input.expectedModelChoice)) c.fail('model_mismatch', 'selection_target');
@@ -399,7 +403,7 @@ async function computaSavedConversation(input, c, dom, config) {
         || input.expectedUserCounts.some(value => ![0, 1].includes(value)) || !input.expectedUserCounts.includes(1)) reject();
       const form = dom.composer();
       if (!form.empty || !c.enabled(form.editor)) reject();
-      selectionEvidence();
+      selectionEvidence(true, held?.clicked ? 'display_after_click' : 'display_before_click');
       const text = t.first.text;
       const preview = text.length === previewLength && prompt.startsWith(text);
       if (!held && (!view.collapsed || !preview && (text !== '' || !t.pendingAnswer))) reject();
@@ -418,7 +422,7 @@ async function computaSavedConversation(input, c, dom, config) {
       guard();
       const current = dom.initialResponseIdentityTranscript();
       const currentView = dom.firstBodyPresentation(current);
-      selectionEvidence();
+      selectionEvidence(true, 'display_preclick');
       if (!sameFirstDisplay(currentView) || !currentView.collapsed || current.first.text !== text
         || !dom.composer().empty || !c.hit(view.control)) reject();
       claim.clicked = true;
@@ -634,7 +638,7 @@ async function computaSavedConversation(input, c, dom, config) {
             : input.expectedUserCounts.some(value => ![0, 1].includes(value)) ? 'counts_invalid'
             : !input.expectedUserCounts.includes(1) ? 'one_user_not_expected' : 'predicate_changed',
             () => dom.firstBodyFailureStructure(candidate.first, state.inserted.prompt));
-        selectionEvidence();
+        selectionEvidence(true, 'id_before_hash');
         if (!state.responseIdentity) state.responseIdentity = { canonical: route.canonical,
           first: candidate.first, answer: candidate.pendingAnswer,
           userTurn: candidate.first.root.parentElement, outer: candidate.pendingAnswer.outer };
@@ -644,7 +648,7 @@ async function computaSavedConversation(input, c, dom, config) {
         guard();
         const current = dom.initialResponseIdentityTranscript();
         validateInitialResponseIdentity(current);
-        selectionEvidence();
+        selectionEvidence(true, 'id_after_hash');
         if (fingerprint !== state.submittedFingerprint) firstBindingFailure('initial_response_digest', 'submitted_fingerprint_mismatch');
         if (current.pendingAnswer) return { qwenInitialResponseIdentityPending: true, url: document.URL,
           sessionLifecycle: 'saved_conversation_delete', temporary: false };
@@ -684,7 +688,7 @@ async function computaSavedConversation(input, c, dom, config) {
       guard(); if (!sameFirst(initial.t.first)) firstFailure('first_changed_after_hash');
       if (state.firstDisplay && fingerprint !== state.submittedFingerprint) firstFailure('first_pinned_hash_mismatch');
       if (state.modeHandoff && !state.modeHandoff.committed) commitInitialModeHandoff(initial.t.first, fingerprint);
-      selectionEvidence();
+      selectionEvidence(true, 'body_after_hash');
       if (state.first) {
         const unpublished = input.action === 'inspect' && input.allowFirstUserBinding === true && input.expectedFirstUserFingerprint == null;
         if (!sameFirst(state.first)) firstFailure('first_pinned_node_changed');
@@ -807,6 +811,9 @@ async function computaSavedConversation(input, c, dom, config) {
         && error.firstContainerDiagnostic ? { firstContainerDiagnostic: error.firstContainerDiagnostic } : {}),
       ...(config.selectionKind === 'mode' && error.error === 'mode_unverified' && error.modeObservationDiagnostic
         ? { modeObservationDiagnostic: error.modeObservationDiagnostic } : {}),
+      ...(config.stateKey === '__computaQwenSavedSessionV1' && error.error === 'model_unverified'
+        && error.detail === 'selection_binding' && error.qwenSelectionBinding
+        ? { qwenSelectionBinding: error.qwenSelectionBinding } : {}),
       ...(config.stateKey === '__computaQwenSavedSessionV1' && error.error === 'conversation_changed'
         && error.detail === 'first_user_message' && error.qwenFirstUserDiagnostic
         ? { qwenFirstUserDiagnostic: error.qwenFirstUserDiagnostic } : {}),
@@ -862,6 +869,18 @@ function computaQwenDOM(c) {
     // wake this read; native retains its original preparation deadline.
     return !!editor && !!trigger && !!name && c.hit(trigger);
   }
+  function rejectSelectionBinding(stage, reason, previousTrigger = null) {
+    // The original error/detail remain the public outcome. A disconnected old
+    // trigger explains one kind of identity change without accepting a new one.
+    try { c.fail('model_unverified', 'selection_binding'); }
+    catch (error) {
+      try {
+        if (reason === 'trigger_replaced' && previousTrigger?.isConnected === false) reason = 'trigger_detached';
+        error.qwenSelectionBinding = stage + '/' + reason;
+      } catch { /* A diagnostic read cannot replace the rejection. */ }
+      throw error;
+    }
+  }
   function picker(closing = null, selecting = null) {
     const trigger = one(visible(document, 'div.wms-trigger[role="button"][aria-label="Select Model"][aria-haspopup="listbox"]')
       .filter(node => !authored(node)), 'model_trigger');
@@ -872,23 +891,31 @@ function computaQwenDOM(c) {
     if (menu && (!menu.classList.contains('wms-list') || menu.getAttribute('aria-label') !== 'Models')) c.fail('model_unverified', 'picker_menu_shape');
     const label = c.normalize(name.textContent), expanded = trigger.getAttribute('aria-expanded');
     if (closing) {
-      if (closing.trigger !== trigger || !closing.menu || !closing.checked || !c.choiceValid(closing.choice)
-        || label !== closing.choice.label) c.fail('model_unverified', 'selection_binding');
+      if (closing.trigger !== trigger) rejectSelectionBinding('closing', 'trigger_replaced', closing.trigger);
+      if (!closing.menu) rejectSelectionBinding('closing', 'previous_menu_missing');
+      if (!closing.checked) rejectSelectionBinding('closing', 'previous_checked_missing');
+      if (!c.choiceValid(closing.choice)) rejectSelectionBinding('closing', 'choice_invalid');
+      if (label !== closing.choice.label) rejectSelectionBinding('closing', 'label_changed');
       if (menu) {
         if (menu !== closing.menu) c.fail('model_unverified', 'picker_menu_replaced');
         const rows = rowsInMenu(menu, label), checked = rows.find(row => row.selected);
-        if (checked.node !== closing.checked || !c.equalChoice(checked.choice, closing.choice)
-          || rows.length !== closing.choices.length
-          || rows.some((row, index) => !c.equalChoice(row.choice, closing.choices[index])))
-          c.fail('model_unverified', 'selection_binding');
+        if (checked.node !== closing.checked) rejectSelectionBinding('closing', 'checked_node_changed');
+        if (!c.equalChoice(checked.choice, closing.choice)) rejectSelectionBinding('closing', 'checked_choice_changed');
+        if (rows.length !== closing.choices.length) rejectSelectionBinding('closing', 'row_count_changed');
+        if (rows.some((row, index) => !c.equalChoice(row.choice, closing.choices[index])))
+          rejectSelectionBinding('closing', 'row_choices_changed');
       }
     }
     if (selecting) {
       const option = selecting.option;
-      if (selecting.trigger !== trigger || !selecting.menu || !option?.node || !option.previous?.node
-        || !c.choiceValid(selecting.target) || !c.choiceValid(option.previous.choice)
-        || label !== selecting.target.label && label !== option.previous.choice.label)
-        c.fail('model_unverified', 'selection_binding');
+      if (selecting.trigger !== trigger) rejectSelectionBinding('selecting', 'trigger_replaced', selecting.trigger);
+      if (!selecting.menu) rejectSelectionBinding('selecting', 'previous_menu_missing');
+      if (!option?.node) rejectSelectionBinding('selecting', 'option_missing');
+      if (!option.previous?.node) rejectSelectionBinding('selecting', 'previous_option_missing');
+      if (!c.choiceValid(selecting.target)) rejectSelectionBinding('selecting', 'target_invalid');
+      if (!c.choiceValid(option.previous.choice)) rejectSelectionBinding('selecting', 'previous_choice_invalid');
+      if (label !== selecting.target.label && label !== option.previous.choice.label)
+        rejectSelectionBinding('selecting', 'label_changed');
       if (menu) {
         if (menu !== selecting.menu) c.fail('model_unverified', 'picker_menu_replaced');
         // Label and checked-row acknowledgement may settle independently, but
@@ -897,9 +924,11 @@ function computaQwenDOM(c) {
         const target = rows.find(row => c.equalChoice(row.choice, selecting.target));
         const checkedNode = c.equalChoice(checked.choice, selecting.target) ? option.node
           : c.equalChoice(checked.choice, option.previous.choice) ? option.previous.node : null;
-        if (target?.node !== option.node || checked.node !== checkedNode || rows.length !== option.choices.length
-          || rows.some((row, index) => !c.equalChoice(row.choice, option.choices[index])))
-          c.fail('model_unverified', 'selection_binding');
+        if (target?.node !== option.node) rejectSelectionBinding('selecting', 'target_node_changed');
+        if (checked.node !== checkedNode) rejectSelectionBinding('selecting', 'checked_node_changed');
+        if (rows.length !== option.choices.length) rejectSelectionBinding('selecting', 'row_count_changed');
+        if (rows.some((row, index) => !c.equalChoice(row.choice, option.choices[index])))
+          rejectSelectionBinding('selecting', 'row_choices_changed');
       }
     }
     // A claimed close may settle ARIA and physical visibility separately. The
@@ -1179,7 +1208,7 @@ function computaQwenDOM(c) {
     setter.call(form.editor, prompt);
     form.editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));
   }
-  return { firstBodyPresentation, firstBodyFailureStructure, initialResponseIdentityTranscript: () => transcript(true), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer,
+  return { rejectSelectionBinding, firstBodyPresentation, firstBodyFailureStructure, initialResponseIdentityTranscript: () => transcript(true), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer,
     deletionTrigger, deletionMenu, deletionConfirmation, deletionObserved, insertLiteral };
 }
 

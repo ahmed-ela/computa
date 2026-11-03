@@ -155,3 +155,43 @@ test('late UUID cannot change during the final digest after completed display ha
   const failed=await inspect({allowQwenFirstBodyExpansion:false});
   expect(failed.error).toBe('conversation_changed'); expect(failed.firstUserVerified).toBeUndefined(); expect(control.clicks).toBe(1);
 });
+
+// These fixtures reproduce the same terminal error/detail at different points.
+// The finite diagnostic identifies the predicate. It grants no retry/rebinding.
+function remountPicker(f: ReturnType<typeof fixture>, detached: boolean) {
+  const replacement = new f.Node('DIV', {...f.trigger.values});
+  replacement.append(new f.Node('DIV', {...f.modelName.values}, f.modelName.text));
+  if (detached) f.trigger.detach(); else f.trigger.setAttribute('hidden', '');
+  f.body.append(replacement);
+}
+
+test('a selected Plus trigger remounted after the acknowledged Send fails before any display click', async () => {
+  for (const [kind,reason] of [['detached','trigger_detached'],['hidden','trigger_replaced'],['open','picker_open'],['label','label_changed']]) {
+    const { f, control, inspect } = await sent();
+    if (kind === 'detached' || kind === 'hidden') remountPicker(f,kind === 'detached');
+    if (kind === 'open') f.openPicker();
+    if (kind === 'label') f.modelName.text='PRIVATE_PAGE_CANARY';
+    const result = await inspect();
+    expect(result).toMatchObject({error:'model_unverified', detail:'selection_binding', qwenSelectionBinding:'display_before_click/'+reason});
+    expect(result.firstUserVerified).toBeUndefined(); expect(JSON.stringify(result)).not.toContain('PRIVATE_PAGE_CANARY');
+    expect(f.send.clicks).toBe(1); expect(control.clicks).toBe(0);
+    expect((await inspect()).detail).toBe('terminal_operation');
+  }
+});
+
+test('a remount during the single expansion is identified after click and never repeats it', async () => {
+  const { f, control, render, inspect } = await sent();
+  f.userBody.text=preview; control.onClick=()=>{render();remountPicker(f,true);};
+  expect(await inspect()).toEqual(pending);
+  const r=await inspect(); expect(r.qwenSelectionBinding).toBe('display_after_click/trigger_detached');
+  expect(r.error).toBe('model_unverified'); expect(r.firstUserVerified).toBeUndefined(); expect(control.clicks).toBe(1);
+});
+
+test('model changed after digest is distinguished from the earlier display observation', async () => {
+  for (const [kind,stage] of [['id','id_after_hash'],['final','body_after_hash']]) {
+    const {f, inspect, settleID} = await sent(); f.userBody.text=prompt; if(kind==='final')settleID();
+    f.beforeDigest(()=>{f.modelName.text='PRIVATE_PAGE_CANARY';});
+    const r=await inspect();expect(r.qwenSelectionBinding).toBe(stage+'/label_changed');expect(r.error).toBe('model_unverified');
+    expect(r.detail).toBe('selection_binding');expect(JSON.stringify(r)).not.toContain('PRIVATE_PAGE_CANARY');
+  }
+});

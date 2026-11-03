@@ -168,7 +168,7 @@ async function computaSavedConversation(input, c, dom, config) {
       return dom.picker(closing, selecting);
     };
     let modeObservationDiagnostic = null;
-    function selectionEvidence(required = true) {
+    function selectionEvidence(required = true, stage = 'bound') {
       if (usesModes) {
         modeObservationDiagnostic = null;
         const controls = dom.modeControls(), selected = state.mode?.choice;
@@ -216,7 +216,11 @@ async function computaSavedConversation(input, c, dom, config) {
       const p = picker(), selected = state.model?.choice;
       if (state.selection?.stage === 'selected' || !selected || !p.closed
         || p.trigger !== state.model.trigger || p.label !== selected.label) {
-        if (required) c.fail('model_unverified', 'selection_binding');
+        if (required) {
+          const reason = state.selection?.stage === 'selected' ? 'selection_pending' : !selected ? 'choice_unbound'
+            : !p.closed ? 'picker_open' : p.trigger !== state.model.trigger ? 'trigger_replaced' : 'label_changed';
+          dom.rejectSelectionBinding(stage, reason, state.model?.trigger);
+        }
         return null;
       }
       if (input.expectedModelChoice != null && !c.equalChoice(selected, input.expectedModelChoice)) c.fail('model_mismatch', 'selection_target');
@@ -317,7 +321,7 @@ async function computaSavedConversation(input, c, dom, config) {
         || input.expectedUserCounts.some(value => ![0, 1].includes(value)) || !input.expectedUserCounts.includes(1)) reject();
       const form = dom.composer();
       if (!form.empty || !c.enabled(form.editor)) reject();
-      selectionEvidence();
+      selectionEvidence(true, held?.clicked ? 'display_after_click' : 'display_before_click');
       const text = t.first.text;
       const preview = text.length === previewLength && prompt.startsWith(text);
       if (!held && (!view.collapsed || !preview && (text !== '' || !t.pendingAnswer))) reject();
@@ -336,7 +340,7 @@ async function computaSavedConversation(input, c, dom, config) {
       guard();
       const current = dom.initialResponseIdentityTranscript();
       const currentView = dom.firstBodyPresentation(current);
-      selectionEvidence();
+      selectionEvidence(true, 'display_preclick');
       if (!sameFirstDisplay(currentView) || !currentView.collapsed || current.first.text !== text
         || !dom.composer().empty || !c.hit(view.control)) reject();
       claim.clicked = true;
@@ -552,7 +556,7 @@ async function computaSavedConversation(input, c, dom, config) {
             : input.expectedUserCounts.some(value => ![0, 1].includes(value)) ? 'counts_invalid'
             : !input.expectedUserCounts.includes(1) ? 'one_user_not_expected' : 'predicate_changed',
             () => dom.firstBodyFailureStructure(candidate.first, state.inserted.prompt));
-        selectionEvidence();
+        selectionEvidence(true, 'id_before_hash');
         if (!state.responseIdentity) state.responseIdentity = { canonical: route.canonical,
           first: candidate.first, answer: candidate.pendingAnswer,
           userTurn: candidate.first.root.parentElement, outer: candidate.pendingAnswer.outer };
@@ -562,7 +566,7 @@ async function computaSavedConversation(input, c, dom, config) {
         guard();
         const current = dom.initialResponseIdentityTranscript();
         validateInitialResponseIdentity(current);
-        selectionEvidence();
+        selectionEvidence(true, 'id_after_hash');
         if (fingerprint !== state.submittedFingerprint) firstBindingFailure('initial_response_digest', 'submitted_fingerprint_mismatch');
         if (current.pendingAnswer) return { qwenInitialResponseIdentityPending: true, url: document.URL,
           sessionLifecycle: 'saved_conversation_delete', temporary: false };
@@ -602,7 +606,7 @@ async function computaSavedConversation(input, c, dom, config) {
       guard(); if (!sameFirst(initial.t.first)) firstFailure('first_changed_after_hash');
       if (state.firstDisplay && fingerprint !== state.submittedFingerprint) firstFailure('first_pinned_hash_mismatch');
       if (state.modeHandoff && !state.modeHandoff.committed) commitInitialModeHandoff(initial.t.first, fingerprint);
-      selectionEvidence();
+      selectionEvidence(true, 'body_after_hash');
       if (state.first) {
         const unpublished = input.action === 'inspect' && input.allowFirstUserBinding === true && input.expectedFirstUserFingerprint == null;
         if (!sameFirst(state.first)) firstFailure('first_pinned_node_changed');
@@ -725,6 +729,9 @@ async function computaSavedConversation(input, c, dom, config) {
         && error.firstContainerDiagnostic ? { firstContainerDiagnostic: error.firstContainerDiagnostic } : {}),
       ...(config.selectionKind === 'mode' && error.error === 'mode_unverified' && error.modeObservationDiagnostic
         ? { modeObservationDiagnostic: error.modeObservationDiagnostic } : {}),
+      ...(config.stateKey === '__computaQwenSavedSessionV1' && error.error === 'model_unverified'
+        && error.detail === 'selection_binding' && error.qwenSelectionBinding
+        ? { qwenSelectionBinding: error.qwenSelectionBinding } : {}),
       ...(config.stateKey === '__computaQwenSavedSessionV1' && error.error === 'conversation_changed'
         && error.detail === 'first_user_message' && error.qwenFirstUserDiagnostic
         ? { qwenFirstUserDiagnostic: error.qwenFirstUserDiagnostic } : {}),

@@ -58,6 +58,30 @@ final class SavedAdapterFailureDiagnosticTests: XCTestCase {
             "action=discoverModes error=model_unverified detail=other")
     }
 
+    @MainActor func testQwenSelectionFailureLogsOnlyFiniteStageReasonPairs() {
+        let base = ["error": "model_unverified", "detail": "selection_binding"]
+        let prefix = "action=inspect error=model_unverified detail=selection_binding"
+        func report(_ tag: String, _ provider: EmbeddedWebModelTransport.Provider = .qwen) -> String? {
+            var row = base
+            row["qwenSelectionBinding"] = tag
+            return EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(row, provider: provider, action: "inspect")
+        }
+        XCTAssertEqual(report("display_before_click/trigger_detached"), prefix + " selectionStage=display_before_click selectionReason=trigger_detached")
+        XCTAssertEqual(report("selecting/option_missing"), prefix + " selectionStage=selecting selectionReason=option_missing")
+        XCTAssertEqual(report("closing/checked_node_changed"), prefix + " selectionStage=closing selectionReason=checked_node_changed")
+        for malformed in ["display_after_click/option_missing", "closing/picker_open", "PRIVATE_PAGE_CANARY/trigger_replaced",
+                          "bound/PRIVATE_PAGE_CANARY", "bound/picker_open/", String(repeating: "x", count: 65)] {
+            XCTAssertEqual(report(malformed), prefix)
+        }
+        for other in [EmbeddedWebModelTransport.Provider.kimi, .deepseek] {
+            XCTAssertFalse(report("bound/label_changed", other)?.contains("selectionStage") ?? true)
+        }
+        var fields = ["error": "model_mismatch", "detail": "selection_binding", "qwenSelectionBinding": "bound/label_changed"]
+        XCTAssertFalse(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(fields, provider: .qwen, action: "inspect")!.contains("selectionStage"))
+        fields["error"] = "model_unverified"; fields["detail"] = "model_trigger"
+        XCTAssertFalse(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(fields, provider: .qwen, action: "inspect")!.contains("selectionStage"))
+    }
+
     @MainActor func testInternalSelectionActionsMapToFiniteDeepSeekModeDiagnostics() {
         let provider = EmbeddedWebModelTransport.Provider.deepseek
         for (internalAction, adapterAction) in [("discoverModels", "discoverModes"),
