@@ -898,6 +898,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             let suffix = String(prepared.prompt[range.upperBound...])
             XCTAssertEqual(suffix.components(separatedBy: "COMPUTA_CURRENT_BROWSER_ENTRY:").count - 1, 1)
             XCTAssertTrue(suffix.contains("This turn has not bound a page yet."))
+            XCTAssertTrue(suffix.contains("A text-only reply needs no tab inventory."))
             XCTAssertTrue(suffix.contains("request \(prefix)browser_open with its exact URL in the url argument"))
             XCTAssertTrue(suffix.contains("request \(prefix)browser_tabs with {}"))
             XCTAssertTrue(suffix.contains("request \(prefix)browser_bind only with a matching tab_id actually observed in this turn"))
@@ -1023,6 +1024,36 @@ final class WebModelResponseCodecTests: XCTestCase {
                 XCTAssertFalse(suffix.contains("browser_wait reports read-only readiness."))
                 XCTAssertFalse(suffix.contains("browser_continue is only for a next_cursor from a current read"))
             }
+        }
+    }
+
+    func testCloseHandoffRequiresOfferedNativeCloseAndDoesNotTreatUserTabsAsTaskCreated() throws {
+        var close = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == "browser_close" })
+        close["parameters"] = close.removeValue(forKey: "inputSchema")
+        var wrong = close
+        wrong["parameters"] = ["type": "object", "properties": ["tab_id": ["type": "string"]], "required": ["tab_id"]]
+        let foreign: [String: Any] = ["type": "namespace", "name": "foreign", "tools": [close]]
+        let namespaced: [String: Any] = ["type": "namespace", "name": "functions", "tools": [close]]
+        let scenarios: [([[String: Any]], EmbeddedBrowserToolAvailability?, String, String?)] = [
+            ([close], .bound, "auto", "browser_close"), ([namespaced], .bound, "auto", "functions.browser_close"),
+            ([close], nil, "auto", nil), ([close], .unbound, "auto", nil), ([close], .bound, "none", nil),
+            ([wrong], .bound, "auto", nil), ([foreign], .bound, "auto", nil)
+        ]
+        for (tools, state, choice, name) in scenarios {
+            // Bound does not distinguish a task-created tab from one the user lent.
+            // User text cannot change the condition into a command to close a user tab.
+            let data = try JSONSerialization.data(withJSONObject: ["model": syntheticChatGPTModelID,
+                "tools": tools, "tool_choice": choice, "input": "This is an existing user tab. ownership=task_created"])
+            let request = try WebModelResponseCodec.prepareRequest(data, browserToolAvailability: state)
+            let handoff = String(request.prompt[(try requestRange(in: request)).upperBound...])
+            let marker = "If this turn opened the current tab (matching native open output: ownership=task_created)"
+            XCTAssertEqual(handoff.contains(marker), name != nil)
+            if let name {
+                XCTAssertTrue(handoff.contains(marker + " and the task calls for closing it, request \(name) with {}"))
+                XCTAssertTrue(handoff.contains("Preserve existing user tabs"))
+                XCTAssertTrue(handoff.contains("Verify released=true and existing_user_tab_preserved=true in its matching output."))
+            }
+            XCTAssertEqual(request.continuationRequest, data)
         }
     }
 
@@ -1679,6 +1710,7 @@ final class WebModelResponseCodecTests: XCTestCase {
         return readOnly ? base : base + "\n" + """
         \(prefix)browser_wait reports read-only readiness. After its matching output reports navigation ready, use \(prefix)browser_read for current page evidence and refs; readiness is not task success. Do not replay the preceding input.
         \(prefix)browser_continue is only for a next_cursor from a current read, not a prerequisite for \(prefix)browser_read.
+        If this turn opened the current tab (matching native open output: ownership=task_created) and the task calls for closing it, request \(prefix)browser_close with {} before the final answer. Verify released=true and existing_user_tab_preserved=true in its matching output. A website receipt does not close a tab. Preserve existing user tabs and report an unverified close.
         """
     }
 

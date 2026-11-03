@@ -5,6 +5,7 @@ function computaQwenDOM(c) {
   const visible = (root, selector, max = 256) => c.nodes(root, selector, max).filter(c.visible);
   const one = (values, reason) => c.unique(values, 'document_changed', reason);
   const optional = (values, reason) => values.length ? one(values, reason) : null;
+  const triggerSelector = 'div.wms-trigger[role="button"][aria-label="Select Model"][aria-haspopup="listbox"]';
   const authored = node => !!node.closest('.qwen-chat-message');
   const leaf = (root, selector, reason) => {
     const node = one(visible(root, selector), reason);
@@ -22,7 +23,7 @@ function computaQwenDOM(c) {
   function initialReady({ control, retain, reject }) {
     if (c.nodes(document, '.qwen-chat-message', 64).length) reject('not_fresh');
     const editor = control('composer', document, 'textarea.message-input-textarea');
-    const trigger = control('model_trigger', document, 'div.wms-trigger[role="button"][aria-label="Select Model"][aria-haspopup="listbox"]');
+    const trigger = control('model_trigger', document, triggerSelector);
     const name = trigger ? control('model_label', trigger, '.wms-trigger__text') : null;
     if (trigger && trigger.getAttribute('aria-expanded') !== 'false') reject('model_unverified', 'initial_picker_not_closed');
     if (trigger && name && (name.children.length !== 0 || !c.normalize(name.textContent))) reject('model_unverified', 'initial_model_label');
@@ -56,7 +57,7 @@ function computaQwenDOM(c) {
     }
   }
   function picker(closing = null, selecting = null) {
-    const trigger = one(visible(document, 'div.wms-trigger[role="button"][aria-label="Select Model"][aria-haspopup="listbox"]')
+    const trigger = one(visible(document, triggerSelector)
       .filter(node => !authored(node)), 'model_trigger');
     const name = leaf(trigger, '.wms-trigger__text', 'model_label');
     const menus = visible(document, '[role="listbox"]').filter(node => !authored(node));
@@ -110,7 +111,18 @@ function computaQwenDOM(c) {
     // No other phase gains permission to accept an inconsistent picker state.
     if (menu && expanded !== 'true' && !closing && !selecting) c.fail('model_unverified', 'picker_menu_collapsed');
     if (!menu && expanded !== 'false' && !closing && !selecting) c.fail('model_unverified', 'picker_menu_missing');
-    return { trigger, menu, label, closed: menu === null && expanded === 'false' };
+    return { trigger, name, menu, label, closed: menu === null && expanded === 'false' };
+  }
+  function firstDisplayReplacement(original, held, choice, stage) {
+    const current = picker();
+    if (!current.closed) rejectSelectionBinding(stage, 'picker_open');
+    if (current.label !== choice.label || current.name.textContent !== choice.label)
+      rejectSelectionBinding(stage, 'label_changed');
+    if (original.isConnected !== false || current.trigger === original || !c.enabled(current.trigger)
+      || c.nodes(document, triggerSelector).filter(node => !authored(node)).length !== 1
+      || held && (current.trigger !== held.trigger || current.name !== held.name))
+      rejectSelectionBinding(stage, 'trigger_replaced', original);
+    return held || { trigger: current.trigger, name: current.name };
   }
   function modelRows(menu) {
     const p = picker();
@@ -382,6 +394,6 @@ function computaQwenDOM(c) {
     setter.call(form.editor, prompt);
     form.editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));
   }
-  return { rejectSelectionBinding, firstBodyPresentation, firstBodyFailureStructure, initialResponseIdentityTranscript: () => transcript(true), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer,
+  return { rejectSelectionBinding, firstDisplayReplacement, firstBodyPresentation, firstBodyFailureStructure, initialResponseIdentityTranscript: () => transcript(true), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer,
     deletionTrigger, deletionMenu, deletionConfirmation, deletionObserved, insertLiteral };
 }

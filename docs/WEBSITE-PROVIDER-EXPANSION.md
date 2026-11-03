@@ -963,6 +963,21 @@ Responses wire format for previous calls. The website prompt now specifies
 the object form required for a new function call and shows the custom tool
 name before its literal patch text.
 
+On installed build 403, the Qwen Plus log identified a detached model picker
+on the first conversation read, before the Expand action. Build 404 can hold
+one replacement while inspecting this long first message. The old picker must
+be disconnected and the only current picker must be closed and show the exact
+requested label. The adapter pins its replacement and commits it only after
+the full first message, fingerprint and turn identity verify.
+
+DeepSeek Chat on build 403 repaired the file, passed the six tests, submitted
+the form exactly once and returned its receipt. Its final answer claimed the
+tab had closed. The browser recorded automatic cleanup after the turn and no
+model-issued close. When the browser is bound and the close tool is permitted,
+the response instructions now distinguish the page receipt from the close
+acknowledgment. ChatGPT Instant completed the same workflow including an
+explicit close after recovering from an indentation error in its first edit.
+
 ## Remaining gates
 
 1. Check each installed model with a fresh task. Verify the response and

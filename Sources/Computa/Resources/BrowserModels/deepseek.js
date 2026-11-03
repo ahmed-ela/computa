@@ -381,6 +381,17 @@ async function computaSavedConversation(input, c, dom, config) {
         && (held.answerID === null || held.answerID === view.answerID)
         && held.pins.length === view.pins.length && held.pins.every((node, i) => node === view.pins[i]);
     }
+    // Only the native-granted long Qwen display may pin a detached picker's
+    // replacement. This observation publishes no evidence. Normal selection
+    // reads continue to use the original handle until first-body ownership binds.
+    function checkFirstDisplaySelection(stage, allowReplacement = false) {
+      const claim = state.firstDisplay;
+      if (state.first || !claim || !claim.replacement && (!allowReplacement || state.model.trigger.isConnected !== false)) {
+        selectionEvidence(true, stage);
+        return;
+      }
+      claim.replacement = dom.firstDisplayReplacement(state.model.trigger, claim.replacement, state.model.choice, stage);
+    }
     // An empty body can only wait. A complete exact observed preview can spend
     // one local display claim. Neither path exposes model output or grants ownership.
     function observeFirstDisplay(t) {
@@ -403,11 +414,11 @@ async function computaSavedConversation(input, c, dom, config) {
         || input.expectedUserCounts.some(value => ![0, 1].includes(value)) || !input.expectedUserCounts.includes(1)) reject();
       const form = dom.composer();
       if (!form.empty || !c.enabled(form.editor)) reject();
-      selectionEvidence(true, held?.clicked ? 'display_after_click' : 'display_before_click');
       const text = t.first.text;
       const preview = text.length === previewLength && prompt.startsWith(text);
       if (!held && (!view.collapsed || !preview && (text !== '' || !t.pendingAnswer))) reject();
       const claim = held || (state.firstDisplay = { ...view, canonical: route.canonical, clicked: false, sawExpanded: false, complete: false });
+      checkFirstDisplaySelection(claim.clicked ? 'display_after_click' : 'display_before_click', !claim.clicked && view.collapsed);
       if (claim.sawExpanded && view.collapsed) reject();
       if (!view.collapsed) claim.sawExpanded = true;
       if (view.answerID !== null) claim.answerID = view.answerID;
@@ -422,7 +433,7 @@ async function computaSavedConversation(input, c, dom, config) {
       guard();
       const current = dom.initialResponseIdentityTranscript();
       const currentView = dom.firstBodyPresentation(current);
-      selectionEvidence(true, 'display_preclick');
+      checkFirstDisplaySelection('display_preclick');
       if (!sameFirstDisplay(currentView) || !currentView.collapsed || current.first.text !== text
         || !dom.composer().empty || !c.hit(view.control)) reject();
       claim.clicked = true;
@@ -638,7 +649,7 @@ async function computaSavedConversation(input, c, dom, config) {
             : input.expectedUserCounts.some(value => ![0, 1].includes(value)) ? 'counts_invalid'
             : !input.expectedUserCounts.includes(1) ? 'one_user_not_expected' : 'predicate_changed',
             () => dom.firstBodyFailureStructure(candidate.first, state.inserted.prompt));
-        selectionEvidence(true, 'id_before_hash');
+        checkFirstDisplaySelection('id_before_hash');
         if (!state.responseIdentity) state.responseIdentity = { canonical: route.canonical,
           first: candidate.first, answer: candidate.pendingAnswer,
           userTurn: candidate.first.root.parentElement, outer: candidate.pendingAnswer.outer };
@@ -648,7 +659,7 @@ async function computaSavedConversation(input, c, dom, config) {
         guard();
         const current = dom.initialResponseIdentityTranscript();
         validateInitialResponseIdentity(current);
-        selectionEvidence(true, 'id_after_hash');
+        checkFirstDisplaySelection('id_after_hash');
         if (fingerprint !== state.submittedFingerprint) firstBindingFailure('initial_response_digest', 'submitted_fingerprint_mismatch');
         if (current.pendingAnswer) return { qwenInitialResponseIdentityPending: true, url: document.URL,
           sessionLifecycle: 'saved_conversation_delete', temporary: false };
@@ -688,7 +699,7 @@ async function computaSavedConversation(input, c, dom, config) {
       guard(); if (!sameFirst(initial.t.first)) firstFailure('first_changed_after_hash');
       if (state.firstDisplay && fingerprint !== state.submittedFingerprint) firstFailure('first_pinned_hash_mismatch');
       if (state.modeHandoff && !state.modeHandoff.committed) commitInitialModeHandoff(initial.t.first, fingerprint);
-      selectionEvidence(true, 'body_after_hash');
+      checkFirstDisplaySelection('body_after_hash');
       if (state.first) {
         const unpublished = input.action === 'inspect' && input.allowFirstUserBinding === true && input.expectedFirstUserFingerprint == null;
         if (!sameFirst(state.first)) firstFailure('first_pinned_node_changed');
@@ -697,6 +708,7 @@ async function computaSavedConversation(input, c, dom, config) {
       } else {
         if (input.action !== 'inspect' || input.allowFirstUserBinding !== true || input.expectedFirstUserFingerprint != null)
           firstFailure('first_binding_not_authorized');
+        if (state.firstDisplay?.replacement) state.model.trigger = state.firstDisplay.replacement.trigger;
         state.first = { ...initial.t.first, fingerprint };
       }
       initial = read();

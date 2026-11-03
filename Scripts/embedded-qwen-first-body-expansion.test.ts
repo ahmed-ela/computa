@@ -8,17 +8,17 @@ const pending = { qwenFirstBodyExpansionPending: true, url: canonical, sessionLi
 const idPending = { qwenInitialResponseIdentityPending: true, url: canonical, sessionLifecycle: 'saved_conversation_delete', temporary: false };
 const chunkClass = 'chunked-text-renderer-root chunked-text-renderer-root-with-expand';
 
-async function sent(model = 'Qwen3.7-Plus') {
+async function sent(model = 'Qwen3.7-Plus', outbound = prompt) {
   const f = fixture({ completeOnSend: false });
   for (let i = 0; i < 8; i++) {
     const result = await f.run('selectModel', { modelChoice: choice(model) });
     expect(result.error).toBeUndefined(); if (result.selected) break;
   }
   expect((await f.run('prepare')).prepared).toBe(true);
-  expect((await f.run('insert', { prompt })).inserted).toBe(true);
-  expect((await f.run('sendReady', { prompt })).sendReady).toBe(true);
-  const hash = await fingerprint(prompt);
-  expect((await f.run('submit', { prompt, savedSubmissionFingerprint: hash })).submitted).toBe(true);
+  expect((await f.run('insert', { prompt: outbound })).inserted).toBe(true);
+  expect((await f.run('sendReady', { prompt: outbound })).sendReady).toBe(true);
+  const hash = await fingerprint(outbound);
+  expect((await f.run('submit', { prompt: outbound, savedSubmissionFingerprint: hash })).submitted).toBe(true);
   const chunk = f.userBody.parentElement!;
   chunk.setAttribute('class', chunkClass + ' is-collapsed');
   const control = new f.Node('BUTTON', { class: 'chat-user-message-expand-toggle chat-user-message-expand-toggle-pc', 'aria-label': 'Expand' });
@@ -26,7 +26,7 @@ async function sent(model = 'Qwen3.7-Plus') {
   f.answer.setAttribute('id', 'chat-response-message-'); f.phase.detach();
   const loading = new f.Node('DIV', { class: 'response-loading' }); f.answer.append(loading);
   const settleID = () => { f.answer.setAttribute('id', 'chat-response-message-' + answerID); loading.detach(); f.flow.append(f.phase); f.complete(); };
-  const render = () => { chunk.setAttribute('class', chunkClass); control.setAttribute('aria-label', 'Collapse'); f.userBody.text = prompt; };
+  const render = () => { chunk.setAttribute('class', chunkClass); control.setAttribute('aria-label', 'Collapse'); f.userBody.text = outbound; };
   const grant = { allowQwenInitialResponseIdentity: true, allowQwenFirstBodyExpansion: true,
     expectedModelChoice: choice(model), savedSubmissionFingerprint: hash };
   const inspect = (overrides = {}) => f.run('inspect', { ...grant, ...overrides });
@@ -156,19 +156,18 @@ test('late UUID cannot change during the final digest after completed display ha
   expect(failed.error).toBe('conversation_changed'); expect(failed.firstUserVerified).toBeUndefined(); expect(control.clicks).toBe(1);
 });
 
-// These fixtures reproduce the same terminal error/detail at different points.
-// The finite diagnostic identifies the predicate. It grants no retry/rebinding.
 function remountPicker(f: ReturnType<typeof fixture>, detached: boolean) {
   const replacement = new f.Node('DIV', {...f.trigger.values});
   replacement.append(new f.Node('DIV', {...f.modelName.values}, f.modelName.text));
   if (detached) f.trigger.detach(); else f.trigger.setAttribute('hidden', '');
   f.body.append(replacement);
+  return replacement;
 }
 
-test('a selected Plus trigger remounted after the acknowledged Send fails before any display click', async () => {
-  for (const [kind,reason] of [['detached','trigger_detached'],['hidden','trigger_replaced'],['open','picker_open'],['label','label_changed']]) {
+test('a connected replacement, open picker or changed label still fails before any display click', async () => {
+  for (const [kind,reason] of [['hidden','trigger_replaced'],['open','picker_open'],['label','label_changed']]) {
     const { f, control, inspect } = await sent();
-    if (kind === 'detached' || kind === 'hidden') remountPicker(f,kind === 'detached');
+    if (kind === 'hidden') remountPicker(f, false);
     if (kind === 'open') f.openPicker();
     if (kind === 'label') f.modelName.text='PRIVATE_PAGE_CANARY';
     const result = await inspect();
@@ -194,4 +193,109 @@ test('model changed after digest is distinguished from the earlier display obser
     const r=await inspect();expect(r.qwenSelectionBinding).toBe(stage+'/label_changed');expect(r.error).toBe('model_unverified');
     expect(r.detail).toBe('selection_binding');expect(JSON.stringify(r)).not.toContain('PRIVATE_PAGE_CANARY');
   }
+});
+
+test('only the first exact expanded body commits its detached-picker replacement', async () => {
+  for (const firstRead of ['empty', 'preview', 'before-remount']) {
+    const label = firstRead === 'preview' ? 'Qwen3.8-Max' : 'Qwen3.7-Plus';
+    const { f, control, render, settleID, inspect, hash } = await sent(label);
+    const state = f.world.__computaQwenSavedSessionV1, pickerClicks = f.trigger.clicks;
+    if (firstRead === 'before-remount') expect(await inspect()).toEqual(pending);
+    const replacement = remountPicker(f, true);
+    if (firstRead === 'empty') {
+      expect(await inspect()).toEqual(pending);
+      expect(control.clicks).toBe(0);
+    }
+    f.userBody.text = preview; control.onClick = render;
+    expect(await inspect()).toEqual(pending); expect(await inspect()).toEqual(idPending);
+    expect(state.model.trigger).toBe(f.trigger); expect(state.first).toBeNull();
+    settleID();
+    f.beforeDigest(() => { expect(state.model.trigger).toBe(f.trigger); expect(state.first).toBeNull(); });
+    const result = await inspect({ allowQwenFirstBodyExpansion: false });
+    expect(result).toMatchObject({ firstUserVerified: true, firstUserFingerprint: hash,
+      modelEvidence: { selected: choice(label) }, answerComplete: true });
+    expect(state.model.trigger).toBe(replacement);
+    expect([f.trigger.clicks, replacement.clicks, control.clicks, f.send.clicks, f.more.clicks])
+      .toEqual([pickerClicks, 0, 1, 1, 0]);
+    f.beforeDigest(() => {}); replacement.detach(); remountPicker(f, true);
+    const cleanup = await inspect({ savedCleanupInspection: true, allowFirstUserBinding: false, expectedFirstUserFingerprint: hash });
+    expect(cleanup.error).toBe('model_unverified'); expect(f.more.clicks).toBe(0);
+  }
+});
+
+test('a detached picker alone cannot authorize any first-body, selection or delete proof', async () => {
+  for (const kind of ['no-display-grant', 'no-id-grant', 'wrong-grant-hash', 'wrong-choice', 'cleanup', 'action',
+    'authored', 'hidden-duplicate', 'visible-duplicate', 'replacement-disabled', 'replacement-open', 'wrong-label',
+    'wrong-preview', 'full-without-expand']) {
+    const { f, control, inspect, grant } = await sent();
+    const replacement = remountPicker(f, true);
+    f.userBody.text = preview;
+    if (kind === 'authored') { replacement.detach(); f.root.append(replacement); }
+    if (kind.endsWith('duplicate')) {
+      const extra = new f.Node('DIV', { ...replacement.values });
+      extra.append(new f.Node('DIV', { ...f.modelName.values }, f.modelName.text));
+      if (kind === 'hidden-duplicate') extra.setAttribute('hidden', '');
+      f.body.append(extra);
+    }
+    if (kind === 'replacement-disabled') replacement.setAttribute('aria-disabled', 'true');
+    if (kind === 'replacement-open') { replacement.setAttribute('aria-expanded', 'true'); f.modelMenu.removeAttribute('hidden'); }
+    if (kind === 'wrong-label') replacement.children[0].text = 'Qwen3.8-Max';
+    if (kind === 'wrong-preview') f.userBody.text = '?' + preview.slice(1);
+    if (kind === 'full-without-expand') f.userBody.text = prompt;
+    const overrides: Record<string, unknown> = {};
+    if (kind === 'no-display-grant') overrides.allowQwenFirstBodyExpansion = false;
+    if (kind === 'no-id-grant') overrides.allowQwenInitialResponseIdentity = false;
+    if (kind === 'wrong-grant-hash') overrides.savedSubmissionFingerprint = '0'.repeat(64);
+    if (kind === 'wrong-choice') overrides.expectedModelChoice = choice('Qwen3.8-Max');
+    if (kind === 'cleanup') overrides.savedCleanupInspection = true;
+    const result = kind === 'action' ? await f.run('deleteConversation', grant) : await inspect(overrides);
+    expect(result.error, kind).toBeDefined(); expect(result.modelEvidence).toBeUndefined();
+    expect(result.firstUserVerified).toBeUndefined(); expect(result.deleteProof).toBeUndefined();
+    expect(f.world.__computaQwenSavedSessionV1.model.trigger).toBe(f.trigger);
+    expect([replacement.clicks, control.clicks, f.send.clicks, f.more.clicks]).toEqual([0, 0, 1, 0]);
+  }
+});
+
+test('the same replacement and message must survive every wait and both digest boundaries', async () => {
+  for (const kind of ['empty-replacement', 'original-returns', 'label-node', 'wrong-tail', 'response-id-digest', 'full-digest',
+    'digest-label', 'digest-body', 'digest-owner', 'digest-url', 'cleanup-while-held']) {
+    const { f, control, render, inspect, settleID } = await sent();
+    const replacement = remountPicker(f, true);
+    const remount = () => { replacement.detach(); remountPicker(f, true); };
+    expect(await inspect()).toEqual(pending);
+    const state = f.world.__computaQwenSavedSessionV1;
+    f.userBody.text = preview;
+    if (kind === 'empty-replacement') remount();
+    else {
+      control.onClick = render;
+      expect(await inspect()).toEqual(pending);
+      if (kind === 'original-returns') { f.trigger.setAttribute('hidden', ''); f.body.append(f.trigger); }
+      if (kind === 'label-node') { const name = replacement.children[0] as typeof f.modelName; name.detach(); replacement.append(new f.Node('DIV', { ...name.values }, name.text)); }
+      if (kind === 'wrong-tail') f.userBody.text = prompt.slice(0, -1) + '!';
+      if (kind !== 'response-id-digest') settleID();
+      if (kind === 'response-id-digest' || kind === 'full-digest') f.beforeDigest(remount);
+      if (kind === 'digest-label') f.beforeDigest(() => { replacement.children[0].text = 'Qwen3.8-Max'; });
+      if (kind === 'digest-body') f.beforeDigest(() => { f.userBody.text += '!'; });
+      if (kind === 'digest-owner') f.beforeDigest(() => { f.world.__computaModelOwner = generation; });
+      if (kind === 'digest-url') f.beforeDigest(() => { f.document.URL = 'https://chat.qwen.ai/c/' + generation; });
+    }
+    const result = await inspect(kind === 'cleanup-while-held' ? { savedCleanupInspection: true } : {});
+    expect(result.error, kind).toBeDefined(); expect(result.modelEvidence).toBeUndefined();
+    expect(result.firstUserVerified).toBeUndefined(); expect(state.first).toBeNull(); expect(state.model.trigger).toBe(f.trigger);
+    expect([replacement.clicks, control.clicks, f.send.clicks, f.more.clicks])
+      .toEqual([0, kind === 'empty-replacement' ? 0 : 1, 1, 0]);
+    expect(state.terminal).toBe(true);
+  }
+});
+
+test('a short exact first body cannot authorize a detached picker even with both grants', async () => {
+  const short = 'Synthetic short body.\n\nComputa session marker: ' + marker;
+  const { f, control, inspect, settleID } = await sent('Qwen3.7-Plus', short);
+  const replacement = remountPicker(f, true);
+  settleID(); f.userBody.text = short;
+  const result = await inspect();
+  expect(result).toMatchObject({ error: 'model_unverified', qwenSelectionBinding: 'body_after_hash/trigger_detached' });
+  expect(result.firstUserVerified).toBeUndefined(); expect(result.modelEvidence).toBeUndefined();
+  expect(f.world.__computaQwenSavedSessionV1.model.trigger).toBe(f.trigger);
+  expect([replacement.clicks, control.clicks, f.send.clicks]).toEqual([0, 0, 1]);
 });

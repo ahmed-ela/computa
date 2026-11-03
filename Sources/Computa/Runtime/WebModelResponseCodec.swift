@@ -546,7 +546,7 @@ enum WebModelResponseCodec {
             var lines = [
                 "COMPUTA_CURRENT_BROWSER_ENTRY:",
                 "Computa offers these permitted browser entry operations: \(entry.keys.sorted().joined(separator: ", ")). This turn has not bound a page yet.",
-                "Return a tool_calls JSON request for the next needed operation. Computa executes it outside this website; the website itself needs no connection to the browser or target URL.",
+                "If the task needs a webpage, request the relevant browser operation. Computa executes it outside this website. A text-only reply needs no tab inventory.",
             ]
             if let open = entry.filter({ $0.value.name == "browser_open" }).keys.sorted().first {
                 lines.append("For a supplied URL, request \(open) with its exact URL in the url argument, including localhost URLs. This creates and binds a task page, subject to native permissions.")
@@ -561,7 +561,12 @@ enum WebModelResponseCodec {
             return lines.joined(separator: "\n")
         }
         guard availability == .bound else { return "" }
-        guard let read = allowed.filter({ $0.value.browserReadMode == .fresh }).keys.sorted().first else { return "" }
+        let closeHandoff = allowed.filter { $0.value.name == "browser_close" }.keys.sorted().first.map { close in
+            "If this turn opened the current tab (matching native open output: ownership=task_created) and the task calls for closing it, request \(close) with {} before the final answer. Verify released=true and existing_user_tab_preserved=true in its matching output. A website receipt does not close a tab. Preserve existing user tabs and report an unverified close."
+        }
+        guard let read = allowed.filter({ $0.value.browserReadMode == .fresh }).keys.sorted().first else {
+            return closeHandoff ?? ""
+        }
         var lines = [
             "COMPUTA_CURRENT_BROWSER_CAPABILITIES:",
             "This request has a native browser binding. Tool_choice permits these native browser tools: \(allowed.keys.sorted().joined(separator: ", ")).",
@@ -574,6 +579,7 @@ enum WebModelResponseCodec {
         if let continuation = allowed.filter({ $0.value.name == "browser_continue" }).keys.sorted().first {
             lines.append("\(continuation) is only for a next_cursor from a current read, not a prerequisite for \(read).")
         }
+        if let closeHandoff { lines.append(closeHandoff) }
         return lines.joined(separator: "\n")
     }
 
