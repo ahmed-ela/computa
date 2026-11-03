@@ -112,7 +112,8 @@ struct WebsiteTurnFailureStore: Sendable {
             case "unexpected_website_page": nativeError = EmbeddedWebModelTransport.Failure.unexpectedPage(webProvider)
             case "website_ownership_unverified":
                 guard let rawReason = error["ownership_reason"] as? String,
-                      let reason = EmbeddedWebModelTransport.OwnershipReason(rawValue: rawReason) else { return nil }
+                      let reason = EmbeddedWebModelTransport.OwnershipReason(rawValue: rawReason),
+                      ![.groqDraftRestored, .groqReportedSubmissionError].contains(reason) || provider == "groq" else { return nil }
                 nativeError = EmbeddedWebModelTransport.Failure.ownershipFailure(reason)
             case "website_continuation_unverified":
                 guard provider == "gemini", let rawReason = error["reason"] as? String,

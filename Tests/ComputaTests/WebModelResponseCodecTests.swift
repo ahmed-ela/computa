@@ -340,11 +340,13 @@ final class WebModelResponseCodecTests: XCTestCase {
             let discovery = try XCTUnwrap(unboundInventory["inventory"] as? [[String]])
             XCTAssertEqual(Set(discovery.compactMap(\.first)), Set(choices + [prefix + GroqToolCatalog.name]))
             XCTAssertTrue(unbound.prompt.contains("Page tools require successful " + prefix + "browser_bind" + " or " + prefix + "browser_open"))
+            XCTAssertTrue(unbound.prompt.contains("Load only the chosen entry schema, then call it"))
             XCTAssertTrue(unbound.prompt.contains("loading alone does not bind"))
             XCTAssertTrue(unbound.prompt.contains("next request's refreshed inventory and catalog_revision"))
             let openReply = "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"\(prefix)browser_open\",\"arguments\":{\"url\":\"http://localhost:62341/\"}}]}"
             XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(openReply, request: unbound), "Guidance grants no unloaded schema authority")
             let (entryLoaded, _) = try request(.unbound, selected: [prefix + "browser_open"])
+            XCTAssertTrue(entryLoaded.prompt.contains("Already callable: " + prefix + "browser_open. Call the matching route directly"))
             XCTAssertNoThrow(try WebModelResponseCodec.parseEmbeddedReply(openReply, request: entryLoaded))
             XCTAssertThrowsError(try request(.unbound, selected: [prefix + "browser_read"]))
             let (bound, boundProjection) = try request(.bound, selected: [prefix + "browser_read"])

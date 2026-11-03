@@ -1,8 +1,8 @@
 # Kimi, Qwen and DeepSeek website adapters
 
-The latest live checkpoint used Computa 0.8.0 (407). Five model selections
-completed the invoice and browser workflow on that build. Qwen Plus and Max
-still lacked a verified answer and deletion receipt. [Installed build 407 results](#installed-build-407-2026-11-03)
+On installed Computa 0.8.0 (408), Alibaba Qwen3.7 Flash completed the invoice
+workflow after correcting three rejected patches. Seven other cases stopped
+early. A separate ninth task observed an HTTP 429 on a Sonnet 5.5 marker. [Installed build 408 results](#installed-build-408-2026-11-03)
 
 ### Build 400 checkpoint (2026-11-03 UTC)
 
@@ -1046,6 +1046,51 @@ The journal recorded a start request and failure before the transport acquired
 a session token or verified website submission. The native client surfaced
 HTTP 429. The case recorded zero tool calls, no final answer and an automatic
 cleanup receipt with outcome `unconfirmed`.
+
+### Installed build 408 (2026-11-03)
+
+Eight fresh tasks ran on commit `f27cb07`. Only the Alibaba API workflow
+reached its requested final. It edited the designated function, passed all six
+tests, submitted the local form once, returned its receipt and explicitly
+closed the task tab. Three rejected patch attempts preceded the successful edit.
+
+| Selection | Outcome |
+| --- | --- |
+| ChatGPT Instant | Five verified submissions produced five native calls. A second patch repaired an indentation error and passed all six tests in an independent copy. The sixth session failed model selection before verified Send. All six sessions closed. The task produced no form receipt or final. |
+| Claude Haiku 5.5 and Sonnet 5.5 | Both verified their first submission. Each then lost its previously observed user row, with zero recognized rows and no observed warning. Each stopped with zero calls and unconfirmed cleanup. Sonnet had completed the workflow on 407. |
+| Groq GPT OSS 20B | The first submitted row disappeared and the original composer restored its exact draft. No answer or tool call was observed. |
+| Groq GPT OSS 120B | Two verified rounds each requested five schemas against the four-name limit, and both transcripts cleared. The third round lost the submitted row and restored the draft. Neither Groq failure exposed an HTTP status or confirmed final cleanup. |
+| Qwen3.7-Plus and Qwen3.8-Max websites | An unrelated element still covered Plus’s Expand button after scrolling. Max displayed the complete original text on the same pinned elements, then its user-message ID changed as the answer settled. Both stopped with zero tools and unconfirmed deletion. |
+
+A ninth task sent a fresh Sonnet 5.5 marker with response diagnostics armed.
+The single matching request returned HTTP 429 and `application/json`. The
+marker was absent. The native task ended after 2.355 seconds with unconfirmed
+cleanup and no replay. The earlier Haiku and Sonnet workflows showed a similar
+missing user row. Their HTTP responses were not captured.
+
+### Candidate build 409
+
+- Qwen Max waits for the first settled user and answer IDs on the original
+  physical turn before allowing expansion. Plus can test one additional point
+  inside the intersection of the control and its clipping ancestors. A click
+  still requires the same verified point on the pinned control after rechecking
+  its model and conversation. Persistent coverage reports only finite
+  categories from the actual rejected hits.
+- ChatGPT Instant can retry one unacknowledged picker opening during the
+  first prepared draft’s verification. The original composer, exact draft,
+  selection and submission binding must survive. Acknowledged openings are
+  never replayed and the selected preset must still verify before Send.
+  In a separate WebKit regression, a 1,400-line draft exhausted the Chat/Work
+  verification budget because the observer traversed the same editor subtree
+  repeatedly. It now indexes the nodes once per mutation batch and checks the
+  affected ranges. A Work control at the end of a large subtree still prevents Send.
+- Groq reports when the original composer restores the exact submitted draft.
+  It can distinguish a fresh generic site error in the same notification
+  region. Both outcomes stop the turn. An oversized schema request now
+  identifies eligible requested tools already offered and those requiring a
+  loader call. The four-name limit still rejects the whole request.
+
+Fresh installed runs are needed to measure the effect of these changes.
 
 ## Remaining gates
 

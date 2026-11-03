@@ -89,10 +89,54 @@ final class GroqToolCatalogTests: XCTestCase {
         let accepted = try catalog.prepare(scope: scope, seed: seed)
         for invalid in [[], names, [names[0], names[0]]] as [[String]] {
             XCTAssertThrowsError(try catalog.load(scope: scope, arguments: args(initial, invalid))) {
-                XCTAssertEqual($0 as? GroqToolCatalog.Failure, .invalidArguments)
+                let reason: GroqToolCatalog.Failure = invalid.count == 5
+                    ? .tooManyNames(count: 5, direct: [], loadable: Array(names.prefix(4)), ineligible: 0) : .invalidArguments
+                XCTAssertEqual($0 as? GroqToolCatalog.Failure, reason)
             }
             XCTAssertEqual(try catalog.prepare(scope: scope, seed: seed), accepted)
         }
+    }
+
+    func testOversizedSelectionUsesAdmittedSchemasAndCurrentPolicyWithoutLoadingAnything() throws {
+        let registration = [canonicalLoader()] + ["browser_open", "browser_bind", "computer_v2_read_page",
+                                                  "computer_v2_fill", "computer_v2_press"].map(function)
+        let loader = GroqToolCatalog.name
+        let seed = GroqToolCatalog.Seed(registeredDefinitionsJSON: try encode(registration),
+            callableNames: [loader, "browser_open", "browser_bind", "computer_v2_fill"],
+            allowedNames: [loader, "browser_open", "browser_bind", "computer_v2_read_page", "computer_v2_press"],
+            preloadNames: [], toolChoiceJSON: try encode("auto"))
+        let scope = makeScope()
+        var catalog = GroqToolCatalog()
+        let initial = try catalog.prepare(scope: scope, seed: seed)
+        let names = ["browser_bind", "browser_open", "computer_v2_read_page", "computer_v2_fill", "computer_v2_press"]
+        let expected = GroqToolCatalog.Failure.tooManyNames(count: 5, direct: ["browser_open"], loadable: ["browser_bind"], ineligible: 3)
+        for requested in [names, [names[1], names[0]] + Array(names.dropFirst(2)),
+                          Array(names.prefix(4)) + ["DO_NOT_ECHO"]] {
+            XCTAssertThrowsError(try catalog.load(scope: scope, arguments: args(initial, requested),
+                lastOfferedNames: ["browser_open", "computer_v2_fill", "DO_NOT_ECHO"])) { error in
+                XCTAssertEqual(error as? GroqToolCatalog.Failure, expected)
+                for privateName in ["computer_v2_fill", "computer_v2_read_page", "computer_v2_press", "DO_NOT_ECHO"] {
+                    XCTAssertFalse(error.localizedDescription.contains(privateName))
+                }
+            }
+            XCTAssertEqual(try catalog.prepare(scope: scope, seed: seed), initial)
+        }
+        // No presumed directly callable schemas under the loaded-only budget fallback.
+        XCTAssertThrowsError(try catalog.load(scope: scope, arguments: args(initial, names), lastOfferedNames: [loader])) {
+            XCTAssertEqual($0 as? GroqToolCatalog.Failure, .tooManyNames(count: 5, direct: [], loadable: ["browser_bind", "browser_open"], ineligible: 3))
+        }
+        // Malformed, duplicate, stale and recursive loader requests disclose no suggestions.
+        for (rev, badNames, expectedError) in [
+            (initial.revision, names + ["browser_open"], GroqToolCatalog.Failure.invalidArguments),
+            (String(repeating: "0", count: 64), names, .staleRevision),
+            (initial.revision, names + [loader], .unavailableTool)
+        ] {
+            let data = try encode(["catalog_revision":rev, "names":badNames])
+            XCTAssertThrowsError(try catalog.load(scope: scope, arguments: data, lastOfferedNames: ["browser_open"])) {
+                XCTAssertEqual($0 as? GroqToolCatalog.Failure, expectedError)
+            }
+        }
+        XCTAssertEqual(try catalog.prepare(scope: scope, seed: seed), initial)
     }
 
     func testOnlyExactPinnedEngineLoaderProjectionCanRestoreNativeBounds() throws {

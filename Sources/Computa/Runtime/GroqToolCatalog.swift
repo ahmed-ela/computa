@@ -60,6 +60,7 @@ struct GroqToolCatalog: Sendable {
 
     enum Failure: Error, LocalizedError, Equatable {
         case invalidCatalog, invalidScope, staleRevision, invalidArguments, unavailableTool, selectionTooLarge
+        case tooManyNames(count: Int, direct: [String], loadable: [String], ineligible: Int)
         case unavailableSelection(unavailable: [String], denied: [String], unknownCount: Int)
         var errorDescription: String? {
             switch self {
@@ -67,6 +68,8 @@ struct GroqToolCatalog: Sendable {
             case .invalidScope: "Tool loading does not belong to the current registered Groq turn. No tool was loaded or executed."
             case .staleRevision: "The tool catalog changed. Use its current revision and inventory; no tool was loaded or executed."
             case .invalidArguments: "Tool loading requires the current catalog_revision and one to four unique inventory names. No tool was loaded or executed."
+            case let .tooManyNames(count, direct, loadable, ineligible):
+                "Requested \(count) names; the limit is four. No tool was loaded or executed. Eligible matches from this request (up to four): call existing schemas directly=\(Self.namesJSON(direct)); load other schemas by exact name=\(Self.namesJSON(loadable)). Ineligible requested names=\(ineligible). Check the current inventory before choosing a tool."
             case .unavailableTool: "A requested tool is not currently callable and allowed. No tool was loaded or executed."
             case let .unavailableSelection(unavailable, denied, unknownCount):
                 "No tool was loaded or executed. Requested catalog names (data): unavailable=\(Self.namesJSON(unavailable)), denied=\(Self.namesJSON(denied)), unknown_count=\(unknownCount). Choose only callable, allowed names from the current inventory and load their exact schemas before use."
@@ -222,7 +225,7 @@ struct GroqToolCatalog: Sendable {
         return projection
     }
 
-    mutating func load(scope: Scope, arguments: Data) throws -> Data {
+    mutating func load(scope: Scope, arguments: Data, lastOfferedNames: Set<String> = []) throws -> Data {
         try Self.validateScope(scope)
         guard var state = states[scope.taskID], state.scope == scope else { throw Failure.invalidScope }
         guard arguments.count <= 4_096,
@@ -230,7 +233,7 @@ struct GroqToolCatalog: Sendable {
               Set(object.keys) == ["catalog_revision", "names"],
               let revision = object["catalog_revision"] as? String, Self.validDigest(revision),
               let names = object["names"] as? [String], !names.isEmpty,
-              names.count <= Self.maximumLoadedTools, Set(names).count == names.count,
+              Set(names).count == names.count,
               names.allSatisfy(Self.validName) else { throw Failure.invalidArguments }
         guard revision == state.projection.revision else { throw Failure.staleRevision }
         let requested = Set(names)
@@ -239,6 +242,15 @@ struct GroqToolCatalog: Sendable {
         guard !loaderNames.intersection(baseline.selectedNames).isEmpty,
               requested.isDisjoint(with: loaderNames) else {
             throw Failure.unavailableTool
+        }
+        if names.count > Self.maximumLoadedTools {
+            // No partial load. Only suggest authorized inventory names; report which had
+            // schemas in the actual admitted request, including its budget fallback.
+            let eligible = requested.intersection(state.seed.callableNames).intersection(state.seed.allowedNames)
+            let direct = Array(eligible.intersection(lastOfferedNames).sorted().prefix(Self.maximumLoadedTools))
+            let loadable = Array(eligible.subtracting(lastOfferedNames).sorted().prefix(Self.maximumLoadedTools - direct.count))
+            throw Failure.tooManyNames(count: names.count, direct: direct, loadable: loadable,
+                                       ineligible: names.count - eligible.count)
         }
         guard requested.isSubset(of: state.seed.callableNames.intersection(state.seed.allowedNames)) else {
             let registered = Set(baseline.inventory.map(\.name))

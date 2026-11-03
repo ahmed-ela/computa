@@ -20,6 +20,7 @@ export const raw = '{"type":"message","text":"Synthetic Qwen reply"}';
 export function fixture(options: { completeOnSend?: boolean } = {}) {
   const document: any = { URL: 'https://chat.qwen.ai/' }; let hit: any, occluded: any;
   class Node extends Element {
+    computedStyle: Record<string,string> = {};
     _value = '';
     get value() { return this._value; }
     set value(value: string) { this._value = value; }
@@ -100,7 +101,7 @@ export function fixture(options: { completeOnSend?: boolean } = {}) {
   buttons.append(cancel, confirm); dialog.append(title, modalBody, buttons);
   const execute = new Function('input', 'document', 'window', 'globalThis', 'location', 'getComputedStyle', 'MutationObserver', core + '\n' + engine + '\n' + driver
     + '\nreturn computaQwenDOM(computaProviderCore(input,"qwen","https://chat.qwen.ai",["inspect"]));');
-  const style = (node: Node) => ({ visibility: node.values.visibility || 'visible', display: node.closest('[hidden]') ? 'none' : 'block' });
+  const style = (node: Node) => ({ visibility: node.values.visibility || 'visible', display: node.closest('[hidden]') ? 'none' : 'block', ...node.computedStyle });
   const observers: any[] = [], signals: any[] = [];
   window.webkit = { messageHandlers: { computaChatGPTSignal: { postMessage: (value: any) => signals.push(value) } } };
   class Observer {

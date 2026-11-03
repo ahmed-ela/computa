@@ -472,6 +472,22 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   let remount = null, remountClaimed = false;
   let prepareOpening = null, insertOpening = null, genericPowerRecheck = false;
   let verifyObserver = null, verifyAcknowledged = false;
+  let draftObserver = null, draftChanged = false;
+  const invalidateDraft = () => { draftChanged = true; };
+  const recordDraftChanges = records => {
+    const composer = insertOpening?.composer;
+    if (!composer || !records.length) return;
+    if (records.length > 64) { draftChanged = true; return; }
+    for (const r of records) {
+      if (r.target === composer || composer.contains(r.target)) draftChanged = true;
+      if (r.type !== 'childList') continue;
+      if (r.addedNodes.length + r.removedNodes.length > 64) { draftChanged = true; return; }
+      for (const node of [...r.addedNodes, ...r.removedNodes]) {
+        if (node === composer || node.contains?.(composer) || node === trigger || node.contains?.(trigger)) draftChanged = true;
+        if (['menu','listbox'].includes(node.getAttribute?.('role')) || node.querySelector?.('[role="menu"],[role="listbox"]')) verifyAcknowledged = true;
+      }
+    }
+  };
   const recordVerifyOpening = records => {
     if (records.some(record => record.target === trigger && (record.attributeName === 'aria-expanded' && record.oldValue === 'true'
       || record.attributeName === 'data-state' && record.oldValue === 'open'))) verifyAcknowledged = true;
@@ -593,14 +609,14 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       throw failure('model_unverified');
     attempt.familyCloseAcknowledged = true;
   };
-  const readonlyOpeningSelectionIntact = (saved, current) => {
+  const readonlyOpeningSelectionIntact = (saved, current, spent = false) => {
     const pin = globalThis.__computaChatPresetPin;
     const choice = saved && websiteChatPresetChoice(saved.resolved.family, saved.resolved.power);
     return saved != null && !mutable && owned() && !selectionChanged && Date.now() < until
       && document.URL === request.expectedURL && location.pathname === '/'
       && saved.owner === owner && saved.document === originalDocument
       && globalThis.__computaModelSelection === saved.attempt && saved.attempt.started === true
-      && saved.attempt.completed === true && saved.recoveryClaimed !== true
+      && saved.attempt.completed === true && (spent ? saved.recoveryClaimed === true : saved.recoveryClaimed !== true)
       && websiteModelChoiceEqual(saved.attempt.choice, expected)
       && pin === saved.pin && pin?.owner === owner && pin.document === originalDocument
       && pin.invalidated !== true && !pin.provisionalHeader && pin.selection === saved.selection
@@ -644,22 +660,27 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     return paragraph.tagName === 'P' && paragraph.childNodes.length === 1 && br?.tagName === 'BR'
       && br.classList.contains('ProseMirror-trailingBreak') && !br.childNodes.length;
   };
-  const insertOpeningIntact = current => {
-    const saved = insertOpening, state = saved?.state, record = saved?.record;
-    const composer = saved?.composer;
-    const value = insertComposerValue(composer);
-    return readonlyOpeningSelectionIntact(saved, current)
-      && request.action === 'insert' && context?.action === 'insert' && context.scope === 'action_final_guard'
+  const insertOpeningIntact = (current, spent = false) => {
+    const saved = insertOpening, state = saved?.state, record = saved?.record, prior = saved?.insertProof;
+    const composer = saved?.composer, value = insertComposerValue(composer);
+    const grant = request.preparedInstantVerificationOpening;
+    if (prior) {
+      recordVerifyOpening(verifyObserver?.takeRecords?.() || []);
+      recordDraftChanges(draftObserver?.takeRecords?.() || []);
+      if (draftChanged || !spent && verifyAcknowledged || request.action !== 'verifyModel' || expected.key !== 'chat/latest/instant'
+        || !grant || typeof grant !== 'object' || Array.isArray(grant) || Object.keys(grant).sort().join(',') !== 'fingerprint,marker,sequence' || grant.sequence !== 1
+        || grant.marker !== record.marker || !/^[a-f0-9]{64}$/.test(grant.fingerprint) || grant.fingerprint !== record.fingerprint
+        || record.firstPreparedVerificationOpening !== saved || record.firstInsertOpening !== prior || prior.proved !== true) return false;
+    } else if (request.action !== 'insert' || record?.firstInsertOpening !== saved || request.submissionSequence !== 1
+      || record.marker !== request.submissionMarker || typeof request.prompt !== 'string' || request.prompt !== saved.prompt) return false;
+    return readonlyOpeningSelectionIntact(saved, current, spent)
+      && context?.action === request.action && context.scope === 'action_final_guard'
       && chatGPTSubmissionContext(state) && state.pending === record && state.lastVerified == null
-      && record.firstInsertOpening === saved && record.document === originalDocument && record.owner === owner
-      && record.sequence === 1 && request.submissionSequence === 1 && record.phase === 'prepared'
-      && record.marker === request.submissionMarker && record.marker === request.expectedFirstUserMarker
-      && record.root === null && record.body === null && record.expansionAttempted === false
+      && record.document === originalDocument && record.owner === owner && record.sequence === 1 && record.phase === 'prepared'
+      && record.marker === request.expectedFirstUserMarker && record.root === null && record.body === null && record.expansionAttempted === false
       && Array.isArray(request.expectedSubmissionProofs) && request.expectedSubmissionProofs.length === 0
-      && typeof request.prompt === 'string' && request.prompt === saved.prompt
       && record.canonical === saved.canonical && record.fingerprint === saved.fingerprint
-      && chatGPTSubmissionCanonical(request.prompt) === record.canonical
-      && globalThis.__computaModelFirstPrompt === request.prompt
+      && chatGPTSubmissionCanonical(saved.prompt) === record.canonical && globalThis.__computaModelFirstPrompt === saved.prompt
       && composer?.isConnected === true && insertComposer(current) === composer && current.enabled(composer)
       && value === saved.editorValue && chatGPTSubmissionCanonical(value) === record.canonical;
   };
@@ -740,6 +761,25 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       current = drainOpeningEvidence();
       if (!insertOpeningIntact(current)) insertOpening = null;
     }
+    if (!genericPowerRecheck && !mutable && !firstVerify && request.action === 'verifyModel' && request.preparedInstantVerificationOpening
+      && context?.action === 'verifyModel' && context.scope === 'action_final_guard' && prepared?.firstInsertOpening?.proved === true
+      && prepared.firstPreparedVerificationOpening == null) {
+      // The just-proved insertion already identifies the physical editor, header,
+      // selected pair and exact draft. Consume the verification slot before the
+      // first opening, even when it succeeds, and never reconstruct those pins.
+      const prior = prepared.firstInsertOpening;
+      insertOpening = { ...prior, insertProof:prior, recoveryClaimed:false };
+      prepared.firstPreparedVerificationOpening = insertOpening;
+      current = drainOpeningEvidence();
+      if (!insertOpeningIntact(current)) insertOpening = null;
+      else {
+        verifyObserver = new MutationObserver(recordVerifyOpening);
+        verifyObserver.observe(trigger, { attributes:true, attributeOldValue:true, attributeFilter:['aria-expanded','data-state'] });
+        draftObserver = new MutationObserver(recordDraftChanges);
+        draftObserver.observe(document.documentElement || document, {subtree:true,childList:true,characterData:true});
+        insertOpening.composer.addEventListener?.('input', invalidateDraft, true);
+      }
+    }
     if (cappedFirstInsert && Date.now() >= until) throw failure('model_unverified');
     primaryOpened = true; readStage = 'primary_open_requested';
     trigger.click();
@@ -758,7 +798,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         if (clockRejected || Date.now() < acknowledgementDeadline
           || !(prepareOpening !== null ? prepareOpeningIntact(current) : insertOpeningIntact(current))) throw failure('model_unverified');
         (prepareOpening || insertOpening).recoveryClaimed = true;
-        readStage = firstVerify ? 'primary_open_recovery_requested' : prepareOpening !== null ? 'prepare_open_recovery_requested' : 'insert_open_recovery_requested';
+        readStage = firstVerify || insertOpening?.insertProof ? 'primary_open_recovery_requested' : prepareOpening !== null ? 'prepare_open_recovery_requested' : 'insert_open_recovery_requested';
         trigger.click();
         current = await wait(powerAcknowledged);
       }
@@ -1044,6 +1084,9 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       websiteChatTrackPinnedHeader(globalThis.__computaChatPresetPin, trigger);
     }
     if (cappedFirstInsert && Date.now() >= until) return failure('model_unverified');
+    if (insertOpening?.insertProof && insertOpening.recoveryClaimed && !insertOpeningIntact(final, true))
+      return failure('model_unverified');
+    if (insertOpening && request.action === 'insert' && expected.key === 'chat/latest/instant') insertOpening.proved = true;
     const provedPin = globalThis.__computaChatPresetPin;
     if (provedPin?.owner === owner && provedPin.document === originalDocument
       && provedPin.headerTrigger === trigger && provedPin.invalidated !== true
@@ -1054,6 +1097,8 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     return error?.error ? error : failure('model_unverified');
   } finally {
     verifyObserver?.disconnect?.();
+    draftObserver?.disconnect?.();
+    if (draftObserver) insertOpening?.composer?.removeEventListener?.('input', invalidateDraft, true);
     observer.disconnect?.();
     headerObserver.disconnect?.();
     if (owned() && (primaryOpened || secondaryOpened || closeAttempted)) {

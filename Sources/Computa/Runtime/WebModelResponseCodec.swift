@@ -579,7 +579,11 @@ enum WebModelResponseCodec {
             let bind = entryTools.first { $0.value.name == "browser_bind" }.map {
                 " \($0.key) needs this turn's observed tab_id."
             } ?? ""
-            return "Current browser state: unbound. Page tools require successful \(entryTools.keys.sorted().joined(separator: " or ")). Load its schema if needed, then execute it; loading alone does not bind.\(bind) Wait for matching output, then use the next request's refreshed inventory and catalog_revision for callable page tools. Empty tabs do not prove denied access."
+            let direct = entryTools.keys.filter { tools[$0] != nil && policy.allowedNames.contains($0) }.sorted()
+            let entryUse = direct.isEmpty
+                ? "Load only the chosen entry schema, then call it"
+                : "Already callable: \(direct.joined(separator: ", ")). Call the matching route directly; load only a chosen entry schema that is absent"
+            return "Current browser state: unbound. Page tools require successful \(entryTools.keys.sorted().joined(separator: " or ")). \(entryUse); loading alone does not bind.\(bind) Wait for matching output, then use the next request's refreshed inventory and catalog_revision for callable page tools. Empty tabs do not prove denied access."
         }
         let allowed = tools.filter { policy.allowedNames.contains($0.key) && $0.value.nativeBrowserBit != 0 }
         guard !allowed.isEmpty else { return "" }

@@ -281,11 +281,29 @@ function computaQwenDOM(c) {
     return { current, consume() { disconnect(); status = 'consumed'; } };
   }
 
+  // Describe only elements returned by this failed hit test. Never probe again.
+  function displayCover(nodes, probe, clip, scope, user, answer) {
+    const common = values => values.every(v => v === values[0]) ? values[0] : 'mixed';
+    const anchor = hit => {
+      for (let node = hit, depth = 0; node && depth < 24; node = node.parentElement, depth++) {
+        const position = getComputedStyle(node).position;
+        if (position === 'fixed' || position === 'sticky') return position;
+        if (node === document.documentElement) return 'none';
+      }
+      return 'unknown';
+    };
+    return {probe, clip, hits:nodes.length === 1 ? 'one' : 'several',
+      scope:common(nodes.map(hit => scope.contains(hit) ? 'composer' : user.contains(hit) ? 'user'
+        : answer.contains(hit) ? 'answer' : 'elsewhere')), anchor:common(nodes.map(anchor))};
+  }
   // A clipped display button can have a covered center and an exposed edge.
   // Find one actual pointer target, then require the same viewport point on the
   // same pinned button after the caller revalidates the transcript and choice.
   function displayHitFailure(control, point, classifyOcclusion = false, blockers = null) {
-    let blocker = null;
+    let blocker = null, clip = 'unmeasured';
+    const misses = blockers || (classifyOcclusion ? [] : null);
+    const probe = point.x === undefined ? 'grid' : 'witness';
+    delete point.describeCover;
     const reason = c.hitFailure(control, (left, top, right, bottom) => {
       const ownsPoint = (x, y) => {
         const hit = document.elementFromPoint(x, y);
@@ -294,7 +312,7 @@ function computaQwenDOM(c) {
         if (inside && hit.closest('button, a, input, select, textarea, [role], [tabindex], [contenteditable]') === control) return true;
         if (classifyOcclusion) {
           const kind = !hit ? 'none' : inside ? 'descendant' : hit.contains(control) ? 'ancestor' : 'unrelated';
-          if (kind === 'unrelated' && blockers && !blockers.includes(hit)) blockers.push(hit);
+          if (kind === 'unrelated' && misses && !misses.includes(hit)) misses.push(hit);
           blocker = !blocker || blocker === kind ? kind : 'mixed';
         }
         return false;
@@ -307,8 +325,31 @@ function computaQwenDOM(c) {
         const x = left + (right - left) * u, y = top + (bottom - top) * v;
         if (ownsPoint(x, y)) { point.x = x; point.y = y; return true; }
       }
+      // The grid can miss a thin part of the button inside a clipping ancestor.
+      // Ancestor bounds suggest one more point. Only WebKit's actual hit can select it.
+      let x1 = left, y1 = top, x2 = right, y2 = bottom;
+      const clips = value => ['hidden', 'clip', 'auto', 'scroll', 'overlay'].includes(value);
+      let depth = 0;
+      for (let node = control.parentElement; node; node = node.parentElement) {
+        if (++depth > 64 || !node.isConnected) return false;
+        const style = getComputedStyle(node);
+        if (clips(style.overflowX) || clips(style.overflowY)) {
+          const r = node.getBoundingClientRect();
+          if (clips(style.overflowX)) { x1 = Math.max(x1, r.left); x2 = Math.min(x2, r.left + r.width); }
+          if (clips(style.overflowY)) { y1 = Math.max(y1, r.top); y2 = Math.min(y2, r.top + r.height); }
+        }
+      }
+      if ([x1, y1, x2, y2].every(Number.isFinite)) {
+        clip = x2 <= x1 || y2 <= y1 ? 'empty' : x1 !== left || x2 !== right || y1 !== top || y2 !== bottom ? 'reduced' : 'unchanged';
+      }
+      if (x2 > x1 && y2 > y1 && (x1 !== left || x2 !== right || y1 !== top || y2 !== bottom)) {
+        const x = (x1 + x2) / 2, y = (y1 + y2) / 2;
+        if (ownsPoint(x, y)) { point.x = x; point.y = y; return true; }
+      }
       return false;
     });
+    if (reason === 'occluded' && blocker === 'unrelated' && misses?.length)
+      point.describeCover = (scope, user, answer) => displayCover(misses, probe, clip, scope, user, answer);
     return reason === 'occluded' && blocker ? 'occluded_' + blocker : reason;
   }
   // The long user message has a display-only toggle inside this exact chunk.

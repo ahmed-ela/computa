@@ -472,6 +472,22 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   let remount = null, remountClaimed = false;
   let prepareOpening = null, insertOpening = null, genericPowerRecheck = false;
   let verifyObserver = null, verifyAcknowledged = false;
+  let draftObserver = null, draftChanged = false;
+  const invalidateDraft = () => { draftChanged = true; };
+  const recordDraftChanges = records => {
+    const composer = insertOpening?.composer;
+    if (!composer || !records.length) return;
+    if (records.length > 64) { draftChanged = true; return; }
+    for (const r of records) {
+      if (r.target === composer || composer.contains(r.target)) draftChanged = true;
+      if (r.type !== 'childList') continue;
+      if (r.addedNodes.length + r.removedNodes.length > 64) { draftChanged = true; return; }
+      for (const node of [...r.addedNodes, ...r.removedNodes]) {
+        if (node === composer || node.contains?.(composer) || node === trigger || node.contains?.(trigger)) draftChanged = true;
+        if (['menu','listbox'].includes(node.getAttribute?.('role')) || node.querySelector?.('[role="menu"],[role="listbox"]')) verifyAcknowledged = true;
+      }
+    }
+  };
   const recordVerifyOpening = records => {
     if (records.some(record => record.target === trigger && (record.attributeName === 'aria-expanded' && record.oldValue === 'true'
       || record.attributeName === 'data-state' && record.oldValue === 'open'))) verifyAcknowledged = true;
@@ -593,14 +609,14 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       throw failure('model_unverified');
     attempt.familyCloseAcknowledged = true;
   };
-  const readonlyOpeningSelectionIntact = (saved, current) => {
+  const readonlyOpeningSelectionIntact = (saved, current, spent = false) => {
     const pin = globalThis.__computaChatPresetPin;
     const choice = saved && websiteChatPresetChoice(saved.resolved.family, saved.resolved.power);
     return saved != null && !mutable && owned() && !selectionChanged && Date.now() < until
       && document.URL === request.expectedURL && location.pathname === '/'
       && saved.owner === owner && saved.document === originalDocument
       && globalThis.__computaModelSelection === saved.attempt && saved.attempt.started === true
-      && saved.attempt.completed === true && saved.recoveryClaimed !== true
+      && saved.attempt.completed === true && (spent ? saved.recoveryClaimed === true : saved.recoveryClaimed !== true)
       && websiteModelChoiceEqual(saved.attempt.choice, expected)
       && pin === saved.pin && pin?.owner === owner && pin.document === originalDocument
       && pin.invalidated !== true && !pin.provisionalHeader && pin.selection === saved.selection
@@ -644,22 +660,27 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     return paragraph.tagName === 'P' && paragraph.childNodes.length === 1 && br?.tagName === 'BR'
       && br.classList.contains('ProseMirror-trailingBreak') && !br.childNodes.length;
   };
-  const insertOpeningIntact = current => {
-    const saved = insertOpening, state = saved?.state, record = saved?.record;
-    const composer = saved?.composer;
-    const value = insertComposerValue(composer);
-    return readonlyOpeningSelectionIntact(saved, current)
-      && request.action === 'insert' && context?.action === 'insert' && context.scope === 'action_final_guard'
+  const insertOpeningIntact = (current, spent = false) => {
+    const saved = insertOpening, state = saved?.state, record = saved?.record, prior = saved?.insertProof;
+    const composer = saved?.composer, value = insertComposerValue(composer);
+    const grant = request.preparedInstantVerificationOpening;
+    if (prior) {
+      recordVerifyOpening(verifyObserver?.takeRecords?.() || []);
+      recordDraftChanges(draftObserver?.takeRecords?.() || []);
+      if (draftChanged || !spent && verifyAcknowledged || request.action !== 'verifyModel' || expected.key !== 'chat/latest/instant'
+        || !grant || typeof grant !== 'object' || Array.isArray(grant) || Object.keys(grant).sort().join(',') !== 'fingerprint,marker,sequence' || grant.sequence !== 1
+        || grant.marker !== record.marker || !/^[a-f0-9]{64}$/.test(grant.fingerprint) || grant.fingerprint !== record.fingerprint
+        || record.firstPreparedVerificationOpening !== saved || record.firstInsertOpening !== prior || prior.proved !== true) return false;
+    } else if (request.action !== 'insert' || record?.firstInsertOpening !== saved || request.submissionSequence !== 1
+      || record.marker !== request.submissionMarker || typeof request.prompt !== 'string' || request.prompt !== saved.prompt) return false;
+    return readonlyOpeningSelectionIntact(saved, current, spent)
+      && context?.action === request.action && context.scope === 'action_final_guard'
       && chatGPTSubmissionContext(state) && state.pending === record && state.lastVerified == null
-      && record.firstInsertOpening === saved && record.document === originalDocument && record.owner === owner
-      && record.sequence === 1 && request.submissionSequence === 1 && record.phase === 'prepared'
-      && record.marker === request.submissionMarker && record.marker === request.expectedFirstUserMarker
-      && record.root === null && record.body === null && record.expansionAttempted === false
+      && record.document === originalDocument && record.owner === owner && record.sequence === 1 && record.phase === 'prepared'
+      && record.marker === request.expectedFirstUserMarker && record.root === null && record.body === null && record.expansionAttempted === false
       && Array.isArray(request.expectedSubmissionProofs) && request.expectedSubmissionProofs.length === 0
-      && typeof request.prompt === 'string' && request.prompt === saved.prompt
       && record.canonical === saved.canonical && record.fingerprint === saved.fingerprint
-      && chatGPTSubmissionCanonical(request.prompt) === record.canonical
-      && globalThis.__computaModelFirstPrompt === request.prompt
+      && chatGPTSubmissionCanonical(saved.prompt) === record.canonical && globalThis.__computaModelFirstPrompt === saved.prompt
       && composer?.isConnected === true && insertComposer(current) === composer && current.enabled(composer)
       && value === saved.editorValue && chatGPTSubmissionCanonical(value) === record.canonical;
   };
@@ -740,6 +761,25 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       current = drainOpeningEvidence();
       if (!insertOpeningIntact(current)) insertOpening = null;
     }
+    if (!genericPowerRecheck && !mutable && !firstVerify && request.action === 'verifyModel' && request.preparedInstantVerificationOpening
+      && context?.action === 'verifyModel' && context.scope === 'action_final_guard' && prepared?.firstInsertOpening?.proved === true
+      && prepared.firstPreparedVerificationOpening == null) {
+      // The just-proved insertion already identifies the physical editor, header,
+      // selected pair and exact draft. Consume the verification slot before the
+      // first opening, even when it succeeds, and never reconstruct those pins.
+      const prior = prepared.firstInsertOpening;
+      insertOpening = { ...prior, insertProof:prior, recoveryClaimed:false };
+      prepared.firstPreparedVerificationOpening = insertOpening;
+      current = drainOpeningEvidence();
+      if (!insertOpeningIntact(current)) insertOpening = null;
+      else {
+        verifyObserver = new MutationObserver(recordVerifyOpening);
+        verifyObserver.observe(trigger, { attributes:true, attributeOldValue:true, attributeFilter:['aria-expanded','data-state'] });
+        draftObserver = new MutationObserver(recordDraftChanges);
+        draftObserver.observe(document.documentElement || document, {subtree:true,childList:true,characterData:true});
+        insertOpening.composer.addEventListener?.('input', invalidateDraft, true);
+      }
+    }
     if (cappedFirstInsert && Date.now() >= until) throw failure('model_unverified');
     primaryOpened = true; readStage = 'primary_open_requested';
     trigger.click();
@@ -758,7 +798,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         if (clockRejected || Date.now() < acknowledgementDeadline
           || !(prepareOpening !== null ? prepareOpeningIntact(current) : insertOpeningIntact(current))) throw failure('model_unverified');
         (prepareOpening || insertOpening).recoveryClaimed = true;
-        readStage = firstVerify ? 'primary_open_recovery_requested' : prepareOpening !== null ? 'prepare_open_recovery_requested' : 'insert_open_recovery_requested';
+        readStage = firstVerify || insertOpening?.insertProof ? 'primary_open_recovery_requested' : prepareOpening !== null ? 'prepare_open_recovery_requested' : 'insert_open_recovery_requested';
         trigger.click();
         current = await wait(powerAcknowledged);
       }
@@ -1044,6 +1084,9 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       websiteChatTrackPinnedHeader(globalThis.__computaChatPresetPin, trigger);
     }
     if (cappedFirstInsert && Date.now() >= until) return failure('model_unverified');
+    if (insertOpening?.insertProof && insertOpening.recoveryClaimed && !insertOpeningIntact(final, true))
+      return failure('model_unverified');
+    if (insertOpening && request.action === 'insert' && expected.key === 'chat/latest/instant') insertOpening.proved = true;
     const provedPin = globalThis.__computaChatPresetPin;
     if (provedPin?.owner === owner && provedPin.document === originalDocument
       && provedPin.headerTrigger === trigger && provedPin.invalidated !== true
@@ -1054,6 +1097,8 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     return error?.error ? error : failure('model_unverified');
   } finally {
     verifyObserver?.disconnect?.();
+    draftObserver?.disconnect?.();
+    if (draftObserver) insertOpening?.composer?.removeEventListener?.('input', invalidateDraft, true);
     observer.disconnect?.();
     headerObserver.disconnect?.();
     if (owned() && (primaryOpened || secondaryOpened || closeAttempted)) {
@@ -4232,7 +4277,7 @@ function chatGPTObserveProductMutations(proof, state, records) {
     return [];
   };
   const charge = () => ++visits <= limits.visits || (unavailable('mutation_scan_overflow'), false);
-  const subtrees = new Map(), candidateLists = new Map(), groupNames = new Map();
+  const subtrees = new Map(), groupNames = new Map();
   const ancestry = new Map(), containments = new Map();
   const contains = (ancestor, node) => {
     if (!ancestor || !node) return false;
@@ -4251,42 +4296,72 @@ function chatGPTObserveProductMutations(proof, state, records) {
     const result = ancestry.get(node).has(ancestor), values = cached || new Map();
     values.set(node, result); containments.set(ancestor, values); return result;
   };
-  // Inspect actual nodes before considering semantic candidates. No selector
-  // result or added/removed list may silently discard an unexamined tail.
-  const elements = root => {
+  // A synchronous mutation batch has a fixed DOM. Index the actual children
+  // once so a record target and its added subtree can share the same scan.
+  // Removed subtrees outside the document get their own bounded inventory.
+  const control = node => node?.nodeType === 1 && (node.tagName?.toLowerCase() === 'button'
+    || ['button', 'radio', 'switch', 'checkbox'].includes(node.getAttribute('role')));
+  const inventory = root => {
+    if (analysisFailure) return null;
     if (subtrees.has(root)) return subtrees.get(root);
-    const result = [], stack = [{ node: root, depth: 0 }], seen = new Set();
+    const lists = { elements: [], labels: [], controls: [] };
+    const stack = [{ node: root, depth: 0 }], open = [], seen = new Set();
+    const offsets = () => ({ elements: lists.elements.length, labels: lists.labels.length, controls: lists.controls.length });
+    const close = () => {
+      const item = open.pop();
+      item.end = offsets();
+      subtrees.set(item.node, item);
+    };
     try {
       while (stack.length) {
         const { node, depth } = stack.pop();
-        if (!charge()) return [];
-        if (!node || seen.has(node) || ![1, 3, 8, 9, 11].includes(node.nodeType)) return unavailable('mutation_uninspectable', 'node_shape', node);
-        if (depth > limits.depth) return unavailable('mutation_scan_overflow');
+        while (open.length > depth) close();
+        if (!charge()) return null;
+        if (!node || seen.has(node) || ![1, 3, 8, 9, 11].includes(node.nodeType)) {
+          unavailable('mutation_uninspectable', 'node_shape', node); return null;
+        }
+        if (depth > limits.depth) { unavailable('mutation_scan_overflow'); return null; }
         seen.add(node);
-        if (node.nodeType === 1) result.push(node);
+        open.push({ node, lists, start: offsets() });
+        if (node.nodeType === 1) {
+          lists.elements.push(node);
+          if (node.getAttribute('aria-label') != null || node.getAttribute('aria-labelledby') != null) lists.labels.push(node);
+          if (control(node)) lists.controls.push(node);
+        }
         if (![1, 9, 11].includes(node.nodeType)) continue;
         const children = node.childNodes;
-        if (!children || !Number.isInteger(children.length) || children.length < 0) return unavailable('mutation_uninspectable', 'children_shape', node);
-        if (children.length > limits.children || stack.length + children.length > limits.visits - visits)
-          return unavailable('mutation_scan_overflow');
+        if (!children || !Number.isInteger(children.length) || children.length < 0) {
+          unavailable('mutation_uninspectable', 'children_shape', node); return null;
+        }
+        if (children.length > limits.children || stack.length + children.length > limits.visits - visits) {
+          unavailable('mutation_scan_overflow'); return null;
+        }
         for (let index = children.length - 1; index >= 0; index--) stack.push({ node: children[index], depth: depth + 1 });
       }
-      subtrees.set(root, result); return result;
-    } catch { return unavailable('mutation_uninspectable', 'read_exception', root); }
+      while (open.length) close();
+      return subtrees.get(root);
+    } catch { unavailable('mutation_uninspectable', 'read_exception', root); return null; }
   };
-  const control = node => node?.nodeType === 1 && (node.tagName?.toLowerCase() === 'button'
-    || ['button', 'radio', 'switch', 'checkbox'].includes(node.getAttribute('role')));
   const candidates = (root, kind) => {
-    const cached = candidateLists.get(root) || {};
-    if (cached[kind]) return cached[kind];
-    const result = [];
-    for (const node of elements(root)) {
-      if (!charge()) return [];
-      if (kind === 'controls' ? control(node) : node.getAttribute('aria-label') != null || node.getAttribute('aria-labelledby') != null)
-        result.push(node);
-    }
-    cached[kind] = result; candidateLists.set(root, cached); return result;
+    const range = inventory(root);
+    if (!range) return [];
+    const list = range.lists[kind], start = range.start[kind], end = range.end[kind];
+    if (start === end) return [];
+    if (start === 0 && end === list.length) return list;
+    // Account for each partial range we materialize, including repeated
+    // historical edges. A cached physical scan cannot erase the work limit.
+    visits += end - start;
+    if (visits > limits.visits) return unavailable('mutation_scan_overflow');
+    return list.slice(start, end);
   };
+  const hasCandidate = (root, kind, match) => {
+    for (const node of candidates(root, kind)) {
+      if (!charge()) return false;
+      if (match(node)) return true;
+    }
+    return false;
+  };
+  const elements = root => candidates(root, 'elements');
   let labelInventory = null;
   const labelData = () => {
     if (labelInventory) return labelInventory;
@@ -4327,7 +4402,7 @@ function chatGPTObserveProductMutations(proof, state, records) {
     || contains(control, node) || contains(node, control));
   const containsGroup = node => {
     if (node?.nodeType !== 1) return false;
-    return candidates(node, 'labels').some(labelledGroup) || !!analysisFailure;
+    return hasCandidate(node, 'labels', labelledGroup) || !!analysisFailure;
   };
   const messageOnly = record => {
     // State transitions stay relevant until structural records establish which
@@ -4394,12 +4469,13 @@ function chatGPTObserveProductMutations(proof, state, records) {
     return false;
   };
   const presentationBatchSafe = () => {
+    if (records.length > 4_096 || !records.some(presentationAttribute)) return false;
     // A Chat marker lives on the editor's enclosing form. That relationship
     // does not make the exact editor's class/style presentation product state;
     // all marker, ancestry and editor-identity mutations stay relevant below.
     const presentationProductNodes = proof.source === 'chat_composer_marker' && state.markerRecognized
       && composer === state.markedEditor ? productNodes.filter(node => node !== state.markedForm && node !== composer) : productNodes;
-    if (!composer || records.length > 4_096 || composer.closest(messageBoundary)
+    if (!composer || composer.closest(messageBoundary)
       || presentationProductNodes.some(node => intersects(node, composer)) || containsGroup(composer)
       || candidates(composer, 'controls').length
       || editorCanAffectReferencedLabel()) return false;
@@ -4548,7 +4624,7 @@ function chatGPTObserveProductMutations(proof, state, records) {
     const ownedTarget = groups.has(record.target) || [...groups].some(group => contains(group, record.target));
     if (record.addedNodes.length + record.removedNodes.length > limits.children) { unavailable('mutation_scan_overflow'); break; }
     for (const node of [...record.addedNodes, ...record.removedNodes]) {
-      elements(node);
+      if (!charge() || !inventory(node)) break;
       register(node, allowNewGroups, true);
       if (ownedTarget) for (const descendant of elements(node)) {
         if (!charge()) break;
@@ -4581,7 +4657,7 @@ function chatGPTObserveProductMutations(proof, state, records) {
   const potentialReferrer = node => {
     if (productReferrers.has(node)) return productReferrers.get(node);
     const potential = potentialLabelHistory || groups.has(node) || ownedControls.has(node)
-      || candidates(node, 'controls').some(candidate => candidate !== node && ['Chat', 'Work'].includes(controlName(candidate)));
+      || hasCandidate(node, 'controls', candidate => candidate !== node && ['Chat', 'Work'].includes(controlName(candidate)));
     productReferrers.set(node, potential); return potential;
   };
   let productReferenceData = null;

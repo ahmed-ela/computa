@@ -965,3 +965,37 @@ describe('Groq fixed fresh-session adapter', () => {
     expect(f.f.sendCount).toBe(0); expect(f.f.clearCount).toBe(0);
   });
 });
+
+test('a fresh generic error in the same previously empty site notification region annotates only a verified rollback', async () => {
+  const notice = 'Something went wrong. Please, try again.';
+  for (const fault of ['none','stale','replaced','hidden','other_copy','duplicate','prompt_copy',
+    'editor_mismatch','parent_attached','not_bound','extra_copy','large','throws','authored','elsewhere','class_drift','body_replaced']) {
+    const f = groqFixture(); f.f.delayResponse = true;
+    let region = new f.Node('SECTION', { 'aria-label': 'Notifications alt+T' });
+    f.body.append(region);
+    if (fault === 'stale') region.append(new f.Node('SPAN', {}, notice));
+    await f.submit();
+    if (fault !== 'not_bound') expect((await f.run()).firstUserVerified).toBe(true);
+    if (fault === 'replaced') { region.remove(); region = new f.Node('SECTION', { 'aria-label': 'Notifications alt+T' }); f.body.append(region); }
+    if (fault === 'duplicate') f.body.append(new f.Node('SECTION', { 'aria-label': 'Notifications alt+T' }));
+    if (fault === 'hidden') region.setAttribute('hidden','');
+    if (fault === 'authored') region.setAttribute('class','font-inter');
+    if (fault === 'parent_attached') f.f.user.remove(); else f.f.turn.remove();
+    if (fault === 'class_drift') f.f.user.setAttribute('class','private');
+    if (fault === 'body_replaced') f.f.userBody.remove();
+    f.f.editor.value = fault === 'editor_mismatch' ? groqPrompt + ' ' : groqPrompt;
+    const leaf = new f.Node('SPAN',{},fault === 'other_copy' ? 'PRIVATE HTTP 429' : fault === 'prompt_copy' ? groqPrompt : notice);
+    if (fault !== 'stale') (fault === 'elsewhere' ? f.body : region).append(leaf);
+    if (fault === 'extra_copy') region.append(new f.Node('SPAN',{},'PRIVATE EXTRA'));
+    if (fault === 'large') for (let i=0;i<49;i++) region.append(new f.Node('DIV'));
+    if (fault === 'throws') Object.defineProperty(region,'childNodes',{get(){throw new Error('PRIVATE');}});
+    const result = await f.run();
+    expect(result.groqUserCountDiagnostic?.freshNotice).toBe(fault === 'none' ? 'generic_error' : undefined);
+    if (fault === 'none') {
+      expect(result.error).toBe('conversation_changed'); expect(result.detail).toBe('user_count');
+      expect(result.groqUserCountDiagnostic.boundNodes.preparedEditorDraftRestored).toBe(true);
+    }
+    expect(JSON.stringify(result.groqUserCountDiagnostic || {})).not.toContain('PRIVATE');
+    expect(f.f.sendCount).toBe(1); expect(f.f.clearCount).toBe(0);
+  }
+});

@@ -241,6 +241,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         case javaScriptConversation = "js_conversation_changed"
         case javaScriptOwner = "owner_token"
         case javaScriptUserCount = "user_count"
+        case groqDraftRestored = "groq_draft_restored"
+        case groqReportedSubmissionError = "groq_reported_submission_error"
         case javaScriptConversationIdentity = "conversation_identity"
         case javaScriptURL = "document_url"
         case javaScriptConversationRoute = "conversation_route"
@@ -329,6 +331,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .cookieMaintenancePending: "ChatGPT's previous browser session is still closing. Wait briefly before starting another task."
             case .staleSession: "The owned browser model session is no longer available."
             case .documentChanged: "The owned model page or conversation changed. No prompt was replayed."
+            case .ownershipFailure(.groqDraftRestored): "Groq removed the pending message and restored the submitted draft. Computa could not verify a reply."
+            case .ownershipFailure(.groqReportedSubmissionError): "Groq displayed a submission error and restored the submitted draft. Computa could not verify a reply."
             case .ownershipFailure(let reason): "The owned model page or conversation changed (\(reason.rawValue)). No prompt was replayed."
             case .signInRequired: "Sign in to the selected AI website in Computa's built-in browser, then refresh website models before retrying."
             case .temporaryUnverified: "The AI website did not confirm temporary or incognito chat mode. No further prompt was sent."
@@ -1989,7 +1993,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     /// Failure-only shared-engine tags. Pairwise allowlists prevent arbitrary
     /// adapter text from reaching logs; no tag participates in ownership proof.
-    static func qwenFirstUserBindingDiagnostic(_ observed: [String: Any], provider: Provider) -> String? {
+    static func qwenFirstUserBindingDiagnostic(_ observed: [String: Any], provider: Provider, inspectCover: Bool = false) -> String? {
         guard provider == .qwen, observed["error"] as? String == "conversation_changed",
               observed["detail"] as? String == "first_user_message",
               let packet = observed["qwenFirstUserBindingDiagnostic"] as? [String: Any],
@@ -2014,7 +2018,20 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         ]
         guard reasons[stage]?.contains(reason) == true else { return nil }
         let message = "firstUserStage=\(stage) firstUserReason=\(reason)"
-        if Set(packet.keys) == ["version", "stage", "reason"] { return message }
+        if Set(packet.keys) == ["version", "stage", "reason"] {
+            guard inspectCover, stage == "display_reveal_hit", reason == "occluded_unrelated",
+                  let cover = observed["qwenDisplayCover"] as? [String: String],
+                  Set(cover.keys) == ["phase", "probe", "clip", "hits", "scope", "anchor"],
+                  let phase = cover["phase"], ["revealed", "settled"].contains(phase),
+                  let probe = cover["probe"], ["grid", "witness"].contains(probe),
+                  let clip = cover["clip"], ["unmeasured", "unchanged", "reduced", "empty"].contains(clip),
+                  let hits = cover["hits"], ["one", "several"].contains(hits),
+                  let scope = cover["scope"], ["composer", "user", "answer", "elsewhere", "mixed"].contains(scope),
+                  let anchor = cover["anchor"], ["fixed", "sticky", "none", "mixed", "unknown"].contains(anchor),
+                  probe != "witness" || (hits == "one" && clip == "unmeasured"),
+                  hits != "one" || (scope != "mixed" && anchor != "mixed") else { return message }
+            return message + " displayCover phase=\(phase) probe=\(probe) clip=\(clip) hits=\(hits) scope=\(scope) anchor=\(anchor)"
+        }
         guard stage == "display_completed", reason == "user_id_changed",
               Set(packet.keys) == ["version", "stage", "reason", "change"],
               let facts = packet["change"] as? [String: Any] else { return nil }
@@ -2283,7 +2300,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         default: return nil
         }
         let details = commonDetails + providerDetails, detail = observed["detail"] as? String
-        let firstBinding = qwenFirstUserBindingDiagnostic(observed, provider: provider).map { " " + $0 } ?? ""
+        let firstBinding = qwenFirstUserBindingDiagnostic(observed, provider: provider, inspectCover: action == "inspect").map { " " + $0 } ?? ""
         return "action=\(actions.contains(action) ? action : "other") error=\(errors.contains(error) ? error : "other") detail=\(detail.map { details.contains($0) ? $0 : "other" } ?? "absent")" + firstBinding + qwenSelectionBindingDiagnostic(observed, provider: provider)
     }
 
@@ -4059,12 +4076,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     /// A rejection-only projection of the exact Groq count decision. It never
     /// supplies lineage, response, retry or cleanup authority.
     static func sanitizedGroqUserCountDiagnostic(_ raw: Any?, provider: Provider, action: String) -> String? {
+        groqCountRejection(raw, provider: provider, action: action)?.diagnostic
+    }
+
+    static func groqCountRejection(_ raw: Any?, provider: Provider, action: String) -> (diagnostic: String, rollback: OwnershipReason?)? {
         let keys: Set<String> = ["kind", "action", "branch", "userCount", "answerCount", "visibleUserCount",
             "visibleAnswerCount", "expectedUserCounts", "submitted", "adapterFirstBound", "boundNodes"]
         let actions: Set<String> = ["inspect", "discoverModels", "selectModel", "modelDiagnostic", "verifyModel",
             "prepare", "insert", "sendReady", "submit", "stop", "clearTranscript", "observeClearTranscript"]
         guard provider == .groq, actions.contains(action), let value = raw as? [String: Any],
-              Set(value.keys) == keys, value["kind"] as? String == "groq_user_count_v2",
+              (Set(value.keys) == keys || Set(value.keys) == keys.union(["freshNotice"])), value["kind"] as? String == "groq_user_count_v2",
               value["action"] as? String == action, let branch = value["branch"] as? String,
               ["multiple_users", "multiple_answers", "answer_without_user", "expected_count"].contains(branch),
               let users = ComputerToolArgumentContract.exactInt64(value["userCount"]), (0...64).contains(users),
@@ -4108,8 +4129,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               nodes["preparedEditorDraftRestored"] is NSNull
                 || submitted && nodes["preparedEditorConnected"] as? Bool == true else { return nil }
         safe["boundNodes"] = nodes
-        guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), bytes.count <= 1_024 else { return nil }
-        return String(decoding: bytes, as: UTF8.self)
+        let rollback = action == "inspect" && branch == "expected_count" && expected == [1]
+            && users == 0 && answers == 0 && submitted && bound
+            && nodes["preparedEditorConnected"] as? Bool == true && nodes["preparedEditorDraftRestored"] as? Bool == true
+            && ["rootConnected", "bodyConnected", "parentConnected", "rootInDocument"].allSatisfy { nodes[$0] as? Bool == false }
+            && ["rootClassMatches", "bodyClassMatches", "rootParentMatches", "bodyWithinRoot"].allSatisfy { nodes[$0] as? Bool == true }
+        var reason: OwnershipReason? = rollback ? .groqDraftRestored : nil
+        if let notice = value["freshNotice"] {
+            guard rollback, notice as? String == "generic_error" else { return nil }
+            safe["freshNotice"] = "generic_error"; reason = .groqReportedSubmissionError
+        }
+        guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), bytes.count <= 1_024,
+              let diagnostic = String(data: bytes, encoding: .utf8) else { return nil }
+        return (diagnostic, reason)
     }
 
     static func sanitizedUserCountDiagnostic(_ raw: Any?, action: String) -> String? {
@@ -6085,6 +6117,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             input["prepareFirstInstantInInsert"] = true
         }
         if profilePreparation { input["preparationTiming"] = true }
+        let preparedOpening = action == "verifyModel" && preparedReadinessSink != nil
+            ? preparedReadinessRequest.flatMap { isCurrent($0, session: session) ? $0 : nil } : nil
+        if let preparedOpening {
+            // Only insert's nested post-await verification carries this call-local
+            // request. An ordinary verification cannot borrow a prepared draft.
+            input["preparedInstantVerificationOpening"] = preparedOpening.dictionary
+        }
         let requestsPreparedReadiness = action == "verifyProductMode" && preparedReadinessSink != nil
             && preparedReadinessRequest.map({ isCurrent($0, session: session) }) == true
         if requestsPreparedReadiness, let preparedReadinessRequest {
@@ -6405,7 +6444,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // to inference state. Unknown fields/values cannot become log content.
         let completionDiagnostic = Self.completionMatchDiagnostic(observed.removeValue(forKey: "terminalCompletionDiagnostic"))
         let userCountDiagnostic = Self.sanitizedUserCountDiagnostic(observed.removeValue(forKey: "userCountDiagnostic"), action: action)
-        let groqUserCountDiagnostic = Self.sanitizedGroqUserCountDiagnostic(
+        let groqCountRejection = Self.groqCountRejection(
             observed.removeValue(forKey: "groqUserCountDiagnostic"), provider: provider, action: action)
         if provider == .chatgpt, action == "inspect" {
             session.completionMatchDiagnostic = completionDiagnostic
@@ -6557,9 +6596,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                           action: action, allowsBlockedProvider: allowBlockedProvider)
                 }
                 if provider == .groq, error == "conversation_changed", observed["detail"] as? String == "user_count",
-                   !session.loggedGroqUserCountDiagnostic, let groqUserCountDiagnostic {
-                    session.loggedGroqUserCountDiagnostic = true
-                    Self.inspectionLog.error("userCountDiagnostic provider=groq \(groqUserCountDiagnostic, privacy: .public)")
+                   let groqCountRejection {
+                    if !session.loggedGroqUserCountDiagnostic {
+                        session.loggedGroqUserCountDiagnostic = true
+                        Self.inspectionLog.error("userCountDiagnostic provider=groq \(groqCountRejection.diagnostic, privacy: .public)")
+                    }
+                    if let reason = groqCountRejection.rollback, !allowBlockedProvider, session.state == "running",
+                       session.submitted, session.sequence == 1, session.acknowledgedSendSequence == 1 {
+                        throw Failure.ownershipFailure(reason)
+                    }
                 }
                 if provider == .chatgpt, observed["detail"] as? String == "user_count", let userCountDiagnostic {
                     #if DEBUG
@@ -7056,6 +7101,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     tabID: session.tabID, view: session.view, ownerToken: session.token,
                     generation: generation, firstUserFingerprint: fingerprint)
             }
+        }
+        if let preparedOpening, !isCurrent(preparedOpening, session: session) {
+            if browser.webView(for: session.tabID) === session.view,
+               browser.documentGeneration(for: session.tabID) != preparedOpening.generation {
+                throw Failure.ownershipFailure(.documentGenerationBefore)
+            }
+            throw Failure.modelUnverified
         }
         if requestsPreparedReadiness, let request = preparedReadinessRequest,
            isCurrent(request, session: session), let receipt = readinessReceipt(preparedReadiness, request: request) {

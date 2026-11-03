@@ -114,6 +114,34 @@ try {
     && !['meta-llama/llama-prompt-guard-2-22m', 'meta-llama/llama-prompt-guard-2-86m',
       'openai/gpt-oss-safeguard-20b'].includes(choice.key)
     && !/(?:^|\/)(?:whisper|distil-whisper|playai-tts|canopylabs\/orpheus)(?:[-/]|$)/i.test(choice.key);
+  // The site's notification region was empty before the observed submission,
+  // then displayed this exact generic failure. Its copy supplies no HTTP status.
+  function notificationRegion(expected, failed = false) {
+    try {
+      const matches = document.querySelectorAll('[aria-label="Notifications alt+T"]');
+      if (matches.length !== 1) return null;
+      const region = matches[0];
+      if (!region.isConnected || !document.documentElement.contains(region) || expected && region !== expected
+        || region.closest('form, textarea, [contenteditable], [hidden], [inert], [aria-hidden="true"]')
+        || authored(region) || region.contains(state.prepared)) return null;
+      const stack = [region]; let visited = 0, messages = 0;
+      while (stack.length) {
+        const node = stack.pop();
+        if (++visited > 48) return null;
+        if (node.nodeType === 3) {
+          if (node.length > 96) return null;
+          const text = node.textContent.trim();
+          if (!text) continue;
+          if (!failed || text !== 'Something went wrong. Please, try again.' || ++messages > 1
+            || !c.visible(node.parentElement) || authored(node.parentElement)) return null;
+        } else if (node.nodeType === 1) {
+          if (node.childNodes.length + stack.length + visited > 48) return null;
+          for (const child of node.childNodes) stack.push(child);
+        } else return null;
+      }
+      return messages === (failed ? 1 : 0) ? region : null;
+    } catch { return null; }
+  }
   function failUserCount(branch, users, answers) {
     // Snapshot the arrays from this rejected evaluation; no transcript reread.
     // Visibility is diagnostic only and unknown if its getters cannot be read.
@@ -145,6 +173,13 @@ try {
         userCount: users.length, answerCount: answers.length,
         visibleUserCount: visibleCount(users), visibleAnswerCount: visibleCount(answers),
         expectedUserCounts, submitted, adapterFirstBound, boundNodes };
+      if (input.action === 'inspect' && branch === 'expected_count' && expectedUserCounts?.length === 1
+        && expectedUserCounts[0] === 1 && users.length === 0 && answers.length === 0 && adapterFirstBound && submitted
+        && preparedEditorDraftRestored === true && boundNodes.rootConnected === false && boundNodes.bodyConnected === false
+        && boundNodes.parentConnected === false && boundNodes.rootInDocument === false && boundNodes.rootClassMatches === true
+        && boundNodes.bodyClassMatches === true && boundNodes.rootParentMatches === true && boundNodes.bodyWithinRoot === true
+        && state.emptyNotice && notificationRegion(state.emptyNotice, true))
+        groqUserCountDiagnostic.freshNotice = 'generic_error';
     } catch { groqUserCountDiagnostic = null; }
     c.fail('conversation_changed', 'user_count');
   }
@@ -491,6 +526,7 @@ try {
   if (input.action === 'sendReady') return { ...initial.output, sendReady: ready, sendReadinessFailure,
     ...(state.sendReveal?.diagnostic ? { sendRevealDiagnostic: state.sendReveal.diagnostic } : {}) };
   if (!ready) c.fail('send_unavailable', sendReadinessFailure);
+  state.emptyNotice = notificationRegion(null);
   state.submitted = true;
   form.send.click();
   // This is the pre-click empty observation plus dispatch acknowledgment. It

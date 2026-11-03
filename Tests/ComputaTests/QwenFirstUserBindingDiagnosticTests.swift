@@ -41,6 +41,33 @@ final class QwenFirstUserBindingDiagnosticTests: XCTestCase {
             }
         }
     }
+    func testCoverEvidenceIsFiniteAndRestrictedToRejectedQwenInspection() {
+        let good = ["phase":"settled", "probe":"grid", "clip":"reduced", "hits":"several", "scope":"composer", "anchor":"fixed"]
+        let bare = "firstUserStage=display_reveal_hit firstUserReason=occluded_unrelated"
+        func observe(_ cover: [String:Any], stage: String = "display_reveal_hit", reason: String = "occluded_unrelated",
+                     action: String = "inspect", provider: EmbeddedWebModelTransport.Provider = .qwen) -> String {
+            var row = observation(stage, reason); row["qwenDisplayCover"] = cover
+            return EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(row, provider: provider, action: action) ?? ""
+        }
+        XCTAssertTrue(observe(good).hasSuffix(bare + " displayCover phase=settled probe=grid clip=reduced hits=several scope=composer anchor=fixed"))
+        var witness = good; witness["phase"] = "revealed"; witness["probe"] = "witness"; witness["clip"] = "unmeasured"; witness["hits"] = "one"
+        XCTAssertTrue(observe(witness).contains("displayCover phase=revealed probe=witness"))
+        for key in good.keys {
+            var absent = good; absent.removeValue(forKey:key); XCTAssertTrue(observe(absent).hasSuffix(bare))
+            for bad: Any in [2, true, NSNull(), "PRIVATE", ["PRIVATE"]] {
+                var fields:[String:Any] = good; fields[key] = bad
+                XCTAssertTrue(observe(fields).hasSuffix(bare)); XCTAssertFalse(observe(fields).contains("PRIVATE"))
+            }
+        }
+        for (field, value) in [("clip","reduced"),("hits","several"),("scope","mixed"),("anchor","mixed"),("extra","PRIVATE")] {
+            var bad = witness; bad[field]=value; XCTAssertTrue(observe(bad).hasSuffix(bare))
+        }
+        XCTAssertFalse(observe(good, action:"submit").contains("displayCover"))
+        XCTAssertFalse(observe(good, provider:.deepseek).contains("displayCover"))
+        XCTAssertFalse(observe(good, reason:"occluded_ancestor").contains("displayCover"))
+        XCTAssertFalse(observe(good, stage:"display_settlement", reason:"render_deadline").contains("displayCover"))
+    }
+
     func testCompletedDisplayUUIDChangePublishesOnlyFiniteRelationsForThatExactRejection() {
         let facts = ["point":"id_candidate", "spelling":"different_uuid", "pins":"same", "body":"exact",
                      "display":"expanded", "reply":"settled_now", "responseIdentity":"held"]

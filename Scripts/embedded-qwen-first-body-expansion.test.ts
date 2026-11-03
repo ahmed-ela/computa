@@ -207,11 +207,15 @@ test('only the first exact expanded body commits its detached-picker replacement
       expect(control.clicks).toBe(0);
     }
     f.userBody.text = preview; control.onClick = render;
-    expect(await inspect()).toEqual(pending); expect(await inspect()).toEqual(idPending);
+    expect(await inspect()).toEqual(pending);
+    if (label === 'Qwen3.8-Max') {
+      expect(control.clicks).toBe(0); settleID(); expect(await inspect()).toEqual(pending);
+      expect(control.clicks).toBe(0); expect(await inspect()).toEqual(pending);
+    } else expect(await inspect()).toEqual(idPending);
     expect(state.model.trigger).toBe(f.trigger); expect(state.first).toBeNull();
-    settleID();
+    if (label !== 'Qwen3.8-Max') settleID();
     f.beforeDigest(() => { expect(state.model.trigger).toBe(f.trigger); expect(state.first).toBeNull(); });
-    const result = await inspect({ allowQwenFirstBodyExpansion: false });
+    const result = await inspect({ allowQwenFirstBodyExpansion: label === 'Qwen3.8-Max' });
     expect(result).toMatchObject({ firstUserVerified: true, firstUserFingerprint: hash,
       modelEvidence: { selected: choice(label) }, answerComplete: true });
     expect(state.model.trigger).toBe(replacement);
@@ -352,6 +356,7 @@ test('Qwen rejects replaced display pins and invalid first preview with only fin
 test('a clipped Qwen display button needs the same exposed point before its sole click', async () => {
   for (const model of ['Qwen3.7-Plus', 'Qwen3.8-Max']) {
     const { f, control, inspect, render, settleID, hash } = await sent(model);
+    if (model === 'Qwen3.8-Max') settleID();
     const icon = new f.Node('SPAN');
     control.append(icon); control.onClick = render; f.userBody.text = preview;
     control.getBoundingClientRect = () => ({ left: -70, top: 70, width: 100, height: 32 });
@@ -366,9 +371,8 @@ test('a clipped Qwen display button needs the same exposed point before its sole
     expect(await inspect()).toEqual(pending);
     expect(points).toEqual([[15,86], [3.75,86], [3.75,86]]);
     expect(control.clicks).toBe(1);
-    expect(await inspect()).toEqual(idPending);
-    settleID();
-    const verified = await inspect({allowQwenFirstBodyExpansion:false});
+    if (model !== 'Qwen3.8-Max') { expect(await inspect()).toEqual(idPending); settleID(); }
+    const verified = await inspect({allowQwenFirstBodyExpansion:model === 'Qwen3.8-Max'});
     expect(verified.firstUserFingerprint).toBe(hash);
     expect(verified.answerComplete).toBe(true); expect(f.send.clicks).toBe(1);
   }
@@ -418,6 +422,7 @@ test('one normal scroll can reveal only the exact pinned preview control', async
   for (const model of ['Qwen3.7-Plus', 'Qwen3.8-Max']) {
     for (const before of ['occluded', 'outside_viewport']) {
       const {f, control, render, inspect, hash, settleID} = await sent(model);
+      if (model === 'Qwen3.8-Max') settleID();
       f.userBody.text = preview; control.onClick = render;
       let scrolls = 0;
       const original = f.document.elementFromPoint;
@@ -435,9 +440,8 @@ test('one normal scroll can reveal only the exact pinned preview control', async
       expect(await inspect()).toEqual(pending);
       expect(points.slice(-2)).toEqual([[70,116],[70,116]]);
       expect(scrolls).toBe(1); expect(control.clicks).toBe(1);
-      expect(await inspect()).toEqual(idPending);
-      settleID();
-      const result = await inspect({allowQwenFirstBodyExpansion:false});
+      if (model !== 'Qwen3.8-Max') { expect(await inspect()).toEqual(idPending); settleID(); }
+      const result = await inspect({allowQwenFirstBodyExpansion:model === 'Qwen3.8-Max'});
       expect(result.firstUserVerified).toBe(true); expect(result.firstUserFingerprint).toBe(hash);
       expect(result.answerComplete).toBe(true); expect(f.send.clicks).toBe(1);
       expect(scrolls).toBe(1); expect(control.clicks).toBe(1);
@@ -549,6 +553,7 @@ async function renderSettlement(model = 'Qwen3.7-Plus') {
 test('one post-scroll render wakes a fresh granted read before a single revalidated display click', async () => {
   for (const model of ['Qwen3.7-Plus','Qwen3.8-Max']) {
     const {f,control,inspect,hash,settleID,observed,frames,timers,editorEvents,frame} = await renderSettlement(model);
+    if (model === 'Qwen3.8-Max') settleID();
     expect(await inspect()).toEqual(pending);
     expect([observed.scrolls,observed.points,control.clicks,frames.size]).toEqual([1,18,0,1]);
     observed.exposed = true;
@@ -560,8 +565,8 @@ test('one post-scroll render wakes a fresh granted read before a single revalida
     expect([observed.points,control.clicks]).toEqual([18,0]);
     expect(await inspect()).toEqual(pending);
     expect([observed.scrolls,observed.points,control.clicks,frames.size,timers.size,editorEvents.size]).toEqual([1,20,1,0,0,0]);
-    expect(await inspect()).toEqual(idPending); settleID();
-    const result = await inspect({allowQwenFirstBodyExpansion:false});
+    if (model !== 'Qwen3.8-Max') { expect(await inspect()).toEqual(idPending); settleID(); }
+    const result = await inspect({allowQwenFirstBodyExpansion:model === 'Qwen3.8-Max'});
     expect(result.firstUserVerified).toBe(true); expect(result.firstUserFingerprint).toBe(hash);
     expect(result.answerComplete).toBe(true); expect(f.send.clicks).toBe(1);
   }
@@ -586,8 +591,47 @@ test('persistent coverage, late frames, elapsed deadline, or loss of the final p
     expect(result.qwenFirstUserBindingDiagnostic).toEqual(
       ['late_frames','one_frame','deadline_at_hit'].includes(fault) ? {version:1,stage:'display_settlement',reason:'render_deadline'}
         : {version:1,stage:'display_reveal_hit',reason:'occluded_unrelated'});
+    if (result.qwenFirstUserBindingDiagnostic.stage === 'display_settlement') expect(result.qwenDisplayCover).toBeUndefined();
     expect((await inspect()).detail).toBe('terminal_operation');
     expect([observed.scrolls,control.clicks,foreign.clicks,f.send.clicks,frames.size,timers.size]).toEqual([1,0,0,1,0,0]);
+  }
+});
+
+test('only terminal unrelated hits describe the actual final grid or same-point witness', async () => {
+  for (const kind of ['settled_grid','settled_witness','revealed_witness','clipped','empty','throws','mixed']) {
+    const {f,control,inspect,foreign,observed,frame} = await renderSettlement();
+    foreign.computedStyle.position = 'sticky';
+    if (kind === 'mixed') {
+      const second = new f.Node('SPAN'); second.computedStyle.position='fixed'; f.scope.append(second);
+      const original = f.document.elementFromPoint;
+      f.document.elementFromPoint = (x:number,y:number) => {
+        const observedHit = original(x,y);
+        return y >= 120 && observed.points > 18 && observed.points % 2 === 0 ? second : observedHit;
+      };
+    }
+    if (kind === 'revealed_witness') observed.pointRead = () => { observed.exposed = observed.points === 10; };
+    else {
+      expect(await inspect()).toEqual(pending);
+      frame(); frame();
+      if (kind === 'settled_witness') observed.pointRead = () => { observed.exposed = observed.points === 19; };
+      if (kind === 'clipped' || kind === 'empty') {
+        const ancestor = control.parentElement!;
+        ancestor.computedStyle.overflowY='hidden';
+        ancestor.getBoundingClientRect = () => ({left:0,top:kind==='empty'?800:123,width:300,height:12});
+      }
+      if (kind === 'throws') Object.defineProperty(foreign.computedStyle,'position',{enumerable:true,get(){throw Error('PRIVATE');}});
+    }
+    const result = await inspect();
+    expect(result.qwenFirstUserBindingDiagnostic).toEqual({version:1,stage:'display_reveal_hit',reason:'occluded_unrelated'});
+    const witness = kind.endsWith('witness');
+    const expectedPoints = kind==='revealed_witness'?11:kind==='settled_witness'?20:kind==='clipped'?28:27;
+    expect(observed.points,kind).toBe(expectedPoints);
+    if (kind==='throws') expect(result.qwenDisplayCover).toBeUndefined();
+    else expect(result.qwenDisplayCover).toEqual({phase:kind==='revealed_witness'?'revealed':'settled',
+      probe:witness?'witness':'grid',clip:witness?'unmeasured':kind==='empty'?'empty':kind==='clipped'?'reduced':'unchanged',
+      hits:kind==='mixed'?'several':'one',scope:kind==='mixed'?'mixed':'elsewhere',anchor:kind==='mixed'?'mixed':'sticky'});
+    expect(result.text).toBeUndefined(); expect(result.firstUserVerified).toBeUndefined();
+    expect([observed.scrolls,control.clicks,foreign.clicks,f.send.clicks]).toEqual([1,0,0,1]);
   }
 });
 
@@ -649,7 +693,7 @@ test('a hidden view can settle only on removal of an actual blocker, with an ind
 
 test('completed display UUID changes stay terminal even when every other user pin and the full prompt match', async () => {
   for (const shape of ['case_only','different_uuid','reply_settled','body_changed','pin_changed','recollapsed','during_digest']) {
-    const {f, control, chunk, render, settleID, inspect} = await sent('Qwen3.8-Max');
+    const {f, control, chunk, render, settleID, inspect} = await sent('Qwen3.7-Plus');
     f.userBody.text = preview; control.onClick = render; expect(await inspect()).toEqual(pending);
     const old = f.userContainer.getAttribute('data-msg-id')!;
     const changed = shape === 'case_only' ? old.toUpperCase() : 'eb61e1c6-f2a0-4b7e-b356-3d3aaa1af374';
@@ -693,4 +737,79 @@ test('stable answer UUID and unchanged full bytes cannot legitimize a changed us
     version:1,stage:'display_completed',reason:'user_id_changed',change:{point:'body_digest_check',spelling:'different_uuid',
       pins:'same',body:'exact',display:'expanded',reply:'stable',responseIdentity:'absent'}}});
   expect(result.firstUserVerified).toBeUndefined();expect(result.text).toBeUndefined();expect(control.clicks).toBe(1);expect(f.send.clicks).toBe(1);
+});
+
+test('Max first binds a real UUID pair after its optimistic long preview, before one display action', async () => {
+  for (const transition of ['stable','new_user_and_answer','case_only','remounted_picker']) {
+    const { f, control, render, inspect, hash, settleID } = await sent('Qwen3.8-Max');
+    const state = f.world.__computaQwenSavedSessionV1;
+    if (transition === 'remounted_picker') remountPicker(f, true);
+    expect(await inspect()).toEqual(pending);
+    f.userBody.text = preview; control.onClick = render;
+    expect(await inspect()).toEqual(pending);
+    expect(state.firstDisplay).toBeUndefined(); expect(state.responseIdentity).toBeNull();
+    const old = f.userContainer.getAttribute('data-msg-id')!;
+    const stable = transition === 'new_user_and_answer' ? '494d93fb-ad37-43ab-868d-5dade1cdc4b1' : transition === 'case_only' ? old.toUpperCase() : old;
+    expect(state.firstDisplayWitness.userID).toBeUndefined();
+    expect(state.firstDisplayWitness.answerID).toBeUndefined();
+    f.userContainer.setAttribute('data-msg-id',stable); settleID();
+    expect(await inspect()).toEqual(pending);
+    expect(state.firstDisplay.userID).toBe(stable); expect(state.firstDisplay.answerID).toBe(answerID);
+    expect(state.first).toBeNull(); expect(state.responseIdentity).toBeNull(); expect(control.clicks).toBe(0);
+    expect(await inspect()).toEqual(pending); expect(control.clicks).toBe(1);
+    const result=await inspect();
+    expect(result).toMatchObject({firstUserVerified:true,firstUserFingerprint:hash,answerComplete:true,
+      modelEvidence:{selected:choice('Qwen3.8-Max')}});
+    expect(state.first.id).toBe(stable); expect(f.send.clicks).toBe(1); expect(f.more.clicks).toBe(0);
+  }
+});
+
+test('Max optimistic preview cannot bridge foreign nodes, text, choices, routes, grants, or actions', async () => {
+  for (const fault of ['body','answer','control','preview','empty','wrong_length','external_expand','change_choice','remount_picker','composer',
+    'editor','double_user','route','user_not_uuid','same_user_answer','missing_grant','marker','hash','cleanup','delete','cancel']) {
+    const { f, chunk, control, render, inspect, settleID } = await sent('Qwen3.8-Max');
+    f.userBody.text=preview; control.onClick=render;
+    expect(await inspect()).toEqual(pending);
+    if (fault === 'body') { const fresh=new f.Node('P',{...f.userBody.values},preview); f.userBody.detach();chunk.children.unshift(fresh);fresh.parentElement=chunk; }
+    if (fault === 'answer') { const prior=f.answer.parentElement!;f.answer.detach();prior.append(new f.Node('DIV',{...f.answer.values})); }
+    if (fault === 'control') { control.detach();chunk.append(new f.Node('BUTTON',{...control.values})); }
+    if (fault === 'preview') f.userBody.text='x'+preview.slice(1);
+    if (fault === 'empty') f.userBody.text='';
+    if (fault === 'wrong_length') f.userBody.text=preview.slice(0,-1);
+    if (fault === 'external_expand') render();
+    if (fault === 'change_choice') f.modelName.text='Qwen3.7-Plus';
+    if (fault === 'remount_picker') remountPicker(f,true);
+    if (fault === 'composer') f.editor.value='foreign draft';
+    if (fault === 'editor') { const e=new (f.editor.constructor as any)('TEXTAREA',{...f.editor.values}); f.editor.detach(); f.scope.append(e); }
+    if (fault === 'double_user') f.root.parentElement!.append(f.root.cloneNode(true));
+    if (fault === 'route') f.document.URL='https://chat.qwen.ai/c/494d93fb-ad37-43ab-868d-5dade1cdc4b1';
+    if (fault === 'user_not_uuid') f.userContainer.setAttribute('data-msg-id','bad');
+    if (fault === 'same_user_answer') { f.userContainer.setAttribute('data-msg-id',answerID); settleID(); }
+    const overrides = fault === 'missing_grant' ? {allowQwenFirstBodyExpansion:false} : fault === 'marker'
+      ? {expectedFirstUserMarker:generation} : fault === 'hash' ? {savedSubmissionFingerprint:'0'.repeat(64)}
+      : fault === 'cleanup' ? {savedCleanupInspection:true} : {};
+    const rejected = ['delete','cancel'].includes(fault) ? await f.run(fault === 'delete' ? 'deleteConversation':'stop') : await inspect(overrides);
+    expect(rejected.error,fault).toBeDefined(); expect(rejected.firstUserVerified).toBeUndefined();
+    expect([control.clicks,f.send.clicks,f.more.clicks]).toEqual([0,1,0]);
+  }
+});
+
+test('Max refuses any UUID disagreement after first genuine pair, including a changed ID during the final digest', async () => {
+  for (const phase of ['pair','answer','expanded','digest']) {
+    const {f, control, render, inspect, settleID} = await sent('Qwen3.8-Max');
+    f.userBody.text=preview; control.onClick=render; expect(await inspect()).toEqual(pending);
+    settleID(); expect(await inspect()).toEqual(pending);
+    const changeUser=()=>f.userContainer.setAttribute('data-msg-id','494d93fb-ad37-43ab-868d-5dade1cdc4b1');
+    if (phase === 'pair') changeUser();
+    if (phase === 'answer') f.answer.setAttribute('id','chat-response-message-199ea110-b867-4800-a5f4-6dc37706ee1a');
+    if (phase === 'expanded' || phase === 'digest') {
+      expect(await inspect()).toEqual(pending); expect(control.clicks).toBe(1);
+      if (phase === 'digest') f.beforeDigest(changeUser); else changeUser();
+    }
+    const rejected=await inspect();
+    expect(rejected.error,phase).toBe('conversation_changed');
+    expect(rejected.firstUserVerified).toBeUndefined(); expect(rejected.text).toBeUndefined();
+    expect((await inspect()).detail).toBe('terminal_operation');
+    expect([control.clicks,f.send.clicks,f.more.clicks]).toEqual([phase==='expanded'||phase==='digest'?1:0,1,0]);
+  }
 });

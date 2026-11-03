@@ -91,8 +91,8 @@ async function computaSavedConversation(input, c, dom, config) {
     guard();
     if (state.terminal) c.fail('conversation_changed', 'terminal_operation');
     const cleanupInspection = input.action === 'inspect' && input.savedCleanupInspection === true;
-    if (state.firstDisplay && !state.first && (input.action !== 'inspect' || cleanupInspection
-      || !state.firstDisplay.complete && input.allowQwenFirstBodyExpansion !== true || input.allowQwenInitialResponseIdentity !== true))
+    if ((state.firstDisplay || state.firstDisplayWitness) && !state.first && (input.action !== 'inspect' || cleanupInspection
+      || !state.firstDisplay?.complete && input.allowQwenFirstBodyExpansion !== true || input.allowQwenInitialResponseIdentity !== true))
       firstBindingFailure('display_scope', 'held_claim_ineligible');
     const route = dom.route();
     if (!state.submitted && route.kind !== 'fresh') c.fail('not_fresh');
@@ -120,6 +120,9 @@ async function computaSavedConversation(input, c, dom, config) {
       catch (error) {
         if (diagnostic && error?.computaAdapterFailure) {
           error.qwenFirstUserBindingDiagnostic = diagnostic;
+          if (stage === 'display_reveal_hit' && diagnostic.reason === 'occluded_unrelated' && typeof structure === 'function') {
+            try { const cover = structure(); if (cover) error.qwenDisplayCover = cover; } catch { /* Keep the original rejection. */ }
+          }
           if (stage === 'display_completed' && diagnostic.reason === 'user_id_changed' && typeof structure === 'function') {
             try { diagnostic.change = structure(); } catch { /* Never replace the ownership rejection. */ }
           }
@@ -315,6 +318,9 @@ async function computaSavedConversation(input, c, dom, config) {
       if (held.canonical !== dom.route().canonical) reject('route_changed');
       if (held.userID !== view.userID) firstBindingFailure(stage, 'user_id_changed', rejectedIdentityFacts);
       if (held.answerID !== null && held.answerID !== view.answerID) reject('answer_id_changed');
+      requireDisplayPins(held, view, reject);
+    }
+    function requireDisplayPins(held, view, reject) {
       if (held.pins.length !== view.pins.length) reject('pin_count_changed');
       const i = held.pins.findIndex((node, i) => node !== view.pins[i]);
       if (i >= 0) reject(i === 0 ? 'body_changed' : i === 1 ? 'control_changed'
@@ -323,8 +329,7 @@ async function computaSavedConversation(input, c, dom, config) {
     // Only the native-granted long Qwen display may pin a detached picker's
     // replacement. This observation publishes no evidence. Normal selection
     // reads continue to use the original handle until first-body ownership binds.
-    function checkFirstDisplaySelection(stage, allowReplacement = false) {
-      const claim = state.firstDisplay;
+    function checkFirstDisplaySelection(stage, allowReplacement = false, claim = state.firstDisplay) {
       if (state.first || !claim || !claim.replacement && (!allowReplacement || state.model.trigger.isConnected !== false)) {
         selectionEvidence(true, stage);
         return;
@@ -336,19 +341,25 @@ async function computaSavedConversation(input, c, dom, config) {
     function observeFirstDisplay(t) {
       const prompt = state.inserted.prompt;
       const previewLength = 10_240;
-      const held = state.firstDisplay;
+      const held = state.firstDisplay, optimistic = state.firstDisplayWitness;
       // The completed presentation was revalidated above. An ID-only receipt can
       // continue without a new display grant and can never spend another click.
       if (held?.complete) return false;
-      if (!held && (state.responseIdentity || !t.first || t.first.text === prompt || prompt.length <= previewLength)) return false;
+      if (!held && !optimistic && (state.responseIdentity || !t.first || t.first.text === prompt || prompt.length <= previewLength)) return false;
       if (input.allowQwenFirstBodyExpansion !== true) {
-        if (held) firstBindingFailure('display_scope', 'display_grant_missing');
+        if (held || optimistic) firstBindingFailure('display_scope', 'display_grant_missing');
         return false;
       }
       const view = dom.firstBodyPresentation(t);
-      if (!view && !held) return false; // Ordinary full-body mismatch follows.
+      if (!view && !held && !optimistic) return false; // Ordinary full-body mismatch follows.
       const reject = reason => firstBindingFailure('display_observation', reason);
       if (held) requireSameFirstDisplay(view, 'display_held');
+      if (optimistic) {
+        const refuse = reason => firstBindingFailure('display_held', reason);
+        if (!view) refuse('presentation_missing');
+        if (optimistic.canonical !== route.canonical) refuse('route_changed');
+        requireDisplayPins(optimistic, view, refuse);
+      }
       if (!Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.length || input.expectedUserCounts.length > 2
         || input.expectedUserCounts.some(value => ![0, 1].includes(value)) || !input.expectedUserCounts.includes(1)) reject('user_count_expectation');
       const form = dom.composer();
@@ -365,8 +376,31 @@ async function computaSavedConversation(input, c, dom, config) {
       if (!held && !preview && (text !== '' || !t.pendingAnswer)) {
         reject(text === '' ? 'initial_empty_no_pending_answer' : text.length === previewLength ? 'initial_prefix_mismatch' : 'initial_length_mismatch');
       }
+      // On Max, the user UUID displayed beside an empty answer ID may belong
+      // only to the optimistic rendering. Keep the original physical turn, but
+      // acquire neither message identity nor expansion authority in that phase.
+      const witnessControls = optimistic || held?.settledPair;
+      if (witnessControls && (form.editor !== witnessControls.editor || form.scope !== witnessControls.scope
+        || state.inserted !== witnessControls.inserted || state.send !== witnessControls.send || state.model !== witnessControls.model))
+        reject('composer_not_ready');
+      if (!held && (optimistic || t.pendingAnswer && c.equalChoice(state.model.choice, config.deferDisplayUntilAnswer))) {
+        const witness = optimistic || (state.firstDisplayWitness = { pins:view.pins, canonical:route.canonical,
+          editor:form.editor, scope:form.scope, inserted:state.inserted, send:state.send, model:state.model });
+        if (witness.sawPreview && !preview) reject('preview_prefix_mismatch');
+        if (preview) witness.sawPreview = true;
+        checkFirstDisplaySelection('display_before_click', !optimistic, witness);
+        if (t.pendingAnswer) return true;
+        // First genuine pair. Spend a separate, unchanged native-granted read
+        // after pinning it. No action or response is released by this receipt.
+        state.firstDisplay = { ...view, canonical:route.canonical, settledPair:witness, replacement:witness.replacement,
+          clicked:false, sawExpanded:false, complete:false };
+        delete state.firstDisplayWitness;
+        try { window.webkit?.messageHandlers?.computaChatGPTSignal?.postMessage({ownerToken:input.ownerToken,kind:'dom_changed'}); }
+        catch { /* The existing native deadline remains authoritative. */ }
+        return true;
+      }
       const claim = held || (state.firstDisplay = { ...view, canonical: route.canonical, clicked: false, sawExpanded: false, complete: false });
-      checkFirstDisplaySelection(claim.clicked ? 'display_after_click' : 'display_before_click', !settlement && !claim.clicked && view.collapsed);
+      checkFirstDisplaySelection(claim.clicked ? 'display_after_click' : 'display_before_click', !claim.settledPair && !settlement && !claim.clicked && view.collapsed);
       if (claim.sawExpanded && view.collapsed) reject('recollapsed');
       if (!view.collapsed) claim.sawExpanded = true;
       if (view.answerID !== null) claim.answerID = view.answerID;
@@ -396,6 +430,10 @@ async function computaSavedConversation(input, c, dom, config) {
         return currentView.control;
       };
       const point = {};
+      const cover = () => {
+        const info = point.describeCover?.(form.scope, t.first.root, (t.pendingAnswer || t.answer).root);
+        return info && {...info, phase:settlement ? 'settled' : 'revealed'};
+      };
       if (settlement) {
         checkedControl();
         const status = settlement.watch.current();
@@ -403,7 +441,7 @@ async function computaSavedConversation(input, c, dom, config) {
         if (status !== 'ready') renderFailure(status);
       }
       let hit = dom.displayHitFailure(view.control, point, !!settlement);
-      if (settlement && hit !== null) firstBindingFailure('display_reveal_hit', hit);
+      if (settlement && hit !== null) firstBindingFailure('display_reveal_hit', hit, cover);
       if ((hit === 'occluded' || hit === 'outside_viewport') && !claim.scrolled && typeof view.control.scrollIntoView === 'function') {
         const control = checkedControl();
         claim.scrolled = true;
@@ -427,10 +465,10 @@ async function computaSavedConversation(input, c, dom, config) {
             return true;
           }
         }
-        if (hit !== null) firstBindingFailure('display_reveal_hit', hit);
+        if (hit !== null) firstBindingFailure('display_reveal_hit', hit, cover);
       } else if (hit !== null) firstBindingFailure('display_hit', hit);
       const currentHit = dom.displayHitFailure(checkedControl(), point, claim.scrolled === true);
-      if (currentHit !== null) firstBindingFailure(claim.scrolled ? 'display_reveal_hit' : 'display_preclick_hit', currentHit);
+      if (currentHit !== null) firstBindingFailure(claim.scrolled ? 'display_reveal_hit' : 'display_preclick_hit', currentHit, cover);
       if (settlement) {
         const status = settlement.watch.current();
         if (status !== 'ready') renderFailure(status);
@@ -835,7 +873,8 @@ async function computaSavedConversation(input, c, dom, config) {
         ? { qwenFirstUserDiagnostic: error.qwenFirstUserDiagnostic } : {}),
       ...(config.stateKey === '__computaQwenSavedSessionV1' && error.error === 'conversation_changed'
         && error.detail === 'first_user_message' && error.qwenFirstUserBindingDiagnostic
-        ? { qwenFirstUserBindingDiagnostic: error.qwenFirstUserBindingDiagnostic } : {}) }
+        ? { qwenFirstUserBindingDiagnostic: error.qwenFirstUserBindingDiagnostic,
+            ...(error.qwenDisplayCover ? {qwenDisplayCover:error.qwenDisplayCover} : {}) } : {}) }
       : { error: 'document_changed' };
   }
 }

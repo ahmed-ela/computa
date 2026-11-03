@@ -252,6 +252,7 @@ actor WebModelServer {
         let scope: GroqToolCatalog.Scope
         let canonicalRequest: Data
         let browserAvailability: EmbeddedBrowserToolAvailability?
+        let lastOfferedNames: Set<String>
         let seed: GroqToolCatalog.Seed
     }
     private var groqCatalogRequests: [String: GroqCatalogRequestContext] = [:]
@@ -484,7 +485,7 @@ actor WebModelServer {
         // Preview on a value copy. An over-budget schema selection returns a
         // normal read-only tool error, leaving the prior usable selection intact.
         var candidate = groqToolCatalog
-        let receipt = try candidate.load(scope: scope, arguments: arguments)
+        let receipt = try candidate.load(scope: scope, arguments: arguments, lastOfferedNames: current.lastOfferedNames)
         let projection = try candidate.prepare(scope: scope, seed: current.seed)
         do {
             let preview = try WebModelResponseCodec.prepareRequest(current.canonicalRequest,
@@ -1016,7 +1017,7 @@ actor WebModelServer {
             measuredGroqBodyUnits = result.units
             groqCatalogRequest = GroqCatalogRequestContext(scope: scope,
                 canonicalRequest: originalRequest.continuationRequest,
-                browserAvailability: admittedBrowserAvailability, seed: seed)
+                browserAvailability: admittedBrowserAvailability, lastOfferedNames: request.offeredToolNames, seed: seed)
             stagedGroqCatalog = candidate
         }
         // Count the final projection, not the full internal native catalog.
@@ -2427,6 +2428,8 @@ actor WebModelServer {
                 return .init(status: "403 Forbidden", type: "model_error", code: failure.diagnosticCode!)
             case .usageLimited:
                 return .init(status: "429 Too Many Requests", type: "too_many_requests", code: failure.diagnosticCode!)
+            case .ownershipFailure(.groqDraftRestored), .ownershipFailure(.groqReportedSubmissionError):
+                return .init(status: "400 Bad Request", type: "model_error", code: "website_ownership_unverified")
             case .capacity: return .init(status: "400 Bad Request", type: "invalid_request", code: failure.diagnosticCode!)
             // The request no longer has a valid owned website context. HTTP 400
             // preserves this body in the pinned runtime's nonretryable

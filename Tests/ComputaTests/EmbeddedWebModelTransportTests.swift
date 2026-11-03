@@ -1129,6 +1129,65 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testPreparedInstantPostInsertRecheckRecoversIgnoredOpeningButRejectsTransientAcknowledgement() async throws {
+        for behavior in ["ignored", "transient_acknowledgement", "draft_remounted"] {
+            let (fixture, view, token, choice) = try await readyInstantPrepareFixture(synchronousReadiness: true)
+            defer { fixture.transport.setBeforePageResultValidationForTesting(nil); fixture.shutdown() }
+            var armed = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                guard action == "insert", !armed else { return }
+                let result = try? await self.evaluate(view, """
+                    // Exercise a stable prepared draft. The fixture normally reconciles its
+                    // editable subtree 15ms after input, independently of the picker.
+                    const until = performance.now() + 1000;
+                    while (window.fixtureNormalizationCount === 0 && performance.now() < until) {
+                      await new Promise(resolve => setTimeout(resolve, 5));
+                    }
+                    if (window.fixtureNormalizationCount !== 1) return false;
+                    const trigger = document.getElementById('fixture-model-trigger');
+                    const editor = document.getElementById('fixture-editor');
+                    window.preparedVerifyOpenings = 0;
+                    trigger.addEventListener('click', function interrupt(event) {
+                      window.preparedVerifyOpenings++;
+                      if (window.preparedVerifyOpenings === 2) {
+                        trigger.removeEventListener('click', interrupt, true); return;
+                      }
+                      event.stopImmediatePropagation(); event.preventDefault();
+                      const behavior = \(String(reflecting: behavior));
+                      if (behavior === 'transient_acknowledgement') {
+                        trigger.setAttribute('aria-expanded','true');
+                        trigger.setAttribute('aria-expanded','false');
+                      } else if (behavior === 'draft_remounted') {
+                        editor.replaceChildren(...[...editor.childNodes].map(node => node.cloneNode(true)));
+                      }
+                    }, true);
+                    return true;
+                    """)
+                armed = result as? Bool == true
+            }
+            let shouldRecover = behavior == "ignored"
+            if shouldRecover {
+                let sent = try await call(fixture.transport, "webProviderSend",
+                                          ["sessionToken":token,"prompt":"Exact synthetic prepared draft"])
+                try assertRunningOrVerifiedChoice(sent, choice: choice)
+                let complete = try await waitForState("complete", fixture.transport, token: token)
+                try assertChoiceEvidence(complete, choice: choice)
+            } else {
+                do {
+                    _ = try await call(fixture.transport, "webProviderSend",
+                                       ["sessionToken":token,"prompt":"Exact synthetic prepared draft"])
+                    XCTFail("Changed draft or acknowledged popup cannot authorize a second opening")
+                } catch {
+                    XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelUnverified, behavior)
+                }
+            }
+            XCTAssertTrue(armed, behavior)
+            let openings = try await evaluate(view, "return window.preparedVerifyOpenings;") as? Int
+            XCTAssertEqual(openings, shouldRecover ? 2 : 1, behavior)
+            try await assertChoiceLedger(view, insertions: 1, sends: shouldRecover ? 1 : 0, selections: 0)
+        }
+    }
+
     func testFirstInstantPreparedEditorReadinessAcceptsExactLongEditorClippedByItsScroller() async throws {
         let (fixture, view, token, choice) = try await readyInstantPrepareFixture(synchronousReadiness: true)
         defer {
@@ -1794,6 +1853,44 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         Dictionary(uniqueKeysWithValues: ["rootConnected", "bodyConnected", "parentConnected", "rootClassMatches",
             "bodyClassMatches", "rootParentMatches", "bodyWithinRoot", "rootInDocument",
             "preparedEditorConnected", "preparedEditorDraftRestored"].map { ($0, NSNull() as Any) })
+    }
+
+    func testGroqRestoredDraftReasonsRequireTheExactFailedInspectionAndFixedNotice() throws {
+        let nodes: [String: Any] = ["rootConnected":false, "bodyConnected":false, "parentConnected":false,
+            "rootClassMatches":true, "bodyClassMatches":true, "rootParentMatches":true, "bodyWithinRoot":true,
+            "rootInDocument":false, "preparedEditorConnected":true, "preparedEditorDraftRestored":true]
+        let base: [String: Any] = ["kind":"groq_user_count_v2","action":"inspect","branch":"expected_count",
+            "expectedUserCounts":[1],"userCount":0,"answerCount":0,"visibleUserCount":0,"visibleAnswerCount":0,
+            "submitted":true,"adapterFirstBound":true,"boundNodes":nodes]
+        func reason(_ fields: [String: Any]) -> EmbeddedWebModelTransport.OwnershipReason? {
+            EmbeddedWebModelTransport.groqCountRejection(fields, provider: .groq, action: "inspect")?.rollback
+        }
+        XCTAssertEqual(reason(base), .groqDraftRestored)
+        var notice = base; notice["freshNotice"] = "generic_error"
+        XCTAssertEqual(reason(notice), .groqReportedSubmissionError)
+        for field in nodes.keys {
+            var changed = nodes; changed[field] = !(try XCTUnwrap(nodes[field] as? Bool))
+            var bad = notice; bad["boundNodes"] = changed; XCTAssertNil(reason(bad), field)
+        }
+        for badNotice: Any in ["HTTP 429", "PRIVATE", true, 1, NSNull(), ["message":"private"]] {
+            var bad = notice; bad["freshNotice"] = badNotice; XCTAssertNil(reason(bad))
+        }
+        XCTAssertNil(EmbeddedWebModelTransport.groqCountRejection(notice, provider: .claude, action: "inspect"))
+        XCTAssertNil(EmbeddedWebModelTransport.groqCountRejection(notice, provider: .groq, action: "stop"))
+        for value in [EmbeddedWebModelTransport.OwnershipReason.groqDraftRestored,.groqReportedSubmissionError] {
+            let failure = EmbeddedWebModelTransport.Failure.ownershipFailure(value)
+            let data = try WebModelServer.errorBody(for: failure)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with:data) as? [String: Any])
+            let fields = try XCTUnwrap(body["error"] as? [String: Any])
+            XCTAssertEqual(fields["code"] as? String, "website_ownership_unverified")
+            XCTAssertEqual(fields["ownership_reason"] as? String, value.rawValue)
+            XCTAssertEqual(fields["retryable"] as? Bool, false)
+            XCTAssertEqual(WebModelServer.errorPresentation(for: failure).status, "400 Bad Request")
+            let id = UUID().uuidString
+            let text = String(decoding:data,as:UTF8.self)
+            XCTAssertNotNil(WebsiteTurnFailureStore.Record.make(taskID:id,threadID:id,turnID:id,modelID:"browser/groq",diagnosticText:text))
+            XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID:id,threadID:id,turnID:id,modelID:"browser/claude",diagnosticText:text))
+        }
     }
 
     func testGroqUserCountDiagnosticIsFiniteBranchBoundAndRejectsPrivateOrMalformedFields() throws {

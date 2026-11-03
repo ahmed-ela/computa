@@ -1642,6 +1642,46 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         }
       });
 
+      test('indexed child subtrees keep the last Work control and charge repeated historical edges', async () => {
+        for (const kind of ['work_tail', 'repeated_edges', 'overlapping_labels']) {
+          const { f, picker, expand, send, prompt } = await collapsed();
+          expand.onClick = () => {
+            f.userBody.text = prompt;
+            const branch = new Node('DIV');
+            const siblings = Array.from({ length: 1_400 }, () => new Node('SPAN'));
+            branch.append(...siblings);
+            const row = new Node('DIV');
+            row.append(branch);
+            let records;
+            if (kind === 'work_tail') {
+              const work = new Node('BUTTON', { 'aria-pressed': 'false' }, 'Work');
+              branch.append(work);
+              records = [{ type: 'childList', target: f.modeGroup, addedNodes: [row], removedNodes: [] },
+                { type: 'childList', target: row, addedNodes: [branch], removedNodes: [] },
+                { type: 'attributes', target: work, attributeName: 'aria-pressed', oldValue: 'true' }];
+            } else if (kind === 'repeated_edges') {
+              records = Array.from({ length: 24 }, (_, index) => ({ type: 'childList', target: branch,
+                addedNodes: index % 2 ? siblings : [], removedNodes: index % 2 ? [] : siblings }));
+            } else {
+              // Each range shares the same sparse label list. Reading its
+              // candidates repeatedly still consumes the batch's work budget.
+              const roots = [new Node('DIV')];
+              for (let i = 0; i < 35; i++) {
+                const child = new Node('DIV'); roots[roots.length - 1].append(child); roots.push(child);
+              }
+              roots[roots.length - 1].append(...Array.from({ length: 1_000 },
+                () => new Node('SPAN', { 'aria-label': 'Unrelated label' })));
+              records = roots.map(root => ({ type: 'childList', target: f.userBody, addedNodes: [root], removedNodes: [] }));
+            }
+            productRecords(f, records);
+          };
+          const result = await f.run('inspect', expansionInput); rejected(result);
+          expect(JSON.parse(result.debugStructure).productProofFailure)
+            .toBe(kind === 'work_tail' ? 'work_selected' : 'mutation_scan_overflow');
+          expect(f.world.__computaModelFirstProof).toBeUndefined(); noSend(f, picker, send);
+        }
+      });
+
       test('only exact disjoint editor class and style churn is excluded from the product budget', async () => {
         const { f, picker, expand, send, prompt } = await collapsed();
         expand.onClick = () => { f.userBody.text = prompt; productRecords(f, composerChurn(f, 1_100)); };
@@ -3452,6 +3492,58 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect(x.picker.familyOptions.map((node: any) => node.clicks)).toEqual(x.familyBefore);
         expect(x.f.world.__computaModelFirstSubmitted).toBeUndefined();
       };
+      const preparedVerification = async () => {
+        const x=await firstInsertOpening();
+        await finishFirstInsertWait(x);
+        expect((await x.inserting).inserted).toBe(true);
+        expect(x.pending.firstInsertOpening.proved).toBe(true);
+        let calls=0;
+        x.picker.trigger.onClick=()=>{calls++; if(calls===2)x.open();};
+        const grant={sequence:1,marker:firstMarker,fingerprint:x.pending.fingerprint};
+        const verify=(overrides={})=>x.f.run('verifyModel',{expectedModelChoice:x.expected,expectedSubmissionProofs:[],
+          preparedInstantVerificationOpening:grant,...overrides});
+        return {...x,grant,verify,calls:()=>calls};
+      };
+      test('post-insert Instant verification reopens an unacknowledged header once and reads a fresh selection',async()=>{
+        const x=await preparedVerification();
+        const request=x.verify(); await microtasks();
+        expect(x.calls()).toBe(1); await finishFirstInsertWait(x);
+        const result=await request;
+        expect(result.error).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(x.expected);
+        expect(x.calls()).toBe(2); noFirstInsertReplay(x);
+        const repeat=x.verify(); await microtasks(); await finishFirstInsertWait(x,1801);
+        expect((await repeat).error).toBeDefined(); expect(x.calls()).toBe(3); noFirstInsertReplay(x);
+      });
+      test('post-insert Instant verification refuses changed draft, missing grant, transient open-close and expired budget',async()=>{
+        for(const change of ['raw_draft','pending','sent','hash','marker','no_grant','record','picker','late','transient','removed_menu','restored_text','fresh_selection','no_prior','sequence']) {
+          const x=await preparedVerification();
+          const grant={...x.grant}; if(change==='hash')grant.fingerprint='0'.repeat(64); if(change==='marker')grant.marker='bad'; if(change==='sequence')grant.sequence=2;
+          if(change==='no_prior')x.pending.firstInsertOpening=null;
+          let changedSelectionOpenings=0;
+          const read=x.verify({preparedInstantVerificationOpening:change==='no_grant'?null:grant});
+          await microtasks(); expect(x.calls()).toBe(1);
+          if(change==='raw_draft')x.f.composer.text+='\n';
+          if(change==='pending')x.state.pending={...x.pending};
+          if(change==='sent')x.pending.phase='send_claimed';
+          if(change==='record')x.pending.firstInsertOpening={...x.pending.firstInsertOpening};
+          if(change==='picker')x.f.world.__computaChatPresetPin.invalidated=true;
+          if(change==='removed_menu'||change==='restored_text'){
+            const records=change==='removed_menu' ? [{type:'childList',target:x.f.body,addedNodes:[],removedNodes:[new Node('DIV',{role:'menu'})]}]
+              : [{type:'characterData',target:x.f.composer}];
+            x.f.observers.forEach((o:any)=>o.callback(records));
+          }
+          if(change==='fresh_selection') {
+            x.picker.trigger.onClick=()=>{changedSelectionOpenings++; x.picker.selected('High'); x.open();};
+          }
+          if(change==='transient'){
+            const records=[{type:'attributes',target:x.picker.trigger,attributeName:'aria-expanded',oldValue:'true'}];
+            x.f.observers.forEach((o:any)=>o.callback(records));
+          }
+          await finishFirstInsertWait(x,change==='late'?1801:901);
+          await finishFirstInsertWait(x,901);
+          const result=await read; expect(result.error,change).toBeDefined(); expect(x.calls(),change).toBe(1); expect(changedSelectionOpenings).toBe(change==='fresh_selection'?1:0); noFirstInsertReplay(x);
+        }
+      });
       test('first insert final guard recovers one ignored opening after exactly one literal insertion', async () => {
         const x = await firstInsertOpening();
         await finishFirstInsertWait(x);
