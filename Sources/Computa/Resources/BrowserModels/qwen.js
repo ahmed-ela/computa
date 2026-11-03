@@ -26,7 +26,7 @@ function computaProviderCore(request, provider, origin, actions) {
     if (values.length !== 1) fail(error, detail);
     return values[0];
   };
-  const hitFailure = node => {
+  const hitFailure = (node, testIntersection) => {
     if (!enabled(node)) return 'disabled';
     if (typeof node.getBoundingClientRect !== 'function' || typeof document.elementFromPoint !== 'function') return 'invalid_geometry';
     const r = node.getBoundingClientRect(), width = window.innerWidth, height = window.innerHeight;
@@ -38,6 +38,7 @@ function computaProviderCore(request, provider, origin, actions) {
     const left = Math.max(0, r.left), top = Math.max(0, r.top);
     const clippedRight = Math.min(width, right), clippedBottom = Math.min(height, bottom);
     if (clippedRight <= left || clippedBottom <= top) return 'outside_viewport';
+    if (testIntersection) return testIntersection(left, top, clippedRight, clippedBottom) ? null : 'occluded';
     const x = left + (clippedRight - left) / 2, y = top + (clippedBottom - top) / 2;
     return node.contains(document.elementFromPoint(x, y)) ? null : 'occluded';
   };
@@ -442,7 +443,8 @@ async function computaSavedConversation(input, c, dom, config) {
       if (!preview) reject(text.length === previewLength ? 'preview_prefix_mismatch' : 'preview_length_mismatch');
       if (claim.clicked) return true; // Same preview during the one local display transition.
       if (!view.collapsed) reject('not_collapsed');
-      const hit = c.hitFailure(view.control);
+      const point = {};
+      const hit = dom.displayHitFailure(view.control, point);
       if (hit !== null) firstBindingFailure('display_hit', hit);
       guard();
       const current = dom.initialResponseIdentityTranscript();
@@ -452,7 +454,7 @@ async function computaSavedConversation(input, c, dom, config) {
       if (!currentView.collapsed) firstBindingFailure('display_preclick', 'not_collapsed');
       if (current.first.text !== text) firstBindingFailure('display_preclick', 'preview_changed');
       if (!dom.composer().empty) firstBindingFailure('display_preclick', 'composer_not_empty');
-      const currentHit = c.hitFailure(view.control);
+      const currentHit = dom.displayHitFailure(currentView.control, point);
       if (currentHit !== null) firstBindingFailure('display_preclick_hit', currentHit);
       claim.clicked = true;
       view.control.click();
@@ -1079,6 +1081,27 @@ function computaQwenDOM(c) {
     }
     return { users, answers, first: { root, container, body, id, text: body.textContent }, answer, pendingAnswer };
   }
+  // A clipped display button can have a covered center and an exposed edge.
+  // Find one actual pointer target, then require the same viewport point on the
+  // same pinned button after the caller revalidates the transcript and choice.
+  function displayHitFailure(control, point) {
+    return c.hitFailure(control, (left, top, right, bottom) => {
+      const ownsPoint = (x, y) => {
+        const hit = document.elementFromPoint(x, y);
+        return hit === control || (control.contains(hit) &&
+          hit.closest('button, a, input, select, textarea, [role], [tabindex], [contenteditable]') === control);
+      };
+      if (point.x !== undefined) {
+        return left < point.x && point.x < right && top < point.y && point.y < bottom && ownsPoint(point.x, point.y);
+      }
+      for (const [u, v] of [[.5,.5], [.125,.5], [.875,.5], [.5,.125], [.5,.875],
+        [.125,.125], [.875,.125], [.125,.875], [.875,.875]]) {
+        const x = left + (right - left) * u, y = top + (bottom - top) * v;
+        if (ownsPoint(x, y)) { point.x = x; point.y = y; return true; }
+      }
+      return false;
+    });
+  }
   // The long user message has a display-only toggle inside this exact chunk.
   // A missing/ambiguous shape is never an invitation to click another button.
   function firstBodyPresentation(transcript) {
@@ -1250,7 +1273,7 @@ function computaQwenDOM(c) {
     setter.call(form.editor, prompt);
     form.editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));
   }
-  return { rejectSelectionBinding, firstDisplayReplacement, firstBodyPresentation, firstBodyFailureStructure, initialResponseIdentityTranscript: () => transcript(true), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer,
+  return { rejectSelectionBinding, firstDisplayReplacement, displayHitFailure, firstBodyPresentation, firstBodyFailureStructure, initialResponseIdentityTranscript: () => transcript(true), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer,
     deletionTrigger, deletionMenu, deletionConfirmation, deletionObserved, insertLiteral };
 }
 

@@ -26,7 +26,7 @@ function computaProviderCore(request, provider, origin, actions) {
     if (values.length !== 1) fail(error, detail);
     return values[0];
   };
-  const hitFailure = node => {
+  const hitFailure = (node, testIntersection) => {
     if (!enabled(node)) return 'disabled';
     if (typeof node.getBoundingClientRect !== 'function' || typeof document.elementFromPoint !== 'function') return 'invalid_geometry';
     const r = node.getBoundingClientRect(), width = window.innerWidth, height = window.innerHeight;
@@ -38,6 +38,7 @@ function computaProviderCore(request, provider, origin, actions) {
     const left = Math.max(0, r.left), top = Math.max(0, r.top);
     const clippedRight = Math.min(width, right), clippedBottom = Math.min(height, bottom);
     if (clippedRight <= left || clippedBottom <= top) return 'outside_viewport';
+    if (testIntersection) return testIntersection(left, top, clippedRight, clippedBottom) ? null : 'occluded';
     const x = left + (clippedRight - left) / 2, y = top + (clippedBottom - top) / 2;
     return node.contains(document.elementFromPoint(x, y)) ? null : 'occluded';
   };
@@ -442,7 +443,8 @@ async function computaSavedConversation(input, c, dom, config) {
       if (!preview) reject(text.length === previewLength ? 'preview_prefix_mismatch' : 'preview_length_mismatch');
       if (claim.clicked) return true; // Same preview during the one local display transition.
       if (!view.collapsed) reject('not_collapsed');
-      const hit = c.hitFailure(view.control);
+      const point = {};
+      const hit = dom.displayHitFailure(view.control, point);
       if (hit !== null) firstBindingFailure('display_hit', hit);
       guard();
       const current = dom.initialResponseIdentityTranscript();
@@ -452,7 +454,7 @@ async function computaSavedConversation(input, c, dom, config) {
       if (!currentView.collapsed) firstBindingFailure('display_preclick', 'not_collapsed');
       if (current.first.text !== text) firstBindingFailure('display_preclick', 'preview_changed');
       if (!dom.composer().empty) firstBindingFailure('display_preclick', 'composer_not_empty');
-      const currentHit = c.hitFailure(view.control);
+      const currentHit = dom.displayHitFailure(currentView.control, point);
       if (currentHit !== null) firstBindingFailure('display_preclick_hit', currentHit);
       claim.clicked = true;
       view.control.click();

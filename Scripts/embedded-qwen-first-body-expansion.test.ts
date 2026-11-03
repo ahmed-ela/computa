@@ -348,3 +348,68 @@ test('Qwen rejects replaced display pins and invalid first preview with only fin
     expect(control.clicks).toBe(0); expect(f.send.clicks).toBe(1);
   }
 });
+
+test('a clipped Qwen display button needs the same exposed point before its sole click', async () => {
+  for (const model of ['Qwen3.7-Plus', 'Qwen3.8-Max']) {
+    const { f, control, inspect, render, settleID, hash } = await sent(model);
+    const icon = new f.Node('SPAN');
+    control.append(icon); control.onClick = render; f.userBody.text = preview;
+    control.getBoundingClientRect = () => ({ left: -70, top: 70, width: 100, height: 32 });
+    const original = f.document.elementFromPoint;
+    const points: number[][] = [];
+    f.document.elementFromPoint = (x: number, y: number) => {
+      if (y < 70 || y > 102) return original(x, y);
+      points.push([x, y]);
+      // A foreign overlay occupies the center of the 30 CSS pixels on screen.
+      return x < 7 ? icon : f.document.body;
+    };
+    expect(await inspect()).toEqual(pending);
+    expect(points).toEqual([[15,86], [3.75,86], [3.75,86]]);
+    expect(control.clicks).toBe(1);
+    expect(await inspect()).toEqual(idPending);
+    settleID();
+    const verified = await inspect({allowQwenFirstBodyExpansion:false});
+    expect(verified.firstUserFingerprint).toBe(hash);
+    expect(verified.answerComplete).toBe(true); expect(f.send.clicks).toBe(1);
+  }
+});
+
+test('Qwen refuses full coverage, a lost hit point, a moved target, and nested interactive hits', async () => {
+  for (const kind of ['foreign', 'no_hit', 'covered_after', 'moved', 'nested_role', 'replaced']) {
+    const { f, chunk, control, inspect } = await sent();
+    const foreign = new f.Node('A', {href: '/foreign'}); f.document.body.append(foreign);
+    const child = new f.Node('SPAN', {role:'button'}); control.append(child);
+    let measurements = 0;
+    control.getBoundingClientRect = () => {
+      measurements++;
+      return { left: kind === 'moved' && measurements === 2 ? 210 : 10, top:70, width:100, height:32 };
+    };
+    f.userBody.text = preview;
+    const original = f.document.elementFromPoint;
+    const points: number[][] = [];
+    f.document.elementFromPoint = (x: number, y: number) => {
+      if (y < 70 || y > 102) return original(x,y);
+      points.push([x,y]);
+      if (kind === 'nested_role') return child;
+      if (kind === 'no_hit') return null;
+      if (kind === 'replaced' && points.length === 2) {
+        control.detach(); chunk.append(new f.Node('BUTTON', {...control.values}));
+        return control;
+      }
+      if (kind === 'moved' || kind === 'covered_after') {
+        // Another exposed point would succeed on the second read.
+        if (measurements === 1 ? x === 22.5 : x !== 22.5) return control;
+      }
+      return foreign;
+    };
+    const result = await inspect();
+    expect(result.error, kind).toBe('conversation_changed');
+    expect(result.firstUserVerified).toBeUndefined();
+    expect(result.qwenFirstUserBindingDiagnostic.reason).toBe(kind === 'replaced' ? 'control_changed' : 'occluded');
+    if (kind === 'covered_after') expect(points).toEqual([[60,86], [22.5,86], [22.5,86]]);
+    if (kind === 'moved' || kind === 'replaced') expect(points).toHaveLength(2);
+    if (['foreign', 'no_hit', 'nested_role'].includes(kind)) expect(points).toHaveLength(9);
+    expect((await inspect()).detail).toBe('terminal_operation');
+    expect([control.clicks, child.clicks, foreign.clicks, f.send.clicks, f.more.clicks]).toEqual([0,0,0,1,0]);
+  }
+});

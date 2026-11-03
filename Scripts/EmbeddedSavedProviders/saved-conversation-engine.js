@@ -360,7 +360,8 @@ async function computaSavedConversation(input, c, dom, config) {
       if (!preview) reject(text.length === previewLength ? 'preview_prefix_mismatch' : 'preview_length_mismatch');
       if (claim.clicked) return true; // Same preview during the one local display transition.
       if (!view.collapsed) reject('not_collapsed');
-      const hit = c.hitFailure(view.control);
+      const point = {};
+      const hit = dom.displayHitFailure(view.control, point);
       if (hit !== null) firstBindingFailure('display_hit', hit);
       guard();
       const current = dom.initialResponseIdentityTranscript();
@@ -370,7 +371,7 @@ async function computaSavedConversation(input, c, dom, config) {
       if (!currentView.collapsed) firstBindingFailure('display_preclick', 'not_collapsed');
       if (current.first.text !== text) firstBindingFailure('display_preclick', 'preview_changed');
       if (!dom.composer().empty) firstBindingFailure('display_preclick', 'composer_not_empty');
-      const currentHit = c.hitFailure(view.control);
+      const currentHit = dom.displayHitFailure(currentView.control, point);
       if (currentHit !== null) firstBindingFailure('display_preclick_hit', currentHit);
       claim.clicked = true;
       view.control.click();

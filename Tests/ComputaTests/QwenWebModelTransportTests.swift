@@ -168,6 +168,44 @@ final class QwenWebModelTransportTests: XCTestCase {
         try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
     }
 
+    func testLongDisplayOnlyClicksAnExposedPartOfItsPinnedButton() async throws {
+        for fullyCovered in [false, true] {
+            let fixture = try Fixture(setup: "qwenFixture.options.firstLongMessageDisplay=true; qwenFixture.options.holdResponseIdentity=true;")
+            defer { fixture.shutdown() }
+            let token = try await start(fixture)
+            _ = try await call(fixture, "webProviderSend", token, prompt: String(repeating: "Literal display geometry ", count: 600))
+            let initial = try await call(fixture, "webProviderPoll", token)
+            XCTAssertEqual(initial["modelVerificationPendingReason"] as? String, "qwen_first_body_expansion_v1")
+            let hits = try await evaluate(fixture.view, """
+                qwenFixture.revealPreview();
+                const control = document.querySelector('.chat-user-message-expand-toggle');
+                control.style.cssText = 'position:fixed;left:100px;top:150px;width:120px;height:32px;margin:0;z-index:3';
+                const cover = document.createElement('a');
+                cover.href = '#other';
+                cover.style.cssText = 'position:fixed;top:150px;height:32px;z-index:4;left:\(fullyCovered ? 100 : 140)px;width:\(fullyCovered ? 120 : 40)px';
+                document.body.append(cover);
+                return [document.elementFromPoint(160,166) === cover, document.elementFromPoint(115,166) === control];
+                """) as? [Bool]
+            XCTAssertEqual(hits, [true, !fullyCovered])
+            if fullyCovered {
+                do {
+                    _ = try await call(fixture, "webProviderPoll", token)
+                    XCTFail("A covering link cannot authorize expansion")
+                } catch {
+                    XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser))
+                }
+            } else {
+                let pending = try await call(fixture, "webProviderPoll", token)
+                XCTAssertEqual(pending["modelVerificationPendingReason"] as? String, "qwen_first_body_expansion_v1")
+                let context = try XCTUnwrap(pending["pendingSubmissionContext"] as? [String: Any])
+                XCTAssertEqual(context["firstUserFingerprint"] as? String, "")
+            }
+            let clicks = try await evaluate(fixture.view, "return qwenFixture.counts.displayClicks;") as? Int
+            XCTAssertEqual(clicks, fullyCovered ? 0 : 1)
+            try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+        }
+    }
+
     func testLongFirstDisplayRequiresOneLocalClickThenFullBodyAndSelectedModelForBothModels() async throws {
         for label in ["Qwen3.7-Plus", "Qwen3.8-Max"] {
             let fixture = try Fixture(setup: "qwenFixture.options.firstLongMessageDisplay=true; qwenFixture.options.holdResponseIdentity=true;")

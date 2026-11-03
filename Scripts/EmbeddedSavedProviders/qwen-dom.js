@@ -223,6 +223,27 @@ function computaQwenDOM(c) {
     }
     return { users, answers, first: { root, container, body, id, text: body.textContent }, answer, pendingAnswer };
   }
+  // A clipped display button can have a covered center and an exposed edge.
+  // Find one actual pointer target, then require the same viewport point on the
+  // same pinned button after the caller revalidates the transcript and choice.
+  function displayHitFailure(control, point) {
+    return c.hitFailure(control, (left, top, right, bottom) => {
+      const ownsPoint = (x, y) => {
+        const hit = document.elementFromPoint(x, y);
+        return hit === control || (control.contains(hit) &&
+          hit.closest('button, a, input, select, textarea, [role], [tabindex], [contenteditable]') === control);
+      };
+      if (point.x !== undefined) {
+        return left < point.x && point.x < right && top < point.y && point.y < bottom && ownsPoint(point.x, point.y);
+      }
+      for (const [u, v] of [[.5,.5], [.125,.5], [.875,.5], [.5,.125], [.5,.875],
+        [.125,.125], [.875,.125], [.125,.875], [.875,.875]]) {
+        const x = left + (right - left) * u, y = top + (bottom - top) * v;
+        if (ownsPoint(x, y)) { point.x = x; point.y = y; return true; }
+      }
+      return false;
+    });
+  }
   // The long user message has a display-only toggle inside this exact chunk.
   // A missing/ambiguous shape is never an invitation to click another button.
   function firstBodyPresentation(transcript) {
@@ -394,6 +415,6 @@ function computaQwenDOM(c) {
     setter.call(form.editor, prompt);
     form.editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));
   }
-  return { rejectSelectionBinding, firstDisplayReplacement, firstBodyPresentation, firstBodyFailureStructure, initialResponseIdentityTranscript: () => transcript(true), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer,
+  return { rejectSelectionBinding, firstDisplayReplacement, displayHitFailure, firstBodyPresentation, firstBodyFailureStructure, initialResponseIdentityTranscript: () => transcript(true), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer,
     deletionTrigger, deletionMenu, deletionConfirmation, deletionObserved, insertLiteral };
 }
