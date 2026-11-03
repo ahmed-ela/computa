@@ -2791,6 +2791,34 @@ if (!Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.includ
       expectedCounts: Array.isArray(expected) && expected.length <= 3
         && expected.every(count => Number.isInteger(count) && count >= 0 && count <= 1_000) ? [...expected] : null });
   } catch { /* Diagnostics cannot change the original ownership rejection. */ }
+  // Once native has already bound this first body, describe only the prior
+  // physical root and a known structural warning hook. Missing markup leaves
+  // the cause unknown. Do not rerun any text-based page classifier here.
+  try {
+    const proof = globalThis.__computaModelFirstProof;
+    if (failure.debugStructure && input.action === 'inspect' && ownedUserCount === 0
+      && input.expectedUserCounts.length === 1 && input.expectedUserCounts[0] === 1
+      && globalThis.__computaModelFirstSubmitted === true && proof?.marker === input.expectedFirstUserMarker
+      && /^[a-f0-9]{64}$/.test(proof?.fingerprint || '') && input.expectedFirstUserFingerprint === proof.fingerprint) {
+      const prior = proof.diagnosticRoot?.deref();
+      let priorRoot = 'unavailable', warningHook = 'unverified';
+      if (prior) {
+        priorRoot = prior.isConnected === false ? 'detached' : !document.documentElement.contains(prior) ? 'outside_tree'
+          : prior.getAttribute('data-testid') !== 'user-message' ? 'marker_lost' : 'indeterminate';
+        const warnings = document.querySelectorAll('[data-testid="asl3-stop-warning"]');
+        if (!warnings.length) warningHook = 'none';
+        else if (warnings.length > 1) warningHook = 'ambiguous';
+        else {
+          const w = warnings[0];
+          if (!prior.contains(w) && !w.contains(prior) && modelVisible(w) && !w.closest(
+            '[data-testid="assistant-message"], [data-testid="user-message"], [data-perf-reply-text], [data-message-author-role], [data-markdown-text-style], [data-turn], [data-user-message-bubble], model-response, user-query, [contenteditable], [role="textbox"], textarea, input, pre, code, [role="tooltip"], [hidden], [inert], [aria-hidden="true"]'))
+            warningHook = 'single_visible';
+        }
+      }
+      failure.debugStructure = JSON.stringify({ kind: 'claude_missing_user_v1', provider: 'claude', userCount: 0,
+        userCountSaturated: false, expectedCounts: [1], priorRoot, warningHook });
+    }
+  } catch { /* Preserve the original count observation and rejection. */ }
   return failure;
 }
 let usageLimited = modelUsageLimited();
@@ -3169,6 +3197,13 @@ if (firstSnapshot) {
     globalThis.__computaModelFirstProof = { marker: input.expectedFirstUserMarker, fingerprint: firstUserFingerprint,
       identity: firstUserIdentity };
   }
+  // A disappearing first-user marker can be diagnosed without retaining an
+  // authored DOM subtree after unmount. Never use this handle for ownership.
+  try {
+    const proof = globalThis.__computaModelFirstProof;
+    if (typeof WeakRef === 'function' && proof.diagnosticRoot?.deref() !== firstSnapshot.root)
+      proof.diagnosticRoot = new WeakRef(firstSnapshot.root);
+  } catch { /* Diagnostics cannot affect a verified submission or response. */ }
   // Submit intentionally exposes its acknowledgment only, as in the native contract.
   if (input.action === 'submit') return observed;
   return { ...observed, firstUserVerified: true, firstUserFingerprint, firstUserMarkerVerified: true };

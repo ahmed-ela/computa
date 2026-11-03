@@ -1975,6 +1975,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             "initial_response_body": ["user_count", "answer_count", "first_missing", "full_prompt_mismatch", "counts_not_array", "counts_empty", "counts_limit", "counts_invalid", "one_user_not_expected", "predicate_changed"],
             "initial_response_digest": ["hash_input_invalid", "submitted_fingerprint_mismatch"],
             "binding_digest": ["hash_input_invalid"],
+            "display_scope": ["held_claim_ineligible", "display_grant_missing"],
+            "display_observation": ["user_count_expectation", "composer_not_ready", "initial_not_collapsed", "initial_empty_no_pending_answer", "initial_prefix_mismatch", "initial_length_mismatch", "recollapsed", "preview_prefix_mismatch", "preview_length_mismatch", "not_collapsed"],
+            "display_held": ["presentation_missing", "route_changed", "user_id_changed", "answer_id_changed", "pin_count_changed", "body_changed", "control_changed", "user_ancestry_changed", "answer_ancestry_changed"],
+            "display_completed": ["presentation_missing", "route_changed", "user_id_changed", "answer_id_changed", "pin_count_changed", "body_changed", "control_changed", "user_ancestry_changed", "answer_ancestry_changed", "recollapsed", "full_text_changed"],
+            "display_preclick": ["presentation_missing", "route_changed", "user_id_changed", "answer_id_changed", "pin_count_changed", "body_changed", "control_changed", "user_ancestry_changed", "answer_ancestry_changed", "not_collapsed", "preview_changed", "composer_not_empty"],
+            "display_hit": ["disabled", "invalid_geometry", "outside_viewport", "occluded"],
+            "display_preclick_hit": ["disabled", "invalid_geometry", "outside_viewport", "occluded"],
             "binding": ["first_not_submitted", "first_prompt_mismatch", "first_marker_invalid", "first_marker_mismatch", "first_marker_suffix", "first_changed_after_hash", "first_pinned_node_changed", "first_pinned_hash_mismatch", "first_expected_hash_mismatch", "first_binding_not_authorized", "first_disappeared"],
         ]
         guard reasons[stage]?.contains(reason) == true else { return nil }
@@ -4562,12 +4569,24 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     static func sanitizedClaudeUserCountDiagnostic(_ raw: String, provider: Provider) -> String? {
         guard provider == .claude, raw.utf8.count <= 512,
               let value = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
-              Set(value.keys) == ["kind", "provider", "userCount", "userCountSaturated", "expectedCounts"],
-              value["kind"] as? String == "claude_user_count_v1", value["provider"] as? String == "claude",
+              let kind = value["kind"] as? String, value["provider"] as? String == "claude",
               let count = ComputerToolArgumentContract.exactInt64(value["userCount"]), (0...1_000).contains(count),
               let saturated = firstUserDiagnosticBool(value["userCountSaturated"]), !saturated || count == 1_000 else { return nil }
-        var safe: [String: Any] = ["kind": "claude_user_count_v1", "provider": "claude",
-            "userCount": count, "userCountSaturated": saturated]
+        let baseKeys: Set<String> = ["kind", "provider", "userCount", "userCountSaturated", "expectedCounts"]
+        var safe: [String: Any] = ["kind": kind, "provider": "claude", "userCount": count, "userCountSaturated": saturated]
+        if kind == "claude_missing_user_v1" {
+            guard count == 0, !saturated, Set(value.keys) == baseKeys.union(["priorRoot", "warningHook"]),
+                  let expected = value["expectedCounts"] as? [Any], expected.count == 1,
+                  ComputerToolArgumentContract.exactInt64(expected[0]) == 1,
+                  let root = value["priorRoot"] as? String,
+                  ["unavailable", "detached", "outside_tree", "marker_lost", "indeterminate"].contains(root),
+                  let warning = value["warningHook"] as? String, ["none", "single_visible", "ambiguous", "unverified"].contains(warning),
+                  root != "unavailable" || warning == "unverified" else { return nil }
+            safe["priorRoot"] = root
+            safe["warningHook"] = warning
+        } else {
+            guard kind == "claude_user_count_v1", Set(value.keys) == baseKeys else { return nil }
+        }
         if value["expectedCounts"] is NSNull { safe["expectedCounts"] = NSNull() }
         else {
             guard let rawCounts = value["expectedCounts"] as? [Any], rawCounts.count <= 3 else { return nil }

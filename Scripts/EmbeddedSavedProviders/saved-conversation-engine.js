@@ -93,7 +93,7 @@ async function computaSavedConversation(input, c, dom, config) {
     const cleanupInspection = input.action === 'inspect' && input.savedCleanupInspection === true;
     if (state.firstDisplay && !state.first && (input.action !== 'inspect' || cleanupInspection
       || !state.firstDisplay.complete && input.allowQwenFirstBodyExpansion !== true || input.allowQwenInitialResponseIdentity !== true))
-      c.fail('conversation_changed', 'first_user_message');
+      firstBindingFailure('display_scope', 'held_claim_ineligible');
     const route = dom.route();
     if (!state.submitted && route.kind !== 'fresh') c.fail('not_fresh');
     if (state.submitted && !state.deletion?.confirmAcknowledged) {
@@ -108,7 +108,7 @@ async function computaSavedConversation(input, c, dom, config) {
     if (input.expectedConversation != null && input.expectedConversation !== state.canonical)
       c.fail('conversation_changed', 'conversation_url');
     const usesModes = config.selectionKind === 'mode';
-    const firstBindingFailure = (stage, reason, structure = null) => {
+    function firstBindingFailure(stage, reason, structure = null) {
       // Diagnostic-only classification of an already rejected guard. Keep the
       // public category/detail and terminal behavior; never publish page data.
       let diagnostic;
@@ -126,7 +126,7 @@ async function computaSavedConversation(input, c, dom, config) {
         }
         throw error;
       }
-    };
+    }
     const initialFirstAdmissionReason = provisional => {
       if (input.action !== 'inspect') return 'action_not_inspect';
       if (input[provisional ? 'allowQwenProvisionalRoute' : 'allowQwenInitialResponseIdentity'] !== true) return 'native_grant_missing';
@@ -278,8 +278,9 @@ async function computaSavedConversation(input, c, dom, config) {
     function validateInitialResponseIdentity(t) {
       if (state.firstDisplay?.complete && !state.first) {
         const view = dom.firstBodyPresentation(t);
-        if (!sameFirstDisplay(view) || view.collapsed || t.first.text !== state.inserted.prompt)
-          c.fail('conversation_changed', 'first_user_message');
+        requireSameFirstDisplay(view, 'display_completed');
+        if (view.collapsed) firstBindingFailure('display_completed', 'recollapsed');
+        if (t.first.text !== state.inserted.prompt) firstBindingFailure('display_completed', 'full_text_changed');
         if (view.answerID !== null) state.firstDisplay.answerID = view.answerID;
       }
       const held = state.responseIdentity;
@@ -293,11 +294,19 @@ async function computaSavedConversation(input, c, dom, config) {
         || answer.root.parentElement !== held.answer.turn || held.answer.turn.parentElement !== held.outer)
         c.fail('conversation_changed', 'response_scope');
     }
-    function sameFirstDisplay(view) {
+    // Compare existing physical pins in their original order. Report only the
+    // first failing group; no selector, attribute, text or hit test is reread.
+    function requireSameFirstDisplay(view, stage) {
       const held = state.firstDisplay;
-      return !!view && held.canonical === dom.route().canonical && held.userID === view.userID
-        && (held.answerID === null || held.answerID === view.answerID)
-        && held.pins.length === view.pins.length && held.pins.every((node, i) => node === view.pins[i]);
+      const reject = reason => firstBindingFailure(stage, reason);
+      if (!view) reject('presentation_missing');
+      if (held.canonical !== dom.route().canonical) reject('route_changed');
+      if (held.userID !== view.userID) reject('user_id_changed');
+      if (held.answerID !== null && held.answerID !== view.answerID) reject('answer_id_changed');
+      if (held.pins.length !== view.pins.length) reject('pin_count_changed');
+      const i = held.pins.findIndex((node, i) => node !== view.pins[i]);
+      if (i >= 0) reject(i === 0 ? 'body_changed' : i === 1 ? 'control_changed'
+        : i < held.pins.length - 3 ? 'user_ancestry_changed' : 'answer_ancestry_changed');
     }
     // Only the native-granted long Qwen display may pin a detached picker's
     // replacement. This observation publishes no evidence. Normal selection
@@ -321,23 +330,26 @@ async function computaSavedConversation(input, c, dom, config) {
       if (held?.complete) return false;
       if (!held && (state.responseIdentity || !t.first || t.first.text === prompt || prompt.length <= previewLength)) return false;
       if (input.allowQwenFirstBodyExpansion !== true) {
-        if (held) c.fail('conversation_changed', 'first_user_message');
+        if (held) firstBindingFailure('display_scope', 'display_grant_missing');
         return false;
       }
       const view = dom.firstBodyPresentation(t);
       if (!view && !held) return false; // Ordinary full-body mismatch follows.
-      const reject = () => c.fail('conversation_changed', 'first_user_message');
-      if (!view || held && !sameFirstDisplay(view)) reject();
+      const reject = reason => firstBindingFailure('display_observation', reason);
+      if (held) requireSameFirstDisplay(view, 'display_held');
       if (!Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.length || input.expectedUserCounts.length > 2
-        || input.expectedUserCounts.some(value => ![0, 1].includes(value)) || !input.expectedUserCounts.includes(1)) reject();
+        || input.expectedUserCounts.some(value => ![0, 1].includes(value)) || !input.expectedUserCounts.includes(1)) reject('user_count_expectation');
       const form = dom.composer();
-      if (!form.empty || !c.enabled(form.editor)) reject();
+      if (!form.empty || !c.enabled(form.editor)) reject('composer_not_ready');
       const text = t.first.text;
       const preview = text.length === previewLength && prompt.startsWith(text);
-      if (!held && (!view.collapsed || !preview && (text !== '' || !t.pendingAnswer))) reject();
+      if (!held && !view.collapsed) reject('initial_not_collapsed');
+      if (!held && !preview && (text !== '' || !t.pendingAnswer)) {
+        reject(text === '' ? 'initial_empty_no_pending_answer' : text.length === previewLength ? 'initial_prefix_mismatch' : 'initial_length_mismatch');
+      }
       const claim = held || (state.firstDisplay = { ...view, canonical: route.canonical, clicked: false, sawExpanded: false, complete: false });
       checkFirstDisplaySelection(claim.clicked ? 'display_after_click' : 'display_before_click', !claim.clicked && view.collapsed);
-      if (claim.sawExpanded && view.collapsed) reject();
+      if (claim.sawExpanded && view.collapsed) reject('recollapsed');
       if (!view.collapsed) claim.sawExpanded = true;
       if (view.answerID !== null) claim.answerID = view.answerID;
       if (!view.collapsed && text === prompt && claim.clicked) {
@@ -345,15 +357,21 @@ async function computaSavedConversation(input, c, dom, config) {
         return false; // Continue through exact first-body/hash/marker/response-ID verification.
       }
       if (view.collapsed && text === '' && !claim.clicked) return true;
-      if (!preview) reject();
+      if (!preview) reject(text.length === previewLength ? 'preview_prefix_mismatch' : 'preview_length_mismatch');
       if (claim.clicked) return true; // Same preview during the one local display transition.
-      if (!view.collapsed || !c.hit(view.control)) reject();
+      if (!view.collapsed) reject('not_collapsed');
+      const hit = c.hitFailure(view.control);
+      if (hit !== null) firstBindingFailure('display_hit', hit);
       guard();
       const current = dom.initialResponseIdentityTranscript();
       const currentView = dom.firstBodyPresentation(current);
       checkFirstDisplaySelection('display_preclick');
-      if (!sameFirstDisplay(currentView) || !currentView.collapsed || current.first.text !== text
-        || !dom.composer().empty || !c.hit(view.control)) reject();
+      requireSameFirstDisplay(currentView, 'display_preclick');
+      if (!currentView.collapsed) firstBindingFailure('display_preclick', 'not_collapsed');
+      if (current.first.text !== text) firstBindingFailure('display_preclick', 'preview_changed');
+      if (!dom.composer().empty) firstBindingFailure('display_preclick', 'composer_not_empty');
+      const currentHit = c.hitFailure(view.control);
+      if (currentHit !== null) firstBindingFailure('display_preclick_hit', currentHit);
       claim.clicked = true;
       view.control.click();
       return true;

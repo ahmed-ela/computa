@@ -10,6 +10,13 @@ final class QwenFirstUserBindingDiagnosticTests: XCTestCase {
         "initial_response_body": ["user_count", "answer_count", "first_missing", "full_prompt_mismatch", "counts_not_array", "counts_empty", "counts_limit", "counts_invalid", "one_user_not_expected", "predicate_changed"],
         "initial_response_digest": ["hash_input_invalid", "submitted_fingerprint_mismatch"],
         "binding_digest": ["hash_input_invalid"],
+        "display_scope": ["held_claim_ineligible", "display_grant_missing"],
+        "display_observation": ["user_count_expectation", "composer_not_ready", "initial_not_collapsed", "initial_empty_no_pending_answer", "initial_prefix_mismatch", "initial_length_mismatch", "recollapsed", "preview_prefix_mismatch", "preview_length_mismatch", "not_collapsed"],
+        "display_held": ["presentation_missing", "route_changed", "user_id_changed", "answer_id_changed", "pin_count_changed", "body_changed", "control_changed", "user_ancestry_changed", "answer_ancestry_changed"],
+        "display_completed": ["presentation_missing", "route_changed", "user_id_changed", "answer_id_changed", "pin_count_changed", "body_changed", "control_changed", "user_ancestry_changed", "answer_ancestry_changed", "recollapsed", "full_text_changed"],
+        "display_preclick": ["presentation_missing", "route_changed", "user_id_changed", "answer_id_changed", "pin_count_changed", "body_changed", "control_changed", "user_ancestry_changed", "answer_ancestry_changed", "not_collapsed", "preview_changed", "composer_not_empty"],
+        "display_hit": ["disabled", "invalid_geometry", "outside_viewport", "occluded"],
+        "display_preclick_hit": ["disabled", "invalid_geometry", "outside_viewport", "occluded"],
         "binding": ["first_not_submitted", "first_prompt_mismatch", "first_marker_invalid", "first_marker_mismatch", "first_marker_suffix", "first_changed_after_hash", "first_pinned_node_changed", "first_pinned_hash_mismatch", "first_expected_hash_mismatch", "first_binding_not_authorized", "first_disappeared"],
     ]
     private func observation(_ stage: String = "binding", _ reason: String = "first_prompt_mismatch") -> [String: Any] {

@@ -299,3 +299,52 @@ test('a short exact first body cannot authorize a detached picker even with both
   expect(f.world.__computaQwenSavedSessionV1.model.trigger).toBe(f.trigger);
   expect([replacement.clicks, control.clicks, f.send.clicks]).toEqual([0, 0, 1]);
 });
+
+test('Qwen display failures report the original hit decision with no repeated geometry check or action', async () => {
+  for (const which of [1, 2]) for (const reason of ['outside_viewport', 'invalid_geometry', 'occluded']) {
+    const {f, control, inspect} = await sent();
+    f.userBody.text = preview;
+    let checks = 0;
+    const rect = control.getBoundingClientRect.bind(control);
+    control.getBoundingClientRect = () => {
+      const box = rect();
+      if (++checks === which) {
+        if (reason === 'outside_viewport') return {...box, left: 1200};
+        if (reason === 'invalid_geometry') return {...box, width: 0};
+        f.occlude(control);
+      }
+      return box;
+    };
+    const result = await inspect();
+    expect(result).toEqual({error: 'conversation_changed', detail: 'first_user_message',
+      qwenFirstUserBindingDiagnostic: {version: 1, stage: which === 1 ? 'display_hit' : 'display_preclick_hit', reason}});
+    expect(checks).toBe(which);
+    expect(control.clicks).toBe(0);
+    expect(f.send.clicks).toBe(1);
+    expect((await inspect()).detail).toBe('terminal_operation');
+  }
+});
+
+test('Qwen rejects replaced display pins and invalid first preview with only finite evidence', async () => {
+  for (const reason of ['body_changed','control_changed','pin_count_changed','answer_ancestry_changed','initial_length_mismatch','initial_prefix_mismatch']) {
+    const {f, control, chunk, inspect} = await sent();
+    const held = !reason.startsWith('initial_');
+    if (held) expect(await inspect()).toEqual(pending);
+    f.userBody.text = preview;
+    if (reason === 'body_changed') {
+      f.userBody.detach(); control.detach(); chunk.append(new f.Node('P',{class:'user-message-content'},preview), control);
+    } else if (reason === 'control_changed') {
+      control.detach(); chunk.append(new f.Node('BUTTON',{...control.values}));
+    } else if (reason === 'pin_count_changed') {
+      const parent = chunk.parentElement!, middle = new f.Node('DIV'); chunk.detach(); parent.append(middle); middle.append(chunk);
+    } else if (reason === 'answer_ancestry_changed') {
+      const parent = f.answerRoot.parentElement!; f.answerRoot.detach(); parent.append(f.answerRoot.cloneNode(true));
+    } else {
+      f.userBody.text = reason === 'initial_length_mismatch' ? 'PRIVATE_BODY' : 'x' + preview.slice(1);
+    }
+    const result = await inspect();
+    expect(result).toEqual({error: 'conversation_changed', detail: 'first_user_message',
+      qwenFirstUserBindingDiagnostic: {version: 1, stage: held ? 'display_held' : 'display_observation', reason}});
+    expect(control.clicks).toBe(0); expect(f.send.clicks).toBe(1);
+  }
+});

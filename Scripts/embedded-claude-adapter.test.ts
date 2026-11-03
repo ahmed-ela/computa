@@ -2437,7 +2437,9 @@ describe('Claude early user-count failure diagnostics', () => {
     expect(result.text).toBeUndefined(); expect(result.firstUserVerified).toBeUndefined();
     expect(result.modelEvidence).toBeUndefined();
     const value = JSON.parse(result.debugStructure);
-    expect(Object.keys(value).sort()).toEqual(['expectedCounts', 'kind', 'provider', 'userCount', 'userCountSaturated']);
+    const keys = ['expectedCounts', 'kind', 'provider', 'userCount', 'userCountSaturated'];
+    if (value.kind === 'claude_missing_user_v1') keys.push('priorRoot', 'warningHook');
+    expect(Object.keys(value).sort()).toEqual(keys.sort());
     expect(result.debugStructure.length).toBeLessThan(256);
     return value;
   };
@@ -2445,17 +2447,60 @@ describe('Claude early user-count failure diagnostics', () => {
     for (const count of [0, 2]) {
       const f = fixture('claude', { userPrompt: 'PRIVATE_USER_COUNT_BODY' });
       expect((await f.run()).firstUserVerified).toBe(true);
-      if (count === 0) f.messages.children = f.messages.children.filter(node => !node.contains(f.userRoot!));
+      if (count === 0) {
+        f.messages.children = f.messages.children.filter(node => !node.contains(f.userRoot!));
+        f.userRoot!.connected = false;
+      }
       else f.messages.append(new Element('DIV', { 'data-testid': 'user-message', hidden: '' }, 'PRIVATE_DUPLICATE_BODY'));
       const original = f.document.querySelectorAll; let userReads = 0;
       f.document.querySelectorAll = (selector: string) => { if (selector === '[data-testid="user-message"]') userReads++; return original(selector); };
       Object.defineProperty(f.userRoot!, 'innerText', { get: () => { throw new Error('No body read allowed on count failure'); } });
       const result = await f.run('inspect');
-      expect(diagnostic(result)).toEqual({ kind: 'claude_user_count_v1', provider: 'claude', userCount: count,
-        userCountSaturated: false, expectedCounts: [1] });
+      expect(diagnostic(result)).toEqual({ kind: count === 0 ? 'claude_missing_user_v1' : 'claude_user_count_v1',
+        provider: 'claude', userCount: count, userCountSaturated: false, expectedCounts: [1],
+        ...(count === 0 ? { priorRoot: 'detached', warningHook: 'none' } : {}) });
       expect(userReads).toBe(1);
       expect(result.debugStructure).not.toContain('PRIVATE_');
       expect(f.send.clicks).toBe(0); expect(f.composer.events).toHaveLength(0); expect(f.toggle.clicks).toBe(0);
+    }
+  });
+  test('lost marker and warning-hook shape stay diagnostic, without scanning any page text or performing actions', async () => {
+    for (const kind of ['plain', 'warning', 'authored', 'lost-user', 'duplicate', 'hidden', 'outside', 'weak-gone', 'wrong-digest', 'wrong-marker', 'reader-error']) {
+      const f = fixture('claude', { userPrompt: 'PRIVATE_ROOT_BODY' });
+      expect((await f.run()).firstUserVerified).toBe(true);
+      const root = f.userRoot!, warning = new Element('DIV', {'data-testid': 'asl3-stop-warning'});
+      delete root.values['data-testid'];
+      if (kind === 'warning' || kind === 'duplicate' || kind === 'hidden') f.body.append(warning);
+      if (kind === 'authored') f.answer.append(warning);
+      if (kind === 'lost-user') root.append(warning);
+      if (kind === 'duplicate') f.body.append(warning.cloneNode(true));
+      if (kind === 'hidden') warning.values.hidden = '';
+      if (kind === 'outside') f.messages.children = f.messages.children.filter(node => !node.contains(root));
+      if (kind === 'weak-gone') f.world.__computaModelFirstProof.diagnosticRoot = {deref: () => undefined};
+      for (const node of [root, warning]) {
+        for (const name of ['innerText', 'textContent']) Object.defineProperty(node, name, {get: () => {
+          throw new Error('PRIVATE_TEXT_WAS_READ');
+        }});
+      }
+      if (kind === 'reader-error') {
+        const original = f.document.querySelectorAll;
+        f.document.querySelectorAll = (selector: string) => {
+          if (selector.includes('asl3-stop-warning')) throw new Error('PRIVATE_EXCEPTION');
+          return original(selector);
+        };
+      }
+      const overrides = kind === 'wrong-digest' ? {expectedFirstUserFingerprint: 'f'.repeat(64)}
+        : kind === 'wrong-marker' ? {expectedFirstUserMarker: 'PRIVATE_MARKER'} : {};
+      const result = await f.run('inspect', overrides), packet = diagnostic(result);
+      if (['wrong-digest','wrong-marker','reader-error'].includes(kind)) expect(packet.kind).toBe('claude_user_count_v1');
+      else {
+        expect(packet.priorRoot).toBe(kind === 'outside' ? 'outside_tree' : kind === 'weak-gone' ? 'unavailable' : 'marker_lost');
+        expect(packet.warningHook).toBe(kind === 'warning' ? 'single_visible' : kind === 'duplicate' ? 'ambiguous'
+          : ['authored','lost-user','hidden','weak-gone'].includes(kind) ? 'unverified' : 'none');
+      }
+      expect(result.debugStructure).not.toContain('PRIVATE'); expect(result.answerComplete).toBeUndefined();
+      expect(result.temporary).toBeUndefined(); expect(result.stopped).toBeUndefined();
+      expect(f.send.clicks).toBe(0); expect(f.toggle.clicks).toBe(0); expect(f.composer.events).toHaveLength(0);
     }
   });
   test('nested user markers retain deduplication and allowed pending counts produce no failure diagnostic', async () => {

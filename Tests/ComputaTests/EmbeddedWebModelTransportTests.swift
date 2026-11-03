@@ -11723,8 +11723,14 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             let emission = try XCTUnwrap(emissions.first)
             XCTAssertTrue(emission.isFailure)
             let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(emission.record.utf8)) as? [String: Any])
-            XCTAssertEqual(Set(fields.keys), ["kind", "provider", "userCount", "userCountSaturated", "expectedCounts"])
-            XCTAssertEqual(fields["kind"] as? String, "claude_user_count_v1")
+            let baseKeys: Set<String> = ["kind", "provider", "userCount", "userCountSaturated", "expectedCounts"]
+            XCTAssertEqual(Set(fields.keys), count == 0 ? baseKeys.union(["priorRoot", "warningHook"]) : baseKeys)
+            XCTAssertEqual(fields["kind"] as? String, count == 0 ? "claude_missing_user_v1" : "claude_user_count_v1")
+            if count == 0 {
+                // A removed node may already have been collected when WebKit next runs the adapter.
+                XCTAssertTrue(["detached", "unavailable"].contains(fields["priorRoot"] as? String ?? ""))
+                XCTAssertEqual(fields["warningHook"] as? String, fields["priorRoot"] as? String == "detached" ? "none" : "unverified")
+            }
             XCTAssertEqual(fields["provider"] as? String, "claude")
             XCTAssertEqual(fields["userCount"] as? Int, count)
             XCTAssertEqual(fields["userCountSaturated"] as? Bool, false)
@@ -14858,6 +14864,19 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 XCTAssertNil(EmbeddedWebModelTransport.sanitizedFirstUserStructure(safe, provider: .claude),
                              "An early count observation must not impersonate the full first-message schema")
             }
+        }
+        var missingUser = base
+        missingUser["kind"] = "claude_missing_user_v1"
+        missingUser["priorRoot"] = "marker_lost"
+        missingUser["warningHook"] = "single_visible"
+        XCTAssertEqual(EmbeddedWebModelTransport.sanitizedClaudeUserCountDiagnostic(try encoded(missingUser), provider: .claude),
+                       try encoded(missingUser))
+        let invalidMissing: [(String, Any)] = [("kind", "claude_user_count_v1"), ("userCount", 1), ("expectedCounts", [true]),
+            ("expectedCounts", [0, 1]), ("priorRoot", "unavailable"), ("priorRoot", "PRIVATE_ROOT"), ("warningHook", true),
+            ("warningHook", "website_response_blocked"), ("text", "PRIVATE_PAGE")]
+        for (key, value) in invalidMissing {
+            var packet = missingUser; packet[key] = value
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedClaudeUserCountDiagnostic(try encoded(packet), provider: .claude), key)
         }
         for key in base.keys {
             var missing = base; missing.removeValue(forKey: key)
