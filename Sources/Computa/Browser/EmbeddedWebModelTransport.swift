@@ -4150,13 +4150,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             safe["literalCodeKnownEnvelopeType"] = known
         }
         if let extraction = source["selectedExtraction"] {
-            guard ["raw_code", "rendered_fallback"].contains(extraction as? String ?? "") else { return nil }
+            guard ["raw_code", "rendered_fallback", "literal_dil"].contains(extraction as? String ?? "") else { return nil }
             safe["selectedExtraction"] = extraction
         }
         if let reason = source["extractionReason"] {
             guard ["absent_answer", "missing_pre", "multiple_pre", "missing_code", "multiple_code",
                    "oversized_code", "invalid_json", "unknown_envelope_type", "outside_content",
-                   "outside_scan_limit", "accepted_literal_code"].contains(reason as? String ?? "") else { return nil }
+                   "outside_scan_limit", "accepted_literal_code", "accepted_literal_dil"].contains(reason as? String ?? "") else { return nil }
             safe["extractionReason"] = reason
         }
         if let raw = source["rendererGuard"] {
@@ -6436,16 +6436,25 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     result.setTimeout(timeout)
                     guard result.isPending else { return }
                     var pageInput = input
-                    if provider == .chatgpt, action == "inspect" {
+                    let initialChatHeaderReadiness = provider == .chatgpt && action == "selectModel"
+                        && session.state == "loading" && !session.isDiscovery && session.lifecycleVerified
+                        && session.modelChoice != nil && !session.modelSelectionVerified
+                        && session.confirmedUsers == 0 && !session.submitted && !session.pendingSubmission
+                        && session.firstUserFingerprint == nil
+                    if provider == .chatgpt, action == "inspect" || initialChatHeaderReadiness {
                         // A negative-only wall-clock fence for an adapter wait.
                         // Sample wall time first and round down so dispatch
                         // overhead cannot extend the existing native deadline.
                         // ContinuousClock timeout/cancellation remain authoritative.
                         let epochMilliseconds = Date().timeIntervalSince1970 * 1_000
-                        let remaining = (evaluationDeadline - .now).components
+                        let initialReadinessDeadline = initialChatHeaderReadiness
+                            ? min(evaluationDeadline, session.created + preparationTimeout) : evaluationDeadline
+                        let remaining = (initialReadinessDeadline - .now).components
                         let remainingMilliseconds = max(0, min(30_000,
                             Double(remaining.seconds) * 1_000 + Double(remaining.attoseconds) / 1e15))
-                        pageInput["evaluationDeadlineEpochMilliseconds"] = Int64((epochMilliseconds + remainingMilliseconds).rounded(.down))
+                        let key = initialChatHeaderReadiness ? "initialModelReadinessDeadlineEpochMilliseconds"
+                            : "evaluationDeadlineEpochMilliseconds"
+                        pageInput[key] = Int64((epochMilliseconds + remainingMilliseconds).rounded(.down))
                     }
                     if session.coldNamedChatRootRead, action != "inspect" { session.initialRootActionDispatched = true }
                     session.providerAdapterEverDispatched = true

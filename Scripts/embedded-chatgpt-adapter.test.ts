@@ -389,6 +389,7 @@ class Element {
     return (order.indexOf(this) < order.indexOf(other) ? 4 : 2)
       | (this.contains(other) ? 16 : 0) | (other.contains(this) ? 8 : 0);
   }
+  matches(selector: string) { return selector.split(",").some(part => matches(this, part.trim())); }
   closest(selector: string): Element | null {
     for (let node: Element | null = this; node; node = node.parentElement)
       if (selector.split(",").some(part => matches(node!, part.trim()))) return node;
@@ -523,7 +524,9 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
       display: node.values['data-fixture-display'] ?? (node.getAttribute('hidden') !== null ? 'none' : 'block'),
       opacity: node.values['data-fixture-opacity'] ?? '1',
       stroke: node.values.stroke ?? 'none', strokeOpacity: node.values['stroke-opacity'] ?? '0', strokeWidth: node.values['stroke-width'] ?? '0',
-      content: pseudo === '::before' ? node.beforeContent : node.afterContent }), Observer, (callback: () => void, delay: number) => {
+      content: pseudo === '::before' ? node.beforeContent : node.afterContent,
+      textTransform: (node as any).literalTransform || 'none', webkitTextSecurity: (node as any).literalSecurity || 'none',
+      contentVisibility: (node as any).literalContentVisibility || 'visible', filter: (node as any).literalFilter || 'none', clipPath: (node as any).literalClip || 'none' }), Observer, (callback: () => void, delay: number) => {
       timers.push(callback); scheduledDelays.push(delay);
     }, world, { subtle: { digest: async (algorithm: string, data: Uint8Array) => {
       digestInputs.push(new TextDecoder().decode(data));
@@ -1518,10 +1521,12 @@ describe('ChatGPT literal terminal source equivalence', () => {
       + 'const extraction=modelResponseExtraction(answer);return {relation:chatGPTTerminalResponseTextRelation(rawSource,answer,extraction,messageID),text:extraction.text,flags:extraction.flags};');
   const style = (node: any, pseudo?: string) => ({ visibility: node.cssVisibility || 'visible',
     display: node.literalDisplay || (node.getAttribute('hidden') !== null ? 'none' : 'block'),
-    opacity: node.literalOpacity || '1', content: pseudo === '::before' ? node.beforeContent : node.afterContent });
+    opacity: node.literalOpacity || '1', content: pseudo === '::before' ? node.beforeContent : node.afterContent,
+    textTransform: node.literalTransform || 'none', webkitTextSecurity: node.literalSecurity || 'none',
+    contentVisibility: node.literalContentVisibility || 'visible', filter: node.literalFilter || 'none', clipPath: node.literalClip || 'none' });
   const wrap = (body: string) => '```json\n' + body + '\n```';
   function literal(body: string) {
-    const answer = new Element('DIV', { 'data-markdown-text-style': 'assistant-message' });
+    const answer = new Element('DIV', { 'data-markdown-text-style': 'assistant-message', 'data-chatgpt-selection-message-id': messageID });
     const copy = new Element('DIV', { class: 'my-4', 'data-dil-source-message-id': messageID,
       'data-chatgpt-copy-reference': '0', 'data-markdown-copy': 'contents' });
     const layout = new Element('DIV', { class: 'layout' }), hidden = new Element('DIV', { hidden: '' });
@@ -1537,6 +1542,31 @@ describe('ChatGPT literal terminal source equivalence', () => {
     return { answer, copy, layout, hidden, portal, dil, p, span, raw,
       read: (value = '<escape>' + raw() + '</escape>') => read(value, answer, messageID, style) };
   }
+  test('literal DIL action input preserves indentation and escapes while normal rendering collapses them', () => {
+    const patch = '*** Begin Patch\n*** Add File: /synthetic/résumé.py\n+    def f():\n+        return "🌍 \\ path"\n*** End Patch';
+    const f = literal(JSON.stringify({type:'tool_calls',calls:[{name:'apply_patch',input:patch}]}));
+    Object.defineProperty(f.answer,'innerText',{configurable:true,get:()=>f.raw().replace(/\n/g,' ').replace(/[ \t]+/g,' ')});
+    expect(JSON.parse(f.answer.innerText.slice(8,-4)).calls[0].input).not.toBe(patch);
+    expect(f.read().flags).toMatchObject({selectedExtraction:'literal_dil',extractionReason:'accepted_literal_dil'});
+    expect(JSON.parse(f.read().text.slice(8,-4)).calls[0].input).toBe(patch);
+    for (const mutate of [
+      (x:any)=>delete x.answer.values['data-chatgpt-selection-message-id'],
+      (x:any)=>x.answer.values['data-chatgpt-selection-message-id']=firstMarker,
+      (x:any)=>x.answer.values['data-markdown-text-style']='user-message',
+      (x:any)=>x.p.literalTransform='uppercase', (x:any)=>x.p.literalSecurity='disc',
+      (x:any)=>x.p.literalContentVisibility='hidden', (x:any)=>x.p.literalFilter='opacity(0)',
+      (x:any)=>x.p.literalClip='inset(100%)', (x:any)=>x.p.namespaceURI='http://www.w3.org/2000/svg',
+      (x:any)=>x.hidden.text='hidden', (x:any)=>x.p.children[0].append(new Element('BUTTON',{},'extra')),
+      (x:any)=>x.p.children[0].beforeContent='"extra"', (x:any)=>x.p.values.onclick='extra',
+    ]) {
+      const bad=literal(JSON.stringify({type:'tool_calls',calls:[{name:'apply_patch',input:patch}]}));
+      mutate(bad);expect(bad.read().flags.selectedExtraction,String(mutate)).not.toBe('literal_dil');
+    }
+    const stale=f.read(), other=firstMarker;
+    f.copy.values['data-dil-source-message-id']=other; f.dil.values['data-dil-message-id']=other;
+    expect(f.read(stale.text).relation).toBeNull();
+  });
+
   test('the actual three-span source preserves LF, JSON escapes and a single exact escape wrapper', () => {
     expect(start).toBeGreaterThan(0); expect(extractionStart).toBeGreaterThan(end);
     for (const envelope of [
@@ -1546,8 +1576,8 @@ describe('ChatGPT literal terminal source equivalence', () => {
       const raw = JSON.stringify(envelope), f = literal(raw), before = f.raw();
       expect(f.read().relation).toBe('dil_escaped_literal_json_fence');
       expect(f.read(f.raw()).relation).toBe('dil_literal_json_fence');
-      expect(f.read().text).toBe('```json ' + raw + ' ```');
-      expect(f.read().flags.selectedExtraction).toBe('rendered_fallback');
+      expect(f.read().text).toBe(wrap(raw));
+      expect(f.read().flags.selectedExtraction).toBe('literal_dil');
       expect(f.raw()).toBe(before); expect(f.raw()).toBe(wrap(raw));
     }
   });
@@ -1597,19 +1627,19 @@ describe('ChatGPT literal terminal source equivalence', () => {
     const f = literal('{"type":"message","text":"HI"}'), raw = '<escape>' + f.raw() + '</escape>';
     expect(f.read(raw).relation).toBe('dil_escaped_literal_json_fence');
     Object.defineProperty(f.answer, 'innerText', { configurable: true, get: () => '```json  {"type":"message","text":"HI"} ```\n' });
-    expect(f.read(raw).relation).toBeNull();
+    expect(f.read(raw).relation).toBe('dil_escaped_literal_json_fence');
     Object.defineProperty(f.answer, 'innerText', { configurable: true, get: () => f.p.children.map(child => child.textContent.replace(/\r?\n$/, ' ')).join('') + '\n' });
     f.p.children[1].text = '{"type":"message","text":"CHANGED"}\n';
     expect(f.read(raw).relation).toBeNull();
   });
   test('a fenced DIL source still obtains full fresh proof and is rechecked after the last picker await', async () => {
-    for (const mutation of ['none', 'raw_line_ending', 'dil_identity', 'extra_attribute']) {
+    for (const mutation of ['none', 'raw_line_ending', 'dil_identity', 'extra_attribute', 'raw_whitespace']) {
       const choice = { key: 'chat/latest/medium', label: 'Medium' }, conversationID = '6ad86c7a-2284-8331-b846-a59490db0c46';
       const x = await chatTurnFixture(choice), click = x.send.onClick!;
       x.send.onClick = () => { click(); x.f.location.pathname = '/c/' + conversationID;
         x.f.document.URL = 'https://chatgpt.com' + x.f.location.pathname + '?temporary-chat=true'; };
       const record = await x.dispatch('Exact owned DIL terminal source', { deferModelVerification: true });
-      const body = literal('{"type":"message","text":"HI"}'), root = x.answer('placeholder');
+      const body = literal('{"type":"message","text":"HI    THERE"}'), root = x.answer('placeholder');
       root.children[0].connected = false; root.children[0] = body.answer; body.answer.parentElement = root;
       root.values['data-chatgpt-selection-message-id'] = messageID;
       const candidate = { correlationID: '245e3c88-8dac-4239-947b-1aff997b9f61', sequence: 1,
@@ -1620,7 +1650,8 @@ describe('ChatGPT literal terminal source equivalence', () => {
       picker.trigger.onClick = () => { open(); if (++opens !== 2) return;
         if (mutation === 'raw_line_ending') body.p.children[0].text = '```json\r\n';
         if (mutation === 'dil_identity') body.dil.values['data-dil-message-id'] = firstMarker;
-        if (mutation === 'extra_attribute') body.p.values.onclick = 'not invoked'; };
+        if (mutation === 'extra_attribute') body.p.values.onclick = 'not invoked';
+        if (mutation === 'raw_whitespace') body.p.children[1].text = body.p.children[1].text.replace('HI    THERE','HI        THERE'); };
       const observed = await x.observe(record, { deferModelVerification: false, terminalCompletionCandidate: candidate });
       expect(opens).toBe(2); expect(x.send.clicks).toBe(1);
       if (mutation === 'none') {
@@ -1631,7 +1662,7 @@ describe('ChatGPT literal terminal source equivalence', () => {
         expect(observed.terminalCompletionMatched, mutation).toBeUndefined();
         expect(observed.terminalCompletionRepresentation, mutation).toBeUndefined();
       }
-      expect(candidate.text).toBe('<escape>```json\n{"type":"message","text":"HI"}\n```</escape>');
+      expect(candidate.text).toBe('<escape>```json\n{"type":"message","text":"HI    THERE"}\n```</escape>');
     }
   });
 });

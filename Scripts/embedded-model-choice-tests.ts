@@ -4174,7 +4174,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           noSelection(f, picker);
         }
       });
-      const pendingDisabledHeader = async (composite = true, attribute = 'disabled', requested = 'Instant') => {
+      const pendingDisabledHeader = async (composite = true, attribute = 'disabled', requested = 'Instant', nativeBudget?: number) => {
         const { f, picker } = setup(false, { closedCompositeHeader: composite, resetToPowerOnClose: true });
         picker.selected('Instant'); await f.run('inspect');
         const form = new Node('FORM'); form.append(f.composer, picker.trigger); f.body.append(form);
@@ -4188,17 +4188,100 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           clocks.push({ milliseconds: body.milliseconds, expire: () => resolve(true) }); registered();
         }) };
         const pending = f.run('selectModel', { modelChoice: choice(requested),
-          operationID: '95e24632-2eb6-4cd6-b30f-17ab208c2fbd' });
+          operationID: '95e24632-2eb6-4cd6-b30f-17ab208c2fbd',
+          ...(nativeBudget === undefined ? {} : { initialModelReadinessDeadlineEpochMilliseconds: Date.now() + nativeBudget }) });
         await Promise.race([registration, pending.then((result: any) => {
           throw new Error('Disabled initial picker returned before readiness wait: ' + result.error);
         })]);
         expect(picker.trigger.clicks).toBe(0); noSelection(f, picker);
-        expect(clocks).toHaveLength(1); expect(clocks[0].milliseconds).toBeLessThanOrEqual(1_800);
+        expect(clocks).toHaveLength(1); expect(clocks[0].milliseconds).toBeLessThanOrEqual(nativeBudget ?? 1_800);
         const wake = (records?: any[]) => { for (const observer of [...f.observers]) observer.callback(records || [
           { type: 'attributes', target: picker.trigger, attributeName: 'disabled', oldValue: '' }]); };
         const enable = () => { picker.trigger.disabled = false; delete picker.trigger.values.disabled; delete picker.trigger.values['aria-disabled']; wake(); };
         return { f, picker, form, clocks, pending, wake, enable };
       };
+      test('native initial readiness budget observes late enabled Extra High before an independent complete picker proof', async () => {
+        for (const requested of ['Extra High', 'Instant', 'Medium', 'High', 'Pro']) {
+          const x = await pendingDisabledHeader(true, 'aria-disabled', requested, 8_000);
+          expect(x.clocks[0].milliseconds).toBeGreaterThan(1_800);
+          x.f.advanceTime(2_100); x.picker.selected(requested);
+          expect(x.picker.trigger.clicks).toBe(0); noSelection(x.f, x.picker);
+          x.enable(); const result = await x.pending;
+          expect(result.selected).toBe(true); expect(result.modelEvidence.selected.key).toBe(choice(requested).key);
+          expect(result.modelEvidence.chatSelection.family.key).toBe('GPT-6');
+          expect(result.modelDiagnostic.chatHeader.readiness.outcome).toBe('recognized');
+          expect(x.picker.trigger.clicks).toBe(1); noSelection(x.f, x.picker);
+        }
+      });
+      test('native initial readiness ignores unrelated hydration while keeping relevant mutation limits', async () => {
+        for (const relevant of [false, true]) {
+          const x = await pendingDisabledHeader(true, 'aria-disabled', 'Instant', 8_000);
+          const sidebar = new Node('DIV'); x.f.body.append(sidebar);
+          const target = relevant ? x.f.composer : sidebar;
+          // Deliver this batch to the new scoped readiness watchers. The
+          // fixture's generic wake broadcasts to unrelated existing policies.
+          const records = Array.from({ length: 65 }, () => ({ type: 'characterData', target }));
+          for (const observer of x.f.observers) if (observer.options?.childList === true
+            && (Object.keys(observer.options).length === 1 || observer.options.subtree === true
+              && observer.options.characterData === true && observer.options.attributes === undefined
+              && observer.options.characterDataOldValue === undefined)) observer.callback(records);
+          x.f.advanceTime(2_100); x.enable(); const result = await x.pending;
+          if (relevant) { expect(result.error).toBeDefined(); expect(x.picker.trigger.clicks).toBe(0); }
+          else { expect(result.selected).toBe(true); expect(result.modelEvidence.selected).toEqual(choice('Instant')); }
+          noSelection(x.f, x.picker);
+        }
+      });
+      test('native initial readiness rejects malformed or renewed bounds without input or a clock', async () => {
+        for (const value of ['late', NaN, Infinity, Date.now() - 1, Date.now() + 20_000, Date.now() + 5_000.5]) {
+          const { f, picker } = setup(false, { closedCompositeHeader: true }); picker.selected('Instant');
+          picker.trigger.values['aria-disabled'] = 'true'; let clocks = 0;
+          f.window.webkit.messageHandlers.computaModelClock = { postMessage: () => { clocks++; return Promise.resolve(true); } };
+          const result = await f.run('selectModel', { modelChoice: choice('Extra High'),
+            initialModelReadinessDeadlineEpochMilliseconds: value, operationID: '95e24632-2eb6-4cd6-b30f-17ab208c2fbd' });
+          expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+          expect(clocks).toBe(0); expect(picker.trigger.clicks).toBe(0); noSelection(f, picker);
+        }
+      });
+      test('native initial readiness budget expires without actions and cannot renew a selection attempt', async () => {
+        const x = await pendingDisabledHeader(true, 'aria-disabled', 'Extra High', 3_000);
+        x.f.advanceTime(3_001); x.clocks[0].expire(); const result = await x.pending;
+        expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+        expect(result.modelDiagnostic.chatHeader.readiness.reason).toBe('deadline');
+        x.enable(); expect((await x.f.run('selectModel', { modelChoice: choice('Extra High'),
+          initialModelReadinessDeadlineEpochMilliseconds: Date.now() + 10_000 })).error).toBe('model_unverified');
+        expect(x.clocks).toHaveLength(1); expect(x.picker.trigger.clicks).toBe(0); noSelection(x.f, x.picker);
+      });
+      test('native initial readiness budget cannot add a fresh full picker clock beyond its original deadline', async () => {
+        const x = await pendingDisabledHeader(true, 'aria-disabled', 'Instant', 3_000);
+        x.f.advanceTime(2_800); x.picker.trigger.onClick = () => {}; x.enable(); await microtasks();
+        expect(x.clocks).toHaveLength(2); expect(x.clocks[1].milliseconds).toBeLessThanOrEqual(200);
+        x.f.advanceTime(201); x.clocks[1].expire(); const result = await x.pending;
+        expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+        expect(x.picker.trigger.clicks).toBe(1); noSelection(x.f, x.picker);
+      });
+      test('native initial readiness budget rejects changed composer and detached or ambiguous header before input', async () => {
+        for (const mutation of ['draft', 'draft_then_restore', 'composer_replace', 'header_detach_restore', 'duplicate', 'parent', 'busy', 'owner', 'route']) {
+          const x = await pendingDisabledHeader(true, 'aria-disabled', 'Extra High', 8_000);
+          x.f.advanceTime(2_100);
+          let records: any[] = [];
+          if (mutation === 'draft') x.f.composer.text = 'PRIVATE_UNSENT_DRAFT';
+          if (mutation === 'draft_then_restore') records = [{ type: 'characterData', target: x.f.composer }];
+          if (mutation === 'composer_replace') {
+            const replacement = new Node('DIV', { id: 'prompt-textarea', contenteditable: 'true' });
+            x.f.composer.connected = false; x.form.append(replacement);
+          }
+          if (mutation === 'header_detach_restore') records = [{ type: 'childList', target: x.form,
+            addedNodes: [x.picker.trigger], removedNodes: [x.picker.trigger] }];
+          if (mutation === 'duplicate') x.f.body.append(new Node('BUTTON', { 'aria-label': 'Select ChatGPT model', 'aria-haspopup': 'menu' }, 'Thinking effort Instant'));
+          if (mutation === 'parent') { const parent = new Node('DIV'); x.form.append(parent); parent.append(x.picker.trigger); }
+          if (mutation === 'busy') x.f.body.append(new Node('BUTTON', { 'data-testid': 'stop-button' }, 'Stop'));
+          if (mutation === 'owner') x.f.world.__computaModelOwner = 'PRIVATE_OTHER_OWNER';
+          if (mutation === 'route') x.f.document.URL += '&changed=1';
+          x.wake(records); x.enable(); const result = await x.pending;
+          expect(result.error).toBeDefined(); expect(result.modelEvidence).toBeUndefined();
+          expect(x.picker.trigger.clicks).toBe(0); noSelection(x.f, x.picker, mutation === 'draft' ? 'PRIVATE_UNSENT_DRAFT' : '');
+        }
+      });
       test('disabled initial picker waits without input then proves Instant from the complete current picker', async () => {
         for (const composite of [false, true]) for (const attribute of ['disabled', 'aria-disabled', 'property']) {
           const x = await pendingDisabledHeader(composite, attribute); x.enable();

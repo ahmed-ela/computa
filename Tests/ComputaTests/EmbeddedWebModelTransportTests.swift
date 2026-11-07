@@ -799,6 +799,71 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testLiteralDILPatchPreservesBytesAndRejectsLateWhitespaceMutationThroughOwnedWebKit() async throws {
+        let patch = "*** Begin Patch\n*** Add File: /synthetic/résumé.py\n+    def f():\n+        return \"🌍 \\ path\"\n*** End Patch"
+        let raw = String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [
+            ["name": "apply_patch", "input": patch]]], options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
+        let fenced = "```json\n" + raw + "\n```"
+        let request = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
+            "model": syntheticChatGPTModelID, "input": "Synthetic exact patch bytes", "tools": [["type": "custom", "name": "apply_patch"]]]))
+        for mutate in [false, true] {
+            let (fixture, token, view) = try await boundInspectionFixture(prompt: "Keep the exact owned literal patch")
+            defer { fixture.shutdown() }
+            let facts = try await evaluate(view, """
+                const answer=document.querySelector('[data-markdown-text-style="assistant-message"]');
+                const id='cea6201b-846d-404a-b4dc-f974e184065a';
+                answer.setAttribute('data-chatgpt-selection-message-id',id); answer.style.whiteSpace='normal';
+                const el=(tag,attrs={},text)=>{const e=document.createElement(tag);for(const [k,v] of Object.entries(attrs))e.setAttribute(k,v);if(text!==undefined)e.textContent=text;return e;};
+                const source=el('div',{'data-dil-source-message-id':id,'data-chatgpt-copy-reference':'0','data-markdown-copy':'contents'});
+                const layout=el('div'),hidden=el('div',{hidden:''}),portal=el('div',{class:'PortalBoundary-TFj9W2 Renderer-ojZscX'});
+                const dil=el('div',{class:'DilRenderer-tB76Jj DilResponseRoot-HfQrEh',dir:'auto','data-d-inline-reveal':'','data-d-direction':'col','data-dil-message-id':id});
+                const p=el('p',{class:'TextBase-hXhSqg Text-lIMP0_','data-d-text-flow':'','data-d-component':'text'});
+                const span=el('span',{'data-d-text-flow':'word','data-d-stream-word':''},\(try matchedProbeJSON(fenced)));
+                p.append(span);dil.append(p);portal.append(dil);layout.append(hidden,portal);source.append(layout);answer.replaceChildren(source);
+                window.fixtureLiteralSpan=span;window.fixtureLiteralRendered=answer.innerText;
+                return {literal:answer.textContent,rendered:answer.innerText,whiteSpace:getComputedStyle(p).whiteSpace};
+                """) as? [String: Any]
+            XCTAssertEqual(facts?["literal"] as? String, fenced)
+            XCTAssertNotEqual(facts?["rendered"] as? String, fenced)
+            XCTAssertEqual(facts?["whiteSpace"] as? String, "normal")
+            if mutate {
+                // Replacing the fixture's original answer starts a new quiet
+                // candidate. Bind this exact literal body before timing its
+                // final proof, so the mutation below actually crosses it.
+                let candidate = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTAssertEqual(candidate["state"] as? String, "running")
+                try await Task.sleep(for: .milliseconds(1_650))
+                _ = try await evaluate(view, """
+                    window.fixtureLiteralProofOpens=0; window.fixtureLiteralMutated=false;
+                    document.getElementById('fixture-model-trigger').addEventListener('click', event=>{
+                      if(event.currentTarget.getAttribute('aria-expanded')!=='true'||++window.fixtureLiteralProofOpens!==2)return;
+                      window.fixtureLiteralSpan.textContent=window.fixtureLiteralSpan.textContent.replace('+    def','+        def');
+                      window.fixtureLiteralMutated=true;
+                    });return true;
+                    """)
+                do { _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]); XCTFail("Changed literal source cannot publish") }
+                catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptConversation)) }
+                let after = try await evaluate(view, "return {changed:window.fixtureLiteralMutated,renderedSame:document.querySelector('[data-markdown-text-style=\"assistant-message\"]').innerText===window.fixtureLiteralRendered};") as? [String: Bool]
+                XCTAssertEqual(after?["changed"], true); XCTAssertEqual(after?["renderedSame"], true)
+            } else {
+                let complete = try await waitForState("complete", fixture.transport, token: token)
+                try assertChoiceEvidence(complete, choice: Self.fixtureChoice(.chatgpt))
+                let text = try XCTUnwrap(complete["text"] as? String)
+                XCTAssertEqual(Data(text.utf8), Data(fenced.utf8))
+                let evidence = try XCTUnwrap(complete["completionEvidence"] as? [String: Any])
+                let structure = try XCTUnwrap(evidence["codeStructure"] as? [String: Any])
+                XCTAssertEqual(structure["selectedExtraction"] as? String, "literal_dil")
+                guard case let .toolCalls(calls) = try WebModelResponseCodec.parseEmbeddedReply(text, request: request) else { return XCTFail("Expected strict custom call") }
+                XCTAssertEqual(calls.count, 1); XCTAssertEqual(calls[0].name, "apply_patch")
+                XCTAssertEqual(calls[0].customInput.map { Data($0.utf8) }, Data(patch.utf8))
+            }
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
     func testRendererGuardFactsSurviveOwnedCompletionWithoutChangingTextOrInputs() async throws {
         let fixture = try Fixture()
         defer { fixture.shutdown() }
@@ -10715,8 +10780,16 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testChatGPTInitialDisabledPickerUsesExistingNativeCallBudgetForLateExtraHighAndInstant() async throws {
+        for (key, label, remembered) in [("extra-high", "Extra High", 3), ("instant", "Instant", 0)] {
+            let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/" + key, label: label)
+            try await assertInitialDisabledPickerHydration(choice: choice, rememberedPower: remembered,
+                enableDelay: .milliseconds(2_100))
+        }
+    }
+
     private func assertInitialDisabledPickerHydration(choice: WebsiteModelChoice, rememberedPower: Int? = nil,
-                                                     expectedPowerInputs: Int = 0) async throws {
+                                                     expectedPowerInputs: Int = 0, enableDelay: Duration = .zero) async throws {
         let fixture = try Fixture(page: Self.disabledTemporaryChatPickerPage)
         defer { fixture.shutdown() }
         var diagnostics: [String] = []
@@ -10762,6 +10835,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(before?["header"] as? String, "Thinking effort Instant")
         XCTAssertEqual(before?["temporary"] as? Int, 1)
         for key in ["opens", "selections", "powerInputs", "inputs", "sends"] { XCTAssertEqual(before?[key] as? Int, 0, key) }
+        if enableDelay > .zero {
+            try await Task.sleep(for: enableDelay)
+            XCTAssertFalse(finished, "The initial hydration wait must not consume the ordinary 1.8-second picker proof clock")
+        }
         if let rememberedPower {
             _ = try await evaluate(view, """
                 const value = \(rememberedPower);
@@ -10779,7 +10856,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
               powerInputs: window.fixturePowerKeyEvents, familyReads: window.fixtureModelFamilyOpenCount,
               inputs: window.fixtureInputCount, sends: window.fixturePrompts.length};
             """) as? [String: Int]
-        XCTAssertEqual(prepared?["power"], choice.key == "chat/latest/medium" ? 1 : 0)
+        let expectedPower = ["instant", "medium", "high", "extra-high", "pro"].firstIndex(of: String(choice.key.dropFirst("chat/latest/".count)))
+        XCTAssertEqual(prepared?["power"], expectedPower)
         XCTAssertEqual(prepared?["powerInputs"], expectedPowerInputs)
         XCTAssertGreaterThan(prepared?["familyReads"] ?? 0, 0)
         XCTAssertEqual(prepared?["inputs"], 0)
@@ -10804,29 +10882,47 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
         let fixture = try Fixture(page: Self.disabledTemporaryChatPickerPage)
         defer { fixture.shutdown() }
-        var diagnostics: [String] = []
+        fixture.transport.setTimeoutsForTesting(preparation: .milliseconds(2_500), response: .seconds(300))
+        var diagnostics: [String] = [], nativeTimeouts: [String] = []
         fixture.transport.setModelDiagnosticsObserverForTesting { diagnostics.append($0) }
+        fixture.transport.setAdapterTimeoutObserverForTesting { nativeTimeouts.append($0) }
         let start = try await startChoice(choice, in: fixture)
         let token = try XCTUnwrap(start["sessionToken"] as? String)
         let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
         let began = ContinuousClock.now
+        var elapsed: Duration = .zero
         do {
             _ = try await waitForState("ready", fixture.transport, token: token)
             XCTFail("A permanently disabled picker cannot establish a selected model")
-        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelUnverified) }
-        XCTAssertLessThan(ContinuousClock.now - began, .seconds(4), "Initial model waiting cannot renew its 1.8-second deadline")
+        } catch {
+            // XCTest failure reporting can itself take seconds. Measure the
+            // original request before any assertion or failure formatting.
+            elapsed = ContinuousClock.now - began
+            let failure = error as? EmbeddedWebModelTransport.Failure
+            if failure == .pageUnavailable {
+                XCTAssertEqual(nativeTimeouts.count, 1, "Only the original native evaluation timeout may win this race")
+                XCTAssertTrue(nativeTimeouts.first?.contains("model_wait") == true)
+                XCTAssertTrue(nativeTimeouts.first?.contains("clocksPending=1") == true)
+                XCTAssertTrue(nativeTimeouts.first?.contains("generationCurrent=true") == true)
+            } else {
+                XCTAssertTrue(failure == .modelUnverified || failure == .preparationDeadline,
+                    "Only the unchanged deadline or the exact unverified header can terminate this wait: \(error)")
+            }
+        }
+        XCTAssertGreaterThan(elapsed, .milliseconds(1_800))
+        XCTAssertLessThan(elapsed, .seconds(4), "Initial model waiting cannot renew the original preparation deadline")
         let readiness = try diagnostics.compactMap { line -> [String: Any]? in
             let value = try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
             return (value?["chatHeader"] as? [String: Any])?["readiness"] as? [String: Any]
         }
-        XCTAssertTrue(readiness.contains { $0["startedDisabled"] as? Bool == true && $0["outcome"] as? String == "rejected"
-            && $0["reason"] as? String == "deadline" })
+        XCTAssertTrue(readiness.allSatisfy { $0["startedDisabled"] as? Bool == true && $0["outcome"] as? String == "rejected"
+            && $0["reason"] as? String == "deadline" }, "The native deadline may win; a diagnostic cannot claim readiness")
         let ledger = try await evaluate(view, "return {temporary: window.fixtureTemporaryModeClicks, opens: window.fixtureModelTriggerClicks, selections: window.fixtureModelSelectionClicks, inputs: window.fixtureInputCount, sends: window.fixturePrompts.length};") as? [String: Int]
         XCTAssertEqual(ledger, ["temporary": 1, "opens": 0, "selections": 0, "inputs": 0, "sends": 0])
     }
 
     func testChatGPTInitialDisabledPickerRejectsIdentityOwnerAndRouteDriftWithoutActions() async throws {
-        for mutation in ["identity", "owner", "route"] {
+        for mutation in ["identity", "owner", "route", "duplicate", "generation"] {
             let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
             let fixture = try Fixture(page: Self.disabledTemporaryChatPickerPage)
             defer { fixture.shutdown() }
@@ -10855,6 +10951,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 XCTFail("The drift must cross an actual initial disabled picker wait: \(mutation)")
                 throw FixtureFailure.timeout
             }
+            if mutation == "generation" { fixture.browser.stop(tabID: tabID) }
             if mutation == "owner" {
                 _ = try await evaluate(view, "globalThis.__computaModelOwner = '00000000-0000-4000-8000-000000000001'; return true;",
                     world: .world(name: "computa-chatgpt-model-v1"))
@@ -10862,6 +10959,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             _ = try await evaluate(view, """
                 const trigger = document.getElementById('fixture-model-trigger');
                 if ('\(mutation)' === 'identity') trigger.replaceWith(trigger.cloneNode(true));
+                if ('\(mutation)' === 'duplicate') trigger.parentElement.append(trigger.cloneNode(true));
                 if ('\(mutation)' === 'route') history.replaceState({}, '', '/?temporary-chat=true&fixture-route-changed=1');
                 document.dispatchEvent(new Event('fixture-enable-picker')); return true;
                 """)
@@ -10872,13 +10970,28 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 let failure = error as? EmbeddedWebModelTransport.Failure
                 switch mutation {
                 case "owner": XCTAssertEqual(failure, .ownershipFailure(.javaScriptDocument))
+                case "generation": XCTAssertEqual(failure, .ownershipFailure(.documentGenerationAfter))
                 case "route": XCTAssertTrue(failure == .ownershipFailure(.routeAfter)
                     || failure == .ownershipFailure(.javaScriptDocument), "\(String(describing: failure))")
                 default: XCTAssertEqual(failure, .modelUnverified, mutation)
                 }
             }
             let ledger = try await evaluate(view, "return {temporary: window.fixtureTemporaryModeClicks, opens: window.fixtureModelTriggerClicks, selections: window.fixtureModelSelectionClicks, inputs: window.fixtureInputCount, sends: window.fixturePrompts.length};") as? [String: Int]
-            XCTAssertEqual(ledger, ["temporary": 1, "opens": 0, "selections": 0, "inputs": 0, "sends": 0], mutation)
+            if mutation == "generation" {
+                // Native Stop can race with in-flight picker activity. The
+                // generation fence must reject that observation before
+                // insertion or Send.
+                XCTAssertEqual(ledger?["temporary"], 1)
+                XCTAssertEqual(ledger?["inputs"], 0)
+                XCTAssertEqual(ledger?["sends"], 0)
+                do {
+                    _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                        "prompt": "A rejected generation must never become ready"])
+                    XCTFail("Rejected model proof cannot authorize a submission")
+                } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.documentGenerationAfter)) }
+            } else {
+                XCTAssertEqual(ledger, ["temporary": 1, "opens": 0, "selections": 0, "inputs": 0, "sends": 0], mutation)
+            }
             try await assertHumanTabIntact(fixture, retaining: tabID)
         }
     }
@@ -15656,6 +15769,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             poisoned[key] = "private_canary"
             XCTAssertNil(EmbeddedWebModelTransport.sanitizedCodeStructure(poisoned))
         }
+        source["selectedExtraction"] = "literal_dil"
+        source["extractionReason"] = "accepted_literal_dil"
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedCodeStructure(source))
         source["literalCodeValidJSON"] = 1
         XCTAssertNil(EmbeddedWebModelTransport.sanitizedCodeStructure(source))
         source["literalCodeValidJSON"] = NSNull()

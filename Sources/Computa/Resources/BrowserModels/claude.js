@@ -472,7 +472,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   let remount = null, remountClaimed = false;
   let prepareOpening = null, insertOpening = null, genericPowerRecheck = false;
   let verifyObserver = null, verifyAcknowledged = false, passiveFirstVerification = null;
-  let draftObserver = null, draftChanged = false, firstVerificationEditor = null;
+  let draftObserver = null, draftChanged = false, firstVerificationEditor = null, initialReadinessObserver = null;
   const invalidateDraft = () => { draftChanged = true; };
   const recordDraftChanges = records => {
     const composer = insertOpening?.composer || firstVerificationEditor;
@@ -489,11 +489,19 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       }
     }
   };
+  const recordInitialReadinessRemovals = records => {
+    const pinned = initialReadinessBinding?.nodes;
+    if (!pinned) return;
+    // Observe only the fixed ancestor child lists. Unrelated hydration cannot
+    // consume the composer's relevant-record bound or change these pins.
+    for (const record of records) if (record.type === 'childList'
+      && [...record.addedNodes, ...record.removedNodes].some(node => pinned.has(node))) draftChanged = true;
+  };
   const recordVerifyOpening = records => {
     if (records.some(record => record.target === trigger && (record.attributeName === 'aria-expanded' && record.oldValue === 'true'
       || record.attributeName === 'data-state' && record.oldValue === 'open'))) verifyAcknowledged = true;
   };
-  let headerReadiness = null, changingPowerHeader = null, changingPowerSlider = null;
+  let headerReadiness = null, changingPowerHeader = null, changingPowerSlider = null, initialReadinessBinding = null;
   const tracked = new Map();
   const observeHeader = records => {
     const diagnostic = {};
@@ -545,6 +553,10 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     if (selectionChanged || pin?.owner === owner && pin.document === document && pin.invalidated === true)
       throw failure('model_mismatch');
     const current = websiteChatPickerState();
+    recordInitialReadinessRemovals(initialReadinessObserver?.takeRecords?.() || []);
+    if (initialReadinessBinding && (trigger.parentElement !== initialReadinessBinding.parent
+      || !websiteModelChoiceEqual(attempt?.choice, expected)
+      || !passiveEditorIntact(initialReadinessBinding, current))) throw failure('model_unverified');
     let remountFailure = null;
     const rejectRemount = (rule, value) => { if (value && remountFailure == null) remountFailure = rule; return value; };
     if (remount && (rejectRemount('previous_connected', remount.previous.isConnected !== false)
@@ -959,6 +971,33 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       && attempt?.started === true && attempt.completed === false && attempt.powerEvents === 0 && attempt.familyClicked === false
       && !primaryOpened && !secondaryOpened && !closeAttempted && !observedProof) {
       const form = trigger.closest('form');
+      const nativeDeadline = request.initialModelReadinessDeadlineEpochMilliseconds;
+      let readinessUntil = until, readinessComposer = null, readinessParent = null;
+      if (nativeDeadline !== undefined) {
+        // Native supplies only the remainder of this existing selection call,
+        // already capped by the original preparation deadline. No retry budget.
+        const now = Date.now();
+        if (!Number.isSafeInteger(nativeDeadline) || nativeDeadline <= now || nativeDeadline - now > 10_000)
+          return failure('model_unverified');
+        readinessUntil = nativeDeadline;
+        readinessComposer = insertComposer(initial); readinessParent = trigger.parentElement;
+        if (!readinessComposer || !readinessParent || !firstVerificationComposerEmpty(readinessComposer)
+          || !passiveEditorIntact({ composer: readinessComposer }, initial)) return failure('model_unverified');
+        firstVerificationEditor = readinessComposer;
+        const nodes = new Set(), parents = new Set();
+        for (const held of [trigger, readinessComposer]) for (let node = held; node; node = node.parentElement) {
+          if (nodes.has(node)) break;
+          if (nodes.size >= 64) return failure('model_unverified');
+          nodes.add(node); if (node.parentElement) parents.add(node.parentElement);
+        }
+        initialReadinessBinding = { composer: readinessComposer, parent: readinessParent, nodes };
+        draftObserver = new MutationObserver(records => recordDraftChanges(records.filter(record =>
+          record.target === readinessComposer || readinessComposer.contains(record.target))));
+        draftObserver.observe(readinessComposer, { subtree: true, childList: true, characterData: true });
+        initialReadinessObserver = new MutationObserver(recordInitialReadinessRemovals);
+        for (const parent of parents) initialReadinessObserver.observe(parent, { childList: true });
+        readinessComposer.addEventListener?.('input', invalidateDraft, true);
+      }
       // No selection has been observed yet. Hydration may replace this
       // canonical placeholder with another canonical remembered preset;
       // neither disabled value can pin or authorize a model selection.
@@ -976,19 +1015,25 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         try { current = state(); } catch { return reject('state_changed'); }
         if (current.trigger !== trigger || !current.visible(trigger) || !closedShape(current)
           || trigger.closest('form') !== form || form && !current.physical(form)) return reject('state_changed');
+        if (readinessComposer && (trigger.parentElement !== readinessParent || insertComposer(current) !== readinessComposer
+          || !websiteModelChoiceEqual(attempt.choice, expected)
+          || !passiveEditorIntact({ composer: readinessComposer }, current))) return reject('state_changed');
         const power = websiteChatHeaderPresentation(trigger.innerText).power;
         if (!power) return reject('unknown_header');
         if (current.enabled(trigger)) return true;
         if (!disabled(trigger)) return reject('state_changed');
         return false;
       };
-      const changed = await websiteModelWaitForChange(until, ready, 'model_wait', () => { rejected = 'clock_failed'; });
+      const changed = await websiteModelWaitForChange(readinessUntil, ready, 'model_wait', () => { rejected = 'clock_failed'; });
       if (!ready() && changed) rejected ||= 'state_changed';
-      if (!changed || Date.now() >= until || rejected) {
+      if (!changed || Date.now() >= readinessUntil || rejected) {
         headerReadiness.outcome = 'rejected'; headerReadiness.reason = rejected || 'deadline';
         readStage = 'initial_trigger_disabled_rejected';
         return failure(rejected === 'ownership_changed' ? 'document_changed' : 'model_unverified');
       }
+      // The full picker keeps its ordinary 1.8-second proof budget and cannot
+      // outlive the original native call. Enabling supplies no model evidence.
+      if (nativeDeadline !== undefined) until = Math.min(readinessUntil, Date.now() + 1_800);
       initial = state();
       // The newly enabled current header starts the ordinary full picker proof.
       // Its associated Power and checked family still must independently agree.
@@ -1148,6 +1193,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   } finally {
     verifyObserver?.disconnect?.();
     draftObserver?.disconnect?.();
+    initialReadinessObserver?.disconnect?.();
     if (draftObserver) (insertOpening?.composer || firstVerificationEditor)?.removeEventListener?.('input', invalidateDraft, true);
     observer.disconnect?.();
     headerObserver.disconnect?.();
