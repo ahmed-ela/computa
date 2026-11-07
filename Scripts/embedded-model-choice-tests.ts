@@ -4174,13 +4174,14 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           noSelection(f, picker);
         }
       });
-      const pendingDisabledHeader = async (composite = true, attribute = 'disabled', requested = 'Instant', nativeBudget?: number) => {
+      const pendingDisabledHeader = async (composite = true, attribute = 'disabled', requested = 'Instant', nativeBudget?: number, beforeSelection?: (f: any, picker: any, form: any) => void) => {
         const { f, picker } = setup(false, { closedCompositeHeader: composite, resetToPowerOnClose: true });
         picker.selected('Instant'); await f.run('inspect');
         const form = new Node('FORM'); form.append(f.composer, picker.trigger); f.body.append(form);
         if (attribute === 'property') picker.trigger.disabled = true;
         else picker.trigger.values[attribute] = attribute === 'aria-disabled' ? 'true' : '';
         picker.trigger.values['data-state'] = 'closed';
+        beforeSelection?.(f, picker, form);
         const clocks: { milliseconds: number; expire: () => void }[] = [];
         let registered!: () => void;
         const registration = new Promise<void>(resolve => { registered = resolve; });
@@ -4200,6 +4201,87 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         const enable = () => { picker.trigger.disabled = false; delete picker.trigger.values.disabled; delete picker.trigger.values['aria-disabled']; wake(); };
         return { f, picker, form, clocks, pending, wake, enable };
       };
+      test('425 finite disabled composite header already enters the pinned readiness wait', async () => {
+        for (const requested of ['Extra High', 'Instant']) {
+          const x = await pendingDisabledHeader(true, 'aria-disabled', requested, 8_000, (_f, picker) => {
+            picker.primary.text = 'Thinking effortInstant'; picker.primary.zeroRects = true;
+            const svg = new Node('SVG'); svg.zeroRects = true; picker.trigger.append(svg);
+            Object.defineProperty(picker.trigger, 'innerText', { configurable: true, get: () =>
+              picker.trigger.getAttribute('aria-disabled') === 'true' ? 'Thinking effort\n\nInstant' : picker.primary.text });
+          });
+          expect(x.picker.trigger.innerText.length).toBe(24);
+          expect(x.picker.trigger.textContent.length).toBe(22);
+          expect(x.picker.primary.getClientRects()).toHaveLength(0);
+          expect(x.picker.trigger.clicks).toBe(0);
+          x.picker.selected(requested); x.enable(); const result = await x.pending;
+          expect(result.selected).toBe(true); expect(result.modelEvidence.chatSelection.power.label).toBe(requested);
+          expect(result.modelDiagnostic.chatHeader.readiness).toEqual({ startedDisabled: true, outcome: 'recognized', reason: null });
+          noSelection(x.f, x.picker);
+        }
+      });
+      test('initial disabled readiness diagnoses the original early guards without a clock or action', async () => {
+        for (const condition of ['invalid_deadline', 'expired_deadline', 'over_budget', 'disabled_editor', 'hidden_editor',
+          'multiple_editors', 'empty_paragraph', 'bare_br', 'draft', 'busy', 'submission', 'ancestor_limit', 'temporary_lost']) {
+          const { f, picker } = setup(false, { closedCompositeHeader: true }); picker.selected('Instant'); await f.run('inspect');
+          const form = new Node('FORM'); form.append(f.composer, picker.trigger); f.body.append(form);
+          picker.trigger.values['aria-disabled'] = 'true'; picker.trigger.values['data-state'] = 'closed';
+          let deadline: any = Date.now() + 8_000;
+          if (condition === 'invalid_deadline') deadline = 'PRIVATE_INVALID_DEADLINE';
+          if (condition === 'expired_deadline') deadline = Date.now() - 1;
+          if (condition === 'over_budget') deadline = Date.now() + 20_000;
+          if (condition === 'disabled_editor') f.composer.values['aria-disabled'] = 'true';
+          if (condition === 'hidden_editor') f.composer.values.hidden = '';
+          if (condition === 'multiple_editors') for (let i = 0; i < 4; i++) form.append(new Node('DIV', { id: 'prompt-textarea', contenteditable: 'true' }));
+          if (condition === 'empty_paragraph') { f.composer.append(new Node('P', { dir: 'auto' })); Object.defineProperty(f.composer, 'innerText', { get: () => '\n' }); }
+          if (condition === 'bare_br') { const p = new Node('P'); p.append(new Node('BR')); f.composer.append(p); Object.defineProperty(f.composer, 'innerText', { get: () => '\n' }); }
+          if (condition === 'draft') f.composer.text = 'PRIVATE_UNSENT_DRAFT';
+          if (condition === 'busy') f.body.append(new Node('BUTTON', { 'data-testid': 'stop-button' }, 'PRIVATE_STOP_TEXT'));
+          if (condition === 'submission') f.world.__computaChatSubmissionState = {};
+          if (condition === 'ancestor_limit') { let parent = f.body; for (let i = 0; i < 66; i++) { const next = new Node('DIV'); parent.append(next); parent = next; } parent.append(form); }
+          if (condition === 'temporary_lost') f.temporary.connected = false;
+          let clocks = 0; f.window.webkit.messageHandlers.computaModelClock = { postMessage: () => { clocks++; return Promise.resolve(true); } };
+          const result = await f.run('selectModel', { modelChoice: choice('Extra High'),
+            initialModelReadinessDeadlineEpochMilliseconds: deadline, operationID: '95e24632-2eb6-4cd6-b30f-17ab208c2fbd' });
+          expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+          expect(result.modelDiagnostic.readStage).toBe('initial_trigger_disabled_rejected');
+          const h = result.modelDiagnostic.chatHeader;
+          const reason = condition.includes('deadline') || condition === 'over_budget' ? 'native_deadline'
+            : ['disabled_editor', 'hidden_editor', 'multiple_editors'].includes(condition) ? 'composer_unavailable'
+            : ['empty_paragraph', 'bare_br', 'draft'].includes(condition) ? 'composer_not_empty'
+            : ['busy', 'submission'].includes(condition) ? 'passive_editor_changed'
+            : condition === 'temporary_lost' ? 'fresh_context' : 'ancestor_limit';
+          expect(h.readiness).toEqual({ startedDisabled: true, outcome: 'rejected', reason });
+          if (reason === 'native_deadline') expect(h.initialReadiness.nativeDeadline).toBe(condition === 'invalid_deadline' ? 'invalid' : condition === 'expired_deadline' ? 'expired' : 'over_budget');
+          if (condition === 'disabled_editor') expect(h.initialReadiness).toEqual({ nativeDeadline: 'within_budget', candidateCount: 1, physicalCount: 1, visibleCount: 1, enabledCount: 0 });
+          if (condition === 'hidden_editor') expect(h.initialReadiness).toEqual({ nativeDeadline: 'within_budget', candidateCount: 1, physicalCount: 0, visibleCount: 0, enabledCount: 0 });
+          if (condition === 'multiple_editors') expect(h.initialReadiness).toEqual({ nativeDeadline: 'within_budget', candidateCount: 3, physicalCount: 3, visibleCount: 3, enabledCount: 3 });
+          if (condition === 'empty_paragraph') expect(h.initialReadiness.composer).toMatchObject({ rendered: 'line_feed', literalEmpty: true, childCount: 1, childTags: ['p'], soleParagraph: true, paragraphChildCount: 0, paragraphDir: 'auto', soleBR: false });
+          if (condition === 'bare_br') expect(h.initialReadiness.composer).toMatchObject({ rendered: 'line_feed', literalEmpty: true, soleParagraph: true, paragraphChildCount: 1, soleBR: true, trailingBreak: false });
+          if (condition === 'draft') expect(h.initialReadiness.composer).toMatchObject({ rendered: 'other', literalEmpty: false, childTags: ['text'] });
+          expect(clocks).toBe(0); expect(picker.trigger.clicks).toBe(0); noSelection(f, picker, condition === 'draft' ? 'PRIVATE_UNSENT_DRAFT' : '');
+          expect(JSON.stringify(result)).not.toContain('PRIVATE');
+        }
+      });
+      test('rejected initial composer diagnostic visits only its first three child entries', async () => {
+        const { f, picker } = setup(false, { closedCompositeHeader: true }); picker.selected('Instant'); await f.run('inspect');
+        const form = new Node('FORM'); form.append(f.composer, picker.trigger); f.body.append(form);
+        picker.trigger.values['aria-disabled'] = 'true'; f.composer.text = 'PRIVATE_DRAFT';
+        const reads: number[] = [];
+        const children = new Proxy({ length: 16_384 }, { get(target, key) {
+          if (key === 'length') return target.length;
+          if (typeof key !== 'string' || !/^[0-9]+$/.test(key)) throw new Error('No full collection traversal');
+          const index = Number(key); reads.push(index);
+          if (index > 2) throw new Error('Beyond bounded diagnostic children');
+          return { nodeType: 3 };
+        } });
+        Object.defineProperty(f.composer, 'childNodes', { get: () => children });
+        const result = await f.run('selectModel', { modelChoice: choice('Extra High'),
+          initialModelReadinessDeadlineEpochMilliseconds: Date.now() + 8_000 });
+        expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+        expect(result.modelDiagnostic.chatHeader.initialReadiness.composer).toMatchObject({ childCount: 3, childTags: ['text', 'text', 'text'] });
+        expect(reads).toEqual([0, 1, 2]); expect(picker.trigger.clicks).toBe(0); noSelection(f, picker, 'PRIVATE_DRAFT');
+        expect(JSON.stringify(result)).not.toContain('PRIVATE');
+      });
       test('native initial readiness budget observes late enabled Extra High before an independent complete picker proof', async () => {
         for (const requested of ['Extra High', 'Instant', 'Medium', 'High', 'Pro']) {
           const x = await pendingDisabledHeader(true, 'aria-disabled', requested, 8_000);

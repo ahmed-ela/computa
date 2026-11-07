@@ -502,6 +502,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       || record.attributeName === 'data-state' && record.oldValue === 'open'))) verifyAcknowledged = true;
   };
   let headerReadiness = null, changingPowerHeader = null, changingPowerSlider = null, initialReadinessBinding = null;
+  let initialReadinessFacts = null;
   const tracked = new Map();
   const observeHeader = records => {
     const diagnostic = {};
@@ -531,7 +532,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     attributeFilter: ['aria-valuenow', 'aria-checked', 'aria-selected'] });
   const failure = code => {
     const current = websiteChatPickerState(), selection = globalThis.__computaModelSelection;
-    return { error: code, modelDiagnostic: websiteModelDiagnostic(current, { readStage, headerReadiness,
+    return { error: code, modelDiagnostic: websiteModelDiagnostic(current, { readStage, headerReadiness, initialReadinessFacts,
       readContext: {
         scope: ['action_precheck', 'action_final_guard', 'completed_selection', 'post_selection'].includes(context?.scope)
           ? context.scope : 'unknown',
@@ -661,11 +662,21 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       && globalThis.__computaChatSubmissionState == null && ![...document.querySelectorAll('button[data-testid="stop-button"],'
         + 'button[aria-label="Stop streaming"],button[aria-label="Stop generating"],button[aria-label="Stop"]')].some(current.visible);
   };
-  const insertComposer = current => {
+  const insertComposer = (current, facts = null) => {
     const candidates = [...new Set(document.querySelectorAll('#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, '
-      + '#prompt-textarea [contenteditable="true"], [contenteditable="true"][aria-label="Ask ChatGPT"], textarea[data-testid="prompt-textarea"]'))]
-      .filter(node => current.enabled(node));
-    return candidates.length === 1 ? candidates[0] : null;
+      + '#prompt-textarea [contenteditable="true"], [contenteditable="true"][aria-label="Ask ChatGPT"], textarea[data-testid="prompt-textarea"]'))];
+    const enabled = candidates.filter(node => current.enabled(node));
+    if (facts) {
+      // Counts only, from this original candidate read. Three means three or
+      // more; diagnostic reads cannot change the selected composer or refusal.
+      try {
+        facts.candidateCount = Math.min(candidates.length, 3);
+        facts.enabledCount = Math.min(enabled.length, 3);
+        facts.physicalCount = Math.min(candidates.filter(current.physical).length, 3);
+        facts.visibleCount = Math.min(candidates.filter(current.visible).length, 3);
+      } catch { }
+    }
+    return enabled.length === 1 ? enabled[0] : null;
   };
   const insertComposerValue = composer => composer instanceof HTMLTextAreaElement ? composer.value : composer?.innerText;
   const firstVerificationComposerEmpty = composer => {
@@ -965,29 +976,73 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       && [null, 'false'].includes(current.trigger?.getAttribute('aria-expanded'))
       && [null, 'closed'].includes(current.trigger?.getAttribute('data-state'));
     const disabledHeaderRecognized = websiteChatHeaderPresentation(initial.trigger?.innerText).power !== null;
+    const initialEligibility = (reason, passed) => {
+      if (!passed) {
+        headerReadiness = { startedDisabled: true, outcome: 'rejected', reason };
+        readStage = 'initial_trigger_disabled_rejected';
+      }
+      return passed;
+    };
     if (mutable && request.action === 'selectModel' && context?.scope === 'post_selection'
       && initial.visible(trigger) && disabled(trigger) && closedShape(initial) && disabledHeaderRecognized
-      && freshGuard() === true && !globalThis.__computaChatPresetPin && globalThis.__computaModelSelection === attempt
-      && attempt?.started === true && attempt.completed === false && attempt.powerEvents === 0 && attempt.familyClicked === false
-      && !primaryOpened && !secondaryOpened && !closeAttempted && !observedProof) {
+      && initialEligibility('fresh_context', freshGuard() === true)
+      && initialEligibility('prior_pin', !globalThis.__computaChatPresetPin)
+      && initialEligibility('attempt_identity', globalThis.__computaModelSelection === attempt)
+      && initialEligibility('attempt_state', attempt?.started === true && attempt.completed === false
+        && attempt.powerEvents === 0 && attempt.familyClicked === false)
+      && initialEligibility('prior_effect', !primaryOpened && !secondaryOpened && !closeAttempted && !observedProof)) {
       const form = trigger.closest('form');
       const nativeDeadline = request.initialModelReadinessDeadlineEpochMilliseconds;
+      initialReadinessFacts = { nativeDeadline: nativeDeadline === undefined ? 'absent' : 'unchecked' };
+      const rejectInitialReadiness = (reason, composer = null) => {
+        headerReadiness = { startedDisabled: true, outcome: 'rejected', reason };
+        readStage = 'initial_trigger_disabled_rejected';
+        // A bounded structural snapshot after the original guard rejected.
+        // No text, attributes, IDs or coordinates leave this diagnostic.
+        if (composer) try {
+          const children = composer.childNodes, first = children.length === 1 ? children[0] : null;
+          const paragraph = first?.tagName === 'P' ? first : null;
+          const leaf = paragraph?.childNodes.length === 1 ? paragraph.childNodes[0] : null;
+          const kind = node => node?.nodeType === 3 ? 'text'
+            : ['P', 'BR', 'SPAN', 'DIV'].includes(node?.tagName) ? node.tagName.toLowerCase() : 'other';
+          const childTags = [];
+          for (let index = 0; index < Math.min(children.length, 3); index++) childTags.push(kind(children[index]));
+          const value = insertComposerValue(composer);
+          initialReadinessFacts.composer = {
+            kind: composer instanceof HTMLTextAreaElement ? 'textarea'
+              : composer.getAttribute('contenteditable') === 'true' ? 'contenteditable' : 'other',
+            rendered: value === '' ? 'empty' : value === '\n' ? 'line_feed' : typeof value === 'string' ? 'other' : 'unavailable',
+            literalEmpty: composer.textContent === '', prosemirror: composer.classList.contains('ProseMirror'),
+            childCount: Math.min(children.length, 3), childTags,
+            soleParagraph: !!paragraph, paragraphChildCount: paragraph ? Math.min(paragraph.childNodes.length, 3) : null,
+            paragraphAttributeCount: paragraph ? Math.min(paragraph.attributes.length, 3) : null,
+            paragraphDir: !paragraph || paragraph.getAttribute('dir') === null ? 'absent'
+              : paragraph.getAttribute('dir') === 'auto' ? 'auto' : 'other',
+            soleBR: leaf?.tagName === 'BR', trailingBreak: leaf?.tagName === 'BR' && leaf.classList.contains('ProseMirror-trailingBreak')
+          };
+        } catch { }
+        return failure('model_unverified');
+      };
       let readinessUntil = until, readinessComposer = null, readinessParent = null;
       if (nativeDeadline !== undefined) {
         // Native supplies only the remainder of this existing selection call,
         // already capped by the original preparation deadline. No retry budget.
         const now = Date.now();
+        initialReadinessFacts.nativeDeadline = !Number.isSafeInteger(nativeDeadline) ? 'invalid'
+          : nativeDeadline <= now ? 'expired' : nativeDeadline - now > 10_000 ? 'over_budget' : 'within_budget';
         if (!Number.isSafeInteger(nativeDeadline) || nativeDeadline <= now || nativeDeadline - now > 10_000)
-          return failure('model_unverified');
+          return rejectInitialReadiness('native_deadline');
         readinessUntil = nativeDeadline;
-        readinessComposer = insertComposer(initial); readinessParent = trigger.parentElement;
-        if (!readinessComposer || !readinessParent || !firstVerificationComposerEmpty(readinessComposer)
-          || !passiveEditorIntact({ composer: readinessComposer }, initial)) return failure('model_unverified');
+        readinessComposer = insertComposer(initial, initialReadinessFacts); readinessParent = trigger.parentElement;
+        if (!readinessComposer) return rejectInitialReadiness('composer_unavailable');
+        if (!readinessParent) return rejectInitialReadiness('trigger_parent_missing', readinessComposer);
+        if (!firstVerificationComposerEmpty(readinessComposer)) return rejectInitialReadiness('composer_not_empty', readinessComposer);
+        if (!passiveEditorIntact({ composer: readinessComposer }, initial)) return rejectInitialReadiness('passive_editor_changed', readinessComposer);
         firstVerificationEditor = readinessComposer;
         const nodes = new Set(), parents = new Set();
         for (const held of [trigger, readinessComposer]) for (let node = held; node; node = node.parentElement) {
           if (nodes.has(node)) break;
-          if (nodes.size >= 64) return failure('model_unverified');
+          if (nodes.size >= 64) return rejectInitialReadiness('ancestor_limit', readinessComposer);
           nodes.add(node); if (node.parentElement) parents.add(node.parentElement);
         }
         initialReadinessBinding = { composer: readinessComposer, parent: readinessParent, nodes };
@@ -1691,8 +1746,31 @@ function websiteModelDiagnostic(state, readObservation = null) {
     if ((readiness?.startedEmpty === true || readiness?.startedDisabled === true)
       && ['waiting', 'recognized', 'rejected'].includes(readiness.outcome))
       diagnostic.chatHeader.readiness = { ...(readiness.startedDisabled === true ? { startedDisabled: true } : { startedEmpty: true }), outcome: readiness.outcome,
-        reason: ['ownership_changed', 'state_changed', 'unknown_header', 'deadline', 'clock_failed'].includes(readiness.reason)
+        reason: ['ownership_changed', 'state_changed', 'unknown_header', 'deadline', 'clock_failed', 'native_deadline',
+          'fresh_context', 'prior_pin', 'attempt_identity', 'attempt_state', 'prior_effect',
+          'composer_unavailable', 'trigger_parent_missing', 'composer_not_empty', 'passive_editor_changed', 'ancestor_limit'].includes(readiness.reason)
           ? readiness.reason : null };
+    const facts = readObservation?.initialReadinessFacts;
+    if (diagnostic.chatHeader.readiness && facts) {
+      const safe = {};
+      if (['absent', 'unchecked', 'invalid', 'expired', 'over_budget', 'within_budget'].includes(facts.nativeDeadline))
+        safe.nativeDeadline = facts.nativeDeadline;
+      for (const key of ['candidateCount', 'enabledCount', 'physicalCount', 'visibleCount'])
+        if (Number.isInteger(facts[key]) && facts[key] >= 0 && facts[key] <= 3) safe[key] = facts[key];
+      const c = facts.composer;
+      if (c && ['textarea', 'contenteditable', 'other'].includes(c.kind)
+        && ['empty', 'line_feed', 'other', 'unavailable'].includes(c.rendered)
+        && ['absent', 'auto', 'other'].includes(c.paragraphDir)
+        && ['literalEmpty', 'prosemirror', 'soleParagraph', 'soleBR', 'trailingBreak'].every(key => typeof c[key] === 'boolean')
+        && Number.isInteger(c.childCount) && c.childCount >= 0 && c.childCount <= 3
+        && ['paragraphChildCount', 'paragraphAttributeCount'].every(key => c[key] === null
+          || Number.isInteger(c[key]) && c[key] >= 0 && c[key] <= 3)
+        && Array.isArray(c.childTags) && c.childTags.length <= 3
+        && c.childTags.every(tag => ['text', 'p', 'br', 'span', 'div', 'other'].includes(tag)))
+        safe.composer = Object.fromEntries(['kind', 'rendered', 'literalEmpty', 'prosemirror', 'childCount', 'childTags',
+          'soleParagraph', 'paragraphChildCount', 'paragraphAttributeCount', 'paragraphDir', 'soleBR', 'trailingBreak'].map(key => [key, c[key]]));
+      diagnostic.chatHeader.initialReadiness = safe;
+    }
   }
   const responseRoots = state.provider === 'chatgpt' ? chatGPTMessageRoots('assistant')
     : [...document.querySelectorAll(state.provider === 'claude' ? '[data-testid="assistant-message"]' : 'model-response')];
