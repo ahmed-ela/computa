@@ -41,6 +41,7 @@ import OSLog
         let eligibleCookieCount: Int
         let excludedConversationCookieCount: Int
         let ignoredOutOfScopeDuplicateCount: Int
+        let ignoredExcludedConversationDuplicateCount: Int
     }
     enum Failure: Error, LocalizedError, Equatable {
         case unavailable, bounds, invalidSource, destinationNotEmpty, verificationFailed, deadline
@@ -213,7 +214,7 @@ import OSLog
             receive(ticket) {
                 diagnosticPhase = .sourceSelection; sourceCount = cookies.count
                 let selection = try Self.select(cookies, now: Date(), onFailure: { self.selectionFailure = $0 })
-                Self.failureLog.notice("cookieSeedSelection version=1 sourceCount=\(cookies.count) eligibleCount=\(selection.eligibleCookieCount) selectedCount=\(selection.cookies.count) ignoredOutOfScopeDuplicateCount=\(selection.ignoredOutOfScopeDuplicateCount)")
+                Self.failureLog.notice("cookieSeedSelection version=1 sourceCount=\(cookies.count) eligibleCount=\(selection.eligibleCookieCount) selectedCount=\(selection.cookies.count) ignoredOutOfScopeDuplicateCount=\(selection.ignoredOutOfScopeDuplicateCount) ignoredExcludedConversationDuplicateCount=\(selection.ignoredExcludedConversationDuplicateCount)")
                 selected = selection.cookies
                 selectionCounts = Summary(sourceCookieCount: cookies.count, eligibleCookieCount: selection.eligibleCookieCount,
                     excludedConversationCookieCount: selection.excludedConversationCookieCount, seededCookieCount: selected.count,
@@ -302,11 +303,13 @@ import OSLog
     /// are not classified as conversation cookies. No auth-name allowlist is
     /// guessed: all other eligible ChatGPT cookies retain their exact objects.
     static func select(_ cookies: [HTTPCookie], now: Date, onFailure: ((FailureDiagnostic) -> Void)? = nil) throws -> Selection {
-        var bytes = 0, identities = Set<Data>(), selected: [HTTPCookie] = []
-        var eligible = 0, excluded = 0, ignoredOutOfScopeDuplicates = 0
-        func reject(_ failure: Failure, _ reason: FailureDiagnostic.Reason) -> Failure {
+        var bytes = 0, identities: [Data: HTTPCookie] = [:], selected: [HTTPCookie] = []
+        var eligible = 0, excluded = 0, ignoredOutOfScopeDuplicates = 0, ignoredExcludedConversationDuplicates = 0
+        func reject(_ failure: Failure, _ reason: FailureDiagnostic.Reason,
+                    mismatch: (mask: Int, comparison: FailureDiagnostic.Comparison)? = nil) -> Failure {
             onFailure?(FailureDiagnostic(phase: .sourceSelection, code: FailureDiagnostic.code(for: failure), reason: reason,
-                sourceCount: cookies.count, eligibleCount: eligible, selectedCount: selected.count, measuredFieldBytes: bytes))
+                sourceCount: cookies.count, eligibleCount: eligible, selectedCount: selected.count, measuredFieldBytes: bytes,
+                attributeMismatchMask: mismatch?.mask, comparison: mismatch?.comparison))
             return failure
         }
         guard cookies.count <= 4_096 else { throw reject(.bounds, .sourceCount) }
@@ -323,13 +326,27 @@ import OSLog
             var host = cookie.domain.lowercased()
             if host.hasPrefix(".") { host.removeFirst() }
             let inScope = host == "chatgpt.com" || host.hasSuffix(".chatgpt.com")
+            let conversation = ChatGPTTemporaryConversationCookies.canonicalID(name: cookie.name, prefix: "conv_key_") != nil
+                || ChatGPTTemporaryConversationCookies.canonicalID(name: cookie.name, prefix: "history_off_") != nil
+            let excludedConversation = host == "chatgpt.com" && cookie.path == "/" && conversation
             let identity = Data((cookie.domain + "\0" + cookie.path + "\0" + cookie.name).utf8)
-            if !identities.insert(identity).inserted {
-                // The shared source contains unrelated websites. Their identity
-                // ambiguity cannot affect this fresh ChatGPT-only destination.
-                // Keep in-scope rejection before expiry, as in the original policy.
-                guard !inScope else { throw reject(.invalidSource, .duplicateIdentity) }
-                ignoredOutOfScopeDuplicates += 1
+            if let first = identities[identity] {
+                // Neither foreign cookies nor these exact canonical root
+                // conversation cookies can enter the destination. Keep every
+                // other in-scope identity rejection before expiry; do not pick
+                // a value or mutate either source object to resolve ambiguity.
+                if excludedConversation {
+                    ignoredExcludedConversationDuplicates += 1
+                } else {
+                    guard !inScope else {
+                        let mismatch = onFailure == nil ? nil : attributeMismatch(first, remaining: [cookie])
+                        throw reject(.invalidSource, .duplicateIdentity,
+                            mismatch: mismatch?.comparison == .uniqueIdentity ? mismatch : nil)
+                    }
+                    ignoredOutOfScopeDuplicates += 1
+                }
+            } else {
+                identities[identity] = cookie
             }
             if let expiry = cookie.expiresDate {
                 guard expiry.timeIntervalSince1970.isFinite else { throw reject(.invalidSource, .nonfiniteExpiry) }
@@ -342,9 +359,7 @@ import OSLog
                     && label.utf8.allSatisfy { (97...122).contains($0) || (48...57).contains($0) || $0 == 45 }
             }), cookie.path.hasPrefix("/") else { throw reject(.invalidSource, .invalidScopeFields) }
             eligible += 1
-            let conversation = ChatGPTTemporaryConversationCookies.canonicalID(name: cookie.name, prefix: "conv_key_") != nil
-                || ChatGPTTemporaryConversationCookies.canonicalID(name: cookie.name, prefix: "history_off_") != nil
-            if host == "chatgpt.com", cookie.path == "/", conversation {
+            if excludedConversation {
                 excluded += 1
                 continue
             }
@@ -352,7 +367,8 @@ import OSLog
             selected.append(cookie)
         }
         return Selection(cookies: selected, eligibleCookieCount: eligible, excludedConversationCookieCount: excluded,
-            ignoredOutOfScopeDuplicateCount: ignoredOutOfScopeDuplicates)
+            ignoredOutOfScopeDuplicateCount: ignoredOutOfScopeDuplicates,
+            ignoredExcludedConversationDuplicateCount: ignoredExcludedConversationDuplicates)
     }
 }
 

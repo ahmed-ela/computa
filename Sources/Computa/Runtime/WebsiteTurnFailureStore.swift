@@ -163,7 +163,6 @@ struct WebsiteTurnFailureStore: Sendable {
             var records = try load(threadID: record.threadID)
             if let old = records.first(where: { $0.turnID == record.turnID }) { return old.diagnosticText == record.diagnosticText && old.modelID == record.modelID }
             guard records.count < 16 else { return false }
-            if records.isEmpty { guard try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).count < 256 else { return false } }
             records.append(record)
             let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
             let data = try encoder.encode(Envelope(version: 1, threadID: record.threadID, records: records))

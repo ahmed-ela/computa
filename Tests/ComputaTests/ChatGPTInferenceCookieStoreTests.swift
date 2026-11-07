@@ -68,7 +68,7 @@ final class ChatGPTInferenceCookieStoreTests: XCTestCase {
         }
     }
 
-    func testChatGPTDuplicateRejectionStillPrecedesExpiryAndConversationExclusion() throws {
+    func testRetainedChatGPTDuplicateRejectionStillPrecedesExpiry() throws {
         let now = Date()
         for domain in ["chatgpt.com", ".chatgpt.com", "auth.chatgpt.com"] {
             let active = try cookie(domain: domain), expired = try cookie(domain: domain, expiry: now.addingTimeInterval(-1))
@@ -80,10 +80,91 @@ final class ChatGPTInferenceCookieStoreTests: XCTestCase {
                 XCTAssertEqual(diagnostic?.reason, .duplicateIdentity)
             }
         }
-        let excluded = try cookie("conv_key_" + conversation)
-        XCTAssertThrowsError(try ChatGPTInferenceCookieSeed.select([excluded, excluded], now: now)) {
-            XCTAssertEqual($0 as? ChatGPTInferenceCookieSeed.Failure, .invalidSource)
+    }
+
+    func testExcludedCanonicalConversationDuplicatesNeverEnterVerifiedSeedOrMutateSource() async throws {
+        let now = Date()
+        for domain in ["chatgpt.com", ".chatgpt.com"] {
+            for prefix in ["conv_key_", "history_off_"] {
+                let auth = try cookie(), first = try cookie(prefix + conversation, domain: domain, value: "FIRST_PRIVATE_VALUE")
+                let changed = try cookie(prefix + conversation, domain: domain, value: "OTHER_PRIVATE_VALUE")
+                let expired = try cookie(prefix + conversation, domain: domain, expiry: now.addingTimeInterval(-10))
+                for duplicates in [[first, first], [first, changed], [expired, first], [first, expired], [expired, expired]] {
+                    let original = duplicates + [auth], source = CookieSeedStore(original), destination = CookieSeedStore()
+                    let seed = ChatGPTInferenceCookieSeed(source: source, destination: destination)
+                    try await seed.run(until: .now + .seconds(2), isCurrent: { true }, onDrained: {})
+                    XCTAssertNil(seed.failureDiagnostic); XCTAssertNotNil(seed.verifiedSummary)
+                    XCTAssertEqual(destination.sets.count, 1); XCTAssertTrue(destination.sets[0] === auth)
+                    XCTAssertEqual(destination.cookies.count, 1); XCTAssertTrue(destination.cookies[0] === auth)
+                    XCTAssertTrue(source.sets.isEmpty); XCTAssertEqual(source.cookies.count, original.count)
+                    XCTAssertTrue(zip(source.cookies, original).allSatisfy { $0 === $1 })
+                }
+            }
         }
+    }
+
+    func testExcludedConversationDuplicateCountIsSeparateAndDoesNotSelectARepresentative() throws {
+        let now = Date(), auth = try cookie(), foreign = try cookie(domain: "example.invalid")
+        let excluded = try cookie("conv_key_" + conversation)
+        let changed = try cookie("conv_key_" + conversation, value: "DIFFERENT_PRIVATE_VALUE")
+        let expired = try cookie("conv_key_" + conversation, expiry: now.addingTimeInterval(-1))
+        let selection = try ChatGPTInferenceCookieSeed.select([foreign, foreign, excluded, changed, expired, auth], now: now)
+        XCTAssertEqual(selection.ignoredOutOfScopeDuplicateCount, 1)
+        XCTAssertEqual(selection.ignoredExcludedConversationDuplicateCount, 2)
+        XCTAssertEqual(selection.eligibleCookieCount, 3)
+        XCTAssertEqual(selection.excludedConversationCookieCount, 2)
+        XCTAssertEqual(selection.cookies.count, 1); XCTAssertTrue(selection.cookies[0] === auth)
+    }
+
+    func testConversationLikeDuplicateVariantsStillRejectBeforeDestinationAccess() async throws {
+        let variants = try [cookie("conv_key_not-a-uuid"), cookie("history_off_" + conversation.uppercased()),
+            cookie("Conv_key_" + conversation), cookie("history_off_" + conversation + "x"),
+            cookie("conv_key_" + conversation, path: "/auth"), cookie("history_off_" + conversation, path: "//"),
+            cookie("conv_key_" + conversation, domain: "auth.chatgpt.com"),
+            cookie("history_off_" + conversation, domain: ".auth.chatgpt.com")]
+        for value in variants {
+            let source = CookieSeedStore([value, value]), destination = CookieSeedStore()
+            let seed = ChatGPTInferenceCookieSeed(source: source, destination: destination)
+            do { try await seed.run(until: .now + .seconds(2), isCurrent: { true }, onDrained: {}); XCTFail("Expected rejection") }
+            catch { XCTAssertEqual(error as? ChatGPTInferenceCookieSeed.Failure, .invalidSource) }
+            XCTAssertEqual(seed.failureDiagnostic?.reason, .duplicateIdentity)
+            XCTAssertEqual(destination.reads, 0); XCTAssertTrue(destination.sets.isEmpty); XCTAssertTrue(source.sets.isEmpty)
+        }
+    }
+
+    func testExcludedConversationDuplicatesKeepFieldExpiryAndTotalBounds() throws {
+        let original = try cookie("conv_key_" + conversation)
+        func changed(_ edit: (DiagnosticCookie) -> Void) throws -> HTTPCookie {
+            let value = try XCTUnwrap(DiagnosticCookie(properties: original.properties!)); edit(value); return value
+        }
+        let huge = try changed { $0.replacementValue = String(repeating: "x", count: 65_537) }
+        let large = try changed { $0.replacementValue = String(repeating: "x", count: 65_536) }
+        let cases: [([HTTPCookie], ChatGPTInferenceCookieSeed.FailureDiagnostic.Reason)] = [
+            ([original, try changed { $0.missingProperties = true }], .invalidFields),
+            ([original, try changed { $0.replacementExpiry = Date(timeIntervalSince1970: .infinity) }], .nonfiniteExpiry),
+            ([original, huge], .fieldBytes), (Array(repeating: large, count: 17), .totalBytes),
+            (Array(repeating: original, count: 4_097), .sourceCount),
+        ]
+        for (cookies, reason) in cases {
+            var diagnostic: ChatGPTInferenceCookieSeed.FailureDiagnostic?
+            XCTAssertThrowsError(try ChatGPTInferenceCookieSeed.select(cookies, now: Date(), onFailure: { diagnostic = $0 }))
+            XCTAssertEqual(diagnostic?.reason, reason)
+        }
+    }
+
+    func testExcludedDuplicatesDoNotMaskLaterAuthAmbiguityOrDestinationVerification() async throws {
+        let excluded = try cookie("history_off_" + conversation), auth = try cookie()
+        let ambiguous = ChatGPTInferenceCookieSeed(source: CookieSeedStore([excluded, excluded, auth, auth]), destination: CookieSeedStore())
+        do { try await ambiguous.run(until: .now + .seconds(2), isCurrent: { true }, onDrained: {}); XCTFail("Expected rejection") }
+        catch { XCTAssertEqual(error as? ChatGPTInferenceCookieSeed.Failure, .invalidSource) }
+        XCTAssertEqual(ambiguous.failureDiagnostic?.reason, .duplicateIdentity)
+        let source = CookieSeedStore([excluded, excluded, auth]), destination = CookieSeedStore()
+        destination.dropWrites = true
+        let seed = ChatGPTInferenceCookieSeed(source: source, destination: destination)
+        do { try await seed.run(until: .now + .seconds(2), isCurrent: { true }, onDrained: {}); XCTFail("Expected readback rejection") }
+        catch { XCTAssertEqual(error as? ChatGPTInferenceCookieSeed.Failure, .verificationFailed) }
+        XCTAssertNil(seed.verifiedSummary); XCTAssertEqual(seed.failureDiagnostic?.reason, .verificationCount)
+        XCTAssertEqual(destination.sets.count, 1); XCTAssertTrue(destination.sets[0] === auth); XCTAssertTrue(source.sets.isEmpty)
     }
 
     func testForeignDuplicatesDoNotRelaxGlobalBoundsOrInvalidChatGPTCandidateChecks() throws {
@@ -112,6 +193,30 @@ final class ChatGPTInferenceCookieStoreTests: XCTestCase {
                 XCTAssertEqual($0 as? ChatGPTInferenceCookieSeed.Failure, failure)
             }
             XCTAssertEqual(diagnostic?.reason, reason)
+        }
+    }
+
+    func testRetainedDuplicateDiagnosticReportsOnlyExactAttributeMaskAndKeepsRejection() throws {
+        let now = Date(), first = try cookie("PRIVATE_NAME", value: "PRIVATE_VALUE", expiry: now.addingTimeInterval(60))
+        let changedValue = try cookie("PRIVATE_NAME", value: "DIFFERENT_PRIVATE_VALUE", expiry: now.addingTimeInterval(60))
+        let changedExpiry = try cookie("PRIVATE_NAME", value: "PRIVATE_VALUE", expiry: now.addingTimeInterval(120))
+        let both = try cookie("PRIVATE_NAME", value: "DIFFERENT_PRIVATE_VALUE", expiry: now.addingTimeInterval(120))
+        for (second, expectedMask) in [(first, 0), (changedValue, 8), (changedExpiry, 128), (both, 136)] {
+            var diagnostic: ChatGPTInferenceCookieSeed.FailureDiagnostic?
+            XCTAssertThrowsError(try ChatGPTInferenceCookieSeed.select([first, second], now: now, onFailure: { diagnostic = $0 })) {
+                XCTAssertEqual($0 as? ChatGPTInferenceCookieSeed.Failure, .invalidSource)
+            }
+            let record = try XCTUnwrap(diagnostic)
+            XCTAssertEqual(record.phase, .sourceSelection); XCTAssertEqual(record.reason, .duplicateIdentity)
+            XCTAssertEqual(record.code, .invalidSource); XCTAssertEqual(record.attributeMismatchMask, expectedMask)
+            XCTAssertEqual(record.comparison, .uniqueIdentity); XCTAssertEqual(record.completedWrites, 0)
+            XCTAssertEqual(record.selectedCount, 1); XCTAssertEqual(record.sourceCount, 2)
+            for forbidden in ["PRIVATE", "chatgpt.com", "name=", "domain=", "path=", "value=", "expiry="] {
+                XCTAssertFalse(record.record.contains(forbidden))
+            }
+            XCTAssertThrowsError(try ChatGPTInferenceCookieSeed.select([first, second], now: now)) {
+                XCTAssertEqual($0 as? ChatGPTInferenceCookieSeed.Failure, .invalidSource)
+            }
         }
     }
 

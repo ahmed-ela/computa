@@ -3,6 +3,71 @@ import XCTest
 @testable import Computa
 
 final class WebsiteFailureHistoryTests: XCTestCase {
+
+    func testNativeProfileFailurePersistsAfter256ThreadsWithoutChangingPriorHistory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaFailureStoreCapacity-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant").modelID
+        let data = try WebModelServer.errorBody(for: ChatGPTInferenceCookieSeed.Failure.invalidSource)
+        let diagnostic = String(decoding: data, as: UTF8.self)
+        let store = WebsiteTurnFailureStore(directory: root)
+        var previous: [(record: WebsiteTurnFailureStore.Record, bytes: Data)] = []
+        for _ in 0 ..< 256 {
+            let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: UUID().uuidString,
+                threadID: UUID().uuidString, turnID: UUID().uuidString, modelID: model, diagnosticText: diagnostic))
+            XCTAssertTrue(store.append(record))
+            previous.append((record, try Data(contentsOf: root.appendingPathComponent(record.threadID + ".json"))))
+        }
+        let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: UUID().uuidString,
+            threadID: UUID().uuidString, turnID: UUID().uuidString, modelID: model, diagnosticText: diagnostic))
+        XCTAssertTrue(store.append(record), "An unrelated thread's saved failure cannot prevent this finite diagnosis")
+        let reloaded = WebsiteTurnFailureStore(directory: root)
+        XCTAssertEqual(try reloaded.load(threadID: record.threadID), [record])
+        for saved in previous {
+            XCTAssertEqual(try reloaded.load(threadID: saved.record.threadID), [saved.record])
+            XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(saved.record.threadID + ".json")), saved.bytes)
+        }
+        let later = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: record.taskID, threadID: record.threadID,
+            turnID: UUID().uuidString, modelID: model, diagnosticText: diagnostic))
+        XCTAssertTrue(reloaded.append(later))
+        XCTAssertTrue(reloaded.append(later), "Appending the same record remains idempotent")
+        XCTAssertEqual(try WebsiteTurnFailureStore(directory: root).load(threadID: record.threadID), [record, later])
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path).count, 257)
+    }
+
+    func testNativeProfileFailureStoreStillRejectsMalformedFilesAndSymlinks() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaFailureStoreSafety-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let directory = root.appendingPathComponent("store")
+        let model = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant").modelID
+        let diagnostic = String(decoding: try WebModelServer.errorBody(for: ChatGPTInferenceCookieSeed.Failure.invalidSource), as: UTF8.self)
+        let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: UUID().uuidString,
+            threadID: UUID().uuidString, turnID: UUID().uuidString, modelID: model, diagnosticText: diagnostic))
+        let store = WebsiteTurnFailureStore(directory: directory)
+        XCTAssertTrue(store.append(record))
+        let file = directory.appendingPathComponent(record.threadID + ".json")
+        let original = try Data(contentsOf: file)
+        let linkedDirectory = root.appendingPathComponent("linked-store")
+        try FileManager.default.createSymbolicLink(at: linkedDirectory, withDestinationURL: directory)
+        XCTAssertFalse(WebsiteTurnFailureStore(directory: linkedDirectory).append(record))
+        XCTAssertEqual(try Data(contentsOf: file), original)
+
+        let malformed = Data("PRIVATE_INVALID_FILE_CANARY".utf8)
+        try malformed.write(to: file)
+        XCTAssertThrowsError(try store.load(threadID: record.threadID))
+        XCTAssertFalse(store.append(record))
+        XCTAssertEqual(try Data(contentsOf: file), malformed)
+
+        let target = root.appendingPathComponent("private-target")
+        try original.write(to: target)
+        try FileManager.default.removeItem(at: file)
+        try FileManager.default.createSymbolicLink(at: file, withDestinationURL: target)
+        XCTAssertThrowsError(try store.load(threadID: record.threadID))
+        XCTAssertFalse(store.append(record))
+        XCTAssertEqual(try Data(contentsOf: target), original)
+    }
+
     func testFiniteRejectedToolDiagnosisSurvivesRecreationWithoutReplyData() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaCodecFailureHistory-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
