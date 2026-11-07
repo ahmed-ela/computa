@@ -1042,8 +1042,13 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         const nodes = new Set(), parents = new Set();
         for (const held of [trigger, readinessComposer]) for (let node = held; node; node = node.parentElement) {
           if (nodes.has(node)) break;
-          if (nodes.size >= 64) return rejectInitialReadiness('ancestor_limit', readinessComposer);
+          // Track every ancestor in both paths, including deeply nested layouts.
+          // Reject if their complete union exceeds this bound.
+          if (nodes.size >= 256) return rejectInitialReadiness('ancestor_limit', readinessComposer);
           nodes.add(node); if (node.parentElement) parents.add(node.parentElement);
+          // documentElement has no parentElement. Observe its actual parent as
+          // well so removing and restoring the same root cannot erase history.
+          if (node === document.documentElement) parents.add(document);
         }
         initialReadinessBinding = { composer: readinessComposer, parent: readinessParent, nodes };
         draftObserver = new MutationObserver(records => recordDraftChanges(records.filter(record =>

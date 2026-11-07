@@ -4237,7 +4237,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           if (condition === 'draft') f.composer.text = 'PRIVATE_UNSENT_DRAFT';
           if (condition === 'busy') f.body.append(new Node('BUTTON', { 'data-testid': 'stop-button' }, 'PRIVATE_STOP_TEXT'));
           if (condition === 'submission') f.world.__computaChatSubmissionState = {};
-          if (condition === 'ancestor_limit') { let parent = f.body; for (let i = 0; i < 66; i++) { const next = new Node('DIV'); parent.append(next); parent = next; } parent.append(form); }
+          if (condition === 'ancestor_limit') { let parent = f.body; for (let i = 0; i < 258; i++) { const next = new Node('DIV'); parent.append(next); parent = next; } parent.append(form); }
           if (condition === 'temporary_lost') f.temporary.connected = false;
           let clocks = 0; f.window.webkit.messageHandlers.computaModelClock = { postMessage: () => { clocks++; return Promise.resolve(true); } };
           const result = await f.run('selectModel', { modelChoice: choice('Extra High'),
@@ -4281,6 +4281,72 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect(result.modelDiagnostic.chatHeader.initialReadiness.composer).toMatchObject({ childCount: 3, childTags: ['text', 'text', 'text'] });
         expect(reads).toEqual([0, 1, 2]); expect(picker.trigger.clicks).toBe(0); noSelection(f, picker, 'PRIVATE_DRAFT');
         expect(JSON.stringify(result)).not.toContain('PRIVATE');
+      });
+      const deepReadinessAncestors = (f: any, picker: any, form: any, count: number) => {
+        const union = () => {
+          const nodes = new Set<any>();
+          for (const held of [picker.trigger, f.composer]) for (let n = held; n; n = n.parentElement) nodes.add(n);
+          return nodes;
+        };
+        const p = new Node('P'); p.append(new Node('BR', { class: 'ProseMirror-trailingBreak' }));
+        f.composer.values.class = 'ProseMirror'; f.composer.append(p);
+        Object.defineProperty(f.composer, 'innerText', { get: () => '\n' });
+        const old = new Node('DIV', { id: 'prompt-textarea', contenteditable: 'true', hidden: '' }); form.append(old);
+        let index = 0;
+        while (union().size < count) {
+          const held = index++ % 2 ? picker.trigger : f.composer;
+          const parent = held.parentElement, wrapper = new Node('DIV'); parent.append(wrapper); wrapper.append(held);
+        }
+        expect(union().size).toBe(count);
+        return union();
+      };
+      test('disabled readiness retains the complete shared ancestor union at65 and129 before full proof', async () => {
+        for (const count of [65, 129]) for (const requested of ['Instant', 'Extra High']) {
+          let nodes!: Set<any>;
+          const x = await pendingDisabledHeader(true, 'aria-disabled', requested, 8_000, (f, picker, form) => {
+            nodes = deepReadinessAncestors(f, picker, form, count);
+          });
+          const ancestorObserver = x.f.observers.find((o: any) => o.options?.childList === true && Object.keys(o.options).length === 1);
+          expect(ancestorObserver).toBeDefined(); expect(nodes.size).toBe(count);
+          expect(x.picker.trigger.clicks).toBe(0); x.picker.selected(requested); x.enable();
+          const result = await x.pending;
+          expect(result.selected).toBe(true); expect(result.modelEvidence.chatSelection.power.label).toBe(requested);
+          expect(result.modelDiagnostic.chatHeader.readiness.outcome).toBe('recognized');
+          expect(x.clocks[0].milliseconds).toBeLessThanOrEqual(8_000); noSelection(x.f, x.picker);
+        }
+      });
+      test('disabled readiness retains256 ancestors only as a bounded passive wait without model authority', async () => {
+        const x = await pendingDisabledHeader(true, 'aria-disabled', 'Extra High', 8_000,
+          (f, picker, form) => deepReadinessAncestors(f, picker, form, 256));
+        expect(x.picker.trigger.clicks).toBe(0); expect(x.f.world.__computaChatPresetPin).toBeUndefined();
+        x.f.advanceTime(8_001); x.clocks[0].expire(); const result = await x.pending;
+        expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+        expect(result.modelDiagnostic.chatHeader.readiness.reason).toBe('deadline');
+        expect(x.clocks).toHaveLength(1); expect(x.picker.trigger.clicks).toBe(0); noSelection(x.f, x.picker);
+      });
+      test('disabled readiness rejects the257th union ancestor rather than observing a truncated path', async () => {
+        const { f, picker } = setup(false, { closedCompositeHeader: true }); picker.selected('Instant'); await f.run('inspect');
+        const form = new Node('FORM'); form.append(f.composer, picker.trigger); f.body.append(form);
+        deepReadinessAncestors(f, picker, form, 257); picker.trigger.values['aria-disabled'] = 'true';
+        let clocks = 0; f.window.webkit.messageHandlers.computaModelClock = { postMessage: () => { clocks++; return Promise.resolve(true); } };
+        const result = await f.run('selectModel', { modelChoice: choice('Instant'),
+          initialModelReadinessDeadlineEpochMilliseconds: Date.now() + 8_000, operationID: '95e24632-2eb6-4cd6-b30f-17ab208c2fbd' });
+        expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+        expect(result.modelDiagnostic.chatHeader.readiness.reason).toBe('ancestor_limit');
+        expect(clocks).toBe(0); expect(picker.trigger.clicks).toBe(0); noSelection(f, picker);
+      });
+      test('disabled readiness invalidates deep shared and document-root remove-and-restore history', async () => {
+        for (const target of ['composer_parent', 'header_parent', 'shared_form', 'html']) {
+          const x = await pendingDisabledHeader(true, 'aria-disabled', 'Extra High', 8_000,
+            (f, picker, form) => deepReadinessAncestors(f, picker, form, 256));
+          const node = target === 'composer_parent' ? x.f.composer.parentElement : target === 'header_parent'
+            ? x.picker.trigger.parentElement : target === 'shared_form' ? x.form : x.f.document.documentElement;
+          const parent = target === 'html' ? x.f.document : node.parentElement;
+          const record = { type: 'childList', target: parent, removedNodes: [node], addedNodes: [node] };
+          x.wake([record]); x.enable(); const result = await x.pending;
+          expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+          expect(x.picker.trigger.clicks).toBe(0); noSelection(x.f, x.picker);
+        }
       });
       test('native initial readiness budget observes late enabled Extra High before an independent complete picker proof', async () => {
         for (const requested of ['Extra High', 'Instant', 'Medium', 'High', 'Pro']) {

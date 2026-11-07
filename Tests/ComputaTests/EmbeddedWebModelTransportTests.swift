@@ -10789,8 +10789,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     private func assertInitialDisabledPickerHydration(choice: WebsiteModelChoice, rememberedPower: Int? = nil,
-                                                     expectedPowerInputs: Int = 0, enableDelay: Duration = .zero) async throws {
-        let fixture = try Fixture(page: Self.disabledTemporaryChatPickerPage)
+                                                     expectedPowerInputs: Int = 0, enableDelay: Duration = .zero,
+                                                     ancestorCount: Int? = nil) async throws {
+        let fixture = try Fixture(page: ancestorCount.map(Self.deepDisabledTemporaryChatPickerPage)
+            ?? Self.disabledTemporaryChatPickerPage)
         defer { fixture.shutdown() }
         var diagnostics: [String] = []
         fixture.transport.setModelDiagnosticsObserverForTesting { diagnostics.append($0) }
@@ -10835,6 +10837,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(before?["header"] as? String, "Thinking effort Instant")
         XCTAssertEqual(before?["temporary"] as? Int, 1)
         for key in ["opens", "selections", "powerInputs", "inputs", "sends"] { XCTAssertEqual(before?[key] as? Int, 0, key) }
+        if let ancestorCount {
+            let observedCount = try await evaluate(view, "return window.fixtureReadinessAncestorCount;") as? Int
+            XCTAssertEqual(observedCount, ancestorCount)
+        }
         if enableDelay > .zero {
             try await Task.sleep(for: enableDelay)
             XCTAssertFalse(finished, "The initial hydration wait must not consume the ordinary 1.8-second picker proof clock")
@@ -10876,6 +10882,53 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let closed = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
         XCTAssertEqual(closed["cleanup"] as? String, "not_created")
         try await assertHumanTabIntact(fixture)
+    }
+
+    func testChatGPTInitialDisabledPickerDeepAncestorUnionWaitsThenCompletes() async throws {
+        for (key, label, power, count) in [("instant", "Instant", 0, 65), ("extra-high", "Extra High", 3, 129)] {
+            try await assertInitialDisabledPickerHydration(
+                choice: WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/" + key, label: label),
+                rememberedPower: power, ancestorCount: count)
+        }
+    }
+
+    func testChatGPTInitialDisabledPickerDeepAncestorRemovalRejectBeforeInput() async throws {
+        for mutation in ["deep", "shared", "html"] {
+            let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
+            let fixture = try Fixture(page: Self.deepDisabledTemporaryChatPickerPage(129))
+            defer { fixture.shutdown() }
+            let start = try await startChoice(choice, in: fixture)
+            let token = try XCTUnwrap(start["sessionToken"] as? String)
+            let tabID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+            var finished = false
+            let preparation = Task { @MainActor in
+                defer { finished = true }
+                _ = try await self.waitForState("ready", fixture.transport, token: token)
+            }
+            defer { preparation.cancel() }
+            do {
+                let deadline = ContinuousClock.now + .seconds(3)
+                var registered = false
+                while ContinuousClock.now < deadline, !finished {
+                    let snapshot = fixture.browser.modelDiagnosticSnapshot(tabID: tabID)
+                    if snapshot.contains("model_wait") && snapshot.contains("clocksPending=1") { registered = true; break }
+                    await Task.yield()
+                }
+                XCTAssertTrue(registered, "The complete deep chain must be observed before mutation")
+                _ = try await evaluate(view, """
+                    const node = \(mutation == "html" ? "document.documentElement" : mutation == "shared" ? "document.getElementById('fixture-chat-form')" : "document.getElementById('fixture-editor').parentElement");
+                    const parent = node.parentNode, next = node.nextSibling;
+                    node.remove(); parent.insertBefore(node, next);
+                    document.dispatchEvent(new Event('fixture-enable-picker')); return true;
+                    """)
+            }
+            do { try await preparation.value; XCTFail("An incomplete or removed ancestor chain cannot verify selection") }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelUnverified) }
+            let ledger = try await evaluate(view, "return {opens: window.fixtureModelTriggerClicks, selections: window.fixtureModelSelectionClicks, inputs: window.fixtureInputCount, sends: window.fixturePrompts.length};") as? [String: Int]
+            XCTAssertEqual(ledger, ["opens": 0, "selections": 0, "inputs": 0, "sends": 0])
+            try await assertHumanTabIntact(fixture, retaining: tabID)
+        }
     }
 
     func testChatGPTInitialDisabledPickerNeverEnabledExhaustsOneModelDeadlineWithoutActions() async throws {
@@ -21013,6 +21066,31 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             document.addEventListener('fixture-enable-picker', () => {
               document.getElementById('fixture-model-trigger').disabled = false;
             });
+            </script></body>
+            """)
+    }
+
+    private static func deepDisabledTemporaryChatPickerPage(_ count: Int) -> String {
+        // Build layout before the adapter observes the document. The existing
+        // temporary transition moves these same wrappers intact into its owned
+        // successor form; the readiness test does not manufacture reparenting
+        // history after product verification.
+        disabledTemporaryChatPickerPage.replacingOccurrences(of: "</body>", with: """
+            <script>
+            {
+              const held = [document.getElementById('fixture-model-trigger'), document.getElementById('fixture-editor')];
+              const ancestors = () => {
+                const nodes = new Set();
+                for (const leaf of held) for (let node = leaf; node; node = node.parentElement) nodes.add(node);
+                return nodes;
+              };
+              let next = 0;
+              while (ancestors().size < \(count)) {
+                const node = held[next++ % held.length], wrapper = document.createElement('div');
+                node.before(wrapper); wrapper.append(node);
+              }
+              Object.defineProperty(window, 'fixtureReadinessAncestorCount', { get: () => ancestors().size });
+            }
             </script></body>
             """)
     }
