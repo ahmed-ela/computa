@@ -75,7 +75,7 @@ async function computaSavedConversation(input, c, dom, config) {
     // Negative-only fence for the single final Copy. Native stamps the existing
     // evaluation deadline; neither this local clock nor the grant renews it.
     let sampleDeadline = null;
-    if (input.qwenCodePayloadSample != null) {
+    if (input.qwenCodePayloadSample != null || input.savedResponseChoiceGrant != null) {
       const now = Date.now(), end = input.evaluationDeadlineEpochMilliseconds;
       if (!Number.isSafeInteger(end) || end <= now || end - now > 30000)
         c.fail('unsupported_response_format', 'copy_deadline');
@@ -295,6 +295,10 @@ async function computaSavedConversation(input, c, dom, config) {
         && first.container === now.container && first.id === now.id && first.text === now.text;
     }
     function validateInitialResponseIdentity(t, readPoint) {
+      if (state.responseChoice?.acknowledged && (!t.answer || t.answer.id !== state.responseChoice.ids[0]
+        || c.nodes(t.answer.root, '.chat-response-message', 2).length !== 1
+        || c.nodes(t.answer.root, '.smrm, .cmrm', 1).length))
+        c.fail('conversation_changed', 'response_choice_selected');
       if (state.firstDisplay?.complete && !state.first) {
         const view = dom.firstBodyPresentation(t);
         requireSameFirstDisplay(view, 'display_completed', () => {
@@ -364,7 +368,7 @@ async function computaSavedConversation(input, c, dom, config) {
     }
     // An empty body can only wait. A complete exact observed preview can spend
     // one local display claim. Neither path exposes model output or grants ownership.
-    function observeFirstDisplay(t) {
+    function observeFirstDisplay(t, transcriptReader = () => dom.initialResponseIdentityTranscript()) {
       const prompt = state.inserted.prompt;
       const previewLength = 10_240;
       const held = state.firstDisplay, optimistic = state.firstDisplayWitness;
@@ -440,7 +444,7 @@ async function computaSavedConversation(input, c, dom, config) {
       if (!view.collapsed) reject('not_collapsed');
       const checkedControl = () => {
         guard();
-        const current = dom.initialResponseIdentityTranscript(), currentView = dom.firstBodyPresentation(current);
+        const current = transcriptReader(), currentView = dom.firstBodyPresentation(current);
         checkFirstDisplaySelection('display_preclick');
         requireSameFirstDisplay(currentView, 'display_preclick');
         if ((settlement || claim.scrolled) && currentView.answerID !== view.answerID) renderFailure('render_binding_changed');
@@ -504,6 +508,12 @@ async function computaSavedConversation(input, c, dom, config) {
       view.control.click();
       return true;
     }
+    function responseChoiceMetadata(phase) {
+      const held = state.responseChoice;
+      return { version:1, kind:'qwen_smrm', policy:'first_observed_card_v1', state:phase,
+        candidate:held.candidate, responseIDs:held.ids, selectedResponseID:held.ids[0],
+        firstUserFingerprint:held.fingerprint, ...(held.grant ? {grant:held.grant} : {}) };
+    }
     const qwenCodeEnabled = key === '__computaQwenSavedSessionV1'
       && ['Qwen3.7-Plus','Qwen3.8-Max'].some(label => c.equalChoice(input.expectedModelChoice,{key:label,label}));
     const sameCodeAnswer = (held, answer) => !!held && !!answer && held.root === answer.root
@@ -512,8 +522,9 @@ async function computaSavedConversation(input, c, dom, config) {
       && held.content === current.content && held.responseID === current.responseID && held.control === current.control
       && held.nodes.length === current.nodes.length && held.nodes.every((node,index) => node === current.nodes[index] && node.isConnected);
     function read() {
-      const t = dom.transcript(), form = dom.composer(), evidence = selectionEvidence(false), extracted = dom.rawAnswer(t.answer);
+      const t = dom.transcript(), form = dom.composer(), evidence = selectionEvidence(false);
       validateInitialResponseIdentity(t, 'ordinary_read');
+      const extracted = dom.rawAnswer(t.answer);
       state.initialReadComplete = true;
       const terminalUI = !!state.first && !!evidence && !state.deletion && dom.completionCandidate(t.answer);
       if (terminalUI && extracted.formatIssue && !cleanupInspection && !deletionActions.includes(input.action)) {
@@ -549,6 +560,7 @@ async function computaSavedConversation(input, c, dom, config) {
         [usesModes ? 'modeEvidence' : 'modelEvidence']: evidence,
         ...(usesModes && !evidence && modeObservationDiagnostic ? { modeObservationDiagnostic } : {}),
         ...(codeMetadata ? {qwenCodePayload:codeMetadata} : {}),
+        ...(state.responseChoice?.acknowledged ? {savedResponseChoice:responseChoiceMetadata('acknowledged')} : {}),
         text: state.first && !cleanupInspection ? extracted.text : '', answerComplete: !!complete && !cleanupInspection,
         busy: state.submitted && !complete, interrupted: false, conversationIdentity: state.first ? state.canonical : null,
         firstUserIdentity: state.first?.id || null, firstUserVerified: false, firstUserMarkerVerified: false, firstUserFingerprint: null } };
@@ -706,6 +718,116 @@ async function computaSavedConversation(input, c, dom, config) {
       guard();
       return { qwenProvisionalRoutePending: true, url: document.URL,
         sessionLifecycle: 'saved_conversation_delete', temporary: false };
+    }
+    if (config.responseChoice === 'qwen_smrm' && state.submitted && !state.first && route.kind === 'canonical'
+      && (state.responseChoice || input.allowSavedResponseChoice === true && dom.hasResponseChoice())) {
+      // Conversation ownership is sealed independently of either reply. This
+      // receipt grants neither output, ordinary first-body proof, nor deletion.
+      const refuse = () => c.fail('conversation_changed', 'response_choice_scope');
+      if (input.action !== 'inspect' || input.allowSavedResponseChoice !== true
+        || input.allowQwenInitialResponseIdentity !== true || cleanupInspection
+        || !state.inserted || !state.prepared || !state.send || !state.model || state.selection || state.deletion
+        || input.allowFirstUserBinding !== true || input.expectedFirstUserFingerprint != null
+        || !qwenCodeEnabled || !c.uuid(input.expectedFirstUserMarker) || input.expectedFirstUserMarker !== state.inserted.marker
+        || !state.inserted.prompt.endsWith(`\n\nComputa session marker: ${input.expectedFirstUserMarker}`)
+        || !c.equalChoice(input.expectedModelChoice, state.model.choice)
+        || !/^[a-f0-9]{64}$/.test(state.submittedFingerprint || '')
+        || input.savedSubmissionFingerprint !== state.submittedFingerprint
+        || !Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.includes(1)
+        || input.expectedUserCounts.length > 2 || input.expectedUserCounts.some(value => ![0,1].includes(value))
+        || state.responseIdentity || state.firstDisplayWitness) refuse();
+      const readChoice = () => dom.responseChoiceTranscript();
+      let current = readChoice();
+      const pair = current.responseChoice;
+      let held = state.responseChoice;
+      const sameUser = t => t.users.length === 1 && t.answers.length === 1 && t.first
+        && t.first.root === held.first.root && t.first.container === held.first.container
+        && t.first.body === held.first.body && t.first.id === held.first.id
+        && t.first.root.parentElement === held.userTurn && held.userTurn.parentElement === held.outer
+        && (t.answer || t.pendingAnswer)?.root === held.root
+        && held.root.parentElement === held.answerTurn && held.answerTurn.parentElement === held.outer
+        && dom.route().canonical === held.canonical;
+      const samePair = t => sameUser(t) && t.responseChoice && held.pins.length === t.responseChoice.pins.length
+        && held.pins.every((node,i) => node === t.responseChoice.pins[i] && node.isConnected)
+        && held.ids.every((id,i) => id === t.responseChoice.rows[i].id);
+      if (!held) {
+        if (!pair || current.users.length !== 1 || current.answers.length !== 1 || !current.first) refuse();
+        held = state.responseChoice = { candidate:crypto.randomUUID(), canonical:route.canonical,
+          first:current.first, userTurn:current.first.root.parentElement, outer:current.first.root.parentElement.parentElement,
+          root:pair.root, answerTurn:pair.root.parentElement, wrapper:pair.wrapper,
+          pins:pair.pins, ids:pair.rows.map(row => row.id), fingerprint:null, spent:false, acknowledged:false };
+      }
+      if (pair) {
+        if (!samePair(current) || held.acknowledged) refuse();
+        if (observeFirstDisplay(current, readChoice)) return { qwenFirstBodyExpansionPending:true, url:document.URL,
+          sessionLifecycle:'saved_conversation_delete', temporary:false };
+      } else if (!held.spent || !sameUser(current) || !current.answer || current.answer.id !== held.ids[0]
+        || c.nodes(current.answer.root, '.chat-response-message', 2).length !== 1
+        || c.nodes(current.answer.root, '.smrm, .cmrm', 1).length) refuse();
+      if (current.first.text !== state.inserted.prompt) refuse();
+      checkFirstDisplaySelection('id_before_hash');
+      const fingerprint = await c.hash(c.bodyText(current.first.text));
+      guard();
+      current = readChoice();
+      if (!sameUser(current) || current.first.text !== state.inserted.prompt
+        || fingerprint !== state.submittedFingerprint || held.fingerprint && fingerprint !== held.fingerprint) refuse();
+      checkFirstDisplaySelection('id_after_hash');
+      held.fingerprint = fingerprint;
+      if (pair) {
+        if (!samePair(current)) refuse();
+        const row = current.responseChoice.rows[0];
+        const ready = current.responseChoice.ready && c.enabled(row.control)
+          && !row.footer.classList.contains('smrm-card__footer--btn-hidden') && c.hit(row.control);
+        // Revealing this pinned, completed card changes presentation only. It
+        // cannot choose a response; the separate native grant below does that.
+        if (current.responseChoice.ready && !ready && !held.revealed && !held.spent) {
+          held.revealed = true;
+          if (typeof row.content.scrollTo === 'function' && Number.isFinite(row.content.scrollHeight)
+            && row.content.scrollHeight >= 0 && row.content.scrollHeight <= 100000000)
+            row.content.scrollTo({top:row.content.scrollHeight,behavior:'instant'});
+          if (typeof row.control.scrollIntoView === 'function') row.control.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});
+          guard();
+          if (!samePair(readChoice())) refuse();
+        }
+        const modelEvidence = selectionEvidence(true, 'response_choice_ready');
+        if (input.savedResponseChoiceGrant != null) {
+          const grant = input.savedResponseChoiceGrant;
+          if (!ready || held.spent || !grant || Object.keys(grant).sort().join(',') !== 'candidate,grant,kind,policy,responseIDs,selectedResponseID,sequence,version'
+            || grant.version !== 1 || grant.sequence !== 1 || grant.kind !== 'qwen_smrm'
+            || grant.policy !== 'first_observed_card_v1' || grant.candidate !== held.candidate
+            || grant.selectedResponseID !== held.ids[0] || !Array.isArray(grant.responseIDs)
+            || grant.responseIDs.length !== 2 || grant.responseIDs.some((id,i) => id !== held.ids[i])
+            || !c.uuid(grant.grant) || !sampleDeadline) refuse();
+          if (Date.now() >= sampleDeadline.epoch || performance.now() >= sampleDeadline.monotonic)
+            c.fail('conversation_changed', 'response_choice_deadline');
+          // Both native and JS claims are spent before the official click,
+          // including throws, lost acknowledgement, cancellation and timeout.
+          held.spent = true; held.grant = grant.grant;
+          row.control.click();
+          return { savedResponseChoice:responseChoiceMetadata('dispatched'), modelEvidence,
+            url:held.canonical, sessionLifecycle:'saved_conversation_delete', temporary:false };
+        }
+        return { savedResponseChoice:responseChoiceMetadata(held.spent ? 'dispatched' : ready ? 'ready' : 'waiting'),
+          modelEvidence, url:document.URL,
+          sessionLifecycle:'saved_conversation_delete', temporary:false };
+      }
+      if (input.savedResponseChoiceGrant != null || !held.spent || !held.grant
+        || !current.answer || current.answer.id !== held.ids[0]
+        || c.nodes(current.answer.root, '.chat-response-message', 2).length !== 1
+        || c.nodes(current.answer.root, '.smrm, .cmrm', 1).length) refuse();
+      // Only the acknowledged official preference can replace comparison
+      // content. Every user/ancestor pin survives; the sole reply UUID is fixed.
+      if (state.firstDisplay) {
+        const view = dom.firstBodyPresentation(current), display = state.firstDisplay;
+        if (!display.complete || !view || view.collapsed || view.userID !== display.userID
+          || view.pins.length !== display.pins.length || display.pins.at(-1) !== held.wrapper
+          || view.pins.some((node,i) => i !== view.pins.length - 1 && node !== display.pins[i])) refuse();
+        display.pins = view.pins; display.answerID = held.ids[0];
+      }
+      held.acknowledged = true;
+      state.responseIdentity = { canonical:held.canonical, fromEmptyContainer:false, first:current.first,
+        userTurn:held.userTurn, outer:held.outer,
+        answer:{root:current.answer.root,content:current.answer.content,turn:held.answerTurn} };
     }
     if (config.initialResponseIdentity === true && state.submitted && !state.first && route.kind === 'canonical'
       && (input.allowQwenInitialResponseIdentity === true || state.responseIdentity)) {

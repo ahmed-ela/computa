@@ -78,8 +78,8 @@ struct ComputaApp: App {
                 WebWorkspaceView(state: state)
                     .preferredColorScheme(state.appearance.colorScheme)
                     .frame(minWidth: 980, minHeight: 640)
-                    .task {
-                        await state.startRuntime()
+                    .onAppear {
+                        state.startRuntimeIfNeeded()
                     }
             }
         }

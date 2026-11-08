@@ -5,7 +5,7 @@ try {
   const c = computaProviderCore(input, 'qwen', 'https://chat.qwen.ai', actions);
   return await computaSavedConversation(input, c, computaQwenDOM(c), {
     stateKey: '__computaQwenSavedSessionV1', origin: 'https://chat.qwen.ai', initialProvisionalRoute: true, initialResponseIdentity: true,
-    firstEmptyContainerChoice: { key: 'Qwen3.8-Max', label: 'Qwen3.8-Max' },
+    responseChoice: 'qwen_smrm', firstEmptyContainerChoice: { key: 'Qwen3.8-Max', label: 'Qwen3.8-Max' },
     deferDisplayUntilAnswer: ['Qwen3.7-Plus', 'Qwen3.8-Max'].map(label => ({ key: label, label }))
   });
 } catch (error) {

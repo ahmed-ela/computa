@@ -1208,6 +1208,10 @@ final class WebModelServerTests: XCTestCase {
         try await verifyPendingSavedFirstBodyContract(provider: "qwen", qwenReason: "qwen_first_body_expansion_v1")
     }
 
+    func testQwenPendingResponseChoiceWithholdsProofAndRejectsMalformedSnapshots() async throws {
+        try await verifyPendingSavedFirstBodyContract(provider: "qwen", qwenReason: "qwen_response_preference_v1")
+    }
+
     private func verifyPendingSavedFirstBodyContract(provider: String, qwenReason: String = "qwen_initial_provisional_route_v1") async throws {
         for mutation in PendingSavedFirstBodyMutation.allCases {
             let label = provider + "-pending-first-body-" + mutation.rawValue
@@ -1260,6 +1264,39 @@ final class WebModelServerTests: XCTestCase {
 
     func testQwenPendingDisplayExpansionCannotRenewServerDeadline() async throws {
         try await verifyPendingSavedFirstBodyDeadline(provider: "qwen", qwenReason: "qwen_first_body_expansion_v1")
+    }
+
+    func testQwenPendingResponseChoiceCannotRenewServerDeadline() async throws {
+        try await verifyPendingSavedFirstBodyDeadline(provider: "qwen", qwenReason: "qwen_response_preference_v1")
+    }
+
+    func testQwenFailedOrCancelledChoiceRetainsOnlyExactFiniteNativeMemoryReceiptWithoutRepolling() async throws {
+        for variant in ["failure", "cancelled", "foreign-generation"] {
+            let label = "qwen-choice-" + variant
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(label + UUID().uuidString)
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+            let base = FixtureWebModelTransport(cleanupResult: "deleted")
+            let modelID = syntheticWebsiteModelID("qwen")
+            let transport = ResponseChoiceFailureFixtureTransport(base: base, modelID: modelID, variant: variant)
+            await server.configureEmbeddedTransport(transport)
+            let data = try turnRequest(input: [["role": "user", "content": "Synthetic uncertain response preference"]], model: modelID)
+            let inference = Task { try await server.fixtureInfer(data, taskID: label) }
+            do { _ = try await inference.value; XCTFail("No uncertain choice may publish output") }
+            catch {
+                if variant == "cancelled" { XCTAssertTrue(error is CancellationError) }
+                else { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelUnverified) }
+            }
+            let journal = try turnJournal(root: root, task: label)
+            let terminal = try XCTUnwrap(journal.last { ["failed", "cancelled"].contains($0["phase"] as? String ?? "") })
+            if variant == "foreign-generation" { XCTAssertNil(terminal["savedResponseChoiceReceipt"]) }
+            else { XCTAssertEqual(WebsiteResponseChoiceReceipt(terminal["savedResponseChoiceReceipt"])?.phase, .grantSpent) }
+            XCTAssertFalse(journal.contains { ["complete", "release_verified"].contains($0["phase"] as? String ?? "") })
+            let counts = await transport.counts()
+            XCTAssertEqual(counts.polls, 1); XCTAssertEqual(counts.memoryReads, 1)
+            let operations = await base.operations()
+            XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1)
+            XCTAssertEqual(operations.filter { $0 == "webProviderPoll" }.count, 0)
+        }
     }
 
     private func verifyPendingSavedFirstBodyDeadline(provider: String, qwenReason: String = "qwen_initial_provisional_route_v1") async throws {
@@ -2712,7 +2749,16 @@ final class WebModelServerTests: XCTestCase {
                 XCTAssertEqual(actual as NSDictionary, expected as NSDictionary)
                 XCTAssertTrue(prompt.contains("Local command execution is offered as: functions.exec_command."))
                 XCTAssertTrue(prompt.contains("Exact currently offered local function names: functions.exec_command, functions.write_stdin\nExact currently offered custom names: (none)"))
-                let literalBoundary = ["claude", "kimi"].contains(provider) ? "\n" + ComputaAgentInstructions.literalFencedResponseBoundary : ""
+                let literalBoundary: String
+                switch provider {
+                case "claude", "kimi":
+                    literalBoundary = "\n" + ComputaAgentInstructions.literalFencedResponseBoundary
+                case "qwen":
+                    let rawSpelling = #"In JSON use \u0060 for Markdown backticks and \u002a for asterisks. Example path value (use yours): "report-\u0060x\u0060-\u002a\u002ay\u002a\u002a.txt""#
+                    literalBoundary = "\n" + ComputaAgentInstructions.codePayloadResponseBoundary + "\n" + rawSpelling
+                default:
+                    literalBoundary = ""
+                }
                 XCTAssertTrue(prompt.hasSuffix("Exact-OK message:\n{\"type\":\"message\",\"text\":\"OK\"}\(literalBoundary)\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."), "\(provider) handoff suffix")
             }
             let providers = await transport.startedProviders()
@@ -4014,6 +4060,48 @@ private actor ChatContextSidecarFixtureTransport: WebModelTransport {
     }
 }
 
+private actor ResponseChoiceFailureFixtureTransport: WebModelTransport {
+    private let base: WebsiteInferenceFixtureTransport
+    private let modelID: String
+    private let variant: String
+    private var status: WebsiteResponseChoiceStatus?
+    private var polls = 0
+    private var memoryReads = 0
+    init(base: FixtureWebModelTransport, modelID: String, variant: String) {
+        self.base = WebsiteInferenceFixtureTransport(base); self.modelID = modelID; self.variant = variant
+    }
+    func counts() -> (polls: Int, memoryReads: Int) { (polls, memoryReads) }
+    func snapshotResponseChoiceStatus(sessionToken: String) async -> WebsiteResponseChoiceStatus? {
+        memoryReads += 1
+        guard status?.sessionToken == UUID(uuidString: sessionToken) else { return nil }
+        return status
+    }
+    func request(operation: String, params: Data) async throws -> Data {
+        if operation == "webProviderPoll" {
+            polls += 1
+            if variant == "cancelled" {
+                withUnsafeCurrentTask { $0?.cancel() }
+                throw CancellationError()
+            }
+            throw EmbeddedWebModelTransport.Failure.modelUnverified
+        }
+        let bytes = try await base.request(operation: operation, params: params)
+        var value = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        if ["ready", "running", "complete"].contains(value["state"] as? String ?? "") {
+            value["sessionLifecycle"] = "saved_conversation_delete"; value["temporary"] = false
+        }
+        if operation == "webProviderSend" {
+            let token = try XCTUnwrap((value["sessionToken"] as? String).flatMap(UUID.init(uuidString:)))
+            var context = try XCTUnwrap(value["modelProofContext"] as? [String: Any])
+            let generation = try XCTUnwrap((context["documentGeneration"] as? String).flatMap(UUID.init(uuidString:)))
+            context["firstUserFingerprint"] = ""; value["modelProofContext"] = context
+            status = .init(sessionToken: token, documentGeneration: variant == "foreign-generation" ? UUID() : generation,
+                modelID: modelID, sequence: 1, receipt: .init(phase: .grantSpent))
+        }
+        return try JSONSerialization.data(withJSONObject: value)
+    }
+}
+
 private enum PendingSavedFirstBodyMutation: String, CaseIterable, Sendable {
     case none, numericFlag, falseFlag, text, modeEvidence, modelEvidence, complete, wrongReason, wrongProvider
     case wrongGeneration, wrongPrompt, firstFingerprint, responseCount, wrongSequence, extraContext, extraField
@@ -4070,6 +4158,9 @@ private actor PendingSavedFirstBodyFixtureTransport: WebModelTransport {
                 "sessionLifecycle": "saved_conversation_delete", "temporary": false,
                 "modelVerificationPending": true, "modelVerificationPendingReason": provider == "deepseek"
                     ? "deepseek_initial_composer_remount_v1" : qwenReason]
+            if provider == "qwen", qwenReason == "qwen_response_preference_v1" {
+                packet["savedResponseChoiceReceipt"] = WebsiteResponseChoiceReceipt(phase: .grantSpent).dictionary
+            }
             switch mutation {
             case .numericFlag: packet["modelVerificationPending"] = 1
             case .falseFlag: packet["modelVerificationPending"] = false
@@ -4095,6 +4186,9 @@ private actor PendingSavedFirstBodyFixtureTransport: WebModelTransport {
         }
         if operation == "webProviderPoll", mutation == .missingFinalSelection {
             value.removeValue(forKey: provider == "deepseek" ? "modeEvidence" : "modelEvidence")
+        }
+        if operation == "webProviderPoll", provider == "qwen", qwenReason == "qwen_response_preference_v1" {
+            value["savedResponseChoiceReceipt"] = WebsiteResponseChoiceReceipt(phase: .acknowledged).dictionary
         }
         return try JSONSerialization.data(withJSONObject: value)
     }

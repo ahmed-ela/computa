@@ -237,7 +237,54 @@ function computaQwenDOM(c) {
       throw error;
     }
   }
-  function transcript(allowInitialResponseIdentity = false, emptyContainerPrompt = null) {
+  function responseChoice(node, containers, displayed, ordered, userID) {
+    // The public SMRM component is anonymous. These controls establish a
+    // response preference, never a per-card model/backend identity.
+    const reject = () => c.fail('conversation_changed', 'response_choice_scope');
+    if (!ordered() || !node.classList.contains('qwen-chat-message-dual-message')
+      || node.classList.contains('qwen-chat-message-multi-message')
+      || c.nodes(node, '.cmrm', 1).length || containers.length !== 2 || displayed.length !== 2) reject();
+    const wrapper = one(visible(node, '.smrm', 2), 'response_choice_wrapper');
+    if (wrapper.parentElement !== node || node.children.length !== 1 || node.children[0] !== wrapper) reject();
+    const list = one(visible(wrapper, '.smrm-list', 2), 'response_choice_list');
+    if (list.parentElement !== wrapper || c.nodes(wrapper, '.smrm__track, .smrm-pagination', 1).length) reject();
+    const cards = c.nodes(list, '.smrm-card', 3);
+    const allCards = c.nodes(node, '.smrm-card', 3);
+    if (cards.length !== 2 || allCards.length !== 2 || list.children.length !== 2
+      || cards.some((card, i) => card !== list.children[i] || card !== allCards[i] || !c.visible(card))) reject();
+    const rows = cards.map((card, index) => {
+      const id = card.getAttribute('id')?.replace(/-smrm-card$/, '');
+      const header = one(visible(card, '.smrm-card__header', 2), 'response_choice_header');
+      const body = one(visible(card, '.smrm-card__body', 2), 'response_choice_body');
+      const content = one(visible(card, '.smrm-card__content', 2), 'response_choice_content');
+      const footer = one(c.nodes(card, '.smrm-card__footer', 2), 'response_choice_footer');
+      const control = one(c.nodes(footer, 'button.smrm-card__prefer-btn', 2), 'response_choice_control');
+      if (!c.uuid(id) || id !== id.toLowerCase() || card.getAttribute('id') !== id + '-smrm-card' || id === userID
+        || card.children.length !== 3 || card.children[0] !== header || card.children[1] !== body || card.children[2] !== footer
+        || header.children.length !== 0 || c.normalize(header.textContent) !== 'Response ' + (index + 1)
+        || content.parentElement !== body || footer.parentElement !== card || control.parentElement !== footer
+        || footer.children.length !== 1 || content.children.length !== 1 || content.children[0] !== containers[index]
+        || containers[index].getAttribute('id') !== 'chat-response-message-' + id
+        || c.normalize(control.textContent) !== 'I prefer this response'
+        || control.closest('form, a, [contenteditable="true"]')
+        || c.nodes(control, 'a, button, input, select, textarea, [contenteditable="true"]', 1).length
+        || ['form', 'formaction', 'popovertarget', 'commandfor', 'aria-controls', 'aria-expanded'].some(name => control.getAttribute(name) !== null)
+        || ![null, 'button'].includes(control.getAttribute('type')) || typeof control.disabled !== 'boolean'
+        || ![null, 'true', 'false'].includes(control.getAttribute('aria-disabled'))) reject();
+      return { id, card, header, body, content, footer, control, response: containers[index] };
+    });
+    const allControls = c.nodes(node, '.smrm-card__prefer-btn', 3);
+    if (allControls.length !== 2 || allControls.some((control, i) => control !== rows[i].control)
+      || rows[0].id === rows[1].id || rows.some(row => row.control.disabled !== rows[0].control.disabled
+      || row.control.getAttribute('aria-disabled') !== rows[0].control.getAttribute('aria-disabled'))) reject();
+    // Public AY disables BOTH buttons until every message.done is true. Its
+    // normal response footer is intentionally absent during the comparison.
+    const ready = rows.every(row => !row.control.disabled && row.control.getAttribute('aria-disabled') !== 'true'
+      && c.nodes(row.response, '.response-loading', 1).length === 0);
+    return { wrapper, list, rows, ready, root: node,
+      pins: [node, node.parentElement, wrapper, list, ...rows.flatMap(row => [row.card, row.header, row.body, row.content, row.footer, row.control, row.response])] };
+  }
+  function transcript(allowInitialResponseIdentity = false, emptyContainerPrompt = null, allowResponseChoice = false) {
     const users = c.nodes(document, '.qwen-chat-message.qwen-chat-message-user', 2);
     const answers = c.nodes(document, '.qwen-chat-message.qwen-chat-message-assistant', 2);
     if (users.length > 1 || answers.length > 1 || answers.length > users.length) rejectUserCount('transcript', users, answers);
@@ -257,6 +304,18 @@ function computaQwenDOM(c) {
       const ordered = () => c.visible(node) && answerTurn?.classList.contains('qwen-chat-message-select-turn-message')
         && answerTurn.parentElement === turn.parentElement
         && [...turn.parentElement.children].indexOf(answerTurn) > [...turn.parentElement.children].indexOf(turn);
+      if (allowResponseChoice && c.nodes(node, '.smrm', 2).length) {
+        let choice;
+        try { choice = responseChoice(node, containers, displayed, ordered, id); }
+        catch (error) {
+          // Unknown/unsafe comparison shapes retain the existing closed
+          // multiple-container refusal and its finite structural diagnostic.
+          if (error?.computaAdapterFailure) rejectResponseContainer('response_container_multiple', node, containers, displayed, false);
+          throw error;
+        }
+        return { users, answers, first: { root, container, body, id, text: body.textContent },
+          answer: { root: node, content: choice.wrapper, id: null }, pendingAnswer: null, responseChoice: choice };
+      }
       if (emptyContainerPrompt !== null && !containers.length) {
         // A physically empty, visible first assistant root is only a negative
         // observation. A hidden container, rendered preview, or nonempty shell
@@ -980,6 +1039,9 @@ function computaQwenDOM(c) {
     setter.call(form.editor, prompt);
     form.editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));
   }
-  return { rejectUserCount, rejectSelectionBinding, firstDisplayReplacement, watchDisplayRender, displayHitFailure, firstBodyPresentation, firstBodyFailureStructure, initialResponseIdentityTranscript: emptyContainerPrompt => transcript(true, emptyContainerPrompt), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer, codePayloadFailure, sampleCodePayload,
+  return { rejectUserCount, rejectSelectionBinding, firstDisplayReplacement, watchDisplayRender, displayHitFailure, firstBodyPresentation, firstBodyFailureStructure,
+    responseChoiceTranscript: () => transcript(true, null, true),
+    hasResponseChoice: () => c.nodes(document, '.qwen-chat-message-assistant .smrm', 2).length !== 0,
+    initialResponseIdentityTranscript: emptyContainerPrompt => transcript(true, emptyContainerPrompt), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer, codePayloadFailure, sampleCodePayload,
     deletionTrigger, deletionMenu, deletionConfirmation, deletionObserved, insertLiteral };
 }

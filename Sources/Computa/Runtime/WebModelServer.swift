@@ -15,6 +15,7 @@ protocol WebModelTransport: Sendable {
     func snapshotRequestMetadata(sessionToken: String) async -> ChatGPTRequestMetadataSnapshot?
     func stopRequestMetadata(sessionToken: String) async -> ChatGPTRequestMetadataSnapshot?
     func revokeRequestMetadata(sessionToken: String) async
+    func snapshotResponseChoiceStatus(sessionToken: String) async -> WebsiteResponseChoiceStatus?
     func grantInspectorDiagnostic(_ authorization: ChatGPTInspectorLease, sessionToken: String) async -> Bool
     func revokeInspectorDiagnostic(sessionToken: String) async
     func request(operation: String, params: Data) async throws -> Data
@@ -68,6 +69,7 @@ extension WebModelTransport {
     func snapshotRequestMetadata(sessionToken: String) async -> ChatGPTRequestMetadataSnapshot? { nil }
     func stopRequestMetadata(sessionToken: String) async -> ChatGPTRequestMetadataSnapshot? { nil }
     func revokeRequestMetadata(sessionToken: String) async {}
+    func snapshotResponseChoiceStatus(sessionToken: String) async -> WebsiteResponseChoiceStatus? { nil }
     func request(operation: String, params: Data,
                  onChatSubmissionFailure: (@Sendable (ChatSubmissionFailureDiagnostic) -> Void)?) async throws -> Data {
         try await request(operation: operation, params: params)
@@ -162,6 +164,7 @@ actor WebModelServer {
         var documentGeneration: UUID?
         var firstUserFingerprint: String?
         var hasObservedClaudeOutput = false
+        var responseChoiceReceipt: WebsiteResponseChoiceReceipt?
         var resolvedSelection: WebsiteSelectionEvidence?
         var completedResponseCount: Int?
         var completedText: String?
@@ -1000,6 +1003,17 @@ actor WebModelServer {
             if includeResponseDeadline, correctionTicket != nil, let responseDeadline,
                ContinuousClock.now >= responseDeadline { throw Failure.deadline }
         }
+        func permitsResponseChoiceEvidence(_ lease: Session) -> Bool {
+            // Receipt retention only. A cancelled/timed-out request may retain
+            // its spent native action without granting any operation or time.
+            !shuttingDown && !retiringTaskIDs.contains(taskID) && cleanupTasks[taskID] == nil
+                && context.runtimeGeneration == cleanupRuntimeGeneration && inferenceContexts[taskID] == context
+                && identity == NativeRequestIdentity(threadID: context.threadID, turnID: context.turnID)
+                && transportGeneration == embeddedTransportGeneration && lease.transportGeneration == transportGeneration
+                && lease.context == context && lease.provider == "qwen" && lease.sequence == 1
+                && sessions[taskID]?.token == lease.token && sessions[taskID]?.documentGeneration == lease.documentGeneration
+                && sessions[taskID]?.modelID == lease.modelID && sessions[taskID]?.sequence == lease.sequence
+        }
         // Validate the full saved request first, then project its callable subset
         // only after native turn admission. Freeze it for corrective attempts;
         // continuation checks still use the unchanged original request bytes.
@@ -1738,6 +1752,15 @@ actor WebModelServer {
                     requestMetadata.revoke()
                     if let lease { await lease.transport.revokeRequestMetadata(sessionToken: lease.token) }
                 }
+                let responseChoiceStatus: WebsiteResponseChoiceStatus?
+                if let lease, permitsResponseChoiceEvidence(lease) {
+                    let candidate = await lease.transport.snapshotResponseChoiceStatus(sessionToken: lease.token)
+                    if permitsResponseChoiceEvidence(lease), let candidate,
+                       candidate.matches(sessionToken: lease.token, documentGeneration: lease.documentGeneration,
+                        modelID: lease.modelID, sequence: lease.sequence, previous: lease.responseChoiceReceipt) {
+                        responseChoiceStatus = candidate
+                    } else { responseChoiceStatus = nil }
+                } else { responseChoiceStatus = nil }
                 let submissionDiagnostic: ChatSubmissionFailureDiagnostic?
                 if provider == "chatgpt",
                    (error as? EmbeddedWebModelTransport.Failure) == .ownershipFailure(.javaScriptSubmission),
@@ -1766,7 +1789,8 @@ actor WebModelServer {
                         errorCode: Self.errorPresentation(for: error).code,
                         sequence: lease?.sequence ?? 0, baseline: lease?.baselineResponseCount ?? 0,
                         turnScoped: lease?.retainsConversation ?? requestedClaudeTurnScope,
-                        submissionDiagnostic: (try? requireCurrentContext()) != nil ? submissionDiagnostic : nil)
+                        submissionDiagnostic: (try? requireCurrentContext()) != nil ? submissionDiagnostic : nil,
+                        responseChoiceReceipt: lease.map { permitsResponseChoiceEvidence($0) } == true ? responseChoiceStatus?.receipt : nil)
                 }
                 throw error
             }
@@ -2032,6 +2056,12 @@ actor WebModelServer {
 
     private static func verifyInferenceSnapshot(_ snapshot: [String: Any], session: inout Session) throws {
         let pendingModel = snapshot["modelVerificationPending"] != nil
+        let choiceReceipt = WebsiteResponseChoiceReceipt(snapshot["savedResponseChoiceReceipt"])
+        if snapshot["savedResponseChoiceReceipt"] != nil || session.responseChoiceReceipt != nil {
+            guard session.provider == "qwen", session.sequence == 1, session.modelChoice != nil, session.modeChoice == nil,
+                  let choiceReceipt, choiceReceipt.follows(session.responseChoiceReceipt),
+                  (!pendingModel ? choiceReceipt.phase == .acknowledged : choiceReceipt.phase != .acknowledged) else { throw Failure.invalidRequest }
+        }
         if pendingModel {
             guard let flag = snapshot["modelVerificationPending"] as? NSNumber,
                   CFGetTypeID(flag) == CFBooleanGetTypeID(), flag.boolValue,
@@ -2073,13 +2103,16 @@ actor WebModelServer {
                 // This grants no selection, first-body, response or cleanup proof.
                 let expectedReasons = session.provider == "deepseek"
                     ? ["deepseek_initial_composer_remount_v1"] : ["qwen_initial_provisional_route_v1",
-                        "qwen_first_body_expansion_v1", "qwen_initial_response_identity_v1"]
+                        "qwen_first_body_expansion_v1", "qwen_initial_response_identity_v1", "qwen_response_preference_v1"]
                 let selectionMatches = session.provider == "deepseek"
                     ? session.modeChoice != nil && session.modelChoice == nil
                     : session.modeChoice == nil && session.modelChoice != nil
-                guard selectionMatches, Set(snapshot.keys) == ["provider", "sessionToken", "state", "text", "sequence",
+                let pendingKeys: Set<String> = ["provider", "sessionToken", "state", "text", "sequence",
                         "sessionLifecycle", "temporary", "modelVerificationPending",
-                        "modelVerificationPendingReason", "pendingSubmissionContext"],
+                        "modelVerificationPendingReason", "pendingSubmissionContext"]
+                let preference = snapshot["modelVerificationPendingReason"] as? String == "qwen_response_preference_v1"
+                guard selectionMatches, Set(snapshot.keys) == (preference ? pendingKeys.union(["savedResponseChoiceReceipt"]) : pendingKeys),
+                      !preference || session.provider == "qwen" && choiceReceipt != nil,
                       snapshot["provider"] as? String == session.provider,
                       snapshot["sessionLifecycle"] as? String == "saved_conversation_delete",
                       let temporary = snapshot["temporary"] as? NSNumber,
@@ -2123,6 +2156,12 @@ actor WebModelServer {
               snapshot["state"] as? String != "complete" || (responseCount > session.baselineResponseCount && !fingerprint.isEmpty) else {
             throw Failure.invalidRequest
         }
+        if choiceReceipt?.phase == .acknowledged {
+            guard !pendingModel, !fingerprint.isEmpty, responseCount == 1, session.baselineResponseCount == 0,
+                  snapshot["sessionLifecycle"] as? String == "saved_conversation_delete",
+                  let temporary = snapshot["temporary"] as? NSNumber, CFGetTypeID(temporary) == CFBooleanGetTypeID(),
+                  !temporary.boolValue else { throw Failure.invalidRequest }
+        }
         if session.provesNativeContinuation {
             guard snapshot["turnContinuationCapability"] as? String == "per_submission_ownership_v1",
                   let submitted = context["submittedPromptFingerprint"] as? String,
@@ -2160,6 +2199,7 @@ actor WebModelServer {
             throw Failure.invalidRequest
         }
         session.documentGeneration = generation
+        if let choiceReceipt { session.responseChoiceReceipt = choiceReceipt }
         if !fingerprint.isEmpty { session.firstUserFingerprint = fingerprint }
         if session.provider == "claude", !pendingModel,
            responseCount > session.baselineResponseCount || !(snapshot["text"] as? String ?? "").isEmpty {
@@ -2170,7 +2210,8 @@ actor WebModelServer {
     private func recordTransactionEvidence(taskID: String, inferenceID: UUID, context: InferenceContext,
                                            provider: String, modelID: String, sessionToken: String?, phase: String, errorCode: String? = nil,
                                            sequence: Int = 0, baseline: Int = 0, turnScoped: Bool? = nil,
-                                           submissionDiagnostic: ChatSubmissionFailureDiagnostic? = nil) throws {
+                                           submissionDiagnostic: ChatSubmissionFailureDiagnostic? = nil,
+                                           responseChoiceReceipt: WebsiteResponseChoiceReceipt? = nil) throws {
         var record = transactionEvidenceRecord(taskID: taskID, inferenceID: inferenceID, context: context,
             provider: provider, modelID: modelID, sessionToken: sessionToken, phase: phase, turnScoped: turnScoped)
         record["sequence"] = sequence
@@ -2179,6 +2220,7 @@ actor WebModelServer {
         if phase == "failed", provider == "chatgpt", let submissionDiagnostic {
             record["submissionFailureDiagnostic"] = submissionDiagnostic.dictionary
         }
+        if provider == "qwen", let responseChoiceReceipt { record["savedResponseChoiceReceipt"] = responseChoiceReceipt.dictionary }
         try appendEvidence(record, taskID: taskID)
     }
 
@@ -2227,6 +2269,7 @@ actor WebModelServer {
         if let cleanupAttemptID { record["cleanupAttemptID"] = cleanupAttemptID }
         if let errorCode { record["errorCode"] = errorCode }
         if let evidence { record[evidence.snapshotField] = evidence.dictionary }
+        if let receipt = checkedSession.responseChoiceReceipt { record["savedResponseChoiceReceipt"] = receipt.dictionary }
         if session.provider == "chatgpt",
            let product = try? WebsiteProductModeEvidence.parse(snapshot["productModeEvidence"], requireTemporary: true) {
             record["productModeEvidence"] = product.dictionary

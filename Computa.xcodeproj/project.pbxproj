@@ -378,6 +378,8 @@
 		FE0374F3D4B5C10435590ECD /* WebsiteToolCallSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 752A4CFA6EB4B04868B1117A /* WebsiteToolCallSelection.swift */; };
 		FEAA7BFF4DD806F22C24DC99 /* AccessibilitySnapshotTextFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFF775ABAA863BF70119CFEA /* AccessibilitySnapshotTextFormatter.swift */; };
 		FEEE1114F2F4CC48851B7EBA /* NativePostActionExecution.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2F0AFA7A69068EEAE9C87B2 /* NativePostActionExecution.swift */; };
+		DCF454DC4A80121591A9D912 /* WebsiteResponseChoiceReceipt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03EA364332D1A541B5F9BA54 /* WebsiteResponseChoiceReceipt.swift */; };
+		9AD3E4D04EF8E4F8AC96D589 /* WebsiteResponseChoiceReceiptTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3B962C7CCD08D2B5D3C5550 /* WebsiteResponseChoiceReceiptTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -779,6 +781,8 @@
 		FFB61A1B3822A7EAF955F5F7 /* APIModelCorrection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIModelCorrection.swift; sourceTree = "<group>"; };
 		FFCFAECF642035999C6B2957 /* AgentRPCErrorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentRPCErrorTests.swift; sourceTree = "<group>"; };
 		FFF775ABAA863BF70119CFEA /* AccessibilitySnapshotTextFormatter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilitySnapshotTextFormatter.swift; sourceTree = "<group>"; };
+		03EA364332D1A541B5F9BA54 /* WebsiteResponseChoiceReceipt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebsiteResponseChoiceReceipt.swift; sourceTree = "<group>"; };
+		B3B962C7CCD08D2B5D3C5550 /* WebsiteResponseChoiceReceiptTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebsiteResponseChoiceReceiptTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -893,6 +897,7 @@
 				A457E8918CC979F64E2A39FA /* WebsiteModeEvidence.swift */,
 				55B3AAB542679D65C34828CF /* WebsiteModelEvidence.swift */,
 				E753E7DC71A4E77C8477AAA5 /* WebsiteSelectionEvidence.swift */,
+				03EA364332D1A541B5F9BA54 /* WebsiteResponseChoiceReceipt.swift */,
 			);
 			path = Browser;
 			sourceTree = "<group>";
@@ -1086,6 +1091,7 @@
 				A37D1BAA92581DA4F19AEDDA /* WebModelRuntimeRoutingTests.swift */,
 				1544C8B2C1C2F25040B8EEFA /* WebModelServerTests.swift */,
 				8AD35670915DC3115E6EFB5C /* WebsiteAdapterFailureDiagnosticTests.swift */,
+				B3B962C7CCD08D2B5D3C5550 /* WebsiteResponseChoiceReceiptTests.swift */,
 				44AFEBED8D74863E95562672 /* WebsiteBenchmarkCaptureTests.swift */,
 				D9B85DA2D88E40C69FB24D73 /* WebsiteDispatchProfileTests.swift */,
 				D2D07D907D389C1A2E52C055 /* WebsiteFailureHistoryTests.swift */,
@@ -1623,6 +1629,7 @@
 				9017EB16FC56CE3BAB92D97D /* WebsiteProviderFailure.swift in Sources */,
 				6EF05408844EA0CC94780CBF /* WebsiteRequestPacer.swift in Sources */,
 				0FA0EBD35F85A87F2CBC5438 /* WebsiteSelectionEvidence.swift in Sources */,
+				DCF454DC4A80121591A9D912 /* WebsiteResponseChoiceReceipt.swift in Sources */,
 				C29161A859CB5F1166444F6B /* WebsiteSessionCleanup.swift in Sources */,
 				FE0374F3D4B5C10435590ECD /* WebsiteToolCallSelection.swift in Sources */,
 				D70050BA4DB32A663E998F15 /* WebsiteTurnContinuation.swift in Sources */,
@@ -1822,6 +1829,7 @@
 				60ED317F8B31B2A9103F50D2 /* WebModelServerTests.swift in Sources */,
 				F6B7EBEDB7411C99E7C83F59 /* WebSnapshotTests.swift in Sources */,
 				352DFC7F2557BD880529063F /* WebsiteAdapterFailureDiagnosticTests.swift in Sources */,
+				9AD3E4D04EF8E4F8AC96D589 /* WebsiteResponseChoiceReceiptTests.swift in Sources */,
 				47A6F00012D26AE897C76F4C /* WebsiteBenchmarkCaptureTests.swift in Sources */,
 				D4C5115A25889387EF9A593E /* WebsiteDispatchProfileTests.swift in Sources */,
 				3CDF20ECC6F8C32F66FBB765 /* WebsiteFailureHistoryTests.swift in Sources */,

@@ -14,6 +14,7 @@ private struct ActiveTurnTiming {
 final class AppState {
     @ObservationIgnored private let runtime: (any AgentRuntimeClient)?
     @ObservationIgnored private var runtimeShutdown: Task<RuntimeShutdownReport, Never>?
+    @ObservationIgnored private var runtimeEventConsumer: Task<Void, Never>?
     @ObservationIgnored private var isShuttingDown = false
     @ObservationIgnored private var taskSnapshotRevision: UInt64 = 0
     @ObservationIgnored private var taskSelectionRevision: UInt64 = 0
@@ -1351,9 +1352,31 @@ final class AppState {
         }
     }
 
-    /// Starts listening to the injected runtime. With no runtime installed the
-    /// sample store remains fully local and this method is a no-op.
+    /// Window appearance starts one AppState-owned consumer. Its lifetime is
+    /// independent of any SwiftUI view task and ends only at runtime shutdown.
+    func startRuntimeIfNeeded() {
+        _ = ensureRuntimeEventConsumer()
+    }
+
+    /// Awaiting this handle preserves deterministic finite-stream test/startup
+    /// callers. Cancelling a caller never cancels the owned runtime consumer.
     func startRuntime() async {
+        guard let consumer = ensureRuntimeEventConsumer() else { return }
+        await consumer.value
+    }
+
+    private func ensureRuntimeEventConsumer() -> Task<Void, Never>? {
+        guard !isShuttingDown, runtime != nil else { return nil }
+        if let runtimeEventConsumer { return runtimeEventConsumer }
+        let consumer = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.consumeRuntimeEvents()
+        }
+        runtimeEventConsumer = consumer
+        return consumer
+    }
+
+    private func consumeRuntimeEvents() async {
         guard !isShuttingDown, let runtime else { return }
         let tasksBeforeLoading = tasks
         let selectionRevisionBeforeLoading = taskSelectionRevision
@@ -1385,16 +1408,26 @@ final class AppState {
                 apply(event)
             }
         } catch is CancellationError {
+            // A backend can reject startup with cancellation independently of
+            // our owner. Only a later explicit appearance/start may retry it.
+            if !Task.isCancelled, !isShuttingDown { runtimeEventConsumer = nil }
             return
         } catch {
             guard !isShuttingDown else { return }
+            // Configuration/history failed before subscribing. Release this
+            // attempt so a later explicit start can retry the still-open stream.
+            runtimeEventConsumer = nil
             apply(.connectionChanged(.failed(message: error.localizedDescription)))
         }
+        // An exhausted event stream cannot be recreated by iterating it again.
+        // Retain that completed owner; production finishes it only at shutdown.
     }
 
     func shutdownRuntime() async -> RuntimeShutdownReport {
         if let runtimeShutdown { return await runtimeShutdown.value }
         isShuttingDown = true
+        let eventConsumer = runtimeEventConsumer
+        eventConsumer?.cancel()
         startupWebsiteModelIdleObservation = nil
         startupWebsiteModelProviders.removeAll()
         startupWebsiteModelRefreshTask?.cancel()
@@ -1421,11 +1454,13 @@ final class AppState {
         let task = Task {
             await websiteRefresh?.value
             let report = await runtime?.shutdown() ?? RuntimeShutdownReport(issues: [])
+            await eventConsumer?.value
             browserSession.shutdown()
             return report
         }
         runtimeShutdown = task
         let report = await task.value
+        runtimeEventConsumer = nil
         websiteModelRefreshTask = nil
         websiteModelRefreshIntents = []
         websiteModelRefreshCurrentIntent = nil

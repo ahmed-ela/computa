@@ -373,11 +373,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         case provisionalRoute
         case displayExpansion(URL)
         case responseIdentity(URL)
+        case responseChoice(URL)
 
         var canonicalURL: URL? {
             switch self {
             case .provisionalRoute: nil
-            case .displayExpansion(let url), .responseIdentity(let url): url
+            case .displayExpansion(let url), .responseIdentity(let url), .responseChoice(let url): url
             }
         }
 
@@ -386,6 +387,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .provisionalRoute: "qwen_initial_provisional_route_v1"
             case .displayExpansion: "qwen_first_body_expansion_v1"
             case .responseIdentity: "qwen_initial_response_identity_v1"
+            case .responseChoice: "qwen_response_preference_v1"
             }
         }
     }
@@ -413,6 +415,61 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let since: ContinuousClock.Instant
     }
 
+    // An optional browser-adapter action, separate from response acceptance.
+    // This identity seals the conversation and observed controls. Anonymous
+    // Qwen SMRM cards cannot attest either card's backend model identity.
+    struct SavedResponseChoiceIdentity: Equatable {
+        let candidate: String
+        let responseIDs: [String]
+        let fingerprint: String
+    }
+
+    struct SavedResponseChoiceObservation: Equatable {
+        let identity: SavedResponseChoiceIdentity
+        let state: String
+        let grant: String?
+    }
+
+    static func savedResponseChoiceObservation(_ raw: Any?) -> SavedResponseChoiceObservation? {
+        guard let value = raw as? [String: Any], let state = value["state"] as? String,
+              ["waiting", "ready", "dispatched", "acknowledged"].contains(state) else { return nil }
+        let spent = ["dispatched", "acknowledged"].contains(state)
+        let keys: Set<String> = ["version", "kind", "policy", "state", "candidate", "responseIDs", "selectedResponseID", "firstUserFingerprint"]
+        guard Set(value.keys) == (spent ? keys.union(["grant"]) : keys),
+              let version = value["version"] as? NSNumber, CFGetTypeID(version) != CFBooleanGetTypeID(), version.doubleValue == 1,
+              value["kind"] as? String == "qwen_smrm", value["policy"] as? String == "first_observed_card_v1",
+              let candidate = value["candidate"] as? String, UUID(uuidString: candidate)?.uuidString.lowercased() == candidate,
+              let ids = value["responseIDs"] as? [String], ids.count == 2, ids[0] != ids[1],
+              ids.allSatisfy({ UUID(uuidString: $0)?.uuidString.lowercased() == $0 }),
+              value["selectedResponseID"] as? String == ids[0],
+              let fingerprint = value["firstUserFingerprint"] as? String,
+              fingerprint.utf8.count == 64, fingerprint.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { return nil }
+        let grant = value["grant"] as? String
+        guard !spent || grant.map({ UUID(uuidString: $0)?.uuidString.lowercased() == $0 }) == true else { return nil }
+        return .init(identity: .init(candidate: candidate, responseIDs: ids, fingerprint: fingerprint), state: state, grant: grant)
+    }
+
+    static func savedResponseChoiceActionReceipt(spent: Bool, acknowledged: Bool) -> [String: Any]? {
+        guard !acknowledged || spent else { return nil }
+        return WebsiteResponseChoiceReceipt(phase: acknowledged ? .acknowledged : spent ? .grantSpent : .observed).dictionary
+    }
+
+    static func validSavedResponseChoiceAcknowledgement(_ value: [String: Any], identity: SavedResponseChoiceIdentity,
+                                                         grant: String, codeSampleGrant: String? = nil) -> Bool {
+        guard let choice = savedResponseChoiceObservation(value["savedResponseChoice"]),
+              choice.state == "acknowledged", choice.identity == identity, choice.grant == grant,
+              value["firstUserFingerprint"] as? String == identity.fingerprint,
+              firstUserDiagnosticBool(value["firstUserVerified"]) == true,
+              firstUserDiagnosticBool(value["firstUserMarkerVerified"]) == true,
+              ComputerToolArgumentContract.exactInt64(value["userCount"]) == 1,
+              ComputerToolArgumentContract.exactInt64(value["responseCount"]) == 1 else { return false }
+        if let raw = value["qwenCodePayload"] {
+            guard let payload = qwenCodePayloadIdentity(raw, state: codeSampleGrant == nil ? "pending" : "sampled", grant: codeSampleGrant),
+                  payload.responseID == identity.responseIDs[0] else { return false }
+        } else if codeSampleGrant != nil { return false }
+        return true
+    }
+
     private final class Session {
         let token = UUID().uuidString
         let firstUserMarker = UUID().uuidString
@@ -434,6 +491,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var qwenCodePayload: QwenCodePayloadPending?
         // Spent before queueing the final source evaluation, including timeout.
         var qwenCodePayloadGrant: String?
+        var savedResponseChoice: SavedResponseChoiceIdentity?
+        // One native grant is spent before queueing the official choice click.
+        // A timeout, cancellation, throw, or lost acknowledgement never resets it.
+        var savedResponseChoiceGrant: String?
+        var savedResponseChoiceAcknowledged = false
         var claudeResponseStream: ClaudeResponseStreamLease?
         var claudeResponseStreamGeneration: UUID?
         var claudeResponseStreamArmAttempted = false
@@ -1184,6 +1246,24 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard let session = sessions[sessionToken], session.provider == .chatgpt else { return nil }
         return await browser.modelRequestMetadata(command: "snapshot", tabID: session.tabID,
             view: session.view, ownerToken: session.token)
+    }
+
+    func snapshotResponseChoiceStatus(sessionToken: String) async -> WebsiteResponseChoiceStatus? {
+        // No page evaluation, DOM/model read, await, or action. Cancellation
+        // does not erase a spent claim; a lost native binding returns absence.
+        guard let session = sessions[sessionToken], session.provider == .qwen,
+              session.savedResponseChoice != nil, session.sequence == 1, session.acknowledgedSendSequence == 1,
+              session.submitted, session.requiresSavedDelete, session.savedDeleteReady, session.lifecycleVerified,
+              let choice = session.modelChoice, choice.key == choice.label,
+              ["Qwen3.7-Plus", "Qwen3.8-Max"].contains(choice.label),
+              let binding = session.savedDeleteSubmission, session.documentGeneration == binding.generation,
+              sessions[session.token] === session, finishingTasks[session.token] == nil,
+              browser.webView(for: session.tabID) === session.view,
+              browser.documentGeneration(for: session.tabID) == binding.generation,
+              let token = UUID(uuidString: session.token),
+              let raw = Self.savedResponseChoiceActionReceipt(spent: session.savedResponseChoiceGrant != nil,
+                acknowledged: session.savedResponseChoiceAcknowledged), let receipt = WebsiteResponseChoiceReceipt(raw) else { return nil }
+        return .init(sessionToken: token, documentGeneration: binding.generation, modelID: choice.modelID, sequence: 1, receipt: receipt)
     }
 
     func revokeRequestMetadata(sessionToken: String) async {
@@ -3241,6 +3321,34 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return try snapshot(session)
     }
 
+    private func pollSavedResponseChoice(_ session: Session, observed: [String: Any], deadline: ContinuousClock.Instant) async throws -> Data {
+        guard canObservePendingQwenProvisionalRoute(session),
+              let pending = Self.savedResponseChoiceObservation(observed["savedResponseChoice"]),
+              pending.identity == session.savedResponseChoice,
+              pending.identity.fingerprint == session.savedDeleteSubmission?.outboundFingerprint else { throw Failure.modelUnverified }
+        if pending.state == "ready" {
+            guard session.savedResponseChoiceGrant == nil, !session.savedResponseChoiceAcknowledged,
+                  ContinuousClock.now < deadline else { throw Failure.modelUnverified }
+            let grant = UUID().uuidString.lowercased()
+            session.savedResponseChoiceGrant = grant
+            Self.inspectionLog.notice("savedResponseChoice version=1 provider=qwen phase=grant_spent policy=first_observed_card_v1 sequence=1")
+            let dispatched = try await page(session, action: "inspect", refreshChangedRoute: false,
+                recheckModelAfterAwait: false, recheckProductAfterAwait: false, refreshReadOnlyObservation: false,
+                allowPendingQwenInitialResponseIdentity: true, allowPendingSavedResponseChoice: true,
+                savedResponseChoiceGrant: grant, maximumWait: min(inspectionTimeout, deadline - .now))
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline,
+                  let receipt = Self.savedResponseChoiceObservation(dispatched["savedResponseChoice"]),
+                  receipt.identity == pending.identity, receipt.state == "dispatched", receipt.grant == grant else { throw Failure.modelUnverified }
+            // Official acknowledgement is a separate read. This receipt cannot
+            // accept either card or renew the original response deadline.
+        } else {
+            guard pending.state == "waiting" && session.savedResponseChoiceGrant == nil
+                || pending.state == "dispatched" && pending.grant == session.savedResponseChoiceGrant else { throw Failure.modelUnverified }
+        }
+        return try snapshot(session)
+    }
+
     private func poll(_ session: Session) async throws -> Data {
         try Task.checkCancellation()
         guard ["loading", "running"].contains(session.state) else { return try snapshot(session) }
@@ -3289,6 +3397,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     allowPendingDeepSeekComposerHandoff: true,
                     allowPendingQwenProvisionalRoute: true,
                     allowPendingQwenInitialResponseIdentity: true, allowQwenFirstBodyExpansion: true,
+                    allowPendingSavedResponseChoice: true,
                     maximumWait: min(inspectionTimeout, deadline - .now))
             }
         }
@@ -3348,6 +3457,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if observed["deepSeekComposerHandoffPending"] != nil {
             guard session.deepSeekComposerHandoffPending else { throw Failure.modelUnverified }
             return try snapshot(session)
+        }
+        if observed["savedResponseChoice"] != nil {
+            if let choice = Self.savedResponseChoiceObservation(observed["savedResponseChoice"]), choice.state != "acknowledged" {
+                return try await pollSavedResponseChoice(session, observed: observed, deadline: deadline)
+            }
         }
         if observed["qwenProvisionalRoutePending"] != nil || observed["qwenFirstBodyExpansionPending"] != nil
             || observed["qwenInitialResponseIdentityPending"] != nil {
@@ -6163,6 +6277,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       allowPendingQwenProvisionalRoute: Bool = false,
                       allowPendingQwenInitialResponseIdentity: Bool = false,
                       allowQwenFirstBodyExpansion: Bool = false,
+                      allowPendingSavedResponseChoice: Bool = false,
                       allowFirstChatVerificationOpening: Bool = false,
                       preferQuietChatGPTCompletion: Bool = false,
                       pendingSubmissionProductRecheck: Bool = false,
@@ -6174,7 +6289,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       savedDeleteOperation: Session.SavedDeleteOperation? = nil,
                       allowSavedCleanupInspection: Bool = false,
                       replacingInitialRootFrom: UUID? = nil,
-                      qwenCodePayloadSample: String? = nil, maximumWait: Duration = .seconds(10)) async throws -> [String: Any] {
+                      qwenCodePayloadSample: String? = nil, savedResponseChoiceGrant: String? = nil,
+                      maximumWait: Duration = .seconds(10)) async throws -> [String: Any] {
+        if allowSavedCleanupInspection, session.savedResponseChoice != nil, !session.savedResponseChoiceAcknowledged {
+            // No independent pre-preference deletion capability is granted by
+            // this optional action. Even JS-local acknowledgement is insufficient
+            // until native has accepted the exact choice receipt and body proof.
+            throw Failure.savedDeleteUnverified
+        }
         if allowSavedCleanupInspection {
             guard session.provider.savedConversationPolicy != nil, action == "inspect", allowBlockedProvider, enforceModel,
                   !recheckModelAfterAwait, !recheckProductAfterAwait, savedDeleteOperation == nil else { throw Failure.invalidRequest }
@@ -6350,6 +6472,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             input["qwenCodePayloadSample"] = ["version":1,"grant":grant,"candidate":held.identity.candidate,
                 "responseID":held.identity.responseID,"sequence":1]
         }
+        if let grant = savedResponseChoiceGrant {
+            guard provider == .qwen, action == "inspect", enforceModel, !allowBlockedProvider,
+                  !recheckModelAfterAwait, !recheckProductAfterAwait, !refreshReadOnlyObservation, !refreshChangedRoute,
+                  !allowSavedCleanupInspection, savedDeleteOperation == nil, qwenCodePayloadSample == nil,
+                  session.savedResponseChoiceGrant == grant, let held = session.savedResponseChoice,
+                  !session.savedResponseChoiceAcknowledged, canObservePendingQwenProvisionalRoute(session) else { throw Failure.modelUnverified }
+            input["savedResponseChoiceGrant"] = ["version": 1, "kind": "qwen_smrm", "policy": "first_observed_card_v1",
+                "grant": grant, "candidate": held.candidate, "responseIDs": held.responseIDs,
+                "selectedResponseID": held.responseIDs[0], "sequence": 1]
+        }
         if action == "inspect", onlyInitialChatReads(session), !allowBlockedProvider {
             input["checkUntouchedChatRoot"] = true
         }
@@ -6445,6 +6577,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             input["allowQwenInitialResponseIdentity"] = true
             input["savedSubmissionFingerprint"] = session.savedDeleteSubmission?.outboundFingerprint
         }
+        let allowSavedResponseChoice = allowPendingSavedResponseChoice && allowQwenInitialResponseIdentity
+            && ["Qwen3.7-Plus", "Qwen3.8-Max"].contains(session.modelChoice?.label ?? "")
+            && session.modelChoice?.key == session.modelChoice?.label
+        if allowSavedResponseChoice { input["allowSavedResponseChoice"] = true }
         // Only a normal first-poll read may inspect the exact local disclosure.
         // ID-only pending has already proved the full display; it cannot reopen it.
         let mayExpandQwenFirstBody = allowQwenFirstBodyExpansion && allowQwenInitialResponseIdentity
@@ -6609,7 +6745,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         && session.modelChoice != nil && !session.modelSelectionVerified
                         && session.confirmedUsers == 0 && !session.submitted && !session.pendingSubmission
                         && session.firstUserFingerprint == nil
-                    if (provider == .chatgpt && (action == "inspect" || initialChatHeaderReadiness)) || qwenCodePayloadSample != nil {
+                    if (provider == .chatgpt && (action == "inspect" || initialChatHeaderReadiness)) || qwenCodePayloadSample != nil || savedResponseChoiceGrant != nil {
                         // A negative-only wall-clock fence for an adapter wait.
                         // Sample wall time first and round down so dispatch
                         // overhead cannot extend the existing native deadline.
@@ -6724,6 +6860,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard session.savedRoutes?.observe(currentURL, submitted: session.submitted) == true else { throw Failure.ownershipFailure(.routeAfter) }
         }
         if qwenCodePayloadSample != nil, currentURL != url { throw Failure.ownershipFailure(.routeAfter) }
+        if savedResponseChoiceGrant != nil, currentURL != url { throw Failure.ownershipFailure(.routeAfter) }
         if currentURL != url, provider.savedConversationPolicy != nil {
             if let operation = savedDeleteOperation {
                 guard operation.progress.claimed.contains(.confirmDelete),
@@ -7173,6 +7310,22 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             session.deepSeekComposerHandoffPending = true
             return observed
         }
+        if observed["savedResponseChoice"] != nil, observed["firstUserVerified"] == nil {
+            guard allowSavedResponseChoice, action == "inspect", enforceModel,
+                  canObservePendingQwenProvisionalRoute(session), session.documentGeneration == generation,
+                  currentURL == url, savedDeleteOperation == nil,
+                  let outbound = session.savedDeleteSubmission?.outboundFingerprint,
+                  let choice = Self.savedResponseChoicePendingObservation(observed, url: currentURL.absoluteString, fingerprint: outbound),
+                  session.savedResponseChoice == nil || session.savedResponseChoice == choice.identity,
+                  !session.savedResponseChoiceAcknowledged,
+                  (choice.state == "dispatched" ? choice.grant == session.savedResponseChoiceGrant
+                    : session.savedResponseChoiceGrant == nil),
+                  ContinuousClock.now < evaluationDeadline else { throw Failure.modelUnverified }
+            _ = try validatedSelectionEvidence(observed, session: session, action: action)
+            session.savedResponseChoice = choice.identity
+            session.qwenPendingFirstBody = .responseChoice(currentURL)
+            return observed
+        }
         if observed["qwenProvisionalRoutePending"] != nil {
             guard allowQwenProvisionalRoute, action == "inspect", enforceModel,
                   canObservePendingQwenProvisionalRoute(session), session.documentGeneration == generation,
@@ -7341,6 +7494,17 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                                        preparedReadinessSink: action == "insert" ? preparedReadinessSink : nil,
                                                        maximumWait: evaluationDeadline - .now)
             }
+        }
+        // Validate preference acknowledgement before ordinary first-user or
+        // conversation adoption. A malformed/lost acknowledgement cannot create
+        // the existing saved-session deletion authority as a side effect.
+        if provider == .qwen, action == "inspect", savedDeleteOperation == nil, !allowSavedCleanupInspection,
+           let held = session.savedResponseChoice {
+            guard let grant = session.savedResponseChoiceGrant,
+                  held.fingerprint == session.savedDeleteSubmission?.outboundFingerprint,
+                  Self.validSavedResponseChoiceAcknowledgement(observed, identity: held, grant: grant,
+                    codeSampleGrant: qwenCodePayloadSample) else { throw Failure.modelUnverified }
+            _ = try validatedSelectionEvidence(observed, session: session, action: action)
         }
         let betweenChecksStarted = ContinuousClock.now
         // Submit returns only its acknowledgment; observations carry ownership state.
@@ -7545,6 +7709,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             session.claudeModelObservationPending = false
             Self.inspectionLog.notice("claudeModelObservation phase=restored sessionID=\(session.token, privacy: .public) generation=\(generation.uuidString, privacy: .public) sequence=\(session.sequence)")
         }
+        if provider == .qwen, action == "inspect", savedDeleteOperation == nil, !allowSavedCleanupInspection,
+           session.savedResponseChoice != nil {
+            if !session.savedResponseChoiceAcknowledged {
+                Self.inspectionLog.notice("savedResponseChoice version=1 provider=qwen phase=acknowledged policy=first_observed_card_v1 sequence=1")
+            }
+            session.savedResponseChoiceAcknowledged = true
+        }
         if (session.deepSeekComposerHandoffPending && provider == .deepseek
             || session.qwenPendingFirstBody != nil && provider == .qwen), action == "inspect", enforceModel,
            !allowBlockedProvider, !allowSavedCleanupInspection {
@@ -7597,6 +7768,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && value["sessionLifecycle"] as? String == "saved_conversation_delete"
             && value["url"] as? String == url
             && url == "https://chat.qwen.ai/c/new-chat"
+    }
+
+    static func savedResponseChoicePendingObservation(_ value: [String: Any], url: String, fingerprint: String) -> SavedResponseChoiceObservation? {
+        guard Set(value.keys) == ["savedResponseChoice", "modelEvidence", "url", "sessionLifecycle", "temporary"],
+              firstUserDiagnosticBool(value["temporary"]) == false,
+              value["sessionLifecycle"] as? String == "saved_conversation_delete",
+              value["url"] as? String == url, Provider.qwen.conversationURL(url) == url,
+              let choice = savedResponseChoiceObservation(value["savedResponseChoice"]),
+              ["waiting", "ready", "dispatched"].contains(choice.state), choice.identity.fingerprint == fingerprint else { return nil }
+        return choice
     }
 
     static func isQwenInitialResponseIdentityPendingObservation(_ value: [String: Any], url: String) -> Bool {
@@ -8350,7 +8531,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   let binding = session.savedDeleteSubmission else {
                 throw Failure.modelUnverified
             }
-            return try JSONSerialization.data(withJSONObject: [
+            var value: [String: Any] = [
                 "provider": session.provider.rawValue, "sessionToken": session.token, "state": "running", "text": "", "sequence": 1,
                 "sessionLifecycle": "saved_conversation_delete", "temporary": false,
                 "modelVerificationPending": true,
@@ -8358,7 +8539,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 "pendingSubmissionContext": ["documentGeneration": binding.generation.uuidString, "sequence": 1,
                     "baselineResponseCount": 0, "responseCount": 0, "firstUserFingerprint": "",
                     "submittedPromptFingerprint": binding.promptFingerprint]
-            ])
+            ]
+            if session.savedResponseChoice != nil {
+                value["savedResponseChoiceReceipt"] = Self.savedResponseChoiceActionReceipt(
+                    spent: session.savedResponseChoiceGrant != nil, acknowledged: session.savedResponseChoiceAcknowledged)
+            }
+            return try JSONSerialization.data(withJSONObject: value)
         }
 
         if session.claudeModelObservationPending, session.state == "running", cleanup == nil {
@@ -8409,6 +8595,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     ? session.currentSubmission?.promptFingerprint ?? "" : ""
                 value[contextKey] = context
             }
+        }
+        if session.savedResponseChoice != nil {
+            value["savedResponseChoiceReceipt"] = Self.savedResponseChoiceActionReceipt(
+                spent: session.savedResponseChoiceGrant != nil, acknowledged: session.savedResponseChoiceAcknowledged)
         }
         if let cleanup { value["cleanup"] = cleanup }
         return try JSONSerialization.data(withJSONObject: value)

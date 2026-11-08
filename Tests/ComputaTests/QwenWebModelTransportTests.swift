@@ -1196,6 +1196,118 @@ final class QwenWebModelTransportTests: XCTestCase {
         return payload
     }
 
+    func testQwenResponseChoiceWaitsForBothThenPreservesPlainAndFinalCodeCopyAndDeletion() async throws {
+        for presentation in ["plain", "monaco"] {
+            let fixture = try Fixture(codePayload: presentation == "monaco"); defer { fixture.shutdown() }
+            let token = try await start(fixture, label: "Qwen3.7-Plus")
+            _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic preference ownership and exact payload")
+            try await installResponseChoice(fixture, scenario: "waiting")
+            let expected: String
+            if presentation == "monaco" { expected = try await installCodePayload(fixture, presentation: "monaco") }
+            else { expected = "{\"type\":\"message\",\"text\":\"Synthetic Qwen native reply\"}" }
+            let waiting = try await call(fixture, "webProviderPoll", token)
+            XCTAssertEqual(waiting["text"] as? String, "")
+            XCTAssertEqual(waiting["modelVerificationPendingReason"] as? String, "qwen_response_preference_v1")
+            XCTAssertEqual((waiting["savedResponseChoiceReceipt"] as? [String: Any])?["phase"] as? String, "observed")
+            _ = try await evaluate(fixture.view, "choiceFixture.enable();return true;")
+            _ = try await waitForChoiceSpent(fixture, token)
+            let completed = try await wait(fixture, token, state: "complete")
+            XCTAssertEqual(completed["text"] as? String, expected)
+            XCTAssertEqual((completed["savedResponseChoiceReceipt"] as? [String: Any])?["phase"] as? String, "acknowledged")
+            let choices = try await evaluate(fixture.view, "return choiceFixture.clicks;") as? [Int]
+            XCTAssertEqual(choices, [1, 0])
+            if presentation == "monaco" {
+                let copies = try await evaluate(fixture.view, "return [fixtureCopyCount,clipboardDelegations];") as? [Int]
+                XCTAssertEqual(copies, [1, 0])
+            }
+            let closed = try await call(fixture, "webProviderFinish", token)
+            XCTAssertEqual(closed["cleanup"] as? String, "deleted")
+            try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+            XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+        }
+    }
+
+    func testQwenResponseChoiceLostAckKeepsOneSpentClaimAndNativeMemoryStatusDoesNotEvaluatePage() async throws {
+        let fixture = try Fixture(); defer { fixture.shutdown() }
+        let token = try await start(fixture, label: "Qwen3.7-Plus")
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic lost preference acknowledgement")
+        try await installResponseChoice(fixture, scenario: "lost")
+        var evaluations = 0
+        fixture.transport.setBeforePageResultValidationForTesting { _ in evaluations += 1 }
+        _ = try await waitForChoiceSpent(fixture, token)
+        _ = try await call(fixture, "webProviderPoll", token)
+        let before = evaluations
+        let status = await fixture.transport.snapshotResponseChoiceStatus(sessionToken: token)
+        XCTAssertEqual(status?.receipt.phase, .grantSpent)
+        let cancelledRead = Task { @MainActor in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await fixture.transport.snapshotResponseChoiceStatus(sessionToken: token)
+        }
+        let cancelledStatus = await cancelledRead.value
+        let foreignStatus = await fixture.transport.snapshotResponseChoiceStatus(sessionToken: UUID().uuidString)
+        XCTAssertEqual(cancelledStatus, status)
+        XCTAssertNil(foreignStatus)
+        XCTAssertEqual(evaluations, before, "Native action status must not evaluate the page")
+        fixture.transport.setTimeoutsForTesting(preparation: .seconds(10), response: .milliseconds(1))
+        do { _ = try await call(fixture, "webProviderPoll", token); XCTFail("Choice cannot renew the response deadline") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .deadline) }
+        let after = await fixture.transport.snapshotResponseChoiceStatus(sessionToken: token)
+        XCTAssertEqual(after?.receipt.phase, .grantSpent)
+        let clicks = try await evaluate(fixture.view, "return choiceFixture.clicks;") as? [Int]
+        XCTAssertEqual(clicks, [1, 0])
+        let cleanup = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(cleanup["cleanup"] as? String, "failed")
+        try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+    }
+
+    func testQwenMalformedPreferenceAckCannotCommitFirstUserOrCleanupAuthority() async throws {
+        let fixture = try Fixture(); defer { fixture.shutdown() }
+        let token = try await start(fixture, label: "Qwen3.7-Plus")
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic malformed preference receipt")
+        try await installResponseChoice(fixture, scenario: "ready")
+        _ = try await waitForChoiceSpent(fixture, token)
+        _ = try await evaluate(fixture.view,
+            "globalThis.__computaQwenSavedSessionV1.responseChoice.grant='8d6213d9-e026-4be6-8655-bb9d904981b0';return true;", world: world)
+        do { _ = try await call(fixture, "webProviderPoll", token); XCTFail("Wrong receipt cannot acquire ownership") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelUnverified) }
+        let status = await fixture.transport.snapshotResponseChoiceStatus(sessionToken: token)
+        XCTAssertEqual(status?.receipt.phase, .grantSpent)
+        let cleanup = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(cleanup["cleanup"] as? String, "failed")
+        XCTAssertEqual((cleanup["modelProofContext"] as? [String: Any])?["firstUserFingerprint"] as? String, "")
+        try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+    }
+
+    private func waitForChoiceSpent(_ fixture: Fixture, _ token: String) async throws -> [String: Any] {
+        for _ in 0..<8 {
+            let value = try await call(fixture, "webProviderPoll", token)
+            if (value["savedResponseChoiceReceipt"] as? [String: Any])?["phase"] as? String == "grant_spent" { return value }
+        }
+        throw FixtureFailure.timeout
+    }
+
+    private func installResponseChoice(_ fixture: Fixture, scenario: String) async throws {
+        let source = #"""
+        const first=document.querySelector('.chat-response-message'),root=first.parentElement;
+        const originalFooter=first.querySelector('.response-message-footer-actions');originalFooter.remove();
+        const second=first.cloneNode(true);second.id='chat-response-message-bbf6615b-e58b-4059-a95c-0d711aa4b6ae';
+        const node=(tag,cls,text)=>{const n=document.createElement(tag);n.className=cls;if(text)n.textContent=text;return n;};
+        const wrapper=node('div','smrm'),list=node('div','smrm-list smrm-list--mac'),controls=[],clicks=[0,0];
+        [first,second].forEach((response,index)=>{
+          const id=response.id.slice('chat-response-message-'.length),card=node('div','smrm-card');card.id=id+'-smrm-card';
+          const header=node('div','smrm-card__header','Response '+(index+1)),body=node('div','smrm-card__body');
+          const content=node('div','smrm-card__content'),footer=node('div','smrm-card__footer'),control=node('button','smrm-card__prefer-btn','I prefer this response');
+          control.disabled='__SCENARIO__'==='waiting';controls.push(control);content.append(response);body.append(content);footer.append(control);card.append(header,body,footer);list.append(card);
+          control.addEventListener('click',()=>{clicks[index]++;if('__SCENARIO__'==='lost')return;
+            root.classList.remove('qwen-chat-message-dual-message');root.replaceChildren(response);response.append(originalFooter);});
+        });
+        wrapper.append(list);root.classList.add('qwen-chat-message-dual-message');root.replaceChildren(wrapper);
+        window.choiceFixture={clicks,enable:()=>controls.forEach(control=>control.disabled=false)};
+        return true;
+        """#.replacingOccurrences(of: "__SCENARIO__", with: scenario)
+        _ = try await evaluate(fixture.view, source)
+    }
+
     private func start(_ fixture: Fixture, label: String = "Qwen3.8-Max") async throws -> String {
         let choice = WebsiteModelChoice(provider: "qwen", key: label, label: label)
         let parameters = ["provider": "qwen", "modelChoice": try XCTUnwrap(choice.canonicalJSONString)]

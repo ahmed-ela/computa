@@ -324,7 +324,7 @@ final class AppStateTests: XCTestCase {
         let state = AppState(tasks: [], preferences: isolatedTestPreferences())
         state.createTask()
         let taskID = try XCTUnwrap(state.selectedTaskID)
-        let alternateID = try XCTUnwrap(LocalModelCatalog.options.last?.id)
+        let alternateID = "lmstudio-community/Qwen3.5-9B-MLX-4bit"
 
         state.activeTurnTaskIDs.insert(taskID)
         XCTAssertFalse(state.setTaskModel(alternateID, taskID: taskID))
@@ -549,11 +549,11 @@ final class AppStateTests: XCTestCase {
     }
 
     @MainActor
-    func testCancelledStartupCannotApplyLateHistory() async {
-        let initial = startupTask("initial")
+    func testCancelledStartupWaiterKeepsAppOwnedLoadAlive() async {
+        let initial = startupTask("initial"), late = startupTask("late")
         let gate = StartupTaskLoadGate()
         let state = AppState(tasks: [initial],
-                             runtime: HeldStartupRuntime(tasks: [startupTask("late")], gate: gate),
+                             runtime: HeldStartupRuntime(tasks: [late], gate: gate),
                              preferences: isolatedTestPreferences())
         let startup = Task { await state.startRuntime() }
         await gate.waitUntilLoading()
@@ -561,9 +561,9 @@ final class AppStateTests: XCTestCase {
         await gate.release()
         await startup.value
 
-        XCTAssertEqual(state.tasks, [initial])
-        XCTAssertEqual(state.selectedTaskID, initial.id)
-        XCTAssertNotEqual(state.connectionState, .connected(provider: "Held startup"))
+        XCTAssertEqual(state.tasks, [late])
+        XCTAssertEqual(state.selectedTaskID, late.id)
+        XCTAssertEqual(state.connectionState, .connected(provider: "Held startup"))
     }
 
     @MainActor
@@ -1031,6 +1031,12 @@ private struct HeldStartupRuntime: AgentRuntimeClient {
 
     func interrupt(taskID: AgentTask.ID) async throws {}
     func resolveApproval(requestID: String, approved: Bool) async throws {}
+    func shutdown() async -> RuntimeShutdownReport {
+        // A runtime shutdown releases its outstanding history RPC. This fake
+        // must do the same before AppState drains the cancelled owned consumer.
+        await gate.release()
+        return .init(issues: [])
+    }
 }
 
 private struct RejectingRuntime: AgentRuntimeClient {
@@ -1241,3 +1247,167 @@ private struct ModelRecordingRuntime: AgentRuntimeClient {
 
     func resolveApproval(requestID: String, approved: Bool) async throws {}
 }
+
+@MainActor
+extension AppStateTests {
+    private func eventLifetimeTask() -> AgentTask {
+        AgentTask(id: "synthetic-event-lifetime", title: "Synthetic event lifetime", summary: "",
+                  status: .waiting, workspace: "/tmp", model: "synthetic-model")
+    }
+
+    private func eventLifetimeEventually(_ predicate: @MainActor () async -> Bool) async -> Bool {
+        let deadline = ContinuousClock.now + .seconds(2)
+        while !(await predicate()), ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return await predicate()
+    }
+
+    func testTwoWindowCallersShareOneConsumerAndCancelledCallerKeepsNextTurnEvents() async {
+        let task = eventLifetimeTask(), runtime = EventLifetimeRuntime(tasks: [task])
+        let state = AppState(tasks: [], runtime: runtime, preferences: isolatedTestPreferences())
+        let firstWindow = Task { await state.startRuntime() }
+        let secondWindow = Task { await state.startRuntime() }
+        let subscribed = await eventLifetimeEventually { runtime.subscriptionCount >= 1 }
+        XCTAssertTrue(subscribed)
+        // Give both view callers an opportunity to enter before cancelling one.
+        for _ in 0..<20 { await Task.yield() }
+        firstWindow.cancel()
+        try? await Task.sleep(for: .milliseconds(20))
+        runtime.emit(.taskStatusChanged(taskID: task.id, status: .running))
+        let tool = TimelineEntry(id: "synthetic-tool", kind: .tool, title: "Synthetic tool", body: "Synthetic output",
+            toolEvent: .init(name: "commandExecution", summary: "Synthetic command", status: .succeeded,
+                             input: "synthetic", output: "Synthetic output", duration: 0))
+        runtime.emit(.timelineEntryAppended(taskID: task.id, entry: tool))
+        let answer = TimelineEntry(id: "synthetic-answer", kind: .assistant, title: "Computa", body: "Synthetic final")
+        runtime.emit(.timelineEntryAppended(taskID: task.id, entry: answer))
+        runtime.emit(.taskStatusChanged(taskID: task.id, status: .completed))
+        let completed = await eventLifetimeEventually { state.tasks.first?.status == .completed }
+        XCTAssertTrue(completed)
+        XCTAssertEqual(state.tasks.first?.entries.map(\.id), [tool.id, answer.id])
+        XCTAssertEqual(runtime.subscriptionCount, 1)
+        let before = await runtime.counts()
+        XCTAssertEqual(before.loads, 1)
+        XCTAssertFalse(runtime.streamTerminated)
+        let report = await state.shutdownRuntime()
+        await firstWindow.value; await secondWindow.value
+        XCTAssertTrue(report.succeeded)
+    }
+
+    func testCancellingStartupCallerDoesNotCancelOwnedLoadOrLaterEvents() async {
+        let task = eventLifetimeTask(), runtime = EventLifetimeRuntime(tasks: [task], holdLoad: true)
+        let state = AppState(tasks: [], runtime: runtime, preferences: isolatedTestPreferences())
+        let window = Task { await state.startRuntime() }
+        let loading = await eventLifetimeEventually { await runtime.hasEnteredLoad() }
+        XCTAssertTrue(loading)
+        window.cancel()
+        await runtime.releaseLoad()
+        let subscribed = await eventLifetimeEventually { runtime.subscriptionCount == 1 }
+        XCTAssertTrue(subscribed)
+        runtime.emit(.taskStatusChanged(taskID: task.id, status: .completed))
+        let completed = await eventLifetimeEventually { state.tasks.first?.status == .completed }
+        XCTAssertTrue(completed)
+        XCTAssertEqual(state.connectionState, .connected(provider: runtime.providerName))
+        _ = await state.shutdownRuntime()
+        await window.value
+    }
+
+    func testFailedRuntimeStartupMayRetryOnLaterExplicitStartWithoutDuplicateConsumer() async {
+        let task = eventLifetimeTask(), runtime = EventLifetimeRuntime(tasks: [task], failFirstLoad: true)
+        let state = AppState(tasks: [], runtime: runtime, preferences: isolatedTestPreferences())
+        await state.startRuntime()
+        if case .failed = state.connectionState {} else { XCTFail("Failed load must remain visible") }
+        XCTAssertEqual(runtime.subscriptionCount, 0)
+        state.startRuntimeIfNeeded()
+        state.startRuntimeIfNeeded()
+        let subscribed = await eventLifetimeEventually { runtime.subscriptionCount == 1 }
+        XCTAssertTrue(subscribed)
+        runtime.emit(.taskStatusChanged(taskID: task.id, status: .completed))
+        let completed = await eventLifetimeEventually { state.tasks.first?.status == .completed }
+        XCTAssertTrue(completed)
+        let counts = await runtime.counts()
+        XCTAssertEqual(counts.loads, 2)
+        XCTAssertEqual(runtime.subscriptionCount, 1)
+        _ = await state.shutdownRuntime()
+    }
+
+    func testWindowAppearanceIsIdempotentAndShutdownStopsConsumerWithoutRestart() async {
+        let task = eventLifetimeTask(), runtime = EventLifetimeRuntime(tasks: [task])
+        let state = AppState(tasks: [], runtime: runtime, preferences: isolatedTestPreferences())
+        state.startRuntimeIfNeeded()
+        state.startRuntimeIfNeeded()
+        let subscribed = await eventLifetimeEventually { runtime.subscriptionCount == 1 }
+        XCTAssertTrue(subscribed)
+        let first = await state.shutdownRuntime()
+        let second = await state.shutdownRuntime()
+        state.startRuntimeIfNeeded()
+        await state.startRuntime()
+        let counts = await runtime.counts()
+        XCTAssertEqual(counts.loads, 1)
+        XCTAssertEqual(counts.shutdowns, 1)
+        XCTAssertEqual(runtime.subscriptionCount, 1)
+        XCTAssertTrue(runtime.streamTerminated)
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(state.connectionState, .disconnected)
+    }
+}
+
+private final class EventLifetimeStreamState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var subscriptions = 0
+    private var terminated = false
+    func subscribed() { lock.withLock { subscriptions += 1 } }
+    func terminatedStream() { lock.withLock { terminated = true } }
+    var subscriptionCount: Int { lock.withLock { subscriptions } }
+    var streamTerminated: Bool { lock.withLock { terminated } }
+}
+
+private actor EventLifetimeRuntime: AgentRuntimeClient {
+    nonisolated let providerName = "Synthetic event lifetime runtime"
+    nonisolated private let stream: AsyncStream<AgentRuntimeEvent>
+    nonisolated private let continuation: AsyncStream<AgentRuntimeEvent>.Continuation
+    nonisolated private let streamState: EventLifetimeStreamState
+    private let tasks: [AgentTask]
+    private let holdLoad: Bool
+    private var released = false
+    private var loads = 0
+    private var startupFailuresRemaining: Int
+    private var shutdowns = 0
+    private var loadWaiter: CheckedContinuation<Void, Never>?
+
+    init(tasks: [AgentTask], holdLoad: Bool = false, failFirstLoad: Bool = false) {
+        self.tasks = tasks; self.holdLoad = holdLoad
+        startupFailuresRemaining = failFirstLoad ? 1 : 0
+        let pair = AsyncStream<AgentRuntimeEvent>.makeStream()
+        let state = EventLifetimeStreamState()
+        stream = pair.stream; continuation = pair.continuation; streamState = state
+        pair.continuation.onTermination = { _ in state.terminatedStream() }
+    }
+    nonisolated var subscriptionCount: Int { streamState.subscriptionCount }
+    nonisolated var streamTerminated: Bool { streamState.streamTerminated }
+    nonisolated func events() -> AsyncStream<AgentRuntimeEvent> {
+        streamState.subscribed(); return stream
+    }
+    nonisolated func emit(_ event: AgentRuntimeEvent) { continuation.yield(event) }
+    func loadTasks() async throws -> [AgentTask] {
+        loads += 1
+        if startupFailuresRemaining > 0 {
+            startupFailuresRemaining -= 1
+            throw EventLifetimeSyntheticStartupFailure.failed
+        }
+        if holdLoad && !released { await withCheckedContinuation { loadWaiter = $0 } }
+        return tasks
+    }
+    func hasEnteredLoad() -> Bool { loads > 0 }
+    func releaseLoad() { released = true; loadWaiter?.resume(); loadWaiter = nil }
+    func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String) async throws {}
+    func interrupt(taskID: AgentTask.ID) async throws {}
+    func resolveApproval(requestID: String, approved: Bool) async throws {}
+    func shutdown() async -> RuntimeShutdownReport {
+        shutdowns += 1; releaseLoad(); continuation.finish()
+        return .init(issues: [])
+    }
+    func counts() -> (loads: Int, shutdowns: Int) { (loads, shutdowns) }
+}
+
+private enum EventLifetimeSyntheticStartupFailure: Error { case failed }
