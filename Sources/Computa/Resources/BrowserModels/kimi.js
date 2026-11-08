@@ -84,6 +84,7 @@ function computaProviderCore(request, provider, origin, actions) {
 // Kimi saved-conversation adapter. Uses the exact embedded-provider-core.js prefix.
 // Saved conversations require an explicit confirmed deletion, never temp mode.
 let kimiDraftState = null;
+let kimiComposerGuardDiagnostic = null;
 let kimiDiscoveryProgress = null;
 try {
   const actions = ['inspect', 'discoverModels', 'selectModel', 'verifyModel', 'prepare',
@@ -178,13 +179,13 @@ try {
     const x = left + (right-left)/2, y = top + (bottom-top)/2;
     return editor.contains(document.elementFromPoint(x,y)) ? null : 'occluded';
   }
-  function composerText(editor) {
+  function composerText(editor, diagnostic) {
     // Live Lexical insertText settles asynchronously into one P[dir=ltr]
     // containing a data-lexical-text span whose text retains literal newlines.
     // The empty P/BR and synthetic WebKit P/text shapes are separately tested.
     // Read only those structures; never trim, normalize or repair payload bytes.
     const paragraphs = [...editor.childNodes], lines = [];
-    let nodes = paragraphs.length, bytes = 0;
+    let nodes = paragraphs.length, bytes = 0, breaks = 0;
     if (nodes > 180_201) c.fail('composer_unavailable');
     for (const paragraph of paragraphs) {
       if (paragraph.nodeType !== 1 || paragraph.tagName !== 'P' || !c.visible(paragraph)
@@ -203,11 +204,16 @@ try {
         && span.getAttribute('data-lexical-text') === 'true' && span.getAttribute('contenteditable') == null
         && c.visible(span) && span.childNodes.length > 0 && [...span.childNodes].every(node => node.nodeType === 3);
       if (!emptyBreak && !lexical && (!children.length || children.some(node => node.nodeType !== 3))) c.fail('composer_unavailable');
+      if (emptyBreak && diagnostic) breaks += 1;
       const line = emptyBreak ? '' : lexical ? span.textContent : children.map(node => node.textContent).join('');
       bytes += new TextEncoder().encode(line).length + (lines.length ? 1 : 0);
       if (bytes > 180_200) c.fail('composer_unavailable');
       lines.push(line);
     }
+    if (diagnostic) Object.assign(diagnostic, {
+      childCountCapped32: Math.min(nodes, 32), paragraphCountCapped32: Math.min(paragraphs.length, 32),
+      brCountCapped32: Math.min(breaks, 32), unsupportedShapeCountCapped32: 0,
+    }); // A completed serializer already proved every traversed shape supported.
     return lines.join('\n');
   }
   function composer() {
@@ -782,7 +788,15 @@ try {
       const scope = editor.closest('.chat-editor-input-wrap');
       if (!scope || !c.visible(scope) || c.nodes(scope, '.chat-input-editor[contenteditable="true"]').length !== 1)
         reject('composer_unavailable');
-      if (composerText(editor) !== '') reject('composer_not_empty');
+      const counts = {}, serialized = composerText(editor, counts);
+      if (serialized !== '') {
+        // Reuse the held string and counters from that same serializer pass.
+        // No text, length, hash, HTML, attribute, URL or DOM identifier leaves it.
+        kimiComposerGuardDiagnostic = { version: 1, provider: 'kimi', trigger: 'composer_not_empty',
+          stage: 'initial_inspect', serializedClass: serialized === '' ? 'empty'
+            : /^\s+$/.test(serialized) ? 'whitespace_only' : 'nonwhitespace', ...counts };
+        reject('composer_not_empty');
+      }
     }
     const label = trigger ? control('model_label', trigger, '.model-name .name') : null;
     if (trigger) {
@@ -1101,6 +1115,8 @@ try {
       || kimiDraftState.selection || kimiDraftState.prepared || kimiDraftState.inserted)))
     kimiDraftState.terminal = true;
   return error?.computaAdapterFailure ? { error: error.error, ...(error.detail ? { detail: error.detail } : {}),
+    ...(error.error === 'composer_not_empty' && kimiComposerGuardDiagnostic
+      ? { composerGuardDiagnostic: kimiComposerGuardDiagnostic } : {}),
     ...(error.error === 'model_unverified' && error.modelEvidenceDiagnostic
       ? { modelEvidenceDiagnostic: error.modelEvidenceDiagnostic } : {}),
     ...(error.error === 'unsupported_response_format' && error.adapterFailureStructure

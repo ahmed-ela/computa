@@ -37,7 +37,8 @@ for (const model of [max, plus]) for (const [stage, reason, count, mutate] of ch
     mutate(f);
     const clicks = f.mutations();
     const r = await f.run('inspect', { expectedModelChoice: choice(model) });
-    expect(r).toEqual({error:'unsupported_response_format',detail:'authored_source',adapterFailureStructure:{
+    const legacy = {...r.adapterFailureStructure}; delete legacy.phaseSet;
+    expect({...r,adapterFailureStructure:legacy}).toEqual({error:'unsupported_response_format',detail:'authored_source',adapterFailureStructure:{
       version:1,provider:'qwen',trigger:'authored_source',stage,reason,count
     }});
     expect(f.mutations()).toBe(clicks);
@@ -329,7 +330,8 @@ test('multiple Qwen answer phases are refused with bounded structural facts and 
     const result = await f.run('inspect',{expectedModelChoice:choice(max)});
     expect(result.error,kind).toBe('unsupported_response_format');
     expect(result.detail).toBe('authored_source');
-    expect(result.adapterFailureStructure,kind).toEqual({version:1,provider:'qwen',trigger:'authored_source',stage:'phase_set',reason:kind,count:2});
+    const legacy = {...result.adapterFailureStructure}; delete legacy.phaseSet;
+    expect(legacy,kind).toEqual({version:1,provider:'qwen',trigger:'authored_source',stage:'phase_set',reason:kind,count:2});
     expect(result.text).toBeUndefined();
     expect(result.answerComplete).toBeUndefined();
     expect(JSON.stringify(result)).not.toContain('PRIVATE');

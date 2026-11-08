@@ -293,6 +293,62 @@ final class WebsiteAdapterFailureDiagnosticTests: XCTestCase {
         }
     }
 
+    func testQwenPhaseSetSampleLogsOnlyClosedBoundedCountsOnTheExistingRefusal() throws {
+        var value = qwenAuthoredFailure
+        value.merge(["stage": "phase_set", "reason": "phase_count_limit", "count": 2,
+                     "phaseSet": qwenPhaseSetSample] as [String: Any]) { _, new in new }
+        let packet = try XCTUnwrap(D.sanitize(value, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"))
+        XCTAssertLessThanOrEqual(packet.data.count, 512)
+        XCTAssertEqual(try XCTUnwrap(D.qwenAuthoredLogFields(packet)).data(using: .utf8), packet.data)
+        for action in ["prepare", "submit", "deleteConversation"] {
+            var observed = ["error": "unsupported_response_format", "detail": "authored_source", "adapterFailureStructure": value] as [String: Any]
+            XCTAssertNil(D.remove(from: &observed, provider: "qwen", action: action))
+            XCTAssertNil(observed["adapterFailureStructure"])
+            XCTAssertEqual(observed["error"] as? String, "unsupported_response_format")
+        }
+        for (provider, error, detail) in [("qwen", "document_changed", "authored_source"),
+                                          ("qwen", "unsupported_response_format", "response_container"),
+                                          ("kimi", "unsupported_response_format", "authored_source")] {
+            XCTAssertNil(D.sanitize(value, provider: provider, error: error, detail: detail))
+        }
+    }
+
+    func testQwenPhaseSetSampleRejectsRawFieldsImpossibleTotalsAndWrongStages() {
+        let mutations: [(String, Any)] = [("matched", 1), ("matched", 34), ("matchedOverflow", true),
+                               ("sampled", 3), ("visible", 5), ("textBearing", 3), ("textBearingVisiblePhase", 3),
+                               ("textBearingVisiblePhase", 1),
+                               ("textUnknown", 1), ("physicallyEmpty", 3), ("singleWrapper", 3),
+                               ("direct", -1), ("otherWrapper", "PRIVATE"), ("text", "PRIVATE"),
+                               ("sessionToken", UUID().uuidString)]
+        for (key, invalid) in mutations {
+            var sample = qwenPhaseSetSample
+            sample[key] = invalid
+            var value = qwenAuthoredFailure
+            value.merge(["stage": "phase_set", "reason": "phase_count_limit", "count": 2, "phaseSet": sample] as [String: Any]) { _, new in new }
+            XCTAssertNil(D.sanitize(value, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"), key)
+        }
+        for stage in ["paragraph", "phase", "code_sample"] {
+            var value = qwenAuthoredFailure
+            value["stage"] = stage
+            value["phaseSet"] = qwenPhaseSetSample
+            XCTAssertNil(D.sanitize(value, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"))
+        }
+        var sample = qwenPhaseSetSample
+        sample["matched"] = 3; sample["sampled"] = 3; sample["singleWrapper"] = 3; sample["visible"] = 3
+        sample["textEmpty"] = 1; sample["physicallyEmpty"] = 1
+        var value = qwenAuthoredFailure
+        value.merge(["stage": "phase_set", "reason": "phase_count_limit", "count": 2, "phaseSet": sample] as [String: Any]) { _, new in new }
+        XCTAssertNil(D.sanitize(value, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"))
+        value["reason"] = "multiple_text_bearing"
+        XCTAssertNotNil(D.sanitize(value, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"))
+    }
+
+    private var qwenPhaseSetSample: [String: Any] {
+        ["matched": 4, "matchedOverflow": false, "sampled": 4, "visible": 4,
+         "textBearing": 2, "textBearingVisiblePhase": 2, "textEmpty": 2, "textUnknown": 0, "physicallyEmpty": 1,
+         "singleWrapper": 4, "direct": 0, "otherWrapper": 0]
+    }
+
     func testQwenAuthoredSourcePublicationRequiresExactNamedSelectionAndDedicatedSingleBoundArm() throws {
         let packet = try XCTUnwrap(D.sanitize(qwenAuthoredFailure, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"))
         let max = "Qwen3.8-Max", plus = "Qwen3.7-Plus"

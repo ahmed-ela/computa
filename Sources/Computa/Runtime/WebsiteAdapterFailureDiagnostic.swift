@@ -61,6 +61,50 @@ enum WebsiteAdapterFailureDiagnostic {
     static let kimiTriggers: Set<String> = ["authored_source_markdown_count", "authored_source_markdown_visibility", "authored_source_markdown_scope", "authored_source_json_count", "authored_source_pre_shape", "authored_source_highlighter_shape", "authored_source_segment_scope", "authored_source_code_visibility", "authored_source_outside_content"]
     static let deepSeekPredicates: Set<String> = ["final_count", "final_visibility", "final_parent", "sibling_scope", "paragraph_shape", "fence_child_count", "header_shape", "header_labels", "corner_shape", "interactive_attribute", "literal_span_shape", "node_limit"]
 
+    /// Metadata from the existing initial composer rejection only. Strip even
+    /// malformed/foreign siblings before ordinary error/response classification.
+    static func removeComposerGuard(from observed: inout [String: Any], provider: String, action: String) -> Packet? {
+        let raw = observed.removeValue(forKey: "composerGuardDiagnostic")
+        guard provider == "kimi", action == "inspect", observed["error"] as? String == "composer_not_empty",
+              observed["detail"] == nil else { return nil }
+        return sanitizeComposerGuard(raw)
+    }
+
+    static func sanitizeComposerGuard(_ raw: Any?) -> Packet? {
+        let counts = ["childCountCapped32", "paragraphCountCapped32", "brCountCapped32", "unsupportedShapeCountCapped32"]
+        guard let value = raw as? [String: Any], Set(value.keys) == Set(counts + ["version", "provider", "trigger", "stage", "serializedClass"]),
+              integer(value["version"], 1...1) == 1, value["provider"] as? String == "kimi",
+              value["trigger"] as? String == "composer_not_empty", value["stage"] as? String == "initial_inspect",
+              let kind = value["serializedClass"] as? String, ["empty", "whitespace_only", "nonwhitespace"].contains(kind),
+              counts.allSatisfy({ integer(value[$0], 0...32) != nil }),
+              let children = integer(value["childCountCapped32"], 0...32),
+              let paragraphs = integer(value["paragraphCountCapped32"], 0...32),
+              let breaks = integer(value["brCountCapped32"], 0...32), children >= paragraphs, breaks <= paragraphs,
+              let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), data.count <= 512 else { return nil }
+        return Packet(provider: "kimi", trigger: "composer_not_empty", data: data)
+    }
+
+    /// Native context joins are diagnostic attribution, never model, ownership,
+    /// cleanup or execution proof. Missing/foreign context is explicit JSON null.
+    static func composerGuardLog(_ packet: Packet, context: Context?, sessionToken: UUID,
+                                 documentGeneration: UUID, sequence: Int) -> String? {
+        guard sequence == 0, packet.provider == "kimi", packet.trigger == "composer_not_empty",
+              let raw = try? JSONSerialization.jsonObject(with: packet.data), let safe = sanitizeComposerGuard(raw),
+              let metadata = try? JSONSerialization.jsonObject(with: safe.data) else { return nil }
+        let attribution: Any
+        if let context, context.provider == "kimi" {
+            attribution = ["taskID": context.taskID.uuidString.lowercased(), "threadID": context.threadID.uuidString.lowercased(),
+                           "turnID": context.turnID.uuidString.lowercased(), "inferenceID": context.inferenceID.uuidString.lowercased(),
+                           "runtimeGeneration": context.runtimeGeneration.uuidString.lowercased(),
+                           "preparationID": context.preparationID.uuidString.lowercased()]
+        } else { attribution = NSNull() }
+        let record: [String: Any] = ["version": 1, "diagnosticOnly": true, "attribution": attribution,
+            "sessionToken": sessionToken.uuidString.lowercased(), "documentGeneration": documentGeneration.uuidString.lowercased(),
+            "sequence": sequence, "metadata": metadata]
+        guard let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]), data.count <= 1_536 else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
     /// Always strips first, including unarmed/foreign/malformed packets. The
     /// remaining observation follows its existing validation unchanged.
     static func remove(from observed: inout [String: Any], provider: String, action: String) -> Packet? {
@@ -135,9 +179,12 @@ enum WebsiteAdapterFailureDiagnostic {
                 return Packet(provider: provider, trigger: trigger, data: data)
             }
             if error == "unsupported_response_format", detail == "authored_source", trigger == detail {
-                guard Set(value.keys) == ["version", "provider", "trigger", "stage", "reason", "count"],
+                let hasPhaseSet = value["phaseSet"] != nil
+                let authoredKeys: Set<String> = ["version", "provider", "trigger", "stage", "reason", "count"]
+                guard Set(value.keys) == (hasPhaseSet ? authoredKeys.union(["phaseSet"]) : authoredKeys),
                       let stage = value["stage"] as? String, let reason = value["reason"] as? String,
-                      let count = integer(value["count"], 0...2), reason == "count" || ["span_limit", "phase_set"].contains(stage) || count == 0 else { return nil }
+                      let count = integer(value["count"], 0...2), reason == "count" || ["span_limit", "phase_set"].contains(stage) || count == 0,
+                      !hasPhaseSet || stage == "phase_set" && qwenPhaseSet(value["phaseSet"], reason: reason) else { return nil }
                 switch stage {
                 case "flow", "phase":
                     guard reason == "count" ? count == 2 : reason == (stage == "flow" ? "hidden" : "class") else { return nil }
@@ -205,7 +252,7 @@ enum WebsiteAdapterFailureDiagnostic {
         return Packet(provider: provider, trigger: trigger, data: data)
     }
 
-    /// Ordinary failure logging is limited to the closed six-field Qwen packet.
+    /// Ordinary failure logging is limited to the closed finite Qwen packet.
     /// Other providers' larger structure records remain opt-in only.
     static func qwenAuthoredLogFields(_ packet: Packet) -> String? {
         guard packet.provider == "qwen", packet.trigger == "authored_source", packet.data.count <= 512,
@@ -222,6 +269,24 @@ enum WebsiteAdapterFailureDiagnostic {
               let checked = sanitize(value, provider: "qwen", error: "document_changed", detail: packet.trigger),
               checked.data == packet.data else { return nil }
         return String(data: packet.data, encoding: .utf8)
+    }
+
+    private static func qwenPhaseSet(_ raw: Any?, reason: String) -> Bool {
+        guard let value = raw as? [String: Any],
+              Set(value.keys) == ["matched", "matchedOverflow", "sampled", "visible", "textBearing", "textBearingVisiblePhase", "textEmpty",
+                                  "textUnknown", "physicallyEmpty", "singleWrapper", "direct", "otherWrapper"],
+              let matched = integer(value["matched"], 2...33), let overflow = boolean(value["matchedOverflow"]),
+              !overflow || matched == 33, (reason == "phase_count_limit") == (matched > 3),
+              let sampled = integer(value["sampled"], 2...16), sampled == min(matched, 16),
+              let visible = integer(value["visible"], 0...16), visible <= sampled,
+              let bearing = integer(value["textBearing"], 0...16), let empty = integer(value["textEmpty"], 0...16),
+              let unknown = integer(value["textUnknown"], 0...16), bearing + empty + unknown == sampled,
+              let bearingVisible = integer(value["textBearingVisiblePhase"], 0...16),
+              bearingVisible <= min(visible, bearing), bearingVisible >= max(visible + bearing - sampled, 0),
+              let physicallyEmpty = integer(value["physicallyEmpty"], 0...16), physicallyEmpty <= empty,
+              let wrapper = integer(value["singleWrapper"], 0...16), let direct = integer(value["direct"], 0...16),
+              let other = integer(value["otherWrapper"], 0...16), wrapper + direct + other == sampled else { return false }
+        return true
     }
 
     private static func candidates(_ raw: Any?, categories: Set<String>, kind: String) -> Bool {

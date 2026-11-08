@@ -6959,6 +6959,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard var observed = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw Failure.pageUnavailable }
         let adapterFailureStructure = WebsiteAdapterFailureDiagnostic.remove(from: &observed,
             provider: provider.rawValue, action: action)
+        let kimiComposerGuard = WebsiteAdapterFailureDiagnostic.removeComposerGuard(from: &observed,
+            provider: provider.rawValue, action: action)
         let kimiProgress = Self.removeKimiDiscoveryProgressDiagnostic(from: &observed, provider: provider, action: action)
         logKimiDiscoveryProgress(kimiProgress, session: session)
         // This immutable attempt diagnostic is stripped before response or
@@ -7030,6 +7032,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             Self.inspectionLog.error("productModeDiagnostic provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence) structure=\(safe, privacy: .public)")
         }
         if let error = observed["error"] as? String {
+            if !allowBlockedProvider, !session.loggedSavedAdapterFailure, let packet = kimiComposerGuard,
+               let token = UUID(uuidString: session.token),
+               let record = WebsiteAdapterFailureDiagnostic.composerGuardLog(packet, context: session.adapterFailureContext,
+                   sessionToken: token, documentGeneration: generation, sequence: session.sequence) {
+                Self.inspectionLog.error("kimiComposerGuard version=1 structure=\(record, privacy: .public)")
+            }
             if !allowBlockedProvider, let packet = adapterFailureStructure,
                let detail = observed["detail"] as? String {
                 if provider == .qwen, !session.loggedSavedAdapterFailure,

@@ -587,14 +587,53 @@ function computaQwenDOM(c) {
     // owned terminal inspect can request this finite diagnostic.
     const unsupported = (stage, reason, count = 0) => {
       const result = { text: '', finalMarkup: false, formatIssue: true };
-      Object.defineProperty(result, 'failureStructure', { value: () => ({
-        version: 1, provider: 'qwen', trigger: 'authored_source', stage, reason: typeof reason === 'function' ? reason() : reason, count: Math.min(count, 2)
-      }) });
+      Object.defineProperty(result, 'failureStructure', { value: () => {
+        const packet = { version: 1, provider: 'qwen', trigger: 'authored_source', stage,
+          reason: typeof reason === 'function' ? reason() : reason, count: Math.min(count, 2) };
+        if (stage === 'phase_set') {
+          try { packet.phaseSet = phaseSetStructure(); } catch { /* Keep the original finite refusal. */ }
+        }
+        return packet;
+      } });
       return result;
     };
     if (flows.length !== 1) return unsupported('flow', 'count', flows.length);
     if (!c.visible(flows[0])) return unsupported('flow', 'hidden');
     const flow = flows[0], phases = c.nodes(flow, '.response-message-content.phase-answer');
+    // Failure-only samples of the already matched phases. These counts neither
+    // select a phase nor reconstruct a response; text values are never read.
+    const phaseSetStructure = () => {
+      const sampled = Math.min(phases.length, 16), facts = {
+        matched: Math.min(phases.length, 33), matchedOverflow: phases.length > 33, sampled,
+        visible: 0, textBearing: 0, textBearingVisiblePhase: 0, textEmpty: 0, textUnknown: 0, physicallyEmpty: 0,
+        singleWrapper: 0, direct: 0, otherWrapper: 0
+      };
+      let budget = 256;
+      for (let index = 0; index < sampled; index++) {
+        const phase = phases[index], parent = phase.parentElement, phaseVisible = c.visible(phase);
+        if (phaseVisible) facts.visible++;
+        if (parent === flow) facts.direct++;
+        else if (parent?.tagName === 'DIV' && parent.parentElement === flow
+          && parent.childNodes.length === 1 && parent.attributes.length === 0) facts.singleWrapper++;
+        else facts.otherWrapper++;
+        if (phase.childNodes.length === 0) { facts.physicallyEmpty++; facts.textEmpty++; continue; }
+        const stack = [phase];
+        let bearing = false, limited = false;
+        while (stack.length) {
+          if (budget === 0) { limited = true; break; }
+          budget--;
+          const node = stack.pop();
+          if (node.nodeType === 3) { if (node.length > 0) { bearing = true; break; } continue; }
+          const children = node.childNodes;
+          if (children.length > 32) { limited = true; break; }
+          for (let child = children.length - 1; child >= 0; child--) stack.push(children[child]);
+        }
+        if (bearing) { facts.textBearing++; if (phaseVisible) facts.textBearingVisiblePhase++; }
+        else if (limited) facts.textUnknown++;
+        else facts.textEmpty++;
+      }
+      return facts;
+    };
     if (!phases.length) return { text: '', finalMarkup: false, formatIssue: false };
     if (phases.length !== 1) return unsupported('phase_set', () => {
       if (phases.length > 3) return 'phase_count_limit';
