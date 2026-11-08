@@ -16300,6 +16300,34 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 XCTAssertNil(EmbeddedWebModelTransport.sanitizedCodeStructure(bad))
             }
         }
+        for property in ["namespace", "text_transform", "text_security", "content_visibility", "filter", "clip_path"] {
+            for depth in [1, 64] {
+                var source = base
+                source["literalDILDecline"] = "response_ancestor_masking"
+                let detail: [String: Any] = ["depth": depth, "tag": "other", "property": property]
+                source["literalDILAncestorMasking"] = detail
+                let encoded = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedCodeStructure(source))
+                let value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any])
+                let projected = try XCTUnwrap(value["literalDILAncestorMasking"] as? [String: Any])
+                XCTAssertEqual(projected["depth"] as? Int, depth)
+                XCTAssertEqual(projected["tag"] as? String, "other")
+                XCTAssertEqual(projected["property"] as? String, property)
+                for (key, invalid) in [("depth", 0), ("depth", 65), ("depth", true), ("depth", 1.5),
+                                       ("tag", "PRIVATE_TAG"), ("property", "PRIVATE_STYLE"),
+                                       ("extra", "PRIVATE_VALUE")] as [(String, Any)] {
+                    var poisoned = detail; poisoned[key] = invalid
+                    var bad = source; bad["literalDILAncestorMasking"] = poisoned
+                    XCTAssertNil(EmbeddedWebModelTransport.sanitizedCodeStructure(bad))
+                }
+                for (key, invalid) in [("literalDILDecline", "text_dil_attributes"),
+                                       ("selectedExtraction", "literal_dil"), ("extractionReason", "multiple_code"),
+                                       ("preCount", 1), ("codeCount", 1),
+                                       ("literalDILAncestorMasking", "PRIVATE_VALUE")] as [(String, Any)] {
+                    var bad = source; bad[key] = invalid
+                    XCTAssertNil(EmbeddedWebModelTransport.sanitizedCodeStructure(bad))
+                }
+            }
+        }
         XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedCodeStructure(base), "Historical missing decline facts remain valid")
     }
 

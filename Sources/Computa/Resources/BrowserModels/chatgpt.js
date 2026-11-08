@@ -3102,8 +3102,8 @@ function chatGPTWholeJSONEnvelope(text) {
 
 // This is the observed text-only renderer shape, not a DIL/Markdown parser.
 // Every text leaf is accounted for; a hidden placeholder must be truly empty.
-function chatGPTLiteralDILDecline(report, reason) {
-  try { if (report) report(reason); } catch { /* Diagnostics cannot alter extraction. */ }
+function chatGPTLiteralDILDecline(report, reason, detail = null) {
+  try { if (report) report(reason, detail); } catch { /* Diagnostics cannot alter extraction. */ }
   return null;
 }
 function chatGPTLiteralDILText(answer, messageID, report = null) {
@@ -3257,18 +3257,31 @@ function chatGPTLiteralDILResponse(answer, expectedMessageID = null, report = nu
   if (!literal) return null;
   if (chatGPTSingleJSONFence(literal.text) === null && !(literal.run && chatGPTWholeJSONEnvelope(literal.text)))
     return chatGPTLiteralDILDecline(report, 'response_fence');
-  const plain = node => {
-    if (node.namespaceURI !== 'http://www.w3.org/1999/xhtml') return false;
+  const plainFailure = node => {
+    if (node.namespaceURI !== 'http://www.w3.org/1999/xhtml') return 'namespace';
     const style = getComputedStyle(node);
-    return style.textTransform === 'none' && style.webkitTextSecurity === 'none'
-      && style.contentVisibility !== 'hidden' && style.filter === 'none' && style.clipPath === 'none';
+    if (style.textTransform !== 'none') return 'text_transform';
+    if (style.webkitTextSecurity !== 'none') return 'text_security';
+    if (style.contentVisibility === 'hidden') return 'content_visibility';
+    if (style.filter !== 'none') return 'filter';
+    if (style.clipPath !== 'none') return 'clip_path';
+    return null;
   };
   // The literal helper has already bounded and accounted for this whole tree.
   // Its one truly empty hidden placeholder supplies no source bytes.
-  if ([answer, ...answer.querySelectorAll('*')].some(node => !node.hasAttribute('hidden') && !plain(node))) return chatGPTLiteralDILDecline(report, 'response_masking');
+  if ([answer, ...answer.querySelectorAll('*')].some(node => !node.hasAttribute('hidden') && plainFailure(node) !== null)) return chatGPTLiteralDILDecline(report, 'response_masking');
   for (let node = answer, depth = 0; node; node = node.parentElement) {
     if (++depth > 64) return chatGPTLiteralDILDecline(report, 'response_ancestor_limit');
-    if (!plain(node)) return chatGPTLiteralDILDecline(report, 'response_ancestor_masking');
+    const property = plainFailure(node);
+    if (property !== null) {
+      // First failed predicate only; no computed value or arbitrary tag leaves this read.
+      let detail = null;
+      try {
+        const tag = String(node.tagName).toLowerCase();
+        detail = { depth, tag: ['div', 'span', 'article', 'section', 'main', 'body', 'html', 'form', 'aside'].includes(tag) ? tag : 'other', property };
+      } catch { /* Keep the original rejection if diagnostics are unavailable. */ }
+      return chatGPTLiteralDILDecline(report, 'response_ancestor_masking', detail);
+    }
     const selectionID = node.getAttribute('data-chatgpt-selection-message-id');
     if (selectionID !== null && selectionID !== id) return chatGPTLiteralDILDecline(report, 'response_selection_id');
   }
@@ -3597,7 +3610,10 @@ function modelResponseExtraction(answer) {
   if (blocks.length > 1) return fallback('multiple_pre');
   if (codes.length !== 1) {
     if (codes.length === 0 && blocks.length === 0) {
-      const literal = chatGPTLiteralDILResponse(answer, null, reason => { flags.literalDILDecline = reason; });
+      const literal = chatGPTLiteralDILResponse(answer, null, (reason, detail) => {
+        flags.literalDILDecline = reason;
+        if (detail !== null) flags.literalDILAncestorMasking = detail;
+      });
       if (literal !== null) return { text: literal, blocks, code, flags: { ...flags,
         selectedExtraction: 'literal_dil', extractionReason: 'accepted_literal_dil' } };
     }

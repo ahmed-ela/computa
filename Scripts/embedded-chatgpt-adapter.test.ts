@@ -1701,6 +1701,35 @@ describe('ChatGPT literal terminal source equivalence', () => {
     expect(x.read().flags).not.toHaveProperty('literalDILDecline');
     expect(x.read().flags.selectedExtraction).toBe('literal_dil');
   });
+  test('literal DIL ancestor masking reports only the first closed predicate depth and tag without changing rejection', () => {
+    const raw=JSON.stringify({type:'tool_calls',calls:[{name:'apply_patch',input:'+    PRIVATE_REPLY'}]});
+    const variants: [string,string,string][] = [['namespace','namespaceURI','urn:PRIVATE_NAMESPACE'],
+      ['text_transform','literalTransform','uppercase'],['text_security','literalSecurity','disc'],
+      ['content_visibility','literalContentVisibility','hidden'],['filter','literalFilter','opacity(0)'],
+      ['clip_path','literalClip','inset(100%)']];
+    for(const run of [false,true]) for(const [property,key,value] of variants) for(const count of [1,3,63]) {
+      const x=run?streamRun(raw):literal(raw);let parent:any=x.answer;
+      for(let i=0;i<count;i++){const next=new Element(i===count-1?'SECTION':'DIV');next.append(parent);parent=next;}
+      parent[key]=value;const result=x.read('unrelated');
+      expect(result.flags).toMatchObject({selectedExtraction:'rendered_fallback',extractionReason:'missing_code',
+        literalDILDecline:'response_ancestor_masking',literalDILAncestorMasking:{depth:count+1,tag:'section',property}});
+      expect(result.text).toBe(x.answer.innerText.trim());expect(result.relation).toBeNull();
+      expect(JSON.stringify(result.flags)).not.toContain('PRIVATE');
+    }
+    const x=streamRun(raw), near:any=new Element('DIV'), far:any=new Element('PRIVATE_TAG');near.append(x.answer);far.append(near);
+    near.literalTransform='uppercase';near.literalFilter='opacity(0)';far.literalClip='inset(100%)';
+    expect(x.read().flags.literalDILAncestorMasking).toEqual({depth:2,tag:'div',property:'text_transform'});
+    delete near.literalTransform;expect(x.read().flags.literalDILAncestorMasking).toEqual({depth:2,tag:'div',property:'filter'});
+    delete near.literalFilter;expect(x.read().flags.literalDILAncestorMasking).toEqual({depth:3,tag:'other',property:'clip_path'});
+    delete far.literalClip;expect(x.read().flags).not.toHaveProperty('literalDILAncestorMasking');
+    expect(x.read().flags.selectedExtraction).toBe('literal_dil');
+    x.p.literalFilter='opacity(0)';expect(x.read().flags.literalDILDecline).toBe('response_masking');
+    expect(x.read().flags).not.toHaveProperty('literalDILAncestorMasking');
+    const limited=streamRun(raw);let parent:any=limited.answer;
+    for(let i=0;i<64;i++){const next=new Element('DIV');next.append(parent);parent=next;}
+    parent.literalFilter='opacity(0)';expect(limited.read().flags.literalDILDecline).toBe('response_ancestor_limit');
+    expect(limited.read().flags).not.toHaveProperty('literalDILAncestorMasking');
+  });
   test('literal DIL container decline identifies the same first failed predicate with unchanged fallback bytes', () => {
     const variants: [string,(x:any)=>void][] = [
       ['text_dil_missing', x=>{x.portal.children=[];}],
@@ -1768,7 +1797,7 @@ describe('ChatGPT literal terminal source equivalence', () => {
   test('literal DIL reason schema covers every emitted guard and remains absent on an accepted code block', () => {
     const native=readFileSync(new URL('../Sources/Computa/Browser/EmbeddedWebModelTransport.swift',import.meta.url),'utf8');
     const emitted=new Set([...source.slice(start,end).matchAll(/chatGPTLiteralDILDecline\(report, '([^']+)'/g)].map(m=>m[1]));
-    const branch=native.slice(native.indexOf('if let decline = source["literalDILDecline"]'),native.indexOf('if let raw = source["rendererGuard"]'));
+    const branch=native.slice(native.indexOf('if let decline = source["literalDILDecline"]'),native.indexOf('if let raw = source["literalDILAncestorMasking"]'));
     const accepted=new Set([...branch.matchAll(/"((?:text|response)_[a-z_]+)"/g)].map(m=>m[1]));
     expect(emitted.size).toBe(34);expect(accepted).toEqual(new Set([...emitted,'text_dil_shape']));
     const x=fixture();observedChatGPTCodeBlock(x,'{"type":"message","text":"HI"}');

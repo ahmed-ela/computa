@@ -4178,6 +4178,17 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                    "text_span_count", "text_span_shape"].contains(decline as? String ?? "") else { return nil }
             safe["literalDILDecline"] = decline
         }
+        if let raw = source["literalDILAncestorMasking"] {
+            guard source["literalDILDecline"] as? String == "response_ancestor_masking",
+                  let detail = raw as? [String: Any], Set(detail.keys) == ["depth", "tag", "property"],
+                  let depth = integer(detail["depth"], limit: 64), depth >= 1,
+                  let tag = detail["tag"] as? String,
+                  ["div", "span", "article", "section", "main", "body", "html", "form", "aside", "other"].contains(tag),
+                  let property = detail["property"] as? String,
+                  ["namespace", "text_transform", "text_security", "content_visibility", "filter", "clip_path"].contains(property)
+            else { return nil }
+            safe["literalDILAncestorMasking"] = ["depth": depth, "tag": tag, "property": property]
+        }
         if let raw = source["rendererGuard"] {
             guard let guardDiagnostic = sanitizedRendererGuardDiagnostic(raw) else { return nil }
             safe["rendererGuard"] = guardDiagnostic
