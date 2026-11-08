@@ -806,10 +806,13 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let fenced = "```json\n" + raw + "\n```"
         let request = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
             "model": syntheticChatGPTModelID, "input": "Synthetic exact patch bytes", "tools": [["type": "custom", "name": "apply_patch"]]]))
-        for variant in ["legacy", "legacyMutation", "observed", "observedMutation", "observedExtraContents"] {
+        for variant in ["legacy", "legacyMutation", "observed", "observedMutation", "observedExtraContents",
+                        "observedFenced", "observedFencedMutation"] {
             let observed = variant.hasPrefix("observed"), mutate = variant.hasSuffix("Mutation")
             let extraContents = variant == "observedExtraContents"
-            let literal = observed ? raw : fenced
+            // Both authorized response framings use the identical observed run
+            // tree. Return the whole source, including the exact fence bytes.
+            let literal = observed && !variant.contains("Fenced") ? raw : fenced
             let (fixture, token, view) = try await boundInspectionFixture(prompt: "Keep the exact owned literal patch")
             defer { fixture.shutdown() }
             let facts = try await evaluate(view, """
@@ -874,6 +877,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 } else {
                     XCTAssertEqual(Data(text.utf8), Data(literal.utf8), variant)
                     XCTAssertEqual(structure["selectedExtraction"] as? String, "literal_dil", variant)
+                    XCTAssertEqual(structure["extractionReason"] as? String, "accepted_literal_dil", variant)
+                    XCTAssertNil(structure["literalDILDecline"], variant)
                     guard case let .toolCalls(calls) = try WebModelResponseCodec.parseEmbeddedReply(text, request: request) else { return XCTFail("Expected strict custom call") }
                     XCTAssertEqual(calls.count, 1); XCTAssertEqual(calls[0].name, "apply_patch")
                     XCTAssertEqual(calls[0].customInput.map { Data($0.utf8) }, Data(patch.utf8), variant)

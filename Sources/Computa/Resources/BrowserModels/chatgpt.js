@@ -3241,7 +3241,7 @@ function chatGPTLiteralDILResponse(answer, expectedMessageID = null, report = nu
     || scope.querySelector('[data-message-author-role="user"], [data-markdown-text-style="user-message"], article[data-turn="user"], [data-user-message-bubble]')) return chatGPTLiteralDILDecline(report, 'response_assistant_scope');
   const literal = chatGPTLiteralDILText(answer, id, report);
   if (!literal) return null;
-  if (literal.run ? !chatGPTWholeJSONEnvelope(literal.text) : chatGPTSingleJSONFence(literal.text) === null)
+  if (chatGPTSingleJSONFence(literal.text) === null && !(literal.run && chatGPTWholeJSONEnvelope(literal.text)))
     return chatGPTLiteralDILDecline(report, 'response_fence');
   const plain = node => {
     if (node.namespaceURI !== 'http://www.w3.org/1999/xhtml') return false;

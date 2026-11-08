@@ -1571,6 +1571,39 @@ describe('ChatGPT literal terminal source equivalence', () => {
     x.run.text=x.run.text.replace('+    return 7','+ return 7');
     expect(x.read(raw).relation).toBeNull(); expect(x.read().text).not.toBe(raw);
   });
+  test('observed literal DIL stream run preserves the supported strict JSON fence without repairing its bytes', () => {
+    const patch = '*** Begin Patch\n*** Add File: /synthetic/indent-probe.py\n+def demo():\n+    return "a  b \\ c 🌍"\n*** End Patch';
+    const body = JSON.stringify({type:'tool_calls',calls:[{name:'apply_patch',input:patch}]});
+    for (const ending of ['\n', '\r\n']) for (const trailing of ['', ending]) {
+      const raw='```json'+ending+body+ending+'```'+trailing, x=streamRun(raw), result=x.read();
+      expect(result.flags).toMatchObject({selectedExtraction:'literal_dil',extractionReason:'accepted_literal_dil'});
+      expect(result.flags.literalDILDecline).toBeUndefined(); expect(result.text).toBe(raw);
+      expect(result.relation).toBe('dil_literal_json_fence');
+      expect(x.read('<escape>'+raw+'</escape>').relation).toBe('dil_escaped_literal_json_fence');
+      for(const changed of ['<escape><escape>'+raw+'</escape></escape>', '<escape>'+raw+'</escape> ',
+        '<escape> '+raw+'</escape>', '<escape>'+raw+' </escape>', '<escape>'+raw.replace('```json','```JSON')+'</escape>',
+        '<escape>'+raw.replace('+    return','+ return')+'</escape>']) expect(x.read(changed).relation).toBeNull();
+      expect(JSON.parse(result.text.slice(7+ending.length,-(ending.length+3+trailing.length))).calls[0].input).toBe(patch);
+      expect(x.answer.innerText).not.toContain('+    return');
+      expect(x.read(raw+' ').relation).toBeNull();
+      x.run.text=x.run.text.replace('+    return','+        return');
+      expect(x.read(raw).relation).toBeNull();
+    }
+  });
+  test('observed literal DIL stream run refuses prose multiple fences and malformed fence envelopes', () => {
+    const body=JSON.stringify({type:'tool_calls',calls:[{name:'apply_patch',input:'  exact  input'}]}), fenced=wrap(body);
+    for(const raw of ['before\n'+fenced,fenced+'\nafter',fenced+'\n'+fenced,
+      '```JSON\n'+body+'\n```','```json '+body+'```','```\n'+body+'\n```',
+      '```json\r'+body+'\r```',' '+fenced,fenced+'\n\n','```json\n{broken}\n```',
+      wrap('[]'),wrap('{"type":"unknown"}'),wrap('{"type":"message"}{"type":"message"}'),
+      wrap(JSON.stringify({type:'message',text:'literal ``` or <escape> is excluded'})),
+      wrap(JSON.stringify({type:'message',text:'x'.repeat(220000)}))]) {
+      const result=streamRun(raw).read();
+      expect(result.flags.selectedExtraction,raw.slice(0,30)).not.toBe('literal_dil');
+      expect(result.flags.literalDILDecline,raw.slice(0,30)).toMatch(/^(response_fence|text_size|text_context)$/);
+      expect(['dil_literal_json_fence','dil_escaped_literal_json_fence']).not.toContain(result.relation);
+    }
+  });
   test('observed literal DIL stream run refuses extra content mixed leaves and unaccounted style or identity', () => {
     const raw=JSON.stringify({type:'message',text:'PRIVATE  exact  bytes'});
     const variants: [string,(x:any)=>void][] = [
@@ -1604,7 +1637,7 @@ describe('ChatGPT literal terminal source equivalence', () => {
   });
   test('observed literal DIL stream run admits only one whole bounded envelope and keeps legacy words fenced', () => {
     for(const raw of ['{}','[]','null','{"type":"unknown"}','{"type":"message"} explanation',
-      '{"type":"message"}{"type":"message"}', '```json\n{"type":"message","text":"hi"}\n```',
+      '{"type":"message"}{"type":"message"}', '```text\n{"type":"message","text":"hi"}\n```',
       '{"type":"message","text":"unterminated}', JSON.stringify({type:'message',text:'x'.repeat(220000)}),
       JSON.stringify({type:'message',text:'🌍'.repeat(55000)})]) {
       const x=streamRun(raw);expect(x.read().flags.selectedExtraction,raw.slice(0,30)).not.toBe('literal_dil');
@@ -1768,15 +1801,16 @@ describe('ChatGPT literal terminal source equivalence', () => {
     f.p.children[1].text = '{"type":"message","text":"CHANGED"}\n';
     expect(f.read(raw).relation).toBeNull();
   });
-  test('observed raw DIL stream run requires fresh native context and exact bytes after the final picker await', async () => {
-    for (const mutation of ['none','whitespace','identity','source_identity','selection_identity','contents','model','owner']) {
+  test('observed raw or fenced DIL stream run requires fresh native context and exact bytes after the final picker await', async () => {
+    for (const fenced of [false,true]) for (const mutation of ['none','whitespace','identity','source_identity','selection_identity','contents','model','owner']) {
       const choice={key:'chat/latest/medium',label:'Medium'}, conversationID='6ad86c7a-2284-8331-b846-a59490db0c46';
       const x=await chatTurnFixture(choice), click=x.send.onClick!;
       x.send.onClick=()=>{click();x.f.location.pathname='/c/'+conversationID;
         x.f.document.URL='https://chatgpt.com'+x.f.location.pathname+'?temporary-chat=true';};
       const record=await x.dispatch('Exact owned raw DIL terminal source',{deferModelVerification:true});
       const patch='*** Begin Patch\n*** Add File: /synthetic/indent.py\n+def f():\n+    return 7\n*** End Patch';
-      const raw=JSON.stringify({type:'tool_calls',calls:[{name:'apply_patch',input:patch}]}), body=streamRun(raw), root=x.answer('placeholder');
+      const envelope=JSON.stringify({type:'tool_calls',calls:[{name:'apply_patch',input:patch}]});
+      const raw=fenced?wrap(envelope):envelope, body=streamRun(raw), root=x.answer('placeholder');
       root.children[0].connected=false;root.children[0]=body.answer;body.answer.parentElement=root;
       root.values['data-chatgpt-selection-message-id']=messageID;
       const candidate={correlationID:'245e3c88-8dac-4239-947b-1aff997b9f61',sequence:1,
@@ -1795,8 +1829,8 @@ describe('ChatGPT literal terminal source equivalence', () => {
       expect(opens).toBe(2);expect(x.send.clicks).toBe(1);expect(candidate.text).toBe(raw);
       if(mutation==='none') {
         expect(observed.error).toBeUndefined();expect(observed.terminalCompletionMatched).toBe(true);
-        expect(observed.terminalCompletionRepresentation).toBe('exact');expect(observed.text).toBe(raw);
-        expect(JSON.parse(observed.text).calls[0].input).toBe(patch);
+        expect(observed.terminalCompletionRepresentation).toBe(fenced?'dil_literal_json_fence':'exact');expect(observed.text).toBe(raw);
+        expect(JSON.parse(fenced?observed.text.slice(8,-4):observed.text).calls[0].input).toBe(patch);
         expect(observed.modelEvidence.selected).toEqual(choice);expect(observed.submissionProof.fingerprint).toBe(record.fingerprint);
       } else {
         expect(observed.terminalCompletionMatched,mutation).toBeUndefined();
