@@ -141,6 +141,8 @@ enum WebsiteAdapterFailureDiagnostic {
                     guard ["channel_missing", "channel_shape", "candidate_changed", "candidate_missing",
                            "ancestor_limit", "synchronous_mutation", "result_missing", "result_multiple",
                            "result_invalid", "result_fields", "write_count", "write_invalid", "write_type",
+                           "write_invalid_type", "write_invalid_size", "write_invalid_api",
+                           "write_invalid_exec", "write_invalid_click", "write_invalid_hooks",
                            "write_size", "utf8_roundtrip"].contains(reason) else { return nil }
                 default: return nil
                 }

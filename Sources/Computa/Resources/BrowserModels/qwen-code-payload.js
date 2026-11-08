@@ -6,19 +6,25 @@
     || ![config.dispatch,config.result,config.secret].every(uuid)) return;
   const click = HTMLElement.prototype.click, exec = Document.prototype.execCommand;
   let active = null, spent = false;
+  const invalidate = (record, cause) => {
+    if (!record) return;
+    record.invalid = true;
+    if (record.invalidCause === null) record.invalidCause = cause;
+  };
   const writeText = value => {
     if (active) {
       active.count++;
-      if (typeof value !== 'string' || value.length > 220000) active.invalid = true;
+      if (typeof value !== 'string') invalidate(active, 'value_type');
+      else if (value.length > 220000) invalidate(active, 'value_size');
       else if (active.count === 1) active.text = value;
     }
     // The owned view never delegates clipboard writes, including late callbacks.
     return Promise.resolve();
   };
-  const write = () => { if (active) active.invalid = true; return Promise.resolve(); };
+  const write = () => { invalidate(active, 'write_api'); return Promise.resolve(); };
   const command = function(name, ...args) {
     if (typeof name !== 'string' || ['copy','cut','paste'].includes(name.trim().toLowerCase())) {
-      if (active) active.invalid = true;
+      invalidate(active, 'exec_command');
       return false;
     }
     // Ordinary composer editing remains available; no clipboard command passes.
@@ -38,16 +44,16 @@
       || !request || Object.keys(request).sort().join(',') !== 'grant,secret'
       || request.secret !== config.secret || !uuid(request.grant)) return;
     spent = true;
-    active = {count:0,invalid:false,text:null};
+    active = {count:0,invalid:false,invalidCause:null,text:null};
     let result;
     try { Reflect.apply(click,target,[]); }
-    catch { active.invalid = true; }
+    catch { invalidate(active, 'click_exception'); }
     finally {
       result = active; active = null;
-      result.invalid ||= !intact();
+      if (!result.invalid && !intact()) invalidate(result, 'hooks_changed');
       try {
         target.dispatchEvent(new CustomEvent(config.result,{bubbles:true,
-          detail:{grant:request.grant,count:result.count,invalid:result.invalid,text:result.text}}));
+          detail:{grant:request.grant,count:result.count,invalid:result.invalid,invalidCause:result.invalidCause,text:result.text}}));
       } finally { result.text = null; result = null; }
     }
   },true);

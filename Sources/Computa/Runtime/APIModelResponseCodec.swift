@@ -528,33 +528,25 @@ enum APIModelResponseCodec {
             guard request.body.count + 2 * (correctiveFeedback.utf8.count + suffix.utf8.count) + 64 <= maximumText else { return nil }
             return suffix
         }
-        // Show a complete argument object only for a single localized rejection
-        // of the known native local patch. Preserve the ordinary schema feedback
-        // if the example would exceed either existing bound.
+        // Teach both layers together within the one already-admitted correction:
+        // an outer array failure can otherwise consume the budget before the
+        // provider learns the update-line contract. Never coerce rejected values.
         if details.count == 1, let detail = details.first, var record = records.first,
-           request.tools.indices.contains(detail.toolIndex),
-           request.tools[detail.toolIndex].patchProjection == .local,
-           detail.constraint == .typeMismatch, detail.path == [.property("operations")],
-           let example = try? JSONSerialization.jsonObject(with: Data(AlibabaPatchProjection.updateExample.utf8)) {
-            record["example_arguments_template"] = example
-            if let feedback = boundedFeedback([record]) { return feedback }
-        }
-        // An exact local update-line rejection needs the line contract, not
-        // just the operation-union brief. This only guides the already-admitted
-        // correction; it never repairs arguments or changes tool admission.
-        if details.count == 1, let detail = details.first, var record = records.first,
-           request.tools.indices.contains(detail.toolIndex),
-           detail.constraint == .schemaMismatch, detail.path.isEmpty,
-           detail.patchLocation == .init(operation: .update, field: .line, constraint: .schemaMismatch) {
+           request.tools.indices.contains(detail.toolIndex) {
+            let operationsType = detail.constraint == .typeMismatch && detail.path == [.property("operations")]
+            let updateLine = detail.constraint == .schemaMismatch && detail.path.isEmpty
+                && detail.patchLocation == .init(operation: .update, field: .line, constraint: .schemaMismatch)
             let tool = request.tools[detail.toolIndex]
-            if tool.custom, tool.name == "apply_patch", tool.namespace == nil || tool.namespace == "functions",
+            if operationsType || updateLine,
+               tool.custom, tool.name == "apply_patch", tool.namespace == nil || tool.namespace == "functions",
                tool.wireName == detail.wireName, request.allowedTools.contains(tool.wireName),
                tool.patchProjection == .local, equalJSON(tool.schema, AlibabaPatchProjection.local.schema) {
-                record["update_line_contract"] = "Each hunk.lines element is one source line. Its first character must be ASCII space (keep), + (add), or - (remove), followed by the exact source characters including indentation. A blank source line is represented by just its prefix: space, +, or -. Do not include CR, LF or NUL inside any element, including JSON escapes that decode to them. Use the observed target path and source; no call from the rejected response executed."
-                var withExample = record
-                withExample["example_arguments_template"] = ["operations": [["update": "/absolute/path/file.py",
-                    "hunks": [["lines": [" def f():", "-    old()", "+    new()", " "]]]]]]
-                if let feedback = boundedFeedback([withExample]) { return feedback }
+                record["typed_patch_contract"] = AlibabaPatchProjection.argumentContract
+                if let example = try? JSONSerialization.jsonObject(with: Data(AlibabaPatchProjection.updateExample.utf8)) {
+                    var withExample = record
+                    withExample["example_arguments_template"] = example
+                    if let feedback = boundedFeedback([withExample]) { return feedback }
+                }
                 // The optional example must not displace the actionable contract.
                 if let feedback = boundedFeedback([record]) { return feedback }
             }

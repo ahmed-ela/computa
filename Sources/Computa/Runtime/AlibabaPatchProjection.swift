@@ -27,20 +27,20 @@ enum AlibabaPatchProjection: Sendable, Equatable {
         }
     }
 
-    static let description = """
-        Supply operations as a JSON array of operation objects, including for one file. For add, provide source lines without prefixes. For update, each hunk has one or more literal lines beginning with a space (keep), + (add), or - (remove). Preserve whitespace after the prefix. An optional anchor locates the hunk. Use an empty anchor for an unnamed hunk. Later hunks require an anchor. Set end_of_file to true only to anchor the last hunk at EOF. To move a file, use move_to in an update with at least one hunk. Computa emits the patch control lines. Earlier native custom calls in history show the exact original patch as input.
+    // One contract is supplied initially and in the existing single correction.
+    // It describes provider arguments; native execution still receives literal
+    // compiled input and retains its own grammar, permissions and source checks.
+    static let argumentContract = """
+        Supply one JSON arguments object. operations is an array of operation objects, even for one file; never a JSON-encoded array or patch string.
+        An update uses update (observed absolute path), hunks (array), and each hunk's lines (array of strings). Each lines element is one source line: ASCII space (keep), + (add), or - (remove), then exact source characters including indentation. Blank source lines are " ", "+", or "-". No element may contain decoded CR, LF or NUL.
+        For add, supply add and unprefixed lines. Delete uses delete. Only update may use move_to. An optional anchor is exact observed context; empty means unnamed; later hunks need an anchor. end_of_file is true only to anchor the last hunk at EOF.
+        Computa emits native headers and @@ markers; do not add separate patch control records. Replace example paths/lines with observed source. Prior native custom calls remain original literal input in history, not examples of this function's JSON arguments.
         """
 
-    // This representation applies only to a current allowed, recognized native
-    // patch. It never rewrites user text, previous calls, or partial host policy.
-    static let updateExample = #"{"operations":[{"update":"/absolute/path/file.py","hunks":[{"lines":["-old","+new"]}]}]}"#
+    static let updateExample = #"{"operations":[{"update":"/absolute/path/file.py","hunks":[{"lines":[" def f():","-    old()","+    new()"," "]}]}]}"#
 
-    static let argumentDirections = """
-        Supply an arguments object whose operations field is a JSON array of operation objects, even for one edit.
-        An example update is \(updateExample).
-        Use the observed absolute target path for each operation, even after a terminal command used a different workdir. Replace the sample lines with observed source. Computa compiles the native patch headers and @@ hunk markers.
-        Each update line includes its actual space, + or - prefix. The native grammar checks below describe the compiled patch.
-        """
+    static let description = argumentContract + "\nExample update: " + updateExample
+    static let argumentDirections = argumentContract + "\nExample update: " + updateExample + "\nThe native grammar checks below apply to the compiled patch; supply the JSON arguments object described above."
 
     private static let developerVariants: [Data: String] = {
         var result: [Data: String] = [:]
@@ -66,19 +66,21 @@ enum AlibabaPatchProjection: Sendable, Equatable {
         let path: [String: Any] = ["type": "string", "minLength": 1, "pattern": #"^[^\r\n\u0000]+$"#]
         func nonemptyArray(of type: [String: Any]) -> [String: Any] { ["type": "array", "items": type, "minItems": 1] }
         let hunk = object(
-            ["anchor": line, "lines": nonemptyArray(of: ["type": "string", "pattern": #"^[ +\-][^\r\n\u0000]*$"#])],
+            ["anchor": line, "lines": nonemptyArray(of: ["type": "string", "pattern": #"^[ +\-][^\r\n\u0000]*$"#,
+                "description": "One source line with space/+/- prefix; preserve following indentation. Blank uses prefix alone. No CR/LF/NUL."])],
             ["lines"])
         let update = object(
             [
                 "update": path, "move_to": path, "hunks": nonemptyArray(of: hunk),
                 "end_of_file": ["type": "boolean", "enum": [true]],
             ], ["update", "hunks"])
-        let operations = nonemptyArray(of: [
+        var operations = nonemptyArray(of: [
             "oneOf": [
                 object(["add": path, "lines": nonemptyArray(of: line)], ["add", "lines"]),
                 object(["delete": path], ["delete"]), update,
             ]
         ])
+        operations["description"] = "An actual JSON array, not a JSON-encoded string. Follow the complete contract and example in the tool description."
         var fields: [String: Any] = ["operations": operations]
         if self == .environments { fields["environment_id"] = path }
         return object(fields, ["operations"])

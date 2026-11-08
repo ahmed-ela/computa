@@ -1940,9 +1940,17 @@ function computaQwenDOM(c) {
       if (event.target !== candidate.control || event.detail?.grant !== grant) return;
       count++;
       const value = event.detail;
-      if (Object.keys(value).sort().join(',') !== 'count,grant,invalid,text') { resultReason = 'result_fields'; return; }
+      if (Object.keys(value).sort().join(',') !== 'count,grant,invalid,invalidCause,text') { resultReason = 'result_fields'; return; }
       if (value.count !== 1) { resultReason = 'write_count'; return; }
-      if (value.invalid !== false) { resultReason = 'write_invalid'; return; }
+      if (value.invalid !== false) {
+        const reasons = {value_type:'write_invalid_type',value_size:'write_invalid_size',write_api:'write_invalid_api',
+          exec_command:'write_invalid_exec',click_exception:'write_invalid_click',hooks_changed:'write_invalid_hooks'};
+        resultReason = value.invalid !== true ? 'result_invalid'
+          : typeof value.invalidCause === 'string' && Object.prototype.hasOwnProperty.call(reasons, value.invalidCause)
+            ? reasons[value.invalidCause] : 'result_fields';
+        return;
+      }
+      if (value.invalidCause !== null) { resultReason = 'result_fields'; return; }
       if (typeof value.text !== 'string') { resultReason = 'write_type'; return; }
       if (value.text.length > 220_000) { resultReason = 'write_size'; return; }
       captured = value.text;

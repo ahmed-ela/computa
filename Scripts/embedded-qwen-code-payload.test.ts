@@ -32,7 +32,7 @@ function installCode(f:ReturnType<typeof fixture>, text=payload, controls=true) 
 }
 const channel={dispatch:'11a11111-1111-4111-8111-111111111111',result:'22a22222-2222-4222-8222-222222222222',secret:'33a33333-3333-4333-8333-333333333333'};
 const sink=readFileSync(new URL('../Sources/Computa/Resources/BrowserModels/qwen-code-payload.js',import.meta.url),'utf8');
-function installSink(f:ReturnType<typeof fixture>) {
+function installSink(f:ReturnType<typeof fixture>, resultTransform?:(value:any)=>any) {
   const listeners=new Map<string,Set<(e:any)=>void>>();let delegated=0;
   Object.assign(f.document,{addEventListener:(name:string,fn:any)=>{if(!listeners.has(name))listeners.set(name,new Set());listeners.get(name)!.add(fn);},removeEventListener:(name:string,fn:any)=>listeners.get(name)?.delete(fn)});
   const original=f.Node.prototype.dispatchEvent;
@@ -42,12 +42,12 @@ function installSink(f:ReturnType<typeof fixture>) {
   class Doc {execCommand(_:string){delegated++;return true;}}
   Object.setPrototypeOf(f.document,Doc.prototype);
   const navigator={clipboard:new Clipboard()};
-  const Event=class {constructor(public type:string,init:any){Object.assign(this,init);}};
+  const Event=class {constructor(public type:string,init:any){Object.assign(this,init);if(type===channel.result&&resultTransform)Object.assign(this,{detail:resultTransform(init.detail)});}};
   new Function('window','location','document','Clipboard','navigator','HTMLElement','HTMLButtonElement','Document','CustomEvent',sink.replace('__COMPUTA_QWEN_CODE_PAYLOAD_CONFIG__',JSON.stringify(channel)))(f.window,{origin:'https://chat.qwen.ai'},f.document,Clipboard,navigator,f.Node,f.Node,Doc,Event);
   return {navigator,delegated:()=>delegated};
 }
-async function owned(mode='plain', editorStyle?:string) {
-  const f=fixture(),s=installSink(f);
+async function owned(mode='plain', editorStyle?:string, resultTransform?:(value:any)=>any) {
+  const f=fixture(),s=installSink(f,resultTransform);
   await f.run('inspect');let selected=false;
   for(let i=0;i<8&&!selected;i++)selected=(await f.run('selectModel',{modelChoice:choice()})).selected===true;
   expect(selected).toBe(true);expect((await f.run('prepare')).prepared).toBe(true);
@@ -270,7 +270,7 @@ test('Qwen code candidate decline reports its first finite gate without private 
 });
 
 test('Qwen sampled refusal distinguishes finite sink cardinality and mutation without returning bytes or another click',async()=>{
-  for(const [kind,reason] of [['zero','write_count'],['double','write_count'],['invalid','write_invalid'],['mutation','synchronous_mutation']] as const){
+  for(const [kind,reason] of [['zero','write_count'],['double','write_count'],['invalid','write_invalid_size'],['mutation','synchronous_mutation']] as const){
     const t=await owned();t.x.copy.onClick=()=>{
       if(kind==='zero')return;
       t.s.navigator.clipboard.writeText(kind==='invalid'?'x'.repeat(220001):payload);
@@ -317,5 +317,56 @@ test('Qwen provider viewport style allowance preserves attributes visibility and
     if(bad==='after_digest')t.f.beforeDigest(mutate);else mutate();
     const result=await t.sample();expect(result.error,bad).toBeTruthy();expect(result.text).toBeUndefined();
     expect(t.x.copy.clicks).toBe(0);expect(t.f.send.clicks).toBe(1);expect(t.s.delegated()).toBe(0);
+  }
+});
+
+
+test('Qwen first invalid Copy cause is finite and cannot change the refusal or spend another grant',async()=>{
+  for(const [kind,reason] of [['type','write_invalid_type'],['size','write_invalid_size'],['api','write_invalid_api'],
+    ['exec','write_invalid_exec'],['click','write_invalid_click'],['hooks','write_invalid_hooks']] as const){
+    const t=await owned();t.x.copy.onClick=()=>{
+      t.s.navigator.clipboard.writeText(kind==='type'?42 as any:kind==='size'?'x'.repeat(220001):payload);
+      if(kind==='api')t.s.navigator.clipboard.write([]);
+      if(kind==='exec')t.f.document.execCommand(' CoPy ');
+      if(kind==='click')throw Error('PRIVATE_EXCEPTION_TEXT');
+      if(kind==='hooks')Object.defineProperty(t.s.navigator.clipboard,'writeText',{value:()=>Promise.resolve()});
+    };
+    const r=await t.sample();expect(r.error,kind).toBe('unsupported_response_format');expect(r.text).toBeUndefined();
+    expect(r.adapterFailureStructure).toEqual({version:1,provider:'qwen',trigger:'authored_source',stage:'code_sample',reason,count:0});
+    expect(JSON.stringify(r.adapterFailureStructure)).not.toContain('PRIVATE');
+    expect(t.x.copy.clicks).toBe(1);expect(t.f.send.clicks).toBe(1);expect(t.s.delegated()).toBe(0);
+    expect((await t.sample()).error).toBeTruthy();expect(t.x.copy.clicks).toBe(1);
+  }
+});
+test('Qwen invalid Copy cause latches first and preserves write-count and hook short-circuit order',async()=>{
+  for(const kind of ['first','count','hook_short_circuit']){
+    const t=await owned();t.x.copy.onClick=()=>{
+      t.s.navigator.clipboard.writeText(42 as any);
+      t.s.navigator.clipboard.write([]);
+      if(kind==='count')t.s.navigator.clipboard.writeText(payload);
+      if(kind==='hook_short_circuit')Object.defineProperty(t.s.navigator,'clipboard',{get(){throw Error('PRIVATE_GETTER');}});
+    };
+    const r=await t.sample();expect(r.adapterFailureStructure.reason).toBe(kind==='count'?'write_count':'write_invalid_type');
+    expect(r.text).toBeUndefined();expect(t.x.copy.clicks).toBe(1);expect(t.s.delegated()).toBe(0);
+  }
+});
+test('Qwen Copy result requires boolean flag and consistent closed cause without content disclosure',async()=>{
+  const cases:[string,(value:any)=>any,string][]=[
+    ['false_number',v=>({...v,invalid:0}),'result_invalid'],
+    ['null_flag',v=>({...v,invalid:null}),'result_invalid'],
+    ['string_flag',v=>({...v,invalid:'false'}),'result_invalid'],
+    ['undefined_flag',v=>({...v,invalid:undefined}),'result_invalid'],
+    ['false_cause',v=>({...v,invalidCause:'value_type'}),'result_fields'],
+    ['true_null',v=>({...v,invalid:true}),'result_fields'],
+    ['unknown_cause',v=>({...v,invalid:true,invalidCause:'PRIVATE_CAUSE'}),'result_fields'],
+    ['object_cause',v=>({...v,invalid:true,invalidCause:{text:'PRIVATE_TEXT'}}),'result_fields'],
+    ['missing_cause',v=>{const {invalidCause,...rest}=v;return rest;},'result_fields'],
+    ['extra',v=>({...v,extra:'PRIVATE_TEXT'}),'result_fields']
+  ];
+  for(const [name,transform,reason] of cases){
+    const t=await owned('plain',undefined,transform),r=await t.sample();
+    expect(r.error,name).toBe('unsupported_response_format');expect(r.text).toBeUndefined();
+    expect(r.adapterFailureStructure.reason,name).toBe(reason);expect(JSON.stringify(r.adapterFailureStructure)).not.toContain('PRIVATE');
+    expect(t.x.copy.clicks).toBe(1);expect(t.s.delegated()).toBe(0);
   }
 });
