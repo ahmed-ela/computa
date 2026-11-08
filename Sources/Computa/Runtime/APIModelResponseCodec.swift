@@ -470,6 +470,22 @@ enum APIModelResponseCodec {
     static let correctiveFeedback = "Native validation rejected the preceding provider response because tool arguments did not match the offered JSON schemas. No call from that rejected response was executed. Produce a new response using only the unchanged offered tools and exact schema-valid arguments. Preserve the confirmed outcomes in the supplied history; do not repeat actions already completed in that history."
 
     static let schemaFeedbackMarker = "Trusted schema validation details (from the unchanged offered tools):\n"
+    // The inner end assertion is absolute: unlike $, it cannot stop before a
+    // final LF. This excludes only the captured suffix with zero or one LF.
+    static let alibabaLiteralPatchPattern = #"^(?![\s\S]*\n@@\n\*\*\* End Patch\n?(?![\s\S]))[\s\S]*$"#
+    private static let literalCustomInputDescription = "Literal native tool input. Follow the exact text or grammar contract in this function's description, including delimiters and newlines. Encode the contents once as this JSON string; do not add quoting, JSON, shell syntax or Markdown fences unless the native contract requires them."
+    private static let alibabaPatchTailGuidance = " For an update, every @@ header needs at least one following source line (space, + or - prefix). Close the patch with *** End Patch. Example decoded update tail with sample lines:\n@@\n-old\n+new\n*** End Patch"
+    private static func literalCustomInputSchema(description: String, pattern: String? = nil) -> [String: Any] {
+        var input: [String: Any] = ["type": "string", "description": description]
+        if let pattern { input["pattern"] = pattern }
+        return ["type": "object", "properties": ["input": input], "required": ["input"], "additionalProperties": false]
+    }
+    private static func isAlibabaLiteralPatchPatternTool(_ tool: Tool) -> Bool {
+        guard tool.requiresUnambiguousArguments, tool.custom, tool.name == "apply_patch",
+              tool.namespace == nil || tool.namespace == "functions", tool.patchProjection == nil else { return false }
+        return equalJSON(tool.schema, literalCustomInputSchema(description: literalCustomInputDescription + alibabaPatchTailGuidance,
+                                                               pattern: alibabaLiteralPatchPattern))
+    }
     static func correctiveRequest(_ original: Request, rejectionDetails: [ArgumentRejectionDetail] = []) throws -> Request {
         guard original.provider.wireAPI == .chatCompletions,
               var body = try JSONSerialization.jsonObject(with: original.body) as? [String: Any],
@@ -530,6 +546,21 @@ enum APIModelResponseCodec {
             let suffix = "\n\n" + schemaFeedbackMarker + text
             guard request.body.count + 2 * (correctiveFeedback.utf8.count + suffix.utf8.count) + 64 <= maximumText else { return nil }
             return suffix
+        }
+        // This is the exact declared string pattern, not a new parser or repair.
+        // Only one admitted failure may add static guidance to the same correction.
+        if details.count == 1, let detail = details.first, var record = records.first,
+           detail.constraint == .schemaMismatch, detail.path == [.property("input")],
+           request.provider.wireAPI == .chatCompletions, request.provider.isAlibabaModelStudioInference,
+           request.model.id == "qwen3.7-flash", request.tools.indices.contains(detail.toolIndex) {
+            let tool = request.tools[detail.toolIndex]
+            if isAlibabaLiteralPatchPatternTool(tool),
+               tool.wireName == detail.wireName, request.allowedTools.contains(tool.wireName),
+               record["schema_path"] as? [String] == ["properties", "input"] {
+                record["literal_input_rule"] = "no_empty_trailing_update_hunk"
+                record["literal_input_guidance"] = "The declared input pattern forbids a bare @@ immediately before the final *** End Patch footer (with optional final LF). Every update hunk header needs following source-prefixed lines. Produce a new literal patch using the offered native grammar and observed source."
+                if let feedback = boundedFeedback([record]) { return feedback }
+            }
         }
         // Teach both layers together within the one already-admitted correction:
         // an outer array failure can otherwise consume the budget before the
@@ -853,15 +884,15 @@ enum APIModelResponseCodec {
             if !absent(definition["description"]), !(definition["description"] is String) { throw Failure.invalidTool }
             if !absent(definition["strict"]), strictBool(definition["strict"]) == nil { throw Failure.invalidTool }
             let custom = type == "custom"
-            // Retain exact provider/model/native-grammar admission only for the
-            // outer wrapper's ambiguity guard. Every custom tool still receives
+            // Exact admission grants only wrapper ambiguity rejection and the
+            // declared terminal-hunk pattern. Every custom tool still receives
             // its existing literal-input transport and verbatim native grammar.
             let admittedLiteralPatch = literalPatch && AlibabaPatchProjection.matching(definition, namespace: namespace) != nil
             let schema: [String: Any]
             if custom {
                 // Put the literal-input contract on the argument the provider fills,
                 // while preserving the complete native grammar in the description.
-                var inputDescription = "Literal native tool input. Follow the exact text or grammar contract in this function's description, including delimiters and newlines. Encode the contents once as this JSON string; do not add quoting, JSON, shell syntax or Markdown fences unless the native contract requires them."
+                var inputDescription = literalCustomInputDescription
                 // Both bundled Rust apply_patch grammars use these update and footer rules.
                 // Describe the suffix on the string field; the engine still parses the original input.
                 if alibabaPatchGuidance, name == "apply_patch", namespace == nil || namespace == "functions",
@@ -872,10 +903,11 @@ enum APIModelResponseCodec {
                     if rules.contains(#"end_patch: "*** End Patch" LF?"#),
                        rules.contains(#"change_context: ("@@" | "@@ " /(.+)/) LF"#),
                        rules.contains(#"change_line: ("+" | "-" | " ") /(.*)/ LF"#) {
-                        inputDescription += " For an update, every @@ header needs at least one following source line (space, + or - prefix). Close the patch with *** End Patch. Example decoded update tail with sample lines:\n@@\n-old\n+new\n*** End Patch"
+                        inputDescription += alibabaPatchTailGuidance
                     }
                 }
-                schema = ["type": "object", "properties": ["input": ["type": "string", "description": inputDescription]], "required": ["input"], "additionalProperties": false]
+                schema = literalCustomInputSchema(description: inputDescription,
+                    pattern: admittedLiteralPatch ? alibabaLiteralPatchPattern : nil)
             } else {
                 guard var parameters = definition["parameters"] as? [String: Any], parameters["type"] as? String == "object" else { throw Failure.invalidTool }
                 try checkSchema(parameters)
@@ -1914,6 +1946,13 @@ enum APIModelResponseCodec {
                 }
                 var violation = localizeSchemaFailure(object, schema: diagnosticSchema, depth: 0, path: [], nodes: &nodes)
                     ?? .init(constraint: .schemaMismatch, path: [])
+                // matches() already rejected this exact closed native wrapper.
+                // Localize only its declared pattern, never a foreign string rule.
+                if isAlibabaLiteralPatchPatternTool(tool), object.count == 1,
+                   let literal = object["input"] as? String,
+                   literal.range(of: alibabaLiteralPatchPattern, options: .regularExpression) == nil {
+                    violation = .init(constraint: .schemaMismatch, path: [.property("input")], actualType: .string)
+                }
                 // The parsed root is known even when the failing constraint
                 // is not localized. Exact native-schema checks still decide
                 // whether this finite fact can name a built-in tool.

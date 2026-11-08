@@ -3753,6 +3753,8 @@ final class APIModelResponseCodecTests: XCTestCase {
                                 let properties = try XCTUnwrap(schema["properties"] as? [String: [String: Any]])
                                 XCTAssertEqual(Set(properties.keys), ["input"])
                                 XCTAssertEqual(properties["input"]?["type"] as? String, "string")
+                                XCTAssertEqual(properties["input"]?["pattern"] as? String, APIModelResponseCodec.alibabaLiteralPatchPattern)
+                                XCTAssertNil(fn["strict"], "No unverified provider function.strict flag is added")
                                 XCTAssertEqual(schema["required"] as? [String], ["input"])
                                 XCTAssertEqual(schema["additionalProperties"] as? Bool, false)
                                 XCTAssertNil(req.tools[0].patchProjection)
@@ -3800,6 +3802,7 @@ final class APIModelResponseCodecTests: XCTestCase {
             let req = try request(["tools": [definition]], provider: p)
             XCTAssertFalse(req.tools[0].requiresUnambiguousArguments)
             XCTAssertNil(req.tools[0].patchProjection)
+            XCTAssertNil((req.tools[0].schema["properties"] as? [String: [String: Any]])?["input"]?["pattern"])
             XCTAssertEqual(Set(try XCTUnwrap(req.tools[0].schema["properties"] as? [String: Any]).keys), ["input"])
         }
         let responses = APIProviderDefinition(id: alibaba.id, name: alibaba.name, baseURL: alibaba.baseURL,
@@ -3968,5 +3971,163 @@ final class APIModelResponseCodecTests: XCTestCase {
         XCTAssertThrowsError(try APIModelResponseCodec.decode(result, request: denied)) {
             XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
         }
+    }
+
+    private var observed446TrailingEmptyPatch: String { "*** Begin Patch\n*** Update File: /Users/ahmed/Documents/Codex/2026-10-05/testing-testing-okay-the-mic-works/work/all-models-20261102/alibaba/coding446/case/coding/reconcile.py\n@@\n def summarize(items):\n     \"\"\"Aggregate normalized SKUs, quantities, and exact integer-cent subtotals.\"\"\"\n     grouped = {}\n     for item in items:\n         sku = item[\"sku\"].strip().upper()\n-        grouped[sku] = {\n-            \"sku\": sku,\n-            \"quantity\": item[\"quantity\"],\n-            \"subtotal_cents\": item[\"quantity\"] * item[\"unit_cents\"],\n-        }\n+        if sku not in grouped:\n+            grouped[sku] = {\"sku\": sku, \"quantity\": 0, \"subtotal_cents\": 0}\n+        grouped[sku][\"quantity\"] += item[\"quantity\"]\n+        grouped[sku][\"subtotal_cents\"] += item[\"quantity\"] * item[\"unit_cents\"]\n     rows = [grouped[sku] for sku in sorted(grouped)]\n     return {\"items\": rows, \"total_cents\": sum(row[\"subtotal_cents\"] for row in rows)}\n@@\n*** End Patch" }
+
+    func testAlibabaLiteralPatternRejectsObservedCanonicalEmptyHunkBeforeAnySibling() throws {
+        for naming: APIModelResponseCodec.ToolNaming in [.legacy, .semantic] {
+            for environments in [false, true] {
+                let req = try request(["tools": [["type": "namespace", "name": "functions", "tools": [nativePatch(environments: environments)]]]], provider: literalPatchProvider(), toolNaming: naming)
+                let sibling: [String: Any] = ["id": "valid-sibling", "type": "function", "function": ["name": req.tools[0].wireName,
+                    "arguments": #"{"input":"*** Begin Patch\n*** Delete File: /synthetic/sibling\n*** End Patch"}"#]]
+                for literal in [observed446TrailingEmptyPatch, observed446TrailingEmptyPatch + "\n"] {
+                    let arguments = String(decoding: try JSONSerialization.data(withJSONObject: ["input": literal]), as: UTF8.self)
+                    var observed: APIModelResponseCodec.ArgumentValidationDiagnostic?
+                    let result = try correctionResult(req, arguments: arguments, additionalCalls: [sibling])
+                    guard case .argumentsRejected(_, let details) = try APIModelResponseCodec.decodeForCorrection(result, request: req,
+                        onArgumentRejection: { observed = $0 }) else { return XCTFail("No native call or valid sibling may be released") }
+                    XCTAssertEqual(observed?.reason, .schemaMismatch)
+                    XCTAssertEqual(observed?.callCount, 2); XCTAssertEqual(observed?.rejectedCount, 1)
+                    XCTAssertEqual(details.count, 1); XCTAssertEqual(details.first?.constraint, .schemaMismatch)
+                    XCTAssertEqual(details.first?.path, [.property("input")])
+                    XCTAssertEqual(details.first?.patchProbe?.projection, .literalInput)
+                    XCTAssertThrowsError(try APIModelResponseCodec.decode(result, request: req)) {
+                        XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+                    }
+                }
+            }
+        }
+    }
+
+    func testAlibabaLiteralPatternPreservesSourcePrefixesAndUninterceptedInputBytes() throws {
+        let req = try request(["tools": [nativePatch()]], provider: literalPatchProvider())
+        let prefix = "*** Begin Patch\n*** Update File: /synthetic/file\n@@\n-old\n+new\n"
+        let literals = [
+            prefix + "*** End Patch", prefix + "*** End Patch\n",
+            prefix + "+@@\n*** End Patch", prefix + "-@@\n*** End Patch", prefix + " @@\n*** End Patch",
+            prefix + "@@\n \n*** End Patch", prefix + "@@ named anchor\n context\n*** End Patch",
+            "*** Begin Patch\n*** Add File: /synthetic/file\n+@@\n+*** End Patch\n*** End Patch",
+            observed446TrailingEmptyPatch + "\n\n", // Out of this narrow pattern, not a native grammar pass.
+            observed446TrailingEmptyPatch.replacingOccurrences(of: "\n", with: "\r\n"),
+            observed446TrailingEmptyPatch + " ", observed446TrailingEmptyPatch + "\u{2028}",
+        ]
+        for literal in literals {
+            let arguments = String(decoding: try JSONSerialization.data(withJSONObject: ["input": literal]), as: UTF8.self)
+            let reply = try APIModelResponseCodec.decode(correctionResult(req, arguments: arguments), request: req)
+            let item = try XCTUnwrap((reply.response["output"] as? [[String: Any]])?.first)
+            XCTAssertEqual(Data(try XCTUnwrap(item["input"] as? String).utf8), Data(literal.utf8))
+        }
+    }
+
+    func testAlibabaLiteralPatternCorrectionUsesStaticGuidanceAndPreservesFailedHistory() throws {
+        let failure = "apply_patch verification failed: invalid hunk at line 21, Update hunk does not contain any lines"
+        let history: [[String: Any]] = [["role": "user", "content": "Authorized coding fixture"],
+            ["type": "custom_tool_call", "name": "apply_patch", "call_id": "failed446", "input": observed446TrailingEmptyPatch],
+            ["type": "custom_tool_call_output", "call_id": "failed446", "output": failure],
+            ["role": "user", "content": "Use current observed source and preserve completed outcomes."]]
+        for naming: APIModelResponseCodec.ToolNaming in [.legacy, .semantic] {
+            let req = try request(["tools": [nativePatch()], "input": history], provider: literalPatchProvider(), toolNaming: naming)
+            let bad = String(decoding: try JSONSerialization.data(withJSONObject: ["input": observed446TrailingEmptyPatch]), as: UTF8.self)
+            let details = try rejectedDetails(req, arguments: bad)
+            let (records, payload) = try schemaFeedback(req, details: details)
+            let record = try XCTUnwrap(records.first)
+            XCTAssertEqual(record["constraint"] as? String, "schema_mismatch")
+            XCTAssertEqual(record["schema_path"] as? [String], ["properties", "input"])
+            XCTAssertEqual(record["expected_types"] as? [String], ["string"])
+            XCTAssertEqual(record["literal_input_rule"] as? String, "no_empty_trailing_update_hunk")
+            XCTAssertTrue((record["literal_input_guidance"] as? String ?? "").contains("following source-prefixed lines"))
+            XCTAssertNil(record["typed_patch_contract"]); XCTAssertNil(record["example_arguments_template"])
+            XCTAssertFalse(payload.contains("/Users/ahmed/")); XCTAssertFalse(payload.contains("reconcile.py"))
+            XCTAssertLessThanOrEqual(payload.utf8.count, 1_536)
+            let corrected = try APIModelResponseCodec.correctiveRequest(req, rejectionDetails: details)
+            let before = try XCTUnwrap(JSONSerialization.jsonObject(with: req.body) as? [String: Any])
+            let after = try XCTUnwrap(JSONSerialization.jsonObject(with: corrected.body) as? [String: Any])
+            XCTAssertEqual(before["tools"] as? NSArray, after["tools"] as? NSArray)
+            let a = try XCTUnwrap(before["messages"] as? [[String: Any]])
+            let b = try XCTUnwrap(after["messages"] as? [[String: Any]])
+            XCTAssertEqual(Array(a.dropFirst()) as NSArray, Array(b.dropFirst()) as NSArray)
+            let call = try XCTUnwrap(a.compactMap { $0["tool_calls"] as? [[String: Any]] }.first?.first)
+            let args = try XCTUnwrap((call["function"] as? [String: Any])?["arguments"] as? String)
+            let old = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(args.utf8)) as? [String: String])
+            XCTAssertEqual(Data(try XCTUnwrap(old["input"]).utf8), Data(observed446TrailingEmptyPatch.utf8))
+            XCTAssertEqual(a.first { $0["tool_call_id"] as? String == "failed446" }?["content"] as? String, failure)
+            XCTAssertEqual(req.allowedTools, corrected.allowedTools); XCTAssertEqual(req.historyCallIDs, corrected.historyCallIDs)
+            XCTAssertEqual(req.requiredTool, corrected.requiredTool); XCTAssertEqual(req.maximumCalls, corrected.maximumCalls)
+            let valid = "*** Begin Patch\n*** Update File: /synthetic/file\n@@\n-old\n+new\n*** End Patch"
+            let next = String(decoding: try JSONSerialization.data(withJSONObject: ["input": valid]), as: UTF8.self)
+            let reply = try APIModelResponseCodec.decode(correctionResult(corrected, arguments: next), request: corrected)
+            XCTAssertEqual((reply.response["output"] as? [[String: Any]])?.first?["input"] as? String, valid)
+            XCTAssertThrowsError(try APIModelResponseCodec.decode(correctionResult(corrected, arguments: bad), request: corrected))
+        }
+    }
+
+    func testAlibabaLiteralPatternFeedbackRefusesForeignAuthorityAndWrongLocalization() throws {
+        let req = try request(["tools": [nativePatch()]], provider: literalPatchProvider(), toolNaming: .semantic)
+        let bad = String(decoding: try JSONSerialization.data(withJSONObject: ["input": observed446TrailingEmptyPatch]), as: UTF8.self)
+        let details = try rejectedDetails(req, arguments: bad), real = try XCTUnwrap(details.first)
+        let denied = try request(["tools": [nativePatch()], "tool_choice": "none"], provider: literalPatchProvider(), toolNaming: .semantic)
+        let foreign = try request(["tools": [["type": "function", "name": "apply_patch", "parameters": req.tools[0].schema]]], provider: literalPatchProvider(), toolNaming: .semantic)
+        let wrongWire = APIModelResponseCodec.ArgumentRejectionDetail(toolIndex: 0, wireName: "PRIVATE_UNOFFERED", constraint: .schemaMismatch, path: [.property("input")])
+        let wrongPath = APIModelResponseCodec.ArgumentRejectionDetail(toolIndex: 0, wireName: real.wireName, constraint: .schemaMismatch, path: [.property("PRIVATE_UNKNOWN")])
+        let wrongConstraint = APIModelResponseCodec.ArgumentRejectionDetail(toolIndex: 0, wireName: real.wireName, constraint: .typeMismatch, path: [.property("input")])
+        for (candidate, failures) in [(denied, details), (foreign, try rejectedDetails(foreign, arguments: bad)),
+            (req, [wrongWire]), (req, [wrongPath]), (req, [wrongConstraint]), (req, details + details),
+            (req, try rejectedDetails(req, arguments: "{}")), (req, try rejectedDetails(req, arguments: #"{"input":17}"#))] {
+            let (records, payload) = try schemaFeedback(candidate, details: failures)
+            XCTAssertFalse(records.contains { $0["literal_input_rule"] != nil || $0["literal_input_guidance"] != nil })
+            XCTAssertFalse(payload.contains("PRIVATE_"))
+        }
+        XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(correctionResult(denied, arguments: bad), request: denied)) {
+            XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
+        }
+        let unknown: [String: Any] = ["id": "unoffered", "type": "function", "function": ["name": "PRIVATE_UNOFFERED", "arguments": "{}"]]
+        XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(correctionResult(req, arguments: bad, additionalCalls: [unknown]), request: req)) {
+            XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
+        }
+    }
+
+    func testAlibabaLiteralPatternCorrectionKeepsOriginalBriefAtTheRequestByteBoundary() throws {
+        func sized(_ count: Int) throws -> APIModelResponseCodec.Request {
+            try request(["tools": [nativePatch()], "input": [["role": "user", "content": String(repeating: "x", count: count)]]], provider: literalPatchProvider(), toolNaming: .semantic)
+        }
+        let small = try sized(0)
+        let bad = String(decoding: try JSONSerialization.data(withJSONObject: ["input": observed446TrailingEmptyPatch]), as: UTF8.self)
+        let details = try rejectedDetails(small, arguments: bad)
+        var brief = try XCTUnwrap(schemaFeedback(small, details: details).0.first)
+        XCTAssertNotNil(brief.removeValue(forKey: "literal_input_rule"))
+        XCTAssertNotNil(brief.removeValue(forKey: "literal_input_guidance"))
+        let json = try JSONSerialization.data(withJSONObject: [brief], options: [.sortedKeys, .withoutEscapingSlashes])
+        let suffix = "\n\n" + APIModelResponseCodec.schemaFeedbackMarker + String(decoding: json, as: UTF8.self)
+        let needed = 2 * (APIModelResponseCodec.correctiveFeedback.utf8.count + suffix.utf8.count) + 64
+        let boundary = try sized(2_000_000 - needed - small.body.count)
+        XCTAssertEqual(boundary.body.count + needed, 2_000_000)
+        XCTAssertEqual(try schemaFeedback(boundary, details: details).0 as NSArray, [brief] as NSArray)
+        let beyond = try sized(2_000_000 - needed - small.body.count + 1)
+        XCTAssertTrue(try schemaFeedback(beyond, details: details).0.isEmpty)
+    }
+
+    func testAlibabaLiteralPatternStreamRejectsBeforeAnyNativeInputPublication() throws {
+        let p = literalPatchProvider(), req = try request(["tools": [nativePatch()]], provider: literalPatchProvider(), toolNaming: .semantic)
+        let arguments = String(decoding: try JSONSerialization.data(withJSONObject: ["input": observed446TrailingEmptyPatch]), as: UTF8.self)
+        let middle = arguments.index(arguments.startIndex, offsetBy: arguments.count / 2)
+        let parts = [String(arguments[..<middle]), String(arguments[middle...])]
+        let chunks: [[String: Any]] = [
+            ["choices": [["index": 0, "delta": ["role": "assistant", "tool_calls": [["index": 0, "id": "stream-pattern", "type": "function", "function": ["name": req.tools[0].wireName, "arguments": parts[0]]]]], "finish_reason": NSNull()]]],
+            ["choices": [["index": 0, "delta": ["tool_calls": [["index": 0, "function": ["arguments": parts[1]]]]], "finish_reason": NSNull()]]],
+            ["choices": [["index": 0, "delta": [:], "finish_reason": "tool_calls"]]],
+            ["choices": [], "usage": ["prompt_tokens": 5, "completion_tokens": 4, "total_tokens": 9]]]
+        var data = Data()
+        for chunk in chunks {
+            data.append(Data("data: ".utf8))
+            data.append(try JSONSerialization.data(withJSONObject: chunk.merging(["id": "literal-pattern", "model": p.models[0].id]) { old, _ in old }))
+            data.append(Data("\n\n".utf8))
+        }
+        XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(.init(body: data, contentType: "text/event-stream"), request: req))
+        data.append(Data("data: [DONE]\n\n".utf8))
+        let result = APIProviderHTTPClient.Result(body: data, contentType: "text/event-stream")
+        guard case .argumentsRejected(_, let details) = try APIModelResponseCodec.decodeForCorrection(result, request: req) else { return XCTFail("No reply may publish native input") }
+        XCTAssertEqual(details.first?.path, [.property("input")])
+        XCTAssertThrowsError(try APIModelResponseCodec.decode(result, request: req))
     }
 }
