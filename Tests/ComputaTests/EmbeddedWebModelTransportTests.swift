@@ -807,12 +807,17 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let request = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
             "model": syntheticChatGPTModelID, "input": "Synthetic exact patch bytes", "tools": [["type": "custom", "name": "apply_patch"]]]))
         for variant in ["legacy", "legacyMutation", "observed", "observedMutation", "observedExtraContents",
-                        "observedFenced", "observedFencedMutation"] {
+                        "observedFenced", "observedFencedMutation", "observedViewport", "observedViewportClipMutation"] {
+            print("LiteralDIL fixture variant: \(variant)")
             let observed = variant.hasPrefix("observed"), mutate = variant.hasSuffix("Mutation")
             let extraContents = variant == "observedExtraContents"
+            let viewportClip = variant.hasPrefix("observedViewport"), clipMutation = variant == "observedViewportClipMutation"
             // Both authorized response framings use the identical observed run
             // tree. Return the whole source, including the exact fence bytes.
-            let literal = observed && !variant.contains("Fenced") ? raw : fenced
+            // The clip mutation uses compact tool JSON whose rendered fallback
+            // is byte-identical; rejection must come from fresh literal proof.
+            let literal = clipMutation ? "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"apply_patch\",\"input\":\"synthetic\"}]}"
+                : observed && !variant.contains("Fenced") ? raw : fenced
             let (fixture, token, view) = try await boundInspectionFixture(prompt: "Keep the exact owned literal patch")
             defer { fixture.shutdown() }
             let facts = try await evaluate(view, """
@@ -839,11 +844,21 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                   source.append(tail);
                 }
                 answer.replaceChildren(source);
+                if(\(viewportClip)){
+                  const clip=el('main');clip.style.cssText='position:fixed;left:0;top:0;width:100vw;height:100vh;border-radius:0;clip-path:border-box';
+                  // Keep the original assistant + Copy footer together below
+                  // MAIN: the production footer walk deliberately stops at MAIN.
+                  const turn=answer.parentElement;turn.before(clip);clip.append(turn);window.fixtureLiteralViewport=clip;
+                }
                 window.fixtureLiteralSpan=span;window.fixtureLiteralRendered=answer.innerText;
-                return {literal:answer.textContent,rendered:answer.innerText,whiteSpace:getComputedStyle(p).whiteSpace};
+                return {literal:answer.textContent,rendered:answer.innerText,whiteSpace:getComputedStyle(p).whiteSpace,
+                  copyBelowMain:answer.parentElement.tagName==='SECTION'&&answer.parentElement.querySelectorAll('.turn-action-controls button[aria-label="Copy"]').length===1};
                 """) as? [String: Any]
             XCTAssertEqual(facts?["literal"] as? String, literal + (extraContents ? "EXTRA" : ""), variant)
-            XCTAssertNotEqual(facts?["rendered"] as? String, literal, variant)
+            XCTAssertEqual(facts?["copyBelowMain"] as? Bool, true, variant)
+            if clipMutation {
+                XCTAssertEqual((facts?["rendered"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), literal)
+            } else { XCTAssertNotEqual(facts?["rendered"] as? String, literal, variant) }
             XCTAssertEqual(facts?["whiteSpace"] as? String, observed ? "pre-line" : "normal", variant)
             if mutate {
                 // Replacing the fixture's original answer starts a new quiet
@@ -856,7 +871,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                     window.fixtureLiteralProofOpens=0; window.fixtureLiteralMutated=false;
                     document.getElementById('fixture-model-trigger').addEventListener('click', event=>{
                       if(event.currentTarget.getAttribute('aria-expanded')!=='true'||++window.fixtureLiteralProofOpens!==2)return;
-                      window.fixtureLiteralSpan.textContent=window.fixtureLiteralSpan.textContent.replace('+    def','+        def');
+                      if(\(clipMutation))window.fixtureLiteralViewport.style.width='calc(100vw - 1px)';
+                      else window.fixtureLiteralSpan.textContent=window.fixtureLiteralSpan.textContent.replace('+    def','+        def');
                       window.fixtureLiteralMutated=true;
                     });return true;
                     """)
@@ -864,6 +880,12 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptConversation)) }
                 let after = try await evaluate(view, "return {changed:window.fixtureLiteralMutated,renderedSame:document.querySelector('[data-markdown-text-style=\"assistant-message\"]').innerText===window.fixtureLiteralRendered};") as? [String: Bool]
                 XCTAssertEqual(after?["changed"], true); XCTAssertEqual(after?["renderedSame"], true)
+                if clipMutation {
+                    let bytes = try await evaluate(view, "return {literal:window.fixtureLiteralSpan.textContent,fallback:document.querySelector('[data-markdown-text-style=\"assistant-message\"]').innerText.trim(),opens:window.fixtureLiteralProofOpens};") as? [String: Any]
+                    XCTAssertEqual(bytes?["literal"] as? String, literal)
+                    XCTAssertEqual(bytes?["fallback"] as? String, literal)
+                    XCTAssertEqual(bytes?["opens"] as? Int, 2)
+                }
             } else {
                 let complete = try await waitForState("complete", fixture.transport, token: token)
                 try assertChoiceEvidence(complete, choice: Self.fixtureChoice(.chatgpt))

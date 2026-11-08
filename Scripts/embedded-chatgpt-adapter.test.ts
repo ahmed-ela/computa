@@ -526,7 +526,10 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
       stroke: node.values.stroke ?? 'none', strokeOpacity: node.values['stroke-opacity'] ?? '0', strokeWidth: node.values['stroke-width'] ?? '0',
       content: pseudo === '::before' ? node.beforeContent : node.afterContent,
       textTransform: (node as any).literalTransform || 'none', webkitTextSecurity: (node as any).literalSecurity || 'none',
-      contentVisibility: (node as any).literalContentVisibility || 'visible', filter: (node as any).literalFilter || 'none', clipPath: (node as any).literalClip || 'none' }), Observer, (callback: () => void, delay: number) => {
+      contentVisibility: (node as any).literalContentVisibility || 'visible', filter: (node as any).literalFilter || 'none', clipPath: (node as any).literalClip || 'none',
+      borderTopLeftRadius:'0px',borderTopRightRadius:'0px',borderBottomLeftRadius:'0px',borderBottomRightRadius:'0px',
+      transform:'none',translate:'none',rotate:'none',scale:'none',perspective:'none',offsetPath:'none',zoom:'1',
+      ...(node as any).clipStyles }), Observer, (callback: () => void, delay: number) => {
       timers.push(callback); scheduledDelays.push(delay);
     }, world, { subtle: { digest: async (algorithm: string, data: Uint8Array) => {
       digestInputs.push(new TextDecoder().decode(data));
@@ -1516,7 +1519,7 @@ describe('ChatGPT literal terminal source equivalence', () => {
   const end = source.indexOf('function chatGPTTerminalCompletionMatches(observed) {', start);
   const extractionStart = source.indexOf('function modelResponseExtraction(answer) {');
   const extractionEnd = source.indexOf('function modelResponseText(', extractionStart);
-  const read = new Function('rawSource', 'answer', 'messageID', 'getComputedStyle',
+  const read = new Function('rawSource', 'answer', 'messageID', 'getComputedStyle', 'document', 'window',
     source.slice(start, end) + source.slice(extractionStart, extractionEnd)
       + 'const extraction=modelResponseExtraction(answer);return {relation:chatGPTTerminalResponseTextRelation(rawSource,answer,extraction,messageID),text:extraction.text,flags:extraction.flags};');
   const style = (node: any, pseudo?: string) => ({ visibility: node.cssVisibility || 'visible',
@@ -1700,6 +1703,59 @@ describe('ChatGPT literal terminal source equivalence', () => {
     delete x.copy.values.title;delete x.p.literalTransform;
     expect(x.read().flags).not.toHaveProperty('literalDILDecline');
     expect(x.read().flags.selectedExtraction).toBe('literal_dil');
+  });
+  function viewportClipFixture() {
+    const raw=JSON.stringify({type:'tool_calls',calls:[{name:'apply_patch',input:'+    exact\n+        λ😀'}]});
+    const x=streamRun(raw), main:any=new Element('MAIN'), body:any=new Element('BODY'), html:any=new Element('HTML');
+    main.append(x.answer);body.append(main);html.append(body);main.literalClip='border-box';
+    const rect={x:0,y:0,left:0,top:0,right:360,bottom:527,width:360,height:527};
+    main.getClientRects=()=>[rect];
+    const document={documentElement:html}, window:any={innerWidth:360,innerHeight:527,
+      visualViewport:{width:360,height:527,scale:1,offsetLeft:0,offsetTop:0}};
+    const computed=(node:any,pseudo?:string)=>({...style(node,pseudo),borderTopLeftRadius:'0px',borderTopRightRadius:'0px',
+      borderBottomLeftRadius:'0px',borderBottomRightRadius:'0px',transform:'none',translate:'none',rotate:'none',scale:'none',
+      perspective:'none',offsetPath:'none',zoom:'1',...node.clipStyles});
+    const inspect=()=>read(raw,x.answer,messageID,computed,document,window);
+    return {...x,raw,main,body,html,rect,document,window,computed,inspect};
+  }
+  test('literal DIL viewport border clip preserves bytes and ordinary offscreen content without a persistent grant',()=>{
+    const x=viewportClipFixture();x.main.getAnimations=()=>[{}]; // Unrelated animation is not clipping authority.
+    for(const coords of [{left:0,top:0,right:360,bottom:527,width:360,height:527},
+      {left:-20,top:-40,right:380,bottom:600,width:400,height:640}]) {
+      Object.assign(x.rect,coords);const result=x.inspect();
+      expect(result.flags).toMatchObject({selectedExtraction:'literal_dil',extractionReason:'accepted_literal_dil'});
+      expect(result.text).toBe(x.raw);expect(result.relation).toBe('exact');
+    }
+    // Normal scrolling remains allowed; only additional clipping inside the
+    // viewport is excluded, without requiring every answer line on screen.
+    x.answer.getBoundingClientRect=()=>({x:16,y:900,width:328,height:130,top:900,left:16,right:344,bottom:1030});
+    expect(x.inspect().flags.selectedExtraction).toBe('literal_dil');
+    x.rect.right=359;expect(x.inspect().flags.literalDILAncestorMasking).toEqual({depth:2,tag:'main',property:'clip_path'});
+    x.rect.right=380;expect(x.inspect().flags.selectedExtraction).toBe('literal_dil');
+    x.run.text=x.run.text.replace('+    exact','+        exact');expect(x.inspect().relation).toBeNull();
+  });
+  test('literal DIL viewport border clip refuses narrowed rounded transformed fragmented and ambiguous viewports',()=>{
+    const cases:[string,(x:any)=>void][]=[
+      ...['inset(0px)','padding-box','content-box','fill-box','border-box inset(0px)','url(#clip)'].map(value=>[value,(x:any)=>x.main.literalClip=value] as [string,(x:any)=>void]),
+      ...['left','top'].map(key=>[key,(x:any)=>x.rect[key]=0.01] as [string,(x:any)=>void]),
+      ['right',(x:any)=>x.rect.right=359.99],['bottom',(x:any)=>x.rect.bottom=526.99],
+      ['zero-width',(x:any)=>x.rect.width=0],['nan',(x:any)=>x.rect.left=NaN],['infinity',(x:any)=>x.rect.right=Infinity],
+      ['multiple',(x:any)=>x.main.getClientRects=()=>[x.rect,x.rect]],['none',(x:any)=>x.main.getClientRects=()=>[]],
+      ...['borderTopLeftRadius','borderTopRightRadius','borderBottomLeftRadius','borderBottomRightRadius'].map(key=>[key,(x:any)=>x.main.clipStyles={[key]:'1px'}] as [string,(x:any)=>void]),
+      ...['transform','translate','rotate','scale','perspective','zoom'].flatMap(key=>['main','body','html'].map(where=>[where+key,(x:any)=>x[where].clipStyles={[key]:key==='zoom'?'1.01':key==='scale'?'1':key==='perspective'?'100px':key==='transform'?'matrix(1, 0, 0, 1, 0, 0)':'0deg'}] as [string,(x:any)=>void])),
+      ['vv missing',(x:any)=>delete x.window.visualViewport],['vv scale',(x:any)=>x.window.visualViewport.scale=1.01],
+      ['vv offset',(x:any)=>x.window.visualViewport.offsetLeft=1],['vv width',(x:any)=>x.window.visualViewport.width=359],
+      ['viewport zero',(x:any)=>x.window.innerHeight=0],['viewport nonfinite',(x:any)=>x.window.innerWidth=Infinity],
+      ['wrong root',(x:any)=>x.document.documentElement=new Element('HTML')],['disconnected ancestor',(x:any)=>x.body.connected=false],
+      ['motion path',(x:any)=>x.body.clipStyles={offsetPath:'path("M 0 0 L 10 10")'}],
+    ];
+    for(const [label,mutate] of cases){const x=viewportClipFixture();mutate(x);const result=x.inspect();
+      expect(result.flags.selectedExtraction,label).toBe('rendered_fallback');expect(result.relation,label).toBeNull();
+    }
+    const x=viewportClipFixture();x.main.literalFilter='opacity(0)';
+    expect(x.inspect().flags.literalDILAncestorMasking).toEqual({depth:2,tag:'main',property:'filter'});
+    delete x.main.literalFilter;x.p.literalClip='border-box';
+    expect(x.inspect().flags.literalDILDecline).toBe('response_masking');
   });
   test('literal DIL ancestor masking reports only the first closed predicate depth and tag without changing rejection', () => {
     const raw=JSON.stringify({type:'tool_calls',calls:[{name:'apply_patch',input:'+    PRIVATE_REPLY'}]});
@@ -1928,6 +1984,40 @@ describe('ChatGPT literal terminal source equivalence', () => {
       } else {
         expect(observed.terminalCompletionMatched,mutation).toBeUndefined();
         expect(observed.terminalCompletionRepresentation,mutation).toBeUndefined();
+      }
+    }
+  });
+  test('literal DIL viewport clip is revalidated after the final picker await even when fallback bytes are unchanged',async()=>{
+    for(const mutation of ['none','narrow','rounded','motion']) {
+      const choice={key:'chat/latest/medium',label:'Medium'},conversationID='6ad86c7a-2284-8331-b846-a59490db0c46';
+      const x=await chatTurnFixture(choice),click=x.send.onClick!;
+      x.send.onClick=()=>{click();x.f.location.pathname='/c/'+conversationID;x.f.document.URL='https://chatgpt.com'+x.f.location.pathname+'?temporary-chat=true';};
+      const record=await x.dispatch('Owned literal viewport clip',{deferModelVerification:true});
+      const raw=JSON.stringify({type:'tool_calls',calls:[{name:'exec_command',arguments:{cmd:'pwd'}}]});
+      const body=streamRun(raw),root=x.answer('placeholder');root.children[0].connected=false;
+      root.children[0]=body.answer;body.answer.parentElement=root;root.values['data-chatgpt-selection-message-id']=messageID;
+      const main:any=x.f.body.querySelector('main')!,rect={left:0,top:0,right:360,bottom:527,width:360,height:527};
+      main.literalClip='border-box';main.getClientRects=()=>[rect];
+      Object.assign(x.f.window,{innerWidth:360,innerHeight:527,visualViewport:{width:360,height:527,offsetLeft:0,offsetTop:0,scale:1}});
+      const candidate={correlationID:'245e3c88-8dac-4239-947b-1aff997b9f61',sequence:1,
+        inputSHA256:createHash('sha256').update(record.outbound).digest('hex'),
+        inputMessageID:'ae2e44b2-714e-43cd-ba07-d5c3f09c9463',conversationID,messageID,text:raw};
+      const picker:any=x.picker,open=picker.trigger.onClick;let opens=0;
+      picker.trigger.onClick=()=>{open();if(++opens!==2)return;
+        if(mutation==='narrow')rect.right=359;
+        if(mutation==='rounded')main.clipStyles={borderTopLeftRadius:'1px'};
+        if(mutation==='motion')main.clipStyles={offsetPath:'path("M 0 0 L 10 10")'};
+        expect(body.answer.innerText.trim()).toBe(raw);
+      };
+      const observed=await x.observe(record,{deferModelVerification:false,terminalCompletionCandidate:candidate});
+      expect(opens).toBe(2);expect(x.send.clicks).toBe(1);expect(body.raw()).toBe(raw);
+      if(mutation==='none'){
+        expect(observed.error).toBeUndefined();expect(observed.text).toBe(raw);expect(observed.terminalCompletionMatched).toBe(true);
+        expect(observed.completionEvidence.codeStructure.selectedExtraction).toBe('literal_dil');
+        expect(observed.modelEvidence.selected).toEqual(choice);
+      }else{
+        expect(observed).toMatchObject({error:'conversation_changed',detail:'response_changed'});
+        expect(observed.text).toBeUndefined();expect(observed.terminalCompletionMatched).toBeUndefined();
       }
     }
   });

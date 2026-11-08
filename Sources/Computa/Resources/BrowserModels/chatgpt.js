@@ -3017,8 +3017,10 @@ function chatGPTResponseReadSnapshot() {
   const scope = chatGPTAnswerCopyScope(answer, answers, chatGPTMessageRoots('user'), visible, enabled);
   const footer = scope.footer;
   const copies = footer ? scope.copies.map(node => ({ node, enabled: enabled(node) })) : [];
+  const extraction = modelResponseExtraction(answer);
   return { roots, answers, answer, footer, copies, association: scope.association || null,
-    text: modelResponseText(answer, modelResponseExtraction(answer)).slice(0, 220_001),
+    text: modelResponseText(answer, extraction).slice(0, 220_001),
+    literalDIL: extraction.flags?.selectedExtraction === 'literal_dil',
     busy: [...document.querySelectorAll('button[data-testid="stop-button"], button[aria-label="Stop streaming"], button[aria-label="Stop generating"], button[aria-label="Stop"]')].some(visible),
     users: chatGPTMessageRoots('user').map(root => {
       const body = chatGPTUserBody(root);
@@ -3029,6 +3031,10 @@ function chatGPTResponseSnapshotMatches(captured, observed) {
   const current = chatGPTResponseReadSnapshot();
   const same = (left, right) => left.length === right.length && left.every((value, index) => value === right[index]);
   return observed.busy === false && observed.answerComplete === true && observed.text === captured.text
+    // Matching fallback bytes cannot retain a literal source proof whose
+    // current geometry/structure changed during the final picker await.
+    && (observed.completionEvidence?.codeStructure?.selectedExtraction !== 'literal_dil'
+      || captured.literalDIL === true && current.literalDIL === true)
     && observed.responseCount === captured.answers.length && observed.userCount === captured.users.length
     && captured.busy === false && current.busy === false && !!captured.answer && captured.answer.isConnected
     && !!captured.footer && captured.footer.isConnected && current.answer === captured.answer && current.footer === captured.footer
@@ -3234,6 +3240,36 @@ function chatGPTLiteralDILText(answer, messageID, report = null) {
   return { text, displayed };
 }
 
+// A rectangular border clip covering the complete layout viewport adds no
+// clipping inside the viewport; ordinary offscreen/scrolling source reads retain
+// existing semantics. This current geometry check grants no persistent proof.
+function chatGPTViewportBorderClip(node, style) {
+  try {
+    if (style.clipPath !== 'border-box' || typeof window === 'undefined' || typeof document === 'undefined'
+      || !['borderTopLeftRadius', 'borderTopRightRadius', 'borderBottomLeftRadius', 'borderBottomRightRadius']
+        .every(key => style[key] === '0px')) return false;
+    const width = window.innerWidth, height = window.innerHeight, viewport = window.visualViewport;
+    if (![width, height].every(value => Number.isFinite(value) && value > 0)
+      || !viewport || viewport.scale !== 1 || viewport.offsetLeft !== 0 || viewport.offsetTop !== 0
+      || viewport.width !== width || viewport.height !== height) return false;
+    let root = null, depth = 0;
+    for (let current = node; current; current = current.parentElement) {
+      if (++depth > 64 || !current.isConnected || current.namespaceURI !== 'http://www.w3.org/1999/xhtml') return false;
+      const currentStyle = current === node ? style : getComputedStyle(current);
+      if (!['transform', 'translate', 'rotate', 'scale', 'perspective', 'offsetPath'].every(key => currentStyle[key] === 'none')
+        || currentStyle.zoom !== '1') return false;
+      root = current;
+    }
+    if (root !== document.documentElement) return false;
+    const boxes = node.getClientRects();
+    if (boxes.length !== 1) return false;
+    const box = boxes[0];
+    return ['left', 'top', 'right', 'bottom', 'width', 'height'].every(key => Number.isFinite(box[key]))
+      && box.width > 0 && box.height > 0 && box.left <= 0 && box.top <= 0
+      && box.right >= width && box.bottom >= height;
+  } catch { return false; }
+}
+
 // Read exact JSON bytes only from the two fully accounted observed DIL
 // text shapes. These DOM IDs establish structural consistency, never native
 // submission/model/response authority. The ordinary completion proof still runs.
@@ -3257,14 +3293,14 @@ function chatGPTLiteralDILResponse(answer, expectedMessageID = null, report = nu
   if (!literal) return null;
   if (chatGPTSingleJSONFence(literal.text) === null && !(literal.run && chatGPTWholeJSONEnvelope(literal.text)))
     return chatGPTLiteralDILDecline(report, 'response_fence');
-  const plainFailure = node => {
+  const plainFailure = (node, ancestor = false) => {
     if (node.namespaceURI !== 'http://www.w3.org/1999/xhtml') return 'namespace';
     const style = getComputedStyle(node);
     if (style.textTransform !== 'none') return 'text_transform';
     if (style.webkitTextSecurity !== 'none') return 'text_security';
     if (style.contentVisibility === 'hidden') return 'content_visibility';
     if (style.filter !== 'none') return 'filter';
-    if (style.clipPath !== 'none') return 'clip_path';
+    if (style.clipPath !== 'none' && !(ancestor && chatGPTViewportBorderClip(node, style))) return 'clip_path';
     return null;
   };
   // The literal helper has already bounded and accounted for this whole tree.
@@ -3272,7 +3308,7 @@ function chatGPTLiteralDILResponse(answer, expectedMessageID = null, report = nu
   if ([answer, ...answer.querySelectorAll('*')].some(node => !node.hasAttribute('hidden') && plainFailure(node) !== null)) return chatGPTLiteralDILDecline(report, 'response_masking');
   for (let node = answer, depth = 0; node; node = node.parentElement) {
     if (++depth > 64) return chatGPTLiteralDILDecline(report, 'response_ancestor_limit');
-    const property = plainFailure(node);
+    const property = plainFailure(node, true);
     if (property !== null) {
       // First failed predicate only; no computed value or arbitrary tag leaves this read.
       let detail = null;
