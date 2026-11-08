@@ -8057,7 +8057,15 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await verifyProvisionalDisplayPromotion(conditions: ["changed_body", "second_local"])
     }
 
-    private func verifyProvisionalDisplayPromotion(conditions: [String]) async throws {
+    func testProvisionalDisplayRecoverySurvivesCertifiedPromotionDuringBodyHashBeforeNativeAdoption() async throws {
+        try await verifyProvisionalDisplayPromotion(conditions: ["unchanged"], promoteDuringBodyHash: true)
+    }
+
+    func testProvisionalDisplayBodyHashRecoveryRejectsChangedBodyAndUncertifiedSecondLocalRoute() async throws {
+        try await verifyProvisionalDisplayPromotion(conditions: ["changed_body", "second_local"], promoteDuringBodyHash: true)
+    }
+
+    private func verifyProvisionalDisplayPromotion(conditions: [String], promoteDuringBodyHash: Bool = false) async throws {
         for condition in conditions {
             let succeeds = condition == "unchanged"
             let localRoute = "/c/local-chatgpt%3Aprovisional-finalization?temporary-chat=true"
@@ -8083,8 +8091,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             let generation = fixture.browser.documentGeneration(for: ownedID)
             let world = WKContentWorld.world(name: "computa-chatgpt-model-v1")
             // The fixture only observes private adapter records. Its mutation
-            // changes the real same-document route at the independent final
-            // submission digest, after the display recovery has already hashed.
+            // changes the real same-document route at the selected body/final
+            // digest after exact display expansion; it never edits those records.
             _ = try await evaluate(view, """
                 const original = crypto.subtle.digest.bind(crypto.subtle);
                 globalThis.__fixtureProvisionalPromotion = null;
@@ -8098,12 +8106,20 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                     globalThis.__fixtureProvisionalFinalRouteHashes++;
                   if (!globalThis.__fixtureProvisionalPromotion && exact && recovery.provisional === true
                     && recovery.remount === true && recovery.initialRoute !== true && recovery.pendingPrivate !== true
-                    && recovery.outcome === 'expanded' && recovery.finalizationDiagnostic?.finalizationStage === 'entered'
+                    && recovery.outcome === 'expanded'
+                    && (\(promoteDuringBodyHash) ? !recovery.finalizationDiagnostic
+                      : recovery.finalizationDiagnostic?.finalizationStage === 'entered')
                     && state.pending == null && record === recovery.record && record.phase === 'verified'
-                    && record.nativeFirstPinned !== true && location.pathname.startsWith('/c/local-chatgpt')) {
+                    && record.nativeFirstPinned !== true && location.pathname.startsWith('/c/local-chatgpt')
+                    && (!\(promoteDuringBodyHash) || (record.root?.isConnected === false
+                      && record.body?.isConnected === false && record.root === recovery.oldRoot
+                      && record.body === recovery.oldBody && record.replacement == null))) {
                     globalThis.__fixtureProvisionalPromotion = { provisional: true, initialRoute: false,
                       pending: false, lastVerifiedMatches: true, recordPhase: record.phase,
-                      nativePinned: false, outcome: recovery.outcome, deadline: recovery.deadline };
+                      nativePinned: false, outcome: recovery.outcome, deadline: recovery.deadline,
+                      beforeFinalization: !recovery.finalizationDiagnostic,
+                      oldRootDetached: record.root?.isConnected === false,
+                      oldBodyDetached: record.body?.isConnected === false };
                     history.pushState({}, '', '\(finalRoute)');
                   }
                   return result;
@@ -8134,9 +8150,17 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 guard transitions == 2 else { return }
                 crossedFacts = try? await self.evaluate(view, """
                     const recovery = globalThis.__computaModelBoundFirstExpansion;
+                    const state = globalThis.__computaChatSubmissionState, record = recovery.record;
                     return { ...recovery.finalizationDiagnostic, verified: recovery.verified === true,
                       provisional: recovery.provisional === true, initialRoute: recovery.initialRoute === true,
-                      outcome: recovery.outcome, revoked: globalThis.__computaChatSubmissionState?.revoked === true };
+                      outcome: recovery.outcome, revoked: state?.revoked === true,
+                      routeDiscardStage: recovery.routeDiscard?.stage ?? 'none',
+                      recordPhase: record?.phase, lastVerifiedMatches: state?.lastVerified === record,
+                      pendingMatches: state?.pending === record,
+                      beforeFinalization: !recovery.finalizationDiagnostic,
+                      oldRootDetached: record?.root?.isConnected === false,
+                      oldBodyDetached: record?.body?.isConnected === false,
+                      deadline: recovery.deadline };
                     """, world: world) as? [String: Any]
                 if condition == "changed_body" {
                     _ = try? await self.evaluate(view, """
@@ -8157,10 +8181,18 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 XCTAssertEqual(crossedFacts["lastVerifiedMatches"] as? Bool, true, condition)
                 XCTAssertEqual(crossedFacts["pendingMatches"] as? Bool, false, condition)
                 XCTAssertEqual(crossedFacts["initialRoute"] as? Bool, false, condition)
-                XCTAssertEqual(crossedFacts["finalizationError"] as? String, "document_changed", condition)
-                XCTAssertEqual(crossedFacts["finalizationStage"] as? String, "returned", condition)
-                XCTAssertEqual(crossedFacts["urlWitness"] as? Bool, true, condition)
-                XCTAssertEqual(crossedFacts["leaseCurrent"] as? Bool, true, condition)
+                if promoteDuringBodyHash {
+                    XCTAssertEqual(crossedFacts["routeDiscardStage"] as? String, "body_hash", condition)
+                    XCTAssertEqual(crossedFacts["beforeFinalization"] as? Bool, true, condition)
+                    XCTAssertEqual(crossedFacts["verified"] as? Bool, false, condition)
+                    XCTAssertEqual(crossedFacts["oldRootDetached"] as? Bool, true, condition)
+                    XCTAssertEqual(crossedFacts["oldBodyDetached"] as? Bool, true, condition)
+                } else {
+                    XCTAssertEqual(crossedFacts["finalizationError"] as? String, "document_changed", condition)
+                    XCTAssertEqual(crossedFacts["finalizationStage"] as? String, "returned", condition)
+                    XCTAssertEqual(crossedFacts["urlWitness"] as? Bool, true, condition)
+                    XCTAssertEqual(crossedFacts["leaseCurrent"] as? Bool, true, condition)
+                }
                 XCTAssertEqual(crossedFacts["revoked"] as? Bool, false, condition)
             }
             XCTAssertTrue(remounted, condition)
@@ -8169,6 +8201,14 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             XCTAssertEqual(promotion?["provisional"] as? Bool, true, condition)
             XCTAssertEqual(promotion?["nativePinned"] as? Bool, false, condition)
             XCTAssertEqual(promotion?["recordPhase"] as? String, "verified", condition)
+            if promoteDuringBodyHash {
+                XCTAssertEqual(promotion?["beforeFinalization"] as? Bool, true, condition)
+                XCTAssertEqual(promotion?["oldRootDetached"] as? Bool, true, condition)
+                XCTAssertEqual(promotion?["oldBodyDetached"] as? Bool, true, condition)
+                if let crossedFacts {
+                    XCTAssertEqual(crossedFacts["deadline"] as? Double, promotion?["deadline"] as? Double, condition)
+                }
+            }
             let clicks = try await evaluate(view, "return {initial:window.fixtureExpansionClicks,recovery:window.fixtureBoundExpansionClicks};") as? [String: Int]
             XCTAssertEqual(clicks?["initial"], 1, condition)
             XCTAssertEqual(clicks?["recovery"], 1, condition)
@@ -8183,8 +8223,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                     let proof = try XCTUnwrap((recovered["modelProofContext"] ?? recovered["pendingSubmissionContext"]) as? [String: Any])
                     XCTAssertEqual((proof["firstUserFingerprint"] as? String)?.count, 64)
                     XCTAssertEqual((proof["submittedPromptFingerprint"] as? String)?.count, 64)
-                    XCTAssertEqual(crossedFacts?["verified"] as? Bool, true)
-                    XCTAssertEqual(crossedFacts?["urlDiscard"] as? Bool, true)
+                    XCTAssertEqual(crossedFacts?["verified"] as? Bool, !promoteDuringBodyHash)
+                    if !promoteDuringBodyHash { XCTAssertEqual(crossedFacts?["urlDiscard"] as? Bool, true) }
                     let state = try await evaluate(view, """
                         return { hashes:globalThis.__fixtureProvisionalFinalRouteHashes,
                           deadline:globalThis.__computaModelBoundFirstExpansion?.deadline,
@@ -8207,10 +8247,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, failure) }
             }
             let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
-            // A rejected route does not admit an answer. Cleanup independently
-            // re-proves the exact full temporary body on its current route and
-            // can close that owned view; a changed body still cannot authorize it.
-            let closesOwnedView = failure == nil || condition == "second_local"
+            // The completed finalization case can independently re-prove its
+            // owned temporary body for cleanup. A rejected body-hash handoff has
+            // not completed that proof and cannot grant cleanup authority.
+            let closesOwnedView = failure == nil || condition == "second_local" && !promoteDuringBodyHash
             XCTAssertEqual(finished["cleanup"] as? String, closesOwnedView ? "not_created" : "failed", condition)
             let after = try await evaluate(view, "return window.fixtureBoundExpansionClicks;") as? Int
             XCTAssertEqual(after, 1, "Cleanup must not spend another display action")

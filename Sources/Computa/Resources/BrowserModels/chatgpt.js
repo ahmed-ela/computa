@@ -6832,6 +6832,31 @@ const chatGPTPendingRouteDiagnosticRules = Object.freeze([
 // First rejected operand only; diagnostics never supply ownership authority.
 let chatGPTBoundRouteFailureRule = 'not_attempted';
 let chatGPTBoundRouteFailureStage = null, chatGPTBoundRouteFailureCandidate = null;
+// A privately verified first record can precede native adoption. Its original
+// physical pins remain authoritative until the replacement's fresh full read.
+function chatGPTProvisionalRecoveryRecord(candidate, state) {
+  const record = candidate?.record;
+  return candidate?.provisional === true && candidate.pendingPrivate !== true
+    && candidate.remount === true && candidate.awaitingNativeRefresh !== true
+    && state?.pending == null && state?.lastVerified === record
+    && record?.phase === 'verified' && record.replacement == null
+    && record.root === candidate.oldRoot && record.body === candidate.oldBody
+    && candidate.oldRoot?.isConnected === false && candidate.oldBody?.isConnected === false;
+}
+function chatGPTProvisionalRoutePrefix(candidate) {
+  const edges = input.firstUserExpansionRouteContinuation, first = globalThis.__computaModelFirstExpansion;
+  return Array.isArray(edges) && edges.length === 1 && Object.keys(edges).join(',') === '0'
+    && edges[0] && typeof edges[0] === 'object' && !Array.isArray(edges[0])
+    && Object.keys(edges[0]).sort().join(',') === 'fromURL,toURL'
+    && typeof edges[0].fromURL === 'string' && typeof edges[0].toURL === 'string'
+    && edges[0].fromURL !== edges[0].toURL && edges[0].fromURL !== document.URL
+    && edges[0].toURL === input.expectedURL && edges[0].toURL === candidate.routeURL
+    && first?.outcome === 'expanded' && first.contextFailure == null && first.clicked === true
+    && first.routeURL === edges[0].fromURL && first.document === document && first.owner === candidate.owner
+    && first.prompt === candidate.prompt && first.canonical === candidate.canonical
+    && first.expandedText === candidate.canonical && first.marker === candidate.marker
+    && first.root === candidate.oldRoot && first.body === candidate.oldBody;
+}
 function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage, certifiedDiscard = null) {
   chatGPTBoundRouteFailureRule = 'none';
   chatGPTBoundRouteFailureStage = stage; chatGPTBoundRouteFailureCandidate = candidate;
@@ -6842,6 +6867,7 @@ function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage, certifiedD
   let receiptRule = 'none';
   const receiptCheck = (rule, value) => { if (!value && receiptRule === 'none') receiptRule = rule; return value; };
   const state = candidate?.state, record = candidate?.record, pinned = globalThis.__computaModelFirstProof;
+  const provisional = candidate?.provisional === true;
   // The replacement helper may install its one certificate just before this
   // caller resumes on a promoted URL. Preserve that exact unclaimed receipt
   // for native's existing fresh-read handoff, never manufacture another one.
@@ -6881,12 +6907,13 @@ function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage, certifiedD
   if (reject('candidate_missing', !candidate)
     || reject('candidate_current', candidate !== globalThis.__computaModelBoundFirstExpansion)
     || reject('bound', !candidate.bound)
-    || reject('provisional', candidate.provisional)
+    || reject('provisional', provisional && !chatGPTProvisionalRecoveryRecord(candidate, state))
     || reject('initial_route', candidate.initialRoute)
     || reject('pending_private', candidate.pendingPrivate)
     || reject('recovery_shape', !candidate.remount && !sameNodeRecovery)
     || reject('unconsumed_route', candidate.routeDiscard && candidate.routeDiscardConsumed !== candidate.routeDiscard)
-    || reject('route_budget', (candidate.routeContinuationEdges?.length || 0) >= 2)
+    || reject('route_budget', (candidate.routeContinuationEdges?.length || 0) >= 2
+      || provisional && (candidate.routeContinuationEdges != null || !chatGPTProvisionalRoutePrefix(candidate)))
     || reject('model_failure', candidate.modelFailure)
     || reject('context_failure', candidate.contextFailure)
     || reject('outcome', candidate.outcome !== 'expanded')
@@ -6894,12 +6921,12 @@ function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage, certifiedD
     || reject('deadline_finite', !Number.isFinite(candidate.deadline))
     || reject('deadline_expired', Date.now() > candidate.deadline)
     || reject('action', input.action !== 'inspect')
-    || reject('bound_permission', input.allowBoundFirstUserExpansion !== true)
+    || reject('bound_permission', provisional ? input.allowBoundFirstUserExpansion === true : input.allowBoundFirstUserExpansion !== true)
     || reject('refresh_permission', !returningReceipt && (input.allowBoundFirstUserRemountRefresh === true) !== (candidate.awaitingNativeRefresh === true))
     || reject('suppressed', input.suppressFirstUserExpansionClaim === true)
-    || reject('binding_permission', input.allowFirstUserBinding !== false)
-    || reject('expansion_permission', input.allowFirstUserExpansion === true)
-    || reject('provisional_permission', input.allowProvisionalFirstUserExpansion === true)
+    || reject('binding_permission', provisional ? input.allowFirstUserBinding !== true : input.allowFirstUserBinding !== false)
+    || reject('expansion_permission', provisional ? input.allowFirstUserExpansion !== true : input.allowFirstUserExpansion === true)
+    || reject('provisional_permission', provisional ? input.allowProvisionalFirstUserExpansion !== true : input.allowProvisionalFirstUserExpansion === true)
     || reject('frame', window !== window.top)
     || reject('provider', input.provider !== 'chatgpt')
     || reject('origin', location.origin !== 'https://chatgpt.com')
@@ -6942,7 +6969,9 @@ function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage, certifiedD
     || reject('record_canonical', record.canonical !== candidate.canonical)
     || reject('record_fingerprint', record.fingerprint !== fingerprint)
     || reject('candidate_fingerprint', candidate.fingerprint !== fingerprint)
-    || reject('native_fingerprint', input.expectedFirstUserFingerprint !== fingerprint)
+    || reject('native_fingerprint', provisional
+      ? input.expectedFirstUserFingerprint != null || record.nativeFirstPinned === true
+      : input.expectedFirstUserFingerprint !== fingerprint)
     || reject('private_fingerprint', pinned?.fingerprint !== fingerprint)
     || reject('private_marker', pinned.marker !== candidate.marker)
     || reject('native_marker', input.expectedFirstUserMarker !== candidate.marker)
@@ -6955,12 +6984,19 @@ function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage, certifiedD
     || reject('expansion_model', !websiteModelChoiceEqual(input.firstUserExpansionModelChoice, candidate.modelChoice))
     || reject('product', !chatGPTProductModeProof())
     || reject('temporary', !chatGPTTemporaryVerified())) return null;
+  if (provisional) {
+    chatGPTSubmissionContext(state);
+    const context = chatGPTSubmissionContextFailure;
+    if (reject('context_failure', context?.state !== state || context.checks.urlMatches !== false
+      || !chatGPTSubmissionContextCheckKeys.slice(0, chatGPTSubmissionContextCheckKeys.indexOf('urlMatches'))
+        .every(key => context.checks[key] === true))) return null;
+  }
   let modelRemount = null;
   if (!chatGPTFirstRouteModelPins(candidate)) {
     const pin = chatGPTFirstRouteModelFailurePin, picker = chatGPTFirstRouteModelFailurePicker;
     const diagnostic = {};
     const failModel = rule => { chatGPTFirstRouteModelFailureRule = rule; reject(rule, true); return null; };
-    if (chatGPTFirstRouteModelFailureRule !== 'model_trigger_identity') return failModel(chatGPTFirstRouteModelFailureRule);
+    if (provisional || chatGPTFirstRouteModelFailureRule !== 'model_trigger_identity') return failModel(chatGPTFirstRouteModelFailureRule);
     if (globalThis.__computaChatPresetPin !== pin) return failModel('model_remount_pin_changed');
     if (candidate.routeModelRemount && !chatGPTBoundRouteModelRemountIntact(candidate))
       return failModel('model_remount_pending_replaced');
@@ -6993,6 +7029,7 @@ function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage, certifiedD
   // No new witness or claim: native already knows how to carry this discarded
   // certificate across its bounded route chain and require a fresh full proof.
   if (returningReceipt) return certifiedDiscard;
+  if (provisional) candidate.routeContinuationEdges = input.firstUserExpansionRouteContinuation.map(edge => Object.freeze({ ...edge }));
   candidate.routeDiscard = Object.freeze({ fromURL: input.expectedURL, toURL: document.URL, stage });
   return chatGPTWithRecoveryLifecycle({ error: 'document_changed', detail: 'model_read_context' });
 }
@@ -7009,6 +7046,12 @@ function chatGPTBoundRouteModelRemountIntact(candidate) {
 function chatGPTConsumeBoundFirstRoute(candidate, witness = null) {
   if (!chatGPTBoundRouteModelRemountIntact(candidate)) return false;
   const start = chatGPTFirstUserExpansionRouteStart(candidate), edges = input.firstUserExpansionRouteContinuation;
+  // This provisional discard retained the first native edge. Its continuation
+  // must carry that exact prefix and one second edge, without resetting either.
+  if (candidate.provisional && candidate.routeContinuationEdges?.length === 1
+    && (start !== 1 || edges?.length !== 2
+      || edges[0].fromURL !== candidate.routeContinuationEdges[0].fromURL
+      || edges[0].toURL !== candidate.routeContinuationEdges[0].toURL)) return false;
   if (start < 0 || (candidate.routeContinuationEdges?.length || 0) + edges.length - start > 2
     || witness && (edges[start].fromURL !== witness.fromURL || edges[start].toURL !== witness.toURL)) return false;
   candidate.routeContinuationEdges = [...(candidate.routeContinuationEdges || []), ...edges.slice(start)];
@@ -8194,12 +8237,7 @@ if (ownedUserCount > 0) {
   // A provisional remount can start after JS verified the first submission
   // but before native adopted it. Its URL-discarded rehash still retains the
   // detached original physical pins; it has no bound replacement certificate.
-  const provisionalRecoveryRecord = boundRecovery?.provisional === true && boundRecovery.pendingPrivate !== true
-    && boundRecovery.remount === true && boundRecovery.awaitingNativeRefresh !== true
-    && finalizationState?.pending == null && finalizationState?.lastVerified === recoveryRecord
-    && recoveryRecord?.phase === 'verified' && recoveryRecord.replacement == null
-    && recoveryRecord.root === boundRecovery.oldRoot && recoveryRecord.body === boundRecovery.oldBody
-    && boundRecovery.oldRoot?.isConnected === false && boundRecovery.oldBody?.isConnected === false;
+  const provisionalRecoveryRecord = chatGPTProvisionalRecoveryRecord(boundRecovery, finalizationState);
   const discardedURLRead = finalized.error === 'document_changed' && finalized.detail === 'model_read_context'
     && input.action === 'inspect' && (pendingRecoveryRecord || provisionalRecoveryRecord)
     && input.allowProvisionalFirstUserExpansion === true && input.allowFirstUserBinding === true

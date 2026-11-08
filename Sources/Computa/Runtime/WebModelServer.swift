@@ -2565,7 +2565,10 @@ actor WebModelServer {
             // its inspection action on 400 and replaces a 500 with generic high demand.
             case .responseBlocked(.claude):
                 return .init(status: "400 Bad Request", type: "model_error", code: failure.diagnosticCode!)
-            case .ownershipFailure(.groqDraftRestored), .ownershipFailure(.groqReportedSubmissionError):
+            // Every finite ownership failure is terminal for this inference.
+            // Preserve its existing inspect_website body instead of the engine's
+            // generic HTTP 500 high-demand display; never replay an uncertain Send.
+            case .ownershipFailure:
                 return .init(status: "400 Bad Request", type: "model_error", code: "website_ownership_unverified")
             case .capacity: return .init(status: "400 Bad Request", type: "invalid_request", code: failure.diagnosticCode!)
             // The request no longer has a valid owned website context. HTTP 400

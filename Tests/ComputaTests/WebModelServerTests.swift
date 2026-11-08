@@ -2958,6 +2958,53 @@ final class WebModelServerTests: XCTestCase {
         }
     }
 
+    func testAllFiniteOwnershipReasonsUseHTTP400AndKeepExactNonretryableBody() throws {
+        let reasons: [EmbeddedWebModelTransport.OwnershipReason] = [
+            .documentGenerationBefore, .documentGenerationAfter, .routeBefore, .routeAfter,
+            .unboundCleanup, .javaScriptDocument, .javaScriptConversation, .javaScriptOwner,
+            .javaScriptUserCount, .groqDraftRestored, .groqReportedSubmissionError,
+            .javaScriptConversationIdentity, .javaScriptURL, .javaScriptConversationRoute,
+            .javaScriptFirstUser, .javaScriptSubmission, .promotionFirstUser, .promotionTemporary,
+        ]
+        for reason in reasons {
+            let failure = EmbeddedWebModelTransport.Failure.ownershipFailure(reason)
+            let presentation = WebModelServer.errorPresentation(for: failure)
+            XCTAssertEqual(presentation.status, "400 Bad Request", reason.rawValue)
+            XCTAssertEqual(presentation.type, "model_error")
+            XCTAssertEqual(presentation.code, "website_ownership_unverified")
+            XCTAssertNil(presentation.param)
+            let data = try WebModelServer.errorBody(for: failure)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let expected: [String: Any] = ["error": [
+                "type": "model_error", "message": failure.localizedDescription,
+                "code": "website_ownership_unverified", "param": NSNull(),
+                "retryable": false, "required_action": "inspect_website", "ownership_reason": reason.rawValue,
+            ] as [String: Any]]
+            XCTAssertTrue(NSDictionary(dictionary: body).isEqual(to: expected), reason.rawValue)
+            XCTAssertFalse(failure.blocksProviderUntilRefresh)
+            if reason == .javaScriptFirstUser {
+                XCTAssertEqual(failure.localizedDescription,
+                    "The owned model page or conversation changed (first_user_message). No prompt was replayed.")
+            }
+        }
+    }
+
+    func testOwnershipHTTP400DoesNotBroadenCodecCleanupOrUnclassifiedFailures() {
+        let unchanged: [any Error] = [
+            WebModelResponseCodec.Failure.unsupportedWebsiteResponse,
+            WebModelResponseCodec.Failure.argumentsMustBeObject,
+            WebModelServer.Failure.cleanupFailed,
+            WebModelServer.Failure.startOwnershipUnconfirmed,
+            WebModelServer.Failure.providerFailed,
+            EmbeddedWebModelTransport.Failure.savedDeleteUnverified,
+            EmbeddedWebModelTransport.Failure.explicitClearUnverified,
+            EmbeddedWebModelTransport.Failure.pageUnavailable,
+        ]
+        for failure in unchanged {
+            XCTAssertEqual(WebModelServer.errorPresentation(for: failure).status, "500 Internal Server Error")
+        }
+    }
+
     func testOwnershipFailurePreservesFiniteReasonAndCorrelatedDiagnosticWithoutReplayOrProviderGate() async throws {
         let failure = EmbeddedWebModelTransport.Failure.ownershipFailure(.javaScriptFirstUser)
         XCTAssertFalse(failure.blocksProviderUntilRefresh, "An ownership failure belongs to this session, not the provider profile")
@@ -2973,7 +3020,7 @@ final class WebModelServerTests: XCTestCase {
             urlRequest.setValue(try await bindWebsiteInferenceFixtureTurn(server, taskID: "ownership-task"), forHTTPHeaderField: "X-Computa-Task-ID")
             urlRequest.setValue(try websiteInferenceFixtureMetadata(taskID: "ownership-task"), forHTTPHeaderField: "x-codex-turn-metadata")
             let (data, response) = try await URLSession.shared.data(for: urlRequest)
-            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 500)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 400)
             let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
             let error = try XCTUnwrap(body["error"] as? [String: Any])
             XCTAssertEqual(Set(error.keys), ["type", "message", "code", "param", "retryable", "required_action", "ownership_reason"])
@@ -2989,7 +3036,7 @@ final class WebModelServerTests: XCTestCase {
             let taskID = websiteInferenceFixtureTaskID("ownership-task")
             let diagnostic = try XCTUnwrap(server.takeFailureDiagnostic(taskID: taskID))
             let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(diagnostic.utf8)) as? [String: Any])
-            XCTAssertTrue(NSDictionary(dictionary: decoded).isEqual(to: body), "The exact native diagnostic must survive HTTP 500's generic engine display")
+            XCTAssertTrue(NSDictionary(dictionary: decoded).isEqual(to: body), "The same finite diagnostic must reach HTTP 400 and the correlated durable path")
             XCTAssertNil(server.takeFailureDiagnostic(taskID: taskID), "Only the correlated native turn consumes this diagnostic")
             let operations = await transport.operations()
             XCTAssertEqual(operations.filter { $0 == "webProviderStart" }.count, 1)
