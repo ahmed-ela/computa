@@ -1671,7 +1671,7 @@ describe('ChatGPT literal terminal source equivalence', () => {
       ['text_layout_shape', x=>x.layout.values.title='PRIVATE_ATTRIBUTE'],
       ['text_hidden_placeholder', x=>x.hidden.text='PRIVATE_BODY'],
       ['text_portal_shape', x=>x.portal.values.title='PRIVATE_ATTRIBUTE'],
-      ['text_dil_shape', x=>x.dil.values.dir='rtl'],
+      ['text_dil_dir', x=>x.dil.values.dir='rtl'],
       ['text_paragraph_shape', x=>x.p.values.title='PRIVATE_ATTRIBUTE'],
       ['text_renderer_classes', x=>x.portal.values.class='PRIVATE_CLASS'],
       ['text_span_count', x=>{x.p.children=[];}],
@@ -1701,12 +1701,42 @@ describe('ChatGPT literal terminal source equivalence', () => {
     expect(x.read().flags).not.toHaveProperty('literalDILDecline');
     expect(x.read().flags.selectedExtraction).toBe('literal_dil');
   });
+  test('literal DIL container decline identifies the same first failed predicate with unchanged fallback bytes', () => {
+    const variants: [string,(x:any)=>void][] = [
+      ['text_dil_missing', x=>{x.portal.children=[];}],
+      ['text_dil_tag', x=>{x.dil.tagName='SECTION';}],
+      ['text_dil_children', x=>{x.portal.append(new Element('DIV'));}],
+      ['text_dil_children', x=>{x.portal.text=' ';}],
+      ['text_dil_children', x=>Object.defineProperty(x.portal,'childNodes',{get:()=>[x.dil,{nodeType:8,textContent:''}]})],
+      ['text_dil_message_id', x=>x.dil.values['data-dil-message-id']='PRIVATE_WRONG_ID'],
+      ['text_dil_marker', x=>{delete x.dil.values['data-dil-response'];delete x.dil.values['data-d-inline-reveal'];}],
+      ['text_dil_marker', x=>{const name=x.dil.hasAttribute('data-dil-response')?'data-dil-response':'data-d-inline-reveal';x.dil.values[name]='PRIVATE_NONEMPTY';}],
+      ['text_dil_direction', x=>x.dil.values['data-d-direction']='row'],
+      ['text_dil_dir', x=>x.dil.values.dir='rtl'],
+      ['text_dil_attributes', x=>x.dil.values['data-private-attribute']='PRIVATE_VALUE'],
+      ['text_dil_attributes', x=>{const other=x.dil.hasAttribute('data-dil-response')?'data-d-inline-reveal':'data-dil-response';x.dil.values[other]='';}],
+    ];
+    for(const run of [false,true]) for(const [reason,mutate] of variants) {
+      const raw='{"type":"message","text":"PRIVATE_BODY"}', x=run?streamRun(raw):literal(raw);
+      mutate(x); const expected=(x.answer.innerText||x.answer.textContent||'').trim(), result=x.read('unrelated');
+      expect(result.flags).toMatchObject({selectedExtraction:'rendered_fallback',extractionReason:'missing_code',literalDILDecline:reason});
+      expect(result.text).toBe(expected);expect(result.relation).toBeNull();
+      expect(JSON.stringify(result.flags)).not.toContain('PRIVATE');
+    }
+    const x=streamRun('{"type":"message","text":"unchanged"}');
+    x.dil.values['data-dil-message-id']='PRIVATE'; x.dil.values.dir='rtl';x.dil.values.title='PRIVATE';
+    expect(x.read().flags.literalDILDecline).toBe('text_dil_message_id');
+    x.dil.values['data-dil-message-id']=messageID;expect(x.read().flags.literalDILDecline).toBe('text_dil_dir');
+    x.dil.values.dir='auto';expect(x.read().flags.literalDILDecline).toBe('text_dil_attributes');
+    delete x.dil.values.title;expect(x.read().flags.selectedExtraction).toBe('literal_dil');
+    expect(x.read().flags).not.toHaveProperty('literalDILDecline');
+  });
   test('literal DIL reason schema covers every emitted guard and remains absent on an accepted code block', () => {
     const native=readFileSync(new URL('../Sources/Computa/Browser/EmbeddedWebModelTransport.swift',import.meta.url),'utf8');
     const emitted=new Set([...source.slice(start,end).matchAll(/chatGPTLiteralDILDecline\(report, '([^']+)'/g)].map(m=>m[1]));
     const branch=native.slice(native.indexOf('if let decline = source["literalDILDecline"]'),native.indexOf('if let raw = source["rendererGuard"]'));
     const accepted=new Set([...branch.matchAll(/"((?:text|response)_[a-z_]+)"/g)].map(m=>m[1]));
-    expect(emitted.size).toBe(26);expect(accepted).toEqual(emitted);
+    expect(emitted.size).toBe(33);expect(accepted).toEqual(new Set([...emitted,'text_dil_shape']));
     const x=fixture();observedChatGPTCodeBlock(x,'{"type":"message","text":"HI"}');
     expect(read('unrelated',x.answer,messageID,style).flags).not.toHaveProperty('literalDILDecline');
   });

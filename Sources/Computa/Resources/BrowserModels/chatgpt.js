@@ -3170,11 +3170,16 @@ function chatGPTLiteralDILText(answer, messageID, report = null) {
     || !only(layout, [hidden, portal])
     || run && !customStyle(portal, /^\s*--puik-portal-zoom:\s*1\s*;?\s*$/))
     return chatGPTLiteralDILDecline(report, 'text_portal_shape');
-  if (!dil || dil.tagName !== 'DIV' || !only(portal, [dil])
-    || dil.getAttribute('data-dil-message-id') !== messageID
-    || dil.getAttribute(run ? 'data-dil-response' : 'data-d-inline-reveal') !== ''
-    || dil.getAttribute('data-d-direction') !== 'col' || dil.getAttribute('dir') !== 'auto'
-    || !attrs(dil, ['class', 'dir', run ? 'data-dil-response' : 'data-d-inline-reveal', 'data-d-direction', 'data-dil-message-id'])) return chatGPTLiteralDILDecline(report, 'text_dil_shape');
+  if (!dil) return chatGPTLiteralDILDecline(report, 'text_dil_missing');
+  if (dil.tagName !== 'DIV') return chatGPTLiteralDILDecline(report, 'text_dil_tag');
+  if (!only(portal, [dil])) return chatGPTLiteralDILDecline(report, 'text_dil_children');
+  if (dil.getAttribute('data-dil-message-id') !== messageID) return chatGPTLiteralDILDecline(report, 'text_dil_message_id');
+  if (dil.getAttribute(run ? 'data-dil-response' : 'data-d-inline-reveal') !== '')
+    return chatGPTLiteralDILDecline(report, 'text_dil_marker');
+  if (dil.getAttribute('data-d-direction') !== 'col') return chatGPTLiteralDILDecline(report, 'text_dil_direction');
+  if (dil.getAttribute('dir') !== 'auto') return chatGPTLiteralDILDecline(report, 'text_dil_dir');
+  if (!attrs(dil, ['class', 'dir', run ? 'data-dil-response' : 'data-d-inline-reveal', 'data-d-direction', 'data-dil-message-id']))
+    return chatGPTLiteralDILDecline(report, 'text_dil_attributes');
   if (!paragraph || paragraph.tagName !== 'P' || !only(dil, [paragraph])
     || paragraph.getAttribute('data-d-text-flow') !== '' || paragraph.getAttribute('data-d-component') !== 'text'
     || !attrs(paragraph, ['class', 'data-d-text-flow', 'data-d-component'])) return chatGPTLiteralDILDecline(report, 'text_paragraph_shape');
