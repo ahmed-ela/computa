@@ -4171,7 +4171,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                    "text_context", "text_dil_shape", "text_hidden_placeholder",
                    "text_dil_missing", "text_dil_tag", "text_dil_children",
                    "text_dil_message_id", "text_dil_marker", "text_dil_direction",
-                   "text_dil_dir", "text_dil_attributes",
+                   "text_dil_dir", "text_dil_attributes", "text_dil_opposite_marker_empty",
                    "text_layout_shape", "text_mismatch", "text_paragraph_shape",
                    "text_physical", "text_portal_shape", "text_renderer_classes",
                    "text_size", "text_source_count", "text_source_shape",

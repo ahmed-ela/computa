@@ -3178,8 +3178,17 @@ function chatGPTLiteralDILText(answer, messageID, report = null) {
     return chatGPTLiteralDILDecline(report, 'text_dil_marker');
   if (dil.getAttribute('data-d-direction') !== 'col') return chatGPTLiteralDILDecline(report, 'text_dil_direction');
   if (dil.getAttribute('dir') !== 'auto') return chatGPTLiteralDILDecline(report, 'text_dil_dir');
-  if (!attrs(dil, ['class', 'dir', run ? 'data-dil-response' : 'data-d-inline-reveal', 'data-d-direction', 'data-dil-message-id']))
+  const dilAttributes = ['class', 'dir', run ? 'data-dil-response' : 'data-d-inline-reveal', 'data-d-direction', 'data-dil-message-id'];
+  if (!attrs(dil, dilAttributes)) {
+    // Distinguish only this exact extra empty marker; both shapes stay rejected.
+    const oppositeMarker = run ? 'data-d-inline-reveal' : 'data-dil-response';
+    try {
+      if (dil.attributes.length <= dilAttributes.length + 1 && dil.getAttribute(oppositeMarker) === ''
+        && attrs(dil, [...dilAttributes, oppositeMarker]))
+        return chatGPTLiteralDILDecline(report, 'text_dil_opposite_marker_empty');
+    } catch { /* Diagnostic failure retains the original attribute rejection. */ }
     return chatGPTLiteralDILDecline(report, 'text_dil_attributes');
+  }
   if (!paragraph || paragraph.tagName !== 'P' || !only(dil, [paragraph])
     || paragraph.getAttribute('data-d-text-flow') !== '' || paragraph.getAttribute('data-d-component') !== 'text'
     || !attrs(paragraph, ['class', 'data-d-text-flow', 'data-d-component'])) return chatGPTLiteralDILDecline(report, 'text_paragraph_shape');
@@ -6797,7 +6806,7 @@ function chatGPTPendingFirstRouteDiscard(candidate, fingerprint, stage) {
     || reject('expansion_model', !websiteModelChoiceEqual(input.firstUserExpansionModelChoice, candidate.modelChoice))
     || reject('product', !chatGPTProductModeProof()) || reject('temporary', !chatGPTTemporaryVerified())) return null;
   const modelPins = chatGPTFirstRouteModelPins(candidate);
-  if (reject('model_pins', !modelPins && (!pendingPrivate || chatGPTFirstRouteModelFailureRule !== 'model_trigger_identity'))) return null;
+  if (reject('model_pins', !modelPins && (!(initial || pendingPrivate) || chatGPTFirstRouteModelFailureRule !== 'model_trigger_identity'))) return null;
   const roots = chatGPTMessageRoots('user'), root = roots[0], body = root && chatGPTUserBody(root);
   try { candidate.pendingRouteNodes = { invocation: websiteChatInvocationLease, currentNodesObserved: true,
     currentRootMatches: root === candidate.root, currentBodyMatches: body === candidate.body }; } catch { }
@@ -6808,7 +6817,7 @@ function chatGPTPendingFirstRouteDiscard(candidate, fingerprint, stage) {
       || reject('old_body_detached', candidate.oldBody?.isConnected !== false) || reject('root_replaced', root === candidate.oldRoot)
       || reject('body_replaced', body === candidate.oldBody)
       : reject('root_same', root !== candidate.oldRoot) || reject('body_same', body !== candidate.oldBody))) return null;
-  // A pending private record has no accepted submission proof yet. Complete
+  // Neither admitted pending mode has accepted submission proof yet. Complete
   // every body/route check before retaining the same bounded header witness.
   if (!modelPins) {
     const remount = chatGPTFirstRouteModelRemount(candidate);

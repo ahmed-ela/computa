@@ -9569,13 +9569,30 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await verifyInitialDisplayRecoverySecondPromotion(conditions: ["changed", "recollapsed", "work"], beforePrivatePin: true, unicode: true)
     }
 
+    func testInitialRouteBeforePrivatePinHeaderRemountRequiresFreshModelAndBodyProof() async throws {
+        try await verifyInitialDisplayRecoverySecondPromotion(conditions: ["unchanged"], beforePrivatePin: true,
+            unicode: true, remountModelAtPromotion: true)
+    }
+
+    func testInitialRouteBeforePrivatePinHeaderRemountRejectsInvalidHeaderBodyAndDeadline() async throws {
+        try await verifyInitialDisplayRecoverySecondPromotion(conditions: ["model_old_connected", "model_replacement_disabled",
+            "model_replacement_power", "changed", "route_deadline"], beforePrivatePin: true,
+            unicode: true, remountModelAtPromotion: true)
+    }
+
     private func verifyInitialDisplayRecoverySecondPromotion(conditions: [String], beforePrivatePin: Bool = false,
-                                                            unicode: Bool = false) async throws {
+                                                            unicode: Bool = false, remountModelAtPromotion: Bool = false) async throws {
         for condition in conditions {
             let succeeds = ["unchanged", "remounted", "late_read"].contains(condition)
             let localRoute = "/c/local-chatgpt%3Arecovery-adoption?temporary-chat=true"
             let publicRoute = "/c/public-recovery-adoption?temporary-chat=true"
-            let fixture = try Fixture(page: Self.collapsedFirstUserPage())
+            let rejectsHeaderHandoff = remountModelAtPromotion && condition.hasPrefix("model_")
+            var page = Self.collapsedFirstUserPage()
+            if remountModelAtPromotion {
+                page = page.replacingOccurrences(of: "const modelTrigger = document.getElementById('fixture-model-trigger');",
+                                                 with: "let modelTrigger = document.getElementById('fixture-model-trigger');")
+            }
+            let fixture = try Fixture(page: page)
             defer {
                 fixture.transport.setFirstUserExpansionRouteCheckpointForTesting(nil)
                 fixture.transport.setRouteDiscardDiagnosticsObserverForTesting(nil)
@@ -9592,6 +9609,22 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             _ = try await fixturePhaseProbe("recovery_adoption_ready") { try await waitForState("ready", fixture.transport, token: token) }
             let generation = fixture.browser.documentGeneration(for: ownedID)
             let privateWorld = WKContentWorld.world(name: "computa-chatgpt-model-v1")
+            if remountModelAtPromotion {
+                _ = try await evaluate(view, """
+                    document.addEventListener('fixture-initial-route-model-remount', () => {
+                      const old = document.getElementById('fixture-model-trigger');
+                      const replacement = old.cloneNode(true);
+                      if ('\(condition)' === 'model_old_connected') {
+                        old.id = 'fixture-retained-old-model-trigger'; old.hidden = true; old.after(replacement);
+                      } else old.replaceWith(replacement);
+                      modelTrigger = replacement;
+                      replacement.addEventListener('click', () => old.click());
+                      if ('\(condition)' === 'model_replacement_disabled') replacement.disabled = true;
+                      if ('\(condition)' === 'model_replacement_power') replacement.querySelector('#fixture-model-header').textContent = 'High';
+                      window.fixtureInitialRouteHeaderFamilyReads = window.fixtureModelFamilyOpenCount;
+                    }, {once:true}); return true;
+                    """)
+            }
             _ = try await evaluate(view, """
                 const original = crypto.subtle.digest.bind(crypto.subtle);
                 globalThis.__fixtureRecoveryFreshHashes = 0;
@@ -9614,15 +9647,35 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                     && pending?.phase === 'send_claimed' && location.pathname.startsWith('/c/local-chatgpt')) {
                     globalThis.__fixtureSecondAdoptionRoute = true;
                     history.pushState({}, '', '\(publicRoute)');
+                    if (\(remountModelAtPromotion)) {
+                      const pin = globalThis.__computaChatPresetPin;
+                      const old = document.getElementById('fixture-model-trigger');
+                      document.dispatchEvent(new Event('fixture-initial-route-model-remount'));
+                      const current = document.getElementById('fixture-model-trigger');
+                      globalThis.__fixtureInitialRouteHeaderWitness = {
+                        oldDetached: old.isConnected === false, currentConnected: current?.isConnected === true,
+                        differentPhysicalTrigger: old !== current,
+                        originalPinRetained: globalThis.__computaChatPresetPin === pin && pin.headerTrigger === old,
+                        verified: recovery.verified === true, headerGrantAbsent: recovery.routeModelRemount == null,
+                        initialRoute: recovery.initialRoute === true, pendingPrivate: recovery.pendingPrivate === true,
+                        privatePinned: !!globalThis.__computaModelFirstProof,
+                        pendingMatches: globalThis.__computaChatSubmissionState?.pending === recovery.record,
+                        recordPhase: pending?.phase, hasAdoptedNodes: !!pending?.root || !!pending?.body
+                      };
+                    }
                   }
                   return result;
                 }; return true;
                 """, world: privateWorld)
-            var transitions = 0, deadline: Double?
+            var transitions = 0, deadline: Double?, initialDeadline: Double?
             fixture.transport.setFirstUserExpansionRouteCheckpointForTesting { checkpoint in
                 guard checkpoint == .routeAccepted else { return }
                 transitions += 1
                 if transitions == 1 {
+                    if remountModelAtPromotion {
+                        initialDeadline = try? await self.evaluate(view,
+                            "return globalThis.__computaModelFirstExpansion?.deadline;", world: privateWorld) as? Double
+                    }
                     try? await self.installBoundFirstUserCollapse(view, behavior: "remount")
                 } else if transitions == 2 {
                     let state = try? await self.evaluate(view, """
@@ -9631,7 +9684,14 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                           verified: recovery?.verified === true, deadline: recovery?.deadline,
                           privatePinned: !!globalThis.__computaModelFirstProof,
                           pendingPhase: globalThis.__computaChatSubmissionState?.pending?.phase,
-                          revoked: globalThis.__computaChatSubmissionState?.revoked === true };
+                          revoked: globalThis.__computaChatSubmissionState?.revoked === true,
+                          stage: recovery?.routeDiscard?.stage, pendingPrivate: recovery?.pendingPrivate === true,
+                          lastVerified: !!globalThis.__computaChatSubmissionState?.lastVerified,
+                          adopted: !!recovery?.record?.root || !!recovery?.record?.body,
+                          headerPending: recovery?.routeModelRemount != null && recovery.routeModelRemount.completed !== true,
+                          originalHeaderPinRetained: recovery?.routeModelPin === globalThis.__computaChatPresetPin
+                            && recovery?.routeModelRemount?.previous === globalThis.__computaChatPresetPin?.headerTrigger,
+                          provisionalHeaderPhysical: recovery?.routeModelRemount?.header === document.getElementById('fixture-model-trigger') };
                         """, world: privateWorld) as? [String: Any]
                     XCTAssertEqual(state?["initialRoute"] as? Bool, true, condition)
                     XCTAssertEqual(state?["outcome"] as? String, "expanded", condition)
@@ -9641,6 +9701,19 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                     XCTAssertEqual(state?["pendingPhase"] as? String, "send_claimed", condition)
                     XCTAssertEqual(state?["revoked"] as? Bool, false, condition)
                     deadline = state?["deadline"] as? Double
+                    if remountModelAtPromotion {
+                        // Native admits the route edge before interpreting the
+                        // crossed JS result; rejected headers grant no witness.
+                        XCTAssertEqual(state?["stage"] as? String, rejectsHeaderHandoff ? nil : "body_hash", condition)
+                        for field in ["verified", "privatePinned", "pendingPrivate", "lastVerified", "adopted"] {
+                            XCTAssertEqual(state?[field] as? Bool, false, "\(condition): \(field)")
+                        }
+                        for field in ["headerPending", "originalHeaderPinRetained", "provisionalHeaderPhysical"] {
+                            XCTAssertEqual(state?[field] as? Bool, !rejectsHeaderHandoff, "\(condition): \(field)")
+                        }
+                        XCTAssertNotNil(initialDeadline)
+                        XCTAssertEqual(deadline, initialDeadline)
+                    }
                     if condition == "changed" {
                         _ = try? await self.evaluate(view, """
                             const body = document.querySelector('[data-message-author-role="user"] [data-markdown-text-style="user-message"]');
@@ -9651,6 +9724,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                             const root = document.querySelector('[data-message-author-role="user"]');
                             root.replaceWith(root.cloneNode(true)); return true;
                             """)
+                    } else if condition == "route_deadline" {
+                        // The retained header still needs fresh full proof and
+                        // cannot outlive the original display recovery deadline.
+                        try? await Task.sleep(for: .milliseconds(1_900))
                     } else if condition == "late_read" {
                         // The local display already completed. A later purely
                         // read-only proof does not renew or need its click deadline.
@@ -9685,6 +9762,18 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure,
                     condition == "work" && !beforePrivatePin ? .productModeUnverified : .ownershipFailure(.javaScriptFirstUser), condition)
             }
+            if remountModelAtPromotion {
+                let value = try await evaluate(view, "return globalThis.__fixtureInitialRouteHeaderWitness;", world: privateWorld)
+                let witness = try XCTUnwrap(value as? [String: Any])
+                for field in ["currentConnected", "differentPhysicalTrigger", "originalPinRetained", "headerGrantAbsent", "initialRoute", "pendingMatches"] {
+                    XCTAssertEqual(witness[field] as? Bool, true, "\(condition): \(field)")
+                }
+                for field in ["verified", "pendingPrivate", "privatePinned", "hasAdoptedNodes"] {
+                    XCTAssertEqual(witness[field] as? Bool, false, "\(condition): \(field)")
+                }
+                XCTAssertEqual(witness["oldDetached"] as? Bool, condition != "model_old_connected", condition)
+                XCTAssertEqual(witness["recordPhase"] as? String, "send_claimed", condition)
+            }
             XCTAssertEqual(transitions, 2, condition)
             let clicks = try await evaluate(view,
                 "return {initial:window.fixtureExpansionClicks, recovery:window.fixtureBoundExpansionClicks};") as? [String: Int]
@@ -9711,6 +9800,27 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 XCTAssertNotNil(deadline)
                 XCTAssertEqual(state?["deadline"] as? Double, deadline)
                 XCTAssertEqual(state?["verified"] as? Bool, true)
+                if remountModelAtPromotion {
+                    let header = try await evaluate(view, """
+                        const recovery = globalThis.__computaModelBoundFirstExpansion;
+                        const pin = globalThis.__computaChatPresetPin, pending = recovery.routeModelRemount;
+                        const record = globalThis.__computaChatSubmissionState?.lastVerified;
+                        return { complete: pending?.completed === true, samePin: recovery.routeModelPin === pin,
+                          exactHeader: pending?.header === document.getElementById('fixture-model-trigger')
+                            && pin?.headerTrigger === pending?.header,
+                          previousDetached: pending?.previous?.isConnected === false,
+                          exactHashes: globalThis.__computaModelFirstProof?.fingerprint === record?.fingerprint,
+                          verifiedRecord: record?.phase === 'verified',
+                          edgeCount: recovery.routeContinuationEdges?.length };
+                        """, world: privateWorld) as? [String: Any]
+                    for field in ["complete", "samePin", "exactHeader", "previousDetached", "exactHashes", "verifiedRecord"] {
+                        XCTAssertEqual(header?[field] as? Bool, true, field)
+                    }
+                    XCTAssertEqual(header?["edgeCount"] as? Int, 2)
+                    let freshFamily = try await evaluate(view,
+                        "return window.fixtureModelFamilyOpenCount > window.fixtureInitialRouteHeaderFamilyReads;") as? Bool
+                    XCTAssertEqual(freshFamily, true, "The successor requires fresh full family/power proof")
+                }
                 let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
                 XCTAssertEqual(finished["cleanup"] as? String, "not_created")
                 try await assertHumanTabIntact(fixture)
@@ -16170,7 +16280,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                        "text_context", "text_dil_shape", "text_hidden_placeholder",
                        "text_dil_missing", "text_dil_tag", "text_dil_children",
                        "text_dil_message_id", "text_dil_marker", "text_dil_direction",
-                       "text_dil_dir", "text_dil_attributes",
+                       "text_dil_dir", "text_dil_attributes", "text_dil_opposite_marker_empty",
                        "text_layout_shape", "text_mismatch", "text_paragraph_shape",
                        "text_physical", "text_portal_shape", "text_renderer_classes",
                        "text_size", "text_source_count", "text_source_shape",

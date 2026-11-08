@@ -1714,7 +1714,7 @@ describe('ChatGPT literal terminal source equivalence', () => {
       ['text_dil_direction', x=>x.dil.values['data-d-direction']='row'],
       ['text_dil_dir', x=>x.dil.values.dir='rtl'],
       ['text_dil_attributes', x=>x.dil.values['data-private-attribute']='PRIVATE_VALUE'],
-      ['text_dil_attributes', x=>{const other=x.dil.hasAttribute('data-dil-response')?'data-d-inline-reveal':'data-dil-response';x.dil.values[other]='';}],
+      ['text_dil_opposite_marker_empty', x=>{const other=x.dil.hasAttribute('data-dil-response')?'data-d-inline-reveal':'data-dil-response';x.dil.values[other]='';}],
     ];
     for(const run of [false,true]) for(const [reason,mutate] of variants) {
       const raw='{"type":"message","text":"PRIVATE_BODY"}', x=run?streamRun(raw):literal(raw);
@@ -1731,12 +1731,46 @@ describe('ChatGPT literal terminal source equivalence', () => {
     delete x.dil.values.title;expect(x.read().flags.selectedExtraction).toBe('literal_dil');
     expect(x.read().flags).not.toHaveProperty('literalDILDecline');
   });
+  test('literal DIL opposite empty marker diagnosis never accepts either profile or reveals extra attributes', () => {
+    for (const run of [false, true]) {
+      const raw = '{"type":"message","text":"PRIVATE_BODY"}';
+      const make = () => run ? streamRun(raw) : literal(raw);
+      const expectedMarker = run ? 'data-dil-response' : 'data-d-inline-reveal';
+      const oppositeMarker = run ? 'data-d-inline-reveal' : 'data-dil-response';
+      const cases: [string, (x: any) => void][] = [
+        ['text_dil_opposite_marker_empty', x => { x.dil.values[oppositeMarker] = ''; }],
+        ['text_dil_attributes', x => { x.dil.values[oppositeMarker] = 'PRIVATE_VALUE'; }],
+        ['text_dil_attributes', x => { x.dil.values[oppositeMarker] = ' '; }],
+        ['text_dil_attributes', x => { x.dil.values['data-private-extra'] = ''; }],
+        ['text_dil_attributes', x => { x.dil.values[oppositeMarker] = ''; x.dil.values['data-private-extra'] = 'PRIVATE_VALUE'; }],
+        ['text_dil_attributes', x => { x.dil.values[oppositeMarker] = ''; x.dil.values.title = ''; }],
+        ['text_dil_marker', x => { delete x.dil.values[expectedMarker]; x.dil.values[oppositeMarker] = ''; }],
+        ['text_dil_marker', x => { x.dil.values[expectedMarker] = 'PRIVATE_VALUE'; x.dil.values[oppositeMarker] = ''; }],
+        ['text_dil_dir', x => { x.dil.values.dir = 'rtl'; x.dil.values[oppositeMarker] = ''; }],
+      ];
+      for (const [reason, mutate] of cases) {
+        const x = make(); mutate(x);
+        const fallback = (x.answer.innerText || x.answer.textContent || '').trim();
+        const result = x.read('unrelated');
+        expect(result.flags).toMatchObject({ selectedExtraction: 'rendered_fallback', extractionReason: 'missing_code', literalDILDecline: reason });
+        expect(result.text).toBe(fallback); expect(result.relation).toBeNull();
+        expect(JSON.stringify(result.flags)).not.toContain('PRIVATE');
+        expect(JSON.stringify(result.flags)).not.toContain('data-');
+      }
+      const clean = make(), before = clean.read();
+      expect(before.flags.selectedExtraction).toBe('literal_dil');
+      clean.dil.values[oppositeMarker] = '';
+      expect(clean.read().flags.literalDILDecline).toBe('text_dil_opposite_marker_empty');
+      delete clean.dil.values[oppositeMarker];
+      expect(clean.read()).toEqual(before);
+    }
+  });
   test('literal DIL reason schema covers every emitted guard and remains absent on an accepted code block', () => {
     const native=readFileSync(new URL('../Sources/Computa/Browser/EmbeddedWebModelTransport.swift',import.meta.url),'utf8');
     const emitted=new Set([...source.slice(start,end).matchAll(/chatGPTLiteralDILDecline\(report, '([^']+)'/g)].map(m=>m[1]));
     const branch=native.slice(native.indexOf('if let decline = source["literalDILDecline"]'),native.indexOf('if let raw = source["rendererGuard"]'));
     const accepted=new Set([...branch.matchAll(/"((?:text|response)_[a-z_]+)"/g)].map(m=>m[1]));
-    expect(emitted.size).toBe(33);expect(accepted).toEqual(new Set([...emitted,'text_dil_shape']));
+    expect(emitted.size).toBe(34);expect(accepted).toEqual(new Set([...emitted,'text_dil_shape']));
     const x=fixture();observedChatGPTCodeBlock(x,'{"type":"message","text":"HI"}');
     expect(read('unrelated',x.answer,messageID,style).flags).not.toHaveProperty('literalDILDecline');
   });
@@ -2628,6 +2662,143 @@ describe('ChatGPT per-round canonical submission ownership', () => {
         verified: false, finalizationStage: 'not_reached', finalizationError: 'not_returned' });
       expect(x.send.clicks).toBe(1);
     });
+    const initialNoPinHeaderPromotion = async (remount = true, timing = 'body_hash', mutation = 'none') => {
+      const staged = await initialRouteStage(remount), { x, first, body, record, initial, continuation } = staged;
+      const state: any = x.f.world.__computaChatSubmissionState;
+      const pin: any = x.f.world.__computaChatPresetPin;
+      const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/public-initial-header?temporary-chat=true';
+      let crossed = false, oldHeader: any;
+      const promote = () => {
+        if (timing === 'finalization_hash' && !x.f.world.__computaModelFirstProof) {
+          x.f.onDigest(promote, first.outbound); return;
+        }
+        const candidate: any = x.f.world.__computaModelBoundFirstExpansion;
+        expect(candidate).toMatchObject({ initialRoute: true, bound: true, outcome: 'expanded', remount });
+        expect(candidate.pendingPrivate).not.toBe(true); expect(candidate.provisional).not.toBe(true);
+        expect(candidate.predecessor).toBe(initial); expect(candidate.expandedText).toBe(first.outbound);
+        expect(candidate.deadline).toBe(initial.deadline); expect(body.text).toBe(first.outbound);
+        expect(record.phase).toBe('send_claimed'); expect(record.root).toBeNull(); expect(record.body).toBeNull();
+        expect(record.nativeFirstPinned).not.toBe(true); expect(state.pending).toBe(record); expect(state.lastVerified).toBeNull();
+        if (timing === 'finalization_hash') expect(x.f.world.__computaModelFirstProof).toEqual({ marker: first.marker, fingerprint: first.fingerprint });
+        else expect(x.f.world.__computaModelFirstProof).toBeUndefined();
+        crossed = true; x.f.document.URL = toURL; x.f.location.pathname = '/c/public-initial-header';
+        if (timing === 'model_read') x.picker!.close();
+        oldHeader = x.picker!.replaceTrigger(mutation !== 'connected_old');
+        if (mutation === 'disabled') x.picker!.trigger.disabled = true;
+        if (mutation === 'wrong_power') x.picker!.selected('High');
+        if (mutation === 'body') body.text += '!';
+        if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign';
+        if (mutation === 'document') candidate.document = {};
+        if (mutation === 'private_pin') x.f.world.__computaModelFirstProof = { marker: first.marker, fingerprint: first.fingerprint };
+        if (mutation === 'native_adopted') record.nativeFirstPinned = true;
+        if (mutation === 'record_phase') record.phase = 'verified';
+        if (mutation === 'pending_identity') state.pending = { ...record };
+        if (mutation === 'native_hash') (continuation as any).expectedSubmissionProofs = [{ sequence: 1, fingerprint: '0'.repeat(64) }];
+        if (mutation === 'first_edge') continuation.firstUserExpansionRouteContinuation[0].fromURL += 'wrong';
+        if (mutation === 'extra_edge') continuation.firstUserExpansionRouteContinuation.push({ fromURL, toURL });
+        if (mutation === 'expired') x.f.advanceTime(2_000);
+      };
+      if (timing === 'model_read') {
+        let hashed = false; x.f.onDigest(() => { hashed = true; }, first.outbound);
+        const open = x.picker!.trigger.onClick!;
+        x.picker!.trigger.onClick = () => { open(); if (hashed && !crossed) promote(); };
+      } else x.f.onDigest(promote, first.outbound);
+      const discarded = await x.observe(first, continuation);
+      expect(crossed).toBe(true);
+      const candidate: any = x.f.world.__computaModelBoundFirstExpansion;
+      return { ...staged, state, pin, oldHeader, discarded, candidate, next: { ...continuation,
+        firstUserExpansionRouteContinuation: [...continuation.firstUserExpansionRouteContinuation, { fromURL, toURL }] } };
+    };
+
+    test('initial no-pin header remount retains only a witness until fresh full model and body proof', async () => {
+      for (const remount of [false, true]) for (const timing of ['body_hash', 'model_read']) {
+        const { x, first, body, state, record, pin, oldHeader, candidate, discarded, next, initial, initialControl, expand } =
+          await initialNoPinHeaderPromotion(remount, timing);
+        expect(discarded).toMatchObject({ error: 'document_changed', detail: 'model_read_context' }); denied(discarded);
+        expect(candidate.routeDiscard.stage).toBe(timing); expect(candidate.routeModelPin).toBe(pin);
+        const pending = pin.provisionalHeader;
+        expect(candidate.routeModelRemount).toBe(pending); expect(pending.completed).toBe(false);
+        expect(candidate.verified).not.toBe(true); expect(pin.headerTrigger).toBe(oldHeader);
+        expect(oldHeader.isConnected).toBe(false); expect(x.f.world.__computaModelFirstProof).toBeUndefined();
+        expect(state.pending).toBe(record); expect(state.lastVerified).toBeNull(); expect(record.root).toBeNull(); expect(record.body).toBeNull();
+        const before = x.f.digestInputs.length; let fullReads = 0; const open = x.picker!.trigger.onClick!;
+        x.picker!.trigger.onClick = () => { fullReads++; expect(candidate.verified).not.toBe(true); expect(state.pending).toBe(record); open(); };
+        const fresh = await x.observe(first, { ...next, deferModelVerification: true });
+        expect(fresh.error).toBeUndefined(); expect(fresh.modelEvidence?.selected).toEqual(choice); expect(fresh.modelVerificationPending).toBeUndefined();
+        expect(fresh.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint }); expect(fullReads).toBeGreaterThan(0);
+        expect(x.f.digestInputs.slice(before).filter(text => text === first.outbound).length).toBeGreaterThanOrEqual(2);
+        expect(record.phase).toBe('verified'); expect(record.body).toBe(body); expect(state.pending).toBeNull(); expect(state.lastVerified).toBe(record);
+        expect(candidate.verified).toBe(true); expect(candidate.deadline).toBe(initial.deadline); expect(candidate.routeContinuationEdges).toHaveLength(2);
+        expect(pin.headerTrigger).toBe(x.picker!.trigger); expect(pending.completed).toBe(true);
+        expect(x.f.world.__computaModelFirstProof).toEqual({ marker: first.marker, fingerprint: first.fingerprint });
+        expect(initialControl.clicks).toBe(remount ? 1 : 2); expect(expand.clicks).toBe(remount ? 1 : 2); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    test('initial no-pin header invalid ownership or route cannot create model or body authority', async () => {
+      for (const mutation of ['connected_old', 'disabled', 'wrong_power', 'body', 'owner', 'document', 'private_pin',
+        'native_adopted', 'record_phase', 'pending_identity', 'first_edge', 'extra_edge', 'expired']) {
+        const { x, first, record, candidate, pin, oldHeader, discarded, next, initialControl, expand } =
+          await initialNoPinHeaderPromotion(true, 'body_hash', mutation);
+        denied(discarded); expect(candidate.routeDiscard, mutation).toBeUndefined(); expect(candidate.routeModelRemount, mutation).toBeUndefined();
+        expect(pin.provisionalHeader, mutation).toBeUndefined(); expect(pin.headerTrigger).toBe(oldHeader); expect(candidate.verified).not.toBe(true);
+        expect(record.root).toBeNull(); expect(record.body).toBeNull();
+        denied(await x.observe(first, { ...next, deferModelVerification: true }));
+        expect(record.root).toBeNull(); expect(record.body).toBeNull(); expect(x.send.clicks).toBe(1);
+        expect(initialControl.clicks).toBe(1); expect(expand.clicks).toBe(1);
+      }
+    });
+
+    test('initial no-pin header witness rejects later mutation and cannot renew its original deadline', async () => {
+      for (const mutation of ['replacement', 'old_connected', 'disabled', 'wrong_family', 'switch_restore', 'body', 'owner', 'document',
+        'private_pin', 'record_hash', 'pending_identity', 'missing_edge', 'reversed_edge', 'extra_edge', 'expired', 'expires_during_read']) {
+        const { x, first, record, body, candidate, discarded, next, pin, oldHeader, initialControl, expand } = await initialNoPinHeaderPromotion();
+        expect(discarded).toMatchObject({ error: 'document_changed', detail: 'model_read_context' });
+        const deadline = candidate.deadline, pending = pin.provisionalHeader, goodEdges = next.firstUserExpansionRouteContinuation.map(edge => ({ ...edge }));
+        if (mutation === 'replacement') x.picker!.replaceTrigger();
+        if (mutation === 'old_connected') oldHeader.connected = true;
+        if (mutation === 'disabled') x.picker!.trigger.disabled = true;
+        if (mutation === 'wrong_family') x.picker!.selected('GPT-5.5');
+        if (mutation === 'switch_restore') { let once = true; pending.observer.takeRecords = () => { if (!once) return []; once = false;
+          return [{ type: 'characterData', target: { nodeType: 3, parentElement: x.picker!.trigger, textContent: 'Medium' }, oldValue: 'High' }]; }; }
+        if (mutation === 'body') body.text += '!';
+        if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign';
+        if (mutation === 'document') candidate.document = {};
+        if (mutation === 'private_pin') x.f.world.__computaModelFirstProof = { marker: first.marker, fingerprint: first.fingerprint };
+        if (mutation === 'record_hash') record.fingerprint = '0'.repeat(64);
+        if (mutation === 'pending_identity') pin.provisionalHeader = { ...pending };
+        if (mutation === 'missing_edge') next.firstUserExpansionRouteContinuation.pop();
+        if (mutation === 'reversed_edge') next.firstUserExpansionRouteContinuation.reverse();
+        if (mutation === 'extra_edge') next.firstUserExpansionRouteContinuation.push({ fromURL: x.f.document.URL, toURL: x.f.document.URL + '/extra' });
+        if (mutation === 'expired') x.f.advanceTime(2_000);
+        if (mutation === 'expires_during_read') { const open = x.picker!.trigger.onClick!; x.picker!.trigger.onClick = () => { open(); x.f.advanceTime(2_000); }; }
+        const fresh = await x.observe(first, { ...next, deferModelVerification: true }); denied(fresh); expect(fresh.modelEvidence, mutation).toBeUndefined();
+        expect(candidate.verified, mutation).not.toBe(true); expect(candidate.deadline).toBe(deadline); expect(record.root).toBeNull(); expect(record.body).toBeNull();
+        if (mutation === 'expired' || mutation === 'expires_during_read') x.f.advanceTime(-2_000);
+        if (mutation.endsWith('_edge')) next.firstUserExpansionRouteContinuation = goodEdges;
+        denied(await x.observe(first, { ...next, deferModelVerification: true })); expect(candidate.verified, mutation).not.toBe(true);
+        expect(initialControl.clicks).toBe(1); expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    test('initial no-pin header finalization is a separate completed-display control requiring current model proof', async () => {
+      for (const remount of [false, true]) {
+        const { x, first, state, record, body, pin, oldHeader, candidate, discarded, next, initialControl, expand } =
+          await initialNoPinHeaderPromotion(remount, 'finalization_hash');
+        expect(discarded).toMatchObject({ error: 'document_changed', detail: 'model_read_context' });
+        expect(candidate.verified).toBe(true); expect(record.phase).toBe('send_claimed'); expect(state.pending).toBe(record);
+        expect(candidate.routeModelRemount).toBeUndefined(); expect(record.root).toBeNull(); expect(record.body).toBeNull();
+        expect(pin.headerTrigger).toBe(oldHeader); expect(x.f.world.__computaModelFirstProof).toEqual({ marker: first.marker, fingerprint: first.fingerprint });
+        const before = x.f.digestInputs.length;
+        const fresh = await x.observe(first, { ...next, deferModelVerification: false });
+        expect(fresh.error).toBeUndefined(); expect(fresh.modelEvidence.selected).toEqual(choice);
+        expect(fresh.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+        expect(x.f.digestInputs.slice(before).filter(text => text === first.outbound).length).toBeGreaterThanOrEqual(2);
+        expect(record.phase).toBe('verified'); expect(record.body).toBe(body); expect(state.pending).toBeNull(); expect(pin.headerTrigger).toBe(x.picker!.trigger);
+        expect(initialControl.clicks).toBe(remount ? 1 : 2); expect(expand.clicks).toBe(remount ? 1 : 2); expect(x.send.clicks).toBe(1);
+      }
+    });
+
     const pendingPrivateStage = async () => {
       const x = await chatTurnFixture(choice), first = await x.dispatch('PRIVATE PENDING FIRST\n' + 'x'.repeat(40_000));
       const oldRoot = x.f.document.querySelectorAll('article[data-turn="user"]')[0], oldBody = oldRoot.children[0];
