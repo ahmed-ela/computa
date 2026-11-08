@@ -16380,6 +16380,35 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         source["literalCodeValidJSON"] = NSNull()
         source["literalCodeKnownEnvelopeType"] = NSNull()
         XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedCodeStructure(source))
+        let clip: [String: Any] = ["reason": "coverage_left", "clip": "border_box", "radii": [0, 0, 0, 0],
+            "layout": [1_024, 768], "visual": [1_024, 768, 0, 0, 1], "clipRect": [240, 0, 1_024, 768, 784, 768],
+            "sourceRect": [256, 200, 900, 330, 644, 130], "boxCount": 1, "coverage": [false, true, true, true],
+            "transform": ["depth": 0, "property": "none"]]
+        var fallback = base
+        fallback.merge(["preCount": 0, "codeCount": 0, "codeTextLength": 0, "selectedExtraction": "rendered_fallback",
+            "extractionReason": "missing_code", "literalDILDecline": "response_ancestor_masking",
+            "literalDILAncestorMasking": ["depth": 32, "tag": "main", "property": "clip_path"], "viewportClipDiagnostic": clip]) { _, new in new }
+        let clipped = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedCodeStructure(fallback))
+        let clippedValue = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(clipped.utf8)) as? [String: Any])
+        XCTAssertEqual(clippedValue["viewportClipDiagnostic"] as? NSDictionary, clip as NSDictionary)
+        for (key, poison) in [("reason", "PRIVATE_CSS"), ("clip", "url(PRIVATE)"), ("radii", [-1, 0, 0, 0]),
+            ("layout", [true, 768]), ("visual", [1, 2]), ("clipRect", [0, 0, 1, 2, 3, Double.infinity]),
+            ("sourceRect", [0, 0, 1, 2, 3, 32_769]), ("boxCount", true), ("coverage", [0, 1, 1, 1]),
+            ("transform", ["depth": 0, "property": "zoom"]), ("text", "PRIVATE_REPLY")] as [(String, Any)] {
+            var detail = clip; detail[key] = poison
+            var packet = fallback; packet["viewportClipDiagnostic"] = detail
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedCodeStructure(packet), key)
+        }
+        for key in clip.keys {
+            var detail = clip; detail.removeValue(forKey: key)
+            var packet = fallback; packet["viewportClipDiagnostic"] = detail
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedCodeStructure(packet), key)
+        }
+        var accepted = fallback; accepted["selectedExtraction"] = "literal_dil"; accepted["extractionReason"] = "accepted_literal_dil"
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedCodeStructure(accepted))
+        var unrelated = fallback; unrelated.removeValue(forKey: "literalDILAncestorMasking")
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedCodeStructure(unrelated))
+
     }
 
     func testClaudeEarlyUserCountDiagnosticRequiresExactFiniteSchemaAndPreservesLegacyStructure() throws {

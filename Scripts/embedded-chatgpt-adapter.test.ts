@@ -1709,7 +1709,8 @@ describe('ChatGPT literal terminal source equivalence', () => {
     const x=streamRun(raw), main:any=new Element('MAIN'), body:any=new Element('BODY'), html:any=new Element('HTML');
     main.append(x.answer);body.append(main);html.append(body);main.literalClip='border-box';
     const rect={x:0,y:0,left:0,top:0,right:360,bottom:527,width:360,height:527};
-    main.getClientRects=()=>[rect];
+    main.getClientRects=()=>[rect];main.getBoundingClientRect=()=>rect;
+    x.answer.getBoundingClientRect=()=>({left:16,top:226,right:344,bottom:356,width:328,height:130});
     const document={documentElement:html}, window:any={innerWidth:360,innerHeight:527,
       visualViewport:{width:360,height:527,scale:1,offsetLeft:0,offsetTop:0}};
     const computed=(node:any,pseudo?:string)=>({...style(node,pseudo),borderTopLeftRadius:'0px',borderTopRightRadius:'0px',
@@ -1756,6 +1757,58 @@ describe('ChatGPT literal terminal source equivalence', () => {
     expect(x.inspect().flags.literalDILAncestorMasking).toEqual({depth:2,tag:'main',property:'filter'});
     delete x.main.literalFilter;x.p.literalClip='border-box';
     expect(x.inspect().flags.literalDILDecline).toBe('response_masking');
+  });
+  test('viewport clip diagnostics retain complete desktop geometry after the first refusal without changing fallback',()=>{
+    const x=viewportClipFixture();x.window.innerWidth=1024;x.window.innerHeight=768;
+    Object.assign(x.window.visualViewport,{width:1024,height:768});
+    Object.assign(x.rect,{left:240,right:1024,top:0,bottom:768,width:784,height:768});
+    x.answer.getBoundingClientRect=()=>({left:256,top:200,right:900,bottom:330,width:644,height:130});
+    const result=x.inspect();expect(result.flags.selectedExtraction).toBe('rendered_fallback');expect(result.relation).toBeNull();
+    const diagnostic={reason:'coverage_left',clip:'border_box',radii:[0,0,0,0],layout:[1024,768],
+      visual:[1024,768,0,0,1],clipRect:[240,0,1024,768,784,768],sourceRect:[256,200,900,330,644,130],
+      boxCount:1,coverage:[false,true,true,true],transform:{depth:0,property:'none'}};
+    expect(result.flags.viewportClipDiagnostic).toEqual(diagnostic);
+    x.main.clipStyles={borderTopLeftRadius:'12px'};
+    const rounded=x.inspect();expect(rounded.flags.viewportClipDiagnostic).toEqual({...diagnostic,reason:'corner_radius',radii:[12,0,0,0]});
+    expect(rounded.text).toBe(result.text);expect(rounded.flags.selectedExtraction).toBe(result.flags.selectedExtraction);
+    x.body.clipStyles={offsetPath:'path("PRIVATE_CSS")'};
+    expect(x.inspect().flags.viewportClipDiagnostic).toEqual({...diagnostic,reason:'corner_radius',radii:[12,0,0,0],transform:{depth:2,property:'offset_path'}});
+    expect(JSON.stringify(x.inspect().flags)).not.toContain('PRIVATE');
+  });
+  test('viewport clip diagnostics distinguish closed first decisions and bound every measured number',()=>{
+    const variants:[string,(x:any)=>void][]=[
+      ['clip_kind',x=>{x.main.literalClip='inset(0px)';x.main.clipStyles={borderTopLeftRadius:'12px'};}],
+      ['corner_radius',x=>x.main.clipStyles={borderBottomRightRadius:'PRIVATE_CSS'}],
+      ['layout_viewport',x=>x.window.innerWidth=Infinity],['visual_viewport_missing',x=>delete x.window.visualViewport],
+      ['visual_viewport_scale',x=>x.window.visualViewport.scale=1.1],['visual_viewport_offset',x=>x.window.visualViewport.offsetTop=1],
+      ['visual_viewport_size',x=>x.window.visualViewport.height=526],
+      ['ancestor_namespace',x=>x.body.namespaceURI='urn:PRIVATE'],['ancestor_transform',x=>x.body.clipStyles={rotate:'10deg'}],
+      ['ancestor_zoom',x=>x.body.clipStyles={zoom:'1.1'}],['document_root',x=>x.document.documentElement=new Element('HTML')],
+      ['box_count',x=>x.main.getClientRects=()=>[]],['box_nonfinite',x=>x.rect.left=NaN],['box_empty',x=>x.rect.width=0],
+      ['coverage_left',x=>x.rect.left=0.001],['coverage_top',x=>x.rect.top=1],['coverage_right',x=>x.rect.right=359],
+      ['coverage_bottom',x=>x.rect.bottom=526],
+    ];
+    for(const [reason,mutate]of variants){const x=viewportClipFixture();mutate(x);const result=x.inspect();
+      expect(result.flags.selectedExtraction,reason).toBe('rendered_fallback');expect(result.relation,reason).toBeNull();
+      expect(result.flags.viewportClipDiagnostic,reason).toBeDefined();
+      expect(result.flags.viewportClipDiagnostic?.reason,reason).toBe(reason);
+      expect(result.flags.viewportClipDiagnostic.sourceRect,reason).toEqual([16,226,344,356,328,130]);
+      expect(JSON.stringify(result.flags.viewportClipDiagnostic),reason).not.toContain('PRIVATE');
+    }
+    const x=viewportClipFixture();x.rect.left=.001;x.answer.getBoundingClientRect=()=>({left:Infinity,top:NaN,right:32769,bottom:-32769,width:1/3,height:130});
+    const detail=x.inspect().flags.viewportClipDiagnostic;
+    expect(detail.clipRect[0]).toBe(0);expect(detail.coverage[0]).toBe(false);expect(detail.reason).toBe('coverage_left');
+    expect(detail.sourceRect).toEqual([null,null,null,null,21/64,130]);
+  });
+  test('viewport diagnostic collection is failure-only and cannot rescue or break extraction',()=>{
+    const x=viewportClipFixture();let reads=0;x.main.getBoundingClientRect=()=>{reads++;throw Error('PRIVATE_DIAGNOSTIC');};
+    expect(x.inspect().flags.selectedExtraction).toBe('literal_dil');expect(reads).toBe(0);
+    x.rect.left=1;const failure=x.inspect();expect(failure.flags.selectedExtraction).toBe('rendered_fallback');
+    expect(failure.flags.literalDILAncestorMasking).toEqual({depth:2,tag:'main',property:'clip_path'});
+    expect(failure.flags).not.toHaveProperty('viewportClipDiagnostic');expect(reads).toBe(1);
+    expect(JSON.stringify(failure.flags)).not.toContain('PRIVATE');
+    const early=viewportClipFixture();early.body.connected=false;const beforeClip=early.inspect();
+    expect(beforeClip.flags.literalDILDecline).toBe('response_selection_scope');expect(beforeClip.flags).not.toHaveProperty('viewportClipDiagnostic');
   });
   test('literal DIL ancestor masking reports only the first closed predicate depth and tag without changing rejection', () => {
     const raw=JSON.stringify({type:'tool_calls',calls:[{name:'apply_patch',input:'+    PRIVATE_REPLY'}]});

@@ -3108,8 +3108,8 @@ function chatGPTWholeJSONEnvelope(text) {
 
 // This is the observed text-only renderer shape, not a DIL/Markdown parser.
 // Every text leaf is accounted for; a hidden placeholder must be truly empty.
-function chatGPTLiteralDILDecline(report, reason, detail = null) {
-  try { if (report) report(reason, detail); } catch { /* Diagnostics cannot alter extraction. */ }
+function chatGPTLiteralDILDecline(report, reason, detail = null, viewportClipDiagnostic = null) {
+  try { if (report) report(reason, detail, viewportClipDiagnostic); } catch { /* Diagnostics cannot alter extraction. */ }
   return null;
 }
 function chatGPTLiteralDILText(answer, messageID, report = null) {
@@ -3240,34 +3240,79 @@ function chatGPTLiteralDILText(answer, messageID, report = null) {
   return { text, displayed };
 }
 
+// Failure-only geometry, collected synchronously after the original decision.
+// Rounding and bounds apply only to diagnostics, never to clip admission.
+function chatGPTViewportClipDiagnostic(node, source, reason) {
+  try {
+    const number = value => typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= 32768
+      ? Math.round(value * 64) / 64 : null;
+    const rect = value => value ? ['left', 'top', 'right', 'bottom', 'width', 'height'].map(key => number(value[key])) : null;
+    const style = getComputedStyle(node), corners = ['borderTopLeftRadius', 'borderTopRightRadius', 'borderBottomLeftRadius', 'borderBottomRightRadius'];
+    const radii = corners.map(key => /^\d+(?:\.\d+)?px$/.test(style[key]) ? number(Number.parseFloat(style[key])) : null);
+    const width = window.innerWidth, height = window.innerHeight, viewport = window.visualViewport;
+    const box = node.getBoundingClientRect(), boxes = node.getClientRects();
+    let transform = { depth: 0, property: 'none' }, current = node;
+    for (let depth = 1; current && depth <= 64; depth++, current = current.parentElement) {
+      const css = getComputedStyle(current);
+      const property = ['transform', 'translate', 'rotate', 'scale', 'perspective', 'offsetPath'].find(key => css[key] !== 'none')
+        || (css.zoom !== '1' ? 'zoom' : null);
+      if (property) { transform = { depth, property: property === 'offsetPath' ? 'offset_path' : property }; break; }
+      if (current === document.documentElement) break;
+    }
+    if (transform.property === 'none' && current !== document.documentElement) transform = { depth: 0, property: 'unavailable' };
+    const finite = [box.left, box.top, box.right, box.bottom, width, height].every(Number.isFinite);
+    return { reason, clip: style.clipPath === 'border-box' ? 'border_box' : 'other', radii,
+      layout: [number(width), number(height)],
+      visual: viewport ? [viewport.width, viewport.height, viewport.offsetLeft, viewport.offsetTop, viewport.scale].map(number) : null,
+      clipRect: rect(box), sourceRect: rect(source?.getBoundingClientRect()),
+      boxCount: Number.isInteger(boxes.length) ? Math.min(1000, Math.max(0, boxes.length)) : null,
+      coverage: finite ? [box.left <= 0, box.top <= 0, box.right >= width, box.bottom >= height] : null, transform };
+  } catch { return null; }
+}
 // A rectangular border clip covering the complete layout viewport adds no
 // clipping inside the viewport; ordinary offscreen/scrolling source reads retain
 // existing semantics. This current geometry check grants no persistent proof.
-function chatGPTViewportBorderClip(node, style) {
+function chatGPTViewportBorderClip(node, style, report = null, source = null) {
+  const decline = reason => {
+    if (typeof report === 'function') {
+      try { const detail = chatGPTViewportClipDiagnostic(node, source, reason); if (detail) report(detail); } catch { /* No acceptance effect. */ }
+    }
+    return false;
+  };
   try {
-    if (style.clipPath !== 'border-box' || typeof window === 'undefined' || typeof document === 'undefined'
-      || !['borderTopLeftRadius', 'borderTopRightRadius', 'borderBottomLeftRadius', 'borderBottomRightRadius']
-        .every(key => style[key] === '0px')) return false;
+    if (style.clipPath !== 'border-box') return decline('clip_kind');
+    if (typeof window === 'undefined' || typeof document === 'undefined') return decline('context');
+    if (!['borderTopLeftRadius', 'borderTopRightRadius', 'borderBottomLeftRadius', 'borderBottomRightRadius']
+      .every(key => style[key] === '0px')) return decline('corner_radius');
     const width = window.innerWidth, height = window.innerHeight, viewport = window.visualViewport;
-    if (![width, height].every(value => Number.isFinite(value) && value > 0)
-      || !viewport || viewport.scale !== 1 || viewport.offsetLeft !== 0 || viewport.offsetTop !== 0
-      || viewport.width !== width || viewport.height !== height) return false;
+    if (![width, height].every(value => Number.isFinite(value) && value > 0)) return decline('layout_viewport');
+    if (!viewport) return decline('visual_viewport_missing');
+    if (viewport.scale !== 1) return decline('visual_viewport_scale');
+    if (viewport.offsetLeft !== 0 || viewport.offsetTop !== 0) return decline('visual_viewport_offset');
+    if (viewport.width !== width || viewport.height !== height) return decline('visual_viewport_size');
     let root = null, depth = 0;
     for (let current = node; current; current = current.parentElement) {
-      if (++depth > 64 || !current.isConnected || current.namespaceURI !== 'http://www.w3.org/1999/xhtml') return false;
+      if (++depth > 64) return decline('ancestor_limit');
+      if (!current.isConnected) return decline('ancestor_detached');
+      if (current.namespaceURI !== 'http://www.w3.org/1999/xhtml') return decline('ancestor_namespace');
       const currentStyle = current === node ? style : getComputedStyle(current);
-      if (!['transform', 'translate', 'rotate', 'scale', 'perspective', 'offsetPath'].every(key => currentStyle[key] === 'none')
-        || currentStyle.zoom !== '1') return false;
+      if (!['transform', 'translate', 'rotate', 'scale', 'perspective', 'offsetPath'].every(key => currentStyle[key] === 'none'))
+        return decline('ancestor_transform');
+      if (currentStyle.zoom !== '1') return decline('ancestor_zoom');
       root = current;
     }
-    if (root !== document.documentElement) return false;
+    if (root !== document.documentElement) return decline('document_root');
     const boxes = node.getClientRects();
-    if (boxes.length !== 1) return false;
+    if (boxes.length !== 1) return decline('box_count');
     const box = boxes[0];
-    return ['left', 'top', 'right', 'bottom', 'width', 'height'].every(key => Number.isFinite(box[key]))
-      && box.width > 0 && box.height > 0 && box.left <= 0 && box.top <= 0
-      && box.right >= width && box.bottom >= height;
-  } catch { return false; }
+    if (!['left', 'top', 'right', 'bottom', 'width', 'height'].every(key => Number.isFinite(box[key]))) return decline('box_nonfinite');
+    if (!(box.width > 0 && box.height > 0)) return decline('box_empty');
+    if (!(box.left <= 0)) return decline('coverage_left');
+    if (!(box.top <= 0)) return decline('coverage_top');
+    if (!(box.right >= width)) return decline('coverage_right');
+    if (!(box.bottom >= height)) return decline('coverage_bottom');
+    return true;
+  } catch { return decline('exception'); }
 }
 
 // Read exact JSON bytes only from the two fully accounted observed DIL
@@ -3293,6 +3338,7 @@ function chatGPTLiteralDILResponse(answer, expectedMessageID = null, report = nu
   if (!literal) return null;
   if (chatGPTSingleJSONFence(literal.text) === null && !(literal.run && chatGPTWholeJSONEnvelope(literal.text)))
     return chatGPTLiteralDILDecline(report, 'response_fence');
+  let viewportClipDiagnostic = null;
   const plainFailure = (node, ancestor = false) => {
     if (node.namespaceURI !== 'http://www.w3.org/1999/xhtml') return 'namespace';
     const style = getComputedStyle(node);
@@ -3300,7 +3346,8 @@ function chatGPTLiteralDILResponse(answer, expectedMessageID = null, report = nu
     if (style.webkitTextSecurity !== 'none') return 'text_security';
     if (style.contentVisibility === 'hidden') return 'content_visibility';
     if (style.filter !== 'none') return 'filter';
-    if (style.clipPath !== 'none' && !(ancestor && chatGPTViewportBorderClip(node, style))) return 'clip_path';
+    if (style.clipPath !== 'none' && !(ancestor && chatGPTViewportBorderClip(node, style,
+      typeof report === 'function' ? detail => { viewportClipDiagnostic = detail; } : null, answer))) return 'clip_path';
     return null;
   };
   // The literal helper has already bounded and accounted for this whole tree.
@@ -3316,7 +3363,7 @@ function chatGPTLiteralDILResponse(answer, expectedMessageID = null, report = nu
         const tag = String(node.tagName).toLowerCase();
         detail = { depth, tag: ['div', 'span', 'article', 'section', 'main', 'body', 'html', 'form', 'aside'].includes(tag) ? tag : 'other', property };
       } catch { /* Keep the original rejection if diagnostics are unavailable. */ }
-      return chatGPTLiteralDILDecline(report, 'response_ancestor_masking', detail);
+      return chatGPTLiteralDILDecline(report, 'response_ancestor_masking', detail, viewportClipDiagnostic);
     }
     const selectionID = node.getAttribute('data-chatgpt-selection-message-id');
     if (selectionID !== null && selectionID !== id) return chatGPTLiteralDILDecline(report, 'response_selection_id');
@@ -3646,9 +3693,10 @@ function modelResponseExtraction(answer) {
   if (blocks.length > 1) return fallback('multiple_pre');
   if (codes.length !== 1) {
     if (codes.length === 0 && blocks.length === 0) {
-      const literal = chatGPTLiteralDILResponse(answer, null, (reason, detail) => {
+      const literal = chatGPTLiteralDILResponse(answer, null, (reason, detail, viewportClipDiagnostic) => {
         flags.literalDILDecline = reason;
         if (detail !== null) flags.literalDILAncestorMasking = detail;
+        if (viewportClipDiagnostic !== null) flags.viewportClipDiagnostic = viewportClipDiagnostic;
       });
       if (literal !== null) return { text: literal, blocks, code, flags: { ...flags,
         selectedExtraction: 'literal_dil', extractionReason: 'accepted_literal_dil' } };

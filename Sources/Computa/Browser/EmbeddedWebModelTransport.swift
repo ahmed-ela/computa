@@ -4189,6 +4189,45 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             else { return nil }
             safe["literalDILAncestorMasking"] = ["depth": depth, "tag": tag, "property": property]
         }
+        if let raw = source["viewportClipDiagnostic"] {
+            func boundedNumber(_ value: Any) -> Bool {
+                if value is NSNull { return true }
+                guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return false }
+                let value = number.doubleValue
+                return value.isFinite && abs(value) <= 32_768 && (value * 64).rounded() == value * 64
+            }
+            func numbers(_ value: Any?, count: Int, nullable: Bool = false) -> Bool {
+                if nullable, value is NSNull { return true }
+                guard let values = value as? [Any], values.count == count else { return false }
+                return values.allSatisfy(boundedNumber)
+            }
+            guard source["literalDILDecline"] as? String == "response_ancestor_masking",
+                  let ancestor = source["literalDILAncestorMasking"] as? [String: Any], ancestor["property"] as? String == "clip_path",
+                  let detail = raw as? [String: Any],
+                  Set(detail.keys) == ["reason", "clip", "radii", "layout", "visual", "clipRect", "sourceRect", "boxCount", "coverage", "transform"],
+                  let reason = detail["reason"] as? String,
+                  ["clip_kind", "context", "corner_radius", "layout_viewport", "visual_viewport_missing",
+                   "visual_viewport_scale", "visual_viewport_offset", "visual_viewport_size", "ancestor_limit",
+                   "ancestor_detached", "ancestor_namespace", "ancestor_transform", "ancestor_zoom", "document_root",
+                   "box_count", "box_nonfinite", "box_empty", "coverage_left", "coverage_top", "coverage_right",
+                   "coverage_bottom", "exception"].contains(reason),
+                  ["border_box", "other"].contains(detail["clip"] as? String ?? ""),
+                  numbers(detail["radii"], count: 4), numbers(detail["layout"], count: 2),
+                  numbers(detail["visual"], count: 5, nullable: true), numbers(detail["clipRect"], count: 6, nullable: true),
+                  numbers(detail["sourceRect"], count: 6, nullable: true),
+                  detail["boxCount"] is NSNull || integer(detail["boxCount"], limit: 1_000) != nil,
+                  let transform = detail["transform"] as? [String: Any], Set(transform.keys) == ["depth", "property"],
+                  let depth = integer(transform["depth"], limit: 64), let property = transform["property"] as? String,
+                  ["none", "unavailable", "transform", "translate", "rotate", "scale", "perspective", "offset_path", "zoom"].contains(property),
+                  (["none", "unavailable"].contains(property) ? depth == 0 : depth >= 1)
+            else { return nil }
+            guard (detail["radii"] as? [Any])?.allSatisfy({ $0 is NSNull || (($0 as? NSNumber)?.doubleValue ?? -1) >= 0 }) == true else { return nil }
+            if !(detail["coverage"] is NSNull) {
+                guard let flags = detail["coverage"] as? [Any], flags.count == 4,
+                      flags.allSatisfy({ CFGetTypeID($0 as CFTypeRef) == CFBooleanGetTypeID() }) else { return nil }
+            }
+            safe["viewportClipDiagnostic"] = detail
+        }
         if let raw = source["rendererGuard"] {
             guard let guardDiagnostic = sanitizedRendererGuardDiagnostic(raw) else { return nil }
             safe["rendererGuard"] = guardDiagnostic
