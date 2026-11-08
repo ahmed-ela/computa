@@ -237,6 +237,39 @@ function computaQwenDOM(c) {
       throw error;
     }
   }
+  function ordinaryResponseContainer(root, containers, displayed) {
+    // Preserve the ordinary uniqueness guard and its exact thrown value. Only
+    // after rejection, describe the already selected nodes without body/ID values.
+    try { return one(displayed, 'response_container'); }
+    catch (error) {
+      if (error?.computaAdapterFailure) {
+        try {
+          const first = containers.slice(0, 2), ancestors = [], ids = [];
+          let smrm = false, cmrm = false, ancestorLimited = false;
+          const rows = first.map(node => {
+            const id = node.getAttribute('id'), suffix = id && [22,58].includes(id.length) && id.startsWith('chat-response-message-') ? id.slice(22) : null;
+            const idKind = id === null ? 'missing' : suffix === '' ? 'empty_prefix' : c.uuid(suffix) ? 'uuid' : 'other';
+            ids.push(idKind === 'uuid' ? suffix : null);
+            const chain = []; let parent = node.parentElement;
+            for (let depth = 0; parent && parent !== root && depth < 64; depth++, parent = parent.parentElement) {
+              chain.push(parent); smrm ||= parent.classList.contains('smrm'); cmrm ||= parent.classList.contains('cmrm');
+            }
+            ancestorLimited ||= parent !== root; ancestors.push(chain);
+            return {visible:displayed.includes(node),id:idKind};
+          });
+          error.adapterFailureStructure = {version:1,provider:'qwen',trigger:'response_container',
+            total:Math.min(3,containers.length),displayed:Math.min(3,displayed.length),rootVisible:c.visible(root),
+            dual:root.classList.contains('qwen-chat-message-dual-message'),multi:root.classList.contains('qwen-chat-message-multi-message'),
+            smrm,cmrm,ancestorLimited,
+            relation:first.length === 0 ? 'none' : first.length === 1 ? 'single'
+              : first[0].parentElement === first[1].parentElement ? 'siblings'
+              : ancestors[0].includes(first[1]) || ancestors[1].includes(first[0]) ? 'nested' : 'other',
+            idRelation:ids.length === 2 && ids.every(id => id !== null) ? ids[0] === ids[1] ? 'same_uuid' : 'different_uuid' : 'other',containers:rows};
+        } catch { /* Diagnostic reads cannot replace the original refusal. */ }
+      }
+      throw error;
+    }
+  }
   function responseChoice(node, containers, displayed, ordered, userID) {
     // The public SMRM component is anonymous. These controls establish a
     // response preference, never a per-card model/backend identity.
@@ -329,7 +362,7 @@ function computaQwenDOM(c) {
           rejectResponseContainer(!containers.length ? 'response_container_empty'
             : containers.length > 1 ? 'response_container_multiple' : 'response_container_hidden',
             node, containers, displayed, emptyContainerPrompt !== null);
-        const content = one(displayed, 'response_container');
+        const content = ordinaryResponseContainer(node, containers, displayed);
         const answerID = content.getAttribute('id')?.replace(/^chat-response-message-/, '');
         if (!ordered() || (!c.uuid(answerID) && !(allowInitialResponseIdentity && answerID === ''))
           || content.getAttribute('id') !== 'chat-response-message-' + answerID || answerID === id)

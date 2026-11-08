@@ -93,6 +93,77 @@ final class WebsiteAdapterFailureDiagnosticTests: XCTestCase {
         }
     }
 
+    private func qwenOrdinaryContainerFailure(total: Int = 2, displayed: Int = 2,
+                                              firstBodyBound: Bool = true, responseIdentityRetained: Bool = false) -> [String: Any] {
+        let rows: [[String: Any]] = (0..<min(total, 2)).map { index in
+            ["visible": index < displayed, "id": "uuid"]
+        }
+        return ["version": 1, "provider": "qwen", "trigger": "response_container", "total": total, "displayed": displayed,
+                "rootVisible": true, "dual": false, "multi": false, "smrm": false, "cmrm": false, "ancestorLimited": false,
+                "relation": total == 0 ? "none" : total == 1 ? "single" : "siblings",
+                "idRelation": total >= 2 ? "same_uuid" : "other", "containers": rows,
+                "firstBodyBound": firstBodyBound, "responseIdentityRetained": responseIdentityRetained]
+    }
+
+    func testQwenOrdinaryContainerFailureLogsOnlyFiniteRejectedCountsAndExistingStateFlags() throws {
+        for (total, displayed) in [(0, 0), (1, 0), (2, 0), (2, 2), (3, 0), (3, 3)] {
+            for retained in [false, true] {
+                let value = qwenOrdinaryContainerFailure(total: total, displayed: displayed, responseIdentityRetained: retained)
+                var observation: [String: Any] = ["error": "document_changed", "detail": "response_container", "adapterFailureStructure": value]
+                let packet = try XCTUnwrap(D.remove(from: &observation, provider: "qwen", action: "inspect"))
+                XCTAssertEqual(observation as NSDictionary, ["error": "document_changed", "detail": "response_container"] as NSDictionary)
+                let log = try XCTUnwrap(D.qwenResponseContainerLogFields(packet))
+                XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(log.utf8)) as? NSDictionary, value as NSDictionary)
+                XCTAssertLessThanOrEqual(log.utf8.count, 1_024)
+                XCTAssertNil(D.qwenAuthoredLogFields(packet))
+            }
+        }
+        var unbound = qwenOrdinaryContainerFailure(total: 0, displayed: 0, firstBodyBound: false)
+        XCTAssertNotNil(D.sanitize(unbound, provider: "qwen", error: "document_changed", detail: "response_container"))
+        unbound.removeValue(forKey: "firstBodyBound")
+        XCTAssertNil(D.sanitize(unbound, provider: "qwen", error: "document_changed", detail: "response_container"))
+    }
+
+    func testQwenOrdinaryContainerFailureRejectsSuccessShapesUnboundedValuesRawFieldsAndClaimedIdentities() {
+        let valid = qwenOrdinaryContainerFailure()
+        func accepts(_ value: [String: Any]) -> Bool {
+            D.sanitize(value, provider: "qwen", error: "document_changed", detail: "response_container") != nil
+        }
+        XCTAssertTrue(accepts(valid))
+        for (key, replacement) in [("total", true as Any), ("total", -1), ("total", 4), ("displayed", 1), ("displayed", 3),
+                                   ("rootVisible", 1), ("smrm", "true"), ("firstBodyBound", 1), ("responseIdentityRetained", "false"),
+                                   ("relation", "none"), ("idRelation", "PRIVATE_UUID"), ("text", "PRIVATE_BODY"),
+                                   ("taskID", UUID().uuidString), ("sessionToken", UUID().uuidString), ("inferenceID", UUID().uuidString),
+                                   ("documentGeneration", UUID().uuidString), ("containers", [] as [[String: Any]])] {
+            var bad = valid; bad[key] = replacement; XCTAssertFalse(accepts(bad), key)
+        }
+        for (key, replacement) in [("id", "PRIVATE_UUID" as Any), ("visible", 1), ("text", "PRIVATE_BODY")] {
+            var bad = valid, rows = valid["containers"] as! [[String: Any]]
+            rows[0][key] = replacement; bad["containers"] = rows; XCTAssertFalse(accepts(bad), key)
+        }
+        var mismatchedID = valid, rows = valid["containers"] as! [[String: Any]]
+        rows[0]["id"] = "missing"; mismatchedID["containers"] = rows; XCTAssertFalse(accepts(mismatchedID))
+        var impossibleVisible = valid; impossibleVisible["displayed"] = 0; XCTAssertFalse(accepts(impossibleVisible))
+        var impossibleEmpty = qwenOrdinaryContainerFailure(total: 0, displayed: 0)
+        impossibleEmpty["smrm"] = true; XCTAssertFalse(accepts(impossibleEmpty))
+        var incomplete = valid; incomplete.removeValue(forKey: "responseIdentityRetained"); XCTAssertFalse(accepts(incomplete))
+    }
+
+    func testQwenOrdinaryContainerFailureCannotCrossActionsProviderOrOriginalErrorDetail() {
+        let value = qwenOrdinaryContainerFailure()
+        for action in ["submit", "verifyModel", "deleteConversation"] {
+            var observed: [String: Any] = ["error": "document_changed", "detail": "response_container", "adapterFailureStructure": value]
+            XCTAssertNil(D.remove(from: &observed, provider: "qwen", action: action))
+            XCTAssertEqual(Set(observed.keys), ["error", "detail"])
+        }
+        for (provider, error, detail) in [("deepseek", "document_changed", "response_container"),
+                                         ("qwen", "conversation_changed", "response_container"),
+                                         ("qwen", "document_changed", "response_container_multiple"),
+                                         ("qwen", "unsupported_response_format", "authored_source")] {
+            XCTAssertNil(D.sanitize(value, provider: provider, error: error, detail: detail))
+        }
+    }
+
     private var qwenAuthoredFailure: [String: Any] {
         ["version": 1, "provider": "qwen", "trigger": "authored_source", "stage": "paragraph", "reason": "tag", "count": 0]
     }

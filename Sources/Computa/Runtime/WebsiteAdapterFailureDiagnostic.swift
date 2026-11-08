@@ -85,6 +85,31 @@ enum WebsiteAdapterFailureDiagnostic {
                   candidates(value["markdownCandidates"], categories: kimiCategories, kind: "excludedReasoning") else { return nil }
             categories = kimiCategories
         case "qwen":
+            if error == "document_changed", detail == "response_container", trigger == detail {
+                guard Set(value.keys) == ["version", "provider", "trigger", "total", "displayed", "rootVisible",
+                                          "dual", "multi", "smrm", "cmrm", "ancestorLimited", "relation", "idRelation", "containers",
+                                          "firstBodyBound", "responseIdentityRetained"],
+                      let total = integer(value["total"], 0...3), let displayed = integer(value["displayed"], 0...3),
+                      displayed <= total, displayed != 1,
+                      ["rootVisible", "dual", "multi", "smrm", "cmrm", "ancestorLimited", "firstBodyBound", "responseIdentityRetained"].allSatisfy({ boolean(value[$0]) != nil }),
+                      let relation = value["relation"] as? String,
+                      let idRelation = value["idRelation"] as? String, ["same_uuid", "different_uuid", "other"].contains(idRelation),
+                      let rows = value["containers"] as? [[String: Any]], rows.count == min(Int(total), 2),
+                      (total == 0 ? relation == "none" : total == 1 ? relation == "single" : ["siblings", "nested", "other"].contains(relation)) else { return nil }
+                var visibleCount: Int64 = 0
+                var uuidCount = 0
+                for row in rows {
+                    guard Set(row.keys) == ["visible", "id"], let visible = boolean(row["visible"]),
+                          let id = row["id"] as? String, ["missing", "empty_prefix", "uuid", "other"].contains(id) else { return nil }
+                    if visible { visibleCount += 1 }
+                    if id == "uuid" { uuidCount += 1 }
+                }
+                guard visibleCount <= displayed, total == 3 || visibleCount == displayed,
+                      (uuidCount == 2) == (idRelation != "other"),
+                      total != 0 || ["smrm", "cmrm", "ancestorLimited"].allSatisfy({ boolean(value[$0]) == false }),
+                      let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), data.count <= 1_024 else { return nil }
+                return Packet(provider: provider, trigger: trigger, data: data)
+            }
             if error == "document_changed", detail == "response_container_multiple", trigger == detail {
                 guard Set(value.keys) == ["version", "provider", "trigger", "total", "displayed", "emptyRootMode",
                                           "dual", "multi", "smrm", "cmrm", "ancestorLimited", "relation", "idRelation", "containers"],
@@ -190,11 +215,11 @@ enum WebsiteAdapterFailureDiagnostic {
         return String(data: packet.data, encoding: .utf8)
     }
 
-    /// Only this closed ownership-failure packet is eligible for ordinary logging.
+    /// Only closed Qwen ownership-failure packets are eligible for ordinary logging.
     static func qwenResponseContainerLogFields(_ packet: Packet) -> String? {
-        guard packet.provider == "qwen", packet.trigger == "response_container_multiple", packet.data.count <= 1_024,
+        guard packet.provider == "qwen", ["response_container_multiple", "response_container"].contains(packet.trigger), packet.data.count <= 1_024,
               let value = try? JSONSerialization.jsonObject(with: packet.data),
-              let checked = sanitize(value, provider: "qwen", error: "document_changed", detail: "response_container_multiple"),
+              let checked = sanitize(value, provider: "qwen", error: "document_changed", detail: packet.trigger),
               checked.data == packet.data else { return nil }
         return String(data: packet.data, encoding: .utf8)
     }
