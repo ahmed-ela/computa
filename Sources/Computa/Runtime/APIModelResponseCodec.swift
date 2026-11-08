@@ -187,6 +187,9 @@ enum APIModelResponseCodec {
         let schema: [String: Any]
         let description: String
         var patchProjection: AlibabaPatchProjection? = nil
+        // Exact admitted Qwen patch wrappers stay unambiguous without parsing,
+        // compiling or changing the literal native input string they contain.
+        var requiresUnambiguousArguments = false
         var browserWaitHistoricalSchemas: [[String: Any]]? = nil
         var identity: String { (namespace ?? "") + "\u{0}" + name }
     }
@@ -680,11 +683,12 @@ enum APIModelResponseCodec {
         // calls and current declarations share one stable provider identity.
         let historyByIdentity = Dictionary(uniqueKeysWithValues: historyTools.map { ($0.identity, $0) })
         let alibabaPatchGuidance = selection.provider.wireAPI == .chatCompletions && selection.provider.isAlibabaModelStudioInference
-        let typedPatch = alibabaPatchGuidance && selection.model.id == "qwen3.7-flash"
-        let tools = try parseTools(raw["tools"], naming: toolNaming, alibabaPatchGuidance: alibabaPatchGuidance, typedPatch: typedPatch).map { visible -> Tool in
+        let literalPatch = alibabaPatchGuidance && selection.model.id == "qwen3.7-flash"
+        let tools = try parseTools(raw["tools"], naming: toolNaming, alibabaPatchGuidance: alibabaPatchGuidance, literalPatch: literalPatch).map { visible -> Tool in
             guard let original = historyByIdentity[visible.identity] else { throw Failure.invalidTool }
             return Tool(name: visible.name, namespace: visible.namespace, wireName: original.wireName,
-                        custom: visible.custom, schema: visible.schema, description: visible.description, patchProjection: visible.patchProjection)
+                        custom: visible.custom, schema: visible.schema, description: visible.description, patchProjection: visible.patchProjection,
+                        requiresUnambiguousArguments: visible.requiresUnambiguousArguments)
         }
         var allowed = Set(tools.map(\.wireName)), required = false
         var wireChoice: Any = "auto"
@@ -839,7 +843,7 @@ enum APIModelResponseCodec {
         return stem + "__" + suffix
     }
 
-    private static func parseTools(_ value: Any?, naming: ToolNaming, alibabaPatchGuidance: Bool = false, typedPatch: Bool = false) throws -> [Tool] {
+    private static func parseTools(_ value: Any?, naming: ToolNaming, alibabaPatchGuidance: Bool = false, literalPatch: Bool = false) throws -> [Tool] {
         if absent(value) { return [] }
         guard let definitions = value as? [[String: Any]], definitions.count <= 256 else { throw Failure.invalidTool }
         var result: [Tool] = [], identities = Set<String>(), wireNames = Set<String>()
@@ -849,11 +853,12 @@ enum APIModelResponseCodec {
             if !absent(definition["description"]), !(definition["description"] is String) { throw Failure.invalidTool }
             if !absent(definition["strict"]), strictBool(definition["strict"]) == nil { throw Failure.invalidTool }
             let custom = type == "custom"
-            let projection = typedPatch ? AlibabaPatchProjection.matching(definition, namespace: namespace) : nil
+            // Retain exact provider/model/native-grammar admission only for the
+            // outer wrapper's ambiguity guard. Every custom tool still receives
+            // its existing literal-input transport and verbatim native grammar.
+            let admittedLiteralPatch = literalPatch && AlibabaPatchProjection.matching(definition, namespace: namespace) != nil
             let schema: [String: Any]
-            if let projection {
-                schema = projection.schema
-            } else if custom {
+            if custom {
                 // Put the literal-input contract on the argument the provider fills,
                 // while preserving the complete native grammar in the description.
                 var inputDescription = "Literal native tool input. Follow the exact text or grammar contract in this function's description, including delimiters and newlines. Encode the contents once as this JSON string; do not add quoting, JSON, shell syntax or Markdown fences unless the native contract requires them."
@@ -880,15 +885,10 @@ enum APIModelResponseCodec {
                 if parameters["additionalProperties"] == nil, parameters["properties"] != nil { parameters["additionalProperties"] = false }
                 schema = parameters
             }
-            let description: String
-            if projection != nil {
-                description = AlibabaPatchProjection.description
-            } else {
-                description = custom ? try customToolDescription(definition) : (definition["description"] as? String ?? "")
-            }
+            let description = custom ? try customToolDescription(definition) : (definition["description"] as? String ?? "")
             let wireName = naming == .legacy ? "computa_tool_\(result.count)" : semanticToolName(name: name, namespace: namespace)
             let tool = Tool(name: name, namespace: namespace, wireName: wireName, custom: custom,
-                            schema: schema, description: description, patchProjection: projection,
+                            schema: schema, description: description, requiresUnambiguousArguments: admittedLiteralPatch,
                             browserWaitHistoricalSchemas: ComputaModelToolCatalog.browserWaitDefinitionVariants(
                                 definition, namespace: namespace)?.historical)
             // Validate the complete catalog before filtering, so a collision
@@ -1895,7 +1895,7 @@ enum APIModelResponseCodec {
         guard let value = try? JSONSerialization.jsonObject(with: data) else {
             onRejection?(.invalidJSON); throw Failure.invalidArguments
         }
-        if tool.patchProjection != nil, !APIModelCorrectionJSON.isUnambiguous(data) {
+        if tool.patchProjection != nil || tool.requiresUnambiguousArguments, !APIModelCorrectionJSON.isUnambiguous(data) {
             onRejection?(.invalidJSON); throw Failure.invalidArguments
         }
         guard let object = value as? [String: Any] else {

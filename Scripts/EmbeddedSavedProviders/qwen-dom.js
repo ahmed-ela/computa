@@ -862,10 +862,17 @@ function computaQwenDOM(c) {
       throw error;
     }
   }
+  function codePayloadRoot(control) {
+    const roots = document.querySelectorAll('[id="root"]'), root = roots.length === 1 ? roots[0] : null;
+    return root && root.tagName === 'DIV' && root.namespaceURI === 'http://www.w3.org/1999/xhtml'
+      && root.isConnected && root.parentElement === document.body && root.contains(control) ? root : null;
+  }
   function sampleCodePayload(candidate, channel, grant, recheck) {
     const fail = codePayloadFailure;
     if (!channel || Object.keys(channel).sort().join(',') !== 'dispatch,result,secret'
       || ![channel.dispatch,channel.result,channel.secret].every(c.uuid) || !c.uuid(grant)) fail('channel_shape');
+    const appRoot = codePayloadRoot(candidate.control);
+    if (!appRoot) fail('root_boundary');
     let count = 0, captured = null, changed = false, resultReason = 'result_invalid';
     const observer = new MutationObserver(records => { if (records.length) changed = true; });
     const listener = event => {
@@ -876,7 +883,7 @@ function computaQwenDOM(c) {
       if (value.count !== 1) { resultReason = 'write_count'; return; }
       if (value.invalid !== false) {
         const reasons = {value_type:'write_invalid_type',value_size:'write_invalid_size',write_api:'write_invalid_api',
-          exec_command:'write_invalid_exec',click_exception:'write_invalid_click',hooks_changed:'write_invalid_hooks'};
+          exec_command:'write_invalid_exec',click_exception:'write_invalid_click',hooks_changed:'write_invalid_hooks',resolve_failure:'write_invalid_resolve',root_boundary:'root_boundary'};
         resultReason = value.invalid !== true ? 'result_invalid'
           : typeof value.invalidCause === 'string' && Object.prototype.hasOwnProperty.call(reasons, value.invalidCause)
             ? reasons[value.invalidCause] : 'result_fields';
@@ -896,6 +903,7 @@ function computaQwenDOM(c) {
       if (parents.size > 96) fail('ancestor_limit');
       for (const parent of parents) observer.observe(parent, {childList:true,attributes:true});
       recheck();
+      if (codePayloadRoot(candidate.control) !== appRoot) fail('root_boundary');
       candidate.control.dispatchEvent(new CustomEvent(channel.dispatch, {bubbles:true,
         detail:{secret:channel.secret,grant}}));
       if (observer.takeRecords().length) changed = true;
@@ -903,6 +911,7 @@ function computaQwenDOM(c) {
       if (observer.takeRecords().length) changed = true;
       if (changed) fail('synchronous_mutation');
       if (count !== 1) fail(count === 0 ? 'result_missing' : 'result_multiple');
+      if (codePayloadRoot(candidate.control) !== appRoot) fail('root_boundary');
       if (captured === null) fail(resultReason);
       const bytes = new TextEncoder().encode(captured);
       if (bytes.length > 220_000) c.fail('response_too_large');

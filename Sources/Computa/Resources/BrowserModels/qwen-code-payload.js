@@ -5,6 +5,14 @@
   if (!config || Object.keys(config).sort().join(',') !== 'dispatch,result,secret'
     || ![config.dispatch,config.result,config.secret].every(uuid)) return;
   const click = HTMLElement.prototype.click, exec = Document.prototype.execCommand;
+  const add = EventTarget.prototype.addEventListener, remove = EventTarget.prototype.removeEventListener;
+  const stop = Event.prototype.stopPropagation, query = Document.prototype.querySelectorAll, contains = Node.prototype.contains;
+  const appRoot = target => {
+    const roots = Reflect.apply(query, document, ['[id="root"]']);
+    const root = roots.length === 1 ? roots[0] : null;
+    return root && root.tagName === 'DIV' && root.namespaceURI === 'http://www.w3.org/1999/xhtml'
+      && root.isConnected && root.parentElement === document.body && Reflect.apply(contains, root, [target]) ? root : null;
+  };
   let active = null, spent = false;
   const invalidate = (record, cause) => {
     if (!record) return;
@@ -19,7 +27,8 @@
       else if (active.count === 1) active.text = value;
     }
     // The owned view never delegates clipboard writes, including late callbacks.
-    return Promise.resolve();
+    try { return Promise.resolve(); }
+    catch (error) { invalidate(active, 'resolve_failure'); throw error; }
   };
   const write = () => { invalidate(active, 'write_api'); return Promise.resolve(); };
   const command = function(name, ...args) {
@@ -45,10 +54,28 @@
       || request.secret !== config.secret || !uuid(request.grant)) return;
     spent = true;
     active = {count:0,invalid:false,invalidCause:null,text:null};
-    let result;
-    try { Reflect.apply(click,target,[]); }
+    let result, root = null, seen = 0, listening = false;
+    // React already delegates the header Copy at #root. This temporary listener
+    // stops only that Copy click after the delegate, before Monaco primes a
+    // BODY clipboard write. Same-root and lower writes still invalidate it.
+    const boundary = event => {
+      if (active && event.target === target && event.currentTarget === root && event.type === 'click') {
+        seen++;
+        Reflect.apply(stop, event, []);
+      }
+    };
+    try {
+      root = appRoot(target);
+      if (!root) invalidate(active, 'root_boundary');
+      else {
+        Reflect.apply(add, root, ['click', boundary, false]); listening = true;
+        Reflect.apply(click, target, []);
+        if (seen !== 1 || appRoot(target) !== root) invalidate(active, 'root_boundary');
+      }
+    }
     catch { invalidate(active, 'click_exception'); }
     finally {
+      if (listening) Reflect.apply(remove, root, ['click', boundary, false]);
       result = active; active = null;
       if (!result.invalid && !intact()) invalidate(result, 'hooks_changed');
       try {

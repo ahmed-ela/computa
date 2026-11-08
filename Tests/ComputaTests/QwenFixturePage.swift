@@ -20,6 +20,7 @@ enum QwenFixturePage {
   [role=menu], [role=dialog] { position: fixed; right: 30px; top: 85px; max-width: 440px; z-index: 4; }
   .chat-response-message { padding: 12px; }
 </style>
+<div id="root">
 <div class="wms-trigger" role="button" aria-label="Select Model" aria-haspopup="listbox" aria-expanded="false">
   <div class="wms-trigger__text">Qwen3.8-Max</div>
 </div>
@@ -33,6 +34,7 @@ enum QwenFixturePage {
 <div class="message-input-container-area">
   <textarea class="message-input-textarea" autocomplete="off" placeholder="How can I help you today?"></textarea>
   <div class="chat-prompt-send-button"></div>
+</div>
 </div>
 <script>
 // This document is synthetic. It performs no network requests and contains no

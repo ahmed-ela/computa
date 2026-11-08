@@ -32,28 +32,50 @@ function installCode(f:ReturnType<typeof fixture>, text=payload, controls=true) 
 }
 const channel={dispatch:'11a11111-1111-4111-8111-111111111111',result:'22a22222-2222-4222-8222-222222222222',secret:'33a33333-3333-4333-8333-333333333333'};
 const sink=readFileSync(new URL('../Sources/Computa/Resources/BrowserModels/qwen-code-payload.js',import.meta.url),'utf8');
-function installSink(f:ReturnType<typeof fixture>, resultTransform?:(value:any)=>any) {
-  const listeners=new Map<string,Set<(e:any)=>void>>();let delegated=0;
-  Object.assign(f.document,{addEventListener:(name:string,fn:any)=>{if(!listeners.has(name))listeners.set(name,new Set());listeners.get(name)!.add(fn);},removeEventListener:(name:string,fn:any)=>listeners.get(name)?.delete(fn)});
+function installSink(f:ReturnType<typeof fixture>, resultTransform?:(value:any)=>any, sinkPromise:any=Promise) {
+  const listeners=new WeakMap<any,Map<string,{fn:any,capture:boolean}[]>>();let delegated=0;
+  const add=function(this:any,name:string,fn:any,capture=false){
+    if(!listeners.has(this))listeners.set(this,new Map());const map=listeners.get(this)!;
+    if(!map.has(name))map.set(name,[]);map.get(name)!.push({fn,capture:!!capture});
+  };
+  const remove=function(this:any,name:string,fn:any,capture=false){const map=listeners.get(this);if(map)map.set(name,(map.get(name)||[]).filter(v=>v.fn!==fn||v.capture!==!!capture));};
+  class ET {}Object.assign(ET.prototype,{addEventListener:add,removeEventListener:remove});
+  const Event=class {
+    target:any;currentTarget:any;cancelBubble=false;immediate=false;bubbles=false;detail:any;
+    constructor(public type:string,init:any={}){Object.assign(this,init);if(type===channel.result&&resultTransform)this.detail=resultTransform(init.detail);}
+    stopPropagation(){this.cancelBubble=true;}
+    stopImmediatePropagation(){this.cancelBubble=true;this.immediate=true;}
+  };
+  const root=new f.Node('DIV',{id:'root'}),children=f.body.children.slice();f.body.children=[];root.append(...children);f.body.append(root);
+  Object.defineProperty(root,'namespaceURI',{value:html,configurable:true});
+  Object.assign(f.Node.prototype,{addEventListener:add,removeEventListener:remove});
   const original=f.Node.prototype.dispatchEvent;
-  f.Node.prototype.dispatchEvent=function(event:any){Object.assign(event,{target:this});const r=original.call(this,event);for(const fn of [...listeners.get(event.type)||[]])fn(event);return r;};
-  Object.defineProperty(f.Node.prototype,'parentNode',{get(){return this.parentElement;}});
+  f.Node.prototype.dispatchEvent=function(event:any){
+    event.target=this;original.call(this,event);const path:any[]=[];
+    for(let node:any=this;node;node=node.parentElement)path.push(node);path.push(f.document);
+    const invoke=(node:any,capture:boolean)=>{event.currentTarget=node;for(const row of [...listeners.get(node)?.get(event.type)||[]]){if(row.capture===capture)row.fn.call(node,event);if(event.immediate)break;}};
+    for(const node of path.slice().reverse()){invoke(node,true);if(event.cancelBubble)break;}
+    if(!event.cancelBubble)for(const node of event.bubbles?path:[this]){invoke(node,false);if(event.cancelBubble)break;}
+    event.currentTarget=null;return true;
+  };
+  f.Node.prototype.click=function(){this.clicks++;const event=new Event('click',{bubbles:true});(this.onClick as any)?.(event);this.dispatchEvent(event);};
   class Clipboard {writeText(_:string){delegated++;return Promise.resolve();}write(_:any){delegated++;return Promise.resolve();}}
-  class Doc {execCommand(_:string){delegated++;return true;}}
-  Object.setPrototypeOf(f.document,Doc.prototype);
+  class Doc {execCommand(_:string){delegated++;return true;}querySelectorAll(selector:string){return f.document.documentElement.querySelectorAll(selector);}}
+  Object.assign(Doc.prototype,{addEventListener:add,removeEventListener:remove});Object.setPrototypeOf(f.document,Doc.prototype);
+  Object.assign(f.document,{addEventListener:add,removeEventListener:remove});
   const navigator={clipboard:new Clipboard()};
-  const Event=class {constructor(public type:string,init:any){Object.assign(this,init);if(type===channel.result&&resultTransform)Object.assign(this,{detail:resultTransform(init.detail)});}};
-  new Function('window','location','document','Clipboard','navigator','HTMLElement','HTMLButtonElement','Document','CustomEvent',sink.replace('__COMPUTA_QWEN_CODE_PAYLOAD_CONFIG__',JSON.stringify(channel)))(f.window,{origin:'https://chat.qwen.ai'},f.document,Clipboard,navigator,f.Node,f.Node,Doc,Event);
-  return {navigator,delegated:()=>delegated};
+  new Function('window','location','document','Clipboard','navigator','HTMLElement','HTMLButtonElement','Document','CustomEvent','Promise','EventTarget','Event','Node',sink.replace('__COMPUTA_QWEN_CODE_PAYLOAD_CONFIG__',JSON.stringify(channel)))(f.window,{origin:'https://chat.qwen.ai'},f.document,Clipboard,navigator,f.Node,f.Node,Doc,Event,sinkPromise,ET,Event,f.Node);
+  return {navigator,root,Event,delegated:()=>delegated,listenerCount:(node:any)=>(listeners.get(node)?.get('click')||[]).length};
 }
-async function owned(mode='plain', editorStyle?:string, resultTransform?:(value:any)=>any) {
-  const f=fixture(),s=installSink(f,resultTransform);
+async function owned(mode='plain', editorStyle?:string, resultTransform?:(value:any)=>any, sinkPromise:any=Promise) {
+  const f=fixture(),s=installSink(f,resultTransform,sinkPromise);
   await f.run('inspect');let selected=false;
   for(let i=0;i<8&&!selected;i++)selected=(await f.run('selectModel',{modelChoice:choice()})).selected===true;
   expect(selected).toBe(true);expect((await f.run('prepare')).prepared).toBe(true);
   expect((await f.run('insert',{prompt,expectedFirstUserMarker:marker})).inserted).toBe(true);
   expect((await f.run('sendReady',{prompt})).sendReady).toBe(true);
   expect((await f.run('submit',{prompt,savedSubmissionFingerprint:await fingerprint(prompt)})).submitted).toBe(true);
+  const added=f.body.children.filter(node=>node!==s.root);f.body.children=[s.root];s.root.append(...added);
   const x=installCode(f);
   if(mode==='monaco'||mode==='editor'){
     x.body.setAttribute('class','qwen-markdown-code-body json'+(mode==='monaco'?' qwen-markdown-code-body-virtual':''));
@@ -369,4 +391,124 @@ test('Qwen Copy result requires boolean flag and consistent closed cause without
     expect(r.adapterFailureStructure.reason,name).toBe(reason);expect(JSON.stringify(r.adapterFailureStructure)).not.toContain('PRIVATE');
     expect(t.x.copy.clicks).toBe(1);expect(t.s.delegated()).toBe(0);
   }
+});
+
+test('Qwen synchronous sink resolve failure is rethrown privately and refuses even when the provider swallows it',async()=>{
+  for(const mode of ['swallowed','rich_fallback','uncaught','private_primitive']){
+    let resolves=0,exceptionReads=0,caught=false;
+    const privateError=mode==='private_primitive'?'PRIVATE_THROWN_TEXT':Object.defineProperties({}, {
+      message:{get(){exceptionReads++;return 'PRIVATE_MESSAGE';}},
+      stack:{get(){exceptionReads++;return 'PRIVATE_STACK';}},
+      toString:{value(){exceptionReads++;return 'PRIVATE_STRING';}}
+    });
+    const sinkPromise={resolve(){if(++resolves===1)throw privateError;return Promise.resolve();}};
+    const t=await owned('plain',undefined,undefined,sinkPromise);
+    t.x.copy.onClick=()=>{
+      try{t.s.navigator.clipboard.writeText(payload);}
+      catch(error){caught=error===privateError;if(mode==='uncaught')throw error;}
+      if(mode==='rich_fallback')t.s.navigator.clipboard.write([]);
+    };
+    const r=await t.sample();expect(caught,mode).toBe(true);expect(exceptionReads).toBe(0);
+    expect(r.error,mode).toBe('unsupported_response_format');expect(r.text).toBeUndefined();
+    expect(r.adapterFailureStructure).toEqual({version:1,provider:'qwen',trigger:'authored_source',stage:'code_sample',reason:'write_invalid_resolve',count:0});
+    expect(JSON.stringify(r.adapterFailureStructure)).not.toContain('PRIVATE');
+    expect(t.x.copy.clicks).toBe(1);expect(t.f.send.clicks).toBe(1);expect(t.s.delegated()).toBe(0);
+    if(mode==='swallowed'){
+      const deletion=deleteInput(t);
+      for(const action of ['deleteConversation','selectConversationDeletion','confirmConversationDeletion'])expect((await t.f.run(action,deletion)).error).toBeUndefined();
+      expect((await t.f.run('observeDeletedConversation',deletion)).deleteProof.conversationDeleted).toBe(true);
+    }else expect((await t.sample()).error).toBeTruthy();
+    expect(t.x.copy.clicks).toBe(1);
+  }
+});
+test('Qwen sink resolve diagnostic preserves earlier invalid causes and write-count priority',async()=>{
+  for(const [kind,reason] of [['type','write_invalid_type'],['size','write_invalid_size'],['api','write_invalid_api'],['count','write_count']] as const){
+    let resolves=0;
+    const sinkPromise={resolve(){if(++resolves===(kind==='api'?2:1))throw 'PRIVATE_RESOLVE';return Promise.resolve();}};
+    const t=await owned('plain',undefined,undefined,sinkPromise);t.x.copy.onClick=()=>{
+      if(kind==='api')t.s.navigator.clipboard.write([]);
+      try{t.s.navigator.clipboard.writeText(kind==='type'?42 as any:kind==='size'?'x'.repeat(220001):payload);}catch{}
+      if(kind==='count')t.s.navigator.clipboard.writeText(payload);
+    };
+    const r=await t.sample();expect(r.adapterFailureStructure.reason,kind).toBe(reason);
+    expect(r.text).toBeUndefined();expect(JSON.stringify(r.adapterFailureStructure)).not.toContain('PRIVATE');
+    expect(t.x.copy.clicks).toBe(1);expect(t.s.delegated()).toBe(0);
+  }
+});
+test('Qwen sink resolve diagnostic does not revise accepted bytes after an inactive late callback',async()=>{
+  let resolves=0;
+  const sinkPromise={resolve(){if(++resolves===2)throw 'PRIVATE_LATE';return Promise.resolve();}};
+  const t=await owned('plain',undefined,undefined,sinkPromise),r=await t.sample();
+  expect(r.error).toBeUndefined();expect(r.text).toBe(payload);expect(r.answerComplete).toBe(true);
+  let caught=false;try{t.s.navigator.clipboard.writeText('PRIVATE_LATE_BODY');}catch(error){caught=error==='PRIVATE_LATE';}
+  expect(caught).toBe(true);expect(r.text).toBe(payload);expect(t.s.delegated()).toBe(0);
+  expect((await t.sample()).error).toBeTruthy();expect(t.x.copy.clicks).toBe(1);
+  const bad=await owned('plain',undefined,v=>({...v,invalid:false,invalidCause:'resolve_failure'}));
+  const refused=await bad.sample();expect(refused.adapterFailureStructure.reason).toBe('result_fields');expect(refused.text).toBeUndefined();
+});
+
+test('Qwen owned Copy stops only its own click at the app root after header handling and removes the listener',async()=>{
+  const t=await owned();let ancestorOwned=0,otherClicks=0,rootOwned=0;
+  const other=new t.f.Node('BUTTON');t.s.root.append(other);
+  (t.s.root as any).addEventListener('click',(event:any)=>{if(event.target===t.x.copy)rootOwned++;});
+  (t.f.body as any).addEventListener('click',(event:any)=>{
+    if(event.target===t.x.copy){ancestorOwned++;t.s.navigator.clipboard.write([]);}else if(event.target===other)otherClicks++;
+  });
+  const existing=t.s.listenerCount(t.s.root);
+  t.x.copy.onClick=()=>{other.click();t.s.navigator.clipboard.writeText(payload);};
+  const result=await t.sample();
+  expect(result.error).toBeUndefined();expect(result.text).toBe(payload);expect(result.answerComplete).toBe(true);
+  expect(rootOwned).toBe(1);expect(ancestorOwned).toBe(0);expect(otherClicks).toBe(1);
+  expect(t.s.listenerCount(t.s.root)).toBe(existing);expect(t.x.copy.clicks).toBe(1);expect(t.s.delegated()).toBe(0);
+  other.click();expect(otherClicks).toBe(2);expect(t.x.copy.clicks).toBe(1);
+  const deletion=deleteInput(t);
+  for(const action of ['deleteConversation','selectConversationDeletion','confirmConversationDeletion'])expect((await t.f.run(action,deletion)).error).toBeUndefined();
+  expect((await t.f.run('observeDeletedConversation',deletion)).deleteProof.conversationDeleted).toBe(true);
+  expect(t.x.copy.clicks).toBe(1);
+});
+test('Qwen app-root boundary refuses missing duplicate malformed or moved roots before Copy',async()=>{
+  for(const kind of ['missing','duplicate','tag','namespace','nested','outside'] as const){
+    const t=await owned();
+    t.f.beforeDigest(()=>{
+      if(kind==='missing')t.s.root.removeAttribute('id');
+      if(kind==='duplicate'){const duplicate=new t.f.Node('DIV',{id:'root'});t.f.body.append(duplicate);}
+      if(kind==='tag')t.s.root.tagName='SECTION';
+      if(kind==='namespace')Object.defineProperty(t.s.root,'namespaceURI',{value:svg,configurable:true});
+      if(kind==='nested'){const wrapper=new t.f.Node('DIV');t.f.body.children=t.f.body.children.filter(node=>node!==t.s.root);wrapper.append(t.s.root);t.f.body.append(wrapper);}
+      if(kind==='outside'){t.f.body.children=t.s.root.children.slice();for(const node of t.f.body.children)node.parentElement=t.f.body;t.s.root.children=[];t.f.body.append(t.s.root);}
+    });
+    const result=await t.sample();expect(result.error,kind).toBeTruthy();expect(result.text).toBeUndefined();
+    expect(t.x.copy.clicks,kind).toBe(0);expect(t.s.listenerCount(t.s.root)).toBe(0);expect(t.s.delegated()).toBe(0);
+  }
+});
+test('Qwen root boundary keeps same-root or lower rich writes refused and cleans up after callback throws',async()=>{
+  for(const kind of ['same_root','lower','throw','not_seen','changed','duplicate_during'] as const){
+    const t=await owned();let after=0;
+    const other=new t.f.Node('BUTTON');t.s.root.append(other);
+    (t.f.body as any).addEventListener('click',(event:any)=>{if(event.target===other)after++;});
+    if(kind==='same_root'||kind==='lower')((kind==='same_root'?t.s.root:t.x.actions) as any).addEventListener('click',()=>t.s.navigator.clipboard.write([]));
+    const existing=t.s.listenerCount(t.s.root);
+    t.x.copy.onClick=((event:any)=>{
+      t.s.navigator.clipboard.writeText(payload);
+      if(kind==='throw')throw Error('PRIVATE_CALLBACK');
+      if(kind==='not_seen')event.stopPropagation();
+      if(kind==='changed')t.s.root.setAttribute('id','changed-root');
+      if(kind==='duplicate_during')t.f.body.append(new t.f.Node('DIV',{id:'root'}));
+    }) as any;
+    const result=await t.sample();expect(result.error,kind).toBe('unsupported_response_format');expect(result.text).toBeUndefined();
+    expect(result.adapterFailureStructure.reason,kind).toBe(kind==='same_root'||kind==='lower'?'write_invalid_api':kind==='throw'?'write_invalid_click':'root_boundary');
+    expect(JSON.stringify(result.adapterFailureStructure)).not.toContain('PRIVATE');expect(t.s.listenerCount(t.s.root)).toBe(existing);
+    other.click();expect(after,kind).toBe(1);expect(t.x.copy.clicks).toBe(1);expect(t.s.delegated()).toBe(0);
+  }
+});
+test('Qwen boundary uses captured event methods and never changes ordinary clicks outside its one dispatch',async()=>{
+  const t=await owned();let after=0;
+  const other=new t.f.Node('BUTTON');t.s.root.append(other);
+  (t.f.body as any).addEventListener('click',(event:any)=>{if(event.target===other)after++;});
+  other.click();expect(after).toBe(1);
+  (t.s.root as any).addEventListener=()=>{throw Error('PRIVATE_ADD');};
+  (t.s.root as any).removeEventListener=()=>{throw Error('PRIVATE_REMOVE');};
+  t.s.Event.prototype.stopPropagation=()=>{throw Error('PRIVATE_STOP');};
+  const result=await t.sample();expect(result.error).toBeUndefined();expect(result.text).toBe(payload);
+  expect(t.s.listenerCount(t.s.root)).toBe(0);other.click();expect(after).toBe(2);expect(t.x.copy.clicks).toBe(1);expect(t.s.delegated()).toBe(0);
 });
