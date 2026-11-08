@@ -1040,6 +1040,8 @@ async function computaSavedConversation(input, c, dom, config) {
     return error?.computaAdapterFailure ? { error: error.error, ...(error.detail ? { detail: error.detail } : {}),
       ...(error.adapterFailureStructure && (config.stateKey === '__computaQwenSavedSessionV1'
         && error.error === 'conversation_changed' && error.detail === 'first_user_message'
+        || config.stateKey === '__computaQwenSavedSessionV1' && input.action === 'inspect'
+          && error.error === 'document_changed' && error.detail === 'response_container_multiple'
         || ['__computaQwenSavedSessionV1', '__computaDeepSeekSavedSessionV1'].includes(config.stateKey)
           && error.error === 'unsupported_response_format' && error.detail === 'authored_source')
         ? { adapterFailureStructure: error.adapterFailureStructure } : {}),

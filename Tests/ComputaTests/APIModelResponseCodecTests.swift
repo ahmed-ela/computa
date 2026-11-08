@@ -3853,6 +3853,83 @@ final class APIModelResponseCodecTests: XCTestCase {
         XCTAssertThrowsError(try APIModelResponseCodec.correctiveRequest(sized(2_000_000 - small.body.count), rejectionDetails: details))
     }
 
+    func testAlibabaPatchProbeDistinguishesOuterFailuresWithoutChangingCorrectionOrAdmission() throws {
+        typealias Probe = APIModelResponseCodec.PatchSchemaProbe
+        let req = try request(["tools": [nativePatch()]], provider: typedPatchProvider(), toolNaming: .semantic)
+        let cases: [(String, Probe.Status, Probe.Path, Probe.ValueType, [Probe.OuterKey], Probe.Count)] = [
+            (#"{"operations":{"update":"PRIVATE"}}"#, .operationsType, .operations, .object, [.operations], .one),
+            (#"{"operations":[{"update":"PRIVATE","hunks":"PRIVATE"}],"PRIVATE_KEY":"PRIVATE_VALUE"}"#,
+             .outerKeys, .root, .object, [.operations, .other], .multiple),
+            (#"{"input":"PRIVATE"}"#, .operationsType, .operations, .missing, [.input], .one),
+            (#"{"operations":[]}"#, .operationsEmpty, .operations, .unknown, [.operations], .one),
+        ]
+        for (arguments, status, path, actual, outer, count) in cases {
+            var observation: APIModelResponseCodec.ArgumentValidationDiagnostic?
+            let response = try correctionResult(req, arguments: arguments)
+            guard case .argumentsRejected(_, let details) = try APIModelResponseCodec.decodeForCorrection(response, request: req,
+                onArgumentRejection: { observation = $0 }) else { return XCTFail("Rejected arguments must never emit a call") }
+            let detail = try XCTUnwrap(details.first), probe = try XCTUnwrap(detail.patchProbe)
+            XCTAssertNil(detail.patchLocation); XCTAssertEqual(probe.tool, .namedApplyPatch); XCTAssertEqual(probe.projection, .local)
+            XCTAssertEqual(probe.status, status); XCTAssertEqual(probe.path, path); XCTAssertEqual(probe.actual, actual)
+            XCTAssertEqual(probe.outer, outer); XCTAssertEqual(probe.keys, count); XCTAssertTrue(probe.isConsistent)
+            XCTAssertEqual(observation?.schemaFailures?.first?.patchProbe, probe)
+            XCTAssertThrowsError(try APIModelResponseCodec.decode(response, request: req)) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+            }
+            var withoutProbe = details; withoutProbe[0].patchProbe = nil
+            XCTAssertEqual(try APIModelResponseCodec.correctiveRequest(req, rejectionDetails: details).body,
+                           try APIModelResponseCodec.correctiveRequest(req, rejectionDetails: withoutProbe).body)
+            let bytes = try JSONEncoder().encode(try XCTUnwrap(observation))
+            XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains("PRIVATE"))
+        }
+        let located = try XCTUnwrap(rejectedDetails(req, arguments: #"{"operations":[{"update":"PRIVATE","hunks":"bad"}]}"#).first)
+        XCTAssertNotNil(located.patchLocation); XCTAssertNil(located.patchProbe, "Existing located records keep their prior representation")
+        let accepted = try APIModelResponseCodec.decode(correctionResult(req,
+            arguments: #"{"operations":[{"delete":"/tmp/synthetic.py"}]}"#), request: req)
+        XCTAssertEqual((accepted.response["output"] as? [[String: Any]])?.first?["input"] as? String,
+                       "*** Begin Patch\n*** Delete File: /tmp/synthetic.py\n*** End Patch")
+    }
+
+    func testAlibabaPatchProbeDistinguishesProjectionAndBoundedTraversalRefusals() throws {
+        typealias Probe = APIModelResponseCodec.PatchSchemaProbe
+        var literal = nativePatch(); literal["description"] = "Unrecognized PRIVATE definition"
+        let other: [String: Any] = ["type": "function", "name": "PRIVATE_TOOL", "parameters":
+            ["type": "object", "properties": ["PRIVATE_FIELD": ["type": "string"]], "required": ["PRIVATE_FIELD"]]]
+        let namedFunction: [String: Any] = ["type": "function", "name": "apply_patch", "parameters":
+            ["type": "object", "properties": ["operations": ["type": "string"]], "required": ["operations"]]]
+        let variants: [([String: Any], String, Probe.ToolKind, Probe.Projection, Probe.Status, Probe.Path)] = [
+            (nativePatch(environments: true), #"{"operations":{}}"#, .namedApplyPatch, .environments, .nonLocal, .operations),
+            (literal, #"{"input":17}"#, .namedApplyPatch, .literalInput, .nonLocal, .input),
+            (namedFunction, #"{"operations":17}"#, .namedApplyPatch, .unrecognized, .nonPatch, .operations),
+            (other, #"{"PRIVATE_FIELD":17}"#, .other, .unrecognized, .nonPatch, .other),
+        ]
+        for (definition, arguments, kind, projection, status, path) in variants {
+            let req = try request(["tools": [definition]], provider: typedPatchProvider(), toolNaming: .semantic)
+            let probe = try XCTUnwrap(rejectedDetails(req, arguments: arguments).first?.patchProbe)
+            XCTAssertEqual(probe.tool, kind); XCTAssertEqual(probe.projection, projection); XCTAssertEqual(probe.status, status)
+            XCTAssertEqual(probe.path, path); XCTAssertTrue(probe.isConsistent)
+            XCTAssertFalse(String(decoding: try JSONEncoder().encode(probe), as: UTF8.self).contains("PRIVATE"))
+            if kind == .other { XCTAssertNil(probe.outer); XCTAssertNil(probe.operations); XCTAssertNil(probe.keys) }
+        }
+        let foreignModel = try request(["tools": [literal]], provider: typedPatchProvider(model: "other"))
+        XCTAssertNil(try rejectedDetails(foreignModel, arguments: #"{"input":17}"#).first?.patchProbe)
+        let req = try request(["tools": [nativePatch()]], provider: typedPatchProvider())
+        var tooManyFields: [String: Any] = ["update": "PRIVATE", "hunks": [["lines": ["+ok"]]]]
+        for index in 0..<15 { tooManyFields["PRIVATE_\(index)"] = "PRIVATE" }
+        let bounds: [(Any, Probe.Status)] = [
+            (Array(repeating: ["PRIVATE": "PRIVATE"], count: 65), .operationsLimit),
+            ([tooManyFields], .objectLimit),
+            ([["update": "PRIVATE", "hunks": Array(repeating: ["lines": ["bad"]], count: 257)]], .arrayLimit),
+            ([["update": "PRIVATE", "hunks": [["lines": Array(repeating: "+ok", count: 253) + ["bad"]]]]], .traversalLimit),
+        ]
+        for (operations, status) in bounds {
+            let raw = String(decoding: try JSONSerialization.data(withJSONObject: ["operations": operations]), as: UTF8.self)
+            let detail = try XCTUnwrap(rejectedDetails(req, arguments: raw).first)
+            XCTAssertNil(detail.patchLocation); XCTAssertEqual(detail.patchProbe?.status, status)
+            XCTAssertTrue(try XCTUnwrap(detail.patchProbe).isConsistent)
+        }
+    }
+
     func testLocalTypedPatchUnionDiagnosticPreservesAtomicRejectionAndExactCorrection() throws {
         typealias Location = APIModelResponseCodec.LocalPatchSchemaLocation
         let cases: [(String, Location)] = [

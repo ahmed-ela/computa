@@ -172,3 +172,75 @@ describe('Qwen Max initial assistant root without a mounted response container',
   }
  });
 });
+
+function noContainerFailureAuthority(f: ReturnType<typeof fixture>, r: any, before: number) {
+ expect(r.error).toBe('document_changed');expect(r.detail).toBe('response_container_multiple');
+ expect(r.text).toBeUndefined();expect(r.completionEvidence).toBeUndefined();expect(r.qwenCodePayload).toBeUndefined();
+ expect(r.qwenInitialResponseIdentityPending).toBeUndefined();expect(f.mutations()).toBe(before);
+ expect(f.send.clicks).toBe(1);expect(f.more.clicks).toBe(0);expect(f.actions[0].clicks).toBe(0);
+}
+test('response container diagnostic separates Plus two-visible and all-hidden without response or cleanup authority', async()=>{
+ for(const hidden of [false,true]){
+  const {f,grant}=await sent();f.answer.setAttribute('id','chat-response-message-'+answerID);
+  const other=f.answer.cloneNode(true);other.values.id='chat-response-message-'+generation;f.answerRoot.append(other);
+  if(hidden){f.answer.setAttribute('hidden','');other.values.hidden='';}
+  const before=f.mutations(),r=await f.run('inspect',grant);noContainerFailureAuthority(f,r,before);
+  expect(r.adapterFailureStructure).toEqual({version:1,provider:'qwen',trigger:'response_container_multiple',total:2,displayed:hidden?0:2,
+   emptyRootMode:false,dual:false,multi:false,smrm:false,cmrm:false,ancestorLimited:false,relation:'siblings',idRelation:'different_uuid',
+   containers:[{visible:!hidden,id:'uuid',loading:1,phase:0,footer:0,limited:false},{visible:!hidden,id:'uuid',loading:1,phase:0,footer:0,limited:false}]});
+  f.answerRoot.children=f.answerRoot.children.filter(node=>node!==other);other.parentElement=null;other.connected=false;f.answer.removeAttribute('hidden');
+  expect((await f.run('inspect',grant)).detail).toBe('terminal_operation');
+  expect((await f.run('inspect',{...grant,savedCleanupInspection:true})).detail).toBe('terminal_operation');
+  expect(f.more.clicks).toBe(0);expect(f.send.clicks).toBe(1);
+ }
+});
+test('response container diagnostic recognizes only finite comparison ancestry and nested ID relation',async()=>{
+ for(const kind of ['smrm','cmrm','nested']){
+  const {f,grant}=await sent();f.answer.setAttribute('id','chat-response-message-'+answerID);const other=f.answer.cloneNode(true);
+  if(kind==='nested')f.answer.append(other);
+  else{const wrapper=new f.Node('DIV',{class:kind}),left=new f.Node('DIV'),right=new f.Node('DIV');
+   f.answer.detach();left.append(f.answer);right.append(other);wrapper.append(left,right);f.answerRoot.append(wrapper);
+   f.answerRoot.setAttribute('class','qwen-chat-message qwen-chat-message-assistant qwen-chat-message-dual-message');}
+  const before=f.mutations(),r=await f.run('inspect',grant);noContainerFailureAuthority(f,r,before);
+  const p=r.adapterFailureStructure;expect(p.idRelation).toBe('same_uuid');expect(p.relation).toBe(kind==='nested'?'nested':'other');
+  expect(p.smrm).toBe(kind==='smrm');expect(p.cmrm).toBe(kind==='cmrm');expect(p.dual).toBe(kind!=='nested');
+  expect(p.containers[0].loading).toBe(kind==='nested'?2:1);
+ }
+});
+test('response container diagnostic preserves mixed-hidden Plus control and Max refusal',async()=>{
+ for(const label of ['Qwen3.7-Plus','Qwen3.8-Max']){
+  const {f,grant}=await sent(choice(label));const other=f.answer.cloneNode(true);other.values.hidden='';f.answerRoot.append(other);
+  const before=f.mutations(),r=await f.run('inspect',grant);
+  if(label==='Qwen3.7-Plus'){expect(r).toEqual(receipt);expect(r.adapterFailureStructure).toBeUndefined();}
+  else{noContainerFailureAuthority(f,r,before);expect(r.adapterFailureStructure.displayed).toBe(1);expect(r.adapterFailureStructure.emptyRootMode).toBe(true);}
+  expect(f.mutations()).toBe(before);expect(f.send.clicks).toBe(1);
+ }
+});
+test('response container metadata is bounded, never reads text and never replaces its original rejection',async()=>{
+ for(const kind of ['bounded','throw']){
+  const {f,grant}=await sent();const other=f.answer.cloneNode(true);f.answerRoot.append(other);
+  if(kind==='bounded'){for(let i=0;i<300;i++)f.answer.append(new f.Node('DIV',{class:'response-loading PRIVATE_CLASS'},'PRIVATE_TEXT'));
+   Object.defineProperty(f.answer,'textContent',{get(){throw new Error('must not read reply');}});
+  }else{const get=f.answer.getAttribute.bind(f.answer);f.answer.getAttribute=(name:string)=>{if(name==='id')throw new Error('PRIVATE_ATTRIBUTE');return get(name);};}
+  const before=f.mutations(),r=await f.run('inspect',grant);noContainerFailureAuthority(f,r,before);
+  if(kind==='bounded'){expect(r.adapterFailureStructure.containers[0].limited).toBe(true);expect(r.adapterFailureStructure.containers[0].loading).toBe(3);
+   const text=JSON.stringify(r.adapterFailureStructure);expect(text.length).toBeLessThanOrEqual(1024);expect(text).not.toContain('PRIVATE');expect(text).not.toContain(answerID);}
+  else expect(r.adapterFailureStructure).toBeUndefined();
+ }
+});
+test('response container saturation does not conceal the actual first-two categories or grant uniqueness',async()=>{
+ const {f,grant}=await sent();f.answerRoot.append(f.answer.cloneNode(true),f.answer.cloneNode(true),f.answer.cloneNode(true));
+ const before=f.mutations(),r=await f.run('inspect',grant);noContainerFailureAuthority(f,r,before);
+ expect(r.adapterFailureStructure.total).toBe(3);expect(r.adapterFailureStructure.displayed).toBe(3);
+ expect(r.adapterFailureStructure.containers).toHaveLength(2);expect(r.adapterFailureStructure.idRelation).toBe('other');
+ expect(r.adapterFailureStructure.containers.every((x:any)=>x.id==='empty_prefix')).toBe(true);
+});
+test('response container diagnostic bounds ancestor walks and describes loading phase footer without values',async()=>{
+ const {f,grant}=await sent();f.answer.removeAttribute('id');
+ f.answer.append(new f.Node('DIV',{class:'response-message-content phase-answer'},'PRIVATE_ANSWER'),new f.Node('DIV',{class:'response-message-footer-actions'}));
+ const other=f.answer.cloneNode(true);other.values.id='PRIVATE_ID';let chain=f.answerRoot;
+ for(let i=0;i<70;i++){const next=new f.Node('DIV');chain.append(next);chain=next;}
+ chain.append(other);const before=f.mutations(),r=await f.run('inspect',grant);noContainerFailureAuthority(f,r,before);
+ expect(r.adapterFailureStructure.ancestorLimited).toBe(true);expect(r.adapterFailureStructure.containers[0]).toEqual({visible:true,id:'missing',loading:1,phase:1,footer:1,limited:false});
+ expect(r.adapterFailureStructure.containers[1].id).toBe('other');expect(JSON.stringify(r.adapterFailureStructure)).not.toContain('PRIVATE');
+});

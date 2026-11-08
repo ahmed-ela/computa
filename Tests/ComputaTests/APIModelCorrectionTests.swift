@@ -267,6 +267,112 @@ final class APIModelCorrectionTests: XCTestCase {
         }
     }
 
+    func testPatchProbeJournalKeepsBothAttemptsBoundedAndLegacyRecordsReadable() throws {
+        typealias Probe = APIModelResponseCodec.PatchSchemaProbe
+        let firstProbe = Probe(tool: .namedApplyPatch, projection: .local, path: .operations, actual: .object,
+            status: .operationsType, outer: [.operations], keys: .one, operations: .object)
+        let secondProbe = Probe(tool: .namedApplyPatch, projection: .local, path: .root, actual: .object,
+            status: .outerKeys, outer: [.input, .operations, .environmentID, .other], keys: .overLimit, operations: .array)
+        func validation(_ probe: Probe, constraint: APIModelResponseCodec.SchemaConstraint) throws -> APIModelCorrectionAccounting.FirstValidation {
+            let failure = APIModelResponseCodec.FiniteSchemaFailure(toolIndex: 127, constraint: constraint, patchProbe: probe)
+            return try XCTUnwrap(APIModelCorrectionAccounting.FirstValidation(.init(reason: .schemaMismatch,
+                schemaFailures: [failure, failure], callCount: 128, rejectedCount: 128, envelopeShapeValid: true,
+                unambiguousJSON: true, streamShapeAndUsageValid: true, knownUsage: true, correctionEligible: true)))
+        }
+        let first = try validation(firstProbe, constraint: .typeMismatch), second = try validation(secondProbe, constraint: .schemaMismatch)
+        let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("journal"), store = APIModelCorrectionAccounting(directory: directory)
+        let maximum = APIModelCorrectionUsage(inputTokens: 100_000_000, outputTokens: 100_000_000,
+            totalTokens: 200_000_000, cachedInputTokens: 100_000_000, reasoningOutputTokens: 100_000_000)
+        let ticket = try store.begin(taskID: id, threadID: id, turnID: id, firstUsage: maximum, firstValidation: first)
+        let firstPath = directory.appendingPathComponent(ticket.id.uuidString.lowercased() + ".first_received.json")
+        let firstBytes = try Data(contentsOf: firstPath)
+        try store.claimed(ticket); XCTAssertThrowsError(try store.claimed(ticket))
+        try store.finish(ticket, claimed: true, usage: maximum, outcome: .argumentsRejected, secondValidation: second)
+        XCTAssertEqual(try Data(contentsOf: firstPath), firstBytes)
+        let final = try XCTUnwrap(records(directory).first { $0.phase == "finished" })
+        XCTAssertEqual(final.schemaVersion, 5); XCTAssertEqual(final.firstValidation, first); XCTAssertEqual(final.secondValidation, second)
+        XCTAssertEqual(final.outcome, .argumentsRejected); XCTAssertTrue(final.secondRequestClaimed)
+        for file in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
+            let bytes = try Data(contentsOf: file); XCTAssertLessThanOrEqual(bytes.count, 2_048)
+            XCTAssertNoThrow(try JSONDecoder().decode(APIModelCorrectionAccounting.Record.self, from: bytes))
+            let text = String(decoding: bytes, as: UTF8.self)
+            for forbidden in ["\"arguments\"", "\"wireName\"", "PRIVATE", "http"] { XCTAssertFalse(text.contains(forbidden)) }
+        }
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(final)) as? [String: Any])
+        for version in 1...4 {
+            object["schemaVersion"] = version
+            XCTAssertThrowsError(try JSONDecoder().decode(APIModelCorrectionAccounting.Record.self, from: JSONSerialization.data(withJSONObject: object)))
+        }
+        // Earlier phases may remain v2/v3/v4; a first observed probe on attempt two selects v5 only for that record.
+        let legacyFailure = APIModelResponseCodec.FiniteSchemaFailure(toolIndex: 0, constraint: .typeMismatch)
+        let legacy = try XCTUnwrap(APIModelCorrectionAccounting.FirstValidation(.init(reason: .schemaMismatch,
+            schemaFailures: [legacyFailure], callCount: 1, rejectedCount: 1, envelopeShapeValid: true,
+            unambiguousJSON: true, streamShapeAndUsageValid: true, knownUsage: true, correctionEligible: true)))
+        let late = try store.begin(taskID: id, threadID: id, turnID: id, firstUsage: usage, firstValidation: legacy)
+        try store.claimed(late); try store.finish(late, claimed: true, usage: usage, outcome: .argumentsRejected, secondValidation: second)
+        let lateRecords = try records(directory).filter { $0.correctionID == late.id }
+        XCTAssertEqual(lateRecords.first { $0.phase == "first_received" }?.schemaVersion, 2)
+        XCTAssertEqual(lateRecords.first { $0.phase == "finished" }?.schemaVersion, 5)
+        // Four maximal finite probes, longest accepted constraint and maximum
+        // usage/UUID/index/count widths must not disable an existing correction.
+        let worstProbe = Probe(tool: .namedApplyPatch, projection: .literalInput, path: .operations, actual: .boolean,
+            status: .nonLocal, outer: [.input, .operations, .environmentID, .other], keys: .overLimit, operations: .boolean)
+        let worst = try validation(worstProbe, constraint: .readModeConflict)
+        let largest = try store.begin(taskID: id, threadID: id, turnID: id, firstUsage: maximum, firstValidation: worst)
+        try store.claimed(largest)
+        try store.finish(largest, claimed: true, usage: maximum, outcome: .argumentsRejected, secondValidation: worst)
+        let largestPath = directory.appendingPathComponent(largest.id.uuidString.lowercased() + ".finished.json")
+        let largestBytes = try Data(contentsOf: largestPath)
+        XCTAssertLessThanOrEqual(largestBytes.count, 2_048)
+        let reloaded = try JSONDecoder().decode(APIModelCorrectionAccounting.Record.self, from: largestBytes)
+        XCTAssertEqual(reloaded.firstValidation, worst); XCTAssertEqual(reloaded.secondValidation, worst)
+        XCTAssertTrue(reloaded.secondRequestClaimed)
+        // A nonpatch probe may coexist with the previous builtin location. Its
+        // longest legal combination is larger than the named-patch record above.
+        let builtinFailure = APIModelResponseCodec.FiniteSchemaFailure(toolIndex: 127, constraint: .readModeConflict,
+            location: .init(tool: .browserClick, schemaPath: [.elementIndex], expectedType: .integer, actualType: .missing),
+            patchProbe: .init(tool: .other, projection: .unrecognized, path: .operations, actual: .boolean, status: .nonPatch))
+        let builtin = try XCTUnwrap(APIModelCorrectionAccounting.FirstValidation(.init(reason: .schemaMismatch,
+            schemaFailures: [builtinFailure, builtinFailure], callCount: 128, rejectedCount: 128, envelopeShapeValid: true,
+            unambiguousJSON: true, streamShapeAndUsageValid: true, knownUsage: true, correctionEligible: true)))
+        let combined = try store.begin(taskID: id, threadID: id, turnID: id, firstUsage: maximum, firstValidation: builtin)
+        try store.claimed(combined)
+        try store.finish(combined, claimed: true, usage: maximum, outcome: .argumentsRejected, secondValidation: builtin)
+        let combinedBytes = try Data(contentsOf: directory.appendingPathComponent(combined.id.uuidString.lowercased() + ".finished.json"))
+        XCTAssertLessThanOrEqual(combinedBytes.count, 2_048)
+        let combinedRecord = try JSONDecoder().decode(APIModelCorrectionAccounting.Record.self, from: combinedBytes)
+        XCTAssertEqual(combinedRecord.firstValidation, builtin); XCTAssertEqual(combinedRecord.secondValidation, builtin)
+        XCTAssertTrue(combinedRecord.secondRequestClaimed)
+    }
+
+    func testPatchProbeDecoderRefusesUnknownFieldsAndInconsistentScope() throws {
+        typealias Probe = APIModelResponseCodec.PatchSchemaProbe
+        let valid = Probe(tool: .namedApplyPatch, projection: .local, path: .operations, actual: .object,
+            status: .operationsType, outer: [.operations], keys: .one, operations: .object)
+        let base = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(valid)) as? [String: Any])
+        var variants: [[String: Any]] = []
+        for field in ["tool", "projection", "path", "actual", "status", "keys", "operations"] {
+            var bad = base; bad[field] = "PRIVATE"; variants.append(bad)
+        }
+        var bad = base; bad["PRIVATE"] = "PRIVATE"; variants.append(bad)
+        bad = base; bad["outer"] = ["operations", "operations"]; variants.append(bad)
+        bad = base; bad["outer"] = ["PRIVATE"]; variants.append(bad)
+        bad = base; bad["tool"] = "other"; variants.append(bad)
+        bad = base; bad["projection"] = "environments"; variants.append(bad)
+        bad = base; bad["operations"] = "array"; variants.append(bad)
+        bad = base; bad.removeValue(forKey: "outer"); variants.append(bad)
+        for value in variants {
+            XCTAssertThrowsError(try JSONDecoder().decode(Probe.self, from: JSONSerialization.data(withJSONObject: value)))
+        }
+        XCTAssertEqual(try JSONDecoder().decode(Probe.self, from: JSONEncoder().encode(valid)), valid)
+        let both = APIModelResponseCodec.FiniteSchemaFailure(toolIndex: 0, constraint: .schemaMismatch,
+            patchLocation: .init(operation: .update, field: .hunks, constraint: .typeMismatch), patchProbe: valid)
+        XCTAssertNil(APIModelCorrectionAccounting.FirstValidation(.init(reason: .schemaMismatch, schemaFailures: [both],
+            callCount: 1, rejectedCount: 1, envelopeShapeValid: true, unambiguousJSON: true,
+            streamShapeAndUsageValid: true, knownUsage: true, correctionEligible: true)))
+    }
+
     func testLocalPatchLocationDecoderRejectsUnknownOrInconsistentFields() throws {
         let valid = APIModelResponseCodec.LocalPatchSchemaLocation(operation: .update, field: .hunks, constraint: .typeMismatch)
         let base = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(valid)) as? [String: Any])

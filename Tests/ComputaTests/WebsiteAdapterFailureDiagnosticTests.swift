@@ -19,6 +19,80 @@ final class WebsiteAdapterFailureDiagnosticTests: XCTestCase {
         }
     }
 
+    private var qwenResponseContainerFailure: [String: Any] {
+        let row: [String: Any] = ["visible": true, "id": "uuid", "loading": 0, "phase": 1, "footer": 1, "limited": false]
+        return ["version": 1, "provider": "qwen", "trigger": "response_container_multiple", "total": 2, "displayed": 2,
+                "emptyRootMode": false, "dual": true, "multi": false, "smrm": true, "cmrm": false,
+                "ancestorLimited": false, "relation": "other", "idRelation": "different_uuid", "containers": [row, row]]
+    }
+
+    func testQwenResponseContainerDiagnosticKeepsTheOriginalOwnershipFailureAndClosedLog() throws {
+        let original = qwenResponseContainerFailure
+        for visible in [true, false] {
+            var value = original
+            value["displayed"] = visible ? 2 : 0
+            value["containers"] = (original["containers"] as! [[String: Any]]).map { row in
+                var changed = row; changed["visible"] = visible; return changed
+            }
+            var observation: [String: Any] = ["error": "document_changed", "detail": "response_container_multiple", "adapterFailureStructure": value]
+            let packet = try XCTUnwrap(D.remove(from: &observation, provider: "qwen", action: "inspect"))
+            XCTAssertEqual(observation as NSDictionary, ["error": "document_changed", "detail": "response_container_multiple"] as NSDictionary)
+            let log = try XCTUnwrap(D.qwenResponseContainerLogFields(packet))
+            XCTAssertLessThanOrEqual(log.utf8.count, 1_024)
+            XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(log.utf8)) as? NSDictionary, value as NSDictionary)
+            XCTAssertNil(D.qwenAuthoredLogFields(packet))
+        }
+        let authored = try XCTUnwrap(D.sanitize(qwenAuthoredFailure, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"))
+        XCTAssertNil(D.qwenResponseContainerLogFields(authored))
+        XCTAssertNotNil(D.qwenAuthoredLogFields(authored))
+        for provider in ["kimi", "qwen", "deepseek"] {
+            let value = WebsiteAdapterFailureFixture.packet(provider)
+            let error = provider == "qwen" ? "conversation_changed" : "unsupported_response_format"
+            let detail = provider == "kimi" ? "authored_source_markdown_count" : provider == "qwen" ? "first_user_message" : "authored_source"
+            let packet = try XCTUnwrap(D.sanitize(value, provider: provider, error: error, detail: detail))
+            XCTAssertNil(D.qwenResponseContainerLogFields(packet))
+        }
+    }
+
+    func testQwenResponseContainerDiagnosticRejectsContentImpossibleCountsAndForeignErrors() {
+        let valid = qwenResponseContainerFailure
+        func accepts(_ value: [String: Any]) -> Bool {
+            D.sanitize(value, provider: "qwen", error: "document_changed", detail: "response_container_multiple") != nil
+        }
+        XCTAssertTrue(accepts(valid))
+        for (key, replacement) in [("total", true as Any), ("total", 1), ("total", 4), ("displayed", 1),
+                                   ("displayed", 3), ("smrm", "true"), ("ancestorLimited", 0),
+                                   ("relation", "PRIVATE_CLASS"), ("idRelation", "PRIVATE_UUID"),
+                                   ("text", "PRIVATE_BODY"), ("containers", [] as [[String: Any]])] {
+            var bad = valid; bad[key] = replacement; XCTAssertFalse(accepts(bad), key)
+        }
+        for (key, replacement) in [("id", "PRIVATE_UUID" as Any), ("loading", -1), ("phase", 4), ("footer", true),
+                                   ("limited", "false"), ("visible", 1), ("text", "PRIVATE_BODY")] {
+            var bad = valid, rows = valid["containers"] as! [[String: Any]]
+            rows[0][key] = replacement; bad["containers"] = rows; XCTAssertFalse(accepts(bad), key)
+        }
+        var impossibleID = valid, rows = valid["containers"] as! [[String: Any]]
+        rows[0]["id"] = "empty_prefix"; impossibleID["containers"] = rows
+        XCTAssertFalse(accepts(impossibleID))
+        var mixed = valid
+        rows = valid["containers"] as! [[String: Any]]; rows[1]["visible"] = false
+        mixed["displayed"] = 1; mixed["containers"] = rows
+        XCTAssertFalse(accepts(mixed)); mixed["emptyRootMode"] = true; XCTAssertTrue(accepts(mixed))
+        var limited = valid; limited["total"] = 3; limited["displayed"] = 3; limited["ancestorLimited"] = true
+        XCTAssertTrue(accepts(limited))
+        for action in ["submit", "deleteConversation"] {
+            var observed: [String: Any] = ["error": "document_changed", "detail": "response_container_multiple", "adapterFailureStructure": valid]
+            XCTAssertNil(D.remove(from: &observed, provider: "qwen", action: action))
+            XCTAssertEqual(Set(observed.keys), ["error", "detail"])
+        }
+        for (provider, error, detail) in [("deepseek", "document_changed", "response_container_multiple"),
+                                         ("qwen", "conversation_changed", "response_container_multiple"),
+                                         ("qwen", "document_changed", "response_container"),
+                                         ("qwen", "unsupported_response_format", "authored_source")] {
+            XCTAssertNil(D.sanitize(valid, provider: provider, error: error, detail: detail))
+        }
+    }
+
     private var qwenAuthoredFailure: [String: Any] {
         ["version": 1, "provider": "qwen", "trigger": "authored_source", "stage": "paragraph", "reason": "tag", "count": 0]
     }

@@ -1564,6 +1564,31 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
             argumentDiagnostic: .init(validation: invalid, gate: .accountingDisabled, attempt: 3), context: context))
         XCTAssertFalse(text.contains("argument_validation")); XCTAssertFalse(text.contains("native_context"))
     }
+    func testOptionalPatchProbeCannotDisplaceTheOriginalBoundedFailureLog() throws {
+        let probe = APIModelResponseCodec.PatchSchemaProbe(tool: .namedApplyPatch, projection: .literalInput,
+            path: .operations, actual: .boolean, status: .nonLocal,
+            outer: [.input, .operations, .environmentID, .other], keys: .overLimit, operations: .boolean)
+        let failure = APIModelResponseCodec.FiniteSchemaFailure(toolIndex: 127, constraint: .schemaMismatch, patchProbe: probe)
+        var validation = APIModelResponseCodec.ArgumentValidationDiagnostic(reason: .schemaMismatch,
+            schemaFailures: [failure, failure], callCount: 128, rejectedCount: 128, envelopeShapeValid: true,
+            unambiguousJSON: true, streamShapeAndUsageValid: true, knownUsage: true, correctionEligible: true)
+        let context = APIModelServer.FailureDiagnosticContext(taskID: UUID(), threadID: UUID(), turnID: UUID())
+        let enriched = try XCTUnwrap(APIModelServer.failureDiagnostic(APIModelResponseCodec.Failure.invalidArguments, stage: .decode,
+            argumentDiagnostic: .init(validation: validation, gate: .correctionRejected, attempt: 2), context: context))
+        validation.schemaFailures = [
+            .init(toolIndex: 127, constraint: .schemaMismatch), .init(toolIndex: 127, constraint: .schemaMismatch)]
+        let original = try XCTUnwrap(APIModelServer.failureDiagnostic(APIModelResponseCodec.Failure.invalidArguments, stage: .decode,
+            argumentDiagnostic: .init(validation: validation, gate: .correctionRejected, attempt: 2), context: context))
+        XCTAssertEqual(enriched, original, "Oversized optional probes must leave the exact previous failure packet available")
+        XCTAssertLessThanOrEqual(enriched.utf8.count, 1_024)
+        XCTAssertFalse(enriched.contains("patchProbe"))
+        validation.schemaFailures = [.init(toolIndex: 0, constraint: .typeMismatch,
+            patchProbe: .init(tool: .other, projection: .unrecognized, path: .other, actual: .string, status: .nonPatch))]
+        let small = try XCTUnwrap(APIModelServer.failureDiagnostic(APIModelResponseCodec.Failure.invalidArguments, stage: .decode,
+            argumentDiagnostic: .init(validation: validation, gate: .correctionRejected, attempt: 2)))
+        XCTAssertTrue(small.contains("patchProbe")); XCTAssertLessThanOrEqual(small.utf8.count, 1_024)
+    }
+
     func testBuiltinSchemaFailureLocationsFitExistingLogBoundAndRemainPrivateToDiagnostics() throws {
         let failure = APIModelResponseCodec.FiniteSchemaFailure(toolIndex: 127, constraint: .unexpectedFields,
             location: .init(tool: .browserFill, schemaPath: [.expectedLabel], expectedType: .string, actualType: .boolean))

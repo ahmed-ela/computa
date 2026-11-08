@@ -979,8 +979,20 @@ actor APIModelServer {
             if let context, let bytes = try? JSONEncoder().encode(context),
                let ids = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] { record["native_context"] = ids }
         }
-        guard let data = try? JSONSerialization.data(withJSONObject: record, options: .sortedKeys),
-              data.count <= (record["argument_validation"] == nil && record["response_validation"] == nil && record["tool_validation"] == nil ? 256 : 1_024) else { return nil }
+        guard var data = try? JSONSerialization.data(withJSONObject: record, options: .sortedKeys) else { return nil }
+        if data.count > 1_024, var argument = record["argument_validation"] as? [String: Any],
+           var validation = argument["validation"] as? [String: Any],
+           var failures = validation["schemaFailures"] as? [[String: Any]],
+           failures.contains(where: { $0["patchProbe"] != nil }) {
+            // Optional new detail must never displace an existing finite failure
+            // packet. Durable journals retain it under their separate 2,048 cap.
+            for index in failures.indices { failures[index].removeValue(forKey: "patchProbe") }
+            validation["schemaFailures"] = failures; argument["validation"] = validation
+            record["argument_validation"] = argument
+            guard let compact = try? JSONSerialization.data(withJSONObject: record, options: .sortedKeys) else { return nil }
+            data = compact
+        }
+        guard data.count <= (record["argument_validation"] == nil && record["response_validation"] == nil && record["tool_validation"] == nil ? 256 : 1_024) else { return nil }
         return String(decoding: data, as: UTF8.self)
     }
     /// Shared by terminal failure logs and durable recovered-response metadata.

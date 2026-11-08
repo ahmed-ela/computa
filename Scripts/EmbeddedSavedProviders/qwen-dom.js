@@ -191,6 +191,52 @@ function computaQwenDOM(c) {
       throw error;
     }
   }
+  function rejectResponseContainer(reason, root, containers, displayed, emptyRootMode) {
+    try { c.fail('document_changed', reason); }
+    catch (error) {
+      if (reason === 'response_container_multiple' && error?.computaAdapterFailure) {
+        try {
+          const first = containers.slice(0, 2), ancestors = [], ids = [];
+          let smrm = false, cmrm = false, ancestorLimited = false;
+          const rows = first.map(node => {
+            const id = node.getAttribute('id'), suffix = id && [22,58].includes(id.length) && id.startsWith('chat-response-message-') ? id.slice(22) : null;
+            const idKind = id === null ? 'missing' : suffix === '' ? 'empty_prefix' : c.uuid(suffix) ? 'uuid' : 'other';
+            ids.push(idKind === 'uuid' ? suffix : null);
+            const chain = []; let parent = node.parentElement;
+            for (let depth = 0; parent && parent !== root && depth < 64; depth++, parent = parent.parentElement) {
+              chain.push(parent); smrm ||= parent.classList.contains('smrm'); cmrm ||= parent.classList.contains('cmrm');
+            }
+            ancestorLimited ||= parent !== root; ancestors.push(chain);
+            let loading = 0, phase = 0, footer = 0, visited = 0, limited = false;
+            const stack = [{node, depth:0}];
+            while (stack.length) {
+              if (visited++ === 128) { limited = true; break; }
+              const item = stack.pop(), child = item.node;
+              if (child !== node) {
+                if (child.classList.contains('response-loading')) loading = Math.min(3, loading + 1);
+                if (child.classList.contains('response-message-content') && child.classList.contains('phase-answer')) phase = Math.min(3, phase + 1);
+                if (child.classList.contains('response-message-footer-actions')) footer = Math.min(3, footer + 1);
+              }
+              const total = child.children.length;
+              if (item.depth === 16) { if (total) limited = true; continue; }
+              const take = Math.min(total, Math.max(0, 128 - visited - stack.length));
+              if (take < total) limited = true;
+              for (let index = take - 1; index >= 0; index--) stack.push({node:child.children[index],depth:item.depth + 1});
+            }
+            return {visible:displayed.includes(node),id:idKind,loading,phase,footer,limited};
+          });
+          error.adapterFailureStructure = {version:1,provider:'qwen',trigger:'response_container_multiple',
+            total:Math.min(3,containers.length),displayed:Math.min(3,displayed.length),emptyRootMode,
+            dual:root.classList.contains('qwen-chat-message-dual-message'),multi:root.classList.contains('qwen-chat-message-multi-message'),
+            smrm,cmrm,ancestorLimited,
+            relation:first[0].parentElement === first[1].parentElement ? 'siblings'
+              : ancestors[0].includes(first[1]) || ancestors[1].includes(first[0]) ? 'nested' : 'other',
+            idRelation:ids.every(id => id !== null) ? ids[0] === ids[1] ? 'same_uuid' : 'different_uuid' : 'other',containers:rows};
+        } catch { /* Failure-only metadata cannot replace the original refusal. */ }
+      }
+      throw error;
+    }
+  }
   function transcript(allowInitialResponseIdentity = false, emptyContainerPrompt = null) {
     const users = c.nodes(document, '.qwen-chat-message.qwen-chat-message-user', 2);
     const answers = c.nodes(document, '.qwen-chat-message.qwen-chat-message-assistant', 2);
@@ -221,8 +267,9 @@ function computaQwenDOM(c) {
         pendingAnswer = { root: node, content: null, turn: answerTurn, outer: turn.parentElement, editor: form.editor, composerScope: form.scope };
       } else {
         if (emptyContainerPrompt !== null && containers.length !== 1 || allowInitialResponseIdentity && displayed.length !== 1)
-          c.fail('document_changed', !containers.length ? 'response_container_empty'
-            : containers.length > 1 ? 'response_container_multiple' : 'response_container_hidden');
+          rejectResponseContainer(!containers.length ? 'response_container_empty'
+            : containers.length > 1 ? 'response_container_multiple' : 'response_container_hidden',
+            node, containers, displayed, emptyContainerPrompt !== null);
         const content = one(displayed, 'response_container');
         const answerID = content.getAttribute('id')?.replace(/^chat-response-message-/, '');
         if (!ordered() || (!c.uuid(answerID) && !(allowInitialResponseIdentity && answerID === ''))

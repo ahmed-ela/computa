@@ -6896,7 +6896,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             if !allowBlockedProvider, let packet = adapterFailureStructure,
                let detail = observed["detail"] as? String {
                 if provider == .qwen, !session.loggedSavedAdapterFailure,
-                   let structure = WebsiteAdapterFailureDiagnostic.qwenAuthoredLogFields(packet) {
+                   let structure = WebsiteAdapterFailureDiagnostic.qwenAuthoredLogFields(packet)
+                    ?? WebsiteAdapterFailureDiagnostic.qwenResponseContainerLogFields(packet) {
                     let context = session.adapterFailureContext
                     let task = context?.taskID.uuidString.lowercased() ?? "none"
                     let turn = context?.turnID.uuidString.lowercased() ?? "none"
