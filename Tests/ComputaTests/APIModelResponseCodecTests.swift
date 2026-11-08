@@ -3853,6 +3853,99 @@ final class APIModelResponseCodecTests: XCTestCase {
         XCTAssertThrowsError(try APIModelResponseCodec.correctiveRequest(sized(2_000_000 - small.body.count), rejectionDetails: details))
     }
 
+    func testLocalUpdateLineCorrectionExplainsPrefixesWithoutChangingArgumentsOrHistory() throws {
+        let history: [[String: Any]] = [
+            ["role": "user", "content": "Read observed source first."],
+            ["type": "custom_tool_call", "name": "apply_patch", "call_id": "completed", "input": "*** Begin Patch\n*** Delete File: /tmp/already-done\n*** End Patch"],
+            ["type": "custom_tool_call_output", "call_id": "completed", "output": "completed once"],
+            ["role": "user", "content": "Perform the next observed source update."],
+        ]
+        for naming: APIModelResponseCodec.ToolNaming in [.semantic, .legacy] {
+            let req = try request(["tools": [nativePatch()], "input": history], provider: typedPatchProvider(), toolNaming: naming)
+            let original = req.body
+            for line in ["PRIVATE_NO_PREFIX", "+PRIVATE\nsecond", "+PRIVATE\rsecond", "+PRIVATE\u{0}second", ""] {
+                let arguments = String(decoding: try JSONSerialization.data(withJSONObject: ["operations": [["update": "PRIVATE_PATH", "hunks": [["lines": [line]]]]]]), as: UTF8.self)
+                let rejected = try correctionResult(req, arguments: arguments)
+                let details = try rejectedDetails(req, arguments: arguments)
+                XCTAssertEqual(details.first?.patchLocation, .init(operation: .update, field: .line, constraint: .schemaMismatch))
+                XCTAssertThrowsError(try APIModelResponseCodec.decode(rejected, request: req))
+                let (records, payload) = try schemaFeedback(req, details: details)
+                let record = try XCTUnwrap(records.first)
+                let contract = try XCTUnwrap(record["update_line_contract"] as? String)
+                XCTAssertTrue(contract.contains("ASCII space (keep), + (add), or - (remove)"))
+                XCTAssertTrue(contract.contains("including indentation")); XCTAssertTrue(contract.contains("blank source line"))
+                XCTAssertTrue(contract.contains("CR, LF or NUL")); XCTAssertFalse(payload.contains("PRIVATE"))
+                let sample = try XCTUnwrap(record["example_arguments_template"] as? [String: Any])
+                let corrected = try APIModelResponseCodec.correctiveRequest(req, rejectionDetails: details)
+                let oldBody = try XCTUnwrap(JSONSerialization.jsonObject(with: req.body) as? [String: Any])
+                let newBody = try XCTUnwrap(JSONSerialization.jsonObject(with: corrected.body) as? [String: Any])
+                XCTAssertEqual(oldBody["tools"] as? NSArray, newBody["tools"] as? NSArray)
+                let oldMessages = try XCTUnwrap(oldBody["messages"] as? [[String: Any]])
+                let newMessages = try XCTUnwrap(newBody["messages"] as? [[String: Any]])
+                XCTAssertEqual(oldMessages.count, newMessages.count)
+                XCTAssertEqual(Array(oldMessages.dropFirst()) as NSArray, Array(newMessages.dropFirst()) as NSArray)
+                XCTAssertEqual(req.historyCallIDs, corrected.historyCallIDs)
+                XCTAssertEqual(req.allowedTools, corrected.allowedTools); XCTAssertEqual(req.maximumCalls, corrected.maximumCalls)
+                XCTAssertEqual(req.requiredTool, corrected.requiredTool); XCTAssertEqual(req.body, original)
+                XCTAssertThrowsError(try APIModelResponseCodec.decode(rejected, request: corrected), "Feedback must not repair rejected bytes")
+                let valid = String(decoding: try JSONSerialization.data(withJSONObject: sample), as: UTF8.self)
+                let reply = try APIModelResponseCodec.decode(correctionResult(corrected, arguments: valid), request: corrected)
+                let item = try XCTUnwrap((reply.response["output"] as? [[String: Any]])?.first)
+                XCTAssertEqual(item["input"] as? String, "*** Begin Patch\n*** Update File: /absolute/path/file.py\n def f():\n-    old()\n+    new()\n \n*** End Patch")
+            }
+        }
+    }
+
+    func testLocalUpdateLineGuidanceRequiresOneExactAllowedProjectionAndLocation() throws {
+        let badLine = #"{"operations":[{"update":"PRIVATE_PATH","hunks":[{"lines":["PRIVATE_NO_PREFIX"]}]}]}"#
+        let local = try request(["tools": [nativePatch()]], provider: typedPatchProvider(), toolNaming: .semantic)
+        let detail = try XCTUnwrap(rejectedDetails(local, arguments: badLine).first)
+        var missing = detail; missing.patchLocation = nil
+        var wrongLocation = detail; wrongLocation.patchLocation = .init(operation: .add, field: .line, constraint: .schemaMismatch)
+        let wrongWire = APIModelResponseCodec.ArgumentRejectionDetail(toolIndex: detail.toolIndex, wireName: "not-current", constraint: detail.constraint,
+            path: detail.path, patchLocation: detail.patchLocation)
+        let denied = try request(["tools": [nativePatch()], "tool_choice": "none"], provider: typedPatchProvider(), toolNaming: .semantic)
+        let scoped = try request(["tools": [nativePatch(environments: true)]], provider: typedPatchProvider(), toolNaming: .semantic)
+        let foreign = try request(["tools": [["type": "function", "name": "apply_patch", "parameters": AlibabaPatchProjection.local.schema]]],
+            provider: typedPatchProvider(), toolNaming: .semantic)
+        var changed = nativePatch(); changed["description"] = "Unrecognized grammar owner"
+        let changedSchema = try request(["tools": [changed]], provider: typedPatchProvider(), toolNaming: .semantic)
+        let otherModel = try request(["tools": [nativePatch()]], provider: typedPatchProvider(model: "other"), toolNaming: .semantic)
+        for (req, details) in [(local, [missing]), (local, [wrongLocation]), (local, [wrongWire]), (local, [detail, detail]),
+                               (denied, [detail]), (scoped, [detail]), (foreign, [detail]), (changedSchema, [detail]), (otherModel, [detail])] {
+            let original = req.body
+            let (records, payload) = try schemaFeedback(req, details: details)
+            XCTAssertFalse(records.contains { $0["update_line_contract"] != nil })
+            XCTAssertFalse(records.contains { $0["example_arguments_template"] != nil })
+            XCTAssertFalse(payload.contains("PRIVATE")); XCTAssertEqual(req.body, original)
+        }
+    }
+
+    func testLocalUpdateLineCorrectionKeepsContractWhenOptionalExampleExceedsBudget() throws {
+        func sized(_ count: Int) throws -> APIModelResponseCodec.Request {
+            try request(["tools": [nativePatch()], "input": [["role": "user", "content": String(repeating: "x", count: count)]]],
+                provider: typedPatchProvider(), toolNaming: .semantic)
+        }
+        let small = try sized(0)
+        let details = try rejectedDetails(small, arguments: #"{"operations":[{"update":"PRIVATE_PATH","hunks":[{"lines":["PRIVATE_NO_PREFIX"]}]}]}"#)
+        let (expanded, _) = try schemaFeedback(small, details: details)
+        var contractOnly = try XCTUnwrap(expanded.first)
+        XCTAssertNotNil(contractOnly.removeValue(forKey: "example_arguments_template"))
+        XCTAssertNotNil(contractOnly["update_line_contract"])
+        let bytes = try JSONSerialization.data(withJSONObject: [contractOnly], options: [.sortedKeys, .withoutEscapingSlashes])
+        let suffix = "\n\n" + APIModelResponseCodec.schemaFeedbackMarker + String(decoding: bytes, as: UTF8.self)
+        let needed = 2 * (APIModelResponseCodec.correctiveFeedback.utf8.count + suffix.utf8.count) + 64
+        let boundary = try sized(2_000_000 - needed - small.body.count)
+        XCTAssertEqual(boundary.body.count + needed, 2_000_000)
+        let (atLimit, _) = try schemaFeedback(boundary, details: details)
+        XCTAssertEqual(atLimit as NSArray, [contractOnly] as NSArray, "The actionable contract survives omission of its larger example")
+        let beyond = try sized(2_000_000 - needed - small.body.count + 1)
+        let (brief, _) = try schemaFeedback(beyond, details: details)
+        var originalBrief = contractOnly; originalBrief.removeValue(forKey: "update_line_contract")
+        XCTAssertEqual(brief as NSArray, [originalBrief] as NSArray, "Optional guidance cannot disable correction that already fit")
+        XCTAssertThrowsError(try APIModelResponseCodec.correctiveRequest(sized(2_000_000 - small.body.count), rejectionDetails: details))
+    }
+
     func testAlibabaPatchProbeDistinguishesOuterFailuresWithoutChangingCorrectionOrAdmission() throws {
         typealias Probe = APIModelResponseCodec.PatchSchemaProbe
         let req = try request(["tools": [nativePatch()]], provider: typedPatchProvider(), toolNaming: .semantic)
@@ -3957,7 +4050,7 @@ final class APIModelResponseCodecTests: XCTestCase {
                 XCTAssertEqual(details.count, 1)
                 XCTAssertEqual(details.first?.patchLocation, expected)
                 XCTAssertEqual(details.first?.constraint, .schemaMismatch, "The original union violation is unchanged")
-                XCTAssertEqual(details.first?.path, [], "Diagnostic location must not enter corrective feedback")
+                XCTAssertEqual(details.first?.path, [], "Original schema violation stays unchanged")
                 let finite = try XCTUnwrap(observation)
                 XCTAssertEqual(finite.schemaFailures?.first?.patchLocation, expected)
                 XCTAssertTrue(finite.correctionEligible)
@@ -3966,8 +4059,13 @@ final class APIModelResponseCodecTests: XCTestCase {
                 }
                 var withoutDiagnostic = details
                 withoutDiagnostic[0].patchLocation = nil
-                XCTAssertEqual(try APIModelResponseCodec.correctiveRequest(req, rejectionDetails: details).body,
-                    try APIModelResponseCodec.correctiveRequest(req, rejectionDetails: withoutDiagnostic).body)
+                let correction = try APIModelResponseCodec.correctiveRequest(req, rejectionDetails: details).body
+                let generic = try APIModelResponseCodec.correctiveRequest(req, rejectionDetails: withoutDiagnostic).body
+                if expected == .init(operation: .update, field: .line, constraint: .schemaMismatch) {
+                    XCTAssertNotEqual(correction, generic, "Only the exact known update-line failure now receives static corrective guidance")
+                } else {
+                    XCTAssertEqual(correction, generic)
+                }
                 XCTAssertEqual(req.body, original)
                 let serialized = String(decoding: try JSONEncoder().encode(finite), as: UTF8.self)
                 XCTAssertFalse(serialized.contains("PRIVATE")); XCTAssertFalse(serialized.contains("arguments"))

@@ -246,7 +246,8 @@ enum APIModelResponseCodec {
         var patchLocation: LocalPatchSchemaLocation? = nil
         var patchProbe: PatchSchemaProbe? = nil
     }
-    /// Diagnostic-only location in the exact local typed-patch operation union.
+    /// Finite location in the exact local typed-patch operation union. The one
+    /// recognized update-line rejection may guide correction, never admission.
     /// No argument values, unknown keys, file paths or array indexes are retained.
     struct LocalPatchSchemaLocation: Codable, Equatable, Sendable {
         enum Operation: String, Codable, Sendable { case notObject = "not_object", missing, ambiguous, add, delete, update }
@@ -537,6 +538,26 @@ enum APIModelResponseCodec {
            let example = try? JSONSerialization.jsonObject(with: Data(AlibabaPatchProjection.updateExample.utf8)) {
             record["example_arguments_template"] = example
             if let feedback = boundedFeedback([record]) { return feedback }
+        }
+        // An exact local update-line rejection needs the line contract, not
+        // just the operation-union brief. This only guides the already-admitted
+        // correction; it never repairs arguments or changes tool admission.
+        if details.count == 1, let detail = details.first, var record = records.first,
+           request.tools.indices.contains(detail.toolIndex),
+           detail.constraint == .schemaMismatch, detail.path.isEmpty,
+           detail.patchLocation == .init(operation: .update, field: .line, constraint: .schemaMismatch) {
+            let tool = request.tools[detail.toolIndex]
+            if tool.custom, tool.name == "apply_patch", tool.namespace == nil || tool.namespace == "functions",
+               tool.wireName == detail.wireName, request.allowedTools.contains(tool.wireName),
+               tool.patchProjection == .local, equalJSON(tool.schema, AlibabaPatchProjection.local.schema) {
+                record["update_line_contract"] = "Each hunk.lines element is one source line. Its first character must be ASCII space (keep), + (add), or - (remove), followed by the exact source characters including indentation. A blank source line is represented by just its prefix: space, +, or -. Do not include CR, LF or NUL inside any element, including JSON escapes that decode to them. Use the observed target path and source; no call from the rejected response executed."
+                var withExample = record
+                withExample["example_arguments_template"] = ["operations": [["update": "/absolute/path/file.py",
+                    "hunks": [["lines": [" def f():", "-    old()", "+    new()", " "]]]]]]
+                if let feedback = boundedFeedback([withExample]) { return feedback }
+                // The optional example must not displace the actionable contract.
+                if let feedback = boundedFeedback([record]) { return feedback }
+            }
         }
         return boundedFeedback(records) ?? ""
     }

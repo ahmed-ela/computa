@@ -46,7 +46,7 @@ function installSink(f:ReturnType<typeof fixture>) {
   new Function('window','location','document','Clipboard','navigator','HTMLElement','HTMLButtonElement','Document','CustomEvent',sink.replace('__COMPUTA_QWEN_CODE_PAYLOAD_CONFIG__',JSON.stringify(channel)))(f.window,{origin:'https://chat.qwen.ai'},f.document,Clipboard,navigator,f.Node,f.Node,Doc,Event);
   return {navigator,delegated:()=>delegated};
 }
-async function owned(mode='plain') {
+async function owned(mode='plain', editorStyle?:string) {
   const f=fixture(),s=installSink(f);
   await f.run('inspect');let selected=false;
   for(let i=0;i<8&&!selected;i++)selected=(await f.run('selectModel',{modelChoice:choice()})).selected===true;
@@ -55,9 +55,9 @@ async function owned(mode='plain') {
   expect((await f.run('sendReady',{prompt})).sendReady).toBe(true);
   expect((await f.run('submit',{prompt,savedSubmissionFingerprint:await fingerprint(prompt)})).submitted).toBe(true);
   const x=installCode(f);
-  if(mode==='monaco'){
-    x.body.setAttribute('class','qwen-markdown-code-body json qwen-markdown-code-body-virtual');
-    const viewport=new f.Node('DIV',{class:'qwen-markdown-code-editor-viewport'});
+  if(mode==='monaco'||mode==='editor'){
+    x.body.setAttribute('class','qwen-markdown-code-body json'+(mode==='monaco'?' qwen-markdown-code-body-virtual':''));
+    const viewport=new f.Node('DIV',{class:'qwen-markdown-code-editor-viewport',...(editorStyle===undefined?{}:{style:editorStyle})});
     Object.defineProperty(viewport,'namespaceURI',{value:html});Object.assign(viewport.computedStyle,x.body.computedStyle);
     viewport.append(new f.Node('DIV',{class:'monaco-editor'},'only a virtual fragment'));
     x.body.replaceChildren(viewport);
@@ -281,5 +281,41 @@ test('Qwen sampled refusal distinguishes finite sink cardinality and mutation wi
     expect(r.adapterFailureStructure).toEqual({version:1,provider:'qwen',trigger:'authored_source',stage:'code_sample',reason,count:0});
     expect(t.x.copy.clicks).toBe(1);expect(t.s.delegated()).toBe(0);
     expect((await t.sample()).error).toBeTruthy();expect(t.x.copy.clicks).toBe(1);
+  }
+});
+
+
+test('Qwen provider viewport layout styles retain exact owned final Copy bytes',async()=>{
+  // Public0.3.32 zI writes viewport.style.height and viewport.style.top after mount.
+  for(const mode of ['editor','monaco'])for(const style of ['height: 74px;','top: 52px; height: 582px;','']){
+    const t=await owned(mode,style);
+    expect(t.first.text).toBe('');expect(t.x.copy.clicks).toBe(0);
+    const result=await t.sample();expect(result.error).toBeUndefined();expect(result.text).toBe(payload);
+    expect(JSON.parse(result.text).calls[0].input).toBe(originalPatch);
+    expect(result.answerComplete).toBe(true);expect(t.x.copy.clicks).toBe(1);
+    expect(t.f.send.clicks).toBe(1);expect(t.s.delegated()).toBe(0);
+    expect((await t.sample()).error).toBeTruthy();expect(t.x.copy.clicks).toBe(1);
+  }
+});
+test('Qwen provider viewport style allowance preserves attributes visibility and post-digest refusal',async()=>{
+  for(const bad of ['oversize','unknown','namespace','hidden','inert','aria_hidden','display','visibility','opacity','pseudo','after_digest']){
+    const t=await owned('monaco');const viewport=t.x.body.children[0] as typeof t.x.body;
+    const mutate=()=>{
+      viewport.setAttribute('style','height: 74px;');
+      if(bad==='oversize')viewport.setAttribute('style','x'.repeat(4097));
+      if(bad==='unknown'||bad==='after_digest')viewport.setAttribute('data-private','PRIVATE_VALUE');
+      if(bad==='namespace')Object.defineProperty(viewport,'attributes',{get:()=>[
+        {name:'class',value:'qwen-markdown-code-editor-viewport'},
+        {name:'style',value:'height: 74px;',namespaceURI:'PRIVATE_NAMESPACE'}]});
+      if(bad==='hidden'||bad==='inert')viewport.setAttribute(bad,'');
+      if(bad==='aria_hidden')viewport.setAttribute('aria-hidden','true');
+      if(bad==='display')viewport.computedStyle.display='none';
+      if(bad==='visibility')viewport.computedStyle.visibility='hidden';
+      if(bad==='opacity')viewport.computedStyle.opacity='0';
+      if(bad==='pseudo')viewport.computedStyle.content='"PRIVATE_PSEUDO"';
+    };
+    if(bad==='after_digest')t.f.beforeDigest(mutate);else mutate();
+    const result=await t.sample();expect(result.error,bad).toBeTruthy();expect(result.text).toBeUndefined();
+    expect(t.x.copy.clicks).toBe(0);expect(t.f.send.clicks).toBe(1);expect(t.s.delegated()).toBe(0);
   }
 });

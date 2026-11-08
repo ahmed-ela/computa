@@ -736,7 +736,7 @@ function computaQwenDOM(c) {
       } else {
         if (presentation?.tagName !== 'DIV') return codeDecline('editor_tag');
         if (!classes(presentation, 'qwen-markdown-code-editor-viewport')) return codeDecline('editor_class');
-        if (!attrs(presentation, ['class'])) return codeDecline('editor_attributes');
+        if (!attrs(presentation, ['class', 'style'])) return codeDecline('editor_attributes');
         if (!plain(presentation)) return codeDecline('editor_visibility');
       }
       // The known editor presentation is opaque provider output. Its viewport
