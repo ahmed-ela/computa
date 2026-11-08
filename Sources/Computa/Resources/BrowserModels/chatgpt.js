@@ -6696,6 +6696,20 @@ function chatGPTFirstRouteModelPins(candidate) {
     || reject('model_checked_family', picker.checkedFamily && picker.checkedFamily.key !== pin.selection.family.key)) return false;
   return true;
 }
+function chatGPTFirstRouteModelRemount(candidate) {
+  const pin = chatGPTFirstRouteModelFailurePin, picker = chatGPTFirstRouteModelFailurePicker;
+  const diagnostic = {};
+  const fail = rule => { chatGPTFirstRouteModelFailureRule = rule; return null; };
+  if (chatGPTFirstRouteModelFailureRule !== 'model_trigger_identity') return null;
+  if (globalThis.__computaChatPresetPin !== pin) return fail('model_remount_pin_changed');
+  if (candidate.routeModelRemount && !chatGPTBoundRouteModelRemountIntact(candidate))
+    return fail('model_remount_pending_replaced');
+  // Retain negative history of this exact successor. Only the existing fresh
+  // full model read can transfer the original header pin.
+  if (!websiteChatClaimProvisionalHeader(pin, picker, diagnostic))
+    return fail(diagnostic.rule === 'pending_invalidated' ? 'model_pin_invalidated' : 'model_remount_' + diagnostic.rule);
+  return { pin, pending: pin.provisionalHeader };
+}
 // While native's first submission is pending, its dispatched outbound hash
 // can retain a completed display across the second route edge. Either no
 // first-message pin exists yet, or the existing private pin must match that
@@ -6781,8 +6795,9 @@ function chatGPTPendingFirstRouteDiscard(candidate, fingerprint, stage) {
     || reject('predecessor_model_choice', !websiteModelChoiceEqual(predecessor.modelChoice, candidate.modelChoice))
     || reject('expected_model', !websiteModelChoiceEqual(input.expectedModelChoice, candidate.modelChoice))
     || reject('expansion_model', !websiteModelChoiceEqual(input.firstUserExpansionModelChoice, candidate.modelChoice))
-    || reject('product', !chatGPTProductModeProof()) || reject('temporary', !chatGPTTemporaryVerified())
-    || reject('model_pins', !chatGPTFirstRouteModelPins(candidate))) return null;
+    || reject('product', !chatGPTProductModeProof()) || reject('temporary', !chatGPTTemporaryVerified())) return null;
+  const modelPins = chatGPTFirstRouteModelPins(candidate);
+  if (reject('model_pins', !modelPins && (!pendingPrivate || chatGPTFirstRouteModelFailureRule !== 'model_trigger_identity'))) return null;
   const roots = chatGPTMessageRoots('user'), root = roots[0], body = root && chatGPTUserBody(root);
   try { candidate.pendingRouteNodes = { invocation: websiteChatInvocationLease, currentNodesObserved: true,
     currentRootMatches: root === candidate.root, currentBodyMatches: body === candidate.body }; } catch { }
@@ -6793,6 +6808,14 @@ function chatGPTPendingFirstRouteDiscard(candidate, fingerprint, stage) {
       || reject('old_body_detached', candidate.oldBody?.isConnected !== false) || reject('root_replaced', root === candidate.oldRoot)
       || reject('body_replaced', body === candidate.oldBody)
       : reject('root_same', root !== candidate.oldRoot) || reject('body_same', body !== candidate.oldBody))) return null;
+  // A pending private record has no accepted submission proof yet. Complete
+  // every body/route check before retaining the same bounded header witness.
+  if (!modelPins) {
+    const remount = chatGPTFirstRouteModelRemount(candidate);
+    if (reject('model_pins', !remount)) return null;
+    candidate.routeModelPin = remount.pin;
+    candidate.routeModelRemount = remount.pending;
+  }
   // Retain the already certified first edge; the existing continuation consumes
   // only its second edge. Neither the two-edge budget nor deadline is renewed.
   candidate.routeContinuationEdges = edges.map(edge => Object.freeze({ ...edge }));
@@ -6998,18 +7021,8 @@ function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage, certifiedD
   }
   let modelRemount = null;
   if (!chatGPTFirstRouteModelPins(candidate)) {
-    const pin = chatGPTFirstRouteModelFailurePin, picker = chatGPTFirstRouteModelFailurePicker;
-    const diagnostic = {};
-    const failModel = rule => { chatGPTFirstRouteModelFailureRule = rule; reject(rule, true); return null; };
-    if (chatGPTFirstRouteModelFailureRule !== 'model_trigger_identity') return failModel(chatGPTFirstRouteModelFailureRule);
-    if (globalThis.__computaChatPresetPin !== pin) return failModel('model_remount_pin_changed');
-    if (candidate.routeModelRemount && !chatGPTBoundRouteModelRemountIntact(candidate))
-      return failModel('model_remount_pending_replaced');
-    // Do not adopt the replacement picker here. Reuse the existing single
-    // provisional-header observer, retaining the old pin and all negatives.
-    if (!websiteChatClaimProvisionalHeader(pin, picker, diagnostic))
-      return failModel(diagnostic.rule === 'pending_invalidated' ? 'model_pin_invalidated' : 'model_remount_' + diagnostic.rule);
-    modelRemount = { pin, pending: pin.provisionalHeader };
+    modelRemount = chatGPTFirstRouteModelRemount(candidate);
+    if (!modelRemount) { reject(chatGPTFirstRouteModelFailureRule, true); return null; }
   }
   // Any non-route conversation identity remains a hard boundary. Route-only
   // lineage is independently checked against the original URL by native.

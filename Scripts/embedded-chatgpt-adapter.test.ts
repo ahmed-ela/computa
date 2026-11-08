@@ -2732,6 +2732,87 @@ describe('ChatGPT per-round canonical submission ownership', () => {
         firstUserExpansionRouteContinuation: [...continuation.firstUserExpansionRouteContinuation, { fromURL, toURL }] } };
     };
 
+    const pendingPrivateHeaderPromotion = async (mutation = 'none') => {
+      let oldHeader: any;
+      const staged=await pendingPrivateHashPromotion(staged=>{
+        const {x,first,body,record,state,oldRoot,oldBody,continuation}=staged;
+        oldHeader=x.picker!.replaceTrigger(mutation!=='connected_old');
+        if(mutation==='disabled')x.picker!.trigger.disabled=true;
+        if(mutation==='wrong_power')x.picker!.selected('High');
+        if(mutation==='body')body.text+='!';
+        if(mutation==='owner')x.f.world.__computaModelOwner='foreign';
+        if(mutation==='document')(x.f.world.__computaModelBoundFirstExpansion as any).document={};
+        if(mutation==='private_pin')(x.f.world.__computaModelFirstProof as any).fingerprint='0'.repeat(64);
+        if(mutation==='native_adopted')record.nativeFirstPinned=true;
+        if(mutation==='record_phase')record.phase='verified';
+        if(mutation==='pending_identity')state.pending={...record};
+        if(mutation==='old_root'){oldRoot.connected=true;oldRoot.values['data-turn']='retired';}
+        if(mutation==='old_body')x.f.body.append(oldBody);
+        if(mutation==='first_edge')continuation.firstUserExpansionRouteContinuation[0].fromURL+='wrong';
+        if(mutation==='extra_edge')continuation.firstUserExpansionRouteContinuation.push({fromURL:'https://chatgpt.com/c/foreign',toURL:x.f.document.URL});
+        if(mutation==='expired')x.f.advanceTime(2_000);
+      });
+      return {...staged,oldHeader,pin:staged.x.f.world.__computaChatPresetPin as any};
+    };
+    test('pending private body-hash header remount keeps only a route witness until fresh full proof',async()=>{
+      const {x,first,state,record,body,candidate,discarded,next,oldHeader,pin,initial,initialControl,expand}=await pendingPrivateHeaderPromotion();
+      expect(discarded,JSON.stringify(discarded.boundCertificateDiagnostic)).toMatchObject({error:'document_changed',detail:'model_read_context'});
+      denied(discarded);expect(candidate).toMatchObject({pendingPrivate:true,provisional:true});expect(candidate.verified).not.toBe(true);
+      expect(candidate.routeDiscard.stage).toBe('body_hash');expect(state.pending).toBe(record);expect(state.lastVerified).toBeNull();
+      expect(record.phase).toBe('send_claimed');expect(record.root).toBeNull();expect(record.body).toBeNull();
+      const pending=pin.provisionalHeader;expect(pending.completed).toBe(false);expect(pin.headerTrigger).toBe(oldHeader);
+      expect(candidate.routeModelRemount).toBe(pending);expect(candidate.routeModelPin).toBe(pin);
+      const before=x.f.digestInputs.length;let fullReads=0;const open=x.picker!.trigger.onClick!;
+      x.picker!.trigger.onClick=()=>{fullReads++;expect(candidate.verified).not.toBe(true);expect(state.pending).toBe(record);open();};
+      const fresh=await x.observe(first,{...next,deferModelVerification:true});
+      expect(fresh.error).toBeUndefined();expect(fresh.modelEvidence?.selected).toEqual(choice);expect(fresh.modelVerificationPending).toBeUndefined();
+      expect(fresh.submissionProof).toEqual({sequence:1,fingerprint:first.fingerprint});expect(fullReads).toBeGreaterThan(0);
+      expect(x.f.digestInputs.slice(before).filter(text=>text===first.outbound).length).toBeGreaterThanOrEqual(2);
+      expect(state.lastVerified).toBe(record);expect(state.pending).toBeNull();expect(record.body).toBe(body);expect(record.phase).toBe('verified');
+      expect(candidate.verified).toBe(true);expect(candidate.deadline).toBe(initial.deadline);expect(candidate.routeContinuationEdges).toHaveLength(2);
+      expect(pin.headerTrigger).toBe(x.picker!.trigger);expect(pending.completed).toBe(true);
+      expect(initialControl.clicks).toBe(1);expect(expand.clicks).toBe(1);expect(x.send.clicks).toBe(1);
+    });
+    test('pending private route refuses header and ownership failures before installing a model witness',async()=>{
+      for(const mutation of ['connected_old','disabled','wrong_power','body','owner','document','private_pin','native_adopted','record_phase','pending_identity','old_root','old_body','first_edge','extra_edge','expired']){
+        const {x,first,candidate,discarded,pin,oldHeader,record,next,initialControl,expand}=await pendingPrivateHeaderPromotion(mutation);
+        denied(discarded);expect(candidate.routeDiscard,mutation).toBeUndefined();expect(candidate.routeModelRemount,mutation).toBeUndefined();
+        expect(pin.provisionalHeader,mutation).toBeUndefined();expect(pin.headerTrigger).toBe(oldHeader);expect(candidate.verified).not.toBe(true);
+        denied(await x.observe(first,{...next,deferModelVerification:true}));expect(record.root).toBeNull();expect(record.body).toBeNull();
+        expect(initialControl.clicks).toBe(1);expect(expand.clicks).toBe(1);expect(x.send.clicks).toBe(1);
+      }
+    });
+    test('pending private route header witness cannot survive changed body model lineage or original deadline',async()=>{
+      for(const mutation of ['replacement','old_connected','disabled','wrong_family','switch_restore','body','owner','document','private_pin','record_hash','pending_identity','missing_edge','reversed_edge','extra_edge','expired','expires_during_read']){
+        const {x,first,record,body,candidate,discarded,next,pin,oldHeader,initialControl,expand}=await pendingPrivateHeaderPromotion();
+        expect(discarded).toMatchObject({error:'document_changed',detail:'model_read_context'});
+        const deadline=candidate.deadline,pending=pin.provisionalHeader,goodEdges=next.firstUserExpansionRouteContinuation.map(edge=>({...edge}));
+        if(mutation==='replacement')x.picker!.replaceTrigger();
+        if(mutation==='old_connected')oldHeader.connected=true;
+        if(mutation==='disabled')x.picker!.trigger.disabled=true;
+        if(mutation==='wrong_family')x.picker!.selected('GPT-5.5');
+        if(mutation==='switch_restore'){let once=true;pending.observer.takeRecords=()=>{if(!once)return [];once=false;return [{type:'characterData',target:{nodeType:3,parentElement:x.picker!.trigger,textContent:'Medium'},oldValue:'High'}];};}
+        if(mutation==='body')body.text+='!';
+        if(mutation==='owner')x.f.world.__computaModelOwner='foreign';
+        if(mutation==='document')candidate.document={};
+        if(mutation==='private_pin')(x.f.world.__computaModelFirstProof as any).fingerprint='0'.repeat(64);
+        if(mutation==='record_hash')record.fingerprint='0'.repeat(64);
+        if(mutation==='pending_identity')pin.provisionalHeader={...pending};
+        if(mutation==='missing_edge')next.firstUserExpansionRouteContinuation.pop();
+        if(mutation==='reversed_edge')next.firstUserExpansionRouteContinuation.reverse();
+        if(mutation==='extra_edge')next.firstUserExpansionRouteContinuation.push({fromURL:x.f.document.URL,toURL:x.f.document.URL+'/extra'});
+        if(mutation==='expired')x.f.advanceTime(2_000);
+        if(mutation==='expires_during_read'){const open=x.picker!.trigger.onClick!;x.picker!.trigger.onClick=()=>{open();x.f.advanceTime(2_000);};}
+        const fresh=await x.observe(first,{...next,deferModelVerification:true});expect(fresh.error,mutation).toBeDefined();denied(fresh);expect(fresh.modelEvidence,mutation).toBeUndefined();
+        expect(candidate.verified,mutation).not.toBe(true);expect(candidate.deadline).toBe(deadline);expect(record.root).toBeNull();expect(record.body).toBeNull();
+        if(mutation==='expired'||mutation==='expires_during_read')x.f.advanceTime(-2_000);
+        if(mutation.endsWith('_edge'))next.firstUserExpansionRouteContinuation=goodEdges;
+        denied(await x.observe(first,{...next,deferModelVerification:true}));
+        expect(candidate.verified,mutation).not.toBe(true);
+        expect(initialControl.clicks).toBe(1);expect(expand.clicks).toBe(1);expect(x.send.clicks).toBe(1);
+      }
+    });
+
     test('pending-private public-promotion witness rejects altered ownership content model pins and first edge', async () => {
       for (const mutation of ['body', 'owner', 'private_pin', 'native_pin', 'record_hash', 'model', 'work',
         'temporary', 'deadline', 'second_remount', 'stale_lease', 'first_edge', 'extra_edge']) {
