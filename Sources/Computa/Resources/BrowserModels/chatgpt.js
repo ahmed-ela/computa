@@ -6996,7 +6996,7 @@ function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage, certifiedD
     const pin = chatGPTFirstRouteModelFailurePin, picker = chatGPTFirstRouteModelFailurePicker;
     const diagnostic = {};
     const failModel = rule => { chatGPTFirstRouteModelFailureRule = rule; reject(rule, true); return null; };
-    if (provisional || chatGPTFirstRouteModelFailureRule !== 'model_trigger_identity') return failModel(chatGPTFirstRouteModelFailureRule);
+    if (chatGPTFirstRouteModelFailureRule !== 'model_trigger_identity') return failModel(chatGPTFirstRouteModelFailureRule);
     if (globalThis.__computaChatPresetPin !== pin) return failModel('model_remount_pin_changed');
     if (candidate.routeModelRemount && !chatGPTBoundRouteModelRemountIntact(candidate))
       return failModel('model_remount_pending_replaced');
@@ -7025,6 +7025,9 @@ function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage, certifiedD
   if (modelRemount) {
     candidate.routeModelPin = modelRemount.pin;
     candidate.routeModelRemount = modelRemount.pending;
+    // A completed display is not proof of its replacement header. Keep the
+    // original deadline and full-model requirement through the fresh read.
+    if (provisional) candidate.verified = false;
   }
   // No new witness or claim: native already knows how to carry this discarded
   // certificate across its bounded route chain and require a fresh full proof.

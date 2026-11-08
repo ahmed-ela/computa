@@ -2816,28 +2816,132 @@ describe('ChatGPT per-round canonical submission ownership', () => {
       return { x, first, record, oldRoot, oldBody, ...next, expand, initialControl };
     };
 
-    const provisionalBodyRouteStage = async (mutate?: (value: any) => void, history?: (edges: any[]) => any) => {
+    const provisionalBodyRouteStage = async (mutate?: (value: any) => void, history?: (edges: any[]) => any, timing = 'body_hash') => {
       const value = await provisionalStage(true), { x, first, record } = value;
       const state: any = x.f.world.__computaChatSubmissionState;
       const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/public-provisional-body?temporary-chat=true';
       const firstEdge = { fromURL: (x.f.world.__computaModelFirstExpansion as any).routeURL, toURL: fromURL };
       const secondEdge = { fromURL, toURL };
       let promoted = false;
-      x.f.onDigest(() => {
+      const promote = () => {
         const candidate: any = x.f.world.__computaModelBoundFirstExpansion;
+        if (timing === 'finalization_hash' && candidate?.finalizationDiagnostic?.finalizationStage !== 'entered') {
+          x.f.onDigest(promote, first.outbound); return;
+        }
         expect(candidate).toMatchObject({ provisional: true, pendingPrivate: false, remount: true, outcome: 'expanded' });
-        expect(candidate.finalizationDiagnostic).toBeUndefined();
+        if (timing === 'body_hash') expect(candidate.finalizationDiagnostic).toBeUndefined();
+        else expect(candidate.finalizationDiagnostic).toMatchObject({ finalizationStage: 'entered' });
         expect(state.pending).toBeNull(); expect(state.lastVerified).toBe(record); expect(record.phase).toBe('verified');
         expect(record.nativeFirstPinned).not.toBe(true);
         promoted = true; x.f.document.URL = toURL; x.f.location.pathname = '/c/public-provisional-body';
         mutate?.({ ...value, state, candidate, firstEdge, secondEdge });
-      }, first.outbound);
+      };
+      x.f.onDigest(promote, first.outbound);
       const crossed = await x.observe(first, { ...provisionalAllowance,
         firstUserExpansionRouteContinuation: history ? history([firstEdge]) : [firstEdge] });
       expect(promoted).toBe(true);
       return { ...value, state, fromURL, toURL, firstEdge, secondEdge, crossed,
         candidate: x.f.world.__computaModelBoundFirstExpansion as any };
     };
+
+    const provisionalHeaderRouteStage = async (timing: string, mutation = 'none', replace = true) => {
+      let oldHeader: any;
+      const staged = await provisionalBodyRouteStage(({ x }: any) => {
+        if (!replace) return;
+        oldHeader = x.picker.replaceTrigger(mutation !== 'connected_old');
+        if (mutation === 'disabled') x.picker.trigger.disabled = true;
+        if (mutation === 'wrong_power') x.picker.selected('High');
+      }, undefined, timing);
+      return { ...staged, oldHeader, pin: staged.x.f.world.__computaChatPresetPin as any };
+    };
+
+    test('provisional route header remount requires fresh complete choice proof at body and final hashes', async () => {
+      for (const timing of ['body_hash', 'finalization_hash']) for (const replace of [false, true]) {
+        const { x, first, record, oldRoot, oldBody, root, body, expand, initialControl, firstEdge, secondEdge,
+          crossed, candidate, oldHeader, pin } = await provisionalHeaderRouteStage(timing, 'none', replace);
+        expect(crossed).toMatchObject({ error: 'document_changed', detail: 'model_read_context' });
+        expect(crossed).not.toHaveProperty('submissionProof'); expect(crossed).not.toHaveProperty('firstUserVerified', true);
+        expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody); expect(record.nativeFirstPinned).not.toBe(true);
+        const deadline = candidate.deadline, before = x.f.digestInputs.length, pending = pin.provisionalHeader;
+        expect(candidate.verified === true).toBe(!replace && timing === 'finalization_hash');
+        let fullReads = 0;
+        const click = x.picker!.trigger.onClick!;
+        x.picker!.trigger.onClick = () => {
+          fullReads++;
+          if (replace && fullReads === 1) expect(pin.headerTrigger).toBe(oldHeader);
+          if (replace) expect(candidate.verified).toBe(false);
+          expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody); click();
+        };
+        if (replace) {
+          expect(pin.headerTrigger).toBe(oldHeader); expect(oldHeader.isConnected).toBe(false);
+          expect(pending.completed).toBe(false); expect(candidate.routeModelRemount).toBe(pending);
+          expect(candidate.routeModelPin).toBe(pin);
+        }
+        const fresh = await x.observe(first, { ...provisionalAllowance,
+          firstUserExpansionRouteContinuation: [firstEdge, secondEdge], deferModelVerification: replace });
+        expect(fresh.error).toBeUndefined(); expect(fresh.modelEvidence?.selected).toEqual(choice);
+        expect(fresh).not.toHaveProperty('modelVerificationPending'); expect(fullReads).toBeGreaterThan(0);
+        expect(fresh.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+        expect(x.f.digestInputs.slice(before).filter(text => text === first.outbound).length).toBeGreaterThanOrEqual(2);
+        expect(candidate.deadline).toBe(deadline); expect(candidate.verified).toBe(true);
+        if (replace) { expect(pin.headerTrigger).toBe(x.picker!.trigger); expect(pending.completed).toBe(true); }
+        expect(record.root).toBe(root); expect(record.body).toBe(body); expect(record.replacement).toBeNull();
+        expect(initialControl.clicks).toBe(1); expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    test('provisional route header remount refuses wrong disabled and connected predecessors before fresh proof', async () => {
+      for (const timing of ['body_hash', 'finalization_hash']) for (const mutation of ['connected_old', 'disabled', 'wrong_power']) {
+        const { x, first, crossed, candidate, pin, oldHeader, expand, firstEdge, secondEdge }
+          = await provisionalHeaderRouteStage(timing, mutation);
+        denied(crossed); expect(pin.headerTrigger).toBe(oldHeader); expect(pin.provisionalHeader).toBeUndefined();
+        expect(candidate.routeModelRemount).toBeUndefined();
+        const result = await x.observe(first, { ...provisionalAllowance, firstUserExpansionRouteContinuation: [firstEdge, secondEdge],
+          deferModelVerification: true });
+        denied(result); expect(result).not.toHaveProperty('modelEvidence');
+        expect(x.send.clicks).toBe(1); expect(expand.clicks).toBe(1);
+      }
+    });
+
+    test('provisional route header witness cannot survive drift replacement or its original deadline', async () => {
+      for (const timing of ['body_hash', 'finalization_hash']) for (const mutation of ['second_replacement', 'old_reconnected',
+        'wrong_family', 'switch_restore', 'disabled', 'body', 'owner', 'pending_identity', 'expired', 'expires_during_read']) {
+        const { x, first, crossed, candidate, pin, oldHeader, record, oldRoot, oldBody, body, expand, firstEdge, secondEdge }
+          = await provisionalHeaderRouteStage(timing);
+        expect(crossed).toMatchObject({ error: 'document_changed', detail: 'model_read_context' });
+        const pending = pin.provisionalHeader, trigger = x.picker!.trigger, deadline = candidate.deadline;
+        expect(pending.completed).toBe(false); expect(pin.headerTrigger).toBe(oldHeader);
+        if (mutation === 'second_replacement') x.picker!.replaceTrigger();
+        if (mutation === 'old_reconnected') oldHeader.connected = true;
+        if (mutation === 'wrong_family') x.picker!.selected('GPT-5.5');
+        if (mutation === 'switch_restore') {
+          let once = true;
+          pending.observer.takeRecords = () => { if (!once) return []; once = false;
+            return [{ type: 'characterData', target: { nodeType: 3, parentElement: trigger, textContent: 'Medium' }, oldValue: 'High' }]; };
+        }
+        if (mutation === 'disabled') trigger.disabled = true;
+        if (mutation === 'body') body.text += '!';
+        if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign';
+        if (mutation === 'pending_identity') pin.provisionalHeader = { ...pending };
+        if (mutation === 'expired') x.f.advanceTime(3_000);
+        if (mutation === 'expires_during_read') {
+          const click = trigger.onClick!; let once = true;
+          trigger.onClick = () => { if (once) { once = false; x.f.advanceTime(3_000); } click(); };
+        }
+        const result = await x.observe(first, { ...provisionalAllowance, firstUserExpansionRouteContinuation: [firstEdge, secondEdge],
+          deferModelVerification: true });
+        denied(result); expect(result).not.toHaveProperty('modelEvidence'); expect(result).not.toHaveProperty('submissionProof');
+        expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody); expect(record.nativeFirstPinned).not.toBe(true);
+        expect(candidate.deadline).toBe(deadline); expect(pending.completed).toBe(false);
+        if (mutation === 'expired' || mutation === 'expires_during_read') {
+          x.f.advanceTime(-3_000);
+          denied(await x.observe(first, { ...provisionalAllowance, firstUserExpansionRouteContinuation: [firstEdge, secondEdge],
+            deferModelVerification: true }));
+          expect(pending.completed).toBe(false);
+        }
+        expect(x.send.clicks).toBe(1); expect(expand.clicks).toBe(1);
+      }
+    });
 
     test('provisional body hash carries only the second certified route before native adoption', async () => {
       const { x, first, record, oldRoot, oldBody, root, body, expand, initialControl, firstEdge, secondEdge, crossed, candidate }
