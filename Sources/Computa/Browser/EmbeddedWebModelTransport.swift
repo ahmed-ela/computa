@@ -4159,6 +4159,22 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                    "outside_scan_limit", "accepted_literal_code", "accepted_literal_dil"].contains(reason as? String ?? "") else { return nil }
             safe["extractionReason"] = reason
         }
+        if let decline = source["literalDILDecline"] {
+            guard source["selectedExtraction"] as? String == "rendered_fallback",
+                  source["extractionReason"] as? String == "missing_code",
+                  integer(source["preCount"], limit: 1_000) == 0,
+                  integer(source["codeCount"], limit: 1_000) == 0,
+                  ["response_ancestor_limit", "response_ancestor_masking", "response_assistant_limit",
+                   "response_assistant_scope", "response_fence", "response_masking",
+                   "response_selection_id", "response_selection_scope", "response_source_count",
+                   "response_source_id", "text_ancestor_limit", "text_ancestor_visibility",
+                   "text_context", "text_dil_shape", "text_hidden_placeholder",
+                   "text_layout_shape", "text_mismatch", "text_paragraph_shape",
+                   "text_physical", "text_portal_shape", "text_renderer_classes",
+                   "text_size", "text_source_count", "text_source_shape",
+                   "text_span_count", "text_span_shape"].contains(decline as? String ?? "") else { return nil }
+            safe["literalDILDecline"] = decline
+        }
         if let raw = source["rendererGuard"] {
             guard let guardDiagnostic = sanitizedRendererGuardDiagnostic(raw) else { return nil }
             safe["rendererGuard"] = guardDiagnostic

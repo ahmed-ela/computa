@@ -1542,6 +1542,60 @@ describe('ChatGPT literal terminal source equivalence', () => {
     return { answer, copy, layout, hidden, portal, dil, p, span, raw,
       read: (value = '<escape>' + raw() + '</escape>') => read(value, answer, messageID, style) };
   }
+  test('literal DIL declines report the first finite guard without changing fallback bytes or accepting unknown shape', () => {
+    const parent = (x:any, count:number) => { let child=x.answer;for(let i=0;i<count;i++){const p=new Element('DIV');p.append(child);child=p;}return child; };
+    const cases: [string,(x:any)=>void][] = [
+      ['response_source_count', x=>delete x.copy.values['data-dil-source-message-id']],
+      ['response_source_id', x=>x.copy.values['data-dil-source-message-id']='PRIVATE_ID'],
+      ['response_selection_scope', x=>delete x.answer.values['data-chatgpt-selection-message-id']],
+      ['response_assistant_limit', x=>{for(let i=0;i<65;i++)x.answer.append(new Element('DIV',{'data-message-author-role':'assistant'}));}],
+      ['response_assistant_scope', x=>x.answer.append(new Element('DIV',{'data-message-author-role':'user'},'PRIVATE_BODY'))],
+      ['text_ancestor_limit', x=>parent(x,65)],
+      ['text_ancestor_visibility', x=>parent(x,1).literalOpacity='0'],
+      ['text_source_shape', x=>x.copy.values.title='PRIVATE_ATTRIBUTE'],
+      ['text_layout_shape', x=>x.layout.values.title='PRIVATE_ATTRIBUTE'],
+      ['text_hidden_placeholder', x=>x.hidden.text='PRIVATE_BODY'],
+      ['text_portal_shape', x=>x.portal.values.title='PRIVATE_ATTRIBUTE'],
+      ['text_dil_shape', x=>x.dil.values.dir='rtl'],
+      ['text_paragraph_shape', x=>x.p.values.title='PRIVATE_ATTRIBUTE'],
+      ['text_renderer_classes', x=>x.portal.values.class='PRIVATE_CLASS'],
+      ['text_span_count', x=>{x.p.children=[];}],
+      ['text_physical', x=>x.p.literalOpacity='0'],
+      ['text_span_shape', x=>x.p.children[0].values.title='PRIVATE_ATTRIBUTE'],
+      ['text_size', x=>x.p.children[1].text='x'.repeat(220001)],
+      ['text_mismatch', x=>Object.defineProperty(x.answer,'textContent',{get:()=> 'PRIVATE_BODY'})],
+      ['response_fence', x=>x.p.children[0].text='```other\n'],
+      ['response_masking', x=>x.p.literalTransform='uppercase'],
+      ['response_ancestor_limit', x=>parent(x,64)],
+      ['response_ancestor_masking', x=>parent(x,1).literalFilter='opacity(0)'],
+      ['response_selection_id', x=>parent(x,1).values['data-chatgpt-selection-message-id']=firstMarker],
+    ];
+    for (const [reason, mutate] of cases) {
+      const x=literal('{"type":"message","text":"PRIVATE_REPLY"}');mutate(x);
+      const expected=(x.answer.innerText||x.answer.textContent||'').trim();
+      const result=x.read('unrelated candidate');
+      expect(result.flags,reason).toMatchObject({selectedExtraction:'rendered_fallback',extractionReason:'missing_code',literalDILDecline:reason});
+      expect(result.text,reason).toBe(expected);
+      expect(result.relation,reason).toBeNull();
+      expect(JSON.stringify(result.flags),reason).not.toContain('PRIVATE');
+    }
+    const x=literal('{"type":"message","text":"unchanged"}');
+    x.copy.values.title='PRIVATE';x.p.literalTransform='uppercase';
+    expect(x.read().flags.literalDILDecline).toBe('text_source_shape');
+    delete x.copy.values.title;delete x.p.literalTransform;
+    expect(x.read().flags).not.toHaveProperty('literalDILDecline');
+    expect(x.read().flags.selectedExtraction).toBe('literal_dil');
+  });
+  test('literal DIL reason schema covers every emitted guard and remains absent on an accepted code block', () => {
+    const native=readFileSync(new URL('../Sources/Computa/Browser/EmbeddedWebModelTransport.swift',import.meta.url),'utf8');
+    const emitted=new Set([...source.slice(start,end).matchAll(/chatGPTLiteralDILDecline\(report, '([^']+)'/g)].map(m=>m[1]));
+    const branch=native.slice(native.indexOf('if let decline = source["literalDILDecline"]'),native.indexOf('if let raw = source["rendererGuard"]'));
+    const accepted=new Set([...branch.matchAll(/"((?:text|response)_[a-z_]+)"/g)].map(m=>m[1]));
+    expect(emitted.size).toBe(26);expect(accepted).toEqual(emitted);
+    const x=fixture();observedChatGPTCodeBlock(x,'{"type":"message","text":"HI"}');
+    expect(read('unrelated',x.answer,messageID,style).flags).not.toHaveProperty('literalDILDecline');
+  });
+
   test('literal DIL action input preserves indentation and escapes while normal rendering collapses them', () => {
     const patch = '*** Begin Patch\n*** Add File: /synthetic/résumé.py\n+    def f():\n+        return "🌍 \\ path"\n*** End Patch';
     const f = literal(JSON.stringify({type:'tool_calls',calls:[{name:'apply_patch',input:patch}]}));

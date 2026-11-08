@@ -3086,8 +3086,12 @@ function chatGPTSingleJSONFence(text) {
 
 // This is the observed text-only renderer shape, not a DIL/Markdown parser.
 // Every text leaf is accounted for; a hidden placeholder must be truly empty.
-function chatGPTLiteralDILText(answer, messageID) {
-  if (!answer?.isConnected || typeof messageID !== 'string') return null;
+function chatGPTLiteralDILDecline(report, reason) {
+  try { if (report) report(reason); } catch { /* Diagnostics cannot alter extraction. */ }
+  return null;
+}
+function chatGPTLiteralDILText(answer, messageID, report = null) {
+  if (!answer?.isConnected || typeof messageID !== 'string') return chatGPTLiteralDILDecline(report, 'text_context');
   const children = node => [...node.childNodes];
   const only = (node, expected) => {
     const actual = children(node);
@@ -3104,72 +3108,78 @@ function chatGPTLiteralDILText(answer, messageID) {
     return true;
   };
   for (let node = answer.parentElement, depth = 0; node; node = node.parentElement) {
-    if (++depth > 64 || !node.isConnected || node.closest('[inert], [aria-hidden="true"], [hidden]')) return null;
+    if (++depth > 64) return chatGPTLiteralDILDecline(report, 'text_ancestor_limit');
+    if (!node.isConnected || node.closest('[inert], [aria-hidden="true"], [hidden]')) return chatGPTLiteralDILDecline(report, 'text_ancestor_visibility');
     const style = getComputedStyle(node);
-    if (style.display === 'none' || style.visibility !== 'visible' || !(Number(style.opacity) > 0)) return null;
+    if (style.display === 'none' || style.visibility !== 'visible' || !(Number(style.opacity) > 0)) return chatGPTLiteralDILDecline(report, 'text_ancestor_visibility');
   }
   const sources = [...answer.querySelectorAll('[data-dil-source-message-id]')];
-  if (sources.length !== 1) return null;
+  if (sources.length !== 1) return chatGPTLiteralDILDecline(report, 'text_source_count');
   const source = sources[0], layout = source.children[0], hidden = layout?.children[0], portal = layout?.children[1];
   const dil = portal?.children[0], paragraph = dil?.children[0];
   if (source.tagName !== 'DIV' || source.getAttribute('data-dil-source-message-id') !== messageID
     || source.getAttribute('data-chatgpt-copy-reference') !== '0' || source.getAttribute('data-markdown-copy') !== 'contents'
     || !attrs(source, ['class', 'data-dil-source-message-id', 'data-chatgpt-copy-reference', 'data-markdown-copy'])
-    || !only(answer, [source]) || !layout || layout.tagName !== 'DIV' || !attrs(layout, ['class'])
-    || !only(source, [layout]) || !hidden || hidden.tagName !== 'DIV' || hidden.getAttribute('hidden') !== ''
+    || !only(answer, [source])) return chatGPTLiteralDILDecline(report, 'text_source_shape');
+  if (!layout || layout.tagName !== 'DIV' || !attrs(layout, ['class'])
+    || !only(source, [layout])) return chatGPTLiteralDILDecline(report, 'text_layout_shape');
+  if (!hidden || hidden.tagName !== 'DIV' || hidden.getAttribute('hidden') !== ''
     || !attrs(hidden, ['hidden']) || children(hidden).length !== 0 || hidden.textContent !== ''
-    || hidden.getClientRects().length !== 0 || getComputedStyle(hidden).display !== 'none'
-    || !portal || portal.tagName !== 'DIV' || !attrs(portal, ['class', 'data-theme', 'style'])
-    || !only(layout, [hidden, portal]) || !dil || dil.tagName !== 'DIV' || !only(portal, [dil])
+    || hidden.getClientRects().length !== 0 || getComputedStyle(hidden).display !== 'none') return chatGPTLiteralDILDecline(report, 'text_hidden_placeholder');
+  if (!portal || portal.tagName !== 'DIV' || !attrs(portal, ['class', 'data-theme', 'style'])
+    || !only(layout, [hidden, portal])) return chatGPTLiteralDILDecline(report, 'text_portal_shape');
+  if (!dil || dil.tagName !== 'DIV' || !only(portal, [dil])
     || dil.getAttribute('data-dil-message-id') !== messageID || dil.getAttribute('data-d-inline-reveal') !== ''
     || dil.getAttribute('data-d-direction') !== 'col' || dil.getAttribute('dir') !== 'auto'
-    || !attrs(dil, ['class', 'dir', 'data-d-inline-reveal', 'data-d-direction', 'data-dil-message-id'])
-    || !paragraph || paragraph.tagName !== 'P' || !only(dil, [paragraph])
+    || !attrs(dil, ['class', 'dir', 'data-d-inline-reveal', 'data-d-direction', 'data-dil-message-id'])) return chatGPTLiteralDILDecline(report, 'text_dil_shape');
+  if (!paragraph || paragraph.tagName !== 'P' || !only(dil, [paragraph])
     || paragraph.getAttribute('data-d-text-flow') !== '' || paragraph.getAttribute('data-d-component') !== 'text'
-    || !attrs(paragraph, ['class', 'data-d-text-flow', 'data-d-component'])) return null;
+    || !attrs(paragraph, ['class', 'data-d-text-flow', 'data-d-component'])) return chatGPTLiteralDILDecline(report, 'text_paragraph_shape');
   const pair = (node, prefixes) => prefixes.every(prefix => [...node.classList]
     .some(name => name.startsWith(prefix) && /^[A-Za-z0-9_-]{1,64}$/.test(name.slice(prefix.length))));
-  if (!pair(portal, ['PortalBoundary-', 'Renderer-']) || !pair(dil, ['DilRenderer-', 'DilResponseRoot-'])) return null;
+  if (!pair(portal, ['PortalBoundary-', 'Renderer-']) || !pair(dil, ['DilRenderer-', 'DilResponseRoot-'])) return chatGPTLiteralDILDecline(report, 'text_renderer_classes');
   const spans = children(paragraph);
-  if (!spans.length || spans.length > 128 || ![answer, source, layout, portal, dil, paragraph].every(physical)) return null;
+  if (!spans.length || spans.length > 128) return chatGPTLiteralDILDecline(report, 'text_span_count');
+  if (![answer, source, layout, portal, dil, paragraph].every(physical)) return chatGPTLiteralDILDecline(report, 'text_physical');
   let text = '', displayed = '';
   for (const span of spans) {
     if (span.nodeType !== 1 || span.tagName !== 'SPAN' || !physical(span)
       || span.getAttribute('data-d-text-flow') !== 'word' || span.getAttribute('data-d-stream-word') !== ''
       || !attrs(span, ['data-d-text-flow', 'data-d-stream-word']) || span.childElementCount !== 0
-      || children(span).some(node => node.nodeType !== 3) || !span.textContent.length) return null;
+      || children(span).some(node => node.nodeType !== 3) || !span.textContent.length) return chatGPTLiteralDILDecline(report, 'text_span_shape');
     text += span.textContent;
     // Only the terminal line break of each observed word span is a presentation
     // separator. Internal whitespace, JSON escapes and string bytes stay exact.
     displayed += span.textContent.replace(/\r?\n$/, ' ');
-    if (text.length > 220_000) return null;
+    if (text.length > 220_000) return chatGPTLiteralDILDecline(report, 'text_size');
   }
   if (displayed.endsWith(' ')) displayed = displayed.slice(0, -1);
-  if (text !== answer.textContent || text !== source.textContent || text !== paragraph.textContent) return null;
+  if (text !== answer.textContent || text !== source.textContent || text !== paragraph.textContent) return chatGPTLiteralDILDecline(report, 'text_mismatch');
   return { text, displayed };
 }
 
 // Read exact JSON bytes only from the already-supported, fully accounted DIL
 // text shape. These DOM IDs establish structural consistency, never native
 // submission/model/response authority. The ordinary completion proof still runs.
-function chatGPTLiteralDILResponse(answer, expectedMessageID = null) {
+function chatGPTLiteralDILResponse(answer, expectedMessageID = null, report = null) {
   const sources = answer ? [...answer.querySelectorAll('[data-dil-source-message-id]')] : [];
-  if (sources.length !== 1) return null;
+  if (sources.length !== 1) return chatGPTLiteralDILDecline(report, 'response_source_count');
   const id = sources[0].getAttribute('data-dil-source-message-id');
   if (typeof id !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(id)
-    || expectedMessageID !== null && id !== expectedMessageID) return null;
+    || expectedMessageID !== null && id !== expectedMessageID) return chatGPTLiteralDILDecline(report, 'response_source_id');
   let scope = null;
   for (let node = answer, depth = 0; node && depth < 5; depth++, node = node.parentElement)
     if (node.getAttribute('data-chatgpt-selection-message-id') !== null) { scope = node; break; }
-  if (!scope?.isConnected || scope.getAttribute('data-chatgpt-selection-message-id') !== id) return null;
+  if (!scope?.isConnected || scope.getAttribute('data-chatgpt-selection-message-id') !== id) return chatGPTLiteralDILDecline(report, 'response_selection_scope');
   const assistantSelector = '[data-message-author-role="assistant"], [data-markdown-text-style="assistant-message"], article[data-turn="assistant"]';
   const candidates = [...(scope.matches(assistantSelector) ? [scope] : []), ...scope.querySelectorAll(assistantSelector)];
-  if (candidates.length > 64) return null;
+  if (candidates.length > 64) return chatGPTLiteralDILDecline(report, 'response_assistant_limit');
   const roots = candidates.filter(node => !candidates.some(other => other !== node && other.contains(node)));
   if (roots.length !== 1 || !(roots[0] === answer || roots[0].contains(answer))
-    || scope.querySelector('[data-message-author-role="user"], [data-markdown-text-style="user-message"], article[data-turn="user"], [data-user-message-bubble]')) return null;
-  const literal = chatGPTLiteralDILText(answer, id);
-  if (!literal || chatGPTSingleJSONFence(literal.text) === null) return null;
+    || scope.querySelector('[data-message-author-role="user"], [data-markdown-text-style="user-message"], article[data-turn="user"], [data-user-message-bubble]')) return chatGPTLiteralDILDecline(report, 'response_assistant_scope');
+  const literal = chatGPTLiteralDILText(answer, id, report);
+  if (!literal) return null;
+  if (chatGPTSingleJSONFence(literal.text) === null) return chatGPTLiteralDILDecline(report, 'response_fence');
   const plain = node => {
     if (node.namespaceURI !== 'http://www.w3.org/1999/xhtml') return false;
     const style = getComputedStyle(node);
@@ -3178,11 +3188,12 @@ function chatGPTLiteralDILResponse(answer, expectedMessageID = null) {
   };
   // The literal helper has already bounded and accounted for this whole tree.
   // Its one truly empty hidden placeholder supplies no source bytes.
-  if ([answer, ...answer.querySelectorAll('*')].some(node => !node.hasAttribute('hidden') && !plain(node))) return null;
+  if ([answer, ...answer.querySelectorAll('*')].some(node => !node.hasAttribute('hidden') && !plain(node))) return chatGPTLiteralDILDecline(report, 'response_masking');
   for (let node = answer, depth = 0; node; node = node.parentElement) {
-    if (++depth > 64 || !plain(node)) return null;
+    if (++depth > 64) return chatGPTLiteralDILDecline(report, 'response_ancestor_limit');
+    if (!plain(node)) return chatGPTLiteralDILDecline(report, 'response_ancestor_masking');
     const selectionID = node.getAttribute('data-chatgpt-selection-message-id');
-    if (selectionID !== null && selectionID !== id) return null;
+    if (selectionID !== null && selectionID !== id) return chatGPTLiteralDILDecline(report, 'response_selection_id');
   }
   return literal.text;
 }
@@ -3508,7 +3519,7 @@ function modelResponseExtraction(answer) {
   if (blocks.length > 1) return fallback('multiple_pre');
   if (codes.length !== 1) {
     if (codes.length === 0 && blocks.length === 0) {
-      const literal = chatGPTLiteralDILResponse(answer);
+      const literal = chatGPTLiteralDILResponse(answer, null, reason => { flags.literalDILDecline = reason; });
       if (literal !== null) return { text: literal, blocks, code, flags: { ...flags,
         selectedExtraction: 'literal_dil', extractionReason: 'accepted_literal_dil' } };
     }

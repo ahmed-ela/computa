@@ -864,6 +864,40 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testLiteralDILDeclineReasonSurvivesOwnedCompletionWithoutChangingFallbackOrSendCount() async throws {
+        let raw = #"{"type":"message","text":"Synthetic unchanged reply"}"#
+        let fenced = "```json\n" + raw + "\n```"
+        let (fixture, token, view) = try await boundInspectionFixture(prompt: "Observe only the owned synthetic response shape")
+        defer { fixture.shutdown() }
+        let rendered = try await evaluate(view, """
+            const answer=document.querySelector('[data-markdown-text-style="assistant-message"]');
+            const id='cea6201b-846d-404a-b4dc-f974e184065a';
+            answer.setAttribute('data-chatgpt-selection-message-id',id);answer.style.whiteSpace='normal';
+            const el=(tag,attrs={},text)=>{const n=document.createElement(tag);for(const[k,v]of Object.entries(attrs))n.setAttribute(k,v);if(text!==undefined)n.textContent=text;return n;};
+            const source=el('div',{'data-dil-source-message-id':id,'data-chatgpt-copy-reference':'0','data-markdown-copy':'contents',title:'PRIVATE_ATTRIBUTE'});
+            const layout=el('div'),hidden=el('div',{hidden:''}),portal=el('div',{class:'PortalBoundary-TFj9W2 Renderer-ojZscX'});
+            const dil=el('div',{class:'DilRenderer-tB76Jj DilResponseRoot-HfQrEh',dir:'auto','data-d-inline-reveal':'','data-d-direction':'col','data-dil-message-id':id});
+            const p=el('p',{class:'TextBase-hXhSqg Text-lIMP0_','data-d-text-flow':'','data-d-component':'text'});
+            p.append(el('span',{'data-d-text-flow':'word','data-d-stream-word':''},\(try matchedProbeJSON(fenced))));
+            dil.append(p);portal.append(dil);layout.append(hidden,portal);source.append(layout);answer.replaceChildren(source);
+            return answer.innerText.trim();
+            """) as? String
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        try assertChoiceEvidence(complete, choice: Self.fixtureChoice(.chatgpt))
+        XCTAssertEqual(complete["text"] as? String, rendered)
+        let evidence = try XCTUnwrap(complete["completionEvidence"] as? [String: Any])
+        let structure = try XCTUnwrap(evidence["codeStructure"] as? [String: Any])
+        XCTAssertEqual(structure["selectedExtraction"] as? String, "rendered_fallback")
+        XCTAssertEqual(structure["extractionReason"] as? String, "missing_code")
+        XCTAssertEqual(structure["literalDILDecline"] as? String, "text_source_shape")
+        let encoded = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedCodeStructure(structure))
+        XCTAssertTrue(encoded.contains("text_source_shape")); XCTAssertFalse(encoded.contains("PRIVATE"))
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testRendererGuardFactsSurviveOwnedCompletionWithoutChangingTextOrInputs() async throws {
         let fixture = try Fixture()
         defer { fixture.shutdown() }
@@ -15801,6 +15835,37 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             XCTAssertNil(EmbeddedWebModelTransport.sanitizedCodeStructure(source))
         }
         XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedCodeStructure(base), "Legacy missing evidence remains readable, not correction eligible")
+    }
+
+    func testLiteralDILDeclineProjectionRequiresTheOriginalFallbackAndClosedReason() throws {
+        let base: [String: Any] = ["preCount": 0, "codeCount": 0, "codeTextLength": 0,
+            "outsideTextLength": 1_051, "outsideTruncated": false, "preParentTags": [String](),
+            "selectedExtraction": "rendered_fallback", "extractionReason": "missing_code"]
+        for reason in ["response_ancestor_limit", "response_ancestor_masking", "response_assistant_limit",
+                       "response_assistant_scope", "response_fence", "response_masking",
+                       "response_selection_id", "response_selection_scope", "response_source_count",
+                       "response_source_id", "text_ancestor_limit", "text_ancestor_visibility",
+                       "text_context", "text_dil_shape", "text_hidden_placeholder",
+                       "text_layout_shape", "text_mismatch", "text_paragraph_shape",
+                       "text_physical", "text_portal_shape", "text_renderer_classes",
+                       "text_size", "text_source_count", "text_source_shape",
+                       "text_span_count", "text_span_shape"] {
+            var source = base; source["literalDILDecline"] = reason; source["reply"] = "PRIVATE_REPLY"
+            let encoded = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedCodeStructure(source))
+            let value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any])
+            XCTAssertEqual(value["literalDILDecline"] as? String, reason)
+            XCTAssertEqual(value["selectedExtraction"] as? String, "rendered_fallback")
+            XCTAssertFalse(encoded.contains("PRIVATE"))
+            for (key, invalid) in [("literalDILDecline", "PRIVATE"), ("literalDILDecline", NSNull()),
+                                   ("literalDILDecline", true), ("literalDILDecline", 1),
+                                   ("selectedExtraction", "literal_dil"), ("selectedExtraction", "raw_code"),
+                                   ("extractionReason", "accepted_literal_dil"), ("extractionReason", "multiple_code"),
+                                   ("preCount", 1), ("codeCount", 1)] as [(String, Any)] {
+                var bad = source; bad[key] = invalid
+                XCTAssertNil(EmbeddedWebModelTransport.sanitizedCodeStructure(bad))
+            }
+        }
+        XCTAssertNotNil(EmbeddedWebModelTransport.sanitizedCodeStructure(base), "Historical missing decline facts remain valid")
     }
 
     func testCodeStructureExtractionFlagsAreFiniteAndCannotCarryReplyContent() throws {
