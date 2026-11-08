@@ -1,6 +1,6 @@
 // Qwen DOM driver. The saved-conversation engine owns all
 // mutation claims, native acknowledgement, exact-body hashing and lifecycle.
-// Only insertLiteral mutates, and only after the engine's insertion claim.
+// Input uses the engine's insertion claim; code Copy uses its single final-sample grant.
 function computaQwenDOM(c) {
   const visible = (root, selector, max = 256) => c.nodes(root, selector, max).filter(c.visible);
   const one = (values, reason) => c.unique(values, 'document_changed', reason);
@@ -610,7 +610,122 @@ function computaQwenDOM(c) {
       }
       projected = { source, positions };
     }
-    let literal = phase, splitParagraph = null;
+    // The public renderer's header Copy closes over token.text in either presentation.
+    // This is metadata only; no viewport text or payload is read here.
+    function codePayloadCandidate(pre, markdown) {
+      const html = 'http://www.w3.org/1999/xhtml';
+      const attrs = (node, names) => node.attributes.length <= names.length
+        && [...node.attributes].every(attr => names.includes(attr.name) && !attr.namespaceURI
+          && (attr.name !== 'style' || attr.value.length <= 4096));
+      const classes = (node, expected) => {
+        const raw = node?.getAttribute?.('class');
+        if (typeof raw !== 'string' || raw.length > 512) return false;
+        const tokens = raw.split(/[ \t\n\r\f]+/).filter(Boolean), wanted = expected.split(' ');
+        return tokens.length === wanted.length && new Set(tokens).size === tokens.length
+          && tokens.every(token => wanted.includes(token));
+      };
+      const shown = (node, physical = true) => {
+        if (node.namespaceURI !== html || !node.isConnected
+          || node.closest('[hidden], [inert], [aria-hidden="true"]')
+          || physical && node.getClientRects().length === 0) return false;
+        const s = getComputedStyle(node), opacity = Number(s.opacity);
+        return s.display !== 'none' && s.visibility === 'visible' && Number.isFinite(opacity)
+          && opacity > 0 && s.contentVisibility !== 'hidden';
+      };
+      const plain = node => {
+        if (!shown(node)) return false;
+        // Copy supplies token bytes, independent of paint transforms or clipping.
+        // Source-local pseudo content still violates the single-payload boundary.
+        return ['::before', '::after'].every(pseudo => {
+          const content = getComputedStyle(node, pseudo).content;
+          return content === 'none' || content === 'normal' || content === '""';
+        });
+      };
+      const exact = (node, tag, cls, names = ['class']) => node?.tagName === tag
+        && classes(node, cls) && attrs(node, names) && plain(node);
+      const custom = markdown.parentElement;
+      if (!exact(custom, 'DIV', 'custom-qwen-markdown') || custom.childNodes.length !== 1
+        || !['qwen-markdown', 'qwen-markdown qwen-markdown-loose'].some(cls => classes(markdown, cls))
+        || !attrs(markdown, ['class']) || !plain(markdown) || markdown.childNodes.length !== 1
+        || phase.childNodes.length !== 1 || !attrs(phase, ['class']) || !plain(phase)
+        || !classes(phase, 'response-message-content t2t phase-answer')
+        || !exact(pre, 'PRE', 'qwen-markdown-code', ['class', 'dir']) || pre.getAttribute('dir') !== 'ltr'
+        || pre.childNodes.length !== 2) return null;
+      const [headerWrap, body] = pre.childNodes;
+      if (!['qwen-markdown-code-header-wrapper', 'qwen-markdown-code-header-wrapper qwen-markdown-code-header-wrapper-sticky'].some(cls => classes(headerWrap, cls))
+        || headerWrap.tagName !== 'DIV' || !attrs(headerWrap, ['class', 'style']) || !plain(headerWrap)
+        || headerWrap.childNodes.length !== 1) return null;
+      // Height/top and class serialization order do not bind Copy's token.text.
+      // Bound style size while retaining the exact known structural token sets,
+      // attribute names, enabled/hidden checks and the held official control.
+      const header = headerWrap.childNodes[0];
+      if (!exact(header, 'DIV', 'qwen-markdown-code-header', ['class', 'style'])
+        || header.childNodes.length !== 2) return null;
+      const [language, actions] = header.childNodes;
+      if (language.tagName !== 'DIV' || language.attributes.length || !plain(language)
+        || language.childNodes.length !== 1 || language.childNodes[0].nodeType !== 3 || language.textContent !== 'json'
+        || !exact(actions, 'DIV', 'qwen-markdown-code-header-actions') || actions.childNodes.length > 3
+        || !['qwen-markdown-code-body qwen-markdown-code-body-streaming json',
+          'qwen-markdown-code-body json', 'qwen-markdown-code-body json qwen-markdown-code-body-virtual'].some(cls => classes(body, cls))
+        || body.tagName !== 'DIV' || !attrs(body, ['class', 'id', 'style']) || !plain(body)
+        || !body.getAttribute('id') || body.getAttribute('id').length > 128 || body.childNodes.length !== 1) return null;
+      const presentation = body.childNodes[0];
+      if (body.classList.contains('qwen-markdown-code-body-streaming')) {
+        if (presentation.tagName !== 'CODE' || presentation.attributes.length || !plain(presentation)
+          || presentation.childNodes.length !== 1 || presentation.childNodes[0].nodeType !== 3) return null;
+      } else if (!exact(presentation, 'DIV', 'qwen-markdown-code-editor-viewport')) return null;
+      // The known editor presentation is opaque provider output. Its viewport
+      // is never a complete source; only the official code Copy supplies bytes.
+      const rect = body.getBoundingClientRect();
+      if (!Number.isFinite(rect.width) || !Number.isFinite(rect.height) || rect.width <= 0 || rect.height <= 0) return null;
+      let decorationBudget = 64;
+      const decoration = (node, depth, icon) => {
+        if (--decorationBudget < 0 || depth > 8 || node.nodeType !== 1 || node.childNodes.length > 8
+          || !['SPAN', 'svg', 'path', 'use', 'g'].includes(node.tagName)
+          || ![html, 'http://www.w3.org/2000/svg'].includes(node.namespaceURI)
+          || node.attributes.length > 16) return false;
+        for (const attr of node.attributes) {
+          if (attr.value.length > 4096) return false;
+          if (attr.namespaceURI) {
+            if (node.tagName !== 'use' || attr.namespaceURI !== 'http://www.w3.org/1999/xlink'
+              || attr.localName !== 'href' || attr.name !== 'xlink:href'
+              || !['#qwpcicon-' + icon, '#appicon-' + icon].includes(attr.value)) return false;
+          } else if (!['class', 'role', 'aria-hidden', 'focusable', 'viewBox', 'width', 'height', 'fill', 'stroke', 'stroke-width',
+            'stroke-linecap', 'stroke-linejoin', 'fill-rule', 'clip-rule', 'd', 'href'].includes(attr.name)
+            || attr.name === 'href' && (node.tagName !== 'use' || !['#qwpcicon-' + icon, '#appicon-' + icon].includes(attr.value))
+            || attr.name === 'role' && attr.value !== 'img') return false;
+        }
+        if (['::before', '::after'].some(pseudo => !['none', 'normal', '""'].includes(getComputedStyle(node, pseudo).content))) return false;
+        return [...node.childNodes].every(child => decoration(child, depth + 1, icon));
+      };
+      const labels = new Set(); let control = null;
+      for (const button of actions.childNodes) {
+        const label = button.getAttribute?.('aria-label');
+        if (button.tagName !== 'BUTTON' || !['Copy', 'Download', 'Collapse Code'].includes(label) || labels.has(label)
+          || !attrs(button, ['class', 'type', 'aria-label', 'aria-expanded', 'aria-controls']) || !plain(button) || !c.enabled(button)
+          || !['qwen-markdown-code-header-action-item', ...(label === 'Collapse Code' ? ['qwen-markdown-code-collapse-btn'] : [])]
+            .some(cls => classes(button, 'qwen-chat-v2-btn qwen-chat-v2-btn-text qwen-chat-v2-btn-s qwen-chat-v2-btn-icon-only ' + cls))
+          || button.getAttribute('type') !== null && button.getAttribute('type') !== 'button'
+          || button.childNodes.length > 4 || [...button.childNodes].some(child => !decoration(child, 0,
+            label === 'Copy' ? 'copy' : label === 'Download' ? 'download' : 'up'))) return null;
+        labels.add(label); if (label === 'Copy') control = button;
+        if (label === 'Collapse Code' ? button.getAttribute('aria-expanded') !== 'true'
+          || button.getAttribute('aria-controls') !== body.getAttribute('id')
+          : button.getAttribute('aria-expanded') !== null || button.getAttribute('aria-controls') !== null) return null;
+      }
+      if (!control) return null;
+      const nodes = [phase, custom, markdown, pre, headerWrap, header, language, actions, body, presentation, control];
+      let ancestor = phase.parentElement, depth = 0, contentFound = false, last = null;
+      while (ancestor) {
+        if (++depth > 64 || !(contentFound ? shown(ancestor, false) : plain(ancestor))) return null;
+        nodes.push(ancestor);
+        if (ancestor === answer.content) contentFound = true;
+        last = ancestor; ancestor = ancestor.parentElement;
+      }
+      if (!contentFound || last !== document.documentElement) return null;
+      return { nodes, control, root:answer.root, content:answer.content, responseID:answer.id };
+    }
+    let literal = phase, splitParagraph = null, codePayload = null;
     for (const [stage, tag, cls] of [
       ['custom', 'DIV', 'custom-qwen-markdown'], ['markdown', 'DIV', 'qwen-markdown'],
       ['paragraph', 'DIV', 'qwen-markdown-paragraph'], ['span', 'SPAN', 'qwen-markdown-text'],
@@ -628,12 +743,17 @@ function computaQwenDOM(c) {
       if ([...literal.childNodes].some(node => node.nodeType === 3 && !/^\s*$/.test(node.textContent || '')))
         return unsupported(stage, 'mixed_text');
       literal = literal.children[0];
+      if (stage === 'paragraph' && literal.tagName === 'PRE') {
+        codePayload = codePayloadCandidate(literal, literal.parentElement);
+        if (!codePayload) return unsupported('outside', 'scope');
+        break;
+      }
       if (literal.tagName !== tag) return unsupported(stage, 'tag');
       if (!literal.classList.contains(cls)) return unsupported(stage, 'class');
       if (!c.visible(literal)) return unsupported(stage, 'hidden');
     }
     const literalChildren = literal.children.length;
-    if (!splitParagraph && literalChildren !== 0) return unsupported('literal_contents', 'count', literalChildren);
+    if (!codePayload && !splitParagraph && literalChildren !== 0) return unsupported('literal_contents', 'count', literalChildren);
     let budget = 10_000;
     const onlyAuthoredSource = node => {
       if (--budget < 0) return false;
@@ -646,6 +766,7 @@ function computaQwenDOM(c) {
       return [...node.childNodes].every(onlyAuthoredSource);
     };
     if (!onlyAuthoredSource(flow)) return unsupported('outside', budget < 0 ? 'node_limit' : 'scope');
+    if (codePayload) return { text:'', finalMarkup:false, formatIssue:false, codePayload };
     const text = projected?.source ?? (splitParagraph || literal).textContent;
     if (typeof text !== 'string' || new TextEncoder().encode(text).length > 220_000) c.fail('response_too_large');
     if (projected) {
@@ -661,10 +782,44 @@ function computaQwenDOM(c) {
         if (envelope === null || typeof envelope !== 'object' || Array.isArray(envelope)) return unsupported('inline', 'escape_json');
       } catch { return unsupported('inline', 'escape_json'); }
     }
-    // Return the whole source even when it is invalid JSON. Monaco/fences,
-    // additional prose blocks and unrelated siblings never become a repaired
-    // protocol object; the ordinary codec independently validates raw bytes.
+    // The ordinary plain-text path still returns its whole source, even when
+    // invalid JSON. The codec independently validates the unchanged bytes.
     return { text, finalMarkup: true, formatIssue: false };
+  }
+  function sampleCodePayload(candidate, channel, grant, recheck) {
+    const fail = () => c.fail('unsupported_response_format', 'authored_source');
+    if (!channel || Object.keys(channel).sort().join(',') !== 'dispatch,result,secret'
+      || ![channel.dispatch,channel.result,channel.secret].every(c.uuid) || !c.uuid(grant)) fail();
+    let count = 0, captured = null, changed = false;
+    const observer = new MutationObserver(records => { if (records.length) changed = true; });
+    const listener = event => {
+      if (event.target !== candidate.control || event.detail?.grant !== grant) return;
+      count++;
+      const value = event.detail;
+      if (Object.keys(value).sort().join(',') !== 'count,grant,invalid,text' || value.count !== 1 || value.invalid !== false
+        || typeof value.text !== 'string' || value.text.length > 220_000) return;
+      captured = value.text;
+    };
+    document.addEventListener(channel.result, listener, true);
+    try {
+      observer.observe(candidate.root, {subtree:true,childList:true,attributes:true,characterData:true});
+      // Observe the complete bounded chain, including the Document parent of HTML.
+      // Same-node detach/reinsert and restored ancestor masking must still refuse.
+      const parents = new Set(candidate.nodes.map(node => node.parentNode).filter(Boolean));
+      if (parents.size > 96) fail();
+      for (const parent of parents) observer.observe(parent, {childList:true,attributes:true});
+      recheck();
+      candidate.control.dispatchEvent(new CustomEvent(channel.dispatch, {bubbles:true,
+        detail:{secret:channel.secret,grant}}));
+      if (observer.takeRecords().length) changed = true;
+      recheck();
+      if (observer.takeRecords().length) changed = true;
+      if (changed || count !== 1 || captured === null) fail();
+      const bytes = new TextEncoder().encode(captured);
+      if (bytes.length > 220_000) c.fail('response_too_large');
+      if (new TextDecoder('utf-8', {fatal:true}).decode(bytes) !== captured) fail();
+      return captured;
+    } finally { captured = null; observer.disconnect(); document.removeEventListener(channel.result,listener,true); }
   }
   function deletionTrigger() {
     if (!route().id) c.fail('conversation_changed', 'delete_route');
@@ -727,6 +882,6 @@ function computaQwenDOM(c) {
     setter.call(form.editor, prompt);
     form.editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));
   }
-  return { rejectUserCount, rejectSelectionBinding, firstDisplayReplacement, watchDisplayRender, displayHitFailure, firstBodyPresentation, firstBodyFailureStructure, initialResponseIdentityTranscript: emptyContainerPrompt => transcript(true, emptyContainerPrompt), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer,
+  return { rejectUserCount, rejectSelectionBinding, firstDisplayReplacement, watchDisplayRender, displayHitFailure, firstBodyPresentation, firstBodyFailureStructure, initialResponseIdentityTranscript: emptyContainerPrompt => transcript(true, emptyContainerPrompt), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer, sampleCodePayload,
     deletionTrigger, deletionMenu, deletionConfirmation, deletionObserved, insertLiteral };
 }

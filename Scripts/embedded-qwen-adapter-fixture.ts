@@ -105,14 +105,14 @@ export function fixture(options: { completeOnSend?: boolean } = {}) {
   const observers: any[] = [], signals: any[] = [];
   window.webkit = { messageHandlers: { computaChatGPTSignal: { postMessage: (value: any) => signals.push(value) } } };
   class Observer {
-    options: any; disconnected = false;
-    constructor(public callback: () => void) { observers.push(this); }
-    observe(_root: any, options: any) { this.options = options; }
+    options: any; observations:any[] = []; disconnected = false;
+    constructor(public callback: (records?:any[]) => void) { observers.push(this); }
+    observe(_root: any, options: any) { this.options = options; this.observations.push(options); }
     takeRecords() { return []; }
     disconnect() { this.disconnected = true; }
   }
   const notifyAttribute = (name: string) => {
-    for (const observer of observers) if (!observer.disconnected && observer.options?.attributeFilter.includes(name)) observer.callback();
+    for (const observer of observers) if (!observer.disconnected && observer.observations.some((options:any)=>options.attributeFilter ? options.attributeFilter.includes(name) : options.attributes)) observer.callback([{}]);
   };
   const read = () => execute({ provider: 'qwen', action: 'inspect', expectedURL: document.URL,
     ownerToken, documentGeneration: generation, bindOwner: true },
@@ -138,7 +138,7 @@ export function fixture(options: { completeOnSend?: boolean } = {}) {
   more.onClick = () => { body.append(menu); };
   remove.onClick = () => { menu.detach(); body.append(dialog); };
   confirm.onClick = () => { dialog.detach(); turn.detach(); header.detach(); stop.detach(); document.URL = 'https://chat.qwen.ai/'; };
-  const adapter = new AsyncFunction('input', 'document', 'window', 'globalThis', 'location', 'getComputedStyle', 'MutationObserver', 'HTMLTextAreaElement', 'InputEvent', 'crypto',
+  const adapter = new AsyncFunction('input', 'document', 'window', 'globalThis', 'location', 'getComputedStyle', 'MutationObserver', 'HTMLTextAreaElement', 'InputEvent', 'crypto', 'CustomEvent',
     [core, engine, driver, entry].join('\n'));
   let beforeDigest: (() => void | Promise<void>) | undefined;
   const run = (action: string, overrides: Record<string, unknown> = {}) => adapter({ provider: 'qwen', action, expectedURL: document.URL,
@@ -146,7 +146,7 @@ export function fixture(options: { completeOnSend?: boolean } = {}) {
     allowFirstUserBinding: action === 'inspect', expectedFirstUserFingerprint: null, ...overrides },
     document, window, world, { origin: 'https://chat.qwen.ai' }, style, Observer, TextArea,
     class { constructor(public type: string, public init: any) {} },
-    { subtle: { digest: async (...args: Parameters<typeof crypto.subtle.digest>) => { await beforeDigest?.(); return crypto.subtle.digest(...args); } } });
+    { randomUUID:()=>crypto.randomUUID(), subtle: { digest: async (...args: Parameters<typeof crypto.subtle.digest>) => { await beforeDigest?.(); return crypto.subtle.digest(...args); } } }, class { constructor(public type:string,public init:any){Object.assign(this,init);} });
   return { observers, signals, notifyAttribute, Node, body, document, read, run, world, window, trigger, modelName, modelMenu, choices, editor, scope, sendScope, send, stop,
     turn, root, userContainer, userBody, answerRoot, answer, right, flow, thinking, phase, markdown, paragraph, literal, rail, actions,
     header, more, menu, remove, dialog, title, notice, confirm, cancel,

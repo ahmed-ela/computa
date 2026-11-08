@@ -247,6 +247,7 @@ final class EmbeddedBrowserSession {
         var pendingConversationAdmission: (id: UUID, generation: UUID)?
         var pendingCacheAdmission: (id: UUID, generation: UUID)?
         var modelChanges: EmbeddedModelChangeChannel?
+        var qwenCodePayloadChannel: [String: String]?
         var modelSignalWorld: WKContentWorld?
         var modelSignalOriginHost: String?
         var modelDiagnosticOperation: UUID?
@@ -980,8 +981,30 @@ final class EmbeddedBrowserSession {
         }
     }
 
+    private func installQwenCodePayload(tabID: UUID) throws {
+        guard let entry = entries[tabID], entry.isModelOwned, !entry.isToolOwned,
+              entry.view.url == nil, entry.qwenCodePayloadChannel == nil,
+              let source = Self.rendererDiagnosticSource(named:"qwen-code-payload"),
+              source.components(separatedBy: "__COMPUTA_QWEN_CODE_PAYLOAD_CONFIG__").count == 2 else { throw Failure.tabClosed }
+        let channel = ["dispatch": UUID().uuidString.lowercased(), "result": UUID().uuidString.lowercased(),
+                       "secret": UUID().uuidString.lowercased()]
+        let bytes = try JSONSerialization.data(withJSONObject: channel)
+        let script = WKUserScript(source: source.replacingOccurrences(of: "__COMPUTA_QWEN_CODE_PAYLOAD_CONFIG__",
+            with: String(decoding: bytes, as: UTF8.self)), injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page)
+        entry.view.configuration.userContentController.addUserScript(script)
+        entry.qwenCodePayloadChannel = channel
+    }
+
+    func qwenCodePayloadChannel(tabID: UUID, view: WKWebView, owner: String, generation: UUID) -> [String: String]? {
+        guard let entry = entries[tabID], entry.isModelOwned, !entry.isToolOwned, entry.view === view,
+              entry.modelChanges?.ownerToken == owner, entry.modelSignalOriginHost == "chat.qwen.ai",
+              entry.tab.documentGeneration == generation, view.url?.host == "chat.qwen.ai" else { return nil }
+        return entry.qwenCodePayloadChannel
+    }
+
     func createQwenMarkerTab(url: URL, label: String, lease: QwenMarkerWireLease) throws -> UUID {
         let id = try createModelTab(initialURL: nil)
+        do { try installQwenCodePayload(tabID:id) } catch { closeTab(id); lease.revoke(); throw error }
         do {
             if url.absoluteString == "https://chat.qwen.ai/", let entry = entries[id], entry.isModelOwned, !entry.isToolOwned,
                entry.view.url == nil, !entry.view.isLoading, entry.modelChanges == nil,
@@ -3055,11 +3078,13 @@ final class EmbeddedBrowserSession {
 
     /// Fixtures load one local document themselves. Starting about:blank first
     /// would leave two competing provisional navigations in the same WebView.
-    func createUnloadedModelTabForTesting(isolatedChatGPTProfile: Bool = false,
+    func createUnloadedModelTabForTesting(isolatedChatGPTProfile: Bool = false, qwenCodePayload: Bool = false,
                                          viewFactory: (@MainActor (WKWebViewConfiguration) -> WKWebView)? = nil) throws -> UUID {
         modelViewFactoryForTesting = viewFactory
         defer { modelViewFactoryForTesting = nil }
-        return try createModelTab(initialURL: nil, isolatedChatGPTStore: isolatedChatGPTProfile ? .nonPersistent() : nil)
+        let id = try createModelTab(initialURL: nil, isolatedChatGPTStore: isolatedChatGPTProfile ? .nonPersistent() : nil)
+        if qwenCodePayload { try installQwenCodePayload(tabID:id) }
+        return id
     }
     #endif
 
@@ -3070,7 +3095,10 @@ final class EmbeddedBrowserSession {
             if let entry = entries[id] { installResponseCompletionObserver(entry) }
             view.frame = NSRect(x: 0, y: 0, width: 1_024, height: 768)
             if let entry = entries[id] { mountModelView(entry) }
-            if let initialURL { try navigate(tabID: id, to: initialURL) }
+            if let initialURL {
+                if initialURL.absoluteString == "https://chat.qwen.ai/" { try installQwenCodePayload(tabID:id) }
+                try navigate(tabID: id, to: initialURL)
+            }
             return id
         } catch {
             closeTab(id)

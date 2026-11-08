@@ -324,7 +324,7 @@ enum WebModelResponseCodec {
         // backslashes in patch inputs. Its ordinary paragraph renders Markdown.
         // Kimi also requires all authored content to be inside its single JSON block.
         let responseFormat: ComputaAgentInstructions.WebResponseFormat = switch provider {
-        case "qwen": .rawJSON
+        case "qwen": .codePayloadJSON
         case "claude", "deepseek", "kimi": .literalFencedJSON
         default: .fencedJSON
         }

@@ -390,6 +390,29 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
     }
 
+    struct QwenCodePayloadIdentity: Equatable {
+        let candidate: String
+        let responseID: String
+    }
+
+    static func qwenCodePayloadIdentity(_ raw: Any?, state: String, grant: String? = nil) -> QwenCodePayloadIdentity? {
+        let keys: Set<String> = grant == nil ? ["version", "state", "candidate", "responseID"]
+            : ["version", "state", "grant", "candidate", "responseID"]
+        guard ["pending", "sampled"].contains(state), (state == "sampled") == (grant != nil),
+              let value = raw as? [String: Any], Set(value.keys) == keys,
+              let version = value["version"] as? NSNumber, CFGetTypeID(version) != CFBooleanGetTypeID(), version.doubleValue == 1,
+              value["state"] as? String == state,
+              let candidate = value["candidate"] as? String, UUID(uuidString:candidate)?.uuidString.lowercased() == candidate,
+              let responseID = value["responseID"] as? String, UUID(uuidString:responseID)?.uuidString.lowercased() == responseID,
+              grant == nil || value["grant"] as? String == grant else { return nil }
+        return .init(candidate:candidate,responseID:responseID)
+    }
+
+    private struct QwenCodePayloadPending {
+        let identity: QwenCodePayloadIdentity
+        let since: ContinuousClock.Instant
+    }
+
     private final class Session {
         let token = UUID().uuidString
         let firstUserMarker = UUID().uuidString
@@ -408,6 +431,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var groqOwnedStatus: GroqOwnedStatusLease?
         var qwenMarkerWire: QwenMarkerWireLease?
         var qwenMarkerTurn: String?
+        var qwenCodePayload: QwenCodePayloadPending?
+        // Spent before queueing the final source evaluation, including timeout.
+        var qwenCodePayloadGrant: String?
         var claudeResponseStream: ClaudeResponseStreamLease?
         var claudeResponseStreamGeneration: UUID?
         var claudeResponseStreamArmAttempted = false
@@ -2035,6 +2061,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var wake = deadline
         if session.state == "loading" { wake = min(wake, session.created + preparationTimeout) }
         else if session.state == "running" { wake = min(wake, session.turnStarted + responseTimeout) }
+        if session.state == "running", let pending = session.qwenCodePayload, session.qwenCodePayloadGrant == nil {
+            wake = min(wake, pending.since + Self.completionQuietInterval)
+        }
         if session.state == "running", session.completionCandidate, let since = session.candidateSince {
             wake = min(wake, max(since, session.lastChanged) + Self.completionQuietInterval)
         }
@@ -3157,6 +3186,61 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             ownerToken: session.token, generation: generation, sequence: session.sequence)
     }
 
+    private func requireQwenCodePayloadContext(_ observation: [String: Any], session: Session) throws {
+        guard session.provider == .qwen, !session.isDiscovery, !session.isRecoveryProbe,
+              session.state == "running", session.terminalFailure == nil, sessions[session.token] === session,
+              let choice = session.modelChoice, choice.key == choice.label,
+              ["Qwen3.7-Plus", "Qwen3.8-Max"].contains(choice.label),
+              session.lifecycleVerified, session.requiresSavedDelete, observesLifecycle(observation, session:session),
+              session.submitted, session.sequence == 1, session.acknowledgedSendSequence == 1,
+              session.confirmedUsers == 1, !session.pendingSubmission, session.conversation != nil,
+              count(observation,"userCount") == 1, count(observation,"responseCount") == 1,
+              Self.firstUserDiagnosticBool(observation["interrupted"]) == false,
+              Self.firstUserDiagnosticBool(observation["firstUserVerified"]) == true,
+              Self.firstUserDiagnosticBool(observation["firstUserMarkerVerified"]) == true,
+              let fingerprint = session.firstUserFingerprint,
+              observation["firstUserFingerprint"] as? String == fingerprint,
+              session.savedDeleteSubmission?.outboundFingerprint == fingerprint else { throw Failure.responseFormatUnavailable }
+        _ = try validatedSelectionEvidence(observation,session:session,action:"inspect")
+    }
+
+    private func pollQwenCodePayload(_ session: Session, observed: [String: Any], deadline: ContinuousClock.Instant) async throws -> Data {
+        try requireQwenCodePayloadContext(observed,session:session)
+        guard session.qwenCodePayloadGrant == nil, session.response.isEmpty,
+              observed["text"] as? String == "", Self.firstUserDiagnosticBool(observed["answerComplete"]) == false,
+              Self.firstUserDiagnosticBool(observed["busy"]) == true,
+              let identity = Self.qwenCodePayloadIdentity(observed["qwenCodePayload"],state:"pending") else { throw Failure.responseFormatUnavailable }
+        if let held = session.qwenCodePayload {
+            guard held.identity == identity else { throw Failure.responseFormatUnavailable }
+        } else { session.qwenCodePayload = .init(identity:identity,since:.now) }
+        guard let held = session.qwenCodePayload else { throw Failure.responseFormatUnavailable }
+        guard ContinuousClock.now - held.since >= Self.completionQuietInterval else { return try snapshot(session) }
+        guard ContinuousClock.now < deadline else { throw Failure.deadline }
+        let grant = UUID().uuidString.lowercased()
+        session.qwenCodePayloadGrant = grant
+        // Wire comparison is deliberately ineligible here. The only exact bytes
+        // arrive at this final sample, after all model/body proof awaits.
+        let final = try await page(session,action:"inspect",recheckModelAfterAwait:false,recheckProductAfterAwait:false,
+            refreshReadOnlyObservation:false,qwenCodePayloadSample:grant,
+            maximumWait:min(inspectionTimeout,deadline - .now))
+        try Task.checkCancellation()
+        try requireQwenCodePayloadContext(final,session:session)
+        guard ContinuousClock.now < deadline,
+              Self.qwenCodePayloadIdentity(final["qwenCodePayload"],state:"sampled",grant:grant) == identity,
+              Self.firstUserDiagnosticBool(final["answerComplete"]) == true,
+              Self.firstUserDiagnosticBool(final["busy"]) == false,
+              let text = final["text"] as? String, !text.isEmpty else { throw Failure.responseFormatUnavailable }
+        guard text.utf8.count <= 220_000 else { throw Failure.responseTooLarge }
+        session.response = text
+        session.lastChanged = .now
+        session.completionCandidate = true
+        session.responseProfile?.mark(.firstPositive)
+        session.responseProfile?.mark(.transportComplete)
+        session.state = "complete"
+        logModelNativeLifecycle(session,phase:.completion)
+        return try snapshot(session)
+    }
+
     private func poll(_ session: Session) async throws -> Data {
         try Task.checkCancellation()
         guard ["loading", "running"].contains(session.state) else { return try snapshot(session) }
@@ -3440,6 +3524,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     }
                 }
                 throw Failure.responseFailed(.chatgpt)
+            }
+            if observed["qwenCodePayload"] != nil || session.qwenCodePayload != nil {
+                return try await pollQwenCodePayload(session,observed:observed,deadline:deadline)
             }
             let response = observed["text"] as? String ?? ""
             guard response.utf8.count <= 220_000 else { throw Failure.responseTooLarge }
@@ -6087,7 +6174,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       savedDeleteOperation: Session.SavedDeleteOperation? = nil,
                       allowSavedCleanupInspection: Bool = false,
                       replacingInitialRootFrom: UUID? = nil,
-                      maximumWait: Duration = .seconds(10)) async throws -> [String: Any] {
+                      qwenCodePayloadSample: String? = nil, maximumWait: Duration = .seconds(10)) async throws -> [String: Any] {
         if allowSavedCleanupInspection {
             guard session.provider.savedConversationPolicy != nil, action == "inspect", allowBlockedProvider, enforceModel,
                   !recheckModelAfterAwait, !recheckProductAfterAwait, savedDeleteOperation == nil else { throw Failure.invalidRequest }
@@ -6251,6 +6338,18 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             "allowSubmissionExpansion": provider == .chatgpt && ["inspect", "verifyModel"].contains(action)
                 && session.pendingSubmission && session.sequence > 1,
         ]
+        if provider == .qwen, let channel = browser.qwenCodePayloadChannel(tabID:session.tabID,view:session.view,
+            owner:session.token,generation:generation) { input["qwenCodePayloadChannel"] = channel }
+        if let grant = qwenCodePayloadSample {
+            guard provider == .qwen, action == "inspect", enforceModel, !allowBlockedProvider,
+                  !recheckModelAfterAwait, !recheckProductAfterAwait, !allowSavedCleanupInspection,
+                  !refreshReadOnlyObservation, savedDeleteOperation == nil,
+                  session.qwenCodePayloadGrant == grant, let held = session.qwenCodePayload,
+                  session.state == "running", !session.pendingSubmission, session.firstUserFingerprint != nil,
+                  input["qwenCodePayloadChannel"] != nil else { throw Failure.responseFormatUnavailable }
+            input["qwenCodePayloadSample"] = ["version":1,"grant":grant,"candidate":held.identity.candidate,
+                "responseID":held.identity.responseID,"sequence":1]
+        }
         if action == "inspect", onlyInitialChatReads(session), !allowBlockedProvider {
             input["checkUntouchedChatRoot"] = true
         }
@@ -6510,7 +6609,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         && session.modelChoice != nil && !session.modelSelectionVerified
                         && session.confirmedUsers == 0 && !session.submitted && !session.pendingSubmission
                         && session.firstUserFingerprint == nil
-                    if provider == .chatgpt, action == "inspect" || initialChatHeaderReadiness {
+                    if (provider == .chatgpt && (action == "inspect" || initialChatHeaderReadiness)) || qwenCodePayloadSample != nil {
                         // A negative-only wall-clock fence for an adapter wait.
                         // Sample wall time first and round down so dispatch
                         // overhead cannot extend the existing native deadline.
@@ -6624,6 +6723,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if provider.savedConversationPolicy != nil, savedDeleteOperation == nil {
             guard session.savedRoutes?.observe(currentURL, submitted: session.submitted) == true else { throw Failure.ownershipFailure(.routeAfter) }
         }
+        if qwenCodePayloadSample != nil, currentURL != url { throw Failure.ownershipFailure(.routeAfter) }
         if currentURL != url, provider.savedConversationPolicy != nil {
             if let operation = savedDeleteOperation {
                 guard operation.progress.claimed.contains(.confirmDelete),

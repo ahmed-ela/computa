@@ -929,6 +929,7 @@ enum ComputaAgentInstructions {
     enum WebResponseFormat {
         case fencedJSON
         case literalFencedJSON
+        case codePayloadJSON
         case rawJSON
     }
 
@@ -940,6 +941,11 @@ enum ComputaAgentInstructions {
     progress update inside message.text or tool_calls.commentary as appropriate.
     Include no greeting, introduction, attribution or text before or after that
     single code block.
+    """
+
+    static let codePayloadResponseBoundary = """
+    The complete literal contents of that single JSON code block are the response envelope.
+    Put all explanations inside message.text or tool_calls.commentary; include no text or other blocks outside it.
     """
 
     /// Kept after the complete request so long histories cannot bury the local
@@ -995,13 +1001,19 @@ enum ComputaAgentInstructions {
         let responseFormatInstructions: String
         let responseTask: String
         let responseBoundary: String
+        let rawSpelling = exampleNames.isEmpty
+            ? #"Inside JSON string values, spell backticks as \u0060 and asterisks as \u002a when they form Markdown code or emphasis. Preserve the decoded text exactly."#
+            : #"In JSON use \u0060 for Markdown backticks and \u002a for asterisks. Example path value (use yours): "report-\u0060x\u0060-\u002a\u002ay\u002a\u002a.txt""#
         switch responseFormat {
-        case .fencedJSON, .literalFencedJSON:
+        case .fencedJSON, .literalFencedJSON, .codePayloadJSON:
             responseFormatInstructions = """
             Return exactly one fenced JSON code block labelled json.
             Examples below are JSON contents; put one inside that code block.
             """
-            if case .literalFencedJSON = responseFormat {
+            if case .codePayloadJSON = responseFormat {
+                responseTask = "Generate Computa's next JSON response object. This website does not execute calls."
+                responseBoundary = "\n" + codePayloadResponseBoundary + "\n" + rawSpelling
+            } else if case .literalFencedJSON = responseFormat {
                 responseTask = "Return the response envelope as your entire visible reply. This website does not execute calls."
                 responseBoundary = "\n" + literalFencedResponseBoundary
             } else {
@@ -1009,13 +1021,10 @@ enum ComputaAgentInstructions {
                 responseBoundary = ""
             }
         case .rawJSON:
-            let spelling = exampleNames.isEmpty
-                ? #"Inside JSON string values, spell backticks as \u0060 and asterisks as \u002a when they form Markdown code or emphasis. Preserve the decoded text exactly."#
-                : #"In JSON use \u0060 for Markdown backticks and \u002a for asterisks. Example path value (use yours): "report-\u0060x\u0060-\u002a\u002ay\u002a\u002a.txt""#
             responseFormatInstructions = """
             Return exactly one raw JSON object. Do not use Markdown fences
             or code blocks.
-            \(spelling)
+            \(rawSpelling)
             Examples below are complete raw response objects.
             """
             responseTask = "Generate Computa's next JSON response object. This website does not execute calls."

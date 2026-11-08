@@ -3,7 +3,7 @@ import XCTest
 @testable import Computa
 
 final class QwenWebsiteResponseFormatTests: XCTestCase {
-    func testOnlyQwenRequestsRawEnvelopeWhilePreservingAuthorityAndOriginalRequest() throws {
+    func testOnlyQwenRequestsCodePayloadWhilePreservingAuthorityAndOriginalRequest() throws {
         let providers = ["qwen", "kimi", "claude", "gemini", "chatgpt", "groq"]
         for provider in providers {
             let choice: WebsiteModelChoice
@@ -17,9 +17,36 @@ final class QwenWebsiteResponseFormatTests: XCTestCase {
             let request = try WebModelResponseCodec.prepareRequest(raw)
             XCTAssertEqual(request.continuationRequest, raw)
             XCTAssertEqual(request.offeredToolNames, ["exec_command"])
-            XCTAssertEqual(request.prompt.contains("Return exactly one raw JSON object."), provider == "qwen")
-            XCTAssertEqual(request.prompt.contains("Return exactly one fenced JSON code block labelled json."), provider != "qwen")
+            XCTAssertFalse(request.prompt.contains("Return exactly one raw JSON object."))
+            XCTAssertTrue(request.prompt.contains("Return exactly one fenced JSON code block labelled json."))
+            XCTAssertEqual(request.prompt.contains(ComputaAgentInstructions.codePayloadResponseBoundary), provider == "qwen")
             XCTAssertTrue(request.prompt.contains("This website does not execute calls."))
+        }
+    }
+
+    func testQwenCodePayloadAndLegacyPlainJSONPreserveLiteralToolArgumentsWithoutRepair() throws {
+        let command = "printf '%s' 'report-`x`-**y**.txt'\n    # café 😀 \\n"
+        for label in ["Qwen3.7-Plus", "Qwen3.8-Max"] {
+            let choice = WebsiteModelChoice(provider: "qwen", key: label, label: label)
+            let original = try requestData(choice.modelID)
+            let request = try WebModelResponseCodec.prepareRequest(original)
+            let data = try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [[
+                "name": "exec_command", "arguments": ["cmd": command]
+            ]]])
+            let payload = String(decoding: data, as: UTF8.self)
+            // Both DOM paths supply their complete literal JSON payload.
+            guard case let .toolCalls(calls) = try WebModelResponseCodec.parseEmbeddedReply(payload, request: request) else {
+                return XCTFail("Expected one allowed function call")
+            }
+            XCTAssertEqual(calls.count, 1)
+            XCTAssertEqual(try JSONDecoder().decode([String: String].self, from: Data(calls[0].argumentsJSON.utf8)), ["cmd": command])
+            XCTAssertEqual(request.continuationRequest, original)
+            XCTAssertLessThan(request.prompt.utf8.count, WebModelResponseCodec.maximumPromptBytes)
+            for invalid in ["Outside\n" + payload, payload + "\nOutside", payload + payload, "{\"type\":\"tool_calls\","] {
+                XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(invalid, request: request))
+            }
+            let denied = try WebModelResponseCodec.prepareRequest(requestData(choice.modelID, toolChoice: "none"))
+            XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(payload, request: denied))
         }
     }
 

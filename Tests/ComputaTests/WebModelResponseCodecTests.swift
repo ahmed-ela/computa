@@ -635,13 +635,17 @@ final class WebModelResponseCodecTests: XCTestCase {
             ])
             let prepared = try WebModelResponseCodec.prepareRequest(original)
             let suffix = String(prepared.prompt[(try requestRange(in: prepared)).upperBound...])
-            let rawJSON = LocalModelCatalog.webProvider(for: model) == "qwen"
-            XCTAssertEqual(suffix.contains("Return exactly one raw JSON object."), rawJSON, model)
-            XCTAssertEqual(suffix.contains("Return exactly one fenced JSON code block labelled json."), !rawJSON, model)
-            XCTAssertEqual(suffix.contains("Examples below are JSON contents; put one inside that code block."), !rawJSON, model)
+            let codePayload = LocalModelCatalog.webProvider(for: model) == "qwen"
+            XCTAssertFalse(suffix.contains("Return exactly one raw JSON object."), model)
+            XCTAssertTrue(suffix.contains("Return exactly one fenced JSON code block labelled json."), model)
+            XCTAssertTrue(suffix.contains("Examples below are JSON contents; put one inside that code block."), model)
+            XCTAssertEqual(suffix.contains(ComputaAgentInstructions.codePayloadResponseBoundary), codePayload, model)
             XCTAssertTrue(suffix.contains("Exact currently offered local function names: computer_v2_snapshot"), model)
-            let boundary = ["claude", "deepseek", "kimi"].contains(LocalModelCatalog.webProvider(for: model) ?? "")
-                ? ComputaAgentInstructions.literalFencedResponseBoundary + "\n" : ""
+            let boundary = codePayload
+                ? ComputaAgentInstructions.codePayloadResponseBoundary + "\n"
+                    + #"In JSON use \u0060 for Markdown backticks and \u002a for asterisks. Example path value (use yours): "report-\u0060x\u0060-\u002a\u002ay\u002a\u002a.txt""# + "\n"
+                : ["claude", "deepseek", "kimi"].contains(LocalModelCatalog.webProvider(for: model) ?? "")
+                    ? ComputaAgentInstructions.literalFencedResponseBoundary + "\n" : ""
             XCTAssertTrue(suffix.hasSuffix("{\"type\":\"message\",\"text\":\"OK\"}\n" + boundary + "END_COMPUTA_LOCAL_RESPONSE_HANDOFF."), model)
         }
     }

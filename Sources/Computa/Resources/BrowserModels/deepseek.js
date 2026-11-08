@@ -155,6 +155,19 @@ function computaSavedFirstBodyComparison(actual, expected) {
 async function computaSavedConversation(input, c, dom, config) {
   let state = null;
   try {
+    // Negative-only fence for the single final Copy. Native stamps the existing
+    // evaluation deadline; neither this local clock nor the grant renews it.
+    let sampleDeadline = null;
+    if (input.qwenCodePayloadSample != null) {
+      const now = Date.now(), end = input.evaluationDeadlineEpochMilliseconds;
+      if (!Number.isSafeInteger(end) || end <= now || end - now > 30000)
+        c.fail('unsupported_response_format', 'copy_deadline');
+      sampleDeadline = { epoch: end, monotonic: performance.now() + end - now };
+    }
+    const sampleCurrent = () => {
+      if (!sampleDeadline || Date.now() >= sampleDeadline.epoch || performance.now() >= sampleDeadline.monotonic)
+        c.fail('unsupported_response_format', 'copy_deadline');
+    };
     const deletionActions = ['deleteConversation', 'selectConversationDeletion', 'confirmConversationDeletion', 'observeDeletedConversation'];
     const key = config.stateKey;
     if (globalThis[key] === undefined) globalThis[key] = {
@@ -574,6 +587,13 @@ async function computaSavedConversation(input, c, dom, config) {
       view.control.click();
       return true;
     }
+    const qwenCodeEnabled = key === '__computaQwenSavedSessionV1'
+      && ['Qwen3.7-Plus','Qwen3.8-Max'].some(label => c.equalChoice(input.expectedModelChoice,{key:label,label}));
+    const sameCodeAnswer = (held, answer) => !!held && !!answer && held.root === answer.root
+      && held.content === answer.content && held.responseID === answer.id && held.root.isConnected && held.content.isConnected;
+    const sameCode = (held, current) => !!held && !!current && held.root === current.root
+      && held.content === current.content && held.responseID === current.responseID && held.control === current.control
+      && held.nodes.length === current.nodes.length && held.nodes.every((node,index) => node === current.nodes[index] && node.isConnected);
     function read() {
       const t = dom.transcript(), form = dom.composer(), evidence = selectionEvidence(false), extracted = dom.rawAnswer(t.answer);
       validateInitialResponseIdentity(t, 'ordinary_read');
@@ -594,11 +614,24 @@ async function computaSavedConversation(input, c, dom, config) {
           throw error;
         }
       }
+      let codeMetadata = null;
+      if (qwenCodeEnabled && !cleanupInspection && !state.deletion && !deletionActions.includes(input.action) && extracted.codePayload && terminalUI) {
+        if (!input.qwenCodePayloadChannel) c.fail('unsupported_response_format', 'authored_source');
+        const current = extracted.codePayload;
+        if (state.codePayload && !sameCodeAnswer(state.codePayload.source,t.answer)) c.fail('conversation_changed','response_identity');
+        if (state.codePayload && !sameCode(state.codePayload.source,current)) c.fail('unsupported_response_format','authored_source');
+        if (!state.codePayload) state.codePayload = {candidate:crypto.randomUUID(),source:current,spent:false};
+        codeMetadata = {version:1,state:'pending',candidate:state.codePayload.candidate,responseID:current.responseID};
+      } else if (state.codePayload && !cleanupInspection && !state.deletion && !deletionActions.includes(input.action)) {
+        if (!sameCodeAnswer(state.codePayload.source,t.answer)) c.fail('conversation_changed','response_identity');
+        c.fail('unsupported_response_format','authored_source');
+      }
       const complete = terminalUI && extracted.finalMarkup && !!extracted.text.trim();
       return { t, form, output: { url: document.URL, sessionLifecycle: 'saved_conversation_delete', temporary: false,
         composer: c.enabled(form.editor), userCount: t.users.length, responseCount: t.answers.length,
         [usesModes ? 'modeEvidence' : 'modelEvidence']: evidence,
         ...(usesModes && !evidence && modeObservationDiagnostic ? { modeObservationDiagnostic } : {}),
+        ...(codeMetadata ? {qwenCodePayload:codeMetadata} : {}),
         text: state.first && !cleanupInspection ? extracted.text : '', answerComplete: !!complete && !cleanupInspection,
         busy: state.submitted && !complete, interrupted: false, conversationIdentity: state.first ? state.canonical : null,
         firstUserIdentity: state.first?.id || null, firstUserVerified: false, firstUserMarkerVerified: false, firstUserFingerprint: null } };
@@ -913,6 +946,33 @@ async function computaSavedConversation(input, c, dom, config) {
     }
     if (input.action === 'inspect') {
       const out = initial.output, choice = input.expectedModelChoice;
+      if (input.qwenCodePayloadSample != null) {
+        const grant = input.qwenCodePayloadSample, held = state.codePayload;
+        if (!qwenCodeEnabled || cleanupInspection || state.deletion || !state.first || !held || held.spent
+          || input.allowFirstUserBinding !== false || input.expectedFirstUserFingerprint !== state.first.fingerprint
+          || Object.keys(grant).sort().join(',') !== 'candidate,grant,responseID,sequence,version'
+          || grant.version !== 1 || grant.sequence !== 1 || !c.uuid(grant.grant)
+          || grant.candidate !== held.candidate || grant.responseID !== held.source.responseID
+          || out.qwenCodePayload?.state !== 'pending' || !out.firstUserVerified || !out.firstUserMarkerVerified)
+          c.fail('conversation_changed','response_identity');
+        held.spent = true;
+        const recheck = () => {
+          sampleCurrent(); guard(); selectionEvidence();
+          if (!sameFirst(state.first) || dom.route().canonical !== state.canonical || !dom.completionCandidate(dom.transcript().answer))
+            c.fail('conversation_changed','response_identity');
+          const transcript = dom.transcript(), current = dom.rawAnswer(transcript.answer).codePayload;
+          if (!sameCodeAnswer(held.source,transcript.answer) || transcript.users.length !== 1 || transcript.answers.length !== 1)
+            c.fail('conversation_changed','response_identity');
+          // This dispatch samples the provider's owned Copy source; it is not a
+          // pointer gesture and carries no general browser-action hit authority.
+          if (!sameCode(held.source,current)) c.fail('unsupported_response_format','authored_source');
+        };
+        // This final source sample follows every body/model await. Neither the
+        // callback nor this return path may introduce a source-dependent await.
+        const text = dom.sampleCodePayload(held.source,input.qwenCodePayloadChannel,grant.grant,recheck);
+        return {...out,text,answerComplete:true,busy:false,
+          qwenCodePayload:{version:1,state:'sampled',grant:grant.grant,candidate:held.candidate,responseID:held.source.responseID}};
+      }
       // Metadata for a separately armed native marker comparison. Ordinary acceptance precedes it.
       if (input.qwenSyntheticMarkerComparison === true && key === '__computaQwenSavedSessionV1'
         && !cleanupInspection && !state.deletion && !input.allowFirstUserBinding && route.kind === 'canonical'

@@ -996,6 +996,206 @@ final class QwenWebModelTransportTests: XCTestCase {
         try await assertCounts(fixture, sends: 0, headers: 0, selections: 0, confirmations: 0)
     }
 
+    func testQwenCodePayloadMetadataRequiresExactClosedIdentityAndGrant() {
+        let candidate = "11111111-1111-4111-8111-111111111111"
+        let response = "22222222-2222-4222-8222-222222222222"
+        let grant = "33333333-3333-4333-8333-333333333333"
+        let pending: [String: Any] = ["version": 1, "state": "pending", "candidate": candidate, "responseID": response]
+        XCTAssertNotNil(EmbeddedWebModelTransport.qwenCodePayloadIdentity(pending, state: "pending"))
+        var sampled = pending; sampled["state"] = "sampled"; sampled["grant"] = grant
+        XCTAssertNotNil(EmbeddedWebModelTransport.qwenCodePayloadIdentity(sampled, state: "sampled", grant: grant))
+        for (key, value) in [("version", true as Any), ("version", 2), ("candidate", "foreign"),
+                             ("responseID", "foreign"), ("state", "sampled"), ("extra", "body must not appear")] {
+            var invalid = pending; invalid[key] = value
+            XCTAssertNil(EmbeddedWebModelTransport.qwenCodePayloadIdentity(invalid, state: "pending"), key)
+        }
+        XCTAssertNil(EmbeddedWebModelTransport.qwenCodePayloadIdentity(sampled, state: "pending"))
+        XCTAssertNil(EmbeddedWebModelTransport.qwenCodePayloadIdentity(sampled, state: "sampled", grant: candidate))
+        XCTAssertNil(EmbeddedWebModelTransport.qwenCodePayloadIdentity(pending, state: "sampled", grant: grant))
+    }
+
+    func testQwenFinalCodeCopySuppliesExactPayloadOnceAfterMetadataAndClosesOwnedConversation() async throws {
+        for (presentation, label) in [("plain", "Qwen3.7-Plus"), ("editor", "Qwen3.8-Max")] {
+            let fixture = try Fixture(codePayload: true); defer { fixture.shutdown() }
+            let token = try await start(fixture, label: label)
+            _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic code payload ownership")
+            let payload = try await installCodePayload(fixture, presentation: presentation)
+            var sawPending = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                guard action == "inspect", let facts = try? await self.evaluate(fixture.view,
+                    "return [!!globalThis.__computaQwenSavedSessionV1?.codePayload, globalThis.__computaQwenSavedSessionV1?.codePayload?.spent===true];", world: self.world) as? [Bool],
+                    facts == [true, false] else { return }
+                sawPending = true
+                let counts = try? await self.evaluate(fixture.view, "return [window.fixtureCopyCount,window.clipboardDelegations];") as? [Int]
+                XCTAssertEqual(counts, [0, 0])
+            }
+            let complete = try await wait(fixture, token, state: "complete")
+            XCTAssertTrue(sawPending)
+            XCTAssertEqual(complete["text"] as? String, payload)
+            let repeated = try await call(fixture, "webProviderPoll", token)
+            XCTAssertEqual(repeated["text"] as? String, payload)
+            let copyCounts = try await evaluate(fixture.view, "return [window.fixtureCopyCount,window.clipboardDelegations];") as? [Int]
+            XCTAssertEqual(copyCounts, [1, 0])
+            let finished = try await call(fixture, "webProviderFinish", token)
+            XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+            try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+            XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+            XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+        }
+    }
+
+    func testQwenFailedCodeCopyCannotReplayOrEmitPayloadAndKeepsSeparateDeletionProof() async throws {
+        for mode in ["async", "double", "transient_mutation", "missing_control_after_failure", "changed_code_body_after_failure"] {
+            let fixture = try Fixture(codePayload: true); defer { fixture.shutdown() }
+            let token = try await start(fixture)
+            _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic failed code payload")
+            _ = try await installCodePayload(fixture, presentation: "editor", failure: mode)
+            do { _ = try await wait(fixture, token, state: "complete"); XCTFail("Unverified payload must not complete: \(mode)") }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFormatUnavailable) }
+            do { _ = try await call(fixture, "webProviderPoll", token); XCTFail("A spent Copy must not retry") }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFormatUnavailable) }
+            let copyCounts = try await evaluate(fixture.view, "return [window.fixtureCopyCount,window.clipboardDelegations];") as? [Int]
+            XCTAssertEqual(copyCounts, [1, 0])
+            if mode == "missing_control_after_failure" {
+                _ = try await evaluate(fixture.view, "const b=document.querySelector('pre button');b.replaceWith(b.cloneNode(true));return true;")
+            } else if mode == "changed_code_body_after_failure" {
+                _ = try await evaluate(fixture.view, "document.querySelector('.qwen-markdown-code-body').replaceChildren(document.createElement('div'));return true;")
+            }
+            let finished = try await call(fixture, "webProviderFinish", token)
+            XCTAssertEqual(finished["cleanup"] as? String, "deleted", "Payload failure grants no ownership; prior full body/model proof is rechecked separately")
+            try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+            XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+            XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+        }
+    }
+
+    func testQwenCancelledFinalCodeSampleCannotPublishOrCopyAgain() async throws {
+        let fixture = try Fixture(codePayload: true); defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic cancelled code sample")
+        _ = try await installCodePayload(fixture, presentation: "editor")
+        var sampleTask: Task<Data, Error>?
+        var cancelledAfterSample = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard action == "inspect", !cancelledAfterSample,
+                  let spent = try? await self.evaluate(fixture.view,
+                    "return globalThis.__computaQwenSavedSessionV1?.codePayload?.spent===true;", world: self.world) as? Bool,
+                  spent else { return }
+            cancelledAfterSample = true
+            sampleTask?.cancel()
+        }
+        sampleTask = Task {
+            let value = try await self.wait(fixture, token, state: "complete")
+            return try JSONSerialization.data(withJSONObject: value)
+        }
+        do { _ = try await sampleTask!.value; XCTFail("Cancelled final bytes must not be published") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertTrue(cancelledAfterSample)
+        do { _ = try await call(fixture, "webProviderPoll", token); XCTFail("A cancelled grant cannot be replayed") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFormatUnavailable) }
+        let counts = try await evaluate(fixture.view, "return [window.fixtureCopyCount,window.clipboardDelegations];") as? [Int]
+        XCTAssertEqual(counts, [1, 0])
+        let finished = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+        try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+    }
+
+    func testQwenFinalCodeSampleTimeoutRejectsLateDigestWithoutCopyOrNewGrant() async throws {
+        let fixture = try Fixture(codePayload: true); defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic final-sample deadline")
+        _ = try await installCodePayload(fixture, presentation: "editor")
+        let pending = try await call(fixture, "webProviderPoll", token)
+        XCTAssertEqual(pending["state"] as? String, "running")
+        XCTAssertEqual(pending["text"] as? String, "")
+        // Only the new final-sample path reads Date.now in this isolated adapter.
+        // Observe that real entry without changing clock values or native inputs,
+        // then hold its actual first-body digest until the native cap has fired.
+        _ = try await evaluate(fixture.view, #"""
+        const clock=Date.now, digest=crypto.subtle.digest.bind(crypto.subtle);
+        globalThis.fixtureSampleClockReads=0;globalThis.fixtureHeldDigests=0;
+        globalThis.fixtureDigestReleased=false;
+        Date.now=function(){globalThis.fixtureSampleClockReads++;return Reflect.apply(clock,Date,[]);};
+        crypto.subtle.digest=function(...args){
+          if(globalThis.fixtureSampleClockReads>0 && globalThis.fixtureHeldDigests===0){
+            globalThis.fixtureHeldDigests++;
+            return new Promise((resolve,reject)=>{
+              globalThis.fixtureReleaseDigest=()=>digest(...args).then(value=>{
+                globalThis.fixtureDigestReleased=true;resolve(value);
+              },reject);
+            });
+          }
+          return digest(...args);
+        };
+        globalThis.fixtureRestoreDigest=()=>{Date.now=clock;crypto.subtle.digest=digest;};
+        return true;
+        """#, world: world)
+        fixture.transport.setInspectionTimeoutForTesting(.milliseconds(750))
+        var timeouts = 0
+        fixture.transport.setAdapterTimeoutObserverForTesting { _ in timeouts += 1 }
+        do { _ = try await wait(fixture, token, state: "complete"); XCTFail("The held final digest must hit its original native cap") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .pageUnavailable) }
+        XCTAssertEqual(timeouts, 1)
+        let held = try await evaluate(fixture.view,
+            "return [globalThis.fixtureHeldDigests,globalThis.fixtureSampleClockReads,globalThis.fixtureDigestReleased?1:0];", world: world) as? [Int]
+        XCTAssertEqual(held, [1, 1, 0], "The timed-out operation is the single final grant, before Copy")
+        do { _ = try await call(fixture, "webProviderPoll", token); XCTFail("Timeout must not grant a second sample") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFormatUnavailable) }
+        let beforeRelease = try await evaluate(fixture.view,
+            "return [globalThis.fixtureHeldDigests,globalThis.fixtureSampleClockReads];", world: world) as? [Int]
+        XCTAssertEqual(beforeRelease, [1, 1])
+        _ = try await evaluate(fixture.view, "void globalThis.fixtureReleaseDigest();return true;", world: world)
+        let drainDeadline = ContinuousClock.now + .seconds(2)
+        var lateFinished = false
+        while ContinuousClock.now < drainDeadline {
+            lateFinished = (try await evaluate(fixture.view,
+                "return globalThis.fixtureDigestReleased && globalThis.fixtureSampleClockReads===2 && globalThis.__computaQwenSavedSessionV1?.codePayload?.spent===true;",
+                world: world) as? Bool) == true
+            if lateFinished { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(lateFinished, "The old callback must resume, spend its page slot and reject the expired fence")
+        do { _ = try await call(fixture, "webProviderPoll", token); XCTFail("Late completion cannot publish bytes") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFormatUnavailable) }
+        XCTAssertEqual(timeouts, 1, "No renewed native evaluation timeout")
+        let counts = try await evaluate(fixture.view, "return [window.fixtureCopyCount,window.clipboardDelegations];") as? [Int]
+        XCTAssertEqual(counts, [0, 0])
+        _ = try await evaluate(fixture.view, "globalThis.fixtureRestoreDigest();return true;", world: world)
+        let finished = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+        try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+        XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
+    private func installCodePayload(_ fixture: Fixture, presentation: String, failure: String = "") async throws -> String {
+        let patch = "*** Begin Patch\n*** Update File: /synthetic/report-`x`-**y**.py\n@@\n-    return 1\n+    return \"λ😀\\n\"\n*** End Patch"
+        let bytes = try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [["name": "apply_patch", "input": patch]]])
+        let payload = String(decoding: bytes, as: UTF8.self)
+        let arguments = try JSONSerialization.data(withJSONObject: ["payload": payload, "presentation": presentation, "failure": failure])
+        let source = #"""
+        const args = __ARGS__;
+        const markdown=document.querySelector('.qwen-markdown');
+        const node=(tag,attrs={},text)=>{const n=document.createElement(tag);for(const [k,v] of Object.entries(attrs))n.setAttribute(k,v);if(text!==undefined)n.textContent=text;return n;};
+        const pre=node('pre',{class:'qwen-markdown-code',dir:'ltr'}),wrap=node('div',{class:'qwen-markdown-code-header-wrapper'}),header=node('div',{class:'qwen-markdown-code-header',style:'height: 36px;'});
+        const actions=node('div',{class:'qwen-markdown-code-header-actions'}),copy=node('button',{type:'button','aria-label':'Copy',class:'qwen-chat-v2-btn qwen-chat-v2-btn-text qwen-chat-v2-btn-s qwen-chat-v2-btn-icon-only qwen-markdown-code-header-action-item'});
+        const icon=node('span',{class:'qwen-chat-v2-btn-icon'});copy.append(icon);actions.append(copy);header.append(node('div',{},'json'),actions);wrap.append(header);
+        const body=node('div',{id:'synthetic-code',class:args.presentation==='plain'?'qwen-markdown-code-body qwen-markdown-code-body-streaming json':'qwen-markdown-code-body json qwen-markdown-code-body-virtual'});
+        body.append(args.presentation==='plain'?node('code',{},args.payload):node('div',{class:'qwen-markdown-code-editor-viewport'},'Opaque provider editor viewport fragment'));
+        pre.append(wrap,body);markdown.replaceChildren(pre);window.fixtureCopyCount=0;
+        copy.addEventListener('click',()=>{window.fixtureCopyCount++;
+          if(args.failure==='missing_control_after_failure'||args.failure==='changed_code_body_after_failure')return;
+          if(args.failure==='async'){queueMicrotask(()=>navigator.clipboard.writeText(args.payload));return;}
+          navigator.clipboard.writeText(args.payload);
+          if(args.failure==='double')navigator.clipboard.writeText(args.payload);
+          if(args.failure==='transient_mutation'){body.setAttribute('data-transient','1');body.removeAttribute('data-transient');}
+        });
+        return true;
+        """#.replacingOccurrences(of: "__ARGS__", with: String(decoding: arguments, as: UTF8.self))
+        _ = try await evaluate(fixture.view, source)
+        return payload
+    }
+
     private func start(_ fixture: Fixture, label: String = "Qwen3.8-Max") async throws -> String {
         let choice = WebsiteModelChoice(provider: "qwen", key: label, label: label)
         let parameters = ["provider": "qwen", "modelChoice": try XCTUnwrap(choice.canonicalJSONString)]
@@ -1056,7 +1256,7 @@ final class QwenWebModelTransportTests: XCTestCase {
         var createdID: UUID?
         private var retainedView: WKWebView?
         var view: WKWebView { retainedView! }
-        init(setup: String = "") throws {
+        init(setup: String = "", codePayload: Bool = false) throws {
             window = Window(contentRect: NSRect(x: 20, y: 20, width: 1024, height: 768), styleMask: [], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false; window.ignoresMouseEvents = true
             host = EmbeddedModelRenderContainer(session: browser); host.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
@@ -1064,7 +1264,26 @@ final class QwenWebModelTransportTests: XCTestCase {
             humanID = try browser.createTab()
             browser.webView(for: humanID)?.loadHTMLString("<p>Untouched human fixture</p>", baseURL: URL(string: "https://example.test/"))
             transport = EmbeddedWebModelTransport(browser: browser, createTabForTesting: { [unowned self] url in
-                let id = try self.browser.createUnloadedModelTabForTesting()
+                let id = try self.browser.createUnloadedModelTabForTesting(qwenCodePayload: codePayload, viewFactory: { configuration in
+                    if codePayload {
+                        // Installed before the production sink: any accidental native
+                        // clipboard delegation fails without touching the system pasteboard.
+                        let sentinel = #"""
+                        window.clipboardDelegations=0;
+                        const denied=()=>{window.clipboardDelegations++;throw Error('Synthetic clipboard delegation');};
+                        Object.defineProperty(Clipboard.prototype,'writeText',{configurable:true,writable:true,value:denied});
+                        Object.defineProperty(Clipboard.prototype,'write',{configurable:true,writable:true,value:denied});
+                        const original=Document.prototype.execCommand;
+                        Object.defineProperty(Document.prototype,'execCommand',{configurable:true,writable:true,value:function(name,...args){
+                          if(['copy','cut','paste'].includes(String(name).trim().toLowerCase()))return denied();
+                          return Reflect.apply(original,this,[name,...args]);
+                        }});
+                        """#
+                        configuration.userContentController.addUserScript(WKUserScript(source: sentinel,
+                            injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page))
+                    }
+                    return WKWebView(frame: .zero, configuration: configuration)
+                })
                 let view = try XCTUnwrap(self.browser.webView(for: id)); view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
                 self.createdID = id; self.retainedView = view
                 view.loadHTMLString(QwenFixturePage.html + "<script>" + setup + "</script>", baseURL: url)
