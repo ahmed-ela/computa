@@ -645,8 +645,8 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       && chatGPTMessageRoots('user').length === 0 && chatGPTMessageRoots('assistant').length === 0
       && !!chatGPTProductModeProof() && chatGPTTemporaryVerified();
   };
-  const prepareOpeningIntact = (current, opening = prepareOpening, allowAcknowledged = false) => {
-    if (!readonlyOpeningSelectionIntact(opening, current) || context?.action !== request.action
+  const prepareOpeningIntact = (current, opening = prepareOpening, allowAcknowledged = false, spent = false) => {
+    if (!readonlyOpeningSelectionIntact(opening, current, spent) || context?.action !== request.action
       || context.scope !== 'action_final_guard' || globalThis.__computaChatSubmissionState) return false;
     if (request.action === 'prepare') return globalThis.__computaChatFirstPrepareOpening === opening;
     const composer = opening.composer;
@@ -780,8 +780,8 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       current = drainOpeningEvidence();
       if (!prepareOpeningIntact(current)) prepareOpening = null;
       else if (firstVerify) {
-        // A popup that briefly opened and dismissed was acknowledged; never reopen it.
-        // Observe the editor from before the click, including removal via its parent.
+        // Retain the first opening's acknowledgment and editor history. Any bounded
+        // recovery below shares this phase's single recovery claim and deadline.
         firstVerificationEditor = prepareOpening.composer;
         draftObserver = new MutationObserver(recordDraftChanges);
         draftObserver.observe(document.documentElement || document, {subtree:true,childList:true});
@@ -848,17 +848,21 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         }
         if (firstVerify) recordVerifyOpening(verifyObserver?.takeRecords?.() || []);
         if (firstVerify && verifyAcknowledged) {
-          // The first click was acknowledged. Wait only for a popup associated with
-          // this exact trigger; do not toggle it again or prove a model from a closed header.
+          // An acknowledged opening is now positively closed. Only this untouched
+          // first-verification slot may spend its existing one recovery on a fresh
+          // opening; an open/ambiguous picker or a changed pin/editor still refuses.
           readStage = 'first_verification_acknowledged_closed';
           if (!prepareOpeningIntact(current, prepareOpening, true) || !passiveEditorIntact(prepareOpening, current))
             throw failure('model_unverified');
           passiveFirstVerification = prepareOpening;
+          prepareOpening.recoveryClaimed = true; // Claim before the reversible chrome action.
+          readStage = 'primary_open_recovery_requested';
+          trigger.click();
           let drifted = false;
           current = await wait(() => {
             const observed = websiteChatPickerState();
             if (!passiveEditorIntact(passiveFirstVerification, observed)
-              || !observed.topMenu && !prepareOpeningIntact(observed, passiveFirstVerification, true)) drifted = true;
+              || !observed.topMenu && !prepareOpeningIntact(observed, passiveFirstVerification, true, true)) drifted = true;
             return drifted || powerAcknowledged(observed);
           });
           if (drifted || Date.now() >= until) throw failure('model_unverified');
@@ -1237,7 +1241,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       websiteChatTrackPinnedHeader(globalThis.__computaChatPresetPin, trigger);
     }
     if (passiveFirstVerification && (!passiveEditorIntact(passiveFirstVerification, final)
-      || !prepareOpeningIntact(final, passiveFirstVerification, true))) return failure('model_unverified');
+      || !prepareOpeningIntact(final, passiveFirstVerification, true, true))) return failure('model_unverified');
     if (cappedFirstInsert && Date.now() >= until) return failure('model_unverified');
     if (insertOpening?.insertProof && insertOpening.recoveryClaimed && !insertOpeningIntact(final, true))
       return failure('model_unverified');

@@ -368,7 +368,7 @@ class Element {
   hasAttribute(name: string) { return this.getAttribute(name) !== null; }
   get childNodes(): any[] { return [...(this.text ? [{ nodeType: 3, textContent: this.text, parentElement: this }] : []), ...this.children]; }
   get attributes() { return Object.entries(this.values).map(([name, value]) => ({ name, value })); }
-  get classList() { const names = (this.values.class || "").split(/\s+/).filter(Boolean); return { contains: (name: string) => names.includes(name), [Symbol.iterator]: () => names[Symbol.iterator]() }; }
+  get classList() { const names = (this.values.class || "").split(/\s+/).filter(Boolean); return { length: names.length, contains: (name: string) => names.includes(name), [Symbol.iterator]: () => names[Symbol.iterator]() }; }
   get textContent(): string { return this.text + this.children.map(child => child.textContent).join(""); }
   get innerText() { return this.textContent; }
   getAttribute(name: string) { return this.values[name] ?? null; }
@@ -521,7 +521,7 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
     expectedFirstUserMarker: firstMarker, expectedFirstUserFingerprint: nativeFingerprint,
     allowFirstUserBinding: nativeFingerprint === undefined, ...request },
     document, window, location, (node: Element, pseudo?: string) => ({ visibility: node.cssVisibility,
-      display: node.values['data-fixture-display'] ?? (node.getAttribute('hidden') !== null ? 'none' : 'block'),
+      display: (node as any).literalDisplay ?? node.values['data-fixture-display'] ?? (node.getAttribute('hidden') !== null ? 'none' : 'block'),
       opacity: node.values['data-fixture-opacity'] ?? '1',
       stroke: node.values.stroke ?? 'none', strokeOpacity: node.values['stroke-opacity'] ?? '0', strokeWidth: node.values['stroke-width'] ?? '0',
       content: pseudo === '::before' ? node.beforeContent : node.afterContent,
@@ -1542,6 +1542,88 @@ describe('ChatGPT literal terminal source equivalence', () => {
     return { answer, copy, layout, hidden, portal, dil, p, span, raw,
       read: (value = '<escape>' + raw() + '</escape>') => read(value, answer, messageID, style) };
   }
+  function streamRun(body: string) {
+    const x = literal(body);
+    x.copy.values.class = 'my-4 first:mt-0 last:mb-0 empty:hidden';
+    x.layout.values.class = '[--entity-prose-inset:0px]';
+    delete x.dil.values['data-d-inline-reveal']; x.dil.values['data-dil-response'] = '';
+    const run = new Element('SPAN', { 'data-d-stream-run': '', 'data-d-text-flow': 'run',
+      style: '--d-stream-ink: rgb(13, 13, 13);' }, body);
+    x.p.children = []; x.p.append(run);
+    const tail = new Element('DIV', { class: 'contents' }); tail.literalDisplay = 'contents'; tail.zeroRects = true;
+    x.copy.append(tail);
+    Object.defineProperty(x.answer, 'innerText', { configurable: true, get: () => x.raw().replace(/[ \t]+/g, ' ') + '\n' });
+    return { ...x, run, tail, read: (value = x.raw()) => read(value, x.answer, messageID, style) };
+  }
+  test('observed literal DIL stream run preserves the complete raw JSON patch and exact terminal relation', () => {
+    const patch = '*** Begin Patch\n*** Add File: /synthetic/indent-probe.py\n+def demo():\n+    return 7\n*** End Patch';
+    const raw = JSON.stringify({type:'tool_calls',calls:[{name:'apply_patch',input:patch}]}), x=streamRun(raw);
+    expect(raw.length).toBe(166); expect(JSON.parse(x.answer.innerText).calls[0].input).not.toBe(patch);
+    const result=x.read();
+    expect(result.flags).toMatchObject({selectedExtraction:'literal_dil',extractionReason:'accepted_literal_dil'});
+    expect(result.text).toBe(raw); expect(JSON.parse(result.text).calls[0].input).toBe(patch);
+    expect(result.relation).toBe('exact'); expect(result.flags.literalDILDecline).toBeUndefined();
+    expect(x.read('<escape>'+raw+'</escape>').relation).toBeNull();
+    expect(x.read(raw+' ').relation).toBeNull();
+    for (const body of [JSON.stringify({type:'message',text:'a  b \\ c "quoted" 🌍'}), JSON.stringify({type:'tool_calls',calls:[]})]) {
+      const f=streamRun(body); expect(f.read().text).toBe(body); expect(f.read().relation).toBe('exact');
+    }
+    x.run.text=x.run.text.replace('+    return 7','+ return 7');
+    expect(x.read(raw).relation).toBeNull(); expect(x.read().text).not.toBe(raw);
+  });
+  test('observed literal DIL stream run refuses extra content mixed leaves and unaccounted style or identity', () => {
+    const raw=JSON.stringify({type:'message',text:'PRIVATE  exact  bytes'});
+    const variants: [string,(x:any)=>void][] = [
+      ['tail_text',x=>x.tail.text='PRIVATE hidden text'], ['tail_whitespace',x=>x.tail.text=' '], ['tail_child',x=>x.tail.append(new Element('SPAN'))],
+      ['tail_comment',x=>Object.defineProperty(x.tail,'childNodes',{get:()=>[{nodeType:8,textContent:''}]})],
+      ['tail_hidden',x=>x.tail.values.hidden=''], ['tail_aria',x=>x.tail.values['aria-hidden']='true'],
+      ['tail_inert',x=>x.tail.values.inert=''], ['tail_opacity',x=>x.tail.literalOpacity='0'],
+      ['tail_display',x=>x.tail.literalDisplay='none'], ['tail_visibility',x=>x.tail.cssVisibility='hidden'],
+      ['tail_before',x=>x.tail.beforeContent='"PRIVATE"'], ['tail_after',x=>x.tail.afterContent='"PRIVATE"'],
+      ['tail_attr',x=>x.tail.values.title='PRIVATE'], ['tail_class',x=>x.tail.values.class='contents extra'],
+      ['tail_namespace',x=>x.tail.namespaceURI='http://www.w3.org/2000/svg'],
+      ['layout_class',x=>x.layout.values.class='other'], ['source_class',x=>x.copy.values.class+=' other'],
+      ['extra_source_text',x=>x.copy.text=' '], ['extra_source_child',x=>x.copy.append(new Element('DIV'))],
+      ['portal_style',x=>x.portal.values.style+='display:none'], ['portal_class',x=>x.portal.values.class+=' interactive'],
+      ['dil_mixed',x=>x.dil.values['data-d-inline-reveal']=''], ['dil_id',x=>x.dil.values['data-dil-message-id']=firstMarker],
+      ['source_id',x=>x.copy.values['data-dil-source-message-id']=firstMarker], ['selection_id',x=>x.answer.values['data-chatgpt-selection-message-id']=firstMarker],
+      ['dil_unknown_attr',x=>x.dil.values.onclick='PRIVATE'], ['paragraph_class',x=>x.p.values.class+=' unknown'],
+      ['word_sibling',x=>x.p.append(x.span('other'))], ['run_sibling',x=>x.p.append(new Element('SPAN',x.run.values,raw))],
+      ['run_element',x=>x.run.append(new Element('B',{},'PRIVATE'))], ['run_comment',x=>Object.defineProperty(x.run,'childNodes',{get:()=>[{nodeType:3,textContent:raw},{nodeType:8,textContent:''}]})],
+      ['run_word_attr',x=>x.run.values['data-d-stream-word']=''], ['run_style_extra',x=>x.run.values.style+='color:transparent'],
+      ['run_style_unknown',x=>x.run.values.style='--d-stream-ink: url(PRIVATE)'], ['run_style_bound',x=>x.run.values.style=' '.repeat(129)+x.run.values.style], ['run_hidden',x=>x.run.values.hidden=''],
+      ['run_interactive',x=>x.run.values.role='button'], ['run_before',x=>x.run.beforeContent='"PRIVATE"'],
+      ['run_transform',x=>x.run.literalTransform='uppercase'], ['run_filter',x=>x.run.literalFilter='opacity(0)'],
+      ['run_clip',x=>x.run.literalClip='inset(100%)'], ['run_namespace',x=>x.run.namespaceURI='http://www.w3.org/2000/svg'],
+    ];
+    for(const [name,mutate] of variants) {
+      const x=streamRun(raw);mutate(x);const result=x.read();
+      expect(result.flags.selectedExtraction,name).not.toBe('literal_dil'); expect(result.relation,name).toBeNull();
+      expect(JSON.stringify(result.flags),name).not.toContain('PRIVATE');
+    }
+  });
+  test('observed literal DIL stream run admits only one whole bounded envelope and keeps legacy words fenced', () => {
+    for(const raw of ['{}','[]','null','{"type":"unknown"}','{"type":"message"} explanation',
+      '{"type":"message"}{"type":"message"}', '```json\n{"type":"message","text":"hi"}\n```',
+      '{"type":"message","text":"unterminated}', JSON.stringify({type:'message',text:'x'.repeat(220000)}),
+      JSON.stringify({type:'message',text:'🌍'.repeat(55000)})]) {
+      const x=streamRun(raw);expect(x.read().flags.selectedExtraction,raw.slice(0,30)).not.toBe('literal_dil');
+    }
+    const prefix='{"type":"message","text":"', suffix='"}';
+    const raw=prefix+'x'.repeat(220000-prefix.length-suffix.length)+suffix;
+    expect(streamRun(raw).read().text).toBe(raw);
+    expect(streamRun(raw).read().flags.selectedExtraction).toBe('literal_dil');
+    const old=literal('{"type":"message","text":"old"}');
+    expect(old.read().relation).toBe('dil_escaped_literal_json_fence');
+    old.p.children=[old.span('{"type":"message","text":"raw words"}')];
+    expect(old.read().flags.selectedExtraction).not.toBe('literal_dil');
+    const changed=streamRun('{"type":"message","text":"hi"}');
+    changed.portal.values.class='relative PortalBoundary-Other Renderer-Other';
+    changed.dil.values.class='DilRenderer-Other DilResponseRoot-Other Reveal-Other';
+    changed.p.values.class='TextBase-Other Text-Other';
+    expect(changed.read().flags.selectedExtraction).toBe('literal_dil');
+  });
+
   test('literal DIL declines report the first finite guard without changing fallback bytes or accepting unknown shape', () => {
     const parent = (x:any, count:number) => { let child=x.answer;for(let i=0;i<count;i++){const p=new Element('DIV');p.append(child);child=p;}return child; };
     const cases: [string,(x:any)=>void][] = [
@@ -1685,6 +1767,42 @@ describe('ChatGPT literal terminal source equivalence', () => {
     Object.defineProperty(f.answer, 'innerText', { configurable: true, get: () => f.p.children.map(child => child.textContent.replace(/\r?\n$/, ' ')).join('') + '\n' });
     f.p.children[1].text = '{"type":"message","text":"CHANGED"}\n';
     expect(f.read(raw).relation).toBeNull();
+  });
+  test('observed raw DIL stream run requires fresh native context and exact bytes after the final picker await', async () => {
+    for (const mutation of ['none','whitespace','identity','source_identity','selection_identity','contents','model','owner']) {
+      const choice={key:'chat/latest/medium',label:'Medium'}, conversationID='6ad86c7a-2284-8331-b846-a59490db0c46';
+      const x=await chatTurnFixture(choice), click=x.send.onClick!;
+      x.send.onClick=()=>{click();x.f.location.pathname='/c/'+conversationID;
+        x.f.document.URL='https://chatgpt.com'+x.f.location.pathname+'?temporary-chat=true';};
+      const record=await x.dispatch('Exact owned raw DIL terminal source',{deferModelVerification:true});
+      const patch='*** Begin Patch\n*** Add File: /synthetic/indent.py\n+def f():\n+    return 7\n*** End Patch';
+      const raw=JSON.stringify({type:'tool_calls',calls:[{name:'apply_patch',input:patch}]}), body=streamRun(raw), root=x.answer('placeholder');
+      root.children[0].connected=false;root.children[0]=body.answer;body.answer.parentElement=root;
+      root.values['data-chatgpt-selection-message-id']=messageID;
+      const candidate={correlationID:'245e3c88-8dac-4239-947b-1aff997b9f61',sequence:1,
+        inputSHA256:createHash('sha256').update(record.outbound).digest('hex'),
+        inputMessageID:'ae2e44b2-714e-43cd-ba07-d5c3f09c9463',conversationID,messageID,text:raw};
+      const picker:any=x.picker, open=picker.trigger.onClick;let opens=0;
+      picker.trigger.onClick=()=>{open();if(++opens!==2)return;
+        if(mutation==='whitespace')body.run.text=body.run.text.replace('+    return 7','+        return 7');
+        if(mutation==='identity')body.dil.values['data-dil-message-id']=firstMarker;
+        if(mutation==='source_identity')body.copy.values['data-dil-source-message-id']=firstMarker;
+        if(mutation==='selection_identity')root.values['data-chatgpt-selection-message-id']=firstMarker;
+        if(mutation==='contents')body.tail.text='unexpected';
+        if(mutation==='model')picker.selected('High');
+        if(mutation==='owner')x.f.world.__computaModelOwner='foreign-owner';};
+      const observed=await x.observe(record,{deferModelVerification:false,terminalCompletionCandidate:candidate});
+      expect(opens).toBe(2);expect(x.send.clicks).toBe(1);expect(candidate.text).toBe(raw);
+      if(mutation==='none') {
+        expect(observed.error).toBeUndefined();expect(observed.terminalCompletionMatched).toBe(true);
+        expect(observed.terminalCompletionRepresentation).toBe('exact');expect(observed.text).toBe(raw);
+        expect(JSON.parse(observed.text).calls[0].input).toBe(patch);
+        expect(observed.modelEvidence.selected).toEqual(choice);expect(observed.submissionProof.fingerprint).toBe(record.fingerprint);
+      } else {
+        expect(observed.terminalCompletionMatched,mutation).toBeUndefined();
+        expect(observed.terminalCompletionRepresentation,mutation).toBeUndefined();
+      }
+    }
   });
   test('a fenced DIL source still obtains full fresh proof and is rechecked after the last picker await', async () => {
     for (const mutation of ['none', 'raw_line_ending', 'dil_identity', 'extra_attribute', 'raw_whitespace']) {

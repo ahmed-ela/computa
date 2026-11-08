@@ -3408,13 +3408,13 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         x.f.advanceTime(801); x.f.flush(); await microtasks();
         expect((await x.expire()).error).toBeDefined(); expect(x.openings()).toBe(1); x.noReplay();
       });
-      const firstVerification = async (label = 'Medium') => {
+      const firstVerification = async (label = 'Medium', recoveryOpens = true) => {
         const { f, picker } = setup(); picker.selected(label); const expected = choice(label);
         expect((await f.run('selectModel', { modelChoice: expected })).selected).toBe(true);
         const open = picker.trigger.onClick; let openings = 0;
         const root = {f, picker, expected, open, count: () => openings,
           request: {expectedModelChoice:expected, allowFirstChatVerificationOpening:true}};
-        picker.trigger.onClick = () => { openings++; if (openings === 2) open(); };
+        picker.trigger.onClick = () => { openings++; if (openings === 2 && recoveryOpens) open(); };
         return root;
       };
       const tickVerification = async (f:any, ms:number) => {
@@ -3431,36 +3431,28 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         const again=x.f.run('verifyModel',x.request); expect((await expire(x.f,again)).error).toBe('model_unverified');
         expect(x.count()).toBe(3); noSelection(x.f,x.picker);
       });
-      test('fresh Pro verification distinguishes an ignored initial opener from an acknowledged close', async () => {
+      test('fresh Pro verification shares one recovery for an ignored or acknowledged closed opener', async () => {
         for (const transient of [false, true]) {
-          const x = await firstVerification('Pro');
-          const checking = x.f.run('verifyModel', x.request);
+          const x = await firstVerification('Pro'), checking = x.f.run('verifyModel', x.request);
           await microtasks(); expect(x.count()).toBe(1);
           if (transient) x.f.observers.forEach((observer:any) => observer.callback([
             {type:'attributes',target:x.picker.trigger,attributeName:'aria-expanded',oldValue:'true'}
           ]));
           await tickVerification(x.f,901); await tickVerification(x.f,901);
           const result=await checking;
-          if (transient) {
-            expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
-            expect(result.modelDiagnostic.readStage).toBe('first_verification_acknowledged_closed');
-            expect(result.modelDiagnostic.readContext.recoveryEligible).toBe(true);
-            expect(result.modelDiagnostic.readAttempt.observedProof).toBe(false);
-            expect(result.modelDiagnostic.chatHeader.ordinal).toBe(4); expect(x.count()).toBe(1);
-          } else {
-            expect(result.modelEvidence.selected).toEqual(choice('Pro'));
-            expect(result.modelEvidence.chatSelection.power.key).toBe('pro'); expect(x.count()).toBe(2);
-          }
+          expect(result.error).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(choice('Pro'));
+          expect(result.modelEvidence.chatSelection.power.key).toBe('pro'); expect(x.count()).toBe(2);
+          expect(x.f.world.__computaModelSelection.firstVerificationOpening.recoveryClaimed).toBe(true);
           noSelection(x.f,x.picker);
         }
       });
-      test('fresh Pro verification waits passively for an acknowledged opener to finish rendering', async () => {
+      test('fresh Pro verification requires complete proof after one acknowledged closed-menu recovery', async () => {
         for (const variant of ['same_pro', 'closed', 'late', 'wrong_power', 'wrong_family', 'work', 'replaced', 'owner', 'route', 'draft', 'restored', 'busy']) {
-          const x=await firstVerification('Pro'), checking=x.f.run('verifyModel',x.request);
+          const x=await firstVerification('Pro', false), checking=x.f.run('verifyModel',x.request);
           await microtasks(); expect(x.count()).toBe(1);
           // The original header briefly acknowledged opening but the menu is still closed.
           x.f.observers.forEach((o:any)=>o.callback([{type:'attributes',target:x.picker.trigger,attributeName:'aria-expanded',oldValue:'true'}]));
-          x.f.advanceTime(901); x.f.flush(); await microtasks(); expect(x.count()).toBe(1);
+          x.f.advanceTime(901); x.f.flush(); await microtasks(); expect(x.count()).toBe(2);
           if (variant==='late') await tickVerification(x.f,901);
           if (variant==='draft') x.f.composer.text='unrelated unsent draft';
           if (variant==='busy') x.f.body.append(new Node('BUTTON',{'data-testid':'stop-button'}));
@@ -3472,7 +3464,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           if (variant==='replaced') x.f.composer.connected=false;
           if (variant==='restored') x.f.observers.forEach((o:any)=>o.callback([{type:'characterData',target:x.f.composer}]));
           if (variant!=='closed') {
-            // The website finishes mounting the original popup; the harness never toggles the trigger.
+            // After the one fresh opening, only the website supplies the eventual associated popup.
             x.open();
             x.f.observers.forEach((o:any)=>o.callback([{type:'childList',target:x.f.body,addedNodes:[x.picker.menu],removedNodes:[]}]));
           }
@@ -3483,12 +3475,12 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
             expect(result.modelEvidence.chatSelection.family.key).toBe('GPT-6');
             expect(result.modelEvidence.chatSelection.power.key).toBe('pro');
           } else { expect(result.error,variant).toBeDefined(); expect(result.modelEvidence,variant).toBeUndefined(); }
-          expect(x.count(),variant).toBe(1); noSelection(x.f,x.picker,variant==='draft'?'unrelated unsent draft':'');
+          expect(x.count(),variant).toBe(2); noSelection(x.f,x.picker,variant==='draft'?'unrelated unsent draft':'');
         }
       });
       test('fresh verification remembers same-editor detach or transient draft before and after the acknowledged close', async () => {
         for (const phase of ['before', 'after']) for (const kind of ['reinsert', 'draft']) {
-          const x = await firstVerification('Pro');
+          const x = await firstVerification('Pro', false);
           // Dispatch only to observers registered for the actual mutation target.
           const registrations = new Map<any, any[]>();
           const prototype = Object.getPrototypeOf(x.f.observers[0]), observe = prototype.observe;
@@ -3517,7 +3509,69 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           x.f.observers.forEach((o:any)=>o.callback([{type:'childList',target:x.f.body,addedNodes:[x.picker.menu],removedNodes:[]}]));
           await tickVerification(x.f,30); const result=await checking;
           expect(result.error,phase+' '+kind).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
-          expect(x.count()).toBe(1); noSelection(x.f,x.picker);
+          expect(x.count()).toBe(phase==='before'?1:2); noSelection(x.f,x.picker);
+        }
+      });
+      test('acknowledged closed first verification opens once for all powers without input or selection replay', async () => {
+        for (const label of ['Instant','Medium','High','Extra High','Pro']) {
+          const x=await firstVerification(label), checking=x.f.run('verifyModel',x.request);
+          await microtasks();
+          x.f.observers.forEach((o:any)=>o.callback([{type:'attributes',target:x.picker.trigger,attributeName:'aria-expanded',oldValue:'true'}]));
+          await tickVerification(x.f,901);
+          const result=await checking;
+          expect(result.error,label).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(x.expected);
+          expect(result.modelEvidence.chatSelection.family.key).toBe('GPT-6'); expect(x.count()).toBe(2);
+          expect(x.f.world.__computaModelSelection.firstVerificationOpening.recoveryClaimed).toBe(true);
+          noSelection(x.f,x.picker);
+          const again=x.f.run('verifyModel',x.request); expect((await expire(x.f,again)).error).toBeDefined();
+          expect(x.count()).toBe(3); noSelection(x.f,x.picker);
+        }
+      });
+      test('acknowledged closed first verification refuses a second close without a third opening or renewed deadline', async () => {
+        const x=await firstVerification('Medium',false), checking=x.f.run('verifyModel',x.request);
+        await microtasks();
+        const acknowledged=()=>x.f.observers.forEach((o:any)=>o.callback([{type:'attributes',target:x.picker.trigger,attributeName:'aria-expanded',oldValue:'true'}]));
+        acknowledged(); await tickVerification(x.f,901); expect(x.count()).toBe(2);
+        expect(x.f.scheduledDelays.at(-1)).toBeGreaterThan(0);
+        expect(x.f.scheduledDelays.at(-1)).toBeLessThanOrEqual(899);
+        acknowledged(); await tickVerification(x.f,901);
+        const result=await checking;
+        expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+        expect(x.count()).toBe(2); expect(x.f.world.__computaModelSelection.firstVerificationOpening.recoveryClaimed).toBe(true);
+        noSelection(x.f,x.picker);
+      });
+      test('acknowledged closed first verification rejects pre-recovery identity draft mode and popup ambiguity', async () => {
+        for (const mutation of ['owner','route','invocation','pin','power','work','temporary','draft','restored',
+          'reinsert','busy','foreign_menu','user','assistant','submitted','prepared','spent','expired','disabled']) {
+          const x=await firstVerification('Medium'), checking=x.f.run('verifyModel',x.request);
+          await microtasks();
+          x.f.observers.forEach((o:any)=>o.callback([{type:'attributes',target:x.picker.trigger,attributeName:'aria-expanded',oldValue:'true'}]));
+          if (mutation==='owner') x.f.world.__computaModelOwner='foreign';
+          if (mutation==='route') x.f.document.URL='https://chatgpt.com/c/foreign';
+          if (mutation==='invocation') x.f.world.__computaChatActiveInvocation={};
+          if (mutation==='pin') x.f.world.__computaChatPresetPin={...x.f.world.__computaChatPresetPin};
+          if (mutation==='power') x.picker.selected('High');
+          if (mutation==='work') { x.f.chatMode.values['aria-pressed']='false';x.f.workMode.values['aria-pressed']='true'; }
+          if (mutation==='temporary') x.f.temporary.connected=false;
+          if (mutation==='draft') x.f.composer.text='unrelated unsent draft';
+          if (mutation==='restored') x.f.observers.forEach((o:any)=>o.callback([{type:'characterData',target:x.f.composer}]));
+          if (mutation==='reinsert') x.f.observers.forEach((o:any)=>o.callback([{type:'childList',target:x.f.composer.parentElement,removedNodes:[x.f.composer],addedNodes:[x.f.composer]}]));
+          if (mutation==='busy') x.f.body.append(new Node('BUTTON',{'data-testid':'stop-button'}));
+          if (mutation==='foreign_menu') x.f.body.append(new Node('DIV',{role:'menu'}));
+          if (mutation==='user' || mutation==='assistant') x.f.body.append(new Node('ARTICLE',{'data-turn':mutation}));
+          if (mutation==='submitted') x.f.world.__computaModelFirstSubmitted=true;
+          if (mutation==='prepared') x.f.world.__computaChatSubmissionState={pending:{phase:'prepared'}};
+          if (mutation==='spent') x.f.world.__computaModelSelection.firstVerificationOpening.recoveryClaimed=true;
+          if (mutation==='disabled') x.picker.trigger.disabled=true;
+          await tickVerification(x.f,mutation==='expired'?1801:901); await tickVerification(x.f,901);
+          const result=await checking;
+          expect(result.error,mutation).toBeDefined(); expect(result.modelEvidence,mutation).toBeUndefined();
+          expect(x.count(),mutation).toBe(1);
+          if (mutation==='submitted') {
+            expect(x.f.world.__computaModelFirstSubmitted).toBe(true);
+            expect(arrows(x.picker)).toHaveLength(0); expect(x.picker.familyOptions.every((node:any)=>node.clicks===0)).toBe(true);
+            expect(x.f.composer.textContent).toBe('');
+          } else noSelection(x.f,x.picker,mutation==='draft'?'unrelated unsent draft':'');
         }
       });
       test('fresh post-selection verification recognizes only the empty WebKit ProseMirror caret sentinel', async () => {
@@ -3568,13 +3622,12 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         const result=await checking; expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
         expect(openings).toBe(2); noSelection(x.f,x.picker);
       });
-      test('fresh post-selection verification never reopens after acknowledgment, pin, owner, draft, or submission drift', async () => {
-        for(const variant of ['opened_closed','owner','pin','wrong_model','draft','post_submit','no_native_grant']) {
+      test('fresh post-selection verification never recovers after pin, owner, draft, or submission drift', async () => {
+        for(const variant of ['owner','pin','wrong_model','draft','post_submit','no_native_grant']) {
           const x=await firstVerification();
           if(variant==='no_native_grant') x.request.allowFirstChatVerificationOpening=false;
           if(variant==='post_submit') x.f.world.__computaModelFirstSubmitted=true;
           const checking=x.f.run('verifyModel',x.request); await microtasks();
-          if(variant==='opened_closed') x.f.observers.forEach((o:any)=>o.callback([{type:'attributes',target:x.picker.trigger,attributeName:'aria-expanded',oldValue:'true'}]));
           if(variant==='owner') x.f.world.__computaModelOwner='foreign-owner-token';
           if(variant==='pin') x.picker.trigger.connected=false;
           if(variant==='wrong_model') x.picker.selected('High');

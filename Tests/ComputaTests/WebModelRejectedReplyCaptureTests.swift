@@ -4,6 +4,58 @@ import XCTest
 @testable import Computa
 
 final class WebModelRejectedReplyCaptureTests: XCTestCase {
+
+    func testChatGPTRenderedToolSourceRejectionCapturesOnlyForExactOptInWithoutReplay() async throws {
+        let reply = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf 'one space'"}}]}"#
+        for mode in ["no_arm", "other_task", "exact_task", "unconfigured"] {
+            let fixture = try Fixture(); defer { fixture.remove() }
+            let task = UUID(), thread = UUID()
+            if mode != "no_arm" { try fixture.arm(mode == "other_task" ? UUID() : task) }
+            let transport = RejectedReplyTransport(reply: reply)
+            let storage = fixture.root.appendingPathComponent("state")
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self,
+                rejectedReplyDirectory: mode == "unconfigured" ? nil : fixture.directory, storageDirectory: storage)
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport,
+                defaultChatChoice: syntheticChatGPTChoice))
+            let input = try encoded(["model": syntheticChatGPTModelID, "input": "request-only-secret",
+                "tools": [["type": "function", "name": "exec_command", "parameters": ["type": "object"]]], "stream": true])
+            var emitted: Data?
+            do { emitted = try await server.fixtureInfer(input, taskID: task.uuidString, threadID: thread.uuidString); XCTFail("Rendered tool text must remain rejected") }
+            catch {
+                guard case .toolTextUnverified(.renderedFallback) = error as? WebModelServer.Failure else { return XCTFail("Unexpected source rejection: \(error)") }
+                XCTAssertEqual(WebModelServer.errorPresentation(for: error).status, "400 Bad Request")
+            }
+            XCTAssertNil(emitted)
+            let beforeCleanup = await transport.operations()
+            XCTAssertEqual(beforeCleanup, ["webProviderStart", "webProviderSend", "webProviderPoll"])
+            if mode == "exact_task" {
+                let value = try fixture.record()
+                XCTAssertEqual(value["replyText"] as? String, reply, "This is the rejected rendered reply, not a claim about authored bytes")
+                XCTAssertEqual(value["taskID"] as? String, task.uuidString.lowercased())
+                XCTAssertEqual(value["threadID"] as? String, thread.uuidString.lowercased())
+                XCTAssertEqual(value["provider"] as? String, "chatgpt")
+                XCTAssertEqual(value["automaticReplay"] as? Bool, false)
+                let diagnostic = try XCTUnwrap(value["diagnostic"] as? [String: Any])
+                XCTAssertEqual(Set(diagnostic.keys), ["reason", "sourceReason", "utf8Bytes"])
+                XCTAssertEqual(diagnostic["reason"] as? String, "website_tool_text_unverified")
+                XCTAssertEqual(diagnostic["sourceReason"] as? String, "rendered_fallback")
+                XCTAssertEqual(diagnostic["utf8Bytes"] as? Int, reply.utf8.count)
+                XCTAssertEqual(try fixture.permissions(fixture.output), 0o600)
+                XCTAssertFalse(fixture.exists(fixture.armFile))
+                let saved = String(decoding: try Data(contentsOf: fixture.output), as: UTF8.self)
+                XCTAssertFalse(saved.contains("request-only-secret")); XCTAssertFalse(saved.contains("metadata-content-secret"))
+            } else {
+                XCTAssertFalse(fixture.exists(fixture.output), mode)
+                XCTAssertEqual(fixture.exists(fixture.armFile), mode != "no_arm", mode)
+            }
+            let issues = await server.fixtureFinish(taskID: task.uuidString)
+            XCTAssertTrue(issues.isEmpty)
+            let operations = await transport.operations()
+            XCTAssertEqual(operations, ["webProviderStart", "webProviderSend", "webProviderPoll", "webProviderFinish"])
+            XCTAssertFalse(fixture.exists(storage.appendingPathComponent("evidence/format-corrections-v1")))
+            _ = await server.shutdown()
+        }
+    }
     func testCallShapeFailuresCaptureExactReplyWithoutReleasingValidPrefixOrCorrecting() async throws {
         let invalidFunctions = [
             #"{"name":"exec_command","arguments":"{\"cmd\":\"printf private\"}"}"#,

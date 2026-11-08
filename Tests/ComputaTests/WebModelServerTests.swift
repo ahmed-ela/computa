@@ -4,6 +4,130 @@ import XCTest
 @testable import Computa
 
 final class WebModelServerTests: XCTestCase {
+
+    func testChatGPTLiteralToolAdmissionRequiresExactCurrentEvidenceForBothToolVariants() throws {
+        let text = #"{"type":"tool_calls","calls":[{"name":"fixture","arguments":{"path":"résumé"}}]}"#
+        let call = WebModelResponseCodec.ToolCall(name: "fixture", argumentsJSON: "{}", namespace: nil)
+        let replies: [WebModelResponseCodec.Reply] = [.toolCalls([call]), .toolCallsWithCommentary([call], "Synthetic commentary")]
+        func snapshot(_ extraction: Any = "raw_code", _ reason: Any = "accepted_literal_code") -> [String: Any] {
+            ["state": "complete", "text": text, "completionEvidence": ["codeStructure": [
+                "selectedExtraction": extraction, "extractionReason": reason]]]
+        }
+        var bad: [(String, [String: Any])] = [("missing_snapshot", [:]),
+            ("rendered", snapshot("rendered_fallback", "missing_code")),
+            ("missing_extraction", snapshot(NSNull())), ("unknown_extraction", snapshot("future_literal")),
+            ("wrong_extraction_type", snapshot(true)), ("missing_reason", snapshot("raw_code", NSNull())),
+            ("unknown_reason", snapshot("raw_code", "future_reason")),
+            ("crossed_raw_reason", snapshot("raw_code", "accepted_literal_dil")),
+            ("crossed_dil_reason", snapshot("literal_dil", "accepted_literal_code"))]
+        for (name, key, value) in [("not_complete", "state", "running" as Any),
+                                   ("missing_text", "text", NSNull() as Any),
+                                   ("changed_text", "text", (text + " ") as Any),
+                                   ("unicode_equivalent_text", "text", text.replacingOccurrences(of: "é", with: "e\u{301}") as Any),
+                                   ("missing_completion", "completionEvidence", NSNull() as Any),
+                                   ("wrong_completion_type", "completionEvidence", [] as Any),
+                                   ("missing_structure", "completionEvidence", [:] as [String: Any])] {
+            var valueSnapshot = snapshot(); valueSnapshot[key] = value; bad.append((name, valueSnapshot))
+        }
+        for value in ["text_span_shape" as Any, NSNull() as Any, false as Any] {
+            var valueSnapshot = snapshot("literal_dil", "accepted_literal_dil")
+            valueSnapshot["completionEvidence"] = ["codeStructure": ["selectedExtraction": "literal_dil",
+                "extractionReason": "accepted_literal_dil", "literalDILDecline": value]]
+            bad.append(("declined_literal", valueSnapshot))
+        }
+        XCTAssertEqual(text, text.replacingOccurrences(of: "é", with: "e\u{301}"), "Canonical-equivalent Swift strings still have different UTF8 bytes")
+        for reply in replies {
+            for exact in [snapshot(), snapshot("literal_dil", "accepted_literal_dil")] {
+                XCTAssertNoThrow(try WebModelServer.requireChatGPTLiteralToolReply(reply, provider: "chatgpt", text: text, snapshot: exact))
+            }
+            for (name, rejected) in bad {
+                XCTAssertThrowsError(try WebModelServer.requireChatGPTLiteralToolReply(reply, provider: "chatgpt", text: text, snapshot: rejected), name) { error in
+                    guard case .toolTextUnverified = error as? WebModelServer.Failure else { return XCTFail("Expected finite tool source rejection: \(name)") }
+                }
+            }
+        }
+    }
+
+    func testChatGPTLiteralToolAdmissionLeavesMessagesAndOtherProvidersUnchanged() throws {
+        let call = WebModelResponseCodec.ToolCall(name: "fixture", argumentsJSON: "{}", namespace: nil)
+        for reply: WebModelResponseCodec.Reply in [.message("Ordinary natural response"),
+            .assistantMessage("Ordinary final response", phase: .finalAnswer), .assistantMessage("Ordinary commentary", phase: .commentary)] {
+            XCTAssertNoThrow(try WebModelServer.requireChatGPTLiteralToolReply(reply, provider: "chatgpt", text: "", snapshot: [:]))
+        }
+        for provider in ["claude", "gemini", "deepseek", "groq", "kimi", "qwen"] {
+            for reply: WebModelResponseCodec.Reply in [.toolCalls([call]), .toolCallsWithCommentary([call], "Commentary")] {
+                XCTAssertNoThrow(try WebModelServer.requireChatGPTLiteralToolReply(reply, provider: provider, text: "", snapshot: [:]), provider)
+            }
+        }
+    }
+
+    func testChatGPTRenderedToolBatchCannotEmitSSEOrReplayAndStillClosesItsOwnedSession() async throws {
+        for mode in ["raw_code", "literal_dil", "rendered_fallback", "missing"] {
+            let accepted = ["raw_code", "literal_dil"].contains(mode)
+            let root = try websiteBenchmarkTemporaryDirectory().appendingPathComponent("literal-tool-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let label = "literal-tool-" + mode
+            let patch = "*** Begin Patch\n*** Add File: /synthetic/indent.py\n+def f():\n+    return 7\n*** End Patch"
+            let seenPatch = accepted ? patch : patch.replacingOccurrences(of: "+    return", with: "+ return")
+            let reply = String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "commentary": "Synthetic proposal", "calls": [
+                ["name": "apply_patch", "input": seenPatch], ["name": "exec_command", "arguments": ["cmd": "must-not-be-partially-emitted"]]]]), as: UTF8.self)
+            let tools: [[String: Any]] = [["type": "custom", "name": "apply_patch"],
+                ["type": "function", "name": "exec_command", "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]]]]]
+            let input = try JSONSerialization.data(withJSONObject: ["model": syntheticChatGPTModelID,
+                "input": "Return the synthetic proposal", "tools": tools, "stream": true])
+            let request = try WebModelResponseCodec.prepareRequest(input)
+            let parsed = try WebModelResponseCodec.parseEmbeddedReply(reply, request: request)
+            guard case let .toolCallsWithCommentary(calls, _) = parsed else { return XCTFail("The entire altered proposal must remain syntactically valid for this regression") }
+            XCTAssertEqual(calls.count, 2); XCTAssertEqual(calls[0].customInput, seenPatch)
+            let structure: [String: String]? = mode == "missing" ? nil : ["selectedExtraction": mode,
+                "extractionReason": mode == "raw_code" ? "accepted_literal_code" : mode == "literal_dil" ? "accepted_literal_dil" : "missing_code"]
+            let transport = FixtureWebModelTransport(replyTexts: [reply], chatCodeStructure: structure)
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
+            let endpoint = try await server.start().appendingPathComponent("responses")
+            var http = URLRequest(url: endpoint)
+            http.httpMethod = "POST"; http.httpBody = input
+            http.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            http.setValue("Bearer " + server.bearerToken, forHTTPHeaderField: "Authorization")
+            http.setValue(try await bindWebsiteInferenceFixtureTurn(server, taskID: label), forHTTPHeaderField: "X-Computa-Task-ID")
+            http.setValue(try websiteInferenceFixtureMetadata(taskID: label), forHTTPHeaderField: "x-codex-turn-metadata")
+            let (emitted, response) = try await URLSession.shared.data(for: http)
+            let httpResponse = try XCTUnwrap(response as? HTTPURLResponse)
+            XCTAssertEqual(httpResponse.statusCode, accepted ? 200 : 400)
+            if !accepted {
+                XCTAssertEqual(httpResponse.value(forHTTPHeaderField: "Content-Type"), "application/json")
+                let object = try XCTUnwrap(JSONSerialization.jsonObject(with: emitted) as? [String: Any])
+                let fields = try XCTUnwrap(object["error"] as? [String: Any])
+                XCTAssertEqual(fields["code"] as? String, "website_tool_text_unverified")
+                XCTAssertEqual(fields["type"] as? String, "model_error"); XCTAssertEqual(fields["retryable"] as? Bool, false)
+                XCTAssertEqual(fields["required_action"] as? String, "inspect_website")
+                XCTAssertEqual(fields["reason"] as? String, mode == "missing" ? "missing_evidence" : "rendered_fallback")
+                let body = String(decoding: emitted, as: UTF8.self)
+                for forbidden in ["response.completed", "response.output_item", "function_call", "custom_tool_call", "must-not-be-partially-emitted", "high demand"] {
+                    XCTAssertFalse(body.contains(forbidden), forbidden)
+                }
+            }
+            let before = await transport.operations()
+            XCTAssertEqual(before.filter { $0 == "webProviderStart" }.count, 1)
+            XCTAssertEqual(before.filter { $0 == "webProviderSend" }.count, 1, "No format correction or Send replay")
+            if accepted {
+                let stream = String(decoding: emitted, as: UTF8.self)
+                XCTAssertTrue(stream.contains("response.custom_tool_call_input.done"))
+            } else {
+                let journal = try turnJournal(root: root, task: label)
+                XCTAssertFalse(journal.contains { ["complete", "yield_verified"].contains($0["phase"] as? String ?? "") })
+                XCTAssertEqual(journal.filter { $0["phase"] as? String == "failed" }.count, 1)
+                let issues = await server.fixtureCancel(taskID: label)
+                XCTAssertTrue(issues.isEmpty)
+            }
+            let receipts = await server.latestCleanupReceipts()
+            XCTAssertEqual(receipts.count, 1); XCTAssertEqual(receipts.first?.outcome, .closed)
+            XCTAssertEqual(receipts.first?.receiptSaved, true)
+            let after = await transport.operations()
+            XCTAssertEqual(after.filter { ["webProviderFinish", "webProviderCancel"].contains($0) }.count, 1)
+            _ = await server.shutdown()
+        }
+    }
     func testClaudeStreamGrantOnlyEntersExactNativeStartAndSurvivesFailureUntilCleanup() async throws {
         for mode in ["capture", "unarmed", "ordinary", "history", "old_thread", "maintenance", "gemini", "send_failure", "start_failure"] {
             // Resolve the existing temporary ancestor with realpath before
@@ -3455,14 +3579,17 @@ private actor FixtureWebModelTransport: WebModelTransport {
     private var replyTexts: [String]
     private let fixedChoice: WebsiteModelChoice?
     private let cleanupResult: String
+    private let chatCodeStructure: [String: String]?
     private var currentReply = "{\"type\":\"message\",\"text\":\"OK\"}"
     init(cleanupFailsOnce: Bool = false, cleanupDelay: Bool = false, startGate: WebListenerStartupGate? = nil,
-         replyTexts: [String] = [], fixedChoice: WebsiteModelChoice? = nil, cleanupResult: String = "not_created") {
+         replyTexts: [String] = [], fixedChoice: WebsiteModelChoice? = nil, cleanupResult: String = "not_created",
+         chatCodeStructure: [String: String]? = ["selectedExtraction": "raw_code", "extractionReason": "accepted_literal_code"]) {
         self.cleanupFailsOnce = cleanupFailsOnce; self.cleanupDelay = cleanupDelay
         self.startGate = startGate
         self.replyTexts = replyTexts
         self.fixedChoice = fixedChoice
         self.cleanupResult = cleanupResult
+        self.chatCodeStructure = chatCodeStructure
     }
     func operations() -> [String] { ledger }
     func startedProviders() -> [String] { providers }
@@ -3491,6 +3618,12 @@ private actor FixtureWebModelTransport: WebModelTransport {
                 response = ["state": "running"]
             case "webProviderPoll":
                 response = ["state": "complete", "text": currentReply]
+                // This inert fixture emits its own exact JSON bytes. Literal
+                // metadata is explicit and configurable; negatives can omit or
+                // contradict it without any shared proof helper repairing it.
+                if currentProvider == "chatgpt", let chatCodeStructure {
+                    response["completionEvidence"] = ["codeStructure": chatCodeStructure]
+                }
             case "webProviderFinish", "webProviderCancel":
                 if cleanupDelay { try await Task.sleep(for: .milliseconds(30)) }
                 if cleanupFailsOnce { cleanupFailsOnce = false; response = ["cleanup": "failed"] }

@@ -4,6 +4,71 @@ import XCTest
 
 final class WebsiteFailureHistoryTests: XCTestCase {
 
+
+    func testChatGPTToolTextFailurePersistsEveryFiniteReasonWithoutChangingLegacyErrors() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaToolTextHistory-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant").modelID
+        let task = UUID().uuidString, thread = UUID().uuidString
+        let oldData = try WebModelServer.errorBody(for: WebModelResponseCodec.Failure.unsupportedWebsiteResponse)
+        let oldFields = try XCTUnwrap((JSONSerialization.jsonObject(with: oldData) as? [String: Any])?["error"] as? [String: Any])
+        XCTAssertNil(oldFields["retryable"])
+        let old = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+            turnID: UUID().uuidString, modelID: model, diagnosticText: String(decoding: oldData, as: UTF8.self)))
+        XCTAssertTrue(WebsiteTurnFailureStore(directory: root).append(old))
+        var records = [old]
+        for reason in WebModelServer.ToolTextReason.allCases {
+            let failure = WebModelServer.Failure.toolTextUnverified(reason)
+            XCTAssertEqual(WebModelServer.errorPresentation(for: failure).status, "400 Bad Request")
+            let data = try WebModelServer.errorBody(for: failure)
+            let fields = try XCTUnwrap((JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? [String: Any])
+            XCTAssertEqual(Set(fields.keys), ["type", "message", "code", "param", "retryable", "required_action", "reason"])
+            XCTAssertEqual(fields["code"] as? String, "website_tool_text_unverified")
+            XCTAssertEqual(fields["retryable"] as? Bool, false)
+            XCTAssertEqual(fields["required_action"] as? String, "inspect_website")
+            XCTAssertEqual(fields["reason"] as? String, reason.rawValue)
+            XCTAssertTrue((fields["message"] as? String)?.contains("No tool calls from this reply were released") == true)
+            let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+                turnID: UUID().uuidString, modelID: model, diagnosticText: String(decoding: data, as: UTF8.self)))
+            XCTAssertTrue(WebsiteTurnFailureStore(directory: root).append(record)); records.append(record)
+            XCTAssertEqual(try WebsiteTurnFailureStore(directory: root).load(threadID: thread), records)
+        }
+        XCTAssertEqual(try WebsiteTurnFailureStore(directory: root).load(threadID: thread).first, old)
+        let unchanged = try WebModelServer.errorBody(for: WebModelResponseCodec.Failure.unsupportedWebsiteResponse)
+        let unchangedFields = try XCTUnwrap((JSONSerialization.jsonObject(with: unchanged) as? [String: Any])?["error"] as? [String: Any])
+        XCTAssertTrue(NSDictionary(dictionary: oldFields).isEqual(to: unchangedFields))
+    }
+
+    func testChatGPTToolTextFailureHistoryRejectsAlteredMetadataAndForeignProviders() throws {
+        let model = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant").modelID
+        let data = try WebModelServer.errorBody(for: WebModelServer.Failure.toolTextUnverified(.renderedFallback))
+        let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let fields = try XCTUnwrap(envelope["error"] as? [String: Any])
+        let task = UUID().uuidString, thread = UUID().uuidString, turn = UUID().uuidString
+        func rejected(_ object: [String: Any], modelID: String? = nil) throws {
+            XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turn,
+                modelID: modelID ?? model, diagnosticText: String(decoding:
+                    try JSONSerialization.data(withJSONObject: object), as: UTF8.self)))
+        }
+        for mutation: [String: Any] in [["message": "PRIVATE_REPLY"], ["retryable": true], ["retryable": 0],
+            ["required_action": "retry_send"], ["type": "server_error"], ["code": "unsupported_website_response"],
+            ["reason": "PRIVATE_REASON"], ["reason": 0], ["param": "input"], ["raw_text": "PRIVATE_REPLY"]] {
+            var changed = envelope, changedFields = fields
+            mutation.forEach { changedFields[$0.key] = $0.value }; changed["error"] = changedFields
+            try rejected(changed)
+        }
+        for key in fields.keys {
+            var changed = envelope, changedFields = fields
+            changedFields.removeValue(forKey: key); changed["error"] = changedFields; try rejected(changed)
+        }
+        var extra = envelope; extra["raw_text"] = "PRIVATE_REPLY"; try rejected(extra)
+        for foreign in ["browser/claude", "browser/gemini", "browser/groq",
+                        WebsiteModelChoice(provider: "kimi", key: "k28-instant", label: "Instant").modelID,
+                        WebsiteModelChoice(provider: "qwen", key: "qwen3.7-plus", label: "Qwen3.7-Plus").modelID] {
+            try rejected(envelope, modelID: foreign)
+        }
+    }
+
     func testNativeProfileFailurePersistsAfter256ThreadsWithoutChangingPriorHistory() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaFailureStoreCapacity-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }

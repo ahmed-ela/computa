@@ -645,8 +645,8 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       && chatGPTMessageRoots('user').length === 0 && chatGPTMessageRoots('assistant').length === 0
       && !!chatGPTProductModeProof() && chatGPTTemporaryVerified();
   };
-  const prepareOpeningIntact = (current, opening = prepareOpening, allowAcknowledged = false) => {
-    if (!readonlyOpeningSelectionIntact(opening, current) || context?.action !== request.action
+  const prepareOpeningIntact = (current, opening = prepareOpening, allowAcknowledged = false, spent = false) => {
+    if (!readonlyOpeningSelectionIntact(opening, current, spent) || context?.action !== request.action
       || context.scope !== 'action_final_guard' || globalThis.__computaChatSubmissionState) return false;
     if (request.action === 'prepare') return globalThis.__computaChatFirstPrepareOpening === opening;
     const composer = opening.composer;
@@ -780,8 +780,8 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       current = drainOpeningEvidence();
       if (!prepareOpeningIntact(current)) prepareOpening = null;
       else if (firstVerify) {
-        // A popup that briefly opened and dismissed was acknowledged; never reopen it.
-        // Observe the editor from before the click, including removal via its parent.
+        // Retain the first opening's acknowledgment and editor history. Any bounded
+        // recovery below shares this phase's single recovery claim and deadline.
         firstVerificationEditor = prepareOpening.composer;
         draftObserver = new MutationObserver(recordDraftChanges);
         draftObserver.observe(document.documentElement || document, {subtree:true,childList:true});
@@ -848,17 +848,21 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         }
         if (firstVerify) recordVerifyOpening(verifyObserver?.takeRecords?.() || []);
         if (firstVerify && verifyAcknowledged) {
-          // The first click was acknowledged. Wait only for a popup associated with
-          // this exact trigger; do not toggle it again or prove a model from a closed header.
+          // An acknowledged opening is now positively closed. Only this untouched
+          // first-verification slot may spend its existing one recovery on a fresh
+          // opening; an open/ambiguous picker or a changed pin/editor still refuses.
           readStage = 'first_verification_acknowledged_closed';
           if (!prepareOpeningIntact(current, prepareOpening, true) || !passiveEditorIntact(prepareOpening, current))
             throw failure('model_unverified');
           passiveFirstVerification = prepareOpening;
+          prepareOpening.recoveryClaimed = true; // Claim before the reversible chrome action.
+          readStage = 'primary_open_recovery_requested';
+          trigger.click();
           let drifted = false;
           current = await wait(() => {
             const observed = websiteChatPickerState();
             if (!passiveEditorIntact(passiveFirstVerification, observed)
-              || !observed.topMenu && !prepareOpeningIntact(observed, passiveFirstVerification, true)) drifted = true;
+              || !observed.topMenu && !prepareOpeningIntact(observed, passiveFirstVerification, true, true)) drifted = true;
             return drifted || powerAcknowledged(observed);
           });
           if (drifted || Date.now() >= until) throw failure('model_unverified');
@@ -1237,7 +1241,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       websiteChatTrackPinnedHeader(globalThis.__computaChatPresetPin, trigger);
     }
     if (passiveFirstVerification && (!passiveEditorIntact(passiveFirstVerification, final)
-      || !prepareOpeningIntact(final, passiveFirstVerification, true))) return failure('model_unverified');
+      || !prepareOpeningIntact(final, passiveFirstVerification, true, true))) return failure('model_unverified');
     if (cappedFirstInsert && Date.now() >= until) return failure('model_unverified');
     if (insertOpening?.insertProof && insertOpening.recoveryClaimed && !insertOpeningIntact(final, true))
       return failure('model_unverified');
@@ -3084,6 +3088,18 @@ function chatGPTSingleJSONFence(text) {
   return value && !Array.isArray(value) && ['message', 'tool_calls'].includes(value.type) ? body : null;
 }
 
+// Raw envelopes are admitted only by the separately identified stream-run
+// renderer below. Parsing validates the entire source without rewriting bytes;
+// the native response codec still validates the envelope and allowed tools.
+function chatGPTWholeJSONEnvelope(text) {
+  if (typeof text !== 'string' || !text.length || text.length > 220_000
+    || new TextEncoder().encode(text).length > 220_000) return false;
+  let value;
+  try { value = JSON.parse(text); } catch { return false; }
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    && ['message', 'tool_calls'].includes(value.type);
+}
+
 // This is the observed text-only renderer shape, not a DIL/Markdown parser.
 // Every text leaf is accounted for; a hidden placeholder must be truly empty.
 function chatGPTLiteralDILDecline(report, reason) {
@@ -3117,30 +3133,76 @@ function chatGPTLiteralDILText(answer, messageID, report = null) {
   if (sources.length !== 1) return chatGPTLiteralDILDecline(report, 'text_source_count');
   const source = sources[0], layout = source.children[0], hidden = layout?.children[0], portal = layout?.children[1];
   const dil = portal?.children[0], paragraph = dil?.children[0];
+  const run = source.childNodes.length === 2, tail = run ? source.childNodes[1] : null;
+  const classes = (node, fixed, prefixes) => {
+    if (node.classList.length !== fixed.length + prefixes.length) return false;
+    const names = [...node.classList];
+    return names.length === fixed.length + prefixes.length && fixed.every(name => names.includes(name))
+      && prefixes.every(prefix => names.some(name => name.startsWith(prefix)
+        && /^[A-Za-z0-9_-]{1,64}$/.test(name.slice(prefix.length))));
+  };
+  const customStyle = (node, pattern) => {
+    const value = node.getAttribute('style');
+    return typeof value === 'string' && value.length <= 128 && pattern.test(value);
+  };
+  const emptyContents = node => {
+    if (!node?.isConnected || node.tagName !== 'DIV' || node.namespaceURI !== 'http://www.w3.org/1999/xhtml'
+      || node.getAttribute('class') !== 'contents' || !attrs(node, ['class'])
+      || node.childNodes.length !== 0 || node.textContent !== ''
+      || node.closest('[inert], [aria-hidden="true"], [hidden]')) return false;
+    const style = getComputedStyle(node);
+    return style.display === 'contents' && style.visibility === 'visible' && style.opacity === '1'
+      && ['::before', '::after'].every(pseudo => ['none', 'normal', '""', "''"].includes(getComputedStyle(node, pseudo).content));
+  };
   if (source.tagName !== 'DIV' || source.getAttribute('data-dil-source-message-id') !== messageID
     || source.getAttribute('data-chatgpt-copy-reference') !== '0' || source.getAttribute('data-markdown-copy') !== 'contents'
     || !attrs(source, ['class', 'data-dil-source-message-id', 'data-chatgpt-copy-reference', 'data-markdown-copy'])
     || !only(answer, [source])) return chatGPTLiteralDILDecline(report, 'text_source_shape');
   if (!layout || layout.tagName !== 'DIV' || !attrs(layout, ['class'])
-    || !only(source, [layout])) return chatGPTLiteralDILDecline(report, 'text_layout_shape');
+    || (run ? !only(source, [layout, tail]) || !emptyContents(tail)
+      || layout.getAttribute('class') !== '[--entity-prose-inset:0px]'
+      || !classes(source, ['my-4', 'first:mt-0', 'last:mb-0', 'empty:hidden'], [])
+      : !only(source, [layout]))) return chatGPTLiteralDILDecline(report, 'text_layout_shape');
   if (!hidden || hidden.tagName !== 'DIV' || hidden.getAttribute('hidden') !== ''
     || !attrs(hidden, ['hidden']) || children(hidden).length !== 0 || hidden.textContent !== ''
     || hidden.getClientRects().length !== 0 || getComputedStyle(hidden).display !== 'none') return chatGPTLiteralDILDecline(report, 'text_hidden_placeholder');
   if (!portal || portal.tagName !== 'DIV' || !attrs(portal, ['class', 'data-theme', 'style'])
-    || !only(layout, [hidden, portal])) return chatGPTLiteralDILDecline(report, 'text_portal_shape');
+    || !only(layout, [hidden, portal])
+    || run && !customStyle(portal, /^\s*--puik-portal-zoom:\s*1\s*;?\s*$/))
+    return chatGPTLiteralDILDecline(report, 'text_portal_shape');
   if (!dil || dil.tagName !== 'DIV' || !only(portal, [dil])
-    || dil.getAttribute('data-dil-message-id') !== messageID || dil.getAttribute('data-d-inline-reveal') !== ''
+    || dil.getAttribute('data-dil-message-id') !== messageID
+    || dil.getAttribute(run ? 'data-dil-response' : 'data-d-inline-reveal') !== ''
     || dil.getAttribute('data-d-direction') !== 'col' || dil.getAttribute('dir') !== 'auto'
-    || !attrs(dil, ['class', 'dir', 'data-d-inline-reveal', 'data-d-direction', 'data-dil-message-id'])) return chatGPTLiteralDILDecline(report, 'text_dil_shape');
+    || !attrs(dil, ['class', 'dir', run ? 'data-dil-response' : 'data-d-inline-reveal', 'data-d-direction', 'data-dil-message-id'])) return chatGPTLiteralDILDecline(report, 'text_dil_shape');
   if (!paragraph || paragraph.tagName !== 'P' || !only(dil, [paragraph])
     || paragraph.getAttribute('data-d-text-flow') !== '' || paragraph.getAttribute('data-d-component') !== 'text'
     || !attrs(paragraph, ['class', 'data-d-text-flow', 'data-d-component'])) return chatGPTLiteralDILDecline(report, 'text_paragraph_shape');
   const pair = (node, prefixes) => prefixes.every(prefix => [...node.classList]
     .some(name => name.startsWith(prefix) && /^[A-Za-z0-9_-]{1,64}$/.test(name.slice(prefix.length))));
-  if (!pair(portal, ['PortalBoundary-', 'Renderer-']) || !pair(dil, ['DilRenderer-', 'DilResponseRoot-'])) return chatGPTLiteralDILDecline(report, 'text_renderer_classes');
+  if (!pair(portal, ['PortalBoundary-', 'Renderer-']) || !pair(dil, ['DilRenderer-', 'DilResponseRoot-'])
+    || run && (!classes(portal, ['relative'], ['PortalBoundary-', 'Renderer-'])
+      || !classes(dil, [], ['DilRenderer-', 'DilResponseRoot-', 'Reveal-'])
+      || !classes(paragraph, [], ['TextBase-', 'Text-']))) return chatGPTLiteralDILDecline(report, 'text_renderer_classes');
+  // The observed run profile has one text leaf; do not inventory unknown siblings.
+  if (run && paragraph.childNodes.length !== 1) return chatGPTLiteralDILDecline(report, 'text_span_count');
   const spans = children(paragraph);
   if (!spans.length || spans.length > 128) return chatGPTLiteralDILDecline(report, 'text_span_count');
   if (![answer, source, layout, portal, dil, paragraph].every(physical)) return chatGPTLiteralDILDecline(report, 'text_physical');
+  if (run) {
+    const span = spans[0];
+    if (spans.length !== 1 || span.nodeType !== 1 || span.tagName !== 'SPAN' || !physical(span)
+      || span.getAttribute('data-d-stream-run') !== '' || span.getAttribute('data-d-text-flow') !== 'run'
+      || !attrs(span, ['data-d-stream-run', 'data-d-text-flow', 'style'])
+      || !customStyle(span, /^\s*--d-stream-ink:\s*rgb\(\s*13\s*,\s*13\s*,\s*13\s*\)\s*;?\s*$/)
+      || span.childNodes.length !== 1 || span.childNodes[0].nodeType !== 3 || !span.textContent.length)
+      return chatGPTLiteralDILDecline(report, 'text_span_shape');
+    const text = span.textContent;
+    if (text.length > 220_000) return chatGPTLiteralDILDecline(report, 'text_size');
+    if (text !== answer.textContent || text !== source.textContent || text !== paragraph.textContent)
+      return chatGPTLiteralDILDecline(report, 'text_mismatch');
+    return { text, displayed: null, run: true };
+  }
   let text = '', displayed = '';
   for (const span of spans) {
     if (span.nodeType !== 1 || span.tagName !== 'SPAN' || !physical(span)
@@ -3158,8 +3220,8 @@ function chatGPTLiteralDILText(answer, messageID, report = null) {
   return { text, displayed };
 }
 
-// Read exact JSON bytes only from the already-supported, fully accounted DIL
-// text shape. These DOM IDs establish structural consistency, never native
+// Read exact JSON bytes only from the two fully accounted observed DIL
+// text shapes. These DOM IDs establish structural consistency, never native
 // submission/model/response authority. The ordinary completion proof still runs.
 function chatGPTLiteralDILResponse(answer, expectedMessageID = null, report = null) {
   const sources = answer ? [...answer.querySelectorAll('[data-dil-source-message-id]')] : [];
@@ -3179,7 +3241,8 @@ function chatGPTLiteralDILResponse(answer, expectedMessageID = null, report = nu
     || scope.querySelector('[data-message-author-role="user"], [data-markdown-text-style="user-message"], article[data-turn="user"], [data-user-message-bubble]')) return chatGPTLiteralDILDecline(report, 'response_assistant_scope');
   const literal = chatGPTLiteralDILText(answer, id, report);
   if (!literal) return null;
-  if (chatGPTSingleJSONFence(literal.text) === null) return chatGPTLiteralDILDecline(report, 'response_fence');
+  if (literal.run ? !chatGPTWholeJSONEnvelope(literal.text) : chatGPTSingleJSONFence(literal.text) === null)
+    return chatGPTLiteralDILDecline(report, 'response_fence');
   const plain = node => {
     if (node.namespaceURI !== 'http://www.w3.org/1999/xhtml') return false;
     const style = getComputedStyle(node);
@@ -3205,8 +3268,9 @@ function chatGPTTerminalResponseTextRelation(source, answer, extraction, message
     // Equal bytes cannot substitute for the independent terminal message-ID join.
     const literal = chatGPTLiteralDILResponse(answer, messageID);
     if (literal === null || literal !== extraction.text) return null;
-    if (source === literal) return 'dil_literal_json_fence';
-    return source === '<escape>' + literal + '</escape>' ? 'dil_escaped_literal_json_fence' : null;
+    const fenced = chatGPTSingleJSONFence(literal) !== null;
+    if (source === literal) return fenced ? 'dil_literal_json_fence' : 'exact';
+    return fenced && source === '<escape>' + literal + '</escape>' ? 'dil_escaped_literal_json_fence' : null;
   }
   if (source === extraction.text) return 'exact';
   const fence = chatGPTSingleJSONFence(source);

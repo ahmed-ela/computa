@@ -85,11 +85,19 @@ extension WebModelTransport {
 /// rollout persistence; only model inference goes through the website.
 actor WebModelServer {
     private static let promptLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "WebsitePrompt")
+    enum ToolTextReason: String, CaseIterable, Sendable {
+        case incompleteSnapshot = "incomplete_snapshot", snapshotTextMismatch = "snapshot_text_mismatch"
+        case missingEvidence = "missing_evidence", renderedFallback = "rendered_fallback"
+        case unsupportedExtraction = "unsupported_extraction", extractionReasonMismatch = "extraction_reason_mismatch"
+        case literalDeclined = "literal_declined"
+    }
+
     enum Failure: LocalizedError {
         case embeddedRequired, invalidRequest, busy, providerFailed, preparationDeadline, deadline, cleanupFailed
         case modelUnverified, modelMismatch, productModeUnverified
         case modelNotFound, inferenceContextRequired, persistenceRequired, startOwnershipUnconfirmed, turnLimit, requestMetadataUnavailable
         case malformedReply(WebModelResponseCodec.MalformedEnvelopeDiagnostic)
+        case toolTextUnverified(ToolTextReason)
         var errorDescription: String? {
             switch self {
             case .embeddedRequired: "Open the selected website in Computa's built-in browser and sign in before using this model."
@@ -108,6 +116,8 @@ actor WebModelServer {
             case .persistenceRequired: "The website inference evidence could not be saved locally. No model response or tool calls were released."
             case .startOwnershipUnconfirmed: "Website startup did not return a verifiable owned session. Cleanup remains unconfirmed and this task is paused."
             case .requestMetadataUnavailable: "The explicitly armed decoded metadata diagnostic could not activate. This website inference was not submitted and no prompt was replayed."
+            case .toolTextUnverified:
+                "ChatGPT's tool response text could not be verified without rendering changes. No tool calls from this reply were released and no prompt was replayed. Inspect ChatGPT in Computa before continuing."
             case let .malformedReply(diagnostic):
                 "The website returned a malformed model response envelope (\(diagnostic.reason.rawValue)). No tool calls from this reply were dispatched."
             }
@@ -1469,7 +1479,13 @@ actor WebModelServer {
                                 guard provider == "gemini" else { return }
                                 Self.promptLog.info("rejectedCallShape version=1 provider=gemini inference=\(inferenceID.uuidString.lowercased(), privacy: .public) reason=\(shape.rawValue, privacy: .public) singleUncommentedCall=\(singleUncommentedCall, privacy: .public)")
                             }
+                            try Self.requireChatGPTLiteralToolReply(reply, provider: provider, text: text, snapshot: value)
                         } catch {
+                            if case let .toolTextUnverified(reason) = error as? Failure {
+                                captureRejectedReply(text, diagnostic: .toolTextUnverified(reason), taskID: taskID,
+                                    inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
+                                throw error
+                            }
                             let diagnostic = WebModelResponseCodec.malformedEmbeddedReplyDiagnostic(text, request: request)
                             if let diagnostic {
                                 captureRejectedReply(text, diagnostic: .malformed(diagnostic), taskID: taskID,
@@ -1757,6 +1773,46 @@ actor WebModelServer {
         }
     }
 
+    /// Called synchronously after current-session/selection verification and the
+    /// strict codec, before selecting or emitting any tool call. Stable rendered
+    /// text can still contain collapsed JSON-string whitespace. Only these exact
+    /// literal extraction results may carry ChatGPT tool arguments; metadata does
+    /// not replace the ownership or model proof already required for this snapshot.
+    static func requireChatGPTLiteralToolReply(_ reply: WebModelResponseCodec.Reply,
+                                               provider: String, text: String,
+                                               snapshot: [String: Any]) throws {
+        guard provider == "chatgpt" else { return }
+        switch reply {
+        case .message, .assistantMessage: return
+        case .toolCalls, .toolCallsWithCommentary: break
+        }
+        guard snapshot["state"] as? String == "complete" else {
+            throw Failure.toolTextUnverified(.incompleteSnapshot)
+        }
+        guard let completedText = snapshot["text"] as? String,
+              completedText.utf8.elementsEqual(text.utf8) else {
+            throw Failure.toolTextUnverified(.snapshotTextMismatch)
+        }
+        guard let completion = snapshot["completionEvidence"] as? [String: Any],
+              let structure = completion["codeStructure"] as? [String: Any],
+              let extraction = structure["selectedExtraction"] as? String else {
+            throw Failure.toolTextUnverified(.missingEvidence)
+        }
+        let expectedReason: String
+        switch extraction {
+        case "raw_code": expectedReason = "accepted_literal_code"
+        case "literal_dil": expectedReason = "accepted_literal_dil"
+        case "rendered_fallback": throw Failure.toolTextUnverified(.renderedFallback)
+        default: throw Failure.toolTextUnverified(.unsupportedExtraction)
+        }
+        guard structure["extractionReason"] as? String == expectedReason else {
+            throw Failure.toolTextUnverified(.extractionReasonMismatch)
+        }
+        guard structure["literalDILDecline"] == nil else {
+            throw Failure.toolTextUnverified(.literalDeclined)
+        }
+    }
+
     /// Diagnostic shape restricts eligibility only. It never supplies a
     /// partial response or tool authority; the complete original reply remains
     /// rejected and the second reply passes the unchanged strict codec.
@@ -1857,6 +1913,7 @@ actor WebModelServer {
 
     private enum RejectedReplyDiagnostic {
         case malformed(WebModelResponseCodec.MalformedEnvelopeDiagnostic)
+        case toolTextUnverified(ToolTextReason)
         case unofferedTool
         case unsupportedWebsiteResponse
         case unsupportedCallFields
@@ -1876,6 +1933,9 @@ actor WebModelServer {
               WebsiteModelCatalog.providers.contains(session.provider) else { return }
         let diagnosticFields: [String: Any]
         switch diagnostic {
+        case let .toolTextUnverified(reason):
+            diagnosticFields = ["reason": "website_tool_text_unverified", "sourceReason": reason.rawValue,
+                                "utf8Bytes": text.utf8.count]
         case let .malformed(value):
             guard value.utf8Bytes == text.utf8.count else { return }
             diagnosticFields = ["reason": value.reason.rawValue, "utf8Bytes": value.utf8Bytes,
@@ -2529,6 +2589,7 @@ actor WebModelServer {
             case .deadline, .preparationDeadline: return .init(status: "504 Gateway Timeout", type: "server_error", code: "provider_timeout")
             case .embeddedRequired: return .init(status: "503 Service Unavailable", type: "server_error", code: "provider_unavailable")
             case .malformedReply: return .init(status: "500 Internal Server Error", type: "model_error", code: "malformed_website_reply")
+            case .toolTextUnverified: return .init(status: "400 Bad Request", type: "model_error", code: "website_tool_text_unverified")
             case .inferenceContextRequired: return .init(status: "409 Conflict", type: "invalid_request", code: "native_turn_mismatch")
             case .persistenceRequired: return .init(status: "503 Service Unavailable", type: "server_error", code: "inference_evidence_unsaved")
             case .startOwnershipUnconfirmed: return .init(status: "500 Internal Server Error", type: "model_error", code: "website_start_ownership_unconfirmed")
@@ -2597,6 +2658,11 @@ actor WebModelServer {
         if case .productModeUnverified = error as? Failure {
             fields["retryable"] = false
             fields["required_action"] = EmbeddedWebModelTransport.Failure.productModeUnverified.requiredAction
+        }
+        if case let .toolTextUnverified(reason) = error as? Failure {
+            fields["retryable"] = false
+            fields["required_action"] = "inspect_website"
+            fields["reason"] = reason.rawValue
         }
         if case let .malformedReply(diagnostic) = error as? Failure {
             fields["code"] = "malformed_website_reply"

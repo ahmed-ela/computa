@@ -93,6 +93,10 @@ struct WebsiteTurnFailureStore: Sendable {
                     // terminal turn diagnosis, not arbitrary provider prose.
                     nativeError = EmbeddedWebModelTransport.Failure.responseFormatUnavailable
                 } else { return nil }
+            case "website_tool_text_unverified":
+                guard provider == "chatgpt", let rawReason = error["reason"] as? String,
+                      let reason = WebModelServer.ToolTextReason(rawValue: rawReason) else { return nil }
+                nativeError = WebModelServer.Failure.toolTextUnverified(reason)
             case "website_turn_limit": nativeError = WebModelServer.Failure.turnLimit
             case "malformed_website_reply":
                 guard let rawReason = error["reason"] as? String,

@@ -806,7 +806,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let fenced = "```json\n" + raw + "\n```"
         let request = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
             "model": syntheticChatGPTModelID, "input": "Synthetic exact patch bytes", "tools": [["type": "custom", "name": "apply_patch"]]]))
-        for mutate in [false, true] {
+        for variant in ["legacy", "legacyMutation", "observed", "observedMutation", "observedExtraContents"] {
+            let observed = variant.hasPrefix("observed"), mutate = variant.hasSuffix("Mutation")
+            let extraContents = variant == "observedExtraContents"
+            let literal = observed ? raw : fenced
             let (fixture, token, view) = try await boundInspectionFixture(prompt: "Keep the exact owned literal patch")
             defer { fixture.shutdown() }
             let facts = try await evaluate(view, """
@@ -814,18 +817,31 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 const id='cea6201b-846d-404a-b4dc-f974e184065a';
                 answer.setAttribute('data-chatgpt-selection-message-id',id); answer.style.whiteSpace='normal';
                 const el=(tag,attrs={},text)=>{const e=document.createElement(tag);for(const [k,v] of Object.entries(attrs))e.setAttribute(k,v);if(text!==undefined)e.textContent=text;return e;};
-                const source=el('div',{'data-dil-source-message-id':id,'data-chatgpt-copy-reference':'0','data-markdown-copy':'contents'});
-                const layout=el('div'),hidden=el('div',{hidden:''}),portal=el('div',{class:'PortalBoundary-TFj9W2 Renderer-ojZscX'});
-                const dil=el('div',{class:'DilRenderer-tB76Jj DilResponseRoot-HfQrEh',dir:'auto','data-d-inline-reveal':'','data-d-direction':'col','data-dil-message-id':id});
+                const observed=\(observed),extraContents=\(extraContents);
+                const source=el('div',{'data-dil-source-message-id':id,'data-chatgpt-copy-reference':'0','data-markdown-copy':'contents',
+                  ...(observed?{class:'my-4 first:mt-0 last:mb-0 empty:hidden'}:{})});
+                const layout=el('div',observed?{class:'[--entity-prose-inset:0px]'}:{}),hidden=el('div',{hidden:''});
+                const portal=el('div',{class:observed?'relative PortalBoundary-TFj9W2 Renderer-ojZscX':'PortalBoundary-TFj9W2 Renderer-ojZscX',
+                  ...(observed?{'data-theme':'light',style:'--puik-portal-zoom: 1;'}:{})});
+                const dil=el('div',{class:'DilRenderer-tB76Jj DilResponseRoot-HfQrEh'+(observed?' Reveal-k2IWvM':''),dir:'auto',
+                  ...(observed?{'data-dil-response':''}:{'data-d-inline-reveal':''}),'data-d-direction':'col','data-dil-message-id':id});
                 const p=el('p',{class:'TextBase-hXhSqg Text-lIMP0_','data-d-text-flow':'','data-d-component':'text'});
-                const span=el('span',{'data-d-text-flow':'word','data-d-stream-word':''},\(try matchedProbeJSON(fenced)));
-                p.append(span);dil.append(p);portal.append(dil);layout.append(hidden,portal);source.append(layout);answer.replaceChildren(source);
+                const span=el('span',observed?{'data-d-text-flow':'run','data-d-stream-run':'',style:'--d-stream-ink: rgb(13, 13, 13);'}:
+                  {'data-d-text-flow':'word','data-d-stream-word':''},\(try matchedProbeJSON(literal)));
+                p.append(span);dil.append(p);portal.append(dil);layout.append(hidden,portal);source.append(layout);
+                if(observed){
+                  const css=el('style',{},'.DilResponseRoot-HfQrEh[data-dil-response]{display:flex;white-space:pre-line}.contents{display:contents}');
+                  document.head.append(css);
+                  const tail=el('div',{class:'contents'});if(extraContents)tail.append(document.createTextNode('EXTRA'));
+                  source.append(tail);
+                }
+                answer.replaceChildren(source);
                 window.fixtureLiteralSpan=span;window.fixtureLiteralRendered=answer.innerText;
                 return {literal:answer.textContent,rendered:answer.innerText,whiteSpace:getComputedStyle(p).whiteSpace};
                 """) as? [String: Any]
-            XCTAssertEqual(facts?["literal"] as? String, fenced)
-            XCTAssertNotEqual(facts?["rendered"] as? String, fenced)
-            XCTAssertEqual(facts?["whiteSpace"] as? String, "normal")
+            XCTAssertEqual(facts?["literal"] as? String, literal + (extraContents ? "EXTRA" : ""), variant)
+            XCTAssertNotEqual(facts?["rendered"] as? String, literal, variant)
+            XCTAssertEqual(facts?["whiteSpace"] as? String, observed ? "pre-line" : "normal", variant)
             if mutate {
                 // Replacing the fixture's original answer starts a new quiet
                 // candidate. Bind this exact literal body before timing its
@@ -849,13 +865,19 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 let complete = try await waitForState("complete", fixture.transport, token: token)
                 try assertChoiceEvidence(complete, choice: Self.fixtureChoice(.chatgpt))
                 let text = try XCTUnwrap(complete["text"] as? String)
-                XCTAssertEqual(Data(text.utf8), Data(fenced.utf8))
                 let evidence = try XCTUnwrap(complete["completionEvidence"] as? [String: Any])
                 let structure = try XCTUnwrap(evidence["codeStructure"] as? [String: Any])
-                XCTAssertEqual(structure["selectedExtraction"] as? String, "literal_dil")
-                guard case let .toolCalls(calls) = try WebModelResponseCodec.parseEmbeddedReply(text, request: request) else { return XCTFail("Expected strict custom call") }
-                XCTAssertEqual(calls.count, 1); XCTAssertEqual(calls[0].name, "apply_patch")
-                XCTAssertEqual(calls[0].customInput.map { Data($0.utf8) }, Data(patch.utf8))
+                if extraContents {
+                    XCTAssertEqual(structure["selectedExtraction"] as? String, "rendered_fallback")
+                    XCTAssertNotEqual(Data(text.utf8), Data(raw.utf8))
+                    XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(text, request: request))
+                } else {
+                    XCTAssertEqual(Data(text.utf8), Data(literal.utf8), variant)
+                    XCTAssertEqual(structure["selectedExtraction"] as? String, "literal_dil", variant)
+                    guard case let .toolCalls(calls) = try WebModelResponseCodec.parseEmbeddedReply(text, request: request) else { return XCTFail("Expected strict custom call") }
+                    XCTAssertEqual(calls.count, 1); XCTAssertEqual(calls[0].name, "apply_patch")
+                    XCTAssertEqual(calls[0].customInput.map { Data($0.utf8) }, Data(patch.utf8), variant)
+                }
             }
             try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
             let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
@@ -6281,36 +6303,52 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
 
     func testFirstChatPostSelectionVerificationRecoversOneIgnoredOpeningBeforePrompt() async throws {
         let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/medium", label: "Medium")
-        let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
-        defer { fixture.shutdown() }
-        let started = try await startChoice(choice, in: fixture)
-        let token = try XCTUnwrap(started["sessionToken"] as? String)
-        let ownedID = try XCTUnwrap(fixture.createdTabs.last)
-        let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
-        try await waitForFixture(view)
-        let world = WKContentWorld.world(name: "computa-chatgpt-model-v1")
-        _ = try await evaluate(view, """
-            window.fixturePostSelectionOpens = 0;
-            const trigger = document.getElementById('fixture-model-trigger');
-            const click = trigger.click;
-            trigger.click = function () {
-              if (globalThis.__computaModelSelection?.completed === true && ++window.fixturePostSelectionOpens === 1) return;
-              return click.call(this);
-            };
-            return true;
-            """, world: world)
-        let ready = try await waitForState("ready", fixture.transport, token: token)
-        try assertChoiceEvidence(ready, choice: choice)
-        let openings = try await evaluate(view, "return window.fixturePostSelectionOpens;", world: world) as? Int
-        XCTAssertEqual(openings, 2)
-        let sends = try await evaluate(view, "return window.fixturePrompts.length;") as? Int
-        XCTAssertEqual(sends, 0)
-        let finish = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
-        XCTAssertEqual(finish["cleanup"] as? String, "not_created")
-        try await assertHumanTabIntact(fixture)
+        for variant in ["ignored", "acknowledgedClosed", "closedAgain"] {
+            let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
+            defer { fixture.shutdown() }
+            let started = try await startChoice(choice, in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+            try await waitForFixture(view)
+            let world = WKContentWorld.world(name: "computa-chatgpt-model-v1")
+            _ = try await evaluate(view, """
+                window.fixturePostSelectionOpens = 0;
+                const trigger = document.getElementById('fixture-model-trigger'), click = trigger.click;
+                trigger.click = function () {
+                  if (globalThis.__computaModelSelection?.completed === true) {
+                    const count = ++window.fixturePostSelectionOpens;
+                    if (count === 1 || \(variant == "closedAgain")) {
+                      if (\(variant != "ignored")) {
+                        trigger.setAttribute('aria-expanded', 'true');
+                        trigger.setAttribute('aria-expanded', 'false');
+                      }
+                      return;
+                    }
+                  }
+                  return click.call(this);
+                };
+                return true;
+                """, world: world)
+            do {
+                let ready = try await waitForState("ready", fixture.transport, token: token)
+                XCTAssertNotEqual(variant, "closedAgain", "A second close cannot authorize another recovery")
+                try assertChoiceEvidence(ready, choice: choice)
+            } catch {
+                guard variant == "closedAgain" else { throw error }
+                XCTAssertEqual(try XCTUnwrap(error as? EmbeddedWebModelTransport.Failure), .modelUnverified)
+            }
+            let openings = try await evaluate(view, "return window.fixturePostSelectionOpens;", world: world) as? Int
+            XCTAssertEqual(openings, 2)
+            let activity = try await evaluate(view, "return [window.fixtureInputCount, window.fixturePrompts.length];") as? [Int]
+            XCTAssertEqual(activity, [0, 0])
+            let finish = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finish["cleanup"] as? String, "not_created")
+            try await assertHumanTabIntact(fixture)
+        }
     }
 
-    func testFreshProVerificationObservesDelayedMenuAfterAcknowledgedCloseWithoutAnotherClick() async throws {
+    func testFreshProVerificationObservesDelayedMenuAfterOneBoundedAcknowledgedCloseRecovery() async throws {
         let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/pro", label: "Pro")
         for variant in ["correctPower", "wrongPower", "reattachedEditor"] {
             let correctPower = variant != "wrongPower"
@@ -6383,7 +6421,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 XCTAssertEqual(changed, true, "The same physical editor was actually detached and reinserted")
             }
             let openings = try await evaluate(view, "return window.fixtureVerifyOpens;", world: world) as? Int
-            XCTAssertEqual(openings, 1, "Observing the late associated popup must not toggle the header again")
+            XCTAssertEqual(openings, variant == "reattachedEditor" ? 1 : 2, "Only an intact empty editor may spend one recovery; a late associated popup never grants a third opening")
             let activity = try await evaluate(view, "return [window.fixtureInputCount, window.fixturePrompts.length];") as? [Int]
             XCTAssertEqual(activity, [0, 0])
             let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
