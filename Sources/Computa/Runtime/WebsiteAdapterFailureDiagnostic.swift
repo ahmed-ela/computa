@@ -105,6 +105,19 @@ enum WebsiteAdapterFailureDiagnostic {
                     guard reason == "count", count > 0 else { return nil }
                 case "outside":
                     guard ["scope", "node_limit"].contains(reason) else { return nil }
+                case "code_candidate":
+                    guard ["custom_shape", "markdown_shape", "phase_shape", "pre_shape", "header_wrapper",
+                           "header_shape", "language", "actions_shape", "body_classes", "body_tag", "body_attributes",
+                               "body_visibility", "body_id", "body_empty", "body_children",
+                           "plain_code_tag", "plain_code_attributes", "plain_code_visibility", "plain_code_shape",
+                               "editor_tag", "editor_class", "editor_attributes", "editor_visibility", "body_geometry", "control_label", "control_shape",
+                           "control_decoration", "collapse_state", "missing_copy", "ancestor_limit",
+                           "ancestor_visibility", "ancestor_root"].contains(reason) else { return nil }
+                case "code_sample":
+                    guard ["channel_missing", "channel_shape", "candidate_changed", "candidate_missing",
+                           "ancestor_limit", "synchronous_mutation", "result_missing", "result_multiple",
+                           "result_invalid", "result_fields", "write_count", "write_invalid", "write_type",
+                           "write_size", "utf8_roundtrip"].contains(reason) else { return nil }
                 default: return nil
                 }
                 guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]) else { return nil }
@@ -138,6 +151,16 @@ enum WebsiteAdapterFailureDiagnostic {
               let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]),
               data.count <= maximumPacketBytes else { return nil }
         return Packet(provider: provider, trigger: trigger, data: data)
+    }
+
+    /// Ordinary failure logging is limited to the closed six-field Qwen packet.
+    /// Other providers' larger structure records remain opt-in only.
+    static func qwenAuthoredLogFields(_ packet: Packet) -> String? {
+        guard packet.provider == "qwen", packet.trigger == "authored_source", packet.data.count <= 512,
+              let value = try? JSONSerialization.jsonObject(with: packet.data),
+              let checked = sanitize(value, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"),
+              checked.data == packet.data else { return nil }
+        return String(data: packet.data, encoding: .utf8)
     }
 
     private static func candidates(_ raw: Any?, categories: Set<String>, kind: String) -> Bool {

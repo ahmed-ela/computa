@@ -22,7 +22,7 @@ const checks: [string, string, number, (f: Page) => void][] = [
   ['custom', 'parent_hidden', 0, f => { f.phase.setAttribute('hidden', ''); }],
   ['custom', 'count', 0, f => { f.phase.replaceChildren(); }],
   ['markdown', 'mixed_text', 0, f => { f.phase.children[0].text = 'SYNTHETIC_PRIVATE'; }],
-  ['paragraph', 'tag', 0, f => { f.markdown.replaceChildren(new f.Node('PRE', {class:'SYNTHETIC_CLASS'})); }],
+  ['paragraph', 'tag', 0, f => { f.markdown.replaceChildren(new f.Node('SECTION', {class:'SYNTHETIC_CLASS'})); }],
   ['inline', 'other', 0, f => { f.paragraph.append(new f.Node('A')); }],
   ['literal', 'class', 0, f => { f.literal.setAttribute('class','SYNTHETIC_UNKNOWN'); }],
   ['literal', 'hidden', 0, f => { f.literal.setAttribute('hidden',''); }],

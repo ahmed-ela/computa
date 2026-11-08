@@ -225,3 +225,61 @@ test('Qwen layout allowance keeps style and class bounds and unknown structure r
     expect(t.x.copy.clicks).toBe(0);expect(t.f.send.clicks).toBe(1);expect(t.s.delegated()).toBe(0);
   }
 });
+
+test('Qwen code candidate decline reports its first finite gate without private values or new actions',()=>{
+  const checks:[string,(f:ReturnType<typeof fixture>,x:ReturnType<typeof installCode>)=>void][]=[
+    ['custom_shape',(f)=>f.phase.children[0].setAttribute('data-private','PRIVATE_ATTRIBUTE')],
+    ['markdown_shape',(f)=>f.markdown.setAttribute('data-private','PRIVATE_ATTRIBUTE')],
+    ['phase_shape',(f)=>f.phase.setAttribute('data-private','PRIVATE_ATTRIBUTE')],
+    ['pre_shape',(_,x)=>x.pre.setAttribute('dir','rtl')],
+    ['header_wrapper',(_,x)=>x.wrap.setAttribute('data-private','PRIVATE_ATTRIBUTE')],
+    ['header_shape',(_,x)=>x.header.append(x.language.cloneNode(true))],
+    ['language',(_,x)=>x.language.text='PRIVATE_LANGUAGE'],
+    ['actions_shape',(_,x)=>x.actions.setAttribute('data-private','PRIVATE_ATTRIBUTE')],
+    ['body_classes',(_,x)=>x.body.setAttribute('class','PRIVATE_CLASS')],
+    ['body_tag',(_,x)=>x.body.tagName='SPAN'],
+    ['body_attributes',(_,x)=>x.body.setAttribute('data-private','PRIVATE_ATTRIBUTE')],
+    ['body_visibility',(_,x)=>x.body.computedStyle.visibility='hidden'],
+    ['body_id',(_,x)=>x.body.removeAttribute('id')],
+    ['body_empty',(_,x)=>x.body.replaceChildren()],
+    ['body_children',(_,x)=>x.body.append(x.code.cloneNode(true))],
+    ['plain_code_tag',(_,x)=>x.code.tagName='DIV'],
+    ['plain_code_visibility',(_,x)=>x.code.computedStyle.visibility='hidden'],
+    ['plain_code_shape',(_,x)=>{Object.defineProperty(x.code,'childNodes',{value:[],configurable:true});}],
+    ['plain_code_attributes',(_,x)=>x.code.setAttribute('data-private','PRIVATE_ATTRIBUTE')],
+    ['body_geometry',(_,x)=>x.body.getBoundingClientRect=()=>({left:10,top:10,width:0,height:30})],
+    ['control_shape',(_,x)=>x.copy.setAttribute('data-private','PRIVATE_ATTRIBUTE')],
+    ['control_decoration',(_,x)=>x.copy.children[0].text='PRIVATE_ICON_TEXT'],
+    ['control_label',(_,x)=>x.copy.setAttribute('aria-label','PRIVATE_LABEL')],
+    ['collapse_state',(_,x)=>x.actions.children[2].setAttribute('aria-expanded','false')],
+    ['missing_copy',(_,x)=>x.copy.detach()],
+    ['ancestor_limit',(f)=>{for(let i=0;i<65;i++){const parent=f.phase.parentElement!,wrap=new f.Node('DIV');Object.defineProperty(wrap,'namespaceURI',{value:html});Object.assign(wrap.computedStyle,f.body.computedStyle);parent.replaceChildren(wrap);wrap.append(f.phase);}}],
+    ['ancestor_visibility',(f)=>f.body.computedStyle.opacity='0'],
+    ['ancestor_root',(f)=>{f.document.documentElement=new f.Node('HTML');}]
+  ];
+  for(const [reason,mutate] of [
+    ['editor_tag',(node:any)=>node.tagName='SPAN'],['editor_class',(node:any)=>node.setAttribute('class','PRIVATE_CLASS')],
+    ['editor_attributes',(node:any)=>node.setAttribute('data-private','PRIVATE_ATTRIBUTE')],['editor_visibility',(node:any)=>node.computedStyle.visibility='hidden']
+  ] as const)checks.push([reason,(f,x)=>{x.body.setAttribute('class','qwen-markdown-code-body json');const node=new f.Node('DIV',{class:'qwen-markdown-code-editor-viewport'});Object.defineProperty(node,'namespaceURI',{value:html});Object.assign(node.computedStyle,x.body.computedStyle);x.body.replaceChildren(node);mutate(node);}]);
+  for(const [reason,mutate] of checks){
+    const f=fixture();f.mountConversation();const x=installCode(f);mutate(f,x);const d=f.read(),r=d.rawAnswer(d.transcript().answer);
+    expect(r.text,reason).toBe('');expect(r.formatIssue,reason).toBe(true);
+    expect(r.failureStructure(),reason).toEqual({version:1,provider:'qwen',trigger:'authored_source',stage:'code_candidate',reason,count:0});
+    expect(JSON.stringify(r.failureStructure())).not.toContain('PRIVATE');expect(x.copy.clicks).toBe(0);
+  }
+});
+
+test('Qwen sampled refusal distinguishes finite sink cardinality and mutation without returning bytes or another click',async()=>{
+  for(const [kind,reason] of [['zero','write_count'],['double','write_count'],['invalid','write_invalid'],['mutation','synchronous_mutation']] as const){
+    const t=await owned();t.x.copy.onClick=()=>{
+      if(kind==='zero')return;
+      t.s.navigator.clipboard.writeText(kind==='invalid'?'x'.repeat(220001):payload);
+      if(kind==='double')t.s.navigator.clipboard.writeText(payload);
+      if(kind==='mutation')t.f.notifyAttribute('class');
+    };
+    const r=await t.sample();expect(r.error).toBe('unsupported_response_format');expect(r.text).toBeUndefined();
+    expect(r.adapterFailureStructure).toEqual({version:1,provider:'qwen',trigger:'authored_source',stage:'code_sample',reason,count:0});
+    expect(t.x.copy.clicks).toBe(1);expect(t.s.delegated()).toBe(0);
+    expect((await t.sample()).error).toBeTruthy();expect(t.x.copy.clicks).toBe(1);
+  }
+});

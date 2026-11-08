@@ -236,11 +236,63 @@ enum APIModelResponseCodec {
         let constraint: SchemaConstraint
         let path: [SchemaPathPart]
         var location: BuiltinSchemaLocation? = nil
+        var patchLocation: LocalPatchSchemaLocation? = nil
     }
     struct FiniteSchemaFailure: Codable, Equatable, Sendable {
         let toolIndex: Int
         let constraint: SchemaConstraint
         var location: BuiltinSchemaLocation? = nil
+        var patchLocation: LocalPatchSchemaLocation? = nil
+    }
+    /// Diagnostic-only location in the exact local typed-patch operation union.
+    /// No argument values, unknown keys, file paths or array indexes are retained.
+    struct LocalPatchSchemaLocation: Codable, Equatable, Sendable {
+        enum Operation: String, Codable, Sendable { case notObject = "not_object", missing, ambiguous, add, delete, update }
+        enum Field: String, Codable, Sendable {
+            case operation, path, lines, line, hunks, hunk, anchor
+            case moveTo = "move_to", endOfFile = "end_of_file"
+        }
+        let operation: Operation
+        let field: Field
+        let constraint: SchemaConstraint
+        var isConsistent: Bool {
+            if operation == .notObject { return field == .operation && constraint == .typeMismatch }
+            if operation == .missing || operation == .ambiguous { return field == .operation && constraint == .schemaMismatch }
+            let fields: Set<Field>
+            switch operation {
+            case .add: fields = [.operation, .path, .lines, .line]
+            case .delete: fields = [.operation, .path]
+            case .update: fields = [.operation, .path, .moveTo, .endOfFile, .hunks, .hunk, .anchor, .lines, .line]
+            default: return false
+            }
+            guard fields.contains(field) else { return false }
+            switch constraint {
+            case .unexpectedFields: return field == .operation || field == .hunk
+            case .missingRequired: return field == .lines || field == .hunks
+            case .arrayBounds: return field == .lines || field == .hunks
+            case .typeMismatch: return field != .operation
+            case .schemaMismatch: return [.path, .moveTo, .endOfFile, .anchor, .line].contains(field)
+            case .readModeConflict: return false
+            }
+        }
+        init(operation: Operation, field: Field, constraint: SchemaConstraint) {
+            self.operation = operation; self.field = field; self.constraint = constraint
+        }
+        private enum CodingKeys: String, CodingKey, CaseIterable { case operation, field, constraint }
+        private struct Key: CodingKey {
+            let stringValue: String; var intValue: Int? { nil }
+            init?(stringValue: String) { self.stringValue = stringValue }
+            init?(intValue: Int) { return nil }
+        }
+        init(from decoder: any Decoder) throws {
+            let keys = Set(try decoder.container(keyedBy: Key.self).allKeys.map(\.stringValue))
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            self.init(operation: try values.decode(Operation.self, forKey: .operation),
+                field: try values.decode(Field.self, forKey: .field), constraint: try values.decode(SchemaConstraint.self, forKey: .constraint))
+            guard keys == Set(CodingKeys.allCases.map(\.stringValue)), isConsistent else {
+                throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid finite local patch location."))
+            }
+        }
     }
     /// Closed vocabulary for app-owned browser contracts only. Custom/MCP
     /// names, schema keys and rejected argument values never enter diagnostics.
@@ -311,6 +363,7 @@ enum APIModelResponseCodec {
     private struct SchemaViolation {
         let constraint: SchemaConstraint; let path: [SchemaPathPart]
         var actualType: DiagnosticJSONType? = nil
+        var patchLocation: LocalPatchSchemaLocation? = nil
     }
     /// Finite observations only. This callback cannot authorize correction or
     /// publish any call; all existing complete-envelope gates remain authoritative.
@@ -1096,7 +1149,7 @@ enum APIModelResponseCodec {
         }
         func emitArgumentRejection(oversized: Bool = false) {
             guard let reason = rejectionReason else { return }
-            onArgumentRejection?(.init(reason: reason, envelopeRejection: envelopeRejection, jsonRejection: jsonRejection, schemaFailures: rejectionDetails.isEmpty ? nil : rejectionDetails.prefix(2).map { .init(toolIndex: $0.toolIndex, constraint: $0.constraint, location: $0.location) }, callCount: validatedCalls.count, rejectedCount: rejectedCount,
+            onArgumentRejection?(.init(reason: reason, envelopeRejection: envelopeRejection, jsonRejection: jsonRejection, schemaFailures: rejectionDetails.isEmpty ? nil : rejectionDetails.prefix(2).map { .init(toolIndex: $0.toolIndex, constraint: $0.constraint, location: $0.location, patchLocation: $0.patchLocation) }, callCount: validatedCalls.count, rejectedCount: rejectedCount,
                 envelopeShapeValid: envelopeShapeValid, unambiguousJSON: unambiguousJSON,
                 streamShapeAndUsageValid: streamShapeAndUsageValid, knownUsage: correctionUsage(normalizedUsage) != nil,
                 correctionEligible: rawCorrectionEligible && correctionUsage(normalizedUsage) != nil && !oversized))
@@ -1108,7 +1161,8 @@ enum APIModelResponseCodec {
             do { parsedArguments.append(try validatedArguments(call.arguments, tool: call.tool, onRejection: observe, onSchemaMismatch: { violation in
                 if rejectionDetails.count < 8, let index = request.tools.firstIndex(where: { $0.wireName == call.tool.wireName }) {
                     rejectionDetails.append(.init(toolIndex: index, wireName: call.tool.wireName, constraint: violation.constraint,
-                        path: violation.path, location: builtinSchemaLocation(tool: request.tools[index], violation: violation)))
+                        path: violation.path, location: builtinSchemaLocation(tool: request.tools[index], violation: violation),
+                        patchLocation: violation.patchLocation))
                 }
             })) }
             catch let failure as Failure where failure == .invalidArguments {
@@ -1632,6 +1686,81 @@ enum APIModelResponseCodec {
         }
         return nil
     }
+    private static func localPatchSchemaLocation(_ object: [String: Any], tool: Tool) -> LocalPatchSchemaLocation? {
+        // patchProjection is granted only for the exact bundled native grammar
+        // on the supported Alibaba admission. Recheck its complete offered schema.
+        guard tool.custom, tool.name == "apply_patch", tool.namespace == nil || tool.namespace == "functions",
+              tool.patchProjection == .local, equalJSON(tool.schema, AlibabaPatchProjection.local.schema),
+              object.count == 1, let operations = object["operations"] as? [Any],
+              (1...64).contains(operations.count),
+              let properties = tool.schema["properties"] as? [String: [String: Any]],
+              let items = properties["operations"]?["items"] as? [String: Any],
+              let branches = items["oneOf"] as? [[String: Any]], branches.count == 3 else { return nil }
+        typealias Location = LocalPatchSchemaLocation
+        var nodes = 0, exhausted = false
+        func visit(_ value: Any, schema: [String: Any], operation: Location.Operation, field: Location.Field) -> Location? {
+            nodes += 1
+            guard nodes <= 256 else { exhausted = true; return nil }
+            func failure(_ constraint: SchemaConstraint, _ field: Location.Field) -> Location {
+                .init(operation: operation, field: field, constraint: constraint)
+            }
+            guard let type = schema["type"] as? String, typeMatches(value, type: type) else { return failure(.typeMismatch, field) }
+            if let value = value as? [String: Any], let properties = schema["properties"] as? [String: [String: Any]] {
+                guard value.count <= 16 else { exhausted = true; return nil }
+                func childField(_ name: String) -> Location.Field? {
+                    switch name {
+                    case "add", "delete", "update": return .path
+                    case "lines": return .lines
+                    case "hunks": return .hunks
+                    case "anchor": return .anchor
+                    case "move_to": return .moveTo
+                    case "end_of_file": return .endOfFile
+                    default: return nil
+                    }
+                }
+                for name in (schema["required"] as? [String] ?? []).sorted() where value[name] == nil {
+                    guard let child = childField(name) else { exhausted = true; return nil }
+                    return failure(.missingRequired, child)
+                }
+                if value.keys.contains(where: { properties[$0] == nil }) { return failure(.unexpectedFields, field) }
+                for name in properties.keys.sorted() {
+                    guard let child = value[name] else { continue }
+                    guard let target = childField(name) else { exhausted = true; return nil }
+                    if let result = visit(child, schema: properties[name]!, operation: operation, field: target) { return result }
+                    if exhausted { return nil }
+                }
+            } else if let value = value as? [Any], let items = schema["items"] as? [String: Any] {
+                guard value.count <= 256 else { exhausted = true; return nil }
+                if value.isEmpty { return failure(.arrayBounds, field) }
+                let child: Location.Field
+                if field == .hunks { child = .hunk }
+                else if field == .lines { child = .line }
+                else { exhausted = true; return nil }
+                for item in value {
+                    if let result = visit(item, schema: items, operation: operation, field: child) { return result }
+                    if exhausted { return nil }
+                }
+            } else if !matches(value, schema: schema, root: schema, depth: 0) {
+                // Exact known scalar pattern/enum constraints only, no value text.
+                return failure(.schemaMismatch, field)
+            }
+            return nil
+        }
+        for item in operations {
+            guard let value = item as? [String: Any] else { return .init(operation: .notObject, field: .operation, constraint: .typeMismatch) }
+            let kinds = ["add", "delete", "update"].filter { value[$0] != nil }
+            guard !kinds.isEmpty else { return .init(operation: .missing, field: .operation, constraint: .schemaMismatch) }
+            guard kinds.count == 1 else { return .init(operation: .ambiguous, field: .operation, constraint: .schemaMismatch) }
+            let name = kinds[0], index = name == "add" ? 0 : name == "delete" ? 1 : 2
+            guard let operation = Location.Operation(rawValue: name) else { return nil }
+            if let result = visit(value, schema: branches[index], operation: operation, field: .operation) {
+                return result.isConsistent ? result : nil
+            }
+            if exhausted { return nil }
+        }
+        return nil
+    }
+
     private static func validatedArguments(_ text: String, tool: Tool,
                                            onRejection: ((ArgumentValidationDiagnostic.Reason) -> Void)? = nil,
                                            onSchemaMismatch: ((SchemaViolation) -> Void)? = nil) throws -> [String: Any] {
@@ -1666,6 +1795,9 @@ enum APIModelResponseCodec {
                 if violation.constraint == .schemaMismatch, violation.path.isEmpty, violation.actualType == nil {
                     violation = .init(constraint: .schemaMismatch, path: [], actualType: .object)
                 }
+                // This independent observation never changes the violation/path
+                // used by the existing corrective feedback or admission decision.
+                violation.patchLocation = localPatchSchemaLocation(object, tool: tool)
                 onSchemaMismatch(violation)
             }
             onRejection?(.schemaMismatch); throw Failure.invalidArguments

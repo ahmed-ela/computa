@@ -616,15 +616,15 @@ async function computaSavedConversation(input, c, dom, config) {
       }
       let codeMetadata = null;
       if (qwenCodeEnabled && !cleanupInspection && !state.deletion && !deletionActions.includes(input.action) && extracted.codePayload && terminalUI) {
-        if (!input.qwenCodePayloadChannel) c.fail('unsupported_response_format', 'authored_source');
+        if (!input.qwenCodePayloadChannel) dom.codePayloadFailure('channel_missing');
         const current = extracted.codePayload;
         if (state.codePayload && !sameCodeAnswer(state.codePayload.source,t.answer)) c.fail('conversation_changed','response_identity');
-        if (state.codePayload && !sameCode(state.codePayload.source,current)) c.fail('unsupported_response_format','authored_source');
+        if (state.codePayload && !sameCode(state.codePayload.source,current)) dom.codePayloadFailure('candidate_changed');
         if (!state.codePayload) state.codePayload = {candidate:crypto.randomUUID(),source:current,spent:false};
         codeMetadata = {version:1,state:'pending',candidate:state.codePayload.candidate,responseID:current.responseID};
       } else if (state.codePayload && !cleanupInspection && !state.deletion && !deletionActions.includes(input.action)) {
         if (!sameCodeAnswer(state.codePayload.source,t.answer)) c.fail('conversation_changed','response_identity');
-        c.fail('unsupported_response_format','authored_source');
+        dom.codePayloadFailure('candidate_missing');
       }
       const complete = terminalUI && extracted.finalMarkup && !!extracted.text.trim();
       return { t, form, output: { url: document.URL, sessionLifecycle: 'saved_conversation_delete', temporary: false,
@@ -965,7 +965,7 @@ async function computaSavedConversation(input, c, dom, config) {
             c.fail('conversation_changed','response_identity');
           // This dispatch samples the provider's owned Copy source; it is not a
           // pointer gesture and carries no general browser-action hit authority.
-          if (!sameCode(held.source,current)) c.fail('unsupported_response_format','authored_source');
+          if (!sameCode(held.source,current)) dom.codePayloadFailure('candidate_changed');
         };
         // This final source sample follows every body/model await. Neither the
         // callback nor this return path may introduce a source-dependent await.

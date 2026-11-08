@@ -6895,6 +6895,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if let error = observed["error"] as? String {
             if !allowBlockedProvider, let packet = adapterFailureStructure,
                let detail = observed["detail"] as? String {
+                if provider == .qwen, !session.loggedSavedAdapterFailure,
+                   let structure = WebsiteAdapterFailureDiagnostic.qwenAuthoredLogFields(packet) {
+                    let context = session.adapterFailureContext
+                    let task = context?.taskID.uuidString.lowercased() ?? "none"
+                    let turn = context?.turnID.uuidString.lowercased() ?? "none"
+                    let inference = context?.inferenceID.uuidString.lowercased() ?? "none"
+                    Self.inspectionLog.error("adapterFailureStructure version=1 provider=qwen task=\(task, privacy: .public) turn=\(turn, privacy: .public) inference=\(inference, privacy: .public) session=\(session.token, privacy: .public) generation=\(generation.uuidString.lowercased(), privacy: .public) sequence=\(session.sequence) structure=\(structure, privacy: .public)")
+                }
                 await captureAdapterFailureStructure(session, packet: packet, error: error, detail: detail,
                     generation: generation)
             }

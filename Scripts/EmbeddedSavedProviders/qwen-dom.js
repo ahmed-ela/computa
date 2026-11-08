@@ -612,6 +612,8 @@ function computaQwenDOM(c) {
     }
     // The public renderer's header Copy closes over token.text in either presentation.
     // This is metadata only; no viewport text or payload is read here.
+    let codeDeclineReason = 'custom_shape';
+    const codeDecline = reason => { codeDeclineReason = reason; return null; };
     function codePayloadCandidate(pre, markdown) {
       const html = 'http://www.w3.org/1999/xhtml';
       const attrs = (node, names) => node.attributes.length <= names.length
@@ -644,40 +646,56 @@ function computaQwenDOM(c) {
       const exact = (node, tag, cls, names = ['class']) => node?.tagName === tag
         && classes(node, cls) && attrs(node, names) && plain(node);
       const custom = markdown.parentElement;
-      if (!exact(custom, 'DIV', 'custom-qwen-markdown') || custom.childNodes.length !== 1
-        || !['qwen-markdown', 'qwen-markdown qwen-markdown-loose'].some(cls => classes(markdown, cls))
-        || !attrs(markdown, ['class']) || !plain(markdown) || markdown.childNodes.length !== 1
-        || phase.childNodes.length !== 1 || !attrs(phase, ['class']) || !plain(phase)
-        || !classes(phase, 'response-message-content t2t phase-answer')
-        || !exact(pre, 'PRE', 'qwen-markdown-code', ['class', 'dir']) || pre.getAttribute('dir') !== 'ltr'
-        || pre.childNodes.length !== 2) return null;
+      if (!exact(custom, 'DIV', 'custom-qwen-markdown') || custom.childNodes.length !== 1)
+        return codeDecline('custom_shape');
+      if (!['qwen-markdown', 'qwen-markdown qwen-markdown-loose'].some(cls => classes(markdown, cls))
+        || !attrs(markdown, ['class']) || !plain(markdown) || markdown.childNodes.length !== 1)
+        return codeDecline('markdown_shape');
+      if (phase.childNodes.length !== 1 || !attrs(phase, ['class']) || !plain(phase)
+        || !classes(phase, 'response-message-content t2t phase-answer')) return codeDecline('phase_shape');
+      if (!exact(pre, 'PRE', 'qwen-markdown-code', ['class', 'dir']) || pre.getAttribute('dir') !== 'ltr'
+        || pre.childNodes.length !== 2) return codeDecline('pre_shape');
       const [headerWrap, body] = pre.childNodes;
       if (!['qwen-markdown-code-header-wrapper', 'qwen-markdown-code-header-wrapper qwen-markdown-code-header-wrapper-sticky'].some(cls => classes(headerWrap, cls))
         || headerWrap.tagName !== 'DIV' || !attrs(headerWrap, ['class', 'style']) || !plain(headerWrap)
-        || headerWrap.childNodes.length !== 1) return null;
+        || headerWrap.childNodes.length !== 1) return codeDecline('header_wrapper');
       // Height/top and class serialization order do not bind Copy's token.text.
       // Bound style size while retaining the exact known structural token sets,
       // attribute names, enabled/hidden checks and the held official control.
       const header = headerWrap.childNodes[0];
       if (!exact(header, 'DIV', 'qwen-markdown-code-header', ['class', 'style'])
-        || header.childNodes.length !== 2) return null;
+        || header.childNodes.length !== 2) return codeDecline('header_shape');
       const [language, actions] = header.childNodes;
       if (language.tagName !== 'DIV' || language.attributes.length || !plain(language)
-        || language.childNodes.length !== 1 || language.childNodes[0].nodeType !== 3 || language.textContent !== 'json'
-        || !exact(actions, 'DIV', 'qwen-markdown-code-header-actions') || actions.childNodes.length > 3
-        || !['qwen-markdown-code-body qwen-markdown-code-body-streaming json',
-          'qwen-markdown-code-body json', 'qwen-markdown-code-body json qwen-markdown-code-body-virtual'].some(cls => classes(body, cls))
-        || body.tagName !== 'DIV' || !attrs(body, ['class', 'id', 'style']) || !plain(body)
-        || !body.getAttribute('id') || body.getAttribute('id').length > 128 || body.childNodes.length !== 1) return null;
+        || language.childNodes.length !== 1 || language.childNodes[0].nodeType !== 3 || language.textContent !== 'json')
+        return codeDecline('language');
+      if (!exact(actions, 'DIV', 'qwen-markdown-code-header-actions') || actions.childNodes.length > 3)
+        return codeDecline('actions_shape');
+      if (!['qwen-markdown-code-body qwen-markdown-code-body-streaming json',
+          'qwen-markdown-code-body json', 'qwen-markdown-code-body json qwen-markdown-code-body-virtual'].some(cls => classes(body, cls)))
+        return codeDecline('body_classes');
+      if (body.tagName !== 'DIV') return codeDecline('body_tag');
+      if (!attrs(body, ['class', 'id', 'style'])) return codeDecline('body_attributes');
+      if (!plain(body)) return codeDecline('body_visibility');
+      if (!body.getAttribute('id') || body.getAttribute('id').length > 128) return codeDecline('body_id');
+      const bodyChildren = body.childNodes.length;
+      if (bodyChildren !== 1) return codeDecline(bodyChildren === 0 ? 'body_empty' : 'body_children');
       const presentation = body.childNodes[0];
       if (body.classList.contains('qwen-markdown-code-body-streaming')) {
-        if (presentation.tagName !== 'CODE' || presentation.attributes.length || !plain(presentation)
-          || presentation.childNodes.length !== 1 || presentation.childNodes[0].nodeType !== 3) return null;
-      } else if (!exact(presentation, 'DIV', 'qwen-markdown-code-editor-viewport')) return null;
+        if (presentation.tagName !== 'CODE') return codeDecline('plain_code_tag');
+        if (presentation.attributes.length) return codeDecline('plain_code_attributes');
+        if (!plain(presentation)) return codeDecline('plain_code_visibility');
+        if (presentation.childNodes.length !== 1 || presentation.childNodes[0].nodeType !== 3) return codeDecline('plain_code_shape');
+      } else {
+        if (presentation?.tagName !== 'DIV') return codeDecline('editor_tag');
+        if (!classes(presentation, 'qwen-markdown-code-editor-viewport')) return codeDecline('editor_class');
+        if (!attrs(presentation, ['class'])) return codeDecline('editor_attributes');
+        if (!plain(presentation)) return codeDecline('editor_visibility');
+      }
       // The known editor presentation is opaque provider output. Its viewport
       // is never a complete source; only the official code Copy supplies bytes.
       const rect = body.getBoundingClientRect();
-      if (!Number.isFinite(rect.width) || !Number.isFinite(rect.height) || rect.width <= 0 || rect.height <= 0) return null;
+      if (!Number.isFinite(rect.width) || !Number.isFinite(rect.height) || rect.width <= 0 || rect.height <= 0) return codeDecline('body_geometry');
       let decorationBudget = 64;
       const decoration = (node, depth, icon) => {
         if (--decorationBudget < 0 || depth > 8 || node.nodeType !== 1 || node.childNodes.length > 8
@@ -701,28 +719,30 @@ function computaQwenDOM(c) {
       const labels = new Set(); let control = null;
       for (const button of actions.childNodes) {
         const label = button.getAttribute?.('aria-label');
-        if (button.tagName !== 'BUTTON' || !['Copy', 'Download', 'Collapse Code'].includes(label) || labels.has(label)
-          || !attrs(button, ['class', 'type', 'aria-label', 'aria-expanded', 'aria-controls']) || !plain(button) || !c.enabled(button)
+        if (button.tagName !== 'BUTTON' || !['Copy', 'Download', 'Collapse Code'].includes(label) || labels.has(label))
+          return codeDecline('control_label');
+        if (!attrs(button, ['class', 'type', 'aria-label', 'aria-expanded', 'aria-controls']) || !plain(button) || !c.enabled(button)
           || !['qwen-markdown-code-header-action-item', ...(label === 'Collapse Code' ? ['qwen-markdown-code-collapse-btn'] : [])]
             .some(cls => classes(button, 'qwen-chat-v2-btn qwen-chat-v2-btn-text qwen-chat-v2-btn-s qwen-chat-v2-btn-icon-only ' + cls))
-          || button.getAttribute('type') !== null && button.getAttribute('type') !== 'button'
-          || button.childNodes.length > 4 || [...button.childNodes].some(child => !decoration(child, 0,
-            label === 'Copy' ? 'copy' : label === 'Download' ? 'download' : 'up'))) return null;
+          || button.getAttribute('type') !== null && button.getAttribute('type') !== 'button') return codeDecline('control_shape');
+        if (button.childNodes.length > 4 || [...button.childNodes].some(child => !decoration(child, 0,
+            label === 'Copy' ? 'copy' : label === 'Download' ? 'download' : 'up'))) return codeDecline('control_decoration');
         labels.add(label); if (label === 'Copy') control = button;
         if (label === 'Collapse Code' ? button.getAttribute('aria-expanded') !== 'true'
           || button.getAttribute('aria-controls') !== body.getAttribute('id')
-          : button.getAttribute('aria-expanded') !== null || button.getAttribute('aria-controls') !== null) return null;
+          : button.getAttribute('aria-expanded') !== null || button.getAttribute('aria-controls') !== null) return codeDecline('collapse_state');
       }
-      if (!control) return null;
+      if (!control) return codeDecline('missing_copy');
       const nodes = [phase, custom, markdown, pre, headerWrap, header, language, actions, body, presentation, control];
       let ancestor = phase.parentElement, depth = 0, contentFound = false, last = null;
       while (ancestor) {
-        if (++depth > 64 || !(contentFound ? shown(ancestor, false) : plain(ancestor))) return null;
+        if (++depth > 64 || !(contentFound ? shown(ancestor, false) : plain(ancestor)))
+          return codeDecline(depth > 64 ? 'ancestor_limit' : 'ancestor_visibility');
         nodes.push(ancestor);
         if (ancestor === answer.content) contentFound = true;
         last = ancestor; ancestor = ancestor.parentElement;
       }
-      if (!contentFound || last !== document.documentElement) return null;
+      if (!contentFound || last !== document.documentElement) return codeDecline('ancestor_root');
       return { nodes, control, root:answer.root, content:answer.content, responseID:answer.id };
     }
     let literal = phase, splitParagraph = null, codePayload = null;
@@ -745,7 +765,7 @@ function computaQwenDOM(c) {
       literal = literal.children[0];
       if (stage === 'paragraph' && literal.tagName === 'PRE') {
         codePayload = codePayloadCandidate(literal, literal.parentElement);
-        if (!codePayload) return unsupported('outside', 'scope');
+        if (!codePayload) return unsupported('code_candidate', codeDeclineReason);
         break;
       }
       if (literal.tagName !== tag) return unsupported(stage, 'tag');
@@ -786,18 +806,30 @@ function computaQwenDOM(c) {
     // invalid JSON. The codec independently validates the unchanged bytes.
     return { text, finalMarkup: true, formatIssue: false };
   }
+  function codePayloadFailure(reason) {
+    try { c.fail('unsupported_response_format', 'authored_source'); }
+    catch (error) {
+      if (error?.computaAdapterFailure) error.adapterFailureStructure = {
+        version:1, provider:'qwen', trigger:'authored_source', stage:'code_sample', reason, count:0
+      };
+      throw error;
+    }
+  }
   function sampleCodePayload(candidate, channel, grant, recheck) {
-    const fail = () => c.fail('unsupported_response_format', 'authored_source');
+    const fail = codePayloadFailure;
     if (!channel || Object.keys(channel).sort().join(',') !== 'dispatch,result,secret'
-      || ![channel.dispatch,channel.result,channel.secret].every(c.uuid) || !c.uuid(grant)) fail();
-    let count = 0, captured = null, changed = false;
+      || ![channel.dispatch,channel.result,channel.secret].every(c.uuid) || !c.uuid(grant)) fail('channel_shape');
+    let count = 0, captured = null, changed = false, resultReason = 'result_invalid';
     const observer = new MutationObserver(records => { if (records.length) changed = true; });
     const listener = event => {
       if (event.target !== candidate.control || event.detail?.grant !== grant) return;
       count++;
       const value = event.detail;
-      if (Object.keys(value).sort().join(',') !== 'count,grant,invalid,text' || value.count !== 1 || value.invalid !== false
-        || typeof value.text !== 'string' || value.text.length > 220_000) return;
+      if (Object.keys(value).sort().join(',') !== 'count,grant,invalid,text') { resultReason = 'result_fields'; return; }
+      if (value.count !== 1) { resultReason = 'write_count'; return; }
+      if (value.invalid !== false) { resultReason = 'write_invalid'; return; }
+      if (typeof value.text !== 'string') { resultReason = 'write_type'; return; }
+      if (value.text.length > 220_000) { resultReason = 'write_size'; return; }
       captured = value.text;
     };
     document.addEventListener(channel.result, listener, true);
@@ -806,7 +838,7 @@ function computaQwenDOM(c) {
       // Observe the complete bounded chain, including the Document parent of HTML.
       // Same-node detach/reinsert and restored ancestor masking must still refuse.
       const parents = new Set(candidate.nodes.map(node => node.parentNode).filter(Boolean));
-      if (parents.size > 96) fail();
+      if (parents.size > 96) fail('ancestor_limit');
       for (const parent of parents) observer.observe(parent, {childList:true,attributes:true});
       recheck();
       candidate.control.dispatchEvent(new CustomEvent(channel.dispatch, {bubbles:true,
@@ -814,10 +846,12 @@ function computaQwenDOM(c) {
       if (observer.takeRecords().length) changed = true;
       recheck();
       if (observer.takeRecords().length) changed = true;
-      if (changed || count !== 1 || captured === null) fail();
+      if (changed) fail('synchronous_mutation');
+      if (count !== 1) fail(count === 0 ? 'result_missing' : 'result_multiple');
+      if (captured === null) fail(resultReason);
       const bytes = new TextEncoder().encode(captured);
       if (bytes.length > 220_000) c.fail('response_too_large');
-      if (new TextDecoder('utf-8', {fatal:true}).decode(bytes) !== captured) fail();
+      if (new TextDecoder('utf-8', {fatal:true}).decode(bytes) !== captured) fail('utf8_roundtrip');
       return captured;
     } finally { captured = null; observer.disconnect(); document.removeEventListener(channel.result,listener,true); }
   }
@@ -882,6 +916,6 @@ function computaQwenDOM(c) {
     setter.call(form.editor, prompt);
     form.editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));
   }
-  return { rejectUserCount, rejectSelectionBinding, firstDisplayReplacement, watchDisplayRender, displayHitFailure, firstBodyPresentation, firstBodyFailureStructure, initialResponseIdentityTranscript: emptyContainerPrompt => transcript(true, emptyContainerPrompt), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer, sampleCodePayload,
+  return { rejectUserCount, rejectSelectionBinding, firstDisplayReplacement, watchDisplayRender, displayHitFailure, firstBodyPresentation, firstBodyFailureStructure, initialResponseIdentityTranscript: emptyContainerPrompt => transcript(true, emptyContainerPrompt), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer, codePayloadFailure, sampleCodePayload,
     deletionTrigger, deletionMenu, deletionConfirmation, deletionObserved, insertLiteral };
 }

@@ -48,6 +48,60 @@ final class WebsiteAdapterFailureDiagnosticTests: XCTestCase {
         XCTAssertNil(D.sanitize(valid, provider: "qwen", error: "conversation_changed", detail: "first_user_message"))
     }
 
+    func testQwenCodePayloadFailureGatesAreFiniteAndPreserveTheOriginalFailure() throws {
+        let reasons = [
+            "code_candidate": ["custom_shape", "markdown_shape", "phase_shape", "pre_shape", "header_wrapper",
+                               "header_shape", "language", "actions_shape", "body_classes", "body_tag", "body_attributes",
+                               "body_visibility", "body_id", "body_empty", "body_children",
+                               "plain_code_tag", "plain_code_attributes", "plain_code_visibility", "plain_code_shape",
+                               "editor_tag", "editor_class", "editor_attributes", "editor_visibility", "body_geometry", "control_label", "control_shape",
+                               "control_decoration", "collapse_state", "missing_copy", "ancestor_limit",
+                               "ancestor_visibility", "ancestor_root"],
+            "code_sample": ["channel_missing", "channel_shape", "candidate_changed", "candidate_missing",
+                            "ancestor_limit", "synchronous_mutation", "result_missing", "result_multiple",
+                            "result_invalid", "result_fields", "write_count", "write_invalid", "write_type",
+                            "write_size", "utf8_roundtrip"]
+        ]
+        for (stage, values) in reasons {
+            for reason in values {
+                var value = qwenAuthoredFailure
+                value["stage"] = stage; value["reason"] = reason
+                let packet = try XCTUnwrap(D.sanitize(value, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"))
+                let log = try XCTUnwrap(D.qwenAuthoredLogFields(packet))
+                XCTAssertLessThanOrEqual(log.utf8.count, 512)
+                let logged = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(log.utf8)) as? [String: Any])
+                XCTAssertEqual(Set(logged.keys), ["version", "provider", "trigger", "stage", "reason", "count"])
+                XCTAssertEqual(logged["stage"] as? String, stage)
+                XCTAssertEqual(logged["reason"] as? String, reason)
+                for (key, replacement) in [("reason", "PRIVATE_CONTENT" as Any), ("count", 1), ("count", true), ("text", "PRIVATE_CONTENT")] {
+                    var bad = value; bad[key] = replacement
+                    XCTAssertNil(D.sanitize(bad, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"))
+                }
+                var observation: [String: Any] = ["error": "unsupported_response_format", "detail": "authored_source", "adapterFailureStructure": value]
+                XCTAssertNotNil(D.remove(from: &observation, provider: "qwen", action: "inspect"))
+                XCTAssertEqual(observation["error"] as? String, "unsupported_response_format")
+                XCTAssertEqual(observation["detail"] as? String, "authored_source")
+                XCTAssertNil(observation["adapterFailureStructure"])
+                XCTAssertNil(D.sanitize(value, provider: "qwen", error: "conversation_changed", detail: "first_user_message"))
+            }
+        }
+    }
+
+    func testQwenOrdinaryFailureLogExcludesOtherStructureKindsAndRetainsLegacyReasons() throws {
+        for provider in ["kimi", "qwen", "deepseek"] {
+            let value = WebsiteAdapterFailureFixture.packet(provider)
+            let error = provider == "qwen" ? "conversation_changed" : "unsupported_response_format"
+            let detail = provider == "kimi" ? "authored_source_markdown_count" : provider == "qwen" ? "first_user_message" : "authored_source"
+            let packet = try XCTUnwrap(D.sanitize(value, provider: provider, error: error, detail: detail))
+            XCTAssertNil(D.qwenAuthoredLogFields(packet))
+        }
+        let legacy = try XCTUnwrap(D.sanitize(qwenAuthoredFailure, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"))
+        XCTAssertNotNil(D.qwenAuthoredLogFields(legacy))
+        var wrong = qwenAuthoredFailure
+        wrong["stage"] = "code_sample"; wrong["reason"] = "body_empty"
+        XCTAssertNil(D.sanitize(wrong, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"))
+    }
+
     func testQwenInlineDiagnosticAcceptsOnlyFixedCategoriesAndZeroCount() {
         for reason in ["escape", "bidi", "decorated", "other", "escape_json"] {
             var packet = qwenAuthoredFailure

@@ -231,6 +231,64 @@ final class APIModelCorrectionTests: XCTestCase {
         XCTAssertThrowsError(try JSONDecoder().decode(APIModelCorrectionAccounting.Record.self, from: JSONSerialization.data(withJSONObject: object)),
                              "A second validation cannot be presented as first-attempt evidence")
     }
+    func testLocalPatchLocationsPersistBothAttemptsWithoutAnotherCorrectionClaim() throws {
+        let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("journal"), store = APIModelCorrectionAccounting(directory: directory)
+        func validation(_ location: APIModelResponseCodec.LocalPatchSchemaLocation) throws -> APIModelCorrectionAccounting.FirstValidation {
+            let failure = APIModelResponseCodec.FiniteSchemaFailure(toolIndex: 127, constraint: .schemaMismatch, patchLocation: location)
+            return try XCTUnwrap(APIModelCorrectionAccounting.FirstValidation(.init(reason: .schemaMismatch,
+                schemaFailures: [failure, failure], callCount: 128, rejectedCount: 128, envelopeShapeValid: true,
+                unambiguousJSON: true, streamShapeAndUsageValid: true, knownUsage: true, correctionEligible: true)))
+        }
+        let first = try validation(.init(operation: .ambiguous, field: .operation, constraint: .schemaMismatch))
+        let second = try validation(.init(operation: .update, field: .lines, constraint: .missingRequired))
+        let usage = APIModelCorrectionUsage(inputTokens: 100_000_000, outputTokens: 100_000_000,
+            totalTokens: 200_000_000, cachedInputTokens: 100_000_000, reasoningOutputTokens: 100_000_000)
+        let ticket = try store.begin(taskID: id, threadID: id, turnID: id, firstUsage: usage, firstValidation: first)
+        let firstFile = directory.appendingPathComponent(ticket.id.uuidString.lowercased() + ".first_received.json")
+        let original = try Data(contentsOf: firstFile)
+        try store.claimed(ticket)
+        XCTAssertThrowsError(try store.claimed(ticket), "The same exclusive correction claim cannot be spent twice")
+        try store.finish(ticket, claimed: true, usage: usage, outcome: .argumentsRejected, secondValidation: second)
+        XCTAssertEqual(try Data(contentsOf: firstFile), original)
+        let all = try records(directory), final = try XCTUnwrap(all.first { $0.phase == "finished" })
+        XCTAssertEqual(all.count, 3); XCTAssertTrue(all.allSatisfy { $0.schemaVersion == 4 && $0.firstValidation == first })
+        XCTAssertEqual(final.secondValidation, second); XCTAssertEqual(final.outcome, .argumentsRejected)
+        for file in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
+            let data = try Data(contentsOf: file)
+            XCTAssertLessThanOrEqual(data.count, 2_048)
+            let text = String(decoding: data, as: UTF8.self)
+            for privateKey in ["\"arguments\"", "\"wireName\"", "\"prompt\"", "PRIVATE", "http"] { XCTAssertFalse(text.contains(privateKey)) }
+        }
+        var downgraded = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(final)) as? [String: Any])
+        for version in [1, 2, 3] {
+            downgraded["schemaVersion"] = version
+            XCTAssertThrowsError(try JSONDecoder().decode(APIModelCorrectionAccounting.Record.self, from: JSONSerialization.data(withJSONObject: downgraded)))
+        }
+    }
+
+    func testLocalPatchLocationDecoderRejectsUnknownOrInconsistentFields() throws {
+        let valid = APIModelResponseCodec.LocalPatchSchemaLocation(operation: .update, field: .hunks, constraint: .typeMismatch)
+        let base = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(valid)) as? [String: Any])
+        var variants: [[String: Any]] = []
+        var bad = base; bad["PRIVATE_KEY"] = "PRIVATE_VALUE"; variants.append(bad)
+        bad = base; bad["operation"] = "PRIVATE_VALUE"; variants.append(bad)
+        bad = base; bad["field"] = "PRIVATE_FIELD"; variants.append(bad)
+        bad = base; bad["operation"] = "delete"; variants.append(bad)
+        bad = base; bad["constraint"] = "read_mode_conflict"; variants.append(bad)
+        bad = base; bad["field"] = "operation"; variants.append(bad)
+        for value in variants {
+            XCTAssertThrowsError(try JSONDecoder().decode(APIModelResponseCodec.LocalPatchSchemaLocation.self,
+                from: JSONSerialization.data(withJSONObject: value)))
+        }
+        XCTAssertEqual(try JSONDecoder().decode(APIModelResponseCodec.LocalPatchSchemaLocation.self, from: JSONEncoder().encode(valid)), valid)
+        let both = APIModelResponseCodec.FiniteSchemaFailure(toolIndex: 0, constraint: .schemaMismatch,
+            location: .init(tool: .browserRead, schemaPath: [], expectedType: .object, actualType: .object), patchLocation: valid)
+        XCTAssertNil(APIModelCorrectionAccounting.FirstValidation(.init(reason: .schemaMismatch, schemaFailures: [both],
+            callCount: 1, rejectedCount: 1, envelopeShapeValid: true, unambiguousJSON: true,
+            streamShapeAndUsageValid: true, knownUsage: true, correctionEligible: true)))
+    }
+
     func testBuiltinLocationDecoderRejectsPrivateKeysUnknownEnumsAndWrongToolFields() throws {
         let valid = APIModelResponseCodec.BuiltinSchemaLocation(tool: .browserRead, schemaPath: [.cursor], expectedType: .string, actualType: .null)
         let base = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(valid)) as? [String: Any])
