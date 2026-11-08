@@ -344,11 +344,7 @@ enum APIModelResponseCodec {
         guard original.provider.wireAPI == .chatCompletions,
               var body = try JSONSerialization.jsonObject(with: original.body) as? [String: Any],
               var messages = body["messages"] as? [[String: Any]], !messages.isEmpty else { throw Failure.invalidRequest }
-        let suffix = trustedSchemaFeedback(original, details: rejectionDetails)
-        // Optional detail never displaces the existing generic instruction or
-        // changes the original request-size guard.
-        let feedback = original.body.count + 2 * (correctiveFeedback.utf8.count + suffix.utf8.count) + 64 <= maximumText
-            ? correctiveFeedback + suffix : correctiveFeedback
+        let feedback = correctiveFeedback + trustedSchemaFeedback(original, details: rejectionDetails)
         if messages[0]["role"] as? String == "system" {
             guard let originalText = messages[0]["content"] as? String else { throw Failure.invalidRequest }
             messages[0]["content"] = originalText + "\n\n" + feedback
@@ -398,9 +394,25 @@ enum APIModelResponseCodec {
             if schema["enum"] != nil { record["follow_offered_enum"] = true }
             records.append(record)
         }
-        guard !records.isEmpty, let bytes = try? json(records), bytes.count <= 1_536,
-              let text = String(data: bytes, encoding: .utf8) else { return "" }
-        return "\n\n" + schemaFeedbackMarker + text
+        func boundedFeedback(_ entries: [[String: Any]]) -> String? {
+            guard !entries.isEmpty, let bytes = try? json(entries), bytes.count <= 1_536,
+                  let text = String(data: bytes, encoding: .utf8) else { return nil }
+            let suffix = "\n\n" + schemaFeedbackMarker + text
+            guard request.body.count + 2 * (correctiveFeedback.utf8.count + suffix.utf8.count) + 64 <= maximumText else { return nil }
+            return suffix
+        }
+        // Show a complete argument object only for a single localized rejection
+        // of the known native local patch. Preserve the ordinary schema feedback
+        // if the example would exceed either existing bound.
+        if details.count == 1, let detail = details.first, var record = records.first,
+           request.tools.indices.contains(detail.toolIndex),
+           request.tools[detail.toolIndex].patchProjection == .local,
+           detail.constraint == .typeMismatch, detail.path == [.property("operations")],
+           let example = try? JSONSerialization.jsonObject(with: Data(AlibabaPatchProjection.updateExample.utf8)) {
+            record["example_arguments_template"] = example
+            if let feedback = boundedFeedback([record]) { return feedback }
+        }
+        return boundedFeedback(records) ?? ""
     }
 
     struct TextShape: Codable, Equatable, Sendable {

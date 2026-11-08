@@ -93,6 +93,38 @@ final class QwenMarkerWireLeaseTests: XCTestCase {
             XCTAssertEqual(record["evidenceClass"] as? String,"page_world_untrusted")
         }
     }
+    func testCatalogBindingReasonsPublishOnlyAfterExactMarkerAndDurableDeletion() throws {
+        for label in ["Qwen3.7-Plus", "Qwen3.8-Max"] {
+            // Legacy observations still decode; new labels retain the identical publication contract.
+            for stage in ["catalog_binding", "catalog_binding_scope", "catalog_open_changed", "catalog_send_changed", "catalog_held_changed"] {
+                let fixture = try QwenMarkerWireTestFixture(label: label)
+                defer { fixture.cleanup() }
+                let owner = NSObject(), identity = ObjectIdentifier(owner)
+                let token = UUID().uuidString, generation = UUID(), fingerprint = String(repeating: "b", count: 64)
+                XCTAssertTrue(fixture.lease.claim(view: identity))
+                XCTAssertTrue(fixture.lease.bind(view: identity, ownerToken: token, generation: generation, outboundFingerprint: fingerprint))
+                XCTAssertFalse(fixture.lease.stage(stage + "_PRIVATE", view: identity, ownerToken: token, generation: generation))
+                XCTAssertFalse(fixture.lease.stage(stage, view: identity, ownerToken: token, generation: UUID()))
+                XCTAssertTrue(fixture.lease.stage(stage, view: identity, ownerToken: token, generation: generation))
+                XCTAssertFalse(fixture.lease.publishAfterRelease(reply: .message(fixture.expectedMarker + " changed"),
+                    model: .init(key: label, label: label), generation: generation, firstFingerprint: fingerprint,
+                    receipt: fixture.receipt(token)))
+                XCTAssertFalse(fixture.lease.publishAfterRelease(reply: .message(fixture.expectedMarker),
+                    model: .init(key: label, label: label), generation: generation, firstFingerprint: fingerprint,
+                    receipt: fixture.receipt(token, reason: .cleanupUnverified)))
+                XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("marker-wire.json").path))
+                XCTAssertEqual(try fixture.publishDeleted(token: token, generation: generation, firstUserFingerprint: fingerprint), stage)
+                let data = try Data(contentsOf: fixture.directory.appendingPathComponent("marker-wire.json"))
+                let record = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+                XCTAssertEqual(record["evidenceClass"] as? String, "page_world_untrusted")
+                XCTAssertEqual(record["modelID"] as? String, fixture.admission.modelID)
+                XCTAssertEqual(Set(record.keys), ["schemaVersion", "purpose", "stage", "evidenceClass", "taskID", "threadID", "turnID",
+                    "inferenceID", "runtimeGeneration", "preparationID", "modelID", "sessionToken", "documentGeneration", "cleanupAttemptID"])
+                XCTAssertNil(try fixture.publishDeleted(token: token, generation: generation, firstUserFingerprint: fingerprint))
+            }
+        }
+    }
+
     func testArmsRejectWrongNativeContextModePromptAndUntrustedInputWithoutConsumption() throws {
         let f = try QwenMarkerWireTestFixture(label:"Qwen3.8-Max"); defer { f.cleanup() }
         let dir = f.directory.appendingPathComponent("separate",isDirectory:true)

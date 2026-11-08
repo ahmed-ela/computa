@@ -349,14 +349,19 @@ function observeSiteCatalog(config) {
   function scoped(){return !retired && Date.now()<config.expiresAt && location.origin===config.origin && window===window.top}
   function valid(){return scoped()&&!error && native.open===wrapped && native.send===sendOriginal}
   const catalogErrors=new Set(['catalog_accessor','catalog_mime','catalog_ambiguous','catalog_missing','catalog_size',
-    'catalog_binding','catalog_send_unobserved','catalog_not_done','catalog_final_url','catalog_non_200','catalog_response_type']);
+    'catalog_binding','catalog_binding_scope','catalog_open_changed','catalog_send_changed','catalog_held_changed','catalog_send_unobserved','catalog_not_done','catalog_final_url','catalog_non_200','catalog_response_type']);
   function checkHeldResponse(req) {
     const read = key => {
       if(Object.hasOwn(req,key) || typeof xhrGet[key]!=='function')throw Error('catalog_accessor');
       return Reflect.apply(xhrGet[key],req,[]);
     };
     // The first failed check is diagnostic only. Never read responseText from a failed XHR.
-    if(!valid() || req!==held)throw Error('catalog_binding');
+    // Preserve the original validity/held checks and their short-circuit order.
+    // These fixed reasons discriminate refusal only; none permits a body read.
+    if(!scoped() || error)throw Error('catalog_binding_scope');
+    if(native.open!==wrapped)throw Error('catalog_open_changed');
+    if(native.send!==sendOriginal)throw Error('catalog_send_changed');
+    if(req!==held)throw Error('catalog_held_changed');
     if(!submitted)throw Error('catalog_send_unobserved');
     if(read('readyState')!==4)throw Error('catalog_not_done');
     if(read('responseURL')!==url)throw Error('catalog_final_url');

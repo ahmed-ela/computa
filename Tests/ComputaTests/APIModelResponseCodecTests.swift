@@ -3760,6 +3760,99 @@ final class APIModelResponseCodecTests: XCTestCase {
         }
     }
 
+    func testCorrectionForLocalTypedPatchOffersOneValidNestedExampleWithoutRepairingTheRejectedCall() throws {
+        let noop: (String) -> [String: Any] = { name in
+            ["type": "function", "name": name, "parameters": ["type": "object", "properties": [:]]]
+        }
+        let tools = [noop("first"), noop("second"), nativePatch()]
+        let history: [[String: Any]] = [
+            ["role": "user", "content": "Read observed source first."],
+            ["type": "function_call", "name": "first", "call_id": "already-read", "arguments": "{}"],
+            ["type": "function_call_output", "call_id": "already-read", "output": "observed source; completed once"],
+            ["role": "user", "content": "Now perform the requested source update."],
+        ]
+        for naming: APIModelResponseCodec.ToolNaming in [.semantic, .legacy] {
+            let request = try request(["tools": tools, "input": history], provider: typedPatchProvider(), toolNaming: naming)
+            let rejected = try correctionResult(request, arguments: #"{"operations":{"update":"PRIVATE_REJECTED_VALUE"}}"#, toolIndex: 2)
+            XCTAssertThrowsError(try APIModelResponseCodec.decode(rejected, request: request))
+            guard case .argumentsRejected(_, let details) = try APIModelResponseCodec.decodeForCorrection(rejected, request: request) else {
+                return XCTFail("Expected an atomic rejected local patch")
+            }
+            XCTAssertEqual(details.map(\.toolIndex), [2])
+            XCTAssertEqual(details.first?.path, [.property("operations")])
+            let (records, payload) = try schemaFeedback(request, details: details)
+            XCTAssertFalse(payload.contains("PRIVATE_REJECTED_VALUE"))
+            let record = try XCTUnwrap(records.first)
+            XCTAssertEqual(record["constraint"] as? String, "type_mismatch")
+            XCTAssertEqual(record["expected_types"] as? [String], ["array"])
+            let sample = try XCTUnwrap(record["example_arguments_template"] as? [String: Any])
+            let arguments = String(decoding: try JSONSerialization.data(withJSONObject: sample), as: UTF8.self)
+            let corrected = try APIModelResponseCodec.correctiveRequest(request, rejectionDetails: details)
+            let originalBody = try XCTUnwrap(JSONSerialization.jsonObject(with: request.body) as? NSDictionary)
+            let correctionBody = try XCTUnwrap(JSONSerialization.jsonObject(with: corrected.body) as? NSDictionary)
+            XCTAssertEqual(originalBody["tools"] as? NSArray, correctionBody["tools"] as? NSArray)
+            let originalMessages = try XCTUnwrap(originalBody["messages"] as? [[String: Any]])
+            let correctedMessages = try XCTUnwrap(correctionBody["messages"] as? [[String: Any]])
+            XCTAssertEqual(originalMessages.count, correctedMessages.count)
+            XCTAssertEqual(Array(originalMessages.dropFirst()) as NSArray, Array(correctedMessages.dropFirst()) as NSArray,
+                "Only existing system feedback may change; completed native calls and outputs stay exact")
+            XCTAssertEqual(request.historyCallIDs, corrected.historyCallIDs)
+            XCTAssertEqual(request.allowedTools, corrected.allowedTools)
+            let reply = try APIModelResponseCodec.decode(correctionResult(corrected, arguments: arguments, toolIndex: 2), request: corrected)
+            let item = try XCTUnwrap((reply.response["output"] as? [[String: Any]])?.first)
+            XCTAssertEqual(item["input"] as? String, "*** Begin Patch\n*** Update File: /absolute/path/file.py\n-old\n+new\n*** End Patch")
+            let stillInvalid = try correctionResult(corrected, arguments: #"{"operations":[{"update":"file.py","hunks":"wrong"}]}"#, toolIndex: 2)
+            XCTAssertThrowsError(try APIModelResponseCodec.decode(stillInvalid, request: corrected))
+        }
+    }
+
+    func testTypedUpdateExampleIsWithheldForUnknownLocationForeignSchemaOrEnvironmentGrammar() throws {
+        let raw = #"{"operations":{"update":"PRIVATE_CANARY"}}"#
+        let local = try request(["tools": [nativePatch()]], provider: typedPatchProvider(), toolNaming: .semantic)
+        let real = try XCTUnwrap(rejectedDetails(local, arguments: raw).first)
+        let unrelated = APIModelResponseCodec.ArgumentRejectionDetail(toolIndex: 0, wireName: real.wireName,
+            constraint: .typeMismatch, path: [.property("unobserved")])
+        let nested = try rejectedDetails(local, arguments: #"{"operations":[{"update":"file.py","hunks":"wrong"}]}"#)
+        let denied = try request(["tools": [nativePatch()], "tool_choice": "none"], provider: typedPatchProvider(), toolNaming: .semantic)
+        let scoped = try request(["tools": [nativePatch(environments: true)]], provider: typedPatchProvider(), toolNaming: .semantic)
+        let foreignSchema: [String: Any] = ["type": "function", "name": "apply_patch",
+            "parameters": ["type": "object", "properties": ["operations": ["type": "array", "items": ["type": "string"]]], "required": ["operations"]]]
+        let foreign = try request(["tools": [foreignSchema]], provider: typedPatchProvider(), toolNaming: .semantic)
+        let otherModel = try request(["tools": [nativePatch()]], provider: typedPatchProvider(model: "other"), toolNaming: .semantic)
+        for (candidate, details) in [(local, [unrelated]), (local, nested), (local, [real, real]), (denied, [real]),
+                                      (scoped, try rejectedDetails(scoped, arguments: raw)),
+                                      (foreign, try rejectedDetails(foreign, arguments: raw)), (otherModel, [real])] {
+            let (records, _) = try schemaFeedback(candidate, details: details)
+            XCTAssertFalse(records.contains { $0["example_arguments_template"] != nil })
+        }
+    }
+
+    func testTypedUpdateCorrectionFallsBackToExistingBriefAtTheOriginalByteBound() throws {
+        func sized(_ count: Int) throws -> APIModelResponseCodec.Request {
+            try request(["tools": [nativePatch()], "input": [["role": "user", "content": String(repeating: "x", count: count)]]],
+                provider: typedPatchProvider(), toolNaming: .semantic)
+        }
+        let small = try sized(0)
+        let details = try rejectedDetails(small, arguments: #"{"operations":{}}"#)
+        let (expanded, _) = try schemaFeedback(small, details: details)
+        var brief = try XCTUnwrap(expanded.first)
+        XCTAssertNotNil(brief.removeValue(forKey: "example_arguments_template"))
+        let briefJSON = try JSONSerialization.data(withJSONObject: [brief], options: [.sortedKeys, .withoutEscapingSlashes])
+        let briefSuffix = "\n\n" + APIModelResponseCodec.schemaFeedbackMarker + String(decoding: briefJSON, as: UTF8.self)
+        let needed = 2 * (APIModelResponseCodec.correctiveFeedback.utf8.count + briefSuffix.utf8.count) + 64
+        let boundary = try sized(2_000_000 - needed - small.body.count)
+        XCTAssertEqual(boundary.body.count + needed, 2_000_000)
+        let (atLimit, _) = try schemaFeedback(boundary, details: details)
+        XCTAssertEqual(atLimit as NSArray, [brief] as NSArray,
+            "An optional template must not displace the original validated schema brief")
+        let beyond = try sized(2_000_000 - needed - small.body.count + 1)
+        let (generic, text) = try schemaFeedback(beyond, details: details)
+        XCTAssertTrue(generic.isEmpty)
+        XCTAssertFalse(text.contains(APIModelResponseCodec.schemaFeedbackMarker))
+        XCTAssertTrue(text.hasSuffix(APIModelResponseCodec.correctiveFeedback))
+        XCTAssertThrowsError(try APIModelResponseCodec.correctiveRequest(sized(2_000_000 - small.body.count), rejectionDetails: details))
+    }
+
     func testTypedLocalPatchDistinguishesOperationsTypeFromItemSchemaRejectionWithoutRepair() throws {
         let req = try request(["tools": [nativePatch()]], provider: typedPatchProvider(), toolNaming: .semantic)
         for value: Any in ["serialized", ["update": "file.py"], NSNull(), 4, true] {
