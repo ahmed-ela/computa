@@ -9,6 +9,7 @@ import OSLog
 /// Native-memory diagnostics only. This record never contributes response,
 /// body, selection, action, deadline or cleanup authority.
 struct QwenResponseProgressStatus: Sendable {
+    static let maximumJournalFieldBytes = 1_536
     let sessionToken: UUID
     let documentGeneration: UUID
     let modelID: String
@@ -20,7 +21,8 @@ struct QwenResponseProgressStatus: Sendable {
         guard sequence == 1, modelID.hasPrefix("browser/qwen"), modelID.utf8.count <= 256,
               Self.valid(record, generation: documentGeneration),
               let data = try? JSONSerialization.data(withJSONObject: record, options: .sortedKeys),
-              data.count <= 992 else { return nil } // Includes room for the journal field name below 1024 bytes.
+              let field = try? JSONSerialization.data(withJSONObject: ["qwenResponseProgress": record], options: .sortedKeys),
+              field.count <= Self.maximumJournalFieldBytes else { return nil }
         self.sessionToken = sessionToken; self.documentGeneration = documentGeneration
         self.modelID = modelID; self.sequence = sequence; encoded = data
     }
@@ -43,6 +45,31 @@ struct QwenResponseProgressStatus: Sendable {
     private static func bool(_ raw: Any?) -> Bool? {
         guard let number = raw as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
         return number.boolValue
+    }
+    /// DOM protocol metadata only. Values cannot supply model/output/body proof.
+    static func sanitizedReplyUI(_ raw: Any?) -> [String: Any]? {
+        guard let value = raw as? [String: Any], Set(value.keys) == ["version", "scope", "stop", "loading", "footer", "tv", "alert", "reason", "daily", "terminal", "capped", "visibility", "hidden"],
+              integer(value["version"], 1...1) == 1, let scope = value["scope"] as? String,
+              ["none", "empty_root", "single", "comparison"].contains(scope), let capped = bool(value["capped"]),
+              let visibility = value["visibility"] as? String, ["unknown", "visible", "hidden", "prerender"].contains(visibility) else { return nil }
+        for key in ["stop", "terminal", "daily", "hidden"] { guard value[key] is NSNull || bool(value[key]) != nil else { return nil } }
+        let counts = ["loading", "footer", "tv", "alert"]
+        for key in counts { guard value[key] is NSNull || integer(value[key], 0...3) != nil else { return nil } }
+        guard capped == counts.contains(where: { integer(value[$0], 0...3) == 3 }) else { return nil }
+        if scope != "single" {
+            guard counts.allSatisfy({ value[$0] is NSNull }), value["reason"] is NSNull, value["daily"] is NSNull,
+                  value["terminal"] is NSNull else { return nil }
+        } else {
+            guard integer(value["loading"], 0...3) != nil, integer(value["footer"], 0...3) != nil,
+                  (value["tv"] is NSNull) == (value["alert"] is NSNull) else { return nil }
+            if let tv = integer(value["tv"], 0...3) {
+                guard let reason = value["reason"] as? String else { return nil }
+                if tv == 0 { guard reason == "none", value["daily"] is NSNull else { return nil } }
+                else if tv == 1 { guard ["ExceedLimit", "quota_exhausted", "update_member", "other"].contains(reason) else { return nil } }
+                else { guard reason == "ambiguous", value["daily"] is NSNull else { return nil } }
+            } else { guard value["reason"] is NSNull, value["daily"] is NSNull else { return nil } }
+        }
+        return value
     }
     private static func valid(_ value: [String: Any], generation: UUID) -> Bool {
         guard Set(value.keys) == ["version", "documentGeneration", "sequence", "polls", "callbacks", "waitStarts", "waitReturns",
@@ -82,11 +109,13 @@ struct QwenResponseProgressStatus: Sendable {
         guard let lastState = value["lastState"] as? String, ["missing", "stale", "invalid", "current"].contains(lastState) else { return false }
         if lastState != "current" { return value["last"] is NSNull }
         guard let last = value["last"] as? [String: Any],
-              Set(last.keys) == ["ageMs", "ageSaturated", "pending", "users", "responses", "busy", "complete", "textBytes", "textSaturated"],
+              (Set(last.keys) == ["ageMs", "ageSaturated", "pending", "users", "responses", "busy", "complete", "textBytes", "textSaturated"]
+                || Set(last.keys) == ["ageMs", "ageSaturated", "pending", "users", "responses", "busy", "complete", "textBytes", "textSaturated", "ui"]),
               let age = integer(last["ageMs"], 0...300_001), bool(last["ageSaturated"]) == (age == 300_001),
               let pending = last["pending"] as? [String: Any],
               Set(pending.keys) == ["provisional", "firstBody", "identity", "choice", "codePayload"],
               pending.values.allSatisfy({ bool($0) != nil }) else { return false }
+        if let ui = last["ui"], sanitizedReplyUI(ui) == nil { return false }
         for key in ["users", "responses"] {
             guard last[key] is NSNull || integer(last[key], 0...10_000) != nil else { return false }
         }
@@ -1492,8 +1521,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     /// Snapshot native memory only. It never waits, evaluates WebKit, reads the
     /// provider or supplies a fresh body/model/output proof.
     func snapshotQwenResponseProgress(sessionToken: String) async -> QwenResponseProgressStatus? {
+        // A terminal native format rejection may retain only the prior cache.
+        // This does not revive the session or authorize another page operation.
         guard let session = sessions[sessionToken], session.provider == .qwen, !session.isDiscovery,
-              !session.isRecoveryProbe, session.state == "running", session.submitted,
+              !session.isRecoveryProbe, !session.retainedForCleanup,
+              (session.state == "running" || session.state == "failed"
+                && session.terminalFailure == .responseFormatUnavailable), session.submitted,
               session.sequence == 1, session.acknowledgedSendSequence == 1,
               sessions[session.token] === session, finishingTasks[session.token] == nil,
               let binding = session.savedDeleteSubmission, session.documentGeneration == binding.generation,
@@ -1543,7 +1576,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     /// Only a successful, already native-fenced inspect callback can enter this
     /// diagnostic cache. Negative receipts do not become body/output proof.
-    private func cacheQwenResponseProgress(_ observed: [String: Any], session: Session, action: String, cleanup: Bool) {
+    private func cacheQwenResponseProgress(_ observed: [String: Any], session: Session, action: String, cleanup: Bool, replyUI: [String: Any]?) {
         guard session.provider == .qwen, action == "inspect", !cleanup, session.state == "running", session.submitted,
               session.sequence == 1, session.acknowledgedSendSequence == 1,
               sessions[session.token] === session, browser.webView(for: session.tabID) === session.view,
@@ -1551,7 +1584,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               generation == session.documentGeneration else { return }
         session.qwenProgress.callbacks = min(65_535, session.qwenProgress.callbacks + 1)
         session.qwenProgress.last = .init(at: .now, generation: generation, sequence: session.sequence,
-            url: session.view.url, fields: Self.qwenResponseProgressFields(observed))
+            url: session.view.url, fields: Self.qwenResponseProgressFields(observed, replyUI: replyUI))
     }
 
     static func qwenProgressReadTimeouts(current: Int, baseline: Int) -> Int {
@@ -1559,7 +1592,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         min(65_535, max(0, max(0, current) - max(0, baseline)))
     }
 
-    static func qwenResponseProgressFields(_ observed: [String: Any]) -> [String: Any]? {
+    static func qwenResponseProgressFields(_ observed: [String: Any], replyUI: [String: Any]? = nil) -> [String: Any]? {
         let choice = savedResponseChoiceObservation(observed["savedResponseChoice"])
         var fields: [String: Any] = ["pending": [
             "provisional": observed["qwenProvisionalRoutePending"] != nil,
@@ -1582,6 +1615,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             let bytes = text.utf8.prefix(220_001).count
             fields["textBytes"] = bytes; fields["textSaturated"] = bytes == 220_001
         } else { fields["textBytes"] = NSNull(); fields["textSaturated"] = NSNull() }
+        if let ui = QwenResponseProgressStatus.sanitizedReplyUI(replyUI) { fields["ui"] = ui }
         return fields
     }
 
@@ -6867,6 +6901,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let qwenCountDispatch = provider == .qwen && action == "inspect" && !allowBlockedProvider
             && session.state == "running" && session.sequence == 1 && session.acknowledgedSendSequence == 1
             ? (confirmed: session.confirmedUsers, pending: session.pendingSubmission) : nil
+        // Intermediate DOM diagnostics only; this is never a tool/action grant.
+        let capturesQwenReplyUI = qwenCountDispatch != nil && savedDeleteOperation == nil && !allowSavedCleanupInspection
         // Cleanup also inspects pending lineage. It may verify an already
         // rendered message, but must never acquire expansion-click authority.
         let allowFirstUserExpansion = provider == .chatgpt && action == "inspect" && !allowBlockedProvider
@@ -6923,6 +6959,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             "allowSubmissionExpansion": provider == .chatgpt && ["inspect", "verifyModel"].contains(action)
                 && session.pendingSubmission && session.sequence > 1,
         ]
+        if capturesQwenReplyUI { input["qwenProgressUI"] = true }
         if provider == .qwen, let channel = browser.qwenCodePayloadChannel(tabID:session.tabID,view:session.view,
             owner:session.token,generation:generation) { input["qwenCodePayloadChannel"] = channel }
         if let grant = qwenCodePayloadSample {
@@ -7422,6 +7459,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         try Task.checkCancellation()
         guard var observed = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw Failure.pageUnavailable }
+        // Strip this one private DOM-protocol field before existing closed
+        // pending/response validation. It never enters the model reply decoder.
+        let qwenReplyUI = capturesQwenReplyUI
+            ? QwenResponseProgressStatus.sanitizedReplyUI(observed.removeValue(forKey: "qwenReplyUI")) : nil
         #if DEBUG
         if provider == .qwen, action == "inspect", let transform = qwenQuotaObservationTransformForTesting {
             observed = transform(observed)
@@ -7530,7 +7571,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                        confirmed: dispatch.confirmed, pending: dispatch.pending) {
                     Self.inspectionLog.error("qwenCountFailure version=1 \(counts, privacy: .public)")
                 }
-                if !Self.qwenResponseChoiceDiagnostic(observed, provider: provider).isEmpty {
+                if provider == .qwen {
                     let context = session.adapterFailureContext
                     let task = context?.taskID.uuidString.lowercased() ?? "none"
                     let turn = context?.turnID.uuidString.lowercased() ?? "none"
@@ -7793,7 +7834,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 Self.inspectionLog.notice("claudeModelObservation phase=pending sessionID=\(session.token, privacy: .public) generation=\(generation.uuidString, privacy: .public) sequence=\(session.sequence)")
             }
             session.claudeModelObservationPending = true
-            cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection)
+            cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection, replyUI: qwenReplyUI)
             return observed
         }
         if observed["deepSeekComposerHandoffPending"] != nil {
@@ -7806,7 +7847,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   Self.isDeepSeekComposerHandoffPendingObservation(observed, url: currentURL.absoluteString),
                   ContinuousClock.now < evaluationDeadline else { throw Failure.modelUnverified }
             session.deepSeekComposerHandoffPending = true
-            cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection)
+            cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection, replyUI: qwenReplyUI)
             return observed
         }
         if observed["savedResponseChoice"] != nil, observed["firstUserVerified"] == nil {
@@ -7823,7 +7864,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             _ = try validatedSelectionEvidence(observed, session: session, action: action)
             session.savedResponseChoice = choice.identity
             session.qwenPendingFirstBody = .responseChoice(currentURL)
-            cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection)
+            cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection, replyUI: qwenReplyUI)
             return observed
         }
         if observed["qwenProvisionalRoutePending"] != nil {
@@ -7834,7 +7875,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   Self.isQwenProvisionalRoutePendingObservation(observed, url: currentURL.absoluteString),
                   ContinuousClock.now < evaluationDeadline else { throw Failure.modelUnverified }
             session.qwenPendingFirstBody = .provisionalRoute
-            cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection)
+            cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection, replyUI: qwenReplyUI)
             return observed
         }
         if observed["qwenFirstBodyExpansionPending"] != nil {
@@ -7844,7 +7885,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   Self.isQwenFirstBodyExpansionPendingObservation(observed, url: currentURL.absoluteString),
                   ContinuousClock.now < evaluationDeadline else { throw Failure.modelUnverified }
             session.qwenPendingFirstBody = .displayExpansion(currentURL)
-            cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection)
+            cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection, replyUI: qwenReplyUI)
             return observed
         }
         if observed["qwenInitialResponseIdentityPending"] != nil {
@@ -7856,7 +7897,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   Self.isQwenInitialResponseIdentityPendingObservation(observed, url: currentURL.absoluteString),
                   ContinuousClock.now < evaluationDeadline else { throw Failure.modelUnverified }
             session.qwenPendingFirstBody = .responseIdentity(currentURL)
-            cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection)
+            cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection, replyUI: qwenReplyUI)
             return observed
         }
         if session.provider.lifecycle == .savedConversationDelete, !observesLifecycle(observed, session: session) {
@@ -7867,7 +7908,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   canObserveSavedInitialHydration(session), !allowBlockedProvider, !allowSavedCleanupInspection, savedDeleteOperation == nil,
                   currentURL == url, currentURL == provider.startURL,
                   ContinuousClock.now < evaluationDeadline else { throw Failure.notFresh }
-            cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection)
+            cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection, replyUI: qwenReplyUI)
             return observed
         }
         if provider.savedConversationPolicy != nil, action == "submit" {
@@ -7883,7 +7924,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     generation: generation, fingerprint: binding.outboundFingerprint),
                   ContinuousClock.now < evaluationDeadline else { throw Failure.ownershipFailure(.javaScriptSubmission) }
             session.selectionEvidence = try validatedSelectionEvidence(observed, session: session, action: action)
-            cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection)
+            cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection, replyUI: qwenReplyUI)
             return observed
         }
         if let operation = savedDeleteOperation {
@@ -7894,7 +7935,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     fingerprint: operation.fingerprint, conversation: operation.conversation),
                   currentURL == operation.url || operation.progress.phase == .observing && currentURL == provider.startURL,
                   ContinuousClock.now < evaluationDeadline else { throw Failure.ownershipFailure(.unboundCleanup) }
-            cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection)
+            cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection, replyUI: qwenReplyUI)
             return observed
         }
         if session.provider.lifecycle == .visibleTranscriptClear, !observesLifecycle(observed, session: session) {
@@ -7904,7 +7945,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard Self.isGroqHydrationObservation(observed), action == "inspect", session.state == "loading",
                   session.documentGeneration == nil, !session.modelSelectionRequested, !session.explicitClearReady,
                   !session.submitted, !session.pendingSubmission, session.sequence == 0 else { throw Failure.notFresh }
-            cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection)
+            cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection, replyUI: qwenReplyUI)
             return observed
         }
         if let operation = explicitClearOperation {
@@ -7916,7 +7957,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   Self.validExplicitClearProof(observed["clearProof"], operation: operation),
                   ContinuousClock.now < evaluationDeadline else { throw Failure.ownershipFailure(.unboundCleanup) }
             _ = try validatedSelectionEvidence(observed, session: session, action: action)
-            cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection)
+            cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection, replyUI: qwenReplyUI)
             return observed
         }
         if pendingSubmissionProductRecheck {
@@ -7931,7 +7972,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   (0...1).contains(count(observed, "userCount")), observed["text"] as? String == "",
                   observed["answerComplete"] as? Bool == false else { throw Failure.ownershipFailure(.javaScriptFirstUser) }
             session.selectionEvidence = try validatedSelectionEvidence(observed, session: session, action: action)
-            cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection)
+            cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection, replyUI: qwenReplyUI)
             return ["temporary": false, "sessionLifecycle": "saved_conversation_delete", "userCount": 0,
                 "responseCount": session.baseline, "text": "", "busy": true, "answerComplete": false, "ownershipPending": true]
         }
@@ -8124,7 +8165,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 if observed["modelVerificationPending"] as? Bool == true { pending["modelVerificationPending"] = true }
                 else if let evidence = session.selectionEvidence { pending[evidence.snapshotField] = evidence.dictionary }
                 if let evidence = session.productModeEvidence { pending["productModeEvidence"] = evidence.dictionary }
-                cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection)
+                cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection, replyUI: qwenReplyUI)
                 return pending
             }
             if promotion {
@@ -8240,7 +8281,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if action == "inspect", onlyInitialChatReads(session) {
             session.priorEmptyRootGeneration = observed["untouchedInitialRoot"] as? Bool == true ? generation : nil
         }
-        cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection)
+        cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection, replyUI: qwenReplyUI)
         return observed
     }
 

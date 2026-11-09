@@ -1448,6 +1448,58 @@ final class WebModelServerTests: XCTestCase {
         try await verifyPendingSavedFirstBodyDeadline(provider: "qwen", qwenReason: "qwen_response_preference_v1")
     }
 
+    func testQwenNativeFormatFailureRetainsOneBoundLastKnownUIRecordBeforeCleanupWithoutRepolling() async throws {
+        for scenario in ["format", "format-foreign-token", "format-foreign-generation", "format-foreign-model", "format-unavailable", "format-cancel-during-snapshot"] {
+            let label = "qwen-progress-" + scenario, root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+            let base = FixtureWebModelTransport(cleanupResult: "deleted")
+            let transport = QwenProgressFixtureTransport(base: base, variant: scenario)
+            await server.configureEmbeddedTransport(transport)
+            let data = try turnRequest(input: [["role": "user", "content": "Synthetic last-known format failure"]], model: syntheticWebsiteModelID("qwen"))
+            let inference = Task { try await server.fixtureInfer(data, taskID: label) }
+            do { _ = try await inference.value; XCTFail("Original native format failure must remain terminal") }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFormatUnavailable, scenario) }
+            let rows = try turnJournal(root: root, task: label), failed = rows.filter { $0["phase"] as? String == "failed" }
+            XCTAssertEqual(failed.count, 1)
+            let row = try XCTUnwrap(failed.first)
+            XCTAssertEqual(row["errorCode"] as? String, "unsupported_website_response")
+            if scenario == "format" {
+                let progress = try XCTUnwrap(row["qwenResponseProgress"] as? [String: Any]), last = try XCTUnwrap(progress["last"] as? [String: Any])
+                XCTAssertEqual(progress["lastState"] as? String, "current"); XCTAssertEqual(last["ageMs"] as? Int, 2_500)
+                XCTAssertEqual((last["ui"] as? [String: Any])?["stop"] as? Bool, true, "Last-known UI is not a fresh failure-page read")
+                XCTAssertEqual((progress["state"] as? [String: Bool])?["outputAccepted"], false)
+            } else { XCTAssertNil(row["qwenResponseProgress"], scenario) }
+            XCTAssertFalse(rows.contains { ["complete", "release_verified"].contains($0["phase"] as? String ?? "") })
+            let before = await transport.counts()
+            XCTAssertEqual(before.polls, 1); XCTAssertEqual(before.memoryReads, 1); XCTAssertFalse(before.closedBeforeRead)
+            let beforeFinish = await base.operations()
+            XCTAssertFalse(beforeFinish.contains { $0 == "webProviderFinish" || $0 == "webProviderCancel" })
+            let issues = await server.fixtureFinish(taskID: label); XCTAssertTrue(issues.isEmpty)
+            _ = await server.fixtureFinish(taskID: label)
+            let after = await transport.counts(); XCTAssertEqual(after.polls, before.polls); XCTAssertEqual(after.memoryReads, before.memoryReads)
+            let operations = await base.operations()
+            XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1)
+            XCTAssertEqual(operations.filter { $0 == "webProviderPoll" }.count, 0)
+            XCTAssertEqual(operations.filter { $0 == "webProviderFinish" || $0 == "webProviderCancel" }.count, 1)
+            XCTAssertEqual(try turnJournal(root: root, task: label).filter { $0["qwenResponseProgress"] != nil }.count, scenario == "format" ? 1 : 0)
+        }
+    }
+
+    func testQwenCodecFormatErrorDoesNotRequestNativeProgress() async throws {
+        let label = "qwen-codec-no-progress", root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+        let base = FixtureWebModelTransport(cleanupResult: "deleted"), transport = QwenProgressFixtureTransport(base: base, variant: "codec-format")
+        await server.configureEmbeddedTransport(transport)
+        let data = try turnRequest(input: [["role": "user", "content": "Synthetic codec failure exclusion"]], model: syntheticWebsiteModelID("qwen"))
+        do { _ = try await server.fixtureInfer(data, taskID: label); XCTFail("Codec failure must survive") }
+        catch { XCTAssertEqual(error as? WebModelResponseCodec.Failure, .unsupportedWebsiteResponse) }
+        let rows = try turnJournal(root: root, task: label)
+        XCTAssertEqual(rows.last { $0["phase"] as? String == "failed" }?["errorCode"] as? String, "unsupported_website_response")
+        XCTAssertTrue(rows.allSatisfy { $0["qwenResponseProgress"] == nil })
+        let counts = await transport.counts(); XCTAssertEqual(counts.polls, 1); XCTAssertEqual(counts.memoryReads, 0)
+        _ = await server.fixtureFinish(taskID: label)
+    }
+
     func testQwenOuterDeadlinePersistsOneNativeProgressRecordBeforeCleanupWithoutRepolling() async throws {
         let label = "qwen-progress-outer", root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
@@ -1467,6 +1519,9 @@ final class WebModelServerTests: XCTestCase {
         XCTAssertEqual(progress["lastState"] as? String, "current")
         let last = try XCTUnwrap(progress["last"] as? [String: Any])
         XCTAssertTrue(last["users"] is NSNull); XCTAssertEqual((last["pending"] as? [String: Bool])?["identity"], true)
+        let ui = try XCTUnwrap(last["ui"] as? [String: Any])
+        XCTAssertEqual(ui["stop"] as? Bool, true); XCTAssertEqual(ui["loading"] as? Int, 1)
+        XCTAssertTrue(last["busy"] is NSNull, "An observed UI Stop is separate from protocol busy")
         XCTAssertFalse(rows.contains { ["complete", "release_verified"].contains($0["phase"] as? String ?? "") })
         let counts = await transport.counts()
         XCTAssertEqual(counts.polls, 1); XCTAssertEqual(counts.memoryReads, 1); XCTAssertFalse(counts.closedBeforeRead)
@@ -3445,9 +3500,62 @@ final class WebModelServerTests: XCTestCase {
         }
     }
 
+    func testTerminalUnsupportedWebsiteFormatUsesHTTP400AndKeepsExactBody() throws {
+        let failures: [any Error] = [EmbeddedWebModelTransport.Failure.responseFormatUnavailable,
+            WebModelResponseCodec.Failure.unsupportedWebsiteResponse]
+        for failure in failures {
+            let presentation = WebModelServer.errorPresentation(for: failure)
+            XCTAssertEqual(presentation.status, "400 Bad Request")
+            XCTAssertEqual(presentation.type, "model_error")
+            XCTAssertEqual(presentation.code, "unsupported_website_response")
+            XCTAssertNil(presentation.param)
+            let data = try WebModelServer.errorBody(for: failure)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            var expected: [String: Any] = ["type": "model_error", "message": failure.localizedDescription,
+                "code": "unsupported_website_response", "param": NSNull()]
+            if failure is EmbeddedWebModelTransport.Failure {
+                expected["retryable"] = false
+                expected["required_action"] = "inspect_website"
+                XCTAssertFalse(EmbeddedWebModelTransport.Failure.responseFormatUnavailable.blocksProviderUntilRefresh)
+            }
+            XCTAssertTrue(NSDictionary(dictionary: body).isEqual(to: ["error": expected]),
+                "HTTP status must preserve each existing error body, including the codec's absence of recovery fields")
+        }
+    }
+
+    func testTerminalLiteralFormatHTTP400PreservesNativeDiagnosticWithoutReplay() async throws {
+        let failure = EmbeddedWebModelTransport.Failure.responseFormatUnavailable
+        let transport = ExternalGateWebModelTransport(point: .responsePoll, failure: failure)
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
+        let endpoint = try await server.start().appendingPathComponent("responses")
+        var urlRequest = URLRequest(url: endpoint)
+        urlRequest.httpMethod = "POST"; urlRequest.httpBody = request
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.setValue("Bearer " + server.bearerToken, forHTTPHeaderField: "Authorization")
+        urlRequest.setValue(try await bindWebsiteInferenceFixtureTurn(server, taskID: "literal-format-task"), forHTTPHeaderField: "X-Computa-Task-ID")
+        urlRequest.setValue(try websiteInferenceFixtureMetadata(taskID: "literal-format-task"), forHTTPHeaderField: "x-codex-turn-metadata")
+        let (data, response) = try await URLSession.shared.data(for: urlRequest)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 400)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let expected: [String: Any] = ["error": ["type": "model_error", "message": failure.localizedDescription,
+            "code": "unsupported_website_response", "param": NSNull(), "retryable": false,
+            "required_action": "inspect_website"] as [String: Any]]
+        XCTAssertTrue(NSDictionary(dictionary: body).isEqual(to: expected))
+        let taskID = websiteInferenceFixtureTaskID("literal-format-task")
+        let diagnostic = try XCTUnwrap(server.takeFailureDiagnostic(taskID: taskID))
+        let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(diagnostic.utf8)) as? [String: Any])
+        XCTAssertTrue(NSDictionary(dictionary: decoded).isEqual(to: body))
+        XCTAssertNil(server.takeFailureDiagnostic(taskID: taskID))
+        let operations = await transport.operations()
+        XCTAssertEqual(operations, ["webProviderStart", "webProviderSend", "webProviderPoll"],
+            "Terminal format rejection cannot reread or replay the submitted prompt")
+        _ = await server.shutdown()
+    }
+
     func testOwnershipHTTP400DoesNotBroadenCodecCleanupOrUnclassifiedFailures() {
         let unchanged: [any Error] = [
-            WebModelResponseCodec.Failure.unsupportedWebsiteResponse,
+            WebModelResponseCodec.Failure.unsupportedCallFields,
             WebModelResponseCodec.Failure.argumentsMustBeObject,
             WebModelServer.Failure.cleanupFailed,
             WebModelServer.Failure.startOwnershipUnconfirmed,
@@ -4526,6 +4634,7 @@ private actor ChatContextSidecarFixtureTransport: WebModelTransport {
 private actor QwenProgressFixtureTransport: WebModelTransport {
     private let base: PendingSavedFirstBodyFixtureTransport
     private let variant: String
+    private let scenario: String
     private var status: QwenResponseProgressStatus?
     private var polls = 0, memoryReads = 0
     private var closed = false, closedBeforeRead = false
@@ -4533,6 +4642,7 @@ private actor QwenProgressFixtureTransport: WebModelTransport {
         self.base = PendingSavedFirstBodyFixtureTransport(base: base, provider: "qwen", repeatPending: variant != "success",
             qwenReason: "qwen_initial_response_identity_v1")
         self.variant = variant
+        scenario = variant.hasPrefix("format-") ? String(variant.dropFirst(7)) : variant
     }
     func counts() -> (polls: Int, memoryReads: Int, closedBeforeRead: Bool) { (polls, memoryReads, closedBeforeRead) }
     func changeRevision(sessionToken: String) -> UInt64? { 0 }
@@ -4542,13 +4652,15 @@ private actor QwenProgressFixtureTransport: WebModelTransport {
     }
     func snapshotQwenResponseProgress(sessionToken: String) async -> QwenResponseProgressStatus? {
         memoryReads += 1; closedBeforeRead = closed
-        if variant == "cancel-during-snapshot" { withUnsafeCurrentTask { $0?.cancel() } }
-        return variant == "unavailable" ? nil : status
+        if scenario == "cancel-during-snapshot" { withUnsafeCurrentTask { $0?.cancel() } }
+        return scenario == "unavailable" ? nil : status
     }
     func request(operation: String, params: Data) async throws -> Data {
         if operation == "webProviderPoll" {
             polls += 1
+            if variant.hasPrefix("format") { throw EmbeddedWebModelTransport.Failure.responseFormatUnavailable }
             switch variant {
+            case "codec-format": throw WebModelResponseCodec.Failure.unsupportedWebsiteResponse
             case "preparation": throw EmbeddedWebModelTransport.Failure.preparationDeadline
             case "other-error": throw EmbeddedWebModelTransport.Failure.modelUnverified
             case "cancelled": withUnsafeCurrentTask { $0?.cancel() }; throw CancellationError()
@@ -4563,16 +4675,26 @@ private actor QwenProgressFixtureTransport: WebModelTransport {
             let token = try XCTUnwrap((sent["sessionToken"] as? String).flatMap(UUID.init(uuidString:)))
             let proof = try XCTUnwrap(sent["modelProofContext"] as? [String: Any])
             let actualGeneration = try XCTUnwrap((proof["documentGeneration"] as? String).flatMap(UUID.init(uuidString:)))
-            let generation = variant == "foreign-generation" ? UUID() : actualGeneration
+            let generation = scenario == "foreign-generation" ? UUID() : actualGeneration
             var record = QwenResponseProgressStatus.syntheticRecord(generation: generation)
             record["polls"] = 1; record["callbacks"] = 1
             record["lastState"] = "current"
             record["last"] = ["ageMs": 100, "ageSaturated": false,
                 "pending": ["provisional": false, "firstBody": false, "identity": true, "choice": false, "codePayload": false],
-                "users": NSNull(), "responses": NSNull(), "busy": NSNull(), "complete": NSNull(), "textBytes": NSNull(), "textSaturated": NSNull()]
-            let model = variant == "foreign-model" ? WebsiteModelChoice(provider: "qwen", key: "PRIVATE_MODEL", label: "PRIVATE_MODEL").modelID
+                "users": NSNull(), "responses": NSNull(), "busy": NSNull(), "complete": NSNull(), "textBytes": NSNull(), "textSaturated": NSNull(),
+                "ui": QwenResponseProgressStatus.syntheticReplyUI()]
+            if variant.hasPrefix("format"), var last = record["last"] as? [String: Any] {
+                last["ageMs"] = 2_500
+                last["pending"] = ["provisional": false, "firstBody": false, "identity": false, "choice": false, "codePayload": false]
+                last["users"] = 1; last["responses"] = 1; last["busy"] = true; last["complete"] = false
+                last["textBytes"] = 0; last["textSaturated"] = false
+                record["last"] = last
+                record["state"] = ["pendingSubmission": false, "firstUserBound": true, "outputAccepted": false,
+                    "completionCandidate": false, "codeGrant": false, "choiceGrant": false]
+            }
+            let model = scenario == "foreign-model" ? WebsiteModelChoice(provider: "qwen", key: "PRIVATE_MODEL", label: "PRIVATE_MODEL").modelID
                 : syntheticWebsiteModelID("qwen")
-            status = QwenResponseProgressStatus(sessionToken: variant == "foreign-token" ? UUID() : token,
+            status = QwenResponseProgressStatus(sessionToken: scenario == "foreign-token" ? UUID() : token,
                 documentGeneration: generation, modelID: model, sequence: 1, record: record)
         }
         return data

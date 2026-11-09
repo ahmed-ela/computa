@@ -167,6 +167,143 @@ final class QwenWebModelTransportTests: XCTestCase {
          "modelEvidence": original["modelEvidence"] ?? quotaEvidence()]
     }
 
+    func testQwenNativeFormatFailureRetainsLastAcceptedUICacheWithoutReadingOrRevivingThePage() async throws {
+        let fixture = try Fixture(codePayload: true); defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic last-known format diagnostic")
+        _ = try await installCodePayload(fixture, presentation: "editor", failure: "double")
+        do { _ = try await wait(fixture, token, state: "complete"); XCTFail("Original native payload rejection must survive") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFormatUnavailable) }
+        var pageReads = 0
+        fixture.transport.setBeforePageResultValidationForTesting { _ in pageReads += 1 }
+        let firstValue = await fixture.transport.snapshotQwenResponseProgress(sessionToken: token)
+        let status = try XCTUnwrap(firstValue), last = try XCTUnwrap(status.dictionary["last"] as? [String: Any])
+        let ui = try XCTUnwrap(last["ui"] as? [String: Any])
+        XCTAssertEqual(status.dictionary["lastState"] as? String, "current")
+        XCTAssertEqual((status.dictionary["state"] as? [String: Bool])?["outputAccepted"], false)
+        XCTAssertEqual(ui["scope"] as? String, "single"); XCTAssertEqual(ui["stop"] as? Bool, false)
+        XCTAssertEqual(ui["footer"] as? Int, 1)
+        _ = await fixture.transport.snapshotQwenResponseProgress(sessionToken: token)
+        do { _ = try await call(fixture, "webProviderPoll", token); XCTFail("Diagnostic retention cannot revive the terminal inference") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFormatUnavailable) }
+        XCTAssertEqual(pageReads, 0)
+        let copies = try await evaluate(fixture.view, "return [window.fixtureCopyCount,window.clipboardDelegations];") as? [Int]
+        XCTAssertEqual(copies, [1, 0])
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        let finished = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+        let afterCleanup = await fixture.transport.snapshotQwenResponseProgress(sessionToken: token)
+        XCTAssertNil(afterCleanup)
+        try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+    }
+
+    func testQwenFormatDiagnosticExceptionExcludesPreSendOtherFailureCancelledAndSupersededViews() async throws {
+        for scenario in ["pre-send", "ownership-failure", "cancelled", "superseded"] {
+            let fixture = try Fixture(setup: "qwenFixture.options.holdResponseIdentity=true"); defer { fixture.shutdown() }
+            let token = try await start(fixture)
+            if scenario != "pre-send" {
+                _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic excluded format diagnostic context")
+                _ = try await call(fixture, "webProviderPoll", token)
+                if scenario == "ownership-failure" {
+                    _ = try await evaluate(fixture.view, "history.pushState({},'', '/c/11111111-1111-4111-8111-111111111111');return true;")
+                    do { _ = try await call(fixture, "webProviderPoll", token); XCTFail("Foreign route must retain its original ownership refusal") }
+                    catch {
+                        guard let failure = error as? EmbeddedWebModelTransport.Failure, case .ownershipFailure = failure else {
+                            return XCTFail("Original ownership refusal changed: \(error)")
+                        }
+                    }
+                } else if scenario == "cancelled" {
+                    let cancelled = try await call(fixture, "webProviderCancel", token)
+                    XCTAssertEqual(cancelled["cleanup"] as? String, "failed",
+                        "A retained cleanup handle must not expose a response diagnostic snapshot")
+                }
+                else { fixture.browser.closeTab(try XCTUnwrap(fixture.createdID)) }
+            }
+            let status = await fixture.transport.snapshotQwenResponseProgress(sessionToken: token)
+            XCTAssertNil(status, scenario)
+        }
+    }
+
+    func testQwenReplyUIProgressIsClosedTypedAndKeepsUnknownSeparateFromFalse() throws {
+        let ui = QwenResponseProgressStatus.syntheticReplyUI()
+        XCTAssertNotNil(QwenResponseProgressStatus.sanitizedReplyUI(ui))
+        let fields = try XCTUnwrap(EmbeddedWebModelTransport.qwenResponseProgressFields([:], replyUI: ui))
+        XCTAssertEqual((fields["ui"] as? [String: Any])?["stop"] as? Bool, true)
+        XCTAssertTrue(fields["busy"] is NSNull, "UI Stop must not manufacture the protocol busy flag")
+        let missing = try XCTUnwrap(EmbeddedWebModelTransport.qwenResponseProgressFields([:]))
+        XCTAssertNil(missing["ui"])
+        for mutation: [String: Any] in [["PRIVATE": "PRIVATE_PAGE"], ["version": true], ["scope": "PRIVATE"],
+            ["stop": 0], ["loading": true], ["loading": 4], ["reason": "PRIVATE_REASON"],
+            ["tv": 0, "reason": "none", "daily": true], ["tv": NSNull(), "alert": 0], ["capped": true], ["visibility": "PRIVATE"], ["hidden": 0]] {
+            let bad = ui.merging(mutation) { _, new in new }
+            XCTAssertNil(QwenResponseProgressStatus.sanitizedReplyUI(bad))
+            let retained = try XCTUnwrap(EmbeddedWebModelTransport.qwenResponseProgressFields([:], replyUI: bad))
+            XCTAssertNil(retained["ui"], "Malformed diagnostics cannot invalidate or enrich the original callback")
+        }
+        let unknown: [String: Any] = ["version": 1, "scope": "empty_root", "stop": NSNull(), "loading": NSNull(),
+            "footer": NSNull(), "tv": NSNull(), "alert": NSNull(), "reason": NSNull(), "daily": NSNull(), "terminal": NSNull(), "capped": false, "visibility": "unknown", "hidden": NSNull()]
+        XCTAssertNotNil(QwenResponseProgressStatus.sanitizedReplyUI(unknown))
+        XCTAssertNil(QwenResponseProgressStatus.sanitizedReplyUI(unknown.merging(["loading": 0]) { _, new in new }))
+    }
+
+    func testQwenReplyUIProgressFitsSharedWholeFieldCapAlongsideMaximumLegacyCounters() throws {
+        let generation = UUID(), token = UUID(), model = WebsiteModelChoice(provider: "qwen", key: "Qwen3.8-Max", label: "Qwen3.8-Max").modelID
+        var record = QwenResponseProgressStatus.syntheticRecord(generation: generation)
+        for key in ["polls", "callbacks", "waitStarts", "waitReturns", "readTimeouts"] { record[key] = 65_534 }
+        record["revisionChanged"] = false; record["waitDeadlineReached"] = true
+        record["native"] = ["scope": "entry_lifetime", "received": 65_534, "accepted": 65_534, "revision": 65_534, "saturated": false,
+            "attached": false, "hidden": false, "window": true, "visible": false, "occluded": false]
+        record["outbound"] = ["utf16": 180_199, "utf16Saturated": false, "utf8": 720_799, "utf8Saturated": false]
+        record["lastState"] = "current"
+        let legacy: [String: Any] = ["ageMs": 300_000, "ageSaturated": false,
+            "pending": ["provisional": false, "firstBody": false, "identity": false, "choice": false, "codePayload": false],
+            "users": 10_000, "responses": 10_000, "busy": false, "complete": false, "textBytes": 220_000, "textSaturated": false]
+        record["last"] = legacy
+        let prior = try XCTUnwrap(QwenResponseProgressStatus(sessionToken: token, documentGeneration: generation, modelID: model, sequence: 1, record: record))
+        XCTAssertLessThanOrEqual(try JSONSerialization.data(withJSONObject: ["qwenResponseProgress": prior.dictionary]).count, 1_024)
+        let ui: [String: Any] = ["version": 1, "scope": "single", "stop": false, "loading": 3, "footer": 3, "tv": 1,
+            "alert": 3, "reason": "quota_exhausted", "daily": false, "terminal": false, "capped": true, "visibility": "prerender", "hidden": false]
+        record["last"] = legacy.merging(["ui": ui]) { _, new in new }
+        let status = try XCTUnwrap(QwenResponseProgressStatus(sessionToken: token, documentGeneration: generation, modelID: model, sequence: 1, record: record))
+        let size = try JSONSerialization.data(withJSONObject: ["qwenResponseProgress": status.dictionary], options: .sortedKeys).count
+        XCTAssertGreaterThan(size, 1_024, "The old cap must not silently drop this diagnostic")
+        XCTAssertLessThanOrEqual(size, QwenResponseProgressStatus.maximumJournalFieldBytes)
+        XCTAssertEqual(QwenResponseProgressStatus.maximumJournalFieldBytes, 1_536)
+        XCTAssertEqual(status.dictionary["callbacks"] as? Int, 65_534)
+        XCTAssertEqual((status.dictionary["last"] as? [String: Any])?["ageMs"] as? Int, 300_000)
+    }
+
+    func testQwenReplyUIProgressCachesAcceptedInspectionAndMemoryGetterDoesNotReadThePage() async throws {
+        for pending in [false, true] {
+            let fixture = try Fixture(setup: pending ? "qwenFixture.options.holdResponseIdentity=true" : "qwenFixture.options.holdResponse=true")
+            defer { fixture.shutdown() }
+            let token = try await start(fixture)
+            _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic actual reply UI observations")
+            var reads = 0
+            fixture.transport.setBeforePageResultValidationForTesting { action in if action == "inspect" { reads += 1 } }
+            let observation = try await call(fixture, "webProviderPoll", token)
+            XCTAssertNil(observation["qwenReplyUI"]); XCTAssertNil(observation["ui"], "Intermediate metadata never becomes an inference reply field")
+            let before = reads, firstValue = await fixture.transport.snapshotQwenResponseProgress(sessionToken: token)
+            let status = try XCTUnwrap(firstValue), last = try XCTUnwrap(status.dictionary["last"] as? [String: Any])
+            let ui = try XCTUnwrap(last["ui"] as? [String: Any])
+            if pending {
+                XCTAssertEqual(ui["scope"] as? String, "single")
+                XCTAssertTrue(ui["stop"] is NSNull); XCTAssertEqual(ui["loading"] as? Int, 1)
+            } else {
+                // holdResponse never mounts an assistant host; missing UI counts remain unknown.
+                XCTAssertEqual(ui["scope"] as? String, "none")
+                XCTAssertEqual(ui["stop"] as? Bool, true)
+                for key in ["loading", "footer", "tv", "alert", "reason", "daily", "terminal"] {
+                    XCTAssertTrue(ui[key] is NSNull, key)
+                }
+            }
+            _ = await fixture.transport.snapshotQwenResponseProgress(sessionToken: token)
+            XCTAssertEqual(reads, before)
+            XCTAssertEqual((status.dictionary["state"] as? [String: Bool])?["outputAccepted"], false)
+            try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+        }
+    }
+
     func testQwenProgressReadTimeoutsExcludePreSendHistory() {
         XCTAssertEqual(EmbeddedWebModelTransport.qwenProgressReadTimeouts(current: 8, baseline: 8), 0)
         XCTAssertEqual(EmbeddedWebModelTransport.qwenProgressReadTimeouts(current: 12, baseline: 8), 4)
@@ -1813,6 +1950,10 @@ final class QwenWebModelTransportTests: XCTestCase {
 
 // Shared inert record for the transport-schema and server-retention fixtures.
 extension QwenResponseProgressStatus {
+    static func syntheticReplyUI() -> [String: Any] {
+        ["version": 1, "scope": "single", "stop": true, "loading": 1, "footer": 0, "tv": 0, "alert": 0,
+         "reason": "none", "daily": NSNull(), "terminal": false, "capped": false, "visibility": "unknown", "hidden": NSNull()]
+    }
     static func syntheticRecord(generation: UUID) -> [String: Any] {
         ["version": 1, "documentGeneration": generation.uuidString.lowercased(), "sequence": 1,
             "polls": 0, "callbacks": 0, "waitStarts": 0, "waitReturns": 0, "waitInFlight": false,

@@ -636,6 +636,57 @@ function computaQwenDOM(c) {
         choice: { key: 'Qwen3.8-Max', label: 'Qwen3.8-Max' } };
     } catch { return null; } // A nonmatch preserves the original guarded path.
   }
+  // Optional diagnostics on an already-read physical reply. No text/ID/attribute
+  // values leave this helper; these facts never participate in admission.
+  function replyProgressUI(t, form = null, terminal = null, maxNotice = false) {
+    const ui = { version:1, scope:'none', stop:form && Object.hasOwn(form,'stop') ? !!form.stop : null,
+      loading:null, footer:null, tv:null, alert:null, reason:null, daily:null,
+      terminal:null, capped:false, visibility:'unknown', hidden:null };
+    try { const value=document.visibilityState; if (['visible','hidden','prerender'].includes(value)) ui.visibility=value; } catch { }
+    try { const value=document.hidden; if (typeof value === 'boolean') ui.hidden=value; } catch { }
+    try {
+      if (!t || !Array.isArray(t.answers)) return null;
+      if (t.responseChoice) { ui.scope='comparison'; return ui; }
+      const answer=t.pendingAnswer || t.answer;
+      if (!answer) return t.answers.length === 0 ? ui : null;
+      if (t.answers.length !== 1 || answer.root !== t.answers[0] || !c.visible(answer.root)) return null;
+      const host=answer.content;
+      if (!host) { ui.scope='empty_root'; return ui; }
+      if (!host.isConnected || !c.visible(host) || !host.classList.contains('chat-response-message')
+        || host.closest('.qwen-chat-message') !== answer.root) return null;
+      ui.scope='single';ui.terminal=typeof terminal === 'boolean' ? terminal : null;
+      const outsideAuthored=node => !node.closest('.response-message-content, .custom-qwen-markdown, .qwen-markdown');
+      const count=nodes => Math.min(3,nodes.length); // 3 is saturated: at least three.
+      ui.loading=count(c.nodes(host,'.response-loading').filter(node => c.visible(node) && outsideAuthored(node)));
+      ui.footer=count(c.nodes(host,'.response-message-footer-actions').filter(node => c.visible(node) && outsideAuthored(node)));
+      const rights=c.nodes(host,'.chat-response-message-right',2);
+      if (rights.length === 1 && rights[0].parentElement === host && c.visible(rights[0])) {
+        const right=rights[0];
+        const cards=c.nodes(right,'section.exceed-limit-error-card').filter(node => node.parentElement === right && c.visible(node));
+        const alerts=c.nodes(right,'div.qwen-messsage-status.qwen-alert').filter(node => node.parentElement === right && c.visible(node));
+        ui.tv=count(cards);ui.alert=count(alerts);
+        ui.reason=cards.length === 0 ? 'none' : cards.length !== 1 ? 'ambiguous' : 'other';
+        if (cards.length === 1) {
+          const card=cards[0],reason=card.getAttribute('data-paywall-reason');
+          if (['ExceedLimit','quota_exhausted','update_member'].includes(reason)) ui.reason=reason;
+          // This reports only the observed UI notice, never an HTTP/backend
+          // quota code or a replacement for the strict classification path.
+          if (maxNotice && card.getAttribute('class') === 'exceed-limit-error-card'
+            && card.getAttribute('data-testid') === 'exceed-limit-error-card'
+            && card.getAttribute('data-aes-exp') === 'expExceedLimitCard'
+            && card.getAttribute('data-paywall-scene') === 't2t'
+            && card.getAttribute('data-chat-id') === route().id) {
+            const paragraphs=c.nodes(card,'p',2);
+            if (paragraphs.length === 1 && paragraphs[0].parentElement === card
+              && paragraphs[0].children.length === 0 && c.visible(paragraphs[0]))
+              ui.daily=c.normalize(paragraphs[0].textContent) === "You've reached today's Qwen3.8-Max limit. Upgrade your membership or switch to another model above to continue.";
+          }
+        }
+      }
+      ui.capped=[ui.loading,ui.footer,ui.tv,ui.alert].some(value => value === 3);
+      return ui;
+    } catch { return null; } // Diagnostic failure preserves the original read/result.
+  }
   function completionCandidate(answer) {
     if (!answer) return false;
     const current = route(), form = composer();
@@ -1295,6 +1346,6 @@ function computaQwenDOM(c) {
   return { rejectUserCount, rejectSelectionBinding, firstDisplayReplacement, watchDisplayRender, displayHitFailure, firstBodyPresentation, firstBodyFailureStructure,
     responseChoiceTranscript: () => transcript(true, null, true),
     hasResponseChoice: () => c.nodes(document, '.qwen-chat-message-assistant .smrm', 2).length !== 0,
-    initialResponseIdentityTranscript: emptyContainerPrompt => transcript(true, emptyContainerPrompt), route, authored, initialReady, picker, modelRows, composer, transcript, modelQuotaTV, completionCandidate, rawAnswer, codePayloadFailure, sampleCodePayload, authoredSourceCandidate,
+    initialResponseIdentityTranscript: emptyContainerPrompt => transcript(true, emptyContainerPrompt), route, authored, initialReady, picker, modelRows, composer, transcript, modelQuotaTV, replyProgressUI, completionCandidate, rawAnswer, codePayloadFailure, sampleCodePayload, authoredSourceCandidate,
     deletionTrigger, deletionMenu, deletionConfirmation, deletionObserved, insertLiteral };
 }

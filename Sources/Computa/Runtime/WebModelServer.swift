@@ -1865,9 +1865,10 @@ actor WebModelServer {
                     } else { responseChoiceStatus = nil }
                 } else { responseChoiceStatus = nil }
                 let qwenProgress: QwenResponseProgressStatus?
-                let responseDeadlineFailure = (error as? EmbeddedWebModelTransport.Failure) == .deadline
+                let responseProgressFailure = (error as? EmbeddedWebModelTransport.Failure) == .deadline
+                    || (error as? EmbeddedWebModelTransport.Failure) == .responseFormatUnavailable
                     || { if let failure = error as? Failure, case .deadline = failure { return true }; return false }()
-                if responseDeadlineFailure, let lease, permitsQwenProgressEvidence(lease) {
+                if responseProgressFailure, let lease, permitsQwenProgressEvidence(lease) {
                     // No page read, wait, rearm or deadline renewal. The outer
                     // server can expire while the native transport is idle.
                     let candidate = await lease.transport.snapshotQwenResponseProgress(sessionToken: lease.token)
@@ -2360,7 +2361,8 @@ actor WebModelServer {
             record["groqFailureDiagnostic"] = groqDiagnostic.dictionary
         }
         if provider == "qwen", let responseChoiceReceipt { record["savedResponseChoiceReceipt"] = responseChoiceReceipt.dictionary }
-        if phase == "failed", provider == "qwen", errorCode == "provider_timeout", let qwenProgressDiagnostic {
+        if phase == "failed", provider == "qwen",
+           errorCode == "provider_timeout" || errorCode == "unsupported_website_response", let qwenProgressDiagnostic {
             record["qwenResponseProgress"] = qwenProgressDiagnostic.dictionary
         }
         try appendEvidence(record, taskID: taskID)
@@ -2724,7 +2726,7 @@ actor WebModelServer {
             case .unsupportedParameter(let param): return .init(status: "400 Bad Request", type: "invalid_request", code: "unsupported_parameter", param: param)
             case .invalidToolChoice: return .init(status: "400 Bad Request", type: "invalid_request", code: "invalid_tool_choice", param: "tool_choice")
             case .rejectedToolChoice: return .init(status: "500 Internal Server Error", type: "model_error", code: "tool_choice_violation", param: "tool_choice")
-            case .unsupportedWebsiteResponse: return .init(status: "500 Internal Server Error", type: "model_error", code: "unsupported_website_response")
+            case .unsupportedWebsiteResponse: return .init(status: "400 Bad Request", type: "model_error", code: "unsupported_website_response")
             case .parallelToolCallsUnsupported: return .init(status: "500 Internal Server Error", type: "model_error", code: "parallel_tool_calls_violation", param: "parallel_tool_calls")
             case .toolCallLimitExceeded: return .init(status: "500 Internal Server Error", type: "model_error", code: "max_tool_calls_violation", param: "max_tool_calls")
             case .missingModel: return .init(status: "400 Bad Request", type: "invalid_request", code: "missing_model", param: "model")
@@ -2749,6 +2751,10 @@ actor WebModelServer {
             // This verified provider stop is terminal. The bundled engine preserves
             // its inspection action on 400 and replaces a 500 with generic high demand.
             case .responseBlocked(.claude):
+                return .init(status: "400 Bad Request", type: "model_error", code: failure.diagnosticCode!)
+            // Literal-format rejection is terminal too; preserve its existing
+            // inspection body instead of the engine's generic HTTP 500 display.
+            case .responseFormatUnavailable:
                 return .init(status: "400 Bad Request", type: "model_error", code: failure.diagnosticCode!)
             // Every finite ownership failure is terminal for this inference.
             // Preserve its existing inspect_website body instead of the engine's

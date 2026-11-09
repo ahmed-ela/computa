@@ -644,6 +644,17 @@ async function computaSavedConversation(input, c, dom, config) {
     const payloadMetadata = (held, stateName, grant) => ({version:held.source.kind === 'raw_answer_v1' ? 2 : 1,
       state:stateName,...(grant ? {grant} : {}),candidate:held.candidate,responseID:held.source.responseID,
       ...(held.source.kind === 'raw_answer_v1' ? {sourceKind:'raw_answer_v1'} : {})});
+    function withReplyProgressUI(output, transcript, form = null, terminal = null) {
+      if (config.stateKey === '__computaQwenSavedSessionV1' && input.qwenProgressUI === true
+        && input.action === 'inspect' && state.submitted && !cleanupInspection && typeof dom.replyProgressUI === 'function') {
+        try {
+          const ui=dom.replyProgressUI(transcript,form,terminal,
+            c.equalChoice(input.expectedModelChoice,{key:'Qwen3.8-Max',label:'Qwen3.8-Max'}));
+          if (ui) output.qwenReplyUI=ui;
+        } catch { /* Metadata cannot replace the original result/error. */ }
+      }
+      return output;
+    }
     function read() {
       const t = dom.transcript(), form = dom.composer(), evidence = selectionEvidence(false);
       validateInitialResponseIdentity(t, 'ordinary_read');
@@ -686,7 +697,7 @@ async function computaSavedConversation(input, c, dom, config) {
         dom.codePayloadFailure('candidate_missing');
       }
       const complete = terminalUI && extracted.finalMarkup && !!extracted.text.trim();
-      return { t, form, output: { url: document.URL, sessionLifecycle: 'saved_conversation_delete', temporary: false,
+      const result = { t, form, output: { url: document.URL, sessionLifecycle: 'saved_conversation_delete', temporary: false,
         composer: c.enabled(form.editor), userCount: t.users.length, responseCount: t.answers.length,
         [usesModes ? 'modeEvidence' : 'modelEvidence']: evidence,
         ...(usesModes && !evidence && modeObservationDiagnostic ? { modeObservationDiagnostic } : {}),
@@ -695,6 +706,8 @@ async function computaSavedConversation(input, c, dom, config) {
         text: state.first && !cleanupInspection ? extracted.text : '', answerComplete: !!complete && !cleanupInspection,
         busy: state.submitted && !complete, interrupted: false, conversationIdentity: state.first ? state.canonical : null,
         firstUserIdentity: state.first?.id || null, firstUserVerified: false, firstUserMarkerVerified: false, firstUserFingerprint: null } };
+      withReplyProgressUI(result.output,t,form,state.first && evidence && !state.deletion ? terminalUI : null);
+      return result;
     }
     const fresh = () => !state.submitted && !state.first && !state.deletion && dom.route().kind === 'fresh'
       && dom.transcript().users.length === 0 && dom.transcript().answers.length === 0 && dom.composer().empty;
@@ -911,8 +924,8 @@ async function computaSavedConversation(input, c, dom, config) {
       }
       if (pair) {
         if ((choiceStage = 'pair_scope', !samePair(current)) || (choiceStage = 'pair_ack_state', held.acknowledged)) refuse();
-        if (observeFirstDisplay(current, readChoice, pair)) return { qwenFirstBodyExpansionPending:true, url:document.URL,
-          sessionLifecycle:'saved_conversation_delete', temporary:false };
+        if (observeFirstDisplay(current, readChoice, pair)) return withReplyProgressUI({ qwenFirstBodyExpansionPending:true, url:document.URL,
+          sessionLifecycle:'saved_conversation_delete', temporary:false },current);
       } else if (!held.spent || !sameUser(current) || !current.answer || current.answer.id !== held.ids[0]
         || c.nodes(current.answer.root, '.chat-response-message', 2).length !== 1
         || c.nodes(current.answer.root, '.smrm, .cmrm', 1).length) refuse('selected_scope');
@@ -1002,8 +1015,8 @@ async function computaSavedConversation(input, c, dom, config) {
       };
       const candidate = initialResponse();
       validateInitialResponseIdentity(candidate, 'id_candidate');
-      if (observeFirstDisplay(candidate)) return { qwenFirstBodyExpansionPending: true, url: document.URL,
-        sessionLifecycle: 'saved_conversation_delete', temporary: false };
+      if (observeFirstDisplay(candidate)) return withReplyProgressUI({ qwenFirstBodyExpansionPending: true, url: document.URL,
+        sessionLifecycle: 'saved_conversation_delete', temporary: false },candidate);
       if (candidate.pendingAnswer) {
         if (candidate.users.length !== 1 || candidate.answers.length !== 1 || !candidate.first
           || candidate.first.text !== state.inserted.prompt || !Array.isArray(input.expectedUserCounts)
@@ -1029,8 +1042,8 @@ async function computaSavedConversation(input, c, dom, config) {
         validateInitialResponseIdentity(current, 'id_digest_check');
         checkFirstDisplaySelection('id_after_hash');
         if (fingerprint !== state.submittedFingerprint) firstBindingFailure('initial_response_digest', 'submitted_fingerprint_mismatch');
-        if (current.pendingAnswer) return { qwenInitialResponseIdentityPending: true, url: document.URL,
-          sessionLifecycle: 'saved_conversation_delete', temporary: false };
+        if (current.pendingAnswer) return withReplyProgressUI({ qwenInitialResponseIdentityPending: true, url: document.URL,
+          sessionLifecycle: 'saved_conversation_delete', temporary: false },current);
         // The same nodes may settle during hashing. Re-enter the ordinary
         // strict transcript, full body hash, model and completion checks below.
       }
