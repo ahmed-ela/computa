@@ -298,6 +298,12 @@ enum WebsiteAdapterFailureDiagnostic {
     /// answersSeen counts never claim a complete source or response authority.
     private static func qwenRawSource(_ raw: Any?) -> Bool {
         let stages: Set<String> = ["request", "target", "root", "conversation_nodes", "host_props", "element_tree",
+            "element_tree_budget", "element_tree_depth", "element_tree_nodekind",
+            "element_tree_array", "element_tree_elementshape", "element_tree_kind",
+            "element_tree_props", "element_tree_message", "element_tree_editflags",
+            "element_tree_children", "element_tree_message_set", "element_tree_nodekind_string",
+            "element_tree_nodekind_number", "element_tree_nodekind_bigint", "element_tree_nodekind_symbol",
+            "element_tree_nodekind_function", "element_tree_message_set_empty", "element_tree_message_set_multiple",
             "message_keys", "message_identity", "message_state", "message_mode", "message_legacy_content",
             "message_empty_fields", "message_extra", "message_meta", "message_display", "message_timestamp",
             "feature_keys", "feature_values", "usage_shape", "phase_list", "phase_keys", "phase_kind", "phase_state",
@@ -308,6 +314,9 @@ enum WebsiteAdapterFailureDiagnostic {
               integer(value["version"], 1...1) == 1,
               let stage = value["stage"] as? String, stages.contains(stage),
               let kind = value["kind"] as? String, ["guard", "exception"].contains(kind) else { return false }
+        if stage.hasPrefix("element_tree_") {
+            return value["phaseCount"] is NSNull && value["phaseOverflow"] is NSNull && value["answersSeen"] is NSNull
+        }
         if value["phaseCount"] is NSNull {
             return value["phaseOverflow"] is NSNull && value["answersSeen"] is NSNull
         }

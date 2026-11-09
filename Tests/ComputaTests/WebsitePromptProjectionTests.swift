@@ -3,6 +3,32 @@ import XCTest
 @testable import Computa
 
 final class WebsitePromptProjectionTests: XCTestCase {
+    func testNativeInputAppendPreservesEveryRetainedLexemeForArrayEmptyAndStringInput() throws {
+        let item: [String: Any] = ["type":"function_call_output","call_id":"native","output":"new"]
+        let encoded = #"{"call_id":"native","output":"new","type":"function_call_output"}"#
+        let cases: [(String,String)] = [
+            (#"{ "input" : [{"role":"user","content":"\u0061\/\uD83D\uDE00"} ],"foreign":1.2300e-4,"zero":-0.00e+12 }"#,
+             #"{ "input" : [{"role":"user","content":"\u0061\/\uD83D\uDE00"} ,"# + encoded + #"],"foreign":1.2300e-4,"zero":-0.00e+12 }"#),
+            (#"{"input":[ ],"foreign":9007199254740993}"#,#"{"input":[ "# + encoded + #"],"foreign":9007199254740993}"#),
+            (#"{"\u0069nput":"\u0061\/","foreign":-0.00e+12}"#,
+             #"{"\u0069nput":[{"role":"user","content":"\u0061\/"},"# + encoded + #"],"foreign":-0.00e+12}"#),
+        ]
+        for (source,expected) in cases {
+            let result = try WebsitePromptProjection.appendingInputItems([item],to:Data(source.utf8))
+            XCTAssertEqual(result,Data(expected.utf8))
+            XCTAssertNoThrow(try JSONSerialization.jsonObject(with:result))
+        }
+    }
+
+    func testNativeInputAppendRejectsMissingWrongOrDuplicateInputWithoutChangingSource() throws {
+        let item: [String: Any] = ["type":"function_call_output","call_id":"native","output":"new"]
+        for source in [#"{}"#,#"{"input":null}"#,#"{"input":{}}"#,#"{"input":1}"#,
+                       #"{"input":[],"input":[]}"#,#"{"input":[],"\u0069nput":"other"}"#,#"{"input":[]"#] {
+            XCTAssertThrowsError(try WebsitePromptProjection.appendingInputItems([item],to:Data(source.utf8)))
+        }
+        XCTAssertThrowsError(try WebsitePromptProjection.appendingInputItems([],to:Data(#"{"input":[]}"#.utf8)))
+    }
+
     func testAPIOnlyOmissionRemovesExactlyTheDeclaredTopLevelFieldsAtEveryPosition() throws {
         let omitted = ["include", "reasoning", "client_metadata", "prompt_cache_key", "metadata", "safety_identifier",
             "stream", "stream_options", "store", "background", "service_tier"]

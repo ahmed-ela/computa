@@ -282,10 +282,9 @@ actor WebModelServer {
         let seed: GroqToolCatalog.Seed
     }
     private var groqCatalogRequests: [String: GroqCatalogRequestContext] = [:]
-    // Estimate for the pending loader invocation/receipt in the next history.
-    // Units follow final admission: exact GPT-OSS body tokens, otherwise a
-    // conservative UTF-8 byte allowance. New outputs can still exceed it; the
-    // full final-request budget remains mandatory before every website Start.
+    // Additional allowance for native call IDs/engine envelope changes after
+    // measuring the pending loader arguments and actual receipt in preview history.
+    // Final admission remains mandatory for the full next request before Start.
     static let groqLoaderHistoryReserve = 256
     private var yieldedTurns: [String: YieldedTurn] = [:]
     private var closedTurns: [String: ClosedTurn] = [:]
@@ -512,24 +511,66 @@ actor WebModelServer {
         // normal read-only tool error, leaving the prior usable selection intact.
         var candidate = groqToolCatalog
         let load = try candidate.previewLoad(scope: scope, arguments: arguments, lastOfferedNames: current.lastOfferedNames)
-        let projection = try candidate.prepare(scope: scope, seed: current.seed)
-        do {
-            let preview = try WebModelResponseCodec.prepareRequest(current.canonicalRequest,
-                browserToolAvailability: current.browserAvailability, groqToolCatalogProjection: projection)
-            guard let units = try WebModelResponseCodec.validateGroqPromptBudget(model: preview.model, prompt: preview.prompt),
-                  units <= WebModelResponseCodec.groqMaximumBodyTokens - Self.groqLoaderHistoryReserve else {
-                throw load.budgetFailure
+        func fits(_ staged: inout GroqToolCatalog, receipt: Data) throws -> Bool {
+            let projection = try staged.prepare(scope: scope, seed: current.seed)
+            // Include the original whole loader call and this exact receipt. The
+            // temporary projection never replaces canonical history or executes a call.
+            let history = try Self.groqLoaderBudgetHistory(current.canonicalRequest,
+                projection: projection, arguments: arguments, receipt: receipt)
+            do {
+                let preview = try WebModelResponseCodec.prepareRequest(history,
+                    browserToolAvailability: current.browserAvailability, groqToolCatalogProjection: projection)
+                guard let units = try WebModelResponseCodec.validateGroqPromptBudget(model: preview.model, prompt: preview.prompt) else {
+                    throw WebModelResponseCodec.Failure.invalidTools
+                }
+                return units <= WebModelResponseCodec.groqMaximumBodyTokens - Self.groqLoaderHistoryReserve
+            } catch let failure as WebModelResponseCodec.Failure {
+                switch failure {
+                case .promptTooLarge, .groqPromptBudgetExceeded, .groqPromptByteBudgetExceeded: return false
+                default: throw failure
+                }
             }
-        } catch let failure as WebModelResponseCodec.Failure {
-            switch failure {
-            case .promptTooLarge, .groqPromptBudgetExceeded, .groqPromptByteBudgetExceeded:
-                throw load.budgetFailure
-            default: throw failure
+        }
+        var receipt = load.receipt
+        if try !fits(&candidate, receipt: receipt) {
+            var admitted = false
+            for selection in try load.smallerArguments() {
+                var smaller = groqToolCatalog
+                let preview = try smaller.previewLoad(scope: scope, arguments: selection, lastOfferedNames: current.lastOfferedNames)
+                let deferred = load.names.filter { !preview.names.contains($0) }
+                let partialReceipt = try preview.receipt(deferred: deferred)
+                if try fits(&smaller, receipt: partialReceipt) {
+                    candidate = smaller; receipt = partialReceipt; admitted = true; break
+                }
             }
+            guard admitted else { throw load.budgetFailure }
         }
         try Task.checkCancellation()
         groqToolCatalog = candidate
-        return load.receipt
+        return receipt
+    }
+
+    static func groqLoaderBudgetHistory(_ canonical: Data, projection: GroqToolCatalog.Projection,
+                                              arguments: Data, receipt: Data) throws -> Data {
+        guard let object = try JSONSerialization.jsonObject(with: canonical) as? [String: Any],
+              let loader = projection.inventory.first(where: {
+                  $0.name == GroqToolCatalog.name || $0.name == "functions." + GroqToolCatalog.name
+              })?.name, let argumentText = String(data: arguments, encoding: .utf8),
+              let receiptText = String(data: receipt, encoding: .utf8) else { throw GroqToolCatalog.Failure.invalidCatalog }
+        let input: [[String: Any]]
+        if let history = object["input"] as? [[String: Any]] { input = history }
+        else if object["input"] is String { input = [] }
+        else { throw WebModelResponseCodec.Failure.missingInput }
+        // This API does not receive the runtime's actual call ID. Keep a valid
+        // distinct measurement ID plus the unchanged 256-unit envelope allowance.
+        var id = "call_loader_budget"
+        let used = Set(input.compactMap { $0["call_id"] as? String })
+        while used.contains(id) { id += "_" }
+        var call: [String: Any] = ["type": "function_call", "name": GroqToolCatalog.name,
+            "arguments": argumentText, "call_id": id]
+        if loader.hasPrefix("functions.") { call["namespace"] = "functions" }
+        return try WebsitePromptProjection.appendingInputItems([call,
+            ["type": "function_call_output", "call_id": id, "output": receiptText]], to: canonical)
     }
 
     func registerCleanupTurn(taskID: String, threadID: String?, turnID: String?) {

@@ -128,6 +128,7 @@ final class WebModelResponseCodecTests: XCTestCase {
 
     private func displayedLoader(choices: [String]) throws -> [String: Any] {
         var loader = groqLoaderDefinition
+        loader["description"] = "Load exact schemas for 1–4 inventory names for the next request. Read-only; executes nothing. Replaces the previous loaded selection. Use the current catalog_revision. If all valid requested schemas cannot fit, the receipt reports a fitting loaded subset and deferred names. Wait for the next request's callable schemas; load deferred names separately if needed."
         var schema = try XCTUnwrap(loader["parameters"] as? [String: Any])
         var properties = try XCTUnwrap(schema["properties"] as? [String: Any])
         var names = try XCTUnwrap(properties["names"] as? [String: Any])

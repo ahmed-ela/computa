@@ -1011,13 +1011,16 @@ function computaQwenDOM(c) {
   }
   function rawSourceDiagnostic(input) {
     const value = rawDiagnosticFields(input,['version','stage','kind','phaseCount','phaseOverflow','answersSeen']);
-    const stages = ['request','target','root','conversation_nodes','host_props','element_tree','message_keys','message_identity',
+    const stages = ['request','target','root','conversation_nodes','host_props','element_tree',
+      'element_tree_budget','element_tree_depth','element_tree_nodekind','element_tree_array','element_tree_elementshape','element_tree_kind','element_tree_props','element_tree_message','element_tree_editflags','element_tree_children','element_tree_message_set','element_tree_nodekind_string','element_tree_nodekind_number','element_tree_nodekind_bigint','element_tree_nodekind_symbol','element_tree_nodekind_function','element_tree_message_set_empty','element_tree_message_set_multiple',
+      'message_keys','message_identity',
       'message_state','message_mode','message_legacy_content','message_empty_fields','message_extra','message_meta',
       'message_display','message_timestamp','feature_keys','feature_values','usage_shape','phase_list','phase_keys','phase_kind',
       'phase_state','phase_extra','phase_tools','phase_scalar','answer_count','answer_role','answer_value','renderer_input','utf8','source_stability'];
     if (!value || Object.keys(value).sort().join(',') !== 'answersSeen,kind,phaseCount,phaseOverflow,stage,version'
       || value.version !== 1 || !stages.includes(value.stage) || !['guard','exception'].includes(value.kind)) return null;
     const n = value.phaseCount, overflow = value.phaseOverflow, seen = value.answersSeen;
+    if (value.stage.startsWith('element_tree_') && n !== null) return null;
     if (n === null) { if (overflow !== null || seen !== null) return null; }
     else if (!Number.isInteger(n) || n < 0 || n > 33 || typeof overflow !== 'boolean' || overflow !== (n === 33)
       || seen !== null && (!Number.isInteger(seen) || seen < 0 || seen > Math.min(n,2))) return null;

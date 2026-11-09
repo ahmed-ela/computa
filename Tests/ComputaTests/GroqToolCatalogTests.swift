@@ -3,6 +3,67 @@ import XCTest
 @testable import Computa
 
 final class GroqToolCatalogTests: XCTestCase {
+    func testValidBudgetSubsetsAreLargestFirstAndNeverValidateOnlyPartOfARequest() throws {
+        let names = ["tool_d", "tool_c", "tool_b", "tool_a"]
+        let definitions = [canonicalLoader()] + names.map(function)
+        let allowed = Set(names + [GroqToolCatalog.name])
+        let seed = GroqToolCatalog.Seed(registeredDefinitionsJSON: try encode(definitions),
+            callableNames: allowed, allowedNames: allowed, preloadNames: [], toolChoiceJSON: try encode("auto"))
+        var catalog = GroqToolCatalog()
+        let scope = makeScope(), baseline = try catalog.prepare(scope: scope, seed: seed)
+        var staged = catalog
+        let load = try staged.previewLoad(scope: scope, arguments: args(baseline,names), lastOfferedNames: [])
+        let alternatives = try load.smallerArguments().map { try XCTUnwrap(JSONSerialization.jsonObject(with: $0) as? [String: Any]) }
+        let subsets = try alternatives.map { try XCTUnwrap($0["names"] as? [String]) }
+        XCTAssertEqual(subsets.count,14)
+        XCTAssertEqual(subsets.map(\.count),[3,3,3,3,2,2,2,2,2,2,1,1,1,1])
+        XCTAssertEqual(subsets.first,["tool_d","tool_c","tool_b"])
+        XCTAssertEqual(subsets[1],["tool_d","tool_c","tool_a"])
+        XCTAssertEqual(subsets.last,["tool_a"])
+        XCTAssertEqual(Set(subsets.map { $0.joined(separator:",") }).count,14)
+        XCTAssertTrue(alternatives.allSatisfy { $0["catalog_revision"] as? String == baseline.revision })
+        XCTAssertTrue(subsets.allSatisfy { Set($0).isSubset(of:allowed) && !$0.isEmpty && $0.count<4 })
+        for count in [0, GroqToolCatalog.maximumLoadedTools + 1] {
+            let invalid = GroqToolCatalog.LoadPreview(receipt: Data(), budgetFailure: .selectionTooLarge,
+                revision: baseline.revision, names: Array(repeating: "tool_d", count: count))
+            XCTAssertThrowsError(try invalid.smallerArguments())
+        }
+        for invalid in [["tool_d","not_registered"],["tool_d","tool_d"],names+["not_registered"]] {
+            XCTAssertThrowsError(try catalog.previewLoad(scope: scope, arguments: args(baseline,invalid), lastOfferedNames: []))
+            XCTAssertEqual(try catalog.prepare(scope: scope, seed: seed),baseline)
+        }
+        var smaller = catalog
+        let selected = try smaller.previewLoad(scope: scope, arguments: args(baseline,["tool_c","tool_a"]), lastOfferedNames: [])
+        let receipt = try XCTUnwrap(JSONSerialization.jsonObject(with:selected.receipt(deferred:["tool_d","tool_b"])) as? [String:Any])
+        XCTAssertEqual(receipt["loaded"] as? [String],["tool_a","tool_c"])
+        XCTAssertEqual(receipt["deferred"] as? [String],["tool_b","tool_d"])
+        XCTAssertEqual(receipt["execution"] as? Bool,false)
+        XCTAssertEqual(receipt["catalog_revision"] as? String,baseline.revision)
+        XCTAssertEqual(try catalog.prepare(scope:scope,seed:seed),baseline)
+    }
+
+    func testDisplayedSubsetContractCannotChangeCanonicalRegistrationOrSavedThreadMembership() throws {
+        let canonical = GroqToolCatalog.specification
+        XCTAssertEqual(canonical["description"] as? String,
+            "Load exact schemas for 1–4 inventory names for the next request. Read-only; executes nothing. Replaces the previous loaded selection. Use the current catalog_revision.")
+        let encodedCanonical = try encode(canonical), scope = makeScope(), seed = try makeSeed()
+        let base = try GroqToolCatalog.baseline(for:seed)
+        let suite = "GroqSubsetRegistration-"+UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName:suite))
+        defer { defaults.removePersistentDomain(forName:suite) }
+        GroqToolThreadRegistration.remember(codexHome:"/fixture",threadID:scope.threadID,modelID:scope.modelID,defaults:defaults)
+        let marker = GroqToolThreadRegistration.marker(codexHome:"/fixture",threadID:scope.threadID,modelID:scope.modelID)
+        let shown = try XCTUnwrap(base.displaySchemas([canonicalLoader()]).first)
+        XCTAssertTrue((shown["description"] as? String)?.contains("fitting loaded subset and deferred names") == true)
+        XCTAssertEqual(try encode(GroqToolCatalog.specification),encodedCanonical)
+        XCTAssertEqual(GroqToolThreadRegistration.marker(codexHome:"/fixture",threadID:scope.threadID,modelID:scope.modelID),marker)
+        XCTAssertTrue(GroqToolThreadRegistration.contains(codexHome:"/fixture",threadID:scope.threadID,modelID:scope.modelID,
+            defaults:try XCTUnwrap(UserDefaults(suiteName:suite))))
+        var foreign = canonicalLoader(); foreign["name"]="foreign_loader"
+        XCTAssertEqual(try encode(base.displaySchemas([foreign]).first!),try encode(foreign))
+        XCTAssertEqual(try encode(GroqToolCatalog.restoringRegisteredLoaderBounds(canonicalLoader())),try encode(canonicalLoader()))
+    }
+
     func testBudgetRejectionHintsUseOnlyTheExactAdmittedOfferAndCurrentPolicy() throws {
         var catalog = GroqToolCatalog()
         let scope = makeScope()

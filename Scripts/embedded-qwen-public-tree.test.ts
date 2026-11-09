@@ -41,7 +41,8 @@ test('supported depth keeps malformed trees, prose children, caps, multiple ANSW
    if(cause==='visitCap')nv(p).props.children=Array(64).fill(p.element({}));
   });
   expect(calls,cause).toBe(0);expect(t.first.error,cause).toBe('unsupported_response_format');expect(t.first.text,cause).toBeUndefined();expect(t.first.qwenCodePayload,cause).toBeUndefined();
-  expect(t.first.adapterFailureStructure.rawSource.stage,cause).toBe(cause==='duplicateAnswer'?'answer_count':cause==='parent'?'message_identity':'element_tree');
+  const stages:any={prose:'element_tree_nodekind_string',portal:'element_tree_kind',foreignMessage:'element_tree_message_set_multiple',duplicateAnswer:'answer_count',parent:'message_identity',accessor:'element_tree_children',arrayCap:'element_tree_array',depthCap:'element_tree_depth',visitCap:'element_tree_budget'};
+  expect(t.first.adapterFailureStructure.rawSource.stage,cause).toBe(stages[cause]);
   expect(t.world.delegated(),cause).toBe(0);expect(t.f.actions.every(a=>a.clicks===0),cause).toBe(true);
  }
  const t=await ownedRaw(raw);(t.f.answer as any).__reactProps$fixture={...t.p.current};

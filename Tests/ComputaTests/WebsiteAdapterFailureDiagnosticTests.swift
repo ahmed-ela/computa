@@ -386,6 +386,42 @@ final class WebsiteAdapterFailureDiagnosticTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(D.qwenAuthoredLogFields(legacy)).data(using: .utf8), legacy.data)
     }
 
+    func testQwenElementTreeSubguardsAreClosedFailureOnlyAndCannotClaimPhaseCounts() throws {
+        let stages = ["element_tree_budget", "element_tree_depth", "element_tree_nodekind",
+            "element_tree_array", "element_tree_elementshape", "element_tree_kind",
+            "element_tree_props", "element_tree_message", "element_tree_editflags",
+            "element_tree_children", "element_tree_message_set", "element_tree_nodekind_string",
+            "element_tree_nodekind_number", "element_tree_nodekind_bigint", "element_tree_nodekind_symbol",
+            "element_tree_nodekind_function", "element_tree_message_set_empty", "element_tree_message_set_multiple"]
+        for stage in stages {
+            for kind in ["guard", "exception"] {
+                let raw: [String: Any] = ["version": 1, "stage": stage, "kind": kind,
+                    "phaseCount": NSNull(), "phaseOverflow": NSNull(), "answersSeen": NSNull()]
+                var value = qwenAuthoredFailure; value["rawSource"] = raw
+                let packet = try XCTUnwrap(D.sanitize(value, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"))
+                XCTAssertLessThanOrEqual(packet.data.count, 1_024)
+                XCTAssertEqual(D.qwenAuthoredLogFields(packet), String(decoding: packet.data, as: UTF8.self))
+                for (key, invalid) in [("phaseCount", 0), ("phaseOverflow", false), ("answersSeen", 0),
+                                       ("text", "PRIVATE_TEXT"), ("stage", stage + "_PRIVATE")] as [(String, Any)] {
+                    var changed = raw; changed[key] = invalid
+                    var bad = value; bad["rawSource"] = changed
+                    XCTAssertNil(D.sanitize(bad, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"), key)
+                }
+                XCTAssertNil(D.sanitize(value, provider: "kimi", error: "unsupported_response_format", detail: "authored_source"))
+                XCTAssertNil(D.sanitize(value, provider: "qwen", error: "conversation_changed", detail: "response_scope"))
+                let original: [String: Any] = ["error": "unsupported_response_format", "detail": "authored_source"]
+                var observation = original; observation["adapterFailureStructure"] = value
+                XCTAssertNotNil(D.remove(from: &observation, provider: "qwen", action: "inspect"))
+                XCTAssertEqual(observation as NSDictionary, original as NSDictionary)
+            }
+        }
+        // The historical coarse label and its original schema remain readable.
+        var legacy = qwenAuthoredFailure
+        legacy["rawSource"] = ["version": 1, "stage": "element_tree", "kind": "guard",
+            "phaseCount": NSNull(), "phaseOverflow": NSNull(), "answersSeen": NSNull()] as [String: Any]
+        XCTAssertNotNil(D.sanitize(legacy, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"))
+    }
+
     func testQwenRawSourceDiagnosticRejectsUnknownContentTypesAndImpossibleCounts() {
         let raw: [String: Any] = ["version": 1, "stage": "phase_state", "kind": "guard",
             "phaseCount": 1, "phaseOverflow": false, "answersSeen": 1]

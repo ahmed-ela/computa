@@ -394,6 +394,184 @@ final class WebModelServerTests: XCTestCase {
         XCTAssertTrue(issues.isEmpty)
     }
 
+    func testGroqLoaderBudgetHistoryPreservesLexemesNamespacesStringInputsAndCollidingCallIDs() throws {
+        func encoded(_ value:Any) throws -> Data {
+            try JSONSerialization.data(withJSONObject:value,options:[.fragmentsAllowed,.sortedKeys,.withoutEscapingSlashes])
+        }
+        let model=WebsiteModelChoice(provider:"groq",key:"qwen/qwen3.8-27b",label:"Qwen/Qwen3.8-27B").modelID
+        var loader=GroqToolCatalog.specification;loader["parameters"]=loader.removeValue(forKey:"inputSchema")
+        let read:[String:Any] = ["type":"function","name":"fixture_read","parameters":["type":"object","properties":[:]]]
+        let escaped=String(repeating:#"\u0061"#,count:320),literal="\""+escaped+"\""
+        for namespaced in [false,true] {
+            let declaration:[String:Any] = namespaced ? ["type":"namespace","name":"functions","tools":[loader]] : loader
+            let tools=String(decoding:try encoded([declaration,read]),as:UTF8.self)
+            for stringInput in [false,true] {
+                let originalInput = stringInput ? literal : "[{\"role\":\"user\",\"content\":"+literal+"},"
+                    + #"{"type":"function_call","name":"fixture_read","arguments":"{}","call_id":"call_loader_budget"},"#
+                    + #"{"type":"function_call_output","call_id":"call_loader_budget","output":"observed"}]"#
+                let prefix = #"{ "foreign":1.2300e-4, "model":"# + String(decoding:try encoded(model),as:UTF8.self) + #", "\u0069nput": "#
+                let suffix = #", "tools":"# + tools + #", "zero":-0.00e+12, "integer":9007199254740993 }"#
+                let canonical=Data((prefix+originalInput+suffix).utf8)
+                let seed=try XCTUnwrap(WebModelResponseCodec.prepareRequest(canonical).groqToolCatalogSeed)
+                let baseline=try GroqToolCatalog.baseline(for:seed)
+                let projection=GroqToolCatalog.Projection(revision:baseline.revision,inventory:baseline.inventory,
+                    selectedNames:baseline.selectedNames.union(["fixture_read"]))
+                let arguments=try encoded(["catalog_revision":baseline.revision,"names":["fixture_read"]])
+                let receipt=try encoded(["catalog_revision":baseline.revision,"loaded":["fixture_read"],"available":"next_request","execution":false] as [String:Any])
+                let preview=try WebModelServer.groqLoaderBudgetHistory(canonical,projection:projection,arguments:arguments,receipt:receipt)
+                let text=String(decoding:preview,as:UTF8.self)
+                XCTAssertTrue(text.hasPrefix(prefix));XCTAssertTrue(text.hasSuffix(suffix));XCTAssertTrue(text.contains(literal))
+                if !stringInput {XCTAssertTrue(text.hasPrefix(prefix+String(originalInput.dropLast())),"Existing history is an untouched byte prefix")}
+                let object=try XCTUnwrap(JSONSerialization.jsonObject(with:preview) as? [String:Any])
+                let input=try XCTUnwrap(object["input"] as? [[String:Any]])
+                XCTAssertEqual(input.count,stringInput ? 3 : 5)
+                let pending=input[input.count-2],output=input[input.count-1]
+                XCTAssertEqual(pending["name"] as? String,GroqToolCatalog.name)
+                XCTAssertEqual(pending["namespace"] as? String,namespaced ? "functions" : nil)
+                XCTAssertEqual(pending["call_id"] as? String,stringInput ? "call_loader_budget" : "call_loader_budget_")
+                XCTAssertEqual(pending["call_id"] as? String,output["call_id"] as? String)
+                XCTAssertEqual(pending["arguments"] as? String,String(decoding:arguments,as:UTF8.self))
+                XCTAssertEqual(output["output"] as? String,String(decoding:receipt,as:UTF8.self))
+                // Independent negative control: normalizing retained values is
+                // semantically equal JSON yet undercounts escaped text by >256.
+                let normalized=try encoded(object)
+                let exact=try WebModelResponseCodec.prepareRequest(preview,groqToolCatalogProjection:projection).prompt
+                let lossy=try WebModelResponseCodec.prepareRequest(normalized,groqToolCatalogProjection:projection).prompt
+                XCTAssertGreaterThan(try QwenBodyTokenCounter.tokenCount(exact)-QwenBodyTokenCounter.tokenCount(lossy),WebModelServer.groqLoaderHistoryReserve)
+                XCTAssertGreaterThan(try GroqBodyTokenCounter.tokenCount(exact)-GroqBodyTokenCounter.tokenCount(lossy),WebModelServer.groqLoaderHistoryReserve)
+            }
+        }
+    }
+
+    func testGroqLoaderFitsLargestValidatedBrowserSubsetWithActualReceiptAndKeepsNoFitAtomic() async throws {
+        for key in ["qwen/qwen3.8-27b", "openai/gpt-oss-120b"] {
+            let label = "groq-subset-" + (key.hasPrefix("qwen") ? "qwen" : "oss")
+            let choice = WebsiteModelChoice(provider:"groq",key:key,label:key.hasPrefix("qwen") ? "Qwen/Qwen3.8-27B" : "GPT OSS 120B")
+            let model = choice.modelID
+            var loader = GroqToolCatalog.specification
+            loader["parameters"] = loader.removeValue(forKey:"inputSchema")
+            let requested = ["browser_tabs","browser_open","browser_bind"]
+            // The real native catalog includes bound browser tools even while
+            // unbound. Entry-only schemas do not trigger availability admission.
+            let nativeBrowser = EmbeddedBrowserTools.definitions().map { native in
+                var tool=native;tool["parameters"]=tool.removeValue(forKey:"inputSchema");return tool
+            }
+            let browser = nativeBrowser.filter { requested.contains($0["name"] as? String ?? "") }
+            let exec:[String:Any] = ["type":"function","name":"exec_command","parameters":["type":"object","properties":["cmd":["type":"string"]],"required":["cmd"]]]
+            let patch:[String:Any] = ["type":"custom","name":"apply_patch","format":["type":"text"]]
+            let huge:[[String:Any]] = ["fixture_huge_a","fixture_huge_b"].map {
+                ["type":"function","name":$0,"description":String(repeating:"capacity ",count:4500),"parameters":["type":"object","properties":[:]]]
+            }
+            let tools = [loader,exec,patch]+nativeBrowser+huge
+            // Same bounded chronology as the captured failure: two reads, one
+            // patch, then terminal tests/reference, with no prior loader calls.
+            var history:[[String:Any]] = [["role":"user","content":"Complete the local invoice fixture."]]
+            for (index,output) in ["Fixture README bytes","Fixture source bytes","Six tests passed","INV-FIXTURE-600"].enumerated() {
+                history += [["type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"synthetic\"}","call_id":"call_terminal_\(index)"],
+                            ["type":"function_call_output","output":output,"call_id":"call_terminal_\(index)"]]
+                if index==1 { history += [["type":"custom_tool_call","name":"apply_patch","input":"synthetic fixture patch","call_id":"call_patch"],
+                                         ["type":"custom_tool_call_output","output":"Patched the fixture only.","call_id":"call_patch"]] }
+            }
+            let fixedHistory=history
+            func data(_ input:[[String:Any]]) throws -> Data {
+                // Calibrate the same native identity frame the server retains.
+                // fixtureInfer would add metadata and serialize these bytes again.
+                try JSONSerialization.data(withJSONObject:["model":model,"input":input,"tools":tools,
+                    "client_metadata":["x-codex-turn-metadata":try websiteInferenceFixtureMetadata(taskID:label)]],
+                    options:[.sortedKeys,.withoutEscapingSlashes])
+            }
+            XCTAssertTrue(try WebModelResponseCodec.prepareRequest(data(history)).requiresBrowserToolAvailability,
+                "The fixture must enter the same native availability-admission branch as the complete captured catalog")
+            let seed=try XCTUnwrap(WebModelResponseCodec.prepareRequest(data(history),browserToolAvailability:.unbound).groqToolCatalogSeed)
+            let baseline=try GroqToolCatalog.baseline(for:seed),revision=baseline.revision
+            let arguments=try JSONSerialization.data(withJSONObject:["catalog_revision":revision,"names":requested],options:[.sortedKeys,.withoutEscapingSlashes])
+            func receipt(_ chosen:[String]) throws -> Data {
+                var value:[String:Any] = ["catalog_revision":revision,"loaded":chosen.sorted(),"available":"next_request","execution":false]
+                if chosen.count != requested.count {value["deferred"]=requested.filter{!chosen.contains($0)}.sorted()}
+                return try JSONSerialization.data(withJSONObject:value,options:[.sortedKeys,.withoutEscapingSlashes])
+            }
+            func renderedUnits(_ input:[[String:Any]],_ chosen:[String],pending:Bool) throws -> Int {
+                var input=input
+                if pending {input += [["type":"function_call","name":GroqToolCatalog.name,"arguments":String(decoding:arguments,as:UTF8.self),"call_id":"call_loader_budget"],
+                    ["type":"function_call_output","call_id":"call_loader_budget","output":String(decoding:try receipt(chosen),as:UTF8.self)]]}
+                let projection=GroqToolCatalog.Projection(revision:revision,inventory:baseline.inventory,selectedNames:baseline.selectedNames.union(chosen))
+                let prompt=try WebModelResponseCodec.prepareRequest(data(input),browserToolAvailability:.unbound,groqToolCatalogProjection:projection).prompt
+                if key.hasPrefix("qwen") { return try QwenBodyTokenCounter.tokenCount(prompt) }
+                return try GroqBodyTokenCounter.tokenCount(prompt)
+            }
+            func padded(_ repeats:Int)->[[String:Any]] {
+                var input=fixedHistory;input[0]["content"]=String(repeating:" capacity",count:repeats);return input
+            }
+            let target=WebModelResponseCodec.groqMaximumBodyTokens-WebModelServer.groqLoaderHistoryReserve+1
+            var low=0,high=7000
+            while low<high {let middle=(low+high)/2;if try renderedUnits(padded(middle),requested,pending:false)<target {low=middle+1}else{high=middle}}
+            history=padded(low)
+            XCTAssertGreaterThanOrEqual(try renderedUnits(history,requested,pending:false),target,"Original three-schema preflight reproduces the captured budget refusal")
+            let candidates=[[requested[0],requested[1]],[requested[0],requested[2]],[requested[1],requested[2]],[requested[0]],[requested[1]],[requested[2]]]
+            var expected:[String]?
+            for subset in candidates where try renderedUnits(history,subset,pending:true)<=target-1 {expected=subset;break}
+            let selected=try XCTUnwrap(expected,"A strict subset must fit without dropping history or schemas")
+            let proposal=String(decoding:try JSONSerialization.data(withJSONObject:["type":"tool_calls","calls":[["name":GroqToolCatalog.name,"arguments":try JSONSerialization.jsonObject(with:arguments)]]]),as:UTF8.self)
+            let base=FixtureWebModelTransport(replyTexts:[proposal,#"{"type":"message","text":"Loaded selection observed."}"#,#"{"type":"message","text":"Prior selection retained."}"#],fixedChoice:choice)
+            let server=try await makeWebsiteInferenceFixtureServer(testCase:self)
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base))
+            let availability = WebsiteBrowserAvailabilityFixture()
+            await server.setBrowserToolAvailabilityProvider { request in await availability.read(request) }
+            let scope=GroqToolCatalog.Scope(taskID:websiteInferenceFixtureTaskID(label),threadID:websiteInferenceFixtureTaskID(label+":thread"),
+                turnID:websiteInferenceFixtureTaskID(label+":turn"),runtimeGeneration:websiteInferenceFixtureGeneration,
+                preparationID:UUID(uuidString:websiteInferenceFixtureTaskID(label+":preparation"))!,modelID:model)
+            try await server.prepareInferenceTurn(taskID:scope.taskID,threadID:scope.threadID,runtimeGeneration:scope.runtimeGeneration,preparationID:scope.preparationID,isCompactToolThread:true)
+            func inferExact(_ input:[[String:Any]]) async throws -> Data {
+                let frame=try data(input)
+                let bound=try await bindWebsiteInferenceFixtureTurn(server,taskID:label)
+                XCTAssertEqual(bound,scope.taskID)
+                return try await server.infer(frame,taskID:bound)
+            }
+            let first=try responseOutput(await inferExact(history))
+            let availabilityRequests=await availability.queries()
+            XCTAssertEqual(availabilityRequests,[EmbeddedBrowserToolAvailabilityRequest(taskID:scope.taskID,threadID:scope.threadID,
+                turnID:scope.turnID,preparationID:scope.preparationID)],"Oracle and server must both use the admitted unbound context")
+            let before=await base.operations()
+            let actualReceipt=try await server.loadGroqTools(scope:scope,arguments:arguments)
+            let afterLoad=await base.operations()
+            XCTAssertEqual(afterLoad,before,"Loading schemas cannot navigate, Send or execute a task tool")
+            let afterLoadAvailability=await availability.queries()
+            XCTAssertEqual(afterLoadAvailability,availabilityRequests,"Schema preflight reuses the admitted context without another availability read")
+            XCTAssertEqual(actualReceipt,try receipt(selected))
+            let result=try XCTUnwrap(JSONSerialization.jsonObject(with:actualReceipt) as? [String:Any])
+            XCTAssertEqual(result["loaded"] as? [String],selected.sorted());XCTAssertEqual(result["deferred"] as? [String],requested.filter{!selected.contains($0)}.sorted())
+            XCTAssertEqual(result["execution"] as? Bool,false);XCTAssertEqual(result["catalog_revision"] as? String,revision)
+            history += first + [["type":"function_call_output","call_id":try XCTUnwrap(first.first?["call_id"]),"output":String(decoding:actualReceipt,as:UTF8.self)]]
+            _ = try await inferExact(history)
+            let prompts=await base.sentPrompts(),shown=try canonicalRequest(in:prompts[1])
+            XCTAssertEqual(shown["input"] as? NSArray,history as NSArray,"Every prior call/output and the actual original loader call/receipt remain complete")
+            let shownTools=try XCTUnwrap(shown["tools"] as? [[String:Any]])
+            let shownNames=Set(shownTools.compactMap{$0["name"] as? String})
+            XCTAssertTrue(Set(selected).isSubset(of:shownNames))
+            for name in selected {
+                XCTAssertEqual(try JSONSerialization.data(withJSONObject:try XCTUnwrap(shownTools.first{$0["name"] as? String==name}),options:[.sortedKeys]),
+                    try JSONSerialization.data(withJSONObject:try XCTUnwrap(browser.first{$0["name"] as? String==name}),options:[.sortedKeys]))
+            }
+            let finalUnits: Int
+            if key.hasPrefix("qwen") { finalUnits=try QwenBodyTokenCounter.tokenCount(prompts[1]) }
+            else { finalUnits=try GroqBodyTokenCounter.tokenCount(prompts[1]) }
+            XCTAssertLessThanOrEqual(finalUnits,6000)
+            XCTAssertEqual(WebModelResponseCodec.groqMaximumBodyTokens,6000);XCTAssertEqual(WebModelResponseCodec.groqReservedTokens,2000)
+            let afterSecond=await base.operations()
+            for (rev,names) in [(revision,[requested[0],"not_registered"]),(String(repeating:"0",count:64),requested),(revision,["fixture_huge_a","fixture_huge_b"])] {
+                let bad=try JSONSerialization.data(withJSONObject:["catalog_revision":rev,"names":names])
+                do {_=try await server.loadGroqTools(scope:scope,arguments:bad);XCTFail("Invalid or wholly oversized requests cannot partially load")}
+                catch {XCTAssertTrue(error is GroqToolCatalog.Failure)}
+                let operationsAfterRejected=await base.operations()
+                XCTAssertEqual(operationsAfterRejected,afterSecond)
+            }
+            _=try await inferExact(history)
+            let after=await base.sentPrompts(),retained=try canonicalRequest(in:after[2])
+            XCTAssertEqual(retained["tools"] as? NSArray,shown["tools"] as? NSArray,"No-fit and invalid requests leave the admitted selection intact")
+            _=await server.fixtureFinish(taskID:label)
+        }
+    }
+
     func testGroqLoaderReservesEstimatedHistoryWithoutRaisingFinalBudget() async throws {
         let label = "groq-load-history-reserve", model = syntheticWebsiteModelID("groq")
         var loader = GroqToolCatalog.specification

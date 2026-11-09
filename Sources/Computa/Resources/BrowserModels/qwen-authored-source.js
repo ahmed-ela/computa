@@ -92,28 +92,38 @@
     const hostProps = own(target,propKeys[0]); plain(hostProps);
     require(own(hostProps,'id') === target.id);
     mark('element_tree');
+    mark('element_tree_children');
     const messages = new Set(), inputs = [], stack = [[own(hostProps,'children'),0]];
     let visits = 128;
     while (stack.length) {
-      require(--visits >= 0);
-      const [node,depth] = stack.pop(); require(depth <= 10);
+      mark('element_tree_budget'); require(--visits >= 0);
+      const [node,depth] = stack.pop(); mark('element_tree_depth'); require(depth <= 10);
       if (node === null || node === undefined || typeof node === 'boolean' || node === '') continue;
-      require(typeof node === 'object');
+      const nodeKind = typeof node;
+      mark(nodeKind === 'string' ? 'element_tree_nodekind_string' : nodeKind === 'number' ? 'element_tree_nodekind_number'
+        : nodeKind === 'bigint' ? 'element_tree_nodekind_bigint' : nodeKind === 'symbol' ? 'element_tree_nodekind_symbol'
+        : nodeKind === 'function' ? 'element_tree_nodekind_function' : 'element_tree_nodekind');
+      require(nodeKind === 'object');
       if (array(node)) {
-        const count = list(node,64);
+        mark('element_tree_array'); const count = list(node,64);
         for (let index=count-1;index>=0;index--) stack.push([own(node,String(index)),depth+1]);
         continue;
       }
-      plain(node); require(elementKinds.has(own(node,'$$typeof')));
-      const props = own(node,'props'); plain(props);
-      const message = own(props,'message',true);
+      mark('element_tree_elementshape'); plain(node);
+      mark('element_tree_kind'); require(elementKinds.has(own(node,'$$typeof')));
+      mark('element_tree_props'); const props = own(node,'props'); plain(props);
+      mark('element_tree_message'); const message = own(props,'message',true);
       if (message !== undefined) { require(message !== null && typeof message === 'object'); messages.add(message); }
-      require([undefined,null,false].includes(own(props,'isEdit',true)) && [undefined,null,false].includes(own(props,'isRenderEmpty',true)));
-      const index = own(props,'phaseContentIndex',true);
+      mark('element_tree_editflags'); require([undefined,null,false].includes(own(props,'isEdit',true)) && [undefined,null,false].includes(own(props,'isRenderEmpty',true)));
+      mark('element_tree_props'); const index = own(props,'phaseContentIndex',true);
       if (index !== undefined) inputs.push({props,message,index});
-      stack.push([own(props,'children',true),depth+1]);
+      mark('element_tree_children'); stack.push([own(props,'children',true),depth+1]);
     }
-    require(messages.size === 1);
+    mark('element_tree_message_set');
+    const messageCount = messages.size;
+    mark(messageCount === 0 ? 'element_tree_message_set_empty'
+      : typeof messageCount === 'number' && messageCount > 1 ? 'element_tree_message_set_multiple' : 'element_tree_message_set');
+    require(messageCount === 1);
     const message = messages.values().next().value;
     mark('message_keys');
     closed(message,['id','parentId','fid','childrenIds','role','content','model','models','modelName','modelIdx',

@@ -141,6 +141,11 @@ struct GroqToolCatalog: Sendable {
         }) else { return definition }
         var result = definition
         for key in keys { result[key] = argumentSchema(choices: choices) }
+        if choices != nil {
+            // Website presentation only: keep the canonical registration specification
+            // and its persisted thread marker byte-identical.
+            result["description"] = "Load exact schemas for 1–4 inventory names for the next request. Read-only; executes nothing. Replaces the previous loaded selection. Use the current catalog_revision. If all valid requested schemas cannot fit, the receipt reports a fitting loaded subset and deferred names. Wait for the next request's callable schemas; load deferred names separately if needed."
+        }
         return result
     }
 
@@ -231,6 +236,34 @@ struct GroqToolCatalog: Sendable {
     struct LoadPreview {
         let receipt: Data
         let budgetFailure: Failure
+        let revision: String
+        let names: [String]
+
+        // Every original name has already passed membership/policy/revision checks.
+        // At most14 strict nonempty subsets for the four-name maximum. Prefer
+        // largest cardinality, then original request order (ascending bitmask).
+        func smallerArguments() throws -> [Data] {
+            guard (1...GroqToolCatalog.maximumLoadedTools).contains(names.count) else {
+                throw GroqToolCatalog.Failure.invalidArguments
+            }
+            let lastMask: Int = (1 << names.count) - 1
+            var masks: [Int] = Array(1..<lastMask)
+            masks.sort { left, right in
+                let leftCount = left.nonzeroBitCount
+                let rightCount = right.nonzeroBitCount
+                if leftCount == rightCount { return left < right }
+                return leftCount > rightCount
+            }
+            return try masks.map { mask in
+                try GroqToolCatalog.encoded(["catalog_revision": revision,
+                    "names": names.enumerated().compactMap { mask & (1 << $0.offset) != 0 ? $0.element : nil }] as [String: Any])
+            }
+        }
+        func receipt(deferred: [String]) throws -> Data {
+            guard !deferred.isEmpty else { return receipt }
+            return try GroqToolCatalog.encoded(["catalog_revision": revision, "loaded": names.sorted(),
+                "deferred": deferred.sorted(), "available": "next_request", "execution": false] as [String: Any])
+        }
     }
 
     mutating func load(scope: Scope, arguments: Data, lastOfferedNames: Set<String> = []) throws -> Data {
@@ -282,7 +315,8 @@ struct GroqToolCatalog: Sendable {
         // Exact names reached this point only after every requested name passed
         // the current revision and availability checks. The next offer can change.
         let direct = requested.intersection(lastOfferedNames).sorted()
-        return LoadPreview(receipt: receipt, budgetFailure: direct.isEmpty ? .selectionTooLarge : .budgetWithOfferedSchemas(direct))
+        return LoadPreview(receipt: receipt, budgetFailure: direct.isEmpty ? .selectionTooLarge : .budgetWithOfferedSchemas(direct),
+                           revision: revision, names: names)
     }
 
     mutating func remove(taskID: String) { states.removeValue(forKey: taskID) }
