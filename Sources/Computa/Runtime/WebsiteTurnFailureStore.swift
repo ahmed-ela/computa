@@ -134,7 +134,9 @@ struct WebsiteTurnFailureStore: Sendable {
             case "website_ownership_unverified":
                 guard let rawReason = error["ownership_reason"] as? String,
                       let reason = EmbeddedWebModelTransport.OwnershipReason(rawValue: rawReason),
-                      ![.groqDraftRestored, .groqReportedSubmissionError].contains(reason) || provider == "groq" else { return nil }
+                      ![.groqDraftRestored, .groqReportedSubmissionError].contains(reason) || provider == "groq",
+                      ![.qwenResponseIdentity, .qwenResponseChoiceScope, .qwenResponseChoiceSelected,
+                        .qwenResponseChoiceDeadline].contains(reason) || provider == "qwen" else { return nil }
                 nativeError = EmbeddedWebModelTransport.Failure.ownershipFailure(reason)
             case "website_continuation_unverified":
                 guard provider == "gemini", let rawReason = error["reason"] as? String,

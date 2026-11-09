@@ -227,17 +227,37 @@ enum WebsitePrivateDiagnosticCapture {
     }
 }
 
-/// Optional content-free outcome for an opted-in, synthetic first Groq 20B inference.
+/// Optional content-free outcome for one opted-in, synthetic first Groq inference.
 /// Native lease identity, the selected model and first submission must survive until publication.
 final class GroqOwnedStatusLease: @unchecked Sendable {
     @TaskLocal static var current: GroqOwnedStatusLease?
     static let directoryName = "GroqOwnedStatus-v1"
-    static let purpose = "groq_20b_synthetic_status_v1"
-    static let choice = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-20b", label: "GPT OSS 20B")
+    enum Profile: String, CaseIterable {
+        case gptoss20b, qwen27b, gptoss120b
+        var choice: WebsiteModelChoice {
+            switch self {
+            case .gptoss20b: return .init(provider: "groq", key: "openai/gpt-oss-20b", label: "GPT OSS 20B")
+            case .qwen27b: return .init(provider: "groq", key: "qwen/qwen3.8-27b", label: "Qwen/Qwen3.8-27B")
+            case .gptoss120b: return .init(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B")
+            }
+        }
+        var purpose: String {
+            switch self {
+            case .gptoss20b: return "groq_20b_synthetic_status_v1"
+            case .qwen27b: return "groq_qwen27b_synthetic_status_v1"
+            case .gptoss120b: return "groq_120b_synthetic_status_v1"
+            }
+        }
+    }
+    // Preserve the original 20B arm contract for existing callers.
+    static let purpose = Profile.gptoss20b.purpose
+    static let choice = Profile.gptoss20b.choice
+    let profile: Profile
+    var modelChoice: WebsiteModelChoice { profile.choice }
     static func userText(_ nonce: UUID) -> String {
         "Return exactly GROQSTATUS" + nonce.uuidString.replacingOccurrences(of:"-",with:"") + " and nothing else. Do not call any tools."
     }
-    static let stages: Set<String> = ["no_matching_fetch_observed", "matched_fetch_unsettled", "http_2xx_opened", "http_401", "http_403", "http_413", "http_429", "http_other_non_2xx", "transport_rejected", "ambiguous"]
+    static let stages: Set<String> = ["no_matching_fetch_observed", "matched_fetch_unsettled", "http_2xx_opened", "http_400", "http_401", "http_403", "http_413", "http_429", "http_other_non_2xx", "transport_rejected", "ambiguous"]
     private let file: WebsitePrivateDiagnosticCapture.Claim
     let admission: WebModelStartAdmission
     let deadline: ContinuousClock.Instant
@@ -248,18 +268,19 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
     func revoke() { lock.withLock { active = false } }
     static func digest(_ input: String) -> String { SHA256.hash(data:Data(input.utf8)).map { String(format:"%02x",$0) }.joined() }
     func matches(_ prompt: String) -> Bool { isCurrent && Self.digest(prompt) == promptHash }
-    private init(_ file: WebsitePrivateDiagnosticCapture.Claim, _ admission: WebModelStartAdmission, _ deadline: ContinuousClock.Instant, _ prompt: String) {
-        self.file=file; self.admission=admission; self.deadline=deadline; promptHash=Self.digest(prompt)
+    private init(_ file: WebsitePrivateDiagnosticCapture.Claim, _ admission: WebModelStartAdmission, _ deadline: ContinuousClock.Instant, _ prompt: String, profile: Profile) {
+        self.file=file; self.admission=admission; self.deadline=deadline; promptHash=Self.digest(prompt); self.profile=profile
     }
     static func consume(directory: URL?, admission: WebModelStartAdmission, request: WebModelResponseCodec.Request,
                         first: Bool, now: Date = Date()) -> GroqOwnedStatusLease? {
-        guard first, !Task.isCancelled, let directory, admission.provider == "groq", admission.modelID == choice.modelID,
+        guard first, !Task.isCancelled, let directory, admission.provider == "groq",
+              let profile = Profile.allCases.first(where: { $0.choice.modelID == admission.modelID }),
               request.model == admission.modelID, [admission.taskID,admission.threadID,admission.turnID].allSatisfy({ UUID(uuidString:$0)?.uuidString.lowercased()==$0 }) else { return nil }
         let started=ContinuousClock.now
         var deadline: ContinuousClock.Instant?
         guard let file=WebsitePrivateDiagnosticCapture.claim(directory:directory,record:.groqOwnedStatus,maximumArmBytes:4096,validate:{ data in
             guard APIModelCorrectionJSON.isUnambiguous(data), let v=try? JSONSerialization.jsonObject(with:data) as? [String:String],
-                  Set(v.keys)==["purpose","nonce","modelID","userPromptSHA256","expiresAt"], v["purpose"]==purpose,v["modelID"]==choice.modelID,
+                  Set(v.keys)==["purpose","nonce","modelID","userPromptSHA256","expiresAt"], v["purpose"]==profile.purpose,v["modelID"]==profile.choice.modelID,
                   let raw=v["nonce"], let id=UUID(uuidString:raw),id.uuidString.lowercased()==raw,
                   let exp=v["expiresAt"],exp.utf8.count==24 else { return false }
             let fmt=ISO8601DateFormatter();fmt.formatOptions=[.withInternetDateTime,.withFractionalSeconds]
@@ -268,7 +289,7 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
                   v["userPromptSHA256"]==digest(user), WebsiteSyntheticFirstRequest.matches(request,expectedUserText:user) else {return false}
             deadline=started + .seconds(end.timeIntervalSince(now));return true
         },isCurrent:{ !Task.isCancelled && (deadline.map { ContinuousClock.now < $0 } ?? false) }),let deadline else{return nil}
-        return .init(file,admission,deadline,request.prompt)
+        return .init(file,admission,deadline,request.prompt,profile:profile)
     }
     struct Observation: Sendable {
         let stage: String
@@ -281,7 +302,7 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
         guard !Task.isCancelled, isCurrent, Self.stages.contains(stage),
               ["response_deadline","groq_draft_restored","groq_reported_submission_error"].contains(trigger),
               let session=UUID(uuidString:owner) else{return}
-        let v:[String:Any]=["schemaVersion":1,"purpose":Self.purpose,"provider":"groq","modelID":admission.modelID,
+        let v:[String:Any]=["schemaVersion":1,"purpose":profile.purpose,"provider":"groq","modelID":admission.modelID,
             "taskID":admission.taskID,"threadID":admission.threadID,"turnID":admission.turnID,
             "inferenceID":admission.inferenceID.uuidString.lowercased(),"preparationID":admission.preparationID.uuidString.lowercased(),
             "runtimeGeneration":admission.runtimeGeneration.uuidString.lowercased(),"session":session.uuidString.lowercased(),

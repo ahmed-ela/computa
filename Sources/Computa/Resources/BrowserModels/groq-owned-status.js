@@ -5,6 +5,14 @@
   if (window !== top || location.origin !== origin || !config || !/^[a-f0-9]{32}$/.test(config.key)
     || !/^[a-f0-9]{32}$/.test(config.secret) || config.key === config.secret
     || !Number.isInteger(config.durationMs) || config.durationMs < 1 || config.durationMs > 390000) return;
+  // Fixed first-party request profiles; the page cannot broaden native admission.
+  const profiles = {
+    gptoss20b: {model:'openai/gpt-oss-20b',label:'GPT OSS 20B',temperature:1,maximum:16384,topP:1},
+    qwen27b: {model:'qwen/qwen3.8-27b',label:'Qwen/Qwen3.8-27B',temperature:0.6,maximum:8192,topP:0.95},
+    gptoss120b: {model:'openai/gpt-oss-120b',label:'GPT OSS 120B',temperature:1,maximum:16384,topP:1}
+  };
+  if (!Object.prototype.hasOwnProperty.call(profiles, config.profile)) return;
+  const profile = profiles[config.profile];
   const ownerDocument = document, original = window.fetch, key = '__computaGroqStatus_' + config.key;
   const apply = Reflect.apply, desc = Object.getOwnPropertyDescriptor, then = Promise.prototype.then;
   const stringify = JSON.stringify, proto = Object.getPrototypeOf;
@@ -60,8 +68,11 @@
     }
     for (const indent of [undefined,2]) {
       const sample = 'groq_dummy_prompt', system = 'groq_dummy_system';
-      for (const messages of [[{content:sample,role:'user'}],[{content:system,role:'system'},{content:sample,role:'user'}]]) {
-        const template=stringify({model,messages,temperature:1,max_completion_tokens:16384,top_p:1,stream:true},null,indent);
+      const fresh = [{content:sample,role:'user'}];
+      // The public Qwen branch drops system messages; GPT OSS may retain one.
+      const messageSets = config.profile === 'qwen27b' ? [fresh] : [fresh,[{content:system,role:'system'},...fresh]];
+      for (const messages of messageSets) {
+        const template=stringify({model,messages,temperature:profile.temperature,max_completion_tokens:profile.maximum,top_p:profile.topP,stream:true},null,indent);
         const split=template.indexOf(stringify(sample));
         const prefix=template.slice(0,split),suffix=template.slice(split+stringify(sample).length);
         let pos=0;
@@ -103,7 +114,7 @@
                 || !['basic', 'cors'].includes(apply(response.type, value, []))) return invalidate();
               const status = apply(response.status, value, []);
               outcome = status >= 200 && status < 300 ? 'http_2xx_opened'
-                : [401, 403, 413, 429].includes(status) ? 'http_' + status
+                : [400, 401, 403, 413, 429].includes(status) ? 'http_' + status
                 : status >= 400 && status < 600 ? 'http_other_non_2xx' : 'ambiguous';
             } catch { invalidate(); }
           },
@@ -119,7 +130,7 @@
     if (secret !== config.secret) return false;
     if (command === 'dispose') { dispose(); return true; }
     if (command === 'arm' && phase === 'idle' && !seen && time() < deadline && window.fetch === wrapped) {
-      if (!args || args.model !== 'openai/gpt-oss-20b' || args.label !== 'GPT OSS 20B'
+      if (!args || args.model !== profile.model || args.label !== profile.label
         || typeof args.label !== 'string' || !args.label.length || args.label.length > 128
         || typeof args.prompt !== 'string' || !args.prompt.length || args.prompt.length > 180200) { invalidate(); return false; }
       model = args.model; label = args.label; route = location.href; pin = rendered();

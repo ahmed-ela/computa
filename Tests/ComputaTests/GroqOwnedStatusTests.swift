@@ -27,16 +27,28 @@ import XCTest
     func testRestoredOwnedDraftPreservesOriginalRejectionAndNeverSendsAgain() async throws {
         try await run("rollback",expected:"transport_rejected")
     }
-    private func run(_ mode:String,expected:String) async throws {
+    func testQwenAnd120BProfilesCaptureOnlyTheirFirstSyntheticOwnedRollback() async throws {
+        for profile in [GroqOwnedStatusLease.Profile.qwen27b, .gptoss120b] {
+            try await run("rollback",expected:"transport_rejected",profile:profile)
+        }
+    }
+    func testQwenAnd120BProfilesRejectForeignArmsAndRetiredNativeContexts() async throws {
+        for profile in [GroqOwnedStatusLease.Profile.qwen27b, .gptoss120b] {
+            try await run("wrongProfile",expected:"none",profile:profile)
+            try await run("retiredDuringRead",expected:"none",profile:profile)
+        }
+    }
+    private func run(_ mode:String,expected:String,profile:GroqOwnedStatusLease.Profile = .gptoss20b) async throws {
         let path=try XCTUnwrap(realpath(FileManager.default.temporaryDirectory.path,nil));defer{free(path)}
         let tmp=URL(fileURLWithPath:String(cString:path),isDirectory:true).appendingPathComponent("groq-status-"+UUID().uuidString)
         let directory=tmp.appendingPathComponent(GroqOwnedStatusLease.directoryName)
         try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
         defer{try? FileManager.default.removeItem(at:tmp)}
-        let nonce=UUID(),user=GroqOwnedStatusLease.userText(nonce),model=GroqOwnedStatusLease.choice
+        let nonce=UUID(),user=GroqOwnedStatusLease.userText(nonce),model=profile.choice
+        let armProfile:GroqOwnedStatusLease.Profile = mode=="wrongProfile" ? .gptoss20b : profile
         let output=directory.appendingPathComponent("owned-status.json"),arm=directory.appendingPathComponent("arm.json")
         let date=ISO8601DateFormatter();date.formatOptions=[.withInternetDateTime,.withFractionalSeconds]
-        let data:[String:String]=["nonce":nonce.uuidString.lowercased(),"purpose":GroqOwnedStatusLease.purpose,"modelID":model.modelID,
+        let data:[String:String]=["nonce":nonce.uuidString.lowercased(),"purpose":armProfile.purpose,"modelID":armProfile.choice.modelID,
             "userPromptSHA256":GroqOwnedStatusLease.digest(mode=="wrongNonce" ? "different" : user),"expiresAt":date.string(from:Date().addingTimeInterval(80))]
         if mode != "unarmed" {
             try JSONSerialization.data(withJSONObject:data).write(to:arm)
@@ -111,7 +123,7 @@ import XCTest
         XCTAssertEqual(receipts.last?.reason,mode=="success" ? .transcriptCleared : .cleanupUnverified)
         if expected=="none" {
             XCTAssertFalse(FileManager.default.fileExists(atPath:output.path))
-            XCTAssertEqual(FileManager.default.fileExists(atPath:arm.path),mode=="wrongNonce")
+            XCTAssertEqual(FileManager.default.fileExists(atPath:arm.path),["wrongNonce","wrongProfile"].contains(mode))
         }
         else {
             XCTAssertFalse(FileManager.default.fileExists(atPath:arm.path),"Authorized arm must be consumed")
@@ -119,6 +131,7 @@ import XCTest
             let row=try XCTUnwrap(JSONSerialization.jsonObject(with:report) as? [String:Any])
             XCTAssertEqual(row["stage"] as? String,expected);XCTAssertEqual(row["taskID"] as? String,task)
             XCTAssertEqual(row["modelID"] as? String,model.modelID)
+            XCTAssertEqual(row["purpose"] as? String,profile.purpose)
             XCTAssertEqual(row["trigger"] as? String,mode=="rollback" ? "groq_draft_restored" : "response_deadline")
             XCTAssertFalse(String(decoding:report,as:UTF8.self).contains(nonce.uuidString))
         }
@@ -130,8 +143,9 @@ import XCTest
         if(variant==='success')f.reply=JSON.stringify({type:'message',text:'Fixture complete'});
         f.send.onclick=e=>{
           const prompt=f.editor.value;old.call(f.send,e);
-          if(['preflight','unarmed','success','wrongNonce','nativeDeadline','retiredDuringRead'].includes(variant))return;
-          const body=JSON.stringify({model:'openai/gpt-oss-20b',messages:[{content:'synthetic system',role:'system'},{content:variant==='wrongBody'?'different':prompt,role:'user'}],temperature:1,max_completion_tokens:16384,top_p:1,stream:true});
+          if(['preflight','unarmed','success','wrongNonce','wrongProfile','nativeDeadline','retiredDuringRead'].includes(variant))return;
+          const qwen=f.model==='qwen/qwen3.8-27b',message={content:variant==='wrongBody'?'different':prompt,role:'user'};
+          const body=JSON.stringify({model:f.model,messages:qwen?[message]:[{content:'synthetic system',role:'system'},message],temperature:qwen?0.6:1,max_completion_tokens:qwen?8192:16384,top_p:qwen?0.95:1,stream:true});
           fetch('https://api.groq.com/openai/v1/chat/completions',{method:'POST',body}).catch(()=>{
             setTimeout(()=>{f.turn.remove();f.editor.value=prompt;f.editor.disabled=false;f.send.disabled=false;},900);
           });

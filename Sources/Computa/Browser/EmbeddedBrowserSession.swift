@@ -868,12 +868,12 @@ final class EmbeddedBrowserSession {
         var armed = false
         init?(lease:GroqOwnedStatusLease, url:URL) {
             self.lease=lease; self.url=url
-            guard EmbeddedWebModelTransport.Provider.groq.acceptsGroqModelQuery(url,expectedKey:GroqOwnedStatusLease.choice.key),
+            guard EmbeddedWebModelTransport.Provider.groq.acceptsGroqModelQuery(url,expectedKey:lease.modelChoice.key),
                   let source=EmbeddedBrowserSession.rendererDiagnosticSource(named:"groq-owned-status"),
                   source.components(separatedBy:"__GROQ_OWNED_SYNTHETIC_CONFIG__").count==2 else{return nil}
             let remaining=(lease.deadline - ContinuousClock.now).components
             let milliseconds=Int(min(390_000,max(0,Double(remaining.seconds)*1000+Double(remaining.attoseconds)/1e15)))
-            let config:[String:Any]=["key":key,"secret":secret,"durationMs":milliseconds]
+            let config:[String:Any]=["key":key,"secret":secret,"durationMs":milliseconds,"profile":lease.profile.rawValue]
             guard milliseconds>0,let bytes=try? JSONSerialization.data(withJSONObject:config) else{return nil}
             script = .init(source:source.replacingOccurrences(of:"__GROQ_OWNED_SYNTHETIC_CONFIG__",with:String(decoding:bytes,as:UTF8.self)),
                            injectionTime:.atDocumentStart,forMainFrameOnly:true,in:.page)
@@ -913,7 +913,7 @@ final class EmbeddedBrowserSession {
         guard let e=entries[id],let p=e.groqStatus,p.lease.isCurrent,p.owner==nil,
               groqStatusCurrent(e,p,view:view,owner:owner,generation:generation) else{return}
         p.owner=owner;p.generation=generation;p.fingerprint=fingerprint
-        let r=await callGroqStatus(p,view:view,command:"arm",args:["model":GroqOwnedStatusLease.choice.key,"label":GroqOwnedStatusLease.choice.label,"prompt":outbound])
+        let r=await callGroqStatus(p,view:view,command:"arm",args:["model":p.lease.modelChoice.key,"label":p.lease.modelChoice.label,"prompt":outbound])
         guard p.lease.isCurrent,groqStatusCurrent(e,p,view:view,owner:owner,generation:generation),r=="ready" else{removeGroqStatus(e);return}
         p.armed=true
     }

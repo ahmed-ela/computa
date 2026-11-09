@@ -3122,6 +3122,7 @@ final class WebModelServerTests: XCTestCase {
             .javaScriptUserCount, .groqDraftRestored, .groqReportedSubmissionError,
             .javaScriptConversationIdentity, .javaScriptURL, .javaScriptConversationRoute,
             .javaScriptFirstUser, .javaScriptSubmission, .promotionFirstUser, .promotionTemporary,
+            .qwenResponseIdentity, .qwenResponseChoiceScope, .qwenResponseChoiceSelected, .qwenResponseChoiceDeadline,
         ]
         for reason in reasons {
             let failure = EmbeddedWebModelTransport.Failure.ownershipFailure(reason)

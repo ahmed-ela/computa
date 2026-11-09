@@ -839,6 +839,43 @@ final class WebsiteFailureHistoryTests: XCTestCase {
         }
     }
 
+    func testQwenResponseOwnershipReasonsSurviveHistoryReloadOnlyForQwen() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaQwenOwnership-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = WebsiteModelChoice(provider: "qwen", key: "Qwen3.8-Max", label: "Qwen3.8-Max").modelID
+        let task = UUID().uuidString, thread = UUID().uuidString
+        let reasons: [EmbeddedWebModelTransport.OwnershipReason] = [
+            .qwenResponseIdentity, .qwenResponseChoiceScope, .qwenResponseChoiceSelected, .qwenResponseChoiceDeadline,
+        ]
+        var expected: [WebsiteTurnFailureStore.Record] = []
+        for reason in reasons {
+            let data = try WebModelServer.errorBody(for: EmbeddedWebModelTransport.Failure.ownershipFailure(reason))
+            let text = String(decoding: data, as: UTF8.self), turn = UUID().uuidString
+            let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+                turnID: turn, modelID: model, diagnosticText: text))
+            XCTAssertTrue(WebsiteTurnFailureStore(directory: root).append(record)); expected.append(record)
+            for foreign in [syntheticChatGPTModelID, "browser/gemini", "browser/claude"] {
+                XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+                    turnID: turn, modelID: foreign, diagnosticText: text), foreign)
+            }
+            var altered = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            var fields = try XCTUnwrap(altered["error"] as? [String: Any]); fields["url"] = "PRIVATE_PAGE_CANARY"
+            altered["error"] = fields
+            let raw = try JSONSerialization.data(withJSONObject: altered)
+            XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+                turnID: turn, modelID: model, diagnosticText: String(decoding: raw, as: UTF8.self)))
+        }
+        let restored = try WebsiteTurnFailureStore(directory: root).load(threadID: thread)
+        XCTAssertEqual(restored, expected)
+        XCTAssertEqual(restored.count, reasons.count)
+        for (record, reason) in zip(restored, reasons) {
+            XCTAssertEqual(record.taskID, task.lowercased()); XCTAssertEqual(record.threadID, thread.lowercased())
+            XCTAssertEqual(record.modelID, model); XCTAssertEqual(record.entry.turnID, record.turnID)
+            XCTAssertTrue(record.entry.body.contains(reason.rawValue))
+            XCTAssertFalse(record.entry.body.contains("PRIVATE_PAGE_CANARY"))
+        }
+    }
+
     func testOwnershipStoreRejectsForgedReasonMessageMetadataAndArbitraryErrors() throws {
         let task = UUID().uuidString, thread = UUID().uuidString, turnID = UUID().uuidString
         let modelID = syntheticChatGPTModelID

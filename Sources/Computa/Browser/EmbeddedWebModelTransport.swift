@@ -341,6 +341,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         case javaScriptConversationRoute = "conversation_route"
         case javaScriptFirstUser = "first_user_message"
         case javaScriptSubmission = "submission_message"
+        case qwenResponseIdentity = "response_identity"
+        case qwenResponseChoiceScope = "response_choice_scope"
+        case qwenResponseChoiceSelected = "response_choice_selected"
+        case qwenResponseChoiceDeadline = "response_choice_deadline"
         case promotionFirstUser = "promotion_first_user"
         case promotionTemporary = "promotion_temporary"
     }
@@ -1483,11 +1487,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard let session=sessions[sessionToken],session.groqOwnedStatus===lease,let generation=session.documentGeneration,
               let first=session.firstUserFingerprint,let submission=session.explicitClearSubmission else{return nil}
         func stillBound()->Bool {
-            guard case .model(let proof)?=session.selectionEvidence,proof.selected.key==GroqOwnedStatusLease.choice.key,
-                  proof.selected.label==GroqOwnedStatusLease.choice.label else {return false}
+            guard case .model(let proof)?=session.selectionEvidence,proof.selected.key==lease.modelChoice.key,
+                  proof.selected.label==lease.modelChoice.label else {return false}
             return !Task.isCancelled && sessions[sessionToken]===session && session.groqOwnedStatus===lease
                 && session.provider == .groq && !session.isDiscovery && !session.isRecoveryProbe && !session.temporary
-                && session.explicitClearReady && session.modelChoice==GroqOwnedStatusLease.choice && session.modelSelectionVerified
+                && session.explicitClearReady && session.modelChoice==lease.modelChoice && session.modelSelectionVerified
                 && browser.webView(for:session.tabID)===session.view
                 && session.documentGeneration==generation && browser.documentGeneration(for:session.tabID)==generation
                 && session.view.url==submission.url && submission.url==session.provider.startURL(choice:session.modelChoice)
@@ -1634,7 +1638,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard provider.usesWebsiteModes ? choice == nil && modeChoice != nil : modeChoice == nil else { throw Failure.invalidRequest }
         guard provider != .chatgpt || choice?.chatGPTPower != nil else { throw Failure.invalidRequest }
         guard provider.lifecycle == .temporary || choice != nil || modeChoice != nil else { throw Failure.invalidRequest }
-        let groqLease = provider == .groq && choice==GroqOwnedStatusLease.choice && admission != nil && groqCandidate?.admission==admission ? groqCandidate : nil
+        let groqLease = provider == .groq && choice==groqCandidate?.modelChoice && admission != nil && groqCandidate?.admission==admission ? groqCandidate : nil
         let qwenLease = provider == .qwen && choice != nil && admission.map({ qwenCandidate?.matches(admission:$0) == true }) == true ? qwenCandidate : nil
         let claudeResponseStream: ClaudeResponseStreamLease?
         if let candidate = streamCandidate, provider == .claude, choice != nil,
@@ -1847,8 +1851,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // insertion, Send, model verification or their error handling.
                 await armClaudeResponseStream(session, prompt: prompt, outbound: outbound)
                 if let lease=session.groqOwnedStatus,lease.matches(prompt),session.provider == .groq,session.explicitClearReady,
-                   session.modelChoice==GroqOwnedStatusLease.choice,session.modelSelectionVerified,case .model(let selected)?=session.selectionEvidence,
-                   selected.selected.key==GroqOwnedStatusLease.choice.key,selected.selected.label==GroqOwnedStatusLease.choice.label,
+                   session.modelChoice==lease.modelChoice,session.modelSelectionVerified,case .model(let selected)?=session.selectionEvidence,
+                   selected.selected.key==lease.modelChoice.key,selected.selected.label==lease.modelChoice.label,
                    session.state=="ready",session.sequence==0,!session.submitted,session.baseline==0,session.confirmedUsers==0,
                    session.firstUserFingerprint==nil,let generation=session.documentGeneration,
                    sessions[session.token]===session,browser.webView(for:session.tabID)===session.view,
@@ -2110,7 +2114,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard script(for: provider) != nil else { throw Failure.pageUnavailable }
         let id: UUID
         if let preparedTab { id = preparedTab }
-        else if let groqStatus,provider == .groq,choice==GroqOwnedStatusLease.choice,!isDiscovery,!isRecoveryProbe {
+        else if let groqStatus,provider == .groq,choice==groqStatus.modelChoice,!isDiscovery,!isRecoveryProbe {
             id=try browser.createGroqStatusTab(url:provider.startURL(choice:choice),lease:groqStatus)
         } else if let qwenMarker, let choice, provider == .qwen, !isDiscovery, !isRecoveryProbe {
             id = try browser.createQwenMarkerTab(url:provider.startURL(choice:choice), label:choice.label, lease:qwenMarker)
@@ -2609,6 +2613,30 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return encoded
     }
 
+    /// Translate only fixed adapter detail names. The new response reasons are
+    /// Qwen-only diagnostics; every existing rejection and fallback is retained.
+    static func savedAdapterOwnershipReason(error: String, detail: String?, provider: Provider,
+                                            isFirstUserFailure: Bool) -> OwnershipReason {
+        if isFirstUserFailure { return .javaScriptFirstUser }
+        let allowedDetails: [String: OwnershipReason] = [
+            "owner_token": .javaScriptOwner, "user_count": .javaScriptUserCount,
+            "conversation_identity": .javaScriptConversationIdentity, "document_url": .javaScriptURL,
+            "conversation_route": .javaScriptConversationRoute, "first_user_message": .javaScriptFirstUser,
+            "submission_message": .javaScriptSubmission,
+        ]
+        if let detail, let reason = allowedDetails[detail] { return reason }
+        if provider == .qwen, error == "conversation_changed" {
+            switch detail {
+            case "response_identity": return .qwenResponseIdentity
+            case "response_choice_scope": return .qwenResponseChoiceScope
+            case "response_choice_selected": return .qwenResponseChoiceSelected
+            case "response_choice_deadline": return .qwenResponseChoiceDeadline
+            default: break
+            }
+        }
+        return error == "document_changed" ? .javaScriptDocument : .javaScriptConversation
+    }
+
     /// Fixed native identifiers only. Page prose, URLs, exception messages and
     /// arbitrary detail fields never enter the diagnostic, even on failure.
     static func savedAdapterFailureDiagnostic(_ observed: [String: Any], provider: Provider, action: String) -> String? {
@@ -2656,6 +2684,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         case .qwen:
             providerDetails = ["model_trigger", "model_label", "model_menu", "stop_control", "stop_conversation",
                 "response_actions", "response_container", "response_container_empty", "response_container_multiple",
+                "response_identity", "response_choice_scope", "response_choice_selected", "response_choice_deadline",
                 "response_container_hidden", "delete_cancel", "delete_confirm",
                 "initial_picker_not_closed", "initial_model_label", "initial_menu_present", "picker_expanded_invalid",
                 "picker_menu_shape", "picker_menu_collapsed", "picker_menu_missing", "picker_menu_binding", "picker_menu_replaced",
@@ -7335,15 +7364,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                    let records = Self.firstUserStructureDiagnosticRecords(raw, provider: provider) {
                     logFirstUserStructure(records, sequence: session.sequence, isFailure: true)
                 }
-                let allowedDetails: [String: OwnershipReason] = [
-                    "owner_token": .javaScriptOwner, "user_count": .javaScriptUserCount,
-                    "conversation_identity": .javaScriptConversationIdentity, "document_url": .javaScriptURL,
-                    "conversation_route": .javaScriptConversationRoute, "first_user_message": .javaScriptFirstUser,
-                    "submission_message": .javaScriptSubmission,
-                ]
-                let detail: OwnershipReason? = isFirstUserFailure ? .javaScriptFirstUser
-                    : (observed["detail"] as? String).flatMap { allowedDetails[$0] }
-                throw Failure.ownershipFailure(detail ?? (error == "document_changed" ? .javaScriptDocument : .javaScriptConversation))
+                throw Failure.ownershipFailure(Self.savedAdapterOwnershipReason(error: error,
+                    detail: observed["detail"] as? String, provider: provider, isFirstUserFailure: isFirstUserFailure))
             case "sign_in_required": throw recordedWebsiteBlocker(.signInRequired, session: session)
             case "website_verification_required":
                 let failure = recordedWebsiteBlocker(.humanVerificationRequired(provider), session: session)

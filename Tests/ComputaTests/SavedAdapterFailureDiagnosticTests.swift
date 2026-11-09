@@ -2,6 +2,57 @@ import XCTest
 @testable import Computa
 
 final class SavedAdapterFailureDiagnosticTests: XCTestCase {
+    @MainActor func testQwenResponseOwnershipReasonsPreserveClosedDetailsAndExistingFallbacks() {
+        let cases: [(String, EmbeddedWebModelTransport.OwnershipReason)] = [
+            ("response_identity", .qwenResponseIdentity), ("response_choice_scope", .qwenResponseChoiceScope),
+            ("response_choice_selected", .qwenResponseChoiceSelected), ("response_choice_deadline", .qwenResponseChoiceDeadline),
+        ]
+        func reason(_ detail: String?, _ provider: EmbeddedWebModelTransport.Provider = .qwen,
+                    error: String = "conversation_changed", first: Bool = false) -> EmbeddedWebModelTransport.OwnershipReason {
+            EmbeddedWebModelTransport.savedAdapterOwnershipReason(error: error, detail: detail,
+                provider: provider, isFirstUserFailure: first)
+        }
+        for (detail, expected) in cases {
+            XCTAssertEqual(reason(detail), expected)
+            XCTAssertEqual(expected.rawValue, detail)
+            XCTAssertEqual(reason(detail, error: "document_changed"), .javaScriptDocument)
+            XCTAssertEqual(reason(detail, first: true), .javaScriptFirstUser)
+            for provider in EmbeddedWebModelTransport.Provider.allCases where provider != .qwen {
+                XCTAssertEqual(reason(detail, provider), .javaScriptConversation, provider.rawValue)
+            }
+            XCTAssertEqual(reason(detail + " PRIVATE_PAGE_CANARY"), .javaScriptConversation)
+        }
+        for detail in [nil, "", "PRIVATE_PAGE_CANARY", "future_response_reason"] {
+            XCTAssertEqual(reason(detail), .javaScriptConversation)
+            XCTAssertEqual(reason(detail, error: "document_changed"), .javaScriptDocument)
+        }
+        for provider in EmbeddedWebModelTransport.Provider.allCases {
+            XCTAssertEqual(reason("first_user_message", provider), .javaScriptFirstUser)
+            XCTAssertEqual(reason("user_count", provider), .javaScriptUserCount)
+            XCTAssertEqual(reason("document_url", provider), .javaScriptURL)
+            XCTAssertEqual(reason("response_scope", provider), .javaScriptConversation)
+        }
+    }
+
+    @MainActor func testQwenResponseOwnershipLogDetailsRemainFiniteAndProviderScoped() {
+        for detail in ["response_identity", "response_choice_scope", "response_choice_selected", "response_choice_deadline"] {
+            let observed: [String: Any] = ["error": "conversation_changed", "detail": detail,
+                "text": "PRIVATE_PAGE_CANARY", "url": "https://private.invalid/PRIVATE_PAGE_CANARY"]
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(observed, provider: .qwen, action: "inspect"),
+                "action=inspect error=conversation_changed detail=\(detail)")
+            for provider in [EmbeddedWebModelTransport.Provider.kimi, .deepseek] {
+                XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(observed, provider: provider, action: "inspect"),
+                    "action=inspect error=conversation_changed detail=other")
+            }
+            for value in [detail + " PRIVATE_PAGE_CANARY" as Any, ["private": "PRIVATE_PAGE_CANARY"] as Any] {
+                var changed = observed; changed["detail"] = value
+                let diagnostic = EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(changed, provider: .qwen, action: "inspect")
+                XCTAssertEqual(diagnostic, "action=inspect error=conversation_changed detail=\(value is String ? "other" : "absent")")
+                XCTAssertFalse(diagnostic?.contains("PRIVATE_PAGE_CANARY") ?? true)
+            }
+        }
+    }
+
     @MainActor func testOnlyExplicitSavedConversationProvidersProduceFailureDiagnostics() {
         for provider in EmbeddedWebModelTransport.Provider.allCases {
             let diagnostic = EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
