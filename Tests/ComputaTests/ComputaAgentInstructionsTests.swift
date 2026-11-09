@@ -2178,11 +2178,24 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                     XCTAssertEqual(handoff.contains("Function entry keys are name and arguments only."),
                                    !functions.intersection(allowed).isEmpty)
                     XCTAssertFalse(handoff.contains(#""arguments":{}"#))
-                    var exampleNames = Set<String>()
+                    let expectsInertFunction = provider == "qwen" && !functions.intersection(allowed).isEmpty
+                    var inertFunctions = 0, exampleNames = Set<String>()
                     for (text, envelope) in examples {
                         let calls = try XCTUnwrap(envelope["calls"] as? [[String: Any]])
                         XCTAssertEqual(calls.count, 1)
-                        let call = try XCTUnwrap(calls.first), name = try XCTUnwrap(call["name"] as? String)
+                        let call = try XCTUnwrap(calls.first)
+                        if call["name"] is NSNull {
+                            XCTAssertTrue(expectsInertFunction)
+                            XCTAssertEqual(Set(envelope.keys), ["type", "calls"])
+                            XCTAssertEqual(Set(call.keys), ["name", "arguments"])
+                            XCTAssertEqual(call["arguments"] as? [String: String], ["sample_field": "sample value"])
+                            XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(text, request: request)) {
+                                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .malformedEnvelope)
+                            }
+                            inertFunctions += 1
+                            continue
+                        }
+                        let name = try XCTUnwrap(call["name"] as? String)
                         exampleNames.insert(name)
                         XCTAssertTrue(allowed.contains(name))
                         if customs.contains(name) {
@@ -2202,7 +2215,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                         }
                     }
                     XCTAssertEqual(exampleNames, expectedExamples, "Only policy-allowed current kinds get final call examples")
-                    XCTAssertEqual(examples.count, expectedExamples.count)
+                    XCTAssertEqual(inertFunctions, expectsInertFunction ? 1 : 0)
+                    XCTAssertEqual(examples.count, expectedExamples.count + inertFunctions)
                     XCTAssertEqual(handoff.contains("Custom apply_patch example:"), exampleNames.contains("relay.apply_patch"),
                                    "A forbidden or historical patch tool cannot publish an executable patch example")
                     for name in names.subtracting(allowed) {
@@ -2252,7 +2266,22 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                     let functionExamples = handoff.split(separator: "\n").compactMap { line in
                         (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any]
                     }.filter { $0["type"] as? String == "tool_calls" }
-                    XCTAssertTrue(functionExamples.isEmpty, "Function guidance must not publish a copyable incomplete call")
+                    let expectsInertFunction = provider == "qwen" && !allowed.isEmpty
+                    XCTAssertEqual(functionExamples.count, expectsInertFunction ? 1 : 0,
+                        "Only the allowed Qwen inert layout may accompany function guidance")
+                    for envelope in functionExamples {
+                        XCTAssertEqual(Set(envelope.keys), ["type", "calls"])
+                        let calls = try XCTUnwrap(envelope["calls"] as? [[String: Any]])
+                        XCTAssertEqual(calls.count, 1)
+                        let call = try XCTUnwrap(calls.first)
+                        XCTAssertEqual(Set(call.keys), ["name", "arguments"])
+                        XCTAssertTrue(call["name"] is NSNull)
+                        XCTAssertEqual(call["arguments"] as? [String: String], ["sample_field": "sample value"])
+                        let text = String(decoding: try JSONSerialization.data(withJSONObject: envelope), as: UTF8.self)
+                        XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(text, request: request)) {
+                            XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .malformedEnvelope)
+                        }
+                    }
                     for (name, arguments) in [(commandName, ["cmd": "synthetic read"] as [String: Any]),
                                               (statusName, [String: Any]())] {
                         let encoded = try JSONSerialization.data(withJSONObject: ["type": "tool_calls",
@@ -2316,6 +2345,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             responseFormat: LocalModelCatalog.webProvider(for: request.model) == "qwen" ? .codePayloadJSON
                 : ["claude", "deepseek", "kimi"].contains(LocalModelCatalog.webProvider(for: request.model) ?? "") ? .literalFencedJSON : .fencedJSON,
             singleActionRelay: request.singleActionRelay,
+            illustrateFunctionArguments: LocalModelCatalog.webProvider(for: request.model) == "qwen",
             allowedToolNames: expectedAllowedToolNames)
         let closingFence = ["chatgpt", "claude", "groq"].contains(LocalModelCatalog.webProvider(for: request.model) ?? "") ? "\n```" : ""
         XCTAssertEqual(suffix, closingFence + "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.\n\n" + request.currentUserInstructions + "\n\n" +

@@ -5,11 +5,11 @@ import {fixture,choice,prompt,marker,fingerprint,conversationID,answerID} from '
 const baselineFixture = (options:any={}) => fixture({...options,modelQuota:false});
 const max='Qwen3.8-Max';
 const notice="You've reached today's Qwen3.8-Max limit. Upgrade your membership or switch to another model above to continue.";
-async function setup(factory:any=fixture,label=max) {
+async function setup(factory:any=fixture,label=max,outbound=prompt) {
  const f=factory({completeOnSend:false});await f.run('inspect');
  for(let i=0;i<8;i++)if((await f.run('selectModel',{modelChoice:choice(label)})).selected)break;
- await f.run('prepare');await f.run('insert',{prompt,expectedFirstUserMarker:marker});await f.run('sendReady',{prompt});
- const digest=await fingerprint(prompt);await f.run('submit',{prompt,savedSubmissionFingerprint:digest});
+ await f.run('prepare');await f.run('insert',{prompt:outbound,expectedFirstUserMarker:marker});await f.run('sendReady',{prompt:outbound});
+ const digest=await fingerprint(outbound);await f.run('submit',{prompt:outbound,savedSubmissionFingerprint:digest});
  const inspect=(overrides:any={})=>f.run('inspect',{expectedModelChoice:choice(label),savedSubmissionFingerprint:digest,
   allowQwenInitialResponseIdentity:true,allowQwenFirstBodyExpansion:true,allowFirstUserBinding:true,...overrides});
  return {f,inspect,digest};
@@ -129,5 +129,32 @@ test('retained nonempty identity and display answer UUIDs cannot be replaced by 
   const c=card(f,'update_member');c.node.setAttribute('data-msg-id',other);f.answer.setAttribute('id','chat-response-message-'+(empty?'':other));
   const before=actions(f),out=await inspect({allowFirstUserBinding:false,expectedFirstUserFingerprint:ordinary.firstUserFingerprint});
   expect(out.error).not.toBe('website_usage_limit');expect(out.qwenQuotaScope).toBeUndefined();noActions(f,before);
+ }
+});
+
+async function heldExpandedQuota() {
+ const outbound='Synthetic exact long held quota.\n'+'aé𐀀b\n'.repeat(2800)+'\n\nComputa session marker: '+marker;
+ const x=await setup(fixture,max,outbound),{f,inspect}=x;
+ const chunk=f.userBody.parentElement!,expand=new f.Node('BUTTON',{class:'chat-user-message-expand-toggle chat-user-message-expand-toggle-pc','aria-label':'Expand'});
+ chunk.setAttribute('class','chunked-text-renderer-root chunked-text-renderer-root-with-expand is-collapsed');chunk.append(expand);f.userBody.text=outbound.slice(0,10240);f.phase.detach();card(f,'update_member');
+ expand.onClick=()=>{chunk.setAttribute('class','chunked-text-renderer-root chunked-text-renderer-root-with-expand');expand.setAttribute('aria-label','Collapse');f.userBody.text=outbound;};
+ const pending=await inspect();expect(pending.qwenFirstBodyExpansionPending).toBe(true);expect(pending.qwenQuotaScope).toBeUndefined();expect(expand.clicks).toBe(1);
+ expect(f.world.__computaQwenSavedSessionV1.first).toBeNull();expect(f.world.__computaQwenSavedSessionV1.firstDisplay).toBeDefined();
+ return {...x,chunk,expand,outbound};
+}
+test('a legitimate held expanded full body can classify strict TV before ordinary body or reply proof',async()=>{
+ const {f,inspect,expand,outbound}=await heldExpandedQuota();const before=actions(f);expect(f.userBody.text).toBe(outbound);
+ const result=await inspect();expect(result.error).toBe('website_usage_limit');expect(result.qwenQuotaScope.reason).toBe('update_member');
+ expect(Object.keys(result).sort()).toEqual(['error','modelEvidence','qwenQuotaScope']);expect(f.world.__computaQwenSavedSessionV1.first).toBeNull();expect(f.world.__computaQwenSavedSessionV1.responseIdentity).toBeNull();
+ noActions(f,before);expect(expand.clicks).toBe(1);expect(f.send.clicks).toBe(1);
+});
+test('held full-body quota detection still refuses replacement user, control or answer pins',async()=>{
+ for(const pin of ['body','control','answer']) {
+  const {f,inspect,chunk,expand,outbound}=await heldExpandedQuota();
+  if(pin==='body'){const fresh=new f.Node('P',{...f.userBody.values},outbound);f.userBody.detach();chunk.children.unshift(fresh);fresh.parentElement=chunk;}
+  if(pin==='control'){expand.detach();chunk.append(new f.Node('BUTTON',{...expand.values}));}
+  if(pin==='answer'){f.answer.detach();f.answerRoot.append(f.answer.cloneNode(true));}
+  const before=actions(f),result=await inspect();expect(result.qwenQuotaScope,pin).toBeUndefined();expect(result.error,pin).toBeDefined();expect(result.error,pin).not.toBe('website_usage_limit');
+  noActions(f,before);expect(expand.clicks,pin).toBe(1);expect(f.send.clicks,pin).toBe(1);
  }
 });

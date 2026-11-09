@@ -1872,7 +1872,7 @@ final class WebModelResponseCodecTests: XCTestCase {
                            responseFormat: LocalModelCatalog.webProvider(for: request.model) == "qwen" ? .codePayloadJSON
                                : ["claude", "deepseek", "kimi"].contains(LocalModelCatalog.webProvider(for: request.model) ?? "") ? .literalFencedJSON : .fencedJSON,
                            singleActionRelay: request.singleActionRelay,
-                           illustrateFunctionArguments: expectsFunctionLayout,
+                           illustrateFunctionArguments: expectsFunctionLayout || LocalModelCatalog.webProvider(for: request.model) == "qwen",
                            currentBrowserHandoff: expectedCurrentBrowserHandoff,
                            allowedToolNames: expectedAllowedToolNames),
                        "The fresh response contract and current names follow every complete request", file: file, line: line)
@@ -3126,7 +3126,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             try assertUserPayloadAppearsOnce(latestRequest, in: first)
             XCTAssertTrue(first.prompt.hasSuffix(ComputaAgentInstructions.webResponseContract(offeredToolNames: ["computer_v2_snapshot"],
                 responseFormat: provider == "qwen" ? .codePayloadJSON : ["claude", "deepseek", "kimi"].contains(provider) ? .literalFencedJSON : .fencedJSON,
-                singleActionRelay: first.singleActionRelay)))
+                singleActionRelay: first.singleActionRelay, illustrateFunctionArguments: provider == "qwen")))
             let nextInput = input + [
                 ["type": "function_call", "name": "computer_v2_snapshot", "arguments": "{}", "call_id": "current_extra"],
                 ["type": "function_call_output", "call_id": "current_extra", "output": "Another current native observation completed."],
@@ -3880,6 +3880,85 @@ final class WebModelResponseCodecTests: XCTestCase {
                 XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .malformedEnvelope)
             }
         }
+    }
+
+    func testQwenShowsExistingInertNestedFunctionLayoutAndKeepsOtherProviderContracts() throws {
+        let plus = WebsiteModelChoice(provider: "qwen", key: "Qwen3.7-Plus", label: "Qwen3.7-Plus").modelID
+        let max = WebsiteModelChoice(provider: "qwen", key: "Qwen3.8-Max", label: "Qwen3.8-Max").modelID
+        let opus = WebsiteModelChoice(provider: "claude", key: "Opus 3", label: "Opus 3").modelID
+        let otherClaude = WebsiteModelChoice(provider: "claude", key: "Opus 4.6", label: "Opus 4.6").modelID
+        let scenarios = [(plus, true), (max, true), ("browser/qwen", true), ("web-qwen", false), (opus, true),
+            (otherClaude, false), ("browser/claude", false), ("browser/chatgpt", false), ("browser/gemini", false),
+            ("browser/groq", false), ("browser/kimi", false), ("browser/deepseek/mode/chat", false)]
+        let inert = #"{"type":"tool_calls","calls":[{"name":null,"arguments":{"sample_field":"sample value"}}]}"#
+        for (model, expectsLayout) in scenarios {
+            let original = try JSONSerialization.data(withJSONObject: ["model": model, "input": "Keep this exact user request", "tools": [function]])
+            let prepared = try WebModelResponseCodec.prepareRequest(original)
+            // This existing oracle compares retained request values and the complete
+            // response-contract suffix byte-for-byte, including unchanged providers.
+            _ = try assertContiguousRequestValues(original, in: prepared, expectsFunctionLayout: model == opus)
+            XCTAssertEqual(prepared.prompt.contains("Function call layout."), expectsLayout, model)
+            XCTAssertEqual(prepared.prompt.contains(inert), expectsLayout, model)
+            XCTAssertEqual(prepared.continuationRequest, original)
+            if expectsLayout {
+                XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(inert, request: prepared)) {
+                    XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .malformedEnvelope)
+                }
+            }
+        }
+    }
+
+    func testQwenCapturedFlattenedCommandShapeStillRejectsWholeReplyAndNestedArgumentsStayExact() throws {
+        let model = WebsiteModelChoice(provider: "qwen", key: "Qwen3.7-Plus", label: "Qwen3.7-Plus").modelID
+        let command: [String: Any] = ["type": "function", "name": "exec_command", "parameters": [
+            "type": "object", "properties": ["cmd": ["type": "string"], "workdir": ["type": "string"]],
+            "required": ["cmd", "workdir"], "additionalProperties": false]]
+        let arguments = ["cmd": "cat README.md", "workdir": "/synthetic/fixture/coding"]
+        let original = try JSONSerialization.data(withJSONObject: ["model": model, "input": [
+            ["role": "user", "content": "Read only this synthetic fixture; do not execute other work."]],
+            "tools": [command], "tool_choice": "auto", "parallel_tool_calls": false])
+        let prepared = try WebModelResponseCodec.prepareRequest(original)
+        _ = try assertContiguousRequestValues(original, in: prepared)
+        let nested: [String: Any] = ["name": "exec_command", "arguments": arguments]
+        // Actual459 capture had these exact keys (synthetic values here),
+        // NOT extra type/call_id fields. Do not strip or coerce any field.
+        let flattened: [String: Any] = ["name": "exec_command", "cmd": arguments["cmd"]!, "workdir": arguments["workdir"]!]
+        for calls in [[flattened], [nested, flattened], [flattened, nested]] {
+            let raw = String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": calls]), as: UTF8.self)
+            XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(raw, request: prepared)) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .unsupportedCallFields)
+            }
+            XCTAssertNil(WebModelResponseCodec.malformedEmbeddedReplyDiagnostic(raw, request: prepared),
+                "Valid JSON with unsupported fields must not acquire invalid-JSON correction eligibility")
+        }
+        let raw = String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [nested]]), as: UTF8.self)
+        guard case let .toolCalls(calls) = try WebModelResponseCodec.parseEmbeddedReply(raw, request: prepared) else {
+            return XCTFail("Correct nested arguments must remain a tool proposal")
+        }
+        XCTAssertEqual(calls.count, 1); XCTAssertEqual(calls[0].name, "exec_command")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(calls[0].argumentsJSON.utf8)) as? [String: String], arguments)
+        XCTAssertEqual(prepared.continuationRequest, original)
+        let refusal = #"{"type":"message","text":"I cannot perform that action."}"#
+        XCTAssertEqual(try WebModelResponseCodec.parseEmbeddedReply(refusal, request: prepared), .message("I cannot perform that action."))
+        let denied = try controlledRequest(["model": model, "tool_choice": "none"], tools: [command])
+        XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(raw, request: denied)) {
+            XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .rejectedToolChoice)
+        }
+    }
+
+    func testQwenFunctionLayoutNeverInventsFunctionExamplesForCustomOnlyNoneOrEmptyTools() throws {
+        let model = WebsiteModelChoice(provider: "qwen", key: "Qwen3.7-Plus", label: "Qwen3.7-Plus").modelID
+        let custom: [String: Any] = ["type": "custom", "name": "literal"]
+        for prepared in [try controlledRequest(["model": model], tools: [custom]),
+            try controlledRequest(["model": model, "tool_choice": "none"], tools: [function]),
+            try controlledRequest(["model": model], tools: [])] {
+            XCTAssertFalse(prepared.prompt.contains("Function call layout."))
+            XCTAssertFalse(prepared.prompt.contains(#""name":null"#))
+        }
+        let prepared = try controlledRequest(["model": model], tools: [custom])
+        let raw = #"{"type":"tool_calls","calls":[{"name":"literal","input":"exact Unicode λ input"}]}"#
+        XCTAssertEqual(try WebModelResponseCodec.parseEmbeddedReply(raw, request: prepared),
+            .toolCalls([.init(name: "literal", argumentsJSON: "", namespace: nil, customInput: "exact Unicode λ input")]))
     }
 
     func testOpus3ShowsInertFunctionLayoutOnlyForAnAllowedFunction() throws {

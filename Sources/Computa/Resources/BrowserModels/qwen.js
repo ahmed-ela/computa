@@ -1876,7 +1876,7 @@ function computaQwenDOM(c) {
       if (identity?.answer && (identity.answer.root !== answer || identity.answer.content !== host
         || identity.answer.turn !== answerTurn)) return null;
       if (display && !first) {
-        const view = firstBodyPresentation({first:{root:user,container,body,id:userID,text:body.textContent},
+        const view = firstBodyPresentation({users,answers,first:{root:user,container,body,id:userID,text:body.textContent},
           answer:{root:answer,content:host,id:hostID.slice(prefix.length) || null}});
         if (!view || display.canonical !== current.canonical || view.pins.length !== display.pins.length
           || view.pins.some((node,index) => node !== display.pins[index])) return null;
