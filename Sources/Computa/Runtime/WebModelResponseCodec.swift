@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import CoreFoundation
 
 /// The browser is a model transport. It never owns a tool or executes
@@ -64,6 +65,19 @@ enum WebModelResponseCodec {
         /// Available only for an exact registered native Groq schema loader.
         /// The server owns selection state; page/model data cannot create it.
         let groqToolCatalogSeed: GroqToolCatalog.Seed?
+        /// Exact registered reader, offered and allowed for THIS response only.
+        /// Native scope/issued-call/publication checks remain server-owned.
+        let groqHistoryReaderName: String?
+        /// Only a chosen, fully budget-admitted request may publish this plan.
+        /// Count-only previews carry no plan, even when they render references.
+        let groqHistoryPlan: GroqContextManifestProjector.Plan?
+        let groqHistoryPreviewOnly: Bool
+        /// Native registered-history choice AND the exact currently allowed
+        /// reader are required. This is never decoded from HTTP/model JSON.
+        fileprivate let compactGroqCallIDs: Bool
+        /// The same immutable native-profile predicate drives compact call IDs
+        /// and known permission presentation. It grants no action/permission.
+        var usesNativeGroqHistoryPresentation: Bool { compactGroqCallIDs }
         fileprivate let tools: [String: OfferedTool]
         fileprivate let toolPolicy: ToolPolicy
         fileprivate let parallelToolCalls: Bool
@@ -267,12 +281,25 @@ enum WebModelResponseCodec {
         }
     }
 
+    /// Native-only presentation hook over one already validated candidate.
+    /// Root authenticates the actual frame and resolves ledger fields before
+    /// constructing its closure. A preview returns data, never a snapshot.
+    enum GroqHistoryRendering: Sendable {
+        case planned(GroqContextManifestProjector.Plan)
+        case preview(Data)
+    }
+    typealias GroqHistoryProjection = @Sendable (GroqContextJSONLayout) throws -> GroqHistoryRendering
+
     /// Model state and the read-only loader retain their selected schemas.
     /// Direct tools are an inference-local presentation over that selection.
     static func prepareBudgetedGroqRequest(_ data: Data, availability: EmbeddedBrowserToolAvailability?,
-                                           projection: GroqToolCatalog.Projection, model: String) throws -> (request: Request, units: Int) {
+                                           projection: GroqToolCatalog.Projection, model: String,
+                                           loadedOnly: Bool = false,
+                                           compactHistoryInventory: Bool = false,
+                                           historyProjection: GroqHistoryProjection? = nil) throws -> (request: Request, units: Int) {
         try prepareBudgetedGroqRequest(data, availability: availability, projection: projection, model: model,
-                                      candidateObserver: nil)
+                                      loadedOnly: loadedOnly, compactHistoryInventory: compactHistoryInventory,
+                                      historyProjection: historyProjection, candidateObserver: nil)
     }
 
     #if DEBUG
@@ -280,27 +307,37 @@ enum WebModelResponseCodec {
     /// validator. It cannot substitute bytes, change admission or replace errors.
     static func prepareBudgetedGroqRequest(_ data: Data, availability: EmbeddedBrowserToolAvailability?,
         projection: GroqToolCatalog.Projection, model: String,
+        loadedOnly: Bool = false,
+        compactHistoryInventory: Bool = false,
+        historyProjection: GroqHistoryProjection? = nil,
         observingCandidate: @escaping (Request, String, Bool) -> Void) throws -> (request: Request, units: Int) {
         try prepareBudgetedGroqRequest(data, availability: availability, projection: projection, model: model,
-                                      candidateObserver: observingCandidate)
+                                      loadedOnly: loadedOnly, compactHistoryInventory: compactHistoryInventory,
+                                      historyProjection: historyProjection, candidateObserver: observingCandidate)
     }
     #endif
 
     private static func prepareBudgetedGroqRequest(_ data: Data, availability: EmbeddedBrowserToolAvailability?,
         projection: GroqToolCatalog.Projection, model: String,
+        loadedOnly: Bool,
+        compactHistoryInventory: Bool,
+        historyProjection: GroqHistoryProjection?,
         candidateObserver: ((Request, String, Bool) -> Void)?) throws -> (request: Request, units: Int) {
+        guard historyProjection == nil || loadedOnly else { throw Failure.invalidTools }
         let exact = groqPromptBudgetUsesExactTokenizer(model: model)
-        let choices: [GroqDirectToolSet] = exact
+        let choices: [GroqDirectToolSet] = exact && !loadedOnly
             ? [.standard, .essential, .loadedOnly] : [.loadedOnly]
-        // Keep every previously admissible rendering. Only the final exact-token
-        // fallback may show byte-identical historical loader fields by reference.
-        let attempts = choices.map { ($0, false) } + (exact ? [(.loadedOnly, true)] : [])
+        // Legacy candidates/fallbacks are unchanged. Typed history projection
+        // must see the actual raw payload tokens, never legacy loader rewrites.
+        let attempts = choices.map { ($0, false) }
+            + (exact && historyProjection == nil ? [(.loadedOnly, true)] : [])
         var fullHistoryFailure: Failure?
         for (index, attempt) in attempts.enumerated() {
             let (choice, compactHistory) = attempt
             do {
                 let request = try prepareRequest(data, browserToolAvailability: availability,
-                    groqToolCatalogProjection: projection, groqDirectTools: choice, compactGroqLoaderHistory: compactHistory)
+                    groqToolCatalogProjection: projection, groqDirectTools: choice, compactGroqLoaderHistory: compactHistory,
+                    groqHistoryProjection: historyProjection, compactHistoryInventory: compactHistoryInventory)
                 if let candidateObserver {
                     let direct: String = switch choice {
                     case .standard: "standard"
@@ -331,7 +368,9 @@ enum WebModelResponseCodec {
                                browserToolAvailability: EmbeddedBrowserToolAvailability? = nil,
                                groqToolCatalogProjection: GroqToolCatalog.Projection? = nil,
                                groqDirectTools: GroqDirectToolSet = .loadedOnly,
-                               compactGroqLoaderHistory: Bool = false) throws -> Request {
+                               compactGroqLoaderHistory: Bool = false,
+                               groqHistoryProjection: GroqHistoryProjection? = nil,
+                               compactHistoryInventory: Bool = false) throws -> Request {
         // Reject before expanding a large JSON body into prompt storage.
         guard data.count <= maximumPromptBytes else {
             throw Failure.promptTooLarge(actualBytes: data.count, maximumBytes: maximumPromptBytes)
@@ -346,6 +385,10 @@ enum WebModelResponseCodec {
         }
         let provider = LocalModelCatalog.webProvider(for: model)
         let isChatGPT = provider == "chatgpt", isClaude = provider == "claude", isGroq = provider == "groq"
+        if groqHistoryProjection != nil {
+            guard isGroq, groqToolCatalogProjection != nil, groqDirectTools == .loadedOnly,
+                  !compactGroqLoaderHistory else { throw Failure.invalidTools }
+        }
         // DeepSeek's JSON code block preserves the literal PRE text, including
         // backslashes in patch inputs. Its ordinary paragraph renders Markdown.
         // Kimi also requires all authored content to be inside its single JSON block.
@@ -419,11 +462,14 @@ enum WebModelResponseCodec {
             let loaderAllowed = [GroqToolCatalog.name, "functions." + GroqToolCatalog.name].contains {
                 policy.allowedNames.contains($0)
             }
+            let reader = GroqHistoryTool.registeredName(in: registeredDefinitions).flatMap { name in
+                offered[name] != nil && policy.allowedNames.contains(name) ? name : nil
+            }
             groqToolCatalogSeed = .init(
                 registeredDefinitionsJSON: try JSONSerialization.data(withJSONObject: registeredDefinitions,
                     options: [.sortedKeys, .withoutEscapingSlashes]),
                 callableNames: Set(offered.keys), allowedNames: policy.allowedNames,
-                preloadNames: loaderAllowed ? [] : policy.allowedNames,
+                preloadNames: loaderAllowed ? Set(reader.map { [$0] } ?? []) : policy.allowedNames,
                 toolChoiceJSON: try JSONSerialization.data(withJSONObject: object["tool_choice"] ?? "auto",
                     options: [.fragmentsAllowed, .sortedKeys, .withoutEscapingSlashes]))
         } else { groqToolCatalogSeed = nil }
@@ -461,6 +507,10 @@ enum WebModelResponseCodec {
                            requiresCall: policy.requiresCall, mode: policy.mode)
             guard !policy.requiresCall || !policy.allowedNames.isEmpty else { throw Failure.invalidToolChoice }
         } else { displayProjection = nil }
+        let groqHistoryReaderName = isGroq ? GroqHistoryTool.registeredName(in: registeredDefinitions).flatMap { name in
+            offered[name] != nil && policy.allowedNames.contains(name) ? name : nil
+        } : nil
+        let nativeGroqHistoryPresentation = compactHistoryInventory && groqHistoryReaderName != nil
         let configuration = try responseConfiguration(object, schemas: schemas, parallel: parallel)
         let customNames = Set(offered.filter { $0.value.isCustom }.keys)
         let includedInstructionText = trustedInstructionText(in: object)
@@ -480,10 +530,11 @@ enum WebModelResponseCodec {
             if !tool.isCustom, tool.name.hasPrefix("computer_v2_") { groqDomains.insert(.computer) }
         }
         let runtimeInstructions = compactGroq
-            ? [ComputaAgentInstructions.groqRuntimeContract,
+            ? [ComputaAgentInstructions.groqRuntimeContractForPresentation(includedInstructionText: includedInstructionText,
+                    compactHistoryInventory: compactHistoryInventory),
                ComputaAgentInstructions.groqNativeSupplement(includedInstructionText: includedInstructionText,
                                                             needsBrowser: requiresBrowserToolAvailability, domains: groqDomains),
-               try displayProjection.map(groqCatalogNotice)].compactMap { $0 }.joined(separator: "\n\n")
+               try displayProjection.map { try groqCatalogNotice($0, compactHistoryInventory: compactHistoryInventory) }].compactMap { $0 }.joined(separator: "\n\n")
             : [ComputaAgentInstructions.webInferenceContract(offeredFunctions: offered.mapValues(\.name),
             customToolNames: customNames, includedInstructionText: includedInstructionText, compactNativeContext: isChatGPT,
             deduplicateNativeContext: isClaude || isGroq,
@@ -494,7 +545,7 @@ enum WebModelResponseCodec {
             guard let message = item as? [String: Any], message["role"] as? String == "user" else { return false }
             return message["type"] == nil || message["type"] as? String == "message"
         }
-        let currentUserInstructions = compactGroq
+        let baseCurrentUserInstructions = compactGroq
             ? ComputaAgentInstructions.groqCurrentUserContract(latestUserItemIndex: latestUserItemIndex, inputIsString: object["input"] is String)
             : ComputaAgentInstructions.webCurrentUserContract(latestUserItemIndex: latestUserItemIndex, inputIsString: object["input"] is String)
         let fullDisplaySource = toolDefinitionsChanged
@@ -502,12 +553,44 @@ enum WebModelResponseCodec {
             : originalJSON
         var usesLoaderReferences = false
         let taskDisplaySource = try displayProjection.map {
-            try groqTrustedNativeProjection(originalJSON, object: object, schemas: $0.displaySchemas(schemas), domains: groqDomains, compactLoaderHistory: compactGroqLoaderHistory, usesLoaderReferences: &usesLoaderReferences)
+            try groqTrustedNativeProjection(originalJSON, object: object, schemas: $0.displaySchemas(schemas, compactHistoryInventory: compactHistoryInventory), domains: groqDomains, nativePermissionCompaction: nativeGroqHistoryPresentation, compactLoaderHistory: compactGroqLoaderHistory, usesLoaderReferences: &usesLoaderReferences)
         } ?? fullDisplaySource
         // API response/transport controls are validated above and retained in
         // the canonical request. They must not become website instructions to
         // supply unsupported reasoning output or transport metadata.
-        let displaySource = WebsitePromptProjection.omittingAPIOnlyTopLevelFields(taskDisplaySource)
+        let nativeDisplaySource = WebsitePromptProjection.omittingAPIOnlyTopLevelFields(taskDisplaySource)
+        var displaySource = nativeDisplaySource
+        var groqHistoryPlan: GroqContextManifestProjector.Plan?
+        var groqHistoryPreviewOnly = false
+        var usesHistoryReferences = false
+        if let groqHistoryProjection {
+            // Parse BEFORE whitespace compaction. The existing native policy and
+            // schema splices leave all payload lexemes and user items untouched.
+            let candidate = try GroqContextJSONLayout.parse(Data(nativeDisplaySource.utf8))
+            let rendered: Data
+            switch try groqHistoryProjection(candidate) {
+            case let .planned(plan):
+                guard plan.isCurrent() else { throw GroqContextManifestProjector.Failure.publication }
+                rendered = plan.renderedJSON
+                usesHistoryReferences = plan.requiresManifestContract
+                groqHistoryPlan = plan
+            case let .preview(bytes):
+                rendered = bytes
+                usesHistoryReferences = bytes != candidate.sourceUTF8
+                groqHistoryPreviewOnly = true
+            }
+            guard rendered.count <= maximumPromptBytes,
+                  let text = String(data: rendered, encoding: .utf8),
+                  (try? JSONSerialization.jsonObject(with: rendered)) is [String: Any] else {
+                throw Failure.invalidRequest
+            }
+            guard !usesHistoryReferences || groqHistoryReaderName != nil else { throw Failure.invalidToolChoice }
+            displaySource = text
+        }
+        let requestLabel = usesHistoryReferences ? GroqContextManifestProjector.label : "COMPLETE_RESPONSES_REQUEST_JSON"
+        let currentUserInstructions = usesHistoryReferences
+            ? baseCurrentUserInstructions.replacingOccurrences(of: "COMPLETE_RESPONSES_REQUEST_JSON", with: requestLabel)
+            : baseCurrentUserInstructions
         let projection = WebsitePromptProjection.compactValidatedJSON(displaySource)
         // Groq receives one compact JSON line inside a literal code block.
         // Valid JSON strings cannot contain raw CR/LF, so quoted backticks cannot
@@ -518,9 +601,12 @@ enum WebModelResponseCodec {
             : displayStableJSON(isChatGPT ? projection.json : displaySource, shieldURLPunctuation: isChatGPT)
         // The eight fence bytes count toward admission and ownership fingerprints.
         let framedRequestJSON = (isChatGPT || isClaude || isGroq) ? "```\n" + displayJSON + "\n```" : displayJSON
-        let requestContext = compactGroq ? ComputaAgentInstructions.groqRequestContext
+        let baseRequestContext = compactGroq ? ComputaAgentInstructions.groqRequestContext
             + (usesLoaderReferences ? "\nIn loader arguments and outputs, a $ref object repeats the exact earlier input field at its JSON pointer." : "")
             : ComputaAgentInstructions.requestContext(compactLiteralJSON: isGroq)
+        let requestContext = usesHistoryReferences
+            ? baseRequestContext + "\n" + groqHistoryManifestContract(readerName: groqHistoryReaderName!)
+            : baseRequestContext
         let browserHandoff = compactGroq
             ? currentGroqBrowserHandoff(tools: offered, policy: policy, entryTools: groqEntryTools,
                                        availability: browserToolAvailability)
@@ -528,7 +614,8 @@ enum WebModelResponseCodec {
         let responseContract = compactGroq ? ComputaAgentInstructions.groqResponseContract(currentBrowserHandoff: browserHandoff,
             hasFunctions: offered.values.contains { !$0.isCustom }, hasCustomTools: !customNames.isEmpty,
             currentToolHandoff: try currentGroqToolHandoff(projection: displayProjection,
-                offeredNames: Set(offered.keys), allowedNames: policy.allowedNames))
+                offeredNames: Set(offered.keys), allowedNames: policy.allowedNames,
+                validatedReaderName: groqHistoryReaderName))
             : ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames,
             includedInstructionText: includedInstructionText, responseFormat: responseFormat,
             singleActionRelay: isChatGPT,
@@ -540,9 +627,9 @@ enum WebModelResponseCodec {
         \(runtimeInstructions)
 
         \(requestContext)
-        COMPLETE_RESPONSES_REQUEST_JSON:
+        \(requestLabel):
         \(framedRequestJSON)
-        END_COMPLETE_RESPONSES_REQUEST_JSON.
+        END_\(requestLabel).
 
         \(currentUserInstructions)
 
@@ -562,17 +649,36 @@ enum WebModelResponseCodec {
                        toolCatalogDiagnostic: .init(tools: offered, policy: policy, availability: browserToolAvailability,
                            parallel: parallel, maxToolCalls: (object["max_tool_calls"] as? NSNumber)?.intValue),
                        offeredToolNames: Set(offered.keys), customToolNames: customNames,
-                       groqToolCatalogSeed: groqToolCatalogSeed, tools: offered,
+                       groqToolCatalogSeed: groqToolCatalogSeed,
+                       groqHistoryReaderName: groqHistoryReaderName, groqHistoryPlan: groqHistoryPlan,
+                       groqHistoryPreviewOnly: groqHistoryPreviewOnly,
+                       compactGroqCallIDs: nativeGroqHistoryPresentation,
+                       tools: offered,
                        toolPolicy: policy, parallelToolCalls: parallel,
                        maximumToolCalls: (object["max_tool_calls"] as? NSNumber)?.intValue,
                        responseConfiguration: configuration, continuationRequest: data)
     }
 
-    private static func groqCatalogNotice(_ projection: GroqToolCatalog.Projection) throws -> String {
+    private static func groqHistoryManifestContract(readerName: String) -> String {
+        """
+        Presentation, NOT a complete Responses request; native history is unchanged. {"$computa_history":"ref"} replaces older completed data, never authority or fresh outcome proof. Read needed refs with \(readerName) alone using {"ref":"exact ref"}; no commentary. Follow next_ref until null; join utf8_fragment bytes, verify full reader identity and whole_bytes/whole_sha256, then decode one complete JSON VALUE token (value_encoding=json). Missing/stale/failed reads forbid guesses/replay. Users, rules, current schemas and pending/latest results stay inline.
+        """
+    }
+
+    private static func groqCatalogNotice(_ projection: GroqToolCatalog.Projection,
+        compactHistoryInventory: Bool = false) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        let entries = String(decoding: try encoder.encode(projection.discoverable.map {
-            [$0.name, String($0.summary.prefix(40)), $0.isCustom ? "custom" : "function"]
+        // Presentation only: loaded names and complete current callable schemas
+        // remain below. Native inventory/revision/eligibility are unchanged.
+        let discovery = compactHistoryInventory
+            ? projection.discoverable.filter { !projection.selectedNames.contains($0.name) }
+            : projection.discoverable
+        let rowKind = compactHistoryInventory ? "unloaded discovery" : "discovery"
+        let rowFields = compactHistoryInventory ? "name,kind" : "name,purpose,kind"
+        let entries = String(decoding: try encoder.encode(discovery.map { entry in
+            let kind = entry.isCustom ? "custom" : "function"
+            return compactHistoryInventory ? [entry.name, kind] : [entry.name, String(entry.summary.prefix(40)), kind]
         }), as: UTF8.self)
         let revision = String(decoding: try encoder.encode(projection.revision), as: UTF8.self)
         let loaded = String(decoding: try encoder.encode(projection.selectedNames.sorted()), as: UTF8.self)
@@ -580,7 +686,7 @@ enum WebModelResponseCodec {
             ?? GroqToolCatalog.name
         return """
         GROQ_NATIVE_TOOL_INVENTORY:
-        Catalog rows [name,purpose,kind] list the tools available for this request. Tools under loaded have callable schemas now. To use another tool, load its exact name with \(loader) and the current catalog_revision. Load up to four names at once. Loading replaces optional selections and executes nothing. Wait for the next request's schema before calling a newly loaded tool.
+        Rows [\(rowFields)] are \(rowKind); only loaded tools have callable schemas. Load other exact names with \(loader), current catalog_revision and at most four names. Loading REPLACES optional selections, executes nothing; wait for the next request's schema before calling them.
         ```
         {"catalog_revision":\(revision),"loaded":\(loaded),"inventory":\(entries)}
         ```
@@ -592,7 +698,8 @@ enum WebModelResponseCodec {
     /// Inventory summaries are discovery data, not callable schemas. An exact
     /// loader example avoids requiring the model to invent its first arguments.
     private static func currentGroqToolHandoff(projection: GroqToolCatalog.Projection?,
-                                               offeredNames: Set<String>, allowedNames: Set<String>) throws -> String {
+                                               offeredNames: Set<String>, allowedNames: Set<String>,
+                                               validatedReaderName: String?) throws -> String {
         guard let projection else { return "" }
         func json(_ value: Any) throws -> String {
             String(decoding: try JSONSerialization.data(withJSONObject: value,
@@ -603,7 +710,12 @@ enum WebModelResponseCodec {
         guard let loader = callable.sorted().first(where: {
             $0 == GroqToolCatalog.name || $0 == "functions." + GroqToolCatalog.name
         }) else { return result }
-        if callable.count > 1 {
+        // A preloaded historical reader is not an execution route. Only the
+        // exact registered, currently offered/allowed reader is excluded here;
+        // a foreign tool with the same spelling keeps legacy behavior.
+        var ordinaryCallable = callable.subtracting([loader])
+        if let validatedReaderName { ordinaryCallable.remove(validatedReaderName) }
+        if !ordinaryCallable.isEmpty {
             return result + " Call listed tools directly. Do not load them again. Request only missing schemas."
         }
         let unloaded = projection.loaderChoices.filter { !projection.selectedNames.contains($0) }
@@ -720,12 +832,20 @@ enum WebModelResponseCodec {
     private static func groqTrustedNativeProjection(_ source: String, object: [String: Any],
                                                      schemas: [[String: Any]],
                                                      domains: Set<ComputaAgentInstructions.GroqInstructionDomain>,
+                                                     nativePermissionCompaction: Bool,
                                                      compactLoaderHistory: Bool, usesLoaderReferences: inout Bool) throws -> String {
-        var replacements: [[GroqJSONPath]: (String, String)] = [:]
+        let permission = GroqNativePermissionPresentation.replacement(in: trustedInstructionText(in: object),
+            enabled: nativePermissionCompaction)
+        var replacements: [[GroqJSONPath]: (original: String, permission: GroqNativePermissionPresentation.Replacement?)] = [:]
+        var trustedIndex = 0
         func consider(_ value: Any?, at path: [GroqJSONPath]) {
             guard let text = value as? String else { return }
+            let matchedPermission = permission?.partIndex == trustedIndex ? permission : nil
+            trustedIndex += 1
             let compact = ComputaAgentInstructions.groqCompactTrustedNativeText(text, domains: domains)
-            if Data(text.utf8) != Data(compact.utf8) { replacements[path] = (text, compact) }
+            if Data(text.utf8) != Data(compact.utf8) || matchedPermission != nil {
+                replacements[path] = (text, matchedPermission)
+            }
         }
         consider(object["instructions"], at: [.key("instructions")])
         for (index, item) in (object["input"] as? [[String: Any]] ?? []).enumerated() {
@@ -807,8 +927,9 @@ enum WebModelResponseCodec {
             case 34:
                 let range = try stringRange()
                 if let replacement = replacements[path] {
-                    guard Data(try decoded(range).utf8) == Data(replacement.0.utf8) else { throw ScanFailure.ambiguous }
-                    let encoded = try groqCompactEncodedNativeString(Data(bytes[range]), decoded: replacement.0, domains: domains)
+                    guard Data(try decoded(range).utf8) == Data(replacement.original.utf8) else { throw ScanFailure.ambiguous }
+                    let encoded = try groqCompactEncodedNativeString(Data(bytes[range]), decoded: replacement.original,
+                        domains: domains, permissionReplacement: replacement.permission)
                     edits.append((range, encoded))
                 } else if path.count == 3, path[0] == .key("input"), case let .index(index) = path[1],
                           case let .key(field) = path[2], referenceFields[index] == field,
@@ -875,8 +996,16 @@ enum WebModelResponseCodec {
     /// Map decoded UTF-8 boundaries back to the original JSON string lexeme.
     /// This preserves even foreign \u escapes around the replaced native block.
     private static func groqCompactEncodedNativeString(_ encoded: Data, decoded: String,
-        domains: Set<ComputaAgentInstructions.GroqInstructionDomain>) throws -> Data {
+        domains: Set<ComputaAgentInstructions.GroqInstructionDomain>,
+        permissionReplacement: GroqNativePermissionPresentation.Replacement?) throws -> Data {
         let raw = Array(encoded), text = Data(decoded.utf8)
+        if let permissionReplacement {
+            guard permissionReplacement.sourceUTF8 == text,
+                  permissionReplacement.range.lowerBound >= 0, permissionReplacement.range.upperBound <= text.count,
+                  text.subdata(in: permissionReplacement.range) == Data(GroqNativePermissionPresentation.fullSource.utf8) else {
+                throw Failure.invalidRequest
+            }
+        }
         guard raw.count >= 2, raw.first == 34, raw.last == 34 else { throw Failure.invalidRequest }
         var offsets = [Int: Int](), cursor = 1, decodedOffset = 0
         offsets[0] = cursor
@@ -908,8 +1037,11 @@ enum WebModelResponseCodec {
         guard decodedOffset == text.count else { throw Failure.invalidRequest }
         var result = Data([34]), offset = 0, rawOffset = 1
         while offset < text.count {
-            let matches = ComputaAgentInstructions.groqNativeInstructionReplacements(domains: domains).compactMap { before, after -> (Range<Int>, Data)? in
+            var matches = ComputaAgentInstructions.groqNativeInstructionReplacements(domains: domains).compactMap { before, after -> (Range<Int>, Data)? in
                 text.range(of: before, in: offset..<text.count).map { ($0, after) }
+            }
+            if let permissionReplacement, permissionReplacement.range.lowerBound >= offset {
+                matches.append((permissionReplacement.range, permissionReplacement.replacementUTF8))
             }
             guard let next = matches.min(by: { lhs, rhs in
                 lhs.0.lowerBound == rhs.0.lowerBound ? lhs.0.count > rhs.0.count : lhs.0.lowerBound < rhs.0.lowerBound
@@ -1178,7 +1310,7 @@ enum WebModelResponseCodec {
         guard websiteModelEvidence == nil || websiteSelectionEvidence == nil else { throw Failure.invalidRequest }
         let selectionEvidence = websiteSelectionEvidence ?? websiteModelEvidence.map(WebsiteSelectionEvidence.model)
         _ = try validated(reply, request: request)
-        let output = outputItems(for: reply, responseID: responseID)
+        let output = outputItems(for: reply, request: request, responseID: responseID)
         let initial = response(request: request, reply: reply, responseID: responseID, createdAt: createdAt, output: [], completed: false, websiteSelectionEvidence: selectionEvidence, websiteToolSelection: websiteToolSelection)
         var events: [[String: Any]] = [
             ["type": "response.created", "response": initial],
@@ -1242,7 +1374,7 @@ enum WebModelResponseCodec {
         _ = try validated(reply, request: request)
         return try JSONSerialization.data(withJSONObject: response(
             request: request, reply: reply, responseID: responseID, createdAt: createdAt,
-            output: outputItems(for: reply, responseID: responseID), completed: true, websiteSelectionEvidence: selectionEvidence, websiteToolSelection: websiteToolSelection
+            output: outputItems(for: reply, request: request, responseID: responseID), completed: true, websiteSelectionEvidence: selectionEvidence, websiteToolSelection: websiteToolSelection
         ), options: [.sortedKeys, .withoutEscapingSlashes])
     }
 
@@ -1510,7 +1642,13 @@ enum WebModelResponseCodec {
         return text.range(of: #"["']type["']\s*:\s*["']tool_calls["']"#, options: .regularExpression) != nil
     }
 
-    private static func outputItems(for reply: Reply, responseID: String) -> [[String: Any]] {
+    /// Native staging uses the same IDs/namespace/payload items as both actual
+    /// encoders. This is not HTTP-write acknowledgement or completion evidence.
+    static func nativeOutputItems(for reply: Reply, request: Request, responseID: String) -> [[String: Any]] {
+        outputItems(for: reply, request: request, responseID: responseID)
+    }
+
+    private static func outputItems(for reply: Reply, request: Request, responseID: String) -> [[String: Any]] {
         let identity = responseID.hasPrefix("resp_") ? String(responseID.dropFirst(5)) : responseID
         switch reply {
         case let .message(text):
@@ -1520,12 +1658,14 @@ enum WebModelResponseCodec {
             return [["id": "msg_\(identity)", "type": "message", "role": "assistant", "status": "completed", "phase": phase.rawValue,
                      "content": [["type": "output_text", "text": text, "annotations": [] as [String]]]]]
         case let .toolCallsWithCommentary(calls, commentary):
-            return outputItems(for: .assistantMessage(commentary, phase: .commentary), responseID: responseID)
-                + outputItems(for: .toolCalls(calls), responseID: responseID)
+            return outputItems(for: .assistantMessage(commentary, phase: .commentary), request: request, responseID: responseID)
+                + outputItems(for: .toolCalls(calls), request: request, responseID: responseID)
         case let .toolCalls(calls):
             return calls.enumerated().map { index, call in
+                let callID = request.compactGroqCallIDs ? compactNativeCallID(responseID: responseID, index: index)
+                    : "call_\(identity)_\(index)"
                 var item: [String: Any] = ["id": "fc_\(identity)_\(index)", "type": "function_call", "status": "completed",
-                                          "call_id": "call_\(identity)_\(index)", "name": call.name, "arguments": call.argumentsJSON]
+                                          "call_id": callID, "name": call.name, "arguments": call.argumentsJSON]
                 if let input = call.customInput {
                     item["type"] = "custom_tool_call"
                     item["id"] = "ctc_\(identity)_\(index)"
@@ -1536,6 +1676,17 @@ enum WebModelResponseCodec {
                 return item
             }
         }
+    }
+
+    private static func compactNativeCallID(responseID: String, index: Int) -> String {
+        var source = Data()
+        for part in [Data(responseID.utf8), Data(String(index).utf8)] {
+            source.append(Data("\(part.count):".utf8)); source.append(part)
+        }
+        let raw = Data(SHA256.hash(data: source).prefix(16))
+        let value = raw.base64EncodedString().replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        return "call_" + value
     }
 
     private static func response(request: Request, reply: Reply, responseID: String, createdAt: Int, output: [[String: Any]], completed: Bool, websiteSelectionEvidence: WebsiteSelectionEvidence? = nil, websiteToolSelection: String? = nil) -> [String: Any] {

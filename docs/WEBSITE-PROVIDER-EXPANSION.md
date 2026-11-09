@@ -1,5 +1,9 @@
 # Kimi, Qwen and DeepSeek website adapters
 
+The source-only [Groq context presentation](GROQ-CONTEXT-HISTORY.md) describes
+the bounded native harness tests and the remaining live-qualification boundary.
+It does not supersede the provider failures recorded below.
+
 Qwen Plus and Max have each returned an exact direct answer with verified
 website selection and deletion. Their file-and-browser workflows still stop at
 response extraction. [Installed build 411 results](#installed-build-411-2026-11-03)

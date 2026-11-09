@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import XCTest
 @testable import Computa
@@ -7,6 +8,8 @@ import XCTest
 final class WebModelRuntimeRoutingTests: XCTestCase {
     func testEveryWebsiteRejectsMissingEmbeddedTransportBeforeThreadOrTurnDispatch() async throws {
         for model in websiteModels {
+            XCTAssertFalse(model.isEmpty)
+            XCTAssertNotNil(WebsiteModelCatalog.inferenceSelection(for: model), model)
             let (runtime, root) = try makeRuntime(modelID: model)
             do {
                 try await runtime.submit(prompt: "Synthetic reply", toTaskID: UUID().uuidString, modelID: model)
@@ -26,6 +29,8 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
         var baselineTools: Data?
         let prompt = "Synthetic reply — e\u{0301} 🧭\nLiteral human note: APP_RUNTIME_INTERACTION_POLICY"
         for (model, accessMode) in websiteModels.flatMap({ model in AccessMode.allCases.map { (model, $0) } }) {
+            XCTAssertFalse(model.isEmpty)
+            XCTAssertNotNil(WebsiteModelCatalog.inferenceSelection(for: model), model)
             let (runtime, root) = try makeRuntime(modelID: model)
             await runtime.configureEmbeddedWebModelTransport(InertEmbeddedTransport())
             do {
@@ -54,6 +59,16 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
                 let compact = GroqToolCatalog.supports(modelID: model)
                 XCTAssertEqual(names.contains(GroqToolCatalog.name), compact)
                 XCTAssertEqual(GroqToolCatalog.isRegisteredLoader(tools), compact)
+                let history = GroqHistoryTool.supports(modelID: model)
+                XCTAssertEqual(names.contains(GroqHistoryTool.name), history)
+                XCTAssertEqual(GroqHistoryTool.registeredName(in: tools), history ? GroqHistoryTool.name : nil)
+                if history {
+                    let registered = try XCTUnwrap(tools.first { $0["name"] as? String == GroqHistoryTool.name })
+                    XCTAssertEqual(registered as NSDictionary, GroqHistoryTool.specification as NSDictionary)
+                    let started = try requestResponseThreadID(root: root)
+                    XCTAssertTrue(GroqHistoryThreadRegistration.contains(codexHome: root.path,
+                        threadID: started, modelID: model))
+                }
                 if compact {
                     let registered = try XCTUnwrap(tools.first { $0["name"] as? String == GroqToolCatalog.name })
                     XCTAssertEqual(registered as NSDictionary, GroqToolCatalog.specification as NSDictionary)
@@ -61,10 +76,10 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
                     XCTAssertTrue(GroqToolThreadRegistration.contains(codexHome: root.path,
                         threadID: started, modelID: model))
                 }
-                // Every execution capability remains byte-identical; Groq adds
-                // only the separately registered read-only schema loader.
+                // Every execution capability remains byte-identical; current
+                // Groq adds only its exact read-only loader and history reader.
                 let toolBytes = try JSONSerialization.data(withJSONObject:
-                    tools.filter { $0["name"] as? String != GroqToolCatalog.name }, options: [.sortedKeys])
+                    tools.filter { ![GroqToolCatalog.name, GroqHistoryTool.name].contains($0["name"] as? String ?? "") }, options: [.sortedKeys])
                 if let baselineTools { XCTAssertEqual(toolBytes, baselineTools) }
                 else { baselineTools = toolBytes }
                 let config = try XCTUnwrap(thread["config"] as? [String: Any])
@@ -78,9 +93,18 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
                 XCTAssertEqual(provider["wire_api"] as? String, "responses")
                 let turn = try requestParameters("turn-start", root: root)
                 let input = try XCTUnwrap(turn["input"] as? [[String: String]])
-                XCTAssertEqual(input.count, 2, "Website input keeps its existing policy transport")
+                // The exact current developer/base policy above remains the
+                // governing instruction. Only the acknowledged native history
+                // profile omits its duplicated app-owned user-text suffix.
+                XCTAssertEqual(input.count, history ? 1 : 2)
                 XCTAssertEqual(Data((input.first?["text"] ?? "").utf8), Data(prompt.utf8))
-                XCTAssertEqual(input.last, ["type": "text", "text": ComputaAgentInstructions.runtimeInteractionPolicy()])
+                XCTAssertEqual(input.filter { Data(($0["text"] ?? "").utf8) == Data(prompt.utf8) }.count, 1)
+                if !history {
+                    XCTAssertEqual(input.last, ["type": "text", "text": ComputaAgentInstructions.runtimeInteractionPolicy()])
+                } else {
+                    XCTAssertEqual(thread["developerInstructions"] as? String, ComputaAgentInstructions.developerInstructions())
+                    XCTAssertFalse(input.contains { $0["text"] == ComputaAgentInstructions.runtimeInteractionPolicy() })
+                }
                 XCTAssertEqual(turn["model"] as? String, model)
                 XCTAssertEqual(turn["approvalPolicy"] as? String, accessMode == .fullAccess ? "never" : "on-request")
                 let sandbox = try XCTUnwrap(turn["sandboxPolicy"] as? NSDictionary)
@@ -102,12 +126,35 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
         }
     }
 
+    func testUnsupportedWebsiteIDsCannotFallBackToLocalInferenceBeforeDispatch() async throws {
+        let retired = WebsiteModelChoice(provider: "qwen", key: "Qwen3.8-Omni", label: "Qwen3.8-Omni").modelID
+        let invalid = ["browser/unknown", "browser/deepseek", "browser/qwen", "browser/qwen/choice/_", retired]
+        for model in invalid {
+            XCTAssertFalse(model.isEmpty)
+            XCTAssertNil(WebsiteModelCatalog.inferenceSelection(for: model))
+            for configured in [false, true] {
+                let (runtime, root) = try makeRuntime(modelID: model)
+                if configured { await runtime.configureEmbeddedWebModelTransport(InertEmbeddedTransport()) }
+                do {
+                    try await runtime.submit(prompt: "Inert invalid website model", toTaskID: UUID().uuidString, modelID: model)
+                    XCTFail("An unsupported website ID cannot reach LM Studio or a website route")
+                } catch WebsiteModelCatalog.Failure.invalidModelID { }
+                catch { XCTFail("Expected model-ID refusal before transport selection: \(error)") }
+                XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("request-thread-start.json").path))
+                XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("request-turn-start.json").path))
+                let report = await runtime.shutdown()
+                XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
+            }
+        }
+    }
+
     private var websiteModels: [String] {
         [syntheticChatGPTModelID, LocalModelCatalog.geminiBrowserModelID, LocalModelCatalog.claudeBrowserModelID,
          LocalModelCatalog.groqBrowserModelID]
-            + WebsiteModelCatalog.providers.map {
+            + namedWebsiteModelProviders.map {
                 syntheticWebsiteChoice(provider: $0, key: "fixture-choice", label: "Fixture Choice").modelID
             }
+            + WebsiteModeChoice.DeepSeekMode.allCases.map { WebsiteModeChoice(deepSeekMode: $0).requestID }
     }
 
     private func requestParameters(_ method: String, root: URL) throws -> [String: Any] {
@@ -155,7 +202,33 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
         configuration.codexHomePath = root.path
         configuration.workspacePath = root.path
         configuration.model = modelID
-        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        addTeardownBlock {
+            // Retire only this fixture's exact accepted native thread markers;
+            // all other homes/threads and their membership remain unchanged.
+            if let bytes = try? Data(contentsOf: root.appendingPathComponent("request-turn-start.json")),
+               let request = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+               let params = request["params"] as? [String: Any], let thread = params["threadId"] as? String,
+               UUID(uuidString: thread)?.uuidString.lowercased() == thread {
+                var ownMarkers: [(String, String)] = []
+                if let marker = GroqToolThreadRegistration.marker(codexHome: root.path, threadID: thread, modelID: modelID) {
+                    ownMarkers.append((GroqToolThreadRegistration.preferenceKey, marker))
+                }
+                if let marker = GroqHistoryThreadRegistration.marker(codexHome: root.path, threadID: thread, modelID: modelID) {
+                    ownMarkers.append((GroqHistoryThreadRegistration.preferenceKey, marker))
+                }
+                let namespace = SHA256.hash(data: Data(root.path.utf8)).map { String(format: "%02x", $0) }.joined()
+                ownMarkers.append(("ComputaReferenceToolThreads.v1", namespace + ":" + thread))
+                for (key, marker) in ownMarkers {
+                    let existing = UserDefaults.standard.stringArray(forKey: key) ?? []
+                    let retained = existing.filter { $0 != marker }
+                    UserDefaults.standard.set(retained, forKey: key)
+                    XCTAssertEqual(UserDefaults.standard.stringArray(forKey: key), retained,
+                        "Remove only this fixture's exact marker and preserve unrelated membership")
+                    XCTAssertFalse(UserDefaults.standard.stringArray(forKey: key)?.contains(marker) == true)
+                }
+            }
+            try? FileManager.default.removeItem(at: root)
+        }
         return (CodexAppServerRuntime(configuration: configuration), root)
     }
 }

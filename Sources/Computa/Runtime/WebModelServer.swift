@@ -205,6 +205,7 @@ actor WebModelServer {
         let data: Data
         let inferenceID: UUID
         let responseProfile: WebsiteResponseProfile?
+        let historyWrite: GroqHistoryHTTPWrite?
     }
 
     private struct InferenceContext: Equatable, Sendable {
@@ -216,6 +217,7 @@ actor WebModelServer {
         // Diagnostic provenance only; never page/tool or inference authority.
         let isNewThread: Bool
         let isCompactToolThread: Bool
+        let historyPreparation: GroqHistoryTool.Preparation?
     }
 
     private struct PreparedInferenceContext: Equatable, Sendable {
@@ -226,7 +228,74 @@ actor WebModelServer {
         // Diagnostic provenance only; never page/tool or inference authority.
         let isNewThread: Bool
         let isCompactToolThread: Bool
+        let historyPreparation: GroqHistoryTool.Preparation?
     }
+
+    private struct GroqHistoryTurn {
+        let binding: GroqNativePublicationLedger.Binding
+        let scope: GroqNativePublicationLedger.ScopeHandle
+        let writer: GroqNativePublicationLedger.CompletionWriter
+        let nonce: UUID
+        var readerAuthority: GroqContextManifestProjector.ReaderAuthority?
+        var projector: GroqContextManifestProjector?
+        var snapshot: GroqContextManifestProjector.Snapshot?
+        var nativeLayout: GroqContextJSONLayout?
+        var readerName: String?
+        var issuedReaders: [String: GroqIssuedReader] = [:]
+        var readPublications: [String: GroqHistoryReadPublication] = [:]
+        var spentReaderIDs = Set<String>()
+        var pendingHTTP: GroqHistoryHTTPWrite?
+    }
+
+    private struct GroqIssuedReader {
+        let call: GroqContextManifestProjector.IssuedLookupCall
+        let arguments: Data
+        var delivered = false
+    }
+
+    private struct GroqHistoryHTTPWrite: Sendable {
+        let binding: GroqNativePublicationLedger.Binding
+        let ledgerTicket: GroqNativePublicationLedger.Ticket?
+        let readerIDs: [String]
+        let gate: GroqHistoryHTTPDelivery
+    }
+
+    private struct GroqHistoryProjectionContext: Sendable {
+        let projector: GroqContextManifestProjector
+        let layout: GroqContextJSONLayout
+        let fullSchemaSHA256: String
+        func projection(preview: GroqContextJSONLayout? = nil, inline: Bool = false) -> WebModelResponseCodec.GroqHistoryProjection {
+            let full = fullSchemaSHA256
+            return { candidate in
+                guard let range = candidate.toolsRange else { throw GroqContextManifestProjector.Failure.layout }
+                let selected = Self.sha(try candidate.rawBytes(in: range))
+                if let preview {
+                    return .preview(try projector.projectPreview(candidateLayout: candidate,
+                        hostPreviewLayout: preview, fullSchemaSHA256: full, selectedSchemaSHA256: selected))
+                }
+                let plan = try projector.project(candidateLayout: candidate,
+                    fullSchemaSHA256: full, selectedSchemaSHA256: selected)
+                // A fitting inline rendering may retain already published
+                // lookup cursors without presenting a historical placeholder.
+                guard inline else { return .planned(plan) }
+                let inlinePlan = GroqContextManifestProjector.Plan(renderedJSON: candidate.sourceUTF8,
+                    snapshot: plan.snapshot, replacedFields: 0, savedJSONBytes: 0)
+                #if DEBUG
+                var observed = inlinePlan
+                observed.revisionDiagnostics = plan.revisionDiagnostics
+                return .planned(observed)
+                #else
+                return .planned(inlinePlan)
+                #endif
+            }
+        }
+        private static func sha(_ bytes: Data) -> String {
+            SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        }
+    }
+    private let groqHistoryPublications = GroqNativePublicationLedger.makeOwner()
+    private var groqHistoryTurns: [String: GroqHistoryTurn] = [:]
+    private var retiredGroqHistoryPreparations: [String: UUID] = [:]
 
     private struct ContextWaiter {
         let id: UUID
@@ -340,6 +409,10 @@ actor WebModelServer {
 
     func configureCleanupReceipts(directory: URL, runtimeGeneration: UUID,
                                   observer: @escaping @Sendable (WebsiteSessionCleanupReceipt) async -> Void) {
+        if runtimeGeneration != cleanupRuntimeGeneration
+            || cleanupReceiptStore?.directory.standardizedFileURL != directory.standardizedFileURL {
+            revokeAllGroqHistoryTurns(reason: .nativeContextChanged)
+        }
         cleanupReceiptStore = WebsiteSessionCleanupStore(directory: directory)
         if runtimeGeneration != cleanupRuntimeGeneration {
             revokeAllInspectorAuthorizations()
@@ -353,6 +426,7 @@ actor WebModelServer {
 
     func setCleanupRuntimeGeneration(_ generation: UUID) {
         if generation != cleanupRuntimeGeneration {
+            revokeAllGroqHistoryTurns(reason: .nativeContextChanged)
             revokeAllInspectorAuthorizations()
             revokeAllGroqFixtureStatuses()
             groqToolCatalog.removeAll()
@@ -365,7 +439,8 @@ actor WebModelServer {
     /// identity before the native engine can open its first HTTP inference.
     func prepareInferenceTurn(taskID: String, threadID: String, runtimeGeneration: UUID, preparationID: UUID,
                               isMaintenance: Bool = false, isNewThread: Bool = false,
-                              isCompactToolThread: Bool = false) throws {
+                              isCompactToolThread: Bool = false,
+                              historyPreparation: GroqHistoryTool.Preparation? = nil) throws {
         let task = try Self.canonicalID(taskID)
         let thread = try Self.canonicalID(threadID)
         guard !shuttingDown, active[task] == nil, cleanupTasks[task] == nil,
@@ -375,6 +450,12 @@ actor WebModelServer {
         guard notCreatedStartReceipts[task]?.receiptSaved != false else { throw Failure.persistenceRequired }
         guard cleanupReceiptStore != nil, evidenceDirectory != nil else { throw Failure.persistenceRequired }
         guard runtimeGeneration == cleanupRuntimeGeneration else { throw Failure.inferenceContextRequired }
+        if let historyPreparation {
+            guard !isMaintenance, isCompactToolThread,
+                  GroqHistoryTool.supports(modelID: historyPreparation.modelID) else {
+                throw Failure.inferenceContextRequired
+            }
+        }
         do {
             var retention = WebsiteJournalRetentionStore(cleanupDirectory: cleanupReceiptStore!.directory)
             retention.limits.activeTasks = journalTaskLimit
@@ -385,9 +466,13 @@ actor WebModelServer {
                 .union(yieldedTurns.keys).union(closedTurns.keys).union(retiringTaskIDs)
             try retention.admit(taskID: task, evidenceDirectory: evidenceDirectory!, protectedTaskIDs: protected)
         } catch { throw Failure.persistenceRequired }
+        revokeGroqHistoryTurn(taskID: task, reason: .turnChanged)
+        guard retiredGroqHistoryPreparations[task] != preparationID else { throw Failure.inferenceContextRequired }
+        retiredGroqHistoryPreparations.removeValue(forKey: task)
         preparedInferenceContexts[task] = PreparedInferenceContext(threadID: thread,
             runtimeGeneration: runtimeGeneration, preparationID: preparationID, isMaintenance: isMaintenance,
-            isNewThread: isNewThread, isCompactToolThread: isCompactToolThread)
+            isNewThread: isNewThread, isCompactToolThread: isCompactToolThread,
+            historyPreparation: historyPreparation)
         groqToolCatalog.remove(taskID: task)
         groqCatalogRequests.removeValue(forKey: task)
         inspectorAuthorizations.removeValue(forKey: task)?.revoke()
@@ -410,18 +495,274 @@ actor WebModelServer {
             turnID: try Self.canonicalID(turnID), runtimeGeneration: runtimeGeneration, preparationID: preparationID,
             isMaintenance: preparedInferenceContexts[task]?.isMaintenance ?? false,
             isNewThread: preparedInferenceContexts[task]?.isNewThread ?? false,
-            isCompactToolThread: preparedInferenceContexts[task]?.isCompactToolThread ?? false)
+            isCompactToolThread: preparedInferenceContexts[task]?.isCompactToolThread ?? false,
+            historyPreparation: preparedInferenceContexts[task]?.historyPreparation)
+        if let history = context.historyPreparation {
+            guard let lease = groqHistoryTurns[task],
+                  lease.binding.scope.threadID == context.threadID,
+                  lease.binding.scope.turnID == context.turnID,
+                  lease.binding.scope.runtimeGeneration == runtimeGeneration,
+                  lease.binding.scope.preparationID == preparationID,
+                  lease.binding.scope.modelID == history.modelID,
+                  lease.binding.scope.coreGeneration == history.coreGeneration,
+                  lease.binding.transportGeneration == embeddedTransportGeneration,
+                  lease.writer.isCurrent(current: lease.binding.scope) else { throw Failure.inferenceContextRequired }
+        }
         if inferenceContexts[task] == context { return }
         guard !shuttingDown, !retiringTaskIDs.contains(task),
+              retiredGroqHistoryPreparations[task] != preparationID,
               sessions[task] == nil, pendingClosedTransactions[task] == nil,
               inferenceContexts[task] == nil,
               preparedInferenceContexts[task] == PreparedInferenceContext(threadID: context.threadID,
                   runtimeGeneration: runtimeGeneration, preparationID: preparationID,
                   isMaintenance: context.isMaintenance, isNewThread: context.isNewThread,
-                  isCompactToolThread: context.isCompactToolThread) else { throw Failure.inferenceContextRequired }
+                  isCompactToolThread: context.isCompactToolThread,
+                  historyPreparation: context.historyPreparation) else { throw Failure.inferenceContextRequired }
         inferenceContexts[task] = context
         cleanupTurns[task] = context.turnID
         if let waiter = contextWaiters.removeValue(forKey: task) { waiter.continuation.resume(returning: context) }
+    }
+
+    /// Phase one does not open the HTTP inference gate. Core stores this writer
+    /// before registerInferenceTurn, so an immediate native completion cannot
+    /// overtake its actor's registration continuation.
+    func prepareGroqHistoryTurn(taskID: String, threadID: String, turnID: String,
+        runtimeGeneration: UUID, preparationID: UUID, modelID: String,
+        coreGeneration: UUID) throws -> GroqNativePublicationLedger.CompletionWriter? {
+        let task = try Self.canonicalID(taskID), thread = try Self.canonicalID(threadID)
+        let turn = try Self.canonicalID(turnID)
+        guard let prepared = preparedInferenceContexts[task] else { throw Failure.inferenceContextRequired }
+        guard let history = prepared.historyPreparation else { return nil }
+        guard !shuttingDown, !retiringTaskIDs.contains(task),
+              retiredGroqHistoryPreparations[task] != preparationID,
+              prepared.threadID == thread, prepared.runtimeGeneration == runtimeGeneration,
+              prepared.preparationID == preparationID, runtimeGeneration == cleanupRuntimeGeneration,
+              history == .init(modelID: modelID, coreGeneration: coreGeneration) else {
+            throw Failure.inferenceContextRequired
+        }
+        let binding = GroqNativePublicationLedger.Binding(scope: .init(taskID: task,
+            threadID: thread, turnID: turn, runtimeGeneration: runtimeGeneration,
+            preparationID: preparationID, modelID: modelID, coreGeneration: coreGeneration),
+            transportGeneration: embeddedTransportGeneration)
+        if let existing = groqHistoryTurns[task] {
+            guard existing.binding == binding, existing.writer.isCurrent(current: binding.scope) else {
+                throw Failure.inferenceContextRequired
+            }
+            return existing.writer
+        }
+        guard inferenceContexts[task] == nil else { throw Failure.inferenceContextRequired }
+        let installed: (GroqNativePublicationLedger.ScopeHandle, GroqNativePublicationLedger.CompletionWriter)
+        do {
+            installed = try groqHistoryPublications.ledger.installScope(groqHistoryPublications.authority, binding: binding)
+        } catch { throw Failure.inferenceContextRequired }
+        let (scope, writer) = installed
+        groqHistoryTurns[task] = GroqHistoryTurn(binding: binding, scope: scope, writer: writer, nonce: UUID())
+        return writer
+    }
+
+    private func revokeGroqHistoryTurn(taskID: String, reason: GroqNativePublicationLedger.Revocation) {
+        guard let old = groqHistoryTurns.removeValue(forKey: taskID) else { return }
+        old.pendingHTTP?.gate.revoke()
+        for publication in old.readPublications.values { publication.abortIfPending() }
+        retiredGroqHistoryPreparations[taskID] = old.binding.scope.preparationID
+        groqHistoryPublications.ledger.revoke(groqHistoryPublications.authority, scope: old.scope, reason: reason)
+    }
+
+    private func revokeAllGroqHistoryTurns(reason: GroqNativePublicationLedger.Revocation) {
+        for (task, turn) in groqHistoryTurns {
+            retiredGroqHistoryPreparations[task] = turn.binding.scope.preparationID
+            turn.pendingHTTP?.gate.revoke()
+            for publication in turn.readPublications.values { publication.abortIfPending() }
+        }
+        groqHistoryPublications.ledger.revokeAll(groqHistoryPublications.authority, reason: reason)
+        groqHistoryTurns.removeAll()
+    }
+
+    /// Native may consume an HTTP body before Network's write callback gets an
+    /// actor turn. Neither that next HTTP nor a reader RPC may use staged facts.
+    private func awaitGroqHistoryDelivery(taskID: String) async throws {
+        guard let turn = groqHistoryTurns[taskID] else { throw Failure.inferenceContextRequired }
+        if let pending = turn.pendingHTTP { try await pending.gate.wait() }
+        guard let current = groqHistoryTurns[taskID], current.binding == turn.binding,
+              current.writer.isCurrent(current: current.binding.scope) else { throw Failure.inferenceContextRequired }
+    }
+
+    private func awaitGroqHistoryReadPublications(taskID: String) async throws {
+        guard let turn = groqHistoryTurns[taskID] else { throw Failure.inferenceContextRequired }
+        for publication in turn.readPublications.values { _ = try await publication.waitForPublication() }
+        guard let current = groqHistoryTurns[taskID], current.binding == turn.binding,
+              current.writer.isCurrent(current: current.binding.scope) else { throw Failure.inferenceContextRequired }
+    }
+
+    /// The caller has authenticated and admitted the unchanged native frame.
+    /// Lexical indexing is optional; an unavailable index leaves history inline.
+    private func prepareGroqHistoryProjection(taskID: String, request: WebModelResponseCodec.Request) throws -> GroqHistoryProjectionContext? {
+        guard var turn = groqHistoryTurns[taskID],
+              turn.writer.isCurrent(current: turn.binding.scope),
+              let readerName = request.groqHistoryReaderName,
+              let layout = try? GroqContextJSONLayout.parse(request.continuationRequest),
+              let toolsRange = layout.toolsRange,
+              let frame = try? GroqHistoryNativeFrame(layout: layout) else { return nil }
+        guard layout.sourceUTF8[layout.inputRange.lowerBound] == 91 else {
+            // An initial string request can stay inline. It must not discard
+            // an established snapshot or a pending/issued historical read.
+            guard turn.snapshot == nil, turn.issuedReaders.isEmpty,
+                  turn.readPublications.isEmpty else { throw Failure.inferenceContextRequired }
+            return nil
+        }
+        if turn.readerAuthority == nil {
+            let declaration = try JSONSerialization.data(withJSONObject: GroqHistoryTool.specification,
+                options: [.sortedKeys, .withoutEscapingSlashes])
+            turn.readerAuthority = try GroqContextManifestProjector.makeReaderAuthority(binding: turn.binding,
+                contextNonce: turn.nonce, registeredName: readerName, registrationSHA256: Self.historySHA(declaration))
+            groqHistoryTurns[taskID] = turn
+        }
+        guard let authority = turn.readerAuthority else { throw Failure.inferenceContextRequired }
+        let published = groqHistoryPublications.ledger.reconcileValidatedHistory(groqHistoryPublications.authority,
+            scope: turn.scope, current: turn.binding, history: frame.history)
+        let fields = published.flatMap { publication in
+            [GroqNativePublicationLedger.Field.arguments, .input, .output].compactMap {
+                groqHistoryPublications.ledger.literal(groqHistoryPublications.authority,
+                    publication: publication, current: turn.binding, field: $0)
+            }
+        }
+        let lookups = try turn.readPublications.values.map { publication in
+            guard let value = publication.publishedLookup() else { throw Failure.inferenceContextRequired }
+            return value
+        }
+        let projector = try GroqContextManifestProjector(binding: turn.binding, contextNonce: turn.nonce,
+            nativeLayout: layout, eligibleFields: fields, previous: turn.snapshot,
+            publishedLookups: lookups, readerAuthority: authority)
+        return GroqHistoryProjectionContext(projector: projector, layout: layout,
+            fullSchemaSHA256: Self.historySHA(try layout.rawBytes(in: toolsRange)))
+    }
+
+    private func commitGroqHistoryProjection(taskID: String, projection: GroqHistoryProjectionContext?,
+        request: WebModelResponseCodec.Request) throws {
+        guard var turn = groqHistoryTurns[taskID], turn.writer.isCurrent(current: turn.binding.scope),
+              !request.groqHistoryPreviewOnly, request.groqHistoryPlan?.isCurrent() != false else {
+            throw Failure.inferenceContextRequired
+        }
+        turn.projector = projection?.projector
+        turn.nativeLayout = projection?.layout
+        turn.snapshot = request.groqHistoryPlan?.snapshot
+        turn.readerName = request.groqHistoryReaderName
+        // Committed witnesses are now retained by the chosen snapshot itself.
+        turn.readPublications.removeAll()
+        groqHistoryTurns[taskID] = turn
+    }
+
+    private static func historySHA(_ bytes: Data) -> String {
+        SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func isGroqHistoryBudgetFailure(_ error: any Error) -> Bool {
+        guard let error = error as? WebModelResponseCodec.Failure else { return false }
+        return switch error {
+        case .promptTooLarge, .groqPromptBudgetExceeded, .groqPromptByteBudgetExceeded: true
+        default: false
+        }
+    }
+
+    private func stageGroqHistoryHTTPWrite(taskID: String, request: WebModelResponseCodec.Request,
+        reply: WebModelResponseCodec.Reply, responseID: String, encoded: Data) throws -> GroqHistoryHTTPWrite? {
+        guard var turn = groqHistoryTurns[taskID] else { return nil }
+        guard turn.writer.isCurrent(current: turn.binding.scope), turn.pendingHTTP == nil,
+              !request.groqHistoryPreviewOnly, request.groqHistoryPlan?.isCurrent() != false else {
+            throw Failure.inferenceContextRequired
+        }
+        var calls: [GroqNativePublicationLedger.IssuedCall] = []
+        var readers: [(String, GroqIssuedReader)] = []
+        let outputItems = WebModelResponseCodec.nativeOutputItems(for: reply, request: request, responseID: responseID)
+        for item in outputItems {
+            guard let type = item["type"] as? String, type == "function_call" || type == "custom_tool_call" else { continue }
+            guard let id = item["call_id"] as? String, let name = item["name"] as? String else {
+                throw Failure.invalidRequest
+            }
+            let namespace = item["namespace"] as? String
+            let qualified = namespace.map { $0 + "." + name } ?? name
+            guard namespace == nil || namespace == "functions" else { continue }
+            if type == "function_call", name == "exec_command", let args = item["arguments"] as? String {
+                calls.append(.init(callID: id, kind: .execCommand, name: name,
+                    namespace: namespace, argumentUTF8: Data(args.utf8)))
+            } else if type == "custom_tool_call", name == "apply_patch", let input = item["input"] as? String {
+                calls.append(.init(callID: id, kind: .applyPatch, name: name,
+                    namespace: namespace, argumentUTF8: Data(input.utf8)))
+            } else if type == "function_call", qualified == request.groqHistoryReaderName {
+                guard let snapshot = turn.snapshot, let authority = turn.readerAuthority,
+                      let arguments = item["arguments"] as? String,
+                      !turn.spentReaderIDs.contains(id), turn.issuedReaders[id] == nil else {
+                    throw Failure.inferenceContextRequired
+                }
+                let args = Data(arguments.utf8)
+                let issued = try GroqContextManifestProjector.issueLookupCall(authority,
+                    binding: turn.binding, contextNonce: turn.nonce,
+                    nativeHTTPSourceSHA256: snapshot.nativeHTTPSourceSHA256,
+                    callID: id, qualifiedName: qualified, arguments: args)
+                readers.append((id, GroqIssuedReader(call: issued, arguments: args)))
+            }
+        }
+        guard !calls.isEmpty || !readers.isEmpty else { return nil }
+        // The count-only reader preview includes its exact sole native pair.
+        // Unknown parallel output/commentary cannot borrow that admission.
+        guard readers.isEmpty || outputItems.count == 1 else { throw Failure.invalidRequest }
+        var ticket: GroqNativePublicationLedger.Ticket?
+        if !calls.isEmpty {
+            do {
+                ticket = try groqHistoryPublications.ledger.stageIssuedResponse(groqHistoryPublications.authority,
+                    scope: turn.scope, current: turn.binding, responseID: responseID,
+                    encodedResponseSHA256: Self.historySHA(encoded), calls: calls)
+            } catch GroqNativePublicationLedger.Refusal.bounds {
+                // Exhausted optional history capacity keeps these calls inline;
+                // no staged receipt is invented for a later completion event.
+            }
+        }
+        guard turn.issuedReaders.count + readers.count <= GroqNativePublicationLedger.maximumCalls else {
+            throw Failure.inferenceContextRequired
+        }
+        for (id, reader) in readers { turn.issuedReaders[id] = reader }
+        let write = GroqHistoryHTTPWrite(binding: turn.binding, ledgerTicket: ticket,
+            readerIDs: readers.map(\.0), gate: GroqHistoryHTTPDelivery())
+        turn.pendingHTTP = write
+        groqHistoryTurns[taskID] = turn
+        return write
+    }
+
+    private func commitGroqHistoryHTTPWrite(taskID: String, write: GroqHistoryHTTPWrite?) throws {
+        guard let write else { return }
+        guard var turn = groqHistoryTurns[taskID], turn.binding == write.binding,
+              turn.pendingHTTP?.gate === write.gate,
+              turn.writer.isCurrent(current: turn.binding.scope), !Task.isCancelled else {
+            write.gate.revoke()
+            throw Failure.inferenceContextRequired
+        }
+        if let ticket = write.ledgerTicket {
+            guard groqHistoryPublications.ledger.commitHTTPWrite(groqHistoryPublications.authority,
+                ticket: ticket, current: write.binding) else {
+                revokeGroqHistoryTurn(taskID: taskID, reason: .nativeContextChanged)
+                throw Failure.inferenceContextRequired
+            }
+        }
+        for id in write.readerIDs {
+            guard turn.issuedReaders[id] != nil else { throw Failure.inferenceContextRequired }
+            turn.issuedReaders[id]?.delivered = true
+        }
+        turn.pendingHTTP = nil
+        groqHistoryTurns[taskID] = turn
+        guard write.gate.deliver() else {
+            abortGroqHistoryHTTPWrite(write)
+            revokeGroqHistoryTurn(taskID: taskID, reason: .nativeContextChanged)
+            throw Failure.inferenceContextRequired
+        }
+    }
+
+    private func abortGroqHistoryHTTPWrite(_ write: GroqHistoryHTTPWrite?) {
+        guard let write else { return }
+        if let ticket = write.ledgerTicket {
+            groqHistoryPublications.ledger.abortHTTPWrite(groqHistoryPublications.authority,
+                ticket: ticket, current: write.binding)
+        }
+        write.gate.revoke()
     }
 
     private static func canonicalID(_ value: String) throws -> String {
@@ -487,11 +828,13 @@ actor WebModelServer {
     }
 
     private func revokeInferenceContext(taskID: String) {
+        revokeGroqHistoryTurn(taskID: taskID, reason: .nativeContextChanged)
         groqToolCatalog.remove(taskID: taskID)
         groqCatalogRequests.removeValue(forKey: taskID)
         inspectorAuthorizations.removeValue(forKey: taskID)?.revoke()
         groqFixtureStatuses.removeValue(forKey: taskID)?.revoke()
         preparedInferenceContexts.removeValue(forKey: taskID)
+        retiredGroqHistoryPreparations.removeValue(forKey: taskID)
         inferenceContexts.removeValue(forKey: taskID)
         if let waiter = contextWaiters.removeValue(forKey: taskID) {
             waiter.continuation.resume(throwing: CancellationError())
@@ -530,8 +873,11 @@ actor WebModelServer {
             let history = try Self.groqLoaderBudgetHistory(current.canonicalRequest,
                 projection: projection, arguments: arguments, receipt: receipt)
             do {
+                let historyProjection = try groqHistoryPreviewProjection(taskID: task, preview: history)
                 let preview = try WebModelResponseCodec.prepareRequest(history,
-                    browserToolAvailability: current.browserAvailability, groqToolCatalogProjection: projection)
+                    browserToolAvailability: current.browserAvailability, groqToolCatalogProjection: projection,
+                    groqDirectTools: .loadedOnly, groqHistoryProjection: historyProjection,
+                    compactHistoryInventory: context.historyPreparation != nil)
                 guard let units = try WebModelResponseCodec.validateGroqPromptBudget(model: preview.model, prompt: preview.prompt) else {
                     throw WebModelResponseCodec.Failure.invalidTools
                 }
@@ -560,6 +906,148 @@ actor WebModelServer {
         try Task.checkCancellation()
         groqToolCatalog = candidate
         return receipt
+    }
+
+    private func groqHistoryPreviewProjection(taskID: String, preview: Data) throws -> WebModelResponseCodec.GroqHistoryProjection? {
+        guard let turn = groqHistoryTurns[taskID], let projector = turn.projector,
+              let layout = turn.nativeLayout, let range = layout.toolsRange else { return nil }
+        guard turn.writer.isCurrent(current: turn.binding.scope), turn.snapshot?.isCurrent() == true else {
+            throw Failure.inferenceContextRequired
+        }
+        let context = GroqHistoryProjectionContext(projector: projector, layout: layout,
+            fullSchemaSHA256: Self.historySHA(try layout.rawBytes(in: range)))
+        return context.projection(preview: try GroqContextJSONLayout.parse(preview))
+    }
+
+    /// Read-only native dynamic tool. Exact issuance and the prior HTTP write
+    /// precede this one-shot claim; only Core's successful RPC write publishes
+    /// the returned witness and pagination cursor to a later native HTTP frame.
+    func readGroqHistory(scope: GroqNativePublicationLedger.Scope, callID: String,
+        arguments: Data) async throws -> GroqHistoryReadExecution {
+        let task = try Self.canonicalID(scope.taskID)
+        try await awaitGroqHistoryDelivery(taskID: task)
+        guard task == scope.taskID, !shuttingDown, !Task.isCancelled,
+              active[task] == nil, cleanupTasks[task] == nil, !retiringTaskIDs.contains(task),
+              sessions[task] == nil, pendingClosedTransactions[task] == nil,
+              unresolvedStartAttempts[task] == nil, !failedClosedHandoffs.contains(task),
+              scope.runtimeGeneration == cleanupRuntimeGeneration,
+              let context = inferenceContexts[task], context.historyPreparation != nil,
+              context.threadID == scope.threadID, context.turnID == scope.turnID,
+              context.preparationID == scope.preparationID, context.runtimeGeneration == scope.runtimeGeneration,
+              var turn = groqHistoryTurns[task], turn.binding.scope == scope,
+              turn.binding.transportGeneration == embeddedTransportGeneration,
+              turn.writer.isCurrent(current: scope), let readerName = turn.readerName,
+              let snapshot = turn.snapshot, snapshot.isCurrent(), let authority = turn.readerAuthority,
+              let issued = turn.issuedReaders[callID], issued.delivered, issued.arguments == arguments,
+              !turn.spentReaderIDs.contains(callID), turn.spentReaderIDs.count < GroqNativePublicationLedger.maximumCalls,
+              let current = groqCatalogRequests[task], current.lastOfferedNames.contains(readerName) else {
+            throw Failure.inferenceContextRequired
+        }
+        // Spend before any parsing/preview; an error grants no second attempt.
+        turn.issuedReaders.removeValue(forKey: callID)
+        turn.spentReaderIDs.insert(callID)
+        groqHistoryTurns[task] = turn
+        var catalog = groqToolCatalog
+        let projection = try catalog.prepare(scope: current.scope, seed: current.seed)
+        var chosen: GroqContextManifestProjector.ReadProposal?
+        var budgetFailure: (any Error)?
+        #if DEBUG
+        let previewContext: GroqPreflightContextForTesting? = {
+            guard groqPreflightObserverForTesting != nil, let closed = closedTurns[task],
+                  closed.context == context, closed.transportGeneration == embeddedTransportGeneration else { return nil }
+            return .init(taskID: task, threadID: context.threadID, turnID: context.turnID, modelID: scope.modelID,
+                runtimeGeneration: context.runtimeGeneration, preparationID: context.preparationID,
+                transportGeneration: embeddedTransportGeneration, inferenceID: closed.inferenceID,
+                compactToolThread: context.isCompactToolThread)
+        }()
+        func observePreview(_ preview: GroqHistoryReaderPreviewForTesting) {
+            guard let previewContext, let observer = groqPreflightObserverForTesting,
+                  !Task.isCancelled, inferenceContexts[task] == context,
+                  groqHistoryTurns[task]?.writer.isCurrent(current: scope) == true else { return }
+            observer(previewContext, .historyReaderPreview(preview))
+        }
+        #endif
+        for size in [1_024, 512, 256, 128, 64] {
+            #if DEBUG
+            var stage = GroqHistoryReaderPreviewForTesting.Stage.proposal
+            var responseBytes: Int?, promptBytes: Int?, bodyTokens: Int?, diagnosticError: (any Error)?
+            var outcome = GroqHistoryReaderPreviewForTesting.Outcome.other
+            defer {
+                observePreview(Self.groqHistoryReaderPreviewForTesting(maximumBytes: size,
+                    responseUTF8Bytes: responseBytes, promptUTF8Bytes: promptBytes, bodyTokens: bodyTokens,
+                    stage: stage, outcome: outcome, error: diagnosticError))
+            }
+            func diagnosed<T>(_ nextStage: GroqHistoryReaderPreviewForTesting.Stage, _ operation: () throws -> T) rethrows -> T {
+                stage = nextStage
+                do { return try operation() } catch { diagnosticError = error; throw error }
+            }
+            let proposal = try diagnosed(.proposal) {
+                try GroqContextManifestProjector.prepareRead(snapshot, issued: issued.call, maximumBytes: size)
+            }
+            responseBytes = proposal.responseData.count
+            let history = try diagnosed(.history) {
+                try Self.groqHistoryReadBudgetHistory(current.canonicalRequest,
+                    qualifiedName: readerName, callID: callID, arguments: arguments, receipt: proposal.responseData)
+            }
+            stage = .request
+            #else
+            let proposal = try GroqContextManifestProjector.prepareRead(snapshot, issued: issued.call, maximumBytes: size)
+            let history = try Self.groqHistoryReadBudgetHistory(current.canonicalRequest,
+                qualifiedName: readerName, callID: callID, arguments: arguments, receipt: proposal.responseData)
+            #endif
+            do {
+                let preview = try WebModelResponseCodec.prepareRequest(history,
+                    browserToolAvailability: current.browserAvailability, groqToolCatalogProjection: projection,
+                    groqDirectTools: .loadedOnly,
+                    groqHistoryProjection: try groqHistoryPreviewProjection(taskID: task, preview: history),
+                    compactHistoryInventory: context.historyPreparation != nil)
+                // This preview has the actual issued call ID and the sole exact
+                // RPC text response. Its pinned native call/output shape is
+                // accounted for; the next actual HTTP still undergoes full
+                // 6,000-token admission before any website request.
+                #if DEBUG
+                stage = .counter; promptBytes = preview.prompt.utf8.count
+                let measured = try WebModelResponseCodec.validateGroqPromptBudget(model: scope.modelID, prompt: preview.prompt)
+                bodyTokens = measured
+                guard let units = measured, units <= WebModelResponseCodec.groqMaximumBodyTokens else {
+                    outcome = measured == nil ? .noCounter : .overLimit
+                    continue
+                }
+                outcome = .selected
+                #else
+                guard let units = try WebModelResponseCodec.validateGroqPromptBudget(model: scope.modelID, prompt: preview.prompt),
+                      units <= WebModelResponseCodec.groqMaximumBodyTokens else {
+                    continue
+                }
+                #endif
+                chosen = proposal
+                break
+            } catch {
+                #if DEBUG
+                diagnosticError = error
+                #endif
+                guard Self.isGroqHistoryBudgetFailure(error) else { throw error }
+                budgetFailure = error
+            }
+        }
+        guard let chosen else { throw budgetFailure ?? Failure.inferenceContextRequired }
+        let publication = try GroqHistoryReadPublication(snapshot: snapshot, proposal: chosen,
+            authority: authority, writer: turn.writer)
+        turn.readPublications[callID] = publication
+        groqHistoryTurns[task] = turn
+        return GroqHistoryReadExecution(publication: publication)
+    }
+
+    private static func groqHistoryReadBudgetHistory(_ canonical: Data, qualifiedName: String,
+        callID: String, arguments: Data, receipt: Data) throws -> Data {
+        guard [GroqHistoryTool.name, "functions." + GroqHistoryTool.name].contains(qualifiedName),
+              let argumentText = String(data: arguments, encoding: .utf8),
+              let receiptText = String(data: receipt, encoding: .utf8) else { throw Failure.invalidRequest }
+        var call: [String: Any] = ["type": "function_call", "name": GroqHistoryTool.name,
+            "arguments": argumentText, "call_id": callID]
+        if qualifiedName.hasPrefix("functions.") { call["namespace"] = "functions" }
+        return try WebsitePromptProjection.appendingInputItems([call,
+            ["type": "function_call_output", "call_id": callID, "output": receiptText]], to: canonical)
     }
 
     static func groqLoaderBudgetHistory(_ canonical: Data, projection: GroqToolCatalog.Projection,
@@ -678,12 +1166,30 @@ actor WebModelServer {
     enum GroqPreflightRejectionForTesting: String, Sendable {
         case bodyTokens, bodyBytes, counterUnavailable, other
     }
+    /// Counts from the existing adaptive native-reader preview only. No text,
+    /// hashes, references or call arguments enter the diagnostic event.
+    struct GroqHistoryReaderPreviewForTesting: Codable, Sendable {
+        enum Stage: String, Codable, Sendable { case proposal, history, request, counter }
+        enum Outcome: String, Codable, Sendable {
+            case selected, overLimit, noCounter, bodyTokens, bodyBytes, promptBytes
+            case counterUnavailable, manifest, context, cancelled, other
+        }
+        let maximumBytes: Int
+        let responseUTF8Bytes: Int?
+        let promptUTF8Bytes: Int?
+        let bodyTokens: Int?
+        let stage: Stage
+        let outcome: Outcome
+        /// Only a typed projector Failure.rawValue; never localized page/error text.
+        let manifestReason: String?
+    }
     enum GroqPreflightEventForTesting: Sendable {
         case canonical(Data)
         case candidate(request: WebModelResponseCodec.Request, directTools: String, compactHistory: Bool)
         /// Body-budget admission only; not website Start, selection or workflow proof.
         case admitted(units: Int)
         case rejected(kind: GroqPreflightRejectionForTesting, actual: Int?, maximum: Int?, reserved: Int?)
+        case historyReaderPreview(GroqHistoryReaderPreviewForTesting)
     }
     typealias GroqPreflightObserverForTesting = @Sendable (GroqPreflightContextForTesting, GroqPreflightEventForTesting) -> Void
     private var groqPreflightObserverForTesting: GroqPreflightObserverForTesting?
@@ -691,6 +1197,29 @@ actor WebModelServer {
     init(rejectedReplyDirectory: URL? = nil, groqPreflightObserverForTesting: @escaping GroqPreflightObserverForTesting) {
         self.rejectedReplyDirectory = rejectedReplyDirectory
         self.groqPreflightObserverForTesting = groqPreflightObserverForTesting
+    }
+
+    static func groqHistoryReaderPreviewForTesting(maximumBytes: Int, responseUTF8Bytes: Int?,
+        promptUTF8Bytes: Int?, bodyTokens: Int?, stage: GroqHistoryReaderPreviewForTesting.Stage,
+        outcome: GroqHistoryReaderPreviewForTesting.Outcome, error: (any Error)?) -> GroqHistoryReaderPreviewForTesting {
+        var result = outcome, tokens = bodyTokens, reason: String?
+        if let error {
+            if error is CancellationError { result = .cancelled }
+            else if let failure = error as? GroqContextManifestProjector.Failure {
+                result = .manifest; reason = failure.rawValue
+            } else if let failure = error as? WebModelResponseCodec.Failure {
+                switch failure {
+                case .groqPromptBudgetExceeded(let actual, _, _): result = .bodyTokens; tokens = actual
+                case .groqPromptByteBudgetExceeded: result = .bodyBytes
+                case .promptTooLarge: result = .promptBytes
+                case .groqTokenCounterUnavailable: result = .counterUnavailable
+                default: result = .other
+                }
+            } else if let failure = error as? Failure, case .inferenceContextRequired = failure { result = .context }
+            else { result = .other }
+        }
+        return .init(maximumBytes: maximumBytes, responseUTF8Bytes: responseUTF8Bytes,
+            promptUTF8Bytes: promptUTF8Bytes, bodyTokens: tokens, stage: stage, outcome: result, manifestReason: reason)
     }
 
     private static func groqPreflightRejectedEventForTesting(_ error: any Error) -> GroqPreflightEventForTesting {
@@ -777,6 +1306,7 @@ actor WebModelServer {
         if embeddedTransportIdentity === identity { return }
         revokeAllInspectorAuthorizations()
         revokeAllGroqFixtureStatuses()
+        revokeAllGroqHistoryTurns(reason: .transportChanged)
         embeddedTransport = value
         embeddedTransportIdentity = identity
         embeddedTransportGeneration = UUID()
@@ -1078,6 +1608,7 @@ actor WebModelServer {
         defer { if active[taskID]?.id == id { active.removeValue(forKey: taskID) } }
         do { return try await operation.value }
         catch {
+            revokeGroqHistoryTurn(taskID: taskID, reason: .nativeContextChanged)
             groqFixtureStatuses.removeValue(forKey: taskID)?.revoke()
             throw error
         }
@@ -1126,6 +1657,18 @@ actor WebModelServer {
                   transportGeneration == embeddedTransportGeneration else {
                 throw Failure.inferenceContextRequired
             }
+            if context.historyPreparation != nil {
+                guard let history = groqHistoryTurns[taskID],
+                      history.binding.scope.threadID == context.threadID,
+                      history.binding.scope.turnID == context.turnID,
+                      history.binding.scope.preparationID == context.preparationID,
+                      history.binding.scope.runtimeGeneration == context.runtimeGeneration,
+                      history.binding.scope.modelID == originalRequest.model,
+                      history.binding.transportGeneration == transportGeneration,
+                      history.writer.isCurrent(current: history.binding.scope) else {
+                    throw Failure.inferenceContextRequired
+                }
+            }
             if includeResponseDeadline, correctionTicket != nil, let responseDeadline,
                ContinuousClock.now >= responseDeadline { throw Failure.deadline }
         }
@@ -1148,6 +1691,32 @@ actor WebModelServer {
         // only after native turn admission. Freeze it for corrective attempts;
         // continuation checks still use the unchanged original request bytes.
         try requireCurrentContext()
+        if context.historyPreparation != nil {
+            // History references are a presentation of an already admitted
+            // native continuation. Reconcile no literal payload until the same
+            // full canonical proof used below has accepted this HTTP frame.
+            if let previous = lease {
+                guard let yielded, yielded.inferenceID == previous.inferenceID,
+                      previous.context == context, previous.provider == provider,
+                      previous.modelID == originalRequest.model,
+                      previous.transportGeneration == transportGeneration else {
+                    throw Failure.inferenceContextRequired
+                }
+                try yielded.continuation.validate(next: originalRequest)
+            } else {
+                guard yielded == nil else { throw Failure.invalidRequest }
+                if let closedHandoff {
+                    guard closedHandoff.context == context,
+                          closedHandoff.transportGeneration == transportGeneration,
+                          !closedHandoff.ambiguousHandoff else { throw Failure.inferenceContextRequired }
+                    try closedHandoff.continuation.validate(next: originalRequest)
+                }
+                try WebsiteTurnContinuation.validateRequest(originalRequest)
+            }
+            try await awaitGroqHistoryDelivery(taskID: taskID)
+            try await awaitGroqHistoryReadPublications(taskID: taskID)
+            try requireCurrentContext()
+        }
         #if DEBUG
         let preflightContext: GroqPreflightContextForTesting? = provider == "groq" && groqPreflightObserverForTesting != nil
             ? .init(taskID: taskID, threadID: context.threadID, turnID: context.turnID, modelID: originalRequest.model,
@@ -1194,28 +1763,82 @@ actor WebModelServer {
                 modelID: request.model)
             var candidate = groqToolCatalog
             let projection = try candidate.prepare(scope: scope, seed: seed)
-            let result: (request: WebModelResponseCodec.Request, units: Int)
-            #if DEBUG
-            do {
+            func budgeted(_ history: WebModelResponseCodec.GroqHistoryProjection?) throws -> (request: WebModelResponseCodec.Request, units: Int) {
+                #if DEBUG
                 if preflightContext != nil {
-                    result = try WebModelResponseCodec.prepareBudgetedGroqRequest(originalRequest.continuationRequest,
+                    return try WebModelResponseCodec.prepareBudgetedGroqRequest(originalRequest.continuationRequest,
                         availability: admittedBrowserAvailability, projection: projection, model: request.model,
+                        loadedOnly: context.historyPreparation != nil,
+                        compactHistoryInventory: context.historyPreparation != nil, historyProjection: history,
                         observingCandidate: { candidate, direct, compact in
                             observePreflight(.candidate(request: candidate, directTools: direct, compactHistory: compact))
                         })
-                } else {
-                    result = try WebModelResponseCodec.prepareBudgetedGroqRequest(originalRequest.continuationRequest,
-                        availability: admittedBrowserAvailability, projection: projection, model: request.model)
                 }
-                observePreflight(.admitted(units: result.units))
-            } catch {
-                observePreflight(Self.groqPreflightRejectedEventForTesting(error))
-                throw error // Preserve the builder's selected original failure, not its last fallback.
+                #endif
+                return try WebModelResponseCodec.prepareBudgetedGroqRequest(originalRequest.continuationRequest,
+                    availability: admittedBrowserAvailability, projection: projection, model: request.model,
+                    loadedOnly: context.historyPreparation != nil,
+                    compactHistoryInventory: context.historyPreparation != nil, historyProjection: history)
             }
-            #else
-            result = try WebModelResponseCodec.prepareBudgetedGroqRequest(originalRequest.continuationRequest,
-                availability: admittedBrowserAvailability, projection: projection, model: request.model)
+            var result: (request: WebModelResponseCodec.Request, units: Int)
+            var historyProjection: GroqHistoryProjectionContext?
+            // Seed the native preview even when this request fits inline. A
+            // subsequent schema load/read needs the authenticated source and
+            // current typed facts; it must not depend on an earlier overflow.
+            // Inline is still counted first, and fitting requests never wait.
+            var useHistory = context.historyPreparation != nil
+            var firstBudgetFailure: (any Error)?
+            var nativeFactDeadline: ContinuousClock.Instant?
+            do {
+                while true {
+                    do {
+                        historyProjection = useHistory
+                            ? try prepareGroqHistoryProjection(taskID: taskID, request: originalRequest) : nil
+                        if let historyProjection {
+                            do { result = try budgeted(historyProjection.projection(inline: true)) }
+                            catch {
+                                guard Self.isGroqHistoryBudgetFailure(error) else { throw error }
+                                result = try budgeted(historyProjection.projection())
+                            }
+                        } else { result = try budgeted(nil) }
+                        break
+                    } catch {
+                        guard context.historyPreparation != nil, Self.isGroqHistoryBudgetFailure(error) else {
+                            throw error
+                        }
+                        if firstBudgetFailure == nil { firstBudgetFailure = error }
+                        if !useHistory { useHistory = true; continue }
+                        // Native events and HTTP requests use separate transports.
+                        // Only an actual overflow may await an older issued call's
+                        // missing typed fact; interactive/fitting calls never wait.
+                        guard let turn = groqHistoryTurns[taskID],
+                              let layout = try? GroqContextJSONLayout.parse(originalRequest.continuationRequest),
+                              let frame = try? GroqHistoryNativeFrame(layout: layout) else { throw firstBudgetFailure ?? error }
+                        let unsettled = try groqHistoryPublications.ledger.unsettledIssuedCallIDs(groqHistoryPublications.authority,
+                            scope: turn.scope, current: turn.binding, matchingIDs: frame.olderCallIDs)
+                        guard !unsettled.isEmpty else { throw firstBudgetFailure ?? error }
+                        let end = nativeFactDeadline ?? ContinuousClock.now + .seconds(5)
+                        nativeFactDeadline = end
+                        do {
+                            try await groqHistoryPublications.ledger.waitForAnyNativeCompletion(groqHistoryPublications.authority,
+                                scope: turn.scope, current: turn.binding, callIDs: unsettled, until: end)
+                        } catch is CancellationError { throw CancellationError() }
+                        catch { throw firstBudgetFailure ?? error }
+                        try requireCurrentContext()
+                    }
+                }
+            } catch {
+                #if DEBUG
+                observePreflight(Self.groqPreflightRejectedEventForTesting(error))
+                #endif
+                throw error
+            }
+            #if DEBUG
+            observePreflight(.admitted(units: result.units))
             #endif
+            if context.historyPreparation != nil {
+                try commitGroqHistoryProjection(taskID: taskID, projection: historyProjection, request: result.request)
+            }
             request = result.request
             measuredGroqBodyUnits = result.units
             groqCatalogRequest = GroqCatalogRequestContext(scope: scope,
@@ -1603,6 +2226,8 @@ actor WebModelServer {
                 let sent: [String: Any]
                 do {
                     try requireCurrentContext()
+                    guard !request.groqHistoryPreviewOnly,
+                          request.groqHistoryPlan?.isCurrent() != false else { throw Failure.inferenceContextRequired }
                     sent = try await WebsiteBenchmarkCaptureLease.$current.withValue(benchmarkCapture) {
                         try await ClaudeRequestCapture.$firstRequest.withValue(claudeFirstRequest) {
                             defer { claudeFirstRequest?.revoke() }
@@ -1735,7 +2360,12 @@ actor WebModelServer {
                             ? WebModelResponseCodec.streamData(for: selection.reply, request: request, responseID: responseID, websiteSelectionEvidence: evidence, websiteToolSelection: selection.metadataValue)
                             : WebModelResponseCodec.completedResponse(for: selection.reply, request: request, responseID: responseID, websiteSelectionEvidence: evidence, websiteToolSelection: selection.metadataValue)
                         responseProfile?.mark(.encoded)
-                        let continuation: WebsiteTurnContinuation? = try session.usesVerifiedHistory ? WebsiteTurnContinuation(request: request, encodedResponse: encoded) : nil
+                        // Native history projection requires the same released-call
+                        // proof even when its website conversation is closed after
+                        // every inference. This does not opt Groq into retained
+                        // website-session ownership or verified-history transport.
+                        let continuation: WebsiteTurnContinuation? = try (session.usesVerifiedHistory || context.historyPreparation != nil)
+                            ? WebsiteTurnContinuation(request: request, encodedResponse: encoded) : nil
                         if let requestMetadata {
                             let retain = session.retainsConversation && (continuation?.pendingToolCallCount ?? 0) > 0
                             let diagnostic = retain
@@ -1799,7 +2429,10 @@ actor WebModelServer {
                             groqFixtureStatuses.removeValue(forKey:taskID)?.revoke()
                         case .assistantMessage(_, phase:.commentary), .toolCalls, .toolCallsWithCommentary: break
                         }
-                        return InferenceResult(data: encoded, inferenceID: inferenceID, responseProfile: responseProfile)
+                        let historyWrite = try stageGroqHistoryHTTPWrite(taskID: taskID, request: request,
+                            reply: selection.reply, responseID: responseID, encoded: encoded)
+                        return InferenceResult(data: encoded, inferenceID: inferenceID,
+                            responseProfile: responseProfile, historyWrite: historyWrite)
                     case "running":
                         try Self.verifyInferenceSnapshot(value, session: &session)
                         if value["modelVerificationPending"] as? Bool != true {
@@ -2112,6 +2745,7 @@ actor WebModelServer {
     /// An unsuccessful HTTP write cannot make this particular handoff reusable.
     /// A later round that already reconciled the exact output has a distinct ID.
     private func invalidateHandoff(taskID: String, inferenceID: UUID) {
+        revokeGroqHistoryTurn(taskID: taskID, reason: .nativeContextChanged)
         groqFixtureStatuses.removeValue(forKey: taskID)?.revoke()
         if yieldedTurns[taskID]?.inferenceID == inferenceID { yieldedTurns.removeValue(forKey: taskID) }
         if closedTurns[taskID]?.inferenceID == inferenceID { closedTurns[taskID]?.ambiguousHandoff = true }
@@ -2681,7 +3315,10 @@ actor WebModelServer {
                         defer { body.responseProfile?.mark(.httpWriteEnd) }
                         try await Self.send(connection, status: "200 OK",
                             type: prepared.stream ? "text/event-stream" : "application/json", body: body.data)
+                        try commitGroqHistoryHTTPWrite(taskID: (try? Self.canonicalID(taskID)) ?? taskID,
+                            write: body.historyWrite)
                     } catch {
+                        abortGroqHistoryHTTPWrite(body.historyWrite)
                         invalidateHandoff(taskID: (try? Self.canonicalID(taskID)) ?? taskID, inferenceID: body.inferenceID)
                         throw error
                     }

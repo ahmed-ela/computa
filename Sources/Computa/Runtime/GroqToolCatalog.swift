@@ -44,16 +44,38 @@ struct GroqToolCatalog: Sendable {
 
         /// Constrain only the website's displayed loader schema. Native registration,
         /// canonical history, response configuration and executor checks keep the originals.
-        func displaySchemas(_ schemas: [[String: Any]]) -> [[String: Any]] {
+        func displaySchemas(_ schemas: [[String: Any]], compactHistoryInventory: Bool = false) -> [[String: Any]] {
             let choices = loaderChoices
+            func displayed(_ definition: [String: Any], namespace: String? = nil) -> [String: Any] {
+                var result = GroqToolCatalog.restoringRegisteredLoaderBounds(definition, namespace: namespace, choices: choices)
+                // Only a native registered-history caller selects this display
+                // option. Keep the complete current description and all bounds;
+                // the full discovery inventory already names these choices.
+                guard compactHistoryInventory, !choices.isEmpty,
+                      namespace == nil || namespace == "functions",
+                      result["type"] as? String == "function", result["name"] as? String == GroqToolCatalog.name else { return result }
+                let keys = ["parameters", "inputSchema"].filter { result[$0] != nil }
+                guard !keys.isEmpty,
+                      keys.allSatisfy({ key in
+                          guard let original = definition[key] as? [String: Any] else { return false }
+                          return GroqToolCatalog.matchesRegisteredSchema(original)
+                      }),
+                      let expected = try? GroqToolCatalog.encoded(GroqToolCatalog.argumentSchema(choices: choices)),
+                      keys.allSatisfy({ key in
+                          guard let value = result[key] as? [String: Any] else { return false }
+                          return (try? GroqToolCatalog.encoded(value)) == expected
+                      }) else { return result }
+                for key in keys { result[key] = GroqToolCatalog.argumentSchema() }
+                return result
+            }
             return schemas.map { tool in
                 if tool["type"] as? String == "namespace" {
                     guard tool["name"] as? String == "functions", let children = tool["tools"] as? [[String: Any]] else { return tool }
                     var result = tool
-                    result["tools"] = children.map { GroqToolCatalog.restoringRegisteredLoaderBounds($0, namespace: "functions", choices: choices) }
+                    result["tools"] = children.map { displayed($0, namespace: "functions") }
                     return result
                 }
-                return GroqToolCatalog.restoringRegisteredLoaderBounds(tool, choices: choices)
+                return displayed(tool)
             }
         }
     }

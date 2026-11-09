@@ -5,6 +5,44 @@ import XCTest
 
 final class WebModelServerTests: XCTestCase {
 
+    #if DEBUG
+    func testGroqHistoryReaderPreviewDiagnosticsUseExistingCountsAndClosedTypedErrorsOnly() throws {
+        typealias S = WebModelServer
+        func record(_ error: (any Error)? = nil) -> S.GroqHistoryReaderPreviewForTesting {
+            S.groqHistoryReaderPreviewForTesting(maximumBytes: 256, responseUTF8Bytes: 733,
+                promptUTF8Bytes: 18_400, bodyTokens: 5_921, stage: .counter, outcome: .selected, error: error)
+        }
+        let selected = record()
+        XCTAssertEqual(selected.maximumBytes, 256); XCTAssertEqual(selected.responseUTF8Bytes, 733)
+        XCTAssertEqual(selected.promptUTF8Bytes, 18_400); XCTAssertEqual(selected.bodyTokens, 5_921)
+        XCTAssertEqual(selected.stage, .counter); XCTAssertEqual(selected.outcome, .selected); XCTAssertNil(selected.manifestReason)
+        let limit = record(WebModelResponseCodec.Failure.groqPromptBudgetExceeded(actualTokens: 6_091, maximumTokens: 6_000, reservedTokens: 2_000))
+        XCTAssertEqual(limit.outcome, .bodyTokens); XCTAssertEqual(limit.bodyTokens, 6_091)
+        XCTAssertEqual(record(WebModelResponseCodec.Failure.groqPromptByteBudgetExceeded(actualBytes: 6_500, maximumBytes: 6_000, reservedTokens: 2_000)).outcome, .bodyBytes)
+        XCTAssertEqual(record(WebModelResponseCodec.Failure.promptTooLarge(actualBytes: 200_000, maximumBytes: 163_840)).outcome, .promptBytes)
+        XCTAssertEqual(record(WebModelResponseCodec.Failure.groqTokenCounterUnavailable).outcome, .counterUnavailable)
+        XCTAssertEqual(record(S.Failure.inferenceContextRequired).outcome, .context)
+        XCTAssertEqual(record(CancellationError()).outcome, .cancelled)
+        let failures: [GroqContextManifestProjector.Failure] = [.binding, .layout, .publication, .registration, .stale,
+            .arguments, .bounds, .unknownReference, .uncommittedLookup, .duplicateCall, .noSavings]
+        for failure in failures {
+            XCTAssertEqual(record(failure).outcome, .manifest); XCTAssertEqual(record(failure).manifestReason, failure.rawValue)
+        }
+        let unknown = record(NSError(domain: "PRIVATE_TEST_CONTENT", code: 91,
+            userInfo: [NSLocalizedDescriptionKey: "PRIVATE_TEST_CONTENT"]))
+        XCTAssertEqual(unknown.outcome, .other); XCTAssertNil(unknown.manifestReason)
+        let encoded = try JSONEncoder().encode(unknown)
+        XCTAssertFalse(String(decoding: encoded, as: UTF8.self).contains("PRIVATE_TEST_CONTENT"))
+        let shape = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        XCTAssertEqual(Set(shape.keys), ["maximumBytes", "responseUTF8Bytes", "promptUTF8Bytes", "bodyTokens", "stage", "outcome"])
+        let missing = S.groqHistoryReaderPreviewForTesting(maximumBytes: 64, responseUTF8Bytes: nil,
+            promptUTF8Bytes: nil, bodyTokens: nil, stage: .proposal, outcome: .other,
+            error: GroqContextManifestProjector.Failure.unknownReference)
+        XCTAssertNil(missing.responseUTF8Bytes); XCTAssertNil(missing.promptUTF8Bytes); XCTAssertNil(missing.bodyTokens)
+        XCTAssertEqual(missing.stage, .proposal); XCTAssertEqual(missing.manifestReason, "unknownReference")
+    }
+    #endif
+
     func testChatGPTLiteralToolAdmissionRequiresExactCurrentEvidenceForBothToolVariants() throws {
         let text = #"{"type":"tool_calls","calls":[{"name":"fixture","arguments":{"path":"résumé"}}]}"#
         let call = WebModelResponseCodec.ToolCall(name: "fixture", argumentsJSON: "{}", namespace: nil)
@@ -314,6 +352,212 @@ final class WebModelServerTests: XCTestCase {
             _ = try await server.loadGroqTools(scope: scope, arguments: JSONSerialization.data(withJSONObject: args))
             XCTFail("Retired turn loaded a schema")
         } catch { XCTAssertEqual(WebModelServer.errorPresentation(for: error).code, "native_turn_mismatch") }
+    }
+
+    func testGroqHistoryInitialStringStaysInlineThenAdmitsOnlyItsExactNativeArrayContinuation() async throws {
+        let f = try await makeGroqClosedNativeFixture(label: "groq-history-initial-string")
+        let human = try XCTUnwrap(f.original.first?["content"] as? String)
+        var initial = try XCTUnwrap(JSONSerialization.jsonObject(with: f.request(f.original)) as? [String: Any])
+        initial["input"] = human
+        let initialData = try JSONSerialization.data(withJSONObject: initial, options: [.sortedKeys])
+        let first = try responseOutput(await f.server.infer(initialData, taskID: f.task))
+        XCTAssertEqual(first.first?["name"] as? String, GroqToolCatalog.name)
+        let firstOperations = await f.base.operations()
+        XCTAssertEqual(firstOperations, ["webProviderStart", "webProviderSend", "webProviderPoll", "webProviderFinish"])
+        let receipt = try await f.server.loadGroqTools(scope: f.scope, arguments: f.loadArguments)
+        // This is exactly WebsiteTurnContinuation's native string-input form,
+        // not a coercion or a changed raw prefix of an existing snapshot.
+        let normalized: [[String: Any]] = [["type": "message", "role": "user",
+            "content": [["type": "input_text", "text": human]]]]
+        let next = normalized + nativeGroqClosedCalls(first) + [["type": "function_call_output",
+            "call_id": try XCTUnwrap(first.first?["call_id"] as? String),
+            "output": String(decoding: receipt, as: UTF8.self)]]
+        let second = try responseOutput(await f.server.infer(f.request(next), taskID: f.task))
+        XCTAssertEqual(second.first?["name"] as? String, "fixture_read")
+        let prompts = await f.base.sentPrompts()
+        XCTAssertEqual(prompts.count, 2)
+        let firstPrompt = try XCTUnwrap(prompts.first), secondPrompt = try XCTUnwrap(prompts.dropFirst().first)
+        XCTAssertEqual(try canonicalRequest(in: firstPrompt)["input"] as? String, human)
+        XCTAssertEqual(try canonicalRequest(in: secondPrompt)["input"] as? NSArray, next as NSArray)
+        // Once the array frame has an admitted snapshot/closed native proof,
+        // the old string cannot reopen the optional initial-input fallback.
+        do {
+            _ = try await f.server.infer(initialData, taskID: f.task)
+            XCTFail("An established history context must not fall back to its old string request")
+        } catch WebsiteTurnContinuation.Failure.changedHistory { }
+        catch { XCTFail("Require the existing native proof to reject before projection: \(error)") }
+        let operations = await f.base.operations()
+        XCTAssertEqual(operations, firstOperations + firstOperations)
+        let receipts = await f.server.latestCleanupReceipts()
+        let closed = try XCTUnwrap(receipts.last)
+        XCTAssertEqual(closed.reason, .transcriptCleared); XCTAssertTrue(closed.receiptSaved)
+        let issues = await f.server.finish(taskID: f.task)
+        XCTAssertTrue(issues.isEmpty)
+    }
+
+    func testGroqHistoryClosedNativeHandoffKeepsFreshWebsiteLeasesAcrossLoaderAndCalls() async throws {
+        let f = try await makeGroqClosedNativeFixture(label: "groq-history-closed-positive")
+        let first = try responseOutput(await f.server.infer(f.request(f.original), taskID: f.task))
+        XCTAssertEqual(first.first?["name"] as? String, GroqToolCatalog.name)
+        let afterFirst = await f.base.operations()
+        XCTAssertEqual(afterFirst, ["webProviderStart", "webProviderSend", "webProviderPoll", "webProviderFinish"])
+        let receipt = try await f.server.loadGroqTools(scope: f.scope, arguments: f.loadArguments)
+        let next = f.original + nativeGroqClosedCalls(first) + [["type": "function_call_output",
+            "call_id": try XCTUnwrap(first.first?["call_id"] as? String),
+            "output": String(decoding: receipt, as: UTF8.self)]]
+        let second = try responseOutput(await f.server.infer(f.request(next), taskID: f.task))
+        XCTAssertEqual(second.first?["name"] as? String, "fixture_read")
+        let afterSecond = await f.base.operations()
+        XCTAssertEqual(afterSecond, afterFirst + afterFirst,
+            "Native closed proof must not convert Groq into a retained website session")
+        let finalInput = next + nativeGroqClosedCalls(second) + [["type": "function_call_output",
+            "call_id": try XCTUnwrap(second.first?["call_id"] as? String), "output": "Exact synthetic read result"]]
+        let final = try responseOutput(await f.server.infer(f.request(finalInput), taskID: f.task))
+        XCTAssertEqual(final.first?["type"] as? String, "message")
+        let operations = await f.base.operations()
+        XCTAssertEqual(operations, afterFirst + afterFirst + afterFirst)
+        let receipts = await f.server.latestCleanupReceipts()
+        let closed = try XCTUnwrap(receipts.last)
+        XCTAssertEqual(closed.reason, .transcriptCleared)
+        XCTAssertEqual(closed.outcome, .closed)
+        XCTAssertTrue(closed.receiptSaved)
+        let issues = await f.server.finish(taskID: f.task)
+        XCTAssertTrue(issues.isEmpty)
+    }
+
+    func testGroqHistoryClosedNativeHandoffRejectsChangedHistoryConfigurationAndReplayedCallsBeforeStart() async throws {
+        for mutation in ["history", "configuration", "call_arguments", "foreign_result", "duplicate_result", "replayed_call", "original_request"] {
+            let f = try await makeGroqClosedNativeFixture(label: "groq-history-closed-" + mutation)
+            let first = try responseOutput(await f.server.infer(f.request(f.original), taskID: f.task))
+            let calls = nativeGroqClosedCalls(first)
+            let result: [String: Any] = ["type": "function_call_output",
+                "call_id": try XCTUnwrap(first.first?["call_id"] as? String), "output": "Synthetic loader result"]
+            var next = f.original + calls + [result]
+            var instructions = GroqClosedNativeFixture.instructions
+            switch mutation {
+            case "history": next[0]["content"] = "Changed synthetic human task"
+            case "configuration": instructions += " Changed native policy."
+            case "call_arguments": next[f.original.count]["arguments"] = "{}"
+            case "foreign_result": next[next.count - 1]["call_id"] = "unissued-call"
+            case "duplicate_result": next.append(result)
+            case "replayed_call": next += calls + [result]
+            case "original_request": next = f.original
+            default: XCTFail("Unknown closed fixture mutation")
+            }
+            do {
+                _ = try await f.server.infer(f.request(next, instructions: instructions), taskID: f.task)
+                XCTFail("Changed native handoff reached a replacement Groq page: \(mutation)")
+            } catch let failure as WebsiteTurnContinuation.Failure {
+                let expected: WebsiteTurnContinuation.Failure
+                switch mutation {
+                case "configuration": expected = .changedConfiguration
+                case "foreign_result", "duplicate_result", "replayed_call": expected = .invalidToolOutputs
+                default: expected = .changedHistory
+                }
+                XCTAssertEqual(failure, expected, mutation)
+            } catch { XCTFail("Require the closed native proof refusal, not a later fixture error: \(mutation): \(error)") }
+            let operations = await f.base.operations()
+            XCTAssertEqual(operations, ["webProviderStart", "webProviderSend", "webProviderPoll", "webProviderFinish"], mutation)
+            let issues = await f.server.finish(taskID: f.task)
+            XCTAssertTrue(issues.isEmpty)
+        }
+    }
+
+    func testGroqHistoryClosedNativeHandoffAdvancesAfterLoadedCallAndRejectsOldFrame() async throws {
+        let f = try await makeGroqClosedNativeFixture(label: "groq-history-closed-advance")
+        let first = try responseOutput(await f.server.infer(f.request(f.original), taskID: f.task))
+        let receipt = try await f.server.loadGroqTools(scope: f.scope, arguments: f.loadArguments)
+        let secondInput = f.original + nativeGroqClosedCalls(first) + [["type": "function_call_output",
+            "call_id": try XCTUnwrap(first.first?["call_id"] as? String), "output": String(decoding: receipt, as: UTF8.self)]]
+        let second = try responseOutput(await f.server.infer(f.request(secondInput), taskID: f.task))
+        XCTAssertEqual(second.first?["name"] as? String, "fixture_read")
+        do {
+            _ = try await f.server.infer(f.request(secondInput), taskID: f.task)
+            XCTFail("The consumed loader frame must not replace the new fixture_read handoff")
+        } catch WebsiteTurnContinuation.Failure.changedHistory { }
+        catch { XCTFail("Unexpected handoff refusal: \(error)") }
+        let operations = await f.base.operations()
+        XCTAssertEqual(operations.filter { $0 == "webProviderStart" }.count, 2)
+        XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 2)
+        XCTAssertEqual(operations.filter { $0 == "webProviderFinish" }.count, 2)
+        let issues = await f.server.finish(taskID: f.task)
+        XCTAssertTrue(issues.isEmpty)
+    }
+
+    // Synthetic native gate/transport fixture. It issues no exec/patch/reader
+    // payload and creates no ledger publication, HTTP-delivery or provider proof.
+    private struct GroqClosedNativeFixture {
+        static let instructions = "Synthetic closed native handoff fixture. No external actions."
+        let server: WebModelServer
+        let base: FixtureWebModelTransport
+        let task: String
+        let scope: GroqToolCatalog.Scope
+        let tools: [[String: Any]]
+        let loadArguments: Data
+        let metadata: String
+        let original: [[String: Any]] = [["role": "user", "content": "Read the inert synthetic fixture and finish."]]
+        func request(_ input: [[String: Any]], instructions: String = Self.instructions) throws -> Data {
+            try JSONSerialization.data(withJSONObject: ["model": scope.modelID, "input": input,
+                "instructions": instructions, "tools": tools, "parallel_tool_calls": false, "stream": false,
+                "client_metadata": ["x-codex-turn-metadata": metadata]], options: [.sortedKeys])
+        }
+    }
+
+    private func nativeGroqClosedCalls(_ items: [[String: Any]]) -> [[String: Any]] {
+        items.map { item in
+            var native = item
+            if native["type"] as? String == "function_call" {
+                // Current pinned engine omits record ID/status on its HTTP wire;
+                // the actual native call_id and argument string stay exact.
+                native.removeValue(forKey: "id"); native.removeValue(forKey: "status")
+            }
+            return native
+        }
+    }
+
+    private func makeGroqClosedNativeFixture(label: String) async throws -> GroqClosedNativeFixture {
+        let task = websiteInferenceFixtureTaskID(label)
+        let thread = websiteInferenceFixtureTaskID(label + ":thread")
+        let turn = websiteInferenceFixtureTaskID(label + ":turn")
+        let preparation = UUID(uuidString: websiteInferenceFixtureTaskID(label + ":preparation"))!
+        let model = syntheticWebsiteModelID("groq")
+        let metadata = try websiteInferenceFixtureMetadata(taskID: label)
+        let scope = GroqToolCatalog.Scope(taskID: task, threadID: thread, turnID: turn,
+            runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: preparation, modelID: model)
+        var tools = [GroqToolCatalog.specification, GroqHistoryTool.specification].map { definition in
+            var wire = definition; wire["parameters"] = wire.removeValue(forKey: "inputSchema"); return wire
+        }
+        tools.append(["type": "function", "name": "fixture_read", "description": "Read an inert synthetic fixture.",
+            "parameters": ["type": "object", "properties": [:], "additionalProperties": false]])
+        let seedBody = try JSONSerialization.data(withJSONObject: ["model": model, "input": "Seed only", "tools": tools])
+        let seed = try XCTUnwrap(WebModelResponseCodec.prepareRequest(seedBody).groqToolCatalogSeed)
+        let revision = try GroqToolCatalog.baseline(for: seed).revision
+        let arguments: [String: Any] = ["catalog_revision": revision, "names": ["fixture_read"]]
+        let loadArguments = try JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys])
+        let loaderReply = String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls",
+            "calls": [["name": GroqToolCatalog.name, "arguments": arguments]]]), as: UTF8.self)
+        let base = FixtureWebModelTransport(replyTexts: [loaderReply,
+            #"{"type":"tool_calls","calls":[{"name":"fixture_read","arguments":{}}]}"#,
+            #"{"type":"message","text":"Synthetic fixture complete"}"#], cleanupResult: "transcript_cleared")
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        // This adapter supplies no Groq website continuation/fresh-submission
+        // capability; each successful inference must Finish its own page.
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base))
+        let core = UUID()
+        try await server.prepareInferenceTurn(taskID: task, threadID: thread,
+            runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: preparation,
+            isNewThread: true, isCompactToolThread: true, historyPreparation: .init(modelID: model, coreGeneration: core))
+        let writerValue = try await server.prepareGroqHistoryTurn(taskID: task, threadID: thread,
+            turnID: turn, runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: preparation,
+            modelID: model, coreGeneration: core)
+        let writer = try XCTUnwrap(writerValue)
+        XCTAssertTrue(writer.isCurrent(current: .init(taskID: task, threadID: thread, turnID: turn,
+            runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: preparation,
+            modelID: model, coreGeneration: core)))
+        try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn,
+            runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: preparation)
+        return GroqClosedNativeFixture(server: server, base: base, task: task, scope: scope,
+            tools: tools, loadArguments: loadArguments, metadata: metadata)
     }
 
     func testGroqPromptBudgetRejectsBeforeWebsiteStart() async throws {

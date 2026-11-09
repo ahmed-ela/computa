@@ -1294,6 +1294,14 @@ private extension CodexAppServerRuntime {
         // A prepared website scope precedes the native RPC. Its nonce keeps a
         // delayed acknowledgement from registering under a newer local turn.
         private var inferencePreparations: [AgentTask.ID: UUID] = [:]
+        private struct GroqHistoryCompletionContext {
+            let scope: GroqNativePublicationLedger.Scope
+            let writer: GroqNativePublicationLedger.CompletionWriter
+            var completedItemIDs = Set<String>()
+        }
+        private var groqHistoryCompletions: [AgentTask.ID: GroqHistoryCompletionContext] = [:]
+        private var groqHistoryPreparationIDs: [AgentTask.ID: UUID] = [:]
+        private var retiredGroqHistoryPreparationIDs: [AgentTask.ID: UUID] = [:]
         // IDs are scoped to one live turn. A completed item must never be
         // reopened by a delayed delta or rendered twice after a retry.
         private var assistantStreamTurns: [AgentTask.ID: String] = [:]
@@ -2137,6 +2145,10 @@ private extension CodexAppServerRuntime {
                     GroqToolThreadRegistration.remember(codexHome: configuration.codexHomePath,
                         threadID: threadID, modelID: modelID)
                 }
+                if GroqHistoryTool.supports(modelID: modelID) {
+                    GroqHistoryThreadRegistration.remember(codexHome: configuration.codexHomePath,
+                        threadID: threadID, modelID: modelID)
+                }
                 threadForTask[taskID] = threadID
                 taskForThread[threadID] = taskID
                 contextForLoadedThread[threadID] = requestedContext
@@ -2467,6 +2479,9 @@ private extension CodexAppServerRuntime {
                                                  modelID: String, isNewThread: Bool = false,
                                                   isMaintenance: Bool = false,
                                                   userRequest: String? = nil) async throws -> UUID? {
+            retireGroqHistoryWriter(taskID: taskID, reason: .turnChanged)
+            groqHistoryPreparationIDs.removeValue(forKey: taskID)
+            retiredGroqHistoryPreparationIDs.removeValue(forKey: taskID)
             browserExecutionContexts.removeValue(forKey: taskID)
             guard isRemoteInference(modelID) else {
                 inferencePreparations.removeValue(forKey: taskID)
@@ -2485,14 +2500,23 @@ private extension CodexAppServerRuntime {
                         historicalOutcomeCorrections: historicalOutcomeCorrections(threadID: threadID),
                         userRequest: userRequest)
                 } else {
+                    let historyPreparation: GroqHistoryTool.Preparation? = !isMaintenance
+                        && GroqHistoryThreadRegistration.contains(codexHome: configuration.codexHomePath,
+                            threadID: threadID, modelID: modelID)
+                        ? .init(modelID: modelID, coreGeneration: serverGeneration) : nil
+                    if historyPreparation != nil { groqHistoryPreparationIDs[taskID] = preparationID }
                     try await webModelServer.prepareInferenceTurn(taskID: taskID, threadID: threadID,
                         runtimeGeneration: websiteSessionRuntimeGeneration, preparationID: preparationID,
                         isMaintenance: isMaintenance, isNewThread: isNewThread,
                         isCompactToolThread: GroqToolThreadRegistration.contains(
-                            codexHome: configuration.codexHomePath, threadID: threadID, modelID: modelID))
+                            codexHome: configuration.codexHomePath, threadID: threadID, modelID: modelID),
+                        historyPreparation: historyPreparation)
                 }
                 return preparationID
             } catch {
+                if groqHistoryPreparationIDs[taskID] == preparationID {
+                    groqHistoryPreparationIDs.removeValue(forKey: taskID)
+                }
                 if inferencePreparations[taskID] == preparationID {
                     inferencePreparations.removeValue(forKey: taskID)
                 }
@@ -2526,15 +2550,119 @@ private extension CodexAppServerRuntime {
                     throw error
                 }
             } else {
-                try await webModelServer.registerInferenceTurn(taskID: taskID, threadID: threadID,
-                    turnID: turnID, runtimeGeneration: websiteSessionRuntimeGeneration,
-                    preparationID: preparationID)
+                if groqHistoryPreparationIDs[taskID] == preparationID {
+                    guard let model = modelForTask[taskID], !isPreparingCommandShutdown,
+                          retiredGroqHistoryPreparationIDs[taskID] != preparationID,
+                          commandStoppedTurns[taskID] != turnID,
+                          managedCompactions[taskID] == nil, !compactionTracker.isRunning(taskID: taskID),
+                          GroqHistoryThreadRegistration.contains(codexHome: configuration.codexHomePath,
+                            threadID: threadID, modelID: model) else { return }
+                    let writer = try await webModelServer.prepareGroqHistoryTurn(taskID: taskID,
+                        threadID: threadID, turnID: turnID, runtimeGeneration: websiteSessionRuntimeGeneration,
+                        preparationID: preparationID, modelID: model, coreGeneration: generation)
+                    guard !isShuttingDown, !isPreparingCommandShutdown, serverGeneration == generation,
+                          threadForTask[taskID] == threadID, turnIdentity.activeTurnID(for: taskID) == turnID,
+                          inferencePreparations[taskID] == preparationID, modelForTask[taskID] == model,
+                          nativeStoppedTurns[taskID] != turnID, contextStoppedTurns[taskID] != turnID,
+                          commandStoppedTurns[taskID] != turnID,
+                          managedCompactions[taskID] == nil, !compactionTracker.isRunning(taskID: taskID),
+                          retiredGroqHistoryPreparationIDs[taskID] != preparationID,
+                          groqHistoryPreparationIDs[taskID] == preparationID else {
+                        writer?.revoke(reason: .nativeContextChanged)
+                        return
+                    }
+                    if let writer {
+                        let scope = GroqNativePublicationLedger.Scope(taskID: taskID.lowercased(),
+                            threadID: threadID.lowercased(), turnID: turnID.lowercased(),
+                            runtimeGeneration: websiteSessionRuntimeGeneration, preparationID: preparationID,
+                            modelID: model, coreGeneration: generation)
+                        if groqHistoryCompletions[taskID]?.scope != scope {
+                            groqHistoryCompletions[taskID] = GroqHistoryCompletionContext(scope: scope, writer: writer)
+                        }
+                    }
+                }
+                do {
+                    try await webModelServer.registerInferenceTurn(taskID: taskID, threadID: threadID,
+                        turnID: turnID, runtimeGeneration: websiteSessionRuntimeGeneration,
+                        preparationID: preparationID)
+                    if let current = groqHistoryCompletions[taskID],
+                       isShuttingDown || isPreparingCommandShutdown || current.scope.coreGeneration != serverGeneration
+                        || threadForTask[taskID] != current.scope.threadID
+                        || turnIdentity.activeTurnID(for: taskID) != current.scope.turnID
+                        || inferencePreparations[taskID] != current.scope.preparationID
+                        || modelForTask[taskID] != current.scope.modelID
+                        || nativeStoppedTurns[taskID] == current.scope.turnID
+                        || contextStoppedTurns[taskID] == current.scope.turnID
+                        || commandStoppedTurns[taskID] == current.scope.turnID
+                        || managedCompactions[taskID] != nil
+                        || compactionTracker.isRunning(taskID: taskID) {
+                        retireGroqHistoryWriter(taskID: taskID, reason: .nativeContextChanged)
+                    }
+                } catch {
+                    retireGroqHistoryWriter(taskID: taskID, reason: .nativeContextChanged)
+                    throw error
+                }
+            }
+        }
+
+        private func retireGroqHistoryWriter(taskID: AgentTask.ID,
+            reason: GroqNativePublicationLedger.Revocation) {
+            // Keep this classification sticky even if phase one's writer has
+            // not reached Core yet. Duplicate ACKs cannot enter legacy admission.
+            if let preparation = groqHistoryPreparationIDs[taskID] {
+                retiredGroqHistoryPreparationIDs[taskID] = preparation
+            }
+            groqHistoryCompletions.removeValue(forKey: taskID)?.writer.revoke(reason: reason)
+        }
+
+        private func currentGroqHistoryCompletion(taskID: AgentTask.ID,
+            params: [String: Any]) -> GroqHistoryCompletionContext? {
+            guard let current = groqHistoryCompletions[taskID], !isShuttingDown,
+                  !isPreparingCommandShutdown, current.scope.coreGeneration == serverGeneration,
+                  params["threadId"] as? String == current.scope.threadID,
+                  params["turnId"] as? String == current.scope.turnID,
+                  threadForTask[taskID] == current.scope.threadID,
+                  turnIdentity.activeTurnID(for: taskID) == current.scope.turnID,
+                  inferencePreparations[taskID] == current.scope.preparationID,
+                  groqHistoryPreparationIDs[taskID] == current.scope.preparationID,
+                  retiredGroqHistoryPreparationIDs[taskID] != current.scope.preparationID,
+                  websiteSessionRuntimeGeneration == current.scope.runtimeGeneration,
+                  modelForTask[taskID] == current.scope.modelID,
+                  nativeStoppedTurns[taskID] != current.scope.turnID,
+                  contextStoppedTurns[taskID] != current.scope.turnID,
+                  commandStoppedTurns[taskID] != current.scope.turnID,
+                  managedCompactions[taskID] == nil, !compactionTracker.isRunning(taskID: taskID),
+                  current.writer.isCurrent(current: current.scope) else { return nil }
+            return current
+        }
+
+        private func invalidateRepeatedGroqCompletion(taskID: AgentTask.ID,
+            params: [String: Any], itemID: String) {
+            guard let current = currentGroqHistoryCompletion(taskID: taskID, params: params),
+                  current.completedItemIDs.contains(itemID) else { return }
+            // A second terminal notification cannot reaffirm a cached publication.
+            _ = current.writer.recordCompleted(current: current.scope, itemID: itemID,
+                terminal: .command(status: .failed, exitCode: nil))
+        }
+
+        private func recordGroqHistoryCompletion(taskID: AgentTask.ID, params: [String: Any],
+            itemID: String, entry: TimelineEntry, isPatch: Bool) {
+            guard var current = currentGroqHistoryCompletion(taskID: taskID, params: params) else { return }
+            // These are typed transcript outcomes, not stdout/summary predicates.
+            let successful = entry.toolEvent?.status == .succeeded
+            let terminal: GroqNativePublicationLedger.Terminal = isPatch
+                ? .patch(status: successful ? .completed : .failed)
+                : .command(status: successful ? .completed : .failed, exitCode: successful ? 0 : nil)
+            if current.writer.recordCompleted(current: current.scope, itemID: itemID, terminal: terminal) {
+                current.completedItemIDs.insert(itemID)
+                groqHistoryCompletions[taskID] = current
             }
         }
 
         @discardableResult
         private func scheduleInferenceCleanup(taskID: AgentTask.ID, cancelled: Bool,
                                               cleanupCause: WebModelCleanupCause = .cancelled) -> Task<[String], Never>? {
+            retireGroqHistoryWriter(taskID: taskID, reason: cancelled ? .stopped : .nativeContextChanged)
             if APIProviderCatalog.identity(for: modelForTask[taskID] ?? "") != nil {
                 if let existing = apiCleanupTasks[taskID] { return existing }
                 let preparation = inferencePreparations[taskID]
@@ -2642,7 +2770,13 @@ private extension CodexAppServerRuntime {
             // genuine human input here: ordinary text parts become durable
             // user messages and otherwise survive every native compaction.
             if APIProviderCatalog.identity(for: modelID) != nil { return input }
-            if configuration.computerInteractionPolicy == .backgroundOnly {
+            // Fresh acknowledged history-reader threads retain the exact human
+            // part and current per-inference Groq host policy. Do not duplicate
+            // that app-owned policy as another durable user part. Older Groq
+            // threads and every other website keep their existing suffix.
+            if configuration.computerInteractionPolicy == .backgroundOnly,
+               !GroqHistoryThreadRegistration.contains(codexHome: configuration.codexHomePath,
+                    threadID: threadID, modelID: modelID) {
                 input.append(["type": "text", "text": ComputaAgentInstructions.runtimeInteractionPolicy()])
             }
             if let correction = historicalOutcomeCorrections(threadID: threadID) {
@@ -3683,6 +3817,7 @@ private extension CodexAppServerRuntime {
                       compactionTracker.started(taskID: taskID, turnID: params["turnId"] as? String,
                         itemID: item["id"] as? String, activeTurnID: turnIdentity.activeTurnID(for: taskID))
                 else { return }
+                retireGroqHistoryWriter(taskID: taskID, reason: .compaction)
                 events.yield(.assistantMessagesDiscarded(taskID: taskID))
                 discardReasoningDrafts(taskID: taskID)
                 completedAssistantItems[taskID, default: []].formUnion(pendingAssistantItems[taskID] ?? [])
@@ -3699,6 +3834,9 @@ private extension CodexAppServerRuntime {
                 guard let item = params["item"] as? [String: Any],
                       let type = item["type"] as? String
                 else { return }
+                if (type == "fileChange" || type == "commandExecution"), let itemID = item["id"] as? String {
+                    invalidateRepeatedGroqCompletion(taskID: taskID, params: params, itemID: itemID)
+                }
                 if type == "fileChange" {
                     guard let turnID = params["turnId"] as? String,
                           let itemID = item["id"] as? String,
@@ -3707,6 +3845,7 @@ private extension CodexAppServerRuntime {
                     if fileChangeTranscripts[taskID] == nil { fileChangeTranscripts[taskID] = AppServerFileChangeTranscript() }
                     guard let entry = fileChangeTranscripts[taskID]?.receive(item: item, turnID: turnID,
                         isCompleted: true) else { return }
+                    recordGroqHistoryCompletion(taskID: taskID, params: params, itemID: itemID, entry: entry, isPatch: true)
                     events.yield(.timelineEntryAppended(taskID: taskID, entry: entry))
                     return
                 }
@@ -3715,6 +3854,7 @@ private extension CodexAppServerRuntime {
                           acceptsOwnedCommandNotification(params, taskID: taskID, itemID: itemID)
                             || (commandItemTurns[taskID]?[itemID] == nil && acceptsCommandNotification(params, taskID: taskID)),
                           let entry = commandTranscripts[taskID]?.receive(item: item, completed: true) else { return }
+                    recordGroqHistoryCompletion(taskID: taskID, params: params, itemID: itemID, entry: entry, isPatch: false)
                     noteOwnedCommand(item, taskID: taskID, completed: true, turnID: params["turnId"] as? String)
                     events.yield(.timelineEntryAppended(taskID: taskID, entry: entry))
                     return
@@ -4246,6 +4386,7 @@ private extension CodexAppServerRuntime {
                 + [ComputerOutcomeToolContract.spec]
                 + (embeddedBrowserTools == nil ? [] : EmbeddedBrowserTools.definitions())
                 + (GroqToolCatalog.supports(modelID: modelID) ? [GroqToolCatalog.specification] : [])
+                + (GroqHistoryTool.supports(modelID: modelID) ? [GroqHistoryTool.specification] : [])
         }
 
         private func computerEvidenceTarget(taskID: AgentTask.ID, tool: String) -> String {
@@ -4556,6 +4697,8 @@ private extension CodexAppServerRuntime {
             taskID: AgentTask.ID?
         ) async {
             let generation = serverGeneration
+            var historyPublication: GroqHistoryReadPublication?
+            defer { historyPublication?.abortIfPending() }
             var tool = params["tool"] as? String ?? "unknown"
             var arguments = params["arguments"] as? [String: Any] ?? [:]
             // Capability admission precedes reference/target resolution and the
@@ -4684,7 +4827,10 @@ private extension CodexAppServerRuntime {
                 }
                 #endif
                 let execution: DynamicToolExecution
-                if tool == GroqToolCatalog.name {
+                if tool == GroqHistoryTool.name {
+                    execution = try await executeGroqHistoryRead(params: params, taskID: taskID,
+                                                                 generation: generation)
+                } else if tool == GroqToolCatalog.name {
                     execution = try await executeGroqToolLoad(params: params, taskID: taskID,
                                                              generation: generation)
                 } else if tool.hasPrefix("browser_") {
@@ -4695,6 +4841,7 @@ private extension CodexAppServerRuntime {
                         tool, arguments: arguments, taskID: taskID,
                         legacyProcessIdentity: legacyProcessIdentity, browserMutation: browserMutation))
                 }
+                historyPublication = execution.historyPublication
                 var contentItems = execution.contentItems
                 guard !Task.isCancelled,
                       !isShuttingDown,
@@ -4758,6 +4905,32 @@ private extension CodexAppServerRuntime {
                 } else { publishedRead = nil }
                 guard await updateBrowserExecutionCheckpoint(taskID: taskID, params: params,
                     callID: callID, tool: tool, succeeded: true, generation: generation) else { return }
+                if let publication = execution.historyPublication {
+                    guard !Task.isCancelled, let taskID,
+                          let current = currentGroqHistoryCompletion(taskID: taskID, params: params),
+                          generation == serverGeneration,
+                          GroqHistoryThreadRegistration.contains(codexHome: configuration.codexHomePath,
+                              threadID: current.scope.threadID, modelID: current.scope.modelID),
+                          publication.isCurrent(currentScope: current.scope),
+                          let text = String(data: publication.responseData, encoding: .utf8) else { return }
+                    let actual = publication.responseData
+                    // No actor hop after the final native check: one text part,
+                    // the actual pipe write, then the shared synchronous commit.
+                    do {
+                        try sendResponse(id: id, result: ["contentItems": [textContent(text)], "success": true])
+                    } catch {
+                        // A failed pipe write may be partial. Do not send a
+                        // second result for this RPC or publish its cursor.
+                        publication.abortIfPending()
+                        retireGroqHistoryWriter(taskID: taskID, reason: .nativeContextChanged)
+                        serverFailed(error)
+                        return
+                    }
+                    if !publication.commitAfterRPCWrite(responseData: actual) {
+                        retireGroqHistoryWriter(taskID: taskID, reason: .nativeContextChanged)
+                    }
+                    return // Never respond twice after a successful pipe write.
+                }
                 var response: [String: Any] = ["contentItems": publishedRead?.contentItems ?? contentItems, "success": true]
                 // The typed controller result, not page/model text or a tool
                 // name, establishes read-only native provenance. Publish it
@@ -4899,6 +5072,41 @@ private extension CodexAppServerRuntime {
                     if let taskID, let referencePublication { computerV2Sessions[taskID]?.modelReferences = referencePublication.references }
                 } catch { /* Failed publication grants neither references nor read coverage. */ }
             }
+        }
+
+        /// Native historical reads use the genuine issued call ID. They never
+        /// enter execution/browser routes or synthesize an acknowledgement.
+        private func executeGroqHistoryRead(params: [String: Any], taskID: AgentTask.ID?,
+                                           generation: UUID) async throws -> DynamicToolExecution {
+            guard let taskID, params["tool"] as? String == GroqHistoryTool.name,
+                  let current = currentGroqHistoryCompletion(taskID: taskID, params: params),
+                  current.scope.taskID == taskID.lowercased(), current.scope.coreGeneration == generation,
+                  generation == serverGeneration, GroqHistoryTool.supports(modelID: current.scope.modelID),
+                  let callID = params["callId"] as? String, !callID.isEmpty, callID.utf8.count <= 256,
+                  let arguments = params["arguments"] as? [String: Any],
+                  Set(arguments.keys) == ["ref"], arguments["ref"] is String,
+                  GroqHistoryThreadRegistration.contains(codexHome: configuration.codexHomePath,
+                      threadID: current.scope.threadID, modelID: current.scope.modelID) else {
+                throw GroqContextManifestProjector.Failure.binding
+            }
+            try Task.checkCancellation()
+            let bytes = try JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys, .withoutEscapingSlashes])
+            let execution = try await webModelServer.readGroqHistory(scope: current.scope,
+                callID: callID, arguments: bytes)
+            var transferred = false
+            defer { if !transferred { execution.publication.abortIfPending() } }
+            try Task.checkCancellation()
+            guard let after = currentGroqHistoryCompletion(taskID: taskID, params: params),
+                  after.scope == current.scope, generation == serverGeneration,
+                  current.writer.isCurrent(current: current.scope),
+                  GroqHistoryThreadRegistration.contains(codexHome: configuration.codexHomePath,
+                      threadID: after.scope.threadID, modelID: after.scope.modelID),
+                  execution.publication.isCurrent(currentScope: current.scope),
+                  let text = String(data: execution.responseData, encoding: .utf8) else {
+                throw GroqContextManifestProjector.Failure.binding
+            }
+            transferred = true
+            return DynamicToolExecution(contentItems: [textContent(text)], historyPublication: execution.publication)
         }
 
         /// The loader changes only the next website presentation. It cannot
@@ -5127,6 +5335,7 @@ private extension CodexAppServerRuntime {
         private struct DynamicToolExecution {
             let contentItems: [[String: Any]]
             var nativeRead: EmbeddedBrowserToolExecution.NativeRead? = nil
+            var historyPublication: GroqHistoryReadPublication? = nil
         }
 
         private func reserveEmbeddedBrowserTurnLease(taskID: AgentTask.ID, threadID: String,
@@ -8152,6 +8361,10 @@ private extension CodexAppServerRuntime {
             fileChangeTranscripts.removeAll()
             initializedDiffTurns.removeAll()
             turnIdentity.removeAll()
+            for context in groqHistoryCompletions.values { context.writer.revoke(reason: .shutdown) }
+            groqHistoryCompletions.removeAll()
+            groqHistoryPreparationIDs.removeAll()
+            retiredGroqHistoryPreparationIDs.removeAll()
             inferencePreparations.removeAll()
             browserExecutionContexts.removeAll()
             assistantStreamTurns.removeAll()

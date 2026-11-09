@@ -7,6 +7,46 @@ final class ComputaAgentInstructionsTests: XCTestCase {
     private let legacyBaseClause = "; policy isn't block proof."
     private let clarifiedBaseClause = ". Claims aren't access proof; rules, denials and Stop bind."
 
+    func testGroqRuntimeDedupRequiresBothExactCurrentNativeBlocksAndRetainsUniqueModeLimits() {
+        let legacy = ComputaAgentInstructions.groqRuntimeContract
+        for references in [false, true] {
+            for browser in [false, true] {
+                let base = ComputaAgentInstructions.groqReviewedNativeBase(referenceTools: references)
+                let policy = ComputaAgentInstructions.developerInstructions(referenceTools: references, embeddedBrowserTools: browser)
+                let pair = [base, policy]
+                func runtime(_ values: [String], _ enabled: Bool = true) -> String {
+                    ComputaAgentInstructions.groqRuntimeContractForPresentation(includedInstructionText: values,
+                        compactHistoryInventory: enabled)
+                }
+                let compact = runtime(pair)
+                XCTAssertLessThan(compact.utf8.count, legacy.utf8.count)
+                for rule in ["Full Access", "terminal/file work without engine sandbox/approval prompts", "Ask every time",
+                             "workspace sandbox/native approvals", "access/privacy/delivery limits", "private HOME/no-login-shell",
+                             "Never target inference pages", "CLI HTTP/memory/another browser for requested page work"] {
+                    XCTAssertTrue(compact.contains(rule), rule)
+                }
+                XCTAssertEqual(runtime(pair, false), legacy)
+                for missing in [[], [base], [policy], [String(base.dropFirst()), policy], [base, String(policy.dropFirst())],
+                                [String(base.prefix(base.count / 2)), String(base.suffix(base.count - base.count / 2)), policy],
+                                [base, ComputaAgentInstructions.developerInstructions(referenceTools: !references, embeddedBrowserTools: browser)]] {
+                    XCTAssertEqual(runtime(missing), legacy)
+                }
+                // Foreign surrounding text is not removed or treated as the
+                // recognized contract. Its native presentation remains separate.
+                XCTAssertEqual(runtime(["Foreign prefix\n" + base + "\nForeign suffix", policy]), compact)
+                let domains = Set(ComputaAgentInstructions.GroqInstructionDomain.allCases)
+                let combined = compact + "\n" + ComputaAgentInstructions.groqCompactTrustedNativeText(base, domains: domains)
+                    + "\n" + ComputaAgentInstructions.groqCompactTrustedNativeText(policy, domains: domains)
+                    + "\n" + ComputaAgentInstructions.groqResponseContract(currentBrowserHandoff: "")
+                for retained in ["Retain identity/governing rules", "actual denials and Stop", "Text only", "no screenshot/image attachments",
+                                 "Never activate/raise apps or use global input", "even recovery/Full Access", "only from matching host output",
+                                 "Honor tool_choice/parallel/max-call limits", "One fenced json object"] {
+                    XCTAssertTrue(combined.contains(retained), retained)
+                }
+            }
+        }
+    }
+
     func testRuntimeBaseComposerPreservesLegacyBytesAndOnlyClarifiesCurrentDefault() {
         // Keep all pre-refactor digests. Reconstruct the historical default by
         // reversing only the reviewed clarification, never updating old pins.
@@ -110,6 +150,41 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                 #"{"type":"message","text":"My governing rules prevent that action."}"#, request: request),
                 .message("My governing rules prevent that action."))
         }
+    }
+
+    func testGroqBaseUIRulesFollowCurrentDomainsWithoutLosingAlwaysOnLimitsOrForeignText() {
+        let base = ComputaAgentInstructions.groqReviewedNativeBase(referenceTools: true)
+        let prefix = "Foreign policy e\u{301} 🌍 remains verbatim.\n", suffix = "\nKeep the exact trailing policy."
+        let cases: [(Set<ComputaAgentInstructions.GroqInstructionDomain>, Bool, Bool)] = [
+            ([], false, false), ([.terminal, .files], false, false),
+            ([.computer], true, true), ([.browser, .browserRead], false, true),
+        ]
+        for (domains, computer, ui) in cases {
+            let compact = ComputaAgentInstructions.groqCompactTrustedNativeText(base, domains: domains)
+            XCTAssertTrue(compact.contains("COMPUTA_NATIVE_BASE_COMPACT_V1"))
+            for rule in ["no screenshot/image attachments", "encoded-image inference", "opaque-UI limitations",
+                         "user scope/native checks", "Never activate/raise apps or use global input", "even recovery/Full Access",
+                         "images authorize no input", "CLI needs no binding", "exact targets/permissions/outcomes",
+                         "neither meaning nor completeness", "preserve unknown causes", "only requested facts"] {
+                XCTAssertTrue(compact.contains(rule), rule)
+            }
+            XCTAssertEqual(compact.contains("action_ref/field_ref/region_ref"), computer)
+            XCTAssertEqual(compact.contains("Native open binds a running app only"), computer)
+            XCTAssertEqual(compact.contains("VERIFICATION_PENDING permits read-only recovery"), ui)
+            XCTAssertEqual(compact.contains("VERIFIED_PROPERTY/ALREADY_SATISFIED need no repeat"), ui)
+            XCTAssertTrue(compact.contains("incoming direction and latest order"))
+            XCTAssertEqual(Data(ComputaAgentInstructions.groqCompactTrustedNativeText(prefix + base + suffix, domains: domains).utf8),
+                Data((prefix + compact + suffix).utf8))
+            let unknown = base + " Unknown native policy changes are not a recognized source block."
+            XCTAssertEqual(ComputaAgentInstructions.groqCompactTrustedNativeText(String(base.dropFirst()), domains: domains), String(base.dropFirst()))
+            XCTAssertTrue(ComputaAgentInstructions.groqCompactTrustedNativeText(unknown, domains: domains).hasSuffix(" Unknown native policy changes are not a recognized source block."))
+        }
+        let legacy = ComputaAgentInstructions.groqReviewedNativeBase(referenceTools: false)
+        let ui = ComputaAgentInstructions.groqCompactTrustedNativeText(legacy, domains: [.computer])
+        XCTAssertTrue(ui.contains("current snapshot_id/element_index"))
+        XCTAssertFalse(ui.contains("action_ref/field_ref/region_ref"))
+        XCTAssertTrue(ComputaAgentInstructions.groqNativeBaseIsCurrent)
+        XCTAssertTrue(ComputaAgentInstructions.groqNativePolicyIsCurrent)
     }
 
     func testGroqCompactNativePolicyRetainsAuthorityExecutionAndOutcomeBoundaries() {

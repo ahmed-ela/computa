@@ -16,6 +16,35 @@ final class GroqBundledPreflightProducerTests: XCTestCase {
         try await produce(choice: WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B"))
     }
 
+    func testDiscoveryNoticeJoinsUnloadedRowsWithExactLoadedSchemas() throws {
+        let names = [GroqToolCatalog.name, GroqHistoryTool.name, "computer_v2_status"]
+        let tools = names.map { GroqProducerFacts.Tool(local: $0, qualified: $0) }
+        let revision = String(repeating: "a", count: 64)
+        let unloaded: [String: Any] = ["catalog_revision": revision, "loaded": names,
+            "inventory": [["exec_command", "function"]]]
+        let legacy: [String: Any] = ["catalog_revision": revision, "loaded": names,
+            "inventory": (names + ["exec_command"]).map { [$0, "Inert purpose", "function"] }]
+        let expected = Set(names + ["exec_command"])
+        XCTAssertEqual(try GroqProducerFacts.catalogNames(unloaded, tools: tools), expected)
+        XCTAssertEqual(try GroqProducerFacts.catalogNames(legacy, tools: tools), expected)
+        let rows = try XCTUnwrap(unloaded["inventory"] as? [[String]])
+        XCTAssertFalse(rows.contains { $0.first == GroqToolCatalog.name }, "The loader is intentionally absent from unloaded rows")
+        for kind in ["duplicate_loaded", "missing_schema", "foreign_schema", "unknown_kind", "duplicate_row", "loaded_in_unloaded", "extra_key"] {
+            var changed = unloaded, shown = tools
+            switch kind {
+            case "duplicate_loaded": changed["loaded"] = names + [GroqToolCatalog.name]
+            case "missing_schema": shown.removeLast()
+            case "foreign_schema": shown.append(.init(local: "foreign", qualified: "foreign"))
+            case "unknown_kind": changed["inventory"] = [["exec_command", "unknown"]]
+            case "duplicate_row": changed["inventory"] = [["exec_command", "function"], ["exec_command", "function"]]
+            case "loaded_in_unloaded": changed["inventory"] = [[GroqToolCatalog.name, "function"]]
+            case "extra_key": changed["foreign"] = true
+            default: XCTFail("Unknown synthetic notice mutation")
+            }
+            XCTAssertThrowsError(try GroqProducerFacts.catalogNames(changed, tools: shown), kind)
+        }
+    }
+
     private func produce(choice: WebsiteModelChoice) async throws {
         guard ProcessInfo.processInfo.environment["COMPUTA_TEST_GROQ_BUNDLED_PREFLIGHT"] == "1" else {
             throw XCTSkip("Explicit opt-in required: COMPUTA_TEST_GROQ_BUNDLED_PREFLIGHT=1")
@@ -109,6 +138,8 @@ final class GroqBundledPreflightProducerTests: XCTestCase {
                 XCTAssertNotEqual(inference.bodyMetadataMatches, false, "Body metadata, when present, must agree with the already checked native hook context")
                 XCTAssertTrue(inference.fullNativeRegistryPresent)
                 XCTAssertTrue(inference.registeredLoaderPresent)
+                XCTAssertTrue(inference.registeredHistoryReaderPresent)
+                XCTAssertEqual(inference.fullRegistryCount, 24, "Keep the complete current native registry, including the history reader")
                 XCTAssertTrue(inference.fixtureUserPreserved)
                 XCTAssertTrue(inference.candidates.allSatisfy { $0.nativeHTTPBodySHA256 == inference.nativeHTTPBodySHA256 })
                 XCTAssertLessThanOrEqual(inference.candidates.count, 4)
@@ -123,6 +154,8 @@ final class GroqBundledPreflightProducerTests: XCTestCase {
             XCTAssertTrue(audit.threadBindingConsistent)
             XCTAssertTrue(GroqToolThreadRegistration.contains(codexHome: home.path,
                 threadID: first.threadID, modelID: choice.modelID), "Require accepted native thread registration")
+            XCTAssertTrue(GroqHistoryThreadRegistration.contains(codexHome: home.path,
+                threadID: first.threadID, modelID: choice.modelID), "Require accepted native history-reader registration")
             let cleanup = try WebsiteSessionCleanupStore(directory: home.appendingPathComponent("WebsiteSessionCleanup-v1"))
                 .transactionRecords(for: taskID, turnID: first.turnID)
             let closed = cleanup.filter { $0.outcome == .closed }
@@ -217,16 +250,19 @@ final class GroqBundledPreflightProducerTests: XCTestCase {
 
     private func retireRegistrations(home: URL, threadID: String?, modelID: String) -> Bool {
         guard let threadID, UUID(uuidString: threadID) != nil,
-              let groqMarker = GroqToolThreadRegistration.marker(codexHome: home.path, threadID: threadID, modelID: modelID) else { return false }
+              let groqMarker = GroqToolThreadRegistration.marker(codexHome: home.path, threadID: threadID, modelID: modelID),
+              let historyMarker = GroqHistoryThreadRegistration.marker(codexHome: home.path, threadID: threadID, modelID: modelID) else { return false }
         let defaults = UserDefaults.standard
         let referenceKey = "ComputaReferenceToolThreads.v1"
         let referenceMarker = GroqProducerFacts.hash(Data(home.path.utf8)) + ":" + threadID
         // Remove only these exact registrations; preserve every other test/user marker.
-        for (key, marker) in [(GroqToolThreadRegistration.preferenceKey, groqMarker), (referenceKey, referenceMarker)] {
+        for (key, marker) in [(GroqToolThreadRegistration.preferenceKey, groqMarker),
+                              (GroqHistoryThreadRegistration.preferenceKey, historyMarker), (referenceKey, referenceMarker)] {
             let original = defaults.stringArray(forKey: key) ?? []
             if original.contains(marker) { defaults.set(original.filter { $0 != marker }, forKey: key) }
         }
         return !(defaults.stringArray(forKey: GroqToolThreadRegistration.preferenceKey) ?? []).contains(groqMarker)
+            && !(defaults.stringArray(forKey: GroqHistoryThreadRegistration.preferenceKey) ?? []).contains(historyMarker)
             && !(defaults.stringArray(forKey: referenceKey) ?? []).contains(referenceMarker)
     }
 }
@@ -280,6 +316,7 @@ private struct GroqProducerInference: Codable {
     var nativeHTTPPairs: [GroqProducerPair] = []
     var fullNativeRegistryPresent = false
     var registeredLoaderPresent = false
+    var registeredHistoryReaderPresent = false
     var bodyMetadataMatches: Bool?
     var fixtureUserPreserved = false
     var candidates: [GroqProducerCandidate] = []
@@ -300,10 +337,13 @@ private final class GroqProducerReducer: @unchecked Sendable {
     init(taskID: String, modelID: String, userText: String) {
         self.taskID = taskID; self.modelID = modelID; userSHA256 = GroqProducerFacts.hash(Data(userText.utf8))
         nativeNames = Set((ComputerV2ToolContract.referenceSpecs(for: modelID)
-            + [ComputerOutcomeToolContract.spec, GroqToolCatalog.specification] + EmbeddedBrowserTools.definitions()).compactMap { $0["name"] as? String })
+            + [ComputerOutcomeToolContract.spec, GroqToolCatalog.specification, GroqHistoryTool.specification] + EmbeddedBrowserTools.definitions()).compactMap { $0["name"] as? String })
     }
     func snapshot() -> Snapshot { lock.lock(); defer { lock.unlock() }; return Snapshot(inferences: records, issues: issues.sorted()) }
     func observe(_ context: WebModelServer.GroqPreflightContextForTesting, _ event: WebModelServer.GroqPreflightEventForTesting) {
+        // This older four-round producer issues no reader calls. Ignore the
+        // new diagnostic event without allocating a record or changing checks.
+        if case .historyReaderPreview = event { return }
         lock.lock(); defer { lock.unlock() }
         guard context.taskID == taskID, context.modelID == modelID, context.compactToolThread,
               [context.taskID, context.threadID, context.turnID].allSatisfy({ UUID(uuidString: $0) != nil }) else {
@@ -325,6 +365,7 @@ private final class GroqProducerReducer: @unchecked Sendable {
             index = records.count - 1
         }
         switch event {
+        case .historyReaderPreview: break
         case let .canonical(bytes):
             guard records[index].nativeHTTPBodySHA256.isEmpty,
                   let object = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
@@ -341,6 +382,7 @@ private final class GroqProducerReducer: @unchecked Sendable {
             records[index].fullRegistryCount = definitions.count
             records[index].fullNativeRegistryPresent = nativeNames.isSubset(of: Set(definitions.map { $0.local }))
             records[index].registeredLoaderPresent = GroqToolCatalog.isRegisteredLoader(tools)
+            records[index].registeredHistoryReaderPresent = GroqHistoryTool.registeredName(in: tools) != nil
             if let client = object["client_metadata"] as? [String: Any], let raw = client["x-codex-turn-metadata"] as? String,
                let metadata = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any] {
                 records[index].bodyMetadataMatches = metadata["thread_id"] as? String == context.threadID
@@ -441,7 +483,7 @@ private actor GroqProducerTransport: WebModelTransport {
             let tools = GroqProducerFacts.tools(try XCTUnwrap(object["tools"] as? [[String: Any]]))
             let inventory = try GroqProducerFacts.inventory(prompt)
             let currentRevision = try XCTUnwrap(inventory["catalog_revision"] as? String)
-            let names = (inventory["inventory"] as? [[String]] ?? []).compactMap(\.first)
+            let names = try GroqProducerFacts.catalogNames(inventory, tools: tools)
             let actualLoader = try XCTUnwrap(names.first { $0 == GroqToolCatalog.name || $0 == "functions." + GroqToolCatalog.name })
             let actualStatus = try XCTUnwrap(names.first { $0 == "computer_v2_status" || $0 == "functions.computer_v2_status" })
             if revision.isEmpty { revision = currentRevision; loaderName = actualLoader; statusName = actualStatus }
@@ -537,6 +579,27 @@ private enum GroqProducerFacts {
             }
             return (value["name"] as? String).map { [Tool(local: $0, qualified: $0)] } ?? []
         }
+    }
+    /// The current native profile lists only UNLOADED discovery rows; loaded
+    /// names are proved independently by the exact current callable schemas.
+    /// Legacy three-column discovery may repeat loaded names in its rows.
+    static func catalogNames(_ inventory: [String: Any], tools: [Tool]) throws -> Set<String> {
+        guard Set(inventory.keys) == ["catalog_revision", "loaded", "inventory"],
+              let revision = inventory["catalog_revision"] as? String, revision.utf8.count == 64,
+              revision.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+              let loaded = inventory["loaded"] as? [String], loaded.count <= 128,
+              !loaded.isEmpty, loaded.allSatisfy({ !$0.isEmpty }), Set(loaded).count == loaded.count,
+              let rows = inventory["inventory"] as? [[String]], rows.count <= 128,
+              rows.allSatisfy({ (2...3).contains($0.count) && !($0.first ?? "").isEmpty
+                  && ["function", "custom"].contains($0.last ?? "") }),
+              Set(rows.map(\.count)).count <= 1 else { throw GroqProducerFailure("invalid_discovery_notice") }
+        let discovered = rows.compactMap(\.first), schemaNames = tools.map(\.qualified)
+        guard Set(discovered).count == discovered.count, Set(schemaNames).count == schemaNames.count,
+              Set(loaded) == Set(schemaNames),
+              rows.first?.count != 2 || Set(loaded).isDisjoint(with: discovered) else {
+            throw GroqProducerFailure("invalid_discovery_notice")
+        }
+        return Set(discovered).union(loaded)
     }
     static func pairFacts(_ object: [String: Any]) throws -> [GroqProducerPair] {
         let items = try XCTUnwrap(object["input"] as? [[String: Any]])

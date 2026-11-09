@@ -37,6 +37,15 @@ struct WebsiteTurnContinuation: Sendable {
         _ = try requestContext(request)
     }
 
+    /// Private comparison bytes for digest equality only, using exactly the
+    /// continuation parser's lossless value equivalence and traversal bounds.
+    /// Never substitute this encoding for raw source, history or payload bytes.
+    static func canonicalValueDataForDigest(_ data: Data) throws -> Data {
+        guard data.count <= WebModelResponseCodec.maximumPromptBytes else { throw Failure.contextLimitExceeded }
+        var parser = JSONParser(data)
+        return try parser.parse().encoded()
+    }
+
     init(request: WebModelResponseCodec.Request, encodedResponse: Data) throws {
         let context = try Self.requestContext(request)
         let response = try Self.completedResponse(encodedResponse, streamed: request.stream)

@@ -64,6 +64,44 @@ final class GroqToolCatalogTests: XCTestCase {
         XCTAssertEqual(try encode(GroqToolCatalog.restoringRegisteredLoaderBounds(canonicalLoader())),try encode(canonicalLoader()))
     }
 
+    func testNativeHistoryDisplayChangesOnlyNonemptyLoaderItemsAndPreservesEmptyAndForeignSchemas() throws {
+        let seed = try makeSeed(), baseline = try GroqToolCatalog.baseline(for: seed)
+        let canonical = canonicalLoader(), canonicalBytes = try encode(GroqToolCatalog.specification)
+        let legacy = try XCTUnwrap(baseline.displaySchemas([canonical]).first)
+        XCTAssertEqual(try encode(baseline.displaySchemas([canonical], compactHistoryInventory: false).first!), try encode(legacy))
+        let compact = try XCTUnwrap(baseline.displaySchemas([canonical], compactHistoryInventory: true).first)
+        var expected = legacy
+        var schema = try XCTUnwrap(expected["parameters"] as? [String: Any])
+        var properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+        var names = try XCTUnwrap(properties["names"] as? [String: Any])
+        let oldItems = try XCTUnwrap(names["items"] as? [String: Any])
+        XCTAssertEqual(oldItems["enum"] as? [String], baseline.loaderChoices)
+        names["items"] = ["type": "string"]; properties["names"] = names; schema["properties"] = properties
+        expected["parameters"] = schema
+        XCTAssertEqual(try encode(compact), try encode(expected), "Only the redundant nonempty enum may differ")
+        XCTAssertEqual(compact["description"] as? String, legacy["description"] as? String)
+        XCTAssertTrue((compact["description"] as? String)?.contains("fitting loaded subset and deferred names") == true)
+        XCTAssertEqual(try encode(GroqToolCatalog.specification), canonicalBytes)
+        XCTAssertEqual(try encode(GroqToolCatalog.restoringRegisteredLoaderBounds(canonical)), try encode(canonical))
+        XCTAssertEqual(try GroqToolCatalog.baseline(for: seed), baseline)
+        let empty = try GroqToolCatalog.baseline(for: makeSeed(callable: [GroqToolCatalog.name], allowed: [GroqToolCatalog.name]))
+        XCTAssertTrue(empty.loaderChoices.isEmpty)
+        XCTAssertEqual(try encode(empty.displaySchemas([canonical], compactHistoryInventory: true)), try encode(empty.displaySchemas([canonical])))
+        var foreign = canonical; foreign["name"] = "foreign_loader"
+        var conflicting = canonical; conflicting["parameters"] = ["type": "object", "required": ["names"]]
+        var preEnumeratedForeign = legacy
+        preEnumeratedForeign["description"] = "foreign same-name enum is not a native loader declaration"
+        preEnumeratedForeign["metadata"] = ["foreign": true]
+        for definition in [foreign, conflicting, preEnumeratedForeign] {
+            XCTAssertEqual(try encode(baseline.displaySchemas([definition], compactHistoryInventory: true)), try encode([definition]))
+        }
+        let namespace: [String: Any] = ["type": "namespace", "name": "functions", "tools": [canonical]]
+        let shown = try XCTUnwrap(baseline.displaySchemas([namespace], compactHistoryInventory: true).first)
+        XCTAssertEqual(try encode(try XCTUnwrap(shown["tools"] as? [[String: Any]])), try encode([compact]))
+        let foreignNamespace: [String: Any] = ["type": "namespace", "name": "foreign", "tools": [canonical]]
+        XCTAssertEqual(try encode(baseline.displaySchemas([foreignNamespace], compactHistoryInventory: true)), try encode([foreignNamespace]))
+    }
+
     func testBudgetRejectionHintsUseOnlyTheExactAdmittedOfferAndCurrentPolicy() throws {
         var catalog = GroqToolCatalog()
         let scope = makeScope()
