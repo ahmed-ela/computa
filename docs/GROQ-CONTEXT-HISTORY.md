@@ -72,6 +72,24 @@ permissions, canonical requests and executor checks are never rewritten.
 
 ## Validation and limits
 
+The final handoff distinguishes eligible unloaded schemas from unavailable
+capabilities. With a currently allowed loader, the model loads missing schemas
+itself. A missing browser-entry hint appears only when no recognized browser
+entry is callable and an eligible entry remains unloaded. Native `computer_v2_*`
+tools control native apps; webpage tasks use the separate `browser_*` contract.
+Loading still executes nothing and does not bypass binding, permissions or exact
+schema validation.
+
+The bundled schema-loading regression reproduces the observed four-tool
+selection (`exec_command` plus three native-app tools), then loads
+`browser_open`. It checks the exact native/display call and result pairs,
+immutable history prefixes, current schema, prompt hashes and three cleanup
+receipts. No command, app inspection or browser action runs:
+
+```sh
+COMPUTA_TEST_GROQ_LOADER_SELF_SERVICE=1 swift test --filter GroqBundledPreflightProducerTests/testBundledNativeComputerSelection
+```
+
 Run the controlled native fixture with:
 
 ```sh
@@ -97,3 +115,11 @@ quota availability or browser coverage. Historical provenance is not imported
 across turns or restarts. Existing threads without the new native registration
 keep the legacy route. CAPTCHA, provider limits, uncertain website ownership and
 unconfirmed cleanup remain separate stop conditions.
+
+On 2026-11-09, installed Build 463 returned exact zero-tool markers for GPT-OSS
+120B (5.624 seconds) and Qwen/Qwen3.8-27B (6.002 seconds), with verified website
+selection and saved transcript cleanup. Its fresh 120B combined workflow remained
+unqualified: after successfully loading native-app schemas, the model asked for
+browser tools to be enabled rather than loading them. It performed no command,
+patch or browser action. The revised handoff therefore still needs a fresh live
+combined workflow; marker success is not that evidence.

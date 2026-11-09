@@ -16,6 +16,112 @@ final class GroqBundledPreflightProducerTests: XCTestCase {
         try await produce(choice: WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B"))
     }
 
+    func testBundledNativeComputerSelectionKeepsBrowserEntryLoadableWithoutUserEnablement() async throws {
+        guard ProcessInfo.processInfo.environment["COMPUTA_TEST_GROQ_LOADER_SELF_SERVICE"] == "1" else {
+            throw XCTSkip("Explicit opt-in required: COMPUTA_TEST_GROQ_LOADER_SELF_SERVICE=1")
+        }
+        let failures = try XCTUnwrap(testRun).failureCount
+        let artifact = try ComputaRuntimeArtifact.resolve()
+        XCTAssertEqual(artifact.manifest.sourceCommit, ComputaRuntimeArtifact.sourceCommit)
+        let choice = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B")
+        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appendingPathComponent("GroqLoaderSelfService-" + UUID().uuidString, isDirectory: true)
+        let home = root.appendingPathComponent("Home", isDirectory: true), workspace = root.appendingPathComponent("Workspace", isDirectory: true)
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let task = UUID().uuidString.lowercased(), marker = "GROQ_LOADER_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        let user = "This is a schema-only fixture. First load exactly exec_command, computer_v2_open, computer_v2_fill and computer_v2_read_page. Then load browser_open and acknowledge. Do not execute commands, inspect apps, open pages, perform input or request permissions."
+        let reducer = GroqProducerReducer(taskID: task, modelID: choice.modelID, userText: user)
+        var config = CodexAppServerRuntime.Configuration.externalLocalQwen
+        config.executable = .bundled; config.model = choice.modelID; config.codexHomePath = home.path; config.workspacePath = workspace.path
+        config.protocolTracePath = nil; config.groqPreflightObserverForTesting = { reducer.observe($0, $1) }
+        let runtime = CodexAppServerRuntime(configuration: config, visualGrounder: GroqProducerNoVisualGrounder())
+        let browser = InertRuntimeBrowser(), transport = GroqLoaderSelfServiceTransport(choice: choice, marker: marker)
+        let audit = GroqProducerAudit(taskID: task, marker: marker)
+        let watcher = Task { for await event in runtime.events() { audit.receive(event) } }
+        do {
+            await runtime.configureEmbeddedBrowserTools(EmbeddedBrowserToolController(transport: browser))
+            await runtime.configureEmbeddedWebModelTransport(WebsiteInferenceFixtureTransport(transport))
+            await runtime.setGroqSubmissionIntervalForTesting(.zero)
+            let tasks = try await runtime.loadTasks(); XCTAssertTrue(tasks.isEmpty)
+            try await runtime.configureWorkspace(path: workspace.path, forTaskID: task)
+            try await runtime.submit(prompt: user, toTaskID: task, modelID: choice.modelID)
+            let deadline = ContinuousClock.now + .seconds(300)
+            while !audit.terminal, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+            XCTAssertTrue(audit.terminal); XCTAssertEqual(audit.status, .completed); XCTAssertTrue(audit.finalMarkerSeen)
+            XCTAssertEqual(audit.approvals, 0)
+            let shutdown = await runtime.shutdown(); watcher.cancel(); XCTAssertTrue(shutdown.succeeded)
+            let observed = reducer.snapshot(), receipt = await transport.receipt(), counts = await browser.counts()
+            XCTAssertTrue(observed.issues.isEmpty, observed.issues.joined(separator: ","))
+            XCTAssertEqual(observed.inferences.count, 3); XCTAssertEqual(receipt.sends, 3)
+            XCTAssertEqual(receipt.displayPairs.count, receipt.sends)
+            XCTAssertEqual(receipt.starts.count, 3); XCTAssertEqual(Set(receipt.starts).count, 3)
+            XCTAssertEqual(Set(receipt.starts), Set(receipt.finished))
+            XCTAssertTrue(receipt.firstFourLoaded); XCTAssertTrue(receipt.browserEntryEligibleAfterFirstLoad)
+            XCTAssertTrue(receipt.loaderCallableAfterFirstLoad); XCTAssertTrue(receipt.browserSchemaShownAfterSecondLoad)
+            XCTAssertTrue(receipt.selfServiceHandoffShown); XCTAssertTrue(receipt.deferredPageToolsWithheld)
+            XCTAssertEqual(receipt.onlyLoaderNativePairs, 2)
+            XCTAssertEqual(Set(observed.inferences.map(\.fullRegistrySHA256)).count, 1)
+            for (index, inference) in observed.inferences.enumerated() {
+                XCTAssertTrue(inference.fullNativeRegistryPresent); XCTAssertTrue(inference.registeredLoaderPresent)
+                XCTAssertTrue(inference.registeredHistoryReaderPresent); XCTAssertEqual(inference.fullRegistryCount, 24)
+                XCTAssertTrue(inference.fixtureUserPreserved); XCTAssertEqual(inference.nativeHTTPPairs.count, index)
+                XCTAssertTrue(inference.compactToolThread)
+                XCTAssertNotEqual(inference.bodyMetadataMatches, false)
+                XCTAssertTrue(inference.candidates.allSatisfy { $0.nativeHTTPBodySHA256 == inference.nativeHTTPBodySHA256 })
+                XCTAssertTrue(inference.nativeHTTPPairs.allSatisfy { $0.name == GroqToolCatalog.name
+                    && !$0.callRecordIDPresent && !$0.outputRecordIDPresent })
+                if index > 0 {
+                    let previous = observed.inferences[index - 1].nativeHTTPPairs
+                    XCTAssertEqual(Array(inference.nativeHTTPPairs.prefix(previous.count)), previous)
+                }
+                if receipt.displayPairs.indices.contains(index) {
+                    XCTAssertEqual(inference.nativeHTTPPairs, receipt.displayPairs[index],
+                        "The exact admitted Send must preserve native call IDs, literal args/output hashes and output shape")
+                } else { XCTFail("An admitted native inference has no matching displayed pair capture") }
+                let sentSHA = receipt.promptSHA256.indices.contains(index) ? receipt.promptSHA256[index] : nil
+                XCTAssertEqual(inference.candidates.last?.promptSHA256, sentSHA)
+                XCTAssertEqual(inference.admittedUnits, inference.candidates.last?.sourceUnits)
+                XCTAssertLessThanOrEqual(try XCTUnwrap(inference.admittedUnits), 6_000); XCTAssertNil(inference.rejection)
+            }
+            XCTAssertEqual(counts.created, 0); XCTAssertEqual(counts.mutations, 0); XCTAssertEqual(counts.observations, 0)
+            XCTAssertEqual(counts.activations, 0); XCTAssertEqual(counts.humanCloseAttempts, 0); XCTAssertTrue(counts.humanIntact)
+            let first = try XCTUnwrap(observed.inferences.first)
+            XCTAssertEqual(audit.threadID, first.threadID); XCTAssertTrue(audit.threadBindingConsistent)
+            let cleanup = try WebsiteSessionCleanupStore(directory: home.appendingPathComponent("WebsiteSessionCleanup-v1"))
+                .transactionRecords(for: task, turnID: first.turnID)
+            let closed = cleanup.filter { $0.outcome == .closed }
+            XCTAssertEqual(closed.count, 3); XCTAssertEqual(Set(closed.compactMap(\.sessionToken)), Set(receipt.finished))
+            XCTAssertTrue(closed.allSatisfy { $0.isValid && $0.receiptSaved && $0.reason == .transcriptCleared
+                && $0.provider == .groq && $0.modelID == choice.modelID && $0.threadID == first.threadID && $0.turnID == first.turnID
+                && $0.runtimeGeneration == first.runtimeGeneration.uuidString.lowercased() })
+            let journal = home.appendingPathComponent("WebsiteModelEvidence-v1/transactions/" + task + "/" + first.turnID + ".jsonl")
+            let rows = try Data(contentsOf: journal).split(separator: 10).map {
+                try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0)) as? [String: Any])
+            }
+            let released = rows.filter { $0["phase"] as? String == "release_verified" }
+            XCTAssertEqual(released.count, 3)
+            XCTAssertEqual(Set(released.compactMap { $0["cleanupAttemptID"] as? String }), Set(closed.map(\.attemptID)))
+            XCTAssertTrue(released.allSatisfy { $0["transactionMode"] as? String == "explicit_clear_per_inference" })
+            let retired = retireRegistrations(home: home, threadID: first.threadID, modelID: choice.modelID); XCTAssertTrue(retired)
+            guard testRun?.failureCount == failures else { throw GroqProducerFailure("loader_self_service_invariant") }
+            let report = GroqLoaderSelfServiceReport(firstFourLoaded: receipt.firstFourLoaded,
+                browserEntryEligibleAfterFirstLoad: receipt.browserEntryEligibleAfterFirstLoad,
+                loaderCallableAfterFirstLoad: receipt.loaderCallableAfterFirstLoad,
+                browserSchemaShownAfterSecondLoad: receipt.browserSchemaShownAfterSecondLoad,
+                selfServiceHandoffShown: receipt.selfServiceHandoffShown, deferredPageToolsWithheld: receipt.deferredPageToolsWithheld,
+                sends: receipt.sends, closed: closed.count, onlyLoaderNativePairs: receipt.onlyLoaderNativePairs,
+                nativeRegistryUnchanged: Set(observed.inferences.map(\.fullRegistrySHA256)).count == 1,
+                nativeRegistryCount: 24, providerQualificationClaimed: false, realProviderOrBrowserActions: 0)
+            try writeFiniteReport(JSONEncoder().encode(report), prefix: "groqLoaderSelfServiceFinite=")
+            try FileManager.default.removeItem(at: root)
+        } catch {
+            _ = await runtime.shutdown(); watcher.cancel()
+            _ = retireRegistrations(home: home, threadID: audit.threadID ?? reducer.snapshot().inferences.first?.threadID, modelID: choice.modelID)
+            try? FileManager.default.removeItem(at: root)
+            throw error
+        }
+    }
+
     func testDiscoveryNoticeJoinsUnloadedRowsWithExactLoadedSchemas() throws {
         let names = [GroqToolCatalog.name, GroqHistoryTool.name, "computer_v2_status"]
         let tools = names.map { GroqProducerFacts.Tool(local: $0, qualified: $0) }
@@ -563,6 +669,115 @@ private actor GroqProducerTransport: WebModelTransport {
             // Fixed independently configured synthetic menu, never a reflection of requested fields.
             result["modelEvidence"] = ["selected": ["key": choice.key, "label": choice.label],
                 "source": "selected_model_indicator", "verification": "website_selection"]
+        }
+        return try JSONSerialization.data(withJSONObject: result)
+    }
+}
+
+private struct GroqLoaderSelfServiceReport: Codable {
+    let firstFourLoaded: Bool; let browserEntryEligibleAfterFirstLoad: Bool; let loaderCallableAfterFirstLoad: Bool
+    let browserSchemaShownAfterSecondLoad: Bool; let selfServiceHandoffShown: Bool; let deferredPageToolsWithheld: Bool
+    let sends: Int; let closed: Int; let onlyLoaderNativePairs: Int; let nativeRegistryUnchanged: Bool
+    let nativeRegistryCount: Int; let providerQualificationClaimed: Bool; let realProviderOrBrowserActions: Int
+}
+
+private actor GroqLoaderSelfServiceTransport: WebModelTransport {
+    struct Receipt: Sendable {
+        var starts: [String] = [], finished: [String] = [], promptSHA256: [String] = []
+        var displayPairs: [[GroqProducerPair]] = []
+        var sends = 0, onlyLoaderNativePairs = 0
+        var firstFourLoaded = false, browserEntryEligibleAfterFirstLoad = false, loaderCallableAfterFirstLoad = false
+        var browserSchemaShownAfterSecondLoad = false, selfServiceHandoffShown = false, deferredPageToolsWithheld = false
+    }
+    private let choice: WebsiteModelChoice, marker: String
+    private var state = Receipt(), token: String?, reply = "", revision = "", loader = "", firstNames: [String] = [], open = ""
+    init(choice: WebsiteModelChoice, marker: String) { self.choice = choice; self.marker = marker }
+    func receipt() -> Receipt { state }
+    func request(operation: String, params: Data) async throws -> Data {
+        let input = try XCTUnwrap(JSONSerialization.jsonObject(with: params) as? [String: String])
+        var result: [String: Any]
+        switch operation {
+        case "webProviderStart":
+            guard token == nil, state.starts.count < 3, input["provider"] == "groq",
+                  input["modelChoice"].flatMap(WebsiteModelChoice.parse) == choice else { throw GroqProducerFailure("self_service_start") }
+            let fresh = UUID().uuidString.lowercased(); token = fresh; state.starts.append(fresh)
+            result = ["sessionToken": fresh, "state": "ready"]
+        case "webProviderSend":
+            guard input["sessionToken"] == token, state.sends < 3, let prompt = input["prompt"] else { throw GroqProducerFailure("self_service_send") }
+            let raw = try WebsiteRequestFixture.json(in: prompt)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: raw) as? [String: Any])
+            guard object["model"] as? String == choice.modelID else { throw GroqProducerFailure("self_service_model") }
+            let definitions = try XCTUnwrap(object["tools"] as? [[String: Any]]), tools = GroqProducerFacts.tools(definitions)
+            let inventory = try GroqProducerFacts.inventory(prompt), names = try GroqProducerFacts.catalogNames(inventory, tools: tools)
+            let current = try XCTUnwrap(inventory["catalog_revision"] as? String)
+            func exact(_ local: String) throws -> String {
+                let matches = names.filter { $0 == local || $0 == "functions." + local }
+                guard matches.count == 1 else { throw GroqProducerFailure("self_service_inventory") }; return matches.first!
+            }
+            if state.sends == 0 {
+                revision = current; loader = try exact(GroqToolCatalog.name); open = try exact("browser_open")
+                firstNames = try ["exec_command", "computer_v2_open", "computer_v2_fill", "computer_v2_read_page"].map(exact)
+            }
+            guard current == revision, tools.contains(where: { $0.qualified == loader }) else { throw GroqProducerFailure("self_service_loader_missing") }
+            let items = try XCTUnwrap(object["input"] as? [[String: Any]])
+            let calls = items.filter { $0["type"] as? String == "function_call" }, outputs = items.filter { $0["type"] as? String == "function_call_output" }
+            guard calls.count == state.sends, outputs.count == calls.count else { throw GroqProducerFailure("self_service_pairs") }
+            for (index, pair) in zip(calls, outputs).enumerated() {
+                let call = pair.0, output = pair.1
+                let name = try XCTUnwrap(call["name"] as? String), namespace = call["namespace"] as? String
+                guard (namespace.map { $0 + "." + name } ?? name) == loader,
+                      call["call_id"] as? String == output["call_id"] as? String else { throw GroqProducerFailure("self_service_non_loader_call") }
+                let args = try XCTUnwrap(call["arguments"] as? String)
+                let arguments = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(args.utf8)) as? [String: Any])
+                let expected = index == 0 ? firstNames : [open]
+                guard Set(arguments.keys) == ["catalog_revision", "names"], arguments["catalog_revision"] as? String == revision,
+                      arguments["names"] as? [String] == expected else { throw GroqProducerFailure("self_service_native_arguments") }
+                let text = try GroqProducerFacts.outputText(output["output"])
+                let receipt = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+                guard Set(receipt.keys) == ["catalog_revision", "loaded", "available", "execution"],
+                      receipt["catalog_revision"] as? String == revision, receipt["loaded"] as? [String] == expected.sorted(),
+                      receipt["available"] as? String == "next_request", receipt["execution"] as? Bool == false else {
+                    throw GroqProducerFailure("self_service_native_receipt")
+                }
+            }
+            if state.sends == 0 {
+                reply = try GroqProducerFacts.call(loader, arguments: ["catalog_revision": revision, "names": firstNames])
+            } else if state.sends == 1 {
+                let shown = Set(tools.map(\.qualified)), reader = try exact(GroqHistoryTool.name)
+                state.firstFourLoaded = shown == Set(firstNames + [loader, reader])
+                state.browserEntryEligibleAfterFirstLoad = names.contains(open) && !shown.contains(open)
+                state.loaderCallableAfterFirstLoad = shown.contains(loader)
+                state.selfServiceHandoffShown = prompt.contains("load needed schemas yourself, not user enablement")
+                    && prompt.contains("Webpages use browser_*; computer_v2_* is native-app UI.")
+                state.deferredPageToolsWithheld = !names.contains(where: { ["browser_read", "functions.browser_read"].contains($0) })
+                guard state.firstFourLoaded, state.browserEntryEligibleAfterFirstLoad, state.loaderCallableAfterFirstLoad,
+                      state.selfServiceHandoffShown, state.deferredPageToolsWithheld else { throw GroqProducerFailure("self_service_second_frame") }
+                reply = try GroqProducerFacts.call(loader, arguments: ["catalog_revision": revision, "names": [open]])
+            } else {
+                let shown = Set(tools.map(\.qualified)), reader = try exact(GroqHistoryTool.name)
+                let children = definitions.flatMap { $0["type"] as? String == "namespace" ? ($0["tools"] as? [[String: Any]] ?? []) : [$0] }
+                let definition = try XCTUnwrap(children.first { $0["name"] as? String == "browser_open" })
+                let schema = try XCTUnwrap(definition["parameters"] as? [String: Any]), properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+                let requiresURL = (schema["required"] as? [String])?.contains("url") == true
+                let urlType = (properties["url"] as? [String: Any])?["type"] as? String
+                state.browserSchemaShownAfterSecondLoad = shown == Set([loader, reader, open]) && requiresURL && urlType == "string"
+                guard state.browserSchemaShownAfterSecondLoad else { throw GroqProducerFailure("self_service_browser_schema") }
+                state.onlyLoaderNativePairs = calls.count
+                reply = try GroqProducerFacts.message(marker)
+            }
+            state.displayPairs.append(try GroqProducerFacts.pairFacts(object))
+            state.promptSHA256.append(GroqProducerFacts.hash(Data(prompt.utf8))); state.sends += 1
+            result = ["state": "running"]
+        case "webProviderPoll":
+            guard input["sessionToken"] == token else { throw GroqProducerFailure("self_service_poll") }
+            result = ["state": "complete", "text": reply]
+        case "webProviderFinish", "webProviderCancel":
+            guard let current = token, input["sessionToken"] == current else { throw GroqProducerFailure("self_service_cleanup") }
+            state.finished.append(current); token = nil; result = ["cleanup": "transcript_cleared"]
+        default: throw GroqProducerFailure("self_service_operation")
+        }
+        if ["ready", "running", "complete"].contains(result["state"] as? String ?? "") {
+            result["modelEvidence"] = ["selected": ["key": choice.key, "label": choice.label], "source": "selected_model_indicator", "verification": "website_selection"]
         }
         return try JSONSerialization.data(withJSONObject: result)
     }

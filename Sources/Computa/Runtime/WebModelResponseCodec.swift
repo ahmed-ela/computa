@@ -615,7 +615,7 @@ enum WebModelResponseCodec {
             hasFunctions: offered.values.contains { !$0.isCustom }, hasCustomTools: !customNames.isEmpty,
             currentToolHandoff: try currentGroqToolHandoff(projection: displayProjection,
                 offeredNames: Set(offered.keys), allowedNames: policy.allowedNames,
-                validatedReaderName: groqHistoryReaderName))
+                validatedReaderName: groqHistoryReaderName, nativeBrowserEntryNames: Set(groqEntryTools.keys)))
             : ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames,
             includedInstructionText: includedInstructionText, responseFormat: responseFormat,
             singleActionRelay: isChatGPT,
@@ -699,26 +699,30 @@ enum WebModelResponseCodec {
     /// loader example avoids requiring the model to invent its first arguments.
     private static func currentGroqToolHandoff(projection: GroqToolCatalog.Projection?,
                                                offeredNames: Set<String>, allowedNames: Set<String>,
-                                               validatedReaderName: String?) throws -> String {
+                                               validatedReaderName: String?, nativeBrowserEntryNames: Set<String>) throws -> String {
         guard let projection else { return "" }
         func json(_ value: Any) throws -> String {
             String(decoding: try JSONSerialization.data(withJSONObject: value,
                 options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
         }
         let callable = offeredNames.intersection(allowedNames)
-        var result = "Callable names for THIS response: \(try json(callable.sorted())). Other inventory names are not loaded schemas."
+        let heading = "Callable names for THIS response: \(try json(callable.sorted()))."
         guard let loader = callable.sorted().first(where: {
             $0 == GroqToolCatalog.name || $0 == "functions." + GroqToolCatalog.name
-        }) else { return result }
+        }) else { return heading + " Other inventory names are not loaded schemas." }
+        var result = heading + " Eligible unloaded inventory names are loadable with \(loader); load needed schemas yourself, not user enablement."
+        let unloaded = projection.loaderChoices.filter { !projection.selectedNames.contains($0) }
+        if nativeBrowserEntryNames.isDisjoint(with: callable), !nativeBrowserEntryNames.isDisjoint(with: unloaded) {
+            result += " Webpages use browser_*; computer_v2_* is native-app UI."
+        }
         // A preloaded historical reader is not an execution route. Only the
         // exact registered, currently offered/allowed reader is excluded here;
         // a foreign tool with the same spelling keeps legacy behavior.
         var ordinaryCallable = callable.subtracting([loader])
         if let validatedReaderName { ordinaryCallable.remove(validatedReaderName) }
         if !ordinaryCallable.isEmpty {
-            return result + " Call listed tools directly. Do not load them again. Request only missing schemas."
+            return result + " Call listed tools directly. Do not reload them."
         }
-        let unloaded = projection.loaderChoices.filter { !projection.selectedNames.contains($0) }
         guard let example = unloaded.first(where: { $0 == "exec_command" || $0 == "functions.exec_command" })
             ?? unloaded.first else { return result }
         let call: [String: Any] = ["type": "tool_calls", "calls": [["name": loader,

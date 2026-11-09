@@ -11,6 +11,78 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
     private typealias L = GroqNativePublicationLedger
     private typealias J = GroqContextJSONLayout
 
+    func testLoadedComputerSelectionKeepsBrowserEntrySelfServiceWithoutGrantingUnloadedSchemas() throws {
+        let model = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
+        let localNames = ["exec_command", "computer_v2_open", "computer_v2_fill", "computer_v2_read_page"]
+        var loader = GroqToolCatalog.specification, reader = GroqHistoryTool.specification
+        loader["parameters"] = loader.removeValue(forKey: "inputSchema")
+        reader["parameters"] = reader.removeValue(forKey: "inputSchema")
+        let computers = ComputerV2ToolContract.referenceSpecs(for: model).filter { localNames.contains($0["name"] as? String ?? "") }.map { value in
+            var wire = value; wire["parameters"] = wire.removeValue(forKey: "inputSchema"); return wire
+        }
+        let browser = EmbeddedBrowserTools.definitions().map { value in
+            var wire = value; wire["parameters"] = wire.removeValue(forKey: "inputSchema"); return wire
+        }
+        let exec: [String: Any] = ["type": "function", "name": "exec_command", "parameters": ["type": "object",
+            "properties": ["cmd": ["type": "string"]], "required": ["cmd"], "additionalProperties": false]]
+        for namespaced in [false, true] {
+            let prefix = namespaced ? "functions." : ""
+            let definitions = [loader, reader, exec] + computers + browser
+            let tools: [[String: Any]] = namespaced ? [["type": "namespace", "name": "functions", "tools": definitions]] : definitions
+            let data = try encode(["model": model, "instructions": "Keep native scope and permissions.", "input": "Inspect the synthetic webpage.",
+                "tools": tools, "parallel_tool_calls": false])
+            let seed = try XCTUnwrap(C.prepareRequest(data, browserToolAvailability: .unbound).groqToolCatalogSeed)
+            let scope = GroqToolCatalog.Scope(taskID: "40000000-0000-4000-8000-000000000001", threadID: "40000000-0000-4000-8000-000000000002",
+                turnID: "40000000-0000-4000-8000-000000000003", runtimeGeneration: UUID(), preparationID: UUID(), modelID: model)
+            var catalog = GroqToolCatalog()
+            let initial = try catalog.prepare(scope: scope, seed: seed)
+            let selected = Set(localNames.map { prefix + $0 })
+            let receipt = try catalog.load(scope: scope, arguments: encode(["catalog_revision": initial.revision, "names": selected.sorted()]),
+                lastOfferedNames: initial.selectedNames)
+            let receiptObject = try XCTUnwrap(JSONSerialization.jsonObject(with: receipt) as? [String: Any])
+            XCTAssertEqual(Set(try XCTUnwrap(receiptObject["loaded"] as? [String])), selected)
+            XCTAssertEqual(receiptObject["execution"] as? Bool, false)
+            let loaded = try catalog.prepare(scope: scope, seed: seed)
+            let request = try C.prepareRequest(data, browserToolAvailability: .unbound, groqToolCatalogProjection: loaded,
+                groqDirectTools: .loadedOnly, compactHistoryInventory: true)
+            let open = prefix + "browser_open", load = prefix + GroqToolCatalog.name
+            XCTAssertEqual(request.offeredToolNames, selected.union([load, prefix + GroqHistoryTool.name]))
+            XCTAssertTrue(loaded.loaderChoices.contains(open)); XCTAssertFalse(loaded.loaderChoices.contains(prefix + "browser_read"))
+            XCTAssertFalse(request.offeredToolNames.contains(open)); XCTAssertTrue(request.offeredToolNames.contains(load))
+            XCTAssertTrue(request.prompt.contains("Eligible unloaded inventory names are loadable with " + load))
+            XCTAssertTrue(request.prompt.contains("load needed schemas yourself, not user enablement"))
+            XCTAssertTrue(request.prompt.contains("Webpages use browser_*; computer_v2_* is native-app UI."))
+            let openReply = String(decoding: try encode(["type": "tool_calls", "calls": [["name": open,
+                "arguments": ["url": "http://127.0.0.1:62341/"]]]]), as: UTF8.self)
+            XCTAssertThrowsError(try C.parseReply(openReply, request: request, requireEnvelope: true)) {
+                XCTAssertEqual($0 as? C.Failure, .unknownTool(open))
+            }
+            XCTAssertThrowsError(try catalog.load(scope: scope, arguments: encode(["catalog_revision": loaded.revision,
+                "names": [prefix + "browser_read"]]), lastOfferedNames: request.offeredToolNames)) {
+                guard case .unavailableSelection = $0 as? GroqToolCatalog.Failure else { return XCTFail("Deferred page tools must remain unavailable until bind") }
+            }
+            XCTAssertEqual(try catalog.prepare(scope: scope, seed: seed), loaded)
+            let loadReply = String(decoding: try encode(["type": "tool_calls", "calls": [["name": load,
+                "arguments": ["catalog_revision": loaded.revision, "names": [open]]]]]), as: UTF8.self)
+            XCTAssertNoThrow(try C.parseReply(loadReply, request: request, requireEnvelope: true))
+            _ = try catalog.load(scope: scope, arguments: encode(["catalog_revision": loaded.revision, "names": [open]]), lastOfferedNames: request.offeredToolNames)
+            let next = try C.prepareRequest(data, browserToolAvailability: .unbound, groqToolCatalogProjection: catalog.prepare(scope: scope, seed: seed),
+                groqDirectTools: .loadedOnly, compactHistoryInventory: true)
+            XCTAssertEqual(next.offeredToolNames, [load, prefix + GroqHistoryTool.name, open])
+            XCTAssertNoThrow(try C.parseReply(openReply, request: next, requireEnvelope: true))
+            XCTAssertEqual(next.continuationRequest, data); XCTAssertEqual(request.continuationRequest, data)
+            XCTAssertEqual(next.groqToolCatalogSeed?.registeredDefinitionsJSON, seed.registeredDefinitionsJSON)
+            XCTAssertFalse(next.prompt.contains("Webpages use browser_*; computer_v2_* is native-app UI."), "The entry is now loaded, so no missing-entry cue")
+            var denied = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            denied["tool_choice"] = "none"
+            let deniedData = try encode(denied), deniedSeed = try XCTUnwrap(C.prepareRequest(deniedData, browserToolAvailability: .unbound).groqToolCatalogSeed)
+            let noLoader = try C.prepareRequest(deniedData, browserToolAvailability: .unbound, groqToolCatalogProjection: GroqToolCatalog.baseline(for: deniedSeed),
+                groqDirectTools: .loadedOnly, compactHistoryInventory: true)
+            XCTAssertFalse(noLoader.prompt.contains("load needed schemas yourself, not user enablement"))
+            XCTAssertFalse(noLoader.prompt.contains("Webpages use browser_*; computer_v2_* is native-app UI."))
+        }
+    }
+
     func testKnownNativeRuntimeDedupUsesTrustedBlocksAndPreservesCanonicalRequestAndPayloads() throws {
         let f = try Fixture(output: "Inert historical result"), base = ComputaAgentInstructions.groqReviewedNativeBase(referenceTools: true)
         let policy = ComputaAgentInstructions.developerInstructions(referenceTools: true, embeddedBrowserTools: true)
