@@ -1016,11 +1016,15 @@ function computaQwenDOM(c) {
       'message_keys','message_identity',
       'message_state','message_mode','message_legacy_content','message_empty_fields','message_extra','message_meta',
       'message_display','message_timestamp','feature_keys','feature_values','usage_shape','phase_list','phase_keys','phase_kind',
-      'phase_state','phase_extra','phase_tools','phase_scalar','answer_count','answer_role','answer_value','renderer_input','utf8','source_stability'];
+      'phase_state',
+      'phase_role_read','phase_role_null','phase_role_value_user','phase_role_value_system','phase_role_value_developer','phase_role_value_tool','phase_role_value_function','phase_role_value_empty','phase_role_value_other_string','phase_role_type_undefined','phase_role_type_boolean','phase_role_type_number','phase_role_type_bigint','phase_role_type_symbol','phase_role_type_function','phase_role_type_object','phase_status_read','phase_status_null','phase_status_value_waiting_input','phase_status_value_error','phase_status_value_pause','phase_status_value_empty','phase_status_value_other_string','phase_status_type_undefined','phase_status_type_boolean','phase_status_type_number','phase_status_type_bigint','phase_status_type_symbol','phase_status_type_function','phase_status_type_object',
+      'phase_extra','phase_tools','phase_scalar','answer_count','answer_role','answer_value','renderer_input','utf8','source_stability'];
     if (!value || Object.keys(value).sort().join(',') !== 'answersSeen,kind,phaseCount,phaseOverflow,stage,version'
       || value.version !== 1 || !stages.includes(value.stage) || !['guard','exception'].includes(value.kind)) return null;
     const n = value.phaseCount, overflow = value.phaseOverflow, seen = value.answersSeen;
     if (value.stage.startsWith('element_tree_') && n !== null) return null;
+    if ((value.stage.startsWith('phase_role_') || value.stage.startsWith('phase_status_'))
+      && (n === null || n === 0 || n === 33 || overflow !== false || seen === null)) return null;
     if (n === null) { if (overflow !== null || seen !== null) return null; }
     else if (!Number.isInteger(n) || n < 0 || n > 33 || typeof overflow !== 'boolean' || overflow !== (n === 33)
       || seen !== null && (!Number.isInteger(seen) || seen < 0 || seen > Math.min(n,2))) return null;

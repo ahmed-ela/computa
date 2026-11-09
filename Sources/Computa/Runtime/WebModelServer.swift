@@ -321,6 +321,7 @@ actor WebModelServer {
     private var journalTaskLimit = 256
     private let rejectedReplyDirectory: URL?
     private var inspectorAuthorizations: [String: ChatGPTInspectorLease] = [:]
+    private var groqFixtureStatuses: [String: GroqOwnedStatusLease.FixtureTurn] = [:]
     private let queue = DispatchQueue(label: "wtf.computa.web-model-http")
 
     func setBrowserToolAvailabilityProvider(_ provider: EmbeddedBrowserToolAvailabilityProvider?) {
@@ -340,6 +341,7 @@ actor WebModelServer {
         cleanupReceiptStore = WebsiteSessionCleanupStore(directory: directory)
         if runtimeGeneration != cleanupRuntimeGeneration {
             revokeAllInspectorAuthorizations()
+            revokeAllGroqFixtureStatuses()
             groqToolCatalog.removeAll()
             groqCatalogRequests.removeAll()
         }
@@ -350,6 +352,7 @@ actor WebModelServer {
     func setCleanupRuntimeGeneration(_ generation: UUID) {
         if generation != cleanupRuntimeGeneration {
             revokeAllInspectorAuthorizations()
+            revokeAllGroqFixtureStatuses()
             groqToolCatalog.removeAll()
             groqCatalogRequests.removeAll()
         }
@@ -386,6 +389,7 @@ actor WebModelServer {
         groqToolCatalog.remove(taskID: task)
         groqCatalogRequests.removeValue(forKey: task)
         inspectorAuthorizations.removeValue(forKey: task)?.revoke()
+        groqFixtureStatuses.removeValue(forKey: task)?.revoke()
         inferenceContexts.removeValue(forKey: task)
         if usedSessionTokens[task] == nil { usedSessionTokens[task] = [] }
         closedTurns.removeValue(forKey: task)
@@ -475,10 +479,16 @@ actor WebModelServer {
         inspectorAuthorizations.removeAll()
     }
 
+    private func revokeAllGroqFixtureStatuses() {
+        groqFixtureStatuses.values.forEach { $0.revoke() }
+        groqFixtureStatuses.removeAll()
+    }
+
     private func revokeInferenceContext(taskID: String) {
         groqToolCatalog.remove(taskID: taskID)
         groqCatalogRequests.removeValue(forKey: taskID)
         inspectorAuthorizations.removeValue(forKey: taskID)?.revoke()
+        groqFixtureStatuses.removeValue(forKey: taskID)?.revoke()
         preparedInferenceContexts.removeValue(forKey: taskID)
         inferenceContexts.removeValue(forKey: taskID)
         if let waiter = contextWaiters.removeValue(forKey: taskID) {
@@ -715,6 +725,7 @@ actor WebModelServer {
         let identity = value as AnyObject
         if embeddedTransportIdentity === identity { return }
         revokeAllInspectorAuthorizations()
+        revokeAllGroqFixtureStatuses()
         embeddedTransport = value
         embeddedTransportIdentity = identity
         embeddedTransportGeneration = UUID()
@@ -986,6 +997,7 @@ actor WebModelServer {
     private func retireMalformedRequest(taskID: String) {
         guard let task = try? Self.canonicalID(taskID), active[task] == nil else { return }
         yieldedTurns.removeValue(forKey: task)
+        groqFixtureStatuses.removeValue(forKey: task)?.revoke()
     }
 
     private func infer(_ request: WebModelResponseCodec.Request, taskID: String, identity: NativeRequestIdentity) async throws -> InferenceResult {
@@ -994,6 +1006,7 @@ actor WebModelServer {
               !retiringTaskIDs.contains(taskID) else { throw Failure.busy }
         guard let selection = WebsiteModelCatalog.inferenceSelection(for: request.model) else {
             yieldedTurns.removeValue(forKey: taskID)
+            groqFixtureStatuses.removeValue(forKey: taskID)?.revoke()
             if request.model.hasPrefix("browser/") { throw Failure.invalidRequest }
             throw Failure.modelNotFound
         }
@@ -1012,13 +1025,20 @@ actor WebModelServer {
         let id = UUID()
         active[taskID] = ActiveRequest(id: id, operation: operation)
         defer { if active[taskID]?.id == id { active.removeValue(forKey: taskID) } }
-        return try await operation.value
+        do { return try await operation.value }
+        catch {
+            groqFixtureStatuses.removeValue(forKey: taskID)?.revoke()
+            throw error
+        }
     }
 
     private func perform(_ originalRequest: WebModelResponseCodec.Request, provider: String,
                          taskID: String, identity: NativeRequestIdentity,
                          transport: any WebModelTransport, transportGeneration: UUID) async throws -> InferenceResult {
         let context = try await inferenceContext(taskID: taskID)
+        if provider != "groq" || originalRequest.model != GroqOwnedStatusLease.Profile.qwen27b.choice.modelID {
+            groqFixtureStatuses.removeValue(forKey:taskID)?.revoke()
+        }
         var inferenceID = UUID()
         let submissionFailureSink = WebsiteReadFailureDiagnosticSink()
         var groqFailureProjection: (inferenceID: UUID, token: String, statistics: WebsitePromptProjection.Statistics,
@@ -1281,9 +1301,22 @@ actor WebModelServer {
                             isFirstInference: firstNativeInference, hasCorrectionTicket: correctionTicket != nil)
                     }
                     if provider == "groq" {
-                        groqOwnedStatus=GroqOwnedStatusLease.consume(directory:rejectedReplyDirectory?.deletingLastPathComponent()
-                            .appendingPathComponent(GroqOwnedStatusLease.directoryName),admission:admission,request:request,
-                            first:context.isNewThread && !context.isMaintenance && firstNativeInference && correctionTicket==nil)
+                        let first=context.isNewThread && !context.isMaintenance && firstNativeInference && correctionTicket==nil
+                        let directory=rejectedReplyDirectory?.deletingLastPathComponent()
+                            .appendingPathComponent(GroqOwnedStatusLease.directoryName)
+                        if groqFixtureStatuses[taskID]==nil {
+                            groqOwnedStatus=GroqOwnedStatusLease.consume(directory:directory,admission:admission,request:request,first:first)
+                        }
+                        if groqOwnedStatus==nil,correctionTicket==nil,!context.isMaintenance {
+                            if groqFixtureStatuses[taskID]==nil,first {
+                                groqFixtureStatuses[taskID]=GroqOwnedStatusLease.FixtureTurn.consume(
+                                    directory:directory,admission:admission,request:request,first:true)
+                            }
+                            if let fixture=groqFixtureStatuses[taskID] {
+                                groqOwnedStatus=fixture.child(admission:admission,request:request)
+                                if groqOwnedStatus==nil { groqFixtureStatuses.removeValue(forKey:taskID)?.revoke() }
+                            }
+                        }
                     }
                     if provider == "qwen" {
                         qwenMarkerWire = QwenMarkerWireLease.consume(directory: rejectedReplyDirectory?.deletingLastPathComponent()
@@ -1671,6 +1704,11 @@ actor WebModelServer {
                         }
                         try requireCurrentContext()
                         responseProfile?.mark(.inferenceReturnReady)
+                        switch selection.reply {
+                        case .message, .assistantMessage(_, phase:.finalAnswer):
+                            groqFixtureStatuses.removeValue(forKey:taskID)?.revoke()
+                        case .assistantMessage(_, phase:.commentary), .toolCalls, .toolCallsWithCommentary: break
+                        }
                         return InferenceResult(data: encoded, inferenceID: inferenceID, responseProfile: responseProfile)
                     case "running":
                         try Self.verifyInferenceSnapshot(value, session: &session)
@@ -1969,6 +2007,7 @@ actor WebModelServer {
     /// An unsuccessful HTTP write cannot make this particular handoff reusable.
     /// A later round that already reconciled the exact output has a distinct ID.
     private func invalidateHandoff(taskID: String, inferenceID: UUID) {
+        groqFixtureStatuses.removeValue(forKey: taskID)?.revoke()
         if yieldedTurns[taskID]?.inferenceID == inferenceID { yieldedTurns.removeValue(forKey: taskID) }
         if closedTurns[taskID]?.inferenceID == inferenceID { closedTurns[taskID]?.ambiguousHandoff = true }
     }

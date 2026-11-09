@@ -227,8 +227,8 @@ enum WebsitePrivateDiagnosticCapture {
     }
 }
 
-/// Optional content-free outcome for one opted-in, synthetic first Groq inference.
-/// Native lease identity, the selected model and first submission must survive until publication.
+/// Optional content-free outcome for an opted-in synthetic marker or controlled
+/// fixture child. Native identity, selection and submission must survive publication.
 final class GroqOwnedStatusLease: @unchecked Sendable {
     @TaskLocal static var current: GroqOwnedStatusLease?
     static let directoryName = "GroqOwnedStatus-v1"
@@ -262,14 +262,23 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
     let admission: WebModelStartAdmission
     let deadline: ContinuousClock.Instant
     private let promptHash: String
+    private let fixtureTurn: FixtureTurn?
     private let lock = NSLock()
     private var active = true
-    var isCurrent: Bool { lock.withLock { active && ContinuousClock.now < deadline } }
+    private var observerArmed = false
+    var isCurrent: Bool { lock.withLock { active && ContinuousClock.now < deadline } && (fixtureTurn?.isCurrent ?? true) }
     func revoke() { lock.withLock { active = false } }
+    var isFixture: Bool { fixtureTurn != nil }
+    func recordObserverArmed() { lock.withLock { observerArmed = true } }
+    var unavailableStage: String? {
+        guard isFixture,isCurrent else { return nil }
+        return lock.withLock { observerArmed ? "observer_unavailable" : "observer_not_armed" }
+    }
     static func digest(_ input: String) -> String { SHA256.hash(data:Data(input.utf8)).map { String(format:"%02x",$0) }.joined() }
     func matches(_ prompt: String) -> Bool { isCurrent && Self.digest(prompt) == promptHash }
-    private init(_ file: WebsitePrivateDiagnosticCapture.Claim, _ admission: WebModelStartAdmission, _ deadline: ContinuousClock.Instant, _ prompt: String, profile: Profile) {
+    private init(_ file: WebsitePrivateDiagnosticCapture.Claim, _ admission: WebModelStartAdmission, _ deadline: ContinuousClock.Instant, _ prompt: String, profile: Profile, fixtureTurn: FixtureTurn? = nil) {
         self.file=file; self.admission=admission; self.deadline=deadline; promptHash=Self.digest(prompt); self.profile=profile
+        self.fixtureTurn=fixtureTurn
     }
     static func consume(directory: URL?, admission: WebModelStartAdmission, request: WebModelResponseCodec.Request,
                         first: Bool, now: Date = Date()) -> GroqOwnedStatusLease? {
@@ -291,6 +300,107 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
         },isCurrent:{ !Task.isCancelled && (deadline.map { ContinuousClock.now < $0 } ?? false) }),let deadline else{return nil}
         return .init(file,admission,deadline,request.prompt,profile:profile)
     }
+
+    /// A separate opt-in for one controlled local fixture turn. Each child still
+    /// observes only one fresh owned page's exact outbound prompt and one fetch.
+    /// The claim is shared across children, so only the first failure can publish.
+    final class FixtureTurn: @unchecked Sendable {
+        static let purpose = "groq_qwen27b_fixture_failure_status_v1"
+        private let file: WebsitePrivateDiagnosticCapture.Claim
+        private let first: WebModelStartAdmission
+        private let userHash: String
+        private let deadline: ContinuousClock.Instant
+        private let lock = NSLock()
+        private var active = true
+        private var children = Set<UUID>()
+        var isCurrent: Bool { lock.withLock { active && ContinuousClock.now < deadline } }
+        func revoke() { lock.withLock { active = false } }
+
+        private init(file: WebsitePrivateDiagnosticCapture.Claim, first: WebModelStartAdmission, deadline: ContinuousClock.Instant, user: String) {
+            self.file=file; self.first=first; self.deadline=deadline; userHash=GroqOwnedStatusLease.digest(user)
+        }
+
+        static func consume(directory: URL?, admission: WebModelStartAdmission, request: WebModelResponseCodec.Request,
+                            first: Bool, now: Date = Date()) -> FixtureTurn? {
+            guard first, !Task.isCancelled, let directory, admission.provider == "groq",
+                  admission.modelID == Profile.qwen27b.choice.modelID, request.model == admission.modelID,
+                  [admission.taskID, admission.threadID, admission.turnID].allSatisfy({ UUID(uuidString:$0)?.uuidString.lowercased()==$0 }),
+                  let user = controlledUserText(request,allowingContinuation:false) else { return nil }
+            let started=ContinuousClock.now
+            var deadline: ContinuousClock.Instant?
+            guard let file=WebsitePrivateDiagnosticCapture.claim(directory:directory,record:.groqOwnedStatus,maximumArmBytes:4096,validate:{ data in
+                guard APIModelCorrectionJSON.isUnambiguous(data),
+                      let v=try? JSONSerialization.jsonObject(with:data) as? [String:String],
+                      Set(v.keys)==["purpose","nonce","modelID","userPromptSHA256","expiresAt"],
+                      v["purpose"]==purpose, v["modelID"]==admission.modelID,
+                      let nonce=v["nonce"], UUID(uuidString:nonce)?.uuidString.lowercased()==nonce,
+                      v["userPromptSHA256"]==GroqOwnedStatusLease.digest(user), let expiry=v["expiresAt"], expiry.utf8.count==24 else { return false }
+                let fmt=ISO8601DateFormatter(); fmt.formatOptions=[.withInternetDateTime,.withFractionalSeconds]
+                guard let end=fmt.date(from:expiry),fmt.string(from:end)==expiry,
+                      end>now,end.timeIntervalSince(now)<=600 else { return false }
+                deadline=started + .seconds(end.timeIntervalSince(now)); return true
+            },isCurrent:{ !Task.isCancelled && (deadline.map { ContinuousClock.now < $0 } ?? false) }),let deadline else { return nil }
+            return .init(file:file,first:admission,deadline:deadline,user:user)
+        }
+
+        func child(admission: WebModelStartAdmission, request: WebModelResponseCodec.Request) -> GroqOwnedStatusLease? {
+            lock.withLock {
+                guard !Task.isCancelled, active, ContinuousClock.now < deadline,
+                      admission.taskID==first.taskID, admission.threadID==first.threadID, admission.turnID==first.turnID,
+                      admission.runtimeGeneration==first.runtimeGeneration, admission.preparationID==first.preparationID,
+                      admission.transportGeneration==first.transportGeneration, admission.provider==first.provider,
+                      admission.modelID==first.modelID, request.model==first.modelID,
+                      let user=Self.controlledUserText(request,allowingContinuation:true),GroqOwnedStatusLease.digest(user)==userHash,
+                      children.count < WebModelServer.maximumTurnInferences,
+                      children.insert(admission.inferenceID).inserted else { return nil }
+                return .init(file,admission,deadline,request.prompt,profile:.qwen27b,fixtureTurn:self)
+            }
+        }
+
+        fileprivate func commit(_ rename: () -> Bool) -> Bool {
+            lock.withLock {
+                guard !Task.isCancelled,active,ContinuousClock.now < deadline else { return false }
+                active=false
+                return rename()
+            }
+        }
+
+        private static func controlledUserText(_ request: WebModelResponseCodec.Request, allowingContinuation: Bool) -> String? {
+            guard APIModelCorrectionJSON.isUnambiguous(request.continuationRequest),
+                  var root=try? JSONSerialization.jsonObject(with:request.continuationRequest) as? [String:Any],
+                  let input=root["input"] as? [[String:Any]],let environment=input.firstIndex(where: { $0["role"] as? String == "user" }),
+                  input.indices.contains(environment+1) else { return nil }
+            let userIndex=environment+1
+            guard (allowingContinuation || userIndex==input.count-1),
+                  input.dropFirst(userIndex+1).allSatisfy({ item in
+                      ["function_call","function_call_output","custom_tool_call","custom_tool_call_output"].contains(item["type"] as? String ?? "")
+                          || item["type"] as? String == "message" && item["role"] as? String == "assistant"
+                  }),let parts=input[userIndex]["content"] as? [[String:Any]],let text=parts.first?["text"] as? String else { return nil }
+            let suffix="\n"+ComputaAgentInstructions.runtimeInteractionPolicy()
+            let user=parts.count==1 && text.hasSuffix(suffix) ? String(text.dropLast(suffix.count)) : text
+            // Groq clears and closes each physical inference. It does not use the
+            // retained-page continuation proof, so recheck the controlled initial
+            // user prefix before deriving every diagnostic-only child.
+            root["input"]=Array(input.prefix(userIndex+1))
+            guard matchesPrompt(user),let prefix=try? JSONSerialization.data(withJSONObject:root),
+                  WebsiteSyntheticFirstRequest.matches(prefix,model:request.model,expectedUserText:user) else { return nil }
+            return user
+        }
+
+        static func matchesPrompt(_ user: String) -> Bool {
+            let prefix="In "
+            let middle=", fix the invoice aggregation bug in reconcile.py according to its README. Keep the tests, sample data, and reference format unchanged. Run python3 -m unittest -v, then run python3 reconcile.py.\n\nUse the built-in browser to open http://127.0.0.1:"
+            let suffix="/, enter the printed reference, and submit it once. Read the resulting receipt, then close the tab you opened. Use browser tools for the website; do not use terminal HTTP requests or inspect the fixture's control directory, server source, or receipt files.\n\nReturn the test result, the reference, and the receipt shown by the page."
+            guard user.utf8.count<=8_192,user.hasPrefix(prefix),user.hasSuffix(suffix) else { return false }
+            let pieces=String(user.dropFirst(prefix.count).dropLast(suffix.count)).components(separatedBy:middle)
+            guard pieces.count==2, let port=UInt16(pieces[1]),port>=1_024,String(port)==pieces[1] else { return false }
+            let path=pieces[0]
+            guard path.utf8.count<=4_096,path.hasPrefix("/"),!path.contains("\n"),!path.contains("\r"),!path.contains("\0"),
+                  URL(fileURLWithPath:path).standardizedFileURL.path==path,
+                  path.range(of:#"/fixtures/cases/invoice-[1-9][0-9]{2,5}-groq-qwen27b-[a-f0-9]{16}/coding$"#,options:.regularExpression) != nil else { return false }
+            return true
+        }
+    }
     struct Observation: Sendable {
         let stage: String
         let sessionToken: String
@@ -299,17 +409,22 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
     // Called synchronously on the server after it has rejoined this exact current inference.
     func publish(_ observation: Observation, trigger: String) {
         let stage=observation.stage, owner=observation.sessionToken, generation=observation.generation
-        guard !Task.isCancelled, isCurrent, Self.stages.contains(stage),
+        guard !Task.isCancelled, isCurrent,
+              Self.stages.contains(stage) || isFixture && ["observer_not_armed","observer_unavailable"].contains(stage),
               ["response_deadline","groq_draft_restored","groq_reported_submission_error"].contains(trigger),
               let session=UUID(uuidString:owner) else{return}
-        let v:[String:Any]=["schemaVersion":1,"purpose":profile.purpose,"provider":"groq","modelID":admission.modelID,
+        let v:[String:Any]=["schemaVersion":1,"purpose":fixtureTurn == nil ? profile.purpose : FixtureTurn.purpose,"provider":"groq","modelID":admission.modelID,
             "taskID":admission.taskID,"threadID":admission.threadID,"turnID":admission.turnID,
             "inferenceID":admission.inferenceID.uuidString.lowercased(),"preparationID":admission.preparationID.uuidString.lowercased(),
             "runtimeGeneration":admission.runtimeGeneration.uuidString.lowercased(),"session":session.uuidString.lowercased(),
-            "documentGeneration":generation.uuidString.lowercased(),"trigger":trigger,"stage":stage,"evidenceClass":"page_world_observation"]
+            "documentGeneration":generation.uuidString.lowercased(),"trigger":trigger,"stage":stage,
+            "evidenceClass":["observer_not_armed","observer_unavailable"].contains(stage) ? "native_observer_availability" : "page_world_observation"]
         guard let bytes=try? JSONSerialization.data(withJSONObject:v,options:[.sortedKeys]) else{return}
         _=WebsitePrivateDiagnosticCapture.publish(bytes,using:file,isCurrent:{ !Task.isCancelled && self.isCurrent },commit:{ rename in
-            self.lock.withLock { !Task.isCancelled && self.active && ContinuousClock.now < self.deadline && rename() }
+            self.lock.withLock {
+                guard !Task.isCancelled,self.active,ContinuousClock.now < self.deadline else { return false }
+                return self.fixtureTurn.map { $0.commit(rename) } ?? rename()
+            }
         })
     }
 }

@@ -422,6 +422,50 @@ final class WebsiteAdapterFailureDiagnosticTests: XCTestCase {
         XCTAssertNotNil(D.sanitize(legacy, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"))
     }
 
+    func testQwenPhaseStateDiagnosticsStayClosedAndRequireKnownBoundedPhaseCounts() throws {
+        let stages = [
+            "phase_role_read", "phase_role_null", "phase_role_value_user",
+            "phase_role_value_system", "phase_role_value_developer", "phase_role_value_tool",
+            "phase_role_value_function", "phase_role_value_empty", "phase_role_value_other_string",
+            "phase_role_type_undefined", "phase_role_type_boolean", "phase_role_type_number",
+            "phase_role_type_bigint", "phase_role_type_symbol", "phase_role_type_function",
+            "phase_role_type_object", "phase_status_read", "phase_status_null",
+            "phase_status_value_waiting_input", "phase_status_value_error", "phase_status_value_pause",
+            "phase_status_value_empty", "phase_status_value_other_string", "phase_status_type_undefined",
+            "phase_status_type_boolean", "phase_status_type_number", "phase_status_type_bigint",
+            "phase_status_type_symbol", "phase_status_type_function", "phase_status_type_object"]
+        for stage in stages {
+            for kind in ["guard", "exception"] {
+                for (count, seen) in [(1, 0), (20, 1), (32, 2)] {
+                    let raw: [String: Any] = ["version": 1, "stage": stage, "kind": kind,
+                        "phaseCount": count, "phaseOverflow": false, "answersSeen": seen]
+                    var value = qwenAuthoredFailure; value["rawSource"] = raw
+                    let packet = try XCTUnwrap(D.sanitize(value, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"))
+                    XCTAssertLessThanOrEqual(packet.data.count, 1_024)
+                    XCTAssertEqual(D.qwenAuthoredLogFields(packet), String(decoding: packet.data, as: UTF8.self))
+                    for (key, bad) in [("phaseCount", NSNull()), ("phaseCount", 0), ("phaseCount", 33),
+                                       ("phaseCount", true), ("phaseOverflow", true), ("answersSeen", NSNull()),
+                                       ("answersSeen", true), ("role", "PRIVATE_ROLE"), ("status", "PRIVATE_STATUS"),
+                                       ("stage", stage + "_PRIVATE")] as [(String, Any)] {
+                        var changed = raw; changed[key] = bad
+                        var rejected = value; rejected["rawSource"] = changed
+                        XCTAssertNil(D.sanitize(rejected, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"), key)
+                    }
+                    XCTAssertNil(D.sanitize(value, provider: "kimi", error: "unsupported_response_format", detail: "authored_source"))
+                    XCTAssertNil(D.sanitize(value, provider: "qwen", error: "conversation_changed", detail: "response_scope"))
+                    let original: [String: Any] = ["error": "unsupported_response_format", "detail": "authored_source"]
+                    var observation = original; observation["adapterFailureStructure"] = value
+                    XCTAssertNotNil(D.remove(from: &observation, provider: "qwen", action: "inspect"))
+                    XCTAssertEqual(observation as NSDictionary, original as NSDictionary)
+                }
+            }
+        }
+        var legacy = qwenAuthoredFailure
+        legacy["rawSource"] = ["version": 1, "stage": "phase_state", "kind": "guard",
+            "phaseCount": NSNull(), "phaseOverflow": NSNull(), "answersSeen": NSNull()] as [String: Any]
+        XCTAssertNotNil(D.sanitize(legacy, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"))
+    }
+
     func testQwenRawSourceDiagnosticRejectsUnknownContentTypesAndImpossibleCounts() {
         let raw: [String: Any] = ["version": 1, "stage": "phase_state", "kind": "guard",
             "phaseCount": 1, "phaseOverflow": false, "answersSeen": 1]

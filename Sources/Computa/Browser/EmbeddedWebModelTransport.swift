@@ -1499,13 +1499,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 && session.confirmedUsers==1 && session.baseline==0 && session.firstUserFingerprint==first
                 && first==submission.outboundFingerprint && submission.generation==generation && session.explicitClearOperation==nil
         }
-        guard lease.isCurrent,stillBound(),let value=await browser.groqStatusResult(session.tabID,view:session.view,owner:sessionToken,
-            generation:generation,fingerprint:first),stillBound() else{return nil}
+        guard lease.isCurrent,stillBound() else{return nil}
+        let value=await browser.groqStatusResult(session.tabID,view:session.view,owner:sessionToken,
+            generation:generation,fingerprint:first)
+        guard lease.isCurrent,stillBound() else{return nil}
         #if DEBUG
         await beforePageResultValidationForTesting?("groqOwnedStatusObserved")
         #endif
-        guard stillBound() else{return nil}
-        return .init(stage:value,sessionToken:sessionToken,generation:generation)
+        guard lease.isCurrent,stillBound(),let stage=value ?? lease.unavailableStage else{return nil}
+        return .init(stage:stage,sessionToken:sessionToken,generation:generation)
     }
 
     private func prepareQwenMarker(_ session: Session, prompt: String, outbound: String) async {

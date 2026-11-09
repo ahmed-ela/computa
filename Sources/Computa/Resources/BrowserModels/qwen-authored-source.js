@@ -54,6 +54,43 @@
     const empty = value => value === undefined || value === null || value === ''
       || (array(value) ? list(value,0) === 0 : typeof value === 'object' && plain(value).length === 0);
     const objectExtra = value => value === undefined || value === null || plain(value).length === 0;
+    const phaseRoleFailure = value => {
+      const type = typeof value;
+      return value === null ? 'phase_role_null'
+        : type === 'string' ? (
+          value === 'user' ? 'phase_role_value_user' :
+          value === 'system' ? 'phase_role_value_system' :
+          value === 'developer' ? 'phase_role_value_developer' :
+          value === 'tool' ? 'phase_role_value_tool' :
+          value === 'function' ? 'phase_role_value_function' :
+          value === '' ? 'phase_role_value_empty' :
+          'phase_role_value_other_string')
+        : type === 'undefined' ? 'phase_role_type_undefined'
+        : type === 'boolean' ? 'phase_role_type_boolean'
+        : type === 'number' ? 'phase_role_type_number'
+        : type === 'bigint' ? 'phase_role_type_bigint'
+        : type === 'symbol' ? 'phase_role_type_symbol'
+        : type === 'function' ? 'phase_role_type_function'
+        : 'phase_role_type_object';
+    };
+    const phaseStatusFailure = value => {
+      const type = typeof value;
+      return value === null ? 'phase_status_null'
+        : type === 'string' ? (
+          value === 'waiting_input' ? 'phase_status_value_waiting_input' :
+          value === 'error' ? 'phase_status_value_error' :
+          value === 'pause' ? 'phase_status_value_pause' :
+          value === '' ? 'phase_status_value_empty' :
+          'phase_status_value_other_string')
+        : type === 'undefined' ? 'phase_status_type_undefined'
+        : type === 'boolean' ? 'phase_status_type_boolean'
+        : type === 'number' ? 'phase_status_type_number'
+        : type === 'bigint' ? 'phase_status_type_bigint'
+        : type === 'symbol' ? 'phase_status_type_symbol'
+        : type === 'function' ? 'phase_status_type_function'
+        : 'phase_status_type_object';
+    };
+
     // Known reasoning payloads are not literal ANSWER input. Account for their
     // closed outer DATA fields without reading any title/thought/content value.
     const phaseExtra = (phase,value) => {
@@ -207,8 +244,11 @@
       if (trace && phase === 'answer') trace.answersSeen = trace.answersSeen < 2 ? trace.answersSeen+1 : 2;
       require(['answer','think','thinking_summary'].includes(phase));
       mark('phase_state');
-      require([undefined,'assistant'].includes(own(part,'role',true))
-        && [undefined,'typing','finished'].includes(own(part,'status',true))
+      let partRole, partStatus;
+      require(([undefined,'assistant'].includes((mark('phase_role_read'),partRole = own(part,'role',true)))
+          || (mark(phaseRoleFailure(partRole)),false))
+        && ([undefined,'typing','finished'].includes((mark('phase_status_read'),partStatus = own(part,'status',true)))
+          || (mark(phaseStatusFailure(partStatus)),false))
         && mark('phase_extra') && phaseExtra(phase,own(part,'extra',true)));
       mark('phase_scalar');
       const timestamp = own(part,'timestamp',true), group = own(part,'groupIndex',true);

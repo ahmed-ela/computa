@@ -890,7 +890,7 @@ final class EmbeddedBrowserSession {
             try navigate(tabID:id,to:url);return id
         } catch {closeTab(id);lease.revoke();throw error}
     }
-    private func removeGroqStatus(_ entry:Entry) {
+    private func removeGroqStatus(_ entry:Entry, preserveFixtureFailureScope:Bool=false) {
         guard let probe=entry.groqStatus else{return}
         entry.groqStatus=nil
         let controller=entry.view.configuration.userContentController
@@ -902,7 +902,9 @@ final class EmbeddedBrowserSession {
             entry.view.callAsyncJavaScript("if(document.URL===url)window[key]?.(secret,'dispose'); return null",
                 arguments:["url":probe.url.absoluteString,"key":"__computaGroqStatus_"+probe.key,"secret":probe.secret],in:nil,in:.page,completionHandler:nil)
         }
-        probe.lease.revoke()
+        // Failed observer setup grants nothing. A fixture-only native scope can
+        // still report not-armed at the original failure, under native joins.
+        if !preserveFixtureFailureScope || !probe.lease.isFixture { probe.lease.revoke() }
     }
     private func groqStatusCurrent(_ entry:Entry,_ probe:GroqStatusProbe,view:WKWebView,owner:String,generation:UUID)->Bool {
         !isShutdown && !Task.isCancelled && entries[entry.tab.id]===entry && entry.groqStatus===probe && probe.initialStart
@@ -914,8 +916,8 @@ final class EmbeddedBrowserSession {
               groqStatusCurrent(e,p,view:view,owner:owner,generation:generation) else{return}
         p.owner=owner;p.generation=generation;p.fingerprint=fingerprint
         let r=await callGroqStatus(p,view:view,command:"arm",args:["model":p.lease.modelChoice.key,"label":p.lease.modelChoice.label,"prompt":outbound])
-        guard p.lease.isCurrent,groqStatusCurrent(e,p,view:view,owner:owner,generation:generation),r=="ready" else{removeGroqStatus(e);return}
-        p.armed=true
+        guard p.lease.isCurrent,groqStatusCurrent(e,p,view:view,owner:owner,generation:generation),r=="ready" else{removeGroqStatus(e,preserveFixtureFailureScope:true);return}
+        p.armed=true;p.lease.recordObserverArmed()
     }
     func groqStatusResult(_ id:UUID,view:WKWebView,owner:String,generation:UUID,fingerprint:String) async -> String? {
         guard let e=entries[id],let p=e.groqStatus,p.lease.isCurrent,p.armed,p.owner==owner,p.generation==generation,p.fingerprint==fingerprint,

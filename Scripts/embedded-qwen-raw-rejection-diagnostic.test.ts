@@ -16,8 +16,8 @@ test('raw ineligibility diagnostics preserve original rejection, source descript
   expect(createHash('sha256').update(previousBytes).digest('hex')).toBe('191d72db9192e1b592211197635c60ab9155b7779c97a82516e6be77363dbc6e');
   for(const [kind,stage,count,seen] of [
     ['extra','message_extra',null,null],['timestamp','phase_scalar',2,1],['unknown','phase_kind',2,0],
-    ['duplicate','answer_count',3,2],['limit','phase_list',33,null],['accessor','phase_state',2,1],
-    ['exception','phase_state',2,1],['renderer','renderer_input',2,1],['feature','feature_values',null,null]
+    ['duplicate','answer_count',3,2],['limit','phase_list',33,null],['accessor','phase_status_read',2,1],
+    ['exception','phase_status_read',2,1],['renderer','renderer_input',2,1],['feature','feature_values',null,null]
   ] as const){
     const mutate=(p:any)=>{
       if(kind==='extra')p.message.extra.PRIVATE_SECRET='SECRET_DIAGNOSTIC_MUST_NOT_LEAK';
