@@ -3293,6 +3293,217 @@ final class APIModelResponseCodecTests: XCTestCase {
         XCTAssertEqual(correctedBody["tools"] as? NSArray, adaptedBody["tools"] as? NSArray)
     }
 
+    func testAlibabaCompletedCustomPatchAndBrowserHistorySurvivesAvailabilityAndHostTailProjection() throws {
+        // Captured tool payload structure from the controlled 461 invoice case.
+        // Only case paths/URLs/opaque browser IDs and labels are projected to inert
+        // values below; session/private metadata and the rest of its trace are absent.
+        // This proves codec projection, not the historical provider POST or its cause.
+        let capturedHistory = #"""
+        [
+          {
+            "role": "developer",
+            "content": "Use the current native tools and preserve the full existing tool history."
+          },
+          {
+            "role": "user",
+            "content": "Finish the inert invoice task using current evidence. Preserve completed work and do not repeat completed or uncertain actions."
+          },
+          {
+            "type": "custom_tool_call",
+            "name": "apply_patch",
+            "input": "*** Begin Patch\n*** Update File: /synthetic/invoice-projection/coding/reconcile.py\n@@\n def summarize(items):\n     \"\"\"Aggregate normalized SKUs, quantities, and exact integer-cent subtotals.\"\"\"\n     grouped = {}\n     for item in items:\n         sku = item[\"sku\"].strip().upper()\n-        grouped[sku] = {\n-            \"sku\": sku,\n-            \"quantity\": item[\"quantity\"],\n-            \"subtotal_cents\": item[\"quantity\"] * item[\"unit_cents\"],\n-        }\n+        if sku not in grouped:\n+            grouped[sku] = {\n+                \"sku\": sku,\n+                \"quantity\": 0,\n+                \"subtotal_cents\": 0,\n+            }\n+        grouped[sku][\"quantity\"] += item[\"quantity\"]\n+        grouped[sku][\"subtotal_cents\"] += item[\"quantity\"] * item[\"unit_cents\"]\n     rows = [grouped[sku] for sku in sorted(grouped)]\n     return {\"items\": rows, \"total_cents\": sum(row[\"subtotal_cents\"] for row in rows)}\n\n*** End Patch",
+            "call_id": "history-patch"
+          },
+          {
+            "type": "custom_tool_call_output",
+            "call_id": "history-patch",
+            "output": "Exit code: 0\nWall time: 0 seconds\nOutput:\nSuccess. Updated the following files:\nM /synthetic/invoice-projection/coding/reconcile.py\n"
+          },
+          {
+            "type": "function_call",
+            "name": "browser_open",
+            "arguments": "{\"url\": \"http://127.0.0.1:34567/\"}",
+            "call_id": "history-open"
+          },
+          {
+            "type": "function_call_output",
+            "call_id": "history-open",
+            "output": [
+              {
+                "type": "input_text",
+                "text": "{\"retention\":\"complete_browser_observation_v1\"}"
+              },
+              {
+                "type": "input_text",
+                "text": "{\"completed\":true,\"kind\":\"open\",\"outcome\":\"unverified\"}"
+              },
+              {
+                "type": "input_text",
+                "text": "{\"already_bound\":false,\"bound\":true,\"browser\":\"computa_builtin\",\"current_observation\":{\"snapshot_id\":\"10000000-0000-4000-8000-000000000001\",\"status\":\"available\",\"text\":\"AXSNAPSHOT id=10000000-0000-4000-8000-000000000001 tab_handle=10000000-0000-4000-8000-000000000002 source=computa_webkit_dom url=\\\"http://127.0.0.1:34567/\\\" title=\\\"Inert invoice fixture\\\"\\nREAD view=overview scope=document source_observation=10000000-0000-4000-8000-000000000003 consistency=immutable_capture source_nodes=7 source_truncated=0 matches=6 shown=6 offset=0 output_truncated=0 field_truncated=0 metadata_truncated=0 no_matches=0 observation=live semantic_readiness=ready\\nREAD_SELECTION_EVIDENCE local_view query=false counts=capture site_search=false site_count=unmeasured\\nSCOPE captured rows only; not site results/relevance/absence. *_utf8=exact fragments; href_fragment=not_navigable. Defaults enabled=true settable=false actions=[]. Only shown refs authorize input.\\nVIEW overview. Use refs for links/search; content=text.\\n#0 role=\\\"AXGroup\\\" semantic_role=\\\"form\\\" label=\\\"\\\" child_count=3 expandable=true content_scope=main content_kind=unknown \\n#1 role=\\\"AXTextField\\\" semantic_role=\\\"textbox\\\" label=\\\"Reference\\\" value=\\\"\\\" parent_index=0 content_scope=main content_kind=control settable=true  required=true constraint=invalid[value_missing] fill_ref=\\\"bfill_10000000-0000-4000-8000-000000000004\\\"\\n#2 role=\\\"AXStaticText\\\" semantic_role=\\\"statictext\\\" label=\\\"Reference\\\" parent_index=0 content_scope=main content_kind=readable enabled=false \\n#3 role=\\\"AXButton\\\" semantic_role=\\\"button\\\" label=\\\"Record test receipt\\\" parent_index=0 content_scope=main content_kind=control actions=[\\\"AXPress\\\"] click_ref=\\\"bclick_10000000-0000-4000-8000-000000000005\\\"\\n#4 role=\\\"AXHeading\\\" semantic_role=\\\"heading\\\" label=\\\"Inert invoice fixture\\\" content_scope=main content_kind=readable \\n#5 role=\\\"AXStaticText\\\" semantic_role=\\\"statictext\\\" label=\\\"Record the invoice reference produced by the repaired helper.\\\" content_scope=main content_kind=readable \\nBROWSER_ACTION_REFERENCES {\\\"copy\\\":\\\"Verbatim Unicode/whitespace.\\\",\\\"next\\\":\\\"current_observation/browser_read; never replay.\\\",\\\"refs\\\":\\\"Cursor pages retain same-capture refs (120 FIFO); fresh reads require native corroboration; input consumes all.\\\"}\",\"view\":\"overview\"},\"next\":\"Use this observation; continue only its next_cursor. Operation complete; do not repeat it.\",\"no_replay\":true,\"operation_complete\":true,\"operation_kind\":\"open\",\"ownership\":\"task_created\",\"profile\":\"shared_human\",\"result_verified\":false,\"tab_handle\":\"10000000-0000-4000-8000-000000000002\",\"tab_id\":\"10000000-0000-4000-8000-000000000006\"}"
+              }
+            ]
+          },
+          {
+            "type": "function_call",
+            "name": "browser_fill",
+            "arguments": "{\"fill_ref\": \"bfill_10000000-0000-4000-8000-000000000004\", \"text\": \"INV-INERT-600\"}",
+            "call_id": "history-fill"
+          },
+          {
+            "type": "function_call_output",
+            "call_id": "history-fill",
+            "output": [
+              {
+                "type": "input_text",
+                "text": "{\"retention\":\"complete_browser_observation_v1\"}"
+              },
+              {
+                "type": "input_text",
+                "text": "{\"dispatched\":true,\"kind\":\"fill\",\"label\":\"Reference\",\"outcome\":\"unverified\",\"partial\":false}"
+              },
+              {
+                "type": "input_text",
+                "text": "{\"action_references\":{\"consumed\":true,\"next\":\"current_observation\"},\"current_observation\":{\"snapshot_id\":\"10000000-0000-4000-8000-000000000007\",\"status\":\"available\",\"text\":\"AXSNAPSHOT id=10000000-0000-4000-8000-000000000007 tab_handle=10000000-0000-4000-8000-000000000002 source=computa_webkit_dom url=\\\"http://127.0.0.1:34567/\\\" title=\\\"Inert invoice fixture\\\"\\nREAD view=overview scope=document source_observation=10000000-0000-4000-8000-000000000008 consistency=immutable_capture source_nodes=7 source_truncated=0 matches=6 shown=6 offset=0 output_truncated=0 field_truncated=0 metadata_truncated=0 no_matches=0 observation=live semantic_readiness=ready\\nREAD_SELECTION_EVIDENCE local_view query=false counts=capture site_search=false site_count=unmeasured\\nSCOPE captured rows only; not site results/relevance/absence. *_utf8=exact fragments; href_fragment=not_navigable. Defaults enabled=true settable=false actions=[]. Only shown refs authorize input.\\nVIEW overview. Use refs for links/search; content=text.\\n#0 role=\\\"AXGroup\\\" semantic_role=\\\"form\\\" label=\\\"\\\" child_count=3 expandable=true content_scope=main content_kind=unknown \\n#1 role=\\\"AXTextField\\\" semantic_role=\\\"textbox\\\" label=\\\"Reference\\\" value=\\\"INV-INERT-600\\\" parent_index=0 content_scope=main content_kind=control settable=true  required=true constraint=valid fill_ref=\\\"bfill_10000000-0000-4000-8000-000000000009\\\"\\n#2 role=\\\"AXStaticText\\\" semantic_role=\\\"statictext\\\" label=\\\"Reference\\\" parent_index=0 content_scope=main content_kind=readable enabled=false \\n#3 role=\\\"AXButton\\\" semantic_role=\\\"button\\\" label=\\\"Record test receipt\\\" parent_index=0 content_scope=main content_kind=control actions=[\\\"AXPress\\\"] click_ref=\\\"bclick_10000000-0000-4000-8000-00000000000A\\\"\\n#4 role=\\\"AXHeading\\\" semantic_role=\\\"heading\\\" label=\\\"Inert invoice fixture\\\" content_scope=main content_kind=readable \\n#5 role=\\\"AXStaticText\\\" semantic_role=\\\"statictext\\\" label=\\\"Record the invoice reference produced by the repaired helper.\\\" content_scope=main content_kind=readable \\nBROWSER_ACTION_REFERENCES {\\\"copy\\\":\\\"Verbatim Unicode/whitespace.\\\",\\\"next\\\":\\\"current_observation/browser_read; never replay.\\\",\\\"refs\\\":\\\"Cursor pages retain same-capture refs (120 FIFO); fresh reads require native corroboration; input consumes all.\\\"}\",\"view\":\"overview\"},\"dispatched\":true,\"input_kind\":\"fill\",\"next\":\"Fill: no Enter/submit sent; handlers may react. Verify full values/state; no replay.\",\"no_replay\":true,\"receipt_scope\":\"input\",\"result_verified\":false}"
+              }
+            ]
+          },
+          {
+            "type": "function_call",
+            "name": "browser_click",
+            "arguments": "{\"click_ref\": \"bclick_10000000-0000-4000-8000-00000000000A\"}",
+            "call_id": "history-click"
+          },
+          {
+            "type": "function_call_output",
+            "call_id": "history-click",
+            "output": [
+              {
+                "type": "input_text",
+                "text": "{\"retention\":\"complete_browser_observation_v1\"}"
+              },
+              {
+                "type": "input_text",
+                "text": "{\"dispatched\":true,\"kind\":\"click\",\"label\":\"Record test receipt\",\"outcome\":\"unverified\",\"partial\":false}"
+              },
+              {
+                "type": "input_text",
+                "text": "{\"action_references\":{\"consumed\":true,\"next\":\"current_observation\"},\"current_observation\":{\"snapshot_id\":\"10000000-0000-4000-8000-00000000000B\",\"status\":\"available\",\"text\":\"AXSNAPSHOT id=10000000-0000-4000-8000-00000000000B tab_handle=10000000-0000-4000-8000-000000000002 source=computa_webkit_dom url=\\\"http://127.0.0.1:34567/receipt/RCP-INERT-1\\\" title=\\\"Receipt recorded\\\"\\nREAD view=overview scope=document source_observation=10000000-0000-4000-8000-00000000000C consistency=immutable_capture source_nodes=7 source_truncated=0 matches=5 shown=5 offset=0 output_truncated=0 field_truncated=0 metadata_truncated=0 no_matches=0 observation=live semantic_readiness=ready\\nREAD_SELECTION_EVIDENCE local_view query=false counts=capture site_search=false site_count=unmeasured\\nSCOPE captured rows only; not site results/relevance/absence. *_utf8=exact fragments; href_fragment=not_navigable. Defaults enabled=true settable=false actions=[]. Only shown refs authorize input.\\nVIEW overview. Use refs for links/search; content=text.\\nRECORD_PATH is capture-local read-only ancestry: equal paths group rows; prefixes show nesting, not authorship. Records may span pages. Not input targets or verified outcomes.\\n#0 role=\\\"AXHeading\\\" semantic_role=\\\"heading\\\" label=\\\"Receipt recorded\\\" content_scope=main content_kind=readable \\n#1 role=\\\"AXStaticText\\\" semantic_role=\\\"statictext\\\" label=\\\"Reference: INV-INERT-600\\\" record_path=\\\"10000000-0000-4000-8000-00000000000C/1\\\" content_scope=main content_kind=readable \\n#2 role=\\\"AXHeading\\\" semantic_role=\\\"heading\\\" label=\\\"Reference recorded\\\" record_path=\\\"10000000-0000-4000-8000-00000000000C/1\\\" content_scope=main content_kind=readable \\n#3 role=\\\"AXStaticText\\\" semantic_role=\\\"statictext\\\" label=\\\"Receipt: RCP-INERT-1\\\" record_path=\\\"10000000-0000-4000-8000-00000000000C/1\\\" content_scope=main content_kind=readable \\n#4 role=\\\"AXStaticText\\\" semantic_role=\\\"statictext\\\" label=\\\"Accepted submissions: 1\\\" record_path=\\\"10000000-0000-4000-8000-00000000000C/1\\\" content_scope=main content_kind=readable \\nBROWSER_ACTION_REFERENCES {\\\"copy\\\":\\\"Verbatim Unicode/whitespace.\\\",\\\"next\\\":\\\"current_observation/browser_read; never replay.\\\",\\\"refs\\\":\\\"Cursor pages retain same-capture refs (120 FIFO); fresh reads require native corroboration; input consumes all.\\\"}\",\"view\":\"overview\"},\"dispatched\":true,\"input_kind\":\"click\",\"next\":\"If navigating: browser_wait(after_snapshot=\\\"10000000-0000-4000-8000-00000000000B\\\"); read. No replay.\",\"no_replay\":true,\"receipt_scope\":\"input\",\"result_verified\":false}"
+              }
+            ]
+          },
+          {
+            "type": "function_call",
+            "name": "browser_close",
+            "arguments": "{}",
+            "call_id": "history-close"
+          },
+          {
+            "type": "function_call_output",
+            "call_id": "history-close",
+            "output": "{\"existing_user_tab_preserved\":true,\"literal_copy_guidance\":\"Copy already observed identifiers, receipts, URLs and paths verbatim in inline code unless exact raw output is requested. Preserve original Unicode and whitespace: ASCII '-' (U+002D) must never become U+2011. Inline code changes presentation, not characters. This grants no new observation or action authority.\",\"released\":true}"
+          }
+        ]
+        """#
+        let history = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(capturedHistory.utf8)) as? [[String: Any]])
+        let patchCall = try XCTUnwrap(history.first { $0["type"] as? String == "custom_tool_call" })
+        let patchInput = try XCTUnwrap(patchCall["input"] as? String)
+        let patchID = try XCTUnwrap(patchCall["call_id"] as? String)
+        let patchOutput = try XCTUnwrap(history.first { $0["type"] as? String == "custom_tool_call_output" }?["output"] as? String)
+        XCTAssertEqual(patchID, "history-patch")
+        XCTAssertTrue(patchInput.hasPrefix("*** Begin Patch\n*** Update File: /synthetic/invoice-projection/coding/reconcile.py\n"))
+        XCTAssertTrue(patchInput.hasSuffix("*** End Patch"))
+        XCTAssertTrue(patchOutput.contains("Success. Updated the following files:"))
+        let expectedIDs = ["history-patch", "history-open", "history-fill", "history-click", "history-close"]
+        func outputText(_ value: Any?) throws -> String {
+            if let text = value as? String { return text }
+            let parts = try XCTUnwrap(value as? [[String: Any]])
+            XCTAssertTrue(parts.allSatisfy { Set($0.keys) == ["type", "text"] && $0["type"] as? String == "input_text" })
+            return try parts.map { try XCTUnwrap($0["text"] as? String) }.joined()
+        }
+        let expectedOutputs = try history.filter { ["function_call_output", "custom_tool_call_output"].contains($0["type"] as? String ?? "") }
+            .map { try outputText($0["output"]) }
+        XCTAssertEqual(expectedOutputs.count, expectedIDs.count)
+        let catalog = try [nativePatch()] + EmbeddedBrowserTools.definitions().map {
+            try nativeBrowserTool(XCTUnwrap($0["name"] as? String))
+        }
+        let alibaba = literalPatchProvider()
+        let currentRefs = EmbeddedBrowserCurrentActionReferences(clickReferences: ["bclick_current"], fillReferences: ["bfill_current"])
+        let reminder = "Current user reminder: preserve completed work; do not repeat the patch or browser submission."
+        let checkpoints = [
+            "APP_RUNTIME_EXECUTION_CHECKPOINT\nCurrent-turn checkpoint: browser_open completed=1; result remains unverified.",
+            "APP_RUNTIME_EXECUTION_CHECKPOINT\nCurrent-turn checkpoint: browser_close completed=1; existing user tab preserved."
+        ]
+        for naming: APIModelResponseCodec.ToolNaming in [.legacy, .semantic] {
+            var firstMessages: [[String: Any]]?
+            var firstPatchDefinition: [String: Any]?
+            var firstPatchWireName: String?
+            let bound = try request(["tools": catalog, "input": history], provider: alibaba,
+                toolNaming: naming, browserToolAvailability: .bound, browserActionReferences: currentRefs)
+            let hiddenFillName = try XCTUnwrap(bound.tools.first { $0.name == "browser_fill" }?.wireName)
+            for availability: EmbeddedBrowserToolAvailability in [.unbound, .bound, .unbound] {
+                let prepared = try request(["tools": catalog, "input": history], provider: alibaba,
+                    toolNaming: naming, browserToolAvailability: availability,
+                    browserActionReferences: availability == .bound ? currentRefs : .empty)
+                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.body) as? [String: Any])
+                let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+                if let firstMessages { XCTAssertEqual(messages as NSArray, firstMessages as NSArray) }
+                else { firstMessages = messages }
+                XCTAssertEqual(prepared.historyCallIDs, Set(expectedIDs))
+                let patchTool = try XCTUnwrap(prepared.tools.first { $0.name == "apply_patch" && $0.custom })
+                let patchDefinition = try XCTUnwrap(wireFunctions(prepared).first { $0["name"] as? String == patchTool.wireName })
+                if let firstPatchDefinition { XCTAssertEqual(patchDefinition as NSDictionary, firstPatchDefinition as NSDictionary) }
+                else { firstPatchDefinition = patchDefinition }
+                if let firstPatchWireName { XCTAssertEqual(patchTool.wireName, firstPatchWireName) }
+                else { firstPatchWireName = patchTool.wireName }
+                let calls = messages.flatMap { $0["tool_calls"] as? [[String: Any]] ?? [] }
+                XCTAssertEqual(calls.compactMap { $0["id"] as? String }, expectedIDs)
+                let projectedPatch = try XCTUnwrap(calls.first { $0["id"] as? String == patchID }?["function"] as? [String: Any])
+                XCTAssertEqual(projectedPatch["name"] as? String, patchTool.wireName)
+                let arguments = try XCTUnwrap(projectedPatch["arguments"] as? String)
+                let wrapper = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(arguments.utf8)) as? [String: String])
+                XCTAssertEqual(Set(wrapper.keys), ["input"])
+                XCTAssertEqual(Data(try XCTUnwrap(wrapper["input"]).utf8), Data(patchInput.utf8))
+                let outputs = messages.filter { $0["role"] as? String == "tool" }
+                XCTAssertEqual(outputs.compactMap { $0["tool_call_id"] as? String }, expectedIDs)
+                XCTAssertEqual(try outputs.map { Data(try XCTUnwrap($0["content"] as? String).utf8) }, expectedOutputs.map { Data($0.utf8) })
+                XCTAssertEqual(Data(try XCTUnwrap(outputs.first?["content"] as? String).utf8), Data(patchOutput.utf8))
+                XCTAssertTrue(prepared.tools.contains { $0.name == "browser_open" })
+                XCTAssertEqual(prepared.tools.contains { $0.name == "browser_fill" }, availability == .bound)
+                for checkpoint in checkpoints {
+                    for reminders in [[], [reminder]] as [[String]] {
+                        let appended = try APIModelResponseCodec.appendingHostDeveloperMessage(checkpoint,
+                            to: prepared, userInputs: reminders, purpose: .ordinaryInference)
+                        let afterBody = try XCTUnwrap(JSONSerialization.jsonObject(with: appended.body) as? [String: Any])
+                        let after = try XCTUnwrap(afterBody["messages"] as? [[String: Any]])
+                        XCTAssertEqual(Array(after.prefix(messages.count)) as NSArray, messages as NSArray)
+                        XCTAssertEqual(after.count, messages.count + 1 + reminders.count)
+                        XCTAssertEqual(after[messages.count]["role"] as? String, "system")
+                        XCTAssertEqual(Data(try XCTUnwrap(after[messages.count]["content"] as? String).utf8), Data(checkpoint.utf8))
+                        if let reminder = reminders.first {
+                            XCTAssertEqual(after.last?["role"] as? String, "user")
+                            XCTAssertEqual(Data(try XCTUnwrap(after.last?["content"] as? String).utf8), Data(reminder.utf8))
+                        }
+                        XCTAssertEqual(afterBody["tools"] as? NSArray, body["tools"] as? NSArray)
+                        XCTAssertEqual(appended.historyCallIDs, prepared.historyCallIDs)
+                        XCTAssertEqual(appended.allowedTools, prepared.allowedTools)
+                        XCTAssertEqual(appended.responseConfiguration as NSDictionary, prepared.responseConfiguration as NSDictionary)
+                    }
+                }
+                if availability == .unbound {
+                    let newFill: [String: Any] = ["role": "assistant", "tool_calls": [["id": "new-unoffered-fill", "type": "function",
+                        "function": ["name": hiddenFillName, "arguments": #"{"fill_ref":"bfill_current","text":"inert"}"#]]]]
+                    XCTAssertThrowsError(try decode(newFill, finish: "tool_calls", request: prepared, model: alibaba.models[0].id))
+                }
+            }
+            var orphan = history
+            let outputIndex = try XCTUnwrap(orphan.firstIndex { $0["type"] as? String == "custom_tool_call_output" })
+            orphan[outputIndex]["call_id"] = "foreign-patch-output"
+            XCTAssertThrowsError(try request(["tools": catalog, "input": orphan], provider: alibaba, toolNaming: naming)) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidHistory)
+            }
+        }
+    }
+
     func testAlibabaHostAndMaintenanceInstructionsKeepUserBoundaryAndResponsesUnchanged() throws {
         let officialURL = URL(string: "https://ws-fixture123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1")!
         let profiles: [(APIProviderDefinition, String)] = [

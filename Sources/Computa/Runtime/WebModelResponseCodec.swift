@@ -271,6 +271,24 @@ enum WebModelResponseCodec {
     /// Direct tools are an inference-local presentation over that selection.
     static func prepareBudgetedGroqRequest(_ data: Data, availability: EmbeddedBrowserToolAvailability?,
                                            projection: GroqToolCatalog.Projection, model: String) throws -> (request: Request, units: Int) {
+        try prepareBudgetedGroqRequest(data, availability: availability, projection: projection, model: model,
+                                      candidateObserver: nil)
+    }
+
+    #if DEBUG
+    /// A synchronous fixture observer sees the actual candidate BEFORE its own
+    /// validator. It cannot substitute bytes, change admission or replace errors.
+    static func prepareBudgetedGroqRequest(_ data: Data, availability: EmbeddedBrowserToolAvailability?,
+        projection: GroqToolCatalog.Projection, model: String,
+        observingCandidate: @escaping (Request, String, Bool) -> Void) throws -> (request: Request, units: Int) {
+        try prepareBudgetedGroqRequest(data, availability: availability, projection: projection, model: model,
+                                      candidateObserver: observingCandidate)
+    }
+    #endif
+
+    private static func prepareBudgetedGroqRequest(_ data: Data, availability: EmbeddedBrowserToolAvailability?,
+        projection: GroqToolCatalog.Projection, model: String,
+        candidateObserver: ((Request, String, Bool) -> Void)?) throws -> (request: Request, units: Int) {
         let exact = groqPromptBudgetUsesExactTokenizer(model: model)
         let choices: [GroqDirectToolSet] = exact
             ? [.standard, .essential, .loadedOnly] : [.loadedOnly]
@@ -283,6 +301,14 @@ enum WebModelResponseCodec {
             do {
                 let request = try prepareRequest(data, browserToolAvailability: availability,
                     groqToolCatalogProjection: projection, groqDirectTools: choice, compactGroqLoaderHistory: compactHistory)
+                if let candidateObserver {
+                    let direct: String = switch choice {
+                    case .standard: "standard"
+                    case .essential: "essential"
+                    case .loadedOnly: "loadedOnly"
+                    }
+                    candidateObserver(request, direct, compactHistory)
+                }
                 guard request.model == model,
                       let units = try validateGroqPromptBudget(model: model, prompt: request.prompt) else {
                     throw Failure.invalidTools

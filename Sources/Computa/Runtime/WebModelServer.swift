@@ -661,6 +661,55 @@ actor WebModelServer {
         return provider == "gemini"
     }
 
+    #if DEBUG
+    /// Native-only synthetic producer fixtures. Raw canonical/request values are
+    /// transient callback arguments, never a product endpoint, journal or arm.
+    struct GroqPreflightContextForTesting: Equatable, Sendable {
+        let taskID: String
+        let threadID: String
+        let turnID: String
+        let modelID: String
+        let runtimeGeneration: UUID
+        let preparationID: UUID
+        let transportGeneration: UUID
+        let inferenceID: UUID
+        let compactToolThread: Bool
+    }
+    enum GroqPreflightRejectionForTesting: String, Sendable {
+        case bodyTokens, bodyBytes, counterUnavailable, other
+    }
+    enum GroqPreflightEventForTesting: Sendable {
+        case canonical(Data)
+        case candidate(request: WebModelResponseCodec.Request, directTools: String, compactHistory: Bool)
+        /// Body-budget admission only; not website Start, selection or workflow proof.
+        case admitted(units: Int)
+        case rejected(kind: GroqPreflightRejectionForTesting, actual: Int?, maximum: Int?, reserved: Int?)
+    }
+    typealias GroqPreflightObserverForTesting = @Sendable (GroqPreflightContextForTesting, GroqPreflightEventForTesting) -> Void
+    private var groqPreflightObserverForTesting: GroqPreflightObserverForTesting?
+
+    init(rejectedReplyDirectory: URL? = nil, groqPreflightObserverForTesting: @escaping GroqPreflightObserverForTesting) {
+        self.rejectedReplyDirectory = rejectedReplyDirectory
+        self.groqPreflightObserverForTesting = groqPreflightObserverForTesting
+    }
+
+    private static func groqPreflightRejectedEventForTesting(_ error: any Error) -> GroqPreflightEventForTesting {
+        guard let failure = error as? WebModelResponseCodec.Failure else {
+            return .rejected(kind: .other, actual: nil, maximum: nil, reserved: nil)
+        }
+        switch failure {
+        case .groqPromptBudgetExceeded(let actual, let maximum, let reserved):
+            return .rejected(kind: .bodyTokens, actual: actual, maximum: maximum, reserved: reserved)
+        case .groqPromptByteBudgetExceeded(let actual, let maximum, let reserved):
+            return .rejected(kind: .bodyBytes, actual: actual, maximum: maximum, reserved: reserved)
+        case .groqTokenCounterUnavailable:
+            return .rejected(kind: .counterUnavailable, actual: nil, maximum: nil, reserved: nil)
+        default:
+            return .rejected(kind: .other, actual: nil, maximum: nil, reserved: nil)
+        }
+    }
+    #endif
+
     /// A configured directory alone never enables response-content capture.
     /// Its private arm.json must explicitly name the exact local task.
     init(rejectedReplyDirectory: URL? = nil) {
@@ -1099,6 +1148,21 @@ actor WebModelServer {
         // only after native turn admission. Freeze it for corrective attempts;
         // continuation checks still use the unchanged original request bytes.
         try requireCurrentContext()
+        #if DEBUG
+        let preflightContext: GroqPreflightContextForTesting? = provider == "groq" && groqPreflightObserverForTesting != nil
+            ? .init(taskID: taskID, threadID: context.threadID, turnID: context.turnID, modelID: originalRequest.model,
+                    runtimeGeneration: context.runtimeGeneration, preparationID: context.preparationID,
+                    transportGeneration: transportGeneration, inferenceID: inferenceID,
+                    compactToolThread: context.isCompactToolThread) : nil
+        func observePreflight(_ event: GroqPreflightEventForTesting) {
+            // No await splits the check and callback; cancellation/context loss
+            // suppresses observation and cannot substitute the original outcome.
+            guard let preflightContext, let observer = groqPreflightObserverForTesting,
+                  (try? requireCurrentContext()) != nil else { return }
+            observer(preflightContext, event)
+        }
+        observePreflight(.canonical(originalRequest.continuationRequest))
+        #endif
         var request: WebModelResponseCodec.Request
         var admittedBrowserAvailability: EmbeddedBrowserToolAvailability?
         var groqCatalogRequest: GroqCatalogRequestContext?
@@ -1130,8 +1194,28 @@ actor WebModelServer {
                 modelID: request.model)
             var candidate = groqToolCatalog
             let projection = try candidate.prepare(scope: scope, seed: seed)
-            let result = try WebModelResponseCodec.prepareBudgetedGroqRequest(originalRequest.continuationRequest,
+            let result: (request: WebModelResponseCodec.Request, units: Int)
+            #if DEBUG
+            do {
+                if preflightContext != nil {
+                    result = try WebModelResponseCodec.prepareBudgetedGroqRequest(originalRequest.continuationRequest,
+                        availability: admittedBrowserAvailability, projection: projection, model: request.model,
+                        observingCandidate: { candidate, direct, compact in
+                            observePreflight(.candidate(request: candidate, directTools: direct, compactHistory: compact))
+                        })
+                } else {
+                    result = try WebModelResponseCodec.prepareBudgetedGroqRequest(originalRequest.continuationRequest,
+                        availability: admittedBrowserAvailability, projection: projection, model: request.model)
+                }
+                observePreflight(.admitted(units: result.units))
+            } catch {
+                observePreflight(Self.groqPreflightRejectedEventForTesting(error))
+                throw error // Preserve the builder's selected original failure, not its last fallback.
+            }
+            #else
+            result = try WebModelResponseCodec.prepareBudgetedGroqRequest(originalRequest.continuationRequest,
                 availability: admittedBrowserAvailability, projection: projection, model: request.model)
+            #endif
             request = result.request
             measuredGroqBodyUnits = result.units
             groqCatalogRequest = GroqCatalogRequestContext(scope: scope,

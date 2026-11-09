@@ -893,6 +893,9 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         #if DEBUG
         /// Isolated integration fixtures supply a local gateway and in-memory credentials.
         var apiModelServerForTesting: APIModelServer? = nil
+        /// Preconfigured before a genuine bundled synthetic fixture starts.
+        /// This observer does not change pacing or expose a runtime endpoint.
+        var groqPreflightObserverForTesting: WebModelServer.GroqPreflightObserverForTesting? = nil
         /// Inert transports explicitly simulate a verified artifact feature.
         /// Bundled launches ignore this and use only the validated manifest.
         var fixtureRuntimeCapabilities: Set<ComputaRuntimeArtifact.Capability> = []
@@ -1039,6 +1042,14 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
     func configureEmbeddedWebModelTransport(_ transport: any WebModelTransport) async {
         await core.configureEmbeddedWebModelTransport(transport)
     }
+
+    #if DEBUG
+    /// Explicit fixture choice, independent of observer presence. Never changes
+    /// the release/default pacer; no real provider is used by this test path.
+    func setGroqSubmissionIntervalForTesting(_ interval: Duration) async {
+        await core.setGroqSubmissionIntervalForTesting(interval)
+    }
+    #endif
 
     func configureEmbeddedBrowserTools(_ controller: EmbeddedBrowserToolController) async {
         await core.configureEmbeddedBrowserTools(controller)
@@ -1448,9 +1459,18 @@ private extension CodexAppServerRuntime {
             self.visualGrounder = visualGrounder
             // Captures stay disabled unless a private, exact-task one-shot arm
             // is explicitly created in this local diagnostic directory.
-            self.webModelServer = WebModelServer(rejectedReplyDirectory:
-                URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
-                    .appendingPathComponent("WebsiteReplyDiagnostics-v1", isDirectory: true))
+            let replyDirectory = URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
+                .appendingPathComponent("WebsiteReplyDiagnostics-v1", isDirectory: true)
+            #if DEBUG
+            if let observer = configuration.groqPreflightObserverForTesting {
+                self.webModelServer = WebModelServer(rejectedReplyDirectory: replyDirectory,
+                    groqPreflightObserverForTesting: observer)
+            } else {
+                self.webModelServer = WebModelServer(rejectedReplyDirectory: replyDirectory)
+            }
+            #else
+            self.webModelServer = WebModelServer(rejectedReplyDirectory: replyDirectory)
+            #endif
         }
 
         func start() async throws {
@@ -1618,6 +1638,12 @@ private extension CodexAppServerRuntime {
             embeddedBrowserAvailabilityInstallation = installation
             await installation.value
         }
+
+        #if DEBUG
+        func setGroqSubmissionIntervalForTesting(_ interval: Duration) async {
+            await webModelServer.setGroqSubmissionIntervalForTesting(interval)
+        }
+        #endif
 
         func configureEmbeddedWebModelTransport(_ transport: any WebModelTransport) async {
             guard !isShuttingDown, !isPreparingCommandShutdown else { return }
