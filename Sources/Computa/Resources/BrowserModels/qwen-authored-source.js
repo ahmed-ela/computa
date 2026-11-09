@@ -81,7 +81,7 @@
     let visits = 128;
     while (stack.length) {
       require(--visits >= 0);
-      const [node,depth] = stack.pop(); require(depth <= 8);
+      const [node,depth] = stack.pop(); require(depth <= 10);
       if (node === null || node === undefined || typeof node === 'boolean' || node === '') continue;
       require(typeof node === 'object');
       if (array(node)) {

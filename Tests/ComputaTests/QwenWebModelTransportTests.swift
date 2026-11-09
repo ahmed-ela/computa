@@ -1092,7 +1092,13 @@ final class QwenWebModelTransportTests: XCTestCase {
           content_list:[{phase:'thinking_summary',role:'assistant',status:'finished',extra:{}},{phase:'answer',role:'assistant',status:'finished',extra:{},content:raw}]};
         Object.defineProperty(message.content_list[0],'content',{get(){throw Error('Reasoning must remain unread');}});
         const element=props=>({$$typeof:Symbol.for('react.transitional.element'),type:()=>{throw Error('No component execution');},props});
-        host.__reactProps$synthetic={id:host.id,children:element({message,children:element({message,phaseContentIndex:1,content:raw})})};
+        const input=element({message,phaseContentIndex:1,content:raw});
+        const phase=element({children:element({children:element({message,phase:'answer',children:input})})});
+        const phases=[element({message,phaseContent:message.content_list[0],contentList:message.content_list}),phase];
+        const nv=element({message,children:[element({message}),element({message}),phases,false]});
+        const right=element({className:'chat-response-message-right',children:[element({children:nv}),false,false,false,false,false,false,
+          element({message,isEdit:false,isRenderEmpty:false}),false,false]});
+        host.__reactProps$synthetic={id:host.id,children:right};
         const link=document.createElement('a');link.textContent='DOM is deliberately not the whole source';
         document.querySelector('.qwen-markdown').replaceChildren(link);return true;
         """#.replacingOccurrences(of: "__ARGS__", with: String(decoding: argument, as: UTF8.self))

@@ -3,7 +3,9 @@ import {readFileSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 import {ownedRaw,channel} from './embedded-qwen-authored-source-fixture';
 import {conversationID,userID,answerID} from './embedded-qwen-adapter-fixture';
-const previous=readFileSync(new URL('./fixtures/qwen-authored-source-before452.js',import.meta.url),'utf8');
+const previousBytes=readFileSync(new URL('./fixtures/qwen-authored-source-before452.js',import.meta.url),'utf8');
+// Compare observer-only semantics at the same supported public-tree depth.
+const previous=previousBytes.replace('require(depth <= 8);','require(depth <= 10);');
 const current=readFileSync(new URL('../Sources/Computa/Resources/BrowserModels/qwen-authored-source.js',import.meta.url),'utf8');
 const raw='```json\n'+JSON.stringify({type:'message',text:'Synthetic [[12]] λ😀\n\t"raw"'})+'\n```';
 const observed=(source:string)=>source.replace('const descriptor = Object.getOwnPropertyDescriptor,',
@@ -11,7 +13,7 @@ const observed=(source:string)=>source.replace('const descriptor = Object.getOwn
 const base={version:1,provider:'qwen',trigger:'authored_source',stage:'inline',reason:'other',count:0};
 
 test('raw ineligibility diagnostics preserve original rejection, source descriptor read order and zero actions',async()=>{
-  expect(createHash('sha256').update(previous).digest('hex')).toBe('191d72db9192e1b592211197635c60ab9155b7779c97a82516e6be77363dbc6e');
+  expect(createHash('sha256').update(previousBytes).digest('hex')).toBe('191d72db9192e1b592211197635c60ab9155b7779c97a82516e6be77363dbc6e');
   for(const [kind,stage,count,seen] of [
     ['extra','message_extra',null,null],['timestamp','phase_scalar',2,1],['unknown','phase_kind',2,0],
     ['duplicate','answer_count',3,2],['limit','phase_list',33,null],['accessor','phase_state',2,1],

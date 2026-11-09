@@ -52,7 +52,13 @@ export function props(f:ReturnType<typeof fixture>, raw:string) {
     info:{...usage,openai:true,usage},content_list:[hidden,answer]};
   const element=(p:any)=>({$$typeof:Symbol.for('react.transitional.element'),type:()=>{throw new Error('component must never execute');},props:p});
   const input:any={message,phaseContentIndex:1,content:raw};
-  const current:any={id:'chat-response-message-'+answerID,children:element({children:[element({message,children:[element({message,phaseContent:hidden}),element(input)]}),element({message,isEdit:false})]})};
+  // Pinned0.3.38 CY: rightDIV/array/Fragment/NV/array/map-array/phaseFragment/div/$W/PG.
+  const phase=element({children:element({children:element({message,phase:'answer',children:element(input)})})});
+  const phases=[element({message,phaseContent:hidden,contentList:message.content_list}),phase];
+  const nv=element({message,children:[element({message}),element({message}),phases,false]});
+  const right=element({className:'chat-response-message-right',children:[element({children:nv}),false,false,false,false,false,false,
+    element({message,isEdit:false,isRenderEmpty:false}),false,false]});
+  const current:any={id:'chat-response-message-'+answerID,children:right};
   Object.defineProperty(f.answer,'__reactProps$fixture',{value:current,writable:true,configurable:true});
   return {message,answer,hidden,current,input,element};
 }
