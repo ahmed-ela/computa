@@ -611,13 +611,13 @@ async function computaSavedConversation(input, c, dom, config) {
     function read() {
       const t = dom.transcript(), form = dom.composer(), evidence = selectionEvidence(false);
       validateInitialResponseIdentity(t, 'ordinary_read');
-      let extracted = dom.rawAnswer(t.answer);
+      let extracted = dom.rawAnswer(t.answer), rawSourceFailure = null;
       state.initialReadComplete = true;
       const terminalUI = !!state.first && !!evidence && !state.deletion && dom.completionCandidate(t.answer);
       if (terminalUI && extracted.formatIssue && qwenCodeEnabled
         && (input.action === 'inspect' || input.action === 'verifyModel' && state.codePayload?.source.kind === 'raw_answer_v1')
         && !cleanupInspection && !state.deletion && typeof dom.authoredSourceCandidate === 'function') {
-        const source = dom.authoredSourceCandidate(t.answer,input.qwenCodePayloadChannel,state.first.id);
+        const source = dom.authoredSourceCandidate(t.answer,input.qwenCodePayloadChannel,state.first.id,value => { rawSourceFailure = value; });
         if (source) extracted = {text:'',finalMarkup:false,formatIssue:false,codePayload:source};
       }
       if (terminalUI && extracted.formatIssue && !cleanupInspection && !deletionActions.includes(input.action)) {
@@ -628,8 +628,10 @@ async function computaSavedConversation(input, c, dom, config) {
               const qwenChoice = config.stateKey === '__computaQwenSavedSessionV1'
                 && c.equalChoice(evidence.selected, input.expectedModelChoice)
                 && ['Qwen3.7-Plus', 'Qwen3.8-Max'].some(label => c.equalChoice(evidence.selected, { key: label, label }));
-              if (qwenChoice || config.stateKey === '__computaDeepSeekSavedSessionV1')
-                error.adapterFailureStructure = extracted.failureStructure();
+              if (qwenChoice || config.stateKey === '__computaDeepSeekSavedSessionV1') {
+                const original = extracted.failureStructure();
+                error.adapterFailureStructure = rawSourceFailure ? {...original,rawSource:rawSourceFailure} : original;
+              }
             } catch { /* Preserve the original refusal. */ }
           }
           throw error;

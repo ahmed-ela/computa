@@ -180,11 +180,14 @@ enum WebsiteAdapterFailureDiagnostic {
             }
             if error == "unsupported_response_format", detail == "authored_source", trigger == detail {
                 let hasPhaseSet = value["phaseSet"] != nil
+                let hasRawSource = value["rawSource"] != nil
                 let authoredKeys: Set<String> = ["version", "provider", "trigger", "stage", "reason", "count"]
-                guard Set(value.keys) == (hasPhaseSet ? authoredKeys.union(["phaseSet"]) : authoredKeys),
+                let expectedKeys = authoredKeys.union(hasPhaseSet ? ["phaseSet"] : []).union(hasRawSource ? ["rawSource"] : [])
+                guard Set(value.keys) == expectedKeys,
                       let stage = value["stage"] as? String, let reason = value["reason"] as? String,
                       let count = integer(value["count"], 0...2), reason == "count" || ["span_limit", "phase_set"].contains(stage) || count == 0,
-                      !hasPhaseSet || stage == "phase_set" && qwenPhaseSet(value["phaseSet"], reason: reason) else { return nil }
+                      !hasPhaseSet || stage == "phase_set" && qwenPhaseSet(value["phaseSet"], reason: reason),
+                      !hasRawSource || qwenRawSource(value["rawSource"]) else { return nil }
                 switch stage {
                 case "flow", "phase":
                     guard reason == "count" ? count == 2 : reason == (stage == "flow" ? "hidden" : "class") else { return nil }
@@ -219,7 +222,8 @@ enum WebsiteAdapterFailureDiagnostic {
                            "write_size", "utf8_roundtrip"].contains(reason) else { return nil }
                 default: return nil
                 }
-                guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]) else { return nil }
+                guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]),
+                      data.count <= (hasRawSource ? 1_024 : 512) else { return nil }
                 return Packet(provider: provider, trigger: trigger, data: data)
             }
             guard error == "conversation_changed", detail == "first_user_message", trigger == "full_prompt_mismatch",
@@ -255,8 +259,9 @@ enum WebsiteAdapterFailureDiagnostic {
     /// Ordinary failure logging is limited to the closed finite Qwen packet.
     /// Other providers' larger structure records remain opt-in only.
     static func qwenAuthoredLogFields(_ packet: Packet) -> String? {
-        guard packet.provider == "qwen", packet.trigger == "authored_source", packet.data.count <= 512,
-              let value = try? JSONSerialization.jsonObject(with: packet.data),
+        guard packet.provider == "qwen", packet.trigger == "authored_source", packet.data.count <= 1_024,
+              let value = try? JSONSerialization.jsonObject(with: packet.data) as? [String: Any],
+              packet.data.count <= (value["rawSource"] == nil ? 512 : 1_024),
               let checked = sanitize(value, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"),
               checked.data == packet.data else { return nil }
         return String(data: packet.data, encoding: .utf8)
@@ -287,6 +292,28 @@ enum WebsiteAdapterFailureDiagnostic {
               let wrapper = integer(value["singleWrapper"], 0...16), let direct = integer(value["direct"], 0...16),
               let other = integer(value["otherWrapper"], 0...16), wrapper + direct + other == sampled else { return false }
         return true
+    }
+
+    /// Eligibility failure metadata describes a rejected read only. Partial
+    /// answersSeen counts never claim a complete source or response authority.
+    private static func qwenRawSource(_ raw: Any?) -> Bool {
+        let stages: Set<String> = ["request", "target", "root", "conversation_nodes", "host_props", "element_tree",
+            "message_keys", "message_identity", "message_state", "message_mode", "message_legacy_content",
+            "message_empty_fields", "message_extra", "message_meta", "message_display", "message_timestamp",
+            "feature_keys", "feature_values", "usage_shape", "phase_list", "phase_keys", "phase_kind", "phase_state",
+            "phase_extra", "phase_tools", "phase_scalar", "answer_count", "answer_role", "answer_value",
+            "renderer_input", "utf8", "source_stability"]
+        guard let value = raw as? [String: Any],
+              Set(value.keys) == ["version", "stage", "kind", "phaseCount", "phaseOverflow", "answersSeen"],
+              integer(value["version"], 1...1) == 1,
+              let stage = value["stage"] as? String, stages.contains(stage),
+              let kind = value["kind"] as? String, ["guard", "exception"].contains(kind) else { return false }
+        if value["phaseCount"] is NSNull {
+            return value["phaseOverflow"] is NSNull && value["answersSeen"] is NSNull
+        }
+        guard let count = integer(value["phaseCount"], 0...33), let overflow = boolean(value["phaseOverflow"]),
+              overflow == (count == 33) else { return false }
+        return value["answersSeen"] is NSNull || integer(value["answersSeen"], 0...min(count, 2)) != nil
     }
 
     private static func candidates(_ raw: Any?, categories: Set<String>, kind: String) -> Bool {

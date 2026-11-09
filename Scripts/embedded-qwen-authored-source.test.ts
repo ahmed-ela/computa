@@ -41,7 +41,9 @@ test('ineligible metadata, duplicate or foreign phases preserve the exact origin
       if(kind==='wrongParent')p.message.parentId='11111111-1111-4111-8111-111111111111';if(kind==='role')p.answer.role='function';if(kind==='notDone')p.message.done=false;
     });
     expect(t.first.error,kind).toBe('unsupported_response_format');expect(t.first.detail,kind).toBe('authored_source');
-    expect(t.first.adapterFailureStructure,kind).toEqual({version:1,provider:'qwen',trigger:'authored_source',stage:'inline',reason:'other',count:0});
+    const {rawSource,...originalFailure}=t.first.adapterFailureStructure;
+    expect(originalFailure,kind).toEqual({version:1,provider:'qwen',trigger:'authored_source',stage:'inline',reason:'other',count:0});
+    expect(rawSource.version,kind).toBe(1);
     expect(t.first.qwenCodePayload,kind).toBeUndefined();expect(t.first.text,kind).toBeUndefined();
     expect(JSON.stringify(t.first),kind).not.toContain('PRIVATE');expect(t.world.delegated(),kind).toBe(0);
     expect(t.f.actions.every(action=>action.clicks===0),kind).toBe(true);expect(t.f.send.clicks,kind).toBe(1);

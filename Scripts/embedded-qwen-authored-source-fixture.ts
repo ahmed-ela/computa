@@ -3,7 +3,7 @@ import {fixture,choice,prompt,marker,fingerprint,answerID,userID} from './embedd
 export const channel={dispatch:'11a11111-1111-4111-8111-111111111111',result:'22a22222-2222-4222-8222-222222222222',secret:'33a33333-3333-4333-8333-333333333333'};
 const html='http://www.w3.org/1999/xhtml';
 const source=readFileSync(new URL('../Sources/Computa/Resources/BrowserModels/qwen-authored-source.js',import.meta.url),'utf8');
-function installRawWorld(f:ReturnType<typeof fixture>, resultTransform?:(value:any)=>any, sinkPromise:any=Promise) {
+function installRawWorld(f:ReturnType<typeof fixture>, resultTransform?:(value:any)=>any, sinkPromise:any=Promise, sourceOverride?:string) {
   const listeners=new WeakMap<any,Map<string,{fn:any,capture:boolean}[]>>();let delegated=0;
   const add=function(this:any,name:string,fn:any,capture=false){
     if(!listeners.has(this))listeners.set(this,new Map());const map=listeners.get(this)!;
@@ -38,7 +38,7 @@ function installRawWorld(f:ReturnType<typeof fixture>, resultTransform?:(value:a
   const navigator={clipboard:new Clipboard()};
   Object.defineProperty(f.Node.prototype,'ownerDocument',{get:()=>f.document,configurable:true});
   Object.defineProperty(f.Node.prototype,'id',{get(){return this.getAttribute('id')||'';},configurable:true});
-  new Function('window','location','document','Clipboard','navigator','HTMLElement','HTMLButtonElement','Document','CustomEvent','Promise','EventTarget','Event','Node','HTMLDivElement',source.replace('__COMPUTA_QWEN_CODE_PAYLOAD_CONFIG__',JSON.stringify(channel)))(f.window,{origin:'https://chat.qwen.ai',get href(){return f.document.URL;}},f.document,Clipboard,navigator,f.Node,f.Node,Doc,Event,sinkPromise,ET,Event,f.Node,f.Node);
+  new Function('window','location','document','Clipboard','navigator','HTMLElement','HTMLButtonElement','Document','CustomEvent','Promise','EventTarget','Event','Node','HTMLDivElement',(sourceOverride ?? source).replace('__COMPUTA_QWEN_CODE_PAYLOAD_CONFIG__',JSON.stringify(channel)))(f.window,{origin:'https://chat.qwen.ai',get href(){return f.document.URL;}},f.document,Clipboard,navigator,f.Node,f.Node,Doc,Event,sinkPromise,ET,Event,f.Node,f.Node);
   return {navigator,root,Event,delegated:()=>delegated,listenerCount:(node:any)=>(listeners.get(node)?.get('click')||[]).length};
 }
 
@@ -56,8 +56,8 @@ export function props(f:ReturnType<typeof fixture>, raw:string) {
   Object.defineProperty(f.answer,'__reactProps$fixture',{value:current,writable:true,configurable:true});
   return {message,answer,hidden,current,input,element};
 }
-export async function ownedRaw(raw:string, mutate?:(p:ReturnType<typeof props>,f:ReturnType<typeof fixture>)=>void, transform?:(value:any)=>any, firstAction:'inspect'|'verifyModel'='inspect', deferDOMRefusal=false) {
-  const f=fixture(),world=installRawWorld(f,transform);
+export async function ownedRaw(raw:string, mutate?:(p:ReturnType<typeof props>,f:ReturnType<typeof fixture>)=>void, transform?:(value:any)=>any, firstAction:'inspect'|'verifyModel'='inspect', deferDOMRefusal=false, sourceOverride?:string) {
+  const f=fixture(),world=installRawWorld(f,transform,Promise,sourceOverride);
   await f.run('inspect');for(let i=0;i<8;i++)if((await f.run('selectModel',{modelChoice:choice()})).selected)break;
   await f.run('prepare');await f.run('insert',{prompt,expectedFirstUserMarker:marker});await f.run('sendReady',{prompt});
   await f.run('submit',{prompt,savedSubmissionFingerprint:await fingerprint(prompt)});

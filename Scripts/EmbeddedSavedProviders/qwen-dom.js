@@ -998,24 +998,63 @@ function computaQwenDOM(c) {
     return root && root.tagName === 'DIV' && root.namespaceURI === 'http://www.w3.org/1999/xhtml'
       && root.isConnected && root.parentElement === document.body && root.contains(control) ? root : null;
   }
-  function authoredSourceCandidate(answer, channel, parentID) {
+  function rawDiagnosticFields(value, expected) {
+    if (!value || typeof value !== 'object' || Object.getOwnPropertySymbols(value).length !== 0
+      || Object.getOwnPropertyNames(value).sort().join(',') !== expected.slice().sort().join(',')) return null;
+    const fields = {};
+    for (const key of expected) {
+      const property = Object.getOwnPropertyDescriptor(value,key);
+      if (!property || !Object.prototype.hasOwnProperty.call(property,'value')) return null;
+      fields[key] = property.value;
+    }
+    return fields;
+  }
+  function rawSourceDiagnostic(input) {
+    const value = rawDiagnosticFields(input,['version','stage','kind','phaseCount','phaseOverflow','answersSeen']);
+    const stages = ['request','target','root','conversation_nodes','host_props','element_tree','message_keys','message_identity',
+      'message_state','message_mode','message_legacy_content','message_empty_fields','message_extra','message_meta',
+      'message_display','message_timestamp','feature_keys','feature_values','usage_shape','phase_list','phase_keys','phase_kind',
+      'phase_state','phase_extra','phase_tools','phase_scalar','answer_count','answer_role','answer_value','renderer_input','utf8','source_stability'];
+    if (!value || Object.keys(value).sort().join(',') !== 'answersSeen,kind,phaseCount,phaseOverflow,stage,version'
+      || value.version !== 1 || !stages.includes(value.stage) || !['guard','exception'].includes(value.kind)) return null;
+    const n = value.phaseCount, overflow = value.phaseOverflow, seen = value.answersSeen;
+    if (n === null) { if (overflow !== null || seen !== null) return null; }
+    else if (!Number.isInteger(n) || n < 0 || n > 33 || typeof overflow !== 'boolean' || overflow !== (n === 33)
+      || seen !== null && (!Number.isInteger(seen) || seen < 0 || seen > Math.min(n,2))) return null;
+    return {version:1,stage:value.stage,kind:value.kind,phaseCount:n,phaseOverflow:overflow,answersSeen:seen};
+  }
+  function authoredSourceCandidate(answer, channel, parentID, failedDiagnostic) {
     if (!answer || !channel || Object.keys(channel).sort().join(',') !== 'dispatch,result,secret'
       || ![channel.dispatch,channel.result,channel.secret,parentID,answer.id].every(c.uuid)
       || route().kind !== 'canonical' || !codePayloadRoot(answer.root)) return null;
-    let count = 0, source = null;
+    let count = 0, source = null, failed = null;
     const listener = event => {
       if (event.target !== answer.content || event.detail?.kind !== 'raw_answer_v1' || event.detail?.op !== 'candidate') return;
       count++;
       const value = event.detail;
       if (Object.keys(value).sort().join(',') === 'candidate,eligible,kind,op,responseID'
         && value.eligible === true && c.uuid(value.candidate) && value.responseID === answer.id) source = value.candidate;
+      else {
+        // Failed-source metadata can never be returned as a truthy candidate.
+        try {
+          const rejected = rawDiagnosticFields(value,['candidate','diagnostic','eligible','kind','op','responseID']);
+          if (rejected && rejected.kind === 'raw_answer_v1' && rejected.op === 'candidate'
+            && rejected.eligible === false && rejected.candidate === null && rejected.responseID === answer.id)
+            failed = rawSourceDiagnostic(rejected.diagnostic);
+        } catch { /* Diagnostics cannot change the original refusal. */ }
+      }
     };
     document.addEventListener(channel.result,listener,true);
     try {
       answer.content.dispatchEvent(new CustomEvent(channel.dispatch,{bubbles:true,detail:{kind:'raw_answer_v1',op:'candidate',
         secret:channel.secret,chatID:route().id,parentID,responseID:answer.id}}));
     } finally { document.removeEventListener(channel.result,listener,true); }
-    if (count !== 1 || source === null) return null;
+    if (count !== 1 || source === null) {
+      if (count === 1 && source === null && failed && typeof failedDiagnostic === 'function') {
+        try { failedDiagnostic(failed); } catch { /* Preserve null eligibility. */ }
+      }
+      return null;
+    }
     const nodes = [answer.root,answer.content]; let parent = answer.root.parentElement;
     while (parent && nodes.length < 32) { nodes.push(parent); parent = parent.parentElement; }
     if (parent || nodes[nodes.length-1] !== document.documentElement) return null;

@@ -16,7 +16,12 @@
   let held = null, spent = false;
   const require = ok => { if (!ok) throw null; };
 
-  function read(target, request) {
+  function read(target, request, onTrace) {
+    const trace = onTrace ? {version:1,stage:'target',kind:'exception',phaseCount:null,phaseOverflow:null,answersSeen:null} : null;
+    if (trace && onTrace) onTrace(trace);
+    const mark = stage => { if (trace) trace.stage = stage; return true; };
+    const require = ok => { if (!ok) { if (trace) trace.kind = 'guard'; throw null; } };
+    let phaseList = null;
     const reads = [], shapes = [];
     const own = (object, key, optional = false) => {
       require(object !== null && typeof object === 'object');
@@ -37,7 +42,11 @@
     const closed = (object, allowed) => { const ks = plain(object); require(ks.every(key => allowed.includes(key))); return ks; };
     const list = (object, maximum) => {
       require(array(object)); const length = own(object,'length');
-      require(Number.isInteger(length) && length >= 0 && length <= maximum);
+      const validInteger = Number.isInteger(length) && length >= 0;
+      if (trace && object === phaseList && validInteger && typeof length === 'number') {
+        trace.phaseCount = length > 32 ? 33 : length; trace.phaseOverflow = length > 32;
+      }
+      require(validInteger && length <= maximum);
       require(keys(object,maximum+1).length === length+1);
       for (let index=0;index<length;index++) require(descriptor(object,String(index)) !== undefined);
       return length;
@@ -49,9 +58,11 @@
     require(target instanceof HTMLDivElement && target.isConnected && target.ownerDocument === document
       && target.id === 'chat-response-message-'+request.responseID
       && location.href === 'https://chat.qwen.ai/c/'+request.chatID);
+    mark('root');
     const roots = apply(query, document, ['[id="root"]']);
     require(roots.length === 1 && roots[0].tagName === 'DIV' && roots[0].parentElement === document.body
       && apply(contains, roots[0], [target]));
+    mark('conversation_nodes');
     const hosts = apply(query, document, ['.chat-response-message']);
     const users = apply(query, document, ['.chat-user-message-container']);
     require(hosts.length === 1 && hosts[0] === target && users.length === 1
@@ -60,10 +71,12 @@
 
     // ReactDOM's commit path updates this host-owned props pointer. Walk only
     // this response's ReactElement DATA children; never fibers, owners or hooks.
+    mark('host_props');
     const propKeys = keys(target,32).filter(key => key.startsWith('__reactProps$'));
     require(propKeys.length === 1);
     const hostProps = own(target,propKeys[0]); plain(hostProps);
     require(own(hostProps,'id') === target.id);
+    mark('element_tree');
     const messages = new Set(), inputs = [], stack = [[own(hostProps,'children'),0]];
     let visits = 128;
     while (stack.length) {
@@ -87,19 +100,22 @@
     }
     require(messages.size === 1);
     const message = messages.values().next().value;
+    mark('message_keys');
     closed(message,['id','parentId','fid','childrenIds','role','content','model','models','modelName','modelIdx',
       'userContext','chat_type','user_action','info','merged','feature_config','extra','timestamp','sub_chat_type',
       'content_list','done','error','is_stop','is_stop_in_thinking','isMultiResponse','files']);
+    mark('message_identity');
     require(own(message,'id') === request.responseID && own(message,'parentId') === request.parentID
-      && own(message,'role') === 'assistant' && own(message,'done') === true
-      && own(message,'chat_type') === 't2t' && [undefined,'t2t'].includes(own(message,'sub_chat_type',true))
-      && [undefined,null,''].includes(own(message,'content',true))
-      && empty(own(message,'merged',true))
+      && own(message,'role') === 'assistant' && mark('message_state') && own(message,'done') === true
+      && mark('message_mode') && own(message,'chat_type') === 't2t' && [undefined,'t2t'].includes(own(message,'sub_chat_type',true))
+      && mark('message_legacy_content') && [undefined,null,''].includes(own(message,'content',true))
+      && mark('message_empty_fields') && empty(own(message,'merged',true))
       && [undefined,null,'chat'].includes(own(message,'user_action',true))
-      && [undefined,null,false].includes(own(message,'error',true))
+      && mark('message_state') && [undefined,null,false].includes(own(message,'error',true))
       && [undefined,null,false].includes(own(message,'is_stop',true)) && [undefined,null,false].includes(own(message,'is_stop_in_thinking',true))
       && [undefined,null,false].includes(own(message,'isMultiResponse',true)) && list(own(message,'childrenIds'),0) === 0
       && empty(own(message,'files',true)));
+    mark('message_display');
     require(empty(own(message,'userContext',true)) && empty(own(message,'models',true)));
     const fid = own(message,'fid',true);
     require(fid === undefined || fid === null || uuid(fid));
@@ -109,17 +125,20 @@
     }
     const modelIndex = own(message,'modelIdx',true), timestamp = own(message,'timestamp',true);
     require((modelIndex === undefined || Number.isInteger(modelIndex) && modelIndex >= 0 && modelIndex <= 32)
-      && (timestamp === undefined || Number.isSafeInteger(timestamp) && timestamp >= 0 && timestamp <= 10000000000000));
+      && mark('message_timestamp') && (timestamp === undefined || Number.isSafeInteger(timestamp) && timestamp >= 0 && timestamp <= 10000000000000));
+    mark('message_extra');
     const extra = own(message,'extra',true);
     if (extra !== undefined && extra !== null) {
-      closed(extra,['meta']); const meta = own(extra,'meta',true);
+      closed(extra,['meta']); mark('message_meta'); const meta = own(extra,'meta',true);
       if (meta !== undefined && meta !== null) {
         const ks = closed(meta,['subChatType']);
         require(ks.length === 0 || own(meta,'subChatType') === 't2t');
       }
     }
+    mark('feature_keys');
     const feature = own(message,'feature_config');
     closed(feature,['thinking_enabled','local_mcp','output_schema','research_mode','auto_thinking','thinking_mode','mcp']);
+    mark('feature_values');
     const mode = own(feature,'thinking_mode',true), automatic = own(feature,'auto_thinking',true);
     require(typeof own(feature,'thinking_enabled') === 'boolean' && own(feature,'output_schema') === 'phase'
       && [undefined,'normal'].includes(own(feature,'research_mode',true))
@@ -129,6 +148,7 @@
 
     // The known stream usage constructor copies numeric usage into info and
     // adds openai/usage. Opaque nonempty info is not silently ignored.
+    mark('usage_shape');
     const info = own(message,'info',true);
     if (info !== undefined && info !== null && plain(info).length) {
       const usage = own(info,'usage'), usageKeys = plain(usage);
@@ -147,31 +167,43 @@
       };
       for (const key of usageKeys) require(stringify(numeric(own(info,key),0)) === stringify(numeric(own(usage,key),0)));
     }
-    const parts = own(message,'content_list'), count = list(parts,32);
+    mark('phase_list');
+    const parts = own(message,'content_list'); phaseList = parts; const count = list(parts,32);
     require(count > 0);
+    if (trace) trace.answersSeen = 0;
     let answer = null, answerIndex = -1;
     for (let index=0;index<count;index++) {
+      mark('phase_keys');
       const part = own(parts,String(index));
       closed(part,['content','role','phase','timestamp','status','function_id','extra','groupIndex',
         'lang_code','video','text','tool_name','mcp_name','function_call','mcp_results','name']);
+      mark('phase_kind');
       const phase = own(part,'phase');
+      if (trace && phase === 'answer') trace.answersSeen = trace.answersSeen < 2 ? trace.answersSeen+1 : 2;
       require(['answer','think','thinking_summary'].includes(phase));
+      mark('phase_state');
       require([undefined,'assistant'].includes(own(part,'role',true))
         && [undefined,'typing','finished'].includes(own(part,'status',true))
-        && objectExtra(own(part,'extra',true)));
+        && mark('phase_extra') && objectExtra(own(part,'extra',true)));
+      mark('phase_scalar');
       const timestamp = own(part,'timestamp',true), group = own(part,'groupIndex',true);
       require((timestamp === undefined || Number.isSafeInteger(timestamp) && timestamp >= 0 && timestamp <= 10000000000000)
         && (group === undefined || Number.isInteger(group) && group >= 0 && group <= 32));
+      mark('phase_tools');
       for (const key of ['lang_code','function_id','video','text','tool_name','mcp_name','function_call','mcp_results','name'])
         require(empty(own(part,key,true)));
-      if (phase === 'answer') { require(answer === null); answer = part; answerIndex = index; }
+      if (phase === 'answer') { mark('answer_count'); require(answer === null); answer = part; answerIndex = index; }
       // No non-ANSWER content property/descriptor is read.
     }
+    mark('answer_role');
     require(answer !== null && own(answer,'role') === 'assistant');
+    mark('answer_value');
     const text = own(answer,'content');
     require(typeof text === 'string' && text.length > 0 && text.length <= 220000);
+    mark('renderer_input');
     const payloadInputs = inputs.filter(input => input.index === answerIndex && input.message === message);
     require(payloadInputs.length === 1 && own(payloadInputs[0].props,'content') === text);
+    mark('utf8');
     const bytes = encode.encode(text); require(bytes.length <= 220000 && decode.decode(bytes) === text);
     return {target,hostProps,message,parts,answer,text,reads,shapes};
   }
@@ -182,9 +214,12 @@
   document.addEventListener(config.dispatch,event => {
     const request = event.detail, target = event.target;
     if (!request || request.kind !== kind || request.secret !== config.secret || !['candidate','sample'].includes(request.op)) return;
+    let trace = null, candidateRequest;
+    const checked = ok => { if (!ok && trace) trace.kind = 'guard'; require(ok); };
+    const trackedRead = () => read(target,request,candidateRequest ? value => { trace = value; } : undefined);
     let result = {kind,op:request.op,eligible:false,candidate:null,responseID:request.responseID};
     try {
-      const allowed = request.op === 'candidate' ? ['kind','op','secret','chatID','parentID','responseID']
+      const allowed = (candidateRequest = request.op === 'candidate') ? ['kind','op','secret','chatID','parentID','responseID']
         : ['kind','op','secret','chatID','parentID','responseID','candidate','grant'];
       require(names(request).sort().join(',') === allowed.sort().join(',')
         && [request.chatID,request.parentID,request.responseID].every(uuid));
@@ -192,15 +227,17 @@
         require(!spent && held && uuid(request.grant) && request.candidate === held.candidate);
         spent = true;
       }
-      const current = read(target,request);
+      const current = trackedRead();
+      if (trace) trace.stage = 'source_stability';
       if (!held) held = {candidate:random(),source:current};
-      require(same(held.source,current));
+      checked(same(held.source,current));
       if (request.op === 'candidate') result = {kind,op:'candidate',eligible:true,candidate:held.candidate,responseID:request.responseID};
       else {
-        require(same(held.source,read(target,request)));
+        checked(same(held.source,trackedRead()));
         result = {kind,op:'sample',eligible:true,candidate:held.candidate,responseID:request.responseID,grant:request.grant,text:current.text};
       }
     } catch {
+      if (candidateRequest && trace) result.diagnostic = {...trace};
       if (request.op === 'sample') { spent = true; result.grant = request.grant; result.text = null; }
     }
     apply(dispatch,target,[new Custom(config.result,{bubbles:true,detail:result})]);

@@ -349,6 +349,100 @@ final class WebsiteAdapterFailureDiagnosticTests: XCTestCase {
          "singleWrapper": 4, "direct": 0, "otherWrapper": 0]
     }
 
+    func testQwenRawSourceDiagnosticLogsOnlyClosedStagesAndPartialBoundedCounts() throws {
+        let stages = ["request", "target", "root", "conversation_nodes", "host_props", "element_tree",
+            "message_keys", "message_identity", "message_state", "message_mode", "message_legacy_content",
+            "message_empty_fields", "message_extra", "message_meta", "message_display", "message_timestamp",
+            "feature_keys", "feature_values", "usage_shape", "phase_list", "phase_keys", "phase_kind", "phase_state",
+            "phase_extra", "phase_tools", "phase_scalar", "answer_count", "answer_role", "answer_value",
+            "renderer_input", "utf8", "source_stability"]
+        let samples: [(Any, Any, Any)] = [(NSNull(), NSNull(), NSNull()), (0, false, NSNull()), (0, false, 0),
+            (1, false, 1), (2, false, 0), (2, false, 2), (33, true, NSNull()), (33, true, 2)]
+        for stage in stages {
+            for kind in ["guard", "exception"] {
+                for (count, overflow, answers) in samples {
+                    let raw: [String: Any] = ["version": 1, "stage": stage, "kind": kind,
+                        "phaseCount": count, "phaseOverflow": overflow, "answersSeen": answers]
+                    var value = qwenAuthoredFailure; value["rawSource"] = raw
+                    let packet = try XCTUnwrap(D.sanitize(value, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"))
+                    XCTAssertLessThanOrEqual(packet.data.count, 1_024)
+                    let log = try XCTUnwrap(D.qwenAuthoredLogFields(packet))
+                    XCTAssertEqual(Data(log.utf8), packet.data)
+                    let logged = try XCTUnwrap(JSONSerialization.jsonObject(with: packet.data) as? [String: Any])
+                    XCTAssertEqual(logged as NSDictionary, value as NSDictionary)
+                    XCTAssertEqual(Set(logged.keys), ["version", "provider", "trigger", "stage", "reason", "count", "rawSource"])
+                }
+            }
+        }
+        var combined = qwenAuthoredFailure
+        combined.merge(["stage": "phase_set", "reason": "phase_count_limit", "count": 2, "phaseSet": qwenPhaseSetSample,
+            "rawSource": ["version": 1, "stage": "message_legacy_content", "kind": "exception",
+                          "phaseCount": 33, "phaseOverflow": true, "answersSeen": 2]] as [String: Any]) { _, new in new }
+        let packet = try XCTUnwrap(D.sanitize(combined, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"))
+        XCTAssertLessThanOrEqual(packet.data.count, 1_024)
+        XCTAssertNotNil(D.qwenAuthoredLogFields(packet))
+        let legacy = try XCTUnwrap(D.sanitize(qwenAuthoredFailure, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"))
+        XCTAssertLessThanOrEqual(legacy.data.count, 512)
+        XCTAssertEqual(try XCTUnwrap(D.qwenAuthoredLogFields(legacy)).data(using: .utf8), legacy.data)
+    }
+
+    func testQwenRawSourceDiagnosticRejectsUnknownContentTypesAndImpossibleCounts() {
+        let raw: [String: Any] = ["version": 1, "stage": "phase_state", "kind": "guard",
+            "phaseCount": 1, "phaseOverflow": false, "answersSeen": 1]
+        func accepts(_ sample: Any) -> Bool {
+            var value = qwenAuthoredFailure; value["rawSource"] = sample
+            return D.sanitize(value, provider: "qwen", error: "unsupported_response_format", detail: "authored_source") != nil
+        }
+        let mutations: [(String, Any)] = [("version", true), ("version", 2), ("stage", "PRIVATE_STAGE"),
+            ("kind", "PRIVATE_MESSAGE"), ("text", "PRIVATE_TEXT"), ("html", "PRIVATE_HTML"), ("url", "PRIVATE_URL"),
+            ("id", UUID().uuidString), ("modelEvidence", [String: Any]()), ("responseAuthorityGranted", true),
+            ("phaseCount", true), ("phaseCount", -1), ("phaseCount", 33), ("phaseCount", 34), ("phaseCount", 1.5), ("phaseCount", "1"),
+            ("phaseCount", NSNull()), ("phaseOverflow", NSNull()), ("phaseOverflow", true), ("phaseOverflow", 0),
+            ("answersSeen", true), ("answersSeen", -1), ("answersSeen", 2), ("answersSeen", 0.5), ("answersSeen", "1")]
+        for (key, bad) in mutations {
+            var sample = raw; sample[key] = bad
+            XCTAssertFalse(accepts(sample), key)
+        }
+        for key in raw.keys {
+            var sample = raw; sample.removeValue(forKey: key)
+            XCTAssertFalse(accepts(sample), key)
+        }
+        for bad in [NSNull(), "PRIVATE_TEXT", [Any](), 1, true] as [Any] { XCTAssertFalse(accepts(bad)) }
+        var unknown = raw
+        unknown["phaseCount"] = NSNull(); unknown["phaseOverflow"] = NSNull(); unknown["answersSeen"] = 0
+        XCTAssertFalse(accepts(unknown))
+        unknown["answersSeen"] = NSNull(); unknown["phaseOverflow"] = false
+        XCTAssertFalse(accepts(unknown))
+        var saturated = raw
+        saturated["phaseCount"] = 33; saturated["phaseOverflow"] = true; saturated["answersSeen"] = 3
+        XCTAssertFalse(accepts(saturated))
+    }
+
+    func testQwenRawSourceDiagnosticIsStrippedWithoutChangingOrdinaryObservationOrFailure() {
+        var value = qwenAuthoredFailure
+        value["rawSource"] = ["version": 1, "stage": "request", "kind": "exception",
+                              "phaseCount": NSNull(), "phaseOverflow": NSNull(), "answersSeen": NSNull()] as [String: Any]
+        let originals: [[String: Any]] = [[:], ["text": "SYNTHETIC_ORDINARY_ANSWER", "ready": true],
+            ["error": "unsupported_response_format", "detail": "authored_source"],
+            ["error": "document_changed", "detail": "response_container"],
+            ["error": "unsupported_response_format", "detail": "other"]]
+        for provider in ["qwen", "kimi", "deepseek"] {
+            for action in ["inspect", "submit", "deleteConversation"] {
+                for original in originals {
+                    var observed = original; observed["adapterFailureStructure"] = value
+                    let packet = D.remove(from: &observed, provider: provider, action: action)
+                    XCTAssertEqual(packet != nil, provider == "qwen" && action == "inspect"
+                        && original["error"] as? String == "unsupported_response_format"
+                        && original["detail"] as? String == "authored_source")
+                    XCTAssertEqual(observed as NSDictionary, original as NSDictionary)
+                    XCTAssertNil(observed["rawSource"])
+                    XCTAssertNil(observed["responseAuthorityGranted"])
+                    XCTAssertNil(observed["firstUserFingerprint"])
+                }
+            }
+        }
+    }
+
     func testQwenAuthoredSourcePublicationRequiresExactNamedSelectionAndDedicatedSingleBoundArm() throws {
         let packet = try XCTUnwrap(D.sanitize(qwenAuthoredFailure, provider: "qwen", error: "unsupported_response_format", detail: "authored_source"))
         let max = "Qwen3.8-Max", plus = "Qwen3.7-Plus"
