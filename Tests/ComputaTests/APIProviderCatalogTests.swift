@@ -124,6 +124,28 @@ final class APIProviderCatalogTests: XCTestCase {
         }
         XCTAssertTrue(official.models.isEmpty)
     }
+    func testModelStudioShowsOnlyOneDiscoveredFlashChoiceWithoutChangingStoredCatalog() throws {
+        let models = ["qwen3.7-plus", "qwen3.7-flash-2026-07-15", "qwen3.7-flash", "qwen3.8-flash",
+                      "qwen3.7-flash-future", "text-embedding-v4"].map { APIModelDefinition(id: $0, name: $0) }
+        let provider = APIProviderDefinition(id: "renamed", name: "Custom display",
+            baseURL: URL(string: "https://ws-fixture123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1")!,
+            wireAPI: .chatCompletions, models: models)
+        let preferences = isolatedTestPreferences()
+        try APIProviderCatalog.save([provider], to: preferences)
+        let stored = APIProviderCatalog.load(from: preferences)
+        XCTAssertEqual(stored, [provider], "Hidden catalog entries remain available to configuration and existing identities")
+        XCTAssertEqual(APIProviderCatalog.options(for: stored).map(\.id),
+            [APIProviderCatalog.appModelID(providerID: provider.id, modelID: "qwen3.7-flash")])
+        let datedOnly = provider.withModels(models.filter { $0.id != "qwen3.7-flash" })
+        XCTAssertEqual(APIProviderCatalog.options(for: [datedOnly]).map(\.id),
+            [APIProviderCatalog.appModelID(providerID: provider.id, modelID: "qwen3.7-flash-2026-07-15")])
+        XCTAssertTrue(APIProviderCatalog.options(for: [provider.withModels([models[0]])]).isEmpty)
+        let custom = APIProviderDefinition(id: "alibaba", name: "Alibaba",
+            baseURL: URL(string: "https://example.invalid/v1")!, wireAPI: .chatCompletions, models: models)
+        XCTAssertEqual(APIProviderCatalog.options(for: [custom]).count, models.count,
+            "An editable provider label does not impose official-endpoint filtering")
+    }
+
     func testConfigurationPersistenceContainsNoCredentialAndInvalidCatalogCannotReplaceIt() throws {
         let preferences = isolatedTestPreferences(), model = APIModelDefinition(id: "fixture", name: "Fixture")
         let provider = APIProviderDefinition.cerebras.withModels([model])

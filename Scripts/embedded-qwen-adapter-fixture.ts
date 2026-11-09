@@ -17,7 +17,7 @@ export const answerID = '413e8269-7ba8-476b-84f3-c400e8bed55c';
 export const raw = '{"type":"message","text":"Synthetic Qwen reply"}';
 
 // Observed DOM shapes only; all UUIDs, prompts and responses are synthetic.
-export function fixture(options: { completeOnSend?: boolean } = {}) {
+export function fixture(options: { completeOnSend?: boolean; modelQuota?: boolean } = {}) {
   const document: any = { URL: 'https://chat.qwen.ai/' }; let hit: any, occluded: any;
   class Node extends Element {
     computedStyle: Record<string,string> = {};
@@ -139,7 +139,8 @@ export function fixture(options: { completeOnSend?: boolean } = {}) {
   remove.onClick = () => { menu.detach(); body.append(dialog); };
   confirm.onClick = () => { dialog.detach(); turn.detach(); header.detach(); stop.detach(); document.URL = 'https://chat.qwen.ai/'; };
   const adapter = new AsyncFunction('input', 'document', 'window', 'globalThis', 'location', 'getComputedStyle', 'MutationObserver', 'HTMLTextAreaElement', 'InputEvent', 'crypto', 'CustomEvent',
-    [core, engine, driver, entry].join('\n'));
+    [core, engine, driver, options.modelQuota === false
+      ? entry.replace("modelQuota: 'qwen_tv_card_v1', ", '') : entry].join('\n'));
   let beforeDigest: (() => void | Promise<void>) | undefined;
   const run = (action: string, overrides: Record<string, unknown> = {}) => adapter({ provider: 'qwen', action, expectedURL: document.URL,
     ownerToken, documentGeneration: generation, bindOwner: true, expectedUserCounts: [0, 1], expectedFirstUserMarker: marker,

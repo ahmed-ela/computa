@@ -245,6 +245,32 @@ async function computaSavedConversation(input, c, dom, config) {
       if (input.expectedModelChoice != null && !c.equalChoice(selected, input.expectedModelChoice)) c.fail('model_mismatch', 'selection_target');
       return { selected, verification: 'website_selection', source: 'model_picker_label' };
     }
+    // A finite provider error is independent of positive reply/body admission.
+    // This Qwen-only observation precedes provisional/identity pending paths.
+    if (config.modelQuota === 'qwen_tv_card_v1' && ['inspect', 'verifyModel'].includes(input.action)
+      && !cleanupInspection && state.submitted && !state.deletion && !state.selection && state.model
+      && state.inserted && state.prepared && state.send && c.choiceValid(input.expectedModelChoice)
+      && c.equalChoice(input.expectedModelChoice, {key:'Qwen3.8-Max',label:'Qwen3.8-Max'})
+      && c.equalChoice(state.model.choice, input.expectedModelChoice)
+      && c.uuid(input.expectedFirstUserMarker) && input.expectedFirstUserMarker === state.inserted.marker
+      && state.inserted.prompt.endsWith(`\n\nComputa session marker: ${input.expectedFirstUserMarker}`)
+      && /^[a-f0-9]{64}$/.test(state.submittedFingerprint || '')
+      && input.savedSubmissionFingerprint === state.submittedFingerprint
+      && (state.first ? input.allowFirstUserBinding === false && input.expectedFirstUserFingerprint === state.first.fingerprint
+        : input.allowFirstUserBinding === true && input.expectedFirstUserFingerprint == null)
+      && Array.isArray(input.expectedUserCounts) && input.expectedUserCounts.length > 0 && input.expectedUserCounts.length <= 2
+      && input.expectedUserCounts.every(value => [0,1].includes(value)) && input.expectedUserCounts.includes(1)
+      && typeof dom.modelQuotaTV === 'function') {
+      const qwenQuotaScope = dom.modelQuotaTV({prompt:state.inserted.prompt, prepared:state.prepared,
+        first:state.first, identity:state.responseIdentity, display:state.firstDisplay || state.firstDisplayWitness});
+      // A no-card page keeps its original pending/held-picker path. Fresh
+      // selection is still mandatory before publishing any negative receipt.
+      if (qwenQuotaScope) {
+        const modelEvidence = selectionEvidence(false, 'quota_observation');
+        if (modelEvidence && c.equalChoice(modelEvidence.selected, input.expectedModelChoice))
+          return {error:'website_usage_limit', modelEvidence, qwenQuotaScope};
+      }
+    }
     function observeInitialModeHandoff(initial) {
       // DeepSeek mounts a new empty composer after the first Send. Pin that
       // complete replacement once; it has no mode or response authority until
@@ -368,7 +394,7 @@ async function computaSavedConversation(input, c, dom, config) {
     }
     // An empty body can only wait. A complete exact observed preview can spend
     // one local display claim. Neither path exposes model output or grants ownership.
-    function observeFirstDisplay(t, transcriptReader = () => dom.initialResponseIdentityTranscript()) {
+    function observeFirstDisplay(t, transcriptReader = () => dom.initialResponseIdentityTranscript(), comparisonPair = null) {
       const prompt = state.inserted.prompt;
       const previewLength = 10_240;
       const held = state.firstDisplay, optimistic = state.firstDisplayWitness;
@@ -388,7 +414,17 @@ async function computaSavedConversation(input, c, dom, config) {
         const refuse = reason => firstBindingFailure('display_held', reason);
         if (!view) refuse('presentation_missing');
         if (optimistic.canonical !== route.canonical) refuse('route_changed');
-        requireDisplayPins(optimistic, view, refuse);
+        if (comparisonPair) {
+          // No response UUID or full-body proof is bound yet. Preserve every
+          // physical user/control/ancestor pin; only the pending presentation
+          // slot may become the independently validated official SMRM wrapper.
+          if (held || state.responseIdentity || comparisonPair !== t.responseChoice
+            || view.pins.at(-1) !== comparisonPair.wrapper) refuse('answer_ancestry_changed');
+          const prior = optimistic.pins.at(-1);
+          if (!prior || prior.isConnected !== false
+            && !comparisonPair.rows.some(row => row.response === prior)) refuse('answer_ancestry_changed');
+          requireDisplayPins({ pins: [...optimistic.pins.slice(0, -1), comparisonPair.wrapper] }, view, refuse);
+        } else requireDisplayPins(optimistic, view, refuse);
       }
       if (!Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.length || input.expectedUserCounts.length > 2
         || input.expectedUserCounts.some(value => ![0, 1].includes(value)) || !input.expectedUserCounts.includes(1)) reject('user_count_expectation');
@@ -768,7 +804,7 @@ async function computaSavedConversation(input, c, dom, config) {
         || (choiceStage = 'admission_counts_limit', input.expectedUserCounts.length > 2)
         || (choiceStage = 'admission_counts_values', input.expectedUserCounts.some(value => ![0,1].includes(value)))
         || (choiceStage = 'admission_response_identity', state.responseIdentity)
-        || (choiceStage = 'admission_display_witness', state.firstDisplayWitness)) refuse();
+        || (choiceStage = 'admission_display_witness', state.firstDisplayWitness && !Array.isArray(state.firstDisplayWitness.pins))) refuse();
       const readChoice = () => dom.responseChoiceTranscript();
       let current = readChoice();
       const pair = current.responseChoice;
@@ -792,7 +828,7 @@ async function computaSavedConversation(input, c, dom, config) {
       }
       if (pair) {
         if ((choiceStage = 'pair_scope', !samePair(current)) || (choiceStage = 'pair_ack_state', held.acknowledged)) refuse();
-        if (observeFirstDisplay(current, readChoice)) return { qwenFirstBodyExpansionPending:true, url:document.URL,
+        if (observeFirstDisplay(current, readChoice, pair)) return { qwenFirstBodyExpansionPending:true, url:document.URL,
           sessionLifecycle:'saved_conversation_delete', temporary:false };
       } else if (!held.spent || !sameUser(current) || !current.answer || current.answer.id !== held.ids[0]
         || c.nodes(current.answer.root, '.chat-response-message', 2).length !== 1

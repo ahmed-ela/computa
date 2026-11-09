@@ -2431,6 +2431,38 @@ final class EmbeddedBrowserSession {
         for wait in waits { wait.task.cancel(); wait.reply(nil, "model_clock_cancelled") }
     }
 
+    /// A native-memory observation only. This does not inspect the provider,
+    /// signal/rearm its observer, advance a revision, or grant page authority.
+    struct ModelSignalProgress: Sendable {
+        let received: Int
+        let accepted: Int
+        let revision: Int
+        let saturated: Bool
+        let attached: Bool
+        let hidden: Bool
+        let windowPresent: Bool
+        let visible: Bool
+        let occluded: Bool
+    }
+
+    func modelSignalProgress(tabID: UUID, view: WKWebView, ownerToken: String,
+                             generation: UUID) -> ModelSignalProgress? {
+        guard let entry = entries[tabID], entry.isModelOwned, !entry.isToolOwned,
+              entry.view === view, let channel = entry.modelChanges,
+              channel.ownerToken == ownerToken, entry.tab.documentGeneration == generation,
+              let revision = try? channel.currentRevision() else { return nil }
+        let cap = UInt64(UInt16.max)
+        let received = Int(entry.modelDOMSignalsReceived)
+        let accepted = Int(entry.modelDOMSignalsAccepted)
+        let window = view.window
+        return ModelSignalProgress(received: received, accepted: accepted,
+            revision: Int(min(revision, cap)),
+            saturated: UInt64(received) >= cap || UInt64(accepted) >= cap || revision >= cap,
+            attached: view.superview != nil, hidden: view.isHiddenOrHasHiddenAncestor,
+            windowPresent: window != nil, visible: window?.isVisible == true,
+            occluded: window != nil && window?.occlusionState.contains(.visible) != true)
+    }
+
     func modelChangeRevision(for id: UUID) throws -> UInt64 {
         guard let channel = try entry(id).modelChanges else { throw Failure.tabClosed }
         return try channel.currentRevision()

@@ -4,7 +4,7 @@ try {
     'deleteConversation', 'selectConversationDeletion', 'confirmConversationDeletion', 'observeDeletedConversation'];
   const c = computaProviderCore(input, 'qwen', 'https://chat.qwen.ai', actions);
   return await computaSavedConversation(input, c, computaQwenDOM(c), {
-    stateKey: '__computaQwenSavedSessionV1', origin: 'https://chat.qwen.ai', initialProvisionalRoute: true, initialResponseIdentity: true,
+    stateKey: '__computaQwenSavedSessionV1', modelQuota: 'qwen_tv_card_v1', origin: 'https://chat.qwen.ai', initialProvisionalRoute: true, initialResponseIdentity: true,
     responseChoice: 'qwen_smrm', firstEmptyContainerChoice: { key: 'Qwen3.8-Max', label: 'Qwen3.8-Max' },
     deferDisplayUntilAnswer: ['Qwen3.7-Plus', 'Qwen3.8-Max'].map(label => ({ key: label, label }))
   });

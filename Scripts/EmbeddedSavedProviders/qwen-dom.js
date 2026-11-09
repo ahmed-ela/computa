@@ -565,6 +565,77 @@ function computaQwenDOM(c) {
       paragraphCountOverflow: descendant > 33 || direct > 33, paragraphs };
   }
 
+  // Negative-only provider quota observation. No body expansion, output,
+  // response identity, sampling grant, or deletion authority is published.
+  function modelQuotaTV({ prompt, prepared, first, identity, display }) {
+    try {
+      const current = route();
+      if (current.kind !== 'canonical' || typeof prompt !== 'string' || !prepared
+        || identity && identity.canonical !== current.canonical) return null;
+      const form = composer();
+      if (form.scope !== prepared.scope || form.editor !== prepared.editor || !form.empty || !c.enabled(form.editor)) return null;
+      const users = c.nodes(document, '.qwen-chat-message.qwen-chat-message-user', 2);
+      const answers = c.nodes(document, '.qwen-chat-message.qwen-chat-message-assistant', 2);
+      if (users.length !== 1 || answers.length !== 1) return null;
+      const user = users[0], userTurn = user.parentElement, answer = answers[0], answerTurn = answer.parentElement;
+      if (!c.visible(user) || !c.visible(answer) || !userTurn?.classList.contains('qwen-chat-message-select-turn-message')
+        || !answerTurn?.classList.contains('qwen-chat-message-select-turn-message')
+        || !userTurn.parentElement?.classList.contains('qwen-chat-message-select-turn')
+        || answerTurn.parentElement !== userTurn.parentElement
+        || [...userTurn.parentElement.children].indexOf(answerTurn) <= [...userTurn.parentElement.children].indexOf(userTurn)) return null;
+      const containers = c.nodes(user, '.chat-user-message-container', 2);
+      if (containers.length !== 1) return null;
+      const container = containers[0], bodies = c.nodes(container, '.chunked-text-renderer-root > p.user-message-content', 2);
+      if (bodies.length !== 1) return null;
+      const body = bodies[0], userID = container.getAttribute('data-msg-id');
+      // An unseen collapsed prefix is not an owned full body. Exact retained
+      // pointers are additional negative fences, never replacement proof.
+      if (!c.visible(container) || !c.visible(body) || body.children.length !== 0 || body.textContent !== prompt
+        || !c.uuid(userID) || container.getAttribute('data-chat-id') !== current.id) return null;
+      for (const held of [first, identity?.first]) if (held && (held.root !== user || held.container !== container
+        || held.body !== body || held.id !== userID || held.text !== prompt)) return null;
+      const hosts = c.nodes(answer, '.chat-response-message', 2);
+      if (hosts.length !== 1 || c.nodes(answer, '.smrm, .cmrm', 1).length) return null;
+      const host = hosts[0], hostID = host.getAttribute('id'), prefix = 'chat-response-message-';
+      if (!c.visible(host) || host.closest('.qwen-chat-message') !== answer || typeof hostID !== 'string'
+        || !hostID.startsWith(prefix) || hostID !== prefix && !c.uuid(hostID.slice(prefix.length))) return null;
+      if (identity?.answer && (identity.answer.root !== answer || identity.answer.content !== host
+        || identity.answer.turn !== answerTurn)) return null;
+      if (display && !first) {
+        const view = firstBodyPresentation({first:{root:user,container,body,id:userID,text:body.textContent},
+          answer:{root:answer,content:host,id:hostID.slice(prefix.length) || null}});
+        if (!view || display.canonical !== current.canonical || view.pins.length !== display.pins.length
+          || view.pins.some((node,index) => node !== display.pins[index])) return null;
+      }
+      const rights = c.nodes(host, '.chat-response-message-right', 2);
+      if (rights.length !== 1 || rights[0].parentElement !== host || !c.visible(rights[0])) return null;
+      const right = rights[0], cards = c.nodes(right, 'section.exceed-limit-error-card', 2);
+      if (cards.length !== 1) return null;
+      const card = cards[0], reason = card.getAttribute('data-paywall-reason'), messageID = card.getAttribute('data-msg-id');
+      if (card.parentElement !== right || !c.visible(card) || card.getAttribute('class') !== 'exceed-limit-error-card'
+        || card.getAttribute('data-testid') !== 'exceed-limit-error-card'
+        || card.getAttribute('data-aes-exp') !== 'expExceedLimitCard'
+        || !['ExceedLimit', 'quota_exhausted', 'update_member'].includes(reason) || card.getAttribute('data-paywall-scene') !== 't2t'
+        || card.getAttribute('data-chat-id') !== current.id || !c.uuid(messageID) || messageID === userID
+        || hostID !== prefix && messageID !== hostID.slice(prefix.length)) return null;
+      // A previously pinned UUID cannot disappear or change merely because a
+      // restriction card was added. A fid never adopts positive reply identity.
+      for (const heldID of [identity?.answerID, display?.answerID]) {
+        if (heldID !== undefined && heldID !== null && heldID !== ''
+          && (!c.uuid(heldID) || hostID === prefix || heldID !== hostID.slice(prefix.length) || heldID !== messageID)) return null;
+      }
+      // update_member is a provider UI flag, not an observed backend code.
+      // The exact model-specific daily notice below is mandatory for all reasons.
+      const paragraphs = c.nodes(card, 'p', 2);
+      if (paragraphs.length !== 1 || paragraphs[0].parentElement !== card || paragraphs[0].children.length !== 0
+        || !c.visible(paragraphs[0]) || c.normalize(paragraphs[0].textContent) !==
+          "You've reached today's Qwen3.8-Max limit. Upgrade your membership or switch to another model above to continue.") return null;
+      if ([...card.children].some(node => node !== paragraphs[0]
+        && !(node.tagName === 'DIV' && node.getAttribute('class') === 'exceed-limit-error-card-actions'))) return null;
+      return { version: 1, kind: 'qwen_model_quota_v1', surface: 'tv_card', reason, scene: 't2t',
+        choice: { key: 'Qwen3.8-Max', label: 'Qwen3.8-Max' } };
+    } catch { return null; } // A nonmatch preserves the original guarded path.
+  }
   function completionCandidate(answer) {
     if (!answer) return false;
     const current = route(), form = composer();
@@ -1224,6 +1295,6 @@ function computaQwenDOM(c) {
   return { rejectUserCount, rejectSelectionBinding, firstDisplayReplacement, watchDisplayRender, displayHitFailure, firstBodyPresentation, firstBodyFailureStructure,
     responseChoiceTranscript: () => transcript(true, null, true),
     hasResponseChoice: () => c.nodes(document, '.qwen-chat-message-assistant .smrm', 2).length !== 0,
-    initialResponseIdentityTranscript: emptyContainerPrompt => transcript(true, emptyContainerPrompt), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer, codePayloadFailure, sampleCodePayload, authoredSourceCandidate,
+    initialResponseIdentityTranscript: emptyContainerPrompt => transcript(true, emptyContainerPrompt), route, authored, initialReady, picker, modelRows, composer, transcript, modelQuotaTV, completionCandidate, rawAnswer, codePayloadFailure, sampleCodePayload, authoredSourceCandidate,
     deletionTrigger, deletionMenu, deletionConfirmation, deletionObserved, insertLiteral };
 }

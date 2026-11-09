@@ -16,6 +16,7 @@ protocol WebModelTransport: Sendable {
     func stopRequestMetadata(sessionToken: String) async -> ChatGPTRequestMetadataSnapshot?
     func revokeRequestMetadata(sessionToken: String) async
     func snapshotResponseChoiceStatus(sessionToken: String) async -> WebsiteResponseChoiceStatus?
+    func snapshotQwenResponseProgress(sessionToken: String) async -> QwenResponseProgressStatus?
     func grantInspectorDiagnostic(_ authorization: ChatGPTInspectorLease, sessionToken: String) async -> Bool
     func revokeInspectorDiagnostic(sessionToken: String) async
     func request(operation: String, params: Data) async throws -> Data
@@ -72,6 +73,7 @@ extension WebModelTransport {
     func stopRequestMetadata(sessionToken: String) async -> ChatGPTRequestMetadataSnapshot? { nil }
     func revokeRequestMetadata(sessionToken: String) async {}
     func snapshotResponseChoiceStatus(sessionToken: String) async -> WebsiteResponseChoiceStatus? { nil }
+    func snapshotQwenResponseProgress(sessionToken: String) async -> QwenResponseProgressStatus? { nil }
     func request(operation: String, params: Data,
                  onChatSubmissionFailure: (@Sendable (ChatSubmissionFailureDiagnostic) -> Void)?) async throws -> Data {
         try await request(operation: operation, params: params)
@@ -1089,6 +1091,10 @@ actor WebModelServer {
                 && sessions[taskID]?.token == lease.token && sessions[taskID]?.documentGeneration == lease.documentGeneration
                 && sessions[taskID]?.modelID == lease.modelID && sessions[taskID]?.sequence == lease.sequence
         }
+        func permitsQwenProgressEvidence(_ lease: Session) -> Bool {
+            // Retention only; cancellation/context changes still revoke it.
+            (try? requireCurrentContext(includeResponseDeadline: false)) != nil && permitsResponseChoiceEvidence(lease)
+        }
         // Validate the full saved request first, then project its callable subset
         // only after native turn admission. Freeze it for corrective attempts;
         // continuation checks still use the unchanged original request bytes.
@@ -1858,6 +1864,19 @@ actor WebModelServer {
                         responseChoiceStatus = candidate
                     } else { responseChoiceStatus = nil }
                 } else { responseChoiceStatus = nil }
+                let qwenProgress: QwenResponseProgressStatus?
+                let responseDeadlineFailure = (error as? EmbeddedWebModelTransport.Failure) == .deadline
+                    || { if let failure = error as? Failure, case .deadline = failure { return true }; return false }()
+                if responseDeadlineFailure, let lease, permitsQwenProgressEvidence(lease) {
+                    // No page read, wait, rearm or deadline renewal. The outer
+                    // server can expire while the native transport is idle.
+                    let candidate = await lease.transport.snapshotQwenResponseProgress(sessionToken: lease.token)
+                    if permitsQwenProgressEvidence(lease), let candidate,
+                       candidate.matches(sessionToken: lease.token, documentGeneration: lease.documentGeneration,
+                           modelID: lease.modelID, sequence: lease.sequence) {
+                        qwenProgress = candidate
+                    } else { qwenProgress = nil }
+                } else { qwenProgress = nil }
                 let submissionDiagnostic: ChatSubmissionFailureDiagnostic?
                 if provider == "chatgpt",
                    (error as? EmbeddedWebModelTransport.Failure) == .ownershipFailure(.javaScriptSubmission),
@@ -1903,7 +1922,8 @@ actor WebModelServer {
                         turnScoped: lease?.retainsConversation ?? requestedClaudeTurnScope,
                         submissionDiagnostic: (try? requireCurrentContext()) != nil ? submissionDiagnostic : nil,
                         groqDiagnostic: (try? requireCurrentContext()) != nil ? groqDiagnostic : nil,
-                        responseChoiceReceipt: lease.map { permitsResponseChoiceEvidence($0) } == true ? responseChoiceStatus?.receipt : nil)
+                        responseChoiceReceipt: lease.map { permitsResponseChoiceEvidence($0) } == true ? responseChoiceStatus?.receipt : nil,
+                        qwenProgressDiagnostic: lease.map { permitsQwenProgressEvidence($0) } == true ? qwenProgress : nil)
                 }
                 throw error
             }
@@ -2326,7 +2346,8 @@ actor WebModelServer {
                                            sequence: Int = 0, baseline: Int = 0, turnScoped: Bool? = nil,
                                            submissionDiagnostic: ChatSubmissionFailureDiagnostic? = nil,
                                            groqDiagnostic: GroqFailureJournalDiagnostic? = nil,
-                                           responseChoiceReceipt: WebsiteResponseChoiceReceipt? = nil) throws {
+                                           responseChoiceReceipt: WebsiteResponseChoiceReceipt? = nil,
+                                           qwenProgressDiagnostic: QwenResponseProgressStatus? = nil) throws {
         var record = transactionEvidenceRecord(taskID: taskID, inferenceID: inferenceID, context: context,
             provider: provider, modelID: modelID, sessionToken: sessionToken, phase: phase, turnScoped: turnScoped)
         record["sequence"] = sequence
@@ -2339,6 +2360,9 @@ actor WebModelServer {
             record["groqFailureDiagnostic"] = groqDiagnostic.dictionary
         }
         if provider == "qwen", let responseChoiceReceipt { record["savedResponseChoiceReceipt"] = responseChoiceReceipt.dictionary }
+        if phase == "failed", provider == "qwen", errorCode == "provider_timeout", let qwenProgressDiagnostic {
+            record["qwenResponseProgress"] = qwenProgressDiagnostic.dictionary
+        }
         try appendEvidence(record, taskID: taskID)
     }
 

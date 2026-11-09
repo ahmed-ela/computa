@@ -8,6 +8,314 @@ import XCTest
 final class QwenWebModelTransportTests: XCTestCase {
     private let world = WKContentWorld.world(name: "computa-chatgpt-model-v1")
 
+    func testQwenQuotaScopeRequiresClosedExactNativeMaxChoiceAndKeepsUsageWireUnchanged() throws {
+        let max = WebsiteModelChoice(provider: "qwen", key: "Qwen3.8-Max", label: "Qwen3.8-Max")
+        let plus = WebsiteModelChoice(provider: "qwen", key: "Qwen3.7-Plus", label: "Qwen3.7-Plus")
+        let valid = Self.quotaScope()
+        XCTAssertEqual(EmbeddedWebModelTransport.qwenModelQuotaModelID(valid, expected: max), max.modelID)
+        for reason in ["ExceedLimit", "quota_exhausted", "update_member"] {
+            XCTAssertEqual(EmbeddedWebModelTransport.qwenModelQuotaModelID(Self.quotaScope(reason: reason), expected: max), max.modelID)
+        }
+        XCTAssertNil(EmbeddedWebModelTransport.qwenModelQuotaModelID(valid, expected: plus))
+        XCTAssertNil(EmbeddedWebModelTransport.qwenModelQuotaModelID(valid, expected: .init(provider: "claude", key: "Opus 4.7", label: "Opus 4.7")))
+        for change: [String: Any] in [["version": true], ["version": 2], ["kind": "PRIVATE"], ["surface": "generic_alert"],
+            ["reason": "RateLimited"], ["scene": "agent"], ["choice": ["key": max.key]],
+            ["choice": ["key": plus.key, "label": plus.label]], ["PRIVATE": "PRIVATE_CONTENT"]] {
+            XCTAssertNil(EmbeddedWebModelTransport.qwenModelQuotaModelID(valid.merging(change) { _, new in new }, expected: max))
+        }
+        let failure = EmbeddedWebModelTransport.Failure.usageLimited(.qwen)
+        XCTAssertEqual(failure.diagnosticCode, "website_usage_limit")
+        XCTAssertEqual(failure.requiredAction, "wait_for_quota_reset")
+    }
+
+    func testQwenScopedQuotaGatesAndWakesOnlyMatchingChoiceAndCannotWidenDuringCleanupOrDiscovery() async throws {
+        let fixture = try Fixture(setup: "qwenFixture.options.holdResponse=true"); defer { fixture.shutdown() }
+        let max = try await start(fixture)
+        let maxView = fixture.view
+        _ = try await call(fixture, "webProviderSend", max, prompt: "Synthetic Max quota scope")
+        let peer = try await start(fixture)
+        let peerID = try XCTUnwrap(fixture.createdID)
+        let revision = try fixture.browser.modelChangeRevision(for: peerID)
+        let plus = try await start(fixture, label: "Qwen3.7-Plus")
+        let plusView = fixture.view
+        fixture.transport.setQwenQuotaObservationTransformForTesting { Self.quotaObservation($0, reason: "update_member") }
+        do { _ = try await call(fixture, "webProviderPoll", max); XCTFail("Quota must stop this inference") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.qwen)) }
+        let changed = try fixture.browser.modelChangeRevision(for: peerID)
+        XCTAssertNotEqual(changed, revision, "The existing native channel must notify a matching already-created session")
+        fixture.transport.setQwenQuotaObservationTransformForTesting(nil)
+        do { _ = try await call(fixture, "webProviderPoll", peer); XCTFail("Propagated matching choice must stop") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.qwen)) }
+        let plusReady = try await call(fixture, "webProviderPoll", plus)
+        XCTAssertEqual(plusReady["state"] as? String, "ready", "No quota observation was made for Plus")
+        let before = fixture.createdIDs.count
+        do { _ = try await start(fixture); XCTFail("Known choice gate must reject before page allocation") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.qwen)) }
+        XCTAssertEqual(fixture.createdIDs.count, before)
+        // The same usage error observed during cleanup is deliberately unscoped.
+        // Native sticky scope must prevent it becoming a provider-wide gate.
+        fixture.transport.setQwenQuotaObservationTransformForTesting { _ in ["error": "website_usage_limit"] }
+        _ = try await call(fixture, "webProviderFinish", max)
+        _ = try await call(fixture, "webProviderFinish", peer)
+        fixture.transport.setQwenQuotaObservationTransformForTesting(nil)
+        _ = try await call(fixture, "webProviderFinish", plus)
+        let choices = try await fixture.transport.discoverModels(provider: "qwen", retryBlocked: true)
+        XCTAssertTrue(choices.contains { $0.label == "Qwen3.7-Plus" })
+        do { _ = try await start(fixture); XCTFail("Catalog success cannot prove quota recovery") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.qwen)) }
+        let laterPlus = try await start(fixture, label: "Qwen3.7-Plus")
+        _ = try await call(fixture, "webProviderFinish", laterPlus)
+        let maxSends = try await evaluate(maxView, "return qwenFixture.counts.sends;") as? Int
+        let plusSends = try await evaluate(plusView, "return qwenFixture.counts.sends;") as? Int
+        XCTAssertEqual(maxSends, 1); XCTAssertEqual(plusSends, 0)
+        XCTAssertTrue(fixture.browser.savedHumanVerificationProviders.isEmpty)
+    }
+
+    func testQwenMalformedOrMismatchedScopedQuotaCannotCreateAnyUsageGate() async throws {
+        for scenario in ["foreign-choice", "wrong-evidence", "missing-source", "pre-send"] {
+            let fixture = try Fixture(setup: "qwenFixture.options.holdResponse=true"); defer { fixture.shutdown() }
+            let token = try await start(fixture)
+            if scenario != "pre-send" { _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic invalid quota receipt") }
+            var quotaCallbacks = 0
+            fixture.transport.setQwenQuotaObservationTransformForTesting { value in
+                quotaCallbacks += 1
+                var result = Self.quotaObservation(value)
+                if scenario == "foreign-choice" { result["qwenQuotaScope"] = Self.quotaScope(label: "Qwen3.7-Plus") }
+                if scenario == "wrong-evidence" { result["modelEvidence"] = Self.quotaEvidence(label: "Qwen3.7-Plus") }
+                if scenario == "missing-source" { result["modelEvidence"] = ["selected": ["key": "Qwen3.8-Max", "label": "Qwen3.8-Max"], "verification": "website_selection"] }
+                return result
+            }
+            if scenario == "pre-send" {
+                let ready = try await call(fixture, "webProviderPoll", token)
+                XCTAssertEqual(ready["state"] as? String, "ready")
+                XCTAssertEqual(quotaCallbacks, 0, "A ready snapshot does not dispatch a page observation")
+                try await assertCounts(fixture, sends: 0, headers: 0, selections: 0, confirmations: 0)
+            } else {
+                do { _ = try await call(fixture, "webProviderPoll", token); XCTFail("Invalid scope must refuse: " + scenario) }
+                catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, scenario == "wrong-evidence" ? .modelMismatch : .modelUnverified, scenario) }
+                XCTAssertGreaterThan(quotaCallbacks, 0, scenario)
+            }
+            fixture.transport.setQwenQuotaObservationTransformForTesting(nil)
+            _ = try await call(fixture, "webProviderFinish", token)
+            let nextMax = try await start(fixture), nextPlus = try await start(fixture, label: "Qwen3.7-Plus")
+            _ = try await call(fixture, "webProviderFinish", nextMax)
+            _ = try await call(fixture, "webProviderFinish", nextPlus)
+        }
+    }
+
+    func testQwenQuotaReceiptCannotBypassChangedURLOrDocumentFence() async throws {
+        for scenario in ["route", "document"] {
+            let fixture = try Fixture(setup: "qwenFixture.options.holdResponse=true"); defer { fixture.shutdown() }
+            let token = try await start(fixture)
+            _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic quota callback fence")
+            fixture.transport.setQwenQuotaObservationTransformForTesting { Self.quotaObservation($0) }
+            var changed = false
+            let ownedID = try XCTUnwrap(fixture.createdID)
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                guard action == "inspect", !changed else { return }; changed = true
+                if scenario == "route" { _ = try? await self.evaluate(fixture.view, "history.pushState({},'', '/c/11111111-1111-4111-8111-111111111111'); return true;") }
+                else { fixture.browser.closeTab(ownedID) }
+            }
+            do { _ = try await call(fixture, "webProviderPoll", token); XCTFail("Changed native fence must reject") }
+            catch { XCTAssertNotEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.qwen)) }
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            fixture.transport.setQwenQuotaObservationTransformForTesting(nil)
+            _ = try await call(fixture, "webProviderFinish", token)
+            let next = try await start(fixture)
+            _ = try await call(fixture, "webProviderFinish", next)
+        }
+    }
+
+    func testQwenUnscopedQuotaStaysProviderWideAndVerificationSupersedesModelQuota() async throws {
+        for scoped in [false, true] {
+            let fixture = try Fixture(setup: "qwenFixture.options.holdResponse=true"); defer { fixture.shutdown() }
+            let token = try await start(fixture)
+            _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic quota precedence")
+            fixture.transport.setQwenQuotaObservationTransformForTesting { value in
+                scoped ? Self.quotaObservation(value) : ["error": "website_usage_limit"]
+            }
+            do { _ = try await call(fixture, "webProviderPoll", token); XCTFail("Quota must stop") }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.qwen)) }
+            fixture.transport.setQwenQuotaObservationTransformForTesting(nil)
+            if !scoped {
+                let before = fixture.createdIDs.count
+                do { _ = try await start(fixture, label: "Qwen3.7-Plus"); XCTFail("Unscoped quota keeps existing broad behavior") }
+                catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.qwen)) }
+                XCTAssertEqual(fixture.createdIDs.count, before)
+            } else {
+                fixture.browser.recordHumanVerificationRequired(provider: "qwen")
+                do { _ = try await start(fixture); XCTFail("Provider verification gate takes precedence") }
+                catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .humanVerificationRequired(.qwen)) }
+                do { _ = try await start(fixture, label: "Qwen3.7-Plus"); XCTFail("Verification remains provider-wide") }
+                catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .humanVerificationRequired(.qwen)) }
+                do { _ = try await call(fixture, "webProviderPoll", token); XCTFail("Existing scoped session must observe broader verification") }
+                catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .humanVerificationRequired(.qwen)) }
+            }
+        }
+    }
+
+    private static func quotaScope(label: String = "Qwen3.8-Max", reason: String = "ExceedLimit") -> [String: Any] {
+        ["version": 1, "kind": "qwen_model_quota_v1", "surface": "tv_card", "reason": reason, "scene": "t2t",
+         "choice": ["key": label, "label": label]]
+    }
+    private static func quotaEvidence(label: String = "Qwen3.8-Max") -> [String: Any] {
+        ["selected": ["key": label, "label": label], "verification": "website_selection", "source": "model_picker_label"]
+    }
+    private static func quotaObservation(_ original: [String: Any], reason: String = "ExceedLimit") -> [String: Any] {
+        // This tests native receipt handling only, not public-card eligibility.
+        ["error": "website_usage_limit", "qwenQuotaScope": quotaScope(reason: reason),
+         "modelEvidence": original["modelEvidence"] ?? quotaEvidence()]
+    }
+
+    func testQwenProgressReadTimeoutsExcludePreSendHistory() {
+        XCTAssertEqual(EmbeddedWebModelTransport.qwenProgressReadTimeouts(current: 8, baseline: 8), 0)
+        XCTAssertEqual(EmbeddedWebModelTransport.qwenProgressReadTimeouts(current: 12, baseline: 8), 4)
+        XCTAssertEqual(EmbeddedWebModelTransport.qwenProgressReadTimeouts(current: 0, baseline: 8), 0)
+        XCTAssertEqual(EmbeddedWebModelTransport.qwenProgressReadTimeouts(current: Int.max, baseline: 8), 65_535)
+    }
+
+    func testQwenProgressFieldsKeepAbsentPendingValuesDistinctFromZeroAndDropRawData() throws {
+        let ids = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"]
+        let choice: [String: Any] = ["version": 1, "kind": "qwen_smrm", "policy": "first_observed_card_v1", "state": "waiting",
+            "candidate": "33333333-3333-4333-8333-333333333333", "responseIDs": ids, "selectedResponseID": ids[0], "firstUserFingerprint": String(repeating: "a", count: 64)]
+        let cases: [(String, [String: Any])] = [
+            ("provisional", ["qwenProvisionalRoutePending": true]), ("firstBody", ["qwenFirstBodyExpansionPending": true]),
+            ("identity", ["qwenInitialResponseIdentityPending": true]), ("choice", ["savedResponseChoice": choice]),
+            ("codePayload", ["qwenCodePayload": ["state": "pending"]]),
+        ]
+        for (flag, value) in cases {
+            let fields = try XCTUnwrap(EmbeddedWebModelTransport.qwenResponseProgressFields(value))
+            XCTAssertEqual((fields["pending"] as? [String: Bool])?[flag], true)
+            for key in ["users", "responses", "busy", "complete", "textBytes", "textSaturated"] { XCTAssertTrue(fields[key] is NSNull, key) }
+        }
+        let observed: [String: Any] = ["userCount": 0, "responseCount": 0, "busy": false, "answerComplete": false,
+            "text": "PRIVATE_TEXT_CANARY", "PRIVATE_KEY": "PRIVATE_VALUE"]
+        let fields = try XCTUnwrap(EmbeddedWebModelTransport.qwenResponseProgressFields(observed))
+        XCTAssertEqual(fields["users"] as? Int64, 0); XCTAssertEqual(fields["busy"] as? Bool, false)
+        XCTAssertEqual(fields["textBytes"] as? Int, "PRIVATE_TEXT_CANARY".utf8.count)
+        XCTAssertFalse(String(decoding: try JSONSerialization.data(withJSONObject: fields), as: UTF8.self).contains("PRIVATE"))
+        for changed: [String: Any] in [["userCount": true], ["responseCount": "PRIVATE"], ["busy": 1], ["answerComplete": NSNull()], ["text": ["PRIVATE": true]]] {
+            XCTAssertNil(EmbeddedWebModelTransport.qwenResponseProgressFields(changed))
+        }
+    }
+
+    func testQwenProgressRecordIsClosedCappedAndFitsTheWholeJournalField() throws {
+        let generation = UUID(), token = UUID(), model = WebsiteModelChoice(provider: "qwen", key: "Qwen3.8-Max", label: "Qwen3.8-Max").modelID
+        var record = QwenResponseProgressStatus.syntheticRecord(generation: generation)
+        for key in ["polls", "callbacks", "waitStarts", "waitReturns", "readTimeouts"] { record[key] = 65_535 }
+        record["countsSaturated"] = true; record["waitInFlight"] = true
+        record["native"] = ["scope": "entry_lifetime", "received": 65_535, "accepted": 65_535, "revision": 65_535, "saturated": true,
+            "attached": false, "hidden": false, "window": false, "visible": false, "occluded": false]
+        record["outbound"] = ["utf16": 180_200, "utf16Saturated": true, "utf8": 720_800, "utf8Saturated": true]
+        record["lastState"] = "current"
+        record["last"] = ["ageMs": 300_001, "ageSaturated": true,
+            "pending": ["provisional": false, "firstBody": false, "identity": false, "choice": false, "codePayload": false],
+            "users": 10_000, "responses": 10_000, "busy": false, "complete": false, "textBytes": 220_001, "textSaturated": true]
+        let status = try XCTUnwrap(QwenResponseProgressStatus(sessionToken: token, documentGeneration: generation, modelID: model, sequence: 1, record: record))
+        XCTAssertLessThanOrEqual(try JSONSerialization.data(withJSONObject: ["qwenResponseProgress": status.dictionary], options: .sortedKeys).count, 1_024)
+        XCTAssertTrue(status.matches(sessionToken: token.uuidString, documentGeneration: generation, modelID: model, sequence: 1))
+        var nearCap = record
+        for key in ["polls", "callbacks", "waitStarts", "waitReturns", "readTimeouts"] { nearCap[key] = 65_534 }
+        nearCap["countsSaturated"] = false; nearCap["waitInFlight"] = false
+        nearCap["native"] = ["scope": "entry_lifetime", "received": 65_534, "accepted": 65_534, "revision": 65_534, "saturated": false,
+            "attached": false, "hidden": false, "window": false, "visible": false, "occluded": false]
+        nearCap["outbound"] = ["utf16": 180_199, "utf16Saturated": false, "utf8": 720_799, "utf8Saturated": false]
+        var longLast = try XCTUnwrap(nearCap["last"] as? [String: Any])
+        longLast["ageMs"] = 300_000; longLast["ageSaturated"] = false
+        longLast["textBytes"] = 220_000; longLast["textSaturated"] = false; nearCap["last"] = longLast
+        let longest = try XCTUnwrap(QwenResponseProgressStatus(sessionToken: token, documentGeneration: generation, modelID: model, sequence: 1, record: nearCap))
+        XCTAssertLessThanOrEqual(try JSONSerialization.data(withJSONObject: ["qwenResponseProgress": longest.dictionary], options: .sortedKeys).count, 1_024)
+        var waiting = QwenResponseProgressStatus.syntheticRecord(generation: generation)
+        waiting["waitStarts"] = 1; waiting["waitInFlight"] = true
+        let inFlight = try XCTUnwrap(QwenResponseProgressStatus(sessionToken: token, documentGeneration: generation, modelID: model, sequence: 1, record: waiting))
+        XCTAssertTrue(inFlight.dictionary["revisionChanged"] is NSNull)
+        XCTAssertTrue(inFlight.dictionary["waitDeadlineReached"] is NSNull)
+        for mutation: [String: Any] in [["PRIVATE": "PRIVATE_CANARY"], ["polls": true], ["callbacks": 65_536], ["version": 2],
+            ["lastState": "PRIVATE"], ["documentGeneration": UUID().uuidString.lowercased()], ["last": ["text": "PRIVATE_CANARY"]]] {
+            XCTAssertNil(QwenResponseProgressStatus(sessionToken: token, documentGeneration: generation, modelID: model, sequence: 1,
+                record: record.merging(mutation) { _, new in new }))
+        }
+    }
+
+    func testQwenProgressCachesInitialIdentityBeforeProofAndGetterMakesNoPageRead() async throws {
+        let fixture = try Fixture(setup: "qwenFixture.options.holdResponseIdentity=true"); defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic progress observation")
+        var inspectReads = 0
+        fixture.transport.setBeforePageResultValidationForTesting { action in if action == "inspect" { inspectReads += 1 } }
+        let pending = try await call(fixture, "webProviderPoll", token)
+        XCTAssertEqual(pending["modelVerificationPendingReason"] as? String, "qwen_initial_response_identity_v1")
+        let before = inspectReads
+        let firstValue = await fixture.transport.snapshotQwenResponseProgress(sessionToken: token)
+        let first = try XCTUnwrap(firstValue)
+        let secondValue = await fixture.transport.snapshotQwenResponseProgress(sessionToken: token)
+        let second = try XCTUnwrap(secondValue)
+        XCTAssertEqual(inspectReads, before, "Native-memory snapshot must not invoke page()")
+        let record = first.dictionary, last = try XCTUnwrap(record["last"] as? [String: Any])
+        XCTAssertEqual(record["lastState"] as? String, "current")
+        XCTAssertEqual((last["pending"] as? [String: Bool])?["identity"], true)
+        XCTAssertTrue(last["users"] is NSNull); XCTAssertTrue(last["textBytes"] is NSNull)
+        let state = try XCTUnwrap(record["state"] as? [String: Bool])
+        XCTAssertEqual(state["firstUserBound"], false); XCTAssertEqual(state["outputAccepted"], false)
+        XCTAssertGreaterThan(record["callbacks"] as? Int ?? 0, 0)
+        XCTAssertGreaterThan((record["outbound"] as? [String: Any])?["utf8"] as? Int ?? 0, 0)
+        XCTAssertEqual(second.dictionary["callbacks"] as? Int, record["callbacks"] as? Int)
+        let foreign = await fixture.transport.snapshotQwenResponseProgress(sessionToken: UUID().uuidString)
+        XCTAssertNil(foreign)
+        try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+    }
+
+    func testQwenProgressCachesChoiceAndRawCandidateWithoutGrantingOutput() async throws {
+        let comparison = try Fixture(); defer { comparison.shutdown() }
+        let token = try await start(comparison)
+        _ = try await call(comparison, "webProviderSend", token, prompt: "Synthetic pending preference")
+        try await installResponseChoice(comparison, scenario: "waiting")
+        _ = try await call(comparison, "webProviderPoll", token)
+        let choiceValue = await comparison.transport.snapshotQwenResponseProgress(sessionToken: token)
+        let choiceStatus = try XCTUnwrap(choiceValue)
+        let choiceLast = try XCTUnwrap(choiceStatus.dictionary["last"] as? [String: Any])
+        XCTAssertEqual((choiceLast["pending"] as? [String: Bool])?["choice"], true)
+        XCTAssertTrue(choiceLast["users"] is NSNull)
+        XCTAssertEqual((choiceStatus.dictionary["state"] as? [String: Bool])?["choiceGrant"], false)
+        try await assertCounts(comparison, sends: 1, headers: 0, selections: 0, confirmations: 0)
+
+        let raw = try Fixture(codePayload: true); defer { raw.shutdown() }
+        let rawToken = try await start(raw)
+        _ = try await call(raw, "webProviderSend", rawToken, prompt: "Synthetic pending raw source")
+        _ = try await installRawAnswer(raw)
+        _ = try await call(raw, "webProviderPoll", rawToken)
+        let rawValue = await raw.transport.snapshotQwenResponseProgress(sessionToken: rawToken)
+        let rawStatus = try XCTUnwrap(rawValue)
+        let rawLast = try XCTUnwrap(rawStatus.dictionary["last"] as? [String: Any])
+        XCTAssertEqual((rawLast["pending"] as? [String: Bool])?["codePayload"], true)
+        XCTAssertEqual(rawLast["users"] as? Int, 1); XCTAssertEqual(rawLast["textBytes"] as? Int, 0)
+        let state = try XCTUnwrap(rawStatus.dictionary["state"] as? [String: Bool])
+        XCTAssertEqual(state["firstUserBound"], true); XCTAssertEqual(state["outputAccepted"], false); XCTAssertEqual(state["codeGrant"], false)
+    }
+
+    func testQwenProgressMarksChangedURLStaleAndOmitsCompletedOrClosedSession() async throws {
+        let held = try Fixture(setup: "qwenFixture.options.holdResponseIdentity=true"); defer { held.shutdown() }
+        let token = try await start(held)
+        _ = try await call(held, "webProviderSend", token, prompt: "Synthetic stale cache")
+        _ = try await call(held, "webProviderPoll", token)
+        _ = try await evaluate(held.view, "history.pushState({},'', '/c/11111111-1111-4111-8111-111111111111'); return true;")
+        let staleValue = await held.transport.snapshotQwenResponseProgress(sessionToken: token)
+        let stale = try XCTUnwrap(staleValue)
+        XCTAssertEqual(stale.dictionary["lastState"] as? String, "stale"); XCTAssertTrue(stale.dictionary["last"] is NSNull)
+        held.browser.closeTab(try XCTUnwrap(held.createdID))
+        let closed = await held.transport.snapshotQwenResponseProgress(sessionToken: token)
+        XCTAssertNil(closed)
+
+        let complete = try Fixture(); defer { complete.shutdown() }
+        let completeToken = try await start(complete)
+        _ = try await call(complete, "webProviderSend", completeToken, prompt: "Synthetic completed cache")
+        _ = try await wait(complete, completeToken, state: "complete")
+        let completedValue = await complete.transport.snapshotQwenResponseProgress(sessionToken: completeToken)
+        XCTAssertNil(completedValue)
+        let finished = try await call(complete, "webProviderFinish", completeToken)
+        XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+    }
+
     func testUnexpectedRouteDiagnosticSeparatesOriginPathAndQueryWithoutChangingAdmission() throws {
         let canonical = "https://chat.qwen.ai/c/11111111-abcd-4333-8444-555555555555"
         let cases: [(String, Bool, [String])] = [
@@ -1460,6 +1768,7 @@ final class QwenWebModelTransportTests: XCTestCase {
         let humanID: UUID
         var transport: EmbeddedWebModelTransport!
         var createdID: UUID?
+        var createdIDs: [UUID] = []
         private var retainedView: WKWebView?
         var view: WKWebView { retainedView! }
         init(setup: String = "", codePayload: Bool = false) throws {
@@ -1491,7 +1800,7 @@ final class QwenWebModelTransportTests: XCTestCase {
                     return WKWebView(frame: .zero, configuration: configuration)
                 })
                 let view = try XCTUnwrap(self.browser.webView(for: id)); view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
-                self.createdID = id; self.retainedView = view
+                self.createdID = id; self.createdIDs.append(id); self.retainedView = view
                 view.loadHTMLString(QwenFixturePage.html + "<script>" + setup + "</script>", baseURL: url)
                 return id
             })
@@ -1499,5 +1808,20 @@ final class QwenWebModelTransportTests: XCTestCase {
         func shutdown() {
             browser.shutdown(); host.detach(); window.orderOut(nil); window.close()
         }
+    }
+}
+
+// Shared inert record for the transport-schema and server-retention fixtures.
+extension QwenResponseProgressStatus {
+    static func syntheticRecord(generation: UUID) -> [String: Any] {
+        ["version": 1, "documentGeneration": generation.uuidString.lowercased(), "sequence": 1,
+            "polls": 0, "callbacks": 0, "waitStarts": 0, "waitReturns": 0, "waitInFlight": false,
+            "revisionChanged": NSNull(), "waitDeadlineReached": NSNull(), "readTimeouts": 0, "countsSaturated": false,
+            "lastState": "missing", "last": NSNull(),
+            "state": ["pendingSubmission": true, "firstUserBound": false, "outputAccepted": false,
+                "completionCandidate": false, "codeGrant": false, "choiceGrant": false],
+            "native": ["scope": "entry_lifetime", "received": 0, "accepted": 0, "revision": 0, "saturated": false,
+                "attached": true, "hidden": false, "window": true, "visible": true, "occluded": false],
+            "outbound": ["utf16": NSNull(), "utf16Saturated": NSNull(), "utf8": NSNull(), "utf8Saturated": NSNull()]]
     }
 }

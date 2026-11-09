@@ -147,7 +147,18 @@ enum APIProviderCatalog {
     static func options(for providers: [APIProviderDefinition]) -> [LocalModelOption] {
         guard (try? validate(providers)) != nil else { return [] }
         return providers.flatMap { provider in provider.models.filter { model in
-            !provider.isCerebrasInference || showAdditionalCerebrasModels || model.id == "gpt-oss-120b"
+            if provider.isCerebrasInference {
+                return showAdditionalCerebrasModels || model.id == "gpt-oss-120b"
+            }
+            // Keep Model Studio's other discovered models internal for now.
+            // Prefer the moving Flash alias; expose its dated version only
+            // when that is the only discovered Qwen3.7 Flash option.
+            if provider.isAlibabaModelStudioInference {
+                return model.id == "qwen3.7-flash"
+                    || model.id == "qwen3.7-flash-2026-07-15"
+                        && !provider.models.contains { $0.id == "qwen3.7-flash" }
+            }
+            return true
         }.map { model in
             LocalModelOption(id: appModelID(providerID: provider.id, modelID: model.id),
                 label: "\(provider.name) / \(model.name) · API",

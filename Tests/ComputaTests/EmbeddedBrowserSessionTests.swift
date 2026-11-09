@@ -1719,6 +1719,83 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertThrowsError(try channel.currentRevision())
     }
 
+    func testModelSignalProgressRequiresExactOwnedViewOwnerGenerationAndOpenChannel() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createModelTab(url: XCTUnwrap(URL(string: "about:blank")))
+        let view = try XCTUnwrap(session.webView(for: id))
+        let owner = UUID().uuidString
+        let generation = try XCTUnwrap(session.documentGeneration(for: id))
+        XCTAssertNil(session.modelSignalProgress(tabID: id, view: view, ownerToken: owner, generation: generation))
+        try session.installModelChangeSignal(tabID: id, ownerToken: owner,
+            world: WKContentWorld.world(name: "model-progress-exact"), originHost: "chat.qwen.ai")
+        XCTAssertNotNil(session.modelSignalProgress(tabID: id, view: view, ownerToken: owner, generation: generation))
+        XCTAssertNil(session.modelSignalProgress(tabID: UUID(), view: view, ownerToken: owner, generation: generation))
+        XCTAssertNil(session.modelSignalProgress(tabID: id, view: WKWebView(), ownerToken: owner, generation: generation))
+        XCTAssertNil(session.modelSignalProgress(tabID: id, view: view, ownerToken: UUID().uuidString, generation: generation))
+        XCTAssertNil(session.modelSignalProgress(tabID: id, view: view, ownerToken: owner, generation: UUID()))
+        let human = try session.createTab(select: false)
+        let humanView = try XCTUnwrap(session.webView(for: human))
+        try session.installModelChangeSignal(tabID: human, ownerToken: owner,
+            world: WKContentWorld.world(name: "model-progress-human"), originHost: "chat.qwen.ai")
+        XCTAssertNil(session.modelSignalProgress(tabID: human, view: humanView, ownerToken: owner,
+            generation: try XCTUnwrap(session.documentGeneration(for: human))))
+        session.closeTab(id)
+        XCTAssertNil(session.modelSignalProgress(tabID: id, view: view, ownerToken: owner, generation: generation))
+    }
+
+    func testModelSignalProgressIsReadOnlyNativeMetadataWithClosedPrivacyShape() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createModelTab(url: XCTUnwrap(URL(string: "about:blank")))
+        let view = try XCTUnwrap(session.webView(for: id))
+        let owner = UUID().uuidString
+        try session.installModelChangeSignal(tabID: id, ownerToken: owner,
+            world: WKContentWorld.world(name: "model-progress-readonly"), originHost: "chat.qwen.ai")
+        let generation = try XCTUnwrap(session.documentGeneration(for: id))
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 40, height: 40))
+        host.addSubview(view)
+        view.isHidden = true
+        let revision = try session.modelChangeRevision(for: id)
+        let first = try XCTUnwrap(session.modelSignalProgress(tabID: id, view: view, ownerToken: owner, generation: generation))
+        let second = try XCTUnwrap(session.modelSignalProgress(tabID: id, view: view, ownerToken: owner, generation: generation))
+        XCTAssertEqual(second.received, first.received)
+        XCTAssertEqual(second.accepted, first.accepted)
+        XCTAssertEqual(second.revision, first.revision)
+        XCTAssertEqual(try session.modelChangeRevision(for: id), revision)
+        XCTAssertEqual(session.documentGeneration(for: id), generation)
+        XCTAssertTrue(second.attached)
+        XCTAssertTrue(second.hidden)
+        XCTAssertFalse(second.windowPresent)
+        XCTAssertFalse(second.visible)
+        XCTAssertFalse(second.occluded)
+        XCTAssertEqual(Set(Mirror(reflecting: second).children.compactMap(\.label)),
+            Set(["received", "accepted", "revision", "saturated", "attached", "hidden", "windowPresent", "visible", "occluded"]))
+        XCTAssertTrue(Mirror(reflecting: second).children.allSatisfy { $0.value is Int || $0.value is Bool },
+            "No URL, owner, document/body text, provider data or timing enters this snapshot")
+        view.removeFromSuperview()
+    }
+
+    func testModelSignalProgressClampsRevisionAndMarksSaturationWithoutAdvancingOnRead() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createModelTab(url: XCTUnwrap(URL(string: "about:blank")))
+        let view = try XCTUnwrap(session.webView(for: id))
+        let owner = UUID().uuidString
+        try session.installModelChangeSignal(tabID: id, ownerToken: owner,
+            world: WKContentWorld.world(name: "model-progress-cap"), originHost: "chat.qwen.ai")
+        let generation = try XCTUnwrap(session.documentGeneration(for: id))
+        for _ in 0...UInt16.max { session.notifyModelSessionChange(tabID: id) }
+        let nativeRevision = try session.modelChangeRevision(for: id)
+        XCTAssertGreaterThan(nativeRevision, UInt64(UInt16.max))
+        let progress = try XCTUnwrap(session.modelSignalProgress(tabID: id, view: view, ownerToken: owner, generation: generation))
+        XCTAssertEqual(progress.revision, Int(UInt16.max))
+        XCTAssertTrue(progress.saturated)
+        XCTAssertEqual(progress.received, 0)
+        XCTAssertEqual(progress.accepted, 0)
+        XCTAssertEqual(try session.modelChangeRevision(for: id), nativeRevision)
+    }
+
     func testModelNotificationHandlerIsPrivateAndAcceptsOnlyItsExactReceipt() async throws {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }

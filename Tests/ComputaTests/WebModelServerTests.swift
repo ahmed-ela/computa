@@ -1448,6 +1448,126 @@ final class WebModelServerTests: XCTestCase {
         try await verifyPendingSavedFirstBodyDeadline(provider: "qwen", qwenReason: "qwen_response_preference_v1")
     }
 
+    func testQwenOuterDeadlinePersistsOneNativeProgressRecordBeforeCleanupWithoutRepolling() async throws {
+        let label = "qwen-progress-outer", root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+        let base = FixtureWebModelTransport(cleanupResult: "deleted")
+        let transport = QwenProgressFixtureTransport(base: base, variant: "outer")
+        await server.configureEmbeddedTransport(transport)
+        await server.setTimeoutsForTesting(readiness: .seconds(2), response: .milliseconds(100))
+        let data = try turnRequest(input: [["role": "user", "content": "Synthetic response deadline"]], model: syntheticWebsiteModelID("qwen"))
+        let inference = Task { try await server.fixtureInfer(data, taskID: label) }
+        do { _ = try await inference.value; XCTFail("Pending callback cannot release output") }
+        catch { guard case .deadline? = error as? WebModelServer.Failure else { return XCTFail("Original server deadline changed: \(error)") } }
+        let rows = try turnJournal(root: root, task: label)
+        let failed = rows.filter { $0["phase"] as? String == "failed" }
+        XCTAssertEqual(failed.count, 1)
+        let row = try XCTUnwrap(failed.first), progress = try XCTUnwrap(row["qwenResponseProgress"] as? [String: Any])
+        XCTAssertEqual(row["errorCode"] as? String, "provider_timeout")
+        XCTAssertEqual(progress["lastState"] as? String, "current")
+        let last = try XCTUnwrap(progress["last"] as? [String: Any])
+        XCTAssertTrue(last["users"] is NSNull); XCTAssertEqual((last["pending"] as? [String: Bool])?["identity"], true)
+        XCTAssertFalse(rows.contains { ["complete", "release_verified"].contains($0["phase"] as? String ?? "") })
+        let counts = await transport.counts()
+        XCTAssertEqual(counts.polls, 1); XCTAssertEqual(counts.memoryReads, 1); XCTAssertFalse(counts.closedBeforeRead)
+        // fixtureInfer ends at the rejected inference; runtime terminal
+        // handling separately finishes this exact website lease.
+        let beforeFinish = await base.operations()
+        XCTAssertFalse(beforeFinish.contains { $0 == "webProviderFinish" || $0 == "webProviderCancel" })
+        let finishIssues = await server.fixtureFinish(taskID: label)
+        XCTAssertTrue(finishIssues.isEmpty)
+        let afterFinish = await transport.counts()
+        XCTAssertEqual(afterFinish.polls, counts.polls)
+        XCTAssertEqual(afterFinish.memoryReads, counts.memoryReads)
+        let operations = await base.operations()
+        XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1)
+        XCTAssertEqual(operations.filter { $0 == "webProviderPoll" }.count, 0)
+        XCTAssertEqual(operations.filter { $0 == "webProviderFinish" || $0 == "webProviderCancel" }.count, 1)
+    }
+
+    func testQwenProgressDropsForeignOrUnavailableSnapshotsWithoutChangingDeadlineOrCleanup() async throws {
+        for variant in ["foreign-token", "foreign-generation", "foreign-model", "unavailable", "cancel-during-snapshot"] {
+            let label = "qwen-progress-" + variant, root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+            let base = FixtureWebModelTransport(cleanupResult: "deleted")
+            let transport = QwenProgressFixtureTransport(base: base, variant: variant)
+            await server.configureEmbeddedTransport(transport)
+            await server.setTimeoutsForTesting(readiness: .seconds(2), response: .milliseconds(100))
+            let data = try turnRequest(input: [["role": "user", "content": "Synthetic stale progress"]], model: syntheticWebsiteModelID("qwen"))
+            let inference = Task { try await server.fixtureInfer(data, taskID: label) }
+            do { _ = try await inference.value; XCTFail("Deadline must remain terminal") }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .deadline, variant) }
+            let rows = try turnJournal(root: root, task: label)
+            let failed = try XCTUnwrap(rows.last { $0["phase"] as? String == "failed" })
+            XCTAssertEqual(failed["errorCode"] as? String, "provider_timeout")
+            XCTAssertNil(failed["qwenResponseProgress"], variant)
+            let counts = await transport.counts()
+            XCTAssertEqual(counts.polls, 1); XCTAssertEqual(counts.memoryReads, 1); XCTAssertFalse(counts.closedBeforeRead)
+            // fixtureInfer ends at the rejected inference; runtime terminal
+            // handling separately finishes this exact website lease.
+            let beforeFinish = await base.operations()
+            XCTAssertFalse(beforeFinish.contains { $0 == "webProviderFinish" || $0 == "webProviderCancel" })
+            let finishIssues = await server.fixtureFinish(taskID: label)
+            XCTAssertTrue(finishIssues.isEmpty)
+            let afterFinish = await transport.counts()
+            XCTAssertEqual(afterFinish.polls, counts.polls)
+            XCTAssertEqual(afterFinish.memoryReads, counts.memoryReads)
+            let operations = await base.operations()
+            XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1)
+            XCTAssertEqual(operations.filter { $0 == "webProviderFinish" || $0 == "webProviderCancel" }.count, 1)
+        }
+    }
+
+    func testQwenPreparationOtherErrorsAndCancellationNeverPublishResponseDeadlineProgress() async throws {
+        for variant in ["preparation", "other-error", "cancelled"] {
+            let label = "qwen-progress-" + variant, root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+            let base = FixtureWebModelTransport(cleanupResult: "deleted")
+            let transport = QwenProgressFixtureTransport(base: base, variant: variant)
+            await server.configureEmbeddedTransport(transport)
+            let data = try turnRequest(input: [["role": "user", "content": "Synthetic unchanged failure"]], model: syntheticWebsiteModelID("qwen"))
+            let inference = Task { try await server.fixtureInfer(data, taskID: label) }
+            do { _ = try await inference.value; XCTFail("Original failure must survive") }
+            catch {
+                if variant == "cancelled" { XCTAssertTrue(error is CancellationError) }
+                else { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, variant == "preparation" ? .preparationDeadline : .modelUnverified) }
+            }
+            let rows = try turnJournal(root: root, task: label)
+            XCTAssertTrue(rows.allSatisfy { $0["qwenResponseProgress"] == nil })
+            let counts = await transport.counts(); XCTAssertEqual(counts.memoryReads, 0)
+            // fixtureInfer ends at the rejected inference; runtime terminal
+            // handling separately finishes this exact website lease.
+            let beforeFinish = await base.operations()
+            XCTAssertFalse(beforeFinish.contains { $0 == "webProviderFinish" || $0 == "webProviderCancel" })
+            let finishIssues = await server.fixtureFinish(taskID: label)
+            XCTAssertTrue(finishIssues.isEmpty)
+            let afterFinish = await transport.counts()
+            XCTAssertEqual(afterFinish.polls, counts.polls)
+            XCTAssertEqual(afterFinish.memoryReads, counts.memoryReads)
+            let operations = await base.operations()
+            XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1)
+            XCTAssertEqual(operations.filter { $0 == "webProviderFinish" || $0 == "webProviderCancel" }.count, 1)
+        }
+    }
+
+    func testQwenSuccessfulResponseNeverRequestsOrPersistsFailureProgress() async throws {
+        let label = "qwen-progress-success", root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+        let base = FixtureWebModelTransport(cleanupResult: "deleted")
+        let transport = QwenProgressFixtureTransport(base: base, variant: "success")
+        await server.configureEmbeddedTransport(transport)
+        let data = try turnRequest(input: [["role": "user", "content": "Synthetic ordinary completion"]], model: syntheticWebsiteModelID("qwen"))
+        let reply = try await server.fixtureInfer(data, taskID: label)
+        XCTAssertFalse(reply.isEmpty)
+        let rows = try turnJournal(root: root, task: label)
+        XCTAssertEqual(rows.compactMap { $0["phase"] as? String }, ["start_requested", "started", "submission_verified", "complete", "release_verified"])
+        XCTAssertTrue(rows.allSatisfy { $0["qwenResponseProgress"] == nil })
+        let counts = await transport.counts(); XCTAssertEqual(counts.memoryReads, 0)
+        let operations = await base.operations()
+        XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1)
+        XCTAssertEqual(operations.filter { $0 == "webProviderFinish" || $0 == "webProviderCancel" }.count, 1)
+    }
+
     func testQwenFailedOrCancelledChoiceRetainsOnlyExactFiniteNativeMemoryReceiptWithoutRepolling() async throws {
         for variant in ["failure", "cancelled", "foreign-generation"] {
             let label = "qwen-choice-" + variant
@@ -4398,6 +4518,64 @@ private actor ChatContextSidecarFixtureTransport: WebModelTransport {
             throw EmbeddedWebModelTransport.Failure.ownershipFailure(.javaScriptSubmission)
         }
         return try await base.request(operation: operation, params: params)
+    }
+}
+
+/// Validated pending receipt plus a native-memory-only deadline snapshot.
+/// No website/provider request or new page operation is available to the getter.
+private actor QwenProgressFixtureTransport: WebModelTransport {
+    private let base: PendingSavedFirstBodyFixtureTransport
+    private let variant: String
+    private var status: QwenResponseProgressStatus?
+    private var polls = 0, memoryReads = 0
+    private var closed = false, closedBeforeRead = false
+    init(base: FixtureWebModelTransport, variant: String) {
+        self.base = PendingSavedFirstBodyFixtureTransport(base: base, provider: "qwen", repeatPending: variant != "success",
+            qwenReason: "qwen_initial_response_identity_v1")
+        self.variant = variant
+    }
+    func counts() -> (polls: Int, memoryReads: Int, closedBeforeRead: Bool) { (polls, memoryReads, closedBeforeRead) }
+    func changeRevision(sessionToken: String) -> UInt64? { 0 }
+    func waitForChange(sessionToken: String, after revision: UInt64, until deadline: ContinuousClock.Instant) async throws -> UInt64? {
+        if variant != "success" { try await Task.sleep(until: deadline, tolerance: .zero, clock: .continuous) }
+        return revision
+    }
+    func snapshotQwenResponseProgress(sessionToken: String) async -> QwenResponseProgressStatus? {
+        memoryReads += 1; closedBeforeRead = closed
+        if variant == "cancel-during-snapshot" { withUnsafeCurrentTask { $0?.cancel() } }
+        return variant == "unavailable" ? nil : status
+    }
+    func request(operation: String, params: Data) async throws -> Data {
+        if operation == "webProviderPoll" {
+            polls += 1
+            switch variant {
+            case "preparation": throw EmbeddedWebModelTransport.Failure.preparationDeadline
+            case "other-error": throw EmbeddedWebModelTransport.Failure.modelUnverified
+            case "cancelled": withUnsafeCurrentTask { $0?.cancel() }; throw CancellationError()
+            case "outer", "success": break
+            default: throw EmbeddedWebModelTransport.Failure.deadline
+            }
+        }
+        if operation == "webProviderFinish" || operation == "webProviderCancel" { closed = true }
+        let data = try await base.request(operation: operation, params: params)
+        if operation == "webProviderSend" {
+            let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let token = try XCTUnwrap((sent["sessionToken"] as? String).flatMap(UUID.init(uuidString:)))
+            let proof = try XCTUnwrap(sent["modelProofContext"] as? [String: Any])
+            let actualGeneration = try XCTUnwrap((proof["documentGeneration"] as? String).flatMap(UUID.init(uuidString:)))
+            let generation = variant == "foreign-generation" ? UUID() : actualGeneration
+            var record = QwenResponseProgressStatus.syntheticRecord(generation: generation)
+            record["polls"] = 1; record["callbacks"] = 1
+            record["lastState"] = "current"
+            record["last"] = ["ageMs": 100, "ageSaturated": false,
+                "pending": ["provisional": false, "firstBody": false, "identity": true, "choice": false, "codePayload": false],
+                "users": NSNull(), "responses": NSNull(), "busy": NSNull(), "complete": NSNull(), "textBytes": NSNull(), "textSaturated": NSNull()]
+            let model = variant == "foreign-model" ? WebsiteModelChoice(provider: "qwen", key: "PRIVATE_MODEL", label: "PRIVATE_MODEL").modelID
+                : syntheticWebsiteModelID("qwen")
+            status = QwenResponseProgressStatus(sessionToken: variant == "foreign-token" ? UUID() : token,
+                documentGeneration: generation, modelID: model, sequence: 1, record: record)
+        }
+        return data
     }
 }
 
