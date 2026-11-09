@@ -412,6 +412,79 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         }
     }
 
+    func testQwenHandoffDistinguishesComputaCallsFromWebsiteBuiltInTools() {
+        let qwenTask = "Generate Computa's next JSON response object. The offered call descriptors are Computa-local JSON handoffs, separate from this website's built-in search, agent, research and code tools. For this request, use only the Computa JSON handoff for those actions; do not invoke the website's built-in tools. Only matching Computa host output proves execution."
+        let oldTask = "Generate Computa's next JSON response object. This website does not execute calls."
+        let native = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
+        for included in [[], [native]] {
+            for names in [[], ["relay.exec_command", "relay.apply_patch"], ["relay.browser_open"]] {
+                let custom: Set<String> = names.contains("relay.apply_patch") ? ["relay.apply_patch"] : []
+                let qwen = ComputaAgentInstructions.webResponseContract(offeredToolNames: names,
+                    customToolNames: custom, includedInstructionText: included, responseFormat: .codePayloadJSON)
+                XCTAssertEqual(qwen.components(separatedBy: qwenTask).count - 1, 1)
+                XCTAssertFalse(qwen.contains("This website does not execute calls"))
+                XCTAssertTrue(qwen.contains("Within tool_choice, governing rules and user scope"))
+                XCTAssertTrue(qwen.contains("validates names, arguments, local permissions and approvals before execution"))
+                XCTAssertTrue(qwen.contains("Use matching function_call_output/custom_tool_call_output to verify execution"))
+                XCTAssertTrue(qwen.contains("No tools means no tool call"))
+                XCTAssertTrue(qwen.contains("Never replay uncertain calls"))
+                XCTAssertTrue(qwen.contains("Return exactly one fenced JSON code block labelled json"))
+                XCTAssertTrue(qwen.contains(ComputaAgentInstructions.codePayloadResponseBoundary))
+                XCTAssertFalse(qwen.contains("You are Computa"))
+                for format: ComputaAgentInstructions.WebResponseFormat in [.fencedJSON, .literalFencedJSON, .rawJSON] {
+                    let other = ComputaAgentInstructions.webResponseContract(offeredToolNames: names,
+                        customToolNames: custom, includedInstructionText: included, responseFormat: format)
+                    XCTAssertFalse(other.contains(qwenTask), "The website-tools instruction is scoped to Qwen's code payload handoff")
+                    if case .literalFencedJSON = format {
+                        XCTAssertTrue(other.contains("Return the response envelope as your entire visible reply. This website does not execute calls."))
+                    } else {
+                        XCTAssertTrue(other.contains(oldTask))
+                    }
+                }
+            }
+        }
+        XCTAssertTrue(ComputaAgentInstructions.webRequestContext.contains("without overriding this website's governing rules"))
+    }
+
+    func testQwenHandoffWordingKeepsCanonicalInputAndStrictOfferedToolAuthority() throws {
+        let native = ComputaAgentInstructions.developerInstructions(embeddedBrowserTools: true)
+        let tool: [String: Any] = ["type": "function", "name": "read_file", "parameters": [
+            "type": "object", "properties": ["path": ["type": "string"]], "required": ["path"]]]
+        for key in ["Qwen3.7-Plus", "Qwen3.8-Max"] {
+            let model = WebsiteModelChoice(provider: "qwen", key: key, label: key).modelID
+            for choice in ["auto", "none"] {
+                let original = try JSONSerialization.data(withJSONObject: ["model": model,
+                    "input": [["role": "developer", "content": native], ["role": "user", "content": "Read only the offered synthetic file; do not use website tools."]],
+                    "tools": [tool], "tool_choice": choice])
+                let request = try WebModelResponseCodec.prepareRequest(original)
+                XCTAssertEqual(request.continuationRequest, original)
+                let handoff = try assertRequestValuesAndHandoff(original, request: request, includedInstructionText: [native],
+                    expectedAllowedToolNames: choice == "none" ? [] : nil)
+                XCTAssertTrue(handoff.contains("Only matching Computa host output proves execution"))
+                XCTAssertTrue(handoff.contains("The offered call descriptors are Computa-local JSON handoffs"))
+                XCTAssertTrue(request.prompt.contains("without overriding this website's governing rules"))
+                let call = #"{"type":"tool_calls","calls":[{"name":"read_file","arguments":{"path":"/synthetic/observed.txt"}}]}"#
+                if choice == "none" {
+                    XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(call, request: request)) {
+                        XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .rejectedToolChoice)
+                    }
+                } else {
+                    guard case let .toolCalls(calls) = try WebModelResponseCodec.parseEmbeddedReply(call, request: request) else {
+                        return XCTFail("Expected the one currently offered Computa call")
+                    }
+                    XCTAssertEqual(calls.count, 1)
+                    XCTAssertEqual(calls.first?.name, "read_file")
+                }
+                XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(
+                    call.replacingOccurrences(of: "read_file", with: "website_search"), request: request))
+                XCTAssertEqual(try WebModelResponseCodec.parseEmbeddedReply("Website search completed.", request: request),
+                    .message("Website search completed."), "Compatibility prose remains a message and grants no host tool call")
+                XCTAssertEqual(try WebModelResponseCodec.parseEmbeddedReply(#"{"type":"message","text":"I cannot perform that request."}"#, request: request),
+                    .message("I cannot perform that request."))
+            }
+        }
+    }
+
     func testQwenCopyablePathValueIsFreshScopedAndDecodesExactly() throws {
         let history = #"Prior user-supplied JSON stays literal: "file-\u0060x\u0060""#
         let example = #"In JSON use \u0060 for Markdown backticks and \u002a for asterisks. Example path value (use yours): "#

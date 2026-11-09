@@ -4,6 +4,102 @@ import XCTest
 
 final class WebsiteFailureHistoryTests: XCTestCase {
 
+    func testGroqPreflightTokenBudgetFailurePersistsWithoutAWebsiteJournal() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaGroqPreflight-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let native = try WebModelServer.errorBody(for: WebModelResponseCodec.Failure.groqPromptBudgetExceeded(
+            actualTokens: 6_626, maximumTokens: WebModelResponseCodec.groqMaximumBodyTokens,
+            reservedTokens: WebModelResponseCodec.groqReservedTokens))
+        let expected = try XCTUnwrap(JSONSerialization.jsonObject(with: native) as? [String: Any])
+        let storeRoot = root.appendingPathComponent("WebsiteTurnFailureStore-v1")
+        let journalRoot = root.appendingPathComponent("WebsiteModelEvidence-v1")
+        for (key, label) in [("qwen/qwen3.8-27b", "Qwen/Qwen3.8-27B"),
+                             ("openai/gpt-oss-120b", "GPT OSS 120B"), ("openai/gpt-oss-20b", "GPT OSS 20B")] {
+            let model = WebsiteModelChoice(provider: "groq", key: key, label: label).modelID
+            let task = UUID().uuidString, thread = UUID().uuidString, turnID = UUID().uuidString
+            let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+                turnID: turnID, modelID: model, diagnosticText: String(decoding: native, as: UTF8.self)))
+            XCTAssertTrue(WebsiteTurnFailureStore(directory: storeRoot).append(record))
+            let restored = try WebsiteTurnFailureStore(directory: storeRoot).load(threadID: thread)
+            XCTAssertEqual(restored, [record])
+            XCTAssertEqual(record.taskID, task.lowercased()); XCTAssertEqual(record.modelID, model)
+            XCTAssertEqual(record.entry.id, "agent-error:" + turnID.lowercased())
+            XCTAssertEqual(record.entry.turnID, turnID.lowercased())
+            let saved = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(restored[0].diagnosticText.utf8)) as? [String: Any])
+            XCTAssertTrue(NSDictionary(dictionary: saved).isEqual(to: expected))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: journalRoot.path), "Preflight persistence needs no invented website inference or failed phase")
+        }
+    }
+
+    func testGroqPreflightTokenBudgetStoreRejectsForgedCountsFieldsAndForeignModels() throws {
+        let task = UUID().uuidString, thread = UUID().uuidString, turnID = UUID().uuidString
+        let model = WebsiteModelChoice(provider: "groq", key: "qwen/qwen3.8-27b", label: "Qwen/Qwen3.8-27B").modelID
+        let native = try WebModelServer.errorBody(for: WebModelResponseCodec.Failure.groqPromptBudgetExceeded(
+            actualTokens: 6_626, maximumTokens: 6_000, reservedTokens: 2_000))
+        let original = try XCTUnwrap(JSONSerialization.jsonObject(with: native) as? [String: Any])
+        let fields = try XCTUnwrap(original["error"] as? [String: Any])
+        func rejected(_ object: [String: Any], for candidate: String? = nil) throws {
+            let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
+            XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turnID,
+                modelID: candidate ?? model, diagnosticText: String(decoding: data, as: UTF8.self)))
+        }
+        let mutations: [[String: Any]] = [
+            ["body_tokens": true], ["body_tokens": false], ["body_tokens": 6_626.25], ["body_tokens": "6626"],
+            ["body_tokens": NSNull()], ["body_tokens": 6_627], ["maximum_body_tokens": true],
+            ["maximum_body_tokens": 5_999], ["maximum_body_tokens": 6_001], ["reserved_tokens": false],
+            ["reserved_tokens": 1_999], ["reserved_tokens": 2_001], ["retryable": true], ["retryable": 0],
+            ["message": "PRIVATE_USER_CONTENT"], ["type": "server_error"], ["param": NSNull()],
+            ["code": "website_unknown_budget"], ["request_body": "PRIVATE_USER_CONTENT"]]
+        for mutation in mutations {
+            var changed = original, error = fields; mutation.forEach { error[$0.key] = $0.value }; changed["error"] = error
+            try rejected(changed)
+        }
+        for key in fields.keys {
+            var changed = original, error = fields; error.removeValue(forKey: key); changed["error"] = error
+            try rejected(changed)
+        }
+        var extra = original; extra["history"] = "PRIVATE_USER_CONTENT"; try rejected(extra)
+        // Even internally coherent generated warnings must obey the actual admission bounds.
+        for actual in [-1, 0, 6_000, WebModelResponseCodec.maximumPromptBytes + 1] {
+            let data = try WebModelServer.errorBody(for: WebModelResponseCodec.Failure.groqPromptBudgetExceeded(
+                actualTokens: actual, maximumTokens: 6_000, reservedTokens: 2_000))
+            try rejected(try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any]))
+        }
+        for foreign in [syntheticChatGPTModelID, "browser/claude", "browser/gemini", "browser/kimi", "browser/qwen",
+                        "browser/deepseek/mode/chat", "api/cerebras/model/fixture", "browser/groq",
+                        WebsiteModelChoice(provider: "groq", key: "unverified-model", label: "Unverified").modelID] {
+            try rejected(original, for: foreign)
+        }
+        let raw = String(decoding: native, as: UTF8.self)
+        let duplicate = raw.replacingOccurrences(of: "\"body_tokens\":6626", with: "\"body_tokens\":true,\"body_tokens\":6626")
+        XCTAssertNotEqual(duplicate, raw)
+        XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turnID,
+            modelID: model, diagnosticText: duplicate), "Duplicate fields cannot disappear during JSON decoding")
+    }
+
+    func testGroqPreflightBudgetStoreRejectsCorruptReloadWithoutOverwritingEvidence() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaGroqPreflightCorrupt-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = WebsiteModelChoice(provider: "groq", key: "qwen/qwen3.8-27b", label: "Qwen/Qwen3.8-27B").modelID
+        let native = try WebModelServer.errorBody(for: WebModelResponseCodec.Failure.groqPromptBudgetExceeded(
+            actualTokens: 6_626, maximumTokens: 6_000, reservedTokens: 2_000))
+        let thread = UUID().uuidString, turnID = UUID().uuidString
+        let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: UUID().uuidString, threadID: thread,
+            turnID: turnID, modelID: model, diagnosticText: String(decoding: native, as: UTF8.self)))
+        let store = WebsiteTurnFailureStore(directory: root); XCTAssertTrue(store.append(record))
+        let file = root.appendingPathComponent(thread.lowercased() + ".json")
+        var envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        var records = try XCTUnwrap(envelope["records"] as? [[String: Any]])
+        var diagnostic = try XCTUnwrap(JSONSerialization.jsonObject(with: native) as? [String: Any])
+        var error = try XCTUnwrap(diagnostic["error"] as? [String: Any]); error["body_tokens"] = true; diagnostic["error"] = error
+        records[0]["diagnosticText"] = String(decoding: try JSONSerialization.data(withJSONObject: diagnostic), as: UTF8.self)
+        envelope["records"] = records
+        let corrupted = try JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys])
+        try corrupted.write(to: file)
+        XCTAssertThrowsError(try WebsiteTurnFailureStore(directory: root).load(threadID: thread))
+        XCTAssertFalse(store.append(record))
+        XCTAssertEqual(try Data(contentsOf: file), corrupted, "A rejected durable record cannot be silently replaced")
+    }
 
     func testChatGPTToolTextFailurePersistsEveryFiniteReasonWithoutChangingLegacyErrors() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaToolTextHistory-\(UUID().uuidString)")

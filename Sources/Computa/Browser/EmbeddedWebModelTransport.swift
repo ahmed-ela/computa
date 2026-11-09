@@ -2707,7 +2707,28 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         let details = commonDetails + providerDetails, detail = observed["detail"] as? String
         let firstBinding = qwenFirstUserBindingDiagnostic(observed, provider: provider, inspectCover: action == "inspect").map { " " + $0 } ?? ""
-        return "action=\(actions.contains(action) ? action : "other") error=\(errors.contains(error) ? error : "other") detail=\(detail.map { details.contains($0) ? $0 : "other" } ?? "absent")" + firstBinding + qwenSelectionBindingDiagnostic(observed, provider: provider)
+        return "action=\(actions.contains(action) ? action : "other") error=\(errors.contains(error) ? error : "other") detail=\(detail.map { details.contains($0) ? $0 : "other" } ?? "absent")" + firstBinding + qwenSelectionBindingDiagnostic(observed, provider: provider) + qwenResponseChoiceDiagnostic(observed, provider: provider)
+    }
+
+    private static func qwenResponseChoiceDiagnostic(_ observed: [String: Any], provider: Provider) -> String {
+        guard provider == .qwen, observed["error"] as? String == "conversation_changed",
+              observed["detail"] as? String == "response_choice_scope",
+              let stage = observed["qwenResponseChoiceStage"] as? String, stage.utf8.count <= 64 else { return "" }
+        let stages = [
+            "admission_action", "admission_choice_grant", "admission_cleanup",
+            "admission_code_payload", "admission_counts_array", "admission_counts_limit",
+            "admission_counts_one", "admission_counts_values", "admission_deletion",
+            "admission_display_witness", "admission_first_bind_grant", "admission_identity_grant",
+            "admission_inserted", "admission_marker_match", "admission_marker_uuid",
+            "admission_model", "admission_model_choice", "admission_prepared",
+            "admission_prior_fingerprint", "admission_prompt_marker", "admission_response_identity",
+            "admission_selection", "admission_send", "admission_submission_match",
+            "admission_submitted_digest", "display_ack", "full_body",
+            "grant_scope", "hash_scope", "initial_pair",
+            "pair_ack_state", "pair_after_hash", "pair_scope",
+            "reveal_scope", "selected_ack", "selected_scope",
+        ]
+        return stages.contains(stage) ? " responseChoiceStage=\(stage)" : ""
     }
 
     private static func qwenSelectionBindingDiagnostic(_ observed: [String: Any], provider: Provider) -> String {
@@ -7214,7 +7235,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                        confirmed: dispatch.confirmed, pending: dispatch.pending) {
                     Self.inspectionLog.error("qwenCountFailure version=1 \(counts, privacy: .public)")
                 }
-                Self.inspectionLog.error("adapterFailureDiagnostic version=1 provider=\(provider.rawValue, privacy: .public) \(diagnostic, privacy: .public) generationBound=\(session.documentGeneration != nil) sequence=\(session.sequence)")
+                if !Self.qwenResponseChoiceDiagnostic(observed, provider: provider).isEmpty {
+                    let context = session.adapterFailureContext
+                    let task = context?.taskID.uuidString.lowercased() ?? "none"
+                    let turn = context?.turnID.uuidString.lowercased() ?? "none"
+                    let inference = context?.inferenceID.uuidString.lowercased() ?? "none"
+                    Self.inspectionLog.error("adapterFailureDiagnostic version=1 provider=qwen \(diagnostic, privacy: .public) generationBound=\(session.documentGeneration != nil) sequence=\(session.sequence) task=\(task, privacy: .public) turn=\(turn, privacy: .public) inference=\(inference, privacy: .public) session=\(session.token, privacy: .public) generation=\(generation.uuidString.lowercased(), privacy: .public)")
+                } else {
+                    Self.inspectionLog.error("adapterFailureDiagnostic version=1 provider=\(provider.rawValue, privacy: .public) \(diagnostic, privacy: .public) generationBound=\(session.documentGeneration != nil) sequence=\(session.sequence)")
+                }
                 if let structure = Self.qwenFirstUserDiagnostic(observed, provider: provider) {
                     Self.inspectionLog.error("firstUserDiagnostic version=1 provider=qwen action=\(action == "inspect" ? "inspect" : "other", privacy: .public) sequence=\(session.sequence) structure=\(structure, privacy: .public)")
                 }

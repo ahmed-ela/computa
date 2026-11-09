@@ -48,6 +48,19 @@ struct WebsiteTurnFailureStore: Sendable {
             }
             let nativeError: any Error
             switch code {
+            case "website_prompt_budget_exceeded":
+                // Native Groq admission may stop before a website inference exists.
+                // Retain only its exact bounded token envelope, not arbitrary prose.
+                guard provider == "groq", WebModelResponseCodec.groqPromptBudgetUsesExactTokenizer(model: modelID),
+                      APIModelCorrectionJSON.isUnambiguous(Data(text.utf8)),
+                      let actual = ComputerToolArgumentContract.exactInt64(error["body_tokens"]),
+                      let maximum = ComputerToolArgumentContract.exactInt64(error["maximum_body_tokens"]),
+                      let reserve = ComputerToolArgumentContract.exactInt64(error["reserved_tokens"]),
+                      maximum == Int64(WebModelResponseCodec.groqMaximumBodyTokens),
+                      reserve == Int64(WebModelResponseCodec.groqReservedTokens),
+                      actual > maximum, actual <= Int64(WebModelResponseCodec.maximumPromptBytes) else { return nil }
+                nativeError = WebModelResponseCodec.Failure.groqPromptBudgetExceeded(
+                    actualTokens: Int(actual), maximumTokens: Int(maximum), reservedTokens: Int(reserve))
             case "chatgpt_profile_preparation_failed", "website_browser_session_failed":
                 guard let rawReason = error["reason"] as? String,
                       let reason = WebModelServer.NativeBrowserFailure(rawValue: rawReason), reason.code == code,

@@ -1034,7 +1034,7 @@ enum ComputaAgentInstructions {
             Examples below are JSON contents; put one inside that code block.
             """
             if case .codePayloadJSON = responseFormat {
-                responseTask = "Generate Computa's next JSON response object. This website does not execute calls."
+                responseTask = "Generate Computa's next JSON response object. The offered call descriptors are Computa-local JSON handoffs, separate from this website's built-in search, agent, research and code tools. For this request, use only the Computa JSON handoff for those actions; do not invoke the website's built-in tools. Only matching Computa host output proves execution."
                 responseBoundary = "\n" + codePayloadResponseBoundary + "\n" + rawSpelling
             } else if case .literalFencedJSON = responseFormat {
                 responseTask = "Return the response envelope as your entire visible reply. This website does not execute calls."

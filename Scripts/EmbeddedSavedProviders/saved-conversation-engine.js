@@ -735,19 +735,40 @@ async function computaSavedConversation(input, c, dom, config) {
       && (state.responseChoice || input.allowSavedResponseChoice === true && dom.hasResponseChoice())) {
       // Conversation ownership is sealed independently of either reply. This
       // receipt grants neither output, ordinary first-body proof, nor deletion.
-      const refuse = () => c.fail('conversation_changed', 'response_choice_scope');
-      if (input.action !== 'inspect' || input.allowSavedResponseChoice !== true
-        || input.allowQwenInitialResponseIdentity !== true || cleanupInspection
-        || !state.inserted || !state.prepared || !state.send || !state.model || state.selection || state.deletion
-        || input.allowFirstUserBinding !== true || input.expectedFirstUserFingerprint != null
-        || !qwenCodeEnabled || !c.uuid(input.expectedFirstUserMarker) || input.expectedFirstUserMarker !== state.inserted.marker
-        || !state.inserted.prompt.endsWith(`\n\nComputa session marker: ${input.expectedFirstUserMarker}`)
-        || !c.equalChoice(input.expectedModelChoice, state.model.choice)
-        || !/^[a-f0-9]{64}$/.test(state.submittedFingerprint || '')
-        || input.savedSubmissionFingerprint !== state.submittedFingerprint
-        || !Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.includes(1)
-        || input.expectedUserCounts.length > 2 || input.expectedUserCounts.some(value => ![0,1].includes(value))
-        || state.responseIdentity || state.firstDisplayWitness) refuse();
+      let choiceStage = 'admission_action';
+      const refuse = (stage = choiceStage) => {
+        try { c.fail('conversation_changed', 'response_choice_scope'); }
+        catch (error) {
+          try { if (error?.computaAdapterFailure) error.qwenResponseChoiceStage = stage; }
+          catch { /* Failure-only metadata cannot replace the original refusal. */ }
+          throw error;
+        }
+      };
+      if ((choiceStage = 'admission_action', input.action !== 'inspect')
+        || (choiceStage = 'admission_choice_grant', input.allowSavedResponseChoice !== true)
+        || (choiceStage = 'admission_identity_grant', input.allowQwenInitialResponseIdentity !== true)
+        || (choiceStage = 'admission_cleanup', cleanupInspection)
+        || (choiceStage = 'admission_inserted', !state.inserted)
+        || (choiceStage = 'admission_prepared', !state.prepared)
+        || (choiceStage = 'admission_send', !state.send)
+        || (choiceStage = 'admission_model', !state.model)
+        || (choiceStage = 'admission_selection', state.selection)
+        || (choiceStage = 'admission_deletion', state.deletion)
+        || (choiceStage = 'admission_first_bind_grant', input.allowFirstUserBinding !== true)
+        || (choiceStage = 'admission_prior_fingerprint', input.expectedFirstUserFingerprint != null)
+        || (choiceStage = 'admission_code_payload', !qwenCodeEnabled)
+        || (choiceStage = 'admission_marker_uuid', !c.uuid(input.expectedFirstUserMarker))
+        || (choiceStage = 'admission_marker_match', input.expectedFirstUserMarker !== state.inserted.marker)
+        || (choiceStage = 'admission_prompt_marker', !state.inserted.prompt.endsWith(`\n\nComputa session marker: ${input.expectedFirstUserMarker}`))
+        || (choiceStage = 'admission_model_choice', !c.equalChoice(input.expectedModelChoice, state.model.choice))
+        || (choiceStage = 'admission_submitted_digest', !/^[a-f0-9]{64}$/.test(state.submittedFingerprint || ''))
+        || (choiceStage = 'admission_submission_match', input.savedSubmissionFingerprint !== state.submittedFingerprint)
+        || (choiceStage = 'admission_counts_array', !Array.isArray(input.expectedUserCounts))
+        || (choiceStage = 'admission_counts_one', !input.expectedUserCounts.includes(1))
+        || (choiceStage = 'admission_counts_limit', input.expectedUserCounts.length > 2)
+        || (choiceStage = 'admission_counts_values', input.expectedUserCounts.some(value => ![0,1].includes(value)))
+        || (choiceStage = 'admission_response_identity', state.responseIdentity)
+        || (choiceStage = 'admission_display_witness', state.firstDisplayWitness)) refuse();
       const readChoice = () => dom.responseChoiceTranscript();
       let current = readChoice();
       const pair = current.responseChoice;
@@ -763,30 +784,30 @@ async function computaSavedConversation(input, c, dom, config) {
         && held.pins.every((node,i) => node === t.responseChoice.pins[i] && node.isConnected)
         && held.ids.every((id,i) => id === t.responseChoice.rows[i].id);
       if (!held) {
-        if (!pair || current.users.length !== 1 || current.answers.length !== 1 || !current.first) refuse();
+        if (!pair || current.users.length !== 1 || current.answers.length !== 1 || !current.first) refuse('initial_pair');
         held = state.responseChoice = { candidate:crypto.randomUUID(), canonical:route.canonical,
           first:current.first, userTurn:current.first.root.parentElement, outer:current.first.root.parentElement.parentElement,
           root:pair.root, answerTurn:pair.root.parentElement, wrapper:pair.wrapper,
           pins:pair.pins, ids:pair.rows.map(row => row.id), fingerprint:null, spent:false, acknowledged:false };
       }
       if (pair) {
-        if (!samePair(current) || held.acknowledged) refuse();
+        if ((choiceStage = 'pair_scope', !samePair(current)) || (choiceStage = 'pair_ack_state', held.acknowledged)) refuse();
         if (observeFirstDisplay(current, readChoice)) return { qwenFirstBodyExpansionPending:true, url:document.URL,
           sessionLifecycle:'saved_conversation_delete', temporary:false };
       } else if (!held.spent || !sameUser(current) || !current.answer || current.answer.id !== held.ids[0]
         || c.nodes(current.answer.root, '.chat-response-message', 2).length !== 1
-        || c.nodes(current.answer.root, '.smrm, .cmrm', 1).length) refuse();
-      if (current.first.text !== state.inserted.prompt) refuse();
+        || c.nodes(current.answer.root, '.smrm, .cmrm', 1).length) refuse('selected_scope');
+      if (current.first.text !== state.inserted.prompt) refuse('full_body');
       checkFirstDisplaySelection('id_before_hash');
       const fingerprint = await c.hash(c.bodyText(current.first.text));
       guard();
       current = readChoice();
       if (!sameUser(current) || current.first.text !== state.inserted.prompt
-        || fingerprint !== state.submittedFingerprint || held.fingerprint && fingerprint !== held.fingerprint) refuse();
+        || fingerprint !== state.submittedFingerprint || held.fingerprint && fingerprint !== held.fingerprint) refuse('hash_scope');
       checkFirstDisplaySelection('id_after_hash');
       held.fingerprint = fingerprint;
       if (pair) {
-        if (!samePair(current)) refuse();
+        if (!samePair(current)) refuse('pair_after_hash');
         const row = current.responseChoice.rows[0];
         const ready = current.responseChoice.ready && c.enabled(row.control)
           && !row.footer.classList.contains('smrm-card__footer--btn-hidden') && c.hit(row.control);
@@ -799,7 +820,7 @@ async function computaSavedConversation(input, c, dom, config) {
             row.content.scrollTo({top:row.content.scrollHeight,behavior:'instant'});
           if (typeof row.control.scrollIntoView === 'function') row.control.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});
           guard();
-          if (!samePair(readChoice())) refuse();
+          if (!samePair(readChoice())) refuse('reveal_scope');
         }
         const modelEvidence = selectionEvidence(true, 'response_choice_ready');
         if (input.savedResponseChoiceGrant != null) {
@@ -809,7 +830,7 @@ async function computaSavedConversation(input, c, dom, config) {
             || grant.policy !== 'first_observed_card_v1' || grant.candidate !== held.candidate
             || grant.selectedResponseID !== held.ids[0] || !Array.isArray(grant.responseIDs)
             || grant.responseIDs.length !== 2 || grant.responseIDs.some((id,i) => id !== held.ids[i])
-            || !c.uuid(grant.grant) || !sampleDeadline) refuse();
+            || !c.uuid(grant.grant) || !sampleDeadline) refuse('grant_scope');
           if (Date.now() >= sampleDeadline.epoch || performance.now() >= sampleDeadline.monotonic)
             c.fail('conversation_changed', 'response_choice_deadline');
           // Both native and JS claims are spent before the official click,
@@ -826,14 +847,14 @@ async function computaSavedConversation(input, c, dom, config) {
       if (input.savedResponseChoiceGrant != null || !held.spent || !held.grant
         || !current.answer || current.answer.id !== held.ids[0]
         || c.nodes(current.answer.root, '.chat-response-message', 2).length !== 1
-        || c.nodes(current.answer.root, '.smrm, .cmrm', 1).length) refuse();
+        || c.nodes(current.answer.root, '.smrm, .cmrm', 1).length) refuse('selected_ack');
       // Only the acknowledged official preference can replace comparison
       // content. Every user/ancestor pin survives; the sole reply UUID is fixed.
       if (state.firstDisplay) {
         const view = dom.firstBodyPresentation(current), display = state.firstDisplay;
         if (!display.complete || !view || view.collapsed || view.userID !== display.userID
           || view.pins.length !== display.pins.length || display.pins.at(-1) !== held.wrapper
-          || view.pins.some((node,i) => i !== view.pins.length - 1 && node !== display.pins[i])) refuse();
+          || view.pins.some((node,i) => i !== view.pins.length - 1 && node !== display.pins[i])) refuse('display_ack');
         display.pins = view.pins; display.answerID = held.ids[0];
       }
       held.acknowledged = true;
@@ -1115,6 +1136,9 @@ async function computaSavedConversation(input, c, dom, config) {
         && error.firstContainerDiagnostic ? { firstContainerDiagnostic: error.firstContainerDiagnostic } : {}),
       ...(config.selectionKind === 'mode' && error.error === 'mode_unverified' && error.modeObservationDiagnostic
         ? { modeObservationDiagnostic: error.modeObservationDiagnostic } : {}),
+      ...(config.stateKey === '__computaQwenSavedSessionV1' && error.error === 'conversation_changed'
+        && error.detail === 'response_choice_scope' && error.qwenResponseChoiceStage
+        ? { qwenResponseChoiceStage: error.qwenResponseChoiceStage } : {}),
       ...(config.stateKey === '__computaQwenSavedSessionV1' && error.error === 'model_unverified'
         && error.detail === 'selection_binding' && error.qwenSelectionBinding
         ? { qwenSelectionBinding: error.qwenSelectionBinding } : {}),

@@ -53,6 +53,55 @@ final class SavedAdapterFailureDiagnosticTests: XCTestCase {
         }
     }
 
+    @MainActor func testQwenResponseChoiceStagesStayClosedAndPreserveOriginalOwnershipReason() {
+        let stages = [
+            "admission_action", "admission_choice_grant", "admission_cleanup",
+            "admission_code_payload", "admission_counts_array", "admission_counts_limit",
+            "admission_counts_one", "admission_counts_values", "admission_deletion",
+            "admission_display_witness", "admission_first_bind_grant", "admission_identity_grant",
+            "admission_inserted", "admission_marker_match", "admission_marker_uuid",
+            "admission_model", "admission_model_choice", "admission_prepared",
+            "admission_prior_fingerprint", "admission_prompt_marker", "admission_response_identity",
+            "admission_selection", "admission_send", "admission_submission_match",
+            "admission_submitted_digest", "display_ack", "full_body",
+            "grant_scope", "hash_scope", "initial_pair",
+            "pair_ack_state", "pair_after_hash", "pair_scope",
+            "reveal_scope", "selected_ack", "selected_scope",
+        ]
+        for stage in stages {
+            let observed: [String: Any] = ["error": "conversation_changed", "detail": "response_choice_scope",
+                "qwenResponseChoiceStage": stage, "text": "PRIVATE_PAGE_CANARY", "responseIDs": ["PRIVATE_PAGE_CANARY"]]
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(observed, provider: .qwen, action: "inspect"),
+                "action=inspect error=conversation_changed detail=response_choice_scope responseChoiceStage=\(stage)")
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterOwnershipReason(error: "conversation_changed",
+                detail: "response_choice_scope", provider: .qwen, isFirstUserFailure: false), .qwenResponseChoiceScope)
+        }
+    }
+
+    @MainActor func testQwenResponseChoiceStageDropsUnknownValuesAndOtherErrorProviderCombinations() {
+        let original = "action=inspect error=conversation_changed detail=response_choice_scope"
+        for value: Any in ["PRIVATE_PAGE_CANARY", "admission_action PRIVATE_PAGE_CANARY", String(repeating: "x", count: 65),
+                           ["stage": "admission_action", "text": "PRIVATE_PAGE_CANARY"], ["admission_action"], true, 1, NSNull()] {
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic([
+                "error": "conversation_changed", "detail": "response_choice_scope", "qwenResponseChoiceStage": value],
+                provider: .qwen, action: "inspect"), original)
+        }
+        for provider in [EmbeddedWebModelTransport.Provider.kimi, .deepseek] {
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic([
+                "error": "conversation_changed", "detail": "response_choice_scope", "qwenResponseChoiceStage": "admission_action"],
+                provider: provider, action: "inspect"), "action=inspect error=conversation_changed detail=other")
+        }
+        for observed: [String: Any] in [
+            ["error": "document_changed", "detail": "response_choice_scope"],
+            ["error": "conversation_changed", "detail": "response_scope"],
+            ["error": "conversation_changed", "detail": "response_choice_selected"],
+        ] {
+            var changed = observed; changed["qwenResponseChoiceStage"] = "admission_action"
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(changed, provider: .qwen, action: "inspect"),
+                EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(observed, provider: .qwen, action: "inspect"))
+        }
+    }
+
     @MainActor func testOnlyExplicitSavedConversationProvidersProduceFailureDiagnostics() {
         for provider in EmbeddedWebModelTransport.Provider.allCases {
             let diagnostic = EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(
