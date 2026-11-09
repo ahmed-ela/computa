@@ -4,6 +4,122 @@ import XCTest
 
 final class WebsiteFailureHistoryTests: XCTestCase {
 
+    func testPromptBytePreflightDiagnosticPersistsAcrossWebsiteRoutesWithoutAWebsiteJournal() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaPromptBytes-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let maximum = WebModelResponseCodec.maximumPromptBytes
+        let failure = WebModelResponseCodec.Failure.promptTooLarge(actualBytes: 167_389, maximumBytes: maximum)
+        let native = try WebModelServer.errorBody(for: failure)
+        let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: native) as? [String: Any])
+        let fields = try XCTUnwrap(envelope["error"] as? [String: Any])
+        XCTAssertEqual(Set(fields.keys), ["type", "message", "code", "param", "retryable", "submitted", "actual_bytes", "maximum_bytes"])
+        XCTAssertEqual(fields["actual_bytes"] as? Int, 167_389); XCTAssertEqual(fields["maximum_bytes"] as? Int, maximum)
+        XCTAssertEqual(fields["retryable"] as? Bool, false); XCTAssertEqual(fields["submitted"] as? Bool, false)
+        let presentation = WebModelServer.errorPresentation(for: failure)
+        XCTAssertEqual(presentation.status, "400 Bad Request"); XCTAssertEqual(presentation.code, "input_too_large")
+        XCTAssertEqual(presentation.param, "input")
+        let pro = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/pro", label: "Pro").modelID
+        let models = [syntheticChatGPTModelID, pro, LocalModelCatalog.geminiBrowserModelID, LocalModelCatalog.claudeBrowserModelID,
+            syntheticWebsiteModelID("groq"), syntheticKimiChoice.modelID, syntheticQwenChoice.modelID]
+            + WebsiteModeChoice.DeepSeekMode.allCases.map { WebsiteModeChoice(deepSeekMode: $0).requestID }
+        let storeRoot = root.appendingPathComponent("WebsiteTurnFailureStore-v1")
+        for model in models {
+            let task = UUID().uuidString, thread = UUID().uuidString, turn = UUID().uuidString
+            let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+                turnID: turn, modelID: model, diagnosticText: String(decoding: native, as: UTF8.self)))
+            XCTAssertTrue(WebsiteTurnFailureStore(directory: storeRoot).append(record))
+            let restored = try WebsiteTurnFailureStore(directory: storeRoot).load(threadID: thread)
+            XCTAssertEqual(restored, [record]); XCTAssertEqual(record.taskID, task.lowercased())
+            XCTAssertEqual(record.threadID, thread.lowercased()); XCTAssertEqual(record.turnID, turn.lowercased())
+            XCTAssertEqual(record.modelID, model); XCTAssertEqual(record.entry.id, "agent-error:" + turn.lowercased())
+            let saved = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(record.diagnosticText.utf8)) as? [String: Any])
+            XCTAssertTrue(NSDictionary(dictionary: saved).isEqual(to: envelope))
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("WebsiteModelEvidence-v1").path),
+            "A native preflight diagnostic needs no invented website inference or failed phase")
+    }
+
+    func testActualRawAndRenderedPromptByteLimitsPersistWithoutStartingOrSubmittingAWebsite() async throws {
+        let model = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/pro", label: "Pro").modelID
+        let maximum = WebModelResponseCodec.maximumPromptBytes
+        for (kind, input) in [("raw", String(repeating: "x", count: maximum + 1)),
+                              ("rendered", String(repeating: ":", count: maximum / 2))] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaPromptBytesActual-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+            let transport = PromptBytePreflightProbeTransport()
+            await server.configureEmbeddedTransport(transport)
+            let label = "prompt-byte-preflight-" + kind
+            let task = try await bindWebsiteInferenceFixtureTurn(server, taskID: label)
+            let data = try JSONSerialization.data(withJSONObject: ["model": model, "input": input,
+                "client_metadata": ["x-codex-turn-metadata": try websiteInferenceFixtureMetadata(taskID: label)]], options: [.sortedKeys])
+            if kind == "rendered" { XCTAssertLessThan(data.count, maximum) }
+            var observed: WebModelResponseCodec.Failure?
+            do { _ = try await server.infer(data, taskID: task); XCTFail("Oversized preflight must stop") }
+            catch let failure as WebModelResponseCodec.Failure {
+                guard case .promptTooLarge(let actual, let cap) = failure else { return XCTFail("Wrong codec failure: \(failure)") }
+                XCTAssertGreaterThan(actual, maximum); XCTAssertEqual(cap, maximum)
+                if kind == "raw" { XCTAssertEqual(actual, data.count) }
+                else { XCTAssertGreaterThan(actual, data.count) }
+                observed = failure
+            }
+            let failure = try XCTUnwrap(observed)
+            let native = try WebModelServer.errorBody(for: failure)
+            let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: task,
+                threadID: websiteInferenceFixtureTaskID(label + ":thread"), turnID: websiteInferenceFixtureTaskID(label + ":turn"),
+                modelID: model, diagnosticText: String(decoding: native, as: UTF8.self)))
+            let store = WebsiteTurnFailureStore(directory: root.appendingPathComponent("WebsiteTurnFailureStore-v1"))
+            XCTAssertTrue(store.append(record)); XCTAssertEqual(try store.load(threadID: record.threadID), [record])
+            let calls = await transport.callCount()
+            XCTAssertEqual(calls, 0, "Neither raw nor rendered capacity rejection may start, Send or inspect a provider page")
+            let issues = await server.finish(taskID: task)
+            XCTAssertTrue(issues.isEmpty)
+            let callsAfterCleanup = await transport.callCount(); XCTAssertEqual(callsAfterCleanup, 0)
+        }
+    }
+
+    func testPromptByteStoreRejectsUnboundedMalformedAndProviderAuthoredWarnings() throws {
+        let model = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/pro", label: "Pro").modelID
+        let task = UUID().uuidString, thread = UUID().uuidString, turn = UUID().uuidString
+        let native = try WebModelServer.errorBody(for: WebModelResponseCodec.Failure.promptTooLarge(
+            actualBytes: 167_389, maximumBytes: WebModelResponseCodec.maximumPromptBytes))
+        let original = try XCTUnwrap(JSONSerialization.jsonObject(with: native) as? [String: Any])
+        let fields = try XCTUnwrap(original["error"] as? [String: Any])
+        func rejected(_ object: [String: Any], selected: String? = nil) throws {
+            let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+            XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turn,
+                modelID: selected ?? model, diagnosticText: String(decoding: data, as: UTF8.self)))
+        }
+        let mutations: [[String: Any]] = [["actual_bytes": true], ["actual_bytes": 167_389.5], ["actual_bytes": "167389"],
+            ["actual_bytes": NSNull()], ["actual_bytes": 167_390], ["maximum_bytes": true], ["maximum_bytes": 163_839],
+            ["retryable": true], ["retryable": 0], ["submitted": true], ["submitted": 0],
+            ["message": "PRIVATE_PROVIDER_PROSE"], ["type": "model_error"], ["param": "tools"], ["code": "context_length_exceeded"],
+            ["required_action": "inspect_website"], ["request_body": "PRIVATE_USER_CONTENT"]]
+        for mutation in mutations {
+            var value = original, error = fields; mutation.forEach { error[$0.key] = $0.value }; value["error"] = error
+            try rejected(value)
+        }
+        for key in fields.keys {
+            var value = original, error = fields; error.removeValue(forKey: key); value["error"] = error; try rejected(value)
+        }
+        for actual in [-1, 0, WebModelResponseCodec.maximumPromptBytes, WebModelServer.maximumHTTPBodyBytes + 1] {
+            let data = try WebModelServer.errorBody(for: WebModelResponseCodec.Failure.promptTooLarge(
+                actualBytes: actual, maximumBytes: WebModelResponseCodec.maximumPromptBytes))
+            try rejected(try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any]))
+        }
+        let wrongMaximum = try WebModelServer.errorBody(for: WebModelResponseCodec.Failure.promptTooLarge(actualBytes: 167_389, maximumBytes: 163_839))
+        try rejected(try XCTUnwrap(JSONSerialization.jsonObject(with: wrongMaximum) as? [String: Any]))
+        var extra = original; extra["provider_reply"] = "PRIVATE_PROVIDER_PROSE"; try rejected(extra)
+        for foreign in ["browser/unknown", "api/alibaba/model/fixture", LocalModelCatalog.defaultModelID, ""] {
+            try rejected(original, selected: foreign)
+        }
+        let raw = String(decoding: native, as: UTF8.self)
+        let duplicate = raw.replacingOccurrences(of: "\"actual_bytes\":167389", with: "\"actual_bytes\":true,\"actual_bytes\":167389")
+        XCTAssertNotEqual(duplicate, raw)
+        XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turn,
+            modelID: model, diagnosticText: duplicate))
+    }
+
     func testGroqPreflightTokenBudgetFailurePersistsWithoutAWebsiteJournal() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaGroqPreflight-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1022,4 +1138,14 @@ final class WebsiteFailureHistoryTests: XCTestCase {
                 modelID: "browser/gemini", diagnosticText: String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)))
         }
     }
+}
+
+private actor PromptBytePreflightProbeTransport: WebModelTransport {
+    private var calls = 0
+    func callCount() -> Int { calls }
+    func request(operation: String, params: Data) async throws -> Data {
+        calls += 1
+        throw Failure.unexpectedWebsiteOperation
+    }
+    enum Failure: Error { case unexpectedWebsiteOperation }
 }

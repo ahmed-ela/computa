@@ -48,6 +48,17 @@ struct WebsiteTurnFailureStore: Sendable {
             }
             let nativeError: any Error
             switch code {
+            case "input_too_large":
+                // The local codec can fail before an owned inference/journal
+                // exists. Retain only its exact finite native byte envelope.
+                guard APIModelCorrectionJSON.isUnambiguous(Data(text.utf8)),
+                      let actual = ComputerToolArgumentContract.exactInt64(error["actual_bytes"]),
+                      let maximum = ComputerToolArgumentContract.exactInt64(error["maximum_bytes"]),
+                      maximum == Int64(WebModelResponseCodec.maximumPromptBytes), actual > maximum,
+                      actual <= Int64(WebModelServer.maximumHTTPBodyBytes),
+                      let submitted = error["submitted"] as? NSNumber,
+                      CFGetTypeID(submitted) == CFBooleanGetTypeID(), !submitted.boolValue else { return nil }
+                nativeError = WebModelResponseCodec.Failure.promptTooLarge(actualBytes: Int(actual), maximumBytes: Int(maximum))
             case "website_prompt_budget_exceeded":
                 // Native Groq admission may stop before a website inference exists.
                 // Retain only its exact bounded token envelope, not arbitrary prose.

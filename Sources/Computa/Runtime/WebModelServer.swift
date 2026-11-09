@@ -3546,6 +3546,13 @@ actor WebModelServer {
         }
         if let failure = error as? WebModelResponseCodec.Failure {
             switch failure {
+            case .promptTooLarge(let actual, let maximum):
+                // This codec admission failure precedes website submission.
+                // It is retained as a local preflight diagnostic, not page text.
+                fields["retryable"] = false
+                fields["submitted"] = false
+                fields["actual_bytes"] = actual
+                fields["maximum_bytes"] = maximum
             case .groqPromptBudgetExceeded(let actual, let maximum, let reserve):
                 fields["retryable"] = false
                 fields["body_tokens"] = actual
@@ -3596,6 +3603,9 @@ actor WebModelServer {
         let body: Data
     }
 
+    /// Existing local HTTP body bound, also caps retained native byte counts.
+    static let maximumHTTPBodyBytes = 2_000_000
+
     static func parseRequest(_ buffer: Data) throws -> HTTPRequest? {
         guard buffer.count <= 2_097_152 else { throw Failure.invalidRequest }
         guard let delimiter = buffer.range(of: Data("\r\n\r\n".utf8)) else {
@@ -3616,7 +3626,7 @@ actor WebModelServer {
         }
         guard headers["transfer-encoding"] == nil,
               let lengthText = headers["content-length"], let length = Int(lengthText),
-              length > 0, length <= 2_000_000 else { throw Failure.invalidRequest }
+              length > 0, length <= maximumHTTPBodyBytes else { throw Failure.invalidRequest }
         let available = buffer.count - delimiter.upperBound
         if available < length { return nil }
         guard available == length else { throw Failure.invalidRequest }
