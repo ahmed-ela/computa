@@ -354,7 +354,9 @@ test('Qwen rejects replaced display pins and invalid first preview with only fin
     }
     const result = await inspect();
     expect(result).toEqual({error: 'conversation_changed', detail: 'first_user_message',
-      qwenFirstUserBindingDiagnostic: {version: 1, stage: held ? 'display_held' : 'display_observation', reason}});
+      qwenFirstUserBindingDiagnostic: {version: 1, stage: held ? 'display_held' : 'display_observation', reason,
+        ...(reason === 'answer_ancestry_changed' ? {ancestry:{path:'witness',branch:'pins',index:7,count:10,
+          slot:'assistant_root',previous:'object',current:'object',comparison:false}} : {})}});
     expect(control.clicks).toBe(0); expect(f.send.clicks).toBe(1);
   }
 });
@@ -813,5 +815,37 @@ for (const model of ['Qwen3.7-Plus', 'Qwen3.8-Max']) test(model + ' refuses any 
     expect(rejected.firstUserVerified).toBeUndefined(); expect(rejected.text).toBeUndefined();
     expect((await inspect()).detail).toBe('terminal_operation');
     expect([control.clicks,f.send.clicks,f.more.clicks]).toEqual([phase==='expanded'||phase==='digest'?1:0,1,0]);
+  }
+});
+
+
+for (const model of ['Qwen3.7-Plus','Qwen3.8-Max']) test(model+' rejected display ancestry identifies each physical slot without reading the replaced node',async()=>{
+  for(const path of ['witness','claim']) for(const slot of ['response_content','assistant_root','assistant_turn']){
+    const {f,control,settleID,inspect}=await sent(model);f.userBody.text=preview;
+    if(path==='claim'){expect(await inspect()).toEqual(pending);settleID();}expect(await inspect()).toEqual(pending);
+    const state=f.world.__computaQwenSavedSessionV1;
+    const held=path==='claim'?state.firstDisplay:state.firstDisplayWitness;
+    expect(held.pins.length).toBe(10);
+    let replaced:any;
+    if(slot==='response_content'){
+      replaced=f.answer;const parent=replaced.parentElement!;const fresh=replaced.cloneNode(true);replaced.detach();parent.append(fresh);
+    }else if(slot==='assistant_root'){
+      replaced=f.answerRoot;const parent=replaced.parentElement!;replaced.detach();const fresh=new f.Node('DIV',{...replaced.values});
+      parent.append(fresh);f.answer.detach();fresh.append(f.answer);
+    }else{
+      replaced=f.answerRoot.parentElement!;const parent=replaced.parentElement!;replaced.detach();const fresh=new f.Node('DIV',{...replaced.values});
+      parent.append(fresh);f.answerRoot.detach();fresh.append(f.answerRoot);
+    }
+    let reads=0;
+    for(const key of ['tagName','nodeType','textContent','id'])Object.defineProperty(replaced,key,{configurable:true,get(){reads++;throw Error('PRIVATE_OLD_NODE');}});
+    const result=await inspect();
+    expect(result).toEqual({error:'conversation_changed',detail:'first_user_message',qwenFirstUserBindingDiagnostic:{
+      version:1,stage:'display_held',reason:'answer_ancestry_changed',ancestry:{path,branch:'pins',
+        index:slot==='assistant_root'?7:slot==='assistant_turn'?8:9,count:10,slot,previous:'object',current:'object',comparison:false}}});
+    expect(reads).toBe(0);expect(JSON.stringify(result)).not.toContain('PRIVATE');
+    expect(result.firstUserVerified).toBeUndefined();expect(result.text).toBeUndefined();
+    expect(state.first).toBeNull();expect(state.responseIdentity).toBeNull();
+    expect(control.clicks).toBe(0);expect(f.send.clicks).toBe(1);expect(f.more.clicks).toBe(0);
+    expect((await inspect()).detail).toBe('terminal_operation');expect(control.clicks).toBe(0);
   }
 });

@@ -113,4 +113,57 @@ final class QwenFirstUserBindingDiagnosticTests: XCTestCase {
             XCTAssertNil(EmbeddedWebModelTransport.qwenFirstUserBindingDiagnostic(value, provider: .qwen))
         }
     }
+
+    func testRejectedAncestryMetadataKeepsOnlyBoundedSlotsAndComparisonBranches() throws {
+        func row(_ facts: [String: Any]) -> [String: Any] {
+            ["error":"conversation_changed", "detail":"first_user_message", "qwenFirstUserBindingDiagnostic":
+                ["version":1, "stage":"display_held", "reason":"answer_ancestry_changed", "ancestry":facts]]
+        }
+        for path in ["claim", "witness"] {
+            for (index, slot) in [(7,"assistant_root"),(8,"assistant_turn"),(9,"response_content")] {
+                let facts: [String: Any] = ["path":path,"branch":"pins","index":index,"count":10,"slot":slot,
+                    "previous":"object","current":"object","comparison":false]
+                let value = row(facts)
+                let text = try XCTUnwrap(EmbeddedWebModelTransport.qwenFirstUserBindingDiagnostic(value, provider:.qwen))
+                XCTAssertTrue(text.hasSuffix("ancestry path=\(path) branch=pins index=\(index) count=10 slot=\(slot) previous=object current=object comparison=false"))
+                XCTAssertLessThan(text.utf8.count,512)
+                for provider in EmbeddedWebModelTransport.Provider.allCases where provider != .qwen {
+                    XCTAssertNil(EmbeddedWebModelTransport.qwenFirstUserBindingDiagnostic(value,provider:provider))
+                }
+            }
+        }
+        for branch in ["comparison_scope","comparison_prior"] {
+            let facts: [String: Any] = ["path":"witness","branch":branch,"index":NSNull(),"count":NSNull(),"slot":"none",
+                "previous":"unknown","current":"unknown","comparison":true]
+            XCTAssertTrue(try XCTUnwrap(EmbeddedWebModelTransport.qwenFirstUserBindingDiagnostic(row(facts),provider:.qwen)).contains("index=none count=none"))
+        }
+    }
+
+    func testMalformedAncestryCannotReplaceOriginalFailureOrLeakPrivateFields() {
+        let good: [String: Any] = ["path":"claim","branch":"pins","index":9,"count":10,"slot":"response_content",
+            "previous":"object","current":"object","comparison":false]
+        func observe(_ facts: [String: Any], stage: String = "display_held", reason: String = "answer_ancestry_changed") -> [String: Any] {
+            ["error":"conversation_changed","detail":"first_user_message","qwenFirstUserBindingDiagnostic":
+                ["version":1,"stage":stage,"reason":reason,"ancestry":facts]]
+        }
+        let mutations: [[String: Any]] = [["path":"PRIVATE"],["branch":"PRIVATE"],["index":true],["count":true],
+            ["count":24],["index":6],["index":10],["slot":"assistant_root"],["previous":"PRIVATE_BODY"],
+            ["current":"https://private.invalid"],["comparison":1],["PRIVATE":"PRIVATE_BODY"],
+            ["branch":"comparison_prior"],["index":NSNull()]]
+        for mutation in mutations {
+            let value = observe(good.merging(mutation) { _,new in new })
+            XCTAssertNil(EmbeddedWebModelTransport.qwenFirstUserBindingDiagnostic(value,provider:.qwen))
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(value,provider:.qwen,action:"inspect"),
+                "action=inspect error=conversation_changed detail=first_user_message")
+        }
+        for key in good.keys {
+            var missing=good;missing.removeValue(forKey:key)
+            XCTAssertNil(EmbeddedWebModelTransport.qwenFirstUserBindingDiagnostic(observe(missing),provider:.qwen))
+        }
+        XCTAssertNil(EmbeddedWebModelTransport.qwenFirstUserBindingDiagnostic(observe(good,stage:"display_completed"),provider:.qwen))
+        XCTAssertNil(EmbeddedWebModelTransport.qwenFirstUserBindingDiagnostic(observe(good,reason:"body_changed"),provider:.qwen))
+        let error = EmbeddedWebModelTransport.Failure.ownershipFailure(.javaScriptFirstUser)
+        XCTAssertEqual(error.diagnosticCode,"website_ownership_unverified")
+        XCTAssertEqual(error.requiredAction,"inspect_website")
+    }
 }

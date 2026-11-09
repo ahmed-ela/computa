@@ -2733,6 +2733,31 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   hits != "one" || (scope != "mixed" && anchor != "mixed") else { return message }
             return message + " displayCover phase=\(phase) probe=\(probe) clip=\(clip) hits=\(hits) scope=\(scope) anchor=\(anchor)"
         }
+        if stage == "display_held", reason == "answer_ancestry_changed" {
+            guard Set(packet.keys) == ["version", "stage", "reason", "ancestry"],
+                  let facts = packet["ancestry"] as? [String: Any],
+                  Set(facts.keys) == ["path", "branch", "index", "count", "slot", "previous", "current", "comparison"],
+                  let path = facts["path"] as? String, ["claim", "witness"].contains(path),
+                  let branch = facts["branch"] as? String, ["pins", "comparison_scope", "comparison_prior"].contains(branch),
+                  let slot = facts["slot"] as? String, let previous = facts["previous"] as? String,
+                  let current = facts["current"] as? String,
+                  let comparison = firstUserDiagnosticBool(facts["comparison"]) else { return nil }
+            let index: String, count: String
+            if branch == "pins" {
+                guard let i = ComputerToolArgumentContract.exactInt64(facts["index"]),
+                      let n = ComputerToolArgumentContract.exactInt64(facts["count"]), (3...23).contains(n),
+                      (n-3..<n).contains(i),
+                      slot == (i == n-3 ? "assistant_root" : i == n-2 ? "assistant_turn" : "response_content"),
+                      ["null", "undefined", "object", "other"].contains(previous),
+                      ["null", "undefined", "object", "other"].contains(current) else { return nil }
+                index = String(i); count = String(n)
+            } else {
+                guard path == "witness", comparison, facts["index"] is NSNull, facts["count"] is NSNull,
+                      slot == "none", previous == "unknown", current == "unknown" else { return nil }
+                index = "none"; count = "none"
+            }
+            return message + " ancestry path=\(path) branch=\(branch) index=\(index) count=\(count) slot=\(slot) previous=\(previous) current=\(current) comparison=\(comparison)"
+        }
         guard stage == "display_completed", reason == "user_id_changed",
               Set(packet.keys) == ["version", "stage", "reason", "change"],
               let facts = packet["change"] as? [String: Any] else { return nil }

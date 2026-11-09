@@ -139,6 +139,9 @@ async function computaSavedConversation(input, c, dom, config) {
           if (stage === 'display_completed' && diagnostic.reason === 'user_id_changed' && typeof structure === 'function') {
             try { diagnostic.change = structure(); } catch { /* Never replace the ownership rejection. */ }
           }
+          if (stage === 'display_held' && diagnostic.reason === 'answer_ancestry_changed' && typeof structure === 'function') {
+            try { diagnostic.ancestry = structure(); } catch { /* Keep the original rejected pin. */ }
+          }
           if (stage === 'initial_response_body' && diagnostic.reason === 'full_prompt_mismatch' && typeof structure === 'function') {
             try { const packet = structure(); if (packet) error.adapterFailureStructure = packet; } catch { /* Preserve the original refusal. */ }
           }
@@ -367,20 +370,25 @@ async function computaSavedConversation(input, c, dom, config) {
     }
     // Compare existing physical pins in their original order. Report only the
     // first failing group; no selector, attribute, text or hit test is reread.
-    function requireSameFirstDisplay(view, stage, rejectedIdentityFacts = null) {
+    function requireSameFirstDisplay(view, stage, rejectedIdentityFacts = null, comparison = false) {
       const held = state.firstDisplay;
-      const reject = reason => firstBindingFailure(stage, reason);
+      const reject = (reason, structure = null) => firstBindingFailure(stage, reason, structure);
       if (!view) reject('presentation_missing');
       if (held.canonical !== dom.route().canonical) reject('route_changed');
       if (held.userID !== view.userID) firstBindingFailure(stage, 'user_id_changed', rejectedIdentityFacts);
       if (held.answerID !== null && held.answerID !== view.answerID) reject('answer_id_changed');
-      requireDisplayPins(held, view, reject);
+      requireDisplayPins(held, view, reject, 'claim', comparison);
     }
-    function requireDisplayPins(held, view, reject) {
-      if (held.pins.length !== view.pins.length) reject('pin_count_changed');
-      const i = held.pins.findIndex((node, i) => node !== view.pins[i]);
+    function requireDisplayPins(held, view, reject, path = 'claim', comparison = false) {
+      let count, previous, current;
+      if ((count = held.pins.length) !== view.pins.length) reject('pin_count_changed');
+      const i = held.pins.findIndex((node, i) => node !== (current = view.pins[i]) && (previous = node, true));
       if (i >= 0) reject(i === 0 ? 'body_changed' : i === 1 ? 'control_changed'
-        : i < held.pins.length - 3 ? 'user_ancestry_changed' : 'answer_ancestry_changed');
+        : i < held.pins.length - 3 ? 'user_ancestry_changed' : 'answer_ancestry_changed', () => ({
+          path, branch:'pins', index:i, count,
+          slot:i === count - 3 ? 'assistant_root' : i === count - 2 ? 'assistant_turn' : 'response_content',
+          previous:previous === null ? 'null' : previous === undefined ? 'undefined' : typeof previous === 'object' ? 'object' : 'other',
+          current:current === null ? 'null' : current === undefined ? 'undefined' : typeof current === 'object' ? 'object' : 'other', comparison }));
     }
     // Only the native-granted long Qwen display may pin a detached picker's
     // replacement. This observation publishes no evidence. Normal selection
@@ -409,9 +417,9 @@ async function computaSavedConversation(input, c, dom, config) {
       const view = dom.firstBodyPresentation(t);
       if (!view && !held && !optimistic) return false; // Ordinary full-body mismatch follows.
       const reject = reason => firstBindingFailure('display_observation', reason);
-      if (held) requireSameFirstDisplay(view, 'display_held');
+      if (held) requireSameFirstDisplay(view, 'display_held', null, !!comparisonPair);
       if (optimistic) {
-        const refuse = reason => firstBindingFailure('display_held', reason);
+        const refuse = (reason, structure = null) => firstBindingFailure('display_held', reason, structure);
         if (!view) refuse('presentation_missing');
         if (optimistic.canonical !== route.canonical) refuse('route_changed');
         if (comparisonPair) {
@@ -419,12 +427,14 @@ async function computaSavedConversation(input, c, dom, config) {
           // physical user/control/ancestor pin; only the pending presentation
           // slot may become the independently validated official SMRM wrapper.
           if (held || state.responseIdentity || comparisonPair !== t.responseChoice
-            || view.pins.at(-1) !== comparisonPair.wrapper) refuse('answer_ancestry_changed');
+            || view.pins.at(-1) !== comparisonPair.wrapper) refuse('answer_ancestry_changed', () => ({
+              path:'witness', branch:'comparison_scope', index:null, count:null, slot:'none', previous:'unknown', current:'unknown', comparison:true }));
           const prior = optimistic.pins.at(-1);
           if (!prior || prior.isConnected !== false
-            && !comparisonPair.rows.some(row => row.response === prior)) refuse('answer_ancestry_changed');
-          requireDisplayPins({ pins: [...optimistic.pins.slice(0, -1), comparisonPair.wrapper] }, view, refuse);
-        } else requireDisplayPins(optimistic, view, refuse);
+            && !comparisonPair.rows.some(row => row.response === prior)) refuse('answer_ancestry_changed', () => ({
+              path:'witness', branch:'comparison_prior', index:null, count:null, slot:'none', previous:'unknown', current:'unknown', comparison:true }));
+          requireDisplayPins({ pins: [...optimistic.pins.slice(0, -1), comparisonPair.wrapper] }, view, refuse, 'witness', true);
+        } else requireDisplayPins(optimistic, view, refuse, 'witness', false);
       }
       if (!Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.length || input.expectedUserCounts.length > 2
         || input.expectedUserCounts.some(value => ![0, 1].includes(value)) || !input.expectedUserCounts.includes(1)) reject('user_count_expectation');

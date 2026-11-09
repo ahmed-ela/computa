@@ -83,6 +83,8 @@ test('a comparison cannot adopt changed witness pins, native grants, prompt, mod
   if(fault==='pair-control'){expect((await f.run('inspect',input)).qwenFirstBodyExpansionPending).toBe(true);const control=p.controls[0];control.detach();p.wrapper.querySelectorAll('.smrm-card__footer')[0].append(control.cloneNode(true));}
   if(fault==='double-user')f.turn.append(f.root.cloneNode(true));
   const rejected=await f.run('inspect',over);expect(rejected.error,fault).toBeDefined();
+  if(fault==='foreign-tail')expect(rejected.qwenFirstUserBindingDiagnostic).toEqual({version:1,stage:'display_held',reason:'answer_ancestry_changed',
+    ancestry:{path:'witness',branch:'comparison_prior',index:null,count:null,slot:'none',previous:'unknown',current:'unknown',comparison:true}});
   for(const key of ['text','firstUserVerified','modelEvidence','answerComplete'])expect(rejected[key],fault).toBeUndefined();
   expect(expand.clicks,fault).toBe(0);expect(p.controls.map(n=>n.clicks),fault).toEqual([0,0]);expect(f.send.clicks,fault).toBe(1);
  }
