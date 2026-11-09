@@ -1567,6 +1567,117 @@ final class WebModelServerTests: XCTestCase {
         }
     }
 
+    func testGroqFirstFailurePersistsNativeProjectionBeforeCleanupAndSurvivesArchiveReload() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("groq-first-failure-" + UUID().uuidString)
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+        let base = FixtureWebModelTransport(cleanupResult: "transcript_cleared")
+        await server.configureEmbeddedTransport(GroqCountSidecarFixtureTransport(base: WebsiteInferenceFixtureTransport(base)))
+        let task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(), turn = UUID().uuidString.lowercased()
+        do {
+            _ = try await server.fixtureInfer(groqMetadataRequest, taskID: task, threadID: thread, turnID: turn)
+            XCTFail("Metadata cannot admit the refused continuation")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.groqDraftRestored)) }
+        let path = root.appendingPathComponent("evidence/transactions/" + task + "/" + turn + ".jsonl")
+        let rows = try Data(contentsOf: path).split(separator: 10).map {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0)) as? [String: Any])
+        }
+        let failed = try XCTUnwrap(rows.last)
+        XCTAssertEqual(failed["phase"] as? String, "failed")
+        let saved = try XCTUnwrap(failed["groqFailureDiagnostic"] as? [String: Any])
+        XCTAssertEqual(Set(saved.keys), ["version", "diagnosticOnly", "nativeContext", "promptStatistics", "bodyUnits",
+            "exactTokenizer", "maximumBodyUnits", "reservedUnits", "ownershipReason", "adapter", "nativeFinalPromptBytes",
+            "promptStatisticsCounterCap", "promptStatisticsSaturated", "nativeFinalPromptBytesSaturated"])
+        let context = try XCTUnwrap(saved["nativeContext"] as? [String: Any])
+        for key in ["taskID", "threadID", "turnID", "inferenceID", "sessionToken"] {
+            XCTAssertEqual(context[key] as? String, failed[key] as? String, key)
+        }
+        let prompts = await base.sentPrompts(); XCTAssertEqual(prompts.count, 1)
+        // This is the native transport input, before website/session-marker framing.
+        let prompt = try XCTUnwrap(prompts.first)
+        let sizes = try XCTUnwrap(saved["promptStatistics"] as? [String: Any])
+        XCTAssertEqual(sizes["finalPromptBytes"] as? Int, prompt.utf8.count)
+        XCTAssertEqual(saved["nativeFinalPromptBytes"] as? Int, prompt.utf8.count)
+        XCTAssertEqual(saved["bodyUnits"] as? Int,
+            try WebModelResponseCodec.validateGroqPromptBudget(model: syntheticWebsiteModelID("groq"), prompt: prompt))
+        XCTAssertEqual(saved["maximumBodyUnits"] as? Int, 6_000)
+        XCTAssertEqual(saved["reservedUnits"] as? Int, 2_000)
+        XCTAssertEqual(saved["exactTokenizer"] as? Bool, true)
+        XCTAssertEqual(saved["ownershipReason"] as? String, "groq_draft_restored")
+        let adapter = try XCTUnwrap(saved["adapter"] as? [String: Any])
+        XCTAssertNil(adapter["freshNotice"], "Second callback cannot replace the original first packet")
+        XCTAssertTrue(rows.dropLast().allSatisfy { $0["groqFailureDiagnostic"] == nil })
+        XCTAssertFalse(String(decoding: try JSONSerialization.data(withJSONObject: saved), as: UTF8.self).contains("PRIVATE_GROQ_NATIVE_PROMPT_CANARY"))
+        let operations = await base.operations()
+        XCTAssertEqual(operations, ["webProviderStart", "webProviderSend", "webProviderPoll"], "No diagnostic read was added")
+        let error = EmbeddedWebModelTransport.Failure.ownershipFailure(.groqDraftRestored)
+        let wire = String(decoding: try WebModelServer.errorBody(for: error), as: UTF8.self)
+        XCTAssertFalse(wire.contains("groqFailureDiagnostic")); XCTAssertFalse(wire.contains("bodyUnits"))
+        XCTAssertNotNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turn,
+            modelID: syntheticWebsiteModelID("groq"), diagnosticText: wire))
+        let issues = await server.finish(taskID: task); XCTAssertTrue(issues.isEmpty)
+        let after = await base.operations()
+        XCTAssertEqual(after, operations + ["webProviderFinish"])
+        let durable = try Data(contentsOf: path)
+        let afterRows = try durable.split(separator: 10).map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0)) as? [String: Any]) }
+        let retained = try XCTUnwrap(afterRows.first { $0["groqFailureDiagnostic"] != nil }?["groqFailureDiagnostic"] as? [String: Any])
+        XCTAssertTrue(NSDictionary(dictionary: retained).isEqual(to: saved))
+        XCTAssertEqual(afterRows.filter { $0["groqFailureDiagnostic"] != nil }.count, 1)
+        var retention = WebsiteJournalRetentionStore(cleanupDirectory: root.appendingPathComponent("cleanup"))
+        retention.limits.activeTasks = 1
+        try retention.admit(taskID: UUID().uuidString.lowercased(), evidenceDirectory: root.appendingPathComponent("evidence"), protectedTaskIDs: [])
+        let reopened = WebsiteJournalRetentionStore(cleanupDirectory: root.appendingPathComponent("cleanup"))
+        let archived = try reopened.withWriterLock { try reopened.archivedBytes(store: "evidence", taskID: task, turnID: turn) }
+        XCTAssertEqual(archived, durable, "Archive/reload retains the exact failure attachment bytes")
+    }
+
+    func testGroqFirstFailureCannotAttachForeignOrStaleNativeContext() async throws {
+        for variant in ["missing", "foreign_session", "foreign_document", "stale_transport"] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("groq-metadata-" + UUID().uuidString)
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+            let base = FixtureWebModelTransport(), replacement = FixtureWebModelTransport()
+            let beforeFailure: (@Sendable () async -> Void)?
+            if variant == "stale_transport" {
+                beforeFailure = { await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(replacement)) }
+            } else { beforeFailure = nil }
+            let transport = GroqCountSidecarFixtureTransport(base: WebsiteInferenceFixtureTransport(base),
+                variant: variant, beforeFailure: beforeFailure)
+            await server.configureEmbeddedTransport(transport)
+            let task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(), turn = UUID().uuidString.lowercased()
+            do {
+                _ = try await server.fixtureInfer(groqMetadataRequest, taskID: task, threadID: thread, turnID: turn)
+                XCTFail("Missing/stale metadata cannot change the failed inference")
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.groqDraftRestored)) }
+            let bytes = try Data(contentsOf: root.appendingPathComponent("evidence/transactions/" + task + "/" + turn + ".jsonl"))
+            let rows = try bytes.split(separator: 10).map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0)) as? [String: Any]) }
+            XCTAssertEqual(rows.last?["phase"] as? String, "failed")
+            XCTAssertTrue(rows.allSatisfy { $0["groqFailureDiagnostic"] == nil }, variant)
+            let ledger = await base.operations(); XCTAssertEqual(ledger, ["webProviderStart", "webProviderSend", "webProviderPoll"])
+            let replacementLedger = await replacement.operations(); XCTAssertTrue(replacementLedger.isEmpty)
+            _ = await server.finish(taskID: task)
+        }
+    }
+
+    func testGroqFirstFailureSurvivesUnconfirmedCleanupWithoutASecondPacketOrWireChange() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("groq-unconfirmed-" + UUID().uuidString)
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
+        let base = FixtureWebModelTransport(cleanupResult: "failed")
+        await server.configureEmbeddedTransport(GroqCountSidecarFixtureTransport(base: WebsiteInferenceFixtureTransport(base)))
+        let task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(), turn = UUID().uuidString.lowercased()
+        do {
+            _ = try await server.fixtureInfer(groqMetadataRequest, taskID: task, threadID: thread, turnID: turn)
+            XCTFail("The rejected inference stays rejected")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.groqDraftRestored)) }
+        let path = root.appendingPathComponent("evidence/transactions/" + task + "/" + turn + ".jsonl")
+        let first = try Data(contentsOf: path)
+        let issues = await server.finish(taskID: task); XCTAssertFalse(issues.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: path), first, "Failed cleanup cannot replace or erase the original failed journal")
+        let ledger = await base.operations(); XCTAssertEqual(ledger, ["webProviderStart", "webProviderSend", "webProviderPoll", "webProviderFinish"])
+    }
+
+    private var groqMetadataRequest: Data {
+        Data("{\"model\":\"\(syntheticWebsiteModelID("groq"))\",\"input\":[{\"role\":\"user\",\"content\":\"PRIVATE_GROQ_NATIVE_PROMPT_CANARY\"}],\"tools\":[],\"stream\":true}".utf8)
+    }
+
     private func chatContextFixtureDiagnostic() async throws -> ChatSubmissionFailureDiagnostic {
         let value = await MainActor.run {
             let flags = ["contextMatches", "nativePinMatches", "pendingRecord", "lastVerifiedRecord", "rootSame", "bodySame",
@@ -4032,6 +4143,57 @@ private actor InspectorServerFixtureTransport: WebModelTransport {
     }
     func observations() -> (grants: [Bool], stillCurrent: Bool) {
         (grants, authorization?.matches(taskID: task, threadID: thread, turnID: turn) ?? false)
+    }
+}
+
+/// Only the ordinary original Poll is forwarded. Synthetic callback data is
+/// created in memory; neither the test nor the production callback performs I/O.
+private actor GroqCountSidecarFixtureTransport: WebModelTransport {
+    let base: WebsiteInferenceFixtureTransport
+    let variant: String
+    let beforeFailure: (@Sendable () async -> Void)?
+    init(base: WebsiteInferenceFixtureTransport, variant: String = "valid", beforeFailure: (@Sendable () async -> Void)? = nil) {
+        self.base = base; self.variant = variant; self.beforeFailure = beforeFailure
+    }
+    func request(operation: String, params: Data) async throws -> Data {
+        try await request(operation: operation, params: params, onReadFailure: nil)
+    }
+    func request(operation: String, params: Data,
+                 onReadFailure: (@Sendable (WebsiteReadFailureDiagnostic) -> Void)?) async throws -> Data {
+        let data = try await base.request(operation: operation, params: params)
+        guard operation == "webProviderPoll" else { return data }
+        let request = try XCTUnwrap(JSONSerialization.jsonObject(with: params) as? [String: String])
+        let snapshot = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let context = try XCTUnwrap(snapshot["modelProofContext"] as? [String: Any])
+        let token: String
+        if variant == "foreign_session" { token = UUID().uuidString }
+        else { token = try XCTUnwrap(request["sessionToken"]) }
+        let document: UUID
+        if variant == "foreign_document" { document = UUID() }
+        else { document = try XCTUnwrap(UUID(uuidString: try XCTUnwrap(context["documentGeneration"] as? String))) }
+        if variant != "missing" {
+            let raw: [String: Any] = ["kind": "groq_user_count_v2", "action": "inspect", "branch": "expected_count",
+                "expectedUserCounts": [1], "userCount": 0, "answerCount": 0, "visibleUserCount": 0, "visibleAnswerCount": 0,
+                "submitted": true, "adapterFirstBound": true, "boundNodes": [
+                    "rootConnected": false, "bodyConnected": false, "parentConnected": false,
+                    "rootClassMatches": true, "bodyClassMatches": true, "rootParentMatches": true, "bodyWithinRoot": true,
+                    "rootInDocument": false, "preparedEditorConnected": true, "preparedEditorDraftRestored": true]]
+            let encoded = try JSONSerialization.data(withJSONObject: raw, options: .sortedKeys)
+            let first = await MainActor.run {
+                GroqCountFailureDiagnostic(sanitizedDiagnostic: String(decoding: encoded, as: UTF8.self),
+                    sessionToken: token, documentGeneration: document, sequence: 1)
+            }
+            if let first { onReadFailure?(.groqCount(first)) }
+            var later = raw; later["freshNotice"] = "generic_error"
+            let laterBytes = try JSONSerialization.data(withJSONObject: later, options: .sortedKeys)
+            let second = await MainActor.run {
+                GroqCountFailureDiagnostic(sanitizedDiagnostic: String(decoding: laterBytes, as: UTF8.self),
+                    sessionToken: token, documentGeneration: document, sequence: 1)
+            }
+            if let second { onReadFailure?(.groqCount(second)) }
+        }
+        if let beforeFailure { await beforeFailure() }
+        throw EmbeddedWebModelTransport.Failure.ownershipFailure(.groqDraftRestored)
     }
 }
 

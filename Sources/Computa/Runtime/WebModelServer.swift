@@ -21,6 +21,8 @@ protocol WebModelTransport: Sendable {
     func request(operation: String, params: Data) async throws -> Data
     func request(operation: String, params: Data,
                  onChatSubmissionFailure: (@Sendable (ChatSubmissionFailureDiagnostic) -> Void)?) async throws -> Data
+    func request(operation: String, params: Data,
+                 onReadFailure: (@Sendable (WebsiteReadFailureDiagnostic) -> Void)?) async throws -> Data
     func changeRevision(sessionToken: String) async throws -> UInt64?
     func waitForChange(sessionToken: String, after revision: UInt64,
                        until deadline: ContinuousClock.Instant) async throws -> UInt64?
@@ -73,6 +75,16 @@ extension WebModelTransport {
     func request(operation: String, params: Data,
                  onChatSubmissionFailure: (@Sendable (ChatSubmissionFailureDiagnostic) -> Void)?) async throws -> Data {
         try await request(operation: operation, params: params)
+    }
+    func request(operation: String, params: Data,
+                 onReadFailure: (@Sendable (WebsiteReadFailureDiagnostic) -> Void)?) async throws -> Data {
+        // Existing custom transports keep their original Chat callback behavior.
+        guard let onReadFailure else {
+            return try await request(operation: operation, params: params, onChatSubmissionFailure: nil)
+        }
+        return try await request(operation: operation, params: params, onChatSubmissionFailure: { diagnostic in
+            onReadFailure(.chatSubmission(diagnostic))
+        })
     }
     func grantInspectorDiagnostic(_ authorization: ChatGPTInspectorLease, sessionToken: String) async -> Bool { false }
     func revokeInspectorDiagnostic(sessionToken: String) async {}
@@ -967,7 +979,9 @@ actor WebModelServer {
                          transport: any WebModelTransport, transportGeneration: UUID) async throws -> InferenceResult {
         let context = try await inferenceContext(taskID: taskID)
         var inferenceID = UUID()
-        let submissionFailureSink = ChatSubmissionFailureDiagnosticSink()
+        let submissionFailureSink = WebsiteReadFailureDiagnosticSink()
+        var groqFailureProjection: (inferenceID: UUID, token: String, statistics: WebsitePromptProjection.Statistics,
+            bodyUnits: Int, exactTokenizer: Bool, nativeFinalPromptBytes: Int)?
         var lease = sessions[taskID]
         var closedHandoff = closedTurns[taskID]
         var requestMetadata = lease?.requestMetadata
@@ -1413,6 +1427,10 @@ actor WebModelServer {
                 // Local pacing is separate from prompt admission and cannot
                 // account for requests made outside Computa. Hold the permit
                 // through Send, including uncertain failures; never auto-retry.
+                if provider == "groq", let submissionBodyUnits {
+                    groqFailureProjection = (inferenceID, session.token, request.promptStatistics, submissionBodyUnits,
+                        WebModelResponseCodec.groqPromptBudgetUsesExactTokenizer(model: request.model), prompt.utf8.count)
+                }
                 let pacer = groqSubmissionPacer
                 let permit: UUID?
                 if let submissionBodyUnits {
@@ -1765,9 +1783,24 @@ actor WebModelServer {
                 if provider == "chatgpt",
                    (error as? EmbeddedWebModelTransport.Failure) == .ownershipFailure(.javaScriptSubmission),
                    (try? requireCurrentContext()) != nil, let lease, lease.context == context,
-                   sessions[taskID]?.token == lease.token {
-                    submissionDiagnostic = submissionFailureSink.snapshot
+                   sessions[taskID]?.token == lease.token,
+                   case let .chatSubmission(diagnostic)? = submissionFailureSink.snapshot {
+                    submissionDiagnostic = diagnostic
                 } else { submissionDiagnostic = nil }
+                let groqDiagnostic: GroqFailureJournalDiagnostic?
+                if provider == "groq", (try? requireCurrentContext()) != nil,
+                   let lease, lease.context == context, sessions[taskID]?.token == lease.token,
+                   sessions[taskID]?.documentGeneration == lease.documentGeneration,
+                   case let .groqCount(count)? = submissionFailureSink.snapshot,
+                   (error as? EmbeddedWebModelTransport.Failure) == .ownershipFailure(count.reason),
+                   let projection = groqFailureProjection, projection.inferenceID == inferenceID,
+                   projection.token == lease.token {
+                    groqDiagnostic = GroqFailureJournalDiagnostic(count: count, statistics: projection.statistics,
+                        bodyUnits: projection.bodyUnits, exactTokenizer: projection.exactTokenizer,
+                        nativeFinalPromptBytes: projection.nativeFinalPromptBytes, taskID: taskID, threadID: context.threadID,
+                        turnID: context.turnID, inferenceID: inferenceID, sessionToken: lease.token,
+                        documentGeneration: lease.documentGeneration, sequence: lease.sequence)
+                } else { groqDiagnostic = nil }
                 if let authorization = inspectorAuthorizations.removeValue(forKey: taskID) {
                     authorization.revoke()
                     if let lease { await lease.transport.revokeInspectorDiagnostic(sessionToken: lease.token) }
@@ -1790,6 +1823,7 @@ actor WebModelServer {
                         sequence: lease?.sequence ?? 0, baseline: lease?.baselineResponseCount ?? 0,
                         turnScoped: lease?.retainsConversation ?? requestedClaudeTurnScope,
                         submissionDiagnostic: (try? requireCurrentContext()) != nil ? submissionDiagnostic : nil,
+                        groqDiagnostic: (try? requireCurrentContext()) != nil ? groqDiagnostic : nil,
                         responseChoiceReceipt: lease.map { permitsResponseChoiceEvidence($0) } == true ? responseChoiceStatus?.receipt : nil)
                 }
                 throw error
@@ -2211,6 +2245,7 @@ actor WebModelServer {
                                            provider: String, modelID: String, sessionToken: String?, phase: String, errorCode: String? = nil,
                                            sequence: Int = 0, baseline: Int = 0, turnScoped: Bool? = nil,
                                            submissionDiagnostic: ChatSubmissionFailureDiagnostic? = nil,
+                                           groqDiagnostic: GroqFailureJournalDiagnostic? = nil,
                                            responseChoiceReceipt: WebsiteResponseChoiceReceipt? = nil) throws {
         var record = transactionEvidenceRecord(taskID: taskID, inferenceID: inferenceID, context: context,
             provider: provider, modelID: modelID, sessionToken: sessionToken, phase: phase, turnScoped: turnScoped)
@@ -2219,6 +2254,9 @@ actor WebModelServer {
         if let errorCode { record["errorCode"] = errorCode }
         if phase == "failed", provider == "chatgpt", let submissionDiagnostic {
             record["submissionFailureDiagnostic"] = submissionDiagnostic.dictionary
+        }
+        if phase == "failed", provider == "groq", let groqDiagnostic {
+            record["groqFailureDiagnostic"] = groqDiagnostic.dictionary
         }
         if provider == "qwen", let responseChoiceReceipt { record["savedResponseChoiceReceipt"] = responseChoiceReceipt.dictionary }
         try appendEvidence(record, taskID: taskID)
@@ -2396,12 +2434,12 @@ actor WebModelServer {
     }
 
     private func call(_ transport: any WebModelTransport, operation: String,
-                      params: [String: String], submissionFailureSink: ChatSubmissionFailureDiagnosticSink? = nil) async throws -> [String: Any] {
+                      params: [String: String], submissionFailureSink: WebsiteReadFailureDiagnosticSink? = nil) async throws -> [String: Any] {
         let data = try JSONSerialization.data(withJSONObject: params)
         let result: Data
         if let submissionFailureSink {
             result = try await transport.request(operation: operation, params: data,
-                onChatSubmissionFailure: { submissionFailureSink.record($0) })
+                onReadFailure: { submissionFailureSink.record($0) })
         } else { result = try await transport.request(operation: operation, params: data) }
         guard let value = try JSONSerialization.jsonObject(with: result) as? [String: Any] else { throw Failure.invalidRequest }
         return value

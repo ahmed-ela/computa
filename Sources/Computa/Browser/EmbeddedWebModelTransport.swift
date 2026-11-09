@@ -39,6 +39,96 @@ final class ChatSubmissionFailureDiagnosticSink: @unchecked Sendable {
     }
 }
 
+/// Metadata from the original already-rejected Groq read. It never grants
+/// selection, response, cleanup, retry or HTTP-cause authority.
+struct GroqCountFailureDiagnostic: Sendable {
+    let sessionToken: UUID
+    let documentGeneration: UUID
+    let sequence: Int
+    let reason: EmbeddedWebModelTransport.OwnershipReason
+    private let encoded: Data
+
+    @MainActor
+    init?(sanitizedDiagnostic: String, sessionToken: String, documentGeneration: UUID, sequence: Int) {
+        guard sequence == 1, let token = UUID(uuidString: sessionToken),
+              sanitizedDiagnostic.utf8.count <= 1_024,
+              let value = try? JSONSerialization.jsonObject(with: Data(sanitizedDiagnostic.utf8)),
+              let checked = EmbeddedWebModelTransport.groqCountRejection(value, provider: .groq, action: "inspect"),
+              checked.diagnostic == sanitizedDiagnostic, let reason = checked.rollback else { return nil }
+        self.sessionToken = token; self.documentGeneration = documentGeneration
+        self.sequence = sequence; self.reason = reason
+        encoded = Data(checked.diagnostic.utf8)
+    }
+
+    var dictionary: [String: Any] {
+        (try? JSONSerialization.jsonObject(with: encoded) as? [String: Any]) ?? [:]
+    }
+}
+
+/// One native callback surface; the older Chat-specific overload remains a
+/// compatibility adapter. Neither case is sent to the website or model decoder.
+enum WebsiteReadFailureDiagnostic: Sendable {
+    case chatSubmission(ChatSubmissionFailureDiagnostic)
+    case groqCount(GroqCountFailureDiagnostic)
+}
+
+final class WebsiteReadFailureDiagnosticSink: @unchecked Sendable {
+    private let lock = NSLock()
+    private var first: WebsiteReadFailureDiagnostic?
+    func record(_ diagnostic: WebsiteReadFailureDiagnostic) {
+        lock.lock(); defer { lock.unlock() }
+        if first == nil { first = diagnostic }
+    }
+    var snapshot: WebsiteReadFailureDiagnostic? {
+        lock.lock(); defer { lock.unlock() }
+        return first
+    }
+}
+
+/// A finite companion to the native failed journal, not an enriched wire error.
+/// The five IDs and projection counts come from native admission, never page JSON.
+/// nativeFinalPromptBytes excludes the transport session marker and provider framing.
+struct GroqFailureJournalDiagnostic: Sendable {
+    private let encoded: Data
+    init?(count: GroqCountFailureDiagnostic, statistics: WebsitePromptProjection.Statistics,
+          bodyUnits: Int, exactTokenizer: Bool, nativeFinalPromptBytes: Int,
+          taskID: String, threadID: String, turnID: String, inferenceID: UUID,
+          sessionToken: String, documentGeneration: UUID?, sequence: Int) {
+        guard [taskID, threadID, turnID].allSatisfy({ UUID(uuidString: $0)?.uuidString.lowercased() == $0 }),
+              UUID(uuidString: sessionToken) == count.sessionToken,
+              documentGeneration == count.documentGeneration, sequence == count.sequence,
+              (0...WebModelResponseCodec.groqMaximumBodyTokens).contains(bodyUnits),
+              nativeFinalPromptBytes > 0,
+              let bytes = try? JSONEncoder().encode(statistics), bytes.count <= 1_024,
+              let sizes = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { return nil }
+        let counters = sizes.compactMapValues { $0 as? Int }
+        guard counters.count == sizes.count, counters.values.allSatisfy({ $0 >= 0 }) else { return nil }
+        // Raw input is capped at 2 MB, but normalization may expand catalog JSON.
+        // Cap finite counters explicitly instead of discarding an admitted read.
+        let counterCap = 2_000_000
+        let boundedSizes = counters.mapValues { min($0, counterCap) }
+        let sizesSaturated = counters.values.contains { $0 > counterCap }
+        let value: [String: Any] = ["version": 1, "diagnosticOnly": true,
+            "nativeContext": ["taskID": taskID, "threadID": threadID, "turnID": turnID,
+                "inferenceID": inferenceID.uuidString.lowercased(),
+                "sessionToken": count.sessionToken.uuidString.lowercased(),
+                "documentGeneration": count.documentGeneration.uuidString.lowercased(), "sequence": sequence],
+            "promptStatistics": boundedSizes, "promptStatisticsCounterCap": counterCap,
+            "promptStatisticsSaturated": sizesSaturated,
+            "nativeFinalPromptBytes": min(nativeFinalPromptBytes, counterCap),
+            "nativeFinalPromptBytesSaturated": nativeFinalPromptBytes > counterCap,
+            "bodyUnits": bodyUnits, "exactTokenizer": exactTokenizer,
+            "maximumBodyUnits": WebModelResponseCodec.groqMaximumBodyTokens,
+            "reservedUnits": WebModelResponseCodec.groqReservedTokens,
+            "ownershipReason": count.reason.rawValue, "adapter": count.dictionary]
+        guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), data.count <= 2_048 else { return nil }
+        encoded = data
+    }
+    var dictionary: [String: Any] {
+        (try? JSONSerialization.jsonObject(with: encoded) as? [String: Any]) ?? [:]
+    }
+}
+
 /// Inference-only browser access. The website has no tool or native IPC handlers.
 /// Prompts are data passed to a fixed DOM program in an isolated content world.
 @MainActor
@@ -528,6 +618,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             let diagnostic: ChatSubmissionFailureDiagnostic
         }
         var firstChatSubmissionFailure: SavedChatSubmissionFailure?
+        var firstGroqCountFailure: GroqCountFailureDiagnostic?
         // Claimed before dispatch, including calls whose reply is lost. A
         // checkpoint can never turn an ambiguous adapter call into no input.
         var providerAdapterEverDispatched = false
@@ -1629,6 +1720,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func request(operation: String, params: Data,
                  onChatSubmissionFailure: (@Sendable (ChatSubmissionFailureDiagnostic) -> Void)?) async throws -> Data {
+        guard let onChatSubmissionFailure else {
+            return try await request(operation: operation, params: params, onReadFailure: nil)
+        }
+        return try await request(operation: operation, params: params, onReadFailure: { diagnostic in
+            if case let .chatSubmission(value) = diagnostic { onChatSubmissionFailure(value) }
+        })
+    }
+
+    func request(operation: String, params: Data,
+                 onReadFailure: (@Sendable (WebsiteReadFailureDiagnostic) -> Void)?) async throws -> Data {
         // The wire protocol has no authority to acquire this native diagnostic,
         // including malformed Start requests that fail before decoding.
         if operation == "webProviderStart" { ClaudeResponseStreamLease.current?.revoke(); QwenMarkerWireLease.current?.revoke() }
@@ -1925,14 +2026,23 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
             // This callback belongs to this original request's returned error,
             // not a queued phase notification or a later cleanup inspection.
-            if !Task.isCancelled, let onChatSubmissionFailure,
+            if !Task.isCancelled, let onReadFailure,
                (error as? Failure) == .ownershipFailure(.javaScriptSubmission),
                session.provider == .chatgpt, let saved = session.firstChatSubmissionFailure,
                saved.sequence == session.sequence, sessions[session.token] === session,
                browser.webView(for: session.tabID) === session.view,
                browser.documentGeneration(for: session.tabID) == saved.generation {
                 session.firstChatSubmissionFailure = nil
-                onChatSubmissionFailure(saved.diagnostic)
+                onReadFailure(.chatSubmission(saved.diagnostic))
+            }
+            if !Task.isCancelled, let onReadFailure, session.provider == .groq,
+               let saved = session.firstGroqCountFailure,
+               (error as? Failure) == .ownershipFailure(saved.reason),
+               saved.sequence == session.sequence, sessions[session.token] === session,
+               browser.webView(for: session.tabID) === session.view,
+               browser.documentGeneration(for: session.tabID) == saved.documentGeneration {
+                session.firstGroqCountFailure = nil
+                onReadFailure(.groqCount(saved))
             }
             throw error
         }
@@ -7185,6 +7295,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     }
                     if let reason = groqCountRejection.rollback, !allowBlockedProvider, session.state == "running",
                        session.submitted, session.sequence == 1, session.acknowledgedSendSequence == 1 {
+                        // Freeze only this original validated rejection. Cleanup cannot
+                        // replace it and no extra page observation is performed.
+                        if session.firstGroqCountFailure == nil, sessions[session.token] === session {
+                            session.firstGroqCountFailure = GroqCountFailureDiagnostic(
+                                sanitizedDiagnostic: groqCountRejection.diagnostic, sessionToken: session.token,
+                                documentGeneration: generation, sequence: session.sequence)
+                        }
                         throw Failure.ownershipFailure(reason)
                     }
                 }

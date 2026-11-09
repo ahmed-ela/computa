@@ -54,6 +54,21 @@
     const empty = value => value === undefined || value === null || value === ''
       || (array(value) ? list(value,0) === 0 : typeof value === 'object' && plain(value).length === 0);
     const objectExtra = value => value === undefined || value === null || plain(value).length === 0;
+    // Known reasoning payloads are not literal ANSWER input. Account for their
+    // closed outer DATA fields without reading any title/thought/content value.
+    const phaseExtra = (phase,value) => {
+      if (phase === 'answer') return objectExtra(value);
+      if (value === undefined || value === null || value === '') return true;
+      if (array(value)) return list(value,0) === 0;
+      const ks = plain(value);
+      if (ks.length === 0) return true;
+      if (phase !== 'thinking_summary') return false;
+      require(ks.every(key => ['summary_title','summary_thought','summary_content'].includes(key)));
+      return ks.every(key => {
+        const d = descriptor(value,key);
+        return d !== undefined && hasOwn(d,'value');
+      });
+    };
 
     require(target instanceof HTMLDivElement && target.isConnected && target.ownerDocument === document
       && target.id === 'chat-response-message-'+request.responseID
@@ -184,7 +199,7 @@
       mark('phase_state');
       require([undefined,'assistant'].includes(own(part,'role',true))
         && [undefined,'typing','finished'].includes(own(part,'status',true))
-        && mark('phase_extra') && objectExtra(own(part,'extra',true)));
+        && mark('phase_extra') && phaseExtra(phase,own(part,'extra',true)));
       mark('phase_scalar');
       const timestamp = own(part,'timestamp',true), group = own(part,'groupIndex',true);
       require((timestamp === undefined || Number.isSafeInteger(timestamp) && timestamp >= 0 && timestamp <= 10000000000000)

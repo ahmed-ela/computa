@@ -2147,6 +2147,186 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testGroqFirstFailureTypedProjectionRejectsPrivateFieldsAndFreezesOnlyTheFirstPacket() throws {
+        let nodes: [String: Any] = ["rootConnected": false, "bodyConnected": false, "parentConnected": false,
+            "rootClassMatches": true, "bodyClassMatches": true, "rootParentMatches": true, "bodyWithinRoot": true,
+            "rootInDocument": false, "preparedEditorConnected": true, "preparedEditorDraftRestored": true]
+        let raw: [String: Any] = ["kind": "groq_user_count_v2", "action": "inspect", "branch": "expected_count",
+            "expectedUserCounts": [1], "userCount": 0, "answerCount": 0, "visibleUserCount": 0, "visibleAnswerCount": 0,
+            "submitted": true, "adapterFirstBound": true, "boundNodes": nodes]
+        let selfToken = UUID().uuidString, generation = UUID()
+        func make(_ value: [String: Any], sequence: Int = 1, token: String? = nil) throws -> GroqCountFailureDiagnostic? {
+            let data = try JSONSerialization.data(withJSONObject: value, options: .sortedKeys)
+            return GroqCountFailureDiagnostic(sanitizedDiagnostic: String(decoding: data, as: UTF8.self),
+                sessionToken: token ?? selfToken, documentGeneration: generation, sequence: sequence)
+        }
+        let first = try XCTUnwrap(make(raw))
+        XCTAssertEqual(first.reason, .groqDraftRestored)
+        var later = raw; later["freshNotice"] = "generic_error"
+        let second = try XCTUnwrap(make(later))
+        let sink = WebsiteReadFailureDiagnosticSink()
+        sink.record(.groqCount(first)); sink.record(.groqCount(second))
+        guard case let .groqCount(saved)? = sink.snapshot else { return XCTFail("Expected first Groq packet") }
+        XCTAssertEqual(saved.reason, .groqDraftRestored)
+        XCTAssertNil(saved.dictionary["freshNotice"], "A later cleanup observation cannot replace the first packet")
+        for key in ["text", "url", "prompt", "httpStatus", "headers", "cookie"] {
+            var extra = raw; extra[key] = "PRIVATE_GROQ_PACKET_CANARY"
+            XCTAssertNil(try make(extra), key)
+        }
+        for invalid: Any in [-1, 65, true, "0"] {
+            var malformed = raw; malformed["userCount"] = invalid
+            XCTAssertNil(try make(malformed))
+        }
+        XCTAssertNil(try make(raw, sequence: 0)); XCTAssertNil(try make(raw, sequence: 2))
+        XCTAssertNil(try make(raw, token: "not-a-native-session"))
+        var foreign = raw; foreign["kind"] = "other_provider"
+        XCTAssertNil(try make(foreign))
+        let statistics = WebsitePromptProjection.Statistics(originalRequestBytes: 10, sourceRequestBytes: 10,
+            compactRequestBytes: 10, presentedRequestBytes: 10, outerContractBytes: 0, runtimeBytes: 0,
+            requestContextBytes: 0, currentUserBytes: 10, responseContractBytes: 0, framingBytes: 0,
+            finalPromptBytes: 10, inputJSONBytes: 10, toolsJSONBytes: 0, instructionsJSONBytes: 0, otherJSONBytes: 0)
+        let task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(), turn = UUID().uuidString.lowercased()
+        func journal(token: String? = nil, document: UUID? = nil, includeDocument: Bool = true, sequence: Int = 1,
+                     units: Int = 10, finalBytes: Int = 10, taskID: String? = nil) -> GroqFailureJournalDiagnostic? {
+            GroqFailureJournalDiagnostic(count: first, statistics: statistics, bodyUnits: units,
+                exactTokenizer: true, nativeFinalPromptBytes: finalBytes, taskID: taskID ?? task, threadID: thread,
+                turnID: turn, inferenceID: UUID(), sessionToken: token ?? selfToken,
+                documentGeneration: includeDocument ? document ?? generation : nil, sequence: sequence)
+        }
+        let metadata = try XCTUnwrap(journal()).dictionary
+        XCTAssertEqual(Set(metadata.keys), ["version", "diagnosticOnly", "nativeContext", "promptStatistics", "bodyUnits",
+            "exactTokenizer", "maximumBodyUnits", "reservedUnits", "ownershipReason", "adapter", "nativeFinalPromptBytes",
+            "promptStatisticsCounterCap", "promptStatisticsSaturated", "nativeFinalPromptBytesSaturated"])
+        XCTAssertNil(journal(token: UUID().uuidString)); XCTAssertNil(journal(document: UUID()))
+        XCTAssertNil(journal(includeDocument: false)); XCTAssertNil(journal(sequence: 2))
+        XCTAssertNil(journal(units: -1)); XCTAssertNil(journal(units: 6_001))
+        XCTAssertNotNil(journal(finalBytes: 9), "Submitted bytes may differ from the frozen base projection")
+        XCTAssertNil(journal(finalBytes: 0))
+        let saturatedFinal = try XCTUnwrap(journal(finalBytes: 2_000_001)).dictionary
+        XCTAssertEqual(saturatedFinal["nativeFinalPromptBytes"] as? Int, 2_000_000)
+        XCTAssertEqual(saturatedFinal["nativeFinalPromptBytesSaturated"] as? Bool, true)
+        XCTAssertNil(journal(taskID: "foreign-non-uuid"))
+        let large = WebsitePromptProjection.Statistics(originalRequestBytes: 500_000, sourceRequestBytes: 4_000_000,
+            compactRequestBytes: 10, presentedRequestBytes: 10, outerContractBytes: 0, runtimeBytes: 0,
+            requestContextBytes: 0, currentUserBytes: 10, responseContractBytes: 0, framingBytes: 0,
+            finalPromptBytes: 10, inputJSONBytes: 10, toolsJSONBytes: 390_000, instructionsJSONBytes: 0, otherJSONBytes: 0)
+        let projected = try XCTUnwrap(GroqFailureJournalDiagnostic(count: first, statistics: large, bodyUnits: 20,
+            exactTokenizer: true, nativeFinalPromptBytes: 40, taskID: task, threadID: thread, turnID: turn,
+            inferenceID: UUID(), sessionToken: selfToken, documentGeneration: generation, sequence: 1)).dictionary
+        XCTAssertEqual(projected["nativeFinalPromptBytes"] as? Int, 40)
+        let baseSizes = try XCTUnwrap(projected["promptStatistics"] as? [String: Any])
+        XCTAssertEqual(baseSizes["originalRequestBytes"] as? Int, 500_000)
+        XCTAssertEqual(baseSizes["sourceRequestBytes"] as? Int, 2_000_000)
+        XCTAssertEqual(projected["promptStatisticsSaturated"] as? Bool, true)
+        XCTAssertEqual(baseSizes["finalPromptBytes"] as? Int, 10)
+
+    }
+
+    func testGroqOriginalCountFailurePublishesOnceBeforeThrowAndCleanupCannotReplaceIt() async throws {
+        let fixture = try Fixture(page: Self.groqFixturePage()); defer { fixture.shutdown() }
+        let (token, view) = try await startGroqFixture(fixture, send: false)
+        _ = try await evaluate(view, """
+            const f = groqFixture, append = f.appendUser;
+            f.delayResponse = true;
+            f.appendUser = text => { f.observedOutbound = text; append(text); };
+            return true;
+            """)
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "PRIVATE_GROQ_FIRST_FAILURE_CANARY"])
+        _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        _ = try await evaluate(view, """
+            const f = groqFixture;
+            f.turn.remove(); f.editor.value = f.observedOutbound;
+            f.editor.disabled = false; f.send.disabled = false;
+            return true;
+            """)
+        var actions: [String] = []
+        fixture.transport.setBeforePageResultValidationForTesting { actions.append($0) }
+        let sink = WebsiteReadFailureDiagnosticSink()
+        do {
+            _ = try await fixture.transport.request(operation: "webProviderPoll",
+                params: JSONSerialization.data(withJSONObject: ["sessionToken": token]),
+                onReadFailure: { sink.record($0) })
+            XCTFail("The diagnostic cannot recover the refused read")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.groqDraftRestored)) }
+        guard case let .groqCount(first)? = sink.snapshot else { return XCTFail("Missing original finite packet") }
+        XCTAssertEqual(first.sessionToken, UUID(uuidString: token))
+        XCTAssertEqual(first.dictionary["userCount"] as? Int, 0)
+        XCTAssertEqual(actions, ["inspect"], "Capture adds no page read")
+        let saved = try JSONSerialization.data(withJSONObject: first.dictionary, options: .sortedKeys)
+        XCTAssertFalse(String(decoding: saved, as: UTF8.self).contains("PRIVATE_GROQ_FIRST_FAILURE_CANARY"))
+        let later = WebsiteReadFailureDiagnosticSink()
+        do {
+            _ = try await fixture.transport.request(operation: "webProviderPoll",
+                params: JSONSerialization.data(withJSONObject: ["sessionToken": token]),
+                onReadFailure: { later.record($0) })
+            XCTFail("A terminal read cannot be replayed")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.groqDraftRestored)) }
+        let counts = try await evaluate(view, "return [groqFixture.sendCount, groqFixture.clearCount];") as? [Int]
+        XCTAssertEqual(counts?.first, 1)
+        _ = try? await fixture.transport.request(operation: "webProviderFinish",
+            params: JSONSerialization.data(withJSONObject: ["sessionToken": token]), onReadFailure: { later.record($0) })
+        XCTAssertNil(later.snapshot)
+        XCTAssertEqual(try JSONSerialization.data(withJSONObject: first.dictionary, options: .sortedKeys), saved)
+        let body = try WebModelServer.errorBody(for: EmbeddedWebModelTransport.Failure.ownershipFailure(.groqDraftRestored))
+        XCTAssertFalse(String(decoding: body, as: UTF8.self).contains("groqFailureDiagnostic"))
+    }
+
+    func testGroqFirstFailureDoesNotPublishOnCancelledOriginalRead() async throws {
+        let fixture = try Fixture(page: Self.groqFixturePage()); defer { fixture.shutdown() }
+        let (token, view) = try await startGroqFixture(fixture, send: false)
+        _ = try await evaluate(view, """
+            const f = groqFixture, append = f.appendUser;
+            f.delayResponse = true; f.appendUser = text => { f.observedOutbound = text; append(text); };
+            return true;
+            """)
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "PRIVATE_CANCELLED_GROQ_CANARY"])
+        _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        _ = try await evaluate(view, "groqFixture.turn.remove(); groqFixture.editor.value = groqFixture.observedOutbound; return true;")
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "inspect" { withUnsafeCurrentTask { $0?.cancel() } }
+        }
+        let sink = WebsiteReadFailureDiagnosticSink()
+        let read = Task {
+            try await fixture.transport.request(operation: "webProviderPoll",
+                params: JSONSerialization.data(withJSONObject: ["sessionToken": token]), onReadFailure: { sink.record($0) })
+        }
+        do { _ = try await read.value; XCTFail("The cancelled read cannot succeed") }
+        catch {
+            XCTAssertTrue(error is CancellationError
+                || (error as? EmbeddedWebModelTransport.Failure) == .ownershipFailure(.groqDraftRestored))
+        }
+        XCTAssertNil(sink.snapshot)
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        let count = try await evaluate(view, "return groqFixture.sendCount;") as? Int
+        XCTAssertEqual(count, 1)
+        _ = try? await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+    }
+
+    func testGroqFirstFailureCannotPublishAfterOwnedViewChangesBeforeValidation() async throws {
+        let fixture = try Fixture(page: Self.groqFixturePage()); defer { fixture.shutdown() }
+        let (token, view) = try await startGroqFixture(fixture, send: false)
+        _ = try await evaluate(view, """
+            const f = groqFixture, append = f.appendUser;
+            f.delayResponse = true; f.appendUser = text => { f.observedOutbound = text; append(text); };
+            return true;
+            """)
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "PRIVATE_STALE_GROQ_CANARY"])
+        _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        _ = try await evaluate(view, "groqFixture.turn.remove(); groqFixture.editor.value = groqFixture.observedOutbound; return true;")
+        let owned = try XCTUnwrap(fixture.createdTabs.last)
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "inspect" { fixture.browser.closeTab(owned) }
+        }
+        let sink = WebsiteReadFailureDiagnosticSink()
+        do {
+            _ = try await fixture.transport.request(operation: "webProviderPoll",
+                params: JSONSerialization.data(withJSONObject: ["sessionToken": token]), onReadFailure: { sink.record($0) })
+            XCTFail("A removed owned view remains stale")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .staleSession) }
+        XCTAssertNil(sink.snapshot)
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testGroqUserCountDiagnosticIsFiniteBranchBoundAndRejectsPrivateOrMalformedFields() throws {
         let base: [String: Any] = ["kind": "groq_user_count_v2", "action": "inspect", "branch": "multiple_users",
             "userCount": 2, "answerCount": 0, "visibleUserCount": 1, "visibleAnswerCount": 0,

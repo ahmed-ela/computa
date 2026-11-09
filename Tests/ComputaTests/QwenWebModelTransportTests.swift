@@ -1089,7 +1089,9 @@ final class QwenWebModelTransportTests: XCTestCase {
         const message={id:host.id.slice(22),parentId:user.dataset.msgId,childrenIds:[],role:'assistant',content:'',done:true,
           chat_type:'t2t',sub_chat_type:'t2t',extra:{meta:{subChatType:'t2t'}},info:{},
           feature_config:{thinking_enabled:true,local_mcp:undefined,output_schema:'phase',research_mode:'normal',auto_thinking:true,thinking_mode:'Auto'},
-          content_list:[{phase:'thinking_summary',role:'assistant',status:'finished',extra:{}},{phase:'answer',role:'assistant',status:'finished',extra:{},content:raw}]};
+          content_list:[{phase:'thinking_summary',role:'assistant',status:'finished',
+            extra:{summary_title:{content:['Synthetic summary title']},summary_thought:{content:['Synthetic hidden reasoning']},summary_content:'Synthetic legacy reasoning'}},
+            {phase:'answer',role:'assistant',status:'finished',extra:{},content:raw}]};
         Object.defineProperty(message.content_list[0],'content',{get(){throw Error('Reasoning must remain unread');}});
         const element=props=>({$$typeof:Symbol.for('react.transitional.element'),type:()=>{throw Error('No component execution');},props});
         const input=element({message,phaseContentIndex:1,content:raw});
