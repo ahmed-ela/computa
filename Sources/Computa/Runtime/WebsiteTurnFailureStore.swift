@@ -36,11 +36,12 @@ struct WebsiteTurnFailureStore: Sendable {
                   let webProvider = EmbeddedWebModelTransport.Provider(rawValue: provider),
                   let supplied = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
                   let error = supplied["error"] as? [String: Any], let code = error["code"] as? String else { return nil }
-            // Legacy fixed errors have no retry metadata. The saved-chat
+            // Legacy fixed errors and native timeouts have no retry metadata. The saved-chat
             // adapters' distinct unsupported-response envelope does, and must retain a real Bool.
             // Exact generated envelopes still pass canonical equality below.
             let savedLiteralSource = ["kimi", "qwen", "deepseek"].contains(provider)
             if code != "browser_model_error" && code != "website_turn_limit" && code != "invalid_model_output"
+                && code != "provider_timeout"
                 && (code != "unsupported_website_response" || savedLiteralSource) {
                 guard let retryable = error["retryable"] as? NSNumber, CFGetTypeID(retryable) == CFBooleanGetTypeID(),
                       retryable.boolValue == false else { return nil }
@@ -52,6 +53,21 @@ struct WebsiteTurnFailureStore: Sendable {
                       let reason = WebModelServer.NativeBrowserFailure(rawValue: rawReason), reason.code == code,
                       !reason.requiresChatGPT || provider == "chatgpt" else { return nil }
                 nativeError = reason
+            case "provider_timeout":
+                // These fixed native deadlines carry no retry metadata. Only
+                // their complete generated envelopes may survive reload.
+                let fixedFailures: [any Error] = [
+                    WebModelServer.Failure.deadline,
+                    WebModelServer.Failure.preparationDeadline,
+                    EmbeddedWebModelTransport.Failure.deadline,
+                    EmbeddedWebModelTransport.Failure.preparationDeadline,
+                ]
+                guard let fixed = fixedFailures.first(where: { failure in
+                    guard let bytes = try? WebModelServer.errorBody(for: failure),
+                          let envelope = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { return false }
+                    return NSDictionary(dictionary: supplied).isEqual(to: envelope)
+                }) else { return nil }
+                nativeError = fixed
             case "browser_model_error":
                 // Several finite native failures share this legacy wire code.
                 // Match the complete generated envelope, never arbitrary prose

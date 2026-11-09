@@ -1838,7 +1838,10 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             let request = try WebModelResponseCodec.prepareRequest(original)
             let handoff = try assertRequestValuesAndHandoff(original, request: request)
             XCTAssertTrue(handoff.contains("Exact currently offered local function names: relay.exec_command, relay.write_stdin\n"))
-            let boundary = ["claude", "deepseek", "kimi"].contains(provider) ? ComputaAgentInstructions.literalFencedResponseBoundary + "\n" : ""
+            let boundary = provider == "qwen"
+                ? ComputaAgentInstructions.codePayloadResponseBoundary + "\n"
+                    + #"In JSON use \u0060 for Markdown backticks and \u002a for asterisks. Example path value (use yours): "report-\u0060x\u0060-\u002a\u002ay\u002a\u002a.txt""# + "\n"
+                : ["claude", "deepseek", "kimi"].contains(provider) ? ComputaAgentInstructions.literalFencedResponseBoundary + "\n" : ""
             XCTAssertTrue(handoff.hasSuffix("{\"type\":\"message\",\"text\":\"OK\"}\n" + boundary + "END_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
             XCTAssertFalse(handoff.contains("obsolete.exec_command"))
             XCTAssertFalse(handoff.contains("functions.exec_command"))
@@ -2237,7 +2240,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let handoff = ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(request.offeredToolNames),
             customToolNames: request.customToolNames,
             includedInstructionText: includedInstructionText,
-            responseFormat: LocalModelCatalog.webProvider(for: request.model) == "qwen" ? .rawJSON
+            responseFormat: LocalModelCatalog.webProvider(for: request.model) == "qwen" ? .codePayloadJSON
                 : ["claude", "deepseek", "kimi"].contains(LocalModelCatalog.webProvider(for: request.model) ?? "") ? .literalFencedJSON : .fencedJSON,
             singleActionRelay: request.singleActionRelay,
             allowedToolNames: expectedAllowedToolNames)

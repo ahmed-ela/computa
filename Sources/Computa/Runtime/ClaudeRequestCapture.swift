@@ -49,6 +49,19 @@ enum ClaudeRequestCapture {
     static let firstRequestPurpose = "claude_synthetic_first_request_v2"
     static let firstRequestModel = WebsiteModelChoice(provider: "claude", key: "Opus 5", label: "Opus 5").modelID
 
+    static let clientFirstRequestPurpose = "claude_opus47_client_context_first_marker_v1"
+    static let clientFirstRequestModel = WebsiteModelChoice(provider: "claude", key: "Opus 4.7", label: "Opus 4.7").modelID
+    static let clientFirstRequestSubdirectory = "Opus47ClientContext-v1"
+
+    static func isFirstRequestModel(_ model: String) -> Bool {
+        model == firstRequestModel || model == clientFirstRequestModel
+    }
+
+    static func clientSyntheticUserText(nonce: UUID) -> String {
+        "Return exactly CLAUDEOPUS47" + nonce.uuidString.replacingOccurrences(of: "-", with: "").uppercased()
+            + " and nothing else. Do not call any tools."
+    }
+
     static func syntheticUserText(nonce: UUID) -> String {
         "Computa latency benchmark \(nonce.uuidString.lowercased()). Reply with exactly HI. Do not use tools."
     }
@@ -67,11 +80,13 @@ enum ClaudeRequestCapture {
         init?(directory: URL?, context: Context, request: WebModelResponseCodec.Request, prompt: String,
               isNewThread: Bool, isMaintenance: Bool, isFirstInference: Bool) {
             guard !Task.isCancelled, isNewThread, !isMaintenance, isFirstInference, let directory,
-                  context.modelID == firstRequestModel, request.model == context.modelID,
+                  isFirstRequestModel(context.modelID), request.model == context.modelID,
                   !prompt.isEmpty, prompt.utf8.count <= WebModelResponseCodec.maximumPromptBytes,
                   !request.continuationRequest.isEmpty,
                   request.continuationRequest.count <= WebModelResponseCodec.maximumPromptBytes else { return nil }
-            self.directory = directory; self.context = context; self.request = request; serverPrompt = prompt
+            self.directory = context.modelID == clientFirstRequestModel
+                ? directory.appendingPathComponent(clientFirstRequestSubdirectory) : directory
+            self.context = context; self.request = request; serverPrompt = prompt
         }
 
         func revoke() { lock.withLock { active = false } }
@@ -109,16 +124,19 @@ enum ClaudeRequestCapture {
                       guard active, !attempted else { return false }
                       attempted = true; return true
                   }) else { return false }
+            let clientMarker = context.modelID == clientFirstRequestModel
+            let expectedPurpose = clientMarker ? clientFirstRequestPurpose : firstRequestPurpose
+            let expectedTrigger = clientMarker ? "first_client_context_marker" : "first_user_request"
+            let baseKeys: Set<String> = ["schemaVersion", "purpose", "nonce", "taskID", "turnID", "modelID", "trigger", "expiresAt", "userPromptSHA256"]
+            let expectedKeys = clientMarker ? baseKeys.union(["threadID", "inferenceID", "runtimeGeneration", "preparationID"]) : baseKeys
             var deadline: ContinuousClock.Instant?
-            return WebsitePrivateDiagnosticCapture.publish(directory: directory, outputName: "request.json",
-                maximumArmBytes: 4_096, maximumRecordBytes: 2_000_000,
-                makeRecord: { arm in
+            let makeRecord: (Data) -> Data? = { [self] arm in
                     guard APIModelCorrectionJSON.isUnambiguous(arm),
                           let value = try? JSONSerialization.jsonObject(with: arm) as? [String: Any],
-                          Set(value.keys) == ["schemaVersion", "purpose", "nonce", "taskID", "turnID", "modelID", "trigger", "expiresAt", "userPromptSHA256"],
-                          ComputerToolArgumentContract.exactInt64(value["schemaVersion"]) == 2,
-                          value["purpose"] as? String == firstRequestPurpose,
-                          value["trigger"] as? String == "first_user_request",
+                          Set(value.keys) == expectedKeys,
+                          ComputerToolArgumentContract.exactInt64(value["schemaVersion"]) == (clientMarker ? 3 : 2),
+                          value["purpose"] as? String == expectedPurpose,
+                          value["trigger"] as? String == expectedTrigger,
                           let nonce = canonicalID(value["nonce"]),
                           value["taskID"] as? String == context.taskID.uuidString.lowercased(),
                           value["turnID"] as? String == context.turnID.uuidString.lowercased(),
@@ -127,15 +145,21 @@ enum ClaudeRequestCapture {
                           let expiry = timestampFormatter().date(from: expiryText),
                           timestampFormatter().string(from: expiry) == expiryText,
                           expiry > now, expiry.timeIntervalSince(now) <= maximumLifetime else { return nil }
-                    let expected = syntheticUserText(nonce: nonce)
+                    if clientMarker {
+                        guard value["threadID"] as? String == context.threadID.uuidString.lowercased(),
+                              value["inferenceID"] as? String == context.inferenceID.uuidString.lowercased(),
+                              value["runtimeGeneration"] as? String == context.runtimeGeneration.uuidString.lowercased(),
+                              value["preparationID"] as? String == context.preparationID.uuidString.lowercased() else { return nil }
+                    }
+                    let expected = clientMarker ? clientSyntheticUserText(nonce: nonce) : syntheticUserText(nonce: nonce)
                     guard value["userPromptSHA256"] as? String == sha256(Data(expected.utf8)),
                           WebsiteSyntheticFirstRequest.matches(request, expectedUserText: expected),
                           let canonical = String(data: request.continuationRequest, encoding: .utf8),
                           let catalogData = try? catalogEncoder().encode(request.toolCatalogDiagnostic),
                           let catalog = try? JSONSerialization.jsonObject(with: catalogData) else { return nil }
                     deadline = started + .milliseconds(Int64(expiry.timeIntervalSince(now) * 1_000))
-                    let record: [String: Any] = [
-                        "schemaVersion": 2, "purpose": firstRequestPurpose, "trigger": "first_user_request",
+                    var record: [String: Any] = [
+                        "schemaVersion": clientMarker ? 3 : 2, "purpose": expectedPurpose, "trigger": expectedTrigger,
                         "stage": "before_insert", "submissionVerified": false, "automaticReplay": false,
                         "nonce": nonce.uuidString.lowercased(), "expiresAt": expiryText,
                         "capturedAt": timestampFormatter().string(from: now), "provider": "claude",
@@ -153,9 +177,30 @@ enum ClaudeRequestCapture {
                         "outboundUTF8Bytes": outbound.utf8.count, "outboundUTF16Count": outbound.utf16.count,
                         "toolCatalog": catalog, "toolCatalogSHA256": sha256(catalogData),
                     ]
+                    if clientMarker {
+                        record["caseNonce"] = nonce.uuidString.lowercased()
+                        record["diagnosticOnly"] = true
+                        record["presentationExperiment"] = "transparent_external_client_intro_v1"
+                    }
                     return try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys, .withoutEscapingSlashes])
-                }, isCurrent: { !Task.isCancelled && self.isCurrent && deadline.map { ContinuousClock.now < $0 } == true },
-                beforeArmClaim: beforeArmClaim)
+            }
+            let current = { !Task.isCancelled && self.isCurrent && deadline.map { ContinuousClock.now < $0 } == true }
+            if clientMarker {
+                var bytes: Data?
+                guard let claim = WebsitePrivateDiagnosticCapture.claim(directory: directory, record: .request,
+                    maximumArmBytes: 4_096, validate: { arm in
+                        guard let record = makeRecord(arm), !record.isEmpty, record.count <= 2_000_000 else { return false }
+                        bytes = record; return true
+                    }, isCurrent: current, beforeArmClaim: beforeArmClaim), let bytes else { return false }
+                return WebsitePrivateDiagnosticCapture.publish(bytes, using: claim, isCurrent: current, commit: { rename in
+                    self.lock.withLock {
+                        !Task.isCancelled && self.active && deadline.map { ContinuousClock.now < $0 } == true && rename()
+                    }
+                })
+            }
+            return WebsitePrivateDiagnosticCapture.publish(directory: directory, outputName: "request.json",
+                maximumArmBytes: 4_096, maximumRecordBytes: 2_000_000, makeRecord: makeRecord,
+                isCurrent: current, beforeArmClaim: beforeArmClaim)
         }
     }
 

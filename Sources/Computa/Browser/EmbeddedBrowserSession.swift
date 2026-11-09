@@ -985,13 +985,16 @@ final class EmbeddedBrowserSession {
         guard let entry = entries[tabID], entry.isModelOwned, !entry.isToolOwned,
               entry.view.url == nil, entry.qwenCodePayloadChannel == nil,
               let source = Self.rendererDiagnosticSource(named:"qwen-code-payload"),
-              source.components(separatedBy: "__COMPUTA_QWEN_CODE_PAYLOAD_CONFIG__").count == 2 else { throw Failure.tabClosed }
+              let rawSource = Self.rendererDiagnosticSource(named:"qwen-authored-source"),
+              [source,rawSource].allSatisfy({ $0.components(separatedBy: "__COMPUTA_QWEN_CODE_PAYLOAD_CONFIG__").count == 2 }) else { throw Failure.tabClosed }
         let channel = ["dispatch": UUID().uuidString.lowercased(), "result": UUID().uuidString.lowercased(),
                        "secret": UUID().uuidString.lowercased()]
         let bytes = try JSONSerialization.data(withJSONObject: channel)
-        let script = WKUserScript(source: source.replacingOccurrences(of: "__COMPUTA_QWEN_CODE_PAYLOAD_CONFIG__",
-            with: String(decoding: bytes, as: UTF8.self)), injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page)
-        entry.view.configuration.userContentController.addUserScript(script)
+        for template in [source,rawSource] {
+            let script = WKUserScript(source: template.replacingOccurrences(of: "__COMPUTA_QWEN_CODE_PAYLOAD_CONFIG__",
+                with: String(decoding: bytes, as: UTF8.self)), injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page)
+            entry.view.configuration.userContentController.addUserScript(script)
+        }
         entry.qwenCodePayloadChannel = channel
     }
 

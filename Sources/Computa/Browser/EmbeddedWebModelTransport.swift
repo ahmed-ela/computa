@@ -395,19 +395,30 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     struct QwenCodePayloadIdentity: Equatable {
         let candidate: String
         let responseID: String
+        let rawAnswer: Bool
+
+        init(candidate: String, responseID: String, rawAnswer: Bool = false) {
+            self.candidate = candidate; self.responseID = responseID; self.rawAnswer = rawAnswer
+        }
+
+        var version: Int { rawAnswer ? 2 : 1 }
     }
 
     static func qwenCodePayloadIdentity(_ raw: Any?, state: String, grant: String? = nil) -> QwenCodePayloadIdentity? {
-        let keys: Set<String> = grant == nil ? ["version", "state", "candidate", "responseID"]
+        let baseKeys: Set<String> = grant == nil ? ["version", "state", "candidate", "responseID"]
             : ["version", "state", "grant", "candidate", "responseID"]
         guard ["pending", "sampled"].contains(state), (state == "sampled") == (grant != nil),
-              let value = raw as? [String: Any], Set(value.keys) == keys,
-              let version = value["version"] as? NSNumber, CFGetTypeID(version) != CFBooleanGetTypeID(), version.doubleValue == 1,
+              let value = raw as? [String: Any],
+              let version = value["version"] as? NSNumber, CFGetTypeID(version) != CFBooleanGetTypeID(),
+              [1.0, 2.0].contains(version.doubleValue) else { return nil }
+        let rawAnswer = version.doubleValue == 2
+        guard Set(value.keys) == (rawAnswer ? baseKeys.union(["sourceKind"]) : baseKeys),
+              !rawAnswer || value["sourceKind"] as? String == "raw_answer_v1",
               value["state"] as? String == state,
               let candidate = value["candidate"] as? String, UUID(uuidString:candidate)?.uuidString.lowercased() == candidate,
               let responseID = value["responseID"] as? String, UUID(uuidString:responseID)?.uuidString.lowercased() == responseID,
               grant == nil || value["grant"] as? String == grant else { return nil }
-        return .init(candidate:candidate,responseID:responseID)
+        return .init(candidate:candidate,responseID:responseID,rawAnswer:rawAnswer)
     }
 
     private struct QwenCodePayloadPending {
@@ -1720,7 +1731,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // this scope never grants focus, Inspector or response authority.
                 if let capture = ClaudeRequestCapture.firstRequest, session.provider == .claude,
                    !session.submitted, session.sequence == 0, session.baseline == 0,
-                   let choice = session.modelChoice, choice.modelID == ClaudeRequestCapture.firstRequestModel,
+                   let choice = session.modelChoice, ClaudeRequestCapture.isFirstRequestModel(choice.modelID),
                    let generation = session.documentGeneration,
                    browser.webView(for: session.tabID) === session.view,
                    browser.documentGeneration(for: session.tabID) == generation,
@@ -6469,8 +6480,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   session.qwenCodePayloadGrant == grant, let held = session.qwenCodePayload,
                   session.state == "running", !session.pendingSubmission, session.firstUserFingerprint != nil,
                   input["qwenCodePayloadChannel"] != nil else { throw Failure.responseFormatUnavailable }
-            input["qwenCodePayloadSample"] = ["version":1,"grant":grant,"candidate":held.identity.candidate,
+            var sample: [String: Any] = ["version":held.identity.version,"grant":grant,"candidate":held.identity.candidate,
                 "responseID":held.identity.responseID,"sequence":1]
+            if held.identity.rawAnswer { sample["sourceKind"] = "raw_answer_v1" }
+            input["qwenCodePayloadSample"] = sample
         }
         if let grant = savedResponseChoiceGrant {
             guard provider == .qwen, action == "inspect", enforceModel, !allowBlockedProvider,

@@ -998,7 +998,71 @@ function computaQwenDOM(c) {
     return root && root.tagName === 'DIV' && root.namespaceURI === 'http://www.w3.org/1999/xhtml'
       && root.isConnected && root.parentElement === document.body && root.contains(control) ? root : null;
   }
+  function authoredSourceCandidate(answer, channel, parentID) {
+    if (!answer || !channel || Object.keys(channel).sort().join(',') !== 'dispatch,result,secret'
+      || ![channel.dispatch,channel.result,channel.secret,parentID,answer.id].every(c.uuid)
+      || route().kind !== 'canonical' || !codePayloadRoot(answer.root)) return null;
+    let count = 0, source = null;
+    const listener = event => {
+      if (event.target !== answer.content || event.detail?.kind !== 'raw_answer_v1' || event.detail?.op !== 'candidate') return;
+      count++;
+      const value = event.detail;
+      if (Object.keys(value).sort().join(',') === 'candidate,eligible,kind,op,responseID'
+        && value.eligible === true && c.uuid(value.candidate) && value.responseID === answer.id) source = value.candidate;
+    };
+    document.addEventListener(channel.result,listener,true);
+    try {
+      answer.content.dispatchEvent(new CustomEvent(channel.dispatch,{bubbles:true,detail:{kind:'raw_answer_v1',op:'candidate',
+        secret:channel.secret,chatID:route().id,parentID,responseID:answer.id}}));
+    } finally { document.removeEventListener(channel.result,listener,true); }
+    if (count !== 1 || source === null) return null;
+    const nodes = [answer.root,answer.content]; let parent = answer.root.parentElement;
+    while (parent && nodes.length < 32) { nodes.push(parent); parent = parent.parentElement; }
+    if (parent || nodes[nodes.length-1] !== document.documentElement) return null;
+    return {kind:'raw_answer_v1',rawCandidate:source,parentID,nodes,control:answer.content,
+      root:answer.root,content:answer.content,responseID:answer.id};
+  }
+  function sampleAuthoredSource(candidate, channel, grant, recheck) {
+    const fail = codePayloadFailure, appRoot = codePayloadRoot(candidate.control);
+    if (!channel || Object.keys(channel).sort().join(',') !== 'dispatch,result,secret'
+      || ![channel.dispatch,channel.result,channel.secret,grant,candidate.rawCandidate].every(c.uuid)) fail('channel_shape');
+    if (!appRoot) fail('root_boundary');
+    let count = 0, captured = null, changed = false;
+    const observer = new MutationObserver(records => { if (records.length) changed = true; });
+    const listener = event => {
+      const value = event.detail;
+      if (event.target !== candidate.control || value?.kind !== 'raw_answer_v1' || value?.op !== 'sample' || value?.grant !== grant) return;
+      count++;
+      if (Object.keys(value).sort().join(',') !== 'candidate,eligible,grant,kind,op,responseID,text'
+        || value.eligible !== true || value.candidate !== candidate.rawCandidate || value.responseID !== candidate.responseID
+        || typeof value.text !== 'string' || value.text.length > 220000) return;
+      captured = value.text;
+    };
+    document.addEventListener(channel.result,listener,true);
+    try {
+      observer.observe(candidate.root,{subtree:true,childList:true,attributes:true,characterData:true});
+      for (const parent of new Set(candidate.nodes.map(node=>node.parentNode).filter(Boolean)))
+        observer.observe(parent,{childList:true,attributes:true});
+      recheck();
+      if (codePayloadRoot(candidate.control) !== appRoot) fail('root_boundary');
+      candidate.control.dispatchEvent(new CustomEvent(channel.dispatch,{bubbles:true,detail:{kind:'raw_answer_v1',op:'sample',
+        secret:channel.secret,chatID:route().id,parentID:candidate.parentID,responseID:candidate.responseID,
+        candidate:candidate.rawCandidate,grant}}));
+      if (observer.takeRecords().length) changed = true;
+      recheck();
+      if (observer.takeRecords().length) changed = true;
+      if (changed) fail('synchronous_mutation');
+      if (codePayloadRoot(candidate.control) !== appRoot) fail('root_boundary');
+      if (count !== 1) fail(count === 0 ? 'result_missing' : 'result_multiple');
+      if (captured === null) fail('result_invalid');
+      const bytes = new TextEncoder().encode(captured);
+      if (bytes.length > 220000) c.fail('response_too_large');
+      if (new TextDecoder('utf-8',{fatal:true}).decode(bytes) !== captured) fail('utf8_roundtrip');
+      return captured;
+    } finally { captured = null; observer.disconnect(); document.removeEventListener(channel.result,listener,true); }
+  }
   function sampleCodePayload(candidate, channel, grant, recheck) {
+    if (candidate.kind === 'raw_answer_v1') return sampleAuthoredSource(candidate,channel,grant,recheck);
     const fail = codePayloadFailure;
     if (!channel || Object.keys(channel).sort().join(',') !== 'dispatch,result,secret'
       || ![channel.dispatch,channel.result,channel.secret].every(c.uuid) || !c.uuid(grant)) fail('channel_shape');
@@ -1114,6 +1178,6 @@ function computaQwenDOM(c) {
   return { rejectUserCount, rejectSelectionBinding, firstDisplayReplacement, watchDisplayRender, displayHitFailure, firstBodyPresentation, firstBodyFailureStructure,
     responseChoiceTranscript: () => transcript(true, null, true),
     hasResponseChoice: () => c.nodes(document, '.qwen-chat-message-assistant .smrm', 2).length !== 0,
-    initialResponseIdentityTranscript: emptyContainerPrompt => transcript(true, emptyContainerPrompt), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer, codePayloadFailure, sampleCodePayload,
+    initialResponseIdentityTranscript: emptyContainerPrompt => transcript(true, emptyContainerPrompt), route, authored, initialReady, picker, modelRows, composer, transcript, completionCandidate, rawAnswer, codePayloadFailure, sampleCodePayload, authoredSourceCandidate,
     deletionTrigger, deletionMenu, deletionConfirmation, deletionObserved, insertLiteral };
 }

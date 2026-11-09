@@ -1868,7 +1868,7 @@ final class WebModelResponseCodecTests: XCTestCase {
         XCTAssertEqual(suffix, closingFence + "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.\n\n" + request.currentUserInstructions + "\n\n" +
                        ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(request.offeredToolNames), customToolNames: request.customToolNames,
                            includedInstructionText: includedInstructionText,
-                           responseFormat: LocalModelCatalog.webProvider(for: request.model) == "qwen" ? .rawJSON
+                           responseFormat: LocalModelCatalog.webProvider(for: request.model) == "qwen" ? .codePayloadJSON
                                : ["claude", "deepseek", "kimi"].contains(LocalModelCatalog.webProvider(for: request.model) ?? "") ? .literalFencedJSON : .fencedJSON,
                            singleActionRelay: request.singleActionRelay,
                            illustrateFunctionArguments: expectsFunctionLayout,
@@ -3124,7 +3124,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertFalse(first.currentUserInstructions.contains(latestRequest), "The locator must not duplicate user content")
             try assertUserPayloadAppearsOnce(latestRequest, in: first)
             XCTAssertTrue(first.prompt.hasSuffix(ComputaAgentInstructions.webResponseContract(offeredToolNames: ["computer_v2_snapshot"],
-                responseFormat: provider == "qwen" ? .rawJSON : ["claude", "deepseek", "kimi"].contains(provider) ? .literalFencedJSON : .fencedJSON,
+                responseFormat: provider == "qwen" ? .codePayloadJSON : ["claude", "deepseek", "kimi"].contains(provider) ? .literalFencedJSON : .fencedJSON,
                 singleActionRelay: first.singleActionRelay)))
             let nextInput = input + [
                 ["type": "function_call", "name": "computer_v2_snapshot", "arguments": "{}", "call_id": "current_extra"],

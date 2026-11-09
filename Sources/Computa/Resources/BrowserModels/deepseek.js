@@ -603,13 +603,23 @@ async function computaSavedConversation(input, c, dom, config) {
       && held.content === answer.content && held.responseID === answer.id && held.root.isConnected && held.content.isConnected;
     const sameCode = (held, current) => !!held && !!current && held.root === current.root
       && held.content === current.content && held.responseID === current.responseID && held.control === current.control
+      && held.kind === current.kind && held.rawCandidate === current.rawCandidate && held.parentID === current.parentID
       && held.nodes.length === current.nodes.length && held.nodes.every((node,index) => node === current.nodes[index] && node.isConnected);
+    const payloadMetadata = (held, stateName, grant) => ({version:held.source.kind === 'raw_answer_v1' ? 2 : 1,
+      state:stateName,...(grant ? {grant} : {}),candidate:held.candidate,responseID:held.source.responseID,
+      ...(held.source.kind === 'raw_answer_v1' ? {sourceKind:'raw_answer_v1'} : {})});
     function read() {
       const t = dom.transcript(), form = dom.composer(), evidence = selectionEvidence(false);
       validateInitialResponseIdentity(t, 'ordinary_read');
-      const extracted = dom.rawAnswer(t.answer);
+      let extracted = dom.rawAnswer(t.answer);
       state.initialReadComplete = true;
       const terminalUI = !!state.first && !!evidence && !state.deletion && dom.completionCandidate(t.answer);
+      if (terminalUI && extracted.formatIssue && qwenCodeEnabled
+        && (input.action === 'inspect' || input.action === 'verifyModel' && state.codePayload?.source.kind === 'raw_answer_v1')
+        && !cleanupInspection && !state.deletion && typeof dom.authoredSourceCandidate === 'function') {
+        const source = dom.authoredSourceCandidate(t.answer,input.qwenCodePayloadChannel,state.first.id);
+        if (source) extracted = {text:'',finalMarkup:false,formatIssue:false,codePayload:source};
+      }
       if (terminalUI && extracted.formatIssue && !cleanupInspection && !deletionActions.includes(input.action)) {
         try { c.fail('unsupported_response_format', 'authored_source'); }
         catch (error) {
@@ -632,7 +642,7 @@ async function computaSavedConversation(input, c, dom, config) {
         if (state.codePayload && !sameCodeAnswer(state.codePayload.source,t.answer)) c.fail('conversation_changed','response_identity');
         if (state.codePayload && !sameCode(state.codePayload.source,current)) dom.codePayloadFailure('candidate_changed');
         if (!state.codePayload) state.codePayload = {candidate:crypto.randomUUID(),source:current,spent:false};
-        codeMetadata = {version:1,state:'pending',candidate:state.codePayload.candidate,responseID:current.responseID};
+        codeMetadata = payloadMetadata(state.codePayload,'pending');
       } else if (state.codePayload && !cleanupInspection && !state.deletion && !deletionActions.includes(input.action)) {
         if (!sameCodeAnswer(state.codePayload.source,t.answer)) c.fail('conversation_changed','response_identity');
         dom.codePayloadFailure('candidate_missing');
@@ -1070,10 +1080,12 @@ async function computaSavedConversation(input, c, dom, config) {
       const out = initial.output, choice = input.expectedModelChoice;
       if (input.qwenCodePayloadSample != null) {
         const grant = input.qwenCodePayloadSample, held = state.codePayload;
+        const rawSource = held?.source.kind === 'raw_answer_v1';
         if (!qwenCodeEnabled || cleanupInspection || state.deletion || !state.first || !held || held.spent
           || input.allowFirstUserBinding !== false || input.expectedFirstUserFingerprint !== state.first.fingerprint
-          || Object.keys(grant).sort().join(',') !== 'candidate,grant,responseID,sequence,version'
-          || grant.version !== 1 || grant.sequence !== 1 || !c.uuid(grant.grant)
+          || Object.keys(grant).sort().join(',') !== (rawSource ? 'candidate,grant,responseID,sequence,sourceKind,version' : 'candidate,grant,responseID,sequence,version')
+          || grant.version !== (rawSource ? 2 : 1) || rawSource && grant.sourceKind !== 'raw_answer_v1'
+          || grant.sequence !== 1 || !c.uuid(grant.grant)
           || grant.candidate !== held.candidate || grant.responseID !== held.source.responseID
           || out.qwenCodePayload?.state !== 'pending' || !out.firstUserVerified || !out.firstUserMarkerVerified)
           c.fail('conversation_changed','response_identity');
@@ -1082,18 +1094,20 @@ async function computaSavedConversation(input, c, dom, config) {
           sampleCurrent(); guard(); selectionEvidence();
           if (!sameFirst(state.first) || dom.route().canonical !== state.canonical || !dom.completionCandidate(dom.transcript().answer))
             c.fail('conversation_changed','response_identity');
-          const transcript = dom.transcript(), current = dom.rawAnswer(transcript.answer).codePayload;
+          const transcript = dom.transcript(), current = rawSource
+            ? dom.authoredSourceCandidate(transcript.answer,input.qwenCodePayloadChannel,state.first.id)
+            : dom.rawAnswer(transcript.answer).codePayload;
           if (!sameCodeAnswer(held.source,transcript.answer) || transcript.users.length !== 1 || transcript.answers.length !== 1)
             c.fail('conversation_changed','response_identity');
-          // This dispatch samples the provider's owned Copy source; it is not a
-          // pointer gesture and carries no general browser-action hit authority.
+          // The closed kind is either owned Copy or a read-only current props
+          // source. Neither carries general browser-action hit authority.
           if (!sameCode(held.source,current)) dom.codePayloadFailure('candidate_changed');
         };
         // This final source sample follows every body/model await. Neither the
         // callback nor this return path may introduce a source-dependent await.
         const text = dom.sampleCodePayload(held.source,input.qwenCodePayloadChannel,grant.grant,recheck);
         return {...out,text,answerComplete:true,busy:false,
-          qwenCodePayload:{version:1,state:'sampled',grant:grant.grant,candidate:held.candidate,responseID:held.source.responseID}};
+          qwenCodePayload:payloadMetadata(held,'sampled',grant.grant)};
       }
       // Metadata for a separately armed native marker comparison. Ordinary acceptance precedes it.
       if (input.qwenSyntheticMarkerComparison === true && key === '__computaQwenSavedSessionV1'

@@ -460,7 +460,9 @@ enum WebModelResponseCodec {
                try displayProjection.map(groqCatalogNotice)].compactMap { $0 }.joined(separator: "\n\n")
             : [ComputaAgentInstructions.webInferenceContract(offeredFunctions: offered.mapValues(\.name),
             customToolNames: customNames, includedInstructionText: includedInstructionText, compactNativeContext: isChatGPT,
-            deduplicateNativeContext: isClaude || isGroq),
+            deduplicateNativeContext: isClaude || isGroq,
+            externalClientContext: isClaude && WebsiteModelCatalog.choice(for: model) ==
+                WebsiteModelChoice(provider: "claude", key: "Opus 4.7", label: "Opus 4.7")),
             deferredBrowserInstructions].compactMap { $0 }.joined(separator: "\n\n")
         let latestUserItemIndex = (object["input"] as? [Any])?.lastIndex { item in
             guard let message = item as? [String: Any], message["role"] as? String == "user" else { return false }

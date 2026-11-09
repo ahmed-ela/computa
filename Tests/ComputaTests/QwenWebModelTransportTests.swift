@@ -1014,6 +1014,92 @@ final class QwenWebModelTransportTests: XCTestCase {
         XCTAssertNil(EmbeddedWebModelTransport.qwenCodePayloadIdentity(pending, state: "sampled", grant: grant))
     }
 
+    func testQwenRawAnswerMetadataRequiresDistinctClosedKindAndGrant() {
+        let candidate = "11111111-1111-4111-8111-111111111111"
+        let response = "22222222-2222-4222-8222-222222222222"
+        let grant = "33333333-3333-4333-8333-333333333333"
+        let pending: [String: Any] = ["version": 2, "state": "pending", "candidate": candidate,
+            "responseID": response, "sourceKind": "raw_answer_v1"]
+        let identity = EmbeddedWebModelTransport.qwenCodePayloadIdentity(pending, state: "pending")
+        XCTAssertEqual(identity?.rawAnswer, true)
+        XCTAssertEqual(identity?.version, 2)
+        var sampled = pending; sampled["state"] = "sampled"; sampled["grant"] = grant
+        XCTAssertEqual(EmbeddedWebModelTransport.qwenCodePayloadIdentity(sampled, state: "sampled", grant: grant), identity)
+        var old = pending; old["version"] = 1; old.removeValue(forKey: "sourceKind")
+        XCTAssertNotEqual(EmbeddedWebModelTransport.qwenCodePayloadIdentity(old, state: "pending"), identity)
+        for (key, value) in [("version", true as Any), ("version", 1), ("version", 2.5),
+            ("sourceKind", "other"), ("candidate", "foreign"), ("responseID", "foreign"),
+            ("text", "private source"), ("extra", true)] {
+            var invalid = pending; invalid[key] = value
+            XCTAssertNil(EmbeddedWebModelTransport.qwenCodePayloadIdentity(invalid, state: "pending"), key)
+        }
+        var missing = pending; missing.removeValue(forKey: "sourceKind")
+        XCTAssertNil(EmbeddedWebModelTransport.qwenCodePayloadIdentity(missing, state: "pending"))
+        XCTAssertNil(EmbeddedWebModelTransport.qwenCodePayloadIdentity(sampled, state: "sampled", grant: candidate))
+    }
+
+    func testQwenCurrentHostRawAnswerReturnsWholeSourceWithoutCopyAndDeletesOwnedConversation() async throws {
+        let fixture = try Fixture(codePayload: true); defer { fixture.shutdown() }
+        let token = try await start(fixture, label: "Qwen3.8-Max")
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic raw source ownership")
+        let payload = try await installRawAnswer(fixture)
+        let complete = try await wait(fixture, token, state: "complete")
+        XCTAssertEqual(complete["text"] as? String, payload)
+        let repeated = try await call(fixture, "webProviderPoll", token)
+        XCTAssertEqual(repeated["text"] as? String, payload)
+        let delegations = try await evaluate(fixture.view, "return window.clipboardDelegations;") as? Int
+        XCTAssertEqual(delegations, 0)
+        let finished = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+        try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+        XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
+    func testQwenChangedCurrentRawHostAfterPendingCannotEmitOrReplaySource() async throws {
+        let fixture = try Fixture(codePayload: true); defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic changed raw source")
+        _ = try await installRawAnswer(fixture)
+        var changed = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard action == "inspect", !changed,
+                  let pending = try? await self.evaluate(fixture.view,
+                    "return !!globalThis.__computaQwenSavedSessionV1?.codePayload;", world: self.world) as? Bool,
+                  pending else { return }
+            changed = true
+            _ = try? await self.evaluate(fixture.view,
+                "const host=document.querySelector('.chat-response-message');host.__reactProps$synthetic={...host.__reactProps$synthetic};return true;")
+        }
+        do { _ = try await wait(fixture, token, state: "complete"); XCTFail("Changed raw source must not complete") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFormatUnavailable) }
+        XCTAssertTrue(changed)
+        do { _ = try await call(fixture, "webProviderPoll", token); XCTFail("A failed raw read must not replay") }
+        catch { XCTAssertNotNil(error) }
+        let delegations = try await evaluate(fixture.view, "return window.clipboardDelegations;") as? Int
+        XCTAssertEqual(delegations, 0)
+    }
+
+    private func installRawAnswer(_ fixture: Fixture) async throws -> String {
+        let body = try JSONSerialization.data(withJSONObject: ["type": "message", "text": "Synthetic [[12]] λ😀\n\t`raw` \"quote\"\\path"])
+        let payload = "```json\n" + String(decoding: body, as: UTF8.self) + "\n```"
+        let argument = try JSONSerialization.data(withJSONObject: ["payload": payload])
+        let source = #"""
+        const raw=__ARGS__.payload,host=document.querySelector('.chat-response-message'),user=document.querySelector('.chat-user-message-container');
+        const message={id:host.id.slice(22),parentId:user.dataset.msgId,childrenIds:[],role:'assistant',content:'',done:true,
+          chat_type:'t2t',sub_chat_type:'t2t',extra:{meta:{subChatType:'t2t'}},info:{},
+          feature_config:{thinking_enabled:true,local_mcp:undefined,output_schema:'phase',research_mode:'normal',auto_thinking:true,thinking_mode:'Auto'},
+          content_list:[{phase:'thinking_summary',role:'assistant',status:'finished',extra:{}},{phase:'answer',role:'assistant',status:'finished',extra:{},content:raw}]};
+        Object.defineProperty(message.content_list[0],'content',{get(){throw Error('Reasoning must remain unread');}});
+        const element=props=>({$$typeof:Symbol.for('react.transitional.element'),type:()=>{throw Error('No component execution');},props});
+        host.__reactProps$synthetic={id:host.id,children:element({message,children:element({message,phaseContentIndex:1,content:raw})})};
+        const link=document.createElement('a');link.textContent='DOM is deliberately not the whole source';
+        document.querySelector('.qwen-markdown').replaceChildren(link);return true;
+        """#.replacingOccurrences(of: "__ARGS__", with: String(decoding: argument, as: UTF8.self))
+        _ = try await evaluate(fixture.view, source)
+        return payload
+    }
+
     func testQwenFinalCodeCopySuppliesExactPayloadOnceAfterMetadataAndClosesOwnedConversation() async throws {
         for (presentation, label) in [("plain", "Qwen3.7-Plus"), ("editor", "Qwen3.8-Max")] {
             let fixture = try Fixture(codePayload: true); defer { fixture.shutdown() }
