@@ -21,6 +21,32 @@ No installed Codex app, unpublished source, or prebuilt executable is required.
 Upstream retains its Apache-2.0 license and NOTICE, which are copied into the
 app alongside the generated runtime.
 
+`mactopus-17` adds optional model metadata `command_output_token_limit`.
+Computa sets 1,024 only on canonical Groq catalog rows, including exact choices
+that override the provider prefix. Native model resolution refreshes this value
+when the selected model changes. The exec/write-stdin handlers limit their local
+effective output request before the existing formatter; issued arguments, command
+execution, permissions, exit/session status and raw collection stay unchanged.
+An explicitly smaller requested maximum and a stricter global policy still win.
+All other tools retain the existing generic output policy. This avoids cutting
+structured browser, reader or native UI results merely to shorten terminal text.
+
+The command limit uses the native formatter's byte-based token estimate, not
+Groq's tokenizer. Complete website-prompt admission still enforces the separate
+6,000-token body limit and 2,000-token reserve. Truncation remains explicit in the
+model-visible command result. Native collection is separately capped at 1 MiB
+head/tail and Swift presentation at 32 KiB; neither is unlimited. A completed
+Chunk ID is not a model-readable output handle. Capture large logs to a local
+file at execution time when later inspection is needed; do not replay uncertain
+effects to retrieve omitted text.
+
+The native file-editing regression keeps 32 distinct serial ChatGPT command
+items in one saved chat across three completed user turns, respecting the
+existing 16-inference limit per turn. A fourth no-edit turn and cold history
+reopening verify persistence without replay. Its Gemini fixture expects one
+owned website conversation per user turn. Synthetic reply fixtures supply their
+own literal-extraction evidence; production verification remains in force.
+
 To audit from a new directory without disturbing any existing source checkout:
 
 ```sh

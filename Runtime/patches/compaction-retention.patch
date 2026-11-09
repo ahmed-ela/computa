@@ -12383,6 +12383,18 @@ index 4f36d3a..8587e93 100644
  const DISABLE_MANAGED_CONFIG_ENV_VAR: &str = "CODEX_APP_SERVER_DISABLE_MANAGED_CONFIG";
  
  #[derive(Debug, Parser)]
+diff --git a/codex-rs/app-server/tests/common/models_cache.rs b/codex-rs/app-server/tests/common/models_cache.rs
+index e00e269..2a34065 100644
+--- a/codex-rs/app-server/tests/common/models_cache.rs
++++ b/codex-rs/app-server/tests/common/models_cache.rs
+@@ -55,6 +55,7 @@ fn preset_to_info(preset: &ModelPreset, priority: i32) -> ModelInfo {
+         apply_patch_tool_type: None,
+         web_search_tool_type: Default::default(),
+         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
++        command_output_token_limit: None,
+         supports_image_detail_original: false,
+         context_window: Some(272_000),
+         max_context_window: None,
 diff --git a/codex-rs/app-server/tests/suite/v2/analytics.rs b/codex-rs/app-server/tests/suite/v2/analytics.rs
 index 50fdb0c..9904cf0 100644
 --- a/codex-rs/app-server/tests/suite/v2/analytics.rs
@@ -13022,6 +13034,18 @@ index 863ccb9..76c0c40 100644
  }
  
  fn create_config_toml(
+diff --git a/codex-rs/codex-api/tests/models_integration.rs b/codex-rs/codex-api/tests/models_integration.rs
+index 297925c..bc0a0a2 100644
+--- a/codex-rs/codex-api/tests/models_integration.rs
++++ b/codex-rs/codex-api/tests/models_integration.rs
+@@ -92,6 +92,7 @@ async fn models_client_hits_models_endpoint() {
+             apply_patch_tool_type: None,
+             web_search_tool_type: Default::default(),
+             truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
++            command_output_token_limit: None,
+             supports_image_detail_original: false,
+             context_window: Some(272_000),
+             max_context_window: None,
 diff --git a/codex-rs/core/Cargo.toml b/codex-rs/core/Cargo.toml
 index 24c6640..a851e53 100644
 --- a/codex-rs/core/Cargo.toml
@@ -14010,10 +14034,10 @@ index b129556..ab796d0 100644
      test_model_client_with_thread_id(ThreadId::new(), session_source)
  }
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index c2ab78a..b4b88db 100644
+index c2ab78a..8b6ff67 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
-@@ -59,15 +59,20 @@ pub use codex_prompts::SUMMARIZATION_PROMPT;
+@@ -59,15 +59,28 @@ pub use codex_prompts::SUMMARIZATION_PROMPT;
  pub use codex_prompts::SUMMARY_PREFIX;
  const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
  
@@ -14021,6 +14045,14 @@ index c2ab78a..b4b88db 100644
 +mod assistant_history;
 +#[path = "compact_tool_receipts.rs"]
 +mod tool_receipts;
++
++#[cfg(test)]
++pub(crate) fn external_current_turn_receipts_for_test(
++    history: &[ResponseItemEnvelope],
++    turn_id: &str,
++) -> CodexResult<Vec<ResponseItemEnvelope>> {
++    tool_receipts::current_turn_receipts(history, turn_id, tool_receipts::ReceiptProvider::External)
++}
 +
  /// Controls whether compaction replacement history must include initial context.
  ///
@@ -14037,7 +14069,7 @@ index c2ab78a..b4b88db 100644
  pub(crate) enum InitialContextInjection {
      BeforeLastUserMessage {
          world_state: Arc<WorldState>,
-@@ -240,12 +245,36 @@ async fn run_compact_task_inner_impl(
+@@ -240,12 +253,36 @@ async fn run_compact_task_inner_impl(
      initial_context_injection: InitialContextInjection,
      compaction_metadata: CompactionTurnMetadata,
  ) -> CodexResult<String> {
@@ -14075,7 +14107,7 @@ index c2ab78a..b4b88db 100644
      history.record_items(
          &[initial_input_for_turn.into()],
          turn_context.model_info().truncation_policy.into(),
-@@ -350,7 +379,7 @@ async fn run_compact_task_inner_impl(
+@@ -350,7 +387,7 @@ async fn run_compact_task_inner_impl(
      let history_snapshot = sess.clone_history().await;
      let history_items = history_snapshot.annotated_items();
      let summary_suffix =
@@ -14084,7 +14116,7 @@ index c2ab78a..b4b88db 100644
      let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
      let identity = if sess.guardian_context_mode == GuardianContextMode::ThreadOwned {
          CompactedMessageIdentity::Preserve
-@@ -365,20 +394,49 @@ async fn run_compact_task_inner_impl(
+@@ -365,20 +402,49 @@ async fn run_compact_task_inner_impl(
          // belongs to this compaction turn.
          summary_item.set_turn_id_if_missing(&turn_context.sub_id);
      }
@@ -14136,7 +14168,7 @@ index c2ab78a..b4b88db 100644
      sess.replace_compacted_history(
          new_history,
          reference_context_item,
-@@ -788,7 +846,21 @@ async fn drain_to_completed(
+@@ -788,7 +854,21 @@ async fn drain_to_completed(
              ));
          };
          match event {
@@ -18216,8 +18248,71 @@ index 9252c89..a2413e3 100644
      #[expect(
          clippy::await_holding_invalid_type,
          reason = "active turn checks and turn state updates must remain atomic"
+diff --git a/codex-rs/core/src/session/step_settings_tests.rs b/codex-rs/core/src/session/step_settings_tests.rs
+index 1779136..3fd85d6 100644
+--- a/codex-rs/core/src/session/step_settings_tests.rs
++++ b/codex-rs/core/src/session/step_settings_tests.rs
+@@ -484,3 +484,58 @@ async fn model_resolution_preserves_startup_overrides_and_instruction_provenance
+         );
+     }
+ }
++
++#[tokio::test]
++async fn command_output_metadata_refreshes_on_model_switch_without_mutating_captured_step() {
++    let mut command = model_info_from_slug("model-command");
++    command.command_output_token_limit = Some(1024);
++    let ordinary = model_info_from_slug("model-ordinary");
++    let manager = StaticModelsManager::new(
++        None,
++        ModelsResponse {
++            models: vec![command.clone(), ordinary],
++        },
++    );
++    let requirements = ConfigRequirements::default();
++    let constraints = step_settings_constraints(&requirements);
++    let overrides = ModelInfoOverrides::default();
++    let mut selected = configured_settings();
++    selected.collaboration_mode =
++        selected
++            .collaboration_mode
++            .with_updates(Some("model-command".to_string()), None, None);
++    let initial = ResolvedStepSettings::new(Arc::new(selected), Arc::new(command), false);
++    let switched = initial
++        .apply_update(
++            &StepSettingsUpdate {
++                model: Some("model-ordinary".to_string()),
++                ..Default::default()
++            },
++            &constraints,
++            &manager,
++            &overrides,
++            false,
++        )
++        .await
++        .expect("ordinary switch");
++    assert_eq!(switched.model_info.command_output_token_limit, None);
++    assert_eq!(initial.model_info.command_output_token_limit, Some(1024));
++    let returned = switched
++        .apply_update(
++            &StepSettingsUpdate {
++                model: Some("model-command".to_string()),
++                ..Default::default()
++            },
++            &constraints,
++            &manager,
++            &overrides,
++            false,
++        )
++        .await
++        .expect("command switch");
++    assert_eq!(returned.model_info.command_output_token_limit, Some(1024));
++    assert_eq!(
++        returned.model_info.truncation_policy,
++        initial.model_info.truncation_policy
++    );
++}
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 745756d..7353771 100644
+index 745756d..24aeea1 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -332,6 +332,106 @@ fn assign_missing_response_item_ids_assigns_agent_message_ids() {
@@ -18226,7 +18321,7 @@ index 745756d..7353771 100644
  
 +#[test]
 +fn native_read_ledger_survives_history_id_assignment_and_repeated_serialized_compaction() {
-+    use crate::compact_tool_receipts::{ReceiptProvider, current_turn_receipts};
++    use crate::compact::external_current_turn_receipts_for_test as current_turn_receipts;
 +    use codex_history::{CodexHarnessMetadata, ResponseItemEnvelope};
 +    use codex_protocol::dynamic_tools::NativeBrowserRead;
 +    use codex_protocol::models::{ContentItem, FunctionCallOutputPayload};
@@ -18253,7 +18348,7 @@ index 745756d..7353771 100644
 +            original.push(ResponseItemEnvelope { item, metadata: Some(metadata) });
 +        }
 +    }
-+    let mut compacted = current_turn_receipts(&original, turn, ReceiptProvider::External).unwrap();
++    let mut compacted = current_turn_receipts(&original, turn).unwrap();
 +    let records = compacted.iter().filter_map(|item| item.metadata.as_ref()?.native_completed_reads.clone()).collect::<Vec<_>>();
 +    assert!(!records.is_empty(), "fixture must exercise real native read packing");
 +    assert_eq!(records.iter().map(|run| run.records.len()).sum::<usize>(), 7);
@@ -18290,7 +18385,7 @@ index 745756d..7353771 100644
 +        let metadata: Vec<Option<CodexHarnessMetadata>> = serde_json::from_slice(&serde_json::to_vec(&metadata).unwrap()).unwrap();
 +        let reloaded: Vec<_> = items.into_iter().zip(metadata).map(|(item, metadata)| ResponseItemEnvelope { item, metadata }).collect();
 +        let before = serde_json::to_vec(&reloaded.iter().map(|item| &item.item).collect::<Vec<_>>()).unwrap();
-+        let next = current_turn_receipts(&reloaded, turn, ReceiptProvider::External).unwrap();
++        let next = current_turn_receipts(&reloaded, turn).unwrap();
 +        assert_eq!(serde_json::to_vec(&reloaded.iter().map(|item| &item.item).collect::<Vec<_>>()).unwrap(), before, "validation must not rewrite saved item IDs");
 +        assert_eq!(next.iter().filter_map(|item| item.metadata.as_ref()?.native_completed_reads.clone()).collect::<Vec<_>>(), records);
 +        assert_eq!(&next[next.len()-2..], &reloaded[reloaded.len()-2..], "latest ordinary pair remains exact");
@@ -18318,7 +18413,7 @@ index 745756d..7353771 100644
 +                    content[0] = ContentItem::InputText { text: text.clone() };
 +                },
 +            }
-+            assert!(current_turn_receipts(&changed, turn, ReceiptProvider::External).is_err(), "only the enclosing ID may differ: variation {variation}");
++            assert!(current_turn_receipts(&changed, turn).is_err(), "only the enclosing ID may differ: variation {variation}");
 +        }
 +        compacted = next;
 +    }
@@ -18612,6 +18707,104 @@ index a1513df..b6be862 100644
                  self.request_command_approval(
                      ctx.review_context.turn(),
                      ExecApprovalKind::Command,
+diff --git a/codex-rs/core/src/tools/context_tests.rs b/codex-rs/core/src/tools/context_tests.rs
+index bd0cb0c..4edaffd 100644
+--- a/codex-rs/core/src/tools/context_tests.rs
++++ b/codex-rs/core/src/tools/context_tests.rs
+@@ -554,3 +554,93 @@ fn exec_command_tool_output_preserves_omission_metadata_when_truncated() {
+     assert!(text.contains("Warning: truncated output (original token count: 42000)"));
+     assert_eq!(text.matches(&marker).count(), 1);
+ }
++
++#[test]
++fn command_metadata_cap_preserves_exit_warning_raw_output_and_issued_arguments() {
++    let mut model = codex_models_manager::model_info::model_info_from_slug("fixture-command");
++    model.command_output_token_limit = Some(64);
++    let issued = r#"{"cmd":"synthetic read only","max_output_tokens":70000}"#;
++    let payload = ToolPayload::Function {
++        arguments: issued.to_string(),
++    };
++    let raw = "READ-ONLY-OBSERVATION ".repeat(2000).into_bytes();
++    for (exit, process) in [(Some(7), None), (None, Some(1234))] {
++        let output = ExecCommandToolOutput {
++            event_call_id: "call-command".to_string(),
++            chunk_id: "abc123".to_string(),
++            wall_time: Duration::from_millis(1250),
++            raw_output: raw.clone(),
++            truncation_policy: TruncationPolicy::Bytes(10_000),
++            max_output_tokens: model.cap_command_output_tokens(Some(70_000), 10_000),
++            process_id: process,
++            exit_code: exit,
++            original_token_count: Some(11_000),
++            output_omitted_bytes: None,
++            hook_command: None,
++        };
++        let before_raw = output.raw_output.clone();
++        let ResponseInputItem::FunctionCallOutput {
++            call_id,
++            output: result,
++        } = output.to_response_item("call-command", &payload)
++        else {
++            panic!("expected command result")
++        };
++        let text = result.body.to_text().expect("literal command output");
++        assert_eq!(call_id, "call-command");
++        assert!(text.contains("tokens truncated"));
++        assert!(text.contains("Original token count: 11000"));
++        if exit == Some(7) {
++            assert!(text.contains("Process exited with code 7"));
++        } else {
++            assert!(text.contains("Process running with session ID 1234"));
++        }
++        assert!(text.len() < raw.len());
++        assert_eq!(output.raw_output, before_raw);
++        assert!(output.log_output().len() > text.len());
++        let ToolPayload::Function { arguments } = &payload else {
++            panic!("function issued")
++        };
++        assert_eq!(arguments, issued);
++    }
++}
++
++#[test]
++fn command_metadata_cap_still_obeys_global_policy_and_leaves_structured_outputs_exact() {
++    let mut model = codex_models_manager::model_info::model_info_from_slug("fixture-command");
++    model.command_output_token_limit = Some(1024);
++    let output = ExecCommandToolOutput {
++        event_call_id: "call-global".to_string(),
++        chunk_id: "abc123".to_string(),
++        wall_time: Duration::ZERO,
++        raw_output: "large text ".repeat(2000).into_bytes(),
++        truncation_policy: TruncationPolicy::Tokens(32),
++        max_output_tokens: model.cap_command_output_tokens(None, 10_000),
++        process_id: None,
++        exit_code: Some(0),
++        original_token_count: Some(5500),
++        output_omitted_bytes: None,
++        hook_command: None,
++    };
++    assert_eq!(output.model_output_policy(), TruncationPolicy::Tokens(32));
++    let json =
++        serde_json::json!({"observations": [{"ref": "synthetic-ref", "body": "x".repeat(6000)}]});
++    let exact = serde_json::to_string(&json).expect("full structured JSON");
++    for payload in [
++        ToolPayload::Function {
++            arguments: "{}".to_string(),
++        },
++        ToolPayload::Custom {
++            input: "synthetic patch".to_string(),
++        },
++    ] {
++        let response = FunctionToolOutput::from_text(exact.clone(), Some(true))
++            .to_response_item("call-json", &payload);
++        let stored = match response {
++            ResponseInputItem::FunctionCallOutput { output, .. }
++            | ResponseInputItem::CustomToolCallOutput { output, .. } => output,
++            other => panic!("unexpected result {other:?}"),
++        };
++        assert_eq!(stored.body.to_text().as_deref(), Some(exact.as_str()));
++    }
++}
 diff --git a/codex-rs/core/src/tools/events.rs b/codex-rs/core/src/tools/events.rs
 index faa1e6d..4b37952 100644
 --- a/codex-rs/core/src/tools/events.rs
@@ -18983,6 +19176,93 @@ index f2b7860..4cd01c4 100644
 +            *text = serde_json::to_string_pretty(&body).unwrap();
 +            assert_output_unchanged(&tool, response, Some(NativeBrowserRead::InventoryV1));
 +        }
++    }
++}
+diff --git a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
+index 0a026fb..8a8f058 100644
+--- a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
++++ b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
+@@ -26,6 +26,7 @@ use crate::tools::registry::CoreToolRuntime;
+ use crate::tools::registry::PostToolUsePayload;
+ use crate::tools::registry::PreToolUsePayload;
+ use crate::tools::registry::ToolExecutor;
++use crate::unified_exec::DEFAULT_MAX_OUTPUT_TOKENS;
+ use crate::unified_exec::ExecCommandRequest;
+ use crate::unified_exec::UnifiedExecContext;
+ use crate::unified_exec::UnifiedExecError;
+@@ -307,6 +308,10 @@ impl ExecCommandHandler {
+             prefix_rule,
+             ..
+         } = args;
++        let max_output_tokens = step_context
++            .settings
++            .model_info
++            .cap_command_output_tokens(max_output_tokens, DEFAULT_MAX_OUTPUT_TOKENS);
+         let completion_timeout = match self.lifetime {
+             ExecCommandLifetime::Interactive => None,
+             ExecCommandLifetime::OneShot => {
+diff --git a/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs b/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs
+index 5f9d9cf..03b3945 100644
+--- a/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs
++++ b/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs
+@@ -8,6 +8,7 @@ use crate::tools::registry::PostToolUsePayload;
+ use crate::tools::registry::PreToolUsePayload;
+ use crate::tools::registry::ToolExecutor;
+ use crate::tools::sandboxing::ToolError;
++use crate::unified_exec::DEFAULT_MAX_OUTPUT_TOKENS;
+ use crate::unified_exec::UnifiedExecContext;
+ use crate::unified_exec::UnifiedExecError;
+ use crate::unified_exec::WriteStdinInteractionEvent;
+@@ -90,7 +91,14 @@ impl WriteStdinHandler {
+                     process_id: args.session_id,
+                     input: &args.chars,
+                     yield_time_ms: args.yield_time_ms,
+-                    max_output_tokens: args.max_output_tokens,
++                    max_output_tokens: context
++                        .step_context
++                        .settings
++                        .model_info
++                        .cap_command_output_tokens(
++                            args.max_output_tokens,
++                            DEFAULT_MAX_OUTPUT_TOKENS,
++                        ),
+                     truncation_policy: context
+                         .step_context
+                         .settings
+@@ -143,3 +151,35 @@ impl CoreToolRuntime for WriteStdinHandler {
+         post_unified_exec_tool_use_payload(invocation, result)
+     }
+ }
++
++#[cfg(test)]
++mod command_output_limit_tests {
++    use super::*;
++
++    #[test]
++    fn write_stdin_command_cap_does_not_rewrite_requested_arguments() {
++        let issued = r#"{"session_id":1234,"chars":"","max_output_tokens":70000}"#;
++        let args: WriteStdinArgs = serde_json::from_str(issued).expect("issued poll");
++        let mut model = codex_models_manager::model_info::model_info_from_slug("fixture-limited");
++        model.command_output_token_limit = Some(1024);
++        assert_eq!(
++            model.cap_command_output_tokens(args.max_output_tokens, DEFAULT_MAX_OUTPUT_TOKENS),
++            Some(1024)
++        );
++        assert_eq!(args.max_output_tokens, Some(70_000));
++        assert_eq!(args.session_id, 1234);
++        assert_eq!(args.chars, "");
++        let small: WriteStdinArgs =
++            serde_json::from_str(r#"{"session_id":1234,"max_output_tokens":23}"#)
++                .expect("small poll");
++        assert_eq!(
++            model.cap_command_output_tokens(small.max_output_tokens, DEFAULT_MAX_OUTPUT_TOKENS),
++            Some(23)
++        );
++        model.command_output_token_limit = None;
++        assert_eq!(
++            model.cap_command_output_tokens(args.max_output_tokens, DEFAULT_MAX_OUTPUT_TOKENS),
++            Some(70_000)
++        );
 +    }
 +}
 diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
@@ -20744,6 +21024,18 @@ index 3e24f59..3dc7f87 100644
                  content_items: vec![DynamicToolCallOutputContentItem::InputAudio {
                      audio_url: pcm_wav_data_url(/*sample_count*/ 80_000),
                  }],
+diff --git a/codex-rs/core/tests/suite/auto_review.rs b/codex-rs/core/tests/suite/auto_review.rs
+index 7f6b1a6..2b5e66b 100644
+--- a/codex-rs/core/tests/suite/auto_review.rs
++++ b/codex-rs/core/tests/suite/auto_review.rs
+@@ -640,6 +640,7 @@ fn remote_model_with_auto_review_override(slug: &str, review_model: &str) -> Mod
+         apply_patch_tool_type: Some(ApplyPatchToolType::Freeform),
+         web_search_tool_type: Default::default(),
+         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
++        command_output_token_limit: None,
+         supports_image_detail_original: false,
+         context_window: Some(272_000),
+         max_context_window: None,
 diff --git a/codex-rs/core/tests/suite/code_mode.rs b/codex-rs/core/tests/suite/code_mode.rs
 index acb1f4b..07d4a06 100644
 --- a/codex-rs/core/tests/suite/code_mode.rs
@@ -22412,6 +22704,38 @@ index 59e4019..4df91c2 100644
  mod context_annotations;
  mod current_time_reminder;
  mod cyber_access_program;
+diff --git a/codex-rs/core/tests/suite/model_switching.rs b/codex-rs/core/tests/suite/model_switching.rs
+index 23cd535..9903888 100644
+--- a/codex-rs/core/tests/suite/model_switching.rs
++++ b/codex-rs/core/tests/suite/model_switching.rs
+@@ -151,6 +151,7 @@ fn test_model_info(
+         apply_patch_tool_type: None,
+         web_search_tool_type: Default::default(),
+         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
++        command_output_token_limit: None,
+         supports_image_detail_original: false,
+         context_window: Some(272_000),
+         max_context_window: None,
+@@ -1278,6 +1279,7 @@ async fn model_switch_to_smaller_model_updates_token_context_window() -> Result<
+         apply_patch_tool_type: None,
+         web_search_tool_type: Default::default(),
+         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
++        command_output_token_limit: None,
+         supports_image_detail_original: false,
+         context_window: Some(large_context_window),
+         max_context_window: None,
+diff --git a/codex-rs/core/tests/suite/models_cache_ttl.rs b/codex-rs/core/tests/suite/models_cache_ttl.rs
+index a50a509..552dfd0 100644
+--- a/codex-rs/core/tests/suite/models_cache_ttl.rs
++++ b/codex-rs/core/tests/suite/models_cache_ttl.rs
+@@ -561,6 +561,7 @@ fn test_remote_model(slug: &str, priority: i32) -> ModelInfo {
+         apply_patch_tool_type: None,
+         web_search_tool_type: Default::default(),
+         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
++        command_output_token_limit: None,
+         supports_image_detail_original: false,
+         context_window: Some(272_000),
+         max_context_window: None,
 diff --git a/codex-rs/core/tests/suite/openai_file_mcp.rs b/codex-rs/core/tests/suite/openai_file_mcp.rs
 index 9ae4b31..c568919 100644
 --- a/codex-rs/core/tests/suite/openai_file_mcp.rs
@@ -22447,6 +22771,46 @@ index eada6c3..509f490 100644
          matches!(event, EventMsg::TurnComplete(_))
      })
      .await;
+diff --git a/codex-rs/core/tests/suite/remote_models.rs b/codex-rs/core/tests/suite/remote_models.rs
+index f83623b..2672290 100644
+--- a/codex-rs/core/tests/suite/remote_models.rs
++++ b/codex-rs/core/tests/suite/remote_models.rs
+@@ -638,6 +638,7 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
+         apply_patch_tool_type: None,
+         web_search_tool_type: Default::default(),
+         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
++        command_output_token_limit: None,
+         supports_image_detail_original: false,
+         context_window: Some(272_000),
+         max_context_window: None,
+@@ -925,6 +926,7 @@ async fn remote_models_apply_legacy_instructions(auth: CodexAuth) -> Result<()>
+         apply_patch_tool_type: None,
+         web_search_tool_type: Default::default(),
+         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
++        command_output_token_limit: None,
+         supports_image_detail_original: false,
+         context_window: Some(272_000),
+         max_context_window: None,
+@@ -1504,6 +1506,7 @@ fn test_remote_model_with_policy(
+         apply_patch_tool_type: None,
+         web_search_tool_type: Default::default(),
+         truncation_policy,
++        command_output_token_limit: None,
+         supports_image_detail_original: false,
+         context_window: Some(272_000),
+         max_context_window: None,
+diff --git a/codex-rs/core/tests/suite/rmcp_client.rs b/codex-rs/core/tests/suite/rmcp_client.rs
+index 1b2d495..19eaa48 100644
+--- a/codex-rs/core/tests/suite/rmcp_client.rs
++++ b/codex-rs/core/tests/suite/rmcp_client.rs
+@@ -2835,6 +2835,7 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
+                 apply_patch_tool_type: None,
+                 web_search_tool_type: Default::default(),
+                 truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
++                command_output_token_limit: None,
+                 supports_image_detail_original: false,
+                 context_window: Some(272_000),
+                 max_context_window: None,
 diff --git a/codex-rs/core/tests/suite/search_tool.rs b/codex-rs/core/tests/suite/search_tool.rs
 index 4d9b248..ff95589 100644
 --- a/codex-rs/core/tests/suite/search_tool.rs
@@ -22469,6 +22833,18 @@ index 1fbf7df..bfe7562 100644
      AUTO_SUMMARY
 +04:function_call/test_tool:{}
 +05:function_call_output:unsupported call: test_tool
+diff --git a/codex-rs/core/tests/suite/spawn_agent_description.rs b/codex-rs/core/tests/suite/spawn_agent_description.rs
+index 2df3876..dd0e2e2 100644
+--- a/codex-rs/core/tests/suite/spawn_agent_description.rs
++++ b/codex-rs/core/tests/suite/spawn_agent_description.rs
+@@ -118,6 +118,7 @@ fn test_model_info(
+         apply_patch_tool_type: None,
+         web_search_tool_type: Default::default(),
+         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
++        command_output_token_limit: None,
+         supports_image_detail_original: false,
+         context_window: Some(272_000),
+         max_context_window: None,
 diff --git a/codex-rs/core/tests/suite/step_settings.rs b/codex-rs/core/tests/suite/step_settings.rs
 index afda72b..5525755 100644
 --- a/codex-rs/core/tests/suite/step_settings.rs
@@ -22481,6 +22857,18 @@ index afda72b..5525755 100644
      };
      test.codex
          .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+diff --git a/codex-rs/core/tests/suite/view_image.rs b/codex-rs/core/tests/suite/view_image.rs
+index e29c41d..3dd8ebb 100644
+--- a/codex-rs/core/tests/suite/view_image.rs
++++ b/codex-rs/core/tests/suite/view_image.rs
+@@ -1650,6 +1650,7 @@ async fn view_image_tool_returns_unsupported_message_for_text_only_model() -> an
+         apply_patch_tool_type: None,
+         web_search_tool_type: Default::default(),
+         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
++        command_output_token_limit: None,
+         supports_image_detail_original: false,
+         context_window: Some(272_000),
+         max_context_window: None,
 diff --git a/codex-rs/exec-server/tests/exec_process.rs b/codex-rs/exec-server/tests/exec_process.rs
 index b4e861d..7bfaa37 100644
 --- a/codex-rs/exec-server/tests/exec_process.rs
@@ -22889,6 +23277,65 @@ index 4565f79..7d74443 100644
      ))
      .unwrap();
      assert!(re.is_match(&user_agent));
+diff --git a/codex-rs/models-manager/src/manager_tests.rs b/codex-rs/models-manager/src/manager_tests.rs
+index 4ef2971..62af6a2 100644
+--- a/codex-rs/models-manager/src/manager_tests.rs
++++ b/codex-rs/models-manager/src/manager_tests.rs
+@@ -18,6 +18,7 @@ use codex_login::TokenData;
+ use codex_protocol::auth::AuthMode;
+ use codex_protocol::openai_models::ModelAccessPrograms;
+ use codex_protocol::openai_models::ModelsResponse;
++use codex_protocol::openai_models::TruncationPolicyConfig;
+ use codex_protocol::turn_input::CyberAccessProgram;
+ use pretty_assertions::assert_eq;
+ use serde_json::json;
+@@ -1623,3 +1624,34 @@ fn bundled_models_json_roundtrips() {
+         "bundled models.json should contain at least one model"
+     );
+ }
++
++#[test]
++fn command_output_metadata_follows_longest_current_model_and_global_override_is_separate() {
++    let mut limited = remote_model("fixture/commands", "Limited commands", 0);
++    limited.command_output_token_limit = Some(1024);
++    let ordinary = remote_model("fixture/ordinary", "Ordinary", 0);
++    let catalog = vec![limited, ordinary];
++    for global in [None, Some(31)] {
++        let config = ModelsManagerConfig {
++            tool_output_token_limit: global,
++            ..Default::default()
++        };
++        for (id, expected) in [
++            ("fixture/commands/choice", Some(1024)),
++            ("fixture/ordinary/choice", None),
++            ("fixture/not-matched", None),
++            ("fixture/commands/choice", Some(1024)),
++        ] {
++            let resolved = construct_model_info_from_candidates(id, &catalog, &config);
++            assert_eq!(resolved.slug, id);
++            assert_eq!(resolved.command_output_token_limit, expected);
++            assert_eq!(
++                resolved.truncation_policy,
++                match global {
++                    Some(limit) => TruncationPolicyConfig::bytes((limit * 4) as i64),
++                    None => TruncationPolicyConfig::bytes(10_000),
++                }
++            );
++        }
++    }
++}
+diff --git a/codex-rs/models-manager/src/model_info.rs b/codex-rs/models-manager/src/model_info.rs
+index b9ead2b..1b5cdff 100644
+--- a/codex-rs/models-manager/src/model_info.rs
++++ b/codex-rs/models-manager/src/model_info.rs
+@@ -138,6 +138,7 @@ pub fn model_info_from_slug(slug: &str) -> ModelInfo {
+         apply_patch_tool_type: None,
+         web_search_tool_type: WebSearchToolType::Text,
+         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
++        command_output_token_limit: None,
+         supports_image_detail_original: false,
+         context_window: Some(272_000),
+         max_context_window: Some(272_000),
 diff --git a/codex-rs/network-proxy/src/credential_broker/registry.rs b/codex-rs/network-proxy/src/credential_broker/registry.rs
 index d9e1555..be4fe7e 100644
 --- a/codex-rs/network-proxy/src/credential_broker/registry.rs
@@ -23052,6 +23499,96 @@ index bbe92b8..cec3e05 100644
 +        }
 +    }
 +}
+diff --git a/codex-rs/protocol/src/openai_models.rs b/codex-rs/protocol/src/openai_models.rs
+index 79f268c..fa0b5cd 100644
+--- a/codex-rs/protocol/src/openai_models.rs
++++ b/codex-rs/protocol/src/openai_models.rs
+@@ -446,6 +446,10 @@ pub struct ModelInfo {
+     #[serde(default)]
+     pub web_search_tool_type: WebSearchToolType,
+     pub truncation_policy: TruncationPolicyConfig,
++    /// Optional model-visible output cap for exec_command/write_stdin only.
++    /// Other tool payloads and native command-output collection are unchanged.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub command_output_token_limit: Option<usize>,
+     #[serde(default)]
+     pub supports_image_detail_original: bool,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+@@ -507,6 +511,19 @@ pub struct ModelInfo {
+ }
+ 
+ impl ModelInfo {
++    /// Clamp only the local command formatter's effective request. The actual
++    /// issued arguments remain unchanged in native history. None preserves the
++    /// existing default/request semantics and the global tool policy still caps.
++    pub fn cap_command_output_tokens(
++        &self,
++        requested: Option<usize>,
++        default: usize,
++    ) -> Option<usize> {
++        self.command_output_token_limit
++            .map(|limit| requested.unwrap_or(default).min(limit))
++            .or(requested)
++    }
++
+     pub fn resolved_context_window(&self) -> Option<i64> {
+         self.context_window.or(self.max_context_window)
+     }
+@@ -958,6 +975,7 @@ mod tests {
+             apply_patch_tool_type: None,
+             web_search_tool_type: WebSearchToolType::Text,
+             truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
++            command_output_token_limit: None,
+             supports_image_detail_original: false,
+             context_window: None,
+             max_context_window: None,
+@@ -980,6 +998,46 @@ mod tests {
+             multi_agent_reasoning_effort: None,
+         }
+     }
++    #[test]
++    fn command_output_limit_is_optional_and_preserves_legacy_serialization() {
++        let legacy = test_model(None);
++        let mut value = serde_json::to_value(&legacy).expect("model JSON");
++        assert!(value.get("command_output_token_limit").is_none());
++        let decoded: ModelInfo = serde_json::from_value(value.clone()).expect("legacy metadata");
++        assert_eq!(decoded.command_output_token_limit, None);
++        value["command_output_token_limit"] = serde_json::json!(1024);
++        let limited: ModelInfo = serde_json::from_value(value).expect("new optional metadata");
++        assert_eq!(limited.command_output_token_limit, Some(1024));
++        assert_eq!(limited.truncation_policy, legacy.truncation_policy);
++        let mut restored = limited;
++        restored.command_output_token_limit = None;
++        assert_eq!(
++            serde_json::to_value(restored).expect("restored JSON"),
++            serde_json::to_value(legacy).expect("legacy JSON")
++        );
++    }
++
++    #[test]
++    fn command_output_limit_caps_effective_request_without_changing_other_policy() {
++        let mut model = test_model(None);
++        for requested in [None, Some(70_000), Some(23), Some(0)] {
++            assert_eq!(
++                model.cap_command_output_tokens(requested, 10_000),
++                requested
++            );
++        }
++        let policy = model.truncation_policy;
++        model.command_output_token_limit = Some(1024);
++        assert_eq!(model.cap_command_output_tokens(None, 10_000), Some(1024));
++        assert_eq!(
++            model.cap_command_output_tokens(Some(70_000), 10_000),
++            Some(1024)
++        );
++        assert_eq!(model.cap_command_output_tokens(Some(23), 10_000), Some(23));
++        assert_eq!(model.cap_command_output_tokens(Some(0), 10_000), Some(0));
++        assert_eq!(model.truncation_policy, policy);
++    }
++
+     #[test]
+     fn model_messages_deserialize_without_optional_sections() {
+         let messages: ModelMessages = from_str(
 diff --git a/codex-rs/protocol/src/permission_profile_intersection_tests.rs b/codex-rs/protocol/src/permission_profile_intersection_tests.rs
 index 0b14f14..bee352a 100644
 --- a/codex-rs/protocol/src/permission_profile_intersection_tests.rs

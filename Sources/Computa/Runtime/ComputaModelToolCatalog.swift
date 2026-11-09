@@ -554,7 +554,7 @@ enum ComputaModelToolCatalog {
         ids.insert("api/")
         if let additionalModelID, !additionalModelID.isEmpty { ids.insert(additionalModelID) }
         let models = ids.sorted().map { id -> [String: Any] in
-            [
+            var model: [String: Any] = [
                 "slug": id, "display_name": id, "description": NSNull(),
                 "default_reasoning_level": NSNull(), "supported_reasoning_levels": [String](),
                 "shell_type": "unified_exec", "visibility": "none", "supported_in_api": true,
@@ -576,6 +576,13 @@ enum ComputaModelToolCatalog {
                 "supports_experimental_context": false, "use_responses_lite": false,
                 "node_repl_auto_review_required": false, "node_repl_disabled": false,
             ]
+            // Exact provider classification covers both the prefix and any
+            // longer additional/choice row that wins native metadata lookup.
+            // This caps command text only; structured tool policy stays exact.
+            if LocalModelCatalog.webProvider(for: id) == "groq" {
+                model["command_output_token_limit"] = 1_024
+            }
+            return model
         }
         return try JSONSerialization.data(withJSONObject: ["models": models], options: [.sortedKeys, .withoutEscapingSlashes])
     }

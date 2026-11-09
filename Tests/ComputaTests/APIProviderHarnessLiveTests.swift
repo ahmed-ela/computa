@@ -13,7 +13,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_API_ENGINE_TEST"] == "1",
             "Enable the isolated bundled API harness qualification.")
         let artifact = try ComputaRuntimeArtifact.resolve()
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-16")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-17")
         XCTAssertTrue(artifact.manifest.capabilities.contains(.browserLifecycleObservationsV1))
         let failuresBefore = testRun?.failureCount ?? 0
         guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw CocoaError(.fileReadUnknown) }
@@ -160,7 +160,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_API_ENGINE_TEST"] == "1",
             "Enable the isolated bundled API harness qualification.")
         let artifact = try ComputaRuntimeArtifact.resolve()
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-16")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-17")
         let failuresBefore = testRun?.failureCount ?? 0
         guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw CocoaError(.fileReadUnknown) }
         defer { free(resolved) }
@@ -337,7 +337,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             throw XCTSkip("The bundled AgentRuntime artifact is absent in this source-only checkout.")
         }
         XCTAssertEqual(artifact.manifest.sourceCommit, "4607249e430dac1c961df4dc615beae88e33cec8")
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-16")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-17")
         XCTAssertEqual(artifact.executableURL.lastPathComponent, "codex-app-server")
         XCTAssertFalse(artifact.executableURL.path.contains("ChatGPT.app"))
 
@@ -533,7 +533,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_API_ENGINE_TEST"] == "1",
             "Enable the isolated bundled API harness qualification.")
         let artifact = try ComputaRuntimeArtifact.resolve()
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-16")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-17")
         let failuresBefore = testRun?.failureCount ?? 0
         guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw CocoaError(.fileReadUnknown) }
         defer { free(resolved) }
@@ -680,7 +680,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             throw XCTSkip("The bundled AgentRuntime artifact is absent in this source-only checkout.")
         }
         XCTAssertEqual(artifact.manifest.sourceCommit, "4607249e430dac1c961df4dc615beae88e33cec8")
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-16")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-17")
         let failuresBefore = testRun?.failureCount ?? 0
         let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
             .appendingPathComponent("ComputaAPIRateLimit-\(UUID().uuidString)", isDirectory: true)
@@ -789,7 +789,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             throw XCTSkip("The bundled AgentRuntime artifact is absent in this source-only checkout.")
         }
         XCTAssertEqual(artifact.manifest.sourceCommit, "4607249e430dac1c961df4dc615beae88e33cec8")
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-16")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-17")
         let failuresBefore = testRun?.failureCount ?? 0
         // Match the passing harness: descriptor-based stores reject the /var symlink alias.
         guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw CocoaError(.fileReadUnknown) }

@@ -8,6 +8,118 @@ import XCTest
 /// The finite printed result is budget evidence, never provider qualification.
 @MainActor
 final class GroqBundledPreflightProducerTests: XCTestCase {
+    /// Native command-only metadata; no global cap, provider, or failed publication.
+    func testBundledGroqCommandOnlyLimitRetainsFailedExitAndExactPreflight() async throws {
+        guard ProcessInfo.processInfo.environment["COMPUTA_TEST_GROQ_COMMAND_OUTPUT_POLICY"] == "1" else {
+            throw XCTSkip("Explicit opt-in required: COMPUTA_TEST_GROQ_COMMAND_OUTPUT_POLICY=1")
+        }
+        var reports: [GroqCommandOutputReport] = []
+        for explicit in [false, true] {
+            reports.append(try await commandOutputProbe(limit: 1_024, explicit: explicit))
+        }
+        try writeFiniteReport(JSONEncoder().encode(reports), prefix: "groqCommandOutputFinite=")
+    }
+
+    private func commandOutputProbe(limit: Int, explicit: Bool) async throws -> GroqCommandOutputReport {
+        let failureCount = try XCTUnwrap(testRun).failureCount
+        let artifact = try ComputaRuntimeArtifact.resolve()
+        XCTAssertEqual(artifact.manifest.sourceCommit, ComputaRuntimeArtifact.sourceCommit)
+        let choice = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B")
+        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appendingPathComponent("GroqCommandOutput-" + UUID().uuidString, isDirectory: true)
+        let home = root.appendingPathComponent("Home", isDirectory: true)
+        let workspace = root.appendingPathComponent("Workspace", isDirectory: true)
+        for directory in [home, workspace] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
+        }
+        // No global tool-output setting. New native metadata must affect only commands.
+        XCTAssertFalse(FileManager.default.fileExists(atPath: home.appendingPathComponent("config.toml").path))
+        XCTAssertNil(CodexAppServerRuntime.localThreadConfig(for: choice.modelID)["tool_output_token_limit"])
+        try GroqCommandPolicyProof.require(artifact: artifact, modelID: choice.modelID)
+        let task = UUID().uuidString.lowercased(), marker = "GROQ_COMMAND_OUTPUT_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        let user = "Execute the one inert fixture command exactly once, retain its failed exit as a failure, then acknowledge. Do not retry, repair files, inspect apps, use a browser or request permissions."
+        let command = GroqCommandOutputFacts.commandText
+        let facts = GroqCommandOutputFacts(task: task, choice: choice, user: user, command: command,
+            workspace: workspace.path, explicit: explicit)
+        let transport = GroqCommandOutputTransport(choice: choice, marker: marker, command: command,
+            workspace: workspace.path, explicit: explicit)
+        var config = CodexAppServerRuntime.Configuration.externalLocalQwen
+        config.executable = .bundled; config.model = choice.modelID
+        config.codexHomePath = home.path; config.workspacePath = workspace.path; config.protocolTracePath = nil
+        config.groqPreflightObserverForTesting = { facts.observe($0, $1) }
+        let runtime = CodexAppServerRuntime(configuration: config, visualGrounder: GroqProducerNoVisualGrounder())
+        let audit = GroqCommandOutputAudit(task: task, marker: marker)
+        let browser = InertRuntimeBrowser()
+        let watcher = Task { for await event in runtime.events() { audit.receive(event) } }
+        do {
+            await runtime.configureEmbeddedBrowserTools(EmbeddedBrowserToolController(transport: browser))
+            await runtime.configureEmbeddedWebModelTransport(WebsiteInferenceFixtureTransport(transport))
+            await runtime.setGroqSubmissionIntervalForTesting(.zero)
+            let initialTasks = try await runtime.loadTasks(); XCTAssertTrue(initialTasks.isEmpty)
+            try await runtime.configureWorkspace(path: workspace.path, forTaskID: task)
+            try await runtime.submit(prompt: user, toTaskID: task, modelID: choice.modelID)
+            let deadline = ContinuousClock.now + .seconds(180)
+            while !audit.terminal, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+            XCTAssertTrue(audit.terminal)
+            let shutdown = await runtime.shutdown(); watcher.cancel(); XCTAssertTrue(shutdown.succeeded)
+            let observed = facts.snapshot(), sent = await transport.receipt(), browserCounts = await browser.counts()
+            XCTAssertTrue(observed.issues.isEmpty, observed.issues.joined(separator: ","))
+            XCTAssertEqual(observed.frames.count, 3, "Initial, loader, and one failed native command frame")
+            XCTAssertEqual(observed.nativeFailedOutputs.count, 1)
+            XCTAssertEqual(audit.completedCommands.count, 1, "No replay or repair of the failed command")
+            XCTAssertEqual(audit.completedCommands.first?.status, .failed)
+            XCTAssertEqual(audit.completedCommands.first?.output, GroqCommandOutputFacts.rawOutput + "\nExit code: 1")
+            XCTAssertEqual(audit.approvals, 0)
+            XCTAssertEqual(browserCounts.created, 0); XCTAssertEqual(browserCounts.mutations, 0)
+            XCTAssertEqual(browserCounts.observations, 0); XCTAssertEqual(browserCounts.activations, 0)
+            XCTAssertTrue(browserCounts.humanIntact)
+            XCTAssertEqual(Set(sent.started), Set(sent.finished)); XCTAssertEqual(Set(sent.started).count, sent.started.count)
+            XCTAssertEqual(observed.frames.compactMap(\.admitted).count, sent.sends)
+            let failed = try XCTUnwrap(observed.nativeFailedOutputs.first)
+            XCTAssertTrue(failed.exitOne); XCTAssertTrue(failed.warning); XCTAssertTrue(failed.truncated)
+            XCTAssertTrue(failed.firstSentinel); XCTAssertTrue(failed.lastSentinel)
+            XCTAssertGreaterThan(try XCTUnwrap(failed.originalTokens), limit)
+            // Bound the command text plus its finite native headers; generic output policy stays larger.
+            XCTAssertLessThanOrEqual(failed.bytes, Int(Double(limit * 4) * 1.2))
+            XCTAssertEqual(failed.callID, audit.completedCommands.first?.id)
+            XCTAssertTrue(observed.failedOutputAlwaysInline)
+            XCTAssertTrue(observed.allNativeArgumentsExact)
+            XCTAssertEqual(Set(observed.frames.map(\.registrySHA256)).count, 1)
+            XCTAssertTrue(observed.frames.allSatisfy(\.nativeScopeAndUserExact))
+            if let rejection = observed.frames.last?.rejection {
+                XCTAssertTrue(["bodyTokens", "bodyBytes", "counterUnavailable"].contains(rejection.kind))
+                XCTAssertEqual(audit.status, .failed); XCTAssertFalse(audit.markerSeen)
+                XCTAssertEqual(sent.sends, 2)
+            } else {
+                XCTAssertEqual(audit.status, .completed); XCTAssertTrue(audit.markerSeen)
+                XCTAssertEqual(sent.sends, 3)
+            }
+            XCTAssertTrue(retireRegistrations(home: home, threadID: audit.threadID, modelID: choice.modelID))
+            guard testRun?.failureCount == failureCount else { throw GroqProducerFailure("output_cap_invariant") }
+            let report = GroqCommandOutputReport(limit: limit, globalOutputBytes: 10_000, explicitOversize: explicit,
+                rawBytes: GroqCommandOutputFacts.rawOutput.utf8.count,
+                rawSHA256: GroqProducerFacts.hash(Data(GroqCommandOutputFacts.rawOutput.utf8)),
+                nativeRawRecordVerified: true, failedExit: 1, failedOutput: failed,
+                frames: observed.frames, sends: sent.sends, cleanupCount: sent.finished.count,
+                failedOutputAlwaysInline: observed.failedOutputAlwaysInline, providerQualificationClaimed: false)
+            try FileManager.default.removeItem(at: root)
+            return report
+        } catch {
+            _ = await runtime.shutdown(); watcher.cancel()
+            _ = retireRegistrations(home: home, threadID: audit.threadID, modelID: choice.modelID)
+            let observed = facts.snapshot(), sent = await transport.receipt()
+            let finite = GroqCommandOutputProbeFailure(limit: limit, explicitOversize: explicit,
+                frames: observed.frames, failedOutputs: observed.nativeFailedOutputs, issues: observed.issues,
+                completedNativeCommands: audit.completedCommands.count, sends: sent.sends, cleanupCount: sent.finished.count)
+            if let data = try? JSONEncoder().encode(finite) {
+                try? writeFiniteReport(data, prefix: "groqCommandOutputFailureFinite=")
+            }
+            try? FileManager.default.removeItem(at: root)
+            throw error
+        }
+    }
+
     func testBundledGroq27BProducesUnmodifiedNativePreflightFramesOrAnExactLocalBudgetStop() async throws {
         try await produce(choice: WebsiteModelChoice(provider: "groq", key: "qwen/qwen3.8-27b", label: "Qwen/Qwen3.8-27B"))
     }
@@ -923,4 +1035,260 @@ private struct GroqProducerNoVisualGrounder: VisualGroundingClient {
     }
     func shutdown() async -> [String] { [] }
 }
+private struct GroqCommandOutputOutput: Codable, Sendable {
+    let callID: String
+    let bytes: Int
+    let sha256: String
+    let exitOne: Bool
+    let warning: Bool
+    let truncated: Bool
+    let firstSentinel: Bool
+    let lastSentinel: Bool
+    let originalTokens: Int?
+}
+private struct GroqCommandOutputFrame: Codable {
+    let sourceSHA256: String
+    let registrySHA256: String
+    let nativeScopeAndUserExact: Bool
+    var candidateUnits: [Int] = []
+    var admitted: Int?
+    var rejection: GroqProducerRejection?
+}
+private struct GroqCommandOutputProbeFailure: Codable {
+    let limit: Int
+    let explicitOversize: Bool
+    let frames: [GroqCommandOutputFrame]
+    let failedOutputs: [GroqCommandOutputOutput]
+    let issues: [String]
+    let completedNativeCommands: Int
+    let sends: Int
+    let cleanupCount: Int
+}
+private struct GroqCommandOutputReport: Codable {
+    let limit: Int
+    let globalOutputBytes: Int
+    let explicitOversize: Bool
+    let rawBytes: Int
+    let rawSHA256: String
+    let nativeRawRecordVerified: Bool
+    let failedExit: Int
+    let failedOutput: GroqCommandOutputOutput
+    let frames: [GroqCommandOutputFrame]
+    let sends: Int
+    let cleanupCount: Int
+    let failedOutputAlwaysInline: Bool
+    let providerQualificationClaimed: Bool
+}
+
+private final class GroqCommandOutputFacts: @unchecked Sendable {
+    // <32KiB: the separate native presentation record can be compared in full.
+    static let rawOutput = "CAP-BEGIN\n" + (0..<180).map {
+        String(format: "FAIL: test_case_%04d (fixture.Case)\nAssertionError: expected 1234567890, got abcdefghijklmnopqrstuvwxyz; retain failed exit.\n", $0)
+    }.joined() + "CAP-END\n"
+    static let commandText = #"python3 -c 'import sys; sys.stdout.write("CAP-BEGIN\n" + "".join("FAIL: test_case_%04d (fixture.Case)\nAssertionError: expected 1234567890, got abcdefghijklmnopqrstuvwxyz; retain failed exit.\n" % i for i in range(180)) + "CAP-END\n"); sys.exit(1)'"#
+    struct Snapshot {
+        let frames: [GroqCommandOutputFrame]
+        let nativeFailedOutputs: [GroqCommandOutputOutput]
+        let issues: [String]
+        let failedOutputAlwaysInline: Bool
+        let allNativeArgumentsExact: Bool
+    }
+    private let lock = NSLock()
+    private let task: String, choice: WebsiteModelChoice, userSHA: String, command: String, workspace: String, explicit: Bool
+    private var frames: [GroqCommandOutputFrame] = [], ids: [UUID] = [], scope: String?
+    private var outputs: [GroqCommandOutputOutput] = [], issues = Set<String>()
+    private var inline = true, argumentsExact = true
+    private var nativeFailedRaw: [String: Data] = [:]
+    init(task: String, choice: WebsiteModelChoice, user: String, command: String, workspace: String, explicit: Bool) {
+        self.task = task; self.choice = choice; userSHA = GroqProducerFacts.hash(Data(user.utf8))
+        self.command = command; self.workspace = workspace; self.explicit = explicit
+    }
+    func snapshot() -> Snapshot {
+        lock.lock(); defer { lock.unlock() }
+        return .init(frames: frames, nativeFailedOutputs: outputs, issues: issues.sorted(),
+            failedOutputAlwaysInline: inline, allNativeArgumentsExact: argumentsExact)
+    }
+    func observe(_ context: WebModelServer.GroqPreflightContextForTesting, _ event: WebModelServer.GroqPreflightEventForTesting) {
+        if case .historyReaderPreview = event { return }
+        lock.lock(); defer { lock.unlock() }
+        do {
+            guard context.taskID == task, context.modelID == choice.modelID, context.compactToolThread else {
+                throw GroqProducerFailure("output_cap_scope")
+            }
+            let current = [context.taskID, context.threadID, context.turnID,
+                context.runtimeGeneration.uuidString, context.preparationID.uuidString, context.transportGeneration.uuidString].joined(separator: ":")
+            if let scope { guard scope == current else { throw GroqProducerFailure("output_cap_changed_scope") } }
+            else { scope = current }
+            let index: Int
+            if let found = ids.firstIndex(of: context.inferenceID) { index = found }
+            else {
+                guard frames.count < 3, case .canonical = event else { throw GroqProducerFailure("output_cap_event_order") }
+                index = frames.count; ids.append(context.inferenceID)
+            }
+            switch event {
+            case let .canonical(data):
+                guard frames.count == index else { throw GroqProducerFailure("output_cap_duplicate_canonical") }
+                let nativeLayout = try GroqContextJSONLayout.parse(data)
+                let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+                let items = try XCTUnwrap(object["input"] as? [[String: Any]])
+                let tools = try XCTUnwrap(object["tools"] as? [[String: Any]])
+                let users = items.filter { $0["role"] as? String == "user" }.flatMap { item -> [String] in
+                    if let text = item["content"] as? String { return [text] }
+                    return (item["content"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }
+                }
+                let exact = object["model"] as? String == choice.modelID
+                    && users.filter { GroqProducerFacts.hash(Data($0.utf8)) == userSHA }.count == 1
+                    && GroqToolCatalog.isRegisteredLoader(tools) && GroqHistoryTool.registeredName(in: tools) != nil
+                let registry = try JSONSerialization.data(withJSONObject: tools, options: [.sortedKeys])
+                frames.append(.init(sourceSHA256: GroqProducerFacts.hash(data), registrySHA256: GroqProducerFacts.hash(registry),
+                    nativeScopeAndUserExact: exact))
+                let execs = items.filter { $0["type"] as? String == "function_call" && ($0["name"] as? String)?.split(separator: ".").last == "exec_command" }
+                guard execs.count <= 1 else { throw GroqProducerFailure("output_cap_replayed_exec") }
+                for call in execs {
+                    let id = try XCTUnwrap(call["call_id"] as? String)
+                    let args = try XCTUnwrap(call["arguments"] as? String)
+                    let value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(args.utf8)) as? [String: Any])
+                    let expectedKeys: Set<String> = explicit ? ["cmd", "workdir", "yield_time_ms", "max_output_tokens"] : ["cmd", "workdir", "yield_time_ms"]
+                    argumentsExact = argumentsExact && Set(value.keys) == expectedKeys && value["cmd"] as? String == command
+                        && value["workdir"] as? String == workspace && value["yield_time_ms"] as? Int == 10_000
+                        && (!explicit || value["max_output_tokens"] as? Int == 70_000)
+                    let result = try XCTUnwrap(items.first { $0["type"] as? String == "function_call_output" && $0["call_id"] as? String == id })
+                    let text = try GroqProducerFacts.outputText(result["output"])
+                    let raw = try XCTUnwrap(nativeLayout.items.first { $0.kind == .functionCallOutput && $0.callID == id }?.payload?.rawJSON)
+                    nativeFailedRaw[id] = raw
+                    let original = text.components(separatedBy: "\n").first { $0.hasPrefix("Original token count: ") }
+                        .flatMap { Int($0.dropFirst("Original token count: ".count)) }
+                    outputs.append(.init(callID: id, bytes: text.utf8.count, sha256: GroqProducerFacts.hash(Data(text.utf8)),
+                        exitOne: text.contains("Process exited with code 1"), warning: text.contains("Warning: truncated output"),
+                        truncated: text.contains("tokens truncated") || text.contains("chars truncated"),
+                        firstSentinel: text.contains("CAP-BEGIN"), lastSentinel: text.contains("CAP-END"), originalTokens: original))
+                }
+            case let .candidate(request, _, _):
+                guard GroqProducerFacts.hash(request.continuationRequest) == frames[index].sourceSHA256 else {
+                    throw GroqProducerFailure("output_cap_candidate_source")
+                }
+                guard frames[index].candidateUnits.count < 4 else { throw GroqProducerFailure("output_cap_candidate_bound") }
+                let units = try GroqBodyTokenCounter.tokenCount(request.prompt)
+                frames[index].candidateUnits.append(units)
+                let displayed = try GroqContextJSONLayout.parse(WebsiteRequestFixture.json(in: request.prompt))
+                for (id, raw) in nativeFailedRaw {
+                    let matches = displayed.items.filter { $0.kind == .functionCallOutput && $0.callID == id }
+                    inline = inline && matches.count == 1 && matches.first?.payload?.rawJSON == raw
+                }
+                if !outputs.isEmpty { inline = inline && request.groqHistoryPlan?.replacedFields == 0 }
+            case let .admitted(units):
+                guard frames[index].admitted == nil, frames[index].candidateUnits.last == units,
+                      units <= 6_000 else { throw GroqProducerFailure("output_cap_admission") }
+                frames[index].admitted = units
+            case let .rejected(kind, actual, maximum, reserved):
+                frames[index].rejection = .init(kind: kind.rawValue, actual: actual, maximum: maximum, reserved: reserved)
+            case .historyReaderPreview: break
+            }
+        } catch { issues.insert((error as? GroqProducerFailure)?.code ?? "output_cap_observation") }
+    }
+}
+
+private actor GroqCommandOutputTransport: WebModelTransport {
+    struct Receipt: Sendable { var started: [String] = [], finished: [String] = []; var sends = 0 }
+    private let choice: WebsiteModelChoice, marker: String, command: String, workspace: String, explicit: Bool
+    private var state = Receipt(), active: String?, reply = ""
+    init(choice: WebsiteModelChoice, marker: String, command: String, workspace: String, explicit: Bool) {
+        self.choice = choice; self.marker = marker; self.command = command; self.workspace = workspace; self.explicit = explicit
+    }
+    func receipt() -> Receipt { state }
+    func request(operation: String, params: Data) async throws -> Data {
+        let p = try XCTUnwrap(JSONSerialization.jsonObject(with: params) as? [String: String]); var result: [String: Any]
+        switch operation {
+        case "webProviderStart":
+            guard active == nil, state.started.count < 3, p["modelChoice"].flatMap(WebsiteModelChoice.parse) == choice else { throw GroqProducerFailure("cap_start") }
+            let token = UUID().uuidString.lowercased(); active = token; state.started.append(token)
+            result = ["sessionToken": token, "state": "ready"]
+        case "webProviderSend":
+            guard p["sessionToken"] == active, let prompt = p["prompt"], state.sends < 3 else { throw GroqProducerFailure("cap_send") }
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: WebsiteRequestFixture.json(in: prompt)) as? [String: Any])
+            let tools = GroqProducerFacts.tools(try XCTUnwrap(object["tools"] as? [[String: Any]]))
+            let inventory = try GroqProducerFacts.inventory(prompt)
+            let allNames = try GroqProducerFacts.catalogNames(inventory, tools: tools)
+            let exec = try XCTUnwrap(allNames.first { $0.split(separator: ".").last == "exec_command" })
+            if state.sends == 0 {
+                let loader = try XCTUnwrap(tools.first { $0.local == GroqToolCatalog.name })
+                reply = try GroqProducerFacts.call(loader.qualified, arguments: ["catalog_revision": try XCTUnwrap(inventory["catalog_revision"]), "names": [exec]])
+            } else if state.sends == 1 {
+                guard tools.contains(where: { $0.qualified == exec }) else { throw GroqProducerFailure("cap_exec_not_loaded") }
+                let items = try XCTUnwrap(object["input"] as? [[String: Any]])
+                let output = try XCTUnwrap(items.last { $0["type"] as? String == "function_call_output" })
+                let receipt = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(GroqProducerFacts.outputText(output["output"]).utf8)) as? [String: Any])
+                guard Set(receipt.keys) == ["catalog_revision", "loaded", "available", "execution"],
+                      receipt["loaded"] as? [String] == [exec], receipt["available"] as? String == "next_request",
+                      receipt["execution"] as? Bool == false else { throw GroqProducerFailure("cap_loader_receipt") }
+                var args: [String: Any] = ["cmd": command, "workdir": workspace, "yield_time_ms": 10_000]
+                if explicit { args["max_output_tokens"] = 70_000 }
+                reply = try GroqProducerFacts.call(exec, arguments: args)
+            } else { reply = try GroqProducerFacts.message(marker) }
+            state.sends += 1; result = ["state": "running"]
+        case "webProviderPoll":
+            guard p["sessionToken"] == active else { throw GroqProducerFailure("cap_poll") }
+            result = ["state": "complete", "text": reply]
+        case "webProviderFinish", "webProviderCancel":
+            guard let token = active, p["sessionToken"] == token else { throw GroqProducerFailure("cap_cleanup") }
+            state.finished.append(token); active = nil; result = ["cleanup": "transcript_cleared"]
+        default: throw GroqProducerFailure("cap_operation")
+        }
+        if ["ready", "running", "complete"].contains(result["state"] as? String ?? "") {
+            result["modelEvidence"] = ["selected": ["key": choice.key, "label": choice.label],
+                "source": "selected_model_indicator", "verification": "website_selection"]
+        }
+        return try JSONSerialization.data(withJSONObject: result)
+    }
+}
+
+@MainActor
+private final class GroqCommandOutputAudit {
+    struct Command { let id: String; let output: String?; let status: ToolRunStatus }
+    let task: String, marker: String
+    var terminal = false, began = false, markerSeen = false
+    var status: TaskStatus?, threadID: String?, approvals = 0
+    var completedCommands: [Command] = []
+    init(task: String, marker: String) { self.task = task; self.marker = marker }
+    func receive(_ event: AgentRuntimeEvent) {
+        switch event {
+        case let .taskThreadBound(id, thread) where id == task: threadID = thread
+        case let .taskStatusChanged(id, value) where id == task:
+            status = value; if value == .running { began = true }
+            if began && [.completed, .waiting, .failed].contains(value) { terminal = true }
+        case let .timelineEntryAppended(id, entry) where id == task:
+            if entry.kind == .assistant, entry.assistantPhase == "final_answer", entry.body == marker { markerSeen = true }
+            if let tool = entry.toolEvent, tool.name == "commandExecution", tool.status == .failed {
+                completedCommands.append(.init(id: entry.id, output: tool.output, status: tool.status))
+            }
+        case let .approvalRequested(request) where request.taskID == task: approvals += 1
+        case .connectionChanged(.failed): terminal = true
+        default: break
+        }
+    }
+}
+
+/// Test-only eligibility check. Neither a model hint nor a catalog row alone
+/// proves that the new native command-policy implementation is installed.
+enum GroqCommandPolicyProof {
+    static let expectedPatchSHA256 = "4d9b0d7d2294bae67c9b7f15f2cd8be509f666bbdb8f78ea89ced68e17a767b2"
+    static func require(artifact: ComputaRuntimeArtifact, modelID: String) throws {
+        guard artifact.manifest.runtimeVersion == "mactopus-17",
+              artifact.manifest.patchSHA256 == expectedPatchSHA256,
+              artifact.manifest.sourceCommit == ComputaRuntimeArtifact.sourceCommit,
+              CodexAppServerRuntime.localThreadConfig(for: modelID)["tool_output_token_limit"] == nil else {
+            throw GroqProducerFailure("command_policy_artifact_or_global_policy")
+        }
+        let bytes = try ComputaModelToolCatalog.catalogData(additionalModelID: modelID)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        let models = try XCTUnwrap(object["models"] as? [[String: Any]])
+        let row = try XCTUnwrap(models.first { $0["slug"] as? String == modelID })
+        let policy = try XCTUnwrap(row["truncation_policy"] as? NSDictionary)
+        guard row["command_output_token_limit"] as? Int == 1_024,
+              policy == ["mode": "bytes", "limit": 10_000] as NSDictionary else {
+            throw GroqProducerFailure("command_policy_catalog")
+        }
+    }
+}
+
 #endif

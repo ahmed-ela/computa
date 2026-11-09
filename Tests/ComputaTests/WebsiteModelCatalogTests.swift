@@ -289,6 +289,50 @@ final class WebsiteModelCatalogTests: XCTestCase {
         }
     }
 
+    func testOnlyCanonicalGroqRowsHaveCommandLimitAndKeepGenericStructuredPolicy() throws {
+        let choices = [
+            WebsiteModelChoice(provider: "groq", key: "qwen/qwen3.8-27b", label: "Qwen/Qwen3.8-27B"),
+            WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B"),
+        ]
+        for additional in [nil] + choices.map({ Optional($0.modelID) }) {
+            let root = try XCTUnwrap(JSONSerialization.jsonObject(
+                with: ComputaModelToolCatalog.catalogData(additionalModelID: additional)) as? [String: Any])
+            let rows = try XCTUnwrap(root["models"] as? [[String: Any]])
+            for row in rows {
+                let id = try XCTUnwrap(row["slug"] as? String)
+                XCTAssertEqual(row["truncation_policy"] as? NSDictionary,
+                    ["mode": "bytes", "limit": 10_000] as NSDictionary,
+                    "Browser/schema/tool JSON output policy must not be lowered")
+                if LocalModelCatalog.webProvider(for: id) == "groq" {
+                    XCTAssertEqual(row["command_output_token_limit"] as? Int, 1_024)
+                } else { XCTAssertNil(row["command_output_token_limit"], id) }
+            }
+            for choice in choices {
+                let selected = try XCTUnwrap(rows.filter {
+                    choice.modelID.hasPrefix($0["slug"] as? String ?? "\0")
+                }.max { ($0["slug"] as? String ?? "").count < ($1["slug"] as? String ?? "").count })
+                XCTAssertEqual(selected["command_output_token_limit"] as? Int, 1_024)
+                if additional == choice.modelID { XCTAssertEqual(selected["slug"] as? String, choice.modelID) }
+            }
+        }
+    }
+
+    func testCommandLimitClassificationRejectsGroqLikeForeignAndMalformedAdditionalRows() throws {
+        let canonical = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
+        let foreign = ["browser/groq-foreign", "browser/groq/choice/not-canonical",
+            canonical + "=", "api/groq/model", syntheticChatGPTModelID,
+            WebsiteModeChoice(deepSeekMode: .chat).requestID]
+        for id in foreign {
+            let root = try XCTUnwrap(JSONSerialization.jsonObject(
+                with: ComputaModelToolCatalog.catalogData(additionalModelID: id)) as? [String: Any])
+            let rows = try XCTUnwrap(root["models"] as? [[String: Any]])
+            let row = try XCTUnwrap(rows.first { $0["slug"] as? String == id })
+            XCTAssertNil(row["command_output_token_limit"], id)
+            XCTAssertEqual(row["truncation_policy"] as? NSDictionary,
+                ["mode": "bytes", "limit": 10_000] as NSDictionary)
+        }
+    }
+
     func testPinnedLongestPrefixAdmissionRetainsPatchAndTerminalForFutureChoices() throws {
         let catalog = try XCTUnwrap(JSONSerialization.jsonObject(with: ComputaModelToolCatalog.catalogData()) as? [String: Any])
         let models = try XCTUnwrap(catalog["models"] as? [[String: Any]])

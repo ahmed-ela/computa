@@ -70,6 +70,15 @@ ban rules remain. Mode/network text, writable roots, unknown suffixes and other
 surrounding bytes are preserved. Unknown variants remain literal. Native
 permissions, canonical requests and executor checks are never rewritten.
 
+The native runtime's optional `command_output_token_limit` now gives Groq
+exec/write-stdin results a 1,024-unit formatter cap. These native units are a
+byte-based estimate; the final Groq tokenizer and 6,000/2,000 admission limits
+remain authoritative. Exit codes and truncation notices remain visible, and
+failed command outputs remain inline and ineligible for history publication.
+The generic 10,000-byte tool policy remains unchanged for structured results.
+The value belongs to each model's metadata, including exact catalog rows, so
+switching providers does not carry a thread-wide scalar limit into another model.
+
 ## Validation and limits
 
 The final handoff distinguishes eligible unloaded schemas from unavailable
@@ -104,6 +113,22 @@ output byte-for-byte through multiple reader fragments and join every inference
 to a saved cleanup receipt. Independent checks verify the unchanged original
 permission unit and the exact reviewed displayed unit and surrounding bytes.
 
+On 2026-11-09, m17 passed 66 focused native unit methods and a separate native
+process control that preserved a 6,000-byte JSON tool result exactly on the next
+HTTP request. The command-only fixture retained a 22,518-byte failed command log
+locally while presenting 4,308 bytes with its failure and truncation notice. Both
+omitted and oversized requested limits admitted their continuation at 4,997 and
+5,009 local body tokens, with three saved cleanup receipts each. The full
+15-field history reader also reconstructed its 1,381-byte value in two fragments.
+These checks use synthetic model replies; installed provider workflows supply
+the separate live qualification evidence.
+
+Run the command-limit and full-reader checks together with:
+
+```sh
+COMPUTA_TEST_GROQ_COMMAND_OUTPUT_POLICY=1 swift test --filter 'GroqBundledPreflightProducerTests/testBundledGroqCommandOnlyLimit|GroqBundledCodingHistoryLookupTests/testGroqCommandOnlyLimit'
+```
+
 The separate TypeScript runtime fixtures require `MACTOPUS_TEST_BUN` when Bun
 is not installed at a supported location. Point it at an absolute, regular,
 executable binary named `bun` that is not group/world writable. The resolver
@@ -121,5 +146,8 @@ On 2026-11-09, installed Build 463 returned exact zero-tool markers for GPT-OSS
 selection and saved transcript cleanup. Its fresh 120B combined workflow remained
 unqualified: after successfully loading native-app schemas, the model asked for
 browser tools to be enabled rather than loading them. It performed no command,
-patch or browser action. The revised handoff therefore still needs a fresh live
-combined workflow; marker success is not that evidence.
+patch or browser action. Build 464 advanced to two schema loads and four terminal
+probes. Its failing baseline test retained a 10,214-byte result; the next local
+preflight rejected 7,354 body tokens. No patch, browser action or form submission
+occurred, and no third website inference started. The command-output change still
+needs a fresh live combined workflow; these earlier runs remain unqualified.

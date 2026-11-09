@@ -101,8 +101,18 @@ final class GroqBundledCodingHistoryLookupTests: XCTestCase {
         try await run(WebsiteModelChoice(provider: "groq", key: "qwen/qwen3.8-27b", label: "Qwen/Qwen3.8-27B"))
     }
 
-    private func run(_ choice: WebsiteModelChoice) async throws {
-        guard ProcessInfo.processInfo.environment["COMPUTA_TEST_GROQ_CODING_LOOKUP"] == "1" else {
+    /// Ordinary genuine reader path with native command-only metadata. No
+    /// global tool-output setting and no reconstructed/synthetic reader result.
+    func testGroqCommandOnlyLimitPreservesGenuineFullHistoryReader() async throws {
+        guard ProcessInfo.processInfo.environment["COMPUTA_TEST_GROQ_COMMAND_OUTPUT_POLICY"] == "1" else {
+            throw XCTSkip("Explicit opt-in required: COMPUTA_TEST_GROQ_COMMAND_OUTPUT_POLICY=1")
+        }
+        try await run(WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B"),
+            commandOnlyProbe: true)
+    }
+
+    private func run(_ choice: WebsiteModelChoice, commandOnlyProbe: Bool = false) async throws {
+        guard commandOnlyProbe || ProcessInfo.processInfo.environment["COMPUTA_TEST_GROQ_CODING_LOOKUP"] == "1" else {
             throw XCTSkip("Explicit opt-in required: COMPUTA_TEST_GROQ_CODING_LOOKUP=1")
         }
         let before = try XCTUnwrap(testRun).failureCount
@@ -114,6 +124,11 @@ final class GroqBundledCodingHistoryLookupTests: XCTestCase {
         let workspace = root.appendingPathComponent("Coding", isDirectory: true)
         try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         for (name, bytes) in GroqInvoiceHistorySeed.files { try bytes.write(to: workspace.appendingPathComponent(name)) }
+        if commandOnlyProbe {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: home.appendingPathComponent("config.toml").path))
+            XCTAssertNil(CodexAppServerRuntime.localThreadConfig(for: choice.modelID)["tool_output_token_limit"])
+            try GroqCommandPolicyProof.require(artifact: artifact, modelID: choice.modelID)
+        }
         let task = UUID().uuidString.lowercased(), marker = "GROQ_CODING_LOOKUP_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
         let user = "Read README.md, reconcile.py and test_reconcile.py. Fix only summarize with the native patch tool. Run python3 -m unittest -v and python3 reconcile.py. Then retrieve the earlier reconcile.py read through computa_read_context, following its pagination references, and finish with \(marker). Do not open a browser, inspect apps, change permissions or perform input."
         let facts = CodingLookupFacts(task: task, choice: choice, user: user, home: home.path)
@@ -144,6 +159,10 @@ final class GroqBundledCodingHistoryLookupTests: XCTestCase {
             XCTAssertEqual(observed.permissionPresentationChecks, observed.admitted.reduce(0) { $0 + $1.attempts.count })
             XCTAssertGreaterThan(observed.permissionPresentationChecks, 0)
             XCTAssertTrue(receipt.lookupVerified); XCTAssertGreaterThanOrEqual(receipt.readFragments, 2)
+            if commandOnlyProbe {
+                XCTAssertEqual(receipt.firstReaderFragmentBytes, 1_024,
+                    "The command-only policy must preserve the actual maximum current reader fragment")
+            }
             XCTAssertEqual(receipt.codingSteps, 6); XCTAssertLessThanOrEqual(receipt.sends, 20)
             XCTAssertEqual(receipt.starts.count, receipt.sends); XCTAssertEqual(Set(receipt.starts), Set(receipt.finished))
             XCTAssertEqual(Set(receipt.starts).count, receipt.starts.count)
@@ -190,6 +209,15 @@ final class GroqBundledCodingHistoryLookupTests: XCTestCase {
                 permissionPresentationChecks: observed.permissionPresentationChecks, readerPreviews: observed.readerPreviews)
             var line = Data("groqCodingLookupFinite=".utf8); line.append(try JSONEncoder().encode(report)); line.append(10)
             try FileHandle.standardOutput.write(contentsOf: line)
+            if commandOnlyProbe {
+                let finite: [String: Any] = ["commandOutputLimit": 1_024, "globalOutputBytes": 10_000, "firstFragmentBytes": try XCTUnwrap(receipt.firstReaderFragmentBytes),
+                    "lookupFragments": receipt.readFragments, "retrievedBytes": receipt.retrievedBytes,
+                    "retrievedSHA256": receipt.retrievedSHA256, "full15ReaderVerified": true,
+                    "providerQualificationClaimed": false]
+                var capLine = Data("groqCommandOutputReaderFinite=".utf8)
+                capLine.append(try JSONSerialization.data(withJSONObject: finite, options: [.sortedKeys])); capLine.append(10)
+                try FileHandle.standardOutput.write(contentsOf: capLine)
+            }
             try FileManager.default.removeItem(at: root)
         } catch {
             _ = await runtime.shutdown(); watcher.cancel()
@@ -852,6 +880,7 @@ private actor CodingLookupTransport: WebModelTransport {
         var starts: [String] = [], finished: [String] = []
         var sends = 0, codingSteps = 0, readFragments = 0, retrievedBytes = 0
         var retrievedSHA256 = "", lookupVerified = false
+        var firstReaderFragmentBytes: Int?
         var transportFailureCodes: [String] = []
         var transportFailures: [CodingLookupTransportFailure] = []
         var readerIdentityDiagnostics: [CodingLookupReaderIdentityDiagnostic] = []
@@ -1079,6 +1108,7 @@ private actor CodingLookupTransport: WebModelTransport {
                     requestPhase = .consumeReaderRange
                     let bytes = Data(fragment.utf8), end = try CodingLookupTools.integer(value["end_byte"])
                     guard !bytes.isEmpty, end == recovered.count + bytes.count, end <= target.rawJSON.count else { throw CodingLookupFailure("reader_range") }
+                    if result.firstReaderFragmentBytes == nil { result.firstReaderFragmentBytes = bytes.count }
                     recovered.append(bytes); result.readFragments += 1
                     requestPhase = .consumeReaderCursor
                     if let next = value["next_ref"] as? String {

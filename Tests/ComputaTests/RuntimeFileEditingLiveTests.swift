@@ -24,14 +24,14 @@ final class RuntimeFileEditingLiveTests: XCTestCase {
     func testRepeatedFastCommandOutputReachesModelTimelineAndReopenedHistory() async throws {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_FILE_EDITING_ENGINE_TEST"] == "1",
             "Set COMPUTA_FILE_EDITING_ENGINE_TEST=1 for native command transcript qualification.")
-        try await qualify(modelID: syntheticChatGPTModelID, commandCount: 32)
+        try await qualify(modelID: syntheticChatGPTModelID, commandCount: 32, commandTurnSizes: [12, 12, 8])
     }
 
     func testChatGPTBundledEnginePreservesProjectedToolIdentityAcrossTwoCommandContinuations() async throws {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_FILE_EDITING_ENGINE_TEST"] == "1",
             "Enable the isolated bundled website tool-continuation qualification.")
         let artifact = try ComputaRuntimeArtifact.resolve()
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-16")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-17")
         let failuresBefore = testRun?.failureCount ?? 0
         let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
             .appendingPathComponent("ComputaWebsiteContinuation-\(UUID().uuidString)", isDirectory: true)
@@ -156,8 +156,20 @@ final class RuntimeFileEditingLiveTests: XCTestCase {
         }
     }
 
-    private func qualify(modelID: String, failureProbes: Bool = false, commandCount: Int = 1) async throws {
+    private func qualify(modelID: String, failureProbes: Bool = false, commandCount: Int = 1,
+                         commandTurnSizes: [Int]? = nil) async throws {
         precondition((1...32).contains(commandCount))
+        let turnSizes = commandTurnSizes ?? [commandCount]
+        precondition(!turnSizes.isEmpty && turnSizes.allSatisfy({ $0 > 0 }) && turnSizes.reduce(0, +) == commandCount)
+        let provider = try XCTUnwrap(LocalModelCatalog.webProvider(for: modelID))
+        guard ["chatgpt", "gemini", "claude"].contains(provider) else { throw WebModelServer.Failure.invalidRequest }
+        let turnInferenceCounts = turnSizes.enumerated().map { index, count in
+            count + 1 + (index == 0 ? 1 + (failureProbes ? 2 : 0) : 0)
+        }
+        XCTAssertTrue(turnInferenceCounts.allSatisfy { $0 <= WebModelServer.maximumTurnInferences })
+        let expectedCommandPrefixes = turnSizes.reduce(into: [Int]()) { prefixes, count in
+            prefixes.append((prefixes.last ?? 0) + count)
+        }
         let commandMarkers = (0..<commandCount).map {
             commandCount == 1 ? "PATCH_TEST_OK" : String(format: "PATCH_TEST_OK_%03d", $0)
         }
@@ -189,11 +201,48 @@ final class RuntimeFileEditingLiveTests: XCTestCase {
             // native runtime supplies its actual inference and turn context.
             await runtime.configureEmbeddedWebModelTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
             try await runtime.configureWorkspace(path: project.path, forTaskID: taskID)
-            try await runtime.submit(prompt: "Apply the requested isolated fixture edits and run its assertion.",
-                toTaskID: taskID, modelID: modelID)
-            let deadline = ContinuousClock.now + .seconds(45)
-            while !audit.terminal, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
-            XCTAssertTrue(audit.terminal, "The native executor did not finish within its bounded deadline")
+            var patchTurnDiff: AgentTurnDiff?
+            var commandTurnIDs = Set<String>()
+            var firstMarker = 0
+            for (index, count) in turnSizes.enumerated() {
+                let endMarker = firstMarker + count
+                var prompt = "Apply the requested isolated fixture edits and run its assertion."
+                if commandTurnSizes != nil {
+                    try await transport.beginCommandTurn(markerRange: firstMarker..<endMarker, includesPatch: index == 0)
+                    let markers = commandMarkers[firstMarker..<endMarker].joined(separator: ", ")
+                    prompt = (index == 0 ? "Apply the isolated fixture edits once. " : "Keep the existing edits and do not repeat any earlier command. ")
+                        + "Run only these next fixture assertions, once each: " + markers + ". Then report their observed results."
+                }
+                audit.terminal = false
+                try await runtime.submit(prompt: prompt, toTaskID: taskID, modelID: modelID)
+                let deadline = ContinuousClock.now + .seconds(45)
+                while !audit.terminal, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+                XCTAssertTrue(audit.terminal, "The native executor did not finish within its bounded deadline")
+                if commandTurnSizes != nil {
+                    guard audit.terminal, audit.latestStatus == .completed, audit.errors.isEmpty,
+                          audit.finalMessageIDs.count == index + 1 else {
+                        throw NSError(domain: "ComputaNativePatchTurnBoundary", code: 1,
+                            userInfo: [NSLocalizedDescriptionKey: "The fixture user turn did not complete. No next partition or confirmation was submitted."])
+                    }
+                }
+                let currentDiff = try XCTUnwrap(audit.diffs.last)
+                XCTAssertTrue(commandTurnIDs.insert(currentDiff.id).inserted, "Each partition is a distinct real user turn")
+                if index == 0 { patchTurnDiff = currentDiff }
+                else { XCTAssertEqual(currentDiff.diff, "", "Later assertion turns perform no additional edits") }
+                if commandTurnSizes != nil {
+                    let receipt = await transport.receipt()
+                    let completed = audit.commands.filter { $0.toolEvent?.status == .succeeded }
+                    XCTAssertEqual(Set(completed.map(\.id)).count, endMarker)
+                    XCTAssertTrue(audit.errors.isEmpty)
+                    XCTAssertEqual(audit.finalTexts.last, "PATCH_HARNESS_OK")
+                    XCTAssertEqual(audit.finalMessageIDs.count, index + 1)
+                    XCTAssertEqual(audit.threadIDs.count, 1, "All partitions keep the same native thread")
+                    XCTAssertTrue(receipt.commandOutputMatched)
+                    XCTAssertEqual(receipt.matchedCommandPrefixCounts, Array(expectedCommandPrefixes.prefix(index + 1)))
+                    XCTAssertEqual(receipt.issuedCommandMarkers, Array(commandMarkers.prefix(endMarker)))
+                }
+                firstMarker = endMarker
+            }
             XCTAssertEqual(audit.errors, [])
             XCTAssertEqual(audit.approvals.count, 0, "Workspace-local patch and assertion must use the selected engine workspace")
             let completed = try XCTUnwrap(audit.fileEntries.last { $0.toolEvent?.status == .succeeded })
@@ -213,7 +262,7 @@ final class RuntimeFileEditingLiveTests: XCTestCase {
             XCTAssertFalse(FileManager.default.fileExists(atPath: project.appendingPathComponent("legacy.py").path))
             XCTAssertEqual(try String(contentsOf: project.appendingPathComponent("helpers.py"), encoding: .utf8),
                 "def multiply(a, b):\n    return a * b\n")
-            let diff = try XCTUnwrap(audit.diffs.last)
+            let diff = try XCTUnwrap(patchTurnDiff)
             XCTAssertFalse(diff.diff.isEmpty)
             XCTAssertTrue(diff.diff.contains("lib/greetings.py"))
             XCTAssertTrue(diff.diff.contains("obsolete.txt"))
@@ -238,11 +287,21 @@ final class RuntimeFileEditingLiveTests: XCTestCase {
             XCTAssertEqual(Set(completedCommandIDs.values).count, commandCount,
                 "Separate commands must have separate completed items")
             let receipt = await transport.receipt()
-            let expectedInferences = commandCount + 2 + (failureProbes ? 2 : 0)
+            let expectedInferences = turnInferenceCounts.reduce(0, +)
+            // Gemini retains exactly one owned conversation per real user turn.
+            // ChatGPT and the ordinary Claude profile close after each inference.
+            let expectedSessions = provider == "gemini" ? turnSizes.count : expectedInferences
             XCTAssertEqual(receipt.sendCount, expectedInferences)
-            XCTAssertEqual(receipt.startCount, expectedInferences)
-            XCTAssertEqual(receipt.finishCount, expectedInferences)
-            XCTAssertEqual(Set(receipt.sessionTokens).count, expectedInferences)
+            XCTAssertEqual(receipt.startCount, expectedSessions)
+            XCTAssertEqual(receipt.finishCount, expectedSessions)
+            XCTAssertEqual(Set(receipt.sessionTokens).count, expectedSessions)
+            XCTAssertEqual(receipt.issuedCommandMarkers, commandMarkers)
+            if commandTurnSizes != nil {
+                XCTAssertEqual(turnInferenceCounts, [14, 13, 9])
+                XCTAssertEqual(expectedInferences, 36)
+                XCTAssertEqual(commandTurnIDs.count, 3)
+                XCTAssertEqual(audit.finalMessageIDs.count, 3)
+            }
             XCTAssertTrue(receipt.customPatchOffered)
             XCTAssertTrue(receipt.patchOutputMatched)
             XCTAssertTrue(receipt.commandOutputMatched)
@@ -264,13 +323,25 @@ final class RuntimeFileEditingLiveTests: XCTestCase {
             XCTAssertTrue(audit.terminal)
             let noEditDiff = try XCTUnwrap(audit.diffs.last)
             XCTAssertNotEqual(noEditDiff.id, diff.id)
+            XCTAssertFalse(commandTurnIDs.contains(noEditDiff.id), "The confirmation is another real user turn")
             XCTAssertEqual(noEditDiff.diff, "", "Last turn means the latest actual user turn, even if it made no edits")
             XCTAssertEqual(audit.fileEntries.filter { $0.toolEvent?.status == .succeeded }.count, 1)
             let noEditReceipt = await transport.receipt()
             XCTAssertEqual(noEditReceipt.sendCount, expectedInferences + 1)
-            XCTAssertEqual(noEditReceipt.startCount, expectedInferences + 1)
-            XCTAssertEqual(noEditReceipt.finishCount, expectedInferences + 1)
-            XCTAssertEqual(Set(noEditReceipt.sessionTokens).count, expectedInferences + 1)
+            XCTAssertEqual(noEditReceipt.startCount, expectedSessions + 1)
+            XCTAssertEqual(noEditReceipt.finishCount, expectedSessions + 1)
+            XCTAssertEqual(Set(noEditReceipt.sessionTokens).count, expectedSessions + 1)
+            if commandTurnSizes != nil {
+                guard audit.terminal, audit.latestStatus == .completed, audit.errors.isEmpty,
+                      audit.finalMessageIDs.count == 4 else {
+                    throw NSError(domain: "ComputaNativePatchTurnBoundary", code: 2,
+                        userInfo: [NSLocalizedDescriptionKey: "The fixture confirmation turn did not complete. Cold-resume qualification was not attempted."])
+                }
+                XCTAssertEqual(noEditReceipt.sendCount, 37)
+                XCTAssertEqual(audit.finalMessageIDs.count, 4)
+                XCTAssertEqual(noEditReceipt.issuedCommandMarkers, commandMarkers)
+                XCTAssertEqual(noEditReceipt.matchedCommandPrefixCounts, [12, 24, 32, 32])
+            }
             let report = await runtime.shutdown()
             XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
             observer.cancel()
@@ -282,6 +353,7 @@ final class RuntimeFileEditingLiveTests: XCTestCase {
             reopenedRuntime = reopened
             let tasks = try await reopened.loadTasks()
             let saved = try XCTUnwrap(tasks.first)
+            XCTAssertEqual(tasks.count, 1, "All command partitions remain in the same saved chat")
             XCTAssertEqual(URL(fileURLWithPath: saved.workspace, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath(),
                 project.standardizedFileURL.resolvingSymlinksInPath())
             XCTAssertTrue(saved.turnDiffs.contains(diff))
@@ -311,6 +383,9 @@ final class RuntimeFileEditingLiveTests: XCTestCase {
             let reopenedReport = await reopened.shutdown()
             XCTAssertTrue(reopenedReport.succeeded, reopenedReport.issues.joined(separator: "; "))
             reopenedRuntime = nil
+            let afterReload = await transport.receipt()
+            XCTAssertEqual(afterReload.sendCount, noEditReceipt.sendCount, "Cold loadTasks must not replay inference or actions")
+            XCTAssertEqual(afterReload.issuedCommandMarkers, commandMarkers)
             guard (testRun?.failureCount ?? 0) == failuresBefore else {
                 throw NSError(domain: "ComputaNativePatchQualification", code: 1,
                     userInfo: [NSLocalizedDescriptionKey: "One or more native patch qualification invariants failed; exact fixture artifacts were retained."])
@@ -331,10 +406,13 @@ final class RuntimeFileEditingLiveTests: XCTestCase {
 @MainActor
 private final class PatchAudit {
     var terminal = false
+    var latestStatus: TaskStatus?
     var fileEntries = [TimelineEntry]()
     var commands = [TimelineEntry]()
     var diffs = [AgentTurnDiff]()
     var finalTexts = [String]()
+    var finalMessageIDs = Set<String>()
+    var threadIDs = Set<String>()
     var errors = [String]()
     var approvals = [ActionApprovalRequest]()
     var websiteReceipts = [WebsiteSessionCleanupReceipt]()
@@ -343,10 +421,16 @@ private final class PatchAudit {
         case .timelineEntryAppended(_, let entry):
             if entry.toolEvent?.name == "fileChange" { fileEntries.append(entry) }
             if entry.toolEvent?.name == "commandExecution" { commands.append(entry) }
-            if entry.kind == .assistant { finalTexts.append(entry.body) }
+            if entry.kind == .assistant {
+                finalTexts.append(entry.body)
+                if entry.assistantPhase == "final_answer", entry.body == "PATCH_HARNESS_OK" { finalMessageIDs.insert(entry.id) }
+            }
             if entry.kind == .system, ["Agent error", "Saved chat history unavailable"].contains(entry.title) { errors.append(entry.body) }
+        case .taskThreadBound(_, let threadID): threadIDs.insert(threadID)
         case .turnDiffUpdated(_, let turnID, let diff): diffs.append(AgentTurnDiff(id: turnID, diff: diff))
-        case .taskStatusChanged(_, let status): if status == .completed || status == .waiting || status == .failed { terminal = true }
+        case .taskStatusChanged(_, let status):
+            latestStatus = status
+            if status == .completed || status == .waiting || status == .failed { terminal = true }
         case .approvalRequested(let request): approvals.append(request)
         case .websiteSessionCleanupUpdated(let receipt): websiteReceipts.append(receipt)
         case .connectionChanged(.failed(let message)): errors.append(message); terminal = true
@@ -370,12 +454,18 @@ private actor NativePatchInferenceFixture: WebModelTransport {
         var requestModels = [String]()
         var projectedInputs = [Data]()
         var expectedCommands = [WebModelResponseCodec.ToolCall]()
+        var issuedCommandMarkers = [String]()
+        var matchedCommandPrefixCounts = [Int]()
     }
     private var token = UUID().uuidString
+    private var currentProvider: String?
     private let projectPath: String
     private let failureProbes: Bool
     private let commandMarkers: [String]
     private let commandsOnly: Bool
+    private var commandTurnRange: Range<Int>
+    private var turnStartSendCount = 0
+    private var includesPatchInTurn: Bool
     private var response = ""
     private var observations = Receipt()
     init(projectPath: String, failureProbes: Bool = false, commandMarkers: [String] = ["PATCH_TEST_OK"], commandsOnly: Bool = false) {
@@ -383,12 +473,34 @@ private actor NativePatchInferenceFixture: WebModelTransport {
         self.failureProbes = failureProbes
         self.commandMarkers = commandMarkers
         self.commandsOnly = commandsOnly
+        self.commandTurnRange = 0..<commandMarkers.count
+        self.includesPatchInTurn = !commandsOnly
+    }
+    /// Test driver calls only before the first submit or between completed real
+    /// user turns. No provider reply/argument can select or reset this partition.
+    func beginCommandTurn(markerRange: Range<Int>, includesPatch: Bool) throws {
+        guard !commandsOnly, !markerRange.isEmpty, markerRange.lowerBound >= 0,
+              markerRange.upperBound <= commandMarkers.count else { throw WebModelServer.Failure.invalidRequest }
+        if observations.sendCount == 0 {
+            guard markerRange.lowerBound == 0, includesPatch else { throw WebModelServer.Failure.invalidRequest }
+        } else {
+            guard observations.commandOutputMatched,
+                  response == #"{"type":"message","text":"PATCH_HARNESS_OK"}"#,
+                  markerRange.lowerBound == commandTurnRange.upperBound, !includesPatch else {
+                throw WebModelServer.Failure.invalidRequest
+            }
+        }
+        commandTurnRange = markerRange
+        turnStartSendCount = observations.sendCount
+        includesPatchInTurn = includesPatch
     }
     func receipt() -> Receipt { observations }
     func request(operation: String, params: Data) throws -> Data {
         var result: [String: Any]
         switch operation {
         case "webProviderStart":
+            let parameters = try XCTUnwrap(JSONSerialization.jsonObject(with: params) as? [String: Any])
+            currentProvider = try XCTUnwrap(parameters["provider"] as? String)
             token = UUID().uuidString
             observations.startCount += 1
             observations.sessionTokens.append(token)
@@ -406,7 +518,8 @@ private actor NativePatchInferenceFixture: WebModelTransport {
             if commandsOnly { observations.projectedInputs.append(try JSONSerialization.data(withJSONObject: items, options: [.sortedKeys, .withoutEscapingSlashes])) }
             let outputs = items.filter { ["custom_tool_call_output", "function_call_output"].contains($0["type"] as? String ?? "") }
             let outputsJSON = String(decoding: try JSONSerialization.data(withJSONObject: outputs), as: UTF8.self)
-            let progress = observations.sendCount - (failureProbes ? 2 : 0) + (commandsOnly ? 1 : 0)
+            let progress = observations.sendCount - turnStartSendCount
+                - (failureProbes && includesPatchInTurn ? 2 : 0) + (includesPatchInTurn ? 0 : 1)
             if failureProbes, observations.sendCount == 0 {
                 response = try patchReply(name: XCTUnwrap(patchName), patch: "*** Begin Patch\n*** Invalid Operation: hello.py\n*** End Patch")
             } else if failureProbes, observations.sendCount == 1 {
@@ -443,11 +556,12 @@ private actor NativePatchInferenceFixture: WebModelTransport {
                 *** End Patch
                 """
                 response = try patchReply(name: XCTUnwrap(patchName), patch: patch)
-            } else if (1...commandMarkers.count).contains(progress) {
+            } else if (1...commandTurnRange.count).contains(progress) {
                 observations.patchOutputMatched = observations.patchOutputMatched
                     || outputsJSON.contains("Success. Updated the following files")
                 let commandName = try XCTUnwrap(request.offeredToolNames.first { $0 == "exec_command" || $0.hasSuffix(".exec_command") })
-                let marker = commandMarkers[progress - 1]
+                let marker = commandMarkers[commandTurnRange.lowerBound + progress - 1]
+                observations.issuedCommandMarkers.append(marker)
                 let command = commandsOnly ? "/usr/bin/printf '%s\\n' '\(marker)'" : "/usr/bin/python3 -c 'from lib.greetings import greet; from helpers import multiply; assert greet(\"Computa\") == \"Hello, Computa!\"; assert multiply(2, 3) == 6; print(\"\(marker)\")'"
                 response = String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [["name": commandName, "arguments": ["cmd": command, "workdir": projectPath, "yield_time_ms": 10000, "max_output_tokens": 1000]]]]), as: UTF8.self)
             } else {
@@ -456,7 +570,7 @@ private actor NativePatchInferenceFixture: WebModelTransport {
                 // Keep non-Sendable JSON dictionaries inside this actor's
                 // synchronous execution, rather than capturing them in a
                 // closure invoked through an actor-isolated stored collection.
-                for marker in commandMarkers {
+                for marker in commandMarkers.prefix(commandTurnRange.upperBound) {
                     var matchingOutput: [String: Any]?
                     var matchingOutputCount = 0
                     for candidate in outputs {
@@ -500,7 +614,8 @@ private actor NativePatchInferenceFixture: WebModelTransport {
                     commandCallIDs.insert(callID)
                 }
                 observations.commandOutputMatched = allCommandOutputsMatched
-                    && commandCallIDs.count == commandMarkers.count
+                    && commandCallIDs.count == commandTurnRange.upperBound
+                observations.matchedCommandPrefixCounts.append(commandCallIDs.count)
                 response = #"{"type":"message","text":"PATCH_HARNESS_OK"}"#
             }
             if commandsOnly, case .toolCalls(let calls) = try WebModelResponseCodec.parseEmbeddedReply(response, request: request) {
@@ -514,7 +629,15 @@ private actor NativePatchInferenceFixture: WebModelTransport {
             result = ["cleanup": "not_created"]
         default: throw WebModelServer.Failure.invalidRequest
         }
-        return try JSONSerialization.data(withJSONObject: syntheticPreparedWebsiteSnapshot(result))
+        var snapshot = syntheticPreparedWebsiteSnapshot(result)
+        if currentProvider == "chatgpt", operation == "webProviderPoll", snapshot["state"] as? String == "complete" {
+            // This inert provider owns the exact serialized reply bytes. It
+            // explicitly simulates literal extraction; shared lease helpers do
+            // not invent this evidence or repair contradictory negative cases.
+            snapshot["completionEvidence"] = ["codeStructure": [
+                "selectedExtraction": "raw_code", "extractionReason": "accepted_literal_code"]]
+        }
+        return try JSONSerialization.data(withJSONObject: snapshot)
     }
 
     private func patchReply(name: String, patch: String) throws -> String {
