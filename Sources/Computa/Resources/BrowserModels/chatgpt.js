@@ -3230,6 +3230,48 @@ function chatGPTLiteralDILText(answer, messageID, report = null) {
     || run && (!classes(portal, ['relative'], ['PortalBoundary-', 'Renderer-'])
       || !classes(dil, [], ['DilRenderer-', 'DilResponseRoot-', 'Reveal-'])
       || !classes(paragraph, [], ['TextBase-', 'Text-']))) return chatGPTLiteralDILDecline(report, 'text_renderer_classes');
+  // A separate plaintext profile accounts for every original direct Text
+  // child. Reading data preserves literal whitespace without rendered-text
+  // reconstruction; neither an element nor even an empty comment is ignored.
+  const directCount = paragraph.childNodes.length;
+  if (directCount >= 1 && directCount <= 128) {
+    const nodes = children(paragraph);
+    if (nodes.length !== directCount) return chatGPTLiteralDILDecline(report, 'text_span_count');
+    if (nodes.every(node => node.nodeType === 3)) {
+      if (paragraph.ownerDocument !== document) return chatGPTLiteralDILDecline(report, 'text_context');
+      if (![answer, source, layout, portal, dil, paragraph].every(physical))
+        return chatGPTLiteralDILDecline(report, 'text_physical');
+      let text = '';
+      const fragments = [];
+      for (const node of nodes) {
+        if (!node.isConnected || node.parentNode !== paragraph || node.parentElement !== paragraph
+          || node.ownerDocument !== document)
+          return chatGPTLiteralDILDecline(report, 'text_span_shape');
+        const fragment = node.data;
+        if (typeof fragment !== 'string') return chatGPTLiteralDILDecline(report, 'text_span_shape');
+        if (fragment.length > 220_000 - text.length) return chatGPTLiteralDILDecline(report, 'text_size');
+        fragments.push(fragment); text += fragment;
+      }
+      if (!text.length) return chatGPTLiteralDILDecline(report, 'text_span_shape');
+      // Lone UTF-16 surrogates have no byte-exact UTF-8 representation.
+      for (let index = 0; index < text.length; index++) {
+        const unit = text.charCodeAt(index);
+        if (unit >= 0xD800 && unit <= 0xDBFF) {
+          const next = text.charCodeAt(++index);
+          if (!(next >= 0xDC00 && next <= 0xDFFF)) return chatGPTLiteralDILDecline(report, 'text_context');
+        } else if (unit >= 0xDC00 && unit <= 0xDFFF) return chatGPTLiteralDILDecline(report, 'text_context');
+      }
+      if (new TextEncoder().encode(text).length > 220_000) return chatGPTLiteralDILDecline(report, 'text_size');
+      if (text !== paragraph.textContent || text !== source.textContent || text !== answer.textContent)
+        return chatGPTLiteralDILDecline(report, 'text_mismatch');
+      const current = children(paragraph);
+      if (current.length !== nodes.length || current.some((node, index) => node !== nodes[index]
+        || !node.isConnected || node.parentNode !== paragraph || node.parentElement !== paragraph
+        || node.ownerDocument !== document || node.data !== fragments[index]))
+        return chatGPTLiteralDILDecline(report, 'text_mismatch');
+      return { text, displayed: null, directText: true };
+    }
+  }
   // The observed run profile has one text leaf; do not inventory unknown siblings.
   if (run && paragraph.childNodes.length !== 1) return chatGPTLiteralDILDecline(report, 'text_span_count');
   const spans = children(paragraph);
@@ -3287,7 +3329,7 @@ function chatGPTLiteralDILResponse(answer, expectedMessageID = null, report = nu
     || scope.querySelector('[data-message-author-role="user"], [data-markdown-text-style="user-message"], article[data-turn="user"], [data-user-message-bubble]')) return chatGPTLiteralDILDecline(report, 'response_assistant_scope');
   const literal = chatGPTLiteralDILText(answer, id, report);
   if (!literal) return null;
-  if (chatGPTSingleJSONFence(literal.text) === null && !(literal.run && chatGPTWholeJSONEnvelope(literal.text)))
+  if (chatGPTSingleJSONFence(literal.text) === null && !((literal.run || literal.directText === true) && chatGPTWholeJSONEnvelope(literal.text)))
     return chatGPTLiteralDILDecline(report, 'response_fence');
   const plainFailure = (node, outerAncestor = false) => {
     if (node.namespaceURI !== 'http://www.w3.org/1999/xhtml') return 'namespace';

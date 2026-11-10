@@ -1558,6 +1558,99 @@ describe('ChatGPT literal terminal source equivalence', () => {
     Object.defineProperty(x.answer, 'innerText', { configurable: true, get: () => x.raw().replace(/[ \t]+/g, ' ') + '\n' });
     return { ...x, run, tail, read: (value = x.raw()) => read(value, x.answer, messageID, style) };
   }
+  const readDirectLiteral = new Function('answer', 'messageID', 'getComputedStyle', 'document',
+    source.slice(start, end) + 'return chatGPTLiteralDILText(answer,messageID);');
+  function directText(body: string, fragments = [body]) {
+    const x = streamRun(body), document = {};
+    x.p.children = []; x.p.text = ''; (x.p as any).ownerDocument = document;
+    const nodes: any[] = fragments.map(data => ({ nodeType: 3, isConnected: true, parentNode: x.p,
+      parentElement: x.p, ownerDocument: document, data }));
+    Object.defineProperty(x.p, 'childNodes', { configurable: true, get: () => nodes });
+    Object.defineProperty(x.p, 'textContent', { configurable: true,
+      get: () => nodes.map(node => typeof node.data === 'string' ? node.data : node.textContent || '').join('') });
+    return { ...x, document, nodes,
+      literal: () => readDirectLiteral(x.answer, messageID, style, document),
+      read: (value = body) => read(value, x.answer, messageID, style, document) };
+  }
+  const noDirectActions = (x: any) => {
+    for (const node of [x.answer, x.copy, x.layout, x.hidden, x.portal, x.dil, x.p, x.tail]) expect(node.clicks).toBe(0);
+  };
+  test('direct Text DIL preserves original JSON fence whitespace patch indentation escapes and split Unicode', () => {
+    const patch = '*** Begin Patch\n*** Add File: /synthetic/direct.py\n+def demo():\n+    return "a  b \\ c e\u0301 🌍 `one` ``two``"\n*** End Patch';
+    const body = JSON.stringify({ type: 'tool_calls', calls: [{ name: 'apply_patch', input: patch }] });
+    const cases = [body, ...['\n', '\r\n'].flatMap(ending => [
+      '```json' + ending + body + ending + '```', '```json' + ending + body + ending + '```' + ending,
+    ]), JSON.stringify({ type: 'message', text: 'raw ``` triple backticks, a  b, "quoted", \\path and 🌍' })];
+    for (const raw of cases) for (const fragmented of [false, true]) {
+      const split = raw.indexOf('🌍') + 1;
+      const chunks = fragmented ? [raw.slice(0, split), raw.slice(split)] : [raw];
+      const x = directText(raw, chunks), result = x.read();
+      expect(x.literal()).toEqual({ text: raw, displayed: null, directText: true });
+      expect(result.text).toBe(raw);
+      expect(new TextEncoder().encode(result.text)).toEqual(new TextEncoder().encode(raw));
+      expect(result.flags.selectedExtraction).toBe('literal_dil');
+      expect(result.flags.literalDILDecline).toBeUndefined();
+      expect(result.relation).toBe(raw.startsWith('```') ? 'dil_literal_json_fence' : 'exact');
+      expect(x.read(raw + ' ').relation).toBeNull();
+      if (raw.startsWith('```')) {
+        expect(x.read('<escape>' + raw + '</escape>').relation).toBe('dil_escaped_literal_json_fence');
+      }
+      if (raw === body) {
+        expect(JSON.parse(result.text).calls[0].input).toBe(patch);
+        expect(x.answer.innerText).not.toBe(raw); // Rendered collapsing is not used as the literal source.
+      }
+      expect(x.nodes.map(node => node.data).join('')).toBe(raw); noDirectActions(x);
+    }
+    const short = JSON.stringify({ type: 'message', text: 'exact' });
+    const boundary = directText(short, [short, ...Array(127).fill('')]);
+    expect(boundary.read().text).toBe(short); expect(boundary.read().flags.selectedExtraction).toBe('literal_dil');
+    noDirectActions(boundary);
+  });
+  test('direct Text DIL refuses foreign mixed masked oversized malformed or changing physical sources without actions', () => {
+    const raw = JSON.stringify({ type: 'message', text: 'PRIVATE direct  bytes 🌍' });
+    const variants: [string, (x: any) => void][] = [
+      ['element', x => x.nodes.push({ nodeType: 1, tagName: 'B', parentElement: x.p })],
+      ['comment', x => x.nodes.push({ nodeType: 8, textContent: '', parentElement: x.p })],
+      ['foreign_document', x => x.nodes[0].ownerDocument = {}],
+      ['foreign_paragraph', x => x.p.ownerDocument = {}],
+      ['detached', x => x.nodes[0].isConnected = false],
+      ['parent_node', x => x.nodes[0].parentNode = {}],
+      ['parent_element', x => x.nodes[0].parentElement = {}],
+      ['non_string', x => x.nodes[0].data = 17],
+      ['source_id', x => x.copy.values['data-dil-source-message-id'] = firstMarker],
+      ['answer_id', x => x.answer.values['data-chatgpt-selection-message-id'] = firstMarker],
+      ['mask', x => x.p.literalSecurity = 'disc'],
+      ['transform', x => x.p.literalTransform = 'uppercase'],
+      ['hidden', x => x.p.values.hidden = ''],
+      ['source_mismatch', x => Object.defineProperty(x.copy, 'textContent', { get: () => raw + ' ' })],
+      ['answer_mismatch', x => Object.defineProperty(x.answer, 'textContent', { get: () => raw + ' ' })],
+      ['count129', x => x.nodes.push(...Array.from({ length: 128 }, () => ({ ...x.nodes[0], data: '' })))],
+      ['node_replacement', x => { let reads = 0; Object.defineProperty(x.p, 'childNodes', {
+        get: () => ++reads < 3 ? x.nodes : x.nodes.map((node: any) => ({ ...node })) }); }],
+      ['data_mutation', x => { let reads = 0; Object.defineProperty(x.nodes[0], 'data', {
+        get: () => ++reads === 1 ? raw : raw + ' changed' }); }],
+    ];
+    for (const [name, mutate] of variants) {
+      const x = directText(raw); mutate(x); const result = x.read();
+      expect(result.flags.selectedExtraction, name).not.toBe('literal_dil');
+      expect(['dil_literal_json_fence', 'dil_escaped_literal_json_fence'], name).not.toContain(result.relation);
+      noDirectActions(x);
+    }
+    // Generic equal rendered text is not a literal/tool-release grant.
+    const malformed = ['prose', '{broken}', '[]', '{"type":"unknown"}',
+      '```json ' + raw + ' ```', '```JSON\n' + raw + '\n```', '```json\n' + raw + '\n```\nextra',
+      '```json\n' + JSON.stringify({ type: 'message', text: 'triple ``` remains excluded inside a fence' }) + '\n```',
+      JSON.stringify({ type: 'message', text: 'x'.repeat(220_000) }),
+      JSON.stringify({ type: 'message', text: '🌍'.repeat(60_000) }),
+      '{"type":"message","text":"' + String.fromCharCode(0xD800) + '"}',
+      '{"type":"message","text":"' + String.fromCharCode(0xDC00) + '"}'];
+    for (const text of malformed) {
+      const x = directText(text), result = x.read();
+      expect(result.flags.selectedExtraction, text.slice(0, 32)).not.toBe('literal_dil');
+      expect(['dil_literal_json_fence', 'dil_escaped_literal_json_fence']).not.toContain(result.relation);
+      noDirectActions(x);
+    }
+  });
   test('observed literal DIL stream run preserves the complete raw JSON patch and exact terminal relation', () => {
     const patch = '*** Begin Patch\n*** Add File: /synthetic/indent-probe.py\n+def demo():\n+    return 7\n*** End Patch';
     const raw = JSON.stringify({type:'tool_calls',calls:[{name:'apply_patch',input:patch}]}), x=streamRun(raw);
