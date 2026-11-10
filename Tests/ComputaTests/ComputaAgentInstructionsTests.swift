@@ -844,7 +844,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let commandInstructions = ComputaAgentInstructions.commandLine.replacingOccurrences(of: "\n", with: " ")
         for rule in [
             "HOME is isolated, not macOS home. Use observed paths; quoted ~ is literal",
-            "Locate files before content search; prefer rg with bounded output",
+            "Locate files before search; use bounded grep/sed (rg if available)",
             "Scope product diagnostics to relevant config/help files; skip histories/logs unless needed",
             "Fix observed path errors before repeating",
             "Commands use a private HOME and no login-shell initialization",

@@ -282,7 +282,7 @@ enum ComputaAgentInstructions {
     configuration or credentials may be unavailable. Do not copy credentials or
     alter security settings to work around that boundary.
     HOME is isolated, not macOS home. Use observed paths; quoted ~ is literal. Locate files
-    before content search; prefer rg with bounded output. Scope product diagnostics
+    before search; use bounded grep/sed (rg if available). Scope product diagnostics
     to relevant config/help files; skip histories/logs unless needed. Fix observed
     path errors before repeating.
     A running process/session ID is not success. Poll that exact returned session
@@ -465,10 +465,10 @@ enum ComputaAgentInstructions {
     /// Updating native policy requires reviewing its compact equivalent. Unknown
     /// full policy bytes remain full text in production, never silently mapped.
     static let groqReviewedNativePolicyDigests = [
-        "true:true": "27f8364e6f0e46203f9581e3c397193177982fe9b986b13732d2451116bef7e7",
-        "true:false": "d98b574b3454268f1fa63d02a591ffb25108d8847c8518b6ac484627c2975011",
-        "false:true": "00de103978c0c6cf621c0c7b675df580f7e8b4b96f41e44c2ac5b3d845035df4",
-        "false:false": "60a129b6bed3c191ebb8afc03fe05dd0c8bdb6560c75225fa42ed587655f1d69",
+        "true:true": "4decc1251b5b3d271e34573e11816ccf01019ce4f512d0da76d354ea97dbe9ac",
+        "true:false": "b42dda83c4e05d1cc2b0c855db0017aecfae112fc70685be0f491601ea471119",
+        "false:true": "85b1dd7143e7bee34cd2e9884ec80abb5a403c32fdfafff38da40da60d7a1520",
+        "false:false": "2ba42c0e62b2658aa17b945c341e68dd2a3a7bcc1a788253c8a4f64eaf21a523",
     ]
 
     static let groqNativePolicyIsCurrent = [true, false].allSatisfy { references in
@@ -549,7 +549,7 @@ enum ComputaAgentInstructions {
         """
 
     private static let groqCompactCommandInstructions = """
-        Commands: explicit workdir, bounded output; engine sandbox/approvals govern. Private HOME/no login shell may lack config/credentials: never copy credentials or weaken security. Observe paths; quoted ~ is literal. Locate files before bounded rg; inspect histories/logs only when relevant. Fix path errors. Git only for requested Git work/established repo; no init/preflight for loose files. Batch independent calls only; dependent steps await output or &&. Never join independent checks by ;/&&/||. Read every output/exit; report failed subcommands despite final exit0. Running/session ID isn't success: empty write_stdin to exact current session, nonempty only intended input; Verify final output/exit. No uncertain command replay, old sessions or unrequested jobs. Stop unneeded owned jobs through supported operation, verify exit or report uncertainty.
+        Commands: explicit workdir, bounded output; engine sandbox/approvals govern. Private HOME/no login shell may lack config/credentials: never copy credentials or weaken security. Observe paths; quoted ~ is literal. Locate files before grep/sed (rg if available); relevant histories/logs only. Fix path errors. Git only for requested Git work/established repo; no init/preflight for loose files. Batch independent calls only; dependent steps await output or &&. Never join independent checks by ;/&&/||. Read every output/exit; report failed subcommands despite final exit0. Running/session ID isn't success: empty write_stdin to exact current session, nonempty only intended input; Verify final output/exit. No uncertain command replay, old sessions or unrequested jobs. Stop unneeded owned jobs through supported operation, verify exit or report uncertainty.
         """
 
     private static func groqCompactBrowserInstructions(domains: Set<GroqInstructionDomain>) -> String {
