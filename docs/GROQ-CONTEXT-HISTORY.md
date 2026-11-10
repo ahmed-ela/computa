@@ -363,3 +363,44 @@ checks guard publication. No new page read, Copy operation, request, repair,
 replay or acceptance path is introduced. The original format error and cleanup
 rules remain intact. A captured candidate may explain its apparent format;
 it does not establish authored literal bytes or prove a selector cause.
+
+### Reloading browser entry after a different schema selection (2026-11-10)
+
+Build 485's ordinary workflow returned three verified literal replies and
+closed all three website sessions. It first loaded four terminal/browser
+schemas, then selected only `apply_patch` while successfully listing the coding
+directory. The final reply refused because browser tools were not loaded.
+The native discovery records distinguish the stages: loaded counts were
+2, 6 and 3; offered browser entry masks were 0, 6 and 0. No code edit, test,
+reference or browser receipt was produced. The independent fixture failed.
+The armed pre-parser capture stayed unused because no literal guard rejected
+these replies; this run does not qualify that new diagnostic's live path.
+
+Optional selections intentionally replace one another under the four-name
+limit. The latest selection therefore contained the persistent loader/history
+reader plus `apply_patch`; the browser entry routes remained discoverable but
+unloaded. This is not evidence of denied browser permission. The final handoff
+listed the current schemas and a generic self-loading cue, but returned early
+whenever another execution tool was loaded, omitting its exact loader example.
+The exact website-delivered prompt was not retained; the model's refusal does
+not prove a prompt-delivery defect.
+
+The follow-up adds a conditional exact loader envelope to that branch only
+when native browser state is unbound, no entry route is callable, and an
+eligible unloaded registered entry is available. It prefers `browser_open`,
+otherwise the observed bind route. It does not infer task intent, execute a
+load, retain previous optional schemas, grant permission or admit an unloaded
+call. Current catalog revision, tool choice, native availability, four-name
+selection limit, prompt budget, literal verification and cleanup stay in force.
+An already callable entry keeps direct-call guidance. Live workflow recovery
+requires a fresh controlled task; improved instructions alone are not a pass.
+
+The first instruction draft appended the example to existing generic guidance.
+Its focused checks passed, but the genuine Qwen coding/history workflow later
+failed local budget admission during pagination. The retained late-stage
+contract grew from 1,890 to 2,213 bytes; no output was truncated or oversized
+request admitted. The compact follow-up replaces repeated generic/direct
+wording in that exact branch while keeping its callable list, literal loader
+envelope, next-request boundary, self-loading instruction and browser/native
+app distinction. Full existing inventory rules and native policy remain.
+The original failed validation remains separate from subsequent results.

@@ -658,7 +658,8 @@ enum WebModelResponseCodec {
             hasFunctions: offered.values.contains { !$0.isCustom }, hasCustomTools: !customNames.isEmpty,
             currentToolHandoff: try currentGroqToolHandoff(projection: displayProjection,
                 offeredNames: Set(offered.keys), allowedNames: policy.allowedNames,
-                validatedReaderName: groqHistoryReaderName, nativeBrowserEntryNames: Set(groqEntryTools.keys)))
+                validatedReaderName: groqHistoryReaderName, nativeBrowserEntryNames: Set(groqEntryTools.keys),
+                browserAvailability: browserToolAvailability))
             : ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames,
             includedInstructionText: includedInstructionText, responseFormat: responseFormat,
             compactLiteralBoundary: provider == "groq",
@@ -747,7 +748,8 @@ enum WebModelResponseCodec {
     /// loader example avoids requiring the model to invent its first arguments.
     private static func currentGroqToolHandoff(projection: GroqToolCatalog.Projection?,
                                                offeredNames: Set<String>, allowedNames: Set<String>,
-                                               validatedReaderName: String?, nativeBrowserEntryNames: Set<String>) throws -> String {
+                                               validatedReaderName: String?, nativeBrowserEntryNames: Set<String>,
+                                               browserAvailability: EmbeddedBrowserToolAvailability?) throws -> String {
         guard let projection else { return "" }
         func json(_ value: Any) throws -> String {
             String(decoding: try JSONSerialization.data(withJSONObject: value,
@@ -769,7 +771,18 @@ enum WebModelResponseCodec {
         var ordinaryCallable = callable.subtracting([loader])
         if let validatedReaderName { ordinaryCallable.remove(validatedReaderName) }
         if !ordinaryCallable.isEmpty {
-            return result + " Call listed tools directly. Do not reload them."
+            result += " Call listed tools directly. Do not reload them."
+            // Replacing optional schemas can leave an execution tool loaded
+            // while the native unbound entry route is eligible but unloaded.
+            // Existing callable entries need no extra load. Never infer need
+            // from task text or borrow a same-named, unregistered tool.
+            guard browserAvailability == .unbound, nativeBrowserEntryNames.isDisjoint(with: callable),
+                  let entry = unloaded.first(where: { nativeBrowserEntryNames.contains($0)
+                    && ($0 == "browser_open" || $0 == "functions.browser_open") })
+                    ?? unloaded.first(where: { nativeBrowserEntryNames.contains($0) }) else { return result }
+            let call: [String: Any] = ["type": "tool_calls", "calls": [["name": loader,
+                "arguments": ["catalog_revision": projection.revision, "names": [entry]]]]]
+            return "Callable: \(try json(callable.sorted())). Call loaded tools. Entry if needed: \(try json(call)); await next-request schema. Load eligible names yourself; no user enablement. Webpages use browser_*; computer_v2_* is native-app UI."
         }
         guard let example = unloaded.first(where: { $0 == "exec_command" || $0 == "functions.exec_command" })
             ?? unloaded.first else { return result }
