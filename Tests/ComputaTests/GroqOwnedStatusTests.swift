@@ -275,6 +275,149 @@ import XCTest
         XCTAssertFalse(FileManager.default.fileExists(atPath: retired.output.path))
     }
 
+    func testFailureProgressParserAdmitsOnlyClosedTypedContentFreeInspectionFacts() throws {
+        typealias Lease = GroqOwnedStatusLease
+        let expected: Set<String> = ["not_submitted", "cleared", "user_absent", "answer_absent", "text_empty",
+            "editor_disabled", "editor_not_empty", "send_disabled", "footer_missing", "footer_shape", "footer_hidden",
+            "copy_count", "copy_parent", "copy_disabled", "copy_icon_count", "complete"]
+        XCTAssertEqual(Set(Lease.CompletionGate.allCases.map(\.rawValue)), expected)
+        let canary = "PRIVATE_PROGRESS_TEXT_DO_NOT_EXPORT"
+        func observation(_ complete: Bool = false) -> [String: Any] {
+            ["userCount": 1, "responseCount": 1, "text": canary, "busy": !complete, "answerComplete": complete]
+        }
+        func raw(_ reason: String) -> [String: Any] { ["kind": "groq_completion_gate_v1", "reason": reason] }
+        for gate in Lease.CompletionGate.allCases {
+            let inspection = try XCTUnwrap(Lease.ProgressInspection.parse(raw(gate.rawValue), observed: observation(gate == .complete)))
+            XCTAssertEqual(inspection.gate, gate); XCTAssertEqual(inspection.users, 1); XCTAssertEqual(inspection.answers, 1)
+            XCTAssertEqual(inspection.textBytes, canary.utf8.count)
+            XCTAssertEqual(inspection.answerComplete, gate == .complete); XCTAssertEqual(inspection.busy, gate != .complete)
+            XCTAssertEqual(Set(inspection.fields.keys), ["gate", "users", "answers", "textBytes", "busy", "answerComplete"])
+            let encoded = try JSONSerialization.data(withJSONObject: inspection.fields)
+            XCTAssertFalse(String(decoding: encoded, as: UTF8.self).contains(canary))
+        }
+        let malformedRaw: [Any] = [NSNull(), ["kind": "foreign", "reason": "complete"],
+            ["kind": "groq_completion_gate_v1", "reason": "PRIVATE_PROVIDER_ERROR"],
+            ["kind": "groq_completion_gate_v1", "reason": "footer_missing", "body": canary],
+            ["kind": "groq_completion_gate_v1"], ["kind": "groq_completion_gate_v1", "reason": 1] as [String: Any]]
+        for value in malformedRaw {
+            XCTAssertNil(Lease.ProgressInspection.parse(value, observed: observation()))
+        }
+        XCTAssertNil(Lease.ProgressInspection.parse(nil, observed: observation()))
+        let malformed: [(String, Any)] = [("userCount", -1), ("userCount", 2), ("userCount", true), ("userCount", 0.5),
+            ("responseCount", -1), ("responseCount", 2), ("responseCount", false), ("responseCount", "1"),
+            ("text", NSNull()), ("busy", 1), ("busy", "true"), ("busy", false),
+            ("answerComplete", 0), ("answerComplete", "false"), ("answerComplete", true)]
+        for (key, value) in malformed {
+            var changed = observation(); changed[key] = value
+            XCTAssertNil(Lease.ProgressInspection.parse(raw("footer_missing"), observed: changed), key)
+        }
+        XCTAssertNil(Lease.ProgressInspection.parse(raw("complete"), observed: observation()))
+        var huge = observation(); huge["text"] = canary + String(repeating: "🌍", count: 70_000)
+        let bounded = try XCTUnwrap(Lease.ProgressInspection.parse(raw("footer_missing"), observed: huge))
+        XCTAssertEqual(bounded.textBytes, 220_001, "The sentinel is a bounded UTF-8 count, never retained response text")
+        var empty = observation(); empty["userCount"] = 0; empty["responseCount"] = 0; empty["text"] = ""
+        XCTAssertNotNil(Lease.ProgressInspection.parse(raw("answer_absent"), observed: empty))
+    }
+
+    func testFailureProgressCacheBoundsCountersAgesAndUnknownInspectionWithoutCreatingCompletionProof() throws {
+        typealias Lease = GroqOwnedStatusLease
+        let now = ContinuousClock.now
+        let inspection = try XCTUnwrap(Lease.ProgressInspection.parse(
+            ["kind": "groq_completion_gate_v1", "reason": "footer_missing"],
+            observed: ["userCount": 1, "responseCount": 1, "text": "PRIVATE_CACHE_TEXT", "busy": true, "answerComplete": false]))
+        var cache = Lease.ProgressCache()
+        let unknown = cache.snapshot(now: now, candidate: false, changed: now, quietSince: now)
+        XCTAssertNil(unknown.inspection); XCTAssertNil(unknown.inspectionAgeMS)
+        XCTAssertNil(unknown.readAgeMS); XCTAssertNil(unknown.waitAgeMS)
+        XCTAssertNil(unknown.responseChangeAgeMS); XCTAssertNil(unknown.quietAgeMS)
+        XCTAssertFalse(unknown.completionCandidate); XCTAssertTrue(unknown.fields["inspection"] is NSNull)
+        cache.readStarted(now: now); cache.waitStarted(now: now); cache.admit(inspection, now: now)
+        let active = cache.snapshot(now: now.advanced(by: .milliseconds(1234)), candidate: true, changed: now, quietSince: now)
+        XCTAssertEqual(active.readsStarted, 1); XCTAssertEqual(active.readsReturned, 0); XCTAssertEqual(active.admittedReads, 1)
+        XCTAssertEqual(active.waitsStarted, 1); XCTAssertEqual(active.waitsReturned, 0)
+        XCTAssertEqual(active.inspectionAgeMS, 1234); XCTAssertEqual(active.readAgeMS, 1234); XCTAssertEqual(active.waitAgeMS, 1234)
+        XCTAssertEqual(active.responseChangeAgeMS, 1234); XCTAssertEqual(active.quietAgeMS, 1234)
+        XCTAssertEqual(active.inspection?.gate, .footerMissing); XCTAssertEqual(active.inspection?.answerComplete, false)
+        cache.readReturned(); cache.waitReturned()
+        let returned = cache.snapshot(now: now.advanced(by: .seconds(600)), candidate: false, changed: now, quietSince: now)
+        XCTAssertEqual(returned.inspectionAgeMS, 300_000); XCTAssertEqual(returned.responseChangeAgeMS, 300_000)
+        XCTAssertNil(returned.readAgeMS); XCTAssertNil(returned.waitAgeMS); XCTAssertNil(returned.quietAgeMS)
+        XCTAssertEqual(Lease.ProgressCache.age(now.advanced(by: .seconds(1)), now: now), 0)
+        XCTAssertNil(Lease.ProgressCache.age(nil, now: now))
+        for _ in 0..<65_540 {
+            cache.readStarted(now: now); cache.readReturned(); cache.waitStarted(now: now); cache.waitReturned()
+            cache.admit(inspection, now: now)
+        }
+        let saturated = cache.snapshot(now: now.advanced(by: .seconds(600)), candidate: true, changed: now, quietSince: now)
+        for count in [saturated.readsStarted, saturated.readsReturned, saturated.admittedReads, saturated.waitsStarted, saturated.waitsReturned] {
+            XCTAssertEqual(count, 65_535)
+        }
+        XCTAssertEqual(saturated.quietAgeMS, 300_000)
+        let fields = saturated.fields
+        XCTAssertEqual(Set(fields.keys), ["kind", "inspection", "readsStarted", "readsReturned", "admittedReads", "waitsStarted",
+            "waitsReturned", "inspectionAgeMS", "readAgeMS", "waitAgeMS", "responseChangeAgeMS", "quietAgeMS", "completionCandidate"])
+        XCTAssertEqual(fields["kind"] as? String, "groq_failure_progress_v1")
+        let encoded = try JSONSerialization.data(withJSONObject: fields)
+        XCTAssertFalse(String(decoding: encoded, as: UTF8.self).contains("PRIVATE_CACHE_TEXT"))
+        XCTAssertEqual(saturated.inspection?.answerComplete, false, "A native quiet candidate cannot promote an incomplete gate")
+    }
+
+    func testFailureProgressPublishesOnlyForCurrentEarlyFixtureAndCannotChangeItsFirstFailure() throws {
+        typealias Lease = GroqOwnedStatusLease
+        let fixture = try inspectorArm(purpose: Lease.FixtureTurn.earlyPassivePurpose)
+        let parent = try XCTUnwrap(Lease.FixtureTurn.consume(directory: fixture.directory, admission: fixture.admission,
+            request: fixture.request, first: true, allowEarlyPassive: true))
+        let lease = try XCTUnwrap(parent.child(admission: fixture.admission, request: fixture.request))
+        XCTAssertTrue(lease.capturesFailureProgress)
+        var cache = Lease.ProgressCache()
+        let inspection = try XCTUnwrap(Lease.ProgressInspection.parse(
+            ["kind": "groq_completion_gate_v1", "reason": "footer_missing"],
+            observed: ["userCount": 1, "responseCount": 1, "text": "PRIVATE_FAILURE_PROGRESS", "busy": true, "answerComplete": false]))
+        cache.readStarted(); cache.admit(inspection); cache.waitStarted()
+        let now = ContinuousClock.now
+        let progress = cache.snapshot(now: now, candidate: true, changed: now, quietSince: now)
+        let observation = Lease.Observation(stage: "http_2xx_opened", sessionToken: UUID().uuidString.lowercased(),
+            generation: UUID(), failureProgress: progress)
+        lease.publish(observation, trigger: "response_deadline")
+        let bytes = try Data(contentsOf: fixture.output)
+        let row = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        XCTAssertEqual(row.count, 16); XCTAssertEqual(row["stage"] as? String, "http_2xx_opened")
+        XCTAssertEqual(row["purpose"] as? String, Lease.FixtureTurn.earlyPassivePurpose)
+        let saved = try XCTUnwrap(row["failureProgress"] as? [String: Any])
+        XCTAssertEqual(saved["kind"] as? String, "groq_failure_progress_v1")
+        let savedInspection = try XCTUnwrap(saved["inspection"] as? [String: Any])
+        XCTAssertEqual(savedInspection["gate"] as? String, "footer_missing"); XCTAssertEqual(savedInspection["answerComplete"] as? Bool, false)
+        for secret in ["PRIVATE_FAILURE_PROGRESS", "http://127.0.0.1"] {
+            XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains(secret))
+        }
+        lease.publish(.init(stage: "http_429", sessionToken: observation.sessionToken, generation: observation.generation,
+            failureProgress: nil), trigger: "groq_reported_submission_error")
+        XCTAssertEqual(try Data(contentsOf: fixture.output), bytes)
+        XCTAssertFalse(lease.capturesFailureProgress)
+        for isFixture in [false, true] {
+            let ordinary = try setupLease(fixture: isFixture)
+            XCTAssertFalse(ordinary.lease.capturesFailureProgress)
+            ordinary.lease.publish(observation, trigger: "response_deadline")
+            let value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: ordinary.output)) as? [String: Any])
+            XCTAssertEqual(value.count, 15); XCTAssertNil(value["failureProgress"])
+        }
+        let absent = try inspectorArm(purpose: Lease.FixtureTurn.earlyPassivePurpose)
+        let absentParent = try XCTUnwrap(Lease.FixtureTurn.consume(directory: absent.directory, admission: absent.admission,
+            request: absent.request, first: true, allowEarlyPassive: true))
+        let absentChild = try XCTUnwrap(absentParent.child(admission: absent.admission, request: absent.request))
+        absentChild.publish(.init(stage: "http_2xx_opened", sessionToken: observation.sessionToken,
+            generation: observation.generation), trigger: "response_deadline")
+        let absentRow = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: absent.output)) as? [String: Any])
+        XCTAssertEqual(absentRow.count, 15); XCTAssertNil(absentRow["failureProgress"], "Missing diagnostics remain optional")
+        let retired = try inspectorArm(purpose: Lease.FixtureTurn.earlyPassivePurpose)
+        let retiredParent = try XCTUnwrap(Lease.FixtureTurn.consume(directory: retired.directory, admission: retired.admission,
+            request: retired.request, first: true, allowEarlyPassive: true))
+        let child = try XCTUnwrap(retiredParent.child(admission: retired.admission, request: retired.request))
+        retiredParent.revoke(); XCTAssertFalse(child.capturesFailureProgress)
+        child.publish(observation, trigger: "response_deadline")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: retired.output.path))
+    }
+
     private func setupLease(fixture: Bool = true) throws -> (lease: GroqOwnedStatusLease, output: URL, user: String) {
         let path = try XCTUnwrap(realpath(FileManager.default.temporaryDirectory.path, nil)); defer { free(path) }
         let root = URL(fileURLWithPath: String(cString: path), isDirectory: true).appendingPathComponent("groq-setup-" + UUID().uuidString)
@@ -886,12 +1029,18 @@ import XCTest
             XCTAssertEqual(row["purpose"] as? String,fixture ? (earlyPassive ? GroqOwnedStatusLease.FixtureTurn.earlyPassivePurpose : kind.purpose) : profile.purpose)
             XCTAssertEqual(row["trigger"] as? String,["rollback","observerNotArmed","observerUnavailable","siteWrapper","cachedSDK"].contains(mode) ? "groq_draft_restored" : "response_deadline")
             XCTAssertEqual(row["evidenceClass"] as? String,["observer_not_armed","observer_unavailable"].contains(expected) ? "native_observer_availability" : "page_world_observation")
+            if earlyPassive {
+                let progress = try XCTUnwrap(row["failureProgress"] as? [String: Any])
+                XCTAssertEqual(progress["kind"] as? String, "groq_failure_progress_v1")
+            } else {
+                XCTAssertNil(row["failureProgress"])
+            }
             if ["observer_not_armed", "observer_unavailable"].contains(expected) {
-                XCTAssertEqual(row.count, 16)
+                XCTAssertEqual(row.count, earlyPassive ? 17 : 16)
                 XCTAssertNotNil((row["setupReason"] as? String).flatMap(GroqOwnedStatusLease.SetupReason.init(rawValue:)))
                 XCTAssertEqual(row["setupReason"] as? String, mode == "observerNotArmed" ? "js_fetch_descriptor" : "armed")
             } else {
-                XCTAssertEqual(row.count, 15); XCTAssertNil(row["setupReason"])
+                XCTAssertEqual(row.count, earlyPassive ? 16 : 15); XCTAssertNil(row["setupReason"])
             }
             XCTAssertFalse(String(decoding:report,as:UTF8.self).contains(nonce.uuidString))
         }

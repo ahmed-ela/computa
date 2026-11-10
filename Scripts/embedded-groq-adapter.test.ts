@@ -19,6 +19,90 @@ const appendObservedShowMore = (f: ReturnType<typeof groqFixture>) => {
 };
 
 describe('Groq fixed fresh-session adapter', () => {
+
+  test('optional completion progress preserves the exact ordinary inspect result and never supplies acceptance', async () => {
+    const cases: [string, (f: any) => void][] = [
+      ['complete', () => {}],
+      ['editor_disabled', f => { f.f.editor.disabled = true; }],
+      ['editor_not_empty', f => { f.f.editor.value = 'PRIVATE UNEXPECTED DRAFT'; }],
+      ['send_disabled', f => { f.f.send.disabled = true; }],
+      ['footer_shape', f => { f.f.toolbar.setAttribute('class', 'PRIVATE FOREIGN CLASS'); }],
+      ['footer_hidden', f => { f.f.toolbar.setAttribute('hidden', ''); }],
+      ['copy_count', f => { f.f.copy.remove(); }],
+      ['copy_disabled', f => { f.f.copy.disabled = true; }],
+    ];
+    for (const [reason, change] of cases) {
+      const f = groqFixture({ key: 'openai/gpt-oss-120b', label: 'GPT OSS 120B' });
+      await f.submit(); await f.run(); change(f);
+      const ordinary = await f.run(), reported = await f.run('inspect', { groqFailureProgress: true });
+      expect(ordinary.groqFailureProgress).toBeUndefined();
+      expect(reported.groqFailureProgress).toEqual({ kind: 'groq_completion_gate_v1', reason });
+      const { groqFailureProgress: report, ...same } = reported;
+      expect(same).toEqual(ordinary);
+      expect(reported.answerComplete).toBe(reason === 'complete');
+      expect(reported.busy).toBe(reason !== 'complete');
+      expect(JSON.stringify(report)).not.toContain('PRIVATE');
+      expect(f.f.sendCount).toBe(1); expect(f.f.clearCount).toBe(0);
+      expect((await f.run('inspect', { groqFailureProgress: false })).groqFailureProgress).toBeUndefined();
+    }
+    const waiting = groqFixture(); waiting.f.delayResponse = true; await waiting.submit(); await waiting.run();
+    const pending = await waiting.run('inspect', { groqFailureProgress: true });
+    expect(pending.groqFailureProgress).toEqual({ kind: 'groq_completion_gate_v1', reason: 'answer_absent' });
+    expect(pending.answerComplete).toBe(false); expect(pending.responseCount).toBe(0);
+    const foreign = groqFixture(); await foreign.submit(); await foreign.run();
+    foreign.world.__computaModelOwner = 'foreign';
+    const refused = await foreign.run('inspect', { groqFailureProgress: true });
+    expect(refused.error).toBe('document_changed'); expect(refused.groqFailureProgress).toBeUndefined();
+    expect(foreign.f.sendCount).toBe(1);
+  });
+
+  test('completion progress names only the first original gate and preserves every DOM read and short circuit', () => {
+    const source = readFileSync(new URL('../Sources/Computa/Resources/BrowserModels/groq.js', import.meta.url), 'utf8');
+    const body = source.slice(source.indexOf('  function responseComplete('), source.indexOf('  function read()'));
+    const reasons = ['not_submitted', 'cleared', 'user_absent', 'answer_absent', 'text_empty',
+      'editor_disabled', 'editor_not_empty', 'send_disabled', 'footer_missing', 'footer_shape', 'footer_hidden',
+      'copy_count', 'copy_parent', 'copy_disabled', 'copy_icon_count', 'complete'];
+    for (const failure of reasons) {
+      const invoke = (reporting: boolean) => {
+        const reads: string[] = [];
+        const read = <T>(name: string, value: T): T => { reads.push(name); return value; };
+        const footer = { get tagName() { return read('footer.tag', 'DIV'); } };
+        const answer = { contains: (_node: any) => read('answer.contains', false) };
+        const editor = { get value() { return read('editor.value', failure === 'editor_not_empty' ? 'PRIVATE DRAFT' : ''); } };
+        const send = {}, copy = { get parentElement() { return read('copy.parent', failure === 'copy_parent' ? {} : footer); } };
+        const state = { get submitted() { return read('submitted', failure !== 'not_submitted'); },
+          get clear() { return read('clear', failure === 'cleared'); } };
+        const t = { get first() { return read('first', failure === 'user_absent' ? null : {}); },
+          get answer() { return read('answer', failure === 'answer_absent' ? null : answer); },
+          block: { get children() { return read('children', failure === 'footer_missing' ? [answer] : [answer, footer]); } } };
+        let copyReads = 0;
+        const c = {
+          enabled: (node: any) => read(node === editor ? 'editor.enabled' : node === send ? 'send.enabled' : 'copy.enabled',
+            !(node === editor && failure === 'editor_disabled' || node === send && failure === 'send_disabled'
+              || node === copy && failure === 'copy_disabled')),
+          visible: (_node: any) => read('footer.visible', failure !== 'footer_hidden'),
+          nodes: (root: any, _selector: string, _max: number) => {
+            if (root === t.block) return read('copies', failure === 'copy_count' ? [] : [copy]);
+            copyReads++; return read('copy.icons', Array.from({ length: failure === 'copy_icon_count' && copyReads === 2 ? 2 : 1 }, () => ({})));
+          },
+        };
+        const token = (_node: any, key: string) => read('class.' + key, failure !== 'footer_shape');
+        const complete = new Function('state', 'c', 'token', body + '; return responseComplete;')(state, c, token);
+        const progress = reporting ? { reason: null } : null;
+        const accepted = complete(t, { editor, send }, failure === 'text_empty' ? ' \n ' : 'PRIVATE RESPONSE', progress);
+        return { accepted, progress, reads };
+      };
+      const ordinary = invoke(false), diagnostic = invoke(true);
+      expect(diagnostic.accepted).toBe(failure === 'complete');
+      expect(diagnostic.progress).toEqual({ reason: failure });
+      expect(diagnostic.reads).toEqual(ordinary.reads);
+      if (failure === 'not_submitted') expect(diagnostic.reads).toEqual(['submitted']);
+      if (failure === 'editor_disabled') expect(diagnostic.reads).not.toContain('editor.value');
+      if (failure === 'footer_shape') expect(diagnostic.reads).not.toContain('footer.visible');
+      if (failure === 'copy_parent') expect(diagnostic.reads).not.toContain('copy.enabled');
+      expect(JSON.stringify(diagnostic.progress)).not.toContain('PRIVATE');
+    }
+  });
   test('standalone source embeds only the small audited core exactly', () => {
     const core = readFileSync(new URL('./embedded-provider-core.js', import.meta.url), 'utf8');
     const source = readFileSync(new URL('../Sources/Computa/Resources/BrowserModels/groq.js', import.meta.url), 'utf8');

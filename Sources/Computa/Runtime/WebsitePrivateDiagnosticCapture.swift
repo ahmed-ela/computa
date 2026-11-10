@@ -1,3 +1,4 @@
+import CoreFoundation
 import CryptoKit
 import Darwin
 import Foundation
@@ -382,6 +383,10 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
         callback?()
     }
     var isFixture: Bool { fixtureTurn != nil }
+    var capturesFailureProgress: Bool {
+        isCurrent && profile == .gptoss120b && installationMode == .earlyPassive
+            && fixtureTurn?.publicationPurpose == FixtureTurn.earlyPassivePurpose
+    }
     func recordSetupReason(_ reason: SetupReason) {
         guard isFixture, reason != .armed else { return }
         lock.withLock {
@@ -597,10 +602,89 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
             return true
         }
     }
+    /// Negative troubleshooting metadata only. These values cannot admit a
+    /// response, extend a deadline, grant an action, or establish HTTP/body proof.
+    enum CompletionGate: String, CaseIterable, Sendable {
+        case notSubmitted = "not_submitted", cleared, userAbsent = "user_absent", answerAbsent = "answer_absent"
+        case textEmpty = "text_empty", editorDisabled = "editor_disabled", editorNotEmpty = "editor_not_empty"
+        case sendDisabled = "send_disabled", footerMissing = "footer_missing", footerShape = "footer_shape"
+        case footerHidden = "footer_hidden", copyCount = "copy_count", copyParent = "copy_parent"
+        case copyDisabled = "copy_disabled", copyIconCount = "copy_icon_count", complete
+    }
+    struct ProgressInspection: Sendable {
+        let gate: CompletionGate
+        let users: Int, answers: Int, textBytes: Int
+        let busy: Bool, answerComplete: Bool
+        static func parse(_ raw: Any?, observed: [String: Any]) -> Self? {
+            guard let value = raw as? [String: Any], Set(value.keys) == ["kind", "reason"],
+                  value["kind"] as? String == "groq_completion_gate_v1",
+                  let name = value["reason"] as? String, let gate = CompletionGate(rawValue: name),
+                  let users = ComputerToolArgumentContract.exactInt64(observed["userCount"]), (0...1).contains(users),
+                  let answers = ComputerToolArgumentContract.exactInt64(observed["responseCount"]), (0...1).contains(answers),
+                  let text = observed["text"] as? String,
+                  let busy = observed["busy"] as? NSNumber, CFGetTypeID(busy) == CFBooleanGetTypeID(),
+                  let complete = observed["answerComplete"] as? NSNumber, CFGetTypeID(complete) == CFBooleanGetTypeID(),
+                  complete.boolValue == (gate == .complete), busy.boolValue != complete.boolValue else { return nil }
+            return .init(gate: gate, users: Int(users), answers: Int(answers),
+                         textBytes: text.utf8.prefix(220_001).count, busy: busy.boolValue, answerComplete: complete.boolValue)
+        }
+        var fields: [String: Any] {
+            ["gate": gate.rawValue, "users": users, "answers": answers, "textBytes": textBytes,
+             "busy": busy, "answerComplete": answerComplete]
+        }
+    }
+    struct FailureProgress: Sendable {
+        let inspection: ProgressInspection?
+        let readsStarted: Int, readsReturned: Int, admittedReads: Int, waitsStarted: Int, waitsReturned: Int
+        let inspectionAgeMS: Int?, readAgeMS: Int?, waitAgeMS: Int?, responseChangeAgeMS: Int?, quietAgeMS: Int?
+        let completionCandidate: Bool
+        var fields: [String: Any] {
+            ["kind": "groq_failure_progress_v1", "inspection": inspection.map { $0.fields as Any } ?? NSNull(),
+             "readsStarted": readsStarted, "readsReturned": readsReturned, "admittedReads": admittedReads,
+             "waitsStarted": waitsStarted, "waitsReturned": waitsReturned,
+             "inspectionAgeMS": inspectionAgeMS.map { $0 as Any } ?? NSNull(),
+             "readAgeMS": readAgeMS.map { $0 as Any } ?? NSNull(), "waitAgeMS": waitAgeMS.map { $0 as Any } ?? NSNull(),
+             "responseChangeAgeMS": responseChangeAgeMS.map { $0 as Any } ?? NSNull(),
+             "quietAgeMS": quietAgeMS.map { $0 as Any } ?? NSNull(), "completionCandidate": completionCandidate]
+        }
+    }
+    struct ProgressCache {
+        private(set) var readsStarted = 0, readsReturned = 0, admittedReads = 0, waitsStarted = 0, waitsReturned = 0
+        private var reading: ContinuousClock.Instant?, waiting: ContinuousClock.Instant?
+        private var last: (ProgressInspection, ContinuousClock.Instant)?
+        private static func increment(_ n: Int) -> Int { min(65_535, n + 1) }
+        mutating func readStarted(now: ContinuousClock.Instant = .now) { readsStarted = Self.increment(readsStarted); reading = now }
+        mutating func readReturned() { readsReturned = Self.increment(readsReturned); reading = nil }
+        mutating func waitStarted(now: ContinuousClock.Instant = .now) { waitsStarted = Self.increment(waitsStarted); waiting = now }
+        mutating func waitReturned() { waitsReturned = Self.increment(waitsReturned); waiting = nil }
+        mutating func admit(_ inspection: ProgressInspection, now: ContinuousClock.Instant = .now) {
+            admittedReads = Self.increment(admittedReads); last = (inspection, now)
+        }
+        static func age(_ at: ContinuousClock.Instant?, now: ContinuousClock.Instant) -> Int? {
+            guard let at else { return nil }
+            let span = at.duration(to: now).components
+            // Clamp before integer conversion, including a crossed/invalid clock.
+            guard span.seconds >= 0 else { return 0 }
+            guard span.seconds < 300 else { return 300_000 }
+            return max(0, min(300_000, Int(span.seconds) * 1_000 + Int(span.attoseconds / 1_000_000_000_000_000)))
+        }
+        func snapshot(now: ContinuousClock.Instant = .now, candidate: Bool,
+                      changed: ContinuousClock.Instant?, quietSince: ContinuousClock.Instant?) -> FailureProgress {
+            .init(inspection: last?.0, readsStarted: readsStarted, readsReturned: readsReturned, admittedReads: admittedReads,
+                  waitsStarted: waitsStarted, waitsReturned: waitsReturned, inspectionAgeMS: Self.age(last?.1, now: now),
+                  readAgeMS: Self.age(reading, now: now), waitAgeMS: Self.age(waiting, now: now),
+                  responseChangeAgeMS: last.map { _ in Self.age(changed, now: now) } ?? nil,
+                  quietAgeMS: candidate ? Self.age(quietSince, now: now) : nil, completionCandidate: candidate)
+        }
+    }
     struct Observation: Sendable {
         let stage: String
         let sessionToken: String
         let generation: UUID
+        let failureProgress: FailureProgress?
+        init(stage: String, sessionToken: String, generation: UUID, failureProgress: FailureProgress? = nil) {
+            self.stage = stage; self.sessionToken = sessionToken; self.generation = generation; self.failureProgress = failureProgress
+        }
     }
     // Called synchronously on the server after it has rejoined this exact current inference.
     func publish(_ observation: Observation, trigger: String) {
@@ -618,6 +702,7 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
         if isFixture, ["observer_not_armed","observer_unavailable"].contains(stage) {
             v["setupReason"] = lock.withLock { setupReason.rawValue }
         }
+        if capturesFailureProgress, let progress = observation.failureProgress { v["failureProgress"] = progress.fields }
         guard let bytes=try? JSONSerialization.data(withJSONObject:v,options:[.sortedKeys]) else{return}
         _=WebsitePrivateDiagnosticCapture.publish(bytes,using:file,isCurrent:{ !Task.isCancelled && self.isCurrent },commit:{ rename in
             self.lock.withLock {

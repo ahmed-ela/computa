@@ -307,26 +307,44 @@ try {
     if (!onlyLiteralAndChrome(answer)) return fallback();
     return (code.textContent || '').slice(0, 220_001);
   }
-  function responseComplete(t, form, text) {
-    if (!state.submitted || state.clear || !t.first || !t.answer || !text.trim()
-      || !c.enabled(form.editor) || form.editor.value !== '' || !c.enabled(form.send)) return false;
+  function responseComplete(t, form, text, progress) {
+    // Record only the first failed operand, at its original evaluation point.
+    // This optional report never participates in completion or ownership.
+    const no = reason => { if (progress) progress.reason = reason; return false; };
+    if (!state.submitted) return no('not_submitted');
+    if (state.clear) return no('cleared');
+    if (!t.first) return no('user_absent');
+    if (!t.answer) return no('answer_absent');
+    if (!text.trim()) return no('text_empty');
+    if (!c.enabled(form.editor)) return no('editor_disabled');
+    if (form.editor.value !== '') return no('editor_not_empty');
+    if (!c.enabled(form.send)) return no('send_disabled');
     const siblings = [...t.block.children], footer = siblings[siblings.indexOf(t.answer) + 1];
-    if (footer?.tagName !== 'DIV' || !['flex', 'flex-row', 'align-center', 'items-center', 'gap-1', 'pt-2']
-      .every(value => token(footer, value)) || !c.visible(footer)) return false;
+    if (footer?.tagName !== 'DIV') return no('footer_missing');
+    if (!['flex', 'flex-row', 'align-center', 'items-center', 'gap-1', 'pt-2']
+      .every(value => token(footer, value))) return no('footer_shape');
+    if (!c.visible(footer)) return no('footer_hidden');
     const copies = c.nodes(t.block, 'button', 32).filter(node =>
       c.nodes(node, 'svg[aria-label="copy"]', 4).length > 0 && !t.answer.contains(node));
-    return copies.length === 1 && copies[0].parentElement === footer && c.enabled(copies[0])
-      && c.nodes(copies[0], 'svg[aria-label="copy"]', 4).length === 1;
+    if (copies.length !== 1) return no('copy_count');
+    if (copies[0].parentElement !== footer) return no('copy_parent');
+    if (!c.enabled(copies[0])) return no('copy_disabled');
+    if (c.nodes(copies[0], 'svg[aria-label="copy"]', 4).length !== 1) return no('copy_icon_count');
+    if (progress) progress.reason = 'complete';
+    return true;
   }
   function read() {
     const t = transcript(), form = composer(), modelEvidence = evidence(false);
-    const text = responseText(t.answer), answerComplete = responseComplete(t, form, text);
+    const progress = input.action === 'inspect'
+      && Object.getOwnPropertyDescriptor(input, 'groqFailureProgress')?.value === true ? { reason: null } : null;
+    const text = responseText(t.answer), answerComplete = responseComplete(t, form, text, progress);
     // The terminal conjunction is answer-scoped footer Copy plus an empty,
     // enabled composer and enabled Send. Global speed/code-copy grant nothing.
     return { t, form, output: { url: document.URL, sessionLifecycle: 'explicit_clear', temporary: false,
       modelEvidence, composer: c.enabled(form.editor), userCount: t.users.length, responseCount: t.answers.length,
       conversationIdentity: null, busy: !answerComplete && (t.users.length > 0 || state.submitted && !state.clear),
       interrupted: false, answerComplete, text,
+      ...(progress ? { groqFailureProgress: { kind: 'groq_completion_gate_v1', reason: progress.reason } } : {}),
       firstUserIdentity: null, firstUserVerified: false, firstUserMarkerVerified: false, firstUserFingerprint: null } };
   }
   // React can mount the composer before the picker and canonical model query.

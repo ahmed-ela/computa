@@ -727,6 +727,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // Passive synthetic metadata only. Neither this lease nor its snapshot
         // can supply model, ownership, completion or response text evidence.
         var groqOwnedStatus: GroqOwnedStatusLease?
+        var groqFailureProgress = GroqOwnedStatusLease.ProgressCache()
+        weak var groqFailureProgressOwner: GroqOwnedStatusLease?
         var qwenMarkerWire: QwenMarkerWireLease?
         var qwenMarkerTurn: String?
         var qwenCodePayload: QwenCodePayloadPending?
@@ -1753,6 +1755,36 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return (user,answer,chat)
     }
 
+    // Native-only diagnostic opt-in. No page field or model argument can mint it.
+    // Rechecked at dispatch, admission and failure publication, including awaits.
+    private func groqFailureProgressLease(_ session: Session, allowingPending: Bool = false, allowingFailed: Bool = false) -> GroqOwnedStatusLease? {
+        guard !Task.isCancelled, let lease = session.groqOwnedStatus, lease.capturesFailureProgress,
+              case .model(let proof)? = session.selectionEvidence,
+              proof.selected.key == lease.modelChoice.key, proof.selected.label == lease.modelChoice.label,
+              sessions[session.token] === session, session.provider == .groq,
+              !session.isDiscovery, !session.isRecoveryProbe, !session.temporary,
+              session.state == "running" || allowingFailed && session.state == "failed",
+              session.explicitClearReady, session.modelChoice == lease.modelChoice, session.modelSelectionVerified,
+              let generation = session.documentGeneration,
+              browser.webView(for: session.tabID) === session.view, browser.documentGeneration(for: session.tabID) == generation,
+              let submission = session.explicitClearSubmission, session.view.url == submission.url,
+              submission.url == session.provider.startURL(choice: session.modelChoice), submission.generation == generation,
+              session.submitted, session.sequence == 1, session.acknowledgedSendSequence == 1,
+              session.baseline == 0, session.explicitClearOperation == nil else { return nil }
+        let bound = !session.pendingSubmission && session.confirmedUsers == 1
+            && session.firstUserFingerprint == submission.outboundFingerprint
+        // This weaker branch grants only optional finite reporting on the
+        // existing first inspect. Admission/publication never uses it.
+        let pending = allowingPending && session.pendingSubmission && session.confirmedUsers == 0
+            && session.firstUserFingerprint == nil && submission.outboundFingerprint.utf8.count == 64
+        guard bound || pending else { return nil }
+        if session.groqFailureProgressOwner !== lease {
+            session.groqFailureProgress = .init()
+            session.groqFailureProgressOwner = lease
+        }
+        return lease
+    }
+
     func observeGroqStatus(sessionToken:String,lease:GroqOwnedStatusLease) async -> GroqOwnedStatusLease.Observation? {
         guard let session=sessions[sessionToken],session.groqOwnedStatus===lease,let generation=session.documentGeneration,
               let first=session.firstUserFingerprint,let submission=session.explicitClearSubmission else{return nil}
@@ -1777,7 +1809,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         await beforePageResultValidationForTesting?("groqOwnedStatusObserved")
         #endif
         guard lease.isCurrent,stillBound(),let stage=value ?? lease.unavailableStage else{return nil}
-        return .init(stage:stage,sessionToken:sessionToken,generation:generation)
+        // The existing accepted failure observation may already have marked
+        // this session failed. Only this snapshot site may retain its cache.
+        let progress = groqFailureProgressLease(session, allowingFailed: true) === lease
+            ? session.groqFailureProgress.snapshot(candidate: session.completionCandidate, changed: session.lastChanged,
+                quietSince: session.candidateSince.map { max($0, session.lastChanged) }) : nil
+        return .init(stage:stage,sessionToken:sessionToken,generation:generation,failureProgress:progress)
     }
 
     private func prepareQwenMarker(_ session: Session, prompt: String, outbound: String) async {
@@ -2606,6 +2643,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if let retry = session.initialReadRetry { wake = min(wake, retry) }
         if let settlement = session.initialCheckpointSettlement, !settlement.finished {
             wake = min(wake, settlement.deadline)
+        }
+        let groqProgress = groqFailureProgressLease(session, allowingPending: true)
+        if groqProgress != nil { session.groqFailureProgress.waitStarted() }
+        defer {
+            if let groqProgress, groqFailureProgressLease(session, allowingPending: true) === groqProgress { session.groqFailureProgress.waitReturned() }
         }
         let profileQuietWait = session.state == "running" && session.completionCandidate && session.candidateSince != nil
         if profileQuietWait { session.profileCompletionTransition(.quietWaitStarted) }
@@ -7025,6 +7067,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 && session.pendingSubmission && session.sequence > 1,
         ]
         if capturesQwenReplyUI { input["qwenProgressUI"] = true }
+        let groqProgress = action == "inspect" && enforceModel && !allowBlockedProvider
+            && savedDeleteOperation == nil && !allowSavedCleanupInspection ? groqFailureProgressLease(session, allowingPending: true) : nil
+        if groqProgress != nil { input["groqFailureProgress"] = true }
         if provider == .qwen, let channel = browser.qwenCodePayloadChannel(tabID:session.tabID,view:session.view,
             owner:session.token,generation:generation) { input["qwenCodePayloadChannel"] = channel }
         if let grant = qwenCodePayloadSample {
@@ -7278,6 +7323,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         browser.captureModelNativeFocus(tabID: session.tabID)
         defer { browser.restoreModelNativeFocus(tabID: session.tabID) }
         let result = EmbeddedScriptResult()
+        if groqProgress != nil { session.groqFailureProgress.readStarted() }
+        defer {
+            if let groqProgress, groqFailureProgressLease(session, allowingPending: true) === groqProgress { session.groqFailureProgress.readReturned() }
+        }
         let bytes: Data
         do {
             let evaluationStarted = ContinuousClock.now
@@ -7532,6 +7581,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         try Task.checkCancellation()
         guard var observed = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw Failure.pageUnavailable }
+        // Remove diagnostic-only data before any response/ownership validation.
+        // Retain it only if the entire ordinary read subsequently passes.
+        let groqProgressRaw = groqProgress != nil ? observed.removeValue(forKey: "groqFailureProgress") : nil
         // Strip this one private DOM-protocol field before existing closed
         // pending/response validation. It never enters the model reply decoder.
         let qwenReplyUI = capturesQwenReplyUI
@@ -8353,6 +8405,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         if action == "inspect", onlyInitialChatReads(session) {
             session.priorEmptyRootGeneration = observed["untouchedInitialRoot"] as? Bool == true ? generation : nil
+        }
+        if let groqProgress, groqFailureProgressLease(session) === groqProgress,
+           let progress = GroqOwnedStatusLease.ProgressInspection.parse(groqProgressRaw, observed: observed),
+           observed["firstUserVerified"] as? Bool == true, observed["firstUserMarkerVerified"] as? Bool == true,
+           observed["firstUserFingerprint"] as? String == session.firstUserFingerprint {
+            session.groqFailureProgress.admit(progress)
         }
         cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection, replyUI: qwenReplyUI)
         return observed
