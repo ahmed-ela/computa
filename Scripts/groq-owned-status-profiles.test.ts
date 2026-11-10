@@ -15,7 +15,7 @@ function deferred<T>() {
   const promise = new Promise<T>((yes,no)=>{resolve=yes;reject=no;});
   return { promise, resolve, reject };
 }
-type FixtureOptions={configProfile?:string;syncError?:Error;setupDiagnostics?:boolean;nonWritableFetch?:boolean;missingResponseGetter?:boolean;triggerCount?:number;pickerClosed?:boolean;siteWrapperBeforeInstall?:boolean};
+type FixtureOptions={configProfile?:string;syncError?:Error;setupDiagnostics?:boolean;nonWritableFetch?:boolean;missingResponseGetter?:boolean;triggerCount?:number;pickerClosed?:boolean;siteWrapperBeforeInstall?:boolean;earlyPassive?:boolean;earlyPassivePrototype?:boolean;earlyPassiveAccessor?:boolean};
 function fixture(profile:Profile='qwen27b', options:FixtureOptions={}) {
   const selected=profiles[profile], pending=deferred<any>(), calls:{receiver:unknown;args:unknown[]}[]=[];
   const original=function(this:unknown,...args:unknown[]) {calls.push({receiver:this,args});if(options.syncError)throw options.syncError;return pending.promise;};
@@ -45,10 +45,16 @@ function fixture(profile:Profile='qwen27b', options:FixtureOptions={}) {
   const clearTimer=(id:number)=>{timers.delete(id);};
   const key='__computaGroqStatus_'+'a'.repeat(32),secret='b'.repeat(32);
   const config={key:'a'.repeat(32),secret,durationMs:1000,profile:options.configProfile??profile,
-    ...(options.setupDiagnostics===undefined?{}:{setupDiagnostics:options.setupDiagnostics})};
-  new Function('window','top','location','document','Response','performance','setTimeout','clearTimeout','getComputedStyle',
-    source.replace('__GROQ_OWNED_SYNTHETIC_CONFIG__',JSON.stringify(config)))(window,window,location,document,ResponseDouble,
-      {now:()=>clock},setTimer,clearTimer,()=>({visibility:'visible'}));
+    ...(options.setupDiagnostics===undefined?{}:{setupDiagnostics:options.setupDiagnostics}),
+    ...(options.earlyPassive===undefined?{}:{earlyPassive:options.earlyPassive})};
+  let earlyFlagReads=0;
+  let configExpression=JSON.stringify(config);
+  if(options.earlyPassivePrototype)configExpression='Object.assign(Object.create({earlyPassive:true}),'+configExpression+')';
+  if(options.earlyPassiveAccessor)configExpression='Object.defineProperty('+configExpression+',"earlyPassive",{get(){onEarlyFlagRead();return true;}})';
+  const context=new Function('window','top','location','document','Response','performance','setTimeout','clearTimeout','getComputedStyle','onEarlyFlagRead',
+    source.replace('__GROQ_OWNED_SYNTHETIC_CONFIG__',configExpression)
+      +'\n;return {replaceDocument(next){document=next;},replaceTop(next){top=next;}};')(window,window,location,document,ResponseDouble,
+      {now:()=>clock},setTimer,clearTimer,()=>({visibility:'visible'}),()=>{earlyFlagReads++;});
   const ctl=(command:string,args:any={},givenSecret=secret)=>window[key]?.(givenSecret,command,args);
   const arm=(args:any={})=>ctl('arm',{model:selected.model,label:selected.label,prompt,...args});
   const body=(extra:any={},system=profile!=='qwen27b',pretty=false)=>JSON.stringify({model:selected.model,
@@ -56,8 +62,8 @@ function fixture(profile:Profile='qwen27b', options:FixtureOptions={}) {
     temperature:selected.temperature,max_completion_tokens:selected.maximum,top_p:selected.topP,stream:true,...extra},null,pretty?2:undefined);
   const finish=()=>ctl('finish');
   return {window,original,calls,pending,selected,location,ResponseDouble,arm,body,ctl,finish,key,fetchDescriptorBefore,
-    siteFetch,siteCalls,preinstallFetch,
-    timerCount:()=>timers.size,fireTimers:()=>{for(const [id,callback] of [...timers]){timers.delete(id);callback();}},
+    siteFetch,siteCalls,preinstallFetch,document,replaceDocument:context.replaceDocument,replaceTop:context.replaceTop,
+    earlyFlagReads:()=>earlyFlagReads,timerCount:()=>timers.size,fireTimers:()=>{for(const [id,callback] of [...timers]){timers.delete(id);callback();}},
     tick:(n:number)=>{clock=n;},privateReads:()=>privateReads,driftLabel:()=>{visibleLabel='Foreign model';},replacePicker:()=>{button={...button};}};
 }
 const settle=async(f:ReturnType<typeof fixture>,status:number)=>{const response=new f.ResponseDouble(status);f.pending.resolve(response);await f.pending.promise;await Promise.resolve();return response;};
@@ -236,4 +242,116 @@ test('cached preinstallation fetch bypass stays unmatched without a fabricated H
     expect(f.window[f.key]).toBeUndefined();expect(f.privateReads()).toBe(0);
     expect(Object.getOwnPropertyDescriptor(f.window,'fetch')).toEqual(f.fetchDescriptorBefore);
   }
+});
+
+
+test('early passive SDK cache observes one armed request after a site replacement without rebinding fetch',async()=>{
+  const f=fixture('gptoss120b',{setupDiagnostics:true,earlyPassive:true});
+  const sdkCached=f.window.fetch,controller=f.window[f.key];
+  expect(sdkCached).not.toBe(f.original);expect(f.calls).toHaveLength(0);
+  f.window.fetch=f.siteFetch;
+  expect(f.arm()).toBe(true);expect(f.arm()).toBe('js_arm_state_unavailable');
+  const receiver={synthetic:true},init={method:'POST',body:f.body()},args=[endpoint,init] as const;
+  const promise=Reflect.apply(sdkCached,receiver,args);
+  expect(promise).toBe(f.pending.promise);expect(f.calls).toHaveLength(1);expect(f.siteCalls).toHaveLength(0);
+  expect(f.calls[0].receiver).toBe(receiver);expect(f.calls[0].args).toEqual(args);
+  expect(f.calls[0].args[0]).toBe(endpoint);expect(f.calls[0].args[1]).toBe(init);
+  expect(f.window.fetch).toBe(f.siteFetch);
+  const response=await settle(f,429);expect(await promise).toBe(response);
+  expect(f.finish()).toBe('http_429');expect(f.privateReads()).toBe(0);
+  expect(f.window.fetch).toBe(f.siteFetch);expect(f.window[f.key]).toBeUndefined();expect(f.timerCount()).toBe(0);
+  expect(controller('b'.repeat(32),'arm',{})).toBe('js_arm_state_unavailable');
+  // A disposed SDK closure is inert and still forwards the original call once.
+  let reads=0;
+  const input=new Proxy({}, {get(){reads++;throw Error('PRIVATE_INPUT');}});
+  const privateInit=new Proxy({}, {get(){reads++;throw Error('PRIVATE_INIT');},getPrototypeOf(){reads++;throw Error('PRIVATE_PROTO');},getOwnPropertyDescriptor(){reads++;throw Error('PRIVATE_DESCRIPTOR');}});
+  expect(Reflect.apply(sdkCached,receiver,[input,privateInit])).toBe(promise);
+  expect(f.calls).toHaveLength(2);expect(f.calls[1].receiver).toBe(receiver);
+  expect(f.calls[1].args[0]).toBe(input);expect(f.calls[1].args[1]).toBe(privateInit);
+  expect(reads).toBe(0);expect(f.privateReads()).toBe(0);expect(f.window.fetch).toBe(f.siteFetch);
+});
+
+test('early passive bootstrap is blind before arm and foreign or expired ownership never fabricates HTTP',async()=>{
+  const blind=fixture('gptoss120b',{setupDiagnostics:true,earlyPassive:true});
+  const cached=blind.window.fetch,receiver={synthetic:true};let reads=0;
+  const input=new Proxy({}, {get(){reads++;throw Error('PRIVATE_INPUT');}});
+  const init=new Proxy({}, {get(){reads++;throw Error('PRIVATE_INIT');},getPrototypeOf(){reads++;throw Error('PRIVATE_PROTO');},getOwnPropertyDescriptor(){reads++;throw Error('PRIVATE_DESCRIPTOR');}});
+  const promise=Reflect.apply(cached,receiver,[input,init]);
+  expect(promise).toBe(blind.pending.promise);expect(blind.calls).toHaveLength(1);
+  expect(blind.calls[0].receiver).toBe(receiver);expect(blind.calls[0].args[0]).toBe(input);expect(blind.calls[0].args[1]).toBe(init);
+  expect(reads).toBe(0);expect(blind.finish()).toBe(false);expect(blind.privateReads()).toBe(0);
+  const response=await settle(blind,400);expect(await promise).toBe(response);
+  expect(blind.arm()).toBe(true);expect(blind.finish()).toBe('no_matching_fetch_observed');
+  expect(blind.calls).toHaveLength(1);expect(reads).toBe(0);expect(blind.privateReads()).toBe(0);
+  const thrown=new Error('PRIVATE_SYNC'),sync=fixture('gptoss120b',{setupDiagnostics:true,earlyPassive:true,syncError:thrown});
+  const syncCached=sync.window.fetch;
+  expect(()=>Reflect.apply(syncCached,receiver,[input,init])).toThrow(thrown);
+  expect(sync.calls).toHaveLength(1);expect(sync.calls[0].args[0]).toBe(input);expect(sync.calls[0].args[1]).toBe(init);
+  expect(reads).toBe(0);expect(sync.arm()).toBe(true);expect(sync.finish()).toBe('no_matching_fetch_observed');
+
+  // The absolute deadline makes an armed cache inert before its timer callback runs.
+  const expired=fixture('gptoss120b',{setupDiagnostics:true,earlyPassive:true}),expiredCached=expired.window.fetch;
+  expect(expired.arm()).toBe(true);expired.window.fetch=expired.siteFetch;expired.tick(1001);
+  let expiredReads=0;
+  Object.defineProperty(expired.document,'baseURI',{get(){expiredReads++;throw Error('PRIVATE_BASE_URI');}});
+  const expiredInit=new Proxy({}, {get(){expiredReads++;throw Error('PRIVATE_INIT');},getPrototypeOf(){expiredReads++;throw Error('PRIVATE_PROTO');},getOwnPropertyDescriptor(){expiredReads++;throw Error('PRIVATE_DESCRIPTOR');}});
+  const expiredPromise=Reflect.apply(expiredCached,receiver,[endpoint,expiredInit]);
+  expect(expiredPromise).toBe(expired.pending.promise);expect(expired.calls).toHaveLength(1);
+  expect(expired.calls[0].receiver).toBe(receiver);expect(expired.calls[0].args[0]).toBe(endpoint);expect(expired.calls[0].args[1]).toBe(expiredInit);
+  const expiredResponse=await settle(expired,429);expect(await expiredPromise).toBe(expiredResponse);
+  expect(expired.finish()).toBe('ambiguous');expect(expiredReads).toBe(0);expect(expired.privateReads()).toBe(0);
+  expect(expired.window.fetch).toBe(expired.siteFetch);expect(expired.timerCount()).toBe(0);
+
+  for(const mode of ['controllerBeforeArm','controllerAccessorBeforeArm','documentBeforeArm','controller','controllerAccessor','document','top','origin','route','expired','timer','duplicate','dispose'] as const){
+    const f=fixture('gptoss120b',{setupDiagnostics:true,earlyPassive:true}),sdkCached=f.window.fetch,controller=f.window[f.key];
+    const own=(command:string,args:any={})=>controller('b'.repeat(32),command,args);
+    const foreign=()=>false;let controllerReads=0;
+    const foreignGetter=()=>{controllerReads++;throw Error('PRIVATE_CONTROLLER');};f.window.fetch=f.siteFetch;
+    if(mode==='controllerBeforeArm')Object.defineProperty(f.window,f.key,{configurable:true,value:foreign});
+    if(mode==='controllerAccessorBeforeArm')Object.defineProperty(f.window,f.key,{configurable:true,get:foreignGetter});
+    if(mode==='documentBeforeArm')f.replaceDocument({...f.document});
+    if(mode==='controllerBeforeArm'||mode==='controllerAccessorBeforeArm'||mode==='documentBeforeArm'){
+      expect(own('arm',{model:f.selected.model,label:f.selected.label,prompt})).toBe('js_arm_state_unavailable');
+      const p=Reflect.apply(sdkCached,receiver,[input,init]);expect(p).toBe(f.pending.promise);
+      expect(f.calls).toHaveLength(1);expect(f.calls[0].args[0]).toBe(input);expect(f.calls[0].args[1]).toBe(init);
+      const value=await settle(f,200);expect(await p).toBe(value);expect(own('finish')).toBe(false);
+      expect(own('dispose')).toBe(true);
+    }else{
+      expect(f.arm()).toBe(true);
+      const publicInit={method:'POST',body:f.body()},p=Reflect.apply(sdkCached,receiver,[endpoint,publicInit]);
+      expect(p).toBe(f.pending.promise);
+      if(mode==='controller')Object.defineProperty(f.window,f.key,{configurable:true,value:foreign});
+      if(mode==='controllerAccessor')Object.defineProperty(f.window,f.key,{configurable:true,get:foreignGetter});
+      if(mode==='document')f.replaceDocument({...f.document});if(mode==='top')f.replaceTop({});
+      if(mode==='origin')f.location.origin='https://foreign.invalid';
+      if(mode==='route')f.location.href='https://chat.groq.com/?model=foreign';
+      if(mode==='expired')f.tick(1001);
+      if(mode==='timer'){f.tick(1001);f.fireTimers();}
+      if(mode==='duplicate')expect(Reflect.apply(sdkCached,receiver,[endpoint,publicInit])).toBe(p);
+      if(mode==='dispose')expect(own('dispose')).toBe(true);
+      const value=await settle(f,200);expect(await p).toBe(value);
+      expect(own('finish')).toBe('ambiguous');expect(f.calls).toHaveLength(mode==='duplicate'?2:1);
+      for(const call of f.calls){expect(call.receiver).toBe(receiver);expect(call.args[0]).toBe(endpoint);expect(call.args[1]).toBe(publicInit);}
+    }
+    expect(f.window.fetch).toBe(f.siteFetch);expect(f.siteCalls).toHaveLength(0);expect(f.privateReads()).toBe(0);expect(reads).toBe(0);
+    expect(f.timerCount()).toBe(0);
+    const finalSlot=Object.getOwnPropertyDescriptor(f.window,f.key);
+    if(mode==='controllerAccessorBeforeArm'||mode==='controllerAccessor')expect(finalSlot?.get).toBe(foreignGetter);
+    else expect(finalSlot?.value).toBe(mode==='controllerBeforeArm'||mode==='controller'?foreign:undefined);
+    expect(controllerReads).toBe(0);
+  }
+  // Early mode is a separate 120B fixture profile, not a change to default late behavior.
+  for(const profile of ['gptoss20b','qwen27b'] as const){
+    const f=fixture(profile,{setupDiagnostics:true,earlyPassive:true});
+    expect(f.window.fetch).toBe(f.original);expect(f.arm()).toBe('js_profile_unavailable');
+    expect(f.calls).toHaveLength(0);expect(f.privateReads()).toBe(0);expect(f.ctl('dispose')).toBe(true);
+  }
+  for(const options of [{earlyPassivePrototype:true},{earlyPassiveAccessor:true}]){
+    const f=fixture('gptoss120b',{setupDiagnostics:true,...options});f.window.fetch=f.siteFetch;
+    expect(f.arm()).toBe('js_fetch_replaced');expect(f.earlyFlagReads()).toBe(0);
+    expect(f.ctl('dispose')).toBe(true);expect(f.window.fetch).toBe(f.siteFetch);
+    expect(f.calls).toHaveLength(0);expect(f.privateReads()).toBe(0);expect(f.earlyFlagReads()).toBe(0);
+  }
+  const late=fixture('gptoss120b',{setupDiagnostics:true,earlyPassive:false});late.window.fetch=late.siteFetch;
+  expect(late.arm()).toBe('js_fetch_replaced');expect(late.ctl('dispose')).toBe(true);expect(late.window.fetch).toBe(late.siteFetch);
 });

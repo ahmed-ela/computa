@@ -258,6 +258,7 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
         "Return exactly GROQSTATUS" + nonce.uuidString.replacingOccurrences(of:"-",with:"") + " and nothing else. Do not call any tools."
     }
     static let stages: Set<String> = ["no_matching_fetch_observed", "matched_fetch_unsettled", "http_2xx_opened", "http_400", "http_401", "http_403", "http_413", "http_429", "http_other_non_2xx", "transport_rejected", "ambiguous"]
+    enum InstallationMode: String, Sendable { case late, earlyPassive }
     enum SetupReason: String, CaseIterable, Sendable {
         case notAttempted = "not_attempted"
         case transportPreconditionsSkipped = "transport_preconditions_skipped"
@@ -310,16 +311,32 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
     private var inspectorActivated = false
     private var inspectorRevoked = false
     private var inspectorRevocation: (@Sendable () -> Void)?
+    private var earlyObserverRevocation: (@Sendable () -> Void)?
+    let installationMode: InstallationMode
     let inspectorOrdinal: Int?
     private var setupReason: SetupReason = .notAttempted
     var isCurrent: Bool { lock.withLock { active && ContinuousClock.now < deadline } && (fixtureTurn?.isCurrent ?? true) }
     func revoke() {
-        let callback: (@Sendable () -> Void)? = lock.withLock {
+        let callbacks = lock.withLock {
             active = false; inspectorRevoked = true
-            let callback = inspectorRevocation; inspectorRevocation = nil
-            return callback
+            let callbacks = (inspectorRevocation, earlyObserverRevocation)
+            inspectorRevocation = nil; earlyObserverRevocation = nil
+            return callbacks
         }
-        callback?()
+        callbacks.0?(); callbacks.1?()
+    }
+
+    // Lifecycle notification only; this registers no observation or authority.
+    func onEarlyObserverRevocation(_ callback: @escaping @Sendable () -> Void) -> Bool {
+        let registered = lock.withLock {
+            guard installationMode == .earlyPassive, active, ContinuousClock.now < deadline,
+                  earlyObserverRevocation == nil else { return false }
+            earlyObserverRevocation = callback
+            return true
+        }
+        guard registered else { return false }
+        guard fixtureTurn?.isCurrent == true else { revoke(); return false }
+        return true
     }
 
     /// Native-only public-WebKit inspection grant for an explicitly manual
@@ -379,9 +396,9 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
     }
     static func digest(_ input: String) -> String { SHA256.hash(data:Data(input.utf8)).map { String(format:"%02x",$0) }.joined() }
     func matches(_ prompt: String) -> Bool { isCurrent && Self.digest(prompt) == promptHash }
-    private init(_ file: WebsitePrivateDiagnosticCapture.Claim, _ admission: WebModelStartAdmission, _ deadline: ContinuousClock.Instant, _ prompt: String, profile: Profile, fixtureTurn: FixtureTurn? = nil, inspectorOrdinal: Int? = nil) {
+    private init(_ file: WebsitePrivateDiagnosticCapture.Claim, _ admission: WebModelStartAdmission, _ deadline: ContinuousClock.Instant, _ prompt: String, profile: Profile, fixtureTurn: FixtureTurn? = nil, inspectorOrdinal: Int? = nil, installationMode: InstallationMode = .late) {
         self.file=file; self.admission=admission; self.deadline=deadline; promptHash=Self.digest(prompt); self.profile=profile
-        self.fixtureTurn=fixtureTurn; self.inspectorOrdinal=inspectorOrdinal
+        self.fixtureTurn=fixtureTurn; self.inspectorOrdinal=inspectorOrdinal; self.installationMode=installationMode
     }
     static func consume(directory: URL?, admission: WebModelStartAdmission, request: WebModelResponseCodec.Request,
                         first: Bool, now: Date = Date()) -> GroqOwnedStatusLease? {
@@ -429,11 +446,18 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
         // Preserve the original Qwen fixture arm for existing callers.
         static let purpose = Kind.qwen27b.purpose
         static let inspectorPurpose = "groq_120b_fixture_inferences_2_to_4_network_inspector_v1"
-        private enum Mode { case status, manualInspector }
+        static let earlyPassivePurpose = "groq_120b_fixture_early_passive_status_v1"
+        private enum Mode { case status, manualInspector, earlyPassive }
         private struct WeakChild { weak var lease: GroqOwnedStatusLease? }
         private let kind: Kind
         private let mode: Mode
-        var publicationPurpose: String { mode == .manualInspector ? Self.inspectorPurpose : kind.purpose }
+        var publicationPurpose: String {
+            switch mode {
+            case .status: return kind.purpose
+            case .manualInspector: return Self.inspectorPurpose
+            case .earlyPassive: return Self.earlyPassivePurpose
+            }
+        }
         private let file: WebsitePrivateDiagnosticCapture.Claim
         private let first: WebModelStartAdmission
         private let userHash: String
@@ -441,13 +465,13 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
         private let lock = NSLock()
         private var active = true
         private var children = Set<UUID>()
-        private var lastInspectorInferenceID: UUID?
-        private var inspectorChildren: [WeakChild] = []
+        private var lastScopedInferenceID: UUID?
+        private var dependentChildren: [WeakChild] = []
         var isCurrent: Bool { lock.withLock { active && ContinuousClock.now < deadline } }
         func revoke() {
             let leases = lock.withLock {
                 active = false
-                let leases = inspectorChildren.compactMap(\.lease); inspectorChildren.removeAll()
+                let leases = dependentChildren.compactMap(\.lease); dependentChildren.removeAll()
                 return leases
             }
             leases.forEach { $0.revoke() }
@@ -458,7 +482,7 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
         }
 
         static func consume(directory: URL?, admission: WebModelStartAdmission, request: WebModelResponseCodec.Request,
-                            first: Bool, allowManualInspector: Bool = false, now: Date = Date()) -> FixtureTurn? {
+                            first: Bool, allowManualInspector: Bool = false, allowEarlyPassive: Bool = false, now: Date = Date()) -> FixtureTurn? {
             guard first, !Task.isCancelled, let directory, admission.provider == "groq",
                   let kind=Kind.allCases.first(where: { $0.profile.choice.modelID == admission.modelID }), request.model == admission.modelID,
                   [admission.taskID, admission.threadID, admission.turnID].allSatisfy({ UUID(uuidString:$0)?.uuidString.lowercased()==$0 }),
@@ -470,14 +494,16 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
                 guard APIModelCorrectionJSON.isUnambiguous(data),
                       let v=try? JSONSerialization.jsonObject(with:data) as? [String:String],
                       Set(v.keys)==["purpose","nonce","modelID","userPromptSHA256","expiresAt"],
-                      v["purpose"]==kind.purpose || allowManualInspector && kind == .gptoss120b && v["purpose"]==Self.inspectorPurpose,
+                      v["purpose"]==kind.purpose || allowManualInspector && kind == .gptoss120b && v["purpose"]==Self.inspectorPurpose
+                        || allowEarlyPassive && kind == .gptoss120b && v["purpose"]==Self.earlyPassivePurpose,
                       v["modelID"]==admission.modelID,
                       let nonce=v["nonce"], UUID(uuidString:nonce)?.uuidString.lowercased()==nonce,
                       v["userPromptSHA256"]==GroqOwnedStatusLease.digest(user), let expiry=v["expiresAt"], expiry.utf8.count==24 else { return false }
                 let fmt=ISO8601DateFormatter(); fmt.formatOptions=[.withInternetDateTime,.withFractionalSeconds]
                 guard let end=fmt.date(from:expiry),fmt.string(from:end)==expiry,
                       end>now,end.timeIntervalSince(now)<=600 else { return false }
-                mode = v["purpose"] == Self.inspectorPurpose ? .manualInspector : .status
+                mode = v["purpose"] == Self.inspectorPurpose ? .manualInspector
+                    : v["purpose"] == Self.earlyPassivePurpose ? .earlyPassive : .status
                 deadline=started + .seconds(end.timeIntervalSince(now)); return true
             },isCurrent:{ !Task.isCancelled && (deadline.map { ContinuousClock.now < $0 } ?? false) }),let deadline else { return nil }
             return .init(file:file,first:admission,deadline:deadline,user:user,kind:kind,mode:mode)
@@ -495,23 +521,23 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
                       children.count < WebModelServer.maximumTurnInferences,
                       !children.contains(admission.inferenceID) else { return nil }
                 var inspectorOrdinal: Int?
-                if mode == .manualInspector {
+                if mode == .manualInspector || mode == .earlyPassive {
                     let ordinal = children.count + 1
-                    guard ordinal <= 4 else { return nil }
+                    if mode == .manualInspector { guard ordinal <= 4 else { return nil } }
                     if ordinal == 1 {
                         guard admission == first, closedInferenceID == nil, closedContinuation == nil else { return nil }
                     } else {
-                        guard closedInferenceID == lastInspectorInferenceID,
+                        guard closedInferenceID == lastScopedInferenceID,
                               let closedContinuation, closedContinuation.pendingToolCallCount > 0,
                               (try? closedContinuation.validate(next: request)) != nil else { return nil }
-                        inspectorOrdinal = ordinal
+                        if mode == .manualInspector { inspectorOrdinal = ordinal }
                     }
-                    lastInspectorInferenceID = admission.inferenceID
+                    lastScopedInferenceID = admission.inferenceID
                 }
                 children.insert(admission.inferenceID)
                 let child = GroqOwnedStatusLease(file,admission,deadline,request.prompt,profile:kind.profile,
-                    fixtureTurn:self,inspectorOrdinal:inspectorOrdinal)
-                if inspectorOrdinal != nil { inspectorChildren.append(WeakChild(lease: child)) }
+                    fixtureTurn:self,inspectorOrdinal:inspectorOrdinal, installationMode:mode == .earlyPassive ? .earlyPassive : .late)
+                if inspectorOrdinal != nil || mode == .earlyPassive { dependentChildren.append(WeakChild(lease: child)) }
                 return child
             }
         }
@@ -526,10 +552,10 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
 
         // publish() invokes commit while holding its child's lock. Drain only
         // after that outer lock has been released; never re-enter a child lock.
-        fileprivate func revokeRetiredInspectorChildren() {
+        fileprivate func revokeRetiredChildren() {
             let leases: [GroqOwnedStatusLease] = lock.withLock {
                 guard !active else { return [] }
-                let leases = inspectorChildren.compactMap(\.lease); inspectorChildren.removeAll()
+                let leases = dependentChildren.compactMap(\.lease); dependentChildren.removeAll()
                 return leases
             }
             leases.forEach { $0.revoke() }
@@ -599,6 +625,6 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
                 return self.fixtureTurn.map { $0.commit(rename) } ?? rename()
             }
         })
-        fixtureTurn?.revokeRetiredInspectorChildren()
+        fixtureTurn?.revokeRetiredChildren()
     }
 }

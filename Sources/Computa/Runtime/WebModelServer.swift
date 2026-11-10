@@ -2024,7 +2024,8 @@ actor WebModelServer {
                             if groqFixtureStatuses[taskID]==nil,first {
                                 groqFixtureStatuses[taskID]=GroqOwnedStatusLease.FixtureTurn.consume(
                                     directory:directory,admission:admission,request:request,first:true,
-                                    allowManualInspector:context.historyPreparation != nil)
+                                    allowManualInspector:context.historyPreparation != nil,
+                                    allowEarlyPassive:context.historyPreparation != nil)
                             }
                             if let fixture=groqFixtureStatuses[taskID] {
                                 groqOwnedStatus=fixture.child(admission:admission,request:request,

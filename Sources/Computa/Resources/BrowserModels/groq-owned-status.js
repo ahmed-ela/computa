@@ -6,6 +6,7 @@
     || !/^[a-f0-9]{32}$/.test(config.secret) || config.key === config.secret
     || !Number.isInteger(config.durationMs) || config.durationMs < 1 || config.durationMs > 390000) return;
   const setupDiagnostics = config.setupDiagnostics === true;
+  const earlyPassive = Object.getOwnPropertyDescriptor(config, 'earlyPassive')?.value === true;
   // A failed fixture initializer may expose only its closed reason/dispose
   // controller. This path never reads or replaces fetch, or issues a request.
   function setupFailure(reason) {
@@ -33,7 +34,7 @@
     qwen27b: {model:'qwen/qwen3.8-27b',label:'Qwen/Qwen3.8-27B',temperature:0.6,maximum:8192,topP:0.95},
     gptoss120b: {model:'openai/gpt-oss-120b',label:'GPT OSS 120B',temperature:1,maximum:16384,topP:1}
   };
-  if (!Object.prototype.hasOwnProperty.call(profiles, config.profile)) { setupFailure('js_profile_unavailable'); return; }
+  if (!Object.prototype.hasOwnProperty.call(profiles, config.profile) || earlyPassive && config.profile !== 'gptoss120b') { setupFailure('js_profile_unavailable'); return; }
   const profile = profiles[config.profile];
   const ownerDocument = document, original = window.fetch, key = '__computaGroqStatus_' + config.key;
   const apply = Reflect.apply, desc = Object.getOwnPropertyDescriptor, then = Promise.prototype.then;
@@ -49,6 +50,7 @@
     return;
   }
   let phase = 'idle', outcome = 'ambiguous', seen = false, prompt = null, model = null, label = null, pin = null, route = null;
+  let control = null;
   const style = node => !!node?.isConnected && node.getClientRects().length > 0 && getComputedStyle(node).visibility === 'visible';
   const unauthored = node => !node.closest('[class*="group/input"],.font-inter,pre,code');
   // Small side-band check of the same physical closed picker that the existing native adapter independently qualified.
@@ -75,12 +77,16 @@
     }
     return node;
   }
-  function current() { return phase === 'armed' && time() < deadline && window.fetch === wrapped && rendered() === pin; }
+  function ownController() {
+    return ownerDocument === document && window === top && location.origin === origin && desc(window, key)?.value === control;
+  }
+  function current() { return phase === 'armed' && time() < deadline
+    && (earlyPassive ? ownController() : window.fetch === wrapped) && rendered() === pin; }
   function invalidate() { outcome = 'ambiguous'; phase = 'invalid'; prompt = model = label = pin = route = null; }
   function dispose() {
     invalidate(); clearTimeout(timer);
     if (window.fetch === wrapped) window.fetch = original;
-    delete window[key];
+    if (!earlyPassive || desc(window, key)?.value === control) delete window[key];
   }
   function matches(init) {
     if (!init || ![Object.prototype, null].includes(proto(init))) return false;
@@ -131,6 +137,14 @@
     return false;
   }
   function wrapped(input, init) {
+    // Early bootstrap has no request knowledge or observation before native arm.
+    // Capture original once; a cached closure never rebinds to the site's wrapper.
+    if (earlyPassive) {
+      if (phase === 'idle') return apply(original, this, arguments);
+      if (phase !== 'armed' || time() >= deadline || !ownController()) {
+        invalidate(); return apply(original, this, arguments);
+      }
+    }
     let track = false;
     try {
       const url = phase !== 'invalid' && typeof input === 'string' ? new URL(input, document.baseURI) : null;
@@ -163,12 +177,12 @@
   }
   window.fetch = wrapped;
   const timer = setTimeout(dispose, config.durationMs);
-  Object.defineProperty(window, key, {configurable: true, value: (secret, command, args) => {
+  control = (secret, command, args) => {
     if (secret !== config.secret) return false;
     if (command === 'dispose') { dispose(); return true; }
     if (command === 'arm') {
-      if (!(phase === 'idle' && !seen && time() < deadline && window.fetch === wrapped)) {
-        return setupDiagnostics ? (window.fetch !== wrapped ? 'js_fetch_replaced' : 'js_arm_state_unavailable') : false;
+      if (!(phase === 'idle' && !seen && time() < deadline && (earlyPassive ? ownController() : window.fetch === wrapped))) {
+        return setupDiagnostics ? (!earlyPassive && window.fetch !== wrapped ? 'js_fetch_replaced' : 'js_arm_state_unavailable') : false;
       }
       if (!args || args.model !== profile.model || args.label !== profile.label
         || typeof args.label !== 'string' || !args.label.length || args.label.length > 128) {
@@ -188,5 +202,6 @@
       return finite;
     }
     return false;
-  }});
+  };
+  Object.defineProperty(window, key, {configurable: true, value: control});
 })(__GROQ_OWNED_SYNTHETIC_CONFIG__)

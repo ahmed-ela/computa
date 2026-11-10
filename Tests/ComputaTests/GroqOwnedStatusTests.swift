@@ -317,6 +317,60 @@ import XCTest
         try await run("siteWrapper", expected: "transport_rejected", profile: .gptoss120b, fixture: true, fixtureKind: .gptoss120b)
     }
 
+    func testEarlyPassiveLeaseRequiresItsPrivate120BPurposeAndNativeHistoryOptIn() throws {
+        for refusal in ["disabled","notFirst","wrongModel","hash","purpose","extraKey","expired","tooLong","publicArm"] {
+            let fixture = try inspectorArm(kind:refusal == "wrongModel" ? .qwen27b : .gptoss120b,
+                purpose:GroqOwnedStatusLease.FixtureTurn.earlyPassivePurpose,mutation:refusal,
+                expiresIn:refusal == "expired" ? -1 : refusal == "tooLong" ? 601 : 60)
+            XCTAssertNil(GroqOwnedStatusLease.FixtureTurn.consume(directory:fixture.directory,
+                admission:fixture.admission,request:fixture.request,first:refusal != "notFirst",
+                allowEarlyPassive:refusal != "disabled"),refusal)
+            XCTAssertTrue(FileManager.default.fileExists(atPath:fixture.directory.appendingPathComponent("arm.json").path),refusal)
+            XCTAssertFalse(FileManager.default.fileExists(atPath:fixture.output.path),refusal)
+        }
+        let fixture = try inspectorArm(purpose:GroqOwnedStatusLease.FixtureTurn.earlyPassivePurpose)
+        let parent = try XCTUnwrap(GroqOwnedStatusLease.FixtureTurn.consume(directory:fixture.directory,
+            admission:fixture.admission,request:fixture.request,first:true,allowEarlyPassive:true))
+        XCTAssertEqual(parent.publicationPurpose,GroqOwnedStatusLease.FixtureTurn.earlyPassivePurpose)
+        let first = try XCTUnwrap(parent.child(admission:fixture.admission,request:fixture.request))
+        XCTAssertEqual(first.installationMode,.earlyPassive);XCTAssertNil(first.inspectorOrdinal)
+        let callbacks = GroqManualInspectorCounter()
+        XCTAssertTrue(first.onEarlyObserverRevocation { callbacks.increment() })
+        XCTAssertFalse(first.onEarlyObserverRevocation { callbacks.increment() },"The callback cannot be replaced")
+        XCTAssertNil(first.bindInspector(view:ObjectIdentifier(NSObject()),ownerToken:UUID().uuidString,generation:UUID()))
+        let handoff = try inspectorContinuation(fixture.request)
+        let nextAdmission = inspectorAdmission(after:fixture.admission)
+        XCTAssertNil(parent.child(admission:nextAdmission,request:handoff.next),"A bare matching context is not a closed native handoff")
+        first.revoke();first.revoke()
+        XCTAssertEqual(callbacks.value,1);XCTAssertTrue(parent.isCurrent)
+        let next = try XCTUnwrap(parent.child(admission:nextAdmission,request:handoff.next,
+            closedInferenceID:fixture.admission.inferenceID,closedContinuation:handoff.closed))
+        XCTAssertEqual(next.installationMode,.earlyPassive);XCTAssertNil(next.inspectorOrdinal)
+        XCTAssertTrue(next.onEarlyObserverRevocation { callbacks.increment() })
+        parent.revoke();parent.revoke()
+        XCTAssertFalse(next.isCurrent);XCTAssertEqual(callbacks.value,2)
+        let legacy = try setupLease()
+        XCTAssertEqual(legacy.lease.installationMode,.late)
+        XCTAssertFalse(legacy.lease.onEarlyObserverRevocation { callbacks.increment() })
+        legacy.lease.revoke();XCTAssertEqual(callbacks.value,2)
+    }
+
+    func testEarlyPassiveFixtureObservesTheSDKFetchCachedBeforeNativeArm() async throws {
+        try await run("cachedSDK", expected: "transport_rejected", profile: .gptoss120b,
+            fixture: true, fixtureKind: .gptoss120b, earlyPassive: true)
+        try await run("cachedSDK", expected: "transport_rejected", profile: .gptoss120b,
+            fixture: true, continuation: true, fixtureKind: .gptoss120b, earlyPassive: true)
+    }
+
+    func testEarlyPassivePurposeDoesNotBroadenLateModeOrNativeFailurePublication() async throws {
+        try await run("cachedSDK", expected: "no_matching_fetch_observed", profile: .gptoss120b,
+            fixture: true, fixtureKind: .gptoss120b)
+        try await run("wrongFixture", expected: "none", profile: .gptoss120b,
+            fixture: true, fixtureKind: .gptoss120b, earlyPassive: true)
+        try await run("retiredDuringRead", expected: "none", profile: .gptoss120b,
+            fixture: true, fixtureKind: .gptoss120b, earlyPassive: true)
+    }
+
     func testManualInspectorRequiresPrivateExact120BFixtureAndExplicitNativeOptIn() throws {
         for refusal in ["disabled", "notFirst", "wrongModel", "hash", "purpose", "extraKey", "expired", "tooLong", "publicArm"] {
             let fixture = try inspectorArm(kind: refusal == "wrongModel" ? .qwen27b : .gptoss120b,
@@ -607,7 +661,7 @@ import XCTest
 
     private func run(_ mode:String,expected:String,profile:GroqOwnedStatusLease.Profile = .gptoss20b,
                      fixture:Bool=false,continuation:Bool=false,customHistory:Bool=false,
-                     fixtureKind:GroqOwnedStatusLease.FixtureTurn.Kind?=nil) async throws {
+                     fixtureKind:GroqOwnedStatusLease.FixtureTurn.Kind?=nil,earlyPassive:Bool=false) async throws {
         let path=try XCTUnwrap(realpath(FileManager.default.temporaryDirectory.path,nil));defer{free(path)}
         let tmp=URL(fileURLWithPath:String(cString:path),isDirectory:true).appendingPathComponent("groq-status-"+UUID().uuidString)
         let directory=tmp.appendingPathComponent(GroqOwnedStatusLease.directoryName)
@@ -619,7 +673,7 @@ import XCTest
         let armProfile:GroqOwnedStatusLease.Profile = mode=="wrongProfile" ? .gptoss20b : profile
         let output=directory.appendingPathComponent("owned-status.json"),arm=directory.appendingPathComponent("arm.json")
         let date=ISO8601DateFormatter();date.formatOptions=[.withInternetDateTime,.withFractionalSeconds]
-        let fixturePurpose=mode=="crossFixturePurpose"
+        let fixturePurpose=earlyPassive ? GroqOwnedStatusLease.FixtureTurn.earlyPassivePurpose : mode=="crossFixturePurpose"
             ? (kind == .qwen27b ? GroqOwnedStatusLease.FixtureTurn.Kind.gptoss120b.purpose : GroqOwnedStatusLease.FixtureTurn.Kind.qwen27b.purpose)
             : kind.purpose
         let purpose=fixture && !["wrongProfile","wrongPurpose"].contains(mode) ? fixturePurpose : armProfile.purpose
@@ -641,7 +695,9 @@ import XCTest
         var view:LocalView?
         var pages:[LocalView]=[]
         browser.setModelViewFactoryForTesting { config in
-            let source=(mode == "siteWrapper"
+            let source=(mode == "cachedSDK"
+                ? "window.fetch=function(){'use strict';window.requests=(window.requests||0)+1;window.groqBaseReceiver=this;window.groqBaseArgs=Array.from(arguments);const result=['tool','patch','success'].includes(window.variant)?new Promise(()=>{}):Promise.reject(Error('synthetic'));window.groqBasePromise=result;return result;};window.groqBaseFetch=window.fetch;"
+                : mode == "siteWrapper"
                 ? "window.fetch=function(){window.requests=(window.requests||0)+1;window.groqBaseReceiver=this;window.groqBaseArgs=Array.from(arguments);const result=Promise.reject(Error('synthetic'));window.groqBasePromise=result;return result;}"
                 : "window.fetch=function(){window.requests=(window.requests||0)+1;return ['rollback','observerNotArmed','observerUnavailable'].includes(window.variant)?Promise.reject(Error('synthetic')):new Promise(()=>{})}")
                 + (mode=="observerNotArmed" ? ";Object.defineProperty(window,'fetch',{writable:false})" : "")
@@ -658,7 +714,16 @@ import XCTest
                   const result=Reflect.apply(groqSiteBase,this,args);window.groqSitePromise=result;return result;};
                 window.fetch=window.groqSiteWrapper;
                 """ : ""
-            created.html=html+"<script>window.variant='"+variant+"';"+siteWrapper+Self.client+"</script>"
+            let cachedSDK = mode == "cachedSDK" ? """
+                window.groqEarlyObserverPresent=Object.getOwnPropertyNames(window).some(key=>key.startsWith('__computaGroqStatus_'));
+                window.groqCachedFetch=window.fetch;
+                window.groqCachedReceiver=Object.freeze({synthetic:true});
+                const groqSiteBase=window.fetch;
+                window.groqSiteWrapper=function(...args){window.groqSiteCalls=(window.groqSiteCalls||0)+1;
+                  return Reflect.apply(groqSiteBase,this,args);};
+                window.fetch=window.groqSiteWrapper;
+                """ : ""
+            created.html=html+"<script>window.variant='"+variant+"';"+siteWrapper+cachedSDK+Self.client+"</script>"
             pages.append(created);view=created;return created
         }
         let transport=EmbeddedWebModelTransport(browser:browser)
@@ -689,18 +754,47 @@ import XCTest
         await server.configureEvidenceDirectory(tmp.appendingPathComponent("evidence"))
         let runtime=UUID(),task=UUID().uuidString.lowercased(),thread=UUID().uuidString.lowercased(),turn=UUID().uuidString.lowercased(),prep=UUID()
         await server.configureCleanupReceipts(directory:tmp.appendingPathComponent("cleanup"),runtimeGeneration:runtime){_ in}
-        try await server.prepareInferenceTurn(taskID:task,threadID:thread,runtimeGeneration:runtime,preparationID:prep,isNewThread:true)
+        let coreGeneration = UUID()
+        try await server.prepareInferenceTurn(taskID:task,threadID:thread,runtimeGeneration:runtime,preparationID:prep,
+            isNewThread:true,isCompactToolThread:earlyPassive,
+            historyPreparation:earlyPassive ? .init(modelID:model.modelID,coreGeneration:coreGeneration) : nil)
+        if earlyPassive {
+            let writerValue = try await server.prepareGroqHistoryTurn(taskID:task,threadID:thread,turnID:turn,
+                runtimeGeneration:runtime,preparationID:prep,modelID:model.modelID,coreGeneration:coreGeneration)
+            let writer = try XCTUnwrap(writerValue)
+            XCTAssertTrue(writer.isCurrent(current:.init(taskID:task,threadID:thread,turnID:turn,
+                runtimeGeneration:runtime,preparationID:prep,modelID:model.modelID,coreGeneration:coreGeneration)))
+            try await server.registerInferenceTurn(taskID:task,threadID:thread,turnID:turn,
+                runtimeGeneration:runtime,preparationID:prep)
+        }
         func item(_ role:String,_ text:String)->[String:Any] {
             ["type":"message","role":role,"content":[["type":"input_text","text":text]]]
         }
         var input:[Any]=[item("developer","Synthetic policy"),
             item("user","<environment_context><cwd>/tmp/marker</cwd><shell>zsh</shell></environment_context>"),
             item("user",user+"\n"+ComputaAgentInstructions.runtimeInteractionPolicy())]
-        let tools:[[String:Any]]=continuation ? [["type":"function","name":"fixture_read",
+        let fixtureTools:[[String:Any]]=[["type":"function","name":"fixture_read",
             "parameters":["type":"object","properties":[String:Any](),"additionalProperties":false]],
-            ["type":"custom","name":"apply_patch"]] : []
+            ["type":"custom","name":"apply_patch"]]
+        var tools = continuation ? fixtureTools : []
+        if earlyPassive {
+            tools = [GroqToolCatalog.specification,GroqHistoryTool.specification].map { definition in
+                var wire = definition
+                wire["parameters"] = wire.removeValue(forKey:"inputSchema")
+                return wire
+            } + fixtureTools
+        }
         func request() throws -> Data {
-            try JSONSerialization.data(withJSONObject:["model":model.modelID,"input":input,"tools":tools] as [String:Any])
+            var object:[String:Any] = ["model":model.modelID,"input":input,"tools":tools]
+            if earlyPassive {
+                // The synthetic read is already offered by this exact policy;
+                // no loader replay or unregistered-history opt-in is needed.
+                object["tool_choice"] = ["type":"allowed_tools","mode":"auto","tools":[
+                    ["type":"function","name":GroqHistoryTool.name],
+                    ["type":"function","name":"fixture_read"],
+                    ["type":"custom","name":"apply_patch"]]]
+            }
+            return try JSONSerialization.data(withJSONObject:object)
         }
         if continuation {
             let first=try await server.fixtureInfer(request(),taskID:task,threadID:thread,turnID:turn,runtimeGeneration:runtime,preparationID:prep)
@@ -725,7 +819,7 @@ import XCTest
         } catch {
             XCTAssertNotEqual(mode,"success")
             switch error {
-            case EmbeddedWebModelTransport.Failure.ownershipFailure(.groqDraftRestored):XCTAssertTrue(["rollback","observerNotArmed","observerUnavailable","siteWrapper"].contains(mode))
+            case EmbeddedWebModelTransport.Failure.ownershipFailure(.groqDraftRestored):XCTAssertTrue(["rollback","observerNotArmed","observerUnavailable","siteWrapper","cachedSDK"].contains(mode))
             case WebModelServer.Failure.deadline:XCTAssertNotEqual(mode,"nativeDeadline");XCTAssertNotEqual(mode,"rollback")
             case EmbeddedWebModelTransport.Failure.deadline:XCTAssertEqual(mode,"nativeDeadline")
             default:XCTFail("Unexpected synthetic terminal error: "+String(describing:error))
@@ -751,6 +845,21 @@ import XCTest
             XCTAssertEqual(flags, ["noEarlyObserver":true,"oneSiteCall":true,"oneBaseCall":true,
                 "receiverIdentity":true,"argumentIdentity":true,"promiseIdentity":true,"restoredSiteFetch":true])
         }
+        if mode == "cachedSDK" {
+            let encoded = try await page.evaluateJavaScript("""
+                JSON.stringify({earlyObserver:window.groqEarlyObserverPresent===true,
+                  cachedWrapper:window.groqCachedFetch!==window.groqBaseFetch,
+                  oneBaseCall:window.requests===1,siteWrapperUnused:!window.groqSiteCalls,
+                  receiverIdentity:window.groqBaseReceiver===window.groqCachedReceiver,
+                  argumentIdentity:window.groqSDKArgs.length===2&&window.groqBaseArgs.length===2&&window.groqSDKArgs.every((value,index)=>value===window.groqBaseArgs[index]),
+                  promiseIdentity:window.groqSDKPromise===window.groqBasePromise,
+                  preservedSiteFetch:window.fetch===window.groqSiteWrapper})
+                """)
+            let flags = try JSONDecoder().decode([String: Bool].self, from: Data(try XCTUnwrap(encoded as? String).utf8))
+            XCTAssertEqual(flags, ["earlyObserver":earlyPassive,"cachedWrapper":earlyPassive,
+                "oneBaseCall":true,"siteWrapperUnused":true,"receiverIdentity":true,
+                "argumentIdentity":true,"promiseIdentity":true,"preservedSiteFetch":true])
+        }
         if continuation {
             XCTAssertFalse(pages[0] === pages[1],"Continuation must exercise a genuinely new owned view")
             for page in pages {
@@ -774,8 +883,8 @@ import XCTest
             let row=try XCTUnwrap(JSONSerialization.jsonObject(with:report) as? [String:Any])
             XCTAssertEqual(row["stage"] as? String,expected);XCTAssertEqual(row["taskID"] as? String,task)
             XCTAssertEqual(row["modelID"] as? String,model.modelID)
-            XCTAssertEqual(row["purpose"] as? String,fixture ? kind.purpose : profile.purpose)
-            XCTAssertEqual(row["trigger"] as? String,["rollback","observerNotArmed","observerUnavailable","siteWrapper"].contains(mode) ? "groq_draft_restored" : "response_deadline")
+            XCTAssertEqual(row["purpose"] as? String,fixture ? (earlyPassive ? GroqOwnedStatusLease.FixtureTurn.earlyPassivePurpose : kind.purpose) : profile.purpose)
+            XCTAssertEqual(row["trigger"] as? String,["rollback","observerNotArmed","observerUnavailable","siteWrapper","cachedSDK"].contains(mode) ? "groq_draft_restored" : "response_deadline")
             XCTAssertEqual(row["evidenceClass"] as? String,["observer_not_armed","observer_unavailable"].contains(expected) ? "native_observer_availability" : "page_world_observation")
             if ["observer_not_armed", "observer_unavailable"].contains(expected) {
                 XCTAssertEqual(row.count, 16)
@@ -787,6 +896,18 @@ import XCTest
             XCTAssertFalse(String(decoding:report,as:UTF8.self).contains(nonce.uuidString))
         }
         _=await server.shutdown()
+        if earlyPassive {
+            browser.shutdown()
+            for created in pages {
+                let scripts = created.configuration.userContentController.userScripts
+                let hasEarlyBootstrap = scripts.contains { $0.source.hasPrefix("// Private prototype. Only a fresh owned tab with a native synthetic lease receives this main-world, main-frame script.") }
+                XCTAssertFalse(hasEarlyBootstrap,"Native shutdown removes the exact early bootstrap from every fixture view")
+                if mode == "cachedSDK" {
+                    let hasOriginalFixture = scripts.contains { $0.source.contains("window.groqBaseFetch=window.fetch;") }
+                    XCTAssertTrue(hasOriginalFixture,"Removing the observer preserves the independent original fixture script")
+                }
+            }
+        }
     }
     private static let client = #"""
         const f=window.groqFixture,old=f.send.onclick;
@@ -799,6 +920,14 @@ import XCTest
           if(['preflight','unarmed','success','wrongNonce','wrongProfile','wrongPurpose','crossFixturePurpose','wrongFixture','wrongModel','nativeDeadline','retiredDuringRead','navigatedDuringRead'].includes(variant))return;
           const qwen=f.model==='qwen/qwen3.8-27b',message={content:variant==='wrongBody'?'different':prompt,role:'user'};
           const body=JSON.stringify({model:f.model,messages:qwen?[message]:[{content:'synthetic system',role:'system'},message],temperature:qwen?0.6:1,max_completion_tokens:qwen?8192:16384,top_p:qwen?0.95:1,stream:true});
+          if(variant==='cachedSDK'){
+            window.groqSDKArgs=['https://api.groq.com/openai/v1/chat/completions',{method:'POST',body}];
+            window.groqSDKPromise=Reflect.apply(window.groqCachedFetch,window.groqCachedReceiver,window.groqSDKArgs);
+            window.groqSDKPromise.catch(()=>{
+              setTimeout(()=>{f.turn.remove();f.editor.value=prompt;f.editor.disabled=false;f.send.disabled=false;},900);
+            });
+            return;
+          }
           fetch('https://api.groq.com/openai/v1/chat/completions',{method:'POST',body}).catch(()=>{
             setTimeout(()=>{f.turn.remove();f.editor.value=prompt;f.editor.disabled=false;f.send.disabled=false;},900);
           });

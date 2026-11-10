@@ -869,6 +869,8 @@ final class EmbeddedBrowserSession {
         var owner: String?
         var fingerprint: String?
         var armed = false
+        var earlyScript: WKUserScript?
+        var expiry: Task<Void, Never>?
         init?(lease:GroqOwnedStatusLease, url:URL) {
             self.lease=lease; self.url=url
             guard EmbeddedWebModelTransport.Provider.groq.acceptsGroqModelQuery(url,expectedKey:lease.modelChoice.key),
@@ -879,14 +881,15 @@ final class EmbeddedBrowserSession {
             guard milliseconds>0 else{return nil}
             self.source = source
         }
-        // Capture the current page fetch only inside the already-verified arm
-        // evaluation. No early wrapper or previously captured fetch is rebound.
+        // Late mode captures the current page fetch in the verified arm call.
+        // Explicit early mode captures it once before initial navigation only.
         func installationSource() -> String? {
             guard lease.isCurrent else { return nil }
             let remaining=(lease.deadline - ContinuousClock.now).components
             let milliseconds=Int(min(390_000,max(0,Double(remaining.seconds)*1000+Double(remaining.attoseconds)/1e15)))
             var config:[String:Any]=["key":key,"secret":secret,"durationMs":milliseconds,"profile":lease.profile.rawValue]
             if lease.isFixture { config["setupDiagnostics"] = true }
+            if lease.installationMode == .earlyPassive { config["earlyPassive"] = true }
             guard milliseconds>0,let bytes=try? JSONSerialization.data(withJSONObject:config) else{return nil}
             return source.replacingOccurrences(of:"__GROQ_OWNED_SYNTHETIC_CONFIG__",with:String(decoding:bytes,as:UTF8.self))
         }
@@ -897,13 +900,48 @@ final class EmbeddedBrowserSession {
             if let entry=entries[id],entry.isModelOwned,!entry.isToolOwned,entry.view.url==nil,entry.modelChanges==nil,
                let probe=GroqStatusProbe(lease:lease,url:url),lease.isCurrent {
                 entry.groqStatus=probe
+                if lease.installationMode == .earlyPassive, !installEarlyGroqStatus(entry, probe:probe) {
+                    removeGroqStatus(entry)
+                }
             } else {lease.revoke()}
             try navigate(tabID:id,to:url);return id
         } catch {closeTab(id);lease.revoke();throw error}
     }
+    private func installEarlyGroqStatus(_ entry: Entry, probe: GroqStatusProbe) -> Bool {
+        guard entry.groqStatus === probe, entry.isModelOwned, !entry.isToolOwned, entry.view.url == nil,
+              probe.lease.installationMode == .earlyPassive, probe.lease.isCurrent, probe.earlyScript == nil,
+              let source = probe.installationSource() else { return false }
+        let id = entry.tab.id
+        guard probe.lease.onEarlyObserverRevocation({ [weak self, weak probe] in
+            Task { @MainActor [weak self, weak probe] in
+                guard let self, let probe, let current = self.entries[id], current.groqStatus === probe else { return }
+                self.removeGroqStatus(current)
+            }
+        }) else { return false }
+        let script = WKUserScript(source:source,injectionTime:.atDocumentStart,forMainFrameOnly:true,in:.page)
+        probe.earlyScript = script
+        entry.view.configuration.userContentController.addUserScript(script)
+        let deadline = min(probe.lease.deadline, ContinuousClock.now + .seconds(390))
+        probe.expiry = Task { @MainActor [weak self, weak probe] in
+            do { try await Task.sleep(until:deadline) } catch { return }
+            guard let self, let probe, let current = self.entries[id], current.groqStatus === probe else { return }
+            self.removeGroqStatus(current)
+        }
+        guard probe.lease.isCurrent else { removeGroqStatus(entry); return false }
+        return true
+    }
+
     private func removeGroqStatus(_ entry:Entry, preserveFixtureFailureScope:Bool=false) {
         guard let probe=entry.groqStatus else{return}
         entry.groqStatus=nil
+        probe.expiry?.cancel(); probe.expiry=nil
+        if let script = probe.earlyScript {
+            let controller = entry.view.configuration.userContentController
+            // Public WebKit removes all scripts; preserve every unrelated object/order.
+            let surviving = controller.userScripts.filter { $0 !== script }
+            controller.removeAllUserScripts(); surviving.forEach(controller.addUserScript)
+            probe.earlyScript=nil
+        }
         if entry.view.url==probe.url && (probe.generation==nil || entry.tab.documentGeneration==probe.generation) {
             entry.view.callAsyncJavaScript("if(document.URL===url)window[key]?.(secret,'dispose'); return null",
                 arguments:["url":probe.url.absoluteString,"key":"__computaGroqStatus_"+probe.key,"secret":probe.secret],in:nil,in:.page,completionHandler:nil)
@@ -969,7 +1007,7 @@ final class EmbeddedBrowserSession {
     private enum GroqStatusCallFailure: Error { case javascriptException, timedOut, invalidReturn }
     private func callGroqStatus(_ probe:GroqStatusProbe,view:WKWebView,command:String,args:[String:Any]) async -> GroqStatusCallOutcome {
         let installation: String
-        if command == "arm" {
+        if command == "arm", probe.lease.installationMode == .late {
             guard let source = probe.installationSource() else { return .unavailable }
             installation = source + ";\n"
         } else { installation = "" }
