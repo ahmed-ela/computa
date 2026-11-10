@@ -260,3 +260,29 @@ or the observed code from build 480. V1 retains its previous vocabulary. Unknown
 codes still collapse to `other`; messages, `failed_generation` and reasoning text
 are not retained. The same 20-field packet, finite bounds and no-authority rules
 continue to apply. No request, prompt, model setting or pacing change is implied.
+
+### Final-text relay clarification (2026-11-10)
+
+The fresh build 481 workflow released two responses and executed four terminal
+commands in the fixture directory. It read the README and source, ran the six
+seeded tests (three failing methods, including 24 permutation subtests), and
+printed the incorrect seed reference. It made no edit or browser submission.
+Its third inference reached the five-minute native response deadline.
+
+That inference's complete stream projection reached natural EOF with `stop`
+and `[DONE]`, recognized reasoning, and no recognized string answer content or
+tool calls. The page remained user-only across 19 admitted reads. These facts
+explain the missing supported answer in this run; the existing diagnostic parser
+is not a strict validator of every alternative answer shape, so they do not
+exclude unrepresented refusal, array-content or message forms. No raw reasoning
+was inspected or retained. The provider's exact cause remains unresolved and
+the separate build 480 in-band error is not retrospectively explained.
+
+The next controlled change appends exactly one outer-handoff sentence:
+“Emit JSON in final assistant text, never reasoning or API tool calls.”
+It disambiguates the text relay from provider-native tool channels. Existing
+fence, schema, policy, grounding and handoff prose remain byte-identical. This
+is a testable clarification, not a claim that channel ambiguity caused or now
+prevents the failures. Native body-budget checks still cover the added text.
+Reasoning and private diagnostic packets never become executable responses.
+The five-minute empty-response wait remains a separate termination issue.

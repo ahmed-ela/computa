@@ -493,6 +493,32 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         }
     }
 
+    func testGroqFinalAssistantTextClarificationAppendsOneSentenceOnly() throws {
+        let sentence = "Emit JSON in final assistant text, never reasoning or API tool calls."
+        // Fixed pre-clarification renders of the outer contract only. These are
+        // test fixtures, not native policy fingerprints or budget exemptions.
+        let originalRenderSHA256 = [
+            "false,false": "1a474bd43d24987dd6bf39757eb456873bcf1a8bb38a075f62528664448a04d4",
+            "false,true": "90235bd6700c7d4d22482ed65a12024b7005ea5742a7f2b60332c4a3b64707e8",
+            "true,false": "7882508cc93c0a6fe0b96ae0ca5589a8658803b96627ff9e0319c89f5897951f",
+            "true,true": "1626111438093ac4ab38b14109fede9cbd5948075d6a4a9bb19560a50ed6efb3"
+        ]
+        for functions in [false, true] {
+            for custom in [false, true] {
+                let contract = ComputaAgentInstructions.groqResponseContract(currentBrowserHandoff: "CURRENT_BROWSER",
+                    hasFunctions: functions, hasCustomTools: custom, currentToolHandoff: "CURRENT_TOOLS")
+                XCTAssertEqual(contract.components(separatedBy: sentence).count - 1, 1)
+                let original = contract.replacingOccurrences(of: sentence + "\n", with: "")
+                let digest = SHA256.hash(data: Data(original.utf8)).map { String(format: "%02x", $0) }.joined()
+                XCTAssertEqual(digest, originalRenderSHA256["\(functions),\(custom)"],
+                    "All existing fence, schema, policy, grounding and handoff prose must remain byte-exact")
+                XCTAssertEqual(contract.utf8.count, original.utf8.count + sentence.utf8.count + 1)
+                XCTAssertTrue(contract.hasPrefix("COMPUTA_LOCAL_RESPONSE_HANDOFF:\n" + ComputaAgentInstructions.compactLiteralFencedResponseFormat))
+                XCTAssertTrue(contract.hasSuffix("CURRENT_BROWSER\nCURRENT_TOOLS\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
+            }
+        }
+    }
+
     func testGroqNativeLiteralBoundaryFitsPreviousResponseContractBudget() throws {
         let oldLine = #"One fenced json object; no outside prose. Message/refusal/clarification: {"type":"message","text":"answer"} ends the turn; requested exact/JSON/plain formats apply to decoded text. Use tool_calls for the next unverified step within authorized scope."#
         for functions in [false, true] {
