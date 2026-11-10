@@ -286,3 +286,35 @@ is a testable clarification, not a claim that channel ambiguity caused or now
 prevents the failures. Native body-budget checks still cover the added text.
 Reasoning and private diagnostic packets never become executable responses.
 The five-minute empty-response wait remains a separate termination issue.
+
+### Explicit no-API-tools experiment (2026-11-10)
+
+The fresh build 482 workflow failed on its second inference after one schema
+load and no terminal, editing or browser action. Its matched HTTP 2xx stream
+reached natural EOF with the explicit code `tool_use_failed` and type
+`invalid_request_error`, recognized reasoning and no recognized string answer.
+The exact error message and attempted tool were not captured. One session
+closed; the failing session's cleanup remains unconfirmed. The extra handoff
+sentence did not prevent this failure; its causal effect is not established.
+
+The next experiment adds only `tool_choice: "none"` to one exact owned
+GPT-OSS 120B fixture request. Groq documents this as the default when no API
+tools are supplied, so an explicit parameter is a testable hypothesis, not an
+established repair. It does not disable server-side tool validation or register
+Computa tools with Groq's API. Computa still accepts only verified literal
+assistant text through its existing response codec.
+
+The transform requires the separate private purpose
+`groq_120b_fixture_tool_choice_none_v1` and current registered native history.
+Ordinary sessions and all earlier diagnostic purposes remain observation-only.
+Only a stable data-only request initialization object and the exact existing
+six-field body can produce a copied seven-field request. The original caller
+object and original body remain intact; header contents and authentication
+material are not inspected.
+Unmatched, stale or unsafe inputs pass to the original fetch once without a
+matched-transform claim. A matched diagnostic attests the reviewed outgoing
+arguments, not backend parameter adoption or successful model behavior.
+
+Existing ownership, literal response, tool policy and cleanup checks are
+unchanged. Diagnostic stream metadata never becomes an answer, a tool call,
+or authority to replay an uncertain action. Live qualification remains open.

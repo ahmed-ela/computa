@@ -2026,7 +2026,8 @@ actor WebModelServer {
                                     directory:directory,admission:admission,request:request,first:true,
                                     allowManualInspector:context.historyPreparation != nil,
                                     allowEarlyPassive:context.historyPreparation != nil,
-                                    allowResponseStream:context.historyPreparation != nil)
+                                    allowResponseStream:context.historyPreparation != nil,
+                                    allowRequestTransformForTesting:context.historyPreparation != nil)
                             }
                             if let fixture=groqFixtureStatuses[taskID] {
                                 groqOwnedStatus=fixture.child(admission:admission,request:request,

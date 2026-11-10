@@ -15,6 +15,120 @@ import XCTest
         override var canBecomeMain: Bool { false }
     }
 
+    func testRequestTransformNativeControllerChangesOnlyTheMatchedBodyWithNativeHistoryAndKeepsLiteralRefusal() async throws {
+        try await run("format", expected: "http_2xx_opened", profile: .gptoss120b, fixture: true,
+            fixtureKind: .gptoss120b, earlyPassive: true, requestTransform: true)
+        try await run("format", expected: "none", profile: .gptoss120b, fixture: true,
+            fixtureKind: .gptoss120b, requestTransform: true)
+    }
+
+    func testRequestTransformExperimentRequiresItsOwnNativeOptInAndCannotLeakToObservationalPurposes() throws {
+        typealias Lease = GroqOwnedStatusLease
+        let purpose = Lease.FixtureTurn.requestTransformPurpose
+        for refusal in ["disabled", "observationOnly", "earlyOnly", "manualOnly", "qwen", "hash", "purpose", "extraKey", "publicArm", "expired", "future"] {
+            let arm = try inspectorArm(kind: refusal == "qwen" ? .qwen27b : .gptoss120b,
+                purpose: purpose, mutation: refusal,
+                expiresIn: refusal == "expired" ? -1 : refusal == "future" ? 601 : 60)
+            XCTAssertNil(Lease.FixtureTurn.consume(directory: arm.directory, admission: arm.admission,
+                request: arm.request, first: true, allowManualInspector: refusal == "manualOnly",
+                allowEarlyPassive: refusal == "earlyOnly", allowResponseStream: refusal == "observationOnly",
+                allowRequestTransformForTesting: !["disabled", "observationOnly", "earlyOnly", "manualOnly"].contains(refusal)), refusal)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: arm.directory.appendingPathComponent("arm.json").path))
+        }
+        let arm = try inspectorArm(purpose: purpose)
+        XCTAssertNil(Lease.FixtureTurn.consume(directory: arm.directory, admission: arm.admission,
+            request: arm.request, first: false, allowRequestTransformForTesting: true))
+        let parent = try XCTUnwrap(Lease.FixtureTurn.consume(directory: arm.directory, admission: arm.admission,
+            request: arm.request, first: true, allowRequestTransformForTesting: true))
+        let child = try XCTUnwrap(parent.child(admission: arm.admission, request: arm.request))
+        XCTAssertEqual(parent.publicationPurpose, purpose)
+        XCTAssertTrue(child.permitsRequestTransformForTesting)
+        XCTAssertEqual(child.installationMode, .earlyPassive)
+        XCTAssertEqual(child.responseStreamMetadataVersion, 2)
+        XCTAssertEqual(child.responseStreamMetadataPurpose, purpose)
+        XCTAssertTrue(child.capturesResponseStreamMetadata); XCTAssertTrue(child.capturesFailureProgress)
+        XCTAssertNil(child.inspectorOrdinal)
+        XCTAssertNil(child.bindInspector(view: ObjectIdentifier(NSObject()), ownerToken: UUID().uuidString.lowercased(), generation: UUID()))
+        parent.revoke()
+        for oldPurpose in [Lease.FixtureTurn.Kind.gptoss120b.purpose, Lease.FixtureTurn.inspectorPurpose,
+                           Lease.FixtureTurn.earlyPassivePurpose, Lease.FixtureTurn.responseStreamPurpose,
+                           Lease.FixtureTurn.responseStreamTailPurpose] {
+            let old = try inspectorArm(purpose: oldPurpose)
+            let oldParent = try XCTUnwrap(Lease.FixtureTurn.consume(directory: old.directory, admission: old.admission,
+                request: old.request, first: true, allowManualInspector: true, allowEarlyPassive: true,
+                allowResponseStream: true, allowRequestTransformForTesting: true))
+            let oldChild = try XCTUnwrap(oldParent.child(admission: old.admission, request: old.request))
+            XCTAssertFalse(oldChild.permitsRequestTransformForTesting, oldPurpose)
+            oldParent.revoke()
+        }
+        for ordinary in [try setupLease(fixture: false), try setupLease(fixture: true)] {
+            XCTAssertFalse(ordinary.lease.permitsRequestTransformForTesting)
+        }
+    }
+
+    func testRequestTransformExperimentChildrenRequireExactClosedHandoffAndLosePermissionOnRevocation() throws {
+        typealias Lease = GroqOwnedStatusLease
+        let arm = try inspectorArm(purpose: Lease.FixtureTurn.requestTransformPurpose)
+        let parent = try XCTUnwrap(Lease.FixtureTurn.consume(directory: arm.directory, admission: arm.admission,
+            request: arm.request, first: true, allowRequestTransformForTesting: true))
+        let first = try XCTUnwrap(parent.child(admission: arm.admission, request: arm.request))
+        let continued = try inspectorContinuation(arm.request), next = inspectorAdmission(after: arm.admission)
+        XCTAssertNil(parent.child(admission: next, request: continued.next))
+        for field in ["task", "thread", "turn", "runtime", "preparation", "transport", "provider", "model"] {
+            XCTAssertNil(parent.child(admission: inspectorAdmission(after: arm.admission, changing: field),
+                request: continued.next, closedInferenceID: arm.admission.inferenceID, closedContinuation: continued.closed), field)
+        }
+        XCTAssertNil(parent.child(admission: next, request: continued.next,
+            closedInferenceID: UUID(), closedContinuation: continued.closed))
+        let second = try XCTUnwrap(parent.child(admission: next, request: continued.next,
+            closedInferenceID: arm.admission.inferenceID, closedContinuation: continued.closed))
+        XCTAssertTrue(first.permitsRequestTransformForTesting); XCTAssertTrue(second.permitsRequestTransformForTesting)
+        XCTAssertEqual(second.responseStreamMetadataVersion, 2)
+        XCTAssertEqual(second.responseStreamMetadataPurpose, Lease.FixtureTurn.requestTransformPurpose)
+        XCTAssertNil(parent.child(admission: next, request: continued.next,
+            closedInferenceID: arm.admission.inferenceID, closedContinuation: continued.closed))
+        first.revoke()
+        XCTAssertFalse(first.permitsRequestTransformForTesting)
+        XCTAssertTrue(parent.isCurrent); XCTAssertTrue(second.permitsRequestTransformForTesting)
+        parent.revoke()
+        XCTAssertFalse(second.permitsRequestTransformForTesting); XCTAssertFalse(second.capturesResponseStreamMetadata)
+        XCTAssertFalse(second.capturesFailureProgress)
+        XCTAssertEqual(second.responseStreamMetadataVersion, 2, "Immutable purpose is not live request authority")
+        second.publish(.init(stage: "http_2xx_opened", sessionToken: UUID().uuidString.lowercased(), generation: UUID()), trigger: "response_deadline")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: arm.output.path))
+        XCTAssertNil(parent.child(admission: inspectorAdmission(after: next), request: continued.next,
+            closedInferenceID: next.inferenceID, closedContinuation: continued.closed))
+    }
+
+    func testRequestTransformExperimentReusesOnlyV2FiniteFirstFailureMetadata() throws {
+        typealias Lease = GroqOwnedStatusLease
+        for observedVersion in [1, 2] {
+            let arm = try inspectorArm(purpose: Lease.FixtureTurn.requestTransformPurpose)
+            let parent = try XCTUnwrap(Lease.FixtureTurn.consume(directory: arm.directory, admission: arm.admission,
+                request: arm.request, first: true, allowRequestTransformForTesting: true))
+            let child = try XCTUnwrap(parent.child(admission: arm.admission, request: arm.request))
+            let metadata = try XCTUnwrap(Lease.ResponseStreamMetadata.parse(try responseStreamMetadataJSON(["version": observedVersion])))
+            let observation = Lease.Observation(stage: "http_2xx_opened", sessionToken: UUID().uuidString.lowercased(),
+                generation: UUID(), failureProgress: Lease.ProgressCache().snapshot(candidate: false, changed: nil, quietSince: nil),
+                responseStreamMetadata: metadata)
+            child.publish(observation, trigger: "unsupported_website_response")
+            let bytes = try Data(contentsOf: arm.output)
+            XCTAssertLessThanOrEqual(bytes.count, 4_096)
+            let row = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+            XCTAssertEqual(row["purpose"] as? String, Lease.FixtureTurn.requestTransformPurpose)
+            XCTAssertEqual(row["trigger"] as? String, "unsupported_website_response")
+            XCTAssertNotNil(row["failureProgress"])
+            let saved = row["responseStreamMetadata"] as? [String: Any]
+            if observedVersion == 2 { XCTAssertEqual(saved?["version"] as? Int, 2); XCTAssertEqual(saved?.count, 20) }
+            else { XCTAssertNil(saved, "A V1 packet cannot be relabeled by the experimental purpose") }
+            XCTAssertFalse(child.permitsRequestTransformForTesting); XCTAssertFalse(parent.isCurrent)
+            child.publish(.init(stage: "http_429", sessionToken: observation.sessionToken, generation: observation.generation), trigger: "response_deadline")
+            XCTAssertEqual(try Data(contentsOf: arm.output), bytes)
+            XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains("PRIVATE_"))
+            XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains(Self.fixtureUser.replacingOccurrences(of: "groq-qwen27b", with: "groq-gptoss120b")))
+        }
+    }
+
     func testResponseStreamOuterPacketKeepsTheOldStatusVocabularyAndRejectsUnrepresentedOrContradictoryMetadata() throws {
         typealias Packet = EmbeddedBrowserSession.GroqResponseStreamStatus
         let inner = try responseStreamMetadataJSON()
@@ -1307,7 +1421,7 @@ import XCTest
     private func run(_ mode:String,expected:String,profile:GroqOwnedStatusLease.Profile = .gptoss20b,
                      fixture:Bool=false,continuation:Bool=false,customHistory:Bool=false,
                      fixtureKind:GroqOwnedStatusLease.FixtureTurn.Kind?=nil,earlyPassive:Bool=false,maskReadFailure:Bool=false,
-                     responseStreamTail:Bool=false,responseStreamV1:Bool=false) async throws {
+                     responseStreamTail:Bool=false,responseStreamV1:Bool=false,requestTransform:Bool=false) async throws {
         let path=try XCTUnwrap(realpath(FileManager.default.temporaryDirectory.path,nil));defer{free(path)}
         let tmp=URL(fileURLWithPath:String(cString:path),isDirectory:true).appendingPathComponent("groq-status-"+UUID().uuidString)
         let directory=tmp.appendingPathComponent(GroqOwnedStatusLease.directoryName)
@@ -1319,7 +1433,8 @@ import XCTest
         let armProfile:GroqOwnedStatusLease.Profile = mode=="wrongProfile" ? .gptoss20b : profile
         let output=directory.appendingPathComponent("owned-status.json"),arm=directory.appendingPathComponent("arm.json")
         let date=ISO8601DateFormatter();date.formatOptions=[.withInternetDateTime,.withFractionalSeconds]
-        let fixturePurpose=responseStreamTail ? GroqOwnedStatusLease.FixtureTurn.responseStreamTailPurpose
+        let fixturePurpose=requestTransform ? GroqOwnedStatusLease.FixtureTurn.requestTransformPurpose
+            : responseStreamTail ? GroqOwnedStatusLease.FixtureTurn.responseStreamTailPurpose
             : responseStreamV1 ? GroqOwnedStatusLease.FixtureTurn.responseStreamPurpose
             : earlyPassive ? GroqOwnedStatusLease.FixtureTurn.earlyPassivePurpose : mode=="crossFixturePurpose"
             ? (kind == .qwen27b ? GroqOwnedStatusLease.FixtureTurn.Kind.gptoss120b.purpose : GroqOwnedStatusLease.FixtureTurn.Kind.qwen27b.purpose)
@@ -1360,6 +1475,13 @@ import XCTest
                 ? "window.fetch=function(){window.requests=(window.requests||0)+1;window.groqBaseReceiver=this;window.groqBaseArgs=Array.from(arguments);const result=Promise.reject(Error('synthetic'));window.groqBasePromise=result;return result;}"
                 : "window.fetch=function(){window.requests=(window.requests||0)+1;return ['rollback','observerNotArmed','observerUnavailable'].includes(window.variant)?Promise.reject(Error('synthetic')):new Promise(()=>{})}")
                 + (mode=="observerNotArmed" ? ";Object.defineProperty(window,'fetch',{writable:false})" : "")
+                + (requestTransform ? """
+                    ;const requestTransformFixtureBase=window.fetch;
+                    window.fetch=function(...args){
+                      window.groqReceivedBodyForTesting=args[1].body;
+                      const result=Reflect.apply(requestTransformFixtureBase,this,args);
+                      window.groqForwardedPromiseForTesting=result;return result;};
+                    """ : "")
             let stub = WKUserScript(source:source,
                                     injectionTime:.atDocumentStart,forMainFrameOnly:true,in:.page)
             config.userContentController.addUserScript(stub)
@@ -1382,7 +1504,15 @@ import XCTest
                   return Reflect.apply(groqSiteBase,this,args);};
                 window.fetch=window.groqSiteWrapper;
                 """ : ""
-            created.html=html+"<script>window.variant='"+variant+"';"+siteWrapper+cachedSDK+Self.client+"</script>"
+            let client = requestTransform ? Self.client.replacingOccurrences(
+                of: "fetch('https://api.groq.com/openai/v1/chat/completions',{method:'POST',body})",
+                with: """
+                    (()=>{const init={method:'POST',body};window.groqOriginalBodyForTesting=body;
+                      window.groqOriginalInitForTesting=init;
+                      const result=fetch('https://api.groq.com/openai/v1/chat/completions',init);
+                      window.groqCallerPromiseForTesting=result;return result;})()
+                    """) : Self.client
+            created.html=html+"<script>window.variant='"+variant+"';"+siteWrapper+cachedSDK+client+"</script>"
             pages.append(created);view=created;return created
         }
         let transport=EmbeddedWebModelTransport(browser:browser)
@@ -1393,6 +1523,16 @@ import XCTest
         if mode=="nativeDeadline" {transport.setTimeoutsForTesting(preparation:.seconds(10),response:maskReadFailure ? .seconds(2) : .seconds(1))}
         var maskedReadCallbacks = 0, readFailureDelayed = false
         var sawAdmittedTailConfig = false
+        var sawAdmittedRequestTransformConfig = false
+        if requestTransform {
+            transport.setBeforePageResultValidationForTesting { _ in
+                guard !sawAdmittedRequestTransformConfig, let page = view else { return }
+                sawAdmittedRequestTransformConfig = page.configuration.userContentController.userScripts.contains {
+                    $0.source.contains(#""toolChoiceNoneForTesting":true"#)
+                        && $0.source.contains(#""streamMetadataPurpose":"groq_120b_fixture_tool_choice_none_v1""#)
+                }
+            }
+        }
         if responseStreamTail {
             transport.setBeforePageResultValidationForTesting { _ in
                 guard !sawAdmittedTailConfig, let page = view else { return }
@@ -1524,6 +1664,38 @@ import XCTest
         else { count=try await page.evaluateJavaScript("window.groqFixture.sendCount") as? Int }
         XCTAssertEqual(count,1)
         XCTAssertEqual(pages.count,continuation ? 2 : 1)
+        if requestTransform {
+            let rawFacts = try await page.evaluateJavaScript("""
+                JSON.stringify({original:window.groqOriginalBodyForTesting,
+                  callerBody:window.groqOriginalInitForTesting.body,
+                  received:window.groqReceivedBodyForTesting,
+                  samePromise:window.groqCallerPromiseForTesting===window.groqForwardedPromiseForTesting,
+                  fetches:window.requests})
+                """)
+            let encoded = try XCTUnwrap(rawFacts as? String)
+            let facts = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any])
+            let original = try XCTUnwrap(facts["original"] as? String)
+            let callerBody = try XCTUnwrap(facts["callerBody"] as? String)
+            let received = try XCTUnwrap(facts["received"] as? String)
+            XCTAssertEqual(Data(callerBody.utf8), Data(original.utf8), "The caller's original body bytes remain unchanged")
+            XCTAssertEqual(facts["samePromise"] as? Bool, true)
+            XCTAssertEqual(facts["fetches"] as? Int, 1, "The experiment cannot add a request or replay")
+            let originalFields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(original.utf8)) as? [String: Any])
+            var receivedFields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(received.utf8)) as? [String: Any])
+            let originalKeys: Set<String> = ["model", "messages", "temperature", "max_completion_tokens", "top_p", "stream"]
+            XCTAssertEqual(Set(originalFields.keys), originalKeys)
+            if earlyPassive {
+                XCTAssertEqual(Set(receivedFields.keys), originalKeys.union(["tool_choice"]))
+                XCTAssertEqual(receivedFields.removeValue(forKey: "tool_choice") as? String, "none")
+                XCTAssertEqual(try JSONSerialization.data(withJSONObject: receivedFields, options: [.sortedKeys, .withoutEscapingSlashes]),
+                    try JSONSerialization.data(withJSONObject: originalFields, options: [.sortedKeys, .withoutEscapingSlashes]),
+                    "Every original decoded field, including prompt string bytes, must remain exact")
+            } else {
+                XCTAssertEqual(Data(received.utf8), Data(original.utf8), "No native history authority means no body transformation")
+                XCTAssertEqual(Set(receivedFields.keys), originalKeys)
+                XCTAssertNil(receivedFields["tool_choice"])
+            }
+        }
         if mode == "siteWrapper" {
             let encoded = try await page.evaluateJavaScript("""
                 JSON.stringify({noEarlyObserver:window.groqSawNoEarlyObserver===true,
@@ -1566,7 +1738,7 @@ import XCTest
             XCTAssertTrue(browser.tabs.contains { browser.webView(for:$0.id) === page }, "The failed view remains owned until explicit Finish")
             let clears = try await page.evaluateJavaScript("window.groqFixture.clearCount") as? Int
             XCTAssertEqual(clears, 0)
-            if responseStreamTail {
+            if responseStreamTail || requestTransform && earlyPassive {
                 formatPacketBeforeCleanup = try Data(contentsOf: output)
                 XCTAssertFalse(formatPacketBeforeCleanup!.isEmpty, "Fully bound V2 failure must publish before cleanup")
             } else { XCTAssertFalse(FileManager.default.fileExists(atPath: output.path)) }
@@ -1584,7 +1756,7 @@ import XCTest
         }
         if expected=="none" {
             XCTAssertFalse(FileManager.default.fileExists(atPath:output.path))
-            XCTAssertEqual(FileManager.default.fileExists(atPath:arm.path),["wrongNonce","wrongProfile","wrongPurpose","crossFixturePurpose","wrongFixture","wrongModel"].contains(mode))
+            XCTAssertEqual(FileManager.default.fileExists(atPath:arm.path),requestTransform && !earlyPassive || ["wrongNonce","wrongProfile","wrongPurpose","crossFixturePurpose","wrongFixture","wrongModel"].contains(mode))
         }
         else {
             XCTAssertFalse(FileManager.default.fileExists(atPath:arm.path),"Authorized arm must be consumed")
@@ -1618,7 +1790,7 @@ import XCTest
                 XCTAssertNotNil((row["setupReason"] as? String).flatMap(GroqOwnedStatusLease.SetupReason.init(rawValue:)))
                 XCTAssertEqual(row["setupReason"] as? String, mode == "observerNotArmed" ? "js_fetch_descriptor" : "armed")
             } else {
-                XCTAssertEqual(row.count, mode == "format" && responseStreamTail ? 17 : earlyPassive ? 16 : 15); XCTAssertNil(row["setupReason"])
+                XCTAssertEqual(row.count, mode == "format" && (responseStreamTail || requestTransform && earlyPassive) ? 17 : earlyPassive ? 16 : 15); XCTAssertNil(row["setupReason"])
             }
             if mode == "format" {
                 XCTAssertEqual(row["threadID"] as? String, thread); XCTAssertEqual(row["turnID"] as? String, turn)
@@ -1637,6 +1809,10 @@ import XCTest
                 XCTAssertFalse(String(decoding: report, as: UTF8.self).contains(user))
             }
             XCTAssertFalse(String(decoding:report,as:UTF8.self).contains(nonce.uuidString))
+        }
+        if requestTransform {
+            XCTAssertEqual(sawAdmittedRequestTransformConfig, earlyPassive, "Only the native-history admission may install the experimental flag and purpose")
+            transport.setBeforePageResultValidationForTesting(nil)
         }
         if responseStreamTail {
             XCTAssertEqual(pages.count, 1)

@@ -5,6 +5,7 @@
   const purpose = 'groq_120b_fixture_response_stream_metadata_v1';
   const limits = Object.freeze({bytes:262144, events:4096, frameBytes:16384, durationMS:60000});
   const tailPurpose = 'groq_120b_fixture_response_stream_tail_metadata_v2';
+  const toolChoicePurpose = 'groq_120b_fixture_tool_choice_none_v1';
   const tailLimits = Object.freeze({bytes:16777216, events:131072, chunks:262144, frameBytes:16384, durationMS:90000});
   const apply = Reflect.apply, descriptor = Object.getOwnPropertyDescriptor;
   const parse = JSON.parse, stringify = JSON.stringify;
@@ -203,7 +204,9 @@
   // tees the body: object identity is preserved, timing equivalence is not.
   function startMatchedGroqResponseStreamProbe(value, options) {
     const requestedPurpose = dataValue(options, 'purpose');
-    const version = requestedPurpose === tailPurpose ? 2 : requestedPurpose === purpose ? 1 : 0;
+    const requestTransform = dataValue(options, 'toolChoiceNoneForTesting') === true;
+    if (requestTransform !== (requestedPurpose === toolChoicePurpose)) return null;
+    const version = requestedPurpose === tailPurpose || requestedPurpose === toolChoicePurpose ? 2 : requestedPurpose === purpose ? 1 : 0;
     if (dataValue(options, 'streamMetadata') !== true || version === 0
       || dataValue(options, 'profile') !== 'gptoss120b') return null;
     const cap = version === 2 ? tailLimits : limits;

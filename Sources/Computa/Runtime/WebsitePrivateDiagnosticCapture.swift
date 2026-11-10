@@ -385,7 +385,12 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
     var isFixture: Bool { fixtureTurn != nil }
     var capturesFailureProgress: Bool {
         isCurrent && profile == .gptoss120b && installationMode == .earlyPassive
-            && [FixtureTurn.earlyPassivePurpose, FixtureTurn.responseStreamPurpose, FixtureTurn.responseStreamTailPurpose].contains(fixtureTurn?.publicationPurpose ?? "")
+            && [FixtureTurn.earlyPassivePurpose, FixtureTurn.responseStreamPurpose, FixtureTurn.responseStreamTailPurpose, FixtureTurn.requestTransformPurpose].contains(fixtureTurn?.publicationPurpose ?? "")
+    }
+    // Experimental request transformation is never inherited by observational purposes.
+    var permitsRequestTransformForTesting: Bool {
+        isCurrent && profile == .gptoss120b && installationMode == .earlyPassive
+            && fixtureTurn?.publicationPurpose == FixtureTurn.requestTransformPurpose
     }
     var capturesResponseStreamMetadata: Bool {
         isCurrent && profile == .gptoss120b && installationMode == .earlyPassive
@@ -395,7 +400,7 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
         guard let purpose = fixtureTurn?.publicationPurpose else { return nil }
         switch purpose {
         case FixtureTurn.responseStreamPurpose: return 1
-        case FixtureTurn.responseStreamTailPurpose: return 2
+        case FixtureTurn.responseStreamTailPurpose, FixtureTurn.requestTransformPurpose: return 2
         default: return nil
         }
     }
@@ -469,7 +474,8 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
         static let earlyPassivePurpose = "groq_120b_fixture_early_passive_status_v1"
         static let responseStreamPurpose = "groq_120b_fixture_response_stream_metadata_v1"
         static let responseStreamTailPurpose = "groq_120b_fixture_response_stream_tail_metadata_v2"
-        private enum Mode { case status, manualInspector, earlyPassive, responseStream, responseStreamTail }
+        static let requestTransformPurpose = "groq_120b_fixture_tool_choice_none_v1"
+        private enum Mode { case status, manualInspector, earlyPassive, responseStream, responseStreamTail, requestTransform }
         private struct WeakChild { weak var lease: GroqOwnedStatusLease? }
         private let kind: Kind
         private let mode: Mode
@@ -480,6 +486,7 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
             case .earlyPassive: return Self.earlyPassivePurpose
             case .responseStream: return Self.responseStreamPurpose
             case .responseStreamTail: return Self.responseStreamTailPurpose
+            case .requestTransform: return Self.requestTransformPurpose
             }
         }
         private let file: WebsitePrivateDiagnosticCapture.Claim
@@ -507,7 +514,8 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
 
         static func consume(directory: URL?, admission: WebModelStartAdmission, request: WebModelResponseCodec.Request,
                             first: Bool, allowManualInspector: Bool = false, allowEarlyPassive: Bool = false,
-                            allowResponseStream: Bool = false, now: Date = Date()) -> FixtureTurn? {
+                            allowResponseStream: Bool = false, allowRequestTransformForTesting: Bool = false,
+                            now: Date = Date()) -> FixtureTurn? {
             guard first, !Task.isCancelled, let directory, admission.provider == "groq",
                   let kind=Kind.allCases.first(where: { $0.profile.choice.modelID == admission.modelID }), request.model == admission.modelID,
                   [admission.taskID, admission.threadID, admission.turnID].allSatisfy({ UUID(uuidString:$0)?.uuidString.lowercased()==$0 }),
@@ -522,7 +530,8 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
                       v["purpose"]==kind.purpose || allowManualInspector && kind == .gptoss120b && v["purpose"]==Self.inspectorPurpose
                         || allowEarlyPassive && kind == .gptoss120b && v["purpose"]==Self.earlyPassivePurpose
                         || allowResponseStream && kind == .gptoss120b
-                            && [Self.responseStreamPurpose, Self.responseStreamTailPurpose].contains(v["purpose"] ?? ""),
+                            && [Self.responseStreamPurpose, Self.responseStreamTailPurpose].contains(v["purpose"] ?? "")
+                        || allowRequestTransformForTesting && kind == .gptoss120b && v["purpose"] == Self.requestTransformPurpose,
                       v["modelID"]==admission.modelID,
                       let nonce=v["nonce"], UUID(uuidString:nonce)?.uuidString.lowercased()==nonce,
                       v["userPromptSHA256"]==GroqOwnedStatusLease.digest(user), let expiry=v["expiresAt"], expiry.utf8.count==24 else { return false }
@@ -532,7 +541,8 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
                 mode = v["purpose"] == Self.inspectorPurpose ? .manualInspector
                     : v["purpose"] == Self.earlyPassivePurpose ? .earlyPassive
                     : v["purpose"] == Self.responseStreamPurpose ? .responseStream
-                    : v["purpose"] == Self.responseStreamTailPurpose ? .responseStreamTail : .status
+                    : v["purpose"] == Self.responseStreamTailPurpose ? .responseStreamTail
+                    : v["purpose"] == Self.requestTransformPurpose ? .requestTransform : .status
                 deadline=started + .seconds(end.timeIntervalSince(now)); return true
             },isCurrent:{ !Task.isCancelled && (deadline.map { ContinuousClock.now < $0 } ?? false) }),let deadline else { return nil }
             return .init(file:file,first:admission,deadline:deadline,user:user,kind:kind,mode:mode)
@@ -550,7 +560,7 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
                       children.count < WebModelServer.maximumTurnInferences,
                       !children.contains(admission.inferenceID) else { return nil }
                 var inspectorOrdinal: Int?
-                if mode == .manualInspector || mode == .earlyPassive || mode == .responseStream || mode == .responseStreamTail {
+                if mode == .manualInspector || mode == .earlyPassive || mode == .responseStream || mode == .responseStreamTail || mode == .requestTransform {
                     let ordinal = children.count + 1
                     if mode == .manualInspector { guard ordinal <= 4 else { return nil } }
                     if ordinal == 1 {
@@ -565,8 +575,8 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
                 }
                 children.insert(admission.inferenceID)
                 let child = GroqOwnedStatusLease(file,admission,deadline,request.prompt,profile:kind.profile,
-                    fixtureTurn:self,inspectorOrdinal:inspectorOrdinal, installationMode:mode == .earlyPassive || mode == .responseStream || mode == .responseStreamTail ? .earlyPassive : .late)
-                if inspectorOrdinal != nil || mode == .earlyPassive || mode == .responseStream || mode == .responseStreamTail { dependentChildren.append(WeakChild(lease: child)) }
+                    fixtureTurn:self,inspectorOrdinal:inspectorOrdinal, installationMode:mode == .earlyPassive || mode == .responseStream || mode == .responseStreamTail || mode == .requestTransform ? .earlyPassive : .late)
+                if inspectorOrdinal != nil || mode == .earlyPassive || mode == .responseStream || mode == .responseStreamTail || mode == .requestTransform { dependentChildren.append(WeakChild(lease: child)) }
                 return child
             }
         }

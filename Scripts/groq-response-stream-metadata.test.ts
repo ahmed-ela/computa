@@ -351,3 +351,24 @@ test('matched real v2 clone errors expose the closed code only and preserve the 
     expect(handle.finishFailure()).toBeNull();
   }
 });
+
+
+test('the request-transform purpose needs its own exact flag and retains the existing v2 metadata contract only', async () => {
+  const requestPurpose='groq_120b_fixture_tool_choice_none_v1',api=factory();let privateReads=0;
+  const neverRead=new Proxy({}, {get(){privateReads++;throw Error('PRIVATE_RESPONSE');}});
+  for(const config of [options({purpose:requestPurpose}),options({purpose:requestPurpose,toolChoiceNoneForTesting:false}),
+    options({purpose:requestPurpose,toolChoiceNoneForTesting:true,profile:'qwen27b'}),
+    options({purpose,toolChoiceNoneForTesting:true}),options({purpose:tailPurpose,toolChoiceNoneForTesting:true}),
+    Object.assign(Object.create({toolChoiceNoneForTesting:true}),options({purpose:requestPurpose})),
+    Object.defineProperty(options({purpose:requestPurpose}),'toolChoiceNoneForTesting',{get(){privateReads++;return true;}})]) {
+    expect(api.startMatchedGroqResponseStreamProbe(neverRead,config)).toBeNull();
+  }
+  expect(privateReads).toBe(0);
+  const raw='event: error\n'+event({error:{code:'tool_use_failed',type:'invalid_request_error',message:'PRIVATE_TRANSFORM_MESSAGE'}});
+  const response=new Response(raw,{headers:{'Content-Type':'text/event-stream'}});
+  const handle=api.startMatchedGroqResponseStreamProbe(response,options({purpose:requestPurpose,toolChoiceNoneForTesting:true}));
+  expect(handle).not.toBeNull();expect(response.bodyUsed).toBe(false);const original=response.text();await handle.settled;
+  expect(await original).toBe(raw);const facts=handle.finishFailure();
+  expect(facts).toMatchObject({version:2,apiErrorCode:'tool_use_failed',apiErrorType:'invalid_request_error',eventError:true,eof:true,outcome:'eof'});
+  finite(facts,['PRIVATE_TRANSFORM_MESSAGE'],2);expect(handle.finishFailure()).toBeNull();
+});

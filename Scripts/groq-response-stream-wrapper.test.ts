@@ -7,6 +7,7 @@ const factory = readFileSync(new URL('../Sources/Computa/Resources/BrowserModels
 const endpoint = 'https://api.groq.com/openai/v1/chat/completions';
 const purpose = 'groq_120b_fixture_response_stream_metadata_v1';
 const tailPurpose = 'groq_120b_fixture_response_stream_tail_metadata_v2';
+const toolChoicePurpose = 'groq_120b_fixture_tool_choice_none_v1';
 const prompt = 'Harmless synthetic exact wrapper marker e\u0301 🌍';
 const encoder = new TextEncoder();
 const event = (value: unknown) => 'data: ' + JSON.stringify(value) + '\n\n';
@@ -15,7 +16,8 @@ function deferred<T>() {
   const promise = new Promise<T>(yes => { resolve = yes; }); return {promise, resolve};
 }
 type Options = {stream?:boolean;early?:boolean;setup?:boolean;purpose?:string;profile?:string;helper?:boolean;
-  streamAccessor?:boolean;streamInherited?:boolean;purposeAccessor?:boolean;};
+  streamAccessor?:boolean;streamInherited?:boolean;purposeAccessor?:boolean;toolChoiceNone?:boolean;
+  toolChoiceAccessor?:boolean;toolChoiceInherited?:boolean;throwValue?:unknown;};
 function fixture(options:Options = {}) {
   const profile = options.profile ?? 'gptoss120b';
   const selected = profile === 'qwen27b'
@@ -23,7 +25,7 @@ function fixture(options:Options = {}) {
     : {model:'openai/gpt-oss-120b',label:'GPT OSS 120B',temperature:1,maximum:16384,topP:1};
   const pending = deferred<any>(), probe = deferred<any>(), probes:any[] = [], calls:any[] = [];
   let clock = 0, cloneCalls = 0, headerReads = 0, bodyReads = 0, secretReads = 0, domReads = 0;
-  const original = function(this:any, ...args:any[]) { calls.push({receiver:this,args}); return pending.promise; };
+  const original = function(this:any, ...args:any[]) { calls.push({receiver:this,args}); if(options.throwValue!==undefined)throw options.throwValue;return pending.promise; };
   const button:any = {isConnected:true,getClientRects:() => [{}],closest:() => null,querySelectorAll:() => [{}],
     getAttribute:(name:string) => ({'aria-controls':'picker','aria-expanded':'false','data-state':'closed'} as any)[name] ?? null,
     innerText:selected.label,textContent:selected.label};
@@ -44,11 +46,14 @@ function fixture(options:Options = {}) {
   const clearTimer = (id:number) => { timers.delete(id); };
   const key = '__computaGroqStatus_'+'a'.repeat(32), secret = 'b'.repeat(32);
   const config:any = {key:'a'.repeat(32),secret,durationMs:390000,profile,earlyPassive:options.early ?? true,
-    setupDiagnostics:options.setup ?? true,streamMetadata:options.stream ?? true,streamMetadataPurpose:options.purpose ?? purpose};
+    setupDiagnostics:options.setup ?? true,streamMetadata:options.stream ?? true,streamMetadataPurpose:options.purpose ?? purpose,
+    ...(options.toolChoiceNone===undefined?{}:{toolChoiceNoneForTesting:options.toolChoiceNone})};
   let expression = JSON.stringify(config);
   if (options.streamAccessor) expression = 'Object.defineProperty('+expression+',"streamMetadata",{get(){onSecretRead();return true;}})';
   if (options.streamInherited) { delete config.streamMetadata; expression = 'Object.assign(Object.create({streamMetadata:true}),'+JSON.stringify(config)+')'; }
   if (options.purposeAccessor) expression = 'Object.defineProperty('+expression+',"streamMetadataPurpose",{get(){onSecretRead();return "'+purpose+'";}})';
+  if(options.toolChoiceAccessor)expression='Object.defineProperty('+expression+',"toolChoiceNoneForTesting",{get(){onSecretRead();return true;}})';
+  if(options.toolChoiceInherited){delete config.toolChoiceNoneForTesting;expression='Object.assign(Object.create({toolChoiceNoneForTesting:true}),'+JSON.stringify(config)+')';}
   const marker = 'null /*__GROQ_RESPONSE_STREAM_FACTORY__*/';
   expect(source.split(marker)).toHaveLength(2);
   // Test-local observation of the actual helper's settled promise: no timing
@@ -244,4 +249,92 @@ test('v2 cannot broaden purpose, native flag, profile or ownership and a stopped
   expect(await returned).toBe(response);expect(await response.text()).toBe('PRIVATE_V2_HTTP_ERROR');
   const {outer,facts,text}=packet(f);expect(outer.stage).toBe('http_429');expect(facts).toBeNull();expect(text).not.toContain('PRIVATE_V2_HTTP_ERROR');
   expect(f.counts()).toMatchObject({cloneCalls:0,headerReads:0,bodyReads:0});
+});
+
+
+test('the explicit native experiment adds only tool_choice none to one exact body without mutating caller objects or inspecting private values', async () => {
+  for(const variant of ['compact','prettyFrozen']) {
+    const f=fixture({purpose:toolChoicePurpose,toolChoiceNone:true});expect(f.arm()).toBe(true);let privateReads=0;
+    const headers=new Proxy({}, {get(){privateReads++;throw Error('PRIVATE_HEADER_CONTENT');},ownKeys(){privateReads++;throw Error('PRIVATE_HEADER_KEYS');}});
+    const signal=new AbortController().signal;
+    const compact=f.body({messages:[{content:'PRIVATE_SYSTEM_"quote"\\path\n🌍',role:'system'},{content:prompt,role:'user'}]});
+    const originalBody=variant==='compact'?compact:JSON.stringify(JSON.parse(compact),null,2);
+    const init:any=Object.assign(Object.create(variant==='compact'?null:Object.prototype),
+      {method:'POST',body:originalBody,headers,signal,credentials:'include',mode:'cors',cache:'no-store'});
+    if(variant==='prettyFrozen')Object.freeze(init);
+    const before=Object.getOwnPropertyDescriptors(init),owner={experiment:true};
+    const returned=f.window.fetch.call(owner,endpoint,init);expect(returned).toBe(f.pending);expect(f.calls).toHaveLength(1);
+    const sent=f.calls[0].args[1];expect(f.calls[0].receiver).toBe(owner);expect(f.calls[0].args[0]).toBe(endpoint);
+    expect(sent).not.toBe(init);expect(Object.getPrototypeOf(sent)).toBe(Object.getPrototypeOf(init));
+    expect(Object.isExtensible(sent)).toBe(Object.isExtensible(init));expect(Object.getOwnPropertyDescriptors(init)).toEqual(before);
+    expect(init.body).toBe(originalBody);expect(sent.headers).toBe(headers);expect(sent.signal).toBe(signal);
+    expect(JSON.parse(sent.body)).toEqual({...JSON.parse(originalBody),tool_choice:'none'});
+    expect(Object.keys(JSON.parse(sent.body))).toHaveLength(7);expect(sent.body).toBe(originalBody.slice(0,-1)+',"tool_choice":"none"}');
+    for(const key of Reflect.ownKeys(before)) {
+      const expected={...before[key as keyof typeof before]};if(key==='body')expected.value=sent.body;
+      expect(Object.getOwnPropertyDescriptor(sent,key)).toEqual(expected);
+    }
+    expect(privateReads).toBe(0);expect(f.counts().secretReads).toBe(0);
+    const raw=event({error:{code:'tool_use_failed',type:'invalid_request_error',message:'PRIVATE_EXPERIMENT_ERROR'}});
+    const response=f.resolve(new Response(raw,{headers:{'Content-Type':'text/event-stream'}}));
+    expect(await returned).toBe(response);const h=await f.probe.promise;expect(h).not.toBeNull();
+    const original=response.text();await h.settled;expect(await original).toBe(raw);
+    const {outer,facts,text}=packet(f);expect(outer.stage).toBe('http_2xx_opened');
+    expect(facts).toMatchObject({version:2,apiErrorCode:'tool_use_failed',apiErrorType:'invalid_request_error',eof:true,outcome:'eof'});
+    for(const canary of ['PRIVATE_SYSTEM','PRIVATE_HEADER','PRIVATE_EXPERIMENT_ERROR',prompt])expect(text).not.toContain(canary);
+    expect(f.calls).toHaveLength(1);expect(f.counts().cloneCalls).toBe(1);expect(privateReads).toBe(0);
+  }
+  const f=fixture({purpose:toolChoicePurpose,toolChoiceNone:true});f.arm();const first={method:'POST',body:f.body()};
+  f.window.fetch(endpoint,first);const response=f.resolve(new Response('data: [DONE]\n\n',{headers:{'Content-Type':'text/event-stream'}}));
+  await f.pending;const h=await f.probe.promise;const second={method:'POST',body:f.body()};f.window.fetch(endpoint,second);
+  expect(f.calls).toHaveLength(2);expect(f.calls[0].args[1]).not.toBe(first);expect(f.calls[1].args[1]).toBe(second);
+  expect(second.body).toBe(f.body());expect(packet(f).facts).toBeNull();await h.settled;await response.text();
+});
+
+test('old purposes stay observation-only and unsafe or stale experiment requests remain byte-identical with no matched transform claim', async () => {
+  for(const oldPurpose of [purpose,tailPurpose]) {
+    const f=fixture({purpose:oldPurpose});f.arm();let reads=0;const init:any={method:'POST',body:f.body()};
+    Object.defineProperty(init,'headers',{get(){reads++;throw Error('PRIVATE_OLD_HEADER');}});
+    const returned=f.window.fetch(endpoint,init);expect(f.calls[0].args[1]).toBe(init);
+    const response=f.resolve(new Response('data: [DONE]\n\n',{headers:{'Content-Type':'text/event-stream'}}));
+    expect(await returned).toBe(response);const h=await f.probe.promise;const original=response.text();await h.settled;await original;
+    expect(packet(f).outer.stage).toBe('http_2xx_opened');expect(reads).toBe(0);expect(init.body).not.toContain('"tool_choice"');
+  }
+  for(const options of [{purpose:toolChoicePurpose},{purpose:toolChoicePurpose,toolChoiceNone:false},
+    {purpose:toolChoicePurpose,toolChoiceAccessor:true},{purpose:toolChoicePurpose,toolChoiceInherited:true},
+    {purpose,toolChoiceNone:true},{purpose:tailPurpose,toolChoiceNone:true},{purpose:toolChoicePurpose,toolChoiceNone:true,stream:false},
+    {purpose:toolChoicePurpose,toolChoiceNone:true,early:false},{purpose:toolChoicePurpose,toolChoiceNone:true,setup:false},
+    {purpose:toolChoicePurpose,toolChoiceNone:true,profile:'qwen27b'}]) {
+    const f=fixture(options);expect([false,'js_profile_unavailable',undefined]).toContain(f.arm());
+    expect(f.window.fetch).toBe(f.original);expect(f.calls).toHaveLength(0);expect(f.probes).toHaveLength(0);expect(f.counts().secretReads).toBe(0);f.ctl('dispose');
+  }
+  for(const mode of ['headerGetter','credentialGetter','bodyGetter','methodGetter','symbol','unknown','prototype','unstable','methodMutation','alreadySeven','extraBodyField','wrongBody','wrongURL','extraArgument','expiry','document','route']) {
+    const f=fixture({purpose:toolChoicePurpose,toolChoiceNone:true});f.arm();let privateReads=0;
+    let init:any={method:'POST',body:f.body()},url=endpoint,extra:any[]=[];
+    if(mode==='headerGetter')Object.defineProperty(init,'headers',{get(){privateReads++;throw Error('PRIVATE_GETTER');}});
+    if(mode==='credentialGetter')Object.defineProperty(init,'credentials',{get(){privateReads++;throw Error('PRIVATE_GETTER');}});
+    if(mode==='bodyGetter')Object.defineProperty(init,'body',{get(){privateReads++;throw Error('PRIVATE_BODY_GETTER');}});
+    if(mode==='methodGetter')Object.defineProperty(init,'method',{get(){privateReads++;throw Error('PRIVATE_METHOD_GETTER');}});
+    if(mode==='symbol')init[Symbol('private')]=true;if(mode==='unknown')init.foreign='PRIVATE_UNKNOWN';
+    if(mode==='prototype')Object.setPrototypeOf(init,{foreign:true});
+    if(mode==='unstable'){let keys=0;init=new Proxy(init,{ownKeys(target){keys++;return keys===1?Reflect.ownKeys(target):['method'];}});}
+    if(mode==='methodMutation')init=new Proxy(init,{ownKeys(target){target.method='GET';return Reflect.ownKeys(target);}});
+    if(mode==='alreadySeven')init.body=f.body({tool_choice:'none'});if(mode==='extraBodyField')init.body=f.body({disable_tool_validation:true});if(mode==='wrongBody')init.body=f.body({temperature:0.25});
+    if(mode==='wrongURL')url+='?foreign=1';if(mode==='extraArgument')extra=[{private:true}];
+    if(mode==='expiry')f.tick(390001);if(mode==='document')f.replaceDocument({});if(mode==='route')f.location.href+='&foreign=1';
+    const before=Object.getOwnPropertyDescriptor(init,'body')?.value;
+    const returned=f.window.fetch(url,init,...extra);expect(returned).toBe(f.pending);expect(f.calls).toHaveLength(1);
+    expect(f.calls[0].args).toEqual([url,init,...extra]);expect(f.calls[0].args[1]).toBe(init);
+    expect(Object.getOwnPropertyDescriptor(init,'body')?.value).toBe(before);expect(privateReads).toBe(0);
+    const response=f.resolve(new Response('PRIVATE_UNTRANSFORMED_RESULT',{headers:{'Content-Type':'application/json'}}));
+    expect(await returned).toBe(response);expect(await response.text()).toBe('PRIVATE_UNTRANSFORMED_RESULT');
+    const report=f.savedCtl('finish_metadata');expect(typeof report).toBe('string');
+    const outer=JSON.parse(report);expect(outer.responseStream).toBeNull();expect(outer.stage).not.toBe('http_2xx_opened');
+    expect(f.probes).toHaveLength(0);expect(f.counts().cloneCalls).toBe(0);expect(privateReads).toBe(0);
+  }
+  const thrown=new Error('PRIVATE_ORIGINAL_FETCH_THROW'),f=fixture({purpose:toolChoicePurpose,toolChoiceNone:true,throwValue:thrown});f.arm();
+  const init={method:'POST',body:f.body()};let caught:unknown;
+  try{f.window.fetch(endpoint,init);}catch(error){caught=error;}
+  expect(caught).toBe(thrown);expect(f.calls).toHaveLength(1);expect(f.calls[0].args[1]).not.toBe(init);
+  expect(init.body).toBe(f.body());expect(packet(f).facts).toBeNull();expect(f.probes).toHaveLength(0);
 });

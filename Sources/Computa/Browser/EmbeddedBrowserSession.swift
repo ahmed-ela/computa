@@ -893,8 +893,9 @@ final class EmbeddedBrowserSession {
     }
     private static let inspectorDiagnosticLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "ModelInspectorDiagnostic")
 
-    /// This observes one explicitly armed synthetic inference. It never supplies
-    /// response text, ownership, provider completion or tool-dispatch authority.
+    /// Captures one explicitly armed synthetic inference. A separately admitted
+    /// experiment may set tool_choice:none; it never supplies response text,
+    /// ownership, provider completion or tool-dispatch authority.
     @MainActor private final class GroqStatusProbe {
         let lease: GroqOwnedStatusLease
         let key = UUID().uuidString.replacingOccurrences(of:"-",with:"").lowercased()
@@ -938,6 +939,11 @@ final class EmbeddedBrowserSession {
                 guard let purpose = lease.responseStreamMetadataPurpose else { return nil }
                 config["streamMetadata"] = true
                 config["streamMetadataPurpose"] = purpose
+            }
+            if lease.permitsRequestTransformForTesting {
+                guard lease.capturesResponseStreamMetadata, lease.responseStreamMetadataVersion == 2,
+                      lease.installationMode == .earlyPassive else { return nil }
+                config["toolChoiceNoneForTesting"] = true
             }
             guard milliseconds>0,let bytes=try? JSONSerialization.data(withJSONObject:config) else{return nil}
             return installedSource.replacingOccurrences(of:"__GROQ_OWNED_SYNTHETIC_CONFIG__",with:String(decoding:bytes,as:UTF8.self))

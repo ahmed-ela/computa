@@ -9,6 +9,8 @@
   const earlyPassive = Object.getOwnPropertyDescriptor(config, 'earlyPassive')?.value === true;
   const streamMetadata = Object.getOwnPropertyDescriptor(config, 'streamMetadata')?.value === true;
   const streamPurpose = Object.getOwnPropertyDescriptor(config, 'streamMetadataPurpose')?.value;
+  const toolChoiceNoneForTesting = Object.getOwnPropertyDescriptor(config, 'toolChoiceNoneForTesting')?.value === true;
+  const transformPurpose = streamPurpose === 'groq_120b_fixture_tool_choice_none_v1';
   // Native replaces this inert expression only for the separate exact fixture purpose.
   const streamFactory = null /*__GROQ_RESPONSE_STREAM_FACTORY__*/;
   // A failed fixture initializer may expose only its closed reason/dispose
@@ -40,14 +42,17 @@
   };
   if (!Object.prototype.hasOwnProperty.call(profiles, config.profile) || earlyPassive && config.profile !== 'gptoss120b') { setupFailure('js_profile_unavailable'); return; }
   const profile = profiles[config.profile];
+  if (toolChoiceNoneForTesting !== transformPurpose || toolChoiceNoneForTesting && !streamMetadata) { setupFailure('js_profile_unavailable'); return; }
   if (streamMetadata && (!earlyPassive || !setupDiagnostics || config.profile !== 'gptoss120b'
-    || !['groq_120b_fixture_response_stream_metadata_v1','groq_120b_fixture_response_stream_tail_metadata_v2'].includes(streamPurpose)
+    || !['groq_120b_fixture_response_stream_metadata_v1','groq_120b_fixture_response_stream_tail_metadata_v2','groq_120b_fixture_tool_choice_none_v1'].includes(streamPurpose)
     || typeof streamFactory?.startMatchedGroqResponseStreamProbe !== 'function')) {
     setupFailure('js_profile_unavailable'); return;
   }
   const ownerDocument = document, original = window.fetch, key = '__computaGroqStatus_' + config.key;
   const apply = Reflect.apply, desc = Object.getOwnPropertyDescriptor, then = Promise.prototype.then;
   const stringify = JSON.stringify, proto = Object.getPrototypeOf;
+  const initKeys = Reflect.ownKeys, initCreate = Object.create, initDefine = Object.defineProperties,
+    initExtensible = Object.isExtensible, initPreventExtensions = Object.preventExtensions, initSame = Object.is;
   if (setupDiagnostics && typeof Response !== 'function') { setupFailure('js_response_getters'); return; }
   const response = Object.fromEntries(['url', 'redirected', 'status', 'type'].map(p => [p, desc(Response.prototype, p)?.get]));
   const time = performance.now.bind(performance), deadline = time() + config.durationMs;
@@ -102,7 +107,7 @@
     if (window.fetch === wrapped) window.fetch = original;
     if (!earlyPassive || desc(window, key)?.value === control) delete window[key];
   }
-  function matches(init) {
+  function matches(init, returnBody = false) {
     if (!init || ![Object.prototype, null].includes(proto(init))) return false;
     const method = desc(init, 'method')?.value, body = desc(init, 'body')?.value;
     if (typeof method !== 'string' || !/^[Pp][Oo][Ss][Tt]$/.test(method) || typeof body !== 'string' || body.length > 262144) return false;
@@ -145,10 +150,46 @@
           pos=prefix.length;
         }
         const content=stringify(prompt);
-        if (body.startsWith(content,pos) && body.length===pos+content.length+suffix.length && body.endsWith(suffix)) return true;
+        if (body.startsWith(content,pos) && body.length===pos+content.length+suffix.length && body.endsWith(suffix)) return returnBody ? body : true;
       }
     }
     return false;
+  }
+  // Separate native experiment only. Inspect own data descriptors, never
+  // header contents, signal state, credentials or accessor values. Reflection
+  // failures/unstable or nonstandard shapes leave the caller request unchanged.
+  function transformedInit(init, body) {
+    const fields = ['method','body','headers','signal','credentials','mode','cache','redirect','referrer',
+      'referrerPolicy','integrity','keepalive','duplex','priority','window'];
+    const prototype = proto(init), keys = initKeys(init), extensible = initExtensible(init);
+    if (![Object.prototype, null].includes(prototype) || keys.length > fields.length
+      || keys.some(key => typeof key !== 'string' || !fields.includes(key))
+      || prototype !== null && fields.some(key => desc(prototype, key) !== undefined)) return null;
+    const descriptors = initCreate(null);
+    for (const key of keys) {
+      const value = desc(init, key);
+      if (!value || !Object.prototype.hasOwnProperty.call(value, 'value')) return null;
+      descriptors[key] = value;
+    }
+    if (descriptors.body?.value !== body || typeof descriptors.method?.value !== 'string'
+      || !/^[Pp][Oo][Ss][Tt]$/.test(descriptors.method.value) || !body.endsWith('}')) return null;
+    const field = ',"tool_choice":"none"', nextBody = body.slice(0, -1) + field + '}';
+    // Exact inverse proves the six original JSON lexemes (including the opaque
+    // optional system string) are unchanged; no message materialization/repair.
+    if (nextBody.length > 262144 || nextBody.slice(0, -(field.length + 1)) + '}' !== body) return null;
+    const currentKeys = initKeys(init);
+    if (proto(init) !== prototype || initExtensible(init) !== extensible || currentKeys.length !== keys.length
+      || keys.some((key,index) => currentKeys[index] !== key)) return null;
+    for (const key of keys) {
+      const previous = descriptors[key], current = desc(init, key);
+      if (!current || !Object.prototype.hasOwnProperty.call(current, 'value')
+        || !initSame(current.value, previous.value) || current.writable !== previous.writable
+        || current.enumerable !== previous.enumerable || current.configurable !== previous.configurable) return null;
+    }
+    descriptors.body.value = nextBody;
+    const next = initDefine(initCreate(prototype), descriptors);
+    if (!extensible) initPreventExtensions(next);
+    return desc(next, 'body')?.value === nextBody ? next : null;
   }
   function wrapped(input, init) {
     // Early bootstrap has no request knowledge or observation before native arm.
@@ -159,16 +200,24 @@
         invalidate(); return apply(original, this, arguments);
       }
     }
-    let track = false;
+    let track = false, forwarded = null;
     try {
       const url = phase !== 'invalid' && typeof input === 'string' ? new URL(input, document.baseURI) : null;
       if (phase !== 'invalid' && (!url || url.origin + url.pathname === endpoint)) {
-        if (input !== endpoint || arguments.length !== 2 || seen || !current() || !matches(init)) invalidate();
-        else { seen = true; prompt = null; outcome='matched_fetch_unsettled'; track = true; }
+        if (input !== endpoint || arguments.length !== 2 || seen || !current()) invalidate();
+        else {
+          const matched = matches(init, toolChoiceNoneForTesting);
+          if (!matched) invalidate();
+          else if (toolChoiceNoneForTesting) {
+            const next = transformedInit(init, matched);
+            if (!next || !current()) invalidate();
+            else { forwarded = [input, next]; seen = true; prompt = null; outcome='matched_fetch_unsettled'; track = true; }
+          } else { seen = true; prompt = null; outcome='matched_fetch_unsettled'; track = true; }
+        }
       }
     } catch { invalidate(); }
     let result;
-    try { result = apply(original, this, arguments); }
+    try { result = apply(original, this, forwarded ?? arguments); }
     catch (error) { if (track) invalidate(); throw error; }
     if (track) {
       try {
@@ -185,6 +234,7 @@
                 try {
                   streamProbe = streamFactory.startMatchedGroqResponseStreamProbe(value, {
                     purpose: streamPurpose, profile: config.profile, streamMetadata: true,
+                    ...(toolChoiceNoneForTesting ? {toolChoiceNoneForTesting:true} : {}),
                     // No additional DOM/picker scan while consuming clone chunks.
                     isCurrent: () => phase === 'armed' && time() < deadline && ownController() && location.href === route
                   });
