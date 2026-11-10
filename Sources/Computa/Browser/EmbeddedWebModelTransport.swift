@@ -6761,6 +6761,20 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && session.documentGeneration != nil && session.routeContext != nil && session.productModeEvidence != nil
     }
 
+    private func canConsolidateFirstChatReadinessProof(_ session: Session) -> Bool {
+        guard let choice = session.modelChoice else { return false }
+        switch (choice.key, choice.label) {
+        case ("chat/latest/medium", "Medium"), ("chat/latest/high", "High"),
+             ("chat/latest/extra-high", "Extra High"), ("chat/latest/pro", "Pro"): break
+        default: return false
+        }
+        return canShareFirstChatGPTEditorContextRecheck(session)
+            && !session.isDiscovery && !session.isRecoveryProbe && session.usesSubmissionOwnership
+            && session.preparedSubmission?.sequence == 1 && session.preparedSubmission?.marker == session.firstUserMarker
+            && session.baseline == 0 && session.observedResponseCount == 0 && session.conversation == nil
+            && session.documentGeneration != nil && session.routeContext != nil && session.productModeEvidence != nil
+    }
+
     /// A call-local readiness observation. Submit still proves and claims every actual Send.
     private struct PreparedEditorReadinessRequest {
         let id = UUID()
@@ -7162,6 +7176,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             // Its full final proof, native model/product callbacks, original
             // readiness wait/deadline and eventual submit all remain unchanged.
             input["firstInstantReadinessFinalGuardOnly"] = true
+        } else if action == "sendReady", canConsolidateFirstChatReadinessProof(session) {
+            // Other current Chat powers use only the read-only final-proof path.
+            // The Instant-only insert/verification/readiness receipt stays unchanged.
+            input["firstChatReadinessFinalGuardOnly"] = true
         }
         if prepareFirstInstantInInsert {
             guard action == "insert", canShareFirstChatGPTEditorContextRecheck(session),

@@ -3766,6 +3766,157 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         x.picker.trigger.onClick = () => { if (++openings > 1) x.open(); };
         return { ...x, request:{...x.request,expectedSubmissionProofs:[{sequence:1,fingerprint:x.pending.fingerprint}]}, openings: () => openings };
       };
+      const preparedFirstChatReadiness = async (label = 'Medium') => {
+        const x = await firstInsertOpening('ignore_once', '', label);
+        await finishFirstInsertWait(x); expect((await x.inserting).inserted).toBe(true);
+        let openings = 0;
+        x.picker.trigger.onClick = () => { openings++; x.open(); };
+        return { ...x, request: { ...x.request, firstChatReadinessFinalGuardOnly: true, preparationTiming: true },
+          readinessOpenings: () => openings };
+      };
+      test('fresh non-Instant readonly readiness replaces only the duplicate precheck and still rejects an ignored final opening', async () => {
+        // Reproduce the old Medium action_precheck refusal, without treating a
+        // successful first insert as proof that another popup actually opened.
+        for (const finalOnly of [false, true]) {
+          const x = await preparedFirstChatReadiness(); let ignored = 0;
+          x.picker.trigger.onClick = () => { ignored++; };
+          const reading = x.f.run('sendReady', { ...x.request, firstChatReadinessFinalGuardOnly: finalOnly });
+          await microtasks(); expect(ignored).toBe(1);
+          await finishFirstInsertWait(x, 901); await finishFirstInsertWait(x, 901);
+          const result = await reading;
+          expect(result.error).toBeDefined(); expect(result.sendReady).toBeUndefined(); expect(result.modelEvidence).toBeUndefined();
+          expect(result.modelDiagnostic.readContext.scope).toBe(finalOnly ? 'action_final_guard' : 'action_precheck');
+          expect(result.modelDiagnostic.readContext.action).toBe('sendReady');
+          expect(ignored).toBe(1); expect(x.counts().insertions).toBe(1); expect(x.send.clicks).toBe(0);
+          expect(x.f.composer.textContent).toBe(x.prompt); expect(x.f.world.__computaModelFirstSubmitted).toBeUndefined();
+        }
+        for (const label of ['Medium', 'High', 'Extra High', 'Pro']) {
+          const x = await preparedFirstChatReadiness(label), result = await x.f.run('sendReady', x.request);
+          expect(result.error, label).toBeUndefined(); expect(result.sendReady, label).toBe(true);
+          expect(result.modelEvidence.selected, label).toEqual(x.expected);
+          expect(result.modelEvidence.chatSelection.family).toEqual({ key: 'GPT-6', label: 'GPT-6' });
+          expect(result.modelEvidence.chatSelection.power.key).toBe(label.toLowerCase().replace(' ', '-'));
+          expect(result.productModeEvidence).toMatchObject({ product: 'chatgpt', mode: 'chat', temporaryTransition: 'acknowledged' });
+          expect(result.preparationTiming.modelPrecheckMs).toBeNull(); expect(result.preparationTiming.finalGuardMs).not.toBeNull();
+          expect(x.readinessOpenings(), label).toBe(1); expect(x.counts().insertions).toBe(1); expect(x.send.clicks).toBe(0);
+          expect(x.f.composer.textContent).toBe(x.prompt); expect(x.f.world.__computaModelFirstSubmitted).toBeUndefined();
+          expect(x.picker.familyOptions.map((node:any) => node.clicks)).toEqual(x.familyBefore);
+          expect(arrows(x.picker)).toHaveLength(x.powerBefore);
+        }
+      });
+      test('fresh non-Instant readiness requires exact native context and literal draft while legacy readiness remains unchanged', async () => {
+        for (const flag of [undefined, false, 1, 'true']) {
+          const x = await preparedFirstChatReadiness();
+          const result = await x.f.run('sendReady', { ...x.request, firstChatReadinessFinalGuardOnly: flag });
+          expect(result.error).toBeUndefined(); expect(result.sendReady).toBe(true);
+          expect(result.preparationTiming.modelPrecheckMs).not.toBeNull(); expect(x.readinessOpenings()).toBe(2);
+          expect(x.counts().insertions).toBe(1); expect(x.send.clicks).toBe(0);
+        }
+        const invalid: [string, Record<string, unknown>, string][] = [
+          ['instant_is_separate', { expectedModelChoice: choice('Instant') }, 'sendReady'],
+          ['foreign_label', { expectedModelChoice: { key: 'chat/latest/medium', label: 'Foreign' } }, 'sendReady'],
+          ['wrong_key_label', { expectedModelChoice: { key: 'chat/latest/high', label: 'Medium' } }, 'sendReady'],
+          ['observed_pro_label_is_not_native_key', { expectedModelChoice: choice('GPT-6 Pro') }, 'sendReady'],
+          ['later_sequence', { submissionSequence: 2 }, 'sendReady'],
+          ['other_marker', { submissionMarker: '00000000-0000-4000-8000-000000000009' }, 'sendReady'],
+          ['retained_counts', { expectedUserCounts: [0, 1] }, 'sendReady'],
+          ['retained_proofs', { expectedSubmissionProofs: [{ sequence: 1, fingerprint: 'a'.repeat(64) }] }, 'sendReady'],
+          ['retained_conversation', { expectedConversation: 'https://chatgpt.com/' }, 'sendReady'],
+          ['retained_first_fingerprint', { expectedFirstUserFingerprint: 'a'.repeat(64) }, 'sendReady'],
+          ['deferred_model', { deferModelVerification: true }, 'sendReady'],
+          ['focus_flag_collision', { prepareFirstInstantInInsert: true }, 'sendReady'],
+          ['instant_flag_collision', { firstInstantReadinessFinalGuardOnly: true }, 'sendReady'],
+          ['not_readonly', {}, 'submit'],
+        ];
+        for (const [name, override, action] of invalid) {
+          const x = await preparedFirstChatReadiness();
+          const result = await x.f.run(action, { ...x.request, ...override });
+          expect(result.error, name).toBeDefined(); expect(result.sendReady, name).toBeUndefined();
+          expect(x.readinessOpenings(), name).toBe(0); expect(x.counts().insertions).toBe(1); expect(x.send.clicks).toBe(0);
+          expect(x.f.world.__computaModelFirstSubmitted).toBeUndefined();
+        }
+        for (const change of ['outer_space', 'extra_lf', 'crlf', 'changed_text']) {
+          const x = await preparedFirstChatReadiness();
+          if (change === 'outer_space') x.f.composer.text = ' ' + x.prompt;
+          if (change === 'extra_lf') x.f.composer.text = x.prompt + '\n\n';
+          if (change === 'crlf') x.f.composer.text = x.prompt.replace(/\n/g, '\r\n');
+          if (change === 'changed_text') x.f.composer.text = x.prompt + ' foreign';
+          const result = await x.f.run('sendReady', x.request);
+          expect(result.error, change).toBe('prompt_not_inserted'); expect(result.sendReady, change).toBeUndefined();
+          expect(x.readinessOpenings(), change).toBe(0); expect(x.counts().insertions).toBe(1); expect(x.send.clicks).toBe(0);
+        }
+      });
+      test('fresh non-Instant readiness retains current final model product ownership and enabled-Send checks', async () => {
+        for (const drift of ['power', 'family', 'owner', 'route', 'work', 'temporary', 'user']) {
+          const x = await preparedFirstChatReadiness(); const open = x.picker.trigger.onClick; let changed = false;
+          x.picker.trigger.onClick = () => {
+            open(); if (changed) return; changed = true;
+            if (drift === 'power') x.picker.selected('High');
+            if (drift === 'family') x.picker.selected('GPT-5.5');
+            if (drift === 'owner') x.f.world.__computaModelOwner = 'different-owner';
+            if (drift === 'route') x.f.document.URL = 'https://chatgpt.com/c/foreign-readiness';
+            if (drift === 'work') { x.f.chatMode.values['aria-pressed'] = 'false'; x.f.workMode.values['aria-pressed'] = 'true'; }
+            if (drift === 'temporary') x.f.temporary.values['aria-label'] = 'Temporary chat';
+            if (drift === 'user') x.f.appendUser('Foreign readiness user');
+          };
+          const reading = x.f.run('sendReady', x.request); await microtasks();
+          await finishFirstInsertWait(x, 901); await finishFirstInsertWait(x, 901);
+          const result = await reading;
+          expect(changed, drift).toBe(true); expect(result.error, drift).toBeDefined(); expect(result.sendReady, drift).toBeUndefined();
+          expect(x.counts().insertions).toBe(1); expect(x.send.clicks).toBe(0); expect(x.f.world.__computaModelFirstSubmitted).toBeUndefined();
+        }
+        for (const drift of ['draft', 'same_text_composer', 'duplicate_composer', 'disabled_composer', 'state_clone', 'pending_clone', 'pending_canonical', 'pending_fingerprint']) {
+          const x = await preparedFirstChatReadiness(), open = x.picker.trigger.onClick; let changed = false;
+          x.picker.trigger.onClick = () => {
+            open(); if (changed) return; changed = true;
+            if (drift === 'draft') x.f.composer.text += ' changed during final proof';
+            if (drift === 'same_text_composer') {
+              const old = x.f.composer, replacement = new Node(old.tagName, { ...old.values }, x.prompt), parent = old.parentElement;
+              parent.children = parent.children.map((node:any) => node === old ? replacement : node);
+              replacement.parentElement = parent; old.connected = false; old.parentElement = null; x.f.document.activeElement = replacement;
+            }
+            if (drift === 'duplicate_composer') x.f.body.append(new Node(x.f.composer.tagName, { ...x.f.composer.values }, x.prompt));
+            if (drift === 'disabled_composer') x.f.composer.disabled = true;
+            if (drift === 'state_clone') x.f.world.__computaChatSubmissionState = { ...x.state };
+            if (drift === 'pending_clone') x.state.pending = { ...x.pending };
+            if (drift === 'pending_canonical') x.pending.canonical += ' different canonical';
+            if (drift === 'pending_fingerprint') x.pending.fingerprint = '0'.repeat(64);
+          };
+          const reading = x.f.run('sendReady', x.request); await microtasks();
+          await finishFirstInsertWait(x, 901); await finishFirstInsertWait(x, 901);
+          const result = await reading;
+          expect(changed, drift).toBe(true); expect(result.error, drift).toBeDefined(); expect(result.sendReady, drift).toBeUndefined();
+          expect(x.readinessOpenings(), drift).toBe(1); expect(x.counts().insertions).toBe(1); expect(x.send.clicks).toBe(0);
+          expect(x.f.world.__computaModelFirstSubmitted).toBeUndefined();
+        }
+        for (const drift of ['disabled', 'remounted', 'duplicate', 'missing']) {
+          const x = await preparedFirstChatReadiness(), open = x.picker.trigger.onClick; let changed = false, replacement:any = null;
+          x.picker.trigger.onClick = () => {
+            open(); if (changed) return; changed = true;
+            if (drift === 'disabled') x.send.disabled = true;
+            if (drift === 'remounted' || drift === 'missing') {
+              const parent = x.send.parentElement;
+              parent.children = parent.children.filter((node:any) => node !== x.send);
+              x.send.parentElement = null; x.send.connected = false;
+            }
+            if (drift === 'remounted' || drift === 'duplicate') {
+              replacement = new Node('BUTTON', { 'aria-label': 'Send prompt' }); x.f.body.append(replacement);
+            }
+          };
+          const reading = x.f.run('sendReady', x.request); await microtasks();
+          await finishFirstInsertWait(x, 901); await finishFirstInsertWait(x, 901);
+          const result = await reading;
+          expect(changed, drift).toBe(true); expect(result.error, drift).toBeUndefined(); expect(result.sendReady, drift).toBe(false);
+          expect(result.modelEvidence.selected).toEqual(x.expected); expect(x.readinessOpenings()).toBe(1);
+          expect(x.counts().insertions).toBe(1); expect(x.send.clicks).toBe(0); expect(replacement?.clicks ?? 0).toBe(0);
+          expect(x.f.world.__computaModelFirstSubmitted).toBeUndefined();
+        }
+        const waiting = await preparedFirstChatReadiness(); waiting.send.disabled = true;
+        const result = await waiting.f.run('sendReady', waiting.request);
+        expect(result.error).toBeUndefined(); expect(result.sendReady).toBe(false);
+        expect(result.modelEvidence.selected).toEqual(waiting.expected); expect(waiting.readinessOpenings()).toBe(1);
+        expect(waiting.counts().insertions).toBe(1); expect(waiting.send.clicks).toBe(0);
+      });
       test('a layout LF never substitutes for the full literal submit draft', () => {
         const source = readFileSync(new URL('../Sources/Computa/Resources/BrowserModels/chatgpt.js', import.meta.url), 'utf8');
         const definition = source.slice(source.indexOf('function chatGPTExactSubmitDraft('), source.indexOf('function chatGPTSubmissionPins('));

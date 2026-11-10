@@ -6056,6 +6056,58 @@ function chatGPTFirstInstantReadinessFinalGuard(request) {
     && request.prepareFirstInstantInInsert !== true && request.deferModelVerification !== true
     && chatGPTFreshInstantInsert({ ...request, action: 'insert', prepareFirstInstantInInsert: true });
 }
+let chatGPTFirstChatReadinessSnapshot = null;
+function chatGPTFirstChatReadinessFinalGuard(request) {
+  // The other current Chat powers share only this read-only duplicate-proof
+  // consolidation. Instant insertion and prepared-verification grants stay separate.
+  const state = globalThis.__computaChatSubmissionState, pending = state?.pending;
+  return request.firstChatReadinessFinalGuardOnly === true && request.action === 'sendReady'
+    && request.firstInstantReadinessFinalGuardOnly !== true
+    && request.prepareFirstInstantInInsert !== true && request.deferModelVerification !== true
+    && websiteModelChoiceValid(request.expectedModelChoice)
+    && [['chat/latest/medium', 'Medium'], ['chat/latest/high', 'High'],
+      ['chat/latest/extra-high', 'Extra High'], ['chat/latest/pro', 'Pro']]
+      .some(([key, label]) => request.expectedModelChoice.key === key && request.expectedModelChoice.label === label)
+    && request.submissionSequence === 1 && request.submissionMarker === request.expectedFirstUserMarker
+    && Array.isArray(request.expectedUserCounts) && request.expectedUserCounts.length === 1 && request.expectedUserCounts[0] === 0
+    && Array.isArray(request.expectedSubmissionProofs) && request.expectedSubmissionProofs.length === 0
+    && request.expectedFirstUserFingerprint == null && request.expectedConversation == null
+    && window === window.top && location.origin === 'https://chatgpt.com'
+    && document.URL === request.expectedURL && new URL(document.URL).pathname === '/'
+    && globalThis.__computaModelOwner === request.ownerToken
+    && websiteChatInvocationLease != null && globalThis.__computaChatActiveInvocation === websiteChatInvocationLease
+    && globalThis.__computaModelFirstSubmitted !== true && !globalThis.__computaModelFirstProof
+    && chatGPTMessageRoots('user').length === 0 && chatGPTMessageRoots('assistant').length === 0
+    && state && chatGPTSubmissionContext(state) && state.lastVerified == null
+    && pending?.sequence === 1 && pending.marker === request.submissionMarker && pending.phase === 'prepared'
+    && pending.root === null && pending.body === null && !pending.expansionAttempted
+    && pending.canonical === chatGPTSubmissionCanonical(request.prompt);
+}
+function chatGPTFirstChatReadinessResult(observed) {
+  if (input.firstChatReadinessFinalGuardOnly !== true || observed.error) return observed;
+  const saved = chatGPTFirstChatReadinessSnapshot, state = globalThis.__computaChatSubmissionState;
+  if (!saved || !chatGPTFirstChatReadinessFinalGuard(input) || saved.document !== document
+    || state !== saved.state || state.pending !== saved.record
+    || saved.record.canonical !== saved.canonical || saved.record.fingerprint !== saved.fingerprint)
+    return { error: 'not_fresh' };
+  const visible = node => !!node && node.isConnected && node.getClientRects().length > 0
+    && getComputedStyle(node).visibility !== 'hidden' && !node.closest('[inert], [aria-hidden="true"]');
+  const editors = [...new Set(document.querySelectorAll('#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, '
+    + '#prompt-textarea [contenteditable="true"], [contenteditable="true"][aria-label="Ask ChatGPT"], textarea[data-testid="prompt-textarea"]'))].filter(visible);
+  const composer = saved.composer;
+  if (editors.length !== 1 || editors[0] !== composer || composer.disabled || composer.getAttribute('aria-disabled') === 'true')
+    return { error: 'composer_unavailable' };
+  const value = composer instanceof HTMLTextAreaElement ? composer.value : composer.innerText;
+  if (value !== saved.value || !chatGPTExactSubmitDraft(composer, value, input.prompt))
+    return { error: 'prompt_not_inserted' };
+  if (observed.sendReady === true) {
+    const sends = [...new Set(document.querySelectorAll('button[data-testid="send-button"], button[aria-label="Send prompt"], '
+      + 'button[aria-label="Send message"], button[aria-label="Send"]'))].filter(visible);
+    if (sends.length !== 1 || sends[0] !== saved.send || saved.send.disabled || saved.send.getAttribute('aria-disabled') === 'true')
+      return { ...observed, sendReady: false };
+  }
+  return observed;
+}
 function chatGPTProcessSignalRecords(signal, records) {
   const observerStarted = chatGPTSyncWorkStart();
   try {
@@ -6116,8 +6168,11 @@ async function providerPageAction(input, readLineageFingerprint = null) {
   }
   const focusFirstInstantInInsert = input.prepareFirstInstantInInsert === true;
   if (focusFirstInstantInInsert && !chatGPTFreshInstantInsert(input)) return { error: 'not_fresh' };
-  const readinessFinalGuardOnly = input.firstInstantReadinessFinalGuardOnly === true;
-  if (readinessFinalGuardOnly && !chatGPTFirstInstantReadinessFinalGuard(input)) return { error: 'not_fresh' };
+  const instantReadinessFinalGuardOnly = input.firstInstantReadinessFinalGuardOnly === true;
+  if (instantReadinessFinalGuardOnly && !chatGPTFirstInstantReadinessFinalGuard(input)) return { error: 'not_fresh' };
+  const chatReadinessFinalGuardOnly = input.firstChatReadinessFinalGuardOnly === true;
+  if (chatReadinessFinalGuardOnly && !chatGPTFirstChatReadinessFinalGuard(input)) return { error: 'not_fresh' };
+  const readinessFinalGuardOnly = instantReadinessFinalGuardOnly || chatReadinessFinalGuardOnly;
   chatGPTPreparationRecord('providerEntryMs', entryStarted);
   let setupStarted = null;
   // Focus-only preparation, model-only verification and scoped read-only
@@ -6449,11 +6504,18 @@ async function providerPageAction(input, readLineageFingerprint = null) {
       return { error: "prompt_not_inserted", detail, ...modelEditorDifference(actual, expected), actualLength: actual.length,
         expectedLength: expected.length, actualLines: actual.split("\n").length, expectedLines: expected.split("\n").length };
     }
+    if (chatReadinessFinalGuardOnly && !chatGPTExactSubmitDraft(composer, value, prompt))
+      return { error: "prompt_not_inserted" };
     const send = provider === "chatgpt" ? find(['button[data-testid="send-button"]', 'button[aria-label="Send prompt"]', 'button[aria-label="Send message"]', 'button[aria-label="Send"]'])
       : provider === "claude" ? find(['button[data-testid="chat-input-send"][aria-label="Send message"]'])
       : find(['button[aria-label="Send message"]', 'button[aria-label="Send"]', 'button.send-button']);
     if (action === "sendReady") {
       const ready = enabled(send), pending = globalThis.__computaChatSubmissionState?.pending, prior = pending?.firstInsertOpening;
+      if (chatReadinessFinalGuardOnly) {
+        const state = globalThis.__computaChatSubmissionState;
+        chatGPTFirstChatReadinessSnapshot = { document, state, record: pending, composer, value, send,
+          canonical: pending.canonical, fingerprint: pending.fingerprint };
+      }
       // Pin the prior verified insertion only when this readiness read sees the identical editor and exact outbound text.
       if (ready && prior?.proved === true && pending.phase === 'prepared' && pending.sequence === 1
         && input.submissionSequence === 1 && pending.marker === input.submissionMarker && prior.composer === composer
@@ -8419,4 +8481,4 @@ if (['inspect', 'verifyModel', 'verifyProductMode'].includes(input.action)) {
 const result = { ...observed, firstUserVerified, firstUserFingerprint };
 const finalized = chatGPTFinalizeResponseRead(globalThis.__computaChatSubmissionState != null ? await chatGPTSubmissionResult(input, result) : result);
 chatGPTPreparationRecord('outerFinalizationMs', outerFinalizationStarted);
-return chatGPTPreparationResult(chatGPTPreparedEditorReadinessResult(finalized));
+return chatGPTPreparationResult(chatGPTPreparedEditorReadinessResult(chatGPTFirstChatReadinessResult(finalized)));
