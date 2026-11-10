@@ -5101,6 +5101,21 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   let exact = Int(exactly: number.doubleValue), (0...limit).contains(exact) else { return nil }
             return exact
         }
+        // A distinct finite Groq profile variant, diagnostic only. Never treat
+        // its reason as literal text, model proof or response/cleanup authority.
+        if source["kind"] as? String == "groq_literal_profile_v1" {
+            let reasons: Set<String> = ["absent_answer", "pre_count", "code_count", "outer_parent", "wrapper_tag",
+                "wrapper_parent", "code_parent", "language_json", "code_hidden", "outer_children", "wrapper_children",
+                "inner_children", "chrome_tag", "chrome_classes", "chrome_hidden", "chrome_children", "chrome_icon_tag",
+                "chrome_icon_label", "chrome_text", "outside_content", "outside_scan_limit", "accepted_literal_code"]
+            guard Set(source.keys) == ["kind", "reason", "preCount", "codeCount", "scanCount"],
+                  source["kind"] as? String == "groq_literal_profile_v1",
+                  let reason = source["reason"] as? String, reasons.contains(reason),
+                  integer(source["preCount"], limit: 64) != nil, integer(source["codeCount"], limit: 64) != nil,
+                  integer(source["scanCount"], limit: 10_001) != nil,
+                  let bytes = try? JSONSerialization.data(withJSONObject: source, options: [.sortedKeys]), bytes.count <= 512 else { return nil }
+            return String(data: bytes, encoding: .utf8)
+        }
         var safe: [String: Any] = [:]
         for key in ["preCount", "codeCount", "codeTextLength", "outsideTextLength"] {
             let limit = key.hasSuffix("Length") ? 220_001 : 1_000

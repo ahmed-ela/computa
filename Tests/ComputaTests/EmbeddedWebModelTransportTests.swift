@@ -3232,6 +3232,52 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testGroqLiteralProfileCodeStructureIsClosedFiniteAndSeparateFromLegacyEvidence() throws {
+        func projected(_ source: [String: Any]) -> String? { EmbeddedWebModelTransport.sanitizedCodeStructure(source) }
+        let reasons = ["absent_answer", "pre_count", "code_count", "outer_parent", "wrapper_tag", "wrapper_parent",
+            "code_parent", "language_json", "code_hidden", "outer_children", "wrapper_children", "inner_children",
+            "chrome_tag", "chrome_classes", "chrome_hidden", "chrome_children", "chrome_icon_tag", "chrome_icon_label",
+            "chrome_text", "outside_content", "outside_scan_limit", "accepted_literal_code"]
+        let base: [String: Any] = ["kind": "groq_literal_profile_v1", "reason": "language_json", "preCount": 2, "codeCount": 1, "scanCount": 0]
+        for reason in reasons {
+            var source = base; source["reason"] = reason
+            if reason == "absent_answer" || reason == "pre_count" { source["preCount"] = 0; source["codeCount"] = 0 }
+            if reason == "code_count" { source["codeCount"] = 0 }
+            if reason == "outside_content" { source["scanCount"] = 10_000 }
+            if reason == "outside_scan_limit" { source["scanCount"] = 10_001 }
+            if reason == "accepted_literal_code" { source["scanCount"] = 7 }
+            let safe = try XCTUnwrap(projected(source), reason)
+            XCTAssertLessThanOrEqual(safe.utf8.count, 512)
+            let value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(safe.utf8)) as? NSDictionary)
+            XCTAssertEqual(value, source as NSDictionary, "Keep exactly the finite report, without invented lengths or hashes")
+            XCTAssertNil(value["groqLiteralResponse"]); XCTAssertNil(value["selectedExtraction"])
+        }
+        for (key, upper) in [("preCount", 64), ("codeCount", 64), ("scanCount", 10_001)] {
+            for invalid: Any in [true, NSNull(), "1", -1, 0.5, upper + 1, Double.nan, Double.infinity] {
+                var source = base; source[key] = invalid
+                XCTAssertNil(projected(source), key + ":" + String(describing: invalid))
+            }
+            var boundary = base; boundary[key] = upper
+            boundary["reason"] = key == "scanCount" ? "outside_scan_limit" : key == "preCount" ? "pre_count" : "code_count"
+            XCTAssertNotNil(projected(boundary), key)
+        }
+        for key in base.keys { var missing = base; missing.removeValue(forKey: key); XCTAssertNil(projected(missing), key) }
+        for (key, value): (String, Any) in [("kind", "groq_literal_profile_v2"), ("kind", true), ("reason", "PRIVATE_CONTENT"),
+            ("reason", NSNull()), ("text", "PRIVATE_CONTENT"), ("url", "PRIVATE_CONTENT"), ("headers", ["x": "PRIVATE_CONTENT"]),
+            ("groqLiteralResponse", true), ("selectedExtraction", "raw_code"), ("extractionReason", "accepted_literal_code")] {
+            var source = base; source[key] = value; XCTAssertNil(projected(source), key)
+        }
+        // The existing generic projection keeps its original format and strips
+        // unrelated data; the Groq variant does not broaden that evidence.
+        let legacy: [String: Any] = ["preCount": 1, "codeCount": 1, "codeTextLength": 12, "outsideTextLength": 0,
+            "outsideTruncated": false, "preParentTags": ["div"]]
+        let safeLegacy = try XCTUnwrap(projected(legacy))
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(safeLegacy.utf8)) as? NSDictionary, legacy as NSDictionary)
+        var privateLegacy = legacy; privateLegacy["text"] = "PRIVATE_CONTENT"
+        privateLegacy["kind"] = "legacy_ignored_kind"
+        XCTAssertEqual(projected(privateLegacy), safeLegacy)
+    }
+
     func testCodeStructureProjectionRejectsBridgedBooleanCountsAndNumericFlags() throws {
         let valid: [String: Any] = ["preCount": 1, "codeCount": 1, "codeTextLength": 129,
             "outsideTextLength": 4, "outsideTruncated": false, "preParentTags": ["div"],
@@ -14838,7 +14884,13 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             XCTAssertEqual(diagnostic["utf8Bytes"] as? Int, reply.utf8.count)
             XCTAssertEqual(diagnostic["userCount"] as? Int, 1); XCTAssertEqual(diagnostic["responseCount"] as? Int, 1)
             XCTAssertEqual(diagnostic["busy"] as? Bool, false); XCTAssertEqual(diagnostic["answerComplete"] as? Bool, true)
-            XCTAssertNil(record["codeStructure"], "The current Groq fallback supplies no structural packet to invent")
+            let structure = try XCTUnwrap(record["codeStructure"] as? [String: Any])
+            XCTAssertEqual(Set(structure.keys), ["kind", "reason", "preCount", "codeCount", "scanCount"])
+            XCTAssertEqual(structure["kind"] as? String, "groq_literal_profile_v1")
+            XCTAssertEqual(structure["reason"] as? String, "pre_count")
+            for key in ["preCount", "codeCount", "scanCount"] {
+                XCTAssertEqual(ComputerToolArgumentContract.exactInt64(structure[key]), 0, key)
+            }
             XCTAssertFalse(FileManager.default.fileExists(atPath: arm.path))
             XCTAssertLessThanOrEqual(bytes.count, WebModelRejectedReplyCapture.maximumRecordBytes)
         } else {

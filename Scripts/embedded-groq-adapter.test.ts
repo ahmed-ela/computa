@@ -20,6 +20,87 @@ const appendObservedShowMore = (f: ReturnType<typeof groqFixture>) => {
 
 describe('Groq fixed fresh-session adapter', () => {
 
+  test('literal structure facts distinguish paragraphs, known code, authored text and misplaced copy without authorizing fallback', async () => {
+    const cases = ['paragraph', 'known', 'malformed_known', 'hidden_authored', 'visible_authored', 'misplaced_copy', 'wrong_language', 'hidden_code'] as const;
+    for (const mode of cases) {
+      const f = groqFixture(); f.f.structuredReply = mode !== 'paragraph';
+      f.f.reply = mode === 'malformed_known' ? '{"type":"tool_calls","calls":[}' : '{"type":"message","text":"PRIVATE_RESPONSE_CANARY\\n\\u005f"}';
+      await f.submit();
+      if (mode === 'hidden_authored' || mode === 'visible_authored') {
+        f.f.answer.append(new f.Node('P', mode === 'hidden_authored' ? { hidden: '' } : {}, 'PRIVATE_AUTHORED_CANARY'));
+      }
+      if (mode === 'misplaced_copy') {
+        const chrome = f.f.codeChrome; chrome.remove(); f.f.code.parentElement.append(chrome);
+      }
+      if (mode === 'wrong_language') f.f.code.setAttribute('class', 'language-javascript PRIVATE_CLASS_CANARY');
+      if (mode === 'hidden_code') f.f.code.setAttribute('hidden', '');
+      const observed = await f.run(), structure = observed.completionEvidence.codeStructure;
+      const reason = mode === 'paragraph' ? 'pre_count'
+        : mode === 'hidden_authored' || mode === 'visible_authored' ? 'outside_content'
+        : mode === 'misplaced_copy' ? 'wrapper_children'
+        : mode === 'wrong_language' ? 'language_json'
+        : mode === 'hidden_code' ? 'code_hidden' : 'accepted_literal_code';
+      expect(Object.keys(structure).sort()).toEqual(['kind', 'reason', 'preCount', 'codeCount', 'scanCount'].sort());
+      expect(structure.kind).toBe('groq_literal_profile_v1'); expect(structure.reason).toBe(reason);
+      expect(structure.preCount).toBe(mode === 'paragraph' ? 0 : 2);
+      expect(structure.codeCount).toBe(mode === 'paragraph' ? 0 : 1);
+      expect(structure.scanCount).toBeGreaterThanOrEqual(0); expect(structure.scanCount).toBeLessThanOrEqual(10_001);
+      expect(observed.groqLiteralResponse).toBe(mode === 'known' || mode === 'malformed_known');
+      expect(observed.answerComplete).toBe(true); expect(observed.busy).toBe(false);
+      if (mode === 'known' || mode === 'malformed_known' || mode === 'paragraph' || mode === 'misplaced_copy'
+        || mode === 'wrong_language' || mode === 'hidden_code') expect(observed.text).toBe(f.f.reply);
+      if (mode === 'malformed_known') expect(() => JSON.parse(observed.text)).toThrow();
+      if (mode === 'paragraph' || mode === 'misplaced_copy') expect(JSON.parse(observed.text).type).toBe('message');
+      if (mode === 'hidden_authored' || mode === 'visible_authored') expect(observed.text).toContain('PRIVATE_AUTHORED_CANARY');
+      expect(JSON.stringify(structure)).not.toContain('PRIVATE');
+      expect(JSON.stringify(structure).length).toBeLessThanOrEqual(512);
+      expect(f.f.sendCount).toBe(1); expect(f.f.clearCount).toBe(0);
+    }
+  });
+
+  test('literal structure reporting keeps original text short circuits and the bounded outside scan', () => {
+    const source = readFileSync(new URL('../Sources/Computa/Resources/BrowserModels/groq.js', import.meta.url), 'utf8');
+    const body = source.slice(source.indexOf('  function responseText('), source.indexOf('  function responseComplete('));
+    const raw = '{"type":"message","text":"PRIVATE_CODE_CANARY\\n"}';
+    const run = (language: boolean, extraWhitespace = 0) => {
+      let answerReads = 0, codeReads = 0, visibilityReads = 0, chromeReads = 0, outsideReads = 0;
+      const answer: any = { nodeType: 1 }, outer: any = { nodeType: 1 }, wrapper: any = { nodeType: 1, tagName: 'DIV' },
+        inner: any = { nodeType: 1 }, code: any = { nodeType: 1 }, icon = { tagName: 'svg', getAttribute: () => 'copy' },
+        chrome: any = { nodeType: 1, tagName: 'DIV', children: [icon] };
+      outer.parentElement = answer; wrapper.parentElement = outer; inner.parentElement = wrapper; code.parentElement = inner;
+      outer.children = outer.childNodes = [wrapper]; wrapper.children = wrapper.childNodes = [inner, chrome]; inner.children = inner.childNodes = [code];
+      answer.childNodes = [outer, ...Array.from({ length: extraWhitespace }, () => ({ nodeType: 3,
+        get textContent() { outsideReads++; return ' '; } }))];
+      Object.defineProperty(answer, 'textContent', { get: () => { answerReads++; return raw; } });
+      Object.defineProperty(code, 'textContent', { get: () => { codeReads++; if (!language) throw Error('unreached code text'); return raw; } });
+      Object.defineProperty(chrome, 'textContent', { get: () => { chromeReads++; return ''; } });
+      const queries: string[] = [];
+      const c = { nodes: (_root: any, selector: string, maximum: number) => {
+        queries.push(selector); expect(maximum).toBe(64); return selector === 'pre' ? [outer, inner] : [code];
+      }, visible: () => { visibilityReads++; if (!language) throw Error('unreached visibility'); return true; } };
+      const token = (node: any, _value: string) => node === code ? language : true;
+      const extract = new Function('c', 'token', body + '; return responseText;')(c, token);
+      const result = extract(answer);
+      expect(queries).toEqual(['pre', 'code']);
+      expect(JSON.stringify(result.structure)).not.toContain('PRIVATE');
+      return { result, answerReads, codeReads, visibilityReads, chromeReads, outsideReads };
+    };
+    const refused = run(false);
+    expect(refused.result.literal).toBe(false); expect(refused.result.text).toBe(raw);
+    expect(refused.result.structure.reason).toBe('language_json'); expect(refused.result.structure.scanCount).toBe(0);
+    expect(refused.answerReads).toBe(1); expect(refused.codeReads).toBe(0);
+    expect(refused.visibilityReads).toBe(0); expect(refused.chromeReads).toBe(0);
+    const accepted = run(true);
+    expect(accepted.result.literal).toBe(true); expect(accepted.result.text).toBe(raw);
+    expect(accepted.result.structure.reason).toBe('accepted_literal_code');
+    expect(accepted.answerReads).toBe(0); expect(accepted.codeReads).toBe(1); expect(accepted.chromeReads).toBe(1);
+    const limited = run(true, 10_000);
+    expect(limited.result.literal).toBe(false); expect(limited.result.structure.reason).toBe('outside_scan_limit');
+    expect(limited.result.structure.scanCount).toBe(10_001); expect(limited.outsideReads).toBe(9_994);
+    expect(limited.answerReads).toBe(1); expect(limited.codeReads).toBe(0);
+  });
+
+
   test('optional completion progress preserves the exact ordinary inspect result and never supplies acceptance', async () => {
     const cases: [string, (f: any) => void][] = [
       ['complete', () => {}],

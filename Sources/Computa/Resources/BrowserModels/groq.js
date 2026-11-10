@@ -279,22 +279,29 @@ try {
       && c.normalize(node.innerText || node.textContent) === 'Clear chat');
   }
   function responseText(answer) {
-    if (!answer) return { text: '', literal: false };
-    // Groq wraps a fenced block as PRE > DIV > PRE > CODE, alongside an
-    // icon-only copy DIV. Read literal code bytes only for this exact shape.
-    // JSON validity belongs to the native codec, including malformed replies.
-    const fallback = () => ({ text: (answer.textContent || '').trim().slice(0, 220_001), literal: false });
+    const structure = { kind: 'groq_literal_profile_v1', reason: 'absent_answer', preCount: 0, codeCount: 0, scanCount: 0 };
+    const result = (text, literal, reason) => { structure.reason = reason; return { text, literal, structure }; };
+    if (!answer) return result('', false, 'absent_answer');
+    // These closed facts report the first original predicate only. They never
+    // read extra DOM/text or participate in literal/completion acceptance.
+    const fallback = reason => result((answer.textContent || '').trim().slice(0, 220_001), false, reason);
+    const decline = (value, reason) => { if (value) structure.reason = reason; return value; };
     const pres = c.nodes(answer, 'pre', 64), codes = c.nodes(answer, 'code', 64);
-    if (pres.length !== 2 || codes.length !== 1) return fallback();
+    structure.preCount = pres.length; structure.codeCount = codes.length;
+    if (decline(pres.length !== 2, 'pre_count') || decline(codes.length !== 1, 'code_count')) return fallback(structure.reason);
     const outer = pres[0], inner = pres[1], code = codes[0], wrapper = inner.parentElement;
-    if (outer.parentElement !== answer || wrapper?.tagName !== 'DIV' || wrapper.parentElement !== outer
-      || code.parentElement !== inner || !token(code, 'language-json') || !c.visible(code)
-      || outer.children.length !== 1 || wrapper.children.length !== 2 || inner.children.length !== 1) return fallback();
+    if (decline(outer.parentElement !== answer, 'outer_parent') || decline(wrapper?.tagName !== 'DIV', 'wrapper_tag')
+      || decline(wrapper.parentElement !== outer, 'wrapper_parent') || decline(code.parentElement !== inner, 'code_parent')
+      || decline(!token(code, 'language-json'), 'language_json') || decline(!c.visible(code), 'code_hidden')
+      || decline(outer.children.length !== 1, 'outer_children') || decline(wrapper.children.length !== 2, 'wrapper_children')
+      || decline(inner.children.length !== 1, 'inner_children')) return fallback(structure.reason);
     const chrome = [...wrapper.children].find(node => node !== inner);
-    if (chrome?.tagName !== 'DIV' || !['w-min', 'ml-2', 'cursor-pointer', 'absolute', 'top-2', 'right-2', 'text-sm', 'px-2']
-      .every(value => token(chrome, value)) || !c.visible(chrome) || chrome.children.length !== 1
-      || chrome.children[0].tagName.toLowerCase() !== 'svg' || chrome.children[0].getAttribute('aria-label') !== 'copy'
-      || (chrome.textContent || '').trim() !== '') return fallback();
+    if (decline(chrome?.tagName !== 'DIV', 'chrome_tag') || decline(!['w-min', 'ml-2', 'cursor-pointer', 'absolute', 'top-2', 'right-2', 'text-sm', 'px-2']
+      .every(value => token(chrome, value)), 'chrome_classes') || decline(!c.visible(chrome), 'chrome_hidden')
+      || decline(chrome.children.length !== 1, 'chrome_children')
+      || decline(chrome.children[0].tagName.toLowerCase() !== 'svg', 'chrome_icon_tag')
+      || decline(chrome.children[0].getAttribute('aria-label') !== 'copy', 'chrome_icon_label')
+      || decline((chrome.textContent || '').trim() !== '', 'chrome_text')) return fallback(structure.reason);
     let visited = 0;
     const onlyLiteralAndChrome = node => {
       if (++visited > 10_000) return false;
@@ -303,9 +310,10 @@ try {
       if (node.nodeType !== 1) return true;
       return [...node.childNodes].every(onlyLiteralAndChrome);
     };
-    // Hidden or visible authored prose is never discarded to salvage a call.
-    if (!onlyLiteralAndChrome(answer)) return fallback();
-    return { text: (code.textContent || '').slice(0, 220_001), literal: true };
+    // Preserve hidden/visible authored content and the original scan bound.
+    const isolated = onlyLiteralAndChrome(answer); structure.scanCount = visited;
+    if (!isolated) return fallback(visited > 10_000 ? 'outside_scan_limit' : 'outside_content');
+    return result((code.textContent || '').slice(0, 220_001), true, 'accepted_literal_code');
   }
   function responseComplete(t, form, text, progress) {
     // Record only the first failed operand, at its original evaluation point.
@@ -344,6 +352,7 @@ try {
       modelEvidence, composer: c.enabled(form.editor), userCount: t.users.length, responseCount: t.answers.length,
       conversationIdentity: null, busy: !answerComplete && (t.users.length > 0 || state.submitted && !state.clear),
       interrupted: false, answerComplete, text, groqLiteralResponse: extracted.literal,
+      completionEvidence: { codeStructure: extracted.structure },
       ...(progress ? { groqFailureProgress: { kind: 'groq_completion_gate_v1', reason: progress.reason } } : {}),
       firstUserIdentity: null, firstUserVerified: false, firstUserMarkerVerified: false, firstUserFingerprint: null } };
   }
