@@ -2115,7 +2115,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                    browser.documentGeneration(for:session.tabID)==generation,session.view.url==session.provider.startURL(choice:session.modelChoice),
                    outbound.utf8.elementsEqual((prompt + "\n\nComputa session marker: " + session.firstUserMarker).utf8) {
                     await browser.prepareGroqStatus(session.tabID,view:session.view,owner:session.token,generation:generation,
-                        outbound:outbound,fingerprint:Self.outboundFingerprint(outbound))
+                        outbound:outbound,fingerprint:Self.outboundFingerprint(outbound),lease:lease)
+                } else if let lease = session.groqOwnedStatus {
+                    lease.recordSetupReason(.transportPreconditionsSkipped)
                 }
                 if session.qwenMarkerWire != nil { await prepareQwenMarker(session, prompt:prompt, outbound:outbound) }
                 if let benchmark = WebsiteBenchmarkCaptureLease.current, prepareFirstInstantInInsert,

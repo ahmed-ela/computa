@@ -5,37 +5,74 @@
   if (window !== top || location.origin !== origin || !config || !/^[a-f0-9]{32}$/.test(config.key)
     || !/^[a-f0-9]{32}$/.test(config.secret) || config.key === config.secret
     || !Number.isInteger(config.durationMs) || config.durationMs < 1 || config.durationMs > 390000) return;
+  const setupDiagnostics = config.setupDiagnostics === true;
+  // A failed fixture initializer may expose only its closed reason/dispose
+  // controller. This path never reads or replaces fetch, or issues a request.
+  function setupFailure(reason) {
+    if (!setupDiagnostics) return;
+    const key = '__computaGroqStatus_' + config.key;
+    if (key in window) return;
+    const ownerDocument = document, time = performance.now.bind(performance), expires = time() + config.durationMs;
+    let used = false, timer;
+    const control = (secret, command) => {
+      if (secret !== config.secret || ownerDocument !== document || window !== top || location.origin !== origin) return false;
+      if (command === 'dispose') {
+        clearTimeout(timer); if (window[key] === control) delete window[key]; return true;
+      }
+      if (command === 'arm' && !used && time() < expires) { used = true; return reason; }
+      return false;
+    };
+    try {
+      Object.defineProperty(window, key, {configurable: true, value: control});
+      timer = setTimeout(() => { if (window[key] === control) delete window[key]; }, config.durationMs);
+    } catch { /* An unavailable key remains controller_absent; never replace it. */ }
+  }
   // Fixed first-party request profiles; the page cannot broaden native admission.
   const profiles = {
     gptoss20b: {model:'openai/gpt-oss-20b',label:'GPT OSS 20B',temperature:1,maximum:16384,topP:1},
     qwen27b: {model:'qwen/qwen3.8-27b',label:'Qwen/Qwen3.8-27B',temperature:0.6,maximum:8192,topP:0.95},
     gptoss120b: {model:'openai/gpt-oss-120b',label:'GPT OSS 120B',temperature:1,maximum:16384,topP:1}
   };
-  if (!Object.prototype.hasOwnProperty.call(profiles, config.profile)) return;
+  if (!Object.prototype.hasOwnProperty.call(profiles, config.profile)) { setupFailure('js_profile_unavailable'); return; }
   const profile = profiles[config.profile];
   const ownerDocument = document, original = window.fetch, key = '__computaGroqStatus_' + config.key;
   const apply = Reflect.apply, desc = Object.getOwnPropertyDescriptor, then = Promise.prototype.then;
   const stringify = JSON.stringify, proto = Object.getPrototypeOf;
+  if (setupDiagnostics && typeof Response !== 'function') { setupFailure('js_response_getters'); return; }
   const response = Object.fromEntries(['url', 'redirected', 'status', 'type'].map(p => [p, desc(Response.prototype, p)?.get]));
   const time = performance.now.bind(performance), deadline = time() + config.durationMs;
   const fetchSlot = desc(window, 'fetch');
   if (!fetchSlot || fetchSlot.value !== original || !fetchSlot.writable || typeof original !== 'function'
-    || key in window || Object.values(response).some(get => typeof get !== 'function')) return;
+    || key in window || Object.values(response).some(get => typeof get !== 'function')) {
+    setupFailure(!fetchSlot || fetchSlot.value !== original || !fetchSlot.writable || typeof original !== 'function'
+      ? 'js_fetch_descriptor' : 'js_response_getters');
+    return;
+  }
   let phase = 'idle', outcome = 'ambiguous', seen = false, prompt = null, model = null, label = null, pin = null, route = null;
   const style = node => !!node?.isConnected && node.getClientRects().length > 0 && getComputedStyle(node).visibility === 'visible';
   const unauthored = node => !node.closest('[class*="group/input"],.font-inter,pre,code');
   // Small side-band check of the same physical closed picker that the existing native adapter independently qualified.
+  let renderedFailure = 'js_picker_unavailable';
   function rendered() {
+    renderedFailure = 'js_route_unavailable';
     const url = new URL(location.href), triggers = document.querySelectorAll('button[aria-haspopup="dialog"][aria-controls]');
     if (ownerDocument !== document || window !== top || location.origin !== origin || location.href !== route
       || url.pathname !== '/' || url.hash || url.username || url.password || url.searchParams.size !== 1
-      || url.searchParams.get('model') !== model || triggers.length > 64) return null;
+      || url.searchParams.get('model') !== model || triggers.length > 64) {
+      if (triggers.length > 64) renderedFailure = 'js_picker_unavailable';
+      return null;
+    }
+    renderedFailure = 'js_picker_unavailable';
     const candidates = [...triggers].filter(n => style(n) && unauthored(n) && n.querySelectorAll('svg.lucide-chevrons-up-down').length === 1);
     const node = candidates[0], dialogs = document.querySelectorAll('[role="dialog"]');
     if (candidates.length !== 1 || !node.getAttribute('aria-controls')?.match(/^\S{1,256}$/) || dialogs.length > 16
-      || [...dialogs].some(n => style(n) && unauthored(n)) || node.closest('[hidden],[inert],[aria-hidden="true"]')
-      || node.getAttribute('aria-expanded') !== 'false' || node.getAttribute('data-state') !== 'closed'
-      || (node.innerText || node.textContent).normalize('NFC').replace(/\s+/g, ' ').trim() !== label) return null;
+      || [...dialogs].some(n => style(n) && unauthored(n)) || node.closest('[hidden],[inert],[aria-hidden="true"]')) return null;
+    if (node.getAttribute('aria-expanded') !== 'false' || node.getAttribute('data-state') !== 'closed') {
+      renderedFailure = 'js_picker_not_closed'; return null;
+    }
+    if ((node.innerText || node.textContent).normalize('NFC').replace(/\s+/g, ' ').trim() !== label) {
+      renderedFailure = 'js_picker_label_mismatch'; return null;
+    }
     return node;
   }
   function current() { return phase === 'armed' && time() < deadline && window.fetch === wrapped && rendered() === pin; }
@@ -129,12 +166,19 @@
   Object.defineProperty(window, key, {configurable: true, value: (secret, command, args) => {
     if (secret !== config.secret) return false;
     if (command === 'dispose') { dispose(); return true; }
-    if (command === 'arm' && phase === 'idle' && !seen && time() < deadline && window.fetch === wrapped) {
+    if (command === 'arm') {
+      if (!(phase === 'idle' && !seen && time() < deadline && window.fetch === wrapped)) {
+        return setupDiagnostics ? (window.fetch !== wrapped ? 'js_fetch_replaced' : 'js_arm_state_unavailable') : false;
+      }
       if (!args || args.model !== profile.model || args.label !== profile.label
-        || typeof args.label !== 'string' || !args.label.length || args.label.length > 128
-        || typeof args.prompt !== 'string' || !args.prompt.length || args.prompt.length > 180200) { invalidate(); return false; }
+        || typeof args.label !== 'string' || !args.label.length || args.label.length > 128) {
+        invalidate(); return setupDiagnostics ? 'js_model_mismatch' : false;
+      }
+      if (typeof args.prompt !== 'string' || !args.prompt.length || args.prompt.length > 180200) {
+        invalidate(); return setupDiagnostics ? 'js_prompt_unavailable' : false;
+      }
       model = args.model; label = args.label; route = location.href; pin = rendered();
-      if (!pin) { invalidate(); return false; }
+      if (!pin) { const reason = renderedFailure; invalidate(); return setupDiagnostics ? reason : false; }
       prompt = args.prompt; phase = 'armed'; return true;
     }
     // Native may call finish only after its separately proven single Send plus exact optimistic rollback.

@@ -873,7 +873,8 @@ final class EmbeddedBrowserSession {
                   source.components(separatedBy:"__GROQ_OWNED_SYNTHETIC_CONFIG__").count==2 else{return nil}
             let remaining=(lease.deadline - ContinuousClock.now).components
             let milliseconds=Int(min(390_000,max(0,Double(remaining.seconds)*1000+Double(remaining.attoseconds)/1e15)))
-            let config:[String:Any]=["key":key,"secret":secret,"durationMs":milliseconds,"profile":lease.profile.rawValue]
+            var config:[String:Any]=["key":key,"secret":secret,"durationMs":milliseconds,"profile":lease.profile.rawValue]
+            if lease.isFixture { config["setupDiagnostics"] = true }
             guard milliseconds>0,let bytes=try? JSONSerialization.data(withJSONObject:config) else{return nil}
             script = .init(source:source.replacingOccurrences(of:"__GROQ_OWNED_SYNTHETIC_CONFIG__",with:String(decoding:bytes,as:UTF8.self)),
                            injectionTime:.atDocumentStart,forMainFrameOnly:true,in:.page)
@@ -911,12 +912,41 @@ final class EmbeddedBrowserSession {
         && entry.view===view && entry.isModelOwned && !entry.isToolOwned && view.url==probe.url && entry.tab.documentGeneration==generation
         && entry.modelChanges?.ownerToken==owner && entry.modelSignalOriginHost=="chat.groq.com"
     }
-    func prepareGroqStatus(_ id:UUID, view:WKWebView, owner:String, generation:UUID, outbound:String, fingerprint:String) async {
+    func prepareGroqStatus(_ id:UUID, view:WKWebView, owner:String, generation:UUID, outbound:String, fingerprint:String,
+                           lease: GroqOwnedStatusLease) async {
         guard let e=entries[id],let p=e.groqStatus,p.lease.isCurrent,p.owner==nil,
-              groqStatusCurrent(e,p,view:view,owner:owner,generation:generation) else{return}
+              groqStatusCurrent(e,p,view:view,owner:owner,generation:generation) else {
+            var reason: GroqOwnedStatusLease.SetupReason = .nativePrepareGuardSkipped
+            // Failed-guard diagnostics read only this exact current owned view;
+            // probe flags additionally require the same native fixture lease.
+            if lease.isFixture, !isShutdown, !Task.isCancelled, lease.isCurrent, let entry=entries[id],
+               entry.view===view, entry.isModelOwned, !entry.isToolOwned, entry.tab.documentGeneration==generation {
+                if let probe=entry.groqStatus, probe.lease===lease {
+                    if !probe.initialStart { reason = .nativeInitialStartMissing }
+                    else if probe.owner != nil { reason = .nativeOwnerAlreadySet }
+                    else if entry.modelChanges?.ownerToken != owner { reason = .nativeSignalOwnerMismatch }
+                    else if entry.modelSignalOriginHost != "chat.groq.com" { reason = .nativeSignalOriginMismatch }
+                } else if entry.groqStatus == nil { reason = .nativeProbeAbsent }
+            }
+            lease.recordSetupReason(reason); return
+        }
         p.owner=owner;p.generation=generation;p.fingerprint=fingerprint
-        let r=await callGroqStatus(p,view:view,command:"arm",args:["model":p.lease.modelChoice.key,"label":p.lease.modelChoice.label,"prompt":outbound])
-        guard p.lease.isCurrent,groqStatusCurrent(e,p,view:view,owner:owner,generation:generation),r=="ready" else{removeGroqStatus(e,preserveFixtureFailureScope:true);return}
+        let result=await callGroqStatus(p,view:view,command:"arm",args:["model":p.lease.modelChoice.key,"label":p.lease.modelChoice.label,"prompt":outbound])
+        guard p.lease.isCurrent,groqStatusCurrent(e,p,view:view,owner:owner,generation:generation) else {
+            lease.recordSetupReason(.postAwaitContextRetired)
+            removeGroqStatus(e,preserveFixtureFailureScope:true); return
+        }
+        guard case .returned("ready") = result else {
+            let reason: GroqOwnedStatusLease.SetupReason
+            switch result {
+            case .returned(let value): reason = .javaScriptArmReason(value) ?? .armFalse
+            case .javascriptException: reason = .armException
+            case .timedOut: reason = .armTimeout
+            case .unavailable: reason = .armFalse
+            }
+            lease.recordSetupReason(reason)
+            removeGroqStatus(e,preserveFixtureFailureScope:true); return
+        }
         p.armed=true;p.lease.recordObserverArmed()
     }
     func groqStatusResult(_ id:UUID,view:WKWebView,owner:String,generation:UUID,fingerprint:String) async -> String? {
@@ -925,26 +955,42 @@ final class EmbeddedBrowserSession {
         p.armed=false
         let result=await callGroqStatus(p,view:view,command:"finish",args:[:])
         guard p.lease.isCurrent,groqStatusCurrent(e,p,view:view,owner:owner,generation:generation) else{return nil}
-        return result.flatMap{GroqOwnedStatusLease.stages.contains($0) ? $0 : nil}
+        guard case .returned(let value) = result, GroqOwnedStatusLease.stages.contains(value) else { return nil }
+        return value
     }
-    private func callGroqStatus(_ probe:GroqStatusProbe,view:WKWebView,command:String,args:[String:Any]) async -> String? {
+    private enum GroqStatusCallOutcome {
+        case returned(String), javascriptException, timedOut, unavailable
+    }
+    private enum GroqStatusCallFailure: Error { case javascriptException, timedOut, invalidReturn }
+    private func callGroqStatus(_ probe:GroqStatusProbe,view:WKWebView,command:String,args:[String:Any]) async -> GroqStatusCallOutcome {
         let result=EmbeddedScriptResult(),deadline=min(probe.lease.deadline,ContinuousClock.now + .milliseconds(500))
-        let bytes:Data?=try? await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                result.install(continuation)
-                result.setTimeout(Task { do { try await Task.sleep(until:deadline) } catch{return};result.complete(.failure(Failure.tabClosed)) })
-                guard !Task.isCancelled,ContinuousClock.now<deadline else{result.complete(.failure(CancellationError()));return}
-                view.callAsyncJavaScript("""
-                    if(document.URL!==url || typeof window[key]!=='function')return null;
-                    const r=window[key](secret,command,args);return r===true?'ready':typeof r==='string'&&r.length<=42?r:null;
-                    """,arguments:["url":probe.url.absoluteString,"key":"__computaGroqStatus_"+probe.key,"secret":probe.secret,"command":command,"args":args],
-                    in:nil,in:.page){ reply in
-                        if case .success(let v)=reply,let s=v as? String,s.utf8.count<=42 {result.complete(.success(Data(s.utf8)))}
-                        else{result.complete(.failure(Failure.tabClosed))}
-                    }
-            }
-        } onCancel: { result.complete(.failure(CancellationError())) }
-        return ContinuousClock.now<deadline ? bytes.map{String(decoding:$0,as:UTF8.self)} : nil
+        do {
+            let bytes: Data = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    result.install(continuation)
+                    result.setTimeout(Task { do { try await Task.sleep(until:deadline) } catch{return};result.complete(.failure(GroqStatusCallFailure.timedOut)) })
+                    guard !Task.isCancelled,ContinuousClock.now<deadline else{result.complete(.failure(CancellationError()));return}
+                    view.callAsyncJavaScript("""
+                        if(document.URL!==url)return command==='arm'?'js_route_unavailable':null;
+                        if(typeof window[key]!=='function')return command==='arm'?'controller_absent':null;
+                        const r=window[key](secret,command,args);
+                        return r===true?'ready':typeof r==='string'&&r.length<=42?r:command==='arm'?'arm_false':null;
+                        """,arguments:["url":probe.url.absoluteString,"key":"__computaGroqStatus_"+probe.key,"secret":probe.secret,"command":command,"args":args],
+                        in:nil,in:.page){ reply in
+                            switch reply {
+                            case .success(let value):
+                                if let string=value as? String,string.utf8.count<=42 {result.complete(.success(Data(string.utf8)))}
+                                else {result.complete(.failure(GroqStatusCallFailure.invalidReturn))}
+                            case .failure: result.complete(.failure(GroqStatusCallFailure.javascriptException))
+                            }
+                        }
+                }
+            } onCancel: { result.complete(.failure(CancellationError())) }
+            guard ContinuousClock.now<deadline else { return .timedOut }
+            return .returned(String(decoding:bytes,as:UTF8.self))
+        } catch GroqStatusCallFailure.timedOut { return .timedOut }
+        catch GroqStatusCallFailure.javascriptException { return .javascriptException }
+        catch { return .unavailable }
     }
 
     @MainActor private final class QwenMarkerProbe {

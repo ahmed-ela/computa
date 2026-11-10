@@ -258,6 +258,46 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
         "Return exactly GROQSTATUS" + nonce.uuidString.replacingOccurrences(of:"-",with:"") + " and nothing else. Do not call any tools."
     }
     static let stages: Set<String> = ["no_matching_fetch_observed", "matched_fetch_unsettled", "http_2xx_opened", "http_400", "http_401", "http_403", "http_413", "http_429", "http_other_non_2xx", "transport_rejected", "ambiguous"]
+    enum SetupReason: String, CaseIterable, Sendable {
+        case notAttempted = "not_attempted"
+        case transportPreconditionsSkipped = "transport_preconditions_skipped"
+        case nativePrepareGuardSkipped = "native_prepare_guard_skipped"
+        case nativeProbeAbsent = "native_probe_absent"
+        case nativeInitialStartMissing = "native_initial_start_missing"
+        case nativeOwnerAlreadySet = "native_owner_already_set"
+        case nativeSignalOwnerMismatch = "native_signal_owner_mismatch"
+        case nativeSignalOriginMismatch = "native_signal_origin_mismatch"
+        case controllerAbsent = "controller_absent"
+        case armFalse = "arm_false"
+        case armException = "arm_exception"
+        case armTimeout = "arm_timeout"
+        case postAwaitContextRetired = "post_await_context_retired"
+        case jsFetchDescriptor = "js_fetch_descriptor"
+        case jsResponseGetters = "js_response_getters"
+        case jsProfileUnavailable = "js_profile_unavailable"
+        case jsFetchReplaced = "js_fetch_replaced"
+        case jsPickerUnavailable = "js_picker_unavailable"
+        case jsPickerNotClosed = "js_picker_not_closed"
+        case jsPickerLabelMismatch = "js_picker_label_mismatch"
+        case jsRouteUnavailable = "js_route_unavailable"
+        case jsModelMismatch = "js_model_mismatch"
+        case jsPromptUnavailable = "js_prompt_unavailable"
+        case jsArmStateUnavailable = "js_arm_state_unavailable"
+        case armed
+
+        // Page-world strings cannot claim a native timeout, exception or guard.
+        static func javaScriptArmReason(_ value: String) -> Self? {
+            guard let reason = Self(rawValue: value) else { return nil }
+            switch reason {
+            case .controllerAbsent, .armFalse, .jsFetchDescriptor, .jsResponseGetters,
+                 .jsProfileUnavailable, .jsFetchReplaced, .jsPickerUnavailable,
+                 .jsPickerNotClosed, .jsPickerLabelMismatch, .jsRouteUnavailable,
+                 .jsModelMismatch, .jsPromptUnavailable, .jsArmStateUnavailable:
+                return reason
+            default: return nil
+            }
+        }
+    }
     private let file: WebsitePrivateDiagnosticCapture.Claim
     let admission: WebModelStartAdmission
     let deadline: ContinuousClock.Instant
@@ -266,10 +306,18 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
     private let lock = NSLock()
     private var active = true
     private var observerArmed = false
+    private var setupReason: SetupReason = .notAttempted
     var isCurrent: Bool { lock.withLock { active && ContinuousClock.now < deadline } && (fixtureTurn?.isCurrent ?? true) }
     func revoke() { lock.withLock { active = false } }
     var isFixture: Bool { fixtureTurn != nil }
-    func recordObserverArmed() { lock.withLock { observerArmed = true } }
+    func recordSetupReason(_ reason: SetupReason) {
+        guard isFixture, reason != .armed else { return }
+        lock.withLock {
+            guard active, !observerArmed, ContinuousClock.now < deadline else { return }
+            setupReason = reason
+        }
+    }
+    func recordObserverArmed() { lock.withLock { observerArmed = true; setupReason = .armed } }
     var unavailableStage: String? {
         guard isFixture,isCurrent else { return nil }
         return lock.withLock { observerArmed ? "observer_unavailable" : "observer_not_armed" }
@@ -434,12 +482,15 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
               Self.stages.contains(stage) || isFixture && ["observer_not_armed","observer_unavailable"].contains(stage),
               ["response_deadline","groq_draft_restored","groq_reported_submission_error"].contains(trigger),
               let session=UUID(uuidString:owner) else{return}
-        let v:[String:Any]=["schemaVersion":1,"purpose":fixtureTurn?.publicationPurpose ?? profile.purpose,"provider":"groq","modelID":admission.modelID,
+        var v:[String:Any]=["schemaVersion":1,"purpose":fixtureTurn?.publicationPurpose ?? profile.purpose,"provider":"groq","modelID":admission.modelID,
             "taskID":admission.taskID,"threadID":admission.threadID,"turnID":admission.turnID,
             "inferenceID":admission.inferenceID.uuidString.lowercased(),"preparationID":admission.preparationID.uuidString.lowercased(),
             "runtimeGeneration":admission.runtimeGeneration.uuidString.lowercased(),"session":session.uuidString.lowercased(),
             "documentGeneration":generation.uuidString.lowercased(),"trigger":trigger,"stage":stage,
             "evidenceClass":["observer_not_armed","observer_unavailable"].contains(stage) ? "native_observer_availability" : "page_world_observation"]
+        if isFixture, ["observer_not_armed","observer_unavailable"].contains(stage) {
+            v["setupReason"] = lock.withLock { setupReason.rawValue }
+        }
         guard let bytes=try? JSONSerialization.data(withJSONObject:v,options:[.sortedKeys]) else{return}
         _=WebsitePrivateDiagnosticCapture.publish(bytes,using:file,isCurrent:{ !Task.isCancelled && self.isCurrent },commit:{ rename in
             self.lock.withLock {

@@ -15,14 +15,15 @@ function deferred<T>() {
   const promise = new Promise<T>((yes,no)=>{resolve=yes;reject=no;});
   return { promise, resolve, reject };
 }
-function fixture(profile:Profile='qwen27b', options:{configProfile?:string;syncError?:Error}={}) {
+type FixtureOptions={configProfile?:string;syncError?:Error;setupDiagnostics?:boolean;nonWritableFetch?:boolean;missingResponseGetter?:boolean;triggerCount?:number;pickerClosed?:boolean};
+function fixture(profile:Profile='qwen27b', options:FixtureOptions={}) {
   const selected=profiles[profile], pending=deferred<any>(), calls:{receiver:unknown;args:unknown[]}[]=[];
   const original=function(this:unknown,...args:unknown[]) {calls.push({receiver:this,args});if(options.syncError)throw options.syncError;return pending.promise;};
   let clock=0, privateReads=0, visibleLabel=selected.label;
   let button:any={isConnected:true,getClientRects:()=>[{}],closest:()=>null,
-    querySelectorAll:()=>[{}],getAttribute:(name:string)=>({'aria-controls':'picker','aria-expanded':'false','data-state':'closed'} as any)[name]??null,
+    querySelectorAll:()=>[{}],getAttribute:(name:string)=>({'aria-controls':'picker','aria-expanded':options.pickerClosed===false?'true':'false','data-state':options.pickerClosed===false?'open':'closed'} as any)[name]??null,
     get innerText(){return visibleLabel;}, get textContent(){return visibleLabel;}};
-  const document={baseURI:'https://chat.groq.com/',querySelectorAll:(selector:string)=>selector.startsWith('button')?[button]:[]};
+  const document={baseURI:'https://chat.groq.com/',querySelectorAll:(selector:string)=>selector.startsWith('button')?Array.from({length:options.triggerCount??1},()=>button):[]};
   const location={origin:'https://chat.groq.com',href:'https://chat.groq.com/?model='+encodeURIComponent(selected.model)};
   class ResponseDouble {
     constructor(public code=429,public finalURL=endpoint,public redirectedValue=false,public kind='cors'){}
@@ -30,19 +31,27 @@ function fixture(profile:Profile='qwen27b', options:{configProfile?:string;syncE
     get headers(){privateReads++;throw Error('PRIVATE_HEADER');}get body(){privateReads++;throw Error('PRIVATE_BODY');}
     clone(){privateReads++;throw Error('PRIVATE_BODY');}text(){privateReads++;throw Error('PRIVATE_BODY');}json(){privateReads++;throw Error('PRIVATE_BODY');}
   }
+  if(options.missingResponseGetter)delete (ResponseDouble.prototype as any).status;
   const window:any={fetch:original};window.top=window;
+  if(options.nonWritableFetch)Object.defineProperty(window,'fetch',{value:original,writable:false,configurable:true,enumerable:true});
+  const fetchDescriptorBefore=Object.getOwnPropertyDescriptor(window,'fetch');
+  const timers=new Map<number,()=>void>();let nextTimer=0;
+  const setTimer=(callback:()=>void)=>{const id=++nextTimer;timers.set(id,callback);return id;};
+  const clearTimer=(id:number)=>{timers.delete(id);};
   const key='__computaGroqStatus_'+'a'.repeat(32),secret='b'.repeat(32);
-  const config={key:'a'.repeat(32),secret,durationMs:1000,profile:options.configProfile??profile};
+  const config={key:'a'.repeat(32),secret,durationMs:1000,profile:options.configProfile??profile,
+    ...(options.setupDiagnostics===undefined?{}:{setupDiagnostics:options.setupDiagnostics})};
   new Function('window','top','location','document','Response','performance','setTimeout','clearTimeout','getComputedStyle',
     source.replace('__GROQ_OWNED_SYNTHETIC_CONFIG__',JSON.stringify(config)))(window,window,location,document,ResponseDouble,
-      {now:()=>clock},()=>1,()=>{},()=>({visibility:'visible'}));
+      {now:()=>clock},setTimer,clearTimer,()=>({visibility:'visible'}));
   const ctl=(command:string,args:any={},givenSecret=secret)=>window[key]?.(givenSecret,command,args);
   const arm=(args:any={})=>ctl('arm',{model:selected.model,label:selected.label,prompt,...args});
   const body=(extra:any={},system=profile!=='qwen27b',pretty=false)=>JSON.stringify({model:selected.model,
     messages:[...(system?[{content:'Harmless system with escaped \" quote',role:'system'}]:[]),{content:prompt,role:'user'}],
     temperature:selected.temperature,max_completion_tokens:selected.maximum,top_p:selected.topP,stream:true,...extra},null,pretty?2:undefined);
   const finish=()=>ctl('finish');
-  return {window,original,calls,pending,selected,location,ResponseDouble,arm,body,ctl,finish,key,
+  return {window,original,calls,pending,selected,location,ResponseDouble,arm,body,ctl,finish,key,fetchDescriptorBefore,
+    timerCount:()=>timers.size,fireTimers:()=>{for(const [id,callback] of [...timers]){timers.delete(id);callback();}},
     tick:(n:number)=>{clock=n;},privateReads:()=>privateReads,driftLabel:()=>{visibleLabel='Foreign model';},replacePicker:()=>{button={...button};}};
 }
 const settle=async(f:ReturnType<typeof fixture>,status:number)=>{const response=new f.ResponseDouble(status);f.pending.resolve(response);await f.pending.promise;await Promise.resolve();return response;};
@@ -108,4 +117,79 @@ test('network rejection,synchronous throw,pending and unmatched captures keep ex
   expect(()=>s.window.fetch(endpoint,{method:'POST',body:s.body()})).toThrow(sync);expect(s.finish()).toBe('ambiguous');expect(s.calls).toHaveLength(1);
   const pending=fixture();pending.arm();pending.window.fetch(endpoint,{method:'POST',body:pending.body()});expect(pending.finish()).toBe('matched_fetch_unsettled');
   const empty=fixture();empty.arm();expect(empty.finish()).toBe('no_matching_fetch_observed');
+});
+
+
+test('fixture-only initializer diagnostics are closed one-read reasons without fetch or private response reads',()=>{
+  const failures:[FixtureOptions,string][]=[
+    [{nonWritableFetch:true},'js_fetch_descriptor'],
+    [{missingResponseGetter:true},'js_response_getters'],
+    [{configProfile:'foreign'},'js_profile_unavailable'],
+  ];
+  for(const [options,reason] of failures){
+    for(const setupDiagnostics of [undefined,false,true]){
+      const f=fixture('gptoss120b',{...options,setupDiagnostics});
+      expect(f.calls).toHaveLength(0);expect(f.privateReads()).toBe(0);
+      expect(f.window.fetch).toBe(f.original);
+      expect(Object.getOwnPropertyDescriptor(f.window,'fetch')).toEqual(f.fetchDescriptorBefore);
+      if(setupDiagnostics===true){
+        expect(f.ctl('arm',{},'foreign-secret')).toBe(false);
+        expect(f.arm()).toBe(reason);expect(f.arm()).toBe(false);
+        expect(f.finish()).toBe(false);expect(f.timerCount()).toBe(1);
+        expect(f.ctl('dispose')).toBe(true);expect(f.timerCount()).toBe(0);
+        expect(f.window[f.key]).toBeUndefined();
+        const expired=fixture('gptoss120b',{...options,setupDiagnostics:true});
+        const controller=expired.window[expired.key];expired.tick(1001);expired.fireTimers();
+        expect(expired.window[expired.key]).toBeUndefined();expect(expired.timerCount()).toBe(0);
+        expect(controller('b'.repeat(32),'arm',{})).toBe(false);
+        expect(expired.window.fetch).toBe(expired.original);
+        expect(Object.getOwnPropertyDescriptor(expired.window,'fetch')).toEqual(expired.fetchDescriptorBefore);
+        expect(expired.calls).toHaveLength(0);expect(expired.privateReads()).toBe(0);
+      }else{
+        expect(f.window[f.key]).toBeUndefined();expect(f.arm()).toBeUndefined();expect(f.timerCount()).toBe(0);
+      }
+      expect(Object.getOwnPropertyDescriptor(f.window,'fetch')).toEqual(f.fetchDescriptorBefore);
+      expect(f.calls).toHaveLength(0);expect(f.privateReads()).toBe(0);
+    }
+  }
+});
+
+test('fixture-only arm diagnostics preserve marker refusal and disposal while successful requests remain exact',async()=>{
+  const modes=['fetch','picker','tooManyPickers','notClosed','route','model','label','prompt','oversize','expired','alreadyArmed'] as const;
+  const reasons={fetch:'js_fetch_replaced',picker:'js_picker_label_mismatch',tooManyPickers:'js_picker_unavailable',
+    notClosed:'js_picker_not_closed',route:'js_route_unavailable',
+    model:'js_model_mismatch',label:'js_model_mismatch',prompt:'js_prompt_unavailable',oversize:'js_prompt_unavailable',
+    expired:'js_arm_state_unavailable',alreadyArmed:'js_arm_state_unavailable'};
+  for(const mode of modes)for(const setupDiagnostics of [undefined,false,true]){
+    const f=fixture('gptoss120b',{setupDiagnostics,
+      ...(mode==='tooManyPickers'?{triggerCount:65}:{}),...(mode==='notClosed'?{pickerClosed:false}:{})});
+    const foreign=()=>{throw Error('FOREIGN_FETCH_MUST_NOT_RUN');};
+    let args:any={};
+    if(mode==='fetch')f.window.fetch=foreign;
+    if(mode==='picker')f.driftLabel();
+    if(mode==='route')f.location.href='https://chat.groq.com/?model=foreign';
+    if(mode==='model')args={model:'foreign/model'};if(mode==='label')args={label:'Foreign model'};
+    if(mode==='prompt')args={prompt:''};if(mode==='oversize')args={prompt:'x'.repeat(180201)};
+    if(mode==='expired')f.tick(1001);if(mode==='alreadyArmed')expect(f.arm()).toBe(true);
+    expect(f.arm(args)).toBe(setupDiagnostics===true?reasons[mode]:false);
+    expect(f.calls).toHaveLength(0);expect(f.privateReads()).toBe(0);
+    if(mode==='fetch')expect(f.window.fetch).toBe(foreign);
+    expect(f.ctl('dispose')).toBe(true);expect(f.timerCount()).toBe(0);expect(f.window[f.key]).toBeUndefined();
+    expect(f.window.fetch).toBe(mode==='fetch'?foreign:f.original);
+    if(mode!=='fetch')expect(Object.getOwnPropertyDescriptor(f.window,'fetch')).toEqual(f.fetchDescriptorBefore);
+  }
+  const timed=fixture('gptoss120b',{setupDiagnostics:true});
+  expect(timed.arm({prompt:''})).toBe('js_prompt_unavailable');timed.tick(1001);timed.fireTimers();
+  expect(timed.window.fetch).toBe(timed.original);expect(timed.window[timed.key]).toBeUndefined();
+  expect(Object.getOwnPropertyDescriptor(timed.window,'fetch')).toEqual(timed.fetchDescriptorBefore);
+  expect(timed.calls).toHaveLength(0);expect(timed.privateReads()).toBe(0);
+  for(const profile of Object.keys(profiles) as Profile[]){
+    const f=fixture(profile,{setupDiagnostics:true});expect(f.arm()).toBe(true);
+    const init={method:'POST',body:f.body()},receiver={synthetic:true};
+    const promise=f.window.fetch.call(receiver,endpoint,init);expect(promise).toBe(f.pending.promise);
+    expect(f.calls).toHaveLength(1);expect(f.calls[0].receiver).toBe(receiver);
+    expect(f.calls[0].args).toEqual([endpoint,init]);expect(f.calls[0].args[1]).toBe(init);
+    const response=await settle(f,400);expect(await promise).toBe(response);expect(f.finish()).toBe('http_400');
+    expect(f.privateReads()).toBe(0);expect(f.window.fetch).toBe(f.original);expect(f.timerCount()).toBe(0);
+  }
 });

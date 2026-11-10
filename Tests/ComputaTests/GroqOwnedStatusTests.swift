@@ -199,6 +199,119 @@ import XCTest
         XCTAssertFalse(pending.isCurrent);XCTAssertFalse(FileManager.default.fileExists(atPath:revokedDirectory.appendingPathComponent("owned-status.json").path))
     }
 
+    func testSetupReasonVocabularyKeepsPageClaimsSeparateFromNativeStages() {
+        typealias Reason = GroqOwnedStatusLease.SetupReason
+        let expected: Set<String> = ["not_attempted", "transport_preconditions_skipped", "native_prepare_guard_skipped",
+            "native_probe_absent", "native_initial_start_missing", "native_owner_already_set",
+            "native_signal_owner_mismatch", "native_signal_origin_mismatch",
+            "controller_absent", "arm_false", "arm_exception", "arm_timeout", "post_await_context_retired",
+            "js_fetch_descriptor", "js_response_getters", "js_profile_unavailable", "js_fetch_replaced",
+            "js_picker_unavailable", "js_picker_not_closed", "js_picker_label_mismatch", "js_route_unavailable", "js_model_mismatch", "js_prompt_unavailable",
+            "js_arm_state_unavailable", "armed"]
+        let page: Set<String> = ["controller_absent", "arm_false", "js_fetch_descriptor", "js_response_getters",
+            "js_profile_unavailable", "js_fetch_replaced", "js_picker_unavailable", "js_picker_not_closed", "js_picker_label_mismatch", "js_route_unavailable",
+            "js_model_mismatch", "js_prompt_unavailable", "js_arm_state_unavailable"]
+        XCTAssertEqual(Set(Reason.allCases.map(\.rawValue)), expected)
+        for reason in Reason.allCases {
+            XCTAssertEqual(Reason.javaScriptArmReason(reason.rawValue)?.rawValue,
+                           page.contains(reason.rawValue) ? reason.rawValue : nil)
+        }
+        for foreign in ["PRIVATE_https://example.invalid/secret", "ARMED", "arm_timeout\n", "js_fetch_descriptor suffix", ""] {
+            XCTAssertNil(Reason(rawValue: foreign)); XCTAssertNil(Reason.javaScriptArmReason(foreign))
+        }
+    }
+
+    func testFixtureAvailabilityReasonsAreClosedPrivateAndCannotForgeArmedState() throws {
+        for reason in GroqOwnedStatusLease.SetupReason.allCases where reason != .armed {
+            let fixture = try setupLease()
+            if reason != .notAttempted { fixture.lease.recordSetupReason(reason) }
+            fixture.lease.recordSetupReason(.armed) // Only recordObserverArmed may establish this native fact.
+            XCTAssertEqual(fixture.lease.unavailableStage, "observer_not_armed")
+            fixture.lease.publish(.init(stage: "observer_not_armed", sessionToken: UUID().uuidString.lowercased(),
+                generation: UUID()), trigger: "groq_reported_submission_error")
+            let bytes = try Data(contentsOf: fixture.output)
+            let row = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+            let keys: Set<String> = ["schemaVersion", "purpose", "provider", "modelID", "taskID", "threadID", "turnID",
+                "inferenceID", "preparationID", "runtimeGeneration", "session", "documentGeneration", "trigger", "stage",
+                "evidenceClass", "setupReason"]
+            XCTAssertEqual(Set(row.keys), keys)
+            XCTAssertEqual(row["setupReason"] as? String, reason.rawValue)
+            XCTAssertEqual(row["evidenceClass"] as? String, "native_observer_availability")
+            XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains(fixture.user))
+            XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains("http://127.0.0.1"))
+            fixture.lease.recordSetupReason(.armTimeout)
+            fixture.lease.publish(.init(stage: "observer_unavailable", sessionToken: UUID().uuidString.lowercased(),
+                generation: UUID()), trigger: "response_deadline")
+            XCTAssertEqual(try Data(contentsOf: fixture.output), bytes, "Only the first exact failure may publish")
+        }
+        let armed = try setupLease()
+        armed.lease.recordSetupReason(.controllerAbsent); armed.lease.recordObserverArmed()
+        armed.lease.recordSetupReason(.armTimeout)
+        XCTAssertEqual(armed.lease.unavailableStage, "observer_unavailable")
+        armed.lease.publish(.init(stage: "observer_unavailable", sessionToken: UUID().uuidString.lowercased(),
+            generation: UUID()), trigger: "groq_reported_submission_error")
+        let row = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: armed.output)) as? [String: Any])
+        XCTAssertEqual(row["setupReason"] as? String, "armed", "A later setup error cannot downgrade actual arm success")
+    }
+
+    func testSetupDiagnosticsDoNotBroadenMarkerPacketsOrReviveRetiredFixtureLeases() throws {
+        let marker = try setupLease(fixture: false)
+        marker.lease.recordSetupReason(.jsFetchDescriptor)
+        XCTAssertNil(marker.lease.unavailableStage)
+        marker.lease.publish(.init(stage: "observer_not_armed", sessionToken: UUID().uuidString.lowercased(),
+            generation: UUID()), trigger: "groq_reported_submission_error")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.output.path))
+        marker.lease.publish(.init(stage: "http_429", sessionToken: UUID().uuidString.lowercased(),
+            generation: UUID()), trigger: "groq_reported_submission_error")
+        let markerRow = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: marker.output)) as? [String: Any])
+        XCTAssertEqual(markerRow.count, 15); XCTAssertNil(markerRow["setupReason"])
+        XCTAssertEqual(markerRow["evidenceClass"] as? String, "page_world_observation")
+        let retired = try setupLease()
+        retired.lease.recordSetupReason(.controllerAbsent); retired.lease.revoke()
+        retired.lease.recordObserverArmed(); retired.lease.recordSetupReason(.armTimeout)
+        XCTAssertFalse(retired.lease.isCurrent); XCTAssertNil(retired.lease.unavailableStage)
+        retired.lease.publish(.init(stage: "observer_unavailable", sessionToken: UUID().uuidString.lowercased(),
+            generation: UUID()), trigger: "groq_reported_submission_error")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: retired.output.path))
+    }
+
+    private func setupLease(fixture: Bool = true) throws -> (lease: GroqOwnedStatusLease, output: URL, user: String) {
+        let path = try XCTUnwrap(realpath(FileManager.default.temporaryDirectory.path, nil)); defer { free(path) }
+        let root = URL(fileURLWithPath: String(cString: path), isDirectory: true).appendingPathComponent("groq-setup-" + UUID().uuidString)
+        let directory = root.appendingPathComponent(GroqOwnedStatusLease.directoryName)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let kind = GroqOwnedStatusLease.FixtureTurn.Kind.gptoss120b, nonce = UUID(), model = kind.profile.choice.modelID
+        let user = fixture ? Self.fixtureUser.replacingOccurrences(of: "groq-qwen27b", with: "groq-gptoss120b") : GroqOwnedStatusLease.userText(nonce)
+        func item(_ role: String, _ text: String) -> [String: Any] {
+            ["type": "message", "role": role, "content": [["type": "input_text", "text": text]]]
+        }
+        let input = [item("developer", "Synthetic policy"),
+            item("user", "<environment_context><cwd>/tmp/marker</cwd><shell>zsh</shell></environment_context>"),
+            item("user", user + "\n" + ComputaAgentInstructions.runtimeInteractionPolicy())]
+        let request = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: ["model": model, "input": input,
+            "tools": [["type": "function", "name": "fixture_read", "parameters": ["type": "object", "properties": [String: Any](), "additionalProperties": false]]]]))
+        let admission = WebModelStartAdmission(id: UUID(), inferenceID: UUID(), taskID: UUID().uuidString.lowercased(),
+            threadID: UUID().uuidString.lowercased(), turnID: UUID().uuidString.lowercased(), runtimeGeneration: UUID(),
+            preparationID: UUID(), transportGeneration: UUID(), provider: "groq", modelID: model, parameters: Data("{}".utf8))
+        let formatter = ISO8601DateFormatter(); formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let arm: [String: String] = ["purpose": fixture ? kind.purpose : kind.profile.purpose,
+            "nonce": nonce.uuidString.lowercased(), "modelID": model, "userPromptSHA256": GroqOwnedStatusLease.digest(user),
+            "expiresAt": formatter.string(from: Date().addingTimeInterval(60))]
+        let armURL = directory.appendingPathComponent("arm.json")
+        try JSONSerialization.data(withJSONObject: arm).write(to: armURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: armURL.path)
+        let lease: GroqOwnedStatusLease
+        if fixture {
+            let parent = try XCTUnwrap(GroqOwnedStatusLease.FixtureTurn.consume(directory: directory, admission: admission,
+                request: request, first: true))
+            lease = try XCTUnwrap(parent.child(admission: admission, request: request))
+        } else {
+            lease = try XCTUnwrap(GroqOwnedStatusLease.consume(directory: directory, admission: admission, request: request, first: true))
+        }
+        return (lease, directory.appendingPathComponent("owned-status.json"), user)
+    }
+
     private static let fixtureUser = """
         In /tmp/test root/fixtures/cases/invoice-457-groq-qwen27b-0123456789abcdef/coding, fix the invoice aggregation bug in reconcile.py according to its README. Keep the tests, sample data, and reference format unchanged. Run python3 -m unittest -v, then run python3 reconcile.py.
 
@@ -356,6 +469,13 @@ import XCTest
             XCTAssertEqual(row["purpose"] as? String,fixture ? kind.purpose : profile.purpose)
             XCTAssertEqual(row["trigger"] as? String,["rollback","observerNotArmed","observerUnavailable"].contains(mode) ? "groq_draft_restored" : "response_deadline")
             XCTAssertEqual(row["evidenceClass"] as? String,["observer_not_armed","observer_unavailable"].contains(expected) ? "native_observer_availability" : "page_world_observation")
+            if ["observer_not_armed", "observer_unavailable"].contains(expected) {
+                XCTAssertEqual(row.count, 16)
+                XCTAssertNotNil((row["setupReason"] as? String).flatMap(GroqOwnedStatusLease.SetupReason.init(rawValue:)))
+                XCTAssertEqual(row["setupReason"] as? String, mode == "observerNotArmed" ? "js_fetch_descriptor" : "armed")
+            } else {
+                XCTAssertEqual(row.count, 15); XCTAssertNil(row["setupReason"])
+            }
             XCTAssertFalse(String(decoding:report,as:UTF8.self).contains(nonce.uuidString))
         }
         _=await server.shutdown()
