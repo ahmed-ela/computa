@@ -173,3 +173,8 @@ same model, user instruction and native turn identity. The existing first-body,
 outbound fingerprint, current view/document and single-failure checks remain.
 Only a finite request status is saved, without headers or response bodies. A
 captured status does not authorize a reply, replay or transcript cleanup.
+
+The fresh Build 466 workflow stopped during local evidence preparation with no
+matching native task retained. Both live journal stores had reached 256 tasks;
+the retained-session archival incompatibility and definitive pre-dispatch queue
+handling are documented in [Website journal retention](WEBSITE-JOURNAL-RETENTION.md).

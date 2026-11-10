@@ -796,6 +796,19 @@ enum LocalThreadContext: Equatable, Sendable {
 /// tool execution. This adapter keeps JSON-RPC out of the SwiftUI layer and
 /// holds protected actions until the native approval controller resolves them.
 final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
+    /// Native proof that this current user prompt never reached turn/start.
+    /// Earlier thread setup or maintenance may already have occurred. RPC text
+    /// cannot construct this non-Codable value or establish retry safety.
+    struct PromptNotDispatched: LocalizedError, Sendable {
+        private let originalDescription: String
+
+        fileprivate init(preparationError: any Error) {
+            originalDescription = preparationError.localizedDescription
+        }
+
+        var errorDescription: String? { originalDescription }
+    }
+
     static func localThreadConfig(for modelID: String, autoCompactLimitOverride: Int? = nil,
                                   apiModel: APIModelDefinition? = nil, apiProviderURL: URL? = nil) -> [String: Any] {
         let context = LocalThreadContext.forModel(modelID, apiModel: apiModel, apiProviderURL: apiProviderURL)
@@ -2205,9 +2218,17 @@ private extension CodexAppServerRuntime {
                       !cancelledSubmissions.contains(claim) else { throw CancellationError() }
                 let turnPreparationStarted = ContinuousClock.now
                 dispatchProfile?.mark(.turnPreparationRequested)
-                inferencePreparation = try await prepareInferenceTurn(
-                    taskID: taskID, threadID: threadID, modelID: modelID, isNewThread: isNewThread,
-                    userRequest: prompt)
+                do {
+                    inferencePreparation = try await prepareInferenceTurn(
+                        taskID: taskID, threadID: threadID, modelID: modelID, isNewThread: isNewThread,
+                        userRequest: prompt)
+                } catch {
+                    // This await is before the current user turn/start invocation.
+                    // Keep cancellation conservative; a shared server error alone
+                    // is never sufficient proof of non-delivery at other sites.
+                    if error is CancellationError { throw error }
+                    throw PromptNotDispatched(preparationError: error)
+                }
                 dispatchProfile?.mark(.turnPrepared, since: turnPreparationStarted)
                 guard serverGeneration == generation, turnSubmissionClaims[taskID] == claim,
                       !cancelledSubmissions.contains(claim) else { throw CancellationError() }

@@ -1985,7 +1985,9 @@ final class AppState {
                 let cancelled = error is CancellationError
                 tasks[currentIndex].status = cancelled ? .waiting : .failed
                 let rejectedBeforeDispatch: Bool
-                if case .embeddedRequired? = error as? WebModelServer.Failure {
+                if error is CodexAppServerRuntime.PromptNotDispatched {
+                    rejectedBeforeDispatch = true
+                } else if case .embeddedRequired? = error as? WebModelServer.Failure {
                     rejectedBeforeDispatch = true
                 } else if case .invalidModelID? = error as? WebsiteModelCatalog.Failure {
                     rejectedBeforeDispatch = true

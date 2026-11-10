@@ -1,3 +1,4 @@
+import CoreFoundation
 import CryptoKit
 import Darwin
 import Foundation
@@ -121,10 +122,14 @@ struct WebsiteJournalRetentionStore: Sendable {
                 return false
             }
             let binding = try Self.binding(receipt)
-            for (kind, id) in [("inference", inference), ("token", receipt.sessionToken)].compactMap({ kind, id in id.map { (kind, $0) } }) {
-                if let old = try query(db, "SELECT binding FROM identities WHERE kind=? AND id=?", [kind, id]).first?.first {
-                    guard old == binding else { throw Failure.unavailable }
-                }
+            let own = try query(db, "SELECT binding FROM identities WHERE kind='inference' AND id=?", [inference]).first?.first
+            if let own { guard own == binding else { throw Failure.unavailable } }
+            if let token = receipt.sessionToken,
+               let old = try query(db, "SELECT binding FROM identities WHERE kind='token' AND id=?", [token]).first?.first,
+               old != binding {
+                let relation = try query(db, "SELECT binding FROM identities WHERE kind='retained_token_v1' AND id=?", [token]).first?.first
+                guard own == binding, let relation,
+                      try Self.retainedToken(relation, permits: binding, anchoredBy: old) else { throw Failure.unavailable }
             }
             return false
         } ?? false
@@ -152,10 +157,16 @@ struct WebsiteJournalRetentionStore: Sendable {
         let bytes: Data
         var hash: String { SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined() }
     }
+    private struct Identity {
+        let kind: String
+        let id: String
+        let binding: Data
+    }
     private struct Bundle {
         let task: String
         let files: [File]
         let receipts: [WebsiteSessionCleanupReceipt]
+        let identities: [Identity]
     }
 
     private func activeTasks(_ root: URL) throws -> Set<String> {
@@ -202,20 +213,42 @@ struct WebsiteJournalRetentionStore: Sendable {
             }
         }
         let groups = Dictionary(grouping: evidence) { $0["inferenceID"] as? String ?? "" }
-        guard !groups.isEmpty, Set(receipts.compactMap(\.inferenceID)) == Set(groups.keys),
+        guard !groups.isEmpty, Set(receipts.compactMap(\.inferenceID)).isSubset(of: Set(groups.keys)),
               Set(receipts.map(\.attemptID)).count == receipts.count else { throw Failure.unavailable }
-        var tokenOwners: [String: String] = [:]
+        var tokenOwners: [String: [String]] = [:], identities: [Identity] = []
         let identity = ["taskID", "threadID", "turnID", "runtimeGeneration", "provider", "modelID", "inferenceID"]
         for (inference, rows) in groups {
             guard Self.uuid(inference), let first = rows.first,
-                  rows.contains(where: { $0["phase"] as? String == "started" }),
                   rows.allSatisfy({ row in identity.allSatisfy { row[$0] as? String == first[$0] as? String } }),
                   ["threadID", "turnID", "runtimeGeneration"].allSatisfy({ Self.uuid(first[$0] as? String ?? "") }) else { throw Failure.unavailable }
             let tokens = Set(rows.compactMap { $0["sessionToken"] as? String })
-            guard tokens.count == 1, let token = tokens.first, Self.uuid(token), tokenOwners[token] == nil else { throw Failure.unavailable }
-            tokenOwners[token] = inference
+            guard tokens.count == 1, let token = tokens.first, Self.uuid(token) else { throw Failure.unavailable }
+            tokenOwners[token, default: []].append(inference)
+        }
+        let hasRetainedLease = tokenOwners.values.contains(where: { $0.count > 1 })
+        if hasRetainedLease {
+            // The successful retained shape must also be unambiguous in the
+            // original evidence and receipt lexemes. Discard comparison bytes;
+            // the exact journal bytes below remain the only archived payload.
+            for file in files {
+                for line in file.bytes.dropLast().split(separator: 10) {
+                    _ = try WebsiteTurnContinuation.canonicalValueDataForDigest(Data(line))
+                }
+            }
+        }
+        for (token, inferences) in tokenOwners {
+            if inferences.count > 1 {
+                let members = Set(inferences)
+                identities += try Self.retainedIdentities(evidence.filter { members.contains($0["inferenceID"] as? String ?? "") },
+                    receipts: receipts.filter { members.contains($0.inferenceID ?? "") }, token: token)
+                continue
+            }
+            // Existing per-inference admission remains unchanged. A different
+            // inference never supplies its missing cleanup or ownership proof.
+            let inference = inferences[0], rows = groups[inference]!, first = rows[0]
             let matching = receipts.filter { $0.inferenceID == inference }
-            let binding = try Self.binding(matching[0])
+            guard rows.contains(where: { $0["phase"] as? String == "started" }), let receipt = matching.first else { throw Failure.unavailable }
+            let binding = try Self.binding(receipt)
             guard matching.allSatisfy({ (try? Self.binding($0)) == binding }),
                   matching.allSatisfy({ receipt in
                       let encoded = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(receipt)) as? [String: Any]
@@ -227,6 +260,11 @@ struct WebsiteJournalRetentionStore: Sendable {
                       $0["phase"] as? String == "release_verified" && $0["cleanupAttemptID"] as? String == closed.attemptID
                   }) else { throw Failure.unavailable }
         }
+        for receipt in receipts {
+            let binding = try Self.binding(receipt)
+            identities.append(Identity(kind: "inference", id: receipt.inferenceID!, binding: binding))
+            identities.append(Identity(kind: "token", id: receipt.sessionToken!, binding: binding))
+        }
         // Summary-only unresolved evidence is not erased or contradicted by
         // archiving the transaction directories.
         let summary = cleanupDirectory.appendingPathComponent(task + ".jsonl")
@@ -234,6 +272,7 @@ struct WebsiteJournalRetentionStore: Sendable {
             let data = try Self.read(summary, maximum: 65_536)
             guard data.last == 10 else { throw Failure.unavailable }
             for line in data.split(separator: 10) {
+                if hasRetainedLease { _ = try WebsiteTurnContinuation.canonicalValueDataForDigest(Data(line)) }
                 let receipt = try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self, from: Data(line))
                 guard receipt.isValid, receipt.taskID == task else { throw Failure.unavailable }
                 if receipt.outcome == .unconfirmed {
@@ -243,7 +282,127 @@ struct WebsiteJournalRetentionStore: Sendable {
                 }
             }
         }
-        return Bundle(task: task, files: files, receipts: receipts)
+        return Bundle(task: task, files: files, receipts: receipts, identities: identities)
+    }
+
+    /// Only the exact successful v2 retained-lease serialization is admitted
+    /// here. Failed, uncertain, incomplete or unfamiliar phase shapes stay live.
+    /// This proves one physical close, not a cleanup receipt for every member.
+    private static func retainedIdentities(_ rows: [[String: Any]], receipts: [WebsiteSessionCleanupReceipt],
+                                           token: String) throws -> [Identity] {
+        let groups = Dictionary(grouping: rows) { $0["inferenceID"] as? String ?? "" }
+        var order: [String] = []
+        for row in rows {
+            let id = row["inferenceID"] as? String ?? ""
+            if order.last != id { guard !order.contains(id) else { throw Failure.unavailable }; order.append(id) }
+        }
+        guard (2...1_024).contains(order.count), let first = rows.first, let finalID = order.last,
+              let closed = receipts.last, !receipts.isEmpty,
+              receipts.allSatisfy({ $0.inferenceID == finalID && $0.outcome == .closed && $0.route == .embedded && $0.trigger == .inference }),
+              receipts.allSatisfy({ (try? binding($0)) == (try? binding(closed)) && $0.timestamp <= closed.timestamp }),
+              closed.sessionToken == token else { throw Failure.unavailable }
+        let scope = ["taskID", "threadID", "turnID", "runtimeGeneration", "preparationID", "provider", "modelID"]
+        guard ["taskID", "threadID", "turnID", "runtimeGeneration", "preparationID"].allSatisfy({ uuid(first[$0] as? String ?? "") }),
+              let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(closed)) as? [String: Any],
+              scope.filter({ $0 != "preparationID" }).allSatisfy({ encoded[$0] as? String == first[$0] as? String }),
+              timestamp(closed.timestamp) else { throw Failure.unavailable }
+        var document: String?, fingerprint: String?, previousTime: String?
+        for (offset, inference) in order.enumerated() {
+            guard uuid(inference), let group = groups[inference] else { throw Failure.unavailable }
+            let sequence = offset + 1
+            let expected = [offset == 0 ? "start_requested" : "continuation_requested",
+                offset == 0 ? "started" : "continued", "submission_verified", "complete",
+                offset == order.count - 1 ? "release_verified" : "yield_verified"]
+            guard group.count == 5, group.compactMap({ $0["phase"] as? String }) == expected else { throw Failure.unavailable }
+            var completedSubmission: String?
+            for (index, row) in group.enumerated() {
+                guard scope.allSatisfy({ row[$0] as? String == first[$0] as? String }),
+                      integer(row["schemaVersion"]) == 2, integer(row["transactionVersion"]) == 2,
+                      boolean(row["transactionPolicyEstablished"]) == true,
+                      row["transactionMode"] as? String == "temporary_conversation_per_turn",
+                      integer(row["sequence"]) == (offset == 0 && index < 2 ? 0 : sequence),
+                      integer(row["baselineResponseCount"]) == offset,
+                      let time = row["timestamp"] as? String, timestamp(time), previousTime.map({ $0 <= time }) ?? true,
+                      index == 4 && offset == order.count - 1 || time <= closed.timestamp,
+                      row["sessionToken"] as? String == token || offset == 0 && index == 0 && row["sessionToken"] == nil,
+                      row["errorCode"] == nil else { throw Failure.unavailable }
+                previousTime = time
+                if index < 2 {
+                    guard ["documentGeneration", "firstUserFingerprint", "responseCount", "submittedPromptFingerprint"]
+                        .allSatisfy({ row[$0] == nil }) else { throw Failure.unavailable }
+                }
+                if index >= 2 {
+                    guard integer(row["responseCount"]) == (index == 2 ? offset : sequence),
+                          let currentDocument = row["documentGeneration"] as? String, uuid(currentDocument),
+                          let currentFingerprint = row["firstUserFingerprint"] as? String, hash(currentFingerprint),
+                          document.map({ $0 == currentDocument }) ?? true,
+                          fingerprint.map({ $0 == currentFingerprint }) ?? true else { throw Failure.unavailable }
+                    document = currentDocument; fingerprint = currentFingerprint
+                }
+                if index >= 3 {
+                    guard let submitted = row["submittedPromptFingerprint"] as? String, hash(submitted),
+                          completedSubmission.map({ $0 == submitted }) ?? true else { throw Failure.unavailable }
+                    completedSubmission = submitted
+                } else if let submitted = row["submittedPromptFingerprint"] as? String {
+                    guard submitted.isEmpty || hash(submitted) else { throw Failure.unavailable }
+                }
+                if offset == order.count - 1 && index == 4 {
+                    guard row["cleanupAttemptID"] as? String == closed.attemptID, time >= closed.timestamp else { throw Failure.unavailable }
+                } else { guard row["cleanupAttemptID"] == nil else { throw Failure.unavailable } }
+            }
+            guard group.allSatisfy({ row in
+                guard let submitted = row["submittedPromptFingerprint"] as? String, !submitted.isEmpty else { return true }
+                return submitted == completedSubmission
+            }) else { throw Failure.unavailable }
+        }
+        guard let finalGroup = groups[finalID], let completed = finalGroup[3]["timestamp"] as? String,
+              let released = finalGroup[4]["timestamp"] as? String,
+              receipts.allSatisfy({ timestamp($0.timestamp) && completed <= $0.timestamp && $0.timestamp <= released }) else { throw Failure.unavailable }
+        let final = try binding(closed)
+        guard let parts = try JSONSerialization.jsonObject(with: final) as? [String], parts.count == 9 else { throw Failure.unavailable }
+        var result = try order.map { inference -> Identity in
+            var member = parts; member[7] = inference
+            return Identity(kind: "inference", id: inference, binding: try strings(member))
+        }
+        // New tagged rows use the existing identities table. The ordinary token
+        // row remains anchored to the actual final cleanup, never overwritten.
+        let relation = ["retained_token_v1"] + Array(parts.prefix(7)) + [token] + order
+        result.append(Identity(kind: "retained_token_v1", id: token, binding: try strings(relation)))
+        return result
+    }
+
+    private static func retainedToken(_ data: Data, permits binding: Data, anchoredBy anchor: Data) throws -> Bool {
+        guard let relation = try JSONSerialization.jsonObject(with: data) as? [String],
+              (11...1_033).contains(relation.count), relation[0] == "retained_token_v1",
+              let own = try JSONSerialization.jsonObject(with: binding) as? [String], own.count == 9 else { return false }
+        let members = Array(relation.dropFirst(9))
+        guard members.allSatisfy(uuid), Set(members).count == members.count,
+              Array(relation[1...7]) == Array(own.prefix(7)), relation[8] == own[8], members.contains(own[7]),
+              let final = members.last else { return false }
+        var expected = own; expected[7] = final
+        return try strings(expected) == anchor
+    }
+
+    private static func strings(_ values: [String]) throws -> Data {
+        try JSONSerialization.data(withJSONObject: values, options: [.sortedKeys, .withoutEscapingSlashes])
+    }
+    private static func integer(_ value: Any?) -> Int? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+              let integer = Int(number.stringValue), NSNumber(value: integer) == number else { return nil }
+        return integer
+    }
+    private static func boolean(_ value: Any?) -> Bool? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+        return number.boolValue
+    }
+    private static func hash(_ value: String) -> Bool {
+        value.utf8.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+    }
+    private static func timestamp(_ value: String) -> Bool {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard let date = formatter.date(from: value) else { return false }
+        return formatter.string(from: date) == value
     }
 
     private func archive(_ bundle: Bundle, evidenceDirectory: URL) throws {
@@ -258,13 +417,12 @@ struct WebsiteJournalRetentionStore: Sendable {
                     guard try query(db, "SELECT bytes FROM files WHERE store=? AND task=? AND turn=?", [file.store, bundle.task, file.turn]).first?.first == file.bytes else { throw Failure.unavailable }
                 }
                 for receipt in bundle.receipts {
-                    let data = try JSONEncoder().encode(receipt), binding = try Self.binding(receipt)
-                    try execute(db, "INSERT INTO receipts(attempt,bytes) VALUES(?,?)", [receipt.attemptID, data])
-                    for (kind, id) in [("inference", receipt.inferenceID!), ("token", receipt.sessionToken!)] {
-                        if let old = try query(db, "SELECT binding FROM identities WHERE kind=? AND id=?", [kind, id]).first?.first {
-                            guard old == binding else { throw Failure.unavailable }
-                        } else { try execute(db, "INSERT INTO identities(kind,id,binding) VALUES(?,?,?)", [kind, id, binding]) }
-                    }
+                    try execute(db, "INSERT INTO receipts(attempt,bytes) VALUES(?,?)", [receipt.attemptID, try JSONEncoder().encode(receipt)])
+                }
+                for identity in bundle.identities {
+                    if let old = try query(db, "SELECT binding FROM identities WHERE kind=? AND id=?", [identity.kind, identity.id]).first?.first {
+                        guard old == identity.binding else { throw Failure.unavailable }
+                    } else { try execute(db, "INSERT INTO identities(kind,id,binding) VALUES(?,?,?)", [identity.kind, identity.id, identity.binding]) }
                 }
                 let latest = bundle.receipts.filter { $0.outcome == .closed }.max { ($0.timestamp, $0.attemptID) < ($1.timestamp, $1.attemptID) }!
                 try execute(db, "INSERT INTO latest(task,timestamp,bytes) VALUES(?,?,?) ON CONFLICT(task) DO UPDATE SET timestamp=excluded.timestamp,bytes=excluded.bytes WHERE excluded.timestamp>=latest.timestamp",

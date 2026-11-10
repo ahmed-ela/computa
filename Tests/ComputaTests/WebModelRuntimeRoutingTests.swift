@@ -148,6 +148,116 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
         }
     }
 
+    func testLocalPreparationFailureHasNativeNonDeliveryProofBeforeTurnStart() async throws {
+        let model = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
+        let (runtime, root) = try makeRuntime(modelID: model)
+        let transport = RecordingPreparationTransport()
+        await runtime.configureEmbeddedWebModelTransport(transport)
+        _ = try blockPreparationStorage(root: root)
+        do {
+            try await runtime.submit(prompt: "Synthetic locally unsent prompt", toTaskID: UUID().uuidString.lowercased(), modelID: model)
+            XCTFail("A local storage refusal cannot dispatch the user turn")
+        } catch let error as CodexAppServerRuntime.PromptNotDispatched {
+            XCTAssertEqual(error.localizedDescription, WebModelServer.Failure.persistenceRequired.localizedDescription)
+        } catch {
+            XCTFail("Expected native proof from the preparation boundary, not an arbitrary error: \(error)")
+        }
+        XCTAssertEqual(try requestCount("thread-start", root: root), 1, "Thread setup is separate from current prompt delivery")
+        XCTAssertEqual(try requestCount("turn-start", root: root), 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("request-turn-start.json").path))
+        let operations = await transport.operations()
+        XCTAssertTrue(operations.isEmpty, "The failed local preparation cannot start or send a website prompt")
+        let report = await runtime.shutdown()
+        XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
+    }
+
+    func testQueuePausesProvenUnsentPreparationAndDispatchesOnlyAfterExplicitResume() async throws {
+        let model = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
+        let (runtime, root) = try makeRuntime(modelID: model)
+        let transport = RecordingPreparationTransport()
+        await runtime.configureEmbeddedWebModelTransport(transport)
+        let blocked = try blockPreparationStorage(root: root)
+        let taskID = UUID().uuidString.lowercased()
+        let prompt = "Keep this exact queued prompt — e\u{0301} 🧭"
+        let task = AgentTask(id: taskID, title: "Local preparation refusal", summary: "", status: .draft,
+                             workspace: root.path, model: model)
+        let state = AppState(tasks: [task], runtime: runtime, preferences: isolatedTestPreferences(),
+                             cookieMaintenanceOnlyLaunch: false)
+        state.connectionState = .connected(provider: runtime.providerName)
+        let accepted = await state.submitOrQueue(prompt: prompt, toTaskID: taskID)
+        XCTAssertTrue(accepted, "Local queue acceptance is distinct from native delivery")
+        let failed = try XCTUnwrap(state.queuedPrompts[taskID]?.first)
+        XCTAssertEqual(failed.text, prompt)
+        XCTAssertEqual(Data(failed.text.utf8), Data(prompt.utf8))
+        XCTAssertEqual(failed.status, .failed)
+        XCTAssertEqual(failed.deliveryUncertain, false)
+        XCTAssertTrue(state.pausedQueueTaskIDs.contains(taskID))
+        XCTAssertEqual(state.selectedTask?.entries.last?.title, "Prompt was not delivered")
+        XCTAssertEqual(state.selectedTask?.entries.last?.body, WebModelServer.Failure.persistenceRequired.localizedDescription)
+        XCTAssertEqual(state.connectionState, .connected(provider: runtime.providerName))
+        XCTAssertEqual(try requestCount("turn-start", root: root), 0)
+
+        // Repairing this inert fixture's storage is not authorization to replay.
+        try FileManager.default.removeItem(at: blocked)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(try requestCount("turn-start", root: root), 0)
+        XCTAssertEqual(state.queuedPrompts[taskID]?.first, failed)
+        XCTAssertTrue(state.pausedQueueTaskIDs.contains(taskID))
+        let resumed = await state.resumeQueue(taskID: taskID)
+        XCTAssertTrue(resumed)
+        XCTAssertEqual(try requestCount("turn-start", root: root), 1)
+        XCTAssertTrue(state.queuedPrompts[taskID, default: []].isEmpty)
+        let params = try requestParameters("turn-start", root: root)
+        let input = try XCTUnwrap(params["input"] as? [[String: String]])
+        XCTAssertEqual(input.first?["text"], prompt)
+        XCTAssertEqual(Data(try XCTUnwrap(input.first?["text"]).utf8), Data(prompt.utf8))
+        let operations = await transport.operations()
+        XCTAssertTrue(operations.isEmpty, "The JSON-RPC fixture never performs website inference")
+        let report = await runtime.shutdown()
+        XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
+    }
+
+    func testDispatchedRPCErrorWithSamePreparationProseRemainsDeliveryUncertain() async throws {
+        let model = syntheticChatGPTModelID
+        let (runtime, root) = try makeRuntime(modelID: model, rejectTurnStart: true)
+        await runtime.configureEmbeddedWebModelTransport(InertEmbeddedTransport())
+        let taskID = UUID().uuidString.lowercased()
+        let task = AgentTask(id: taskID, title: "Dispatched refusal", summary: "", status: .draft,
+                             workspace: root.path, model: model)
+        let state = AppState(tasks: [task], runtime: runtime, preferences: isolatedTestPreferences(),
+                             cookieMaintenanceOnlyLaunch: false)
+        state.connectionState = .connected(provider: runtime.providerName)
+        let accepted = await state.submitOrQueue(prompt: "Retain this dispatched prompt", toTaskID: taskID)
+        XCTAssertTrue(accepted)
+        XCTAssertEqual(try requestCount("turn-start", root: root), 1,
+                       "The RPC was written before the fixture returned its structured error")
+        XCTAssertEqual(state.queuedPrompts[taskID]?.first?.status, .failed)
+        XCTAssertEqual(state.queuedPrompts[taskID]?.first?.deliveryUncertain, true)
+        XCTAssertTrue(state.pausedQueueTaskIDs.contains(taskID))
+        XCTAssertFalse(state.canChangeModel(for: taskID))
+        XCTAssertEqual(state.selectedTask?.entries.last?.title, "Agent error")
+        XCTAssertEqual(state.selectedTask?.entries.last?.body, WebModelServer.Failure.persistenceRequired.localizedDescription)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(try requestCount("turn-start", root: root), 1, "No automatic second dispatch follows uncertain delivery")
+        let report = await runtime.shutdown()
+        XCTAssertTrue(report.succeeded, report.issues.joined(separator: "; "))
+    }
+
+    private func blockPreparationStorage(root: URL) throws -> URL {
+        let evidence = root.appendingPathComponent("WebsiteModelEvidence-v1", isDirectory: true)
+        try FileManager.default.createDirectory(at: evidence, withIntermediateDirectories: true,
+                                               attributes: [.posixPermissions: 0o700])
+        let blocked = evidence.appendingPathComponent("transactions")
+        try Data("Synthetic non-directory blocks local reservation".utf8).write(to: blocked)
+        return blocked
+    }
+
+    private func requestCount(_ method: String, root: URL) throws -> Int {
+        let path = root.appendingPathComponent("request-\(method)-count")
+        guard FileManager.default.fileExists(atPath: path.path) else { return 0 }
+        return try XCTUnwrap(Int(String(contentsOf: path, encoding: .utf8)))
+    }
+
     private var websiteModels: [String] {
         [syntheticChatGPTModelID, LocalModelCatalog.geminiBrowserModelID, LocalModelCatalog.claudeBrowserModelID,
          LocalModelCatalog.groqBrowserModelID]
@@ -168,7 +278,7 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
         return try XCTUnwrap(turn["threadId"] as? String)
     }
 
-    private func makeRuntime(modelID: String) throws -> (CodexAppServerRuntime, URL) {
+    private func makeRuntime(modelID: String, rejectTurnStart: Bool = false) throws -> (CodexAppServerRuntime, URL) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaEmbeddedModel-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let source = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
@@ -177,7 +287,15 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
         let recorder = """
         const request = JSON.parse(line);
         if (['thread/start', 'turn/start'].includes(request.method)) {
-          writeFileSync(join(root, `request-${request.method.replaceAll('/', '-')}.json`), JSON.stringify(request));
+          const stem = `request-${request.method.replaceAll('/', '-')}`;
+          const count = join(root, `${stem}-count`);
+          writeFileSync(count, String((existsSync(count) ? Number(readFileSync(count, 'utf8')) : 0) + 1));
+          writeFileSync(join(root, `${stem}.json`), JSON.stringify(request));
+        }
+        if (request.method === 'thread/start') writeFileSync(join(root, 'accepted-thread-id'), threadId);
+        if (request.method === 'turn/start' && existsSync(join(root, 'reject-turn-start'))) {
+          emit({ id: request.id, error: { code: -32603, message: readFileSync(join(root, 'reject-turn-start'), 'utf8') } });
+          return;
         }
         """
         var sourceText = try String(contentsOf: source, encoding: .utf8)
@@ -195,6 +313,10 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
             .replacingOccurrences(of: turnDeclaration, with: "const turnId = currentTurn = (++turnCount, randomUUID());")
         try Data(sourceText.replacingOccurrences(of: "const request = JSON.parse(line);", with: recorder).utf8).write(to: fixture)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fixture.path)
+        if rejectTurnStart {
+            try Data(WebModelServer.Failure.persistenceRequired.localizedDescription.utf8)
+                .write(to: root.appendingPathComponent("reject-turn-start"))
+        }
         try Data("phase-contract".utf8).write(to: root.appendingPathComponent("scenario"))
         try Data("release".utf8).write(to: root.appendingPathComponent("release-phase-text"))
         var configuration = CodexAppServerRuntime.Configuration.localQwen
@@ -205,9 +327,7 @@ final class WebModelRuntimeRoutingTests: XCTestCase {
         addTeardownBlock {
             // Retire only this fixture's exact accepted native thread markers;
             // all other homes/threads and their membership remain unchanged.
-            if let bytes = try? Data(contentsOf: root.appendingPathComponent("request-turn-start.json")),
-               let request = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
-               let params = request["params"] as? [String: Any], let thread = params["threadId"] as? String,
+            if let thread = try? String(contentsOf: root.appendingPathComponent("accepted-thread-id"), encoding: .utf8),
                UUID(uuidString: thread)?.uuidString.lowercased() == thread {
                 var ownMarkers: [(String, String)] = []
                 if let marker = GroqToolThreadRegistration.marker(codexHome: root.path, threadID: thread, modelID: modelID) {
@@ -237,6 +357,15 @@ private struct InertEmbeddedTransport: WebModelTransport {
     func request(operation: String, params: Data) async throws -> Data {
         // The JSON-RPC fixture does not perform inference. Endpoint and provider
         // admission are real; no browser operation is authorized by this test.
+        throw WebModelServer.Failure.invalidRequest
+    }
+}
+
+private actor RecordingPreparationTransport: WebModelTransport {
+    private var observed = [String]()
+    func operations() -> [String] { observed }
+    func request(operation: String, params: Data) async throws -> Data {
+        observed.append(operation)
         throw WebModelServer.Failure.invalidRequest
     }
 }
