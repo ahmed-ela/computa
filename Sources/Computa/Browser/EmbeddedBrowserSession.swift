@@ -935,8 +935,9 @@ final class EmbeddedBrowserSession {
                       let factory = EmbeddedBrowserSession.rendererDiagnosticSource(named: "groq-response-stream-metadata"),
                       factory.utf8.count <= 32_768 else { return nil }
                 installedSource = installedSource.replacingOccurrences(of: marker, with: "(" + factory + ")")
+                guard let purpose = lease.responseStreamMetadataPurpose else { return nil }
                 config["streamMetadata"] = true
-                config["streamMetadataPurpose"] = GroqOwnedStatusLease.FixtureTurn.responseStreamPurpose
+                config["streamMetadataPurpose"] = purpose
             }
             guard milliseconds>0,let bytes=try? JSONSerialization.data(withJSONObject:config) else{return nil}
             return installedSource.replacingOccurrences(of:"__GROQ_OWNED_SYNTHETIC_CONFIG__",with:String(decoding:bytes,as:UTF8.self))
@@ -1053,8 +1054,8 @@ final class EmbeddedBrowserSession {
         let stage: String
         let metadata: GroqOwnedStatusLease.ResponseStreamMetadata?
 
-        static func parse(_ text: String) -> Self? {
-            guard text.utf8.count <= 2_048 else { return nil }
+        static func parse(_ text: String, expectedVersion: Int = 1) -> Self? {
+            guard [1, 2].contains(expectedVersion), text.utf8.count <= 2_048 else { return nil }
             let data = Data(text.utf8)
             guard APIModelCorrectionJSON.isUnambiguous(data),
                   let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -1064,7 +1065,8 @@ final class EmbeddedBrowserSession {
             if value["responseStream"] is NSNull { metadata = nil }
             else {
                 guard stage == "http_2xx_opened",
-                      let parsed = GroqOwnedStatusLease.ResponseStreamMetadata.parse(value["responseStream"]) else { return nil }
+                      let parsed = GroqOwnedStatusLease.ResponseStreamMetadata.parse(value["responseStream"]),
+                      parsed.version == expectedVersion else { return nil }
                 metadata = parsed
             }
             return .init(stage: stage, metadata: metadata)
@@ -1074,6 +1076,7 @@ final class EmbeddedBrowserSession {
     func groqResponseStreamStatusResult(_ id: UUID, view: WKWebView, owner: String, generation: UUID,
                                        fingerprint: String) async -> GroqResponseStreamStatus? {
         guard let e = entries[id], let p = e.groqStatus, p.lease.capturesResponseStreamMetadata,
+              let expectedVersion = p.lease.responseStreamMetadataVersion,
               p.armed, p.owner == owner, p.generation == generation, p.fingerprint == fingerprint,
               groqStatusCurrent(e, p, view: view, owner: owner, generation: generation) else { return nil }
         p.armed = false
@@ -1081,7 +1084,7 @@ final class EmbeddedBrowserSession {
         guard p.lease.capturesResponseStreamMetadata,
               groqStatusCurrent(e, p, view: view, owner: owner, generation: generation),
               case .returned(let text) = result else { return nil }
-        return GroqResponseStreamStatus.parse(text)
+        return GroqResponseStreamStatus.parse(text, expectedVersion: expectedVersion)
     }
 
     private enum GroqStatusCallOutcome {

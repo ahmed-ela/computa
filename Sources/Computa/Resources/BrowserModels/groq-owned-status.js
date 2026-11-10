@@ -41,7 +41,7 @@
   if (!Object.prototype.hasOwnProperty.call(profiles, config.profile) || earlyPassive && config.profile !== 'gptoss120b') { setupFailure('js_profile_unavailable'); return; }
   const profile = profiles[config.profile];
   if (streamMetadata && (!earlyPassive || !setupDiagnostics || config.profile !== 'gptoss120b'
-    || streamPurpose !== 'groq_120b_fixture_response_stream_metadata_v1'
+    || !['groq_120b_fixture_response_stream_metadata_v1','groq_120b_fixture_response_stream_tail_metadata_v2'].includes(streamPurpose)
     || typeof streamFactory?.startMatchedGroqResponseStreamProbe !== 'function')) {
     setupFailure('js_profile_unavailable'); return;
   }

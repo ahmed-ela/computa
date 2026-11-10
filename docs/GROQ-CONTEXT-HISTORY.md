@@ -186,3 +186,29 @@ A bounded normal-browser comparison on build 477 exposed loss in Groq's rendered
 The strict follow-up distinguishes the existing verified nested JSON code-block profile from rendered fallback text. Only the literal code profile can establish response bytes. Native completion requires that proof on every terminal observation, including a final reread with otherwise unchanged text. A rendered fallback remains available for diagnostics, but it cannot release a message or tool call, even if it happens to parse as JSON. No JSON repair, byte substitution, prose clipping or action replay is authorized. Ownership, current model, first-user proof, deadlines and cleanup remain independent requirements.
 
 The generic Groq and compact native-history response instructions require the entire visible envelope inside one JSON code block. Other providers retain their existing presentation. This is a response representation change; schema loading remains read-only and proves no task execution. One grounded terminal control on 477 does not qualify the combined coding/browser workflow, and neither this finding nor the literal change resolves earlier provider timeouts.
+
+### Bounded stream ending diagnostics (2026-11-10)
+
+The build 478 instrumented workflow released one schema load, then Groq restored
+its draft with a generic submission error. Its matched HTTP 2xx stream prefix
+contained reasoning-channel activity and no observed content before the 256 KiB
+capture cap. The second session's cleanup remained unconfirmed. This is not a
+completed reasoning-only response, a token count, a quota diagnosis, or a repair
+of earlier failures; everything after that cap remains unknown.
+
+The separate `groq_120b_fixture_response_stream_tail_metadata_v2` purpose extends
+only this controlled GPT-OSS 120B diagnostic. V1 retains its original 256 KiB,
+4,096-event, 8,192-chunk and 60-second bounds. V2 permits at most 16 MiB of offered
+clone bytes, 131,072 events, 262,144 chunks and 90 seconds. Both keep 16 KiB
+line/frame buffers, the same JSON depth/node limits, the same 20 closed output
+fields and the same 2 KiB packet / 4 KiB private carrier limits. The immutable
+native purpose determines the version; a controller packet or publication cannot
+borrow another version's bounds. Neither mode retains content, reasoning,
+headers or arbitrary provider error text.
+
+The probe distinguishes finish reason, DONE, natural EOF, read rejection and
+capture limits; none alone supplies an answer or execution proof. Larger bounds
+do not guarantee a complete stream. Cloning tees the response and can affect
+scheduling, backpressure and browser queue use, so this remains an invasive
+synthetic diagnostic. It adds no response acceptance, Inspector, Send, replay,
+cleanup or pacing authority. Ordinary model requests keep the probe disabled.

@@ -4,6 +4,8 @@
   'use strict';
   const purpose = 'groq_120b_fixture_response_stream_metadata_v1';
   const limits = Object.freeze({bytes:262144, events:4096, frameBytes:16384, durationMS:60000});
+  const tailPurpose = 'groq_120b_fixture_response_stream_tail_metadata_v2';
+  const tailLimits = Object.freeze({bytes:16777216, events:131072, chunks:262144, frameBytes:16384, durationMS:90000});
   const apply = Reflect.apply, descriptor = Object.getOwnPropertyDescriptor;
   const parse = JSON.parse, stringify = JSON.stringify;
   const own = (value, key) => value !== null && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, key);
@@ -62,9 +64,11 @@
     return value;
   }
 
-  function createGroqSSEMetadataParser(framing = 'sse') {
+  function createGroqSSEMetadataParser(framing = 'sse', version = 1) {
+    const selectedVersion = version === 2 ? 2 : 1, cap = selectedVersion === 2 ? tailLimits : limits;
+    const chunkLimit = selectedVersion === 2 ? tailLimits.chunks : 8192;
     if (!['sse','json','other','missing'].includes(framing)) framing = 'other';
-    const facts = {version:1, framing, bytes:0, chunks:0, events:0, jsonEvents:0,
+    const facts = {version:selectedVersion, framing, bytes:0, chunks:0, events:0, jsonEvents:0,
       content:false, reasoning:false, toolCalls:false, topLevelError:false,
       eventError:false, xGroqError:'none', apiErrorCode:'none', apiErrorType:'none', finishReason:'none', done:false,
       eof:false, unknownFrames:0, incompleteFrame:false, outcome:'reading'};
@@ -77,7 +81,7 @@
         'read_rejected','deadline','revoked','disposed','unavailable'].includes(reason) ? reason : 'unavailable';
       stopped = true; clear();
     }
-    function unknown() { facts.unknownFrames = Math.min(limits.events, facts.unknownFrames + 1); }
+    function unknown() { facts.unknownFrames = Math.min(cap.events, facts.unknownFrames + 1); }
     function finish(value) {
       const next = ['stop','length','tool_calls','function_call','content_filter'].includes(value) ? value : 'other';
       facts.finishReason = facts.finishReason === 'none' || facts.finishReason === next ? next : 'multiple';
@@ -132,7 +136,7 @@
     }
     function event() {
       if (!data.length) { eventError = false; return; }
-      if (facts.events === limits.events) { stop('event_limit'); return; }
+      if (facts.events === cap.events) { stop('event_limit'); return; }
       facts.events++;
       const text = data.join('\n'), hadEventError = eventError; data = []; dataBytes = 0; eventError = false;
       if (text === '[DONE]') { facts.done = true; return; }
@@ -141,13 +145,13 @@
       json(text);
     }
     function consumeLine() {
-      if (!line.length) { event(); if (!stopped && facts.events === limits.events) stop('event_limit'); }
+      if (!line.length) { event(); if (!stopped && facts.events === cap.events) stop('event_limit'); }
       else if (line[0] !== ':') {
         const colon = line.indexOf(':'), field = colon < 0 ? line : line.slice(0, colon);
         let value = colon < 0 ? '' : line.slice(colon + 1); if (value[0] === ' ') value = value.slice(1);
         if (field === 'data') {
           const size = new TextEncoder().encode(value).length + (data.length ? 1 : 0);
-          if (dataBytes + size > limits.frameBytes) stop('frame_limit');
+          if (dataBytes + size > cap.frameBytes) stop('frame_limit');
           else { data.push(value); dataBytes += size; }
         } else if (field === 'event') eventError = value === 'error';
       }
@@ -158,22 +162,22 @@
         if (stopped) return;
         if (framing === 'json') {
           const cp = c.codePointAt(0), n = cp < 128 ? 1 : cp < 2048 ? 2 : cp < 65536 ? 3 : 4;
-          if (jsonBytes + n > limits.frameBytes) { stop('frame_limit'); return; }
+          if (jsonBytes + n > cap.frameBytes) { stop('frame_limit'); return; }
           jsonBuffer += c; jsonBytes += n; continue;
         }
         if (hadCR) { hadCR = false; if (c === '\n') continue; }
         if (c === '\r' || c === '\n') { consumeLine(); hadCR = c === '\r'; continue; }
         const cp = c.codePointAt(0), n = cp < 128 ? 1 : cp < 2048 ? 2 : cp < 65536 ? 3 : 4;
-        if (lineBytes + n > limits.frameBytes) { stop('frame_limit'); return; }
+        if (lineBytes + n > cap.frameBytes) { stop('frame_limit'); return; }
         line += c; lineBytes += n;
       }
     }
     function push(bytes) {
       if (stopped) return false;
       if (!(bytes instanceof Uint8Array)) { stop('unavailable'); return false; }
-      facts.chunks = Math.min(65535, facts.chunks + 1);
-      if (facts.chunks >= 8192) { stop('chunk_limit'); return false; }
-      const remaining = limits.bytes - facts.bytes, take = Math.min(remaining, bytes.byteLength);
+      facts.chunks = Math.min(chunkLimit, facts.chunks + 1);
+      if (facts.chunks >= chunkLimit) { stop('chunk_limit'); return false; }
+      const remaining = cap.bytes - facts.bytes, take = Math.min(remaining, bytes.byteLength);
       facts.bytes += take;
       try {
         if (framing === 'other' || framing === 'missing') { if (take) facts.unknownFrames = 1; }
@@ -197,8 +201,11 @@
   // it only inside the already-accepted single request/Response callback. Clone
   // tees the body: object identity is preserved, timing equivalence is not.
   function startMatchedGroqResponseStreamProbe(value, options) {
-    if (dataValue(options, 'streamMetadata') !== true || dataValue(options, 'purpose') !== purpose
+    const requestedPurpose = dataValue(options, 'purpose');
+    const version = requestedPurpose === tailPurpose ? 2 : requestedPurpose === purpose ? 1 : 0;
+    if (dataValue(options, 'streamMetadata') !== true || version === 0
       || dataValue(options, 'profile') !== 'gptoss120b') return null;
+    const cap = version === 2 ? tailLimits : limits;
     const isCurrent = dataValue(options, 'isCurrent');
     if (typeof isCurrent !== 'function' || ![nativeClone,nativeBody,nativeStatus,nativeHeaders,nativeHeaderGet,nativeReader,nativeRead,nativeCancel,nativeRelease]
       .every(fn => typeof fn === 'function')) return null;
@@ -215,8 +222,8 @@
       const body = apply(nativeBody, clone, []); if (!body) return null;
       reader = apply(nativeReader, body, []);
     } catch { return null; }
-    const parser = createGroqSSEMetadataParser(framing);
-    const now = performance.now.bind(performance), expiresAt = now() + limits.durationMS;
+    const parser = createGroqSSEMetadataParser(framing, version);
+    const now = performance.now.bind(performance), expiresAt = now() + cap.durationMS;
     let stopped = false, published = false, timer, settle;
     const settled = new Promise(resolve => { settle = resolve; });
     function cancel() {
@@ -226,7 +233,7 @@
       if (stopped) return;
       stopped = true; clearTimeout(timer); parser.stop(reason); cancel(); settle();
     }
-    timer = setTimeout(() => stop(current() ? 'deadline' : 'revoked'), limits.durationMS);
+    timer = setTimeout(() => stop(current() ? 'deadline' : 'revoked'), cap.durationMS);
     (async () => {
       try {
         while (!stopped) {

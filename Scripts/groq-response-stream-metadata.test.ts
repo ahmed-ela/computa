@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 
 const source = readFileSync(new URL('../Sources/Computa/Resources/BrowserModels/groq-response-stream-metadata.js', import.meta.url), 'utf8');
 const purpose = 'groq_120b_fixture_response_stream_metadata_v1';
+const tailPurpose = 'groq_120b_fixture_response_stream_tail_metadata_v2';
 const encoder = new TextEncoder();
 function factory(environment: any = {}) {
   return new Function('setTimeout', 'clearTimeout', 'performance', 'return (' + source + ');')(
@@ -16,14 +17,20 @@ function parseBytes(text: string, width = 1) {
   for (let at = 0; at < bytes.length && !parser.isStopped(); at += width) parser.push(bytes.subarray(at, at + width));
   parser.end(); return parser.snapshot();
 }
-function finite(snapshot: any, canaries: string[] = []) {
+function finite(snapshot: any, canaries: string[] = [], version = 1) {
   expect(Object.keys(snapshot).sort()).toEqual(['version','framing','bytes','chunks','events','jsonEvents','content','reasoning',
     'toolCalls','topLevelError','eventError','xGroqError','apiErrorCode','apiErrorType','finishReason','done','eof','unknownFrames','incompleteFrame','outcome'].sort());
   const serialized = JSON.stringify(snapshot);
   expect(encoder.encode(serialized).length).toBeLessThanOrEqual(2048);
   for (const canary of canaries) expect(serialized).not.toContain(canary);
-  expect(snapshot.bytes).toBeGreaterThanOrEqual(0); expect(snapshot.bytes).toBeLessThanOrEqual(262144);
-  expect(snapshot.events).toBeGreaterThanOrEqual(0); expect(snapshot.events).toBeLessThanOrEqual(4096);
+  expect(snapshot.version).toBe(version);
+  const byteLimit = version === 2 ? 16777216 : 262144, eventLimit = version === 2 ? 131072 : 4096;
+  expect(snapshot.bytes).toBeGreaterThanOrEqual(0); expect(snapshot.bytes).toBeLessThanOrEqual(byteLimit);
+  expect(snapshot.events).toBeGreaterThanOrEqual(0); expect(snapshot.events).toBeLessThanOrEqual(eventLimit);
+  for (const key of ['jsonEvents','unknownFrames']) {
+    expect(snapshot[key]).toBeGreaterThanOrEqual(0); expect(snapshot[key]).toBeLessThanOrEqual(eventLimit);
+  }
+  expect(snapshot.chunks).toBeGreaterThanOrEqual(0); expect(snapshot.chunks).toBeLessThanOrEqual(version === 2 ? 262144 : 8192);
 }
 
 test('SSE metadata preserves split UTF8 and CRLF framing while discarding content, reasoning and tool payloads', () => {
@@ -222,4 +229,82 @@ test('read rejection retains no exception text and revoked ownership cannot publ
   current = false; expect(stale.finishFailure()).toBeNull(); await stale.settled;
   late.enqueue(encoder.encode(event({choices:[{delta:{content:'PRIVATE_LATE'}}]}))); late.close();
   expect(await originalSecond).toContain('PRIVATE_LATE'); expect(stale.finishFailure()).toBeNull();
+});
+
+
+test('v2 observes a finite tail beyond the unchanged v1 byte cutoff, including length, DONE and natural EOF', () => {
+  const hidden = ['PRIVATE_TAIL_REASONING', 'PRIVATE_TAIL_CONTENT_🌍'];
+  const prefix = event({choices:[{delta:{reasoning:hidden[0] + 'x'.repeat(800)}}]}).repeat(400);
+  const raw = prefix + event({choices:[{delta:{content:hidden[1]},finish_reason:'length'}]}) + 'data: [DONE]\n\n';
+  const bytes = encoder.encode(raw); expect(bytes.length).toBeGreaterThan(262144);
+  const snapshots:any[] = [];
+  for (const version of [undefined,1,2,'2',99]) {
+    const parser = factory().createGroqSSEMetadataParser('sse', version);
+    for (let at = 0; at < bytes.length && !parser.isStopped(); at += 4096) parser.push(bytes.subarray(at, at + 4096));
+    parser.end(); const facts = parser.snapshot(); snapshots.push(facts);
+    if (version === 2) {
+      expect(facts).toMatchObject({version:2,bytes:bytes.length,events:402,jsonEvents:401,reasoning:true,content:true,
+        finishReason:'length',done:true,eof:true,outcome:'eof'});
+      finite(facts,hidden,2);
+    } else {
+      expect(facts).toMatchObject({version:1,bytes:262144,reasoning:true,content:false,finishReason:'none',done:false,eof:false,outcome:'byte_limit'});
+      finite(facts,hidden);
+    }
+  }
+  expect(snapshots[0]).toEqual(snapshots[1]); expect(snapshots[0]).toEqual(snapshots[3]); expect(snapshots[0]).toEqual(snapshots[4]);
+});
+
+test('v2 has finite byte, event and chunk caps while retaining the same 16KiB frame and JSON validation bounds', () => {
+  const create = factory().createGroqSSEMetadataParser;
+  let parser = create('other',2); parser.push(new Uint8Array(16777217));
+  expect(parser.snapshot()).toMatchObject({version:2,bytes:16777216,outcome:'byte_limit',eof:false}); finite(parser.snapshot(),[],2);
+  parser = create('sse',2); const frame = encoder.encode('data: {}\n\n');
+  for (let i = 0; i < 131072; i++) parser.push(frame);
+  expect(parser.snapshot()).toMatchObject({version:2,events:131072,jsonEvents:131072,unknownFrames:131072,outcome:'event_limit'});
+  finite(parser.snapshot(),[],2);
+  parser = create('sse',2);
+  for (let i = 0; i < 262144; i++) parser.push(new Uint8Array());
+  expect(parser.snapshot()).toMatchObject({version:2,chunks:262144,bytes:0,outcome:'chunk_limit'}); finite(parser.snapshot(),[],2);
+  for (const framing of ['sse','json']) {
+    parser = create(framing,2); parser.push(encoder.encode((framing === 'sse' ? 'data: ' : '') + 'x'.repeat(16385)));
+    expect(parser.snapshot()).toMatchObject({version:2,outcome:'frame_limit',jsonEvents:0,content:false}); finite(parser.snapshot(),['xxxx'],2);
+  }
+  const depth:any = {}; let child = depth; for(let i=0;i<40;i++){child.next={};child=child.next;}
+  for(const raw of ['data: {"choices":[],"choices":[{"delta":{"content":"PRIVATE_DUP_TAIL"}}]}\n\n',event(depth)]) {
+    parser=create('sse',2);parser.push(encoder.encode(raw));parser.end();
+    expect(parser.snapshot()).toMatchObject({version:2,content:false,jsonEvents:0,unknownFrames:1,outcome:'eof'});finite(parser.snapshot(),['PRIVATE_DUP_TAIL'],2);
+  }
+});
+
+test('the exact own v2 purpose alone selects 90 seconds and expired or revoked clones leave original bytes untouched', async () => {
+  let secretReads = 0;
+  const neverRead = new Proxy({}, {get(){secretReads++;throw Error('PRIVATE_TAIL_RESPONSE');}});
+  const start = factory().startMatchedGroqResponseStreamProbe;
+  for(const config of [options({purpose:tailPurpose+'/foreign'}),options({purpose:tailPurpose,profile:'gptoss20b'}),
+    options({purpose:tailPurpose,profile:'qwen27b'}),options({purpose:tailPurpose,streamMetadata:false}),
+    Object.assign(Object.create({purpose:tailPurpose}),{streamMetadata:true,profile:'gptoss120b',isCurrent:()=>true}),
+    Object.defineProperty(options({purpose:tailPurpose}),'purpose',{get(){secretReads++;return tailPurpose;}})]) {
+    expect(start(neverRead,config)).toBeNull();
+  }
+  expect(secretReads).toBe(0);
+  for(const mode of ['deadline','revoked','disposed']) {
+    let clock=0,timer:any,scheduled=0,cleared=0,controller:any,cancels=0,current=true;
+    const api=factory({setTimeout:(callback:any,ms:number)=>{timer=callback;scheduled=ms;return 9;},
+      clearTimeout:(id:number)=>{expect(id).toBe(9);cleared++;},performance:{now:()=>clock}});
+    const response=new Response(new ReadableStream({start(c){controller=c;},cancel(){cancels++;}}),{headers:{'Content-Type':'text/event-stream'}});
+    const handle=api.startMatchedGroqResponseStreamProbe(response,options({purpose:tailPurpose,isCurrent:()=>current}));
+    expect(handle).not.toBeNull();expect(scheduled).toBe(90000);expect(response.bodyUsed).toBe(false);
+    if(mode==='deadline')clock=90001;if(mode==='revoked')current=false;if(mode==='disposed')handle.stop();
+    const facts=handle.finishFailure();
+    if(mode==='deadline'){expect(facts).toMatchObject({version:2,outcome:'deadline',bytes:0,done:false,eof:false});finite(facts,[],2);}
+    else expect(facts).toBeNull();
+    await handle.settled;expect(cancels).toBe(0);expect(cleared).toBe(1);expect(response.bodyUsed).toBe(false);
+    const original=response.text();controller.enqueue(encoder.encode('PRIVATE_ORIGINAL_TAIL_BYTES'));controller.close();
+    expect(await original).toBe('PRIVATE_ORIGINAL_TAIL_BYTES');timer();expect(handle.finishFailure()).toBeNull();
+  }
+  let versionReads=0;
+  const raw=event({choices:[]}),response=new Response(raw,{headers:{'Content-Type':'text/event-stream'}});
+  const config=Object.defineProperty(options(),'version',{get(){versionReads++;throw Error('PRIVATE_VERSION');}});
+  const handle=start(response,config);const original=response.text();await handle.settled;
+  expect(await original).toBe(raw);expect(versionReads).toBe(0);expect(handle.finishFailure().version).toBe(1);
 });

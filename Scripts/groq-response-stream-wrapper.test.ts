@@ -6,6 +6,7 @@ const source = readFileSync(new URL('../Sources/Computa/Resources/BrowserModels/
 const factory = readFileSync(new URL('../Sources/Computa/Resources/BrowserModels/groq-response-stream-metadata.js', import.meta.url), 'utf8');
 const endpoint = 'https://api.groq.com/openai/v1/chat/completions';
 const purpose = 'groq_120b_fixture_response_stream_metadata_v1';
+const tailPurpose = 'groq_120b_fixture_response_stream_tail_metadata_v2';
 const prompt = 'Harmless synthetic exact wrapper marker e\u0301 🌍';
 const encoder = new TextEncoder();
 const event = (value: unknown) => 'data: ' + JSON.stringify(value) + '\n\n';
@@ -176,4 +177,71 @@ test('expired or disposed ownership before a late Response callback cannot start
     if(mode==='dispose')expect(f.ctl('finish_metadata')).toBeUndefined();else expect(JSON.parse(f.savedCtl('finish_metadata')).responseStream).toBeNull();
     expect(f.counts().cloneCalls).toBe(0);expect(f.probes).toHaveLength(0);expect(f.calls).toHaveLength(1);
   }
+});
+
+
+test('the exact v2 tail purpose passes the same matched request and Response through while observing beyond the v1 cutoff', async () => {
+  const f=fixture({purpose:tailPurpose});expect(f.arm()).toBe(true);let privateReads=0;
+  Object.defineProperty(f.window,'navigator',{get(){privateReads++;throw Error('PRIVATE_CLIPBOARD_ACCESS');}});
+  const receiver={tail:true},init={method:'POST',body:f.body()},returned=f.window.fetch.call(receiver,endpoint,init);
+  expect(returned).toBe(f.pending);expect(f.calls).toEqual([{receiver,args:[endpoint,init]}]);expect(f.calls[0].args[1]).toBe(init);
+  let controller:any;
+  const response=f.resolve(new Response(new ReadableStream({start(c){controller=c;}}),{headers:{'Content-Type':'text/event-stream'}}));
+  expect(await returned).toBe(response);const h=await f.probe.promise;expect(h).not.toBeNull();
+  expect(f.timers()).toContain(90000);expect(f.timers()).not.toContain(60000);
+  const before=f.counts().domReads,original=response.text();
+  const hidden=['PRIVATE_WRAPPER_TAIL_REASONING','PRIVATE_WRAPPER_TAIL_CONTENT'];
+  const raw=event({choices:[{delta:{reasoning:hidden[0]+'x'.repeat(800)}}]}).repeat(400)
+    +event({choices:[{delta:{content:hidden[1]},finish_reason:'length'}]})+'data: [DONE]\n\n';
+  const bytes=encoder.encode(raw);expect(bytes.length).toBeGreaterThan(262144);
+  for(let at=0;at<bytes.length;at+=4096)controller.enqueue(bytes.subarray(at,at+4096));controller.close();
+  await h.settled;expect(await original).toBe(raw);expect(f.counts().domReads).toBe(before);
+  const {outer,facts,text}=packet(f);expect(outer.stage).toBe('http_2xx_opened');
+  expect(facts).toMatchObject({version:2,framing:'sse',bytes:bytes.length,events:402,jsonEvents:401,reasoning:true,content:true,
+    finishReason:'length',done:true,eof:true,outcome:'eof'});
+  for(const value of [...hidden,prompt,'PRIVATE_CLIPBOARD_ACCESS'])expect(text).not.toContain(value);
+  expect(privateReads).toBe(0);expect(f.calls).toHaveLength(1);expect(f.probes).toHaveLength(1);
+  expect(f.counts()).toMatchObject({cloneCalls:1,headerReads:1,bodyReads:1,secretReads:0});
+  expect(f.window.fetch).toBe(f.original);expect(f.window[f.key]).toBeUndefined();
+});
+
+test('v2 cannot broaden purpose, native flag, profile or ownership and a stopped clone never consumes the original branch', async () => {
+  for(const options of [{purpose:tailPurpose,stream:false},{purpose:tailPurpose,streamAccessor:true},{purpose:tailPurpose,streamInherited:true},
+    {purpose:tailPurpose,purposeAccessor:true},{purpose:tailPurpose,profile:'qwen27b'},{purpose:tailPurpose,profile:'gptoss20b'},
+    {purpose:tailPurpose,early:false},{purpose:tailPurpose,setup:false},{purpose:tailPurpose,helper:false},{purpose:tailPurpose+'/foreign'}]) {
+    const f=fixture(options),armed=f.arm();
+    if(armed===true){const returned=f.window.fetch(endpoint,{method:'POST',body:f.body()});const response=f.resolve(new Response('PRIVATE_CROSS_SCOPE'));
+      expect(returned).toBe(f.pending);expect(await returned).toBe(response);expect(await response.text()).toBe('PRIVATE_CROSS_SCOPE');
+      expect(f.ctl('finish_metadata')).toBe(false);f.ctl('dispose');
+    }else{expect([false,'js_profile_unavailable',undefined]).toContain(armed);f.ctl('dispose');}
+    expect(f.probes).toHaveLength(0);expect(f.counts()).toMatchObject({cloneCalls:0,headerReads:0,bodyReads:0,secretReads:0});
+  }
+  for(const mode of ['deadline','expiry','document','top','route','controller','duplicate','dispose','lateResponse']) {
+    const f=fixture({purpose:tailPurpose});expect(f.arm()).toBe(true);const cached=f.window.fetch;
+    const returned=cached(endpoint,{method:'POST',body:f.body()});let controller:any;
+    if(mode==='lateResponse')f.tick(390001);
+    const response=f.resolve(new Response(new ReadableStream({start(c){controller=c;}}),{headers:{'Content-Type':'text/event-stream'}}));
+    expect(await returned).toBe(response);
+    if(mode==='lateResponse'){
+      controller.enqueue(encoder.encode('PRIVATE_LATE_RESPONSE'));controller.close();expect(await response.text()).toBe('PRIVATE_LATE_RESPONSE');
+      expect(JSON.parse(f.savedCtl('finish_metadata')).responseStream).toBeNull();expect(f.counts().cloneCalls).toBe(0);expect(f.probes).toHaveLength(0);continue;
+    }
+    const h=await f.probe.promise,original=response.text();let foreignReads=0;
+    if(mode==='deadline')f.tick(90001);if(mode==='expiry')f.tick(390001);if(mode==='document')f.replaceDocument({});if(mode==='top')f.replaceTop({});
+    if(mode==='route')f.location.href+='&foreign=1';
+    if(mode==='controller')Object.defineProperty(f.window,f.key,{configurable:true,get(){foreignReads++;throw Error('PRIVATE_FOREIGN_TAIL_CONTROLLER');}});
+    if(mode==='duplicate')cached(endpoint,{method:'POST',body:f.body()});if(mode==='dispose')f.ctl('dispose');
+    const result=mode==='dispose'?f.ctl('finish_metadata'):f.savedCtl('finish_metadata');
+    if(mode==='dispose')expect(result).toBeUndefined();
+    else if(mode==='deadline')expect(JSON.parse(JSON.parse(result).responseStream)).toMatchObject({version:2,outcome:'deadline',eof:false,done:false});
+    else expect(JSON.parse(result).responseStream).toBeNull();
+    await h.settled;controller.enqueue(encoder.encode('PRIVATE_ORIGINAL_AFTER_TAIL_STOP'));controller.close();
+    expect(await original).toBe('PRIVATE_ORIGINAL_AFTER_TAIL_STOP');expect(foreignReads).toBe(0);
+    expect(f.calls).toHaveLength(mode==='duplicate'?2:1);expect(f.counts().cloneCalls).toBe(1);
+  }
+  const f=fixture({purpose:tailPurpose});f.arm();const returned=f.window.fetch(endpoint,{method:'POST',body:f.body()});
+  const response=f.resolve(new Response('PRIVATE_V2_HTTP_ERROR',{status:429,headers:{'Content-Type':'application/json'}}));
+  expect(await returned).toBe(response);expect(await response.text()).toBe('PRIVATE_V2_HTTP_ERROR');
+  const {outer,facts,text}=packet(f);expect(outer.stage).toBe('http_429');expect(facts).toBeNull();expect(text).not.toContain('PRIVATE_V2_HTTP_ERROR');
+  expect(f.counts()).toMatchObject({cloneCalls:0,headerReads:0,bodyReads:0});
 });

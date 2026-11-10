@@ -81,7 +81,7 @@ import XCTest
         }
         XCTAssertNil(Metadata.parse(["version": 1])); XCTAssertNil(Metadata.parse(nil))
         XCTAssertNil(Metadata.parse(try responseStreamMetadataJSON(["version": true])))
-        XCTAssertNil(Metadata.parse(try responseStreamMetadataJSON(["version": 2])))
+        XCTAssertNil(Metadata.parse(try responseStreamMetadataJSON(["version": 3])))
         let saved = try JSONSerialization.data(withJSONObject: parsed.fields, options: [.sortedKeys])
         XCTAssertLessThanOrEqual(saved.count, 2_048)
         XCTAssertFalse(String(decoding: saved, as: UTF8.self).contains("PRIVATE_"))
@@ -181,6 +181,127 @@ import XCTest
         for secret in ["PRIVATE_BODY", "PRIVATE_UNKNOWN_PROVIDER_TEXT", "http://127.0.0.1"] {
             XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains(secret))
         }
+    }
+
+    func testResponseStreamTailV2RequiresExactNativeOptInAndClosedContinuation() throws {
+        typealias Lease = GroqOwnedStatusLease
+        let purpose = Lease.FixtureTurn.responseStreamTailPurpose
+        for refusal in ["disabled", "earlyOnly", "manualOnly", "qwen", "hash", "purpose", "extraKey", "publicArm", "expired", "future"] {
+            let arm = try inspectorArm(kind: refusal == "qwen" ? .qwen27b : .gptoss120b,
+                purpose: purpose, mutation: refusal,
+                expiresIn: refusal == "expired" ? -1 : refusal == "future" ? 601 : 60)
+            XCTAssertNil(Lease.FixtureTurn.consume(directory: arm.directory, admission: arm.admission,
+                request: arm.request, first: true, allowManualInspector: refusal == "manualOnly",
+                allowEarlyPassive: refusal == "earlyOnly", allowResponseStream: !["disabled", "earlyOnly", "manualOnly"].contains(refusal)), refusal)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: arm.directory.appendingPathComponent("arm.json").path))
+        }
+        let arm = try inspectorArm(purpose: purpose, expiresIn: 600)
+        XCTAssertNil(Lease.FixtureTurn.consume(directory: arm.directory, admission: arm.admission,
+            request: arm.request, first: false, allowResponseStream: true))
+        let parent = try XCTUnwrap(Lease.FixtureTurn.consume(directory: arm.directory, admission: arm.admission,
+            request: arm.request, first: true, allowResponseStream: true))
+        let first = try XCTUnwrap(parent.child(admission: arm.admission, request: arm.request))
+        XCTAssertEqual(parent.publicationPurpose, purpose)
+        XCTAssertEqual(first.responseStreamMetadataPurpose, purpose); XCTAssertEqual(first.responseStreamMetadataVersion, 2)
+        XCTAssertEqual(first.installationMode, .earlyPassive)
+        XCTAssertTrue(first.capturesResponseStreamMetadata); XCTAssertTrue(first.capturesFailureProgress)
+        XCTAssertNil(first.inspectorOrdinal)
+        XCTAssertNil(first.bindInspector(view: ObjectIdentifier(NSObject()), ownerToken: UUID().uuidString.lowercased(), generation: UUID()))
+        let continued = try inspectorContinuation(arm.request), next = inspectorAdmission(after: arm.admission)
+        XCTAssertNil(parent.child(admission: next, request: continued.next))
+        XCTAssertNil(parent.child(admission: inspectorAdmission(after: arm.admission, changing: "thread"), request: continued.next,
+            closedInferenceID: arm.admission.inferenceID, closedContinuation: continued.closed))
+        XCTAssertNil(parent.child(admission: next, request: continued.next,
+            closedInferenceID: UUID(), closedContinuation: continued.closed))
+        let second = try XCTUnwrap(parent.child(admission: next, request: continued.next,
+            closedInferenceID: arm.admission.inferenceID, closedContinuation: continued.closed))
+        XCTAssertEqual(second.responseStreamMetadataVersion, 2); XCTAssertEqual(second.responseStreamMetadataPurpose, purpose)
+        XCTAssertNil(parent.child(admission: next, request: continued.next,
+            closedInferenceID: arm.admission.inferenceID, closedContinuation: continued.closed))
+        parent.revoke()
+        XCTAssertFalse(first.capturesResponseStreamMetadata); XCTAssertFalse(second.capturesFailureProgress)
+        XCTAssertEqual(first.responseStreamMetadataVersion, 2, "The immutable purpose survives revocation without any live capture authority")
+        second.publish(.init(stage: "http_2xx_opened", sessionToken: UUID().uuidString.lowercased(), generation: UUID(),
+            responseStreamMetadata: try XCTUnwrap(Lease.ResponseStreamMetadata.parse(try responseStreamMetadataJSON(["version": 2])))), trigger: "response_deadline")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: arm.output.path))
+    }
+
+    func testResponseStreamTailV2KeepsVersionOneBoundsAndStrictFiniteJSONTypes() throws {
+        typealias Metadata = GroqOwnedStatusLease.ResponseStreamMetadata
+        let caps = [("bytes", 16_777_216), ("chunks", 262_144), ("events", 131_072), ("jsonEvents", 131_072), ("unknownFrames", 131_072)]
+        var changes: [String: Any] = ["version": 2]
+        for (field, maximum) in caps { changes[field] = maximum }
+        let json = try responseStreamMetadataJSON(changes), metadata = try XCTUnwrap(Metadata.parse(json))
+        XCTAssertEqual(metadata.version, 2); XCTAssertEqual(metadata.fields.count, 20)
+        XCTAssertLessThanOrEqual(try JSONSerialization.data(withJSONObject: metadata.fields).count, 2_048)
+        for (field, maximum) in caps {
+            for invalid in ([-1, maximum + 1, 1.5, true, "1", NSNull()] as [Any]) {
+                var bad = changes; bad[field] = invalid
+                XCTAssertNil(Metadata.parse(try responseStreamMetadataJSON(bad)), field)
+            }
+            XCTAssertNil(Metadata.parse(try responseStreamMetadataJSON([field: maximum])), "V1 cannot inherit V2 capacity: " + field)
+        }
+        for badVersion in ([0, 3, true, "2", NSNull()] as [Any]) {
+            XCTAssertNil(Metadata.parse(try responseStreamMetadataJSON(["version": badVersion])))
+        }
+        for bad in [json.replacingOccurrences(of: "\"version\":2", with: "\"version\":2,\"version\":2"),
+                    json.replacingOccurrences(of: "\"version\":2", with: #""version":2,"\u0076ersion":2"#),
+                    try responseStreamMetadataJSON(["version": 2, "privateText": "PRIVATE_BODY"]),
+                    try responseStreamMetadataJSON(["version": 2, "content": 1]),
+                    try responseStreamMetadataJSON(["version": 2, "outcome": "PRIVATE_PROVIDER_TEXT"]),
+                    String(repeating: " ", count: 2_049) + json] {
+            XCTAssertNil(Metadata.parse(bad))
+        }
+        let v1 = try XCTUnwrap(Metadata.parse(try responseStreamMetadataJSON()))
+        XCTAssertEqual(v1.version, 1); XCTAssertEqual(v1.fields["bytes"] as? Int, 262_144)
+    }
+
+    func testResponseStreamTailV2PublicationAndControllerPacketsRequireTheAdmittedVersion() throws {
+        typealias Lease = GroqOwnedStatusLease
+        typealias Packet = EmbeddedBrowserSession.GroqResponseStreamStatus
+        for (purpose, version) in [(Lease.FixtureTurn.responseStreamPurpose, 1), (Lease.FixtureTurn.responseStreamTailPurpose, 2)] {
+            for observedVersion in [1, 2] {
+                let arm = try inspectorArm(purpose: purpose)
+                let parent = try XCTUnwrap(Lease.FixtureTurn.consume(directory: arm.directory, admission: arm.admission,
+                    request: arm.request, first: true, allowResponseStream: true))
+                let child = try XCTUnwrap(parent.child(admission: arm.admission, request: arm.request))
+                let json = try responseStreamMetadataJSON(["version": observedVersion])
+                let metadata = try XCTUnwrap(Lease.ResponseStreamMetadata.parse(json))
+                let outer = String(decoding: try JSONSerialization.data(withJSONObject: ["stage": "http_2xx_opened", "responseStream": json]), as: UTF8.self)
+                XCTAssertLessThanOrEqual(outer.utf8.count, 2_048)
+                let parsed = Packet.parse(outer, expectedVersion: version)
+                if version == observedVersion { XCTAssertEqual(parsed?.metadata?.version, version) }
+                else { XCTAssertNil(parsed, "A current controller cannot relabel a mismatched stream version") }
+                if observedVersion == 2 { XCTAssertNil(Packet.parse(outer), "The default packet contract remains V1") }
+                XCTAssertNil(Packet.parse(outer, expectedVersion: 3))
+                let observation = Lease.Observation(stage: "http_2xx_opened", sessionToken: UUID().uuidString.lowercased(),
+                    generation: UUID(), responseStreamMetadata: metadata)
+                child.publish(observation, trigger: "response_deadline")
+                let bytes = try Data(contentsOf: arm.output)
+                XCTAssertLessThanOrEqual(bytes.count, 4_096)
+                let row = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+                XCTAssertEqual(row["purpose"] as? String, purpose)
+                let saved = row["responseStreamMetadata"] as? [String: Any]
+                if version == observedVersion { XCTAssertEqual(saved?["version"] as? Int, version); XCTAssertEqual(saved?.count, 20) }
+                else { XCTAssertNil(saved, "Only matching metadata can enter this admitted purpose's record") }
+                child.publish(.init(stage: "http_429", sessionToken: observation.sessionToken, generation: observation.generation), trigger: "groq_reported_submission_error")
+                XCTAssertEqual(try Data(contentsOf: arm.output), bytes, "First failure remains immutable")
+                XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains("PRIVATE_"))
+            }
+        }
+        let metadata = try XCTUnwrap(Lease.ResponseStreamMetadata.parse(try responseStreamMetadataJSON(["version": 2])))
+        for old in [try setupLease(fixture: false), try setupLease(fixture: true)] {
+            XCTAssertNil(old.lease.responseStreamMetadataVersion); XCTAssertNil(old.lease.responseStreamMetadataPurpose)
+            old.lease.publish(.init(stage: "http_2xx_opened", sessionToken: UUID().uuidString.lowercased(), generation: UUID(),
+                responseStreamMetadata: metadata), trigger: "response_deadline")
+            let row = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: old.output)) as? [String: Any])
+            XCTAssertNil(row["responseStreamMetadata"])
+        }
+    }
+
+    func testResponseStreamTailV2UsesItsExactPurposeInTheFreshNativeEarlyController() async throws {
+        try await run("cachedSDK", expected: "transport_rejected", profile: .gptoss120b, fixture: true,
+            fixtureKind: .gptoss120b, earlyPassive: true, responseStreamTail: true)
     }
 
     private func responseStreamMetadataJSON(_ changes: [String: Any] = [:]) throws -> String {
@@ -1082,7 +1203,8 @@ import XCTest
 
     private func run(_ mode:String,expected:String,profile:GroqOwnedStatusLease.Profile = .gptoss20b,
                      fixture:Bool=false,continuation:Bool=false,customHistory:Bool=false,
-                     fixtureKind:GroqOwnedStatusLease.FixtureTurn.Kind?=nil,earlyPassive:Bool=false,maskReadFailure:Bool=false) async throws {
+                     fixtureKind:GroqOwnedStatusLease.FixtureTurn.Kind?=nil,earlyPassive:Bool=false,maskReadFailure:Bool=false,
+                     responseStreamTail:Bool=false) async throws {
         let path=try XCTUnwrap(realpath(FileManager.default.temporaryDirectory.path,nil));defer{free(path)}
         let tmp=URL(fileURLWithPath:String(cString:path),isDirectory:true).appendingPathComponent("groq-status-"+UUID().uuidString)
         let directory=tmp.appendingPathComponent(GroqOwnedStatusLease.directoryName)
@@ -1094,7 +1216,8 @@ import XCTest
         let armProfile:GroqOwnedStatusLease.Profile = mode=="wrongProfile" ? .gptoss20b : profile
         let output=directory.appendingPathComponent("owned-status.json"),arm=directory.appendingPathComponent("arm.json")
         let date=ISO8601DateFormatter();date.formatOptions=[.withInternetDateTime,.withFractionalSeconds]
-        let fixturePurpose=earlyPassive ? GroqOwnedStatusLease.FixtureTurn.earlyPassivePurpose : mode=="crossFixturePurpose"
+        let fixturePurpose=responseStreamTail ? GroqOwnedStatusLease.FixtureTurn.responseStreamTailPurpose
+            : earlyPassive ? GroqOwnedStatusLease.FixtureTurn.earlyPassivePurpose : mode=="crossFixturePurpose"
             ? (kind == .qwen27b ? GroqOwnedStatusLease.FixtureTurn.Kind.gptoss120b.purpose : GroqOwnedStatusLease.FixtureTurn.Kind.qwen27b.purpose)
             : kind.purpose
         let purpose=fixture && !["wrongProfile","wrongPurpose"].contains(mode) ? fixturePurpose : armProfile.purpose
@@ -1155,6 +1278,14 @@ import XCTest
         await server.setTimeoutsForTesting(readiness:.seconds(10),response:mode=="nativeDeadline" ? .seconds(6) : .seconds(3))
         if mode=="nativeDeadline" {transport.setTimeoutsForTesting(preparation:.seconds(10),response:maskReadFailure ? .seconds(2) : .seconds(1))}
         var maskedReadCallbacks = 0, readFailureDelayed = false
+        var sawAdmittedTailConfig = false
+        if responseStreamTail {
+            transport.setBeforePageResultValidationForTesting { _ in
+                guard !sawAdmittedTailConfig, let page = view else { return }
+                let nativeConfig = #""streamMetadataPurpose":"groq_120b_fixture_response_stream_tail_metadata_v2""#
+                sawAdmittedTailConfig = page.configuration.userContentController.userScripts.contains { $0.source.contains(nativeConfig) }
+            }
+        }
         if maskReadFailure {
             transport.setBeforePageResultValidationForTesting { action in
                 guard action == "inspect", !readFailureDelayed, let page = view,
@@ -1326,7 +1457,7 @@ import XCTest
             let row=try XCTUnwrap(JSONSerialization.jsonObject(with:report) as? [String:Any])
             XCTAssertEqual(row["stage"] as? String,expected);XCTAssertEqual(row["taskID"] as? String,task)
             XCTAssertEqual(row["modelID"] as? String,model.modelID)
-            XCTAssertEqual(row["purpose"] as? String,fixture ? (earlyPassive ? GroqOwnedStatusLease.FixtureTurn.earlyPassivePurpose : kind.purpose) : profile.purpose)
+            XCTAssertEqual(row["purpose"] as? String,fixture ? fixturePurpose : profile.purpose)
             XCTAssertEqual(row["trigger"] as? String,["rollback","observerNotArmed","observerUnavailable","siteWrapper","cachedSDK"].contains(mode) ? "groq_draft_restored" : "response_deadline")
             XCTAssertEqual(row["evidenceClass"] as? String,["observer_not_armed","observer_unavailable"].contains(expected) ? "native_observer_availability" : "page_world_observation")
             if earlyPassive {
@@ -1355,6 +1486,11 @@ import XCTest
                 XCTAssertEqual(row.count, earlyPassive ? 16 : 15); XCTAssertNil(row["setupReason"])
             }
             XCTAssertFalse(String(decoding:report,as:UTF8.self).contains(nonce.uuidString))
+        }
+        if responseStreamTail {
+            XCTAssertEqual(pages.count, 1)
+            XCTAssertTrue(sawAdmittedTailConfig, "The actual fresh native controller must receive its admitted V2 purpose before first-failure revocation")
+            transport.setBeforePageResultValidationForTesting(nil)
         }
         _=await server.shutdown()
         if earlyPassive {
