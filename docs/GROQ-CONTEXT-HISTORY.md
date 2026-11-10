@@ -318,3 +318,22 @@ arguments, not backend parameter adoption or successful model behavior.
 Existing ownership, literal response, tool policy and cleanup checks are
 unchanged. Diagnostic stream metadata never becomes an answer, a tool call,
 or authority to replay an uncertain action. Live qualification remains open.
+
+### Verified reply followed by tool-discovery refusal (2026-11-10)
+
+Build 483's fresh workflow released two verified literal replies and cleared
+both website sessions. Its one schema-only load requested and received
+`apply_patch`, `exec_command`, `computer_v2_open` and `computer_v2_fill`.
+The second reply claimed browser tools were unavailable, without requesting
+another schema or attempting a terminal, editing or browser operation. The
+independent coding/browser oracle failed. A valid final reply and closed
+sessions do not establish completion of the user's task.
+
+The private request-experiment arm was absent afterward, and its failure-only
+capture produced no packet. This does not attest that either outgoing request actually
+contained `tool_choice: "none"`, or establish an improvement over build 482.
+Source inspection preserves the loader and browser-entry discovery after that
+four-tool selection; page action schemas intentionally await an open/bind.
+The exact second website projection was not retained, so a delivery defect
+has not been excluded. The next diagnostic measures the admitted discovery
+contract without storing prompt text or changing response/action authority.

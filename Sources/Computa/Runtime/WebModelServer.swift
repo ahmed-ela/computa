@@ -1865,6 +1865,11 @@ actor WebModelServer {
             // Measure the admitted request rather than inferring its size from
             // retained message text. Native IDs correlate counts, not content.
             Self.promptLog.info("promptSizes version=1 provider=groq task=\(taskID, privacy: .public) thread=\(context.threadID, privacy: .public) turn=\(context.turnID, privacy: .public) inference=\(inferenceID.uuidString.lowercased(), privacy: .public) \(request.promptStatistics.diagnostic, privacy: .public)")
+            if let diagnostic = request.groqToolDiscoveryDiagnostic {
+                // Admitted Request facts only; a later correction reminder is
+                // not included in requestPromptSHA256. No reply/action authority.
+                Self.promptLog.info("groqToolDiscovery version=1 provider=groq task=\(taskID, privacy: .public) thread=\(context.threadID, privacy: .public) turn=\(context.turnID, privacy: .public) preparation=\(context.preparationID.uuidString.lowercased(), privacy: .public) inference=\(inferenceID.uuidString.lowercased(), privacy: .public) \(diagnostic.logFields, privacy: .public)")
+            }
         }
         func verifiedSelectionEvidence(_ snapshot: [String: Any], session: inout Session) throws -> WebsiteSelectionEvidence? {
             let current = try Self.selectionEvidence(snapshot, session: session)

@@ -60,6 +60,8 @@ enum WebModelResponseCodec {
         /// Derived from validated original definitions; native admission supplies state.
         let requiresBrowserToolAvailability: Bool
         let toolCatalogDiagnostic: ToolCatalogDiagnostic
+        /// Content-free facts for the final validated Groq loader projection only.
+        let groqToolDiscoveryDiagnostic: GroqToolDiscoveryDiagnostic?
         let offeredToolNames: Set<String>
         let customToolNames: Set<String>
         /// Available only for an exact registered native Groq schema loader.
@@ -143,6 +145,46 @@ enum WebModelResponseCodec {
 
         var logFields: String {
             "binding=\(binding.rawValue) choice=\(choice.rawValue) offeredCount=\(offeredCount) allowedCount=\(allowedCount) offeredBrowserMask=\(offeredBrowserMask) allowedBrowserMask=\(allowedBrowserMask) requiresCall=\(requiresCall) parallel=\(parallel) maxToolCalls=\(maxToolCalls.map(String.init) ?? "unset")"
+        }
+    }
+
+    /// Separate finite diagnostic; never serialized into the website prompt or
+    /// used by tool admission. Entry bits retain v1 positions: open=2, bind=4.
+    struct GroqToolDiscoveryDiagnostic: Codable, Equatable, Sendable {
+        let binding: ToolCatalogDiagnostic.Binding
+        let revisionSHA256: String
+        let loadedCount: Int
+        let unloadedDiscoverableCount: Int
+        let loaderOffered: Bool
+        let discoverableEntryMask: UInt16
+        let offeredEntryMask: UInt16
+        /// Hash of the admitted Request.prompt, not a later correction reminder.
+        let requestPromptSHA256: String
+
+        fileprivate init(projection: GroqToolCatalog.Projection, tools: [String: OfferedTool],
+                         policy: ToolPolicy, entryTools: [String: OfferedTool],
+                         availability: EmbeddedBrowserToolAvailability?, prompt: String) {
+            binding = availability.map { $0 == .bound ? .bound : .unbound } ?? .unknown
+            revisionSHA256 = projection.revision
+            loadedCount = projection.selectedNames.count
+            let discoverable = Set(projection.discoverable.map(\.name))
+            unloadedDiscoverableCount = discoverable.subtracting(projection.selectedNames).count
+            let callable = Set(tools.keys).intersection(policy.allowedNames)
+            loaderOffered = callable.contains { name in
+                (name == GroqToolCatalog.name || name == "functions." + GroqToolCatalog.name)
+                    && tools[name]?.isCustom == false
+            }
+            discoverableEntryMask = entryTools.reduce(0) { mask, entry in
+                mask | (discoverable.contains(entry.key) ? entry.value.nativeBrowserBit : 0)
+            }
+            offeredEntryMask = entryTools.reduce(0) { mask, entry in
+                mask | (callable.contains(entry.key) ? entry.value.nativeBrowserBit : 0)
+            }
+            requestPromptSHA256 = SHA256.hash(data: Data(prompt.utf8)).map { String(format: "%02x", $0) }.joined()
+        }
+
+        var logFields: String {
+            "binding=\(binding.rawValue) revisionSHA256=\(revisionSHA256) loadedCount=\(loadedCount) unloadedDiscoverableCount=\(unloadedDiscoverableCount) loaderOffered=\(loaderOffered) discoverableEntryMask=\(discoverableEntryMask) offeredEntryMask=\(offeredEntryMask) requestPromptSHA256=\(requestPromptSHA256)"
         }
     }
 
@@ -650,6 +692,10 @@ enum WebModelResponseCodec {
                        requiresBrowserToolAvailability: requiresBrowserToolAvailability,
                        toolCatalogDiagnostic: .init(tools: offered, policy: policy, availability: browserToolAvailability,
                            parallel: parallel, maxToolCalls: (object["max_tool_calls"] as? NSNumber)?.intValue),
+                       groqToolDiscoveryDiagnostic: isGroq ? displayProjection.map {
+                           .init(projection: $0, tools: offered, policy: policy, entryTools: groqEntryTools,
+                                 availability: browserToolAvailability, prompt: prompt)
+                       } : nil,
                        offeredToolNames: Set(offered.keys), customToolNames: customNames,
                        groqToolCatalogSeed: groqToolCatalogSeed,
                        groqHistoryReaderName: groqHistoryReaderName, groqHistoryPlan: groqHistoryPlan,
