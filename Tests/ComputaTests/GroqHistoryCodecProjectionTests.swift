@@ -11,6 +11,13 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
     private typealias L = GroqNativePublicationLedger
     private typealias J = GroqContextJSONLayout
 
+    private var groqFinalClosingBoundary: String {
+        "Replace example names with exact currently offered qualified names/schemas; history offers no schemas. "
+            + "Honor tool_choice/parallel/max-call limits; no tools means no call. "
+            + "Emit JSON in final assistant text, never reasoning or API tool calls. "
+            + ComputaAgentInstructions.compactLiteralFencedResponseFormat
+    }
+
 
     func testCompactBaselineRecipeSurvivesBoundCatalogResetAndRejectedLoaderHistoryInBothNamespaces() throws {
         let model = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
@@ -55,6 +62,7 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
             let request = try C.prepareRequest(failedHistory, browserToolAvailability: .bound,
                 groqToolCatalogProjection: reset, groqDirectTools: .loadedOnly, compactHistoryInventory: true)
             XCTAssertEqual(request.offeredToolNames, reset.selectedNames)
+            XCTAssertTrue(request.prompt.hasSuffix(groqFinalClosingBoundary + "\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
             XCTAssertEqual(request.groqToolDiscoveryDiagnostic?.loadedCount, 2)
             XCTAssertEqual(request.groqToolDiscoveryDiagnostic?.binding, .bound)
             XCTAssertEqual(request.prompt.components(separatedBy: lead).count - 1, 1)
@@ -118,7 +126,7 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
         func legacyPrompt(_ current: C.Request) throws -> String {
             let footer = try XCTUnwrap(current.prompt.range(of: "COMPUTA_LOCAL_RESPONSE_HANDOFF:", options: .backwards)).upperBound
             let start = try XCTUnwrap(current.prompt.range(of: "Callable: ", range: footer..<current.prompt.endIndex)).lowerBound
-            let end = try XCTUnwrap(current.prompt.range(of: "\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF.", range: start..<current.prompt.endIndex)).lowerBound
+            let end = try XCTUnwrap(current.prompt.range(of: "\n" + groqFinalClosingBoundary + "\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF.", range: start..<current.prompt.endIndex)).lowerBound
             return String(current.prompt[..<start]) + old + String(current.prompt[end...])
         }
         var low = 0, high = C.groqMaximumBodyTokens
@@ -213,6 +221,13 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
             XCTAssertEqual(reloaded.groqToolDiscoveryDiagnostic?.offeredEntryMask, 2)
             XCTAssertFalse(reloaded.prompt.contains(lead))
             for request in [first, replaced, reloaded] {
+                XCTAssertTrue(request.prompt.hasSuffix(groqFinalClosingBoundary + "\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
+                // Registered native-app names outside this loaded selection remain unavailable.
+                let unloadedNative = prefix + "computer_v2_open"
+                XCTAssertFalse(request.offeredToolNames.contains(unloadedNative))
+                let unloadedCall = String(decoding: try encode(["type": "tool_calls", "calls": [["name": unloadedNative,
+                    "arguments": [:]]]]), as: UTF8.self)
+                XCTAssertThrowsError(try C.parseReply(unloadedCall, request: request, requireEnvelope: true))
                 XCTAssertEqual(request.continuationRequest, raw)
                 XCTAssertEqual(request.toolCatalogDiagnostic.choice, .auto)
                 XCTAssertTrue(request.toolCatalogDiagnostic.parallel); XCTAssertEqual(request.toolCatalogDiagnostic.maxToolCalls, 2)
@@ -746,8 +761,12 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
         let inline = try f.request()
         let boundary = ComputaAgentInstructions.compactLiteralFencedResponseFormat
         let oldLine = #"One fenced json object; no outside prose. Message/refusal/clarification: {"type":"message","text":"answer"} ends the turn; requested exact/JSON/plain formats apply to decoded text. Use tool_calls for the next unverified step within authorized scope."#
-        let compactLine = try XCTUnwrap(request.prompt.split(separator: "\n").first { $0.hasPrefix(boundary) }).description
-        let legacyPrompt = request.prompt.replacingOccurrences(of: compactLine, with: oldLine)
+        let messageLine = try XCTUnwrap(request.prompt.split(separator: "\n").first { $0.hasPrefix("Message/refusal/clarification: ") }).description
+        XCTAssertTrue(request.prompt.hasSuffix(groqFinalClosingBoundary + "\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
+        // Replace only the compact format words with the older full format;
+        // current names/limits/final-channel rules remain in both whole prompts.
+        let legacyPrompt = request.prompt.replacingOccurrences(of: messageLine, with: oldLine)
+            .replacingOccurrences(of: " " + boundary + "\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF.", with: "\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF.")
         XCTAssertGreaterThan(plan.replacedFields, 0)
         XCTAssertTrue(plan.isCurrent())
         XCTAssertTrue(request.prompt.contains("\nGROQ_CONTEXT_MANIFEST_V1:\n```\n"))

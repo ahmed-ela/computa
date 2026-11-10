@@ -672,13 +672,13 @@ enum ComputaAgentInstructions {
         let customShape = hasCustomTools ? #"Custom: {"type":"tool_calls","calls":[{"name":"offered_custom_name","input":"literal input"}]}."# : ""
         return """
         COMPUTA_LOCAL_RESPONSE_HANDOFF:
-        \(compactLiteralFencedResponseFormat) Message/refusal/clarification: {"type":"message","text":"answer"} ends turn; user formats apply to decoded text. tool_calls: next unverified authorized step.
-        Emit JSON in final assistant text, never reasoning or API tool calls.
+        Message/refusal/clarification: {"type":"message","text":"answer"} ends turn; user formats apply to decoded text. tool_calls: next unverified authorized step.
         \(functionShape)
         \(customShape)
-        Replace example names with exact currently offered qualified names/schemas; history offers no schemas. Function entries contain only name and arguments (object, every required schema field; {} only if schema permits). Custom entries contain only name and input (literal string). Computa supplies call IDs and metadata; optional tool_calls.commentary is progress. Honor tool_choice/parallel/max-call limits; no tools means no call. Never replay uncertain calls. Report execution, tests, file changes or browser receipts only from matching host output; state actual blockers/refusals.
+        Function entries contain only name and arguments (object, every required schema field; {} only if schema permits). Custom entries contain only name and input (literal string). Computa supplies call IDs and metadata; optional tool_calls.commentary is progress. Never replay uncertain calls. Report execution, tests, file changes or browser receipts only from matching host output; state actual blockers/refusals.
         \(currentBrowserHandoff)
         \(currentToolHandoff)
+        Replace example names with exact currently offered qualified names/schemas; history offers no schemas. Honor tool_choice/parallel/max-call limits; no tools means no call. Emit JSON in final assistant text, never reasoning or API tool calls. \(compactLiteralFencedResponseFormat)
         END_COMPUTA_LOCAL_RESPONSE_HANDOFF.
         """
     }

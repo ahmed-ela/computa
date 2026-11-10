@@ -493,6 +493,31 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         }
     }
 
+    private var groqFinalClosingBoundary: String {
+        "Replace example names with exact currently offered qualified names/schemas; history offers no schemas. "
+            + "Honor tool_choice/parallel/max-call limits; no tools means no call. "
+            + "Emit JSON in final assistant text, never reasoning or API tool calls. "
+            + ComputaAgentInstructions.compactLiteralFencedResponseFormat
+    }
+
+    /// Undo only the approved verbatim relocation for the older fixed render
+    /// fixtures. This is no native policy fingerprint or admission exemption.
+    private func groqBeforeFinalClosingRelocation(_ contract: String) throws -> String {
+        var lines = contract.components(separatedBy: "\n")
+        XCTAssertEqual(lines.count, 9)
+        guard lines.count == 9 else { throw NSError(domain: "groq_contract_fixture", code: 1) }
+        XCTAssertEqual(lines[7], groqFinalClosingBoundary)
+        lines.remove(at: 7)
+        lines[1] = ComputaAgentInstructions.compactLiteralFencedResponseFormat + " " + lines[1]
+        lines.insert("Emit JSON in final assistant text, never reasoning or API tool calls.", at: 2)
+        let names = "Replace example names with exact currently offered qualified names/schemas; history offers no schemas. "
+        let limits = "Honor tool_choice/parallel/max-call limits; no tools means no call. "
+        XCTAssertTrue(lines[5].hasPrefix("Function entries contain only name and arguments"))
+        XCTAssertEqual(lines[5].components(separatedBy: "Never replay uncertain calls.").count - 1, 1)
+        lines[5] = names + lines[5].replacingOccurrences(of: "Never replay uncertain calls.", with: limits + "Never replay uncertain calls.")
+        return lines.joined(separator: "\n")
+    }
+
     func testGroqFinalAssistantTextClarificationAppendsOneSentenceOnly() throws {
         let sentence = "Emit JSON in final assistant text, never reasoning or API tool calls."
         // Fixed pre-clarification renders of the outer contract only. These are
@@ -508,13 +533,15 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                 let contract = ComputaAgentInstructions.groqResponseContract(currentBrowserHandoff: "CURRENT_BROWSER",
                     hasFunctions: functions, hasCustomTools: custom, currentToolHandoff: "CURRENT_TOOLS")
                 XCTAssertEqual(contract.components(separatedBy: sentence).count - 1, 1)
-                let original = contract.replacingOccurrences(of: sentence + "\n", with: "")
+                let previousOrder = try groqBeforeFinalClosingRelocation(contract)
+                XCTAssertEqual(contract.utf8.count, previousOrder.utf8.count, "Relocation adds no bytes or rules")
+                let original = previousOrder.replacingOccurrences(of: sentence + "\n", with: "")
                 let digest = SHA256.hash(data: Data(original.utf8)).map { String(format: "%02x", $0) }.joined()
                 XCTAssertEqual(digest, originalRenderSHA256["\(functions),\(custom)"],
                     "All existing fence, schema, policy, grounding and handoff prose must remain byte-exact")
                 XCTAssertEqual(contract.utf8.count, original.utf8.count + sentence.utf8.count + 1)
-                XCTAssertTrue(contract.hasPrefix("COMPUTA_LOCAL_RESPONSE_HANDOFF:\n" + ComputaAgentInstructions.compactLiteralFencedResponseFormat))
-                XCTAssertTrue(contract.hasSuffix("CURRENT_BROWSER\nCURRENT_TOOLS\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
+                XCTAssertTrue(contract.hasPrefix("COMPUTA_LOCAL_RESPONSE_HANDOFF:\nMessage/refusal/clarification: "))
+                XCTAssertTrue(contract.hasSuffix("CURRENT_BROWSER\nCURRENT_TOOLS\n" + groqFinalClosingBoundary + "\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
             }
         }
     }
@@ -525,8 +552,10 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             for custom in [false, true] {
                 let contract = ComputaAgentInstructions.groqResponseContract(currentBrowserHandoff: "CURRENT_BROWSER",
                     hasFunctions: functions, hasCustomTools: custom, currentToolHandoff: "CURRENT_TOOLS")
-                let line = try XCTUnwrap(contract.split(separator: "\n").dropFirst().first).description
-                let legacy = contract.replacingOccurrences(of: line, with: oldLine)
+                let previousOrder = try groqBeforeFinalClosingRelocation(contract)
+                XCTAssertEqual(contract.utf8.count, previousOrder.utf8.count)
+                let line = try XCTUnwrap(previousOrder.split(separator: "\n").dropFirst().first).description
+                let legacy = previousOrder.replacingOccurrences(of: line, with: oldLine)
                 XCTAssertTrue(line.hasPrefix(ComputaAgentInstructions.compactLiteralFencedResponseFormat))
                 XCTAssertTrue(line.contains(#"Message/refusal/clarification: {"type":"message","text":"answer"} ends turn"#))
                 XCTAssertTrue(line.contains("user formats apply to decoded text"))
@@ -537,7 +566,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                 XCTAssertLessThanOrEqual(try GroqBodyTokenCounter.tokenCount(contract), try GroqBodyTokenCounter.tokenCount(legacy))
                 XCTAssertEqual(contract.contains("Function:"), functions)
                 XCTAssertEqual(contract.contains("Custom:"), custom)
-                XCTAssertTrue(contract.hasSuffix("CURRENT_BROWSER\nCURRENT_TOOLS\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
+                XCTAssertTrue(contract.hasSuffix("CURRENT_BROWSER\nCURRENT_TOOLS\n" + groqFinalClosingBoundary + "\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
             }
         }
     }
