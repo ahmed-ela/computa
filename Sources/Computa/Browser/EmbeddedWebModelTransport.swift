@@ -7180,6 +7180,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             // Other current Chat powers use only the read-only final-proof path.
             // The Instant-only insert/verification/readiness receipt stays unchanged.
             input["firstChatReadinessFinalGuardOnly"] = true
+            if let binding = session.preparedSubmission {
+                input["preparedChatReadinessOpening"] = ["sequence": binding.sequence, "marker": binding.marker,
+                                                         "fingerprint": binding.outboundFingerprint]
+            }
         }
         if prepareFirstInstantInInsert {
             guard action == "insert", canShareFirstChatGPTEditorContextRecheck(session),

@@ -1442,6 +1442,132 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testPreparedMediumFinalReadinessRecoversOneIgnoredOpeningBeforeOneSend() async throws {
+        try await assertPreparedMediumFinalReadinessOpening(acknowledged: false)
+    }
+
+    func testPreparedMediumFinalReadinessDoesNotRepeatAcknowledgedOpeningOrSend() async throws {
+        try await assertPreparedMediumFinalReadinessOpening(acknowledged: true)
+        try await assertPreparedMediumFinalReadinessOpening(acknowledged: false, cancelDuringOpening: true)
+    }
+
+    private func assertPreparedMediumFinalReadinessOpening(acknowledged: Bool, cancelDuringOpening: Bool = false) async throws {
+        let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/medium", label: "Medium")
+        let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
+        defer { fixture.transport.setBeforePageResultValidationForTesting(nil); fixture.shutdown() }
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        let ready = try await waitForState("ready", fixture.transport, token: token)
+        try assertChoiceEvidence(ready, choice: choice)
+        let initialSelectionsValue = try await evaluate(view, "return window.fixtureModelSelectionClicks;") as? Int
+        let initialSelections = try XCTUnwrap(initialSelectionsValue)
+        let world = WKContentWorld.world(name: "computa-chatgpt-model-v1")
+        var installed = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "sendReady" {
+                // Retire this fixture listener before the subsequent native submit proof.
+                _ = try? await self.evaluate(view, """
+                    document.getElementById('fixture-model-trigger')?.removeEventListener(
+                      'click', globalThis.__fixtureReadinessInterrupt, true);
+                    return true;
+                    """, world: world)
+                return
+            }
+            guard action == "insert", !installed else { return }
+            // Wait for the fixture's actual asynchronous editor acknowledgement.
+            // Neither the native grant nor this fixture forces Send to become enabled.
+            let enabled = try? await self.evaluate(view, """
+                const send = document.querySelector('[data-testid="send-button"]');
+                if (!send || !send.disabled) return !!send;
+                return await new Promise(resolve => {
+                  const observer = new MutationObserver(() => {
+                    if (!send.disabled) { observer.disconnect(); clearTimeout(deadline); resolve(true); }
+                  });
+                  const deadline = setTimeout(() => { observer.disconnect(); resolve(false); }, 1000);
+                  observer.observe(send, {attributes:true, attributeFilter:['disabled']});
+                });
+                """)
+            XCTAssertEqual(enabled as? Bool, true)
+            guard enabled as? Bool == true else { return }
+            let value = try? await self.evaluate(view, """
+                const trigger = document.getElementById('fixture-model-trigger');
+                if (!trigger) return false;
+                globalThis.__fixtureReadinessOpenings = 0;
+                globalThis.__fixtureReadinessPriorProved = false;
+                const interrupt = event => {
+                  // Inspect only the real slot minted by the exact native sendReady
+                  // final invocation. Earlier insertion/model proofs remain untouched.
+                  const pending = globalThis.__computaChatSubmissionState?.pending;
+                  const slot = pending?.firstReadinessOpening;
+                  if (!slot) return;
+                  globalThis.__fixtureReadinessPriorProved = slot.insertProof === pending.firstInsertOpening
+                    && slot.insertProof?.proved === true && slot.insertProof?.exactSubmitDraft === true;
+                  if (++globalThis.__fixtureReadinessOpenings === 2) return;
+                  event.stopImmediatePropagation(); event.preventDefault();
+                  if (\(acknowledged)) {
+                    trigger.setAttribute('aria-expanded', 'true');
+                    trigger.setAttribute('aria-expanded', 'false');
+                  }
+                };
+                globalThis.__fixtureReadinessInterrupt = interrupt;
+                trigger.addEventListener('click', interrupt, true);
+                return true;
+                """, world: world)
+            installed = value as? Bool == true
+        }
+        let prompt = "Read the synthetic Medium final-readiness fixture."
+        if cancelDuringOpening {
+            let sending = Task<Void, Error> {
+                _ = try await self.call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+            }
+            // The ignored click precedes the original native acknowledgement clock.
+            // Cancellation retires that operation and rejects its outstanding clock.
+            let waiting = try await evaluate(view, """
+                const until = performance.now() + 1000;
+                while (globalThis.__fixtureReadinessOpenings !== 1 && performance.now() < until)
+                  await new Promise(resolve => setTimeout(resolve, 5));
+                return globalThis.__fixtureReadinessOpenings === 1;
+                """, world: world) as? Bool
+            sending.cancel()
+            do { try await sending.value; XCTFail("A cancelled final readiness proof cannot return or Send") }
+            catch { XCTAssertTrue(error is CancellationError) }
+            XCTAssertEqual(waiting, true)
+            // Observe beyond the old 900ms window; no second header opening is allowed.
+            _ = try await evaluate(view, "await new Promise(resolve => setTimeout(resolve, 1000)); return true;", world: world)
+        } else if acknowledged {
+            do {
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+                XCTFail("A transient acknowledged final opening cannot authorize a second click or Send")
+            } catch {
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelUnverified)
+            }
+        } else {
+            let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+            try assertRunningOrVerifiedChoice(sent, choice: choice)
+            let complete = try await waitForState("complete", fixture.transport, token: token)
+            try assertChoiceEvidence(complete, choice: choice)
+        }
+        // A failed final proof may not reach the result-validation callback.
+        _ = try await evaluate(view, """
+            document.getElementById('fixture-model-trigger')?.removeEventListener(
+              'click', globalThis.__fixtureReadinessInterrupt, true);
+            return true;
+            """, world: world)
+        XCTAssertTrue(installed)
+        // The counter lives with the real prepared state in the isolated content world.
+        let scopedOpenings = try await evaluate(view, "return globalThis.__fixtureReadinessOpenings;", world: world) as? Int
+        XCTAssertEqual(scopedOpenings, acknowledged || cancelDuringOpening ? 1 : 2)
+        let priorProved = try await evaluate(view, "return globalThis.__fixtureReadinessPriorProved;", world: world) as? Bool
+        XCTAssertEqual(priorProved, true)
+        try await assertChoiceLedger(view, insertions: 1, sends: acknowledged || cancelDuringOpening ? 0 : 1, selections: initialSelections)
+        let finish = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        // Readiness fails before the native submission claim. The ordinary
+        // unsent-session proof must establish zero users/answers and close it.
+        XCTAssertEqual(finish["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testFirstInstantPreparedEditorReadinessAcceptsExactLongEditorClippedByItsScroller() async throws {
         let (fixture, view, token, choice) = try await readyInstantPrepareFixture(synchronousReadiness: true)
         defer {

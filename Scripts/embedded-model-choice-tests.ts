@@ -3917,6 +3917,157 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect(result.modelEvidence.selected).toEqual(waiting.expected); expect(waiting.readinessOpenings()).toBe(1);
         expect(waiting.counts().insertions).toBe(1); expect(waiting.send.clicks).toBe(0);
       });
+      const preparedReadinessRecovery = async (label = 'Medium') => {
+        const x = await preparedFirstChatReadiness(label);
+        const grant = { sequence: 1, marker: firstMarker, fingerprint: x.pending.fingerprint };
+        let openings = 0, claimedBeforeFirst = false;
+        x.picker.trigger.onClick = () => {
+          openings++;
+          if (openings === 1) claimedBeforeFirst = x.pending.firstReadinessOpening?.insertProof === x.pending.firstInsertOpening
+            && x.pending.firstReadinessOpening?.recoveryClaimed === false;
+          if (openings === 2) x.open();
+        };
+        return { ...x, grant, recoveryRequest: { ...x.request, preparedChatReadinessOpening: grant },
+          recoveryOpenings: () => openings, claimedBeforeFirst: () => claimedBeforeFirst };
+      };
+      const noReadinessInputReplay = (x:any) => {
+        expect(x.counts().insertions).toBe(1); expect(x.send.clicks).toBe(0);
+        expect(x.f.world.__computaModelFirstSubmitted).toBeUndefined();
+        expect(x.picker.familyOptions.map((node:any) => node.clicks)).toEqual(x.familyBefore);
+        expect(arrows(x.picker)).toHaveLength(x.powerBefore);
+      };
+      test('prepared non-Instant readiness spends one native-bound recovery and requires a fresh complete final model proof', async () => {
+        for (const label of ['Medium', 'High', 'Extra High', 'Pro']) {
+          const x = await preparedReadinessRecovery(label), reading = x.f.run('sendReady', x.recoveryRequest);
+          await microtasks(); expect(x.recoveryOpenings(), label).toBe(1); expect(x.claimedBeforeFirst()).toBe(true);
+          const slot = x.pending.firstReadinessOpening;
+          expect(slot.insertProof).toBe(x.pending.firstInsertOpening); expect(slot.recoveryClaimed).toBe(false);
+          await finishFirstInsertWait(x, 901); await finishFirstInsertWait(x, 100);
+          const result = await reading;
+          expect(result.error, label).toBeUndefined(); expect(result.sendReady, label).toBe(true);
+          expect(result.modelEvidence.selected, label).toEqual(x.expected);
+          expect(result.modelEvidence.chatSelection.family.key).toBe('GPT-6');
+          expect(result.modelEvidence.chatSelection.automaticFamily.policy).toBe('highest_offered_plain_gpt');
+          expect(result.modelEvidence.chatSelection.power.key).toBe(label.toLowerCase().replace(' ', '-'));
+          expect(x.recoveryOpenings()).toBe(2); expect(x.pending.firstReadinessOpening).toBe(slot); expect(slot.recoveryClaimed).toBe(true);
+          expect(x.picker.trigger.values['aria-expanded']).toBe('false'); expect(x.f.composer.textContent).toBe(x.prompt);
+          noReadinessInputReplay(x);
+          // The same native grant cannot mint another recovery on a later read.
+          let repeatedOpenings = 0; x.picker.trigger.onClick = () => { repeatedOpenings++; };
+          const repeat = x.f.run('sendReady', x.recoveryRequest); await microtasks();
+          await finishFirstInsertWait(x, 901); await finishFirstInsertWait(x, 901);
+          const refused = await repeat;
+          expect(refused.error).toBeDefined(); expect(refused.modelEvidence).toBeUndefined(); expect(repeatedOpenings).toBe(1);
+          expect(refused.modelDiagnostic.readContext.preparedReadinessOpening.slot).toBe('existing');
+          expect(x.pending.firstReadinessOpening).toBe(slot); noReadinessInputReplay(x);
+        }
+        for (const wrongProof of ['power', 'family']) {
+          const x = await preparedReadinessRecovery(); let openings = 0;
+          x.picker.trigger.onClick = () => {
+            if (++openings === 2) { x.picker.selected(wrongProof === 'power' ? 'High' : 'GPT-5.5'); x.open(); }
+          };
+          const reading = x.f.run('sendReady', x.recoveryRequest); await microtasks();
+          await finishFirstInsertWait(x, 901); await finishFirstInsertWait(x, 901);
+          const result = await reading;
+          expect(result.error, wrongProof).toBeDefined(); expect(result.modelEvidence, wrongProof).toBeUndefined(); expect(openings).toBe(2);
+          noReadinessInputReplay(x);
+        }
+      });
+      test('prepared readiness opening rejects missing forged stale or previously affected grants without extra input', async () => {
+        for (const mode of ['missing', 'hash', 'marker', 'sequence', 'extra', 'array', 'old_grant', 'no_ready', 'unproved_insert', 'preopened']) {
+          const x = await preparedReadinessRecovery(); let openings = 0, initialEscapes = 0;
+          x.picker.trigger.onClick = () => { openings++; };
+          const request:any = { ...x.recoveryRequest, preparedChatReadinessOpening: { ...x.grant } };
+          if (mode === 'missing') delete request.preparedChatReadinessOpening;
+          if (mode === 'hash') request.preparedChatReadinessOpening.fingerprint = '0'.repeat(64);
+          if (mode === 'marker') request.preparedChatReadinessOpening.marker = '00000000-0000-4000-8000-000000000009';
+          if (mode === 'sequence') request.preparedChatReadinessOpening.sequence = 2;
+          if (mode === 'extra') request.preparedChatReadinessOpening.extra = true;
+          if (mode === 'array') request.preparedChatReadinessOpening = [x.grant];
+          if (mode === 'old_grant') { delete request.preparedChatReadinessOpening; request.preparedInstantVerificationOpening = x.grant; }
+          if (mode === 'no_ready') x.send.disabled = true;
+          if (mode === 'unproved_insert') x.pending.firstInsertOpening.proved = false;
+          if (mode === 'preopened') {
+            const dispatch = x.picker.menu.onDispatch;
+            x.picker.menu.onDispatch = (event:any) => { if (event.type === 'keydown' && event.key === 'Escape') initialEscapes++; dispatch?.(event); };
+            x.open();
+          }
+          const reading = x.f.run('sendReady', request); await microtasks();
+          await finishFirstInsertWait(x, 901); await finishFirstInsertWait(x, 901);
+          const result = await reading;
+          expect(result.error, mode).toBeDefined(); expect(result.modelEvidence, mode).toBeUndefined(); expect(openings, mode).toBe(1);
+          expect(x.pending.firstReadinessOpening?.recoveryClaimed ?? false).toBe(false);
+          const diagnostic = result.modelDiagnostic.readContext.preparedReadinessOpening;
+          expect(Object.keys(diagnostic).sort()).toEqual(['clockRejected', 'clockUnconfirmed', 'nativeGrant', 'observedAcknowledgement', 'recoveryClaimed', 'slot']);
+          for (const field of ['clockRejected', 'clockUnconfirmed', 'nativeGrant', 'observedAcknowledgement', 'recoveryClaimed']) expect(typeof diagnostic[field]).toBe('boolean');
+          expect(['existing', 'not_claimed', 'grant_refused', 'ineligible', 'established', 'prior_effect']).toContain(diagnostic.slot);
+          if (['missing', 'hash', 'marker', 'sequence', 'extra', 'array', 'old_grant'].includes(mode)) expect(diagnostic.nativeGrant).toBe(false);
+          if (mode === 'preopened') { expect(initialEscapes).toBe(1); expect(diagnostic.slot).toBe('prior_effect'); }
+          for (const secret of [x.prompt, firstMarker, x.grant.fingerprint]) expect(JSON.stringify(diagnostic)).not.toContain(secret);
+          noReadinessInputReplay(x);
+        }
+      });
+      test('prepared readiness recovery retains transient acknowledgement draft native-clock and original-deadline refusals', async () => {
+        for (const mode of ['aria', 'menu', 'transient_draft', 'draft', 'owner', 'composer', 'pending', 'prior', 'ready_link', 'send_disabled', 'send_replaced', 'header', 'expired', 'clock']) {
+          const x = await preparedReadinessRecovery();
+          const registrations = new Map<any, any[]>(), prototype = Object.getPrototypeOf(x.f.observers[0]), observe = prototype.observe;
+          prototype.observe = function(target:any, options:any) {
+            registrations.set(this, [...(registrations.get(this) || []), { target, options }]); return observe.call(this, target, options);
+          };
+          try {
+            const notify = (records:any[]) => {
+              for (const [observer, scopes] of registrations) if (scopes.some(({target: root, options}) => records.some(record =>
+                options[record.type] && (root === record.target || options.subtree && (root === x.f.document || root.contains?.(record.target)))
+                && (record.type !== 'attributes' || !options.attributeFilter || options.attributeFilter.includes(record.attributeName))))) observer.callback(records);
+            };
+            const request:any = { ...x.recoveryRequest };
+            if (mode === 'clock') {
+              request.operationID = 'a909845c-2857-4b22-a66b-261b22281513';
+              x.f.window.webkit.messageHandlers.computaModelClock = { postMessage: () => Promise.reject(new Error('PRIVATE_READINESS_CLOCK_CANARY')) };
+            }
+            const reading = x.f.run('sendReady', request); await microtasks(); expect(x.recoveryOpenings(), mode).toBe(1);
+            if (mode === 'aria') notify([{ type: 'attributes', target: x.picker.trigger, attributeName: 'aria-expanded', oldValue: 'true' }]);
+            if (mode === 'menu') {
+              const menu = new Node('DIV', { role: 'menu', 'aria-labelledby': x.picker.trigger.values.id });
+              x.f.body.append(menu); x.f.body.children = x.f.body.children.filter((node:any) => node !== menu); menu.parentElement = null; menu.connected = false;
+              notify([{ type: 'childList', target: x.f.body, addedNodes: [menu], removedNodes: [] },
+                { type: 'childList', target: x.f.body, addedNodes: [], removedNodes: [menu] }]);
+            }
+            if (mode === 'transient_draft') { const old = x.f.composer.text; x.f.composer.text = 'changed'; x.f.composer.text = old; notify([{ type: 'characterData', target: x.f.composer }]); }
+            if (mode === 'draft') x.f.composer.text += ' foreign';
+            if (mode === 'owner') x.f.world.__computaModelOwner = 'foreign';
+            if (mode === 'composer') {
+              const old = x.f.composer, replacement = new Node(old.tagName, { ...old.values }, x.prompt), parent = old.parentElement;
+              parent.children = parent.children.map((node:any) => node === old ? replacement : node); replacement.parentElement = parent;
+              old.connected = false; old.parentElement = null;
+            }
+            if (mode === 'pending') x.state.pending = { ...x.pending };
+            if (mode === 'prior') x.pending.firstInsertOpening = { ...x.pending.firstInsertOpening };
+            if (mode === 'ready_link') x.pending.readyForSubmitOpening = { ...x.pending.firstInsertOpening };
+            if (mode === 'send_disabled') x.send.disabled = true;
+            if (mode === 'send_replaced') {
+              const parent = x.send.parentElement; parent.children = parent.children.filter((node:any) => node !== x.send);
+              x.send.connected = false; x.send.parentElement = null; x.f.body.append(new Node('BUTTON', { 'aria-label': 'Send prompt' }));
+            }
+            if (mode === 'header') x.picker.trigger.connected = false;
+            await finishFirstInsertWait(x, mode === 'expired' ? 1801 : 901); await finishFirstInsertWait(x, 901);
+            const result = await reading;
+            expect(result.error, mode).toBeDefined(); expect(result.modelEvidence, mode).toBeUndefined(); expect(x.recoveryOpenings(), mode).toBe(1);
+            expect(x.pending.firstReadinessOpening?.recoveryClaimed ?? false).toBe(false);
+            if (mode === 'clock') {
+              const diagnostic = result.modelDiagnostic.readContext.preparedReadinessOpening;
+              expect(diagnostic.clockRejected).toBe(true); expect(JSON.stringify(diagnostic)).not.toContain('PRIVATE_READINESS_CLOCK_CANARY');
+            }
+            noReadinessInputReplay(x);
+          } finally { prototype.observe = observe; }
+        }
+        const late = await preparedReadinessRecovery(), reading = late.f.run('sendReady', late.recoveryRequest);
+        await microtasks(); expect(late.recoveryOpenings()).toBe(1); late.f.advanceTime(850); late.open(); late.f.flush(); await microtasks();
+        await finishFirstInsertWait(late, 51);
+        const result = await reading;
+        expect(result.error).toBeUndefined(); expect(result.sendReady).toBe(true); expect(result.modelEvidence.selected).toEqual(late.expected);
+        expect(late.recoveryOpenings()).toBe(1); expect(late.pending.firstReadinessOpening.recoveryClaimed).toBe(false); noReadinessInputReplay(late);
+      });
       test('a layout LF never substitutes for the full literal submit draft', () => {
         const source = readFileSync(new URL('../Sources/Computa/Resources/BrowserModels/chatgpt.js', import.meta.url), 'utf8');
         const definition = source.slice(source.indexOf('function chatGPTExactSubmitDraft('), source.indexOf('function chatGPTSubmissionPins('));
