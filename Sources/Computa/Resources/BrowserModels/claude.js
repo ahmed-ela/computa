@@ -479,6 +479,13 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     return value;
   };
   let verifyObserver = null, verifyAcknowledged = false, passiveFirstVerification = null;
+  // Diagnostic-only identities at the original short-circuit operands. Never
+  // inspect a second node/attribute to explain an acknowledgement or grant proof.
+  const acknowledgementSources = { triggerAriaExpanded:false, triggerDataState:false, menuRoot:false, menuDescendant:false };
+  const openingAcknowledgement = (source, value) => {
+    if (value) acknowledgementSources[source] = true;
+    return value;
+  };
   let draftObserver = null, draftChanged = false, firstVerificationEditor = null, initialReadinessObserver = null;
   const invalidateDraft = () => { draftChanged = true; };
   const recordDraftChanges = records => {
@@ -491,8 +498,8 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       if (r.addedNodes.length + r.removedNodes.length > 64) { draftChanged = true; return; }
       for (const node of [...r.addedNodes, ...r.removedNodes]) {
         if (node === composer || node.contains?.(composer) || node === trigger || node.contains?.(trigger)) draftChanged = true;
-        if (insertOpening && (['menu','listbox'].includes(node.getAttribute?.('role')) ||
-          node.querySelector?.('[role="menu"],[role="listbox"]'))) verifyAcknowledged = true;
+        if (insertOpening && (openingAcknowledgement('menuRoot', ['menu','listbox'].includes(node.getAttribute?.('role'))) ||
+          openingAcknowledgement('menuDescendant', node.querySelector?.('[role="menu"],[role="listbox"]')))) verifyAcknowledged = true;
       }
     }
   };
@@ -505,8 +512,8 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       && [...record.addedNodes, ...record.removedNodes].some(node => pinned.has(node))) draftChanged = true;
   };
   const recordVerifyOpening = records => {
-    if (records.some(record => record.target === trigger && (record.attributeName === 'aria-expanded' && record.oldValue === 'true'
-      || record.attributeName === 'data-state' && record.oldValue === 'open'))) verifyAcknowledged = true;
+    if (records.some(record => record.target === trigger && (openingAcknowledgement('triggerAriaExpanded', record.attributeName === 'aria-expanded' && record.oldValue === 'true')
+      || openingAcknowledgement('triggerDataState', record.attributeName === 'data-state' && record.oldValue === 'open')))) verifyAcknowledged = true;
   };
   let headerReadiness = null, changingPowerHeader = null, changingPowerSlider = null, initialReadinessBinding = null;
   let initialReadinessFacts = null;
@@ -552,6 +559,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         firstVerificationOpening: firstVerificationOpeningDiagnostic,
         ...(preparedReadinessOpeningDiagnostic ? { preparedReadinessOpening: {
           ...preparedReadinessOpeningDiagnostic, observedAcknowledgement: verifyAcknowledged,
+          acknowledgementSources: { ...acknowledgementSources },
           recoveryClaimed: insertOpening?.recoveryClaimed === true } } : {}) },
       readAttempt: { primaryOpened, secondaryOpened, closeAttempted, observedProof,
         sameTrigger: !trigger || current.trigger === trigger, popupStillAssociated: !!current.topMenu } }) };

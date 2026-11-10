@@ -3234,7 +3234,19 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           expect(x.f.world.__computaModelFirstSubmitted).toBeUndefined();
         }
       });
-      const firstInsertReadiness = async (ignoreWhenReady = false, rejectClock = false, missing = '') => {
+      // Wait for the actual insertion/prepared-record signal, not an arbitrary
+      // number of event-loop turns: real WebCrypto completion is independent.
+      // This host-only bound never advances or extends the adapter's clock.
+      const firstInsertHostSignal = async (signal: Promise<void>, operation: Promise<unknown>) => {
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([signal, operation.then(() => undefined), new Promise<void>((_, reject) => {
+            timeout = setTimeout(() => reject(new Error('first-insert fixture acknowledgement host deadline')), 1_000);
+          })]);
+        } finally { if (timeout !== undefined) clearTimeout(timeout); }
+      };
+      const firstInsertReadiness = async (ignoreWhenReady = false, rejectClock = false, missing = '',
+        beforeDigestReturns?: () => void | Promise<void>) => {
         const { f, picker } = setup(); picker.selected('Instant'); const expected = choice('Instant');
         expect((await f.run('selectModel', { modelChoice: expected })).selected).toBe(true);
         expect((await f.run('prepare', { expectedModelChoice: expected })).prepared).toBe(true);
@@ -3243,8 +3255,11 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         f.window.getSelection = () => selection;
         f.document.createRange = () => ({ selectNodeContents(node: any) { selection.anchorNode = node; selection.focusNode = node; }, collapse() {} });
         let insertions = 0, openings = 0;
+        let acknowledgeInsertion!: () => void;
+        const insertionAcknowledged = new Promise<void>(resolve => { acknowledgeInsertion = resolve; });
         f.document.execCommand = (command: string, _ui: boolean, text: string) => {
           expect(command).toBe('insertText'); expect(text).toBe(prompt); insertions++; f.composer.text = text;
+          if (insertions === 1 && f.world.__computaChatSubmissionState?.pending?.phase === 'prepared') acknowledgeInsertion();
           if (['composer', 'both'].includes(missing)) {
             f.composer.parentElement.children = f.composer.parentElement.children.filter((node: any) => node !== f.composer);
             f.composer.connected = false;
@@ -3267,10 +3282,9 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         if (rejectClock) f.window.webkit.messageHandlers.computaModelClock = {
           postMessage: () => Promise.reject(new Error('PRIVATE_READINESS_CLOCK_CANARY')) };
         let settled = false;
+        if (beforeDigestReturns) f.onDigest(beforeDigestReturns, prompt);
         const inserting = f.run('insert', request).then((value: any) => { settled = true; return value; });
-        for (let tick = 0; tick < 20 && (insertions === 0 || !f.world.__computaChatSubmissionState?.pending); tick++) {
-          await microtasks(); await new Promise(resolve => setImmediate(resolve));
-        }
+        await firstInsertHostSignal(insertionAcknowledged, inserting);
         await microtasks();
         expect(insertions).toBe(1);
         const state = f.world.__computaChatSubmissionState, pending = state.pending;
@@ -3290,6 +3304,27 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         return { f, picker, expected, prompt, request, send, inserting, state, pending, notify, expire, noReplay,
           openings: () => openings, settled: () => settled };
       };
+      test('first Instant readiness fixture awaits the actual prepared insertion across a delayed digest', async () => {
+        let releaseDigest!: () => void, reachedDigest!: () => void;
+        const digestHeld = new Promise<void>(resolve => { releaseDigest = resolve; });
+        const digestEntered = new Promise<void>(resolve => { reachedDigest = resolve; });
+        let entered = false, returned = false;
+        const starting = firstInsertReadiness(false, false, '', async () => {
+          entered = true; reachedDigest(); await digestHeld;
+        }).then(value => { returned = true; return value; });
+        try {
+          await firstInsertHostSignal(digestEntered, starting);
+          expect(entered).toBe(true);
+          // Exceed the previous driver turn limit while the real digest's
+          // existing hook is held. No provider/adapter clock is advanced.
+          for (let tick = 0; tick < 20; tick++) { await microtasks(); await new Promise(resolve => setImmediate(resolve)); }
+          expect(returned).toBe(false);
+        } finally { releaseDigest(); }
+        const x = await starting;
+        expect(x.pending.phase).toBe('prepared'); expect(x.openings()).toBe(0); x.noReplay();
+        // The ordinary unready-Send deadline remains the production refusal.
+        expect((await x.expire()).error).toBe('send_unavailable'); expect(x.openings()).toBe(0); x.noReplay();
+      });
       test('first Instant insert waits for editor acknowledgement before its sole final picker opening', async () => {
         const x = await firstInsertReadiness();
         // A controlled site ignores picker actions while its Send is disabled.
@@ -3998,7 +4033,9 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           expect(result.error, mode).toBeDefined(); expect(result.modelEvidence, mode).toBeUndefined(); expect(openings, mode).toBe(1);
           expect(x.pending.firstReadinessOpening?.recoveryClaimed ?? false).toBe(false);
           const diagnostic = result.modelDiagnostic.readContext.preparedReadinessOpening;
-          expect(Object.keys(diagnostic).sort()).toEqual(['clockRejected', 'clockUnconfirmed', 'nativeGrant', 'observedAcknowledgement', 'recoveryClaimed', 'slot']);
+          expect(Object.keys(diagnostic).sort()).toEqual(['acknowledgementSources', 'clockRejected', 'clockUnconfirmed', 'nativeGrant', 'observedAcknowledgement', 'recoveryClaimed', 'slot']);
+          expect(Object.keys(diagnostic.acknowledgementSources).sort()).toEqual(['menuDescendant', 'menuRoot', 'triggerAriaExpanded', 'triggerDataState']);
+          for (const value of Object.values(diagnostic.acknowledgementSources)) expect(typeof value).toBe('boolean');
           for (const field of ['clockRejected', 'clockUnconfirmed', 'nativeGrant', 'observedAcknowledgement', 'recoveryClaimed']) expect(typeof diagnostic[field]).toBe('boolean');
           expect(['existing', 'not_claimed', 'grant_refused', 'ineligible', 'established', 'prior_effect']).toContain(diagnostic.slot);
           if (['missing', 'hash', 'marker', 'sequence', 'extra', 'array', 'old_grant'].includes(mode)) expect(diagnostic.nativeGrant).toBe(false);
@@ -4067,6 +4104,58 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         const result = await reading;
         expect(result.error).toBeUndefined(); expect(result.sendReady).toBe(true); expect(result.modelEvidence.selected).toEqual(late.expected);
         expect(late.recoveryOpenings()).toBe(1); expect(late.pending.firstReadinessOpening.recoveryClaimed).toBe(false); noReadinessInputReplay(late);
+      });
+      test('prepared readiness acknowledgement provenance distinguishes transient original signals without granting a model proof', async () => {
+        const sourceNames = ['triggerAriaExpanded', 'triggerDataState', 'menuRoot', 'menuDescendant'];
+        for (const mode of [...sourceNames, 'closed_old_value', 'foreign_trigger']) {
+          const x = await preparedReadinessRecovery('Extra High'); let openings = 0;
+          // All physical opening attempts are ignored: only original mutation
+          // acknowledgements may suppress the existing bounded second attempt.
+          x.picker.trigger.onClick = () => { openings++; };
+          const registrations = new Map<any, any[]>(), prototype = Object.getPrototypeOf(x.f.observers[0]), observe = prototype.observe;
+          prototype.observe = function(target:any, options:any) {
+            registrations.set(this, [...(registrations.get(this) || []), { target, options }]); return observe.call(this, target, options);
+          };
+          try {
+            const notify = (records:any[]) => {
+              for (const [observer, scopes] of registrations) if (scopes.some(({target: root, options}) => records.some(record =>
+                options[record.type] && (root === record.target || options.subtree && (root === x.f.document || root.contains?.(record.target)))
+                && (record.type !== 'attributes' || !options.attributeFilter || options.attributeFilter.includes(record.attributeName))))) observer.callback(records);
+            };
+            const reading = x.f.run('sendReady', x.recoveryRequest); await microtasks(); expect(openings).toBe(1);
+            expect(x.pending.firstReadinessOpening.insertProof).toBe(x.pending.firstInsertOpening);
+            if (mode === 'triggerAriaExpanded' || mode === 'triggerDataState' || mode === 'closed_old_value') {
+              const isState = mode === 'triggerDataState';
+              notify([{ type: 'attributes', target: x.picker.trigger, attributeName: isState ? 'data-state' : 'aria-expanded',
+                oldValue: mode === 'closed_old_value' ? 'false' : isState ? 'open' : 'true' }]);
+            } else if (mode === 'foreign_trigger') {
+              const foreign = new Node('BUTTON', { 'aria-label': 'PRIVATE_ACK_CANARY' }); x.f.body.append(foreign);
+              notify([{ type: 'attributes', target: foreign, attributeName: 'aria-expanded', oldValue: 'true' }]);
+            } else {
+              const menu = new Node('DIV', { role: 'menu', 'aria-label': 'PRIVATE_ACK_CANARY' });
+              // This menu has no association with the picker. A transient root
+              // or descendant remains only an ACK signal, never accepted proof.
+              const removed = mode === 'menuRoot' ? menu : new Node('SECTION', { 'aria-label': 'PRIVATE_ACK_WRAPPER' });
+              if (mode === 'menuDescendant') removed.append(menu);
+              x.f.body.append(removed); x.f.body.children = x.f.body.children.filter((node:any) => node !== removed);
+              removed.parentElement = null; removed.connected = false;
+              notify([{ type: 'childList', target: x.f.body, addedNodes: [], removedNodes: [removed] }]);
+            }
+            await finishFirstInsertWait(x, 901); await finishFirstInsertWait(x, 901);
+            const result = await reading, acknowledged = sourceNames.includes(mode);
+            expect(result.error, mode).toBeDefined(); expect(result.modelEvidence, mode).toBeUndefined();
+            expect(openings, mode).toBe(acknowledged ? 1 : 2);
+            const diagnostic = result.modelDiagnostic.readContext.preparedReadinessOpening;
+            expect(diagnostic.nativeGrant).toBe(true); expect(diagnostic.slot).toBe('established');
+            expect(diagnostic.observedAcknowledgement).toBe(acknowledged);
+            expect(diagnostic.recoveryClaimed).toBe(!acknowledged);
+            expect(diagnostic.acknowledgementSources).toEqual(Object.fromEntries(sourceNames.map(name => [name, name === mode])));
+            expect(x.picker.trigger.values['aria-expanded']).toBe('false');
+            for (const secret of [x.prompt, firstMarker, x.grant.fingerprint, 'PRIVATE_ACK_CANARY', 'PRIVATE_ACK_WRAPPER'])
+              expect(JSON.stringify(diagnostic)).not.toContain(secret);
+            noReadinessInputReplay(x);
+          } finally { prototype.observe = observe; }
+        }
       });
       test('a layout LF never substitutes for the full literal submit draft', () => {
         const source = readFileSync(new URL('../Sources/Computa/Resources/BrowserModels/chatgpt.js', import.meta.url), 'utf8');
