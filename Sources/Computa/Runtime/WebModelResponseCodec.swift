@@ -1363,6 +1363,37 @@ enum WebModelResponseCodec {
         }
     }
 
+    /// A rejected call can request one correction only when the current native
+    /// catalog permits loading its exact name. This never validates its arguments
+    /// against an absent schema or accepts/loads/dispatches the rejected call.
+    static func isGroqUnloadedToolCorrectionCandidate(_ text: String, requestedName: String,
+                                                       request: Request) -> Bool {
+        guard LocalModelCatalog.webProvider(for: request.model) == "groq",
+              let seed = request.groqToolCatalogSeed,
+              let catalog = try? GroqToolCatalog.baseline(for: seed),
+              request.tools[requestedName] == nil,
+              let entry = catalog.inventory.first(where: { $0.name == requestedName }),
+              entry.callable, entry.allowed,
+              seed.callableNames.contains(requestedName), seed.allowedNames.contains(requestedName),
+              [GroqToolCatalog.name, "functions." + GroqToolCatalog.name].contains(where: {
+                  request.tools[$0] != nil && request.toolPolicy.allowedNames.contains($0)
+                      && catalog.selectedNames.contains($0)
+              }),
+              request.maximumToolCalls == nil || request.maximumToolCalls! >= 1 else { return false }
+        let candidate = removingJSONFence(text.trimmingCharacters(in: .whitespacesAndNewlines))
+        let data = Data(candidate.utf8)
+        guard !data.isEmpty, data.count <= maximumPromptBytes,
+              APIModelCorrectionJSON.isUnambiguous(data),
+              let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(envelope.keys) == ["type", "calls"], envelope["type"] as? String == "tool_calls",
+              let calls = envelope["calls"] as? [[String: Any]], calls.count == 1,
+              let call = calls.first, call["name"] as? String == requestedName else { return false }
+        if entry.isCustom {
+            return Set(call.keys) == ["name", "input"] && call["input"] is String
+        }
+        return Set(call.keys) == ["name", "arguments"] && call["arguments"] is [String: Any]
+    }
+
     /// Diagnose exactly the existing malformed-envelope failure without
     /// changing acceptance, repairing JSON, or exposing provider response data.
     /// Other failures (including unoffered tools) keep their existing identity.

@@ -15002,6 +15002,489 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    private func groqProofPromptWithoutMarker(_ outbound: String) throws -> String {
+        let separator = "\n\nComputa session marker: "
+        let range = try XCTUnwrap(outbound.range(of: separator, options: .backwards))
+        XCTAssertEqual(outbound.components(separatedBy: separator).count, 2)
+        _ = try XCTUnwrap(UUID(uuidString: String(outbound[range.upperBound...])))
+        return String(outbound[..<range.lowerBound])
+    }
+
+    private func startNativeGroqProofFixture(_ fixture: Fixture) async throws -> (WebModelStartAdmission, String, WKWebView) {
+        let choice = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B")
+        let params = try JSONSerialization.data(withJSONObject:
+            ["provider": "groq", "modelChoice": try XCTUnwrap(choice.canonicalJSONString)])
+        let admission = WebModelStartAdmission(id: UUID(), inferenceID: UUID(),
+            taskID: UUID().uuidString.lowercased(), threadID: UUID().uuidString.lowercased(),
+            turnID: UUID().uuidString.lowercased(), runtimeGeneration: UUID(), preparationID: UUID(),
+            transportGeneration: UUID(), provider: "groq", modelID: choice.modelID, parameters: params)
+        let data = try await fixture.transport.start(params: params, admission: admission, authorization: nil)
+        let started = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        try await waitForFixture(view)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        return (admission, token, view)
+    }
+
+    func testGroqCompletedLiteralProofBindsActualNativeAdmissionPromptAndFinalBytes() async throws {
+        let fixture = try Fixture(page: Self.groqFixturePage()); defer { fixture.shutdown() }
+        let (admission, token, view) = try await startNativeGroqProofFixture(fixture)
+        let before = await fixture.transport.snapshotGroqCompletedLiteralProof(sessionToken: token)
+        XCTAssertNil(before)
+        let prompt = "SAFE native proof  two spaces e\u{301} 🌍\nExact final line"
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+        let candidate = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        XCTAssertEqual(candidate["state"] as? String, "running")
+        let pending = await fixture.transport.snapshotGroqCompletedLiteralProof(sessionToken: token)
+        XCTAssertNil(pending, "An initial literal candidate is not the independent final completion")
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        let completedProof = await fixture.transport.snapshotGroqCompletedLiteralProof(sessionToken: token)
+        let proof = try XCTUnwrap(completedProof)
+        let context = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+        XCTAssertEqual(proof.admission, admission); XCTAssertEqual(proof.sessionToken, token)
+        XCTAssertEqual(proof.documentGeneration.uuidString, context["documentGeneration"] as? String)
+        XCTAssertEqual(proof.modelChoice.modelID, admission.modelID); XCTAssertEqual(proof.sequence, 1)
+        XCTAssertEqual(proof.firstUserFingerprint, context["firstUserFingerprint"] as? String)
+        XCTAssertEqual(proof.promptFingerprint, EmbeddedWebModelTransport.promptFingerprint(prompt))
+        XCTAssertEqual(proof.responseSHA256, EmbeddedWebModelTransport.promptFingerprint(try XCTUnwrap(complete["text"] as? String)))
+        XCTAssertEqual(complete["sessionLifecycle"] as? String, "explicit_clear")
+        XCTAssertEqual(complete["temporary"] as? Bool, false)
+        XCTAssertNil(complete["turnContinuationCapability"]); XCTAssertNil(complete["freshSessionSubmissionCapability"])
+        var unexpectedReads = 0
+        fixture.transport.setBeforePageResultValidationForTesting { _ in unexpectedReads += 1 }
+        let again = await fixture.transport.snapshotGroqCompletedLiteralProof(sessionToken: token)
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        XCTAssertEqual(again, proof); XCTAssertEqual(unexpectedReads, 0, "Snapshot must add no DOM read")
+        let foreign = await fixture.transport.snapshotGroqCompletedLiteralProof(sessionToken: UUID().uuidString)
+        XCTAssertNil(foreign)
+        let cancelled = Task { @MainActor in await fixture.transport.snapshotGroqCompletedLiteralProof(sessionToken: token) }
+        cancelled.cancel()
+        let cancelledProof = await cancelled.value
+        XCTAssertNil(cancelledProof)
+        let current = await fixture.transport.snapshotGroqCompletedLiteralProof(sessionToken: token)
+        XCTAssertEqual(current, proof, "A cancelled observer cannot mint or replace another proof")
+        _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        let finished = await fixture.transport.snapshotGroqCompletedLiteralProof(sessionToken: token)
+        XCTAssertNil(finished)
+        let counts = try await evaluate(view, "return [groqFixture.sendCount, groqFixture.clearCount];") as? [Int]
+        XCTAssertEqual(counts, [1, 1]); try await assertHumanTabIntact(fixture)
+    }
+
+    func testGroqCompletedLiteralProofRequiresNativeStartAndCannotBorrowAnotherTransport() async throws {
+        let legacy = try Fixture(page: Self.groqFixturePage()); defer { legacy.shutdown() }
+        let (token, _) = try await startGroqFixture(legacy)
+        let missing = await legacy.transport.snapshotGroqCompletedLiteralProof(sessionToken: token)
+        XCTAssertNil(missing, "Ordinary completed text without native Start admission has no correction proof")
+        _ = try await call(legacy.transport, "webProviderFinish", ["sessionToken": token])
+        let native = try Fixture(page: Self.groqFixturePage()); defer { native.shutdown() }
+        let (_, otherToken, _) = try await startNativeGroqProofFixture(native)
+        _ = try await call(native.transport, "webProviderSend", ["sessionToken": otherToken, "prompt": "SAFE independent native proof"])
+        _ = try await waitForState("complete", native.transport, token: otherToken)
+        let own = await native.transport.snapshotGroqCompletedLiteralProof(sessionToken: otherToken)
+        let borrowed = await legacy.transport.snapshotGroqCompletedLiteralProof(sessionToken: otherToken)
+        XCTAssertNotNil(own); XCTAssertNil(borrowed)
+        _ = try await call(native.transport, "webProviderFinish", ["sessionToken": otherToken])
+        try await assertHumanTabIntact(native); try await assertHumanTabIntact(legacy)
+    }
+
+    func testGroqCompletedLiteralProofCannotSurviveNonliteralOrStaleFinalObservation() async throws {
+        for mutation in ["rendered", "final_rendered", "answer_changed", "streaming"] {
+            let fixture = try Fixture(page: Self.groqFixturePage()); defer { fixture.shutdown() }
+            let (_, token, view) = try await startNativeGroqProofFixture(fixture)
+            if mutation == "rendered" { _ = try await evaluate(view, "groqFixture.structuredReply = false; return true;") }
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "SAFE proof final observation"])
+            if mutation != "rendered" {
+                _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                try await Task.sleep(for: .milliseconds(1_700))
+                var changed = false
+                fixture.transport.setBeforePageResultValidationForTesting { action in
+                    guard action == "verifyModel", !changed else { return }; changed = true
+                    let script: String
+                    if mutation == "final_rendered" {
+                        script = "const p=document.createElement('p'); p.className='text-left mb-4'; p.textContent=groqFixture.code.textContent; groqFixture.answer.replaceChildren(p);"
+                    } else if mutation == "answer_changed" {
+                        script = #"groqFixture.code.textContent = '{"type":"message","text":"CHANGED"}';"#
+                    } else { script = "groqFixture.editor.disabled=true; groqFixture.send.disabled=true;" }
+                    _ = try? await self.evaluate(view, script + " return true;")
+                }
+                if mutation == "final_rendered" {
+                    do { _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]); XCTFail("Final literal drift must reject") }
+                    catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFormatUnavailable) }
+                } else {
+                    let current = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                    XCTAssertEqual(current["state"] as? String, "running", mutation)
+                }
+                fixture.transport.setBeforePageResultValidationForTesting(nil)
+                XCTAssertTrue(changed)
+            } else {
+                do { _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]); XCTFail("Rendered text cannot mint a proof") }
+                catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFormatUnavailable) }
+            }
+            let missing = await fixture.transport.snapshotGroqCompletedLiteralProof(sessionToken: token)
+            XCTAssertNil(missing, mutation)
+            if mutation == "answer_changed" || mutation == "streaming" {
+                if mutation == "streaming" { _ = try await evaluate(view, "groqFixture.editor.disabled=false; groqFixture.send.disabled=false; return true;") }
+                let complete = try await waitForState("complete", fixture.transport, token: token)
+                let completedProof = await fixture.transport.snapshotGroqCompletedLiteralProof(sessionToken: token)
+                let fresh = try XCTUnwrap(completedProof)
+                XCTAssertEqual(fresh.responseSHA256, EmbeddedWebModelTransport.promptFingerprint(try XCTUnwrap(complete["text"] as? String)))
+            }
+            _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            let counts = try await evaluate(view, "return [groqFixture.sendCount, groqFixture.clearCount];") as? [Int]
+            XCTAssertEqual(counts, [1, 1]); try await assertHumanTabIntact(fixture)
+        }
+    }
+
+    func testGroqCompletedLiteralProofIsRevokedByCancelOrDocumentReplacement() async throws {
+        for mutation in ["cancel", "document"] {
+            let fixture = try Fixture(page: Self.groqFixturePage()); defer { fixture.shutdown() }
+            let (_, token, view) = try await startNativeGroqProofFixture(fixture)
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "SAFE proof revocation"])
+            _ = try await waitForState("complete", fixture.transport, token: token)
+            let initial = await fixture.transport.snapshotGroqCompletedLiteralProof(sessionToken: token)
+            XCTAssertNotNil(initial)
+            if mutation == "cancel" {
+                let closed = try await call(fixture.transport, "webProviderCancel", ["sessionToken": token])
+                XCTAssertEqual(closed["cleanup"] as? String, "transcript_cleared")
+            } else {
+                let page = try Self.groqFixturePage().replacingOccurrences(of: "window.fixtureGeneration = 'initial';", with: "window.fixtureGeneration = 'replacement';")
+                view.loadHTMLString(page, baseURL: view.url)
+                try await waitForFixture(view, generation: "replacement")
+            }
+            let revoked = await fixture.transport.snapshotGroqCompletedLiteralProof(sessionToken: token)
+            XCTAssertNil(revoked, mutation)
+        }
+    }
+
+    func testGroqNativeLiteralCorrectionKeepsTheClosedLoaderAndNextHistoryReadLinked() async throws {
+        try await runGroqNativeLiteralCorrection(secondFails: false)
+    }
+
+    func testGroqNativeLiteralCorrectionSecondFailureAndDuplicateHTTPCannotStartAThirdAttempt() async throws {
+        try await runGroqNativeLiteralCorrection(secondFails: true)
+    }
+
+    private func runGroqNativeLiteralCorrection(secondFails: Bool) async throws {
+        let fixture = try Fixture(page: Self.groqFixturePage()); defer { fixture.shutdown() }
+        let root = try websiteBenchmarkTemporaryDirectory().appendingPathComponent("GroqLiteralCorrection-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let server = WebModelServer(), runtime = UUID(), preparation = UUID(), core = UUID()
+        addTeardownBlock { _ = await server.shutdown(); try? FileManager.default.removeItem(at: root) }
+        await server.configureEmbeddedTransport(fixture.transport)
+        await server.configureEvidenceDirectory(root.appendingPathComponent("evidence"))
+        await server.configureCleanupReceipts(directory: root.appendingPathComponent("cleanup"), runtimeGeneration: runtime) { _ in }
+        await server.setGroqSubmissionIntervalForTesting(.zero)
+        await server.setTimeoutsForTesting(readiness: .seconds(10), response: .seconds(10))
+        let task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(), turn = UUID().uuidString.lowercased()
+        let choice = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B")
+        try await server.prepareInferenceTurn(taskID: task, threadID: thread, runtimeGeneration: runtime,
+            preparationID: preparation, isNewThread: true, isCompactToolThread: true,
+            historyPreparation: .init(modelID: choice.modelID, coreGeneration: core))
+        let writerValue = try await server.prepareGroqHistoryTurn(taskID: task, threadID: thread, turnID: turn,
+            runtimeGeneration: runtime, preparationID: preparation, modelID: choice.modelID, coreGeneration: core)
+        let writer = try XCTUnwrap(writerValue)
+        let historyScope = GroqNativePublicationLedger.Scope(taskID: task, threadID: thread, turnID: turn,
+            runtimeGeneration: runtime, preparationID: preparation, modelID: choice.modelID, coreGeneration: core)
+        try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn,
+            runtimeGeneration: runtime, preparationID: preparation)
+        var tools = [GroqToolCatalog.specification, GroqHistoryTool.specification].map { definition in
+            var wire = definition; wire["parameters"] = wire.removeValue(forKey: "inputSchema"); return wire
+        }
+        for name in ["exec_command", "fixture_other"] {
+            tools.append(["type": "function", "name": name, "parameters": ["type": "object",
+                "properties": ["cmd": ["type": "string"]], "required": ["cmd"], "additionalProperties": false]])
+        }
+        let metadata = try websiteInferenceFixtureMetadata(taskID: task, threadID: thread, turnID: turn)
+        var input: [[String: Any]] = [["role": "user", "content": "Use only the inert synthetic host protocol; no external actions."]]
+        func request() throws -> Data {
+            try JSONSerialization.data(withJSONObject: ["model": choice.modelID, "input": input, "tools": tools,
+                "stream": false, "parallel_tool_calls": true, "max_tool_calls": 2,
+                "client_metadata": ["x-codex-turn-metadata": metadata]], options: [.sortedKeys, .withoutEscapingSlashes])
+        }
+        let seed = try XCTUnwrap(WebModelResponseCodec.prepareRequest(request()).groqToolCatalogSeed)
+        let revision = try GroqToolCatalog.baseline(for: seed).revision
+        let catalogScope = GroqToolCatalog.Scope(taskID: task, threadID: thread, turnID: turn,
+            runtimeGeneration: runtime, preparationID: preparation, modelID: choice.modelID)
+        func envelope(_ calls: [[String: Any]]) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": calls], options: [.sortedKeys]), as: UTF8.self)
+        }
+        func loader(_ names: [String]) throws -> String {
+            try envelope([["name": GroqToolCatalog.name, "arguments": ["catalog_revision": revision, "names": names]]])
+        }
+        let bad = try envelope([["name": "exec_command", "arguments": ["cmd": "REJECTED_UNLOADED_NEVER_DISPATCHED"]]])
+        let replies = [try loader(["exec_command"]), try loader(["fixture_other"]), bad,
+            secondFails ? bad : try loader(["exec_command"]),
+            try envelope([["name": "exec_command", "arguments": ["cmd": "SYNTHETIC_FIRST_COMPLETION"]],
+                          ["name": "exec_command", "arguments": ["cmd": "SYNTHETIC_LAST_COMPLETION"]]])]
+        var pages: [WKWebView] = [], readerReference: String?, correctivePrompt: String?, firstBadPrompt: String?
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard let id = fixture.createdTabs.last, let view = fixture.browser.webView(for: id) else { return }
+            if action == "prepare", !pages.contains(where: { $0 === view }) {
+                pages.append(view)
+                if pages.count <= replies.count {
+                    let text = replies[pages.count - 1]
+                    let quote = try? JSONSerialization.data(withJSONObject: text, options: [.fragmentsAllowed])
+                    if let quote { _ = try? await self.evaluate(view, "groqFixture.reply = " + String(decoding: quote, as: UTF8.self) + "; return true;") }
+                }
+            }
+            if action == "sendReady" {
+                let prompt = (try? await self.evaluate(view, "return groqFixture.editor.value;")) as? String
+                if pages.count == 3 { firstBadPrompt = prompt }
+                if pages.count == 4 { correctivePrompt = prompt }
+                if pages.count == 6, let prompt,
+                   let opening = prompt.range(of: "\nGROQ_CONTEXT_MANIFEST_V1:\n```\n"),
+                   let closing = prompt.range(of: "\n```\nEND_GROQ_CONTEXT_MANIFEST_V1.", range: opening.upperBound..<prompt.endIndex) {
+                    // The request-context guidance has an earlier illustrative
+                    // ref="ref". Read only the actual displayed manifest JSON.
+                    let manifest = String(prompt[opening.upperBound..<closing.lowerBound])
+                    let regex = try? NSRegularExpression(pattern: #""\$computa_history"\s*:\s*"([^"]+)""#)
+                    guard let match = regex?.firstMatch(in: manifest, range: NSRange(manifest.startIndex..., in: manifest)),
+                          let range = Range(match.range(at: 1), in: manifest) else { return }
+                    let ref = String(manifest[range]); readerReference = ref
+                    if let reply = try? envelope([["name": GroqHistoryTool.name, "arguments": ["ref": ref]]]),
+                       let quote = try? JSONSerialization.data(withJSONObject: reply, options: [.fragmentsAllowed]) {
+                        _ = try? await self.evaluate(view, "groqFixture.reply = " + String(decoding: quote, as: UTF8.self) + "; return true;")
+                    }
+                }
+            }
+        }
+        let endpoint = try await server.start().appendingPathComponent("responses")
+        func post() async throws -> (Data, Int) {
+            var http = URLRequest(url: endpoint); http.httpMethod = "POST"; http.httpBody = try request()
+            http.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            http.setValue("Bearer " + server.bearerToken, forHTTPHeaderField: "Authorization")
+            http.setValue(task, forHTTPHeaderField: "X-Computa-Task-ID")
+            let (body, response) = try await URLSession.shared.data(for: http)
+            return (body, try XCTUnwrap(response as? HTTPURLResponse).statusCode)
+        }
+        func output(_ body: Data) throws -> [[String: Any]] {
+            try XCTUnwrap((JSONSerialization.jsonObject(with: body) as? [String: Any])?["output"] as? [[String: Any]])
+        }
+        func nativeCalls(_ calls: [[String: Any]]) -> [[String: Any]] {
+            calls.map { item in var value = item; value.removeValue(forKey: "id"); value.removeValue(forKey: "status"); return value }
+        }
+        func appendLoader(_ body: Data, expected: String) async throws {
+            let calls = try output(body); XCTAssertEqual(calls.count, 1)
+            let call = try XCTUnwrap(calls.first); XCTAssertEqual(call["name"] as? String, GroqToolCatalog.name)
+            let arguments = Data(try XCTUnwrap(call["arguments"] as? String).utf8)
+            let loaded = try await server.loadGroqTools(scope: catalogScope, arguments: arguments)
+            let receipt = try XCTUnwrap(JSONSerialization.jsonObject(with: loaded) as? [String: Any])
+            XCTAssertEqual(receipt["loaded"] as? [String], [expected]); XCTAssertEqual(receipt["execution"] as? Bool, false)
+            input += nativeCalls(calls) + [["type": "function_call_output", "call_id": try XCTUnwrap(call["call_id"]),
+                "output": String(decoding: loaded, as: UTF8.self)]]
+        }
+        for name in ["exec_command", "fixture_other"] {
+            let (body, status) = try await post(); XCTAssertEqual(status, 200)
+            try await appendLoader(body, expected: name)
+        }
+        let (corrected, status) = try await post()
+        XCTAssertEqual(pages.count, 4, "One fresh correction session follows the rejected completed literal reply")
+        let firstPrompt = try groqProofPromptWithoutMarker(XCTUnwrap(firstBadPrompt))
+        let secondPrompt = try groqProofPromptWithoutMarker(XCTUnwrap(correctivePrompt))
+        XCTAssertTrue(secondPrompt.hasPrefix(firstPrompt)); XCTAssertGreaterThan(secondPrompt.utf8.count, firstPrompt.utf8.count)
+        XCTAssertFalse(writer.recordCompleted(current: historyScope, itemID: "REJECTED_UNISSUED_CALL", terminal: .command(status: .completed, exitCode: 0)))
+        if secondFails {
+            XCTAssertEqual(status, 500)
+            let error = try XCTUnwrap((JSONSerialization.jsonObject(with: corrected) as? [String: Any])?["error"] as? [String: Any])
+            XCTAssertEqual(error["code"] as? String, "invalid_model_output")
+            let (_, duplicateStatus) = try await post(); XCTAssertNotEqual(duplicateStatus, 200)
+            XCTAssertEqual(pages.count, 4, "A same-context duplicate native HTTP request cannot obtain a third correction")
+            let issues = await server.fixtureFinish(taskID: task, runtimeGeneration: runtime); XCTAssertTrue(issues.isEmpty)
+        } else {
+            XCTAssertEqual(status, 200)
+            try await appendLoader(corrected, expected: "exec_command")
+            let (executed, executionStatus) = try await post(); XCTAssertEqual(executionStatus, 200)
+            let calls = try output(executed); XCTAssertEqual(calls.count, 2)
+            XCTAssertTrue(calls.allSatisfy { $0["name"] as? String == "exec_command" })
+            let older = "SYNTHETIC_HOST_OUTPUT  two spaces e\u{301} 🌍\n" + String(repeating: "OLDER_PAYLOAD ", count: 2_000)
+            let latest = "SYNTHETIC_LATEST_OUTPUT"
+            input += nativeCalls(calls)
+            for (call, text) in zip(calls, [older, latest]) {
+                let callID = try XCTUnwrap(call["call_id"] as? String)
+                // Explicit synthetic native completion fixture, not a real
+                // Core command execution or provider qualification claim.
+                XCTAssertTrue(writer.recordCompleted(current: historyScope, itemID: callID, terminal: .command(status: .completed, exitCode: 0)))
+                input.append(["type": "function_call_output", "call_id": callID, "output": text])
+            }
+            let (readBody, readStatus) = try await post(); XCTAssertEqual(readStatus, 200)
+            let readers = try output(readBody), reader = try XCTUnwrap(readers.first)
+            XCTAssertEqual(readers.count, 1); XCTAssertEqual(reader["name"] as? String, GroqHistoryTool.name)
+            XCTAssertNotNil(readerReference)
+            let read = try await server.readGroqHistory(scope: historyScope,
+                callID: try XCTUnwrap(reader["call_id"] as? String),
+                arguments: Data(try XCTUnwrap(reader["arguments"] as? String).utf8))
+            let record = try XCTUnwrap(JSONSerialization.jsonObject(with: read.responseData) as? [String: Any])
+            XCTAssertEqual(record["source_call_id"] as? String, calls[0]["call_id"] as? String)
+            XCTAssertEqual(record["source_name"] as? String, "exec_command"); XCTAssertEqual(record["field"] as? String, "output")
+            XCTAssertEqual(record["historical_only"] as? Bool, true); XCTAssertEqual(record["action_authority"] as? Bool, false)
+            let raw = try JSONSerialization.data(withJSONObject: older, options: [.fragmentsAllowed, .withoutEscapingSlashes])
+            XCTAssertEqual(record["whole_sha256"] as? String, EmbeddedWebModelTransport.promptFingerprint(String(decoding: raw, as: UTF8.self)))
+            XCTAssertTrue(String(decoding: raw, as: UTF8.self).hasPrefix(try XCTUnwrap(record["utf8_fragment"] as? String)))
+            read.publication.abortIfPending() // No Core reader-RPC write is claimed by this fixture.
+            XCTAssertTrue(writer.isCurrent(current: historyScope)); XCTAssertEqual(pages.count, 6)
+        }
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        let journal = root.appendingPathComponent("evidence/transactions/" + task + "/" + turn + ".jsonl")
+        let rows = try Data(contentsOf: journal).split(separator: 10).map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0)) as? [String: Any]) }
+        XCTAssertEqual(rows.filter { $0["phase"] as? String == "failed" }.count, secondFails ? 2 : 1)
+        let correctionDirectory = root.appendingPathComponent("evidence/format-corrections-v1")
+        let files = try FileManager.default.contentsOfDirectory(at: correctionDirectory, includingPropertiesForKeys: nil).filter { $0.pathExtension == "json" }
+        XCTAssertEqual(files.count, 3, "Exactly one durable claimed/closed/finished allowance")
+        let correctionRows = try files.map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: $0)) as? [String: Any]) }
+        XCTAssertTrue(correctionRows.allSatisfy { $0["reason"] as? String == "unoffered_tool" })
+        XCTAssertEqual(correctionRows.first { $0["phase"] as? String == "finished" }?["outcome"] as? String,
+            secondFails ? "failed" : "response_validated")
+        _ = await server.shutdown()
+        for view in pages {
+            let counts = try await evaluate(view, "return [groqFixture.sendCount, groqFixture.clearCount];") as? [Int]
+            XCTAssertEqual(counts, [1, 1])
+        }
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testGroqNativeLiteralCorrectionBarriersPreventAnotherStartOrSend() async throws {
+        for barrier in ["cancel", "context", "cleanup", "expiry", "budget"] {
+            try await runGroqNativeLiteralCorrectionBarrier(barrier)
+        }
+    }
+
+    private func runGroqNativeLiteralCorrectionBarrier(_ barrier: String) async throws {
+        let bad = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"REJECTED_UNLOADED_NEVER_DISPATCHED"}}]}"#
+        let quoted = String(decoding: try JSONSerialization.data(withJSONObject: bad, options: [.fragmentsAllowed]), as: UTF8.self)
+        let page = try Self.groqFixturePage().replacingOccurrences(of: "window.fixtureReady = true;",
+            with: "f.reply = " + quoted + "; window.fixtureReady = true;")
+        let fixture = try Fixture(page: page); defer { fixture.shutdown() }
+        let root = try websiteBenchmarkTemporaryDirectory().appendingPathComponent("GroqCorrectionBarrier-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let forwarder = GroqProofForwardingTransport(native: fixture.transport)
+        let server = WebModelServer(), runtime = UUID(), preparation = UUID(), core = UUID()
+        addTeardownBlock { _ = await server.shutdown(); try? FileManager.default.removeItem(at: root) }
+        await server.configureEmbeddedTransport(forwarder)
+        await server.configureEvidenceDirectory(root.appendingPathComponent("evidence"))
+        await server.configureCleanupReceipts(directory: root.appendingPathComponent("cleanup"), runtimeGeneration: runtime) { _ in }
+        await server.setGroqSubmissionIntervalForTesting(.zero)
+        await server.setTimeoutsForTesting(readiness: .seconds(10), response: barrier == "expiry" ? .seconds(4) : .seconds(10))
+        let task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(), turn = UUID().uuidString.lowercased()
+        let choice = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B")
+        try await server.prepareInferenceTurn(taskID: task, threadID: thread, runtimeGeneration: runtime,
+            preparationID: preparation, isNewThread: true, isCompactToolThread: true,
+            historyPreparation: .init(modelID: choice.modelID, coreGeneration: core))
+        let writer = try await server.prepareGroqHistoryTurn(taskID: task, threadID: thread, turnID: turn,
+            runtimeGeneration: runtime, preparationID: preparation, modelID: choice.modelID, coreGeneration: core)
+        XCTAssertNotNil(writer)
+        try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn,
+            runtimeGeneration: runtime, preparationID: preparation)
+        var tools = [GroqToolCatalog.specification, GroqHistoryTool.specification].map { definition in
+            var wire = definition; wire["parameters"] = wire.removeValue(forKey: "inputSchema"); return wire
+        }
+        tools.append(["type": "function", "name": "exec_command", "parameters": ["type": "object",
+            "properties": ["cmd": ["type": "string"]], "required": ["cmd"], "additionalProperties": false]])
+        let metadata = try websiteInferenceFixtureMetadata(taskID: task, threadID: thread, turnID: turn)
+        func data(_ padding: Int) throws -> Data {
+            try JSONSerialization.data(withJSONObject: ["model": choice.modelID,
+                "input": "Synthetic initial string has no established historical snapshot. " + String(repeating: "PAD ", count: padding),
+                "tools": tools, "stream": false, "client_metadata": ["x-codex-turn-metadata": metadata]], options: [.sortedKeys, .withoutEscapingSlashes])
+        }
+        var body = try data(0), expected: (request: WebModelResponseCodec.Request, units: Int)?
+        if barrier == "budget" {
+            // Initial-string native history has no projector/snapshot. This is
+            // the exact production presentation, with the actual frozen IDs.
+            let seed = try XCTUnwrap(WebModelResponseCodec.prepareRequest(body).groqToolCatalogSeed)
+            let baseline = try GroqToolCatalog.baseline(for: seed)
+            func candidate(_ n: Int) throws -> (request: WebModelResponseCodec.Request, units: Int) {
+                try WebModelResponseCodec.prepareBudgetedGroqRequest(data(n), availability: nil, projection: baseline,
+                    model: choice.modelID, loadedOnly: true, compactHistoryInventory: true, historyProjection: nil)
+            }
+            var low = 0, high = 12_000
+            while low < high {
+                let middle = (low + high + 1) / 2
+                do { _ = try candidate(middle); low = middle }
+                catch WebModelResponseCodec.Failure.groqPromptBudgetExceeded { high = middle - 1 }
+            }
+            expected = try candidate(low); body = try data(low)
+            XCTAssertGreaterThanOrEqual(try XCTUnwrap(expected).units, 5_990)
+            XCTAssertLessThanOrEqual(try XCTUnwrap(expected).units, 6_000)
+        }
+        var proofEntered = false, cancelledAtProof = false
+        var ownedView: WKWebView?, budgetOutboundBeforeCleanup: String?
+        forwarder.beforeReturningProof = { _ in
+            proofEntered = true
+            if let id = fixture.createdTabs.last { ownedView = fixture.browser.webView(for: id) }
+            if barrier == "budget", let view = ownedView {
+                // Capture the actual proved user body before ordinary Clear
+                // removes it; post-error comparison must not reread deleted DOM.
+                budgetOutboundBeforeCleanup = (try? await self.evaluate(view, "return groqFixture.userBody.textContent;")) as? String
+            }
+            if barrier == "cancel" {
+                let until = ContinuousClock.now + .seconds(10)
+                while !Task.isCancelled && ContinuousClock.now < until { try? await Task.sleep(for: .milliseconds(20)) }
+                cancelledAtProof = Task.isCancelled
+            } else if barrier == "context" {
+                await server.configureEmbeddedTransport(EmbeddedWebModelTransport(browser: fixture.browser))
+            } else if barrier == "cleanup", let id = fixture.createdTabs.last, let view = fixture.browser.webView(for: id) {
+                _ = try? await self.evaluate(view, "groqFixture.ignoreClear = true; return true;")
+            } else if barrier == "expiry" {
+                try? await Task.sleep(for: .milliseconds(4_100))
+            }
+        }
+        let inference = Task { try await server.infer(body, taskID: task) }
+        var cancellation: Task<[String], Never>?
+        if barrier == "cancel" {
+            let deadline = ContinuousClock.now + .seconds(12)
+            while !proofEntered && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+            XCTAssertTrue(proofEntered, "Cancellation must target a real native completed-literal proof")
+            cancellation = Task { await server.fixtureCancel(taskID: task, runtimeGeneration: runtime) }
+        }
+        var failure: (any Error)?
+        do { _ = try await inference.value; XCTFail("Unsafe correction barrier released a response: " + barrier) }
+        catch { failure = error }
+        XCTAssertNotNil(failure); XCTAssertTrue(proofEntered); XCTAssertEqual(forwarder.proofSnapshots, 1)
+        if barrier == "budget" {
+            guard case let .groqPromptBudgetExceeded(actual, maximum, reserved) = failure as? WebModelResponseCodec.Failure else {
+                XCTFail("The actual reminder must fail the original whole native counter"); throw FixtureFailure.timeout
+            }
+            XCTAssertGreaterThan(actual, maximum); XCTAssertEqual(maximum, 6_000); XCTAssertEqual(reserved, 2_000)
+            let outbound = try XCTUnwrap(budgetOutboundBeforeCleanup)
+            XCTAssertEqual(try groqProofPromptWithoutMarker(outbound), try XCTUnwrap(expected).request.prompt)
+            XCTAssertEqual(try GroqBodyTokenCounter.tokenCount(try XCTUnwrap(expected).request.prompt), try XCTUnwrap(expected).units)
+        }
+        if barrier == "cancel" { XCTAssertTrue(cancelledAtProof); _ = await cancellation?.value }
+        XCTAssertEqual(fixture.createdTabs.count, 1, "No corrective Start after " + barrier)
+        let pages = [try XCTUnwrap(ownedView)]
+        if barrier != "cleanup" { _ = await server.fixtureFinish(taskID: task, runtimeGeneration: runtime) }
+        for view in pages {
+            let sends = try await evaluate(view, "return groqFixture.sendCount;") as? Int
+            XCTAssertEqual(sends, 1)
+        }
+        // The cleanup-negative case retains its failed Clear operation;
+        // local fixture teardown disposes it without replaying that action.
+        if barrier != "cleanup" { _ = await server.shutdown() }
+    }
+
+    @MainActor
+    private final class GroqProofForwardingTransport: WebModelTransport {
+        let native: EmbeddedWebModelTransport
+        var beforeReturningProof: ((GroqCompletedLiteralProof) async -> Void)?
+        private(set) var proofSnapshots = 0
+        init(native: EmbeddedWebModelTransport) { self.native = native }
+        func start(params: Data, admission: WebModelStartAdmission, authorization: ChatGPTRequestMetadataLease?) async throws -> Data {
+            try await native.start(params: params, admission: admission, authorization: authorization)
+        }
+        func request(operation: String, params: Data) async throws -> Data {
+            try await native.request(operation: operation, params: params)
+        }
+        func snapshotGroqCompletedLiteralProof(sessionToken: String) async -> GroqCompletedLiteralProof? {
+            let proof = await native.snapshotGroqCompletedLiteralProof(sessionToken: sessionToken)
+            if let proof { proofSnapshots += 1; await beforeReturningProof?(proof) }
+            return proof
+        }
+        func changeRevision(sessionToken: String) async throws -> UInt64? { try await native.changeRevision(sessionToken: sessionToken) }
+        func waitForChange(sessionToken: String, after revision: UInt64, until deadline: ContinuousClock.Instant) async throws -> UInt64? {
+            try await native.waitForChange(sessionToken: sessionToken, after: revision, until: deadline)
+        }
+    }
+
     func testGroqKnownLiteralProfileCompletesWithExactOriginalJSONBytes() async throws {
         let fixture = try Fixture(page: Self.groqFixturePage()); defer { fixture.shutdown() }
         let (token, view) = try await startGroqFixture(fixture, send: false)

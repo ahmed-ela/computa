@@ -9,12 +9,13 @@ actor WebsiteRequestPacer {
         let id: UUID
         let cost: Int
         let continuation: CheckedContinuation<UUID, Error>
+        let deadline: ContinuousClock.Instant?
     }
     private struct Charge {
         let cost: Int
         let expires: ContinuousClock.Instant
     }
-    enum Failure: Error { case invalidCost }
+    enum Failure: Error { case invalidCost, deadline }
 
     private let interval: Duration
     private let budget: Int
@@ -22,6 +23,7 @@ actor WebsiteRequestPacer {
     private var charges: [Charge] = []
     private var waiters: [Waiter] = []
     private var wakeTask: Task<Void, Never>?
+    private var deadlineTasks: [UUID: Task<Void, Never>] = [:]
 
     init(interval: Duration = .seconds(65), budget: Int = 8_000) {
         self.interval = max(.zero, interval)
@@ -32,19 +34,36 @@ actor WebsiteRequestPacer {
     func waitingCountForTesting() -> Int { waiters.count }
     #endif
 
-    func acquire(cost: Int = 8_000) async throws -> UUID {
+    func acquire(cost: Int = 8_000, until deadline: ContinuousClock.Instant? = nil) async throws -> UUID {
         guard cost > 0, cost <= budget else { throw Failure.invalidCost }
         try Task.checkCancellation()
+        if let deadline, ContinuousClock.now >= deadline { throw Failure.deadline }
         let id = UUID()
-        let permit = try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                waiters.append(Waiter(id: id, cost: cost, continuation: continuation))
-                grantIfReady()
+        let permit: UUID
+        do {
+            permit = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    waiters.append(Waiter(id: id, cost: cost, continuation: continuation, deadline: deadline))
+                    if let deadline {
+                        deadlineTasks[id] = Task {
+                            do { try await ContinuousClock().sleep(until: deadline) }
+                            catch { return }
+                            self.expireWaiter(id)
+                        }
+                    }
+                    grantIfReady()
+                }
+            } onCancel: {
+                Task { await self.cancelWaiter(id) }
             }
-        } onCancel: {
-            Task { await self.cancelWaiter(id) }
+        } catch Failure.deadline {
+            try Task.checkCancellation()
+            throw Failure.deadline
         }
-        do { try Task.checkCancellation() }
+        do {
+            try Task.checkCancellation()
+            if let deadline, ContinuousClock.now >= deadline { throw Failure.deadline }
+        }
         catch { release(permit); throw error }
         return permit
     }
@@ -58,14 +77,28 @@ actor WebsiteRequestPacer {
 
     private func cancelWaiter(_ id: UUID) {
         guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+        deadlineTasks.removeValue(forKey: id)?.cancel()
         waiters.remove(at: index).continuation.resume(throwing: CancellationError())
         if waiters.isEmpty { wakeTask?.cancel(); wakeTask = nil }
         grantIfReady()
     }
 
+    private func expireWaiter(_ id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+        deadlineTasks.removeValue(forKey: id)?.cancel()
+        waiters.remove(at: index).continuation.resume(throwing: Failure.deadline)
+        if waiters.isEmpty { wakeTask?.cancel(); wakeTask = nil }
+        grantIfReady()
+    }
+
     private func grantIfReady() {
-        guard active == nil, let first = waiters.first else { return }
+        guard active == nil else { return }
         let now = ContinuousClock.now
+        while let first = waiters.first, let deadline = first.deadline, now >= deadline {
+            deadlineTasks.removeValue(forKey: first.id)?.cancel()
+            waiters.removeFirst().continuation.resume(throwing: Failure.deadline)
+        }
+        guard let first = waiters.first else { return }
         charges.removeAll { $0.expires <= now }
         if charges.reduce(0, { $0 + $1.cost }) + first.cost > budget,
            let deadline = charges.first?.expires {
@@ -81,6 +114,7 @@ actor WebsiteRequestPacer {
         wakeTask?.cancel()
         wakeTask = nil
         let waiter = waiters.removeFirst()
+        deadlineTasks.removeValue(forKey: waiter.id)?.cancel()
         active = (waiter.id, waiter.cost)
         waiter.continuation.resume(returning: waiter.id)
     }

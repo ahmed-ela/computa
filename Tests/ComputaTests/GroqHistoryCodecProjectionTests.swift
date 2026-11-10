@@ -1252,6 +1252,121 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
             .init(name: "apply_patch", argumentsJSON: "", namespace: nil, customInput: "*** Begin Patch\n*** Add File: /inert/file\n+inert\n*** End Patch\n"),
         ], "Inert progress.")
     }
+    func testUnloadedCorrectionCandidateRequiresExactSingleKnownCallAfterSelectionReplacement() throws {
+        let model = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
+        func wire(_ value: [String: Any]) -> [String: Any] { var result = value; result["parameters"] = result.removeValue(forKey: "inputSchema"); return result }
+        let definitions: [[String: Any]] = [wire(GroqToolCatalog.specification), wire(GroqHistoryTool.specification),
+            ["type": "function", "name": "exec_command", "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]], "required": ["cmd"], "additionalProperties": false]],
+            ["type": "custom", "name": "apply_patch", "format": ["type": "text"]]] + EmbeddedBrowserTools.definitions().map(wire)
+        func envelope(_ calls: [[String: Any]]) throws -> String { String(decoding: try encode(["type": "tool_calls", "calls": calls]), as: UTF8.self) }
+        for namespaced in [false, true] {
+            let prefix = namespaced ? "functions." : ""
+            let tools = namespaced ? [["type": "namespace", "name": "functions", "tools": definitions] as [String: Any]] : definitions
+            let raw = try encode(["model": model, "input": "Synthetic correction eligibility only.", "tools": tools,
+                "parallel_tool_calls": false, "max_tool_calls": 1])
+            let seed = try XCTUnwrap(C.prepareRequest(raw, browserToolAvailability: .unbound).groqToolCatalogSeed)
+            let scope = GroqToolCatalog.Scope(taskID: "80000000-0000-4000-8000-000000000001", threadID: "80000000-0000-4000-8000-000000000002",
+                turnID: "80000000-0000-4000-8000-000000000003", runtimeGeneration: UUID(), preparationID: UUID(), modelID: model)
+            var catalog = GroqToolCatalog(); let initial = try catalog.prepare(scope: scope, seed: seed)
+            _ = try catalog.load(scope: scope, arguments: encode(["catalog_revision": initial.revision, "names": [prefix + "exec_command"]]))
+            let first = try C.prepareRequest(raw, browserToolAvailability: .unbound, groqToolCatalogProjection: catalog.prepare(scope: scope, seed: seed), groqDirectTools: .loadedOnly)
+            let call: [String: Any] = ["name": prefix + "exec_command", "arguments": ["command": "not schema-validated here", "cwd": "/tmp/inert"]]
+            let text = try envelope([call])
+            XCTAssertFalse(C.isGroqUnloadedToolCorrectionCandidate(text, requestedName: prefix + "exec_command", request: first), "Already offered tools cannot gain an unloaded-tool correction")
+            _ = try catalog.load(scope: scope, arguments: encode(["catalog_revision": initial.revision,
+                "names": ["browser_open", "browser_bind", "browser_tabs"].map { prefix + $0 }]))
+            let request = try C.prepareRequest(raw, browserToolAvailability: .unbound, groqToolCatalogProjection: catalog.prepare(scope: scope, seed: seed), groqDirectTools: .loadedOnly)
+            XCTAssertFalse(request.offeredToolNames.contains(prefix + "exec_command"))
+            XCTAssertTrue(request.offeredToolNames.contains(prefix + GroqToolCatalog.name))
+            let offered = request.offeredToolNames
+            XCTAssertTrue(C.isGroqUnloadedToolCorrectionCandidate(text, requestedName: prefix + "exec_command", request: request))
+            XCTAssertTrue(C.isGroqUnloadedToolCorrectionCandidate("```json\n" + text + "\n```", requestedName: prefix + "exec_command", request: request))
+            let custom: [String: Any] = ["name": prefix + "apply_patch", "input": "Literal café \\u0061\n*** inert patch ***"]
+            XCTAssertTrue(C.isGroqUnloadedToolCorrectionCandidate(try envelope([custom]), requestedName: prefix + "apply_patch", request: request))
+            // Candidacy supplies neither a schema nor literal/action authority.
+            // The still-current request must continue to reject the same call.
+            XCTAssertThrowsError(try C.parseReply(text, request: request, requireEnvelope: true)) {
+                XCTAssertEqual($0 as? C.Failure, .unknownTool(prefix + "exec_command"))
+            }
+            XCTAssertFalse(C.isGroqUnloadedToolCorrectionCandidate(text, requestedName: prefix + "apply_patch", request: request))
+            var negatives: [(String, String)] = [
+                ("multi", try envelope([call, call])), ("empty", try envelope([])),
+                ("commentary", String(decoding: try encode(["type": "tool_calls", "calls": [call], "commentary": "not eligible"]), as: UTF8.self)),
+                ("extra_envelope", String(decoding: try encode(["type": "tool_calls", "calls": [call], "phase": "final"]), as: UTF8.self)),
+                ("prose", "Explanation\n" + text), ("trailing_prose", "```json\n" + text + "\n```\nExplanation"),
+                ("message", #"{"type":"message","text":"no call"}"#)]
+            for arguments in [NSNull(), ["not", "an", "object"], "encoded object"] as [Any] {
+                negatives.append(("function_arguments", try envelope([["name": prefix + "exec_command", "arguments": arguments]])))
+            }
+            negatives.append(("function_input", try envelope([["name": prefix + "exec_command", "input": "wrong kind"]])))
+            negatives.append(("call_extra", try envelope([["name": prefix + "exec_command", "arguments": [:], "id": "untrusted"]])))
+            let callJSON = String(decoding: try encode(call), as: UTF8.self)
+            negatives.append(("duplicate_envelope", "{\"type\":\"tool_calls\",\"type\":\"tool_calls\",\"calls\":[" + callJSON + "]}"))
+            negatives.append(("duplicate_call", "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"" + prefix + "exec_command\",\"name\":\"" + prefix + "exec_command\",\"arguments\":{}}]}"))
+            negatives.append(("duplicate_arguments", "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"" + prefix + "exec_command\",\"arguments\":{\"cmd\":\"one\",\"cmd\":\"two\"}}]}"))
+            for (label, invalid) in negatives {
+                XCTAssertFalse(C.isGroqUnloadedToolCorrectionCandidate(invalid, requestedName: prefix + "exec_command", request: request), label)
+            }
+            for invalid in [["name": prefix + "apply_patch", "input": ["patch": "not a string"]],
+                            ["name": prefix + "apply_patch", "input": NSNull()],
+                            ["name": prefix + "apply_patch", "input": "literal", "arguments": [:]]] as [[String: Any]] {
+                XCTAssertFalse(C.isGroqUnloadedToolCorrectionCandidate(try envelope([invalid]), requestedName: prefix + "apply_patch", request: request))
+            }
+            XCTAssertEqual(request.continuationRequest, raw)
+            XCTAssertEqual(request.offeredToolNames, offered)
+            XCTAssertEqual(try catalog.prepare(scope: scope, seed: seed).selectedNames, offered)
+        }
+    }
+
+    func testUnloadedCorrectionCandidateCannotBorrowDeniedUnavailableForeignOrImpostorCapabilities() throws {
+        let model = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
+        func wire(_ value: [String: Any]) -> [String: Any] { var result = value; result["parameters"] = result.removeValue(forKey: "inputSchema"); return result }
+        let loader = wire(GroqToolCatalog.specification), reader = wire(GroqHistoryTool.specification)
+        let exec: [String: Any] = ["type": "function", "name": "exec_command", "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]]]]
+        let patch: [String: Any] = ["type": "custom", "name": "apply_patch"]
+        let browser = EmbeddedBrowserTools.definitions().map(wire)
+        func request(_ definitions: [[String: Any]], modelID suppliedModelID: String? = nil, policy: Any? = nil, selection: [String] = []) throws -> C.Request {
+            let modelID = suppliedModelID ?? model
+            var object: [String: Any] = ["model": modelID, "input": "Synthetic capability boundary.", "tools": definitions]
+            if let policy { object["tool_choice"] = policy }
+            let raw = try encode(object), initial = try C.prepareRequest(raw, browserToolAvailability: .unbound)
+            guard let seed = initial.groqToolCatalogSeed else { return initial }
+            let scope = GroqToolCatalog.Scope(taskID: "90000000-0000-4000-8000-000000000001", threadID: "90000000-0000-4000-8000-000000000002",
+                turnID: "90000000-0000-4000-8000-000000000003", runtimeGeneration: UUID(), preparationID: UUID(), modelID: modelID)
+            var catalog = GroqToolCatalog(); let baseline = try catalog.prepare(scope: scope, seed: seed)
+            if !selection.isEmpty { _ = try catalog.load(scope: scope, arguments: encode(["catalog_revision": baseline.revision, "names": selection])) }
+            return try C.prepareRequest(raw, browserToolAvailability: .unbound, groqToolCatalogProjection: catalog.prepare(scope: scope, seed: seed), groqDirectTools: .loadedOnly)
+        }
+        for mode in ["unknown", "foreign_name", "denied", "unavailable", "already_offered", "none", "loader_absent", "loader_impostor", "loader_custom", "loader_foreign_namespace", "loader_denied", "foreign_provider"] {
+            var definitions = [loader, reader, exec, patch] + browser
+            var policy: Any?, modelID = model, selected: [String] = [], name = "exec_command"
+            switch mode {
+            case "unknown": name = "missing_registered_tool"
+            case "foreign_name": name = "foreign.exec_command"
+            case "denied": policy = ["type": "allowed_tools", "tools": [["type": "function", "name": GroqToolCatalog.name], ["type": "function", "name": GroqHistoryTool.name], ["type": "custom", "name": "apply_patch"]]]
+            case "unavailable": name = "browser_fill"
+            case "already_offered": selected = ["exec_command"]
+            case "none": policy = "none"
+            case "loader_absent": definitions = [reader, exec, patch] + browser
+            case "loader_impostor": var fake = loader; fake["parameters"] = ["type": "object", "properties": [:]]; definitions = [fake, reader, exec, patch] + browser
+            case "loader_custom": definitions = [["type": "custom", "name": GroqToolCatalog.name], reader, exec, patch] + browser
+            case "loader_foreign_namespace": definitions = [["type": "namespace", "name": "foreign", "tools": [loader]], reader, exec, patch] + browser
+            case "loader_denied": policy = ["type": "allowed_tools", "tools": [["type": "function", "name": "exec_command"]]]
+            case "foreign_provider": modelID = "browser/claude"
+            default: break
+            }
+            let value = try request(definitions, modelID: modelID, policy: policy, selection: selected)
+            let raw = value.continuationRequest, offered = value.offeredToolNames
+            if mode == "unavailable" { XCTAssertFalse(try XCTUnwrap(value.groqToolCatalogSeed).callableNames.contains(name)) }
+            if mode == "already_offered" { XCTAssertTrue(offered.contains(name)) }
+            if mode == "loader_denied" { XCTAssertTrue(try XCTUnwrap(value.groqToolCatalogSeed).allowedNames.contains(name)); XCTAssertFalse(offered.contains(GroqToolCatalog.name)) }
+            let text = String(decoding: try encode(["type": "tool_calls", "calls": [["name": name, "arguments": [String: Any]()]]]), as: UTF8.self)
+            XCTAssertFalse(C.isGroqUnloadedToolCorrectionCandidate(text, requestedName: name, request: value), mode)
+            XCTAssertEqual(value.continuationRequest, raw)
+            XCTAssertEqual(value.offeredToolNames, offered)
+        }
+    }
+
     private func callIDs(_ reply: C.Reply, request: C.Request, responseID: String) throws -> [String] {
         let body = try C.completedResponse(for: reply, request: request, responseID: responseID, createdAt: 1)
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])

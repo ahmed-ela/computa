@@ -17,6 +17,7 @@ protocol WebModelTransport: Sendable {
     func revokeRequestMetadata(sessionToken: String) async
     func snapshotResponseChoiceStatus(sessionToken: String) async -> WebsiteResponseChoiceStatus?
     func snapshotQwenResponseProgress(sessionToken: String) async -> QwenResponseProgressStatus?
+    func snapshotGroqCompletedLiteralProof(sessionToken: String) async -> GroqCompletedLiteralProof?
     func grantInspectorDiagnostic(_ authorization: ChatGPTInspectorLease, sessionToken: String) async -> Bool
     func revokeInspectorDiagnostic(sessionToken: String) async
     func request(operation: String, params: Data) async throws -> Data
@@ -75,6 +76,7 @@ extension WebModelTransport {
     func revokeRequestMetadata(sessionToken: String) async {}
     func snapshotResponseChoiceStatus(sessionToken: String) async -> WebsiteResponseChoiceStatus? { nil }
     func snapshotQwenResponseProgress(sessionToken: String) async -> QwenResponseProgressStatus? { nil }
+    func snapshotGroqCompletedLiteralProof(sessionToken: String) async -> GroqCompletedLiteralProof? { nil }
     func request(operation: String, params: Data,
                  onChatSubmissionFailure: (@Sendable (ChatSubmissionFailureDiagnostic) -> Void)?) async throws -> Data {
         try await request(operation: operation, params: params)
@@ -166,6 +168,7 @@ actor WebModelServer {
         let provesFreshSessionSubmission: Bool
         let retainsConversation: Bool
         var requestMetadata: ChatGPTRequestMetadataLease?
+        var nativeStartAdmission: WebModelStartAdmission?
         var submittedPromptFingerprint = ""
         var cumulativePromptUTF8Count = 0
         var turnInferenceCount = 0
@@ -1921,6 +1924,7 @@ actor WebModelServer {
             // A named Haiku Start can be rejected before a token exists. Its
             // failure belongs to the same turn policy as the journaled request.
             var requestedClaudeTurnScope: Bool?
+            var groqCorrectionProof: GroqCompletedLiteralProof?
             var correctionCandidate: (reason: WebsiteModelFormatCorrectionStore.Reason, session: Session,
                 deadline: ContinuousClock.Instant, evidence: WebsiteSelectionEvidence?, snapshot: [String: Any]?)?
             do {
@@ -2011,6 +2015,7 @@ actor WebModelServer {
                     } else {
                         prompt = request.prompt
                     }
+                    if correctionTicket?.reason == .unofferedTool { try requireCurrentContext() }
                     var params = ["provider": provider]
                     if let choice {
                         guard let encoded = choice.canonicalJSONString else { throw Failure.invalidRequest }
@@ -2092,7 +2097,8 @@ actor WebModelServer {
                         let data = try await ClaudeResponseStreamLease.$current.withValue(claudeResponseStream) {
                             try await QwenMarkerWireLease.$current.withValue(qwenMarkerWire) {
                                 try await GroqOwnedStatusLease.$current.withValue(groqOwnedStatus) {
-                                    try await transport.start(params: startParameters, admission: admission, authorization: requestMetadata)
+                                    try requireCurrentContext()
+                                    return try await transport.start(params: startParameters, admission: admission, authorization: requestMetadata)
                                 }
                             }
                         }
@@ -2129,6 +2135,7 @@ actor WebModelServer {
                         provesFreshSessionSubmission: provesFreshSessionSubmission,
                         retainsConversation: retainClaudeTurn || retainsConversation(provider: provider))
                     session.requestMetadata = requestMetadata
+                    session.nativeStartAdmission = provider == "groq" ? admission : nil
                     session.resolvedSelection = correctionSource?.resolvedSelection ?? closed?.resolvedSelection
                     session.turnInferenceCount = correctionSource?.turnInferenceCount ?? closed?.turnInferenceCount ?? 0
                     session.cumulativePromptUTF8Count = correctionSource?.cumulativePromptUTF8Count ?? closed?.cumulativePromptUTF8Count ?? 0
@@ -2271,7 +2278,13 @@ actor WebModelServer {
                 let pacer = groqSubmissionPacer
                 let permit: UUID?
                 if let submissionBodyUnits {
-                    permit = try await pacer.acquire(cost: submissionBodyUnits + WebModelResponseCodec.groqReservedTokens)
+                    do {
+                        permit = try await pacer.acquire(cost: submissionBodyUnits + WebModelResponseCodec.groqReservedTokens,
+                            until: correctionTicket?.reason == .unofferedTool ? responseDeadline : nil)
+                    } catch WebsiteRequestPacer.Failure.deadline {
+                        try Task.checkCancellation()
+                        throw Failure.deadline
+                    }
                 } else { permit = nil }
                 let sent: [String: Any]
                 do {
@@ -2366,9 +2379,26 @@ actor WebModelServer {
                                 }
                                 throw Failure.malformedReply(diagnostic)
                             }
-                            if case .unknownTool = error as? WebModelResponseCodec.Failure {
+                            if case let .unknownTool(name) = error as? WebModelResponseCodec.Failure {
                                 captureRejectedReply(text, diagnostic: .unofferedTool, taskID: taskID,
                                     inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
+                                // Compact-thread classification only narrows this path;
+                                // native history, admission/proof and loader eligibility authorize it.
+                                if provider == "groq", correctionTicket == nil,
+                                   context.isCompactToolThread, context.historyPreparation != nil, !context.isMaintenance,
+                                   WebModelResponseCodec.isGroqUnloadedToolCorrectionCandidate(text, requestedName: name, request: request),
+                                   ContinuousClock.now < end {
+                                    // Freeze the first response's actual end before the first
+                                    // corrective await. The fresh page never receives five new minutes.
+                                    responseDeadline = end
+                                    let proof = await session.transport.snapshotGroqCompletedLiteralProof(sessionToken: session.token)
+                                    try requireCurrentContext()
+                                    if ContinuousClock.now < end, let proof,
+                                       Self.matchesGroqCompletedLiteralProof(proof, taskID: taskID, session: session, snapshot: value, text: text) {
+                                        groqCorrectionProof = proof
+                                        correctionCandidate = (.unofferedTool, session, end, evidence, value)
+                                    }
+                                }
                             } else if case .unsupportedWebsiteResponse = error as? WebModelResponseCodec.Failure {
                                 captureRejectedReply(text, diagnostic: .unsupportedWebsiteResponse, taskID: taskID,
                                     inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
@@ -2509,6 +2539,9 @@ actor WebModelServer {
                             || provider == "claude" && reason == .invalidJSON
                                 && session.provesFreshSessionSubmission && session.freshSessionSubmissionVerified
                                 && Self.isClaudeFormatCorrectionCandidate(candidate.snapshot)
+                            || provider == "groq" && reason == .unofferedTool
+                                && context.isCompactToolThread && context.historyPreparation != nil
+                                && groqCorrectionProof != nil
                         if correctionTicket == nil, correctionProof, !context.isMaintenance,
                               !session.retainsConversation,
                               session.sequence == 1, session.baselineResponseCount == 0,
@@ -2597,7 +2630,9 @@ actor WebModelServer {
                     let second = inferenceID == correctionTicket.secondInferenceID ? lease : nil
                     let outcome: WebsiteModelFormatCorrectionStore.Outcome
                     if error is CancellationError { outcome = .cancelled }
-                    else if let failure = error as? Failure {
+                    else if correctionTicket.reason == .unofferedTool, Self.isGroqHistoryBudgetFailure(error) {
+                        outcome = .budgetExhausted
+                    } else if let failure = error as? Failure {
                         switch failure {
                         case .deadline, .preparationDeadline: outcome = .timedOut
                         case .turnLimit: outcome = .budgetExhausted
@@ -2780,11 +2815,41 @@ actor WebModelServer {
         return prompt + claudeMatchedOutputNote
     }
 
+    private static func matchesGroqCompletedLiteralProof(_ proof: GroqCompletedLiteralProof,
+        taskID: String, session: Session, snapshot: [String: Any], text: String) -> Bool {
+        guard session.provider == "groq", !session.retainsConversation,
+              session.sequence == 1, session.baselineResponseCount == 0,
+              let admission = session.nativeStartAdmission, proof.admission == admission,
+              admission.inferenceID == session.inferenceID,
+              admission.taskID == taskID,
+              admission.threadID == session.context.threadID, admission.turnID == session.context.turnID,
+              admission.runtimeGeneration == session.context.runtimeGeneration,
+              admission.preparationID == session.context.preparationID,
+              admission.transportGeneration == session.transportGeneration,
+              admission.provider == "groq", admission.modelID == session.modelID,
+              proof.sessionToken == session.token, proof.sequence == session.sequence,
+              proof.documentGeneration == session.documentGeneration,
+              proof.modelChoice == session.modelChoice, session.resolvedSelection != nil,
+              proof.firstUserFingerprint == session.firstUserFingerprint,
+              !proof.firstUserFingerprint.isEmpty,
+              proof.promptFingerprint == session.submittedPromptFingerprint,
+              proof.responseSHA256 == historySHA(Data(text.utf8)),
+              snapshot["state"] as? String == "complete", snapshot["text"] as? String == text,
+              let context = snapshot["modelProofContext"] as? [String: Any],
+              receiptInteger(context["sequence"], range: 1...1) == 1,
+              receiptInteger(context["baselineResponseCount"], range: 0...0) == 0,
+              receiptInteger(context["responseCount"], range: 1...1) == 1,
+              context["firstUserFingerprint"] as? String == proof.firstUserFingerprint,
+              (context["documentGeneration"] as? String).flatMap(UUID.init(uuidString:)) == proof.documentGeneration else { return false }
+        return true
+    }
+
     private static func correctionReminder(for reason: WebsiteModelFormatCorrectionStore.Reason) -> String {
         let failure: String
         switch reason {
         case .invalidJSON: failure = "The entire previous website reply was rejected as invalid JSON."
         case .rendererFailure: failure = "The website could not render the previous reply. Computa accepted no response or tool calls from that inference."
+        case .unofferedTool: failure = "The previous reply called an unloaded tool and was rejected; no call from it executed. Optional tool loads replace the selection. Use currently offered schemas, or request an eligible name through the offered loader and await its next-request schema."
         }
         return """
 

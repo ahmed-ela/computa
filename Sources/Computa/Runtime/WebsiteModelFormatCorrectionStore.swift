@@ -7,7 +7,7 @@ import Darwin
 struct WebsiteModelFormatCorrectionStore: Sendable {
     enum Failure: Error { case unavailable }
     enum Reason: String, Codable, Sendable {
-        case invalidJSON = "invalid_json", rendererFailure = "renderer_failure"
+        case invalidJSON = "invalid_json", rendererFailure = "renderer_failure", unofferedTool = "unoffered_tool"
     }
     enum Outcome: String, Codable, Sendable {
         case responseValidated = "response_validated", invalidJSON = "invalid_json", failed, cancelled

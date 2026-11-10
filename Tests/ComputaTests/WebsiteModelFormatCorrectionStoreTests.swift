@@ -276,6 +276,56 @@ final class WebsiteModelFormatCorrectionStoreTests: XCTestCase {
         }
     }
 
+    func testUnofferedReasonPersistsWithoutCreatingAnotherPerNativeTurnAllowance() throws {
+        let reasons: [Store.Reason] = [.invalidJSON, .rendererFailure, .unofferedTool]
+        for firstReason in reasons {
+            let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
+            let directory = root.appendingPathComponent("correction"), store = Store(directory: directory)
+            let ticket = try store.claim(taskID: task, threadID: thread, turnID: turn,
+                firstInferenceID: UUID(), firstSessionToken: UUID(), secondInferenceID: UUID(), reason: firstReason)
+            let claimed = try XCTUnwrap(files(directory).first), claimedBytes = try Data(contentsOf: claimed)
+            func requireSpent(_ phase: String) throws {
+                let before = try Dictionary(uniqueKeysWithValues: files(directory).map { ($0.lastPathComponent, try Data(contentsOf: $0)) })
+                for attemptedReason in reasons {
+                    let restarted = Store(directory: directory)
+                    XCTAssertThrowsError(try restarted.claim(taskID: UUID().uuidString.lowercased(), threadID: thread, turnID: turn,
+                        firstInferenceID: UUID(), firstSessionToken: UUID(), secondInferenceID: UUID(), reason: attemptedReason),
+                        "Changing reason/task cannot replenish the same thread+turn at " + phase)
+                }
+                let after = try Dictionary(uniqueKeysWithValues: files(directory).map { ($0.lastPathComponent, try Data(contentsOf: $0)) })
+                XCTAssertEqual(after, before, "Denied claims cannot append or rewrite journal phases")
+            }
+            XCTAssertEqual(try record(claimed).ticket.reason, firstReason)
+            try requireSpent("claimed")
+            let cleanup = UUID(), secondToken = UUID()
+            try Store(directory: directory).recordClosed(ticket, cleanupAttemptID: cleanup)
+            try requireSpent("first_closed")
+            try Store(directory: directory).finish(ticket, secondInferenceID: ticket.secondInferenceID,
+                secondSessionToken: secondToken, outcome: .responseValidated)
+            try requireSpent("finished")
+            let all = try files(directory), restored = try all.map(record)
+            XCTAssertEqual(all.count, 3)
+            XCTAssertEqual(Set(restored.map(\.phase)), [.claimed, .firstClosed, .finished])
+            XCTAssertEqual(try Data(contentsOf: claimed), claimedBytes)
+            for (file, value) in zip(all, restored) {
+                XCTAssertTrue(value.isValid); XCTAssertTrue(value.usageUnknown)
+                XCTAssertEqual(value.ticket, ticket)
+                XCTAssertEqual(value.reason, firstReason, "Restart must preserve the exact closed reason")
+                let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+                XCTAssertEqual(fields["reason"] as? String, firstReason.rawValue)
+                var expected: Set<String> = ["schemaVersion", "scope", "correctionID", "taskID", "threadID", "turnID",
+                    "firstInferenceID", "firstSessionToken", "secondInferenceID", "phase", "usageUnknown", "secondStarted", "reason"]
+                if value.phase != .claimed { expected.insert("cleanupAttemptID") }
+                if value.phase == .finished { expected.formUnion(["secondSessionToken", "outcome"]) }
+                XCTAssertEqual(Set(fields.keys), expected, "Reason extension retains identity/phase metadata only, without raw request/reply/argument fields")
+            }
+            let finished = try XCTUnwrap(restored.first { $0.phase == .finished })
+            XCTAssertEqual(finished.cleanupAttemptID, cleanup)
+            XCTAssertEqual(finished.secondSessionToken, secondToken)
+            XCTAssertEqual(finished.outcome, .responseValidated)
+        }
+    }
+
     func testCapacityReservesClosureAndOutcomeBeforeGrantingAClaim() throws {
         let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
         let directory = root.appendingPathComponent("correction"), store = Store(directory: directory)
