@@ -317,6 +317,286 @@ import XCTest
         try await run("siteWrapper", expected: "transport_rejected", profile: .gptoss120b, fixture: true, fixtureKind: .gptoss120b)
     }
 
+    func testManualInspectorRequiresPrivateExact120BFixtureAndExplicitNativeOptIn() throws {
+        for refusal in ["disabled", "notFirst", "wrongModel", "hash", "purpose", "extraKey", "expired", "tooLong", "publicArm"] {
+            let fixture = try inspectorArm(kind: refusal == "wrongModel" ? .qwen27b : .gptoss120b,
+                mutation: refusal, expiresIn: refusal == "expired" ? -1 : refusal == "tooLong" ? 601 : 60)
+            XCTAssertNil(GroqOwnedStatusLease.FixtureTurn.consume(directory: fixture.directory, admission: fixture.admission,
+                request: fixture.request, first: refusal != "notFirst", allowManualInspector: refusal != "disabled"), refusal)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("arm.json").path), refusal)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.output.path), refusal)
+        }
+        let fixture = try inspectorArm()
+        let parent = try inspectorParent(fixture)
+        XCTAssertEqual(parent.publicationPurpose, GroqOwnedStatusLease.FixtureTurn.inspectorPurpose)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("arm.json").path))
+        XCTAssertNil(GroqOwnedStatusLease.FixtureTurn.consume(directory: fixture.directory, admission: fixture.admission,
+            request: fixture.request, first: true, allowManualInspector: true), "The private arm is consumed only once")
+        let status = try inspectorArm(purpose: GroqOwnedStatusLease.FixtureTurn.Kind.gptoss120b.purpose)
+        let statusParent = try inspectorParent(status)
+        let statusChild = try XCTUnwrap(statusParent.child(admission: status.admission, request: status.request))
+        let view = NSObject()
+        XCTAssertNil(statusChild.inspectorOrdinal)
+        XCTAssertNil(statusChild.bindInspector(view: ObjectIdentifier(view), ownerToken: UUID().uuidString, generation: UUID()))
+        let marker = try setupLease(fixture: false)
+        XCTAssertNil(marker.lease.bindInspector(view: ObjectIdentifier(view), ownerToken: UUID().uuidString, generation: UUID()))
+        parent.revoke(); statusParent.revoke()
+    }
+
+    func testManualInspectorRequiresValidatedClosedHandoffsAndIssuesOnlyChildrenTwoThroughFour() throws {
+        let fixture = try inspectorArm(), parent = try inspectorParent(fixture)
+        let first = try XCTUnwrap(parent.child(admission: fixture.admission, request: fixture.request))
+        XCTAssertNil(first.inspectorOrdinal)
+        let view = NSObject()
+        XCTAssertNil(first.bindInspector(view: ObjectIdentifier(view), ownerToken: UUID().uuidString, generation: UUID()))
+        XCTAssertNil(parent.child(admission: fixture.admission, request: fixture.request))
+        let step = try inspectorContinuation(fixture.request)
+        let nextAdmission = inspectorAdmission(after: fixture.admission)
+        XCTAssertNil(parent.child(admission: nextAdmission, request: step.next, closedInferenceID: fixture.admission.inferenceID))
+        XCTAssertNil(parent.child(admission: nextAdmission, request: step.next, closedInferenceID: UUID(), closedContinuation: step.closed))
+        for field in ["task", "thread", "turn", "runtime", "preparation", "transport", "provider", "model"] {
+            XCTAssertNil(parent.child(admission: inspectorAdmission(after: fixture.admission, changing: field), request: step.next,
+                closedInferenceID: fixture.admission.inferenceID, closedContinuation: step.closed), field)
+        }
+        var changedRoot = try XCTUnwrap(JSONSerialization.jsonObject(with: step.next.continuationRequest) as? [String: Any])
+        var changedInput = try XCTUnwrap(changedRoot["input"] as? [[String: Any]])
+        changedInput[0] = ["type": "message", "role": "developer", "content": [["type": "input_text", "text": "Changed governing policy"]]]
+        changedRoot["input"] = changedInput
+        let changedRequest = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: changedRoot))
+        XCTAssertNil(parent.child(admission: nextAdmission, request: changedRequest,
+            closedInferenceID: fixture.admission.inferenceID, closedContinuation: step.closed))
+        let finalBytes = try WebModelResponseCodec.completedResponse(for: .message("Synthetic final"), request: fixture.request)
+        let final = try WebsiteTurnContinuation(request: fixture.request, encodedResponse: finalBytes)
+        XCTAssertEqual(final.pendingToolCallCount, 0)
+        XCTAssertNil(parent.child(admission: nextAdmission, request: step.next,
+            closedInferenceID: fixture.admission.inferenceID, closedContinuation: final))
+        first.revoke() // Successful physical-view cleanup cannot retire the native fixture parent.
+        XCTAssertTrue(parent.isCurrent)
+        let winners = GroqManualInspectorLeaseResults()
+        DispatchQueue.concurrentPerform(iterations: 8) { _ in
+            if let child = parent.child(admission: nextAdmission, request: step.next,
+                closedInferenceID: fixture.admission.inferenceID, closedContinuation: step.closed) { winners.append(child) }
+        }
+        XCTAssertEqual(winners.values.count, 1)
+        let second = try XCTUnwrap(winners.values.first)
+        XCTAssertEqual(second.inspectorOrdinal, 2)
+        var previous = nextAdmission, request = step.next
+        var retained = [second]
+        for ordinal in 3...4 {
+            let next = try inspectorContinuation(request), admission = inspectorAdmission(after: previous)
+            let child = try XCTUnwrap(parent.child(admission: admission, request: next.next,
+                closedInferenceID: previous.inferenceID, closedContinuation: next.closed))
+            XCTAssertEqual(child.inspectorOrdinal, ordinal)
+            retained.append(child); previous = admission; request = next.next
+        }
+        let fifth = try inspectorContinuation(request)
+        XCTAssertNil(parent.child(admission: inspectorAdmission(after: previous), request: fifth.next,
+            closedInferenceID: previous.inferenceID, closedContinuation: fifth.closed))
+        parent.revoke()
+        XCTAssertTrue(retained.allSatisfy { !$0.isCurrent })
+    }
+
+    func testManualInspectorBindingIsExactOnceOnlyAndInspectorRevocationDoesNotGrantOtherAuthority() async throws {
+        let fixture = try inspectorArm(), parent = try inspectorParent(fixture)
+        let first = try XCTUnwrap(parent.child(admission: fixture.admission, request: fixture.request))
+        let step = try inspectorContinuation(fixture.request), admission = inspectorAdmission(after: fixture.admission)
+        let child = try XCTUnwrap(parent.child(admission: admission, request: step.next,
+            closedInferenceID: fixture.admission.inferenceID, closedContinuation: step.closed))
+        let view = NSObject(), other = NSObject(), owner = UUID().uuidString, generation = UUID()
+        let identity = ObjectIdentifier(view)
+        XCTAssertNil(child.bindInspector(view: identity, ownerToken: "not-a-native-owner", generation: generation))
+        let cancelled = Task { () -> Bool in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return child.bindInspector(view: identity, ownerToken: owner, generation: generation) == nil
+        }
+        let cancelledRefused = await cancelled.value
+        XCTAssertTrue(cancelledRefused)
+        let bindings = GroqManualInspectorBindingResults()
+        DispatchQueue.concurrentPerform(iterations: 8) { _ in
+            if let binding = child.bindInspector(view: identity, ownerToken: owner, generation: generation) { bindings.append(binding) }
+        }
+        XCTAssertEqual(bindings.values.count, 1)
+        let binding = try XCTUnwrap(bindings.values.first), callbacks = GroqManualInspectorCounter()
+        for mismatch in ["view", "owner", "generation"] {
+            XCTAssertFalse(binding.activate(view: mismatch == "view" ? ObjectIdentifier(other) : identity,
+                ownerToken: mismatch == "owner" ? UUID().uuidString : owner,
+                generation: mismatch == "generation" ? UUID() : generation,
+                onRevocation: { callbacks.increment() }, action: { callbacks.increment() }), mismatch)
+        }
+        XCTAssertEqual(callbacks.value, 0)
+        XCTAssertTrue(binding.activate(view: identity, ownerToken: owner, generation: generation,
+            onRevocation: { if child.isCurrent { callbacks.increment() } }, action: { callbacks.increment() }))
+        XCTAssertFalse(binding.activate(view: identity, ownerToken: owner, generation: generation,
+            onRevocation: {}, action: { callbacks.increment() }))
+        XCTAssertEqual(callbacks.value, 1)
+        binding.revoke(); binding.revoke()
+        XCTAssertEqual(callbacks.value, 2, "The revocation callback runs once, outside the lease lock")
+        XCTAssertTrue(child.isCurrent, "Inspector-only revocation is not model evidence or cleanup authority")
+        XCTAssertTrue(parent.isCurrent); XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.output.path))
+        XCTAssertNil(child.bindInspector(view: identity, ownerToken: owner, generation: generation))
+        XCTAssertFalse(binding.activate(view: identity, ownerToken: owner, generation: generation, onRevocation: {}, action: {}))
+        child.revoke(); first.revoke(); parent.revoke()
+        XCTAssertFalse(child.isCurrent)
+    }
+
+    func testManualInspectorFirstFailurePublishesWithinABoundAndRevokesEveryActiveChild() async throws {
+        let fixture = try inspectorArm(), parent = try inspectorParent(fixture)
+        let first = try XCTUnwrap(parent.child(admission: fixture.admission, request: fixture.request))
+        var previous = fixture.admission, request = fixture.request
+        var children: [GroqOwnedStatusLease] = [], bindings: [GroqOwnedStatusLease.InspectorBinding] = []
+        let view = NSObject(), owner = UUID().uuidString, generation = UUID(), revoked = GroqManualInspectorCounter()
+        for _ in 2...4 {
+            let step = try inspectorContinuation(request), admission = inspectorAdmission(after: previous)
+            let child = try XCTUnwrap(parent.child(admission: admission, request: step.next,
+                closedInferenceID: previous.inferenceID, closedContinuation: step.closed))
+            let binding = try XCTUnwrap(child.bindInspector(view: ObjectIdentifier(view), ownerToken: owner, generation: generation))
+            XCTAssertTrue(binding.activate(view: ObjectIdentifier(view), ownerToken: owner, generation: generation,
+                onRevocation: { if !child.isCurrent { revoked.increment() } }, action: {}))
+            children.append(child); bindings.append(binding); previous = admission; request = step.next
+        }
+        let publishing = try XCTUnwrap(children.last), terminalAdmission = previous
+        let observation = GroqOwnedStatusLease.Observation(stage: "http_429", sessionToken: UUID().uuidString.lowercased(), generation: generation)
+        let completed = expectation(description: "First failure publishes without re-entering its child lock")
+        let returned = GroqManualInspectorCounter()
+        DispatchQueue.global().async {
+            publishing.publish(observation, trigger: "groq_reported_submission_error")
+            returned.increment(); completed.fulfill()
+        }
+        await fulfillment(of: [completed], timeout: 2)
+        guard returned.value == 1 else { return } // A lock regression must fail finitely; never acquire its held locks below.
+        XCTAssertEqual(revoked.value, 3)
+        XCTAssertFalse(parent.isCurrent); XCTAssertFalse(first.isCurrent)
+        XCTAssertTrue(children.allSatisfy { !$0.isCurrent })
+        for binding in bindings {
+            XCTAssertFalse(binding.activate(view: ObjectIdentifier(view), ownerToken: owner, generation: generation, onRevocation: {}, action: {}))
+        }
+        let bytes = try Data(contentsOf: fixture.output)
+        let row = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        XCTAssertEqual(row.count, 15)
+        XCTAssertEqual(row["purpose"] as? String, GroqOwnedStatusLease.FixtureTurn.inspectorPurpose)
+        XCTAssertEqual(row["inferenceID"] as? String, terminalAdmission.inferenceID.uuidString.lowercased())
+        XCTAssertEqual(row["stage"] as? String, "http_429")
+        XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains(Self.fixtureUser.replacingOccurrences(of: "groq-qwen27b", with: "groq-gptoss120b")))
+        publishing.publish(.init(stage: "http_400", sessionToken: observation.sessionToken, generation: generation), trigger: "response_deadline")
+        XCTAssertEqual(try Data(contentsOf: fixture.output), bytes)
+    }
+
+    func testManualInspectorBrowserRequiresExactOwned120BViewAndRevokesOnEveryLifecycle() async throws {
+        for lifecycle in ["finish", "reload", "navigation", "close", "shutdown", "nativeContext", "expiry"] {
+            let fixture = try inspectorArm(expiresIn: lifecycle == "expiry" ? 3 : 60), parent = try inspectorParent(fixture)
+            let first = try XCTUnwrap(parent.child(admission: fixture.admission, request: fixture.request))
+            let step = try inspectorContinuation(fixture.request), admission = inspectorAdmission(after: fixture.admission)
+            let child = try XCTUnwrap(parent.child(admission: admission, request: step.next,
+                closedInferenceID: fixture.admission.inferenceID, closedContinuation: step.closed))
+            let browser = EmbeddedBrowserSession(persistent: false)
+            defer { browser.shutdown(); parent.revoke(); first.revoke() }
+            let tab = try browser.createUnloadedModelTabForTesting { InspectorView(frame: .zero, configuration: $0) }
+            let view = try XCTUnwrap(browser.webView(for: tab) as? InspectorView)
+            let generation = try XCTUnwrap(browser.documentGeneration(for: tab)), owner = UUID().uuidString
+            view.navigationDelegate = nil
+            try browser.installModelChangeSignal(tabID: tab, ownerToken: owner, world: .world(name: "computa-groq-inspector-fixture"), originHost: "chat.groq.com")
+            let binding = try XCTUnwrap(child.bindInspector(view: ObjectIdentifier(view), ownerToken: owner, generation: generation))
+            let human = try browser.createTab(), humanView = try XCTUnwrap(browser.webView(for: human))
+            for failure in ["view", "tab", "owner", "generation", "origin", "model"] {
+                if failure == "origin" { view.observedURL = URL(string: "https://example.invalid/") }
+                if failure == "model" { view.observedURL = EmbeddedWebModelTransport.Provider.groq.startURL(choice: GroqOwnedStatusLease.Profile.qwen27b.choice) }
+                XCTAssertFalse(browser.grantGroqFixtureInspectorDiagnostic(binding, tabID: failure == "tab" ? human : tab,
+                    view: failure == "view" ? humanView : view, ownerToken: failure == "owner" ? UUID().uuidString : owner,
+                    generation: failure == "generation" ? UUID() : generation), failure)
+                view.observedURL = EmbeddedWebModelTransport.Provider.groq.startURL(choice: GroqOwnedStatusLease.Profile.gptoss120b.choice)
+                XCTAssertFalse(view.isInspectable)
+            }
+            XCTAssertFalse(browser.canInspect(tabID: tab))
+            XCTAssertThrowsError(try browser.setWebInspectorEnabled(true, for: tab))
+            XCTAssertTrue(browser.grantGroqFixtureInspectorDiagnostic(binding, tabID: tab, view: view, ownerToken: owner, generation: generation))
+            XCTAssertTrue(view.isInspectable); XCTAssertFalse(humanView.isInspectable)
+            XCTAssertFalse(browser.canInspect(tabID: tab))
+            XCTAssertFalse(try XCTUnwrap(browser.tabs.first(where: { $0.id == tab })).isWebInspectorEnabled)
+            XCTAssertFalse(browser.grantGroqFixtureInspectorDiagnostic(binding, tabID: tab, view: view, ownerToken: owner, generation: generation))
+            switch lifecycle {
+            case "finish":
+                browser.revokeGroqFixtureInspectorDiagnostic(tabID: tab, ownerToken: UUID().uuidString)
+                XCTAssertTrue(view.isInspectable)
+                browser.revokeGroqFixtureInspectorDiagnostic(tabID: tab, ownerToken: owner)
+            case "reload": browser.reload(tabID: tab)
+            case "navigation": try browser.navigate(tabID: tab, to: XCTUnwrap(URL(string: "about:blank")))
+            case "close": browser.closeTab(tab)
+            case "shutdown": browser.shutdown()
+            case "nativeContext": parent.revoke()
+            default: break // Expiry has its own monotonic timer; no page or clock mutation.
+            }
+            let deadline = ContinuousClock.now + .seconds(lifecycle == "expiry" ? 4 : 2)
+            while view.isInspectable && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertFalse(view.isInspectable, lifecycle)
+            XCTAssertFalse(browser.grantGroqFixtureInspectorDiagnostic(binding, tabID: tab, view: view, ownerToken: owner, generation: generation), lifecycle)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.output.path), "Inspection never supplies failure, completion or cleanup evidence")
+        }
+    }
+
+    private final class InspectorView: WKWebView {
+        var observedURL: URL? = EmbeddedWebModelTransport.Provider.groq.startURL(choice: GroqOwnedStatusLease.Profile.gptoss120b.choice)
+        override var url: URL? { observedURL }
+        override func load(_ request: URLRequest) -> WKNavigation? { nil }
+        override func reload() -> WKNavigation? { nil }
+    }
+    private func inspectorArm(kind: GroqOwnedStatusLease.FixtureTurn.Kind = .gptoss120b, purpose: String? = nil,
+                              mutation: String = "", expiresIn: TimeInterval = 60) throws -> GroqManualInspectorArm {
+        let path = try XCTUnwrap(realpath(FileManager.default.temporaryDirectory.path, nil)); defer { free(path) }
+        let directory = URL(fileURLWithPath: String(cString: path), isDirectory: true).appendingPathComponent("groq-manual-inspector-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let model = kind.profile.choice.modelID
+        let user = kind == .gptoss120b ? Self.fixtureUser.replacingOccurrences(of: "groq-qwen27b", with: "groq-gptoss120b") : Self.fixtureUser
+        func item(_ role: String, _ text: String) -> [String: Any] {
+            ["type": "message", "role": role, "content": [["type": "input_text", "text": text]]]
+        }
+        let request = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: ["model": model, "stream": false,
+            "input": [item("developer", "Synthetic policy"), item("user", "<environment_context><cwd>/tmp/marker</cwd><shell>zsh</shell></environment_context>"),
+                item("user", user + "\n" + ComputaAgentInstructions.runtimeInteractionPolicy())],
+            "tools": [["type": "function", "name": "fixture_read", "parameters": ["type": "object", "properties": [String: Any](), "additionalProperties": false]]]]))
+        let admission = WebModelStartAdmission(id: UUID(), inferenceID: UUID(), taskID: UUID().uuidString.lowercased(),
+            threadID: UUID().uuidString.lowercased(), turnID: UUID().uuidString.lowercased(), runtimeGeneration: UUID(),
+            preparationID: UUID(), transportGeneration: UUID(), provider: "groq", modelID: model, parameters: Data("{}".utf8))
+        let formatter = ISO8601DateFormatter(); formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var fields = ["purpose": purpose ?? GroqOwnedStatusLease.FixtureTurn.inspectorPurpose, "nonce": UUID().uuidString.lowercased(),
+            "modelID": model, "userPromptSHA256": GroqOwnedStatusLease.digest(user), "expiresAt": formatter.string(from: Date().addingTimeInterval(expiresIn))]
+        if mutation == "hash" { fields["userPromptSHA256"] = GroqOwnedStatusLease.digest("A different fixture") }
+        if mutation == "purpose" { fields["purpose"] = "groq_unknown_inspector_purpose" }
+        if mutation == "extraKey" { fields["scope"] = "foreign" }
+        let arm = directory.appendingPathComponent("arm.json")
+        try JSONSerialization.data(withJSONObject: fields).write(to: arm)
+        try FileManager.default.setAttributes([.posixPermissions: mutation == "publicArm" ? 0o644 : 0o600], ofItemAtPath: arm.path)
+        return .init(directory: directory, output: directory.appendingPathComponent("owned-status.json"), admission: admission, request: request)
+    }
+    private func inspectorParent(_ fixture: GroqManualInspectorArm) throws -> GroqOwnedStatusLease.FixtureTurn {
+        try XCTUnwrap(GroqOwnedStatusLease.FixtureTurn.consume(directory: fixture.directory, admission: fixture.admission,
+            request: fixture.request, first: true, allowManualInspector: true))
+    }
+    private func inspectorAdmission(after first: WebModelStartAdmission, changing field: String = "") -> WebModelStartAdmission {
+        .init(id: UUID(), inferenceID: UUID(), taskID: field == "task" ? UUID().uuidString.lowercased() : first.taskID,
+            threadID: field == "thread" ? UUID().uuidString.lowercased() : first.threadID,
+            turnID: field == "turn" ? UUID().uuidString.lowercased() : first.turnID,
+            runtimeGeneration: field == "runtime" ? UUID() : first.runtimeGeneration,
+            preparationID: field == "preparation" ? UUID() : first.preparationID,
+            transportGeneration: field == "transport" ? UUID() : first.transportGeneration,
+            provider: field == "provider" ? "qwen" : first.provider,
+            modelID: field == "model" ? GroqOwnedStatusLease.Profile.qwen27b.choice.modelID : first.modelID, parameters: first.parameters)
+    }
+    private func inspectorContinuation(_ request: WebModelResponseCodec.Request) throws -> (closed: WebsiteTurnContinuation, next: WebModelResponseCodec.Request) {
+        let encoded = try WebModelResponseCodec.completedResponse(for: .toolCalls([.init(name: "fixture_read", argumentsJSON: "{}", namespace: nil)]), request: request)
+        let closed = try WebsiteTurnContinuation(request: request, encodedResponse: encoded)
+        let response = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        let calls = try XCTUnwrap(response["output"] as? [[String: Any]])
+        let callID = try XCTUnwrap(calls.first?["call_id"] as? String)
+        var root = try XCTUnwrap(JSONSerialization.jsonObject(with: request.continuationRequest) as? [String: Any])
+        var input = try XCTUnwrap(root["input"] as? [[String: Any]])
+        input += calls + [["type": "function_call_output", "call_id": callID, "output": "Synthetic native read result"]]
+        root["input"] = input
+        let next = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: root, options: [.sortedKeys, .withoutEscapingSlashes]))
+        try closed.validate(next: next)
+        return (closed, next)
+    }
+
     private static let fixtureUser = """
         In /tmp/test root/fixtures/cases/invoice-457-groq-qwen27b-0123456789abcdef/coding, fix the invoice aggregation bug in reconcile.py according to its README. Keep the tests, sample data, and reference format unchanged. Run python3 -m unittest -v, then run python3 reconcile.py.
 
@@ -525,4 +805,23 @@ import XCTest
           if(variant==='observerUnavailable')for(const key of Object.getOwnPropertyNames(window))if(key.startsWith('__computaGroqStatus_'))delete window[key];
         };
         """#
+}
+
+private struct GroqManualInspectorArm: Sendable {
+    let directory: URL, output: URL, admission: WebModelStartAdmission, request: WebModelResponseCodec.Request
+}
+private final class GroqManualInspectorCounter: @unchecked Sendable {
+    private let lock = NSLock(); private var count = 0
+    var value: Int { lock.withLock { count } }
+    func increment() { lock.withLock { count += 1 } }
+}
+private final class GroqManualInspectorLeaseResults: @unchecked Sendable {
+    private let lock = NSLock(); private var children: [GroqOwnedStatusLease] = []
+    var values: [GroqOwnedStatusLease] { lock.withLock { children } }
+    func append(_ child: GroqOwnedStatusLease) { lock.withLock { children.append(child) } }
+}
+private final class GroqManualInspectorBindingResults: @unchecked Sendable {
+    private let lock = NSLock(); private var bindings: [GroqOwnedStatusLease.InspectorBinding] = []
+    var values: [GroqOwnedStatusLease.InspectorBinding] { lock.withLock { bindings } }
+    func append(_ binding: GroqOwnedStatusLease.InspectorBinding) { lock.withLock { bindings.append(binding) } }
 }

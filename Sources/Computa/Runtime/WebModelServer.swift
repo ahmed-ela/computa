@@ -2023,10 +2023,13 @@ actor WebModelServer {
                         if groqOwnedStatus==nil,correctionTicket==nil,!context.isMaintenance {
                             if groqFixtureStatuses[taskID]==nil,first {
                                 groqFixtureStatuses[taskID]=GroqOwnedStatusLease.FixtureTurn.consume(
-                                    directory:directory,admission:admission,request:request,first:true)
+                                    directory:directory,admission:admission,request:request,first:true,
+                                    allowManualInspector:context.historyPreparation != nil)
                             }
                             if let fixture=groqFixtureStatuses[taskID] {
-                                groqOwnedStatus=fixture.child(admission:admission,request:request)
+                                groqOwnedStatus=fixture.child(admission:admission,request:request,
+                                    closedInferenceID:context.historyPreparation != nil ? closed?.inferenceID : nil,
+                                    closedContinuation:context.historyPreparation != nil ? closed?.continuation : nil)
                                 if groqOwnedStatus==nil { groqFixtureStatuses.removeValue(forKey:taskID)?.revoke() }
                             }
                         }

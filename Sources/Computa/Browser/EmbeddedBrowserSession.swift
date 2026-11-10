@@ -226,6 +226,7 @@ final class EmbeddedBrowserSession {
         var geminiDocumentCommitObserved = false
         var serverRedirectObservedInCurrentNavigation = false
         var inspectorDiagnostic: (id: UUID, binding: ChatGPTInspectorLease.Binding, expiry: Task<Void, Never>)?
+        var groqFixtureInspectorDiagnostic: (id: UUID, binding: GroqOwnedStatusLease.InspectorBinding, expiry: Task<Void, Never>)?
         #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
         var syntheticNativeFocusDiagnostic: (id: UUID, binding: WebsiteBenchmarkCaptureLease.NativeFocusBinding,
                                             expiry: Task<Void, Never>)?
@@ -731,6 +732,7 @@ final class EmbeddedBrowserSession {
         let postBlockObservation = entry.geminiPostBlockObservation
         entry.geminiPostBlockObservation = nil
         revokeModelInspector(entry, reason: isShutdown ? .shutdown : .closed)
+        revokeGroqFixtureInspector(entry, reason: isShutdown ? .shutdown : .closed)
         let humanIndex = tabs.prefix(index).filter { entries[$0.id]?.isModelOwned == false }.count
         entry.view.isInspectable = false
         entry.tab.isWebInspectorEnabled = false
@@ -821,6 +823,7 @@ final class EmbeddedBrowserSession {
         removeQwenMarker(entry)
         revokeClaudeResponseStream(entry)
         revokeModelInspector(entry, reason: .navigation)
+        revokeGroqFixtureInspector(entry, reason: .navigation)
         resetModelNavigationDiagnostic(entry)
         entry.navigation = nil
         entry.preparedDocumentNavigation = false
@@ -1911,6 +1914,54 @@ final class EmbeddedBrowserSession {
         entry.inspectorDiagnostic = (id, binding, expiry)
         Self.inspectorDiagnosticLog.notice("inspectorDiagnostic disposition=granted")
         return true
+    }
+
+    /// A separate, explicitly manual fixture purpose. Existing human policy and
+    /// ChatGPT inspection guards are independent and unchanged.
+    func grantGroqFixtureInspectorDiagnostic(_ binding: GroqOwnedStatusLease.InspectorBinding, tabID: UUID,
+                                            view: WKWebView, ownerToken: String, generation: UUID) -> Bool {
+        guard !isShutdown, !Task.isCancelled, let entry = entries[tabID], entry.view === view,
+              entry.isModelOwned, !entry.isToolOwned, entry.inspectorDiagnostic == nil,
+              entry.groqFixtureInspectorDiagnostic == nil,
+              entry.modelChanges?.ownerToken == ownerToken, entry.modelSignalOriginHost == "chat.groq.com",
+              entry.tab.documentGeneration == generation, Self.groqFixtureInspectorURLAllowed(view.url) else { return false }
+        let id = UUID()
+        let activated = binding.activate(view: ObjectIdentifier(view), ownerToken: ownerToken, generation: generation,
+            onRevocation: { [weak self] in
+                Task { @MainActor [weak self] in
+                    guard let self, let current = self.entries[tabID], current.groqFixtureInspectorDiagnostic?.id == id else { return }
+                    self.revokeGroqFixtureInspector(current, reason: .nativeContext)
+                }
+            }, action: { view.isInspectable = true })
+        guard activated else { return false }
+        let expiry = Task { @MainActor [weak self] in
+            do { try await Task.sleep(until: binding.deadline, clock: .continuous) }
+            catch { return }
+            guard let self, let current = self.entries[tabID], current.groqFixtureInspectorDiagnostic?.id == id else { return }
+            self.revokeGroqFixtureInspector(current, reason: .expired)
+        }
+        entry.groqFixtureInspectorDiagnostic = (id, binding, expiry)
+        Self.inspectorDiagnosticLog.notice("groqFixtureInspectorDiagnostic disposition=granted")
+        return true
+    }
+
+    func revokeGroqFixtureInspectorDiagnostic(tabID: UUID, ownerToken: String) {
+        guard let entry = entries[tabID], entry.modelChanges?.ownerToken == ownerToken else { return }
+        revokeGroqFixtureInspector(entry, reason: .finished)
+    }
+
+    private static func groqFixtureInspectorURLAllowed(_ url: URL?) -> Bool {
+        guard let url else { return false }
+        return url == EmbeddedWebModelTransport.Provider.groq.startURL(choice: GroqOwnedStatusLease.Profile.gptoss120b.choice)
+    }
+
+    private func revokeGroqFixtureInspector(_ entry: Entry, reason: ModelInspectorRevocation) {
+        guard let diagnostic = entry.groqFixtureInspectorDiagnostic else { return }
+        entry.groqFixtureInspectorDiagnostic = nil
+        diagnostic.expiry.cancel()
+        entry.view.isInspectable = false
+        diagnostic.binding.revoke()
+        Self.inspectorDiagnosticLog.notice("groqFixtureInspectorDiagnostic disposition=revoked reason=\(reason.rawValue, privacy: .public)")
     }
 
     #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
@@ -3254,6 +3305,7 @@ final class EmbeddedBrowserSession {
             revokeClaudeResponseStream(entry)
         }
         revokeModelInspector(entry, reason: .navigation)
+        revokeGroqFixtureInspector(entry, reason: .navigation)
         resetModelNavigationDiagnostic(entry)
         entry.recoverySettledGeneration = nil
         entry.tab.documentID = UUID()
@@ -3298,6 +3350,7 @@ final class EmbeddedBrowserSession {
            !claudeResponseStreamRouteCurrent(entry, diagnostic: diagnostic) { revokeClaudeResponseStream(entry) }
         if entry.responseCompletion != nil, !Self.responseCompletionURLAllowed(view.url) { revokeResponseCompletion(entry) }
         if entry.inspectorDiagnostic != nil, !Self.inspectorOriginAllowed(view.url) { revokeModelInspector(entry, reason: .origin) }
+        if entry.groqFixtureInspectorDiagnostic != nil, !Self.groqFixtureInspectorURLAllowed(view.url) { revokeGroqFixtureInspector(entry, reason: .origin) }
         let title = view.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         entry.tab.title = title.isEmpty ? (view.url?.host ?? "New tab") : String(title.prefix(512))
         // Includes history.pushState/fragment navigation. This is intentionally conservative;
@@ -3662,6 +3715,7 @@ final class EmbeddedBrowserSession {
         removeQwenMarker(entry)
         revokeClaudeResponseStream(entry)
         revokeModelInspector(entry, reason: .navigation)
+        revokeGroqFixtureInspector(entry, reason: .navigation)
         resetModelNavigationDiagnostic(entry)
         entry.navigation = nil
         entry.preparedDocumentNavigation = false

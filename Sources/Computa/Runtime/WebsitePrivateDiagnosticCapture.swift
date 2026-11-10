@@ -306,9 +306,64 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
     private let lock = NSLock()
     private var active = true
     private var observerArmed = false
+    private var inspectorBound = false
+    private var inspectorActivated = false
+    private var inspectorRevoked = false
+    private var inspectorRevocation: (@Sendable () -> Void)?
+    let inspectorOrdinal: Int?
     private var setupReason: SetupReason = .notAttempted
     var isCurrent: Bool { lock.withLock { active && ContinuousClock.now < deadline } && (fixtureTurn?.isCurrent ?? true) }
-    func revoke() { lock.withLock { active = false } }
+    func revoke() {
+        let callback: (@Sendable () -> Void)? = lock.withLock {
+            active = false; inspectorRevoked = true
+            let callback = inspectorRevocation; inspectorRevocation = nil
+            return callback
+        }
+        callback?()
+    }
+
+    /// Native-only public-WebKit inspection grant for an explicitly manual
+    /// fixture purpose. This carries no request, response, replay or cleanup proof.
+    final class InspectorBinding: @unchecked Sendable {
+        private let lease: GroqOwnedStatusLease
+        private let view: ObjectIdentifier, ownerToken: String, generation: UUID
+        let deadline: ContinuousClock.Instant
+        fileprivate init(_ lease: GroqOwnedStatusLease, view: ObjectIdentifier, ownerToken: String, generation: UUID) {
+            self.lease = lease; self.view = view; self.ownerToken = ownerToken; self.generation = generation
+            deadline = lease.deadline
+        }
+        func activate(view: ObjectIdentifier, ownerToken: String, generation: UUID,
+                      onRevocation: @escaping @Sendable () -> Void, action: () -> Void) -> Bool {
+            lease.lock.withLock {
+                guard !Task.isCancelled, lease.active, !lease.inspectorRevoked, !lease.inspectorActivated,
+                      ContinuousClock.now < deadline, lease.fixtureTurn?.isCurrent == true,
+                      self.view == view, self.ownerToken == ownerToken, self.generation == generation else { return false }
+                lease.inspectorActivated = true; lease.inspectorRevocation = onRevocation
+                action()
+                return true
+            }
+        }
+        func revoke() { lease.revokeInspector() }
+    }
+
+    func bindInspector(view: ObjectIdentifier, ownerToken: String, generation: UUID) -> InspectorBinding? {
+        lock.withLock {
+            guard !Task.isCancelled, active, !inspectorBound, !inspectorRevoked, ContinuousClock.now < deadline,
+                  let ordinal = inspectorOrdinal, (2...4).contains(ordinal), profile == .gptoss120b,
+                  fixtureTurn?.isCurrent == true, UUID(uuidString: ownerToken) != nil else { return nil }
+            inspectorBound = true
+            return InspectorBinding(self, view: view, ownerToken: ownerToken, generation: generation)
+        }
+    }
+
+    private func revokeInspector() {
+        let callback: (@Sendable () -> Void)? = lock.withLock {
+            inspectorRevoked = true
+            let callback = inspectorRevocation; inspectorRevocation = nil
+            return callback
+        }
+        callback?()
+    }
     var isFixture: Bool { fixtureTurn != nil }
     func recordSetupReason(_ reason: SetupReason) {
         guard isFixture, reason != .armed else { return }
@@ -324,9 +379,9 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
     }
     static func digest(_ input: String) -> String { SHA256.hash(data:Data(input.utf8)).map { String(format:"%02x",$0) }.joined() }
     func matches(_ prompt: String) -> Bool { isCurrent && Self.digest(prompt) == promptHash }
-    private init(_ file: WebsitePrivateDiagnosticCapture.Claim, _ admission: WebModelStartAdmission, _ deadline: ContinuousClock.Instant, _ prompt: String, profile: Profile, fixtureTurn: FixtureTurn? = nil) {
+    private init(_ file: WebsitePrivateDiagnosticCapture.Claim, _ admission: WebModelStartAdmission, _ deadline: ContinuousClock.Instant, _ prompt: String, profile: Profile, fixtureTurn: FixtureTurn? = nil, inspectorOrdinal: Int? = nil) {
         self.file=file; self.admission=admission; self.deadline=deadline; promptHash=Self.digest(prompt); self.profile=profile
-        self.fixtureTurn=fixtureTurn
+        self.fixtureTurn=fixtureTurn; self.inspectorOrdinal=inspectorOrdinal
     }
     static func consume(directory: URL?, admission: WebModelStartAdmission, request: WebModelResponseCodec.Request,
                         first: Bool, now: Date = Date()) -> GroqOwnedStatusLease? {
@@ -373,8 +428,12 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
         }
         // Preserve the original Qwen fixture arm for existing callers.
         static let purpose = Kind.qwen27b.purpose
+        static let inspectorPurpose = "groq_120b_fixture_inferences_2_to_4_network_inspector_v1"
+        private enum Mode { case status, manualInspector }
+        private struct WeakChild { weak var lease: GroqOwnedStatusLease? }
         private let kind: Kind
-        var publicationPurpose: String { kind.purpose }
+        private let mode: Mode
+        var publicationPurpose: String { mode == .manualInspector ? Self.inspectorPurpose : kind.purpose }
         private let file: WebsitePrivateDiagnosticCapture.Claim
         private let first: WebModelStartAdmission
         private let userHash: String
@@ -382,37 +441,50 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
         private let lock = NSLock()
         private var active = true
         private var children = Set<UUID>()
+        private var lastInspectorInferenceID: UUID?
+        private var inspectorChildren: [WeakChild] = []
         var isCurrent: Bool { lock.withLock { active && ContinuousClock.now < deadline } }
-        func revoke() { lock.withLock { active = false } }
+        func revoke() {
+            let leases = lock.withLock {
+                active = false
+                let leases = inspectorChildren.compactMap(\.lease); inspectorChildren.removeAll()
+                return leases
+            }
+            leases.forEach { $0.revoke() }
+        }
 
-        private init(file: WebsitePrivateDiagnosticCapture.Claim, first: WebModelStartAdmission, deadline: ContinuousClock.Instant, user: String, kind: Kind) {
-            self.file=file; self.first=first; self.deadline=deadline; userHash=GroqOwnedStatusLease.digest(user); self.kind=kind
+        private init(file: WebsitePrivateDiagnosticCapture.Claim, first: WebModelStartAdmission, deadline: ContinuousClock.Instant, user: String, kind: Kind, mode: Mode) {
+            self.file=file; self.first=first; self.deadline=deadline; userHash=GroqOwnedStatusLease.digest(user); self.kind=kind; self.mode=mode
         }
 
         static func consume(directory: URL?, admission: WebModelStartAdmission, request: WebModelResponseCodec.Request,
-                            first: Bool, now: Date = Date()) -> FixtureTurn? {
+                            first: Bool, allowManualInspector: Bool = false, now: Date = Date()) -> FixtureTurn? {
             guard first, !Task.isCancelled, let directory, admission.provider == "groq",
                   let kind=Kind.allCases.first(where: { $0.profile.choice.modelID == admission.modelID }), request.model == admission.modelID,
                   [admission.taskID, admission.threadID, admission.turnID].allSatisfy({ UUID(uuidString:$0)?.uuidString.lowercased()==$0 }),
                   let user = controlledUserText(request,allowingContinuation:false,kind:kind) else { return nil }
             let started=ContinuousClock.now
             var deadline: ContinuousClock.Instant?
+            var mode: Mode = .status
             guard let file=WebsitePrivateDiagnosticCapture.claim(directory:directory,record:.groqOwnedStatus,maximumArmBytes:4096,validate:{ data in
                 guard APIModelCorrectionJSON.isUnambiguous(data),
                       let v=try? JSONSerialization.jsonObject(with:data) as? [String:String],
                       Set(v.keys)==["purpose","nonce","modelID","userPromptSHA256","expiresAt"],
-                      v["purpose"]==kind.purpose, v["modelID"]==admission.modelID,
+                      v["purpose"]==kind.purpose || allowManualInspector && kind == .gptoss120b && v["purpose"]==Self.inspectorPurpose,
+                      v["modelID"]==admission.modelID,
                       let nonce=v["nonce"], UUID(uuidString:nonce)?.uuidString.lowercased()==nonce,
                       v["userPromptSHA256"]==GroqOwnedStatusLease.digest(user), let expiry=v["expiresAt"], expiry.utf8.count==24 else { return false }
                 let fmt=ISO8601DateFormatter(); fmt.formatOptions=[.withInternetDateTime,.withFractionalSeconds]
                 guard let end=fmt.date(from:expiry),fmt.string(from:end)==expiry,
                       end>now,end.timeIntervalSince(now)<=600 else { return false }
+                mode = v["purpose"] == Self.inspectorPurpose ? .manualInspector : .status
                 deadline=started + .seconds(end.timeIntervalSince(now)); return true
             },isCurrent:{ !Task.isCancelled && (deadline.map { ContinuousClock.now < $0 } ?? false) }),let deadline else { return nil }
-            return .init(file:file,first:admission,deadline:deadline,user:user,kind:kind)
+            return .init(file:file,first:admission,deadline:deadline,user:user,kind:kind,mode:mode)
         }
 
-        func child(admission: WebModelStartAdmission, request: WebModelResponseCodec.Request) -> GroqOwnedStatusLease? {
+        func child(admission: WebModelStartAdmission, request: WebModelResponseCodec.Request,
+                   closedInferenceID: UUID? = nil, closedContinuation: WebsiteTurnContinuation? = nil) -> GroqOwnedStatusLease? {
             lock.withLock {
                 guard !Task.isCancelled, active, ContinuousClock.now < deadline,
                       admission.taskID==first.taskID, admission.threadID==first.threadID, admission.turnID==first.turnID,
@@ -421,8 +493,26 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
                       admission.modelID==first.modelID, request.model==first.modelID,
                       let user=Self.controlledUserText(request,allowingContinuation:true,kind:kind),GroqOwnedStatusLease.digest(user)==userHash,
                       children.count < WebModelServer.maximumTurnInferences,
-                      children.insert(admission.inferenceID).inserted else { return nil }
-                return .init(file,admission,deadline,request.prompt,profile:kind.profile,fixtureTurn:self)
+                      !children.contains(admission.inferenceID) else { return nil }
+                var inspectorOrdinal: Int?
+                if mode == .manualInspector {
+                    let ordinal = children.count + 1
+                    guard ordinal <= 4 else { return nil }
+                    if ordinal == 1 {
+                        guard admission == first, closedInferenceID == nil, closedContinuation == nil else { return nil }
+                    } else {
+                        guard closedInferenceID == lastInspectorInferenceID,
+                              let closedContinuation, closedContinuation.pendingToolCallCount > 0,
+                              (try? closedContinuation.validate(next: request)) != nil else { return nil }
+                        inspectorOrdinal = ordinal
+                    }
+                    lastInspectorInferenceID = admission.inferenceID
+                }
+                children.insert(admission.inferenceID)
+                let child = GroqOwnedStatusLease(file,admission,deadline,request.prompt,profile:kind.profile,
+                    fixtureTurn:self,inspectorOrdinal:inspectorOrdinal)
+                if inspectorOrdinal != nil { inspectorChildren.append(WeakChild(lease: child)) }
+                return child
             }
         }
 
@@ -432,6 +522,17 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
                 active=false
                 return rename()
             }
+        }
+
+        // publish() invokes commit while holding its child's lock. Drain only
+        // after that outer lock has been released; never re-enter a child lock.
+        fileprivate func revokeRetiredInspectorChildren() {
+            let leases: [GroqOwnedStatusLease] = lock.withLock {
+                guard !active else { return [] }
+                let leases = inspectorChildren.compactMap(\.lease); inspectorChildren.removeAll()
+                return leases
+            }
+            leases.forEach { $0.revoke() }
         }
 
         private static func controlledUserText(_ request: WebModelResponseCodec.Request, allowingContinuation: Bool, kind: Kind) -> String? {
@@ -498,5 +599,6 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
                 return self.fixtureTurn.map { $0.commit(rename) } ?? rename()
             }
         })
+        fixtureTurn?.revokeRetiredInspectorChildren()
     }
 }

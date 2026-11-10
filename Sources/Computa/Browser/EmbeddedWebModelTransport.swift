@@ -1441,6 +1441,29 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         browser.revokeModelInspectorDiagnostic(tabID: session.tabID, ownerToken: session.token)
     }
 
+    /// Called only after the ordinary loading Poll has proved this empty owned
+    /// page ready. The task-local child was joined to its exact native Start.
+    /// Failure is diagnostic-only; no wait, new request, Send gate or retry.
+    private func grantGroqFixtureInspectorIfReady(_ session: Session) {
+        guard !Task.isCancelled, sessions[session.token] === session,
+              let lease = session.groqOwnedStatus, lease.isCurrent, lease.inspectorOrdinal != nil,
+              session.provider == .groq, session.modelChoice == GroqOwnedStatusLease.Profile.gptoss120b.choice,
+              session.modelChoice == lease.modelChoice, !session.isDiscovery, !session.isRecoveryProbe,
+              session.state == "ready", !session.submitted, !session.pendingSubmission,
+              session.sequence == 0, session.acknowledgedSendSequence == 0,
+              session.baseline == 0, session.confirmedUsers == 0, session.firstUserFingerprint == nil,
+              !session.temporary, session.explicitClearReady, session.lifecycleVerified,
+              session.modelSelectionVerified, case .model(let proof)? = session.selectionEvidence,
+              proof.selected.key == lease.modelChoice.key, proof.selected.label == lease.modelChoice.label,
+              browser.webView(for: session.tabID) === session.view,
+              let generation = session.documentGeneration,
+              browser.documentGeneration(for: session.tabID) == generation,
+              session.view.url == session.provider.startURL(choice: session.modelChoice),
+              let binding = lease.bindInspector(view: ObjectIdentifier(session.view), ownerToken: session.token, generation: generation) else { return }
+        if !browser.grantGroqFixtureInspectorDiagnostic(binding, tabID: session.tabID, view: session.view,
+            ownerToken: session.token, generation: generation) { binding.revoke() }
+    }
+
     /// No public/memberwise initializer: only this native transport can attest
     /// rejection before it has reserved or acquired any inference page.
     struct PrecreationRejection: Error, Sendable {
@@ -4104,6 +4127,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard session.state == "ready" || ContinuousClock.now - session.created < preparationTimeout else {
                 throw preparationFailure(session)
             }
+            grantGroqFixtureInspectorIfReady(session)
         } else {
             let previouslyCandidate = session.completionCandidate
             session.completionCandidate = false
@@ -8959,6 +8983,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         finishInitialCheckpointSettlement(session, phase: cancel ? .cancelled : .finished)
         browser.revokeChatGPTResponseCompletion(tabID: session.tabID, ownerToken: session.token)
         browser.revokeModelInspectorDiagnostic(tabID: session.tabID, ownerToken: session.token)
+        browser.revokeGroqFixtureInspectorDiagnostic(tabID: session.tabID, ownerToken: session.token)
         if let capture = session.postBlockDiagnostic, let task = capture.task {
             if cancel && cleanupCause != .failedTurn || Task.isCancelled { task.cancel() }
             let result = await withTaskCancellationHandler(operation: { await task.value }, onCancel: { task.cancel() })
