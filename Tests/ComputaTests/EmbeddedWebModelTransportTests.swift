@@ -14442,6 +14442,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
         return try String(contentsOf: root.appendingPathComponent("Scripts/fixtures/groq-chat.html"), encoding: .utf8)
+            .replacingOccurrences(of: "structuredReply: false", with: "structuredReply: true")
     }
 
     private func startGroqFixture(_ fixture: Fixture, send: Bool = true) async throws -> (String, WKWebView) {
@@ -14719,6 +14720,126 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testGroqRenderedValidToolJSONCannotBecomeACompletedNativeResponse() async throws {
+        let reply = #"{"type":"tool_calls","calls":[{"name":"fixture_read","arguments":{"text":"A  B"}}]}"#
+        let quoted = String(decoding: try JSONSerialization.data(withJSONObject: reply, options: [.fragmentsAllowed]), as: UTF8.self)
+        let page = try Self.groqFixturePage().replacingOccurrences(of: "window.fixtureReady = true;",
+            with: "f.structuredReply = false; f.reply = " + quoted + "; window.fixtureReady = true;")
+        let fixture = try Fixture(page: page); defer { fixture.shutdown() }
+        var physical: [String]?, retainedView: WKWebView?
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard action == "inspect", physical == nil, let id = fixture.createdTabs.last,
+                  let view = fixture.browser.webView(for: id) else { return }
+            let value = try? await self.evaluate(view, "return groqFixture.answer ? [groqFixture.answer.textContent, groqFixture.answer.innerText] : null;")
+            if let texts = value as? [String] { physical = texts; retainedView = view }
+        }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("GroqLiteralRefusal-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let server = WebModelServer(), generation = UUID()
+        await server.configureEmbeddedTransport(fixture.transport)
+        await server.configureEvidenceDirectory(root.appendingPathComponent("evidence"))
+        await server.configureCleanupReceipts(directory: root, runtimeGeneration: generation) { _ in }
+        let choice = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B")
+        let request = try JSONSerialization.data(withJSONObject: ["model": choice.modelID,
+            "input": "Return one synthetic offered fixture call.", "stream": true,
+            "tools": [["type": "function", "name": "fixture_read", "parameters": ["type": "object", "properties": [String: Any]()]]]] as [String: Any])
+        let taskID = UUID().uuidString.lowercased()
+        var released: Data?
+        do {
+            released = try await server.fixtureInfer(request, taskID: taskID,
+                threadID: UUID().uuidString.lowercased(), turnID: UUID().uuidString.lowercased(), runtimeGeneration: generation)
+            XCTFail("Rendered JSON cannot release a final message or executable call")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFormatUnavailable) }
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        XCTAssertNil(released, "The server cannot encode the rendered tool proposal as a native completed response")
+        // Ordinary inference failure retains cleanup for the native caller's
+        // explicit Finish; the refusal itself must not replay or clear a view.
+        let cleanupIssues = await server.fixtureFinish(taskID: taskID, runtimeGeneration: generation)
+        XCTAssertTrue(cleanupIssues.isEmpty)
+        let texts = try XCTUnwrap(physical)
+        XCTAssertEqual(texts.count, 2); XCTAssertEqual(Data(texts[0].utf8), Data(reply.utf8))
+        XCTAssertNotEqual(Data(texts[1].utf8), Data(reply.utf8), "Normal paragraph rendering collapses authored string spaces")
+        XCTAssertNoThrow(try JSONSerialization.jsonObject(with: Data(texts[1].utf8)),
+            "Syntactic JSON validity alone cannot establish literal bytes")
+        let receipts = await server.latestCleanupReceipts()
+        XCTAssertEqual(receipts.count, 1); XCTAssertEqual(receipts.first?.outcome, .closed)
+        XCTAssertEqual(receipts.first?.reason, .transcriptCleared)
+        let counts = try await evaluate(try XCTUnwrap(retainedView), "return [groqFixture.sendCount, groqFixture.clearCount];") as? [Int]
+        XCTAssertEqual(counts, [1, 1], "Refusal preserves the existing one-Send, verified-clear lifecycle")
+        _ = await server.shutdown()
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testGroqKnownLiteralProfileCompletesWithExactOriginalJSONBytes() async throws {
+        let fixture = try Fixture(page: Self.groqFixturePage()); defer { fixture.shutdown() }
+        let (token, view) = try await startGroqFixture(fixture, send: false)
+        let expected = String(decoding: try JSONSerialization.data(withJSONObject:
+            ["type": "message", "text": "KEEP  2 spaces e\u{301} 🌍 and \\n"]), as: UTF8.self)
+        let quoted = String(decoding: try JSONSerialization.data(withJSONObject: expected, options: [.fragmentsAllowed]), as: UTF8.self)
+        _ = try await evaluate(view, "groqFixture.reply = " + quoted + "; return true;")
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "SAFE exact literal fixture"])
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        let actual = try XCTUnwrap(complete["text"] as? String)
+        XCTAssertEqual(Data(actual.utf8), Data(expected.utf8))
+        let code = try await evaluate(view, "return groqFixture.code.textContent;") as? String
+        XCTAssertEqual(code.map { Data($0.utf8) }, Data(expected.utf8))
+        let choice = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B")
+        XCTAssertNoThrow(try WebsiteModelEvidence.parse(complete["modelEvidence"], provider: "groq", expected: choice))
+        let finish = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finish["cleanup"] as? String, "transcript_cleared")
+        let counts = try await evaluate(view, "return [groqFixture.sendCount, groqFixture.clearCount];") as? [Int]
+        XCTAssertEqual(counts, [1, 1]); try await assertHumanTabIntact(fixture)
+    }
+
+    func testGroqFinalReadRejectsLiteralFlagDriftEvenWhenCompletedTextIsUnchanged() async throws {
+        let fixture = try Fixture(page: Self.groqFixturePage()); defer { fixture.shutdown() }
+        let (token, view) = try await startGroqFixture(fixture, send: false)
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "SAFE literal final-read drift fixture"])
+        let candidate = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        XCTAssertEqual(candidate["state"] as? String, "running")
+        let before = try await evaluate(view, "return groqFixture.code.textContent;") as? String
+        try await Task.sleep(for: .milliseconds(1_700))
+        var changes = 0, actions: [String] = []
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            actions.append(action)
+            guard action == "verifyModel", changes == 0 else { return }
+            changes += 1
+            _ = try? await self.evaluate(view, """
+                const f = groqFixture, text = f.code.textContent, p = document.createElement('p');
+                p.className = 'text-left mb-4'; p.textContent = text;
+                f.answer.replaceChildren(p); return true;
+                """)
+        }
+        do {
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTFail("An initial literal candidate cannot authorize a later rendered-only final read")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFormatUnavailable) }
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        XCTAssertEqual(changes, 1)
+        XCTAssertEqual(Array(actions.suffix(2)), ["verifyModel", "inspect"])
+        let after = try await evaluate(view, "return groqFixture.answer.textContent;") as? String
+        XCTAssertEqual(before.map { Data($0.utf8) }, after.map { Data($0.utf8) })
+        do { _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]); XCTFail("The same failed session cannot release a cached final") }
+        catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFormatUnavailable) }
+        let finish = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finish["cleanup"] as? String, "transcript_cleared")
+        let counts = try await evaluate(view, "return [groqFixture.sendCount, groqFixture.clearCount];") as? [Int]
+        XCTAssertEqual(counts, [1, 1]); try await assertHumanTabIntact(fixture)
+    }
+
+    func testGroqLiteralRequirementDoesNotApplyToExistingClaudePlainTextCompletion() async throws {
+        let fixture = try Fixture(page: Self.providerPage(.claude)); defer { fixture.shutdown() }
+        let start = try await call(fixture.transport, "webProviderStart", ["provider": "claude"])
+        let token = try XCTUnwrap(start["sessionToken"] as? String)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "SAFE ordinary provider fixture"])
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
+        _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testGroqStreamingFooterCannotCompleteUntilComposerIsEnabledAndEmpty() async throws {
         let fixture = try Fixture(page: Self.groqFixturePage())
         defer { fixture.shutdown() }
@@ -14808,7 +14929,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 guard action == "verifyModel", mutations == 0 else { return }
                 mutations += 1
                 let change = mutation == "answer"
-                    ? #"groqFixture.answer.querySelector('p').textContent = '{"type":"message","text":"CHANGED"}';"#
+                    ? #"groqFixture.code.textContent = '{"type":"message","text":"CHANGED"}';"#
                     : "groqFixture.editor.disabled = true; groqFixture.send.disabled = true;"
                 _ = try? await self.evaluate(view, change + " return true;")
             }

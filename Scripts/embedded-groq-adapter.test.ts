@@ -876,12 +876,50 @@ describe('Groq fixed fresh-session adapter', () => {
     f.f.reply = '{"type":"tool_calls","calls":[{"name":"fixture","arguments":{"literal":"a\\n  b\\u005f\\\""}}]}';
     await f.submit(); const observed = await f.run();
     expect(observed.text).toBe(f.f.reply); expect(observed.answerComplete).toBe(true);
+    expect(observed.groqLiteralResponse).toBe(true);
     expect(observed.text).not.toContain('Synthetic reasoning');
     expect(JSON.parse(observed.text).calls[0].arguments.literal).toBe('a\n  b_"');
     // Syntax highlighting may split code into spans; textContent retains bytes.
     const raw = f.f.reply; f.f.code.textContent = '';
     f.f.code.append(new f.Node('SPAN', {}, raw.slice(0, 20)), new f.Node('SPAN', {}, raw.slice(20)));
     expect((await f.run()).text).toBe(raw);
+    expect((await f.run()).groqLiteralResponse).toBe(true);
+  });
+
+  test('a Markdown-rendered paragraph that remains valid JSON cannot claim literal response bytes', async () => {
+    const f = groqFixture({ key: 'openai/gpt-oss-120b', label: 'GPT OSS 120B' });
+    const intended = '{"type":"message","text":"a*b*"}';
+    f.f.reply = intended; await f.submit();
+    // CommonMark emphasis removes source asterisks before textContent. This
+    // actual inline DOM produces a valid but semantically different JSON value.
+    f.f.answer.textContent = '';
+    const paragraph = new f.Node('P');
+    paragraph.append(new f.Node('SPAN', {}, '{"type":"message","text":"a'),
+      new f.Node('EM', {}, 'b'), new f.Node('SPAN', {}, '"}'));
+    f.f.answer.append(paragraph);
+    const observed = await f.run();
+    expect(observed.text).toBe('{"type":"message","text":"ab"}');
+    expect(JSON.parse(observed.text).text).toBe('ab'); expect(JSON.parse(intended).text).toBe('a*b*');
+    expect(observed.text).not.toBe(intended); expect(observed.groqLiteralResponse).toBe(false);
+    expect(observed.answerComplete).toBe(true); expect(observed.busy).toBe(false); expect(observed.firstUserVerified).toBe(true);
+    expect(f.f.sendCount).toBe(1); expect(f.f.clearCount).toBe(0);
+  });
+
+  test('the observed display-copy escape loss keeps the invalid paragraph diagnostic text without a literal claim', async () => {
+    const f = groqFixture({ key: 'openai/gpt-oss-120b', label: 'GPT OSS 120B' });
+    const intended = JSON.stringify({marker:'GROQ477DISPLAYCABE59A846F841098D42FA652E84623F',quoted:'say "hi"',
+      path:'C:\\tmp\\note.txt',markdown:'a*b*'});
+    const displayed = String.raw`{"marker":"GROQ477DISPLAYCABE59A846F841098D42FA652E84623F","quoted":"say "hi"","path":"C:\tmp\note.txt","markdown":"a b "}`;
+    expect(new TextEncoder().encode(intended)).toHaveLength(126);
+    expect(new TextEncoder().encode(displayed)).toHaveLength(122);
+    expect(JSON.parse(intended).quoted).toBe('say "hi"'); expect(() => JSON.parse(displayed)).toThrow();
+    f.f.reply = intended; await f.submit(); f.f.answer.textContent = '';
+    f.f.answer.append(new f.Node('P', {}, displayed));
+    const observed = await f.run();
+    expect(observed.text).toBe(displayed);
+    expect(new TextEncoder().encode(observed.text)).toEqual(new TextEncoder().encode(displayed));
+    expect(observed.groqLiteralResponse).toBe(false); expect(observed.answerComplete).toBe(true);
+    expect(observed.firstUserVerified).toBe(true); expect(f.f.sendCount).toBe(1); expect(f.f.clearCount).toBe(0);
   });
 
   test('finished malformed JSON with the observed extra closing bracket is never repaired', async () => {
@@ -890,6 +928,7 @@ describe('Groq fixed fresh-session adapter', () => {
       + Array.from({ length: 180 }, (_, i) => i + 1).join(',') + ']]}}]}';
     await f.submit(); const observed = await f.run();
     expect(observed.text).toBe(f.f.reply); expect(observed.text.endsWith(',178,179,180]]}}]}')).toBe(true);
+    expect(observed.groqLiteralResponse).toBe(true);
     expect(observed.answerComplete).toBe(true); expect(observed.busy).toBe(false);
     expect(() => JSON.parse(observed.text)).toThrow(); expect(f.f.sendCount).toBe(1);
   });
@@ -900,6 +939,7 @@ describe('Groq fixed fresh-session adapter', () => {
       f.f.answer.append(new f.Node('P', hidden ? { hidden: '' } : {}, 'Do not execute this example.'));
       const observed = await f.run();
       expect(observed.text).toContain(f.f.reply); expect(observed.text).toContain('Do not execute this example.');
+      expect(observed.groqLiteralResponse).toBe(false);
       expect(() => JSON.parse(observed.text)).toThrow(); expect(observed.answerComplete).toBe(true);
     }
   });
@@ -908,10 +948,12 @@ describe('Groq fixed fresh-session adapter', () => {
     const chrome = groqFixture(); chrome.f.structuredReply = true; await chrome.submit();
     chrome.f.codeChrome.append(new chrome.Node('SPAN', {}, 'Authored extra content'));
     expect((await chrome.run()).text).toContain('Authored extra content');
+    expect((await chrome.run()).groqLiteralResponse).toBe(false);
     const duplicate = groqFixture(); duplicate.f.structuredReply = true; await duplicate.submit();
     duplicate.f.answer.append(new duplicate.Node('PRE', {}, 'SECOND CODE BODY'));
     const observed = await duplicate.run();
     expect(observed.text).toContain(duplicate.f.reply); expect(observed.text).toContain('SECOND CODE BODY');
+    expect(observed.groqLiteralResponse).toBe(false);
     expect(() => JSON.parse(observed.text)).toThrow();
   });
 

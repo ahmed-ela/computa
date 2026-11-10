@@ -399,7 +399,12 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertTrue(unbound.prompt.contains("Supplied URL: first load " + prefix + "browser_open."))
             XCTAssertTrue(unbound.prompt.contains("Existing human tab with an observed tab_id: first load " + prefix + "browser_bind."))
             XCTAssertTrue(unbound.prompt.contains("Loading schemas executes no task tools."))
-            XCTAssertTrue(unbound.prompt.contains("Shell HTTP cannot verify browser state. After entry check catalog_revision for reads/actions"))
+            XCTAssertTrue(unbound.prompt.contains("Shell HTTP cannot verify browser state."))
+            XCTAssertTrue(unbound.prompt.contains("Empty tabs do not prove denial."))
+            XCTAssertTrue(unbound.prompt.contains("Registered page tools await successful open/bind, which refreshes the next catalog without user enablement; tool_choice and permissions still govern."))
+            XCTAssertTrue(unbound.prompt.contains("Then load only offered, allowed schemas with current catalog_revision. Do not call deferred tools now; respect actual denials."))
+            XCTAssertFalse(unbound.prompt.contains("After entry check catalog_revision for reads/actions."),
+                "This fixture registers page tools, so the deferred-capability handoff must be present")
             let openReply = "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"\(prefix)browser_open\",\"arguments\":{\"url\":\"http://localhost:62341/\"}}]}"
             XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(openReply, request: unbound), "Guidance grants no unloaded schema authority")
             let (entryLoaded, _) = try request(.unbound, selected: [prefix + "browser_open"])
@@ -638,8 +643,12 @@ final class WebModelResponseCodecTests: XCTestCase {
             let suffix = String(prepared.prompt[(try requestRange(in: prepared)).upperBound...])
             let codePayload = LocalModelCatalog.webProvider(for: model) == "qwen"
             XCTAssertFalse(suffix.contains("Return exactly one raw JSON object."), model)
-            XCTAssertTrue(suffix.contains("Return exactly one fenced JSON code block labelled json."), model)
-            XCTAssertTrue(suffix.contains("Examples below are JSON contents; put one inside that code block."), model)
+            if LocalModelCatalog.webProvider(for: model) == "groq" {
+                XCTAssertTrue(suffix.contains(ComputaAgentInstructions.compactLiteralFencedResponseFormat), model)
+            } else {
+                XCTAssertTrue(suffix.contains("Return exactly one fenced JSON code block labelled json."), model)
+                XCTAssertTrue(suffix.contains("Examples below are JSON contents; put one inside that code block."), model)
+            }
             XCTAssertEqual(suffix.contains(ComputaAgentInstructions.codePayloadResponseBoundary), codePayload, model)
             XCTAssertTrue(suffix.contains("Exact currently offered local function names: computer_v2_snapshot"), model)
             let boundary = codePayload
@@ -1706,6 +1715,30 @@ final class WebModelResponseCodecTests: XCTestCase {
         }
     }
 
+    func testGroqLiteralBoundaryPreservesNativeRequestAndStrictReplyValidation() throws {
+        let boundary = ComputaAgentInstructions.compactLiteralFencedResponseFormat
+        let models = ["browser/groq", WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID,
+            WebsiteModelChoice(provider: "groq", key: "qwen/qwen3.8-27b", label: "Qwen/Qwen3.8-27B").modelID]
+        let call = #"{"type":"tool_calls","calls":[{"name":"computer_v2_snapshot","arguments":{}}]}"#
+        for model in models {
+            let body = try JSONSerialization.data(withJSONObject: ["model": model,
+                "input": [["role": "user", "content": "Keep literal quotes \" and slash \\ and **text**."]],
+                "tools": [function], "tool_choice": "auto"])
+            let request = try WebModelResponseCodec.prepareRequest(body)
+            let suffix = try assertContiguousRequestValues(body, in: request)
+            XCTAssertEqual(request.continuationRequest, body)
+            XCTAssertEqual(suffix.components(separatedBy: boundary).count - 1, 1)
+            XCTAssertFalse(suffix.contains(ComputaAgentInstructions.literalFencedResponseBoundary))
+            XCTAssertEqual(try WebModelResponseCodec.parseEmbeddedReply("```json\n" + call + "\n```", request: request),
+                .toolCalls([.init(name: "computer_v2_snapshot", argumentsJSON: "{}", namespace: nil)]))
+            XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply("Outside prose\n```json\n" + call + "\n```", request: request))
+            XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(
+                #"{"type":"tool_calls","calls":[{"name":"unoffered","arguments":{}}]}"#, request: request)) { error in
+                XCTAssertEqual(error as? WebModelResponseCodec.Failure, .unknownTool("unoffered"))
+            }
+        }
+    }
+
     func testLiteralHandoffPreservesRequestAndRejectsAuthoredIntroduction() throws {
         let tool: [String: Any] = ["type": "function", "name": "exec_command",
             "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]],
@@ -1870,7 +1903,8 @@ final class WebModelResponseCodecTests: XCTestCase {
                        ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(request.offeredToolNames), customToolNames: request.customToolNames,
                            includedInstructionText: includedInstructionText,
                            responseFormat: LocalModelCatalog.webProvider(for: request.model) == "qwen" ? .codePayloadJSON
-                               : ["claude", "deepseek", "kimi"].contains(LocalModelCatalog.webProvider(for: request.model) ?? "") ? .literalFencedJSON : .fencedJSON,
+                               : ["claude", "deepseek", "kimi", "groq"].contains(LocalModelCatalog.webProvider(for: request.model) ?? "") ? .literalFencedJSON : .fencedJSON,
+                           compactLiteralBoundary: LocalModelCatalog.webProvider(for: request.model) == "groq",
                            singleActionRelay: request.singleActionRelay,
                            illustrateFunctionArguments: expectsFunctionLayout || LocalModelCatalog.webProvider(for: request.model) == "qwen",
                            currentBrowserHandoff: expectedCurrentBrowserHandoff,
@@ -3125,7 +3159,8 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertFalse(first.currentUserInstructions.contains(latestRequest), "The locator must not duplicate user content")
             try assertUserPayloadAppearsOnce(latestRequest, in: first)
             XCTAssertTrue(first.prompt.hasSuffix(ComputaAgentInstructions.webResponseContract(offeredToolNames: ["computer_v2_snapshot"],
-                responseFormat: provider == "qwen" ? .codePayloadJSON : ["claude", "deepseek", "kimi"].contains(provider) ? .literalFencedJSON : .fencedJSON,
+                responseFormat: provider == "qwen" ? .codePayloadJSON : ["claude", "deepseek", "kimi", "groq"].contains(provider) ? .literalFencedJSON : .fencedJSON,
+                compactLiteralBoundary: provider == "groq",
                 singleActionRelay: first.singleActionRelay, illustrateFunctionArguments: provider == "qwen")))
             let nextInput = input + [
                 ["type": "function_call", "name": "computer_v2_snapshot", "arguments": "{}", "call_id": "current_extra"],

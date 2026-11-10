@@ -178,3 +178,11 @@ The fresh Build 466 workflow stopped during local evidence preparation with no
 matching native task retained. Both live journal stores had reached 256 tasks;
 the retained-session archival incompatibility and definitive pre-dispatch queue
 handling are documented in [Website journal retention](WEBSITE-JOURNAL-RETENTION.md).
+
+### Literal response preservation (2026-11-10)
+
+A bounded normal-browser comparison on build 477 exposed loss in Groq's rendered reply. The same synthetic reply's Copy output matched the exact 126-byte JSON fixture, while its Accessibility text lost quote escapes, path backslashes and Markdown characters. This demonstrates why rendered paragraph text is not a lossless protocol representation. The earlier 143-byte rejected command reply was not captured, so this comparison does not establish its exact cause.
+
+The strict follow-up distinguishes the existing verified nested JSON code-block profile from rendered fallback text. Only the literal code profile can establish response bytes. Native completion requires that proof on every terminal observation, including a final reread with otherwise unchanged text. A rendered fallback remains available for diagnostics, but it cannot release a message or tool call, even if it happens to parse as JSON. No JSON repair, byte substitution, prose clipping or action replay is authorized. Ownership, current model, first-user proof, deadlines and cleanup remain independent requirements.
+
+The generic Groq and compact native-history response instructions require the entire visible envelope inside one JSON code block. Other providers retain their existing presentation. This is a response representation change; schema loading remains read-only and proves no task execution. One grounded terminal control on 477 does not qualify the combined coding/browser workflow, and neither this finding nor the literal change resolves earlier provider timeouts.

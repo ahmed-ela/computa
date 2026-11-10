@@ -394,7 +394,7 @@ enum WebModelResponseCodec {
         // Kimi also requires all authored content to be inside its single JSON block.
         let responseFormat: ComputaAgentInstructions.WebResponseFormat = switch provider {
         case "qwen": .codePayloadJSON
-        case "claude", "deepseek", "kimi": .literalFencedJSON
+        case "claude", "deepseek", "kimi", "groq": .literalFencedJSON
         default: .fencedJSON
         }
         guard object["input"] is String || object["input"] is [Any] else {
@@ -619,6 +619,7 @@ enum WebModelResponseCodec {
                 validatedReaderName: groqHistoryReaderName, nativeBrowserEntryNames: Set(groqEntryTools.keys)))
             : ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames,
             includedInstructionText: includedInstructionText, responseFormat: responseFormat,
+            compactLiteralBoundary: provider == "groq",
             singleActionRelay: isChatGPT,
             illustrateFunctionArguments: provider == "qwen" || (isClaude && WebsiteModelCatalog.choice(for: model) ==
                 WebsiteModelChoice(provider: "claude", key: "Opus 3", label: "Opus 3")),

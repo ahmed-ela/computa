@@ -1106,6 +1106,7 @@ import XCTest
         }
         let fixtureURL=URL(fileURLWithPath:#filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Scripts/fixtures/groq-chat.html")
         let html=try String(contentsOf:fixtureURL,encoding:.utf8)
+            .replacingOccurrences(of:"structuredReply: false",with:"structuredReply: true")
         let browser = EmbeddedBrowserSession(persistent:false)
         let window = Window(contentRect:NSRect(x:20,y:20,width:1024,height:768),styleMask:[],backing:.buffered,defer:false)
         window.isReleasedWhenClosed=false

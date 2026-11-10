@@ -356,6 +356,38 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
         }
     }
 
+    func testNativeHistoryLiteralBoundaryPreservesProjectionAndFullPromptBudget() throws {
+        let f = try Fixture(), hook = try f.hook()
+        let admitted = try C.prepareBudgetedGroqRequest(f.source, availability: nil,
+            projection: f.catalog(), model: f.binding.scope.modelID, loadedOnly: true, historyProjection: hook)
+        let request = admitted.request, plan = try XCTUnwrap(request.groqHistoryPlan)
+        let inline = try f.request()
+        let boundary = ComputaAgentInstructions.compactLiteralFencedResponseFormat
+        let oldLine = #"One fenced json object; no outside prose. Message/refusal/clarification: {"type":"message","text":"answer"} ends the turn; requested exact/JSON/plain formats apply to decoded text. Use tool_calls for the next unverified step within authorized scope."#
+        let compactLine = try XCTUnwrap(request.prompt.split(separator: "\n").first { $0.hasPrefix(boundary) }).description
+        let legacyPrompt = request.prompt.replacingOccurrences(of: compactLine, with: oldLine)
+        XCTAssertGreaterThan(plan.replacedFields, 0)
+        XCTAssertTrue(plan.isCurrent())
+        XCTAssertTrue(request.prompt.contains("\nGROQ_CONTEXT_MANIFEST_V1:\n```\n"))
+        XCTAssertEqual(request.prompt.components(separatedBy: boundary).count - 1, 1)
+        XCTAssertEqual(request.continuationRequest, f.source)
+        XCTAssertEqual(request.offeredToolNames, inline.offeredToolNames)
+        XCTAssertEqual(request.customToolNames, inline.customToolNames)
+        XCTAssertEqual(request.groqToolCatalogSeed?.registeredDefinitionsJSON, inline.groqToolCatalogSeed?.registeredDefinitionsJSON)
+        XCTAssertEqual(request.groqToolCatalogSeed?.allowedNames, inline.groqToolCatalogSeed?.allowedNames)
+        XCTAssertEqual(try C.completedResponse(for: .message("inert"), request: request, responseID: "resp_fixed", createdAt: 1),
+            try C.completedResponse(for: .message("inert"), request: inline, responseID: "resp_fixed", createdAt: 1))
+        let original = try J.parse(f.source), displayed = try J.parse(displayJSON(request))
+        XCTAssertEqual(displayed.items.last?.payload?.rawJSON, original.items.last?.payload?.rawJSON)
+        let sourceUser = try XCTUnwrap(original.items.first { $0.role == "user" })
+        let displayUser = try XCTUnwrap(displayed.items.first { $0.role == "user" })
+        XCTAssertEqual(try original.rawBytes(in: sourceUser.wholeRange), try displayed.rawBytes(in: displayUser.wholeRange))
+        XCTAssertEqual(admitted.units, try GroqBodyTokenCounter.tokenCount(request.prompt))
+        XCTAssertLessThanOrEqual(admitted.units, try GroqBodyTokenCounter.tokenCount(legacyPrompt))
+        XCTAssertLessThanOrEqual(admitted.units, C.groqMaximumBodyTokens)
+        XCTAssertEqual(request.promptStatistics.finalPromptBytes, request.prompt.utf8.count)
+    }
+
     func testManifestContractAndLabelAreIncludedInFullProductionAdmission() throws {
         let f = try Fixture()
         let inline = try f.request()

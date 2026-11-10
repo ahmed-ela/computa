@@ -672,7 +672,7 @@ enum ComputaAgentInstructions {
         let customShape = hasCustomTools ? #"Custom: {"type":"tool_calls","calls":[{"name":"offered_custom_name","input":"literal input"}]}."# : ""
         return """
         COMPUTA_LOCAL_RESPONSE_HANDOFF:
-        One fenced json object; no outside prose. Message/refusal/clarification: {"type":"message","text":"answer"} ends the turn; requested exact/JSON/plain formats apply to decoded text. Use tool_calls for the next unverified step within authorized scope.
+        \(compactLiteralFencedResponseFormat) Message/refusal/clarification: {"type":"message","text":"answer"} ends turn; user formats apply to decoded text. tool_calls: next unverified authorized step.
         \(functionShape)
         \(customShape)
         Replace example names with exact currently offered qualified names/schemas; history offers no schemas. Function entries contain only name and arguments (object, every required schema field; {} only if schema permits). Custom entries contain only name and input (literal string). Computa supplies call IDs and metadata; optional tool_calls.commentary is progress. Honor tool_choice/parallel/max-call limits; no tools means no call. Never replay uncertain calls. Report execution, tests, file changes or browser receipts only from matching host output; state actual blockers/refusals.
@@ -980,6 +980,9 @@ enum ComputaAgentInstructions {
         case rawJSON
     }
 
+    /// Groq presentation only; extraction and native call validation remain unchanged.
+    static let compactLiteralFencedResponseFormat = "Whole reply: first line ```json; last line ```. One object; nothing outside."
+
     /// Presentation experiment for Claude's authored introductions around valid
     /// tool-call JSON. This grants no extraction, correction or tool authority.
     static let literalFencedResponseBoundary = """
@@ -1000,6 +1003,7 @@ enum ComputaAgentInstructions {
     static func webResponseContract(offeredToolNames: [String], customToolNames: Set<String> = [],
                                     includedInstructionText: [String] = [],
                                     responseFormat: WebResponseFormat = .fencedJSON,
+                                    compactLiteralBoundary: Bool = false,
                                     singleActionRelay: Bool = false,
                                     illustrateFunctionArguments: Bool = false,
                                     currentBrowserHandoff: String = "",
@@ -1052,6 +1056,10 @@ enum ComputaAgentInstructions {
             ? #"Inside JSON string values, spell backticks as \u0060 and asterisks as \u002a when they form Markdown code or emphasis. Preserve the decoded text exactly."#
             : #"In JSON use \u0060 for Markdown backticks and \u002a for asterisks. Example path value (use yours): "report-\u0060x\u0060-\u002a\u002ay\u002a\u002a.txt""#
         switch responseFormat {
+        case .literalFencedJSON where compactLiteralBoundary:
+            responseFormatInstructions = compactLiteralFencedResponseFormat
+            responseTask = "Generate Computa's next JSON response object. This website does not execute calls."
+            responseBoundary = ""
         case .fencedJSON, .literalFencedJSON, .codePayloadJSON:
             responseFormatInstructions = """
             Return exactly one fenced JSON code block labelled json.

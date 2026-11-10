@@ -40,7 +40,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                     + "\n" + ComputaAgentInstructions.groqResponseContract(currentBrowserHandoff: "")
                 for retained in ["Retain identity/governing rules", "actual denials and Stop", "Text only", "no screenshot/image attachments",
                                  "Never activate/raise apps or use global input", "even recovery/Full Access", "only from matching host output",
-                                 "Honor tool_choice/parallel/max-call limits", "One fenced json object"] {
+                                 "Honor tool_choice/parallel/max-call limits", "Whole reply: first line ```json; last line ```"] {
                     XCTAssertTrue(combined.contains(retained), retained)
                 }
             }
@@ -225,7 +225,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let response = ComputaAgentInstructions.groqResponseContract(currentBrowserHandoff: "exact current native binding")
         for rule in ["Message/refusal/clarification", "exact currently offered qualified name", "required schema field",
                      "Custom entries contain only name and input", "Computa supplies call IDs and metadata", "Never replay uncertain calls", "only from matching host output",
-                     "tool_calls for the next unverified step", "max-call", "exact current native binding"] {
+                     "tool_calls: next unverified authorized step", "max-call", "exact current native binding"] {
             XCTAssertTrue(response.contains(rule), rule)
         }
         XCTAssertTrue(ComputaAgentInstructions.groqNativeSupplement(includedInstructionText: [], needsBrowser: true)?.contains("actions=[]") == true)
@@ -460,6 +460,58 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                     let envelope = try JSONSerialization.data(withJSONObject: ["type": "message", "text": text])
                     XCTAssertEqual(try WebModelResponseCodec.parseEmbeddedReply(String(decoding: envelope, as: UTF8.self), request: request), .message(text))
                 }
+            }
+        }
+    }
+
+    func testCompactLiteralBoundaryChangesOnlyGroqFormatAndFitsLegacyBudget() throws {
+        let oldFormat = """
+        Return exactly one fenced JSON code block labelled json.
+        Examples below are JSON contents; put one inside that code block.
+        """
+        let compactFormat = ComputaAgentInstructions.compactLiteralFencedResponseFormat
+        XCTAssertTrue(compactFormat.contains("first line ```json; last line ```"))
+        XCTAssertTrue(compactFormat.contains("Whole reply"))
+        XCTAssertFalse(compactFormat.split(separator: "\n").contains { $0.hasPrefix("```") })
+        for names in [[], ["relay.exec_command"], ["relay.exec_command", "relay.apply_patch"]] {
+            let custom: Set<String> = names.contains("relay.apply_patch") ? ["relay.apply_patch"] : []
+            let old = ComputaAgentInstructions.webResponseContract(offeredToolNames: names, customToolNames: custom)
+            let compact = ComputaAgentInstructions.webResponseContract(offeredToolNames: names, customToolNames: custom,
+                responseFormat: .literalFencedJSON, compactLiteralBoundary: true)
+            XCTAssertEqual(compact.replacingOccurrences(of: compactFormat, with: oldFormat), old,
+                "Only the response-format wording changes; task, schemas, examples and authority remain exact")
+            XCTAssertEqual(compact.components(separatedBy: compactFormat).count - 1, 1)
+            XCTAssertFalse(compact.contains(ComputaAgentInstructions.literalFencedResponseBoundary))
+            XCTAssertLessThanOrEqual(compact.utf8.count, old.utf8.count)
+            XCTAssertLessThanOrEqual(try GroqBodyTokenCounter.tokenCount(compact), try GroqBodyTokenCounter.tokenCount(old))
+            for format: ComputaAgentInstructions.WebResponseFormat in [.fencedJSON, .codePayloadJSON, .rawJSON] {
+                XCTAssertEqual(ComputaAgentInstructions.webResponseContract(offeredToolNames: names, customToolNames: custom,
+                    responseFormat: format, compactLiteralBoundary: true),
+                    ComputaAgentInstructions.webResponseContract(offeredToolNames: names, customToolNames: custom,
+                    responseFormat: format), "The opt-in affects only literal fenced format")
+            }
+        }
+    }
+
+    func testGroqNativeLiteralBoundaryFitsPreviousResponseContractBudget() throws {
+        let oldLine = #"One fenced json object; no outside prose. Message/refusal/clarification: {"type":"message","text":"answer"} ends the turn; requested exact/JSON/plain formats apply to decoded text. Use tool_calls for the next unverified step within authorized scope."#
+        for functions in [false, true] {
+            for custom in [false, true] {
+                let contract = ComputaAgentInstructions.groqResponseContract(currentBrowserHandoff: "CURRENT_BROWSER",
+                    hasFunctions: functions, hasCustomTools: custom, currentToolHandoff: "CURRENT_TOOLS")
+                let line = try XCTUnwrap(contract.split(separator: "\n").dropFirst().first).description
+                let legacy = contract.replacingOccurrences(of: line, with: oldLine)
+                XCTAssertTrue(line.hasPrefix(ComputaAgentInstructions.compactLiteralFencedResponseFormat))
+                XCTAssertTrue(line.contains(#"Message/refusal/clarification: {"type":"message","text":"answer"} ends turn"#))
+                XCTAssertTrue(line.contains("user formats apply to decoded text"))
+                XCTAssertTrue(line.contains("next unverified authorized step"))
+                XCTAssertEqual(contract.components(separatedBy: ComputaAgentInstructions.compactLiteralFencedResponseFormat).count - 1, 1)
+                XCTAssertLessThanOrEqual(line.utf8.count, oldLine.utf8.count)
+                XCTAssertLessThanOrEqual(line.split(separator: " ").count, oldLine.split(separator: " ").count)
+                XCTAssertLessThanOrEqual(try GroqBodyTokenCounter.tokenCount(contract), try GroqBodyTokenCounter.tokenCount(legacy))
+                XCTAssertEqual(contract.contains("Function:"), functions)
+                XCTAssertEqual(contract.contains("Custom:"), custom)
+                XCTAssertTrue(contract.hasSuffix("CURRENT_BROWSER\nCURRENT_TOOLS\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
             }
         }
     }
@@ -2418,7 +2470,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             customToolNames: request.customToolNames,
             includedInstructionText: includedInstructionText,
             responseFormat: LocalModelCatalog.webProvider(for: request.model) == "qwen" ? .codePayloadJSON
-                : ["claude", "deepseek", "kimi"].contains(LocalModelCatalog.webProvider(for: request.model) ?? "") ? .literalFencedJSON : .fencedJSON,
+                : ["claude", "deepseek", "kimi", "groq"].contains(LocalModelCatalog.webProvider(for: request.model) ?? "") ? .literalFencedJSON : .fencedJSON,
+            compactLiteralBoundary: LocalModelCatalog.webProvider(for: request.model) == "groq",
             singleActionRelay: request.singleActionRelay,
             illustrateFunctionArguments: LocalModelCatalog.webProvider(for: request.model) == "qwen",
             allowedToolNames: expectedAllowedToolNames)

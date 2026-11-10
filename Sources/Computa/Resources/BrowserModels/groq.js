@@ -279,11 +279,11 @@ try {
       && c.normalize(node.innerText || node.textContent) === 'Clear chat');
   }
   function responseText(answer) {
-    if (!answer) return '';
+    if (!answer) return { text: '', literal: false };
     // Groq wraps a fenced block as PRE > DIV > PRE > CODE, alongside an
     // icon-only copy DIV. Read literal code bytes only for this exact shape.
     // JSON validity belongs to the native codec, including malformed replies.
-    const fallback = () => (answer.textContent || '').trim().slice(0, 220_001);
+    const fallback = () => ({ text: (answer.textContent || '').trim().slice(0, 220_001), literal: false });
     const pres = c.nodes(answer, 'pre', 64), codes = c.nodes(answer, 'code', 64);
     if (pres.length !== 2 || codes.length !== 1) return fallback();
     const outer = pres[0], inner = pres[1], code = codes[0], wrapper = inner.parentElement;
@@ -305,7 +305,7 @@ try {
     };
     // Hidden or visible authored prose is never discarded to salvage a call.
     if (!onlyLiteralAndChrome(answer)) return fallback();
-    return (code.textContent || '').slice(0, 220_001);
+    return { text: (code.textContent || '').slice(0, 220_001), literal: true };
   }
   function responseComplete(t, form, text, progress) {
     // Record only the first failed operand, at its original evaluation point.
@@ -337,13 +337,13 @@ try {
     const t = transcript(), form = composer(), modelEvidence = evidence(false);
     const progress = input.action === 'inspect'
       && Object.getOwnPropertyDescriptor(input, 'groqFailureProgress')?.value === true ? { reason: null } : null;
-    const text = responseText(t.answer), answerComplete = responseComplete(t, form, text, progress);
+    const extracted = responseText(t.answer), text = extracted.text, answerComplete = responseComplete(t, form, text, progress);
     // The terminal conjunction is answer-scoped footer Copy plus an empty,
     // enabled composer and enabled Send. Global speed/code-copy grant nothing.
     return { t, form, output: { url: document.URL, sessionLifecycle: 'explicit_clear', temporary: false,
       modelEvidence, composer: c.enabled(form.editor), userCount: t.users.length, responseCount: t.answers.length,
       conversationIdentity: null, busy: !answerComplete && (t.users.length > 0 || state.submitted && !state.clear),
-      interrupted: false, answerComplete, text,
+      interrupted: false, answerComplete, text, groqLiteralResponse: extracted.literal,
       ...(progress ? { groqFailureProgress: { kind: 'groq_completion_gate_v1', reason: progress.reason } } : {}),
       firstUserIdentity: null, firstUserVerified: false, firstUserMarkerVerified: false, firstUserFingerprint: null } };
   }

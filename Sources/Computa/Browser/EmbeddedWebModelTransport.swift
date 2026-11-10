@@ -2521,18 +2521,41 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return failure
     }
 
-    private func checkProviderGate(_ session: Session) throws {
+    private func checkProviderGate(_ session: Session, allowGroqFormatCleanupModelRead: Bool = false) throws {
         synchronizeProviderGate(session.provider)
         if session.qwenModelQuotaScope != nil, !session.isRecoveryProbe, let gate = providerGates[session.provider] {
             throw gate.failure // A broader verification/sign-in gate still takes precedence.
         }
-        if let failure = session.terminalFailure { throw failure }
+        if let failure = session.terminalFailure,
+           !(allowGroqFormatCleanupModelRead && failure == .responseFormatUnavailable
+             && permitsGroqFormatCleanupModelRead(session)) { throw failure }
         if !session.isRecoveryProbe, let gate = providerGates[session.provider] { throw gate.failure }
         if session.provider == .qwen, !session.isRecoveryProbe, !session.isDiscovery, let modelID = session.modelChoice?.modelID,
            let gate = qwenModelUsageGates[modelID] {
             session.qwenModelQuotaScope = modelID
             throw gate.failure
         }
+    }
+
+    /// Ignore only this session's latched format failure for the ordinary fresh
+    /// model recheck inside an active, exactly bound Clear cleanup. Current
+    /// provider gates and every page/model/body/clear proof still apply.
+    private func permitsGroqFormatCleanupModelRead(_ session: Session) -> Bool {
+        guard session.provider == .groq, session.state == "failed",
+              session.terminalFailure == .responseFormatUnavailable,
+              finishingTasks[session.token] != nil, sessions[session.token] === session,
+              session.requiresExplicitClear, session.explicitClearReady, !session.temporary,
+              session.submitted, session.sequence == 1, session.confirmedUsers == 1,
+              session.acknowledgedSendSequence == 1, !session.pendingSubmission,
+              session.explicitClearOperation == nil, session.modelSelectionVerified,
+              session.modelChoice != nil, session.selectionEvidence != nil,
+              let submitted = session.explicitClearSubmission,
+              let fingerprint = session.firstUserFingerprint else { return false }
+        return submitted.outboundFingerprint == fingerprint
+            && session.documentGeneration == submitted.generation
+            && browser.documentGeneration(for: session.tabID) == submitted.generation
+            && browser.webView(for: session.tabID) === session.view
+            && session.view.url == submitted.url
     }
 
     private func createSession(provider: Provider, choice: WebsiteModelChoice?, modeChoice: WebsiteModeChoice? = nil, isDiscovery: Bool,
@@ -4315,6 +4338,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         throw Failure.ownershipFailure(.javaScriptSubmission)
                     }
                 }
+                if session.provider == .groq, observed["busy"] as? Bool == false,
+                   observed["answerComplete"] as? Bool == true {
+                    // Rendered text may be valid but byte-different JSON. Only
+                    // the adapter's current exact literal profile can complete.
+                    guard Self.firstUserDiagnosticBool(observed["groqLiteralResponse"]) == true else {
+                        throw Failure.responseFormatUnavailable
+                    }
+                }
                 if !session.profiledFirstPositive {
                     session.profiledFirstPositive = true
                     session.responseProfile?.mark(.firstPositive)
@@ -4468,6 +4499,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             }
                         }
                         if currentAnswerVerified {
+                            if session.provider == .groq {
+                                // Recheck the last independent final read, never
+                                // a cached flag from the initial quiet candidate.
+                                guard Self.firstUserDiagnosticBool(completionObservation["groqLiteralResponse"]) == true else {
+                                    throw Failure.responseFormatUnavailable
+                                }
+                            }
                             // A revoked/changed receipt cannot survive the last
                             // await and publish through the early-completion path.
                             guard !terminalReady || terminalCandidate == terminalCompletionReceipt(session) else {
@@ -7027,7 +7065,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let budgetParts = maximumWait.components
         let allocatedBudgetMilliseconds = Int(max(0, min(45_000,
             Double(budgetParts.seconds) * 1_000 + Double(budgetParts.attoseconds) / 1e15)))
-        if !allowBlockedProvider { try checkProviderGate(session) }
+        if !allowBlockedProvider {
+            try checkProviderGate(session, allowGroqFormatCleanupModelRead: action == "verifyModel")
+        }
         guard browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }
         try rejectWebsiteBlocker(session, action: action, phase: "before")
         func mayInspectReplacement(_ generation: UUID) -> Bool {
@@ -7520,7 +7560,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         await beforePageResultValidationForTesting?(action)
         await beforePageResultValidationDetailedForTesting?(action, enforceModel)
         #endif
-        if !allowBlockedProvider { try checkProviderGate(session) }
+        if !allowBlockedProvider {
+            try checkProviderGate(session, allowGroqFormatCleanupModelRead: action == "verifyModel")
+        }
         guard browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }
         try rejectWebsiteBlocker(session, action: action, phase: "after")
         guard browser.documentGeneration(for: session.tabID) == generation else {
