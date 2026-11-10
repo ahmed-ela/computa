@@ -633,11 +633,44 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
              "busy": busy, "answerComplete": answerComplete]
         }
     }
+    enum AttemptPhase: String, Sendable {
+        case evaluation, evaluationReturned = "evaluation_returned", decoded, validated
+        fileprivate var order: Int {
+            switch self { case .evaluation: 0; case .evaluationReturned: 1; case .decoded: 2; case .validated: 3 }
+        }
+    }
+    enum AttemptOutcome: String, Sendable {
+        case inFlight = "in_flight", unrepresented, admitted, failed
+    }
+    enum AttemptError: String, Sendable {
+        case cancelled, pageUnavailable = "page_unavailable", deadline
+        case modelUnverified = "model_unverified", modelMismatch = "model_mismatch", ownership
+        case nativeRefusal = "native_refusal", jsonDecode = "json_decode", other
+    }
+    struct ReadAttempt: Sendable {
+        fileprivate let id: UUID
+        let ordinal: Int
+        fileprivate init(ordinal: Int) { id = UUID(); self.ordinal = ordinal }
+    }
+    struct AttemptSnapshot: Sendable {
+        let ordinal: Int
+        let phase: AttemptPhase
+        let outcome: AttemptOutcome
+        let error: AttemptError?
+        let startedAgeMS: Int
+        let returnedAgeMS: Int?
+        var fields: [String: Any] {
+            ["ordinal": ordinal, "phase": phase.rawValue, "outcome": outcome.rawValue,
+             "error": error.map { $0.rawValue as Any } ?? NSNull(), "startedAgeMS": startedAgeMS,
+             "returnedAgeMS": returnedAgeMS.map { $0 as Any } ?? NSNull()]
+        }
+    }
     struct FailureProgress: Sendable {
         let inspection: ProgressInspection?
         let readsStarted: Int, readsReturned: Int, admittedReads: Int, waitsStarted: Int, waitsReturned: Int
         let inspectionAgeMS: Int?, readAgeMS: Int?, waitAgeMS: Int?, responseChangeAgeMS: Int?, quietAgeMS: Int?
         let completionCandidate: Bool
+        let lastAttempt: AttemptSnapshot?
         var fields: [String: Any] {
             ["kind": "groq_failure_progress_v1", "inspection": inspection.map { $0.fields as Any } ?? NSNull(),
              "readsStarted": readsStarted, "readsReturned": readsReturned, "admittedReads": admittedReads,
@@ -645,13 +678,50 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
              "inspectionAgeMS": inspectionAgeMS.map { $0 as Any } ?? NSNull(),
              "readAgeMS": readAgeMS.map { $0 as Any } ?? NSNull(), "waitAgeMS": waitAgeMS.map { $0 as Any } ?? NSNull(),
              "responseChangeAgeMS": responseChangeAgeMS.map { $0 as Any } ?? NSNull(),
-             "quietAgeMS": quietAgeMS.map { $0 as Any } ?? NSNull(), "completionCandidate": completionCandidate]
+             "quietAgeMS": quietAgeMS.map { $0 as Any } ?? NSNull(), "completionCandidate": completionCandidate,
+             "lastAttempt": lastAttempt.map { $0.fields as Any } ?? NSNull()]
         }
     }
     struct ProgressCache {
         private(set) var readsStarted = 0, readsReturned = 0, admittedReads = 0, waitsStarted = 0, waitsReturned = 0
         private var reading: ContinuousClock.Instant?, waiting: ContinuousClock.Instant?
         private var last: (ProgressInspection, ContinuousClock.Instant)?
+        private struct AttemptRecord {
+            let token: ReadAttempt
+            let started: ContinuousClock.Instant
+            var phase: AttemptPhase = .evaluation
+            var outcome: AttemptOutcome = .inFlight
+            var error: AttemptError?
+            var returned: ContinuousClock.Instant?
+        }
+        private var attempt: AttemptRecord?
+        // The ordinal is the existing capped native read-start counter. An
+        // unexported identity prevents stale completions from aliasing at its cap.
+        mutating func beginAttempt(now: ContinuousClock.Instant = .now) -> ReadAttempt? {
+            guard readsStarted > 0 else { return nil }
+            let token = ReadAttempt(ordinal: readsStarted)
+            attempt = .init(token: token, started: now)
+            return token
+        }
+        mutating func attemptReached(_ phase: AttemptPhase, for token: ReadAttempt) {
+            guard var value = attempt, value.token.id == token.id, value.outcome == .inFlight,
+                  phase.order >= value.phase.order else { return }
+            value.phase = phase; attempt = value
+        }
+        mutating func attemptAdmitted(_ token: ReadAttempt) {
+            guard var value = attempt, value.token.id == token.id, value.outcome == .inFlight,
+                  value.phase == .validated else { return }
+            value.outcome = .admitted; attempt = value
+        }
+        mutating func attemptFailed(_ token: ReadAttempt, error: AttemptError) {
+            guard var value = attempt, value.token.id == token.id, value.outcome == .inFlight else { return }
+            value.outcome = .failed; value.error = error; attempt = value
+        }
+        mutating func attemptReturned(_ token: ReadAttempt, now: ContinuousClock.Instant = .now) {
+            guard var value = attempt, value.token.id == token.id, value.returned == nil else { return }
+            if value.outcome == .inFlight { value.outcome = .unrepresented }
+            value.returned = now; attempt = value
+        }
         private static func increment(_ n: Int) -> Int { min(65_535, n + 1) }
         mutating func readStarted(now: ContinuousClock.Instant = .now) { readsStarted = Self.increment(readsStarted); reading = now }
         mutating func readReturned() { readsReturned = Self.increment(readsReturned); reading = nil }
@@ -674,7 +744,10 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
                   waitsStarted: waitsStarted, waitsReturned: waitsReturned, inspectionAgeMS: Self.age(last?.1, now: now),
                   readAgeMS: Self.age(reading, now: now), waitAgeMS: Self.age(waiting, now: now),
                   responseChangeAgeMS: last.map { _ in Self.age(changed, now: now) } ?? nil,
-                  quietAgeMS: candidate ? Self.age(quietSince, now: now) : nil, completionCandidate: candidate)
+                  quietAgeMS: candidate ? Self.age(quietSince, now: now) : nil, completionCandidate: candidate,
+                  lastAttempt: attempt.map { .init(ordinal: $0.token.ordinal, phase: $0.phase, outcome: $0.outcome,
+                      error: $0.error, startedAgeMS: Self.age($0.started, now: now) ?? 0,
+                      returnedAgeMS: Self.age($0.returned, now: now)) })
         }
     }
     struct Observation: Sendable {

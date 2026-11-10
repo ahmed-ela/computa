@@ -355,11 +355,111 @@ import XCTest
         XCTAssertEqual(saturated.quietAgeMS, 300_000)
         let fields = saturated.fields
         XCTAssertEqual(Set(fields.keys), ["kind", "inspection", "readsStarted", "readsReturned", "admittedReads", "waitsStarted",
-            "waitsReturned", "inspectionAgeMS", "readAgeMS", "waitAgeMS", "responseChangeAgeMS", "quietAgeMS", "completionCandidate"])
+            "waitsReturned", "inspectionAgeMS", "readAgeMS", "waitAgeMS", "responseChangeAgeMS", "quietAgeMS", "completionCandidate", "lastAttempt"])
         XCTAssertEqual(fields["kind"] as? String, "groq_failure_progress_v1")
         let encoded = try JSONSerialization.data(withJSONObject: fields)
         XCTAssertFalse(String(decoding: encoded, as: UTF8.self).contains("PRIVATE_CACHE_TEXT"))
         XCTAssertEqual(saturated.inspection?.answerComplete, false, "A native quiet candidate cannot promote an incomplete gate")
+    }
+
+    func testLatestAttemptOrdinalSeparatesAnEarlierUnrepresentedReadFromTheLastAdmittedRead() throws {
+        typealias Lease = GroqOwnedStatusLease
+        let now = ContinuousClock.now
+        var cache = Lease.ProgressCache()
+        XCTAssertNil(cache.beginAttempt(now: now))
+        XCTAssertNil(cache.snapshot(now: now, candidate: false, changed: nil, quietSince: nil).lastAttempt)
+        cache.readStarted(now: now)
+        let earlier = try XCTUnwrap(cache.beginAttempt(now: now))
+        cache.attemptReached(.evaluationReturned, for: earlier)
+        cache.attemptAdmitted(earlier) // No validated ordinary read: cannot promote it.
+        cache.attemptReturned(earlier, now: now.advanced(by: .milliseconds(100))); cache.readReturned()
+        let rejected = try XCTUnwrap(cache.snapshot(now: now, candidate: false, changed: nil, quietSince: nil).lastAttempt)
+        XCTAssertEqual(rejected.ordinal, 1); XCTAssertEqual(rejected.outcome, .unrepresented)
+        XCTAssertEqual(rejected.phase, .evaluationReturned); XCTAssertNil(rejected.error)
+        cache.readStarted(now: now.advanced(by: .milliseconds(200)))
+        let latest = try XCTUnwrap(cache.beginAttempt(now: now.advanced(by: .milliseconds(200))))
+        cache.attemptReached(.evaluationReturned, for: latest); cache.attemptReached(.decoded, for: latest)
+        cache.attemptReached(.validated, for: latest)
+        let inspection = try XCTUnwrap(Lease.ProgressInspection.parse(
+            ["kind": "groq_completion_gate_v1", "reason": "answer_absent"],
+            observed: ["userCount": 1, "responseCount": 0, "text": "", "busy": true, "answerComplete": false]))
+        cache.admit(inspection, now: now.advanced(by: .milliseconds(240))); cache.attemptAdmitted(latest)
+        cache.attemptReturned(latest, now: now.advanced(by: .milliseconds(400))); cache.readReturned()
+        let snapshot = cache.snapshot(now: now.advanced(by: .milliseconds(500)), candidate: false, changed: now, quietSince: nil)
+        let last = try XCTUnwrap(snapshot.lastAttempt)
+        XCTAssertEqual(snapshot.readsStarted, 2); XCTAssertEqual(snapshot.readsReturned, 2); XCTAssertEqual(snapshot.admittedReads, 1)
+        XCTAssertEqual(last.ordinal, 2); XCTAssertEqual(last.phase, .validated); XCTAssertEqual(last.outcome, .admitted)
+        XCTAssertNil(last.error); XCTAssertEqual(last.startedAgeMS, 300); XCTAssertEqual(last.returnedAgeMS, 100)
+        XCTAssertEqual(snapshot.inspection?.gate, .answerAbsent); XCTAssertEqual(snapshot.inspectionAgeMS, 260)
+        XCTAssertFalse(snapshot.completionCandidate)
+        XCTAssertEqual(Set(last.fields.keys), ["ordinal", "phase", "outcome", "error", "startedAgeMS", "returnedAgeMS"])
+    }
+
+    func testAttemptErrorIsClosedAndPreservesTheEarlierAdmittedInspection() throws {
+        typealias Lease = GroqOwnedStatusLease
+        typealias Failure = EmbeddedWebModelTransport.Failure
+        let canary = "PRIVATE_ATTEMPT_ERROR_DO_NOT_EXPORT", now = ContinuousClock.now
+        let errors: [(Error, String)] = [(CancellationError(), "cancelled"), (Failure.pageUnavailable, "page_unavailable"),
+            (Failure.deadline, "deadline"), (Failure.preparationDeadline, "deadline"),
+            (Failure.modelUnverified, "model_unverified"), (Failure.modelMismatch, "model_mismatch"),
+            (Failure.ownershipFailure(.groqDraftRestored), "ownership"), (Failure.signInRequired, "native_refusal"),
+            (NSError(domain: NSCocoaErrorDomain, code: 3840, userInfo: [NSLocalizedDescriptionKey: canary]), "json_decode"),
+            (NSError(domain: canary, code: 3840, userInfo: [NSLocalizedDescriptionKey: canary]), "other")]
+        for (error, expected) in errors {
+            XCTAssertEqual(EmbeddedWebModelTransport.groqFailureProgressAttemptError(error).rawValue, expected)
+        }
+        var cache = Lease.ProgressCache()
+        let inspection = try XCTUnwrap(Lease.ProgressInspection.parse(
+            ["kind": "groq_completion_gate_v1", "reason": "answer_absent"],
+            observed: ["userCount": 1, "responseCount": 0, "text": "", "busy": true, "answerComplete": false]))
+        cache.readStarted(now: now); let first = try XCTUnwrap(cache.beginAttempt(now: now))
+        cache.attemptReached(.validated, for: first); cache.admit(inspection, now: now); cache.attemptAdmitted(first)
+        cache.attemptReturned(first, now: now); cache.readReturned()
+        cache.readStarted(now: now.advanced(by: .seconds(1)))
+        let failed = try XCTUnwrap(cache.beginAttempt(now: now.advanced(by: .seconds(1))))
+        cache.attemptReached(.evaluationReturned, for: failed); cache.attemptReached(.decoded, for: failed)
+        cache.attemptFailed(failed, error: EmbeddedWebModelTransport.groqFailureProgressAttemptError(Failure.pageUnavailable))
+        cache.attemptReturned(failed, now: now.advanced(by: .seconds(2))); cache.readReturned()
+        cache.attemptReached(.validated, for: failed); cache.attemptAdmitted(failed) // A later callback cannot promote a terminal failure.
+        let snapshot = cache.snapshot(now: now.advanced(by: .seconds(3)), candidate: false, changed: now, quietSince: nil)
+        let last = try XCTUnwrap(snapshot.lastAttempt)
+        XCTAssertEqual(last.ordinal, 2); XCTAssertEqual(last.phase, .decoded); XCTAssertEqual(last.outcome, .failed)
+        XCTAssertEqual(last.error, .pageUnavailable); XCTAssertEqual(snapshot.inspection?.gate, .answerAbsent)
+        XCTAssertEqual(snapshot.admittedReads, 1); XCTAssertEqual(snapshot.inspectionAgeMS, 3_000)
+        XCTAssertEqual(last.startedAgeMS, 2_000); XCTAssertEqual(last.returnedAgeMS, 1_000)
+        XCTAssertFalse(String(decoding: try JSONSerialization.data(withJSONObject: snapshot.fields), as: UTF8.self).contains(canary))
+    }
+
+    func testStaleAttemptTokensCannotRelabelANewerReadEvenWhenOrdinalsSaturate() throws {
+        typealias Lease = GroqOwnedStatusLease
+        let now = ContinuousClock.now
+        var cache = Lease.ProgressCache(), foreign = Lease.ProgressCache()
+        for _ in 0..<65_535 { cache.readStarted(now: now) }
+        let earlier = try XCTUnwrap(cache.beginAttempt(now: now))
+        cache.readStarted(now: now)
+        let latest = try XCTUnwrap(cache.beginAttempt(now: now))
+        foreign.readStarted(now: now); let alien = try XCTUnwrap(foreign.beginAttempt(now: now))
+        XCTAssertEqual(earlier.ordinal, latest.ordinal); XCTAssertEqual(latest.ordinal, 65_535)
+        for stale in [earlier, alien] {
+            cache.attemptReached(.validated, for: stale); cache.attemptAdmitted(stale)
+            cache.attemptFailed(stale, error: .ownership); cache.attemptReturned(stale, now: now)
+        }
+        let untouched = try XCTUnwrap(cache.snapshot(now: now, candidate: false, changed: nil, quietSince: nil).lastAttempt)
+        XCTAssertEqual(untouched.phase, .evaluation); XCTAssertEqual(untouched.outcome, .inFlight)
+        XCTAssertNil(untouched.error); XCTAssertNil(untouched.returnedAgeMS)
+        cache.attemptReached(.decoded, for: latest); cache.attemptReached(.evaluationReturned, for: latest) // Phase cannot regress.
+        cache.attemptReturned(latest, now: now.advanced(by: .seconds(1)))
+        cache.attemptFailed(latest, error: .other) // Returned unrepresented is already terminal.
+        let bounded = cache.snapshot(now: now.advanced(by: .seconds(600)), candidate: false, changed: nil, quietSince: nil)
+        let last = try XCTUnwrap(bounded.lastAttempt)
+        XCTAssertEqual(last.phase, .decoded); XCTAssertEqual(last.outcome, .unrepresented); XCTAssertNil(last.error)
+        XCTAssertEqual(last.startedAgeMS, 300_000); XCTAssertEqual(last.returnedAgeMS, 300_000)
+        XCTAssertNil(bounded.inspection); XCTAssertNil(bounded.inspectionAgeMS); XCTAssertEqual(bounded.readsStarted, 65_535)
+    }
+
+    func testNativeAttemptRetainsTheOriginalReadErrorBeforePollDeadlineMasking() async throws {
+        try await run("nativeDeadline", expected: "no_matching_fetch_observed", profile: .gptoss120b,
+                      fixture: true, fixtureKind: .gptoss120b, earlyPassive: true, maskReadFailure: true)
     }
 
     func testFailureProgressPublishesOnlyForCurrentEarlyFixtureAndCannotChangeItsFirstFailure() throws {
@@ -804,7 +904,7 @@ import XCTest
 
     private func run(_ mode:String,expected:String,profile:GroqOwnedStatusLease.Profile = .gptoss20b,
                      fixture:Bool=false,continuation:Bool=false,customHistory:Bool=false,
-                     fixtureKind:GroqOwnedStatusLease.FixtureTurn.Kind?=nil,earlyPassive:Bool=false) async throws {
+                     fixtureKind:GroqOwnedStatusLease.FixtureTurn.Kind?=nil,earlyPassive:Bool=false,maskReadFailure:Bool=false) async throws {
         let path=try XCTUnwrap(realpath(FileManager.default.temporaryDirectory.path,nil));defer{free(path)}
         let tmp=URL(fileURLWithPath:String(cString:path),isDirectory:true).appendingPathComponent("groq-status-"+UUID().uuidString)
         let directory=tmp.appendingPathComponent(GroqOwnedStatusLease.directoryName)
@@ -874,7 +974,27 @@ import XCTest
         await server.configureEmbeddedTransport(transport)
         if continuation { await server.setGroqSubmissionIntervalForTesting(.zero) }
         await server.setTimeoutsForTesting(readiness:.seconds(10),response:mode=="nativeDeadline" ? .seconds(6) : .seconds(3))
-        if mode=="nativeDeadline" {transport.setTimeoutsForTesting(preparation:.seconds(10),response:.seconds(1))}
+        if mode=="nativeDeadline" {transport.setTimeoutsForTesting(preparation:.seconds(10),response:maskReadFailure ? .seconds(2) : .seconds(1))}
+        var maskedReadCallbacks = 0, readFailureDelayed = false
+        if maskReadFailure {
+            transport.setBeforePageResultValidationForTesting { action in
+                guard action == "inspect", !readFailureDelayed, let page = view,
+                      (try? await page.evaluateJavaScript("window.groqFixture.sendCount") as? Int) == 1 else { return }
+                maskedReadCallbacks += 1
+                if maskedReadCallbacks <= 2 {
+                    // Callback1 is submit's mandatory nested model recheck,
+                    // before native acknowledgedSendSequence=1: no progress attempt.
+                    // Callback2 is the first eligible answer-absent inspection.
+                    // Wake after each so callback3 can fail AFTER one admission.
+                    _ = try? await page.evaluateJavaScript("setTimeout(()=>window.groqFixture.editor.classList.toggle('fixture-progress-wake'),50)")
+                } else {
+                    readFailureDelayed = true
+                    // Cross only the already-fixed native response deadline;
+                    // the page's original error must be recorded before poll masks it.
+                    try? await Task.sleep(for: .milliseconds(2_100))
+                }
+            }
+        }
         var retired=false
         var sendCountBeforeNavigation:Int?
         if mode=="retiredDuringRead" {
@@ -968,6 +1088,7 @@ import XCTest
             default:XCTFail("Unexpected synthetic terminal error: "+String(describing:error))
             }
         }
+        if maskReadFailure { XCTAssertTrue(readFailureDelayed); XCTAssertEqual(maskedReadCallbacks, 3) }
         XCTAssertEqual(retired,["retiredDuringRead","navigatedDuringRead"].contains(mode))
         let page=try XCTUnwrap(view)
         let count:Int?
@@ -1032,6 +1153,18 @@ import XCTest
             if earlyPassive {
                 let progress = try XCTUnwrap(row["failureProgress"] as? [String: Any])
                 XCTAssertEqual(progress["kind"] as? String, "groq_failure_progress_v1")
+                if maskReadFailure {
+                    let last = try XCTUnwrap(progress["lastAttempt"] as? [String: Any])
+                    let admitted = try XCTUnwrap(progress["inspection"] as? [String: Any])
+                    XCTAssertEqual(last["outcome"] as? String, "failed"); XCTAssertEqual(last["error"] as? String, "page_unavailable")
+                    XCTAssertEqual(last["ordinal"] as? Int, 2)
+                    XCTAssertEqual(progress["readsStarted"] as? Int, 2); XCTAssertEqual(progress["admittedReads"] as? Int, 1)
+                    XCTAssertEqual(progress["readsReturned"] as? Int, 2)
+                    let started = try XCTUnwrap(progress["readsStarted"] as? Int)
+                    XCTAssertEqual(maskedReadCallbacks, started + 1, "The pre-ack submit recheck is not a progress attempt")
+                    XCTAssertEqual(admitted["gate"] as? String, "answer_absent"); XCTAssertEqual(admitted["answers"] as? Int, 0)
+                    XCTAssertEqual(admitted["users"] as? Int, 1); XCTAssertEqual(admitted["answerComplete"] as? Bool, false)
+                }
             } else {
                 XCTAssertNil(row["failureProgress"])
             }

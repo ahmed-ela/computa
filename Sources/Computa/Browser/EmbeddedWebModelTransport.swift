@@ -1755,6 +1755,25 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return (user,answer,chat)
     }
 
+    // Closed native error classes only: never render an Error or read its
+    // localized text/userInfo into the private diagnostic.
+    static func groqFailureProgressAttemptError(_ error: Error) -> GroqOwnedStatusLease.AttemptError {
+        if error is CancellationError { return .cancelled }
+        if let failure = error as? Failure {
+            switch failure {
+            case .pageUnavailable: return .pageUnavailable
+            case .deadline, .preparationDeadline: return .deadline
+            case .modelUnverified: return .modelUnverified
+            case .modelMismatch: return .modelMismatch
+            case .ownershipFailure: return .ownership
+            default: return .nativeRefusal
+            }
+        }
+        let native = error as NSError
+        if native.domain == NSCocoaErrorDomain && native.code == 3840 { return .jsonDecode }
+        return .other
+    }
+
     // Native-only diagnostic opt-in. No page field or model argument can mint it.
     // Rechecked at dispatch, admission and failure publication, including awaits.
     private func groqFailureProgressLease(_ session: Session, allowingPending: Bool = false, allowingFailed: Bool = false) -> GroqOwnedStatusLease? {
@@ -7323,10 +7342,26 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         browser.captureModelNativeFocus(tabID: session.tabID)
         defer { browser.restoreModelNativeFocus(tabID: session.tabID) }
         let result = EmbeddedScriptResult()
-        if groqProgress != nil { session.groqFailureProgress.readStarted() }
+        let groqAttempt: GroqOwnedStatusLease.ReadAttempt?
+        if groqProgress != nil {
+            session.groqFailureProgress.readStarted()
+            groqAttempt = session.groqFailureProgress.beginAttempt()
+        } else { groqAttempt = nil }
+        // Bookkeeping for an already-started native read also records cancellation
+        // or a failed return. It grants no dispatch/admission/publication; those
+        // retain their full original native checks, including cancellation.
+        func groqAttemptIsCurrent() -> Bool {
+            guard let groqProgress else { return false }
+            return sessions[session.token] === session && session.groqOwnedStatus === groqProgress
+                && session.groqFailureProgressOwner === groqProgress && groqProgress.capturesFailureProgress
+        }
         defer {
+            if let groqAttempt, groqAttemptIsCurrent() { session.groqFailureProgress.attemptReturned(groqAttempt) }
             if let groqProgress, groqFailureProgressLease(session, allowingPending: true) === groqProgress { session.groqFailureProgress.readReturned() }
         }
+        // Keep the existing body in place. Only observe its original thrown error
+        // before the caller's deadline masking; rethrow the same value unchanged.
+        do {
         let bytes: Data
         do {
             let evaluationStarted = ContinuousClock.now
@@ -7419,6 +7454,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 try rejectWebsiteBlocker(session, action: action, phase: "callback_failure")
             }
             throw error
+        }
+        if let groqAttempt, groqAttemptIsCurrent() {
+            session.groqFailureProgress.attemptReached(.evaluationReturned, for: groqAttempt)
         }
         let callbackValidationStarted = ContinuousClock.now
         // A callback and its timeout can become runnable together. A late
@@ -7581,6 +7619,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         try Task.checkCancellation()
         guard var observed = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw Failure.pageUnavailable }
+        if let groqAttempt, groqAttemptIsCurrent() {
+            session.groqFailureProgress.attemptReached(.decoded, for: groqAttempt)
+        }
         // Remove diagnostic-only data before any response/ownership validation.
         // Retain it only if the entire ordinary read subsequently passes.
         let groqProgressRaw = groqProgress != nil ? observed.removeValue(forKey: "groqFailureProgress") : nil
@@ -8406,14 +8447,24 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if action == "inspect", onlyInitialChatReads(session) {
             session.priorEmptyRootGeneration = observed["untouchedInitialRoot"] as? Bool == true ? generation : nil
         }
+        if let groqAttempt, groqAttemptIsCurrent() {
+            session.groqFailureProgress.attemptReached(.validated, for: groqAttempt)
+        }
         if let groqProgress, groqFailureProgressLease(session) === groqProgress,
            let progress = GroqOwnedStatusLease.ProgressInspection.parse(groqProgressRaw, observed: observed),
            observed["firstUserVerified"] as? Bool == true, observed["firstUserMarkerVerified"] as? Bool == true,
            observed["firstUserFingerprint"] as? String == session.firstUserFingerprint {
             session.groqFailureProgress.admit(progress)
+            if let groqAttempt { session.groqFailureProgress.attemptAdmitted(groqAttempt) }
         }
         cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection, replyUI: qwenReplyUI)
         return observed
+        } catch {
+            if let groqAttempt, groqAttemptIsCurrent() {
+                session.groqFailureProgress.attemptFailed(groqAttempt, error: Self.groqFailureProgressAttemptError(error))
+            }
+            throw error
+        }
     }
 
     private func canObservePendingDeepSeekComposerHandoff(_ session: Session) -> Bool {
