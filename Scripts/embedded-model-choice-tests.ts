@@ -3420,6 +3420,68 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       const tickVerification = async (f:any, ms:number) => {
         await microtasks(); f.advanceTime(ms); f.flush(); await microtasks(); f.flush(); await microtasks();
       };
+      test('first verification failures report only the original closed eligibility decision', async () => {
+        const cases = [
+          ['no_grant', false, 'not_claimed', 'native_grant_absent'],
+          ['existing', true, 'existing', 'slot_existing'],
+          ['spent', true, 'existing', 'slot_existing'],
+          ['draft', true, 'ineligible', 'editor_not_empty'],
+          ['counts', true, 'ineligible', 'user_context'],
+          ['prepared', true, 'ineligible', 'context'],
+        ] as const;
+        for (const [variant, nativeGrant, slot, reason] of cases) {
+          const x = await firstVerification('Medium', false);
+          if (variant === 'no_grant') x.request.allowFirstChatVerificationOpening = false;
+          if (variant === 'existing' || variant === 'spent')
+            x.f.world.__computaModelSelection.firstVerificationOpening = { recoveryClaimed: variant === 'spent' };
+          if (variant === 'draft') x.f.composer.text = 'PRIVATE_ELIGIBILITY_DRAFT';
+          if (variant === 'counts') (x.request as any).expectedUserCounts = [0, 1];
+          if (variant === 'prepared') x.f.world.__computaChatSubmissionState = { pending: { phase: 'prepared' } };
+          const checking = x.f.run('verifyModel', x.request);
+          await tickVerification(x.f, 901); await tickVerification(x.f, 901);
+          const result = await checking;
+          expect(result.error, variant).toBe('model_unverified'); expect(result.modelEvidence, variant).toBeUndefined();
+          expect(result.modelDiagnostic.readContext.firstVerificationOpening, variant).toEqual({ nativeGrant, slot, reason });
+          expect(x.count(), variant).toBe(1);
+          const diagnostic = JSON.stringify(result.modelDiagnostic);
+          expect(diagnostic, variant).not.toContain('PRIVATE_ELIGIBILITY_DRAFT');
+          expect(diagnostic.length, variant).toBeLessThanOrEqual(8_192);
+          noSelection(x.f, x.picker, variant === 'draft' ? 'PRIVATE_ELIGIBILITY_DRAFT' : '');
+        }
+      });
+      test('first verification diagnostics do not inspect an existing slot or grant proof to changed guards', async () => {
+        const x = await firstVerification('Medium', false); let slotReads = 0, privateReads = 0;
+        const existing: any = {};
+        Object.defineProperty(existing, 'PRIVATE_ELIGIBILITY_SLOT', { enumerable: true, get() { privateReads++; throw new Error('private slot read'); } });
+        Object.defineProperty(x.f.world.__computaModelSelection, 'firstVerificationOpening', {
+          configurable: true, get() { slotReads++; return existing; },
+        });
+        const checking = x.f.run('verifyModel', x.request);
+        await tickVerification(x.f, 901); await tickVerification(x.f, 901);
+        const result = await checking;
+        expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+        expect(result.modelDiagnostic.readContext.firstVerificationOpening).toEqual({ nativeGrant: true, slot: 'existing', reason: 'slot_existing' });
+        expect(slotReads).toBe(1); expect(privateReads).toBe(0); expect(x.count()).toBe(1);
+        expect(JSON.stringify(result.modelDiagnostic)).not.toContain('PRIVATE_ELIGIBILITY_SLOT');
+        expect(JSON.stringify(result.modelDiagnostic).length).toBeLessThanOrEqual(8_192); noSelection(x.f, x.picker);
+        // These original guards may reject before the first-slot decision. No
+        // missing decision is converted into an eligibility or recovery grant.
+        for (const variant of ['mode', 'pin', 'invocation']) {
+          const y = await firstVerification('Medium', false);
+          if (variant === 'mode') { y.f.chatMode.values['aria-pressed'] = 'false'; y.f.workMode.values['aria-pressed'] = 'true'; }
+          if (variant === 'pin') y.f.world.__computaChatPresetPin.invalidated = true;
+          const rejected = y.f.run('verifyModel', y.request); await microtasks();
+          if (variant === 'invocation') y.f.world.__computaChatActiveInvocation = {};
+          await tickVerification(y.f, 901); await tickVerification(y.f, 901);
+          const failed = await rejected;
+          expect(failed.error, variant).toBeDefined(); expect(failed.modelEvidence, variant).toBeUndefined();
+          expect(y.count(), variant).toBeLessThanOrEqual(1); noSelection(y.f, y.picker);
+        }
+        const valid = await firstVerification(), verified = valid.f.run('verifyModel', valid.request);
+        await tickVerification(valid.f, 901); await tickVerification(valid.f, 901);
+        expect((await verified).modelEvidence.selected).toEqual(valid.expected);
+        expect(valid.count()).toBe(2); noSelection(valid.f, valid.picker);
+      });
       test('fresh post-selection verification recovers one lost opening and proves the complete selected family and power', async () => {
         const x=await firstVerification(), checking=x.f.run('verifyModel',x.request);
         await tickVerification(x.f,901); await tickVerification(x.f,901);

@@ -471,6 +471,12 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   let headerExpected = null, proofLocked = false, headerObserved = false, finalPowerState = null;
   let remount = null, remountClaimed = false;
   let prepareOpening = null, insertOpening = null, genericPowerRecheck = false;
+  let firstVerificationOpeningDiagnostic = null;
+  const openingCondition = (reason, value, capture = false, rejects = false) => {
+    if (capture && (rejects ? value : !value) && firstVerificationOpeningDiagnostic?.reason === null)
+      firstVerificationOpeningDiagnostic.reason = reason;
+    return value;
+  };
   let verifyObserver = null, verifyAcknowledged = false, passiveFirstVerification = null;
   let draftObserver = null, draftChanged = false, firstVerificationEditor = null, initialReadinessObserver = null;
   const invalidateDraft = () => { draftChanged = true; };
@@ -541,7 +547,8 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         selectionAttemptPresent: !!selection && typeof selection === 'object',
         selectionClicked: selection?.familyClicked === true || Number.isInteger(selection?.powerEvents) && selection.powerEvents > 0,
         selectionSettled: selection?.completed === true, selectionCompleted: selection?.completed === true,
-        recoveryEligible: prepareOpening !== null || insertOpening !== null },
+        recoveryEligible: prepareOpening !== null || insertOpening !== null,
+        firstVerificationOpening: firstVerificationOpeningDiagnostic },
       readAttempt: { primaryOpened, secondaryOpened, closeAttempted, observedProof,
         sameTrigger: !trigger || current.trigger === trigger, popupStillAssociated: !!current.topMenu } }) };
   };
@@ -623,38 +630,43 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       throw failure('model_unverified');
     attempt.familyCloseAcknowledged = true;
   };
-  const readonlyOpeningSelectionIntact = (saved, current, spent = false) => {
+  const readonlyOpeningSelectionIntact = (saved, current, spent = false, capture = false) => {
     const pin = globalThis.__computaChatPresetPin;
     const choice = saved && websiteChatPresetChoice(saved.resolved.family, saved.resolved.power);
-    return saved != null && !mutable && owned() && !selectionChanged && Date.now() < until
-      && document.URL === request.expectedURL && location.pathname === '/'
-      && saved.owner === owner && saved.document === originalDocument
-      && globalThis.__computaModelSelection === saved.attempt && saved.attempt.started === true
-      && saved.attempt.completed === true && (spent ? saved.recoveryClaimed === true : saved.recoveryClaimed !== true)
-      && websiteModelChoiceEqual(saved.attempt.choice, expected)
-      && pin === saved.pin && pin?.owner === owner && pin.document === originalDocument
-      && pin.invalidated !== true && !pin.provisionalHeader && pin.selection === saved.selection
-      && websiteChatResolvedSelectionEqual(pin.selection, saved.resolved)
-      && websiteChatPresetIntentValid(expected) && choice && expected.key === choice.key
-      && (expected.label === choice.label || saved.resolved.power.key === 'pro' && expected.label === 'Pro')
-      && pin.headerTrigger === trigger && trigger === saved.header && trigger.isConnected === true
-      && pickerClosed(current) && websiteChatClosedHeaderMatches(current, saved.resolved.power, pin)
-      && Array.isArray(request.expectedUserCounts) && request.expectedUserCounts.length === 1 && request.expectedUserCounts[0] === 0
-      && request.expectedFirstUserFingerprint == null && request.expectedConversation == null
-      && globalThis.__computaModelFirstSubmitted !== true && !globalThis.__computaModelFirstProof
-      && chatGPTMessageRoots('user').length === 0 && chatGPTMessageRoots('assistant').length === 0
-      && !!chatGPTProductModeProof() && chatGPTTemporaryVerified();
+    return openingCondition('fresh_context', saved != null && !mutable && owned() && !selectionChanged && Date.now() < until, capture)
+      && openingCondition('route', document.URL === request.expectedURL && location.pathname === '/', capture)
+      && openingCondition('selection_attempt', saved.owner === owner && saved.document === originalDocument
+        && globalThis.__computaModelSelection === saved.attempt && saved.attempt.started === true
+        && saved.attempt.completed === true && (spent ? saved.recoveryClaimed === true : saved.recoveryClaimed !== true), capture)
+      && openingCondition('selection_choice', websiteModelChoiceEqual(saved.attempt.choice, expected), capture)
+      && openingCondition('pin_context', pin === saved.pin && pin?.owner === owner && pin.document === originalDocument
+        && pin.invalidated !== true && !pin.provisionalHeader, capture)
+      && openingCondition('pin_selection', pin.selection === saved.selection
+        && websiteChatResolvedSelectionEqual(pin.selection, saved.resolved), capture)
+      && openingCondition('choice', websiteChatPresetIntentValid(expected) && choice && expected.key === choice.key
+        && (expected.label === choice.label || saved.resolved.power.key === 'pro' && expected.label === 'Pro'), capture)
+      && openingCondition('header', pin.headerTrigger === trigger && trigger === saved.header && trigger.isConnected === true, capture)
+      && openingCondition('popup', pickerClosed(current) && websiteChatClosedHeaderMatches(current, saved.resolved.power, pin), capture)
+      && openingCondition('user_context', Array.isArray(request.expectedUserCounts) && request.expectedUserCounts.length === 1
+        && request.expectedUserCounts[0] === 0 && request.expectedFirstUserFingerprint == null && request.expectedConversation == null, capture)
+      && openingCondition('submission', globalThis.__computaModelFirstSubmitted !== true && !globalThis.__computaModelFirstProof, capture)
+      && openingCondition('message_roots', chatGPTMessageRoots('user').length === 0 && chatGPTMessageRoots('assistant').length === 0, capture)
+      && openingCondition('mode', !!chatGPTProductModeProof() && chatGPTTemporaryVerified(), capture);
   };
-  const prepareOpeningIntact = (current, opening = prepareOpening, allowAcknowledged = false, spent = false) => {
-    if (!readonlyOpeningSelectionIntact(opening, current, spent) || context?.action !== request.action
-      || context.scope !== 'action_final_guard' || globalThis.__computaChatSubmissionState) return false;
+  const prepareOpeningIntact = (current, opening = prepareOpening, allowAcknowledged = false, spent = false, capture = false) => {
+    if (!readonlyOpeningSelectionIntact(opening, current, spent, capture)
+      || openingCondition('context', context?.action !== request.action, capture, true)
+      || openingCondition('context', context.scope !== 'action_final_guard', capture, true)
+      || openingCondition('context', globalThis.__computaChatSubmissionState, capture, true)) return false;
     if (request.action === 'prepare') return globalThis.__computaChatFirstPrepareOpening === opening;
     const composer = opening.composer;
     recordVerifyOpening(verifyObserver?.takeRecords?.() || []);
     recordDraftChanges(draftObserver?.takeRecords?.() || []);
-    return !draftChanged && request.action === 'verifyModel' && request.allowFirstChatVerificationOpening === true
-      && opening.attempt.firstVerificationOpening === opening && (allowAcknowledged || !verifyAcknowledged)
-      && composer && composer.isConnected && insertComposer(current) === composer && firstVerificationComposerEmpty(composer);
+    return openingCondition('editor_changed', !draftChanged, capture)
+      && openingCondition('verification_context', request.action === 'verifyModel' && request.allowFirstChatVerificationOpening === true
+        && opening.attempt.firstVerificationOpening === opening && (allowAcknowledged || !verifyAcknowledged), capture)
+      && openingCondition('editor_unavailable', composer && composer.isConnected && insertComposer(current) === composer, capture)
+      && openingCondition('editor_not_empty', firstVerificationComposerEmpty(composer), capture);
   };
   const passiveEditorIntact = (opening, current) => {
     recordDraftChanges(draftObserver?.takeRecords?.() || []);
@@ -765,9 +777,18 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     if (recoveryEligible) attempt.postFamilyOpeningClaimed = true;
     const completed = globalThis.__computaModelSelection;
     const firstVerify = request.action === 'verifyModel' && request.allowFirstChatVerificationOpening === true;
-    if (!genericPowerRecheck && !mutable && context?.action === request.action && context.scope === 'action_final_guard'
-      && completed?.completed === true && (request.action === 'prepare' && globalThis.__computaChatFirstPrepareOpening == null
-        || firstVerify && completed.firstVerificationOpening == null)) {
+    // Negative-only facts from this original decision. No guard is reread and
+    // these fields never establish an opening slot, model proof or readiness.
+    if (request.action === 'verifyModel' && firstVerificationOpeningDiagnostic === null)
+      firstVerificationOpeningDiagnostic = { nativeGrant: firstVerify, slot: 'not_claimed', reason: null };
+    const captureOpening = firstVerificationOpeningDiagnostic !== null && firstVerificationOpeningDiagnostic.slot === 'not_claimed';
+    if (openingCondition('generic_recheck', !genericPowerRecheck, captureOpening)
+      && openingCondition('mutable_read', !mutable, captureOpening)
+      && openingCondition('context', context?.action === request.action && context.scope === 'action_final_guard', captureOpening)
+      && openingCondition('selection_incomplete', completed?.completed === true, captureOpening)
+      && (request.action === 'prepare' && globalThis.__computaChatFirstPrepareOpening == null
+        || openingCondition('native_grant_absent', firstVerify, captureOpening)
+          && openingCondition('slot_existing', completed.firstVerificationOpening == null, captureOpening))) {
       // Claim only the first opening of this phase, including an acknowledged opening.
       const pin = globalThis.__computaChatPresetPin;
       prepareOpening = { owner, document: originalDocument, attempt: completed, pin, selection: pin?.selection, header: trigger,
@@ -778,8 +799,11 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         prepareOpening.composer = insertComposer(current);
       } else globalThis.__computaChatFirstPrepareOpening = prepareOpening;
       current = drainOpeningEvidence();
-      if (!prepareOpeningIntact(current)) prepareOpening = null;
-      else if (firstVerify) {
+      if (!prepareOpeningIntact(current, prepareOpening, false, false, firstVerify)) {
+        if (firstVerify) firstVerificationOpeningDiagnostic.slot = 'ineligible';
+        prepareOpening = null;
+      } else if (firstVerify) {
+        firstVerificationOpeningDiagnostic.slot = 'established';
         // Retain the first opening's acknowledgment and editor history. Any bounded
         // recovery below shares this phase's single recovery claim and deadline.
         firstVerificationEditor = prepareOpening.composer;
@@ -791,6 +815,8 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         verifyObserver.observe(trigger, { attributes: true, attributeOldValue: true, attributeFilter: ['aria-expanded', 'data-state'] });
       }
     }
+    if (firstVerificationOpeningDiagnostic?.reason === 'slot_existing')
+      firstVerificationOpeningDiagnostic.slot = 'existing';
     const submission = globalThis.__computaChatSubmissionState, prepared = submission?.pending;
     if (!genericPowerRecheck && !mutable && request.action === 'insert' && context?.scope === 'action_final_guard'
       && completed?.completed === true && prepared?.phase === 'prepared' && prepared.firstInsertOpening == null) {
