@@ -1035,6 +1035,49 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     // This transport belongs to one shared browser profile. New tasks must not
     // repeatedly revisit a checkpoint that the profile already encountered.
     private var providerGates: [Provider: ProviderGate] = [:]
+
+    /// A normal human landing may request read-only recovery of one observed
+    /// sign-in gate. This token never clears a gate or authorizes a model Send.
+    struct SignInRecoveryGate {
+        fileprivate let owner: UUID
+        fileprivate let provider: Provider
+        fileprivate let id: UUID
+        fileprivate init(owner: UUID, provider: Provider, id: UUID) {
+            self.owner = owner; self.provider = provider; self.id = id
+        }
+    }
+    private let signInRecoveryOwner = UUID()
+
+    func signInRecoveryGate(provider rawProvider: String) -> SignInRecoveryGate? {
+        guard rawProvider == Provider.deepseek.rawValue else { return nil }
+        synchronizeProviderGate(.deepseek)
+        guard let gate = providerGates[.deepseek], gate.failure == .signInRequired else { return nil }
+        return SignInRecoveryGate(owner: signInRecoveryOwner, provider: .deepseek, id: gate.id)
+    }
+
+    func isSignInRecoveryGateCurrent(_ token: SignInRecoveryGate) -> Bool {
+        guard token.owner == signInRecoveryOwner, token.provider == .deepseek else { return false }
+        synchronizeProviderGate(token.provider)
+        return providerGates[token.provider].map { $0.id == token.id && $0.failure == .signInRequired } == true
+    }
+
+    private func signInRecoveryIsQuiescent(_ token: SignInRecoveryGate) -> Bool {
+        pendingInferenceStarts == 0 && !sessions.values.contains {
+            $0.provider == token.provider && !$0.isDiscovery
+        }
+    }
+
+    func canRecoverSignInGate(_ token: SignInRecoveryGate) -> Bool {
+        isSignInRecoveryGateCurrent(token) && signInRecoveryIsQuiescent(token)
+    }
+
+    /// Post-discovery bookkeeping only. Native discovery owns the unchanged
+    /// exact mode, cleanup and newer-gate checks that actually remove the gate.
+    func didClearSignInRecoveryGate(_ token: SignInRecoveryGate) -> Bool {
+        guard token.owner == signInRecoveryOwner, token.provider == .deepseek else { return false }
+        synchronizeProviderGate(token.provider)
+        return providerGates[token.provider] == nil && signInRecoveryIsQuiescent(token)
+    }
     private var qwenModelUsageGates: [String: ProviderGate] = [:]
     private var chatGPTPrewarmingEnabled = false
     private var scripts: [Provider: String] = [:]
@@ -1821,8 +1864,17 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 && first==submission.outboundFingerprint && submission.generation==generation && session.explicitClearOperation==nil
         }
         guard lease.isCurrent,stillBound() else{return nil}
-        let value=await browser.groqStatusResult(session.tabID,view:session.view,owner:sessionToken,
-            generation:generation,fingerprint:first)
+        let value: String?
+        var responseMetadata: GroqOwnedStatusLease.ResponseStreamMetadata?
+        if lease.capturesResponseStreamMetadata {
+            let observed = await browser.groqResponseStreamStatusResult(session.tabID, view: session.view,
+                owner: sessionToken, generation: generation, fingerprint: first)
+            value = observed?.stage
+            responseMetadata = observed?.metadata
+        } else {
+            value = await browser.groqStatusResult(session.tabID,view:session.view,owner:sessionToken,
+                generation:generation,fingerprint:first)
+        }
         guard lease.isCurrent,stillBound() else{return nil}
         #if DEBUG
         await beforePageResultValidationForTesting?("groqOwnedStatusObserved")
@@ -1833,7 +1885,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let progress = groqFailureProgressLease(session, allowingFailed: true) === lease
             ? session.groqFailureProgress.snapshot(candidate: session.completionCandidate, changed: session.lastChanged,
                 quietSince: session.candidateSince.map { max($0, session.lastChanged) }) : nil
-        return .init(stage:stage,sessionToken:sessionToken,generation:generation,failureProgress:progress)
+        return .init(stage:stage,sessionToken:sessionToken,generation:generation,failureProgress:progress,
+                     responseStreamMetadata:responseMetadata)
     }
 
     private func prepareQwenMarker(_ session: Session, prompt: String, outbound: String) async {

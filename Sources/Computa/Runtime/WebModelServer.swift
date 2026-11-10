@@ -2025,7 +2025,8 @@ actor WebModelServer {
                                 groqFixtureStatuses[taskID]=GroqOwnedStatusLease.FixtureTurn.consume(
                                     directory:directory,admission:admission,request:request,first:true,
                                     allowManualInspector:context.historyPreparation != nil,
-                                    allowEarlyPassive:context.historyPreparation != nil)
+                                    allowEarlyPassive:context.historyPreparation != nil,
+                                    allowResponseStream:context.historyPreparation != nil)
                             }
                             if let fixture=groqFixtureStatuses[taskID] {
                                 groqOwnedStatus=fixture.child(admission:admission,request:request,

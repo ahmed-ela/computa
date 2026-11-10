@@ -7,6 +7,10 @@
     || !Number.isInteger(config.durationMs) || config.durationMs < 1 || config.durationMs > 390000) return;
   const setupDiagnostics = config.setupDiagnostics === true;
   const earlyPassive = Object.getOwnPropertyDescriptor(config, 'earlyPassive')?.value === true;
+  const streamMetadata = Object.getOwnPropertyDescriptor(config, 'streamMetadata')?.value === true;
+  const streamPurpose = Object.getOwnPropertyDescriptor(config, 'streamMetadataPurpose')?.value;
+  // Native replaces this inert expression only for the separate exact fixture purpose.
+  const streamFactory = null /*__GROQ_RESPONSE_STREAM_FACTORY__*/;
   // A failed fixture initializer may expose only its closed reason/dispose
   // controller. This path never reads or replaces fetch, or issues a request.
   function setupFailure(reason) {
@@ -36,6 +40,11 @@
   };
   if (!Object.prototype.hasOwnProperty.call(profiles, config.profile) || earlyPassive && config.profile !== 'gptoss120b') { setupFailure('js_profile_unavailable'); return; }
   const profile = profiles[config.profile];
+  if (streamMetadata && (!earlyPassive || !setupDiagnostics || config.profile !== 'gptoss120b'
+    || streamPurpose !== 'groq_120b_fixture_response_stream_metadata_v1'
+    || typeof streamFactory?.startMatchedGroqResponseStreamProbe !== 'function')) {
+    setupFailure('js_profile_unavailable'); return;
+  }
   const ownerDocument = document, original = window.fetch, key = '__computaGroqStatus_' + config.key;
   const apply = Reflect.apply, desc = Object.getOwnPropertyDescriptor, then = Promise.prototype.then;
   const stringify = JSON.stringify, proto = Object.getPrototypeOf;
@@ -50,7 +59,7 @@
     return;
   }
   let phase = 'idle', outcome = 'ambiguous', seen = false, prompt = null, model = null, label = null, pin = null, route = null;
-  let control = null;
+  let control = null, streamProbe = null;
   const style = node => !!node?.isConnected && node.getClientRects().length > 0 && getComputedStyle(node).visibility === 'visible';
   const unauthored = node => !node.closest('[class*="group/input"],.font-inter,pre,code');
   // Small side-band check of the same physical closed picker that the existing native adapter independently qualified.
@@ -82,7 +91,12 @@
   }
   function current() { return phase === 'armed' && time() < deadline
     && (earlyPassive ? ownController() : window.fetch === wrapped) && rendered() === pin; }
-  function invalidate() { outcome = 'ambiguous'; phase = 'invalid'; prompt = model = label = pin = route = null; }
+  function invalidate() {
+    // Only the opt-in clone branch exists here. Cancellation is never awaited.
+    try { streamProbe?.stop('revoked'); } catch { /* Diagnostic-only. */ }
+    streamProbe = null;
+    outcome = 'ambiguous'; phase = 'invalid'; prompt = model = label = pin = route = null;
+  }
   function dispose() {
     invalidate(); clearTimeout(timer);
     if (window.fetch === wrapped) window.fetch = original;
@@ -167,6 +181,15 @@
               outcome = status >= 200 && status < 300 ? 'http_2xx_opened'
                 : [400, 401, 403, 413, 429].includes(status) ? 'http_' + status
                 : status >= 400 && status < 600 ? 'http_other_non_2xx' : 'ambiguous';
+              if (streamMetadata && status >= 200 && status < 300) {
+                try {
+                  streamProbe = streamFactory.startMatchedGroqResponseStreamProbe(value, {
+                    purpose: streamPurpose, profile: config.profile, streamMetadata: true,
+                    // No additional DOM/picker scan while consuming clone chunks.
+                    isCurrent: () => phase === 'armed' && time() < deadline && ownController() && location.href === route
+                  });
+                } catch { /* An unavailable diagnostic never changes the header observation or SDK result. */ }
+              }
             } catch { invalidate(); }
           },
           () => { try { if (current()) outcome = 'transport_rejected'; else invalidate(); } catch { invalidate(); } }
@@ -196,10 +219,18 @@
       prompt = args.prompt; phase = 'armed'; return true;
     }
     // Native may call finish only after its separately proven single Send plus exact optimistic rollback.
-    if (command === 'finish' && phase !== 'idle') {
-      let finite = 'ambiguous';
-      try { if (current()) finite = seen ? outcome : 'no_matching_fetch_observed'; } catch { finite = 'ambiguous'; } finally { dispose(); }
-      return finite;
+    if ((command === 'finish' || streamMetadata && command === 'finish_metadata') && phase !== 'idle') {
+      let finite = 'ambiguous', metadata = null;
+      try {
+        if (current()) {
+          finite = seen ? outcome : 'no_matching_fetch_observed';
+          if (command === 'finish_metadata') metadata = streamProbe?.finishFailure() ?? null;
+        }
+      } catch { finite = 'ambiguous'; metadata = null; } finally { dispose(); }
+      // The old command remains the exact short String protocol. This separate
+      // result is still untrusted: native admits only exact finite typed fields.
+      return command === 'finish_metadata'
+        ? stringify({__proto__:null, stage:finite, responseStream:metadata === null ? null : stringify(metadata)}) : finite;
     }
     return false;
   };

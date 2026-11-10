@@ -144,6 +144,7 @@ final class EmbeddedBrowserSession {
     @ObservationIgnored private var transientHumanVerificationCheckpoints: [String: UUID] = [:]
     @ObservationIgnored private var transientRecoveryReports: [String: EmbeddedHumanVerificationStore.RecoveryReport] = [:]
     @ObservationIgnored var onHumanVerificationRecoveryCandidate: (@MainActor (HumanVerificationRecoveryCandidate) -> Void)?
+    @ObservationIgnored var onProviderSignInRecoveryCandidate: (@MainActor (ProviderSignInRecoveryCandidate) -> Void)?
     @ObservationIgnored private var entries: [UUID: Entry] = [:]
     @ObservationIgnored private weak var modelRenderHost: NSView?
     @ObservationIgnored private var modelRenderHosts: [ModelRenderHostReference] = []
@@ -273,6 +274,7 @@ final class EmbeddedBrowserSession {
         var geminiCookieObservationGeneration: UUID?
         var recoveryAttemptedCheckpointID: UUID?
         var recoveryAttemptedDocumentID: UUID?
+        var providerSignInRecoveryAttemptedDocumentID: UUID?
         // The callback that requests a popup carries no public tool-origin
         // token. Retain the guard until a replacement document commits so
         // delayed page callbacks cannot become human-owned after tool cleanup.
@@ -341,6 +343,42 @@ final class EmbeddedBrowserSession {
         let committedDocumentID: UUID
         let documentID: UUID
         let documentGeneration: UUID
+    }
+
+    /// A settled normal human landing is recovery intent, never authentication
+    /// proof. The transport separately requires its exact cached sign-in gate.
+    struct ProviderSignInRecoveryCandidate: Equatable, Sendable {
+        let id = UUID()
+        let provider: String
+        let tabID: UUID
+        let committedDocumentID: UUID
+        let documentID: UUID
+        let documentGeneration: UUID
+    }
+
+    func isProviderSignInRecoveryCandidateCurrent(_ candidate: ProviderSignInRecoveryCandidate) -> Bool {
+        guard candidate.provider == "deepseek", !isShutdown,
+              let entry = entries[candidate.tabID], !entry.isModelOwned, !entry.isToolOwned,
+              !entry.recoveryToolUsed, entry.toolPopupContext == nil,
+              entry.humanCommittedDocumentID == candidate.committedDocumentID,
+              entry.tab.documentID == candidate.documentID, entry.tab.documentGeneration == candidate.documentGeneration,
+              entry.recoveryCommittedGeneration == candidate.documentGeneration,
+              entry.recoverySettledGeneration == candidate.documentGeneration,
+              entry.navigation == nil, !entry.view.isLoading, !entry.tab.isLoading, entry.tab.error == nil,
+              entry.view.url == EmbeddedWebModelTransport.Provider.deepseek.startURL else { return false }
+        return true
+    }
+
+    private func observeProviderSignInRecovery(_ entry: Entry) {
+        guard let callback = onProviderSignInRecoveryCandidate,
+              entry.view.url == EmbeddedWebModelTransport.Provider.deepseek.startURL else { return }
+        let candidate = ProviderSignInRecoveryCandidate(provider: "deepseek", tabID: entry.tab.id,
+            committedDocumentID: entry.humanCommittedDocumentID, documentID: entry.tab.documentID,
+            documentGeneration: entry.tab.documentGeneration)
+        guard isProviderSignInRecoveryCandidateCurrent(candidate),
+              entry.providerSignInRecoveryAttemptedDocumentID != entry.tab.documentID else { return }
+        entry.providerSignInRecoveryAttemptedDocumentID = entry.tab.documentID
+        callback(candidate)
     }
 
     var humanVerificationRecoveryReports: [String: EmbeddedHumanVerificationStore.RecoveryReport] {
@@ -890,8 +928,18 @@ final class EmbeddedBrowserSession {
             var config:[String:Any]=["key":key,"secret":secret,"durationMs":milliseconds,"profile":lease.profile.rawValue]
             if lease.isFixture { config["setupDiagnostics"] = true }
             if lease.installationMode == .earlyPassive { config["earlyPassive"] = true }
+            var installedSource = source
+            if lease.capturesResponseStreamMetadata {
+                let marker = "null /*__GROQ_RESPONSE_STREAM_FACTORY__*/"
+                guard installedSource.components(separatedBy: marker).count == 2,
+                      let factory = EmbeddedBrowserSession.rendererDiagnosticSource(named: "groq-response-stream-metadata"),
+                      factory.utf8.count <= 32_768 else { return nil }
+                installedSource = installedSource.replacingOccurrences(of: marker, with: "(" + factory + ")")
+                config["streamMetadata"] = true
+                config["streamMetadataPurpose"] = GroqOwnedStatusLease.FixtureTurn.responseStreamPurpose
+            }
             guard milliseconds>0,let bytes=try? JSONSerialization.data(withJSONObject:config) else{return nil}
-            return source.replacingOccurrences(of:"__GROQ_OWNED_SYNTHETIC_CONFIG__",with:String(decoding:bytes,as:UTF8.self))
+            return installedSource.replacingOccurrences(of:"__GROQ_OWNED_SYNTHETIC_CONFIG__",with:String(decoding:bytes,as:UTF8.self))
         }
     }
     func createGroqStatusTab(url:URL,lease:GroqOwnedStatusLease) throws -> UUID {
@@ -1001,11 +1049,51 @@ final class EmbeddedBrowserSession {
         guard case .returned(let value) = result, GroqOwnedStatusLease.stages.contains(value) else { return nil }
         return value
     }
+    struct GroqResponseStreamStatus {
+        let stage: String
+        let metadata: GroqOwnedStatusLease.ResponseStreamMetadata?
+
+        static func parse(_ text: String) -> Self? {
+            guard text.utf8.count <= 2_048 else { return nil }
+            let data = Data(text.utf8)
+            guard APIModelCorrectionJSON.isUnambiguous(data),
+                  let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  Set(value.keys) == ["stage", "responseStream"],
+                  let stage = value["stage"] as? String, GroqOwnedStatusLease.stages.contains(stage) else { return nil }
+            let metadata: GroqOwnedStatusLease.ResponseStreamMetadata?
+            if value["responseStream"] is NSNull { metadata = nil }
+            else {
+                guard stage == "http_2xx_opened",
+                      let parsed = GroqOwnedStatusLease.ResponseStreamMetadata.parse(value["responseStream"]) else { return nil }
+                metadata = parsed
+            }
+            return .init(stage: stage, metadata: metadata)
+        }
+    }
+
+    func groqResponseStreamStatusResult(_ id: UUID, view: WKWebView, owner: String, generation: UUID,
+                                       fingerprint: String) async -> GroqResponseStreamStatus? {
+        guard let e = entries[id], let p = e.groqStatus, p.lease.capturesResponseStreamMetadata,
+              p.armed, p.owner == owner, p.generation == generation, p.fingerprint == fingerprint,
+              groqStatusCurrent(e, p, view: view, owner: owner, generation: generation) else { return nil }
+        p.armed = false
+        let result = await callGroqStatus(p, view: view, command: "finish_metadata", args: [:])
+        guard p.lease.capturesResponseStreamMetadata,
+              groqStatusCurrent(e, p, view: view, owner: owner, generation: generation),
+              case .returned(let text) = result else { return nil }
+        return GroqResponseStreamStatus.parse(text)
+    }
+
     private enum GroqStatusCallOutcome {
         case returned(String), javascriptException, timedOut, unavailable
     }
     private enum GroqStatusCallFailure: Error { case javascriptException, timedOut, invalidReturn }
     private func callGroqStatus(_ probe:GroqStatusProbe,view:WKWebView,command:String,args:[String:Any]) async -> GroqStatusCallOutcome {
+        let maximumBytes: Int
+        if command == "finish_metadata" {
+            guard probe.lease.capturesResponseStreamMetadata else { return .unavailable }
+            maximumBytes = 2_048
+        } else { maximumBytes = 42 }
         let installation: String
         if command == "arm", probe.lease.installationMode == .late {
             guard let source = probe.installationSource() else { return .unavailable }
@@ -1023,12 +1111,12 @@ final class EmbeddedBrowserSession {
                         \(installation)
                         if(typeof window[key]!=='function')return command==='arm'?'controller_absent':null;
                         const r=window[key](secret,command,args);
-                        return r===true?'ready':typeof r==='string'&&r.length<=42?r:command==='arm'?'arm_false':null;
+                        return r===true?'ready':typeof r==='string'&&r.length<=\(maximumBytes)?r:command==='arm'?'arm_false':null;
                         """,arguments:["url":probe.url.absoluteString,"key":"__computaGroqStatus_"+probe.key,"secret":probe.secret,"command":command,"args":args],
                         in:nil,in:.page){ reply in
                             switch reply {
                             case .success(let value):
-                                if let string=value as? String,string.utf8.count<=42 {result.complete(.success(Data(string.utf8)))}
+                                if let string=value as? String,string.utf8.count<=maximumBytes {result.complete(.success(Data(string.utf8)))}
                                 else {result.complete(.failure(GroqStatusCallFailure.invalidReturn))}
                             case .failure: result.complete(.failure(GroqStatusCallFailure.javascriptException))
                             }
@@ -3301,6 +3389,7 @@ final class EmbeddedBrowserSession {
         for seed in Array(inferenceCookieSeeds.values) { seed.cancel() }
         for validation in Array(inferenceCookieValidations.values) { validation.cancel() }
         onHumanVerificationRecoveryCandidate = nil
+        onProviderSignInRecoveryCandidate = nil
         for id in tabs.map(\.id) { closeTab(id) }
         temporaryCookieRetirement?.stop()
         modelRenderHost = nil
@@ -3402,7 +3491,10 @@ final class EmbeddedBrowserSession {
         // committed document or settled native URL without inspecting its DOM.
         if !entry.isModelOwned, committedNavigation || !view.isLoading {
             observeHumanVerificationCheckpoint(entry)
-            if entry.recoverySettledGeneration == entry.tab.documentGeneration { observeHumanVerificationRecovery(entry) }
+            if entry.recoverySettledGeneration == entry.tab.documentGeneration {
+                observeHumanVerificationRecovery(entry)
+                observeProviderSignInRecovery(entry)
+            }
         }
         signalModelChange(entry)
         emitGeminiPostBlockNativeEvent(entry, .changed)
@@ -3715,6 +3807,7 @@ final class EmbeddedBrowserSession {
            entry.recoveryCommittedGeneration == entry.tab.documentGeneration {
             entry.recoverySettledGeneration = entry.tab.documentGeneration
             observeHumanVerificationRecovery(entry)
+            observeProviderSignInRecovery(entry)
         }
         emitGeminiPostBlockNativeEvent(entry, error == nil ? .finished : .failed)
         if error == nil, navigation != nil,

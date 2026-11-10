@@ -15,6 +15,184 @@ import XCTest
         override var canBecomeMain: Bool { false }
     }
 
+    func testResponseStreamOuterPacketKeepsTheOldStatusVocabularyAndRejectsUnrepresentedOrContradictoryMetadata() throws {
+        typealias Packet = EmbeddedBrowserSession.GroqResponseStreamStatus
+        let inner = try responseStreamMetadataJSON()
+        func outer(_ stage: Any = "http_2xx_opened", _ metadata: Any = NSNull()) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: ["stage": stage, "responseStream": metadata]), as: UTF8.self)
+        }
+        let packet = try XCTUnwrap(Packet.parse(try outer("http_2xx_opened", inner)))
+        XCTAssertEqual(packet.stage, "http_2xx_opened")
+        XCTAssertEqual(packet.metadata?.fields.count, 20)
+        let headerOnly = try XCTUnwrap(Packet.parse(try outer("http_429")))
+        XCTAssertEqual(headerOnly.stage, "http_429")
+        XCTAssertNil(headerOnly.metadata, "A header observation supplies no body or completion facts")
+        for stage in ["http_429", "ambiguous", "matched_fetch_unsettled"] {
+            XCTAssertNil(Packet.parse(try outer(stage, inner)), "Only a matched 2xx branch can clone a body")
+        }
+        for invalid in [try outer("PRIVATE_FOREIGN_STATUS"), try outer(true),
+                        try outer("http_2xx_opened", "PRIVATE_BODY"),
+                        try outer("http_2xx_opened", ["version": 1]),
+                        try outer("http_2xx_opened", try responseStreamMetadataJSON(["content": 1])),
+                        "[]", "{\"stage\":\"http_2xx_opened\"}",
+                        "{\"stage\":\"http_2xx_opened\",\"responseStream\":null,\"privateBody\":\"PRIVATE_BODY\"}",
+                        "{\"stage\":\"http_429\",\"stage\":\"http_2xx_opened\",\"responseStream\":null}",
+                        #"{"stage":"http_429","sta\u0067e":"http_2xx_opened","responseStream":null}"#,
+                        String(repeating: " ", count: 2_049) + (try outer())] {
+            XCTAssertNil(Packet.parse(invalid))
+        }
+    }
+
+    func testResponseStreamMetadataRequiresOnlyClosedBoundedFieldsAndExactJSONTypes() throws {
+        typealias Metadata = GroqOwnedStatusLease.ResponseStreamMetadata
+        let good = try responseStreamMetadataJSON()
+        let parsed = try XCTUnwrap(Metadata.parse(good))
+        XCTAssertEqual(parsed.fields.count, 20)
+        XCTAssertEqual(parsed.fields["apiErrorType"] as? String, "tokens")
+        for (field, maximum) in [("bytes", 262_144), ("chunks", 8_192), ("events", 4_096), ("jsonEvents", 4_096), ("unknownFrames", 4_096)] {
+            XCTAssertNotNil(Metadata.parse(try responseStreamMetadataJSON([field: maximum])))
+            for invalid in ([-1, maximum + 1, 1.5, true, "1", NSNull()] as [Any]) {
+                XCTAssertNil(Metadata.parse(try responseStreamMetadataJSON([field: invalid])), field)
+            }
+        }
+        for field in ["content", "reasoning", "toolCalls", "topLevelError", "eventError", "done", "eof", "incompleteFrame"] {
+            XCTAssertNotNil(Metadata.parse(try responseStreamMetadataJSON([field: false])))
+            for invalid in ([0, 1, "true", NSNull()] as [Any]) {
+                XCTAssertNil(Metadata.parse(try responseStreamMetadataJSON([field: invalid])), field)
+            }
+        }
+        for field in ["framing", "xGroqError", "apiErrorCode", "apiErrorType", "finishReason", "outcome"] {
+            XCTAssertNil(Metadata.parse(try responseStreamMetadataJSON([field: "PRIVATE_UNKNOWN_PROVIDER_TEXT"])), field)
+            XCTAssertNil(Metadata.parse(try responseStreamMetadataJSON([field: NSNull()])), field)
+        }
+        for value in ["tokens", "requests", "other"] {
+            XCTAssertNotNil(Metadata.parse(try responseStreamMetadataJSON(["apiErrorType": value])))
+        }
+        for value in ["revoked", "disposed"] {
+            XCTAssertNil(Metadata.parse(try responseStreamMetadataJSON(["outcome": value])), "Retired callbacks do not publish")
+        }
+        XCTAssertNotNil(Metadata.parse(good + String(repeating: " ", count: 2_048 - good.utf8.count)))
+        for bad in [try responseStreamMetadataJSON(["privateText": "PRIVATE_BODY"]),
+                    good.replacingOccurrences(of: "\"done\":true,", with: ""),
+                    good.replacingOccurrences(of: "\"version\":1", with: "\"version\":1,\"version\":1"),
+                    good.replacingOccurrences(of: "\"version\":1", with: #""version":1,"\u0076ersion":1"#),
+                    "[" + good + "]", String(repeating: " ", count: 2_049) + good] {
+            XCTAssertNil(Metadata.parse(bad))
+        }
+        XCTAssertNil(Metadata.parse(["version": 1])); XCTAssertNil(Metadata.parse(nil))
+        XCTAssertNil(Metadata.parse(try responseStreamMetadataJSON(["version": true])))
+        XCTAssertNil(Metadata.parse(try responseStreamMetadataJSON(["version": 2])))
+        let saved = try JSONSerialization.data(withJSONObject: parsed.fields, options: [.sortedKeys])
+        XCTAssertLessThanOrEqual(saved.count, 2_048)
+        XCTAssertFalse(String(decoding: saved, as: UTF8.self).contains("PRIVATE_"))
+    }
+
+    func testResponseStreamPurposeRequiresSeparateNativeOptInAndCannotGrantInspector() throws {
+        typealias Lease = GroqOwnedStatusLease
+        for refusal in ["disabled", "earlyOnly", "manualOnly", "qwen", "hash", "purpose", "extraKey", "publicArm", "expired", "future"] {
+            let arm = try inspectorArm(kind: refusal == "qwen" ? .qwen27b : .gptoss120b,
+                purpose: Lease.FixtureTurn.responseStreamPurpose, mutation: refusal,
+                expiresIn: refusal == "expired" ? -1 : refusal == "future" ? 601 : 60)
+            XCTAssertNil(Lease.FixtureTurn.consume(directory: arm.directory, admission: arm.admission,
+                request: arm.request, first: true, allowManualInspector: refusal == "manualOnly",
+                allowEarlyPassive: refusal == "earlyOnly", allowResponseStream: !["disabled", "earlyOnly", "manualOnly"].contains(refusal)), refusal)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: arm.directory.appendingPathComponent("arm.json").path))
+        }
+        let arm = try inspectorArm(purpose: Lease.FixtureTurn.responseStreamPurpose)
+        let parent = try XCTUnwrap(Lease.FixtureTurn.consume(directory: arm.directory, admission: arm.admission,
+            request: arm.request, first: true, allowResponseStream: true))
+        XCTAssertEqual(parent.publicationPurpose, Lease.FixtureTurn.responseStreamPurpose)
+        let child = try XCTUnwrap(parent.child(admission: arm.admission, request: arm.request))
+        XCTAssertEqual(child.installationMode, .earlyPassive)
+        XCTAssertTrue(child.capturesResponseStreamMetadata); XCTAssertTrue(child.capturesFailureProgress)
+        XCTAssertNil(child.inspectorOrdinal)
+        XCTAssertNil(child.bindInspector(view: ObjectIdentifier(NSObject()), ownerToken: UUID().uuidString.lowercased(), generation: UUID()))
+        for (purpose, manual, early) in [(Lease.FixtureTurn.Kind.gptoss120b.purpose, false, false),
+                                        (Lease.FixtureTurn.inspectorPurpose, true, false),
+                                        (Lease.FixtureTurn.earlyPassivePurpose, false, true)] {
+            let old = try inspectorArm(purpose: purpose)
+            let oldParent = try XCTUnwrap(Lease.FixtureTurn.consume(directory: old.directory, admission: old.admission,
+                request: old.request, first: true, allowManualInspector: manual, allowEarlyPassive: early, allowResponseStream: true))
+            let oldChild = try XCTUnwrap(oldParent.child(admission: old.admission, request: old.request))
+            XCTAssertFalse(oldChild.capturesResponseStreamMetadata, "Other purposes cannot inherit the new probe")
+        }
+    }
+
+    func testResponseStreamChildrenRequireCurrentClosedNativeHandoffAndRetireTogether() throws {
+        typealias Lease = GroqOwnedStatusLease
+        let arm = try inspectorArm(purpose: Lease.FixtureTurn.responseStreamPurpose)
+        let parent = try XCTUnwrap(Lease.FixtureTurn.consume(directory: arm.directory, admission: arm.admission,
+            request: arm.request, first: true, allowResponseStream: true))
+        let first = try XCTUnwrap(parent.child(admission: arm.admission, request: arm.request))
+        let continued = try inspectorContinuation(arm.request)
+        let next = inspectorAdmission(after: arm.admission)
+        XCTAssertNil(parent.child(admission: next, request: continued.next))
+        for changed in ["task", "thread", "turn", "runtime", "preparation", "transport", "provider", "model"] {
+            XCTAssertNil(parent.child(admission: inspectorAdmission(after: arm.admission, changing: changed),
+                request: continued.next, closedInferenceID: arm.admission.inferenceID, closedContinuation: continued.closed), changed)
+        }
+        XCTAssertNil(parent.child(admission: next, request: continued.next,
+            closedInferenceID: UUID(), closedContinuation: continued.closed))
+        let second = try XCTUnwrap(parent.child(admission: next, request: continued.next,
+            closedInferenceID: arm.admission.inferenceID, closedContinuation: continued.closed))
+        XCTAssertTrue(second.capturesResponseStreamMetadata); XCTAssertNil(second.inspectorOrdinal)
+        XCTAssertNil(parent.child(admission: next, request: continued.next,
+            closedInferenceID: arm.admission.inferenceID, closedContinuation: continued.closed))
+        parent.revoke()
+        XCTAssertFalse(first.capturesResponseStreamMetadata); XCTAssertFalse(second.capturesResponseStreamMetadata)
+        XCTAssertFalse(first.capturesFailureProgress); XCTAssertFalse(second.isCurrent)
+        XCTAssertNil(parent.child(admission: inspectorAdmission(after: arm.admission), request: continued.next,
+            closedInferenceID: next.inferenceID, closedContinuation: continued.closed))
+    }
+
+    func testResponseStreamMetadataPublishesOnlyOnFirstCurrentNewPurposeFailureWithinPrivateRecordCap() throws {
+        typealias Lease = GroqOwnedStatusLease
+        let metadata = try XCTUnwrap(Lease.ResponseStreamMetadata.parse(try responseStreamMetadataJSON()))
+        let arm = try inspectorArm(purpose: Lease.FixtureTurn.responseStreamPurpose)
+        let parent = try XCTUnwrap(Lease.FixtureTurn.consume(directory: arm.directory, admission: arm.admission,
+            request: arm.request, first: true, allowResponseStream: true))
+        let child = try XCTUnwrap(parent.child(admission: arm.admission, request: arm.request))
+        let progress = Lease.ProgressCache().snapshot(candidate: false, changed: nil, quietSince: nil)
+        let observation = Lease.Observation(stage: "http_2xx_opened", sessionToken: UUID().uuidString.lowercased(),
+            generation: UUID(), failureProgress: progress, responseStreamMetadata: metadata)
+        child.publish(observation, trigger: "response_deadline")
+        let bytes = try Data(contentsOf: arm.output)
+        XCTAssertLessThanOrEqual(bytes.count, 4_096)
+        let row = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        XCTAssertEqual(row.count, 17); XCTAssertEqual(row["purpose"] as? String, Lease.FixtureTurn.responseStreamPurpose)
+        let saved = try XCTUnwrap(row["responseStreamMetadata"] as? [String: Any])
+        XCTAssertEqual(saved.count, 20); XCTAssertEqual(saved["apiErrorType"] as? String, "tokens")
+        XCTAssertNotNil(row["failureProgress"])
+        child.publish(.init(stage: "http_429", sessionToken: observation.sessionToken, generation: observation.generation,
+            responseStreamMetadata: nil), trigger: "groq_reported_submission_error")
+        XCTAssertEqual(try Data(contentsOf: arm.output), bytes)
+        XCTAssertFalse(child.capturesResponseStreamMetadata)
+        for ordinary in [try setupLease(fixture: false), try setupLease(fixture: true)] {
+            ordinary.lease.publish(observation, trigger: "response_deadline")
+            let old = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: ordinary.output)) as? [String: Any])
+            XCTAssertEqual(old.count, 15); XCTAssertNil(old["responseStreamMetadata"])
+        }
+        let retired = try inspectorArm(purpose: Lease.FixtureTurn.responseStreamPurpose)
+        let retiredParent = try XCTUnwrap(Lease.FixtureTurn.consume(directory: retired.directory, admission: retired.admission,
+            request: retired.request, first: true, allowResponseStream: true))
+        let retiredChild = try XCTUnwrap(retiredParent.child(admission: retired.admission, request: retired.request))
+        retiredParent.revoke(); retiredChild.publish(observation, trigger: "response_deadline")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: retired.output.path))
+        for secret in ["PRIVATE_BODY", "PRIVATE_UNKNOWN_PROVIDER_TEXT", "http://127.0.0.1"] {
+            XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains(secret))
+        }
+    }
+
+    private func responseStreamMetadataJSON(_ changes: [String: Any] = [:]) throws -> String {
+        var value: [String: Any] = ["version": 1, "framing": "sse", "bytes": 262_144, "chunks": 8_192,
+            "events": 4_096, "jsonEvents": 4_096, "content": true, "reasoning": true, "toolCalls": true,
+            "topLevelError": true, "eventError": true, "xGroqError": "rate_limit_exceeded",
+            "apiErrorCode": "rate_limit_exceeded", "apiErrorType": "tokens", "finishReason": "length",
+            "done": true, "eof": false, "unknownFrames": 4_096, "incompleteFrame": true, "outcome": "byte_limit"]
+        value.merge(changes) { _, replacement in replacement }
+        return String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), as: UTF8.self)
+    }
+
     func testSyntheticOwnedDeadlineDistinguishesPreflightAndOutstandingFetchWithoutAuthorizingCleanup() async throws {
         for (variant,expected) in [("preflight","no_matching_fetch_observed"),("pending","matched_fetch_unsettled"),("wrongBody","ambiguous"),("unarmed","none"),("nativeDeadline","no_matching_fetch_observed"),("retiredDuringRead","none")] {
             try await run(variant,expected:expected)

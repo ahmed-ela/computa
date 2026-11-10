@@ -32,11 +32,24 @@ final class AppState {
     @ObservationIgnored private let websiteModeDiscovery: (@MainActor (String) async throws -> [WebsiteModeChoice])?
     @ObservationIgnored private var websiteModelRefreshTask: Task<Void, Never>?
     @ObservationIgnored private var websiteModelRefreshGeneration: UUID?
+    private struct ProviderSignInRecovery {
+        let candidate: EmbeddedBrowserSession.ProviderSignInRecoveryCandidate
+        let gate: EmbeddedWebModelTransport.SignInRecoveryGate
+    }
     private struct WebsiteModelRefreshIntent {
         let provider: String
         let retryBlocked: Bool
         let candidate: EmbeddedBrowserSession.HumanVerificationRecoveryCandidate?
+        let signInRecovery: ProviderSignInRecovery?
+        init(provider: String, retryBlocked: Bool,
+             candidate: EmbeddedBrowserSession.HumanVerificationRecoveryCandidate?,
+             signInRecovery: ProviderSignInRecovery? = nil) {
+            self.provider = provider; self.retryBlocked = retryBlocked
+            self.candidate = candidate; self.signInRecovery = signInRecovery
+        }
     }
+    @ObservationIgnored private var pendingProviderSignInRecovery: ProviderSignInRecovery?
+    @ObservationIgnored private var providerSignInRecoveryIdleObservation: UUID?
     @ObservationIgnored private var websiteModelRefreshIntents: [WebsiteModelRefreshIntent] = []
     @ObservationIgnored private var websiteModelRefreshCurrentIntent: WebsiteModelRefreshIntent?
     #if DEBUG
@@ -51,6 +64,8 @@ final class AppState {
     var websiteModelRefreshIntentsForTesting: [(provider: String, retryBlocked: Bool)] {
         websiteModelRefreshIntents.map { ($0.provider, $0.retryBlocked) }
     }
+    var websiteTransportForTesting: EmbeddedWebModelTransport { websiteTransport() }
+    var providerSignInRecoveryPendingForTesting: Bool { pendingProviderSignInRecovery != nil }
     #endif
     @ObservationIgnored private var didStartWebsiteModelDiscovery = false
     @ObservationIgnored private var startupWebsiteModelProviders: [String] = []
@@ -201,6 +216,9 @@ final class AppState {
             })
         self.browserSession.onHumanVerificationRecoveryCandidate = { [weak self] candidate in
             Task { @MainActor [weak self] in await self?.recoverWebsiteModels(candidate) }
+        }
+        self.browserSession.onProviderSignInRecoveryCandidate = { [weak self] candidate in
+            self?.requestProviderSignInRecovery(candidate)
         }
     }
 
@@ -419,11 +437,82 @@ final class AppState {
         await refreshWebsiteModels(intents: [.init(provider: candidate.provider, retryBlocked: true, candidate: candidate)])
     }
 
+    private func providerSignInRecoveryIsCurrent(_ recovery: ProviderSignInRecovery,
+                                                 afterDiscovery: Bool = false) -> Bool {
+        guard humanWebsiteRecoveryIsIdle,
+              browserSession.isProviderSignInRecoveryCandidateCurrent(recovery.candidate),
+              let transport = embeddedModelTransport else { return false }
+        return afterDiscovery ? transport.didClearSignInRecoveryGate(recovery.gate)
+            : transport.canRecoverSignInGate(recovery.gate)
+    }
+
+    private func requestProviderSignInRecovery(_ candidate: EmbeddedBrowserSession.ProviderSignInRecoveryCandidate) {
+        guard didStartWebsiteModelDiscovery, !cookieMaintenanceOnlyLaunch, !isShuttingDown,
+              runtime != nil || websiteModelDiscovery != nil || websiteModeDiscovery != nil,
+              browserSession.isProviderSignInRecoveryCandidateCurrent(candidate),
+              let gate = embeddedModelTransport?.signInRecoveryGate(provider: candidate.provider) else { return }
+        // One coalesced source survives a busy AppState. No timer or failed
+        // discovery can regenerate this navigation event.
+        pendingProviderSignInRecovery = ProviderSignInRecovery(candidate: candidate, gate: gate)
+        scheduleProviderSignInRecovery()
+    }
+
+    private func scheduleProviderSignInRecovery() {
+        guard let recovery = pendingProviderSignInRecovery else { return }
+        guard !isShuttingDown, browserSession.isProviderSignInRecoveryCandidateCurrent(recovery.candidate),
+              embeddedModelTransport?.isSignInRecoveryGateCurrent(recovery.gate) == true else {
+            pendingProviderSignInRecovery = nil
+            providerSignInRecoveryIdleObservation = nil
+            return
+        }
+        guard providerSignInRecoveryIdleObservation == nil else { return }
+        if !humanWebsiteRecoveryIsIdle || websiteModelsRefreshing {
+            let observation = UUID()
+            providerSignInRecoveryIdleObservation = observation
+            _ = withObservationTracking {
+                humanWebsiteRecoveryIsIdle && !websiteModelsRefreshing
+            } onChange: { [weak self] in
+                Task { @MainActor [weak self] in
+                    guard let self, self.providerSignInRecoveryIdleObservation == observation else { return }
+                    self.providerSignInRecoveryIdleObservation = nil
+                    self.scheduleProviderSignInRecovery()
+                }
+            }
+            return
+        }
+        pendingProviderSignInRecovery = nil
+        // Retained or uncertain owned sessions are not recovery authority.
+        guard providerSignInRecoveryIsCurrent(recovery) else { return }
+        Task { @MainActor [weak self] in
+            guard let self,
+                  self.browserSession.isProviderSignInRecoveryCandidateCurrent(recovery.candidate),
+                  self.embeddedModelTransport?.isSignInRecoveryGateCurrent(recovery.gate) == true else { return }
+            // No discovery has begun. Preserve an untouched event if activity
+            // starts at this actor hop; a failed discovery never requeues it.
+            if !self.humanWebsiteRecoveryIsIdle || self.websiteModelsRefreshing {
+                if self.pendingProviderSignInRecovery == nil { self.pendingProviderSignInRecovery = recovery }
+                self.scheduleProviderSignInRecovery()
+                return
+            }
+            guard self.providerSignInRecoveryIsCurrent(recovery) else { return }
+            await self.refreshWebsiteModels(intents: [.init(provider: recovery.candidate.provider,
+                retryBlocked: true, candidate: nil, signInRecovery: recovery)])
+        }
+    }
+
     private func refreshWebsiteModels(providers: [String], retryBlocked: Bool) async {
         await refreshWebsiteModels(intents: providers.map { .init(provider: $0, retryBlocked: retryBlocked, candidate: nil) })
     }
 
     private func enqueueWebsiteModelRefresh(_ intent: WebsiteModelRefreshIntent) {
+        if intent.signInRecovery != nil {
+            let alreadyRecovering = websiteModelRefreshCurrentIntent.map {
+                $0.provider == intent.provider && $0.retryBlocked
+            } == true || websiteModelRefreshIntents.contains {
+                $0.provider == intent.provider && $0.retryBlocked
+            }
+            if alreadyRecovering { return }
+        }
         // Only this provider's intent can bypass its saved gate. A manual
         // request remains queued behind an automatic probe that may be revoked.
         if let current = websiteModelRefreshCurrentIntent, current.provider == intent.provider, current.retryBlocked {
@@ -432,7 +521,7 @@ final class AppState {
                     reason: current.candidate == nil ? .manualRefresh : .recoveryInProgress)
                 return
             }
-            if !intent.retryBlocked || current.candidate == nil { return }
+            if !intent.retryBlocked || current.candidate == nil && current.signInRecovery == nil { return }
         }
         if let index = websiteModelRefreshIntents.firstIndex(where: { $0.provider == intent.provider }) {
             let previous = websiteModelRefreshIntents[index]
@@ -442,7 +531,7 @@ final class AppState {
                         reason: previous.candidate == nil ? .manualRefresh : .recoveryInProgress)
                     return
                 }
-                if !intent.retryBlocked || previous.candidate == nil { return }
+                if !intent.retryBlocked || previous.candidate == nil && previous.signInRecovery == nil { return }
             }
             guard intent.retryBlocked else { return }
             if let candidate = previous.candidate {
@@ -488,7 +577,17 @@ final class AppState {
                 defer { self.websiteModelRefreshCurrentIntent = nil }
                 let provider = intent.provider
                 let requiresIdle = intent.candidate == nil
-                guard !requiresIdle || self.canRefreshWebsiteModels else { continue }
+                if requiresIdle && !self.canRefreshWebsiteModels {
+                    if let recovery = intent.signInRecovery, self.pendingProviderSignInRecovery == nil,
+                       self.browserSession.isProviderSignInRecoveryCandidateCurrent(recovery.candidate),
+                       self.embeddedModelTransport?.isSignInRecoveryGateCurrent(recovery.gate) == true {
+                        self.pendingProviderSignInRecovery = recovery
+                        self.scheduleProviderSignInRecovery()
+                    }
+                    continue
+                }
+                if let recovery = intent.signInRecovery,
+                   !self.providerSignInRecoveryIsCurrent(recovery) { continue }
                 if let candidate = intent.candidate {
                     guard self.recoveryCandidateIsCurrent(candidate) else {
                         self.browserSession.recordHumanVerificationRecovery(candidate, phase: .superseded,
@@ -506,7 +605,9 @@ final class AppState {
                     self.websiteModelRefreshObserverForTesting?(provider, intent.retryBlocked)
                     #endif
                     var validator: (@MainActor () -> Bool)?
-                    if let candidate = intent.candidate {
+                    if let recovery = intent.signInRecovery {
+                        validator = { [weak self] in self?.providerSignInRecoveryIsCurrent(recovery) == true }
+                    } else if let candidate = intent.candidate {
                         validator = { [weak self] in self?.recoveryCandidateIsCurrent(candidate) == true }
                     } else if requiresIdle {
                         // The shared idle/identity check runs before creation
@@ -539,6 +640,8 @@ final class AppState {
                     guard !Task.isCancelled, !self.isShuttingDown,
                           self.websiteModelRefreshGeneration == generation else { break }
                     guard !requiresIdle || self.canRefreshWebsiteModels else { continue }
+                    if let recovery = intent.signInRecovery,
+                       !self.providerSignInRecoveryIsCurrent(recovery, afterDiscovery: true) { continue }
                     // Injection is not checkpoint-clearance authority. Production
                     // discovery clears only behind its cleanup/identity validator.
                     if let candidate = intent.candidate,
@@ -558,6 +661,11 @@ final class AppState {
                     }
                     errors.removeAll { $0.hasPrefix(WebsiteModelCatalog.providerLabel(provider) + ": ") }
                     self.retireWebsiteModelSelections()
+                    if intent.signInRecovery != nil, self.canRefreshWebsiteModels {
+                        self.websiteModelRefreshIntents.removeAll {
+                            $0.provider == provider && $0.retryBlocked && $0.candidate == nil && $0.signInRecovery == nil
+                        }
+                    }
                     if let candidate = intent.candidate {
                         self.browserSession.recordHumanVerificationRecovery(candidate, phase: .verified, reason: .healthyHumanDocument)
                         // A verified recovery can satisfy an overlapping manual
@@ -1429,6 +1537,8 @@ final class AppState {
         let eventConsumer = runtimeEventConsumer
         eventConsumer?.cancel()
         startupWebsiteModelIdleObservation = nil
+        pendingProviderSignInRecovery = nil
+        providerSignInRecoveryIdleObservation = nil
         startupWebsiteModelProviders.removeAll()
         startupWebsiteModelRefreshTask?.cancel()
         browserSession.observeGeminiCookieShutdownRequested()

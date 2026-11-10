@@ -385,7 +385,11 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
     var isFixture: Bool { fixtureTurn != nil }
     var capturesFailureProgress: Bool {
         isCurrent && profile == .gptoss120b && installationMode == .earlyPassive
-            && fixtureTurn?.publicationPurpose == FixtureTurn.earlyPassivePurpose
+            && [FixtureTurn.earlyPassivePurpose, FixtureTurn.responseStreamPurpose].contains(fixtureTurn?.publicationPurpose ?? "")
+    }
+    var capturesResponseStreamMetadata: Bool {
+        isCurrent && profile == .gptoss120b && installationMode == .earlyPassive
+            && fixtureTurn?.publicationPurpose == FixtureTurn.responseStreamPurpose
     }
     func recordSetupReason(_ reason: SetupReason) {
         guard isFixture, reason != .armed else { return }
@@ -452,7 +456,8 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
         static let purpose = Kind.qwen27b.purpose
         static let inspectorPurpose = "groq_120b_fixture_inferences_2_to_4_network_inspector_v1"
         static let earlyPassivePurpose = "groq_120b_fixture_early_passive_status_v1"
-        private enum Mode { case status, manualInspector, earlyPassive }
+        static let responseStreamPurpose = "groq_120b_fixture_response_stream_metadata_v1"
+        private enum Mode { case status, manualInspector, earlyPassive, responseStream }
         private struct WeakChild { weak var lease: GroqOwnedStatusLease? }
         private let kind: Kind
         private let mode: Mode
@@ -461,6 +466,7 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
             case .status: return kind.purpose
             case .manualInspector: return Self.inspectorPurpose
             case .earlyPassive: return Self.earlyPassivePurpose
+            case .responseStream: return Self.responseStreamPurpose
             }
         }
         private let file: WebsitePrivateDiagnosticCapture.Claim
@@ -487,7 +493,8 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
         }
 
         static func consume(directory: URL?, admission: WebModelStartAdmission, request: WebModelResponseCodec.Request,
-                            first: Bool, allowManualInspector: Bool = false, allowEarlyPassive: Bool = false, now: Date = Date()) -> FixtureTurn? {
+                            first: Bool, allowManualInspector: Bool = false, allowEarlyPassive: Bool = false,
+                            allowResponseStream: Bool = false, now: Date = Date()) -> FixtureTurn? {
             guard first, !Task.isCancelled, let directory, admission.provider == "groq",
                   let kind=Kind.allCases.first(where: { $0.profile.choice.modelID == admission.modelID }), request.model == admission.modelID,
                   [admission.taskID, admission.threadID, admission.turnID].allSatisfy({ UUID(uuidString:$0)?.uuidString.lowercased()==$0 }),
@@ -500,7 +507,8 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
                       let v=try? JSONSerialization.jsonObject(with:data) as? [String:String],
                       Set(v.keys)==["purpose","nonce","modelID","userPromptSHA256","expiresAt"],
                       v["purpose"]==kind.purpose || allowManualInspector && kind == .gptoss120b && v["purpose"]==Self.inspectorPurpose
-                        || allowEarlyPassive && kind == .gptoss120b && v["purpose"]==Self.earlyPassivePurpose,
+                        || allowEarlyPassive && kind == .gptoss120b && v["purpose"]==Self.earlyPassivePurpose
+                        || allowResponseStream && kind == .gptoss120b && v["purpose"]==Self.responseStreamPurpose,
                       v["modelID"]==admission.modelID,
                       let nonce=v["nonce"], UUID(uuidString:nonce)?.uuidString.lowercased()==nonce,
                       v["userPromptSHA256"]==GroqOwnedStatusLease.digest(user), let expiry=v["expiresAt"], expiry.utf8.count==24 else { return false }
@@ -508,7 +516,8 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
                 guard let end=fmt.date(from:expiry),fmt.string(from:end)==expiry,
                       end>now,end.timeIntervalSince(now)<=600 else { return false }
                 mode = v["purpose"] == Self.inspectorPurpose ? .manualInspector
-                    : v["purpose"] == Self.earlyPassivePurpose ? .earlyPassive : .status
+                    : v["purpose"] == Self.earlyPassivePurpose ? .earlyPassive
+                    : v["purpose"] == Self.responseStreamPurpose ? .responseStream : .status
                 deadline=started + .seconds(end.timeIntervalSince(now)); return true
             },isCurrent:{ !Task.isCancelled && (deadline.map { ContinuousClock.now < $0 } ?? false) }),let deadline else { return nil }
             return .init(file:file,first:admission,deadline:deadline,user:user,kind:kind,mode:mode)
@@ -526,7 +535,7 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
                       children.count < WebModelServer.maximumTurnInferences,
                       !children.contains(admission.inferenceID) else { return nil }
                 var inspectorOrdinal: Int?
-                if mode == .manualInspector || mode == .earlyPassive {
+                if mode == .manualInspector || mode == .earlyPassive || mode == .responseStream {
                     let ordinal = children.count + 1
                     if mode == .manualInspector { guard ordinal <= 4 else { return nil } }
                     if ordinal == 1 {
@@ -541,8 +550,8 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
                 }
                 children.insert(admission.inferenceID)
                 let child = GroqOwnedStatusLease(file,admission,deadline,request.prompt,profile:kind.profile,
-                    fixtureTurn:self,inspectorOrdinal:inspectorOrdinal, installationMode:mode == .earlyPassive ? .earlyPassive : .late)
-                if inspectorOrdinal != nil || mode == .earlyPassive { dependentChildren.append(WeakChild(lease: child)) }
+                    fixtureTurn:self,inspectorOrdinal:inspectorOrdinal, installationMode:mode == .earlyPassive || mode == .responseStream ? .earlyPassive : .late)
+                if inspectorOrdinal != nil || mode == .earlyPassive || mode == .responseStream { dependentChildren.append(WeakChild(lease: child)) }
                 return child
             }
         }
@@ -750,13 +759,92 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
                       returnedAgeMS: Self.age($0.returned, now: now)) })
         }
     }
+    /// Content-free facts from one explicitly authorized matched response clone.
+    /// This packet cannot prove completion, ownership, delivery or cleanup.
+    struct ResponseStreamMetadata: Sendable {
+        enum Framing: String, Sendable { case sse, json, other, missing }
+        enum XGroqError: String, Sendable {
+            case none, overCapacity = "over_capacity", rateLimitExceeded = "rate_limit_exceeded"
+            case serviceUnavailable = "service_unavailable", other
+        }
+        enum APIErrorCode: String, Sendable {
+            case none, rateLimitExceeded = "rate_limit_exceeded", contextLengthExceeded = "context_length_exceeded"
+            case invalidAPIKey = "invalid_api_key", modelNotFound = "model_not_found", invalidRequestError = "invalid_request_error"
+            case insufficientQuota = "insufficient_quota", overCapacity = "over_capacity", serviceUnavailable = "service_unavailable", other
+        }
+        enum APIErrorType: String, Sendable {
+            case none, rateLimitError = "rate_limit_error", invalidRequestError = "invalid_request_error"
+            case authenticationError = "authentication_error", permissionError = "permission_error"
+            case notFoundError = "not_found_error", serverError = "server_error", insufficientQuota = "insufficient_quota", tokens, requests, other
+        }
+        enum FinishReason: String, Sendable {
+            case none, stop, length, toolCalls = "tool_calls", functionCall = "function_call"
+            case contentFilter = "content_filter", other, multiple
+        }
+        enum Outcome: String, Sendable {
+            case reading, eof, byteLimit = "byte_limit", eventLimit = "event_limit", chunkLimit = "chunk_limit"
+            case frameLimit = "frame_limit", utf8Invalid = "utf8_invalid", readRejected = "read_rejected"
+            case deadline, unavailable
+        }
+        private let framing: Framing
+        private let bytes: Int, chunks: Int, events: Int, jsonEvents: Int, unknownFrames: Int
+        private let content: Bool, reasoning: Bool, toolCalls: Bool, topLevelError: Bool, eventError: Bool
+        private let done: Bool, eof: Bool, incompleteFrame: Bool
+        private let xGroqError: XGroqError, apiErrorCode: APIErrorCode, apiErrorType: APIErrorType
+        private let finishReason: FinishReason, outcome: Outcome
+
+        /// Parse the separate bounded JSON-string command before a general JSON
+        /// decoder could collapse duplicate or escaped-alias field names.
+        static func parse(_ raw: Any?) -> Self? {
+            guard let text = raw as? String, text.utf8.count <= 2_048 else { return nil }
+            let data = Data(text.utf8)
+            guard APIModelCorrectionJSON.isUnambiguous(data),
+                  let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  Set(value.keys) == ["version", "framing", "bytes", "chunks", "events", "jsonEvents", "content", "reasoning", "toolCalls", "topLevelError", "eventError", "xGroqError", "apiErrorCode", "apiErrorType", "finishReason", "done", "eof", "unknownFrames", "incompleteFrame", "outcome"],
+                  ComputerToolArgumentContract.exactInt64(value["version"]) == 1 else { return nil }
+            func count(_ key: String, maximum: Int) -> Int? {
+                guard let n = ComputerToolArgumentContract.exactInt64(value[key]), (0...Int64(maximum)).contains(n) else { return nil }
+                return Int(n)
+            }
+            func bool(_ key: String) -> Bool? {
+                guard let n = value[key] as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() else { return nil }
+                return n.boolValue
+            }
+            guard let framing = (value["framing"] as? String).flatMap(Framing.init(rawValue:)),
+                  let bytes = count("bytes", maximum: 262_144), let chunks = count("chunks", maximum: 8_192),
+                  let events = count("events", maximum: 4_096), let jsonEvents = count("jsonEvents", maximum: 4_096),
+                  let unknown = count("unknownFrames", maximum: 4_096),
+                  let content = bool("content"), let reasoning = bool("reasoning"), let toolCalls = bool("toolCalls"),
+                  let topError = bool("topLevelError"), let eventError = bool("eventError"),
+                  let done = bool("done"), let eof = bool("eof"), let incomplete = bool("incompleteFrame"),
+                  let xError = (value["xGroqError"] as? String).flatMap(XGroqError.init(rawValue:)),
+                  let code = (value["apiErrorCode"] as? String).flatMap(APIErrorCode.init(rawValue:)),
+                  let type = (value["apiErrorType"] as? String).flatMap(APIErrorType.init(rawValue:)),
+                  let reason = (value["finishReason"] as? String).flatMap(FinishReason.init(rawValue:)),
+                  let outcome = (value["outcome"] as? String).flatMap(Outcome.init(rawValue:)) else { return nil }
+            return .init(framing: framing, bytes: bytes, chunks: chunks, events: events, jsonEvents: jsonEvents,
+                unknownFrames: unknown, content: content, reasoning: reasoning, toolCalls: toolCalls,
+                topLevelError: topError, eventError: eventError, done: done, eof: eof, incompleteFrame: incomplete,
+                xGroqError: xError, apiErrorCode: code, apiErrorType: type, finishReason: reason, outcome: outcome)
+        }
+        var fields: [String: Any] {
+            ["version": 1, "framing": framing.rawValue, "bytes": bytes, "chunks": chunks, "events": events,
+             "jsonEvents": jsonEvents, "content": content, "reasoning": reasoning, "toolCalls": toolCalls,
+             "topLevelError": topLevelError, "eventError": eventError, "xGroqError": xGroqError.rawValue,
+             "apiErrorCode": apiErrorCode.rawValue, "apiErrorType": apiErrorType.rawValue, "finishReason": finishReason.rawValue,
+             "done": done, "eof": eof, "unknownFrames": unknownFrames, "incompleteFrame": incompleteFrame, "outcome": outcome.rawValue]
+        }
+    }
     struct Observation: Sendable {
         let stage: String
         let sessionToken: String
         let generation: UUID
         let failureProgress: FailureProgress?
-        init(stage: String, sessionToken: String, generation: UUID, failureProgress: FailureProgress? = nil) {
+        let responseStreamMetadata: ResponseStreamMetadata?
+        init(stage: String, sessionToken: String, generation: UUID, failureProgress: FailureProgress? = nil,
+             responseStreamMetadata: ResponseStreamMetadata? = nil) {
             self.stage = stage; self.sessionToken = sessionToken; self.generation = generation; self.failureProgress = failureProgress
+            self.responseStreamMetadata = responseStreamMetadata
         }
     }
     // Called synchronously on the server after it has rejoined this exact current inference.
@@ -776,6 +864,7 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
             v["setupReason"] = lock.withLock { setupReason.rawValue }
         }
         if capturesFailureProgress, let progress = observation.failureProgress { v["failureProgress"] = progress.fields }
+        if capturesResponseStreamMetadata, let metadata = observation.responseStreamMetadata { v["responseStreamMetadata"] = metadata.fields }
         guard let bytes=try? JSONSerialization.data(withJSONObject:v,options:[.sortedKeys]) else{return}
         _=WebsitePrivateDiagnosticCapture.publish(bytes,using:file,isCurrent:{ !Task.isCancelled && self.isCurrent },commit:{ rename in
             self.lock.withLock {

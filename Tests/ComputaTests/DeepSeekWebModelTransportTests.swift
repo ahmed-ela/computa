@@ -9,6 +9,138 @@ import XCTest
 final class DeepSeekWebModelTransportTests: XCTestCase {
     private let world = WKContentWorld.world(name: "computa-chatgpt-model-v1")
 
+    func testExactSignInGateRecoversReadOnlyModesThenAllowsFreshAdmissionWithoutSend() async throws {
+        for mode in WebsiteModeChoice.DeepSeekMode.allCases {
+            let fixture = try Fixture(); defer { fixture.shutdown() }
+            let gate = try await seedSignInRecoveryGate(fixture)
+            let failedDiscoveryID = try XCTUnwrap(fixture.createdID)
+            XCTAssertNil(fixture.browser.webView(for: failedDiscoveryID))
+            do { _ = try await start(fixture, mode: mode); XCTFail("Cached sign-in must reject new admission") }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .signInRequired) }
+            XCTAssertEqual(fixture.createdID, failedDiscoveryID, "Blocked admission creates no view")
+            fixture.navigationOverride = nil
+            let modes = try await fixture.transport.discoverModes(provider: "deepseek", retryBlocked: true,
+                recoveryCandidateIsCurrent: { fixture.transport.canRecoverSignInGate(gate) })
+            XCTAssertEqual(Set(modes.map(\.key)), ["chat", "deepthink"])
+            XCTAssertTrue(fixture.transport.didClearSignInRecoveryGate(gate))
+            XCTAssertFalse(fixture.transport.isSignInRecoveryGateCurrent(gate))
+            try await assertCounts(fixture, sends: 0, headers: 0, selections: 0, confirmations: 0)
+            let observed = try await evaluate(fixture.view, "return [deepseekFixture.counters.searchClicks,deepseekFixture.counters.deepThinkClicks];") as? [Int]
+            XCTAssertEqual(observed, [0, 0], "Read-only discovery cannot select a mode or Send")
+            XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+            let fresh = try await start(fixture, mode: mode)
+            XCTAssertNotEqual(fixture.createdID, failedDiscoveryID)
+            let cleanup = try await call(fixture, "webProviderCancel", fresh)
+            XCTAssertEqual(cleanup["cleanup"] as? String, "not_created")
+            try await assertCounts(fixture, sends: 0, headers: 0, selections: 0, confirmations: 0)
+            XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+        }
+    }
+
+    func testSignInRecoveryRejectsMissingForeignOwnerAndFailedDiscoveryWithoutGateClear() async throws {
+        let fixture = try Fixture(); defer { fixture.shutdown() }
+        XCTAssertNil(fixture.transport.signInRecoveryGate(provider: "deepseek"))
+        for provider in ["chatgpt", "gemini", "qwen", "deepseek.evil", ""] {
+            XCTAssertNil(fixture.transport.signInRecoveryGate(provider: provider))
+        }
+        let gate = try await seedSignInRecoveryGate(fixture)
+        let foreign = try Fixture(); defer { foreign.shutdown() }
+        XCTAssertFalse(foreign.transport.isSignInRecoveryGateCurrent(gate))
+        XCTAssertFalse(foreign.transport.canRecoverSignInGate(gate))
+        XCTAssertFalse(foreign.transport.didClearSignInRecoveryGate(gate))
+        do {
+            _ = try await fixture.transport.discoverModes(provider: "deepseek", retryBlocked: true,
+                recoveryCandidateIsCurrent: { fixture.transport.canRecoverSignInGate(gate) })
+            XCTFail("The local sign-in page cannot prove modes or clear its gate")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .signInRequired) }
+        XCTAssertTrue(fixture.transport.isSignInRecoveryGateCurrent(gate))
+        XCTAssertTrue(fixture.transport.canRecoverSignInGate(gate))
+        XCTAssertFalse(fixture.transport.didClearSignInRecoveryGate(gate))
+        XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        fixture.browser.recordHumanVerificationRequired(provider: "deepseek")
+        XCTAssertNil(fixture.transport.signInRecoveryGate(provider: "deepseek"))
+        XCTAssertFalse(fixture.transport.isSignInRecoveryGateCurrent(gate))
+        XCTAssertFalse(fixture.transport.canRecoverSignInGate(gate))
+        XCTAssertFalse(fixture.transport.didClearSignInRecoveryGate(gate))
+        let before = fixture.createdID
+        do {
+            _ = try await fixture.transport.discoverModes(provider: "deepseek", retryBlocked: true,
+                recoveryCandidateIsCurrent: { fixture.transport.canRecoverSignInGate(gate) })
+            XCTFail("A changed checkpoint must reject before creating a recovery view")
+        } catch is CancellationError { }
+        XCTAssertEqual(fixture.createdID, before)
+        XCTAssertTrue(fixture.browser.savedHumanVerificationProviders.contains("deepseek"))
+    }
+
+    func testNewCheckpointDuringModeDiscoveryPreservesNewerGateAndDisposesReadOnlyView() async throws {
+        let fixture = try Fixture(); defer { fixture.shutdown() }
+        let gate = try await seedSignInRecoveryGate(fixture)
+        fixture.navigationOverride = nil
+        var changed = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard action == "discoverModels", !changed else { return }
+            changed = true
+            fixture.browser.recordHumanVerificationRequired(provider: "deepseek")
+        }
+        do {
+            _ = try await fixture.transport.discoverModes(provider: "deepseek", retryBlocked: true,
+                recoveryCandidateIsCurrent: { fixture.transport.canRecoverSignInGate(gate) })
+            XCTFail("Mode evidence cannot erase a newer checkpoint")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .humanVerificationRequired(.deepseek)) }
+        XCTAssertTrue(changed)
+        XCTAssertFalse(fixture.transport.isSignInRecoveryGateCurrent(gate))
+        XCTAssertFalse(fixture.transport.didClearSignInRecoveryGate(gate))
+        XCTAssertNil(fixture.transport.signInRecoveryGate(provider: "deepseek"))
+        XCTAssertTrue(fixture.browser.savedHumanVerificationProviders.contains("deepseek"))
+        XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        try await assertCounts(fixture, sends: 0, headers: 0, selections: 0, confirmations: 0)
+    }
+
+    func testSignInRecoveryRefusesAnOwnedSessionAndItsUncertainCleanup() async throws {
+        let fixture = try Fixture(); defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        let ownedID = try XCTUnwrap(fixture.createdID), ownedView = fixture.view
+        let gate = try await seedSignInRecoveryGate(fixture, requiresQuiescent: false)
+        XCTAssertTrue(fixture.transport.isSignInRecoveryGateCurrent(gate))
+        XCTAssertFalse(fixture.transport.canRecoverSignInGate(gate))
+        ownedView.loadHTMLString("<!doctype html><p>Local retained sign-in fixture</p>",
+            baseURL: URL(string: "https://chat.deepseek.com/sign_in"))
+        let deadline = ContinuousClock.now + .seconds(3)
+        while ownedView.isLoading || ownedView.url?.absoluteString != "https://chat.deepseek.com/sign_in" {
+            guard ContinuousClock.now < deadline else { throw FixtureFailure.timeout }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let cleanup = try await call(fixture, "webProviderCancel", token)
+        XCTAssertEqual(cleanup["cleanup"] as? String, "failed")
+        XCTAssertTrue(fixture.browser.webView(for: ownedID) === ownedView)
+        XCTAssertFalse(fixture.transport.canRecoverSignInGate(gate), "Uncertain retained cleanup remains a barrier")
+        let before = fixture.createdID
+        fixture.navigationOverride = nil
+        do {
+            _ = try await fixture.transport.discoverModes(provider: "deepseek", retryBlocked: true,
+                recoveryCandidateIsCurrent: { fixture.transport.canRecoverSignInGate(gate) })
+            XCTFail("Recovery cannot borrow authority from a retained owned session")
+        } catch is CancellationError { }
+        XCTAssertEqual(fixture.createdID, before)
+        XCTAssertTrue(fixture.transport.isSignInRecoveryGateCurrent(gate))
+        XCTAssertFalse(fixture.transport.didClearSignInRecoveryGate(gate))
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
+    private func seedSignInRecoveryGate(_ fixture: Fixture, requiresQuiescent: Bool = true) async throws -> EmbeddedWebModelTransport.SignInRecoveryGate {
+        fixture.navigationOverride = URL(string: "https://chat.deepseek.com/sign_in")!
+        do {
+            _ = try await fixture.transport.discoverModes(provider: "deepseek", retryBlocked: true)
+            XCTFail("The actual local auth route must establish the native sign-in gate")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .signInRequired) }
+        let gate = try XCTUnwrap(fixture.transport.signInRecoveryGate(provider: "deepseek"))
+        XCTAssertTrue(fixture.transport.isSignInRecoveryGateCurrent(gate))
+        XCTAssertEqual(fixture.transport.canRecoverSignInGate(gate), requiresQuiescent)
+        XCTAssertFalse(fixture.transport.didClearSignInRecoveryGate(gate))
+        XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        return gate
+    }
+
     func testCanonicalDeepSeekSignInIsAnAbortOnlyRoute() throws {
         let provider = EmbeddedWebModelTransport.Provider.deepseek
         let url = try XCTUnwrap(URL(string: "https://chat.deepseek.com/sign_in"))
@@ -796,6 +928,7 @@ final class DeepSeekWebModelTransportTests: XCTestCase {
         let humanID: UUID
         var transport: EmbeddedWebModelTransport!
         var createdID: UUID?
+        var navigationOverride: URL?
         private var retainedView: WKWebView?
         var view: WKWebView { retainedView! }
         init(setup: String = "", preparationTimeout: Duration = .seconds(10)) throws {
@@ -810,7 +943,7 @@ final class DeepSeekWebModelTransportTests: XCTestCase {
                 let view = try XCTUnwrap(self.browser.webView(for: id)); view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
                 self.createdID = id; self.retainedView = view
                 let html = DeepSeekFixturePage.html.replacingOccurrences(of: "window.fixtureReady = true;", with: setup + "; window.fixtureReady = true;")
-                view.loadHTMLString(html, baseURL: url)
+                view.loadHTMLString(html, baseURL: self.navigationOverride ?? url)
                 return id
             })
             transport.setTimeoutsForTesting(preparation: preparationTimeout, response: .seconds(12))
