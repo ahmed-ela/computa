@@ -859,7 +859,7 @@ final class EmbeddedBrowserSession {
         let key = UUID().uuidString.replacingOccurrences(of:"-",with:"").lowercased()
         let secret = UUID().uuidString.replacingOccurrences(of:"-",with:"").lowercased()
         let url: URL
-        let script: WKUserScript
+        let source: String
         var initialStart = false
         var initialPreparation = false
         var generation: UUID?
@@ -873,11 +873,19 @@ final class EmbeddedBrowserSession {
                   source.components(separatedBy:"__GROQ_OWNED_SYNTHETIC_CONFIG__").count==2 else{return nil}
             let remaining=(lease.deadline - ContinuousClock.now).components
             let milliseconds=Int(min(390_000,max(0,Double(remaining.seconds)*1000+Double(remaining.attoseconds)/1e15)))
+            guard milliseconds>0 else{return nil}
+            self.source = source
+        }
+        // Capture the current page fetch only inside the already-verified arm
+        // evaluation. No early wrapper or previously captured fetch is rebound.
+        func installationSource() -> String? {
+            guard lease.isCurrent else { return nil }
+            let remaining=(lease.deadline - ContinuousClock.now).components
+            let milliseconds=Int(min(390_000,max(0,Double(remaining.seconds)*1000+Double(remaining.attoseconds)/1e15)))
             var config:[String:Any]=["key":key,"secret":secret,"durationMs":milliseconds,"profile":lease.profile.rawValue]
             if lease.isFixture { config["setupDiagnostics"] = true }
             guard milliseconds>0,let bytes=try? JSONSerialization.data(withJSONObject:config) else{return nil}
-            script = .init(source:source.replacingOccurrences(of:"__GROQ_OWNED_SYNTHETIC_CONFIG__",with:String(decoding:bytes,as:UTF8.self)),
-                           injectionTime:.atDocumentStart,forMainFrameOnly:true,in:.page)
+            return source.replacingOccurrences(of:"__GROQ_OWNED_SYNTHETIC_CONFIG__",with:String(decoding:bytes,as:UTF8.self))
         }
     }
     func createGroqStatusTab(url:URL,lease:GroqOwnedStatusLease) throws -> UUID {
@@ -886,7 +894,6 @@ final class EmbeddedBrowserSession {
             if let entry=entries[id],entry.isModelOwned,!entry.isToolOwned,entry.view.url==nil,entry.modelChanges==nil,
                let probe=GroqStatusProbe(lease:lease,url:url),lease.isCurrent {
                 entry.groqStatus=probe
-                entry.view.configuration.userContentController.addUserScript(probe.script)
             } else {lease.revoke()}
             try navigate(tabID:id,to:url);return id
         } catch {closeTab(id);lease.revoke();throw error}
@@ -894,11 +901,6 @@ final class EmbeddedBrowserSession {
     private func removeGroqStatus(_ entry:Entry, preserveFixtureFailureScope:Bool=false) {
         guard let probe=entry.groqStatus else{return}
         entry.groqStatus=nil
-        let controller=entry.view.configuration.userContentController
-        if controller.userScripts.contains(where:{ $0 === probe.script }) {
-            let scripts=controller.userScripts.filter { $0 !== probe.script }
-            controller.removeAllUserScripts();scripts.forEach(controller.addUserScript)
-        }
         if entry.view.url==probe.url && (probe.generation==nil || entry.tab.documentGeneration==probe.generation) {
             entry.view.callAsyncJavaScript("if(document.URL===url)window[key]?.(secret,'dispose'); return null",
                 arguments:["url":probe.url.absoluteString,"key":"__computaGroqStatus_"+probe.key,"secret":probe.secret],in:nil,in:.page,completionHandler:nil)
@@ -963,6 +965,11 @@ final class EmbeddedBrowserSession {
     }
     private enum GroqStatusCallFailure: Error { case javascriptException, timedOut, invalidReturn }
     private func callGroqStatus(_ probe:GroqStatusProbe,view:WKWebView,command:String,args:[String:Any]) async -> GroqStatusCallOutcome {
+        let installation: String
+        if command == "arm" {
+            guard let source = probe.installationSource() else { return .unavailable }
+            installation = source + ";\n"
+        } else { installation = "" }
         let result=EmbeddedScriptResult(),deadline=min(probe.lease.deadline,ContinuousClock.now + .milliseconds(500))
         do {
             let bytes: Data = try await withTaskCancellationHandler {
@@ -972,6 +979,7 @@ final class EmbeddedBrowserSession {
                     guard !Task.isCancelled,ContinuousClock.now<deadline else{result.complete(.failure(CancellationError()));return}
                     view.callAsyncJavaScript("""
                         if(document.URL!==url)return command==='arm'?'js_route_unavailable':null;
+                        \(installation)
                         if(typeof window[key]!=='function')return command==='arm'?'controller_absent':null;
                         const r=window[key](secret,command,args);
                         return r===true?'ready':typeof r==='string'&&r.length<=42?r:command==='arm'?'arm_false':null;

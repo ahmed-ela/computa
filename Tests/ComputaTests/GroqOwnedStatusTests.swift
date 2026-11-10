@@ -312,6 +312,11 @@ import XCTest
         return (lease, directory.appendingPathComponent("owned-status.json"), user)
     }
 
+    func testLateArmPreservesTheWebsiteFetchWrapperAndTracksOnlyOneOwnedRequest() async throws {
+        try await run("siteWrapper", expected: "transport_rejected", profile: .qwen27b, fixture: true, fixtureKind: .qwen27b)
+        try await run("siteWrapper", expected: "transport_rejected", profile: .gptoss120b, fixture: true, fixtureKind: .gptoss120b)
+    }
+
     private static let fixtureUser = """
         In /tmp/test root/fixtures/cases/invoice-457-groq-qwen27b-0123456789abcdef/coding, fix the invoice aggregation bug in reconcile.py according to its README. Keep the tests, sample data, and reference format unchanged. Run python3 -m unittest -v, then run python3 reconcile.py.
 
@@ -356,14 +361,24 @@ import XCTest
         var view:LocalView?
         var pages:[LocalView]=[]
         browser.setModelViewFactoryForTesting { config in
-            let source="window.fetch=function(){window.requests=(window.requests||0)+1;return ['rollback','observerNotArmed','observerUnavailable'].includes(window.variant)?Promise.reject(Error('synthetic')):new Promise(()=>{})}"
+            let source=(mode == "siteWrapper"
+                ? "window.fetch=function(){window.requests=(window.requests||0)+1;window.groqBaseReceiver=this;window.groqBaseArgs=Array.from(arguments);const result=Promise.reject(Error('synthetic'));window.groqBasePromise=result;return result;}"
+                : "window.fetch=function(){window.requests=(window.requests||0)+1;return ['rollback','observerNotArmed','observerUnavailable'].includes(window.variant)?Promise.reject(Error('synthetic')):new Promise(()=>{})}")
                 + (mode=="observerNotArmed" ? ";Object.defineProperty(window,'fetch',{writable:false})" : "")
             let stub = WKUserScript(source:source,
                                     injectionTime:.atDocumentStart,forMainFrameOnly:true,in:.page)
             config.userContentController.addUserScript(stub)
             let created=LocalView(frame:.init(x:0,y:0,width:1024,height:768),configuration:config)
             let variant=continuation && pages.isEmpty ? (customHistory ? "patch" : "tool") : mode
-            created.html=html+"<script>window.variant='"+variant+"';"+Self.client+"</script>"
+            let siteWrapper = mode == "siteWrapper" ? """
+                window.groqSawNoEarlyObserver=!Object.getOwnPropertyNames(window).some(key=>key.startsWith('__computaGroqStatus_'));
+                const groqSiteBase=window.fetch;
+                window.groqSiteWrapper=function(...args){window.groqSiteCalls=(window.groqSiteCalls||0)+1;
+                  window.groqSiteReceiver=this;window.groqSiteArgs=args;
+                  const result=Reflect.apply(groqSiteBase,this,args);window.groqSitePromise=result;return result;};
+                window.fetch=window.groqSiteWrapper;
+                """ : ""
+            created.html=html+"<script>window.variant='"+variant+"';"+siteWrapper+Self.client+"</script>"
             pages.append(created);view=created;return created
         }
         let transport=EmbeddedWebModelTransport(browser:browser)
@@ -430,7 +445,7 @@ import XCTest
         } catch {
             XCTAssertNotEqual(mode,"success")
             switch error {
-            case EmbeddedWebModelTransport.Failure.ownershipFailure(.groqDraftRestored):XCTAssertTrue(["rollback","observerNotArmed","observerUnavailable"].contains(mode))
+            case EmbeddedWebModelTransport.Failure.ownershipFailure(.groqDraftRestored):XCTAssertTrue(["rollback","observerNotArmed","observerUnavailable","siteWrapper"].contains(mode))
             case WebModelServer.Failure.deadline:XCTAssertNotEqual(mode,"nativeDeadline");XCTAssertNotEqual(mode,"rollback")
             case EmbeddedWebModelTransport.Failure.deadline:XCTAssertEqual(mode,"nativeDeadline")
             default:XCTFail("Unexpected synthetic terminal error: "+String(describing:error))
@@ -443,6 +458,19 @@ import XCTest
         else { count=try await page.evaluateJavaScript("window.groqFixture.sendCount") as? Int }
         XCTAssertEqual(count,1)
         XCTAssertEqual(pages.count,continuation ? 2 : 1)
+        if mode == "siteWrapper" {
+            let encoded = try await page.evaluateJavaScript("""
+                JSON.stringify({noEarlyObserver:window.groqSawNoEarlyObserver===true,
+                  oneSiteCall:window.groqSiteCalls===1,oneBaseCall:window.requests===1,
+                  receiverIdentity:window.groqSiteReceiver===window.groqBaseReceiver,
+                  argumentIdentity:window.groqSiteArgs.length===2&&window.groqBaseArgs.length===2&&window.groqSiteArgs.every((value,index)=>value===window.groqBaseArgs[index]),
+                  promiseIdentity:window.groqSitePromise===window.groqBasePromise,
+                  restoredSiteFetch:window.fetch===window.groqSiteWrapper})
+                """)
+            let flags = try JSONDecoder().decode([String: Bool].self, from: Data(try XCTUnwrap(encoded as? String).utf8))
+            XCTAssertEqual(flags, ["noEarlyObserver":true,"oneSiteCall":true,"oneBaseCall":true,
+                "receiverIdentity":true,"argumentIdentity":true,"promiseIdentity":true,"restoredSiteFetch":true])
+        }
         if continuation {
             XCTAssertFalse(pages[0] === pages[1],"Continuation must exercise a genuinely new owned view")
             for page in pages {
@@ -467,7 +495,7 @@ import XCTest
             XCTAssertEqual(row["stage"] as? String,expected);XCTAssertEqual(row["taskID"] as? String,task)
             XCTAssertEqual(row["modelID"] as? String,model.modelID)
             XCTAssertEqual(row["purpose"] as? String,fixture ? kind.purpose : profile.purpose)
-            XCTAssertEqual(row["trigger"] as? String,["rollback","observerNotArmed","observerUnavailable"].contains(mode) ? "groq_draft_restored" : "response_deadline")
+            XCTAssertEqual(row["trigger"] as? String,["rollback","observerNotArmed","observerUnavailable","siteWrapper"].contains(mode) ? "groq_draft_restored" : "response_deadline")
             XCTAssertEqual(row["evidenceClass"] as? String,["observer_not_armed","observer_unavailable"].contains(expected) ? "native_observer_availability" : "page_world_observation")
             if ["observer_not_armed", "observer_unavailable"].contains(expected) {
                 XCTAssertEqual(row.count, 16)

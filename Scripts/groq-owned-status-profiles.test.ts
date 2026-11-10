@@ -15,7 +15,7 @@ function deferred<T>() {
   const promise = new Promise<T>((yes,no)=>{resolve=yes;reject=no;});
   return { promise, resolve, reject };
 }
-type FixtureOptions={configProfile?:string;syncError?:Error;setupDiagnostics?:boolean;nonWritableFetch?:boolean;missingResponseGetter?:boolean;triggerCount?:number;pickerClosed?:boolean};
+type FixtureOptions={configProfile?:string;syncError?:Error;setupDiagnostics?:boolean;nonWritableFetch?:boolean;missingResponseGetter?:boolean;triggerCount?:number;pickerClosed?:boolean;siteWrapperBeforeInstall?:boolean};
 function fixture(profile:Profile='qwen27b', options:FixtureOptions={}) {
   const selected=profiles[profile], pending=deferred<any>(), calls:{receiver:unknown;args:unknown[]}[]=[];
   const original=function(this:unknown,...args:unknown[]) {calls.push({receiver:this,args});if(options.syncError)throw options.syncError;return pending.promise;};
@@ -32,7 +32,12 @@ function fixture(profile:Profile='qwen27b', options:FixtureOptions={}) {
     clone(){privateReads++;throw Error('PRIVATE_BODY');}text(){privateReads++;throw Error('PRIVATE_BODY');}json(){privateReads++;throw Error('PRIVATE_BODY');}
   }
   if(options.missingResponseGetter)delete (ResponseDouble.prototype as any).status;
-  const window:any={fetch:original};window.top=window;
+  const siteCalls:{receiver:unknown;args:unknown[]}[]=[];
+  const siteFetch=function(this:unknown,...args:unknown[]) {
+    siteCalls.push({receiver:this,args});return Reflect.apply(original,this,args);
+  };
+  const window:any={fetch:options.siteWrapperBeforeInstall?siteFetch:original};window.top=window;
+  const preinstallFetch=window.fetch;
   if(options.nonWritableFetch)Object.defineProperty(window,'fetch',{value:original,writable:false,configurable:true,enumerable:true});
   const fetchDescriptorBefore=Object.getOwnPropertyDescriptor(window,'fetch');
   const timers=new Map<number,()=>void>();let nextTimer=0;
@@ -51,6 +56,7 @@ function fixture(profile:Profile='qwen27b', options:FixtureOptions={}) {
     temperature:selected.temperature,max_completion_tokens:selected.maximum,top_p:selected.topP,stream:true,...extra},null,pretty?2:undefined);
   const finish=()=>ctl('finish');
   return {window,original,calls,pending,selected,location,ResponseDouble,arm,body,ctl,finish,key,fetchDescriptorBefore,
+    siteFetch,siteCalls,preinstallFetch,
     timerCount:()=>timers.size,fireTimers:()=>{for(const [id,callback] of [...timers]){timers.delete(id);callback();}},
     tick:(n:number)=>{clock=n;},privateReads:()=>privateReads,driftLabel:()=>{visibleLabel='Foreign model';},replacePicker:()=>{button={...button};}};
 }
@@ -191,5 +197,43 @@ test('fixture-only arm diagnostics preserve marker refusal and disposal while su
     expect(f.calls[0].args).toEqual([endpoint,init]);expect(f.calls[0].args[1]).toBe(init);
     const response=await settle(f,400);expect(await promise).toBe(response);expect(f.finish()).toBe('http_400');
     expect(f.privateReads()).toBe(0);expect(f.window.fetch).toBe(f.original);expect(f.timerCount()).toBe(0);
+  }
+});
+
+
+test('observer installed after the site wrapper forwards exactly once and restores that captured wrapper',async()=>{
+  const f=fixture('gptoss120b',{setupDiagnostics:true,siteWrapperBeforeInstall:true});
+  expect(f.preinstallFetch).toBe(f.siteFetch);expect(f.siteFetch).not.toBe(f.original);
+  expect(f.window.fetch).not.toBe(f.siteFetch);expect(f.siteCalls).toHaveLength(0);expect(f.calls).toHaveLength(0);
+  expect(f.arm()).toBe(true);
+  const receiver={synthetic:true},init={method:'POST',body:f.body()};
+  const promise=f.window.fetch.call(receiver,endpoint,init);expect(promise).toBe(f.pending.promise);
+  expect(f.siteCalls).toHaveLength(1);expect(f.calls).toHaveLength(1);
+  for(const call of [f.siteCalls[0],f.calls[0]]){
+    expect(call.receiver).toBe(receiver);expect(call.args).toEqual([endpoint,init]);expect(call.args[1]).toBe(init);
+  }
+  const response=await settle(f,200);expect(await promise).toBe(response);
+  expect(f.finish()).toBe('http_2xx_opened');
+  expect(f.window.fetch).toBe(f.siteFetch);expect(f.window.fetch).not.toBe(f.original);
+  expect(Object.getOwnPropertyDescriptor(f.window,'fetch')).toEqual(f.fetchDescriptorBefore);
+  expect(f.timerCount()).toBe(0);expect(f.window[f.key]).toBeUndefined();expect(f.privateReads()).toBe(0);
+});
+
+test('cached preinstallation fetch bypass stays unmatched without a fabricated HTTP result or rebinding',async()=>{
+  for(const kind of ['site','original'] as const){
+    const f=fixture('gptoss120b',{setupDiagnostics:true,siteWrapperBeforeInstall:true});
+    const cached=kind==='site'?f.preinstallFetch:f.original,observer=f.window.fetch;
+    expect(f.arm()).toBe(true);
+    const receiver={synthetic:true},init={method:'POST',body:f.body()};
+    const promise=cached.call(receiver,endpoint,init);expect(promise).toBe(f.pending.promise);
+    expect(f.window.fetch).toBe(observer);expect(f.calls).toHaveLength(1);
+    expect(f.siteCalls).toHaveLength(kind==='site'?1:0);
+    expect(f.calls[0].receiver).toBe(receiver);expect(f.calls[0].args).toEqual([endpoint,init]);
+    expect(f.calls[0].args[1]).toBe(init);
+    const response=await settle(f,429);expect(await promise).toBe(response);
+    expect(f.finish()).toBe('no_matching_fetch_observed');
+    expect(f.window.fetch).toBe(f.siteFetch);expect(f.timerCount()).toBe(0);
+    expect(f.window[f.key]).toBeUndefined();expect(f.privateReads()).toBe(0);
+    expect(Object.getOwnPropertyDescriptor(f.window,'fetch')).toEqual(f.fetchDescriptorBefore);
   }
 });
