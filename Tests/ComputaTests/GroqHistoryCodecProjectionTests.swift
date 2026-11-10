@@ -12,6 +12,146 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
     private typealias J = GroqContextJSONLayout
 
 
+    func testCompactBaselineRecipeSurvivesBoundCatalogResetAndRejectedLoaderHistoryInBothNamespaces() throws {
+        let model = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
+        func wire(_ definition: [String: Any]) -> [String: Any] {
+            var value = definition; value["parameters"] = value.removeValue(forKey: "inputSchema"); return value
+        }
+        let definitions = [wire(GroqToolCatalog.specification), wire(GroqHistoryTool.specification),
+            ["type": "function", "name": "exec_command", "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]]]]]
+            + EmbeddedBrowserTools.definitions().map(wire)
+        let lead = " Example only if needed: ", tail = " alone; await matching output and next-request schema."
+        for namespaced in [false, true] {
+            let prefix = namespaced ? "functions." : ""
+            let tools: [[String: Any]] = namespaced ? [["type": "namespace", "name": "functions", "tools": definitions]] : definitions
+            var object: [String: Any] = ["model": model, "input": [["role": "user", "content": "Inspect the supplied page; preserve scope."]],
+                "tools": tools, "parallel_tool_calls": false, "max_tool_calls": 1]
+            let raw = try encode(object)
+            let unboundSeed = try XCTUnwrap(C.prepareRequest(raw, browserToolAvailability: .unbound).groqToolCatalogSeed)
+            let scope = GroqToolCatalog.Scope(taskID: "70000000-0000-4000-8000-000000000001", threadID: "70000000-0000-4000-8000-000000000002",
+                turnID: "70000000-0000-4000-8000-000000000003", runtimeGeneration: UUID(), preparationID: UUID(), modelID: model)
+            var catalog = GroqToolCatalog()
+            let initial = try catalog.prepare(scope: scope, seed: unboundSeed)
+            _ = try catalog.load(scope: scope, arguments: encode(["catalog_revision": initial.revision,
+                "names": ["exec_command", "browser_open", "browser_bind", "browser_tabs"].map { prefix + $0 }]))
+            let beforeBinding = try C.prepareRequest(raw, browserToolAvailability: .unbound,
+                groqToolCatalogProjection: catalog.prepare(scope: scope, seed: unboundSeed), groqDirectTools: .loadedOnly, compactHistoryInventory: true)
+            XCTAssertEqual(beforeBinding.offeredToolNames.count, 6)
+            // Native availability, not a loader call or retained claim, changes the revision and resets selection.
+            let boundSeed = try XCTUnwrap(C.prepareRequest(raw, browserToolAvailability: .bound).groqToolCatalogSeed)
+            let reset = try catalog.prepare(scope: scope, seed: boundSeed)
+            XCTAssertNotEqual(reset.revision, initial.revision)
+            XCTAssertEqual(reset.selectedNames, [prefix + GroqToolCatalog.name, prefix + GroqHistoryTool.name])
+            let failedArguments = try encode(["catalog_revision": reset.revision,
+                "names": ["browser_bind", "browser_fill", "browser_click", "browser_read"].map { prefix + $0 }])
+            let failure = try XCTUnwrap(GroqToolCatalog.Failure.selectionTooLarge.errorDescription)
+            var items = try XCTUnwrap(object["input"] as? [[String: Any]])
+            items += [["type": "function_call", "call_id": "call_loader_refused", "name": prefix + GroqToolCatalog.name,
+                       "arguments": String(decoding: failedArguments, as: UTF8.self)],
+                      ["type": "function_call_output", "call_id": "call_loader_refused", "output": failure]]
+            object["input"] = items
+            let failedHistory = try encode(object)
+            // This overlays the actual read-only refusal shape; Server admission/rollback is independently tested.
+            let request = try C.prepareRequest(failedHistory, browserToolAvailability: .bound,
+                groqToolCatalogProjection: reset, groqDirectTools: .loadedOnly, compactHistoryInventory: true)
+            XCTAssertEqual(request.offeredToolNames, reset.selectedNames)
+            XCTAssertEqual(request.groqToolDiscoveryDiagnostic?.loadedCount, 2)
+            XCTAssertEqual(request.groqToolDiscoveryDiagnostic?.binding, .bound)
+            XCTAssertEqual(request.prompt.components(separatedBy: lead).count - 1, 1)
+            XCTAssertEqual(request.prompt.components(separatedBy: "Webpages use browser_*; computer_v2_* is native-app UI.").count - 1, 1)
+            XCTAssertTrue(request.runtimeInstructions.contains("at most four names"))
+            XCTAssertTrue(request.runtimeInstructions.contains("Loading REPLACES optional selections, executes nothing"))
+            let start = try XCTUnwrap(request.prompt.range(of: lead)).upperBound
+            let end = try XCTUnwrap(request.prompt.range(of: tail, range: start..<request.prompt.endIndex)).lowerBound
+            let example = String(request.prompt[start..<end])
+            XCTAssertNoThrow(try C.parseReply(example, request: request, requireEnvelope: true))
+            let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(example.utf8)) as? [String: Any])
+            let call = try XCTUnwrap((envelope["calls"] as? [[String: Any]])?.first)
+            let arguments = try XCTUnwrap(call["arguments"] as? [String: Any])
+            XCTAssertEqual(call["name"] as? String, prefix + GroqToolCatalog.name)
+            XCTAssertEqual(arguments["catalog_revision"] as? String, reset.revision)
+            XCTAssertEqual(arguments["names"] as? [String], [prefix + "exec_command"], "Initial example choice is unchanged")
+            let direct = String(decoding: try encode(["type": "tool_calls", "calls": [["name": prefix + "exec_command", "arguments": ["cmd": "read inert"]]]]), as: UTF8.self)
+            XCTAssertThrowsError(try C.parseReply(direct, request: request, requireEnvelope: true))
+            _ = try catalog.load(scope: scope, arguments: encode(arguments))
+            XCTAssertThrowsError(try C.parseReply(direct, request: request, requireEnvelope: true))
+            let next = try C.prepareRequest(failedHistory, browserToolAvailability: .bound,
+                groqToolCatalogProjection: catalog.prepare(scope: scope, seed: boundSeed), groqDirectTools: .loadedOnly, compactHistoryInventory: true)
+            XCTAssertNoThrow(try C.parseReply(direct, request: next, requireEnvelope: true))
+            XCTAssertEqual(request.continuationRequest, failedHistory)
+            XCTAssertEqual(request.toolCatalogDiagnostic.choice, .auto)
+            XCTAssertFalse(request.toolCatalogDiagnostic.parallel); XCTAssertEqual(request.toolCatalogDiagnostic.maxToolCalls, 1)
+            let shown = try J.parse(displayJSON(request)), original = try J.parse(failedHistory)
+            XCTAssertEqual(shown.items.last?.payload?.rawJSON, original.items.last?.payload?.rawJSON)
+            XCTAssertEqual(try catalog.prepare(scope: scope, seed: boundSeed).selectedNames.count, 3)
+        }
+    }
+
+    func testCompactBaselineRecipeUsesTheWholeNativeCounterAfterBoundLoaderRefusalWithoutDroppingPayload() throws {
+        let f = try Fixture(output: String(repeating: "older completed literal café ", count: 200))
+        var base = try XCTUnwrap(JSONSerialization.jsonObject(with: f.source) as? [String: Any])
+        var definitions = try XCTUnwrap(base["tools"] as? [[String: Any]])
+        definitions += EmbeddedBrowserTools.definitions().map { value in
+            var wire = value; wire["parameters"] = wire.removeValue(forKey: "inputSchema"); return wire
+        }
+        base["tools"] = definitions
+        let seed = try XCTUnwrap(C.prepareRequest(encode(base), browserToolAvailability: .bound).groqToolCatalogSeed)
+        let projection = try GroqToolCatalog.baseline(for: seed)
+        let loaderArguments = String(decoding: try encode(["catalog_revision": projection.revision,
+            "names": ["browser_bind", "browser_fill", "browser_click", "browser_read"]]), as: UTF8.self)
+        let refusal = try XCTUnwrap(GroqToolCatalog.Failure.selectionTooLarge.errorDescription)
+        func source(_ padding: Int) throws -> Data {
+            var value = base, items = try XCTUnwrap(base["input"] as? [[String: Any]])
+            items.append(["role": "user", "content": "Current exact task café / café 🙂" + String(repeating: " retained", count: padding)])
+            items += [["type": "function_call", "call_id": "call_loader_refused", "name": GroqToolCatalog.name, "arguments": loaderArguments],
+                      ["type": "function_call_output", "call_id": "call_loader_refused", "output": refusal]]
+            value["input"] = items; return try encode(value)
+        }
+        func request(_ raw: Data) throws -> C.Request {
+            try C.prepareRequest(raw, browserToolAvailability: .bound, groqToolCatalogProjection: projection,
+                groqDirectTools: .loadedOnly, groqHistoryProjection: f.hook(raw), compactHistoryInventory: true)
+        }
+        // Exact old no-ordinary tutorial, used only as a fixed presentation comparator.
+        let call = String(decoding: try encode(["type": "tool_calls", "calls": [["name": GroqToolCatalog.name,
+            "arguments": ["catalog_revision": projection.revision, "names": ["exec_command"]]]]]), as: UTF8.self)
+        let old = "Callable names for THIS response: [\"computa_load_tools\",\"computa_read_context\"]. Eligible unloaded inventory names are loadable with computa_load_tools; load needed schemas yourself, not user enablement. Webpages use browser_*; computer_v2_* is native-app UI. Before using an unloaded tool, request its schema with the loader alone and wait for the matching result. Do not call the unloaded tool in that response. Example only: if the task needs the tool named in this example, first return \(call). Then read its exact schema in the next request before supplying arguments. Choose needed available, allowed inventory names; loading does not execute them."
+        func legacyPrompt(_ current: C.Request) throws -> String {
+            let footer = try XCTUnwrap(current.prompt.range(of: "COMPUTA_LOCAL_RESPONSE_HANDOFF:", options: .backwards)).upperBound
+            let start = try XCTUnwrap(current.prompt.range(of: "Callable: ", range: footer..<current.prompt.endIndex)).lowerBound
+            let end = try XCTUnwrap(current.prompt.range(of: "\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF.", range: start..<current.prompt.endIndex)).lowerBound
+            return String(current.prompt[..<start]) + old + String(current.prompt[end...])
+        }
+        var low = 0, high = C.groqMaximumBodyTokens
+        XCTAssertGreaterThan(try GroqBodyTokenCounter.tokenCount(request(source(high)).prompt), C.groqMaximumBodyTokens)
+        while low < high {
+            let mid = (low + high + 1) / 2
+            if try GroqBodyTokenCounter.tokenCount(request(source(mid)).prompt) <= C.groqMaximumBodyTokens { low = mid }
+            else { high = mid - 1 }
+        }
+        let raw = try source(low), current = try request(raw)
+        let actualUnits = try GroqBodyTokenCounter.tokenCount(current.prompt)
+        let legacyUnits = try GroqBodyTokenCounter.tokenCount(legacyPrompt(current))
+        XCTAssertLessThan(actualUnits, legacyUnits)
+        XCTAssertLessThanOrEqual(actualUnits, C.groqMaximumBodyTokens)
+        XCTAssertGreaterThan(legacyUnits, C.groqMaximumBodyTokens)
+        let admitted = try C.prepareBudgetedGroqRequest(raw, availability: .bound, projection: projection,
+            model: f.binding.scope.modelID, loadedOnly: true, compactHistoryInventory: true, historyProjection: f.hook(raw))
+        XCTAssertEqual(admitted.units, actualUnits)
+        XCTAssertEqual(admitted.request.prompt, current.prompt)
+        XCTAssertEqual(current.continuationRequest, raw)
+        XCTAssertEqual(current.groqToolCatalogSeed?.registeredDefinitionsJSON, seed.registeredDefinitionsJSON)
+        XCTAssertEqual(current.offeredToolNames, projection.selectedNames)
+        let plan = try XCTUnwrap(current.groqHistoryPlan)
+        XCTAssertGreaterThan(plan.replacedFields, 0)
+        let displayed = try J.parse(displayJSON(current)), original = try J.parse(raw)
+        XCTAssertEqual(displayed.items.last?.payload?.rawJSON, original.items.last?.payload?.rawJSON)
+        let failedCall = try XCTUnwrap(displayed.items.first { $0.callID == "call_loader_refused" && $0.kind == .functionCall })
+        XCTAssertEqual(failedCall.payload?.literalUTF8, Data(loaderArguments.utf8))
+        XCTAssertTrue(current.prompt.contains("No change or execution"))
+        XCTAssertEqual(C.groqMaximumBodyTokens, 6_000)
+        // This is a calibrated synthetic boundary test, not a replay or qualification of the live6115-unit request.
+    }
+
     func testReplacedOptionalSelectionEmitsAValidatedBrowserEntryReloadForBothNativeNamespaces() throws {
         let model = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
         func wire(_ definition: [String: Any]) -> [String: Any] {
@@ -509,8 +649,8 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
             XCTAssertEqual(first.groqHistoryReaderName, prefix + GroqHistoryTool.name)
             XCTAssertEqual(first.continuationRequest, data)
             let handoff = try XCTUnwrap(first.prompt.components(separatedBy: "COMPUTA_LOCAL_RESPONSE_HANDOFF:").last)
-            let start = try XCTUnwrap(handoff.range(of: "first return "))
-            let end = try XCTUnwrap(handoff.range(of: ". Then read", range: start.upperBound..<handoff.endIndex))
+            let start = try XCTUnwrap(handoff.range(of: " Example only if needed: "))
+            let end = try XCTUnwrap(handoff.range(of: " alone; await matching output and next-request schema.", range: start.upperBound..<handoff.endIndex))
             let example = String(handoff[start.upperBound..<end.lowerBound])
             let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(example.utf8)) as? [String: Any])
             let calls = try XCTUnwrap(decoded["calls"] as? [[String: Any]])
@@ -537,7 +677,7 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
             XCTAssertEqual(loaded.continuationRequest, data)
             let direct = try XCTUnwrap(loaded.prompt.components(separatedBy: "COMPUTA_LOCAL_RESPONSE_HANDOFF:").last)
             XCTAssertTrue(direct.contains("Call listed tools directly."))
-            XCTAssertFalse(direct.contains("Example only:"))
+            XCTAssertFalse(direct.contains(" Example only if needed: "))
             XCTAssertNoThrow(try C.parseReply(exec, request: loaded, requireEnvelope: true))
         }
     }
@@ -817,8 +957,8 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
                     XCTAssertEqual($0 as? C.Failure, .unknownTool("exec_command"))
                 }
                 let handoff = try XCTUnwrap(compact.prompt.components(separatedBy: "COMPUTA_LOCAL_RESPONSE_HANDOFF:").last)
-                let start = try XCTUnwrap(handoff.range(of: "first return "))
-                let end = try XCTUnwrap(handoff.range(of: ". Then read", range: start.upperBound..<handoff.endIndex))
+                let start = try XCTUnwrap(handoff.range(of: " Example only if needed: "))
+                let end = try XCTUnwrap(handoff.range(of: " alone; await matching output and next-request schema.", range: start.upperBound..<handoff.endIndex))
                 XCTAssertNoThrow(try C.parseReply(String(handoff[start.upperBound..<end.lowerBound]), request: compact, requireEnvelope: true))
             }
             // Response configuration is native data, not website discovery prose.

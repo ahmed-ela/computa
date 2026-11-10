@@ -392,6 +392,7 @@ actor WebModelServer {
     private var evidenceDirectory: URL?
     private var journalTaskLimit = 256
     private let rejectedReplyDirectory: URL?
+    private let groqRejectedRequestDirectory: URL?
     private var inspectorAuthorizations: [String: ChatGPTInspectorLease] = [:]
     private var groqFixtureStatuses: [String: GroqOwnedStatusLease.FixtureTurn] = [:]
     private let queue = DispatchQueue(label: "wtf.computa.web-model-http")
@@ -1195,8 +1196,10 @@ actor WebModelServer {
     typealias GroqPreflightObserverForTesting = @Sendable (GroqPreflightContextForTesting, GroqPreflightEventForTesting) -> Void
     private var groqPreflightObserverForTesting: GroqPreflightObserverForTesting?
 
-    init(rejectedReplyDirectory: URL? = nil, groqPreflightObserverForTesting: @escaping GroqPreflightObserverForTesting) {
+    init(rejectedReplyDirectory: URL? = nil, groqRejectedRequestDirectory: URL? = nil,
+         groqPreflightObserverForTesting: @escaping GroqPreflightObserverForTesting) {
         self.rejectedReplyDirectory = rejectedReplyDirectory
+        self.groqRejectedRequestDirectory = groqRejectedRequestDirectory
         self.groqPreflightObserverForTesting = groqPreflightObserverForTesting
     }
 
@@ -1242,8 +1245,9 @@ actor WebModelServer {
 
     /// A configured directory alone never enables response-content capture.
     /// Its private arm.json must explicitly name the exact local task.
-    init(rejectedReplyDirectory: URL? = nil) {
+    init(rejectedReplyDirectory: URL? = nil, groqRejectedRequestDirectory: URL? = nil) {
         self.rejectedReplyDirectory = rejectedReplyDirectory
+        self.groqRejectedRequestDirectory = groqRejectedRequestDirectory
     }
 
     func start() async throws -> URL {
@@ -1718,6 +1722,19 @@ actor WebModelServer {
             try await awaitGroqHistoryReadPublications(taskID: taskID)
             try requireCurrentContext()
         }
+        // A native-only, exact-task arm can retain a local rejected frame.
+        // Ordinary admission, response and cleanup authority stay unchanged.
+        let rejectedRequestCapture: GroqRejectedRequestCapture.Scope?
+        if provider == "groq", context.isCompactToolThread, context.historyPreparation != nil,
+           !context.isMaintenance, let task = UUID(uuidString: taskID),
+           let thread = UUID(uuidString: context.threadID), let turn = UUID(uuidString: context.turnID) {
+            rejectedRequestCapture = GroqRejectedRequestCapture.prepare(directory: groqRejectedRequestDirectory,
+                context: .init(taskID: task, threadID: thread, turnID: turn,
+                    runtimeGeneration: context.runtimeGeneration, preparationID: context.preparationID,
+                    transportGeneration: transportGeneration, inferenceID: inferenceID, modelID: originalRequest.model),
+                request: originalRequest, isCurrent: { (try? requireCurrentContext()) != nil })
+        } else { rejectedRequestCapture = nil }
+        defer { rejectedRequestCapture?.revoke() }
         #if DEBUG
         let preflightContext: GroqPreflightContextForTesting? = provider == "groq" && groqPreflightObserverForTesting != nil
             ? .init(taskID: taskID, threadID: context.threadID, turnID: context.turnID, modelID: originalRequest.model,
@@ -1764,7 +1781,16 @@ actor WebModelServer {
                 modelID: request.model)
             var candidate = groqToolCatalog
             let projection = try candidate.prepare(scope: scope, seed: seed)
+            // The observer reports only the Codec invocation's actual thrown
+            // candidate. Pair it with the same first error the outer loop retains.
+            var latestBudgetRejection: (request: WebModelResponseCodec.Request?, failure: WebModelResponseCodec.Failure)?
+            var firstBudgetRejection: (request: WebModelResponseCodec.Request?, failure: WebModelResponseCodec.Failure)?
+            let rejectionObserver: ((WebModelResponseCodec.Request?, WebModelResponseCodec.Failure) -> Void)?
+            if rejectedRequestCapture != nil {
+                rejectionObserver = { candidate, failure in latestBudgetRejection = (candidate, failure) }
+            } else { rejectionObserver = nil }
             func budgeted(_ history: WebModelResponseCodec.GroqHistoryProjection?) throws -> (request: WebModelResponseCodec.Request, units: Int) {
+                latestBudgetRejection = nil
                 #if DEBUG
                 if preflightContext != nil {
                     return try WebModelResponseCodec.prepareBudgetedGroqRequest(originalRequest.continuationRequest,
@@ -1773,13 +1799,14 @@ actor WebModelServer {
                         compactHistoryInventory: context.historyPreparation != nil, historyProjection: history,
                         observingCandidate: { candidate, direct, compact in
                             observePreflight(.candidate(request: candidate, directTools: direct, compactHistory: compact))
-                        })
+                        }, rejectionObserver: rejectionObserver)
                 }
                 #endif
                 return try WebModelResponseCodec.prepareBudgetedGroqRequest(originalRequest.continuationRequest,
                     availability: admittedBrowserAvailability, projection: projection, model: request.model,
                     loadedOnly: context.historyPreparation != nil,
-                    compactHistoryInventory: context.historyPreparation != nil, historyProjection: history)
+                    compactHistoryInventory: context.historyPreparation != nil, historyProjection: history,
+                    rejectionObserver: rejectionObserver)
             }
             var result: (request: WebModelResponseCodec.Request, units: Int)
             var historyProjection: GroqHistoryProjectionContext?
@@ -1792,6 +1819,7 @@ actor WebModelServer {
             var nativeFactDeadline: ContinuousClock.Instant?
             do {
                 while true {
+                    latestBudgetRejection = nil
                     do {
                         historyProjection = useHistory
                             ? try prepareGroqHistoryProjection(taskID: taskID, request: originalRequest) : nil
@@ -1807,7 +1835,10 @@ actor WebModelServer {
                         guard context.historyPreparation != nil, Self.isGroqHistoryBudgetFailure(error) else {
                             throw error
                         }
-                        if firstBudgetFailure == nil { firstBudgetFailure = error }
+                        if firstBudgetFailure == nil {
+                            firstBudgetFailure = error
+                            firstBudgetRejection = latestBudgetRejection
+                        }
                         if !useHistory { useHistory = true; continue }
                         // Native events and HTTP requests use separate transports.
                         // Only an actual overflow may await an older issued call's
@@ -1829,6 +1860,12 @@ actor WebModelServer {
                     }
                 }
             } catch {
+                if let rejectedRequestCapture, Self.isGroqHistoryBudgetFailure(error),
+                   let failure = error as? WebModelResponseCodec.Failure {
+                    let selected = firstBudgetFailure == nil ? latestBudgetRejection : firstBudgetRejection
+                    rejectedRequestCapture.capture(failure: failure, candidate: selected?.request,
+                        candidateFailure: selected?.failure, isCurrent: { (try? requireCurrentContext()) != nil })
+                }
                 #if DEBUG
                 observePreflight(Self.groqPreflightRejectedEventForTesting(error))
                 #endif

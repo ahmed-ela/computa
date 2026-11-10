@@ -600,7 +600,7 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
             leases.forEach { $0.revoke() }
         }
 
-        private static func controlledUserText(_ request: WebModelResponseCodec.Request, allowingContinuation: Bool, kind: Kind) -> String? {
+        fileprivate static func controlledUserText(_ request: WebModelResponseCodec.Request, allowingContinuation: Bool, kind: Kind) -> String? {
             guard APIModelCorrectionJSON.isUnambiguous(request.continuationRequest),
                   var root=try? JSONSerialization.jsonObject(with:request.continuationRequest) as? [String:Any],
                   let input=root["input"] as? [[String:Any]],let environment=input.firstIndex(where: { $0["role"] as? String == "user" }),
@@ -917,4 +917,145 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
         })
         fixtureTurn?.revokeRetiredChildren()
     }
+}
+
+
+extension WebsitePrivateDiagnosticCapture {
+    // Read-only arm eligibility. Publication still uses the original exclusive
+    // claim and revalidates these exact bytes; this grants no capture authority.
+    fileprivate static func groqRejectedRequestArm(directory: URL, maximum: Int) -> Data? {
+        let descriptor = openDirectoryWithoutSymlinks(directory)
+        guard descriptor >= 0 else { return nil }
+        defer { close(descriptor) }
+        var directoryInfo = stat(), before = stat(), after = stat(), named = stat(), output = stat()
+        guard fstat(descriptor, &directoryInfo) == 0, privateDirectory(directoryInfo),
+              fstatat(descriptor, Record.request.rawValue, &output, AT_SYMLINK_NOFOLLOW) != 0, errno == ENOENT else { return nil }
+        let arm = openat(descriptor, "arm.json", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard arm >= 0 else { return nil }
+        defer { close(arm) }
+        guard fstat(arm, &before) == 0, privateFile(before), before.st_size > 0, before.st_size <= maximum,
+              let bytes = readArm(arm, maximum: maximum), bytes.count == before.st_size,
+              fstat(arm, &after) == 0, sameUnchangedFile(before, after),
+              fstatat(descriptor, "arm.json", &named, AT_SYMLINK_NOFOLLOW) == 0, sameUnchangedFile(after, named),
+              directoryStillMatches(directory, descriptor: descriptor, initial: directoryInfo) else { return nil }
+        return bytes
+    }
+}
+
+/// Exact-task synthetic payload diagnostics at a local Groq budget refusal.
+/// This neither changes admission nor supplies a response, replay or cleanup proof.
+enum GroqRejectedRequestCapture {
+    static let directoryName = "GroqRejectedRequestDiagnostics-v1"
+    static let purpose = "groq_120b_fixture_rejected_request_v1"
+    static let maximumArmBytes = 2_048
+    static let maximumRecordBytes = 2_000_000
+    static let modelID = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
+
+    struct Context: Equatable, Sendable {
+        let taskID: UUID, threadID: UUID, turnID: UUID
+        let runtimeGeneration: UUID, preparationID: UUID, transportGeneration: UUID, inferenceID: UUID
+        let modelID: String
+    }
+
+    final class Scope: @unchecked Sendable {
+        private let context: Context, directory: URL, arm: Data, request: WebModelResponseCodec.Request
+        private let nonce: UUID, userHash: String, deadline: ContinuousClock.Instant
+        private let lock = NSLock()
+        private var active = true
+        private var attempted = false
+        fileprivate init(context: Context, directory: URL, arm: Data, request: WebModelResponseCodec.Request,
+                         nonce: UUID, userHash: String, deadline: ContinuousClock.Instant) {
+            self.context = context; self.directory = directory; self.arm = arm; self.request = request
+            self.nonce = nonce; self.userHash = userHash; self.deadline = deadline
+        }
+        func revoke() { lock.withLock { active = false } }
+        private var current: Bool { lock.withLock { active && ContinuousClock.now < deadline } && !Task.isCancelled }
+
+        @discardableResult
+        func capture(failure: WebModelResponseCodec.Failure, candidate: WebModelResponseCodec.Request?,
+                     candidateFailure: WebModelResponseCodec.Failure?, isCurrent: () -> Bool) -> Bool {
+            guard current, isCurrent(), Self.isBudgetFailure(failure),
+                  lock.withLock({ guard active, !attempted else { return false }; attempted = true; return true }) else { return false }
+            return WebsitePrivateDiagnosticCapture.publish(directory: directory, outputName: "request.json",
+                maximumArmBytes: GroqRejectedRequestCapture.maximumArmBytes, maximumRecordBytes: GroqRejectedRequestCapture.maximumRecordBytes, makeRecord: { bytes in
+                    guard bytes == self.arm, self.current, isCurrent() else { return nil }
+                    var fields: [String: Any] = ["version": 1, "purpose": GroqRejectedRequestCapture.purpose, "nonce": nonce.uuidString.lowercased(),
+                        "taskID": context.taskID.uuidString.lowercased(), "threadID": context.threadID.uuidString.lowercased(),
+                        "turnID": context.turnID.uuidString.lowercased(), "runtimeGeneration": context.runtimeGeneration.uuidString.lowercased(),
+                        "preparationID": context.preparationID.uuidString.lowercased(), "transportGeneration": context.transportGeneration.uuidString.lowercased(),
+                        "inferenceID": context.inferenceID.uuidString.lowercased(), "modelID": context.modelID, "userPromptSHA256": userHash,
+                        "submitted": false, "automaticReplay": false, "responseAuthority": false, "cleanupAuthority": false,
+                        "canonicalRequestBase64": request.continuationRequest.base64EncodedString(),
+                        "canonicalRequestBytes": request.continuationRequest.count,
+                        "canonicalRequestSHA256": Self.digest(request.continuationRequest)]
+                    let code: String
+                    switch failure {
+                    case let .groqPromptBudgetExceeded(actual, maximum, reserved):
+                        code = "website_prompt_budget_exceeded"; fields["bodyTokens"] = actual
+                        fields["maximumBodyTokens"] = maximum; fields["reservedTokens"] = reserved
+                    case let .groqPromptByteBudgetExceeded(actual, maximum, reserved):
+                        code = "website_prompt_byte_budget_exceeded"; fields["bodyUTF8Bytes"] = actual
+                        fields["maximumBodyUTF8Bytes"] = maximum; fields["reservedTokens"] = reserved
+                    case let .promptTooLarge(actual, maximum):
+                        code = "input_too_large"; fields["actualBytes"] = actual; fields["maximumBytes"] = maximum
+                    default: return nil
+                    }
+                    fields["failureCode"] = code
+                    if let candidate, candidateFailure == failure,
+                       candidate.model == context.modelID, candidate.continuationRequest == request.continuationRequest,
+                       candidate.prompt.utf8.count == candidate.promptStatistics.finalPromptBytes,
+                       !candidate.prompt.isEmpty, candidate.prompt.utf8.count <= WebModelResponseCodec.maximumPromptBytes {
+                        fields["candidateState"] = "matched"
+                        fields["displayedPrompt"] = candidate.prompt
+                        fields["displayedPromptBytes"] = candidate.prompt.utf8.count
+                        fields["displayedPromptSHA256"] = Self.digest(Data(candidate.prompt.utf8))
+                        guard let statistics = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(candidate.promptStatistics)) else { return nil }
+                        fields["statistics"] = statistics
+                    } else {
+                        fields["candidateState"] = candidate == nil ? "unavailable" : "mismatched"
+                    }
+                    return try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys, .withoutEscapingSlashes])
+                }, isCurrent: { self.current && isCurrent() })
+        }
+        private static func isBudgetFailure(_ failure: WebModelResponseCodec.Failure) -> Bool {
+            switch failure {
+            case let .groqPromptBudgetExceeded(actual, maximum, reserved):
+                actual > maximum && maximum == WebModelResponseCodec.groqMaximumBodyTokens && reserved == WebModelResponseCodec.groqReservedTokens
+            case let .groqPromptByteBudgetExceeded(actual, maximum, reserved):
+                actual > maximum && maximum == WebModelResponseCodec.groqMaximumBodyTokens && reserved == WebModelResponseCodec.groqReservedTokens
+            case let .promptTooLarge(actual, maximum):
+                actual > maximum && maximum == WebModelResponseCodec.maximumPromptBytes
+            default: false
+            }
+        }
+        private static func digest(_ bytes: Data) -> String { GroqRejectedRequestCapture.digest(bytes) }
+    }
+
+    static func prepare(directory: URL?, context: Context, request: WebModelResponseCodec.Request,
+                        now: Date = Date(), isCurrent: () -> Bool) -> Scope? {
+        let started = ContinuousClock.now
+        guard !Task.isCancelled, isCurrent(), let directory, context.modelID == modelID, request.model == modelID,
+              !request.continuationRequest.isEmpty, request.continuationRequest.count <= WebModelResponseCodec.maximumPromptBytes,
+              let arm = WebsitePrivateDiagnosticCapture.groqRejectedRequestArm(directory: directory, maximum: maximumArmBytes),
+              APIModelCorrectionJSON.isUnambiguous(arm),
+              let value = try? JSONSerialization.jsonObject(with: arm) as? [String: Any],
+              Set(value.keys) == ["schemaVersion", "purpose", "nonce", "taskID", "threadID", "turnID", "modelID", "userPromptSHA256", "expiresAt"],
+              ComputerToolArgumentContract.exactInt64(value["schemaVersion"]) == 1, value["purpose"] as? String == purpose,
+              let nonceText = value["nonce"] as? String, let nonce = UUID(uuidString: nonceText), nonce.uuidString.lowercased() == nonceText,
+              value["taskID"] as? String == context.taskID.uuidString.lowercased(),
+              value["threadID"] as? String == context.threadID.uuidString.lowercased(),
+              value["turnID"] as? String == context.turnID.uuidString.lowercased(), value["modelID"] as? String == modelID,
+              let user = GroqOwnedStatusLease.FixtureTurn.controlledUserText(request, allowingContinuation: true, kind: .gptoss120b),
+              value["userPromptSHA256"] as? String == digest(Data(user.utf8)),
+              let expiryText = value["expiresAt"] as? String, expiryText.utf8.count == 24 else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = TimeZone(secondsFromGMT: 0); formatter.isLenient = false
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"
+        guard let expiry = formatter.date(from: expiryText), formatter.string(from: expiry) == expiryText,
+              expiry > now, expiry.timeIntervalSince(now) <= 600, isCurrent(), !Task.isCancelled else { return nil }
+        return Scope(context: context, directory: directory, arm: arm, request: request, nonce: nonce,
+            userHash: digest(Data(user.utf8)), deadline: started + .seconds(expiry.timeIntervalSince(now)))
+    }
+    private static func digest(_ bytes: Data) -> String { SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined() }
 }

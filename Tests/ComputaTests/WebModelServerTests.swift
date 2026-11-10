@@ -560,6 +560,107 @@ final class WebModelServerTests: XCTestCase {
             tools: tools, loadArguments: loadArguments, metadata: metadata)
     }
 
+    func testGroqRejectedRequestCaptureBindsNativeHistoryAndKeepsTheOriginalBudgetFailureBeforeStart() async throws {
+        typealias C = WebModelResponseCodec
+        for nativeHistory in [true, false] {
+            let root = try websiteBenchmarkTemporaryDirectory()
+                .appendingPathComponent("groq-rejected-server-" + UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            let directory = root.appendingPathComponent("exact-custom-groq-rejected")
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            let server = WebModelServer(groqRejectedRequestDirectory: directory)
+            addTeardownBlock { _ = await server.shutdown(); try? FileManager.default.removeItem(at: root) }
+            await server.configureEvidenceDirectory(root.appendingPathComponent("evidence"))
+            await server.configureCleanupReceipts(directory: root.appendingPathComponent("cleanup"), runtimeGeneration: websiteInferenceFixtureGeneration) { _ in }
+            await server.setGroqSubmissionIntervalForTesting(.zero)
+            let base = FixtureWebModelTransport()
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base))
+            let task = UUID(), thread = UUID(), turn = UUID(), preparation = UUID(), core = UUID()
+            let model = GroqRejectedRequestCapture.modelID
+            try await server.prepareInferenceTurn(taskID: task.uuidString, threadID: thread.uuidString,
+                runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: preparation, isNewThread: true,
+                isCompactToolThread: true, historyPreparation: nativeHistory ? .init(modelID: model, coreGeneration: core) : nil)
+            if nativeHistory {
+                let writer = try await server.prepareGroqHistoryTurn(taskID: task.uuidString, threadID: thread.uuidString,
+                    turnID: turn.uuidString, runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: preparation,
+                    modelID: model, coreGeneration: core)
+                XCTAssertNotNil(writer)
+            }
+            try await server.registerInferenceTurn(taskID: task.uuidString, threadID: thread.uuidString, turnID: turn.uuidString,
+                runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: preparation)
+            let human = """
+                In /tmp/fixtures/cases/invoice-487-groq-gptoss120b-0123456789abcdef/coding, fix the invoice aggregation bug in reconcile.py according to its README. Keep the tests, sample data, and reference format unchanged. Run python3 -m unittest -v, then run python3 reconcile.py.
+
+                Use the built-in browser to open http://127.0.0.1:50473/, enter the printed reference, and submit it once. Read the resulting receipt, then close the tab you opened. Use browser tools for the website; do not use terminal HTTP requests or inspect the fixture's control directory, server source, or receipt files.
+
+                Return the test result, the reference, and the receipt shown by the page.
+                """
+            func item(_ role: String, _ text: String) -> [String: Any] {
+                ["type": "message", "role": role, "content": [["type": "input_text", "text": text]]]
+            }
+            let tools = [GroqToolCatalog.specification, GroqHistoryTool.specification].map { definition in
+                var wire = definition; wire["parameters"] = wire.removeValue(forKey: "inputSchema"); return wire
+            }
+            let metadata = try websiteInferenceFixtureMetadata(taskID: task.uuidString, threadID: thread.uuidString, turnID: turn.uuidString)
+            let canonical = try JSONSerialization.data(withJSONObject: ["model": model, "stream": false,
+                "input": [item("developer", "Preserve this exact synthetic policy."),
+                    item("user", "<environment_context><cwd>/tmp/marker</cwd><shell>zsh</shell></environment_context>"), item("user", human)],
+                "instructions": String(repeating: "protected ", count: 7_000), "tools": tools,
+                "client_metadata": ["x-codex-turn-metadata": metadata]], options: [.sortedKeys, .withoutEscapingSlashes])
+            let formatter = ISO8601DateFormatter(); formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            let arm = try JSONSerialization.data(withJSONObject: ["schemaVersion": 1,
+                "purpose": GroqRejectedRequestCapture.purpose, "nonce": UUID().uuidString.lowercased(),
+                "taskID": task.uuidString.lowercased(), "threadID": thread.uuidString.lowercased(), "turnID": turn.uuidString.lowercased(),
+                "modelID": model, "userPromptSHA256": SHA256.hash(data: Data(human.utf8)).map { String(format: "%02x", $0) }.joined(),
+                "expiresAt": formatter.string(from: Date().addingTimeInterval(60))], options: [.sortedKeys])
+            let armURL = directory.appendingPathComponent("arm.json"), output = directory.appendingPathComponent("request.json")
+            try arm.write(to: armURL); try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: armURL.path)
+            var actualFailure: C.Failure?
+            do {
+                _ = try await server.infer(canonical, taskID: task.uuidString)
+                XCTFail("The protected policy cannot fit the unchanged native budget")
+            } catch {
+                actualFailure = error as? C.Failure
+                XCTAssertEqual(WebModelServer.errorPresentation(for: error).code, "website_prompt_budget_exceeded")
+            }
+            let failure = try XCTUnwrap(actualFailure)
+            guard case let .groqPromptBudgetExceeded(actualUnits, maximum, reserved) = failure else {
+                return XCTFail("The original exact native budget classification must survive")
+            }
+            XCTAssertGreaterThan(actualUnits, 6_000); XCTAssertEqual(maximum, 6_000); XCTAssertEqual(reserved, 2_000)
+            let operations = await base.operations()
+            XCTAssertTrue(operations.isEmpty, "Capture must precede any owned website Start/Send")
+            if nativeHistory {
+                let saved = try Data(contentsOf: output)
+                let record = try XCTUnwrap(JSONSerialization.jsonObject(with: saved) as? [String: Any])
+                XCTAssertEqual(record["canonicalRequestBase64"] as? String, canonical.base64EncodedString())
+                XCTAssertEqual(record["canonicalRequestSHA256"] as? String, SHA256.hash(data: canonical).map { String(format: "%02x", $0) }.joined())
+                XCTAssertEqual(record["taskID"] as? String, task.uuidString.lowercased())
+                XCTAssertEqual(record["threadID"] as? String, thread.uuidString.lowercased())
+                XCTAssertEqual(record["turnID"] as? String, turn.uuidString.lowercased())
+                XCTAssertEqual(record["candidateState"] as? String, "matched")
+                let displayed = try XCTUnwrap(record["displayedPrompt"] as? String)
+                XCTAssertEqual(try GroqBodyTokenCounter.tokenCount(displayed), actualUnits,
+                    "The retained display must match the actual rethrown error, not the last fallback")
+                XCTAssertEqual(record["bodyTokens"] as? Int, actualUnits)
+                let statistics = try XCTUnwrap(record["statistics"] as? [String: Any])
+                XCTAssertEqual(statistics["finalPromptBytes"] as? Int, displayed.utf8.count)
+                for key in ["submitted", "automaticReplay", "responseAuthority", "cleanupAuthority"] {
+                    XCTAssertEqual(record[key] as? Bool, false)
+                }
+                XCTAssertFalse(FileManager.default.fileExists(atPath: armURL.path))
+                let issues = await server.finish(taskID: task.uuidString)
+                XCTAssertTrue(issues.isEmpty)
+                XCTAssertEqual(try Data(contentsOf: output), saved)
+            } else {
+                XCTAssertFalse(FileManager.default.fileExists(atPath: output.path), "An arm cannot create native-history authority")
+                XCTAssertEqual(try Data(contentsOf: armURL), arm)
+                let issues = await server.finish(taskID: task.uuidString)
+                XCTAssertTrue(issues.isEmpty)
+            }
+        }
+    }
+
     func testGroqPromptBudgetRejectsBeforeWebsiteStart() async throws {
         let base = FixtureWebModelTransport()
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self)

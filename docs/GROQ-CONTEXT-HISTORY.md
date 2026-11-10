@@ -404,3 +404,45 @@ wording in that exact branch while keeping its callable list, literal loader
 envelope, next-request boundary, self-loading instruction and browser/native
 app distinction. Full existing inventory rules and native policy remain.
 The original failed validation remains separate from subsequent results.
+
+### Bound catalog budget failure and exact rejected-frame capture (2026-11-10)
+
+Build 486's fresh ordinary task released three verified literal replies and
+closed their website transcripts. Four terminal commands completed with exit
+zero, and the seed unit tests failed before any fix. Two further terminal
+proposals were rejected before dispatch, including a forbidden HTTP intent;
+no successful HTTP execution is claimed. The built-in browser opened the
+local page. No code edit, accepted submission or receipt completed the task.
+The app automatically closed its one task-created tab; this was separate
+from a model-issued close or verification of an answer.
+
+Browser binding changed the eligible catalog revision and reset optional
+schemas to the persistent loader and reader. A subsequent valid four-name
+page-tool selection failed its success/subset admission forecasts. The
+retained-selection error-result path had no such forecast, and the actual
+next canonical request was rejected locally at 6,115 body tokens against the
+unchanged 6,000-unit limit and 2,000-unit reservation. No fourth website
+inference started. The error receipt alone is not proven responsible for the
+overflow; the exact rejected frame and its components were not retained.
+
+The baseline-only final handoff still repeated a long loader tutorial. A
+shared compact recipe preserves its exact example, eligible-name and
+next-request rules, while leaving the ordinary unbound recipe unchanged.
+Its source text shrinks from 834 to 427 UTF-8 bytes in the observed shape;
+byte savings do not establish native token savings or a live capacity repair.
+
+The separate private purpose `groq_120b_fixture_rejected_request_v1` captures
+only an exact native-history-bound GPT-OSS 120B fixture task, thread, turn,
+model and controlled-user hash, with a one-shot nonce and expiry of at most
+ten minutes. It uses the existing private atomic request writer in
+`GroqRejectedRequestDiagnostics-v1`. The record retains canonical request
+bytes as Base64 plus a hash. An optional observer associates the displayed
+prompt and statistics with the exact failure selected by the existing loops;
+an unavailable or mismatched candidate is labelled explicitly.
+
+Capture is default-off, preserves the original failure and admission rules,
+and supplies no response, execution, replay or cleanup authority. It performs
+no additional website request, DOM inspection, or header/cookie read. The
+canonical frame may contain tool data already in the controlled task's
+history. A retained request is diagnostic data, never a proposed action to
+execute or proof that the model completed the task.

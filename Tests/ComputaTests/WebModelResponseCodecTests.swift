@@ -3,6 +3,68 @@ import XCTest
 @testable import Computa
 
 final class WebModelResponseCodecTests: XCTestCase {
+    func testGroqFinalRejectionObserverReportsTheSelectedFullHistoryCandidateAndNeverIntermediateFailures() throws {
+        typealias C = WebModelResponseCodec
+        let model = WebsiteModelChoice(provider: "groq", key: "qwen/qwen3.8-27b", label: "Qwen/Qwen3.8-27B").modelID
+        let arguments = #"{"catalog_revision":""# + String(repeating: "d", count: 64) + #"","names":["exec_command"]}"#
+        let output = String(repeating: "Exact historical loader receipt. ", count: 6)
+        func source(_ padding: Int) throws -> Data {
+            var input: [[String: Any]] = [["role": "user", "content": "Read inert source." + String(repeating: " token", count: padding)]]
+            for index in 0..<2 {
+                input += [["type": "function_call", "call_id": "call_loader_\(index)", "name": GroqToolCatalog.name, "arguments": arguments],
+                          ["type": "function_call_output", "call_id": "call_loader_\(index)", "output": output]]
+            }
+            return try JSONSerialization.data(withJSONObject: ["model": model, "input": input,
+                "tools": [groqLoaderDefinition]], options: [.sortedKeys, .withoutEscapingSlashes])
+        }
+        let raw = try source(7_000)
+        let seed = try XCTUnwrap(C.prepareRequest(raw).groqToolCatalogSeed)
+        let projection = try GroqToolCatalog.baseline(for: seed)
+        var candidates: [C.Request] = [], rejections: [(C.Request?, C.Failure)] = []
+        var thrown: C.Failure?
+        XCTAssertThrowsError(try C.prepareBudgetedGroqRequest(raw, availability: nil, projection: projection,
+            model: model, loadedOnly: true, observingCandidate: { request, _, _ in candidates.append(request) },
+            rejectionObserver: { request, failure in rejections.append((request, failure)) })) {
+                thrown = $0 as? C.Failure
+            }
+        XCTAssertEqual(candidates.count, 2)
+        let first = try XCTUnwrap(candidates.first), last = try XCTUnwrap(candidates.last)
+        XCTAssertNotEqual(first.prompt, last.prompt, "The compact-loader fallback must genuinely differ")
+        XCTAssertFalse(first.prompt.contains("#/input/1/arguments"))
+        XCTAssertTrue(last.prompt.contains("#/input/1/arguments"))
+        XCTAssertEqual(rejections.count, 1, "Only the final selected failure is observed")
+        let rejection = try XCTUnwrap(rejections.first)
+        XCTAssertEqual(rejection.1, thrown)
+        let rejected = try XCTUnwrap(rejection.0)
+        XCTAssertEqual(rejected.prompt, first.prompt, "The preserved full-history error must retain its own candidate, not the last fallback")
+        XCTAssertNotEqual(rejected.prompt, last.prompt)
+        XCTAssertEqual(rejected.continuationRequest, raw)
+        XCTAssertEqual(rejection.1, .groqPromptBudgetExceeded(actualTokens: try QwenBodyTokenCounter.tokenCount(first.prompt),
+            maximumTokens: 6_000, reservedTokens: 2_000))
+        // The same release callback stays silent if a later compact candidate succeeds.
+        let empty = try source(0)
+        let full = try C.prepareRequest(empty, groqToolCatalogProjection: projection)
+        let units = try QwenBodyTokenCounter.tokenCount(full.prompt)
+        let atBoundary = try source(6_003 - units)
+        let fullBoundary = try C.prepareRequest(atBoundary, groqToolCatalogProjection: projection)
+        XCTAssertGreaterThan(try QwenBodyTokenCounter.tokenCount(fullBoundary.prompt), C.groqMaximumBodyTokens)
+        rejections.removeAll()
+        let admitted = try C.prepareBudgetedGroqRequest(atBoundary, availability: nil, projection: projection,
+            model: model, loadedOnly: true, rejectionObserver: { request, failure in rejections.append((request, failure)) })
+        XCTAssertLessThanOrEqual(admitted.units, C.groqMaximumBodyTokens)
+        XCTAssertTrue(admitted.request.prompt.contains("#/input/1/arguments"))
+        XCTAssertTrue(rejections.isEmpty)
+        // A typed preparation failure has no returned Request to associate with it.
+        let malformed = try JSONSerialization.data(withJSONObject: ["model": model, "input": 7, "tools": [groqLoaderDefinition]])
+        XCTAssertThrowsError(try C.prepareBudgetedGroqRequest(malformed, availability: nil, projection: projection,
+            model: model, loadedOnly: true, rejectionObserver: { request, failure in rejections.append((request, failure)) })) {
+                XCTAssertEqual($0 as? C.Failure, .missingInput)
+            }
+        XCTAssertEqual(rejections.count, 1)
+        XCTAssertNil(rejections.first?.0)
+        XCTAssertEqual(rejections.first?.1, .missingInput)
+    }
+
     func testGroqReferencesOnlyIdenticalHistoricalLoaderFieldsWithoutChangingTheCanonicalRequest() throws {
         let model = WebsiteModelChoice(provider: "groq", key: "qwen/qwen3.8-27b", label: "Qwen/Qwen3.8-27B").modelID
         let args = #"{"catalog_revision":""# + String(repeating: "d", count: 64) + #"","names":["exec_command"]}"#
@@ -268,9 +330,9 @@ final class WebModelResponseCodecTests: XCTestCase {
                 "tools": tools, "parallel_tool_calls": false]
             let baseline = try compactGroqRequest(value)
             let end = String(baseline.prompt.split(separator: "COMPUTA_LOCAL_RESPONSE_HANDOFF:").last!)
-            XCTAssertTrue(end.contains("Callable names for THIS response: [\"\(prefix)computa_load_tools\"]"))
-            let exampleStart = try XCTUnwrap(end.range(of: "first return "))
-            let exampleEnd = try XCTUnwrap(end.range(of: ". Then read", range: exampleStart.upperBound..<end.endIndex))
+            XCTAssertTrue(end.contains("Callable: [\"\(prefix)computa_load_tools\"]"))
+            let exampleStart = try XCTUnwrap(end.range(of: " Example only if needed: "))
+            let exampleEnd = try XCTUnwrap(end.range(of: " alone; await matching output and next-request schema.", range: exampleStart.upperBound..<end.endIndex))
             let example = String(end[exampleStart.upperBound..<exampleEnd.lowerBound])
             XCTAssertNoThrow(try WebModelResponseCodec.parseEmbeddedReply(example, request: baseline))
             let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(example.utf8)) as? [String: Any])
@@ -287,7 +349,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             let loaded = try compactGroqRequest(value, selected: [prefix + "exec_command"])
             let loadedEnd = String(loaded.prompt.split(separator: "COMPUTA_LOCAL_RESPONSE_HANDOFF:").last!)
             XCTAssertTrue(loadedEnd.contains("\"\(prefix)exec_command\""))
-            XCTAssertFalse(loadedEnd.contains("Example only:"))
+            XCTAssertFalse(loadedEnd.contains(" Example only if needed: "))
             // The relay codec checks tool admission and envelope shape. Native
             // execution separately validates arguments against the exact schema.
             let valid = "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"\(prefix)exec_command\",\"arguments\":{\"cmd\":\"ls\"}}]}"
@@ -296,7 +358,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             let none = try compactGroqRequest(value)
             let noneEnd = String(none.prompt.split(separator: "COMPUTA_LOCAL_RESPONSE_HANDOFF:").last!)
             XCTAssertTrue(noneEnd.contains("Callable names for THIS response: []"))
-            XCTAssertFalse(noneEnd.contains("Example only:"))
+            XCTAssertFalse(noneEnd.contains(" Example only if needed: "))
         }
     }
 

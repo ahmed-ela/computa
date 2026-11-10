@@ -334,14 +334,18 @@ enum WebModelResponseCodec {
 
     /// Model state and the read-only loader retain their selected schemas.
     /// Direct tools are an inference-local presentation over that selection.
+    /// The optional rejection observer receives only the ultimately thrown typed
+    /// failure and its own returned candidate; pre-render failures have none.
     static func prepareBudgetedGroqRequest(_ data: Data, availability: EmbeddedBrowserToolAvailability?,
                                            projection: GroqToolCatalog.Projection, model: String,
                                            loadedOnly: Bool = false,
                                            compactHistoryInventory: Bool = false,
-                                           historyProjection: GroqHistoryProjection? = nil) throws -> (request: Request, units: Int) {
+                                           historyProjection: GroqHistoryProjection? = nil,
+                                           rejectionObserver: ((Request?, Failure) -> Void)? = nil) throws -> (request: Request, units: Int) {
         try prepareBudgetedGroqRequest(data, availability: availability, projection: projection, model: model,
                                       loadedOnly: loadedOnly, compactHistoryInventory: compactHistoryInventory,
-                                      historyProjection: historyProjection, candidateObserver: nil)
+                                      historyProjection: historyProjection, candidateObserver: nil,
+                                      rejectionObserver: rejectionObserver)
     }
 
     #if DEBUG
@@ -352,10 +356,12 @@ enum WebModelResponseCodec {
         loadedOnly: Bool = false,
         compactHistoryInventory: Bool = false,
         historyProjection: GroqHistoryProjection? = nil,
-        observingCandidate: @escaping (Request, String, Bool) -> Void) throws -> (request: Request, units: Int) {
+        observingCandidate: @escaping (Request, String, Bool) -> Void,
+        rejectionObserver: ((Request?, Failure) -> Void)? = nil) throws -> (request: Request, units: Int) {
         try prepareBudgetedGroqRequest(data, availability: availability, projection: projection, model: model,
                                       loadedOnly: loadedOnly, compactHistoryInventory: compactHistoryInventory,
-                                      historyProjection: historyProjection, candidateObserver: observingCandidate)
+                                      historyProjection: historyProjection, candidateObserver: observingCandidate,
+                                      rejectionObserver: rejectionObserver)
     }
     #endif
 
@@ -364,8 +370,12 @@ enum WebModelResponseCodec {
         loadedOnly: Bool,
         compactHistoryInventory: Bool,
         historyProjection: GroqHistoryProjection?,
-        candidateObserver: ((Request, String, Bool) -> Void)?) throws -> (request: Request, units: Int) {
-        guard historyProjection == nil || loadedOnly else { throw Failure.invalidTools }
+        candidateObserver: ((Request, String, Bool) -> Void)?,
+        rejectionObserver: ((Request?, Failure) -> Void)?) throws -> (request: Request, units: Int) {
+        guard historyProjection == nil || loadedOnly else {
+            rejectionObserver?(nil, .invalidTools)
+            throw Failure.invalidTools
+        }
         let exact = groqPromptBudgetUsesExactTokenizer(model: model)
         let choices: [GroqDirectToolSet] = exact && !loadedOnly
             ? [.standard, .essential, .loadedOnly] : [.loadedOnly]
@@ -374,12 +384,15 @@ enum WebModelResponseCodec {
         let attempts = choices.map { ($0, false) }
             + (exact && historyProjection == nil ? [(.loadedOnly, true)] : [])
         var fullHistoryFailure: Failure?
+        var fullHistoryFailureRequest: Request?
         for (index, attempt) in attempts.enumerated() {
             let (choice, compactHistory) = attempt
+            var candidateRequest: Request?
             do {
                 let request = try prepareRequest(data, browserToolAvailability: availability,
                     groqToolCatalogProjection: projection, groqDirectTools: choice, compactGroqLoaderHistory: compactHistory,
                     groqHistoryProjection: historyProjection, compactHistoryInventory: compactHistoryInventory)
+                candidateRequest = rejectionObserver == nil ? nil : request
                 if let candidateObserver {
                     let direct: String = switch choice {
                     case .standard: "standard"
@@ -396,13 +409,27 @@ enum WebModelResponseCodec {
             } catch let failure as Failure {
                 switch failure {
                 case .promptTooLarge, .groqPromptBudgetExceeded:
-                    if compactHistory { throw fullHistoryFailure ?? failure }
-                    if choice == .loadedOnly { fullHistoryFailure = failure }
-                    if index == attempts.count - 1 { throw failure }
-                default: throw failure
+                    if compactHistory {
+                        let selectedFailure = fullHistoryFailure ?? failure
+                        rejectionObserver?(fullHistoryFailure == nil ? candidateRequest : fullHistoryFailureRequest,
+                            selectedFailure)
+                        throw selectedFailure
+                    }
+                    if choice == .loadedOnly {
+                        fullHistoryFailure = failure
+                        fullHistoryFailureRequest = candidateRequest
+                    }
+                    if index == attempts.count - 1 {
+                        rejectionObserver?(candidateRequest, failure)
+                        throw failure
+                    }
+                default:
+                    rejectionObserver?(candidateRequest, failure)
+                    throw failure
                 }
             }
         }
+        rejectionObserver?(nil, .invalidTools)
         throw Failure.invalidTools
     }
 
@@ -762,7 +789,19 @@ enum WebModelResponseCodec {
         }) else { return heading + " Other inventory names are not loaded schemas." }
         var result = heading + " Eligible unloaded inventory names are loadable with \(loader); load needed schemas yourself, not user enablement."
         let unloaded = projection.loaderChoices.filter { !projection.selectedNames.contains($0) }
-        if nativeBrowserEntryNames.isDisjoint(with: callable), !nativeBrowserEntryNames.isDisjoint(with: unloaded) {
+        let needsBrowserCue = nativeBrowserEntryNames.isDisjoint(with: callable)
+            && !nativeBrowserEntryNames.isDisjoint(with: unloaded)
+        func compactLoaderRecipe(example: String, lead: String, callLoadedTools: Bool,
+                                 loaderAlone: Bool, browserCue: Bool) throws -> String {
+            let call: [String: Any] = ["type": "tool_calls", "calls": [["name": loader,
+                "arguments": ["catalog_revision": projection.revision, "names": [example]]]]]
+            let wait = loaderAlone ? " alone; await matching output and next-request schema."
+                : "; await next-request schema."
+            return "Callable: \(try json(callable.sorted()))." + (callLoadedTools ? " Call loaded tools." : "")
+                + lead + (try json(call)) + wait + " Load eligible names yourself; no user enablement."
+                + (browserCue ? " Webpages use browser_*; computer_v2_* is native-app UI." : "")
+        }
+        if needsBrowserCue {
             result += " Webpages use browser_*; computer_v2_* is native-app UI."
         }
         // A preloaded historical reader is not an execution route. Only the
@@ -780,17 +819,16 @@ enum WebModelResponseCodec {
                   let entry = unloaded.first(where: { nativeBrowserEntryNames.contains($0)
                     && ($0 == "browser_open" || $0 == "functions.browser_open") })
                     ?? unloaded.first(where: { nativeBrowserEntryNames.contains($0) }) else { return result }
-            let call: [String: Any] = ["type": "tool_calls", "calls": [["name": loader,
-                "arguments": ["catalog_revision": projection.revision, "names": [entry]]]]]
-            return "Callable: \(try json(callable.sorted())). Call loaded tools. Entry if needed: \(try json(call)); await next-request schema. Load eligible names yourself; no user enablement. Webpages use browser_*; computer_v2_* is native-app UI."
+            return try compactLoaderRecipe(example: entry, lead: " Entry if needed: ",
+                callLoadedTools: true, loaderAlone: false, browserCue: true)
         }
         guard let example = unloaded.first(where: { $0 == "exec_command" || $0 == "functions.exec_command" })
             ?? unloaded.first else { return result }
-        let call: [String: Any] = ["type": "tool_calls", "calls": [["name": loader,
-            "arguments": ["catalog_revision": projection.revision, "names": [example]]]]]
-        result += " Before using an unloaded tool, request its schema with the loader alone and wait for the matching result. Do not call the unloaded tool in that response."
-        result += " Example only: if the task needs the tool named in this example, first return \(try json(call)). Then read its exact schema in the next request before supplying arguments. Choose needed available, allowed inventory names; loading does not execute them."
-        return result
+        // The inventory and exact loader schema already retain eligibility,
+        // replacement/max-four, and no-execution rules. Keep this final cue
+        // concise without changing the example choice or any callable schema.
+        return try compactLoaderRecipe(example: example, lead: " Example only if needed: ",
+            callLoadedTools: false, loaderAlone: true, browserCue: needsBrowserCue)
     }
 
     private static func currentGroqBrowserHandoff(tools: [String: OfferedTool], policy: ToolPolicy,

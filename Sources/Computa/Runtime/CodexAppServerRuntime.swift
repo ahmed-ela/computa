@@ -1482,15 +1482,19 @@ private extension CodexAppServerRuntime {
             // is explicitly created in this local diagnostic directory.
             let replyDirectory = URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
                 .appendingPathComponent("WebsiteReplyDiagnostics-v1", isDirectory: true)
+            let groqRejectedRequestDirectory = URL(fileURLWithPath: configuration.codexHomePath, isDirectory: true)
+                .appendingPathComponent(GroqRejectedRequestCapture.directoryName, isDirectory: true)
             #if DEBUG
             if let observer = configuration.groqPreflightObserverForTesting {
                 self.webModelServer = WebModelServer(rejectedReplyDirectory: replyDirectory,
-                    groqPreflightObserverForTesting: observer)
+                    groqRejectedRequestDirectory: groqRejectedRequestDirectory, groqPreflightObserverForTesting: observer)
             } else {
-                self.webModelServer = WebModelServer(rejectedReplyDirectory: replyDirectory)
+                self.webModelServer = WebModelServer(rejectedReplyDirectory: replyDirectory,
+                    groqRejectedRequestDirectory: groqRejectedRequestDirectory)
             }
             #else
-            self.webModelServer = WebModelServer(rejectedReplyDirectory: replyDirectory)
+            self.webModelServer = WebModelServer(rejectedReplyDirectory: replyDirectory,
+                    groqRejectedRequestDirectory: groqRejectedRequestDirectory)
             #endif
         }
 
