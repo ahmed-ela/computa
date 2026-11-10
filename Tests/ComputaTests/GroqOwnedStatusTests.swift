@@ -270,6 +270,41 @@ import XCTest
         XCTAssertEqual(v1.version, 1); XCTAssertEqual(v1.fields["bytes"] as? Int, 262_144)
     }
 
+    func testStreamValidationErrorCodesAreV2OnlyAndCannotRetainUnclassifiedValues() throws {
+        typealias Metadata = GroqOwnedStatusLease.ResponseStreamMetadata
+        typealias Packet = EmbeddedBrowserSession.GroqResponseStreamStatus
+        let codes = ["tool_use_failed", "tool_call_validation_failed", "json_validate_failed"]
+        for code in codes {
+            let json = try responseStreamMetadataJSON(["version": 2, "apiErrorCode": code, "apiErrorType": "invalid_request_error"])
+            let metadata = try XCTUnwrap(Metadata.parse(json))
+            XCTAssertEqual(metadata.version, 2); XCTAssertEqual(metadata.fields.count, 20)
+            XCTAssertEqual(metadata.fields["apiErrorCode"] as? String, code)
+            XCTAssertEqual(metadata.fields["apiErrorType"] as? String, "invalid_request_error")
+            let saved = try JSONSerialization.data(withJSONObject: metadata.fields)
+            XCTAssertLessThanOrEqual(saved.count, 2_048)
+            XCTAssertNil(metadata.fields["message"]); XCTAssertNil(metadata.fields["failed_generation"])
+            XCTAssertFalse(String(decoding: saved, as: UTF8.self).contains("PRIVATE_"))
+            let outer = String(decoding: try JSONSerialization.data(withJSONObject: ["stage": "http_2xx_opened", "responseStream": json]), as: UTF8.self)
+            XCTAssertEqual(Packet.parse(outer, expectedVersion: 2)?.metadata?.fields["apiErrorCode"] as? String, code)
+            XCTAssertNil(Packet.parse(outer), "The native controller's default version remains V1")
+            XCTAssertNil(Metadata.parse(try responseStreamMetadataJSON(["apiErrorCode": code])), "V1 cannot inherit the new diagnostic vocabulary")
+            XCTAssertNil(Metadata.parse(try responseStreamMetadataJSON(["version": 2, "apiErrorCode": code,
+                "privateErrorMessage": "PRIVATE_PROVIDER_ERROR", "failed_generation": "PRIVATE_CODE"])))
+        }
+        for version in [1, 2] {
+            for value in (["PRIVATE_PROVIDER_CODE", "tool_use_failed PRIVATE_PROVIDER_ERROR", "TOOL_USE_FAILED", true, 1, NSNull(), ["code": "tool_use_failed"]] as [Any]) {
+                XCTAssertNil(Metadata.parse(try responseStreamMetadataJSON(["version": version, "apiErrorCode": value])))
+            }
+            for value in (["PRIVATE_PROVIDER_TYPE", true, 1, NSNull()] as [Any]) {
+                XCTAssertNil(Metadata.parse(try responseStreamMetadataJSON(["version": version, "apiErrorType": value])))
+            }
+            for oldCode in ["none", "other", "rate_limit_exceeded", "context_length_exceeded"] {
+                let unchanged = try XCTUnwrap(Metadata.parse(try responseStreamMetadataJSON(["version": version, "apiErrorCode": oldCode])))
+                XCTAssertEqual(unchanged.fields["apiErrorCode"] as? String, oldCode)
+            }
+        }
+    }
+
     func testResponseStreamTailV2PublicationAndControllerPacketsRequireTheAdmittedVersion() throws {
         typealias Lease = GroqOwnedStatusLease
         typealias Packet = EmbeddedBrowserSession.GroqResponseStreamStatus

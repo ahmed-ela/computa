@@ -308,3 +308,46 @@ test('the exact own v2 purpose alone selects 90 seconds and expired or revoked c
   const handle=start(response,config);const original=response.text();await handle.settled;
   expect(await original).toBe(raw);expect(versionReads).toBe(0);expect(handle.finishFailure().version).toBe(1);
 });
+
+
+test('v2 retains only the finite diagnostic error codes after reasoning while every v1 form still maps them to other', () => {
+  const codes=['tool_use_failed','tool_call_validation_failed','json_validate_failed'];
+  for(const code of codes)for(const version of [undefined,1,2]) {
+    const raw=event({choices:[{delta:{reasoning:'PRIVATE_REASONING_BEFORE_ERROR_🌍'}}]})+'event: error\n'
+      +event({error:{type:'invalid_request_error',code,message:'PRIVATE_ERROR_MESSAGE',failed_generation:'PRIVATE_FAILED_GENERATION'}});
+    const parser=factory().createGroqSSEMetadataParser('sse',version),bytes=encoder.encode(raw);
+    for(let at=0;at<bytes.length;at+=7)parser.push(bytes.subarray(at,at+7));parser.end();
+    const facts=parser.snapshot();expect(facts).toMatchObject({version:version===2?2:1,framing:'sse',events:2,jsonEvents:2,
+      reasoning:true,content:false,toolCalls:false,eventError:true,topLevelError:true,apiErrorType:'invalid_request_error',
+      apiErrorCode:version===2?code:'other',finishReason:'none',done:false,eof:true,outcome:'eof',unknownFrames:0});
+    finite(facts,['PRIVATE_REASONING_BEFORE_ERROR','PRIVATE_ERROR_MESSAGE','PRIVATE_FAILED_GENERATION'],version===2?2:1);
+  }
+  for(const code of ['PRIVATE_ARBITRARY_CODE',true,1,null,{tool_use_failed:true}]) {
+    const parser=factory().createGroqSSEMetadataParser('sse',2);
+    parser.push(encoder.encode('event: error\n'+event({error:{code,type:'invalid_request_error',message:'PRIVATE_ERROR_VALUE'}})));parser.end();
+    const facts=parser.snapshot();expect(facts).toMatchObject({version:2,topLevelError:true,apiErrorCode:'other',apiErrorType:'invalid_request_error'});
+    finite(facts,['PRIVATE_ARBITRARY_CODE','PRIVATE_ERROR_VALUE'],2);
+  }
+  for(const body of ['{"error":{"code":"tool_use_failed","code":"PRIVATE_DUPLICATE_CODE"}}',
+    '{"error":{"code":"PRIVATE_DUPLICATE_CODE","\\u0063ode":"json_validate_failed"}}']) {
+    const parser=factory().createGroqSSEMetadataParser('sse',2);parser.push(encoder.encode('event: error\ndata: '+body+'\n\n'));parser.end();
+    const facts=parser.snapshot();expect(facts).toMatchObject({version:2,topLevelError:false,apiErrorCode:'none',unknownFrames:1,jsonEvents:0});
+    finite(facts,['PRIVATE_DUPLICATE_CODE'],2);
+  }
+});
+
+test('matched real v2 clone errors expose the closed code only and preserve the original Response bytes', async () => {
+  const api=factory();
+  for(const code of ['tool_use_failed','tool_call_validation_failed','json_validate_failed']) {
+    const raw=event({choices:[{delta:{reasoning:'PRIVATE_STREAM_REASONING'}}]})+'event: error\n'
+      +event({error:{code,type:'invalid_request_error',message:'PRIVATE_STREAM_MESSAGE',failed_generation:'PRIVATE_STREAM_GENERATION'}});
+    const response=new Response(raw,{status:200,headers:{'Content-Type':'text/event-stream'}});
+    const promise=Promise.resolve(response),handle=api.startMatchedGroqResponseStreamProbe(response,options({purpose:tailPurpose}));
+    expect(await promise).toBe(response);expect(response.bodyUsed).toBe(false);
+    const original=response.text();await handle.settled;expect(await original).toBe(raw);
+    const facts=handle.finishFailure();expect(facts).toMatchObject({version:2,apiErrorCode:code,apiErrorType:'invalid_request_error',
+      reasoning:true,content:false,eventError:true,topLevelError:true,finishReason:'none',done:false,eof:true,outcome:'eof'});
+    finite(facts,['PRIVATE_STREAM_REASONING','PRIVATE_STREAM_MESSAGE','PRIVATE_STREAM_GENERATION'],2);
+    expect(handle.finishFailure()).toBeNull();
+  }
+});

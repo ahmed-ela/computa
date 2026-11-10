@@ -102,7 +102,8 @@
           if (record(value.error)) {
             if (own(value.error, 'code')) errorEnum('apiErrorCode', value.error.code,
               ['rate_limit_exceeded','context_length_exceeded','invalid_api_key','model_not_found','invalid_request_error',
-                'insufficient_quota','over_capacity','service_unavailable']);
+                'insufficient_quota','over_capacity','service_unavailable',
+                ...(selectedVersion === 2 ? ['tool_use_failed','tool_call_validation_failed','json_validate_failed'] : [])]);
             if (own(value.error, 'type')) errorEnum('apiErrorType', value.error.type,
               ['rate_limit_error','invalid_request_error','authentication_error','permission_error','not_found_error','server_error','insufficient_quota','tokens','requests']);
           } else { errorEnum('apiErrorCode', null, []); errorEnum('apiErrorType', null, []); }

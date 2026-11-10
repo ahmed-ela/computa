@@ -786,6 +786,8 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
             case none, rateLimitExceeded = "rate_limit_exceeded", contextLengthExceeded = "context_length_exceeded"
             case invalidAPIKey = "invalid_api_key", modelNotFound = "model_not_found", invalidRequestError = "invalid_request_error"
             case insufficientQuota = "insufficient_quota", overCapacity = "over_capacity", serviceUnavailable = "service_unavailable", other
+            case toolUseFailed = "tool_use_failed", toolCallValidationFailed = "tool_call_validation_failed"
+            case jsonValidateFailed = "json_validate_failed"
         }
         enum APIErrorType: String, Sendable {
             case none, rateLimitError = "rate_limit_error", invalidRequestError = "invalid_request_error"
@@ -843,6 +845,14 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
                   let type = (value["apiErrorType"] as? String).flatMap(APIErrorType.init(rawValue:)),
                   let reason = (value["finishReason"] as? String).flatMap(FinishReason.init(rawValue:)),
                   let outcome = (value["outcome"] as? String).flatMap(Outcome.init(rawValue:)) else { return nil }
+            // Observational tokens only; older diagnostic packets keep their
+            // original vocabulary and no code supplies response/tool authority.
+            if version == 1 {
+                switch code {
+                case .toolUseFailed, .toolCallValidationFailed, .jsonValidateFailed: return nil
+                default: break
+                }
+            }
             return .init(version: version, framing: framing, bytes: bytes, chunks: chunks, events: events, jsonEvents: jsonEvents,
                 unknownFrames: unknown, content: content, reasoning: reasoning, toolCalls: toolCalls,
                 topLevelError: topError, eventError: eventError, done: done, eof: eof, incompleteFrame: incomplete,

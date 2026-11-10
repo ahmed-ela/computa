@@ -233,3 +233,30 @@ only the existing exact native Groq envelope. Its stream publication change is
 limited to the already opted-in v2 synthetic fixture purpose; v1 and ordinary
 requests retain their previous trigger set. Diagnostics do not supply response
 acceptance, execution, retry or cleanup authority.
+
+### Late stream error captured (2026-11-10)
+
+The fresh build 480 diagnostic workflow failed on its second inference after one
+schema-only load and no task action. Its matched response had HTTP 2xx headers,
+then a complete, uncensored SSE observation reached natural EOF with an in-band
+`invalid_request_error`, reasoning-channel activity and no answer content. The
+closed error-code projection was `other`; its actual value and message were not
+retained. One website session closed and the failing session's cleanup remained
+unconfirmed. The native failure record and the pre-cleanup stream packet were
+saved separately. This is not a workflow pass.
+
+This establishes an in-stream provider error for that specific run, rather than
+a successful response inferred from HTTP headers. It does not establish the
+specific error code, the earlier runs' causes, or a formatting/DOM root cause.
+Groq's SDK explicitly checks top-level errors within streamed data after headers:
+[streaming implementation](https://github.com/groq/groq-typescript/blob/main/src/core/streaming.ts).
+The matched request profile has no `tools`, `functions`, `tool_choice` or
+`response_format` field. Tool-generation or validation remains a hypothesis.
+
+The next bounded v2 projection adds only three literal observational candidates:
+`tool_use_failed`, `tool_call_validation_failed` and `json_validate_failed`. These
+are diagnostic hypotheses, not an asserted complete vendor error-code contract
+or the observed code from build 480. V1 retains its previous vocabulary. Unknown
+codes still collapse to `other`; messages, `failed_generation` and reasoning text
+are not retained. The same 20-field packet, finite bounds and no-authority rules
+continue to apply. No request, prompt, model setting or pacing change is implied.
