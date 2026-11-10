@@ -1618,7 +1618,7 @@ actor WebModelServer {
                          taskID: String, identity: NativeRequestIdentity,
                          transport: any WebModelTransport, transportGeneration: UUID) async throws -> InferenceResult {
         let context = try await inferenceContext(taskID: taskID)
-        if provider != "groq" || originalRequest.model != GroqOwnedStatusLease.Profile.qwen27b.choice.modelID {
+        if provider != "groq" || !GroqOwnedStatusLease.FixtureTurn.Kind.supportsModel(originalRequest.model) {
             groqFixtureStatuses.removeValue(forKey:taskID)?.revoke()
         }
         var inferenceID = UUID()

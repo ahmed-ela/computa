@@ -150,4 +150,26 @@ patch or browser action. Build 464 advanced to two schema loads and four termina
 probes. Its failing baseline test retained a 10,214-byte result; the next local
 preflight rejected 7,354 body tokens. No patch, browser action or form submission
 occurred, and no third website inference started. The command-output change still
-needs a fresh live combined workflow; these earlier runs remain unqualified.
+needs a passing live combined workflow; these earlier runs remain unqualified.
+
+Installed Build 465 then completed its first tool-discovery inference, but the
+second website submission restored the draft and reported an error at 3,743
+local body tokens (17,086 prompt bytes). No terminal command, patch or browser
+action ran. Its original ownership error and unconfirmed cleanup were retained;
+the error alone does not establish an HTTP status, quota or backend cause.
+
+A separately approved normal-browser control on the same installed build used
+harmless padding to match those local byte/token counts, before the native
+ownership suffix and website framing. One ordinary Send
+returned HTTP 200 and the exact requested marker. The test exchange was cleared,
+its tab closed and both Inspector settings restored. This excludes a blanket
+size-only rejection in that control. Its content and request timing differ from
+the native workflow; it neither identifies that failure nor qualifies tool use.
+
+The opt-in invoice-fixture status capture now has distinct fixed Qwen 27B and
+GPT-OSS 120B purposes and case templates. The server retains either purpose
+across that fixture's tool continuations, while each child still requires the
+same model, user instruction and native turn identity. The existing first-body,
+outbound fingerprint, current view/document and single-failure checks remain.
+Only a finite request status is saved, without headers or response bodies. A
+captured status does not authorize a reply, replay or transcript cleanup.

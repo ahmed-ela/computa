@@ -53,6 +53,42 @@ import XCTest
         try await run("wrongModel",expected:"none",profile:.gptoss120b,fixture:true)
     }
 
+    func test120BControlledFixtureCapturesOnlyItsExactFirstOrContinuationFailure() async throws {
+        try await run("rollback",expected:"transport_rejected",profile:.gptoss120b,fixture:true,fixtureKind:.gptoss120b)
+        try await run("rollback",expected:"transport_rejected",profile:.gptoss120b,fixture:true,continuation:true,fixtureKind:.gptoss120b)
+        try await run("rollback",expected:"transport_rejected",profile:.gptoss120b,fixture:true,continuation:true,customHistory:true,fixtureKind:.gptoss120b)
+        try await run("observerNotArmed",expected:"observer_not_armed",profile:.gptoss120b,fixture:true,fixtureKind:.gptoss120b)
+        try await run("observerUnavailable",expected:"observer_unavailable",profile:.gptoss120b,fixture:true,fixtureKind:.gptoss120b)
+    }
+
+    func test120BControlledFixtureRejectsCrossedPurposeModelAndRetiredContext() async throws {
+        for mode in ["success","wrongNonce","wrongProfile","wrongPurpose","crossFixturePurpose","wrongFixture","retiredDuringRead","navigatedDuringRead"] {
+            try await run(mode,expected:"none",profile:.gptoss120b,fixture:true,fixtureKind:.gptoss120b)
+        }
+        // A native Qwen model cannot borrow the exact120B template or purpose.
+        try await run("wrongModel",expected:"none",profile:.qwen27b,fixture:true,fixtureKind:.gptoss120b)
+        try await run("crossFixturePurpose",expected:"none",profile:.qwen27b,fixture:true)
+    }
+
+    func testFixtureKindsKeepTheirModelAndCaseTemplatesSeparate() {
+        let qwen=GroqOwnedStatusLease.FixtureTurn.Kind.qwen27b, oss=GroqOwnedStatusLease.FixtureTurn.Kind.gptoss120b
+        let user120B=Self.fixtureUser.replacingOccurrences(of:"groq-qwen27b",with:"groq-gptoss120b")
+        XCTAssertEqual(qwen.purpose,GroqOwnedStatusLease.FixtureTurn.purpose)
+        XCTAssertEqual(oss.purpose,"groq_120b_fixture_failure_status_v1")
+        XCTAssertEqual(oss.profile,.gptoss120b)
+        XCTAssertTrue(GroqOwnedStatusLease.FixtureTurn.Kind.supportsModel(oss.profile.choice.modelID))
+        XCTAssertTrue(GroqOwnedStatusLease.FixtureTurn.Kind.supportsModel(qwen.profile.choice.modelID))
+        XCTAssertFalse(GroqOwnedStatusLease.FixtureTurn.Kind.supportsModel(GroqOwnedStatusLease.Profile.gptoss20b.choice.modelID))
+        XCTAssertFalse(GroqOwnedStatusLease.FixtureTurn.Kind.supportsModel("browser/groq"))
+        XCTAssertTrue(GroqOwnedStatusLease.FixtureTurn.matchesPrompt(user120B,kind:oss))
+        XCTAssertFalse(GroqOwnedStatusLease.FixtureTurn.matchesPrompt(Self.fixtureUser,kind:oss))
+        XCTAssertFalse(GroqOwnedStatusLease.FixtureTurn.matchesPrompt(user120B,kind:qwen))
+        for changed in [user120B+" Extra prose.",user120B.replacingOccurrences(of:"groq-gptoss120b",with:"groq-gptoss20b"),
+            user120B.replacingOccurrences(of:"127.0.0.1",with:"example.invalid"),user120B.replacingOccurrences(of:":50473/",with:":80/")] {
+            XCTAssertFalse(GroqOwnedStatusLease.FixtureTurn.matchesPrompt(changed,kind:oss))
+        }
+    }
+
     func testControlledFixtureTemplateRejectsArbitraryProsePathAndNetworkChanges() {
         XCTAssertTrue(GroqOwnedStatusLease.FixtureTurn.matchesPrompt(Self.fixtureUser))
         XCTAssertTrue(GroqOwnedStatusLease.FixtureTurn.matchesPrompt(Self.fixtureUser.replacingOccurrences(of:"/tmp/test root",with:"/different absolute root")))
@@ -172,17 +208,23 @@ import XCTest
         """
 
     private func run(_ mode:String,expected:String,profile:GroqOwnedStatusLease.Profile = .gptoss20b,
-                     fixture:Bool=false,continuation:Bool=false,customHistory:Bool=false) async throws {
+                     fixture:Bool=false,continuation:Bool=false,customHistory:Bool=false,
+                     fixtureKind:GroqOwnedStatusLease.FixtureTurn.Kind?=nil) async throws {
         let path=try XCTUnwrap(realpath(FileManager.default.temporaryDirectory.path,nil));defer{free(path)}
         let tmp=URL(fileURLWithPath:String(cString:path),isDirectory:true).appendingPathComponent("groq-status-"+UUID().uuidString)
         let directory=tmp.appendingPathComponent(GroqOwnedStatusLease.directoryName)
         try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
         defer{try? FileManager.default.removeItem(at:tmp)}
-        let nonce=UUID(),user=fixture ? Self.fixtureUser + (mode=="wrongFixture" ? " Extra prose." : "") : GroqOwnedStatusLease.userText(nonce),model=profile.choice
+        let kind=fixtureKind ?? .qwen27b
+        let controlledUser=kind == .gptoss120b ? Self.fixtureUser.replacingOccurrences(of:"groq-qwen27b",with:"groq-gptoss120b") : Self.fixtureUser
+        let nonce=UUID(),user=fixture ? controlledUser + (mode=="wrongFixture" ? " Extra prose." : "") : GroqOwnedStatusLease.userText(nonce),model=profile.choice
         let armProfile:GroqOwnedStatusLease.Profile = mode=="wrongProfile" ? .gptoss20b : profile
         let output=directory.appendingPathComponent("owned-status.json"),arm=directory.appendingPathComponent("arm.json")
         let date=ISO8601DateFormatter();date.formatOptions=[.withInternetDateTime,.withFractionalSeconds]
-        let purpose=fixture && !["wrongProfile","wrongPurpose"].contains(mode) ? GroqOwnedStatusLease.FixtureTurn.purpose : armProfile.purpose
+        let fixturePurpose=mode=="crossFixturePurpose"
+            ? (kind == .qwen27b ? GroqOwnedStatusLease.FixtureTurn.Kind.gptoss120b.purpose : GroqOwnedStatusLease.FixtureTurn.Kind.qwen27b.purpose)
+            : kind.purpose
+        let purpose=fixture && !["wrongProfile","wrongPurpose"].contains(mode) ? fixturePurpose : armProfile.purpose
         let data:[String:String]=["nonce":nonce.uuidString.lowercased(),"purpose":purpose,"modelID":armProfile.choice.modelID,
             "userPromptSHA256":GroqOwnedStatusLease.digest(mode=="wrongNonce" ? "different" : user),"expiresAt":date.string(from:Date().addingTimeInterval(80))]
         if mode != "unarmed" {
@@ -303,7 +345,7 @@ import XCTest
         XCTAssertEqual(receipts.last?.reason,mode=="success" ? .transcriptCleared : .cleanupUnverified)
         if expected=="none" {
             XCTAssertFalse(FileManager.default.fileExists(atPath:output.path))
-            XCTAssertEqual(FileManager.default.fileExists(atPath:arm.path),["wrongNonce","wrongProfile","wrongPurpose","wrongFixture","wrongModel"].contains(mode))
+            XCTAssertEqual(FileManager.default.fileExists(atPath:arm.path),["wrongNonce","wrongProfile","wrongPurpose","crossFixturePurpose","wrongFixture","wrongModel"].contains(mode))
         }
         else {
             XCTAssertFalse(FileManager.default.fileExists(atPath:arm.path),"Authorized arm must be consumed")
@@ -311,7 +353,7 @@ import XCTest
             let row=try XCTUnwrap(JSONSerialization.jsonObject(with:report) as? [String:Any])
             XCTAssertEqual(row["stage"] as? String,expected);XCTAssertEqual(row["taskID"] as? String,task)
             XCTAssertEqual(row["modelID"] as? String,model.modelID)
-            XCTAssertEqual(row["purpose"] as? String,fixture ? GroqOwnedStatusLease.FixtureTurn.purpose : profile.purpose)
+            XCTAssertEqual(row["purpose"] as? String,fixture ? kind.purpose : profile.purpose)
             XCTAssertEqual(row["trigger"] as? String,["rollback","observerNotArmed","observerUnavailable"].contains(mode) ? "groq_draft_restored" : "response_deadline")
             XCTAssertEqual(row["evidenceClass"] as? String,["observer_not_armed","observer_unavailable"].contains(expected) ? "native_observer_availability" : "page_world_observation")
             XCTAssertFalse(String(decoding:report,as:UTF8.self).contains(nonce.uuidString))
@@ -326,7 +368,7 @@ import XCTest
         if(variant==='patch')f.reply=JSON.stringify({type:'tool_calls',calls:[{name:'apply_patch',input:'*** Begin Patch\n*** End Patch'}]});
         f.send.onclick=e=>{
           const prompt=f.editor.value;old.call(f.send,e);
-          if(['preflight','unarmed','success','wrongNonce','wrongProfile','wrongPurpose','wrongFixture','wrongModel','nativeDeadline','retiredDuringRead','navigatedDuringRead'].includes(variant))return;
+          if(['preflight','unarmed','success','wrongNonce','wrongProfile','wrongPurpose','crossFixturePurpose','wrongFixture','wrongModel','nativeDeadline','retiredDuringRead','navigatedDuringRead'].includes(variant))return;
           const qwen=f.model==='qwen/qwen3.8-27b',message={content:variant==='wrongBody'?'different':prompt,role:'user'};
           const body=JSON.stringify({model:f.model,messages:qwen?[message]:[{content:'synthetic system',role:'system'},message],temperature:qwen?0.6:1,max_completion_tokens:qwen?8192:16384,top_p:qwen?0.95:1,stream:true});
           fetch('https://api.groq.com/openai/v1/chat/completions',{method:'POST',body}).catch(()=>{
