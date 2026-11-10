@@ -609,7 +609,8 @@ enum WebModelResponseCodec {
             : baseRequestContext
         let browserHandoff = compactGroq
             ? currentGroqBrowserHandoff(tools: offered, policy: policy, entryTools: groqEntryTools,
-                                       availability: browserToolAvailability)
+                                       availability: browserToolAvailability,
+                                       hasDeferredBrowserTools: deferredBrowserInstructions != nil)
             : currentBrowserHandoff(tools: offered, policy: policy, availability: browserToolAvailability)
         let responseContract = compactGroq ? ComputaAgentInstructions.groqResponseContract(currentBrowserHandoff: browserHandoff,
             hasFunctions: offered.values.contains { !$0.isCustom }, hasCustomTools: !customNames.isEmpty,
@@ -734,7 +735,8 @@ enum WebModelResponseCodec {
 
     private static func currentGroqBrowserHandoff(tools: [String: OfferedTool], policy: ToolPolicy,
                                                   entryTools: [String: OfferedTool],
-                                                  availability: EmbeddedBrowserToolAvailability?) -> String {
+                                                  availability: EmbeddedBrowserToolAvailability?,
+                                                  hasDeferredBrowserTools: Bool) -> String {
         if availability == .unbound, !entryTools.isEmpty {
             // Present the supplied URL route first, then a previously observed human tab.
             let routes = entryTools.sorted { ($0.value.name, $0.key) > ($1.value.name, $1.key) }.map { name, tool in
@@ -743,8 +745,18 @@ enum WebModelResponseCodec {
                     ? "Supplied URL: \(use) \(name)."
                     : "Existing human tab with an observed tab_id: \(use) \(name)."
             }
-            return "Current browser state: unbound. " + routes.joined(separator: " ")
-                + " Loading schemas executes no task tools. Shell HTTP cannot verify browser state. After entry check catalog_revision for reads/actions. Empty tabs do not prove denial."
+            var result = "Current browser state: unbound. " + routes.joined(separator: " ")
+                + " Loading schemas executes no task tools. Shell HTTP cannot verify browser state. Empty tabs do not prove denial."
+            if hasDeferredBrowserTools {
+                result += " Registered page tools await successful open/bind, which refreshes the next catalog without user enablement; tool_choice and permissions still govern. Then load only offered, allowed schemas with current catalog_revision. Do not call deferred tools now; respect actual denials."
+            } else {
+                result += " After entry check catalog_revision for reads/actions."
+            }
+            // The loader handoff already carries this cue while entry is unloaded.
+            if entryTools.keys.contains(where: { tools[$0] != nil && policy.allowedNames.contains($0) }) {
+                result += " Webpages use browser_*; computer_v2_* is native-app UI."
+            }
+            return result
         }
         let allowed = tools.filter { policy.allowedNames.contains($0.key) && $0.value.nativeBrowserBit != 0 }
         guard !allowed.isEmpty else { return "" }
