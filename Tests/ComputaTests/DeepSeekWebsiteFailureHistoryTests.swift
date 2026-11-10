@@ -62,7 +62,7 @@ final class DeepSeekWebsiteFailureHistoryTests: XCTestCase {
             try rejected(missing)
         }
         var extra = envelope; extra["pageText"] = "PRIVATE_PAGE_CANARY"; try rejected(extra)
-        for foreign in ["browser/chatgpt", "browser/claude", "browser/gemini", "browser/groq", "api/cerebras/model/fixture", "browser/deepseek", "browser/deepseek/mode/Chat", "browser/deepseek/choice/chat"] {
+        for foreign in ["browser/chatgpt", "browser/claude", "browser/gemini", "api/cerebras/model/fixture", "browser/deepseek", "browser/deepseek/mode/Chat", "browser/deepseek/choice/chat"] {
             try rejected(envelope, modelID: foreign)
         }
         let legacy = try WebModelServer.errorBody(for: WebModelResponseCodec.Failure.unsupportedWebsiteResponse)

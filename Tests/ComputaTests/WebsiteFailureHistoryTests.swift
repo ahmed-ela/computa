@@ -373,6 +373,74 @@ final class WebsiteFailureHistoryTests: XCTestCase {
         }
     }
 
+    func testGroqCapturedNativeLiteralFormatDiagnosticPersistsAndReloadsItsExactEnvelope() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaGroqFormatHistory-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let failure = EmbeddedWebModelTransport.Failure.responseFormatUnavailable
+        XCTAssertFalse(failure.blocksProviderUntilRefresh)
+        let native = try WebModelServer.errorBody(for: failure)
+        // Exact fixed native envelope from stopped build479; no provider reply or user identity.
+        let captured = #"{"error":{"required_action":"inspect_website","code":"unsupported_website_response","type":"model_error","message":"The complete website reply could not be read in a supported literal format. No proposed action was executed.","param":null,"retryable":false}}"#
+        let expected = try XCTUnwrap(JSONSerialization.jsonObject(with: native) as? [String: Any])
+        XCTAssertTrue(NSDictionary(dictionary: try XCTUnwrap(JSONSerialization.jsonObject(with: Data(captured.utf8)) as? [String: Any])).isEqual(to: expected))
+        let fields = try XCTUnwrap(expected["error"] as? [String: Any])
+        XCTAssertEqual(Set(fields.keys), ["type", "message", "code", "param", "retryable", "required_action"])
+        XCTAssertEqual(fields["retryable"] as? Bool, false); XCTAssertEqual(fields["required_action"] as? String, "inspect_website")
+        let model = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
+        for (index, text) in [String(decoding: native, as: UTF8.self), captured].enumerated() {
+            let directory = root.appendingPathComponent(String(index))
+            let task = UUID().uuidString, thread = UUID().uuidString, turn = UUID().uuidString
+            let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+                turnID: turn, modelID: model, diagnosticText: text))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path), "Record admission precedes all store I/O")
+            let store = WebsiteTurnFailureStore(directory: directory)
+            XCTAssertTrue(store.append(record)); XCTAssertTrue(store.append(record), "The same failed turn remains idempotent")
+            let restored = try WebsiteTurnFailureStore(directory: directory).load(threadID: thread)
+            XCTAssertEqual(restored, [record])
+            let saved = try XCTUnwrap(restored.first)
+            XCTAssertEqual(saved.taskID, task.lowercased()); XCTAssertEqual(saved.threadID, thread.lowercased())
+            XCTAssertEqual(saved.turnID, turn.lowercased()); XCTAssertEqual(saved.modelID, model)
+            XCTAssertEqual(saved.entry.id, "agent-error:" + turn.lowercased()); XCTAssertEqual(saved.entry.title, "Agent error")
+            XCTAssertTrue(NSDictionary(dictionary: try XCTUnwrap(JSONSerialization.jsonObject(with: Data(saved.diagnosticText.utf8)) as? [String: Any])).isEqual(to: expected))
+        }
+    }
+
+    func testGroqLiteralFormatHistoryRejectsAlteredOrForeignEnvelopesBeforeStorage() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaGroqFormatRefusal-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
+        let native = try WebModelServer.errorBody(for: EmbeddedWebModelTransport.Failure.responseFormatUnavailable)
+        let original = try XCTUnwrap(JSONSerialization.jsonObject(with: native) as? [String: Any])
+        let fields = try XCTUnwrap(original["error"] as? [String: Any])
+        let task = UUID().uuidString, thread = UUID().uuidString, turn = UUID().uuidString
+        func rejected(_ object: [String: Any], modelID selected: String? = nil) throws {
+            XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turn,
+                modelID: selected ?? model, diagnosticText: String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+        }
+        let changes: [[String: Any]] = [["message": "PRIVATE_PROVIDER_PROSE"], ["retryable": true], ["retryable": 0],
+            ["retryable": "false"], ["required_action": "retry_send"], ["type": "server_error"],
+            ["code": "browser_model_error"], ["param": "input"], ["providerBody": "PRIVATE_PROVIDER_PROSE"]]
+        for change in changes {
+            var object = original, error = fields; change.forEach { error[$0.key] = $0.value }; object["error"] = error
+            try rejected(object)
+        }
+        for key in fields.keys {
+            var object = original, error = fields; error.removeValue(forKey: key); object["error"] = error
+            try rejected(object)
+        }
+        var extra = original; extra["providerBody"] = "PRIVATE_PROVIDER_PROSE"; try rejected(extra)
+        for foreign in [syntheticChatGPTModelID, "browser/claude", "browser/gemini", "browser/deepseek", "browser/unknown", "api/groq/model/fixture"] {
+            try rejected(original, modelID: foreign)
+        }
+        let legacy = try WebModelServer.errorBody(for: WebModelResponseCodec.Failure.unsupportedWebsiteResponse)
+        try rejected(try XCTUnwrap(JSONSerialization.jsonObject(with: legacy) as? [String: Any]))
+        for prose in ["unsupported_website_response", "PRIVATE_PROVIDER_PROSE", "{}", "{\"error\":\"unsupported_website_response\"}"] {
+            XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turn, modelID: model, diagnosticText: prose))
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+    }
+
     func testKimiUnsupportedLiteralResponseSurvivesStoreRecreationAndKeepsTheExactTurnFailed() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaKimiFormatHistory-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -438,7 +506,7 @@ final class WebsiteFailureHistoryTests: XCTestCase {
             try rejected(missing)
         }
         var extra = envelope; extra["pageText"] = "PRIVATE_PAGE_CANARY"; try rejected(extra)
-        for foreign in [syntheticChatGPTModelID, "browser/claude", "browser/gemini", "browser/groq", "api/cerebras/model/fixture"] {
+        for foreign in [syntheticChatGPTModelID, "browser/claude", "browser/gemini", "api/cerebras/model/fixture"] {
             try rejected(envelope, forModel: foreign)
         }
         let chatGPT = try WebModelServer.errorBody(for: WebModelResponseCodec.Failure.unsupportedWebsiteResponse)

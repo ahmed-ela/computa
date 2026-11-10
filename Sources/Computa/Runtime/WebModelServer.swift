@@ -2535,6 +2535,9 @@ actor WebModelServer {
                         case .deadline: cause="response_deadline"
                         case .ownershipFailure(.groqReportedSubmissionError):cause="groq_reported_submission_error"
                         case .ownershipFailure(.groqDraftRestored):cause="groq_draft_restored"
+                        case .responseFormatUnavailable:
+                            cause = diagnostic.capturesResponseStreamMetadata && diagnostic.responseStreamMetadataVersion == 2
+                                ? "unsupported_website_response" : nil
                         default:cause=nil
                         }
                     } else if let server=error as? Failure, case .deadline=server {cause="response_deadline"}

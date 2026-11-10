@@ -198,8 +198,22 @@ import XCTest
         let arm = try inspectorArm(purpose: purpose, expiresIn: 600)
         XCTAssertNil(Lease.FixtureTurn.consume(directory: arm.directory, admission: arm.admission,
             request: arm.request, first: false, allowResponseStream: true))
+        // Exercise the exact bound from the serialized canonical expiry, rather
+        // than a second wall-clock sample across fractional-second formatting.
+        let armURL = arm.directory.appendingPathComponent("arm.json")
+        let armBytes = try Data(contentsOf: armURL)
+        let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: armBytes) as? [String: String])
+        let expiryText = try XCTUnwrap(fields["expiresAt"])
+        let formatter = ISO8601DateFormatter(); formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let expiry = try XCTUnwrap(formatter.date(from: expiryText))
+        XCTAssertEqual(formatter.string(from: expiry), expiryText)
+        let fixedNow = expiry.addingTimeInterval(-600)
+        XCTAssertNil(Lease.FixtureTurn.consume(directory: arm.directory, admission: arm.admission,
+            request: arm.request, first: true, allowResponseStream: true, now: fixedNow.addingTimeInterval(-0.001)),
+            "Even one millisecond beyond the 600-second bound must refuse")
+        XCTAssertEqual(try Data(contentsOf: armURL), armBytes, "A refused boundary check cannot consume or rewrite the arm")
         let parent = try XCTUnwrap(Lease.FixtureTurn.consume(directory: arm.directory, admission: arm.admission,
-            request: arm.request, first: true, allowResponseStream: true))
+            request: arm.request, first: true, allowResponseStream: true, now: fixedNow))
         let first = try XCTUnwrap(parent.child(admission: arm.admission, request: arm.request))
         XCTAssertEqual(parent.publicationPurpose, purpose)
         XCTAssertEqual(first.responseStreamMetadataPurpose, purpose); XCTAssertEqual(first.responseStreamMetadataVersion, 2)
@@ -302,6 +316,60 @@ import XCTest
     func testResponseStreamTailV2UsesItsExactPurposeInTheFreshNativeEarlyController() async throws {
         try await run("cachedSDK", expected: "transport_rejected", profile: .gptoss120b, fixture: true,
             fixtureKind: .gptoss120b, earlyPassive: true, responseStreamTail: true)
+    }
+
+    func testResponseStreamTailV2CapturesBoundLiteralFailureBeforeOwnedCleanup() async throws {
+        try await run("format", expected: "http_2xx_opened", profile: .gptoss120b, fixture: true,
+            fixtureKind: .gptoss120b, earlyPassive: true, responseStreamTail: true)
+    }
+
+    func testLiteralFailureLeavesV1AndDefaultDiagnosticPublicationUnchanged() async throws {
+        try await run("format", expected: "none", profile: .gptoss120b, fixture: true,
+            fixtureKind: .gptoss120b, earlyPassive: true, responseStreamV1: true)
+        try await run("format", expected: "none", profile: .gptoss120b, fixture: true,
+            fixtureKind: .gptoss120b)
+    }
+
+    func testV2LiteralFailureTriggerRemainsPurposeBoundAndFirstFailureOnly() throws {
+        typealias Lease = GroqOwnedStatusLease
+        for purpose in [Lease.FixtureTurn.responseStreamTailPurpose, Lease.FixtureTurn.responseStreamPurpose,
+                        Lease.FixtureTurn.earlyPassivePurpose, Lease.FixtureTurn.Kind.gptoss120b.purpose] {
+            let arm = try inspectorArm(purpose: purpose)
+            let parent = try XCTUnwrap(Lease.FixtureTurn.consume(directory: arm.directory, admission: arm.admission,
+                request: arm.request, first: true, allowEarlyPassive: true, allowResponseStream: true))
+            let child = try XCTUnwrap(parent.child(admission: arm.admission, request: arm.request))
+            let owner = UUID().uuidString.lowercased(), generation = UUID()
+            let metadata = try XCTUnwrap(Lease.ResponseStreamMetadata.parse(try responseStreamMetadataJSON(["version": 2])))
+            let observation = Lease.Observation(stage: "http_2xx_opened", sessionToken: owner,
+                generation: generation, responseStreamMetadata: metadata)
+            child.publish(observation, trigger: "unsupported_website_response")
+            if purpose == Lease.FixtureTurn.responseStreamTailPurpose {
+                let bytes = try Data(contentsOf: arm.output)
+                XCTAssertLessThanOrEqual(bytes.count, 4_096)
+                let row = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+                XCTAssertEqual(row["trigger"] as? String, "unsupported_website_response")
+                XCTAssertEqual((row["responseStreamMetadata"] as? [String: Any])?.count, 20)
+                XCTAssertEqual(row["session"] as? String, owner)
+                child.publish(.init(stage: "http_429", sessionToken: UUID().uuidString.lowercased(), generation: UUID()),
+                    trigger: "response_deadline")
+                XCTAssertEqual(try Data(contentsOf: arm.output), bytes, "A later failure cannot overwrite the first shared claim")
+            } else {
+                XCTAssertFalse(FileManager.default.fileExists(atPath: arm.output.path), purpose)
+                XCTAssertTrue(parent.isCurrent, "A refused new trigger cannot consume the old purpose's first-failure claim")
+            }
+            parent.revoke()
+        }
+        for retireParent in [false, true] {
+            let arm = try inspectorArm(purpose: Lease.FixtureTurn.responseStreamTailPurpose)
+            let parent = try XCTUnwrap(Lease.FixtureTurn.consume(directory: arm.directory, admission: arm.admission,
+                request: arm.request, first: true, allowResponseStream: true))
+            let child = try XCTUnwrap(parent.child(admission: arm.admission, request: arm.request))
+            if retireParent { parent.revoke() } else { child.revoke() }
+            child.publish(.init(stage: "http_2xx_opened", sessionToken: UUID().uuidString.lowercased(), generation: UUID()),
+                trigger: "unsupported_website_response")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: arm.output.path), "Retired leases cannot publish the new trigger")
+            parent.revoke()
+        }
     }
 
     private func responseStreamMetadataJSON(_ changes: [String: Any] = [:]) throws -> String {
@@ -1204,7 +1272,7 @@ import XCTest
     private func run(_ mode:String,expected:String,profile:GroqOwnedStatusLease.Profile = .gptoss20b,
                      fixture:Bool=false,continuation:Bool=false,customHistory:Bool=false,
                      fixtureKind:GroqOwnedStatusLease.FixtureTurn.Kind?=nil,earlyPassive:Bool=false,maskReadFailure:Bool=false,
-                     responseStreamTail:Bool=false) async throws {
+                     responseStreamTail:Bool=false,responseStreamV1:Bool=false) async throws {
         let path=try XCTUnwrap(realpath(FileManager.default.temporaryDirectory.path,nil));defer{free(path)}
         let tmp=URL(fileURLWithPath:String(cString:path),isDirectory:true).appendingPathComponent("groq-status-"+UUID().uuidString)
         let directory=tmp.appendingPathComponent(GroqOwnedStatusLease.directoryName)
@@ -1217,6 +1285,7 @@ import XCTest
         let output=directory.appendingPathComponent("owned-status.json"),arm=directory.appendingPathComponent("arm.json")
         let date=ISO8601DateFormatter();date.formatOptions=[.withInternetDateTime,.withFractionalSeconds]
         let fixturePurpose=responseStreamTail ? GroqOwnedStatusLease.FixtureTurn.responseStreamTailPurpose
+            : responseStreamV1 ? GroqOwnedStatusLease.FixtureTurn.responseStreamPurpose
             : earlyPassive ? GroqOwnedStatusLease.FixtureTurn.earlyPassivePurpose : mode=="crossFixturePurpose"
             ? (kind == .qwen27b ? GroqOwnedStatusLease.FixtureTurn.Kind.gptoss120b.purpose : GroqOwnedStatusLease.FixtureTurn.Kind.qwen27b.purpose)
             : kind.purpose
@@ -1240,7 +1309,17 @@ import XCTest
         var view:LocalView?
         var pages:[LocalView]=[]
         browser.setModelViewFactoryForTesting { config in
-            let source=(mode == "cachedSDK"
+            let source=(mode == "format" ? #"""
+                // Local fixture response only: no network request. The exact URL/type
+                // getters are a controlled Response-double seam; body/clone/status/headers
+                // remain real WebKit Response/ReadableStream implementations.
+                const fixtureNativeResponse=Response;
+                Object.defineProperty(fixtureNativeResponse.prototype,'url',{configurable:true,get(){return 'https://api.groq.com/openai/v1/chat/completions';}});
+                Object.defineProperty(fixtureNativeResponse.prototype,'type',{configurable:true,get(){return 'cors';}});
+                window.fetch=function(){window.requests=(window.requests||0)+1;
+                  const body='data: '+JSON.stringify({choices:[{delta:{content:'PRIVATE_FORMAT_STREAM_BODY'},finish_reason:'stop'}]})+'\n\ndata: [DONE]\n\n';
+                  return Promise.resolve(new fixtureNativeResponse(body,{status:200,headers:{'Content-Type':'text/event-stream'}}));};
+                """# : mode == "cachedSDK"
                 ? "window.fetch=function(){'use strict';window.requests=(window.requests||0)+1;window.groqBaseReceiver=this;window.groqBaseArgs=Array.from(arguments);const result=['tool','patch','success'].includes(window.variant)?new Promise(()=>{}):Promise.reject(Error('synthetic'));window.groqBasePromise=result;return result;};window.groqBaseFetch=window.fetch;"
                 : mode == "siteWrapper"
                 ? "window.fetch=function(){window.requests=(window.requests||0)+1;window.groqBaseReceiver=this;window.groqBaseArgs=Array.from(arguments);const result=Promise.reject(Error('synthetic'));window.groqBasePromise=result;return result;}"
@@ -1381,6 +1460,7 @@ import XCTest
             let firstPage=try XCTUnwrap(pages.first)
             XCTAssertFalse(browser.tabs.contains { browser.webView(for:$0.id)===firstPage },"Groq clears and closes the first physical view")
         }
+        var formatFailureObserved = false
         do {
             let result=try await server.fixtureInfer(request(),taskID:task,threadID:thread,turnID:turn,runtimeGeneration:runtime,preparationID:prep)
             XCTAssertEqual(mode,"success")
@@ -1392,12 +1472,15 @@ import XCTest
         } catch {
             XCTAssertNotEqual(mode,"success")
             switch error {
+            case EmbeddedWebModelTransport.Failure.responseFormatUnavailable:
+                XCTAssertEqual(mode, "format"); formatFailureObserved = true
             case EmbeddedWebModelTransport.Failure.ownershipFailure(.groqDraftRestored):XCTAssertTrue(["rollback","observerNotArmed","observerUnavailable","siteWrapper","cachedSDK"].contains(mode))
             case WebModelServer.Failure.deadline:XCTAssertNotEqual(mode,"nativeDeadline");XCTAssertNotEqual(mode,"rollback")
             case EmbeddedWebModelTransport.Failure.deadline:XCTAssertEqual(mode,"nativeDeadline")
             default:XCTFail("Unexpected synthetic terminal error: "+String(describing:error))
             }
         }
+        if mode == "format" { XCTAssertTrue(formatFailureObserved, "Strict literal failure must remain the actual terminal error; no completed response is released") }
         if maskReadFailure { XCTAssertTrue(readFailureDelayed); XCTAssertEqual(maskedReadCallbacks, 3) }
         XCTAssertEqual(retired,["retiredDuringRead","navigatedDuringRead"].contains(mode))
         let page=try XCTUnwrap(view)
@@ -1443,10 +1526,27 @@ import XCTest
             }
         }
         XCTAssertNotNil(browser.webView(for:human))
+        var formatPacketBeforeCleanup: Data?
+        if mode == "format" {
+            XCTAssertTrue(browser.tabs.contains { browser.webView(for:$0.id) === page }, "The failed view remains owned until explicit Finish")
+            let clears = try await page.evaluateJavaScript("window.groqFixture.clearCount") as? Int
+            XCTAssertEqual(clears, 0)
+            if responseStreamTail {
+                formatPacketBeforeCleanup = try Data(contentsOf: output)
+                XCTAssertFalse(formatPacketBeforeCleanup!.isEmpty, "Fully bound V2 failure must publish before cleanup")
+            } else { XCTAssertFalse(FileManager.default.fileExists(atPath: output.path)) }
+        }
         _=await server.fixtureFinish(taskID:task,runtimeGeneration:runtime)
         let receipts=await server.latestCleanupReceipts()
-        XCTAssertEqual(receipts.last?.outcome,mode=="success" ? .closed : .unconfirmed)
-        XCTAssertEqual(receipts.last?.reason,mode=="success" ? .transcriptCleared : .cleanupUnverified)
+        XCTAssertEqual(receipts.last?.outcome,["success","format"].contains(mode) ? .closed : .unconfirmed)
+        XCTAssertEqual(receipts.last?.reason,["success","format"].contains(mode) ? .transcriptCleared : .cleanupUnverified)
+        if mode == "format" {
+            let clearCount = try await page.evaluateJavaScript("window.groqFixture.clearCount") as? Int
+            XCTAssertEqual(clearCount, 1)
+            XCTAssertEqual(receipts.count, 1)
+            XCTAssertFalse(browser.tabs.contains { browser.webView(for:$0.id) === page })
+            if let formatPacketBeforeCleanup { XCTAssertEqual(try Data(contentsOf: output), formatPacketBeforeCleanup, "Cleanup cannot replace the first failure") }
+        }
         if expected=="none" {
             XCTAssertFalse(FileManager.default.fileExists(atPath:output.path))
             XCTAssertEqual(FileManager.default.fileExists(atPath:arm.path),["wrongNonce","wrongProfile","wrongPurpose","crossFixturePurpose","wrongFixture","wrongModel"].contains(mode))
@@ -1458,7 +1558,7 @@ import XCTest
             XCTAssertEqual(row["stage"] as? String,expected);XCTAssertEqual(row["taskID"] as? String,task)
             XCTAssertEqual(row["modelID"] as? String,model.modelID)
             XCTAssertEqual(row["purpose"] as? String,fixture ? fixturePurpose : profile.purpose)
-            XCTAssertEqual(row["trigger"] as? String,["rollback","observerNotArmed","observerUnavailable","siteWrapper","cachedSDK"].contains(mode) ? "groq_draft_restored" : "response_deadline")
+            XCTAssertEqual(row["trigger"] as? String,mode == "format" ? "unsupported_website_response" : ["rollback","observerNotArmed","observerUnavailable","siteWrapper","cachedSDK"].contains(mode) ? "groq_draft_restored" : "response_deadline")
             XCTAssertEqual(row["evidenceClass"] as? String,["observer_not_armed","observer_unavailable"].contains(expected) ? "native_observer_availability" : "page_world_observation")
             if earlyPassive {
                 let progress = try XCTUnwrap(row["failureProgress"] as? [String: Any])
@@ -1483,7 +1583,23 @@ import XCTest
                 XCTAssertNotNil((row["setupReason"] as? String).flatMap(GroqOwnedStatusLease.SetupReason.init(rawValue:)))
                 XCTAssertEqual(row["setupReason"] as? String, mode == "observerNotArmed" ? "js_fetch_descriptor" : "armed")
             } else {
-                XCTAssertEqual(row.count, earlyPassive ? 16 : 15); XCTAssertNil(row["setupReason"])
+                XCTAssertEqual(row.count, mode == "format" && responseStreamTail ? 17 : earlyPassive ? 16 : 15); XCTAssertNil(row["setupReason"])
+            }
+            if mode == "format" {
+                XCTAssertEqual(row["threadID"] as? String, thread); XCTAssertEqual(row["turnID"] as? String, turn)
+                XCTAssertEqual(row["runtimeGeneration"] as? String, runtime.uuidString.lowercased())
+                XCTAssertEqual(row["preparationID"] as? String, prep.uuidString.lowercased())
+                XCTAssertNotNil(UUID(uuidString: try XCTUnwrap(row["session"] as? String)))
+                XCTAssertNotNil(UUID(uuidString: try XCTUnwrap(row["documentGeneration"] as? String)))
+                let metadata = try XCTUnwrap(row["responseStreamMetadata"] as? [String: Any])
+                XCTAssertEqual(metadata.count, 20); XCTAssertEqual(metadata["version"] as? Int, 2)
+                XCTAssertEqual(metadata["content"] as? Bool, true); XCTAssertEqual(metadata["finishReason"] as? String, "stop")
+                XCTAssertEqual(metadata["done"] as? Bool, true); XCTAssertEqual(metadata["eof"] as? Bool, true)
+                XCTAssertEqual(metadata["outcome"] as? String, "eof")
+                XCTAssertLessThanOrEqual(try JSONSerialization.data(withJSONObject: metadata).count, 2_048)
+                XCTAssertLessThanOrEqual(report.count, 4_096)
+                XCTAssertFalse(String(decoding: report, as: UTF8.self).contains("PRIVATE_FORMAT_STREAM_BODY"))
+                XCTAssertFalse(String(decoding: report, as: UTF8.self).contains(user))
             }
             XCTAssertFalse(String(decoding:report,as:UTF8.self).contains(nonce.uuidString))
         }
@@ -1512,11 +1628,17 @@ import XCTest
         if(variant==='success')f.reply=JSON.stringify({type:'message',text:'Fixture complete'});
         if(variant==='tool')f.reply=JSON.stringify({type:'tool_calls',calls:[{name:'fixture_read',arguments:{}}]});
         if(variant==='patch')f.reply=JSON.stringify({type:'tool_calls',calls:[{name:'apply_patch',input:'*** Begin Patch\n*** End Patch'}]});
+        if(variant==='format'){f.structuredReply=false;f.reply=JSON.stringify({type:'tool_calls',calls:[{name:'fixture_read',arguments:{}}]});}
         f.send.onclick=e=>{
           const prompt=f.editor.value;old.call(f.send,e);
           if(['preflight','unarmed','success','wrongNonce','wrongProfile','wrongPurpose','crossFixturePurpose','wrongFixture','wrongModel','nativeDeadline','retiredDuringRead','navigatedDuringRead'].includes(variant))return;
           const qwen=f.model==='qwen/qwen3.8-27b',message={content:variant==='wrongBody'?'different':prompt,role:'user'};
           const body=JSON.stringify({model:f.model,messages:qwen?[message]:[{content:'synthetic system',role:'system'},message],temperature:qwen?0.6:1,max_completion_tokens:qwen?8192:16384,top_p:qwen?0.95:1,stream:true});
+          if(variant==='format'){
+            fetch('https://api.groq.com/openai/v1/chat/completions',{method:'POST',body})
+              .then(response=>response.text()).then(()=>setTimeout(()=>f.finishResponse(),50));
+            return;
+          }
           if(variant==='cachedSDK'){
             window.groqSDKArgs=['https://api.groq.com/openai/v1/chat/completions',{method:'POST',body}];
             window.groqSDKPromise=Reflect.apply(window.groqCachedFetch,window.groqCachedReceiver,window.groqSDKArgs);

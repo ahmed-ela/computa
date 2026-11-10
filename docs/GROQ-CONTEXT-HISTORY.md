@@ -212,3 +212,24 @@ do not guarantee a complete stream. Cloning tees the response and can affect
 scheduling, backpressure and browser queue use, so this remains an invasive
 synthetic diagnostic. It adds no response acceptance, Inspector, Send, replay,
 cleanup or pacing authority. Ordinary model requests keep the probe disabled.
+
+### Format-failure evidence coverage (2026-11-10)
+
+The fresh private build 479 workflow completed two schema-loading responses,
+then rejected its third reply as `unsupported_website_response` before any task
+action. All three owned website sessions closed. The fixture did not pass.
+The literal source rejection does not establish whether the provider ignored
+the requested fenced format or the page used an unsupported representation.
+
+Two independent diagnostic gaps prevented that run from retaining useful failure
+evidence. The native failure-store parser did not admit Groq's exact transport
+format-error envelope, so record construction returned nil before append or I/O.
+Separately, the stream probe's closed trigger list omitted the new transport
+format-error category, so it did not publish its existing metadata before cleanup.
+Neither observation is evidence of storage exhaustion or a provider stream cause.
+
+The follow-up keeps strict literal verification. Its persistence change admits
+only the existing exact native Groq envelope. Its stream publication change is
+limited to the already opted-in v2 synthetic fixture purpose; v1 and ordinary
+requests retain their previous trigger set. Diagnostics do not supply response
+acceptance, execution, retry or cleanup authority.

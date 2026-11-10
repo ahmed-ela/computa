@@ -36,10 +36,10 @@ struct WebsiteTurnFailureStore: Sendable {
                   let webProvider = EmbeddedWebModelTransport.Provider(rawValue: provider),
                   let supplied = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
                   let error = supplied["error"] as? [String: Any], let code = error["code"] as? String else { return nil }
-            // Legacy fixed errors and native timeouts have no retry metadata. The saved-chat
-            // adapters' distinct unsupported-response envelope does, and must retain a real Bool.
+            // Legacy fixed errors and native timeouts have no retry metadata. The fixed
+            // literal adapters' unsupported-response envelope does, and must retain a real Bool.
             // Exact generated envelopes still pass canonical equality below.
-            let savedLiteralSource = ["kimi", "qwen", "deepseek"].contains(provider)
+            let savedLiteralSource = ["kimi", "qwen", "deepseek", "groq"].contains(provider)
             if code != "browser_model_error" && code != "website_turn_limit" && code != "invalid_model_output"
                 && code != "provider_timeout"
                 && (code != "unsupported_website_response" || savedLiteralSource) {

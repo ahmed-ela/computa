@@ -873,7 +873,8 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
         let stage=observation.stage, owner=observation.sessionToken, generation=observation.generation
         guard !Task.isCancelled, isCurrent,
               Self.stages.contains(stage) || isFixture && ["observer_not_armed","observer_unavailable"].contains(stage),
-              ["response_deadline","groq_draft_restored","groq_reported_submission_error"].contains(trigger),
+              (["response_deadline","groq_draft_restored","groq_reported_submission_error"].contains(trigger)
+                || capturesResponseStreamMetadata && responseStreamMetadataVersion == 2 && trigger == "unsupported_website_response"),
               let session=UUID(uuidString:owner) else{return}
         var v:[String:Any]=["schemaVersion":1,"purpose":fixtureTurn?.publicationPurpose ?? profile.purpose,"provider":"groq","modelID":admission.modelID,
             "taskID":admission.taskID,"threadID":admission.threadID,"turnID":admission.turnID,
