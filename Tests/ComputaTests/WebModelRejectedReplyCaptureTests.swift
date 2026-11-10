@@ -668,6 +668,61 @@ final class WebModelRejectedReplyCaptureTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.directory.path), ["arm.json"])
     }
 
+    func testCurrentnessFenceRejectsExpiredAndRevokedCapturesWithoutAnOutput() throws {
+        for mode in ["inactive", "expired", "revoked_at_claim"] {
+            let fixture = try Fixture(); defer { fixture.remove() }
+            let task = UUID(); try fixture.arm(task)
+            let arm = try Data(contentsOf: fixture.armFile)
+            let current = LockedRejectedCaptureCurrentness(active: mode != "inactive")
+            let deadline = ContinuousClock.now + (mode == "expired" ? .seconds(-1) : .seconds(5))
+            let captured = WebModelRejectedReplyCapture.capture(directory: fixture.directory, taskID: task,
+                record: try record(task), beforeArmClaimForTesting: {
+                    if mode == "revoked_at_claim" { current.revoke() }
+                }, isCurrent: { current.isActive && ContinuousClock.now < deadline })
+            XCTAssertFalse(captured, mode)
+            XCTAssertFalse(fixture.exists(fixture.output), mode)
+            if mode == "revoked_at_claim" {
+                // A valid claim is irreversible even when its native lease retires before commit.
+                XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.directory.path), [])
+            } else {
+                XCTAssertEqual(try Data(contentsOf: fixture.armFile), arm, mode)
+                XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.directory.path), ["arm.json"], mode)
+            }
+        }
+    }
+
+    func testCancellationBeforeOrDuringClaimCannotPublishButCurrentCapturePreservesExactBytes() async throws {
+        for mode in ["current", "cancelled", "cancelled_at_claim"] {
+            let fixture = try Fixture(); defer { fixture.remove() }
+            let task = UUID(); try fixture.arm(task)
+            let arm = try Data(contentsOf: fixture.armFile)
+            let bytes = try record(task, reply: "rejected  text\r\n\t\"literal\" e\u{0301} 🌍")
+            let directory = fixture.directory
+            let capture = Task { () -> Bool in
+                if mode == "cancelled" { withUnsafeCurrentTask { $0?.cancel() } }
+                return WebModelRejectedReplyCapture.capture(directory: directory, taskID: task, record: bytes,
+                    beforeArmClaimForTesting: {
+                        if mode == "cancelled_at_claim" { withUnsafeCurrentTask { $0?.cancel() } }
+                    }, isCurrent: { !Task.isCancelled })
+            }
+            let captured = await capture.value
+            XCTAssertEqual(captured, mode == "current", mode)
+            if mode == "current" {
+                XCTAssertEqual(try Data(contentsOf: fixture.output), bytes)
+                XCTAssertEqual(try fixture.permissions(fixture.output), 0o600)
+                XCTAssertFalse(fixture.exists(fixture.armFile))
+                try fixture.arm(task)
+                XCTAssertFalse(WebModelRejectedReplyCapture.capture(directory: directory, taskID: task,
+                    record: try record(task, reply: "must not replace the first capture"), isCurrent: { true }))
+                XCTAssertEqual(try Data(contentsOf: fixture.output), bytes)
+            } else {
+                XCTAssertFalse(fixture.exists(fixture.output), mode)
+                if mode == "cancelled" { XCTAssertEqual(try Data(contentsOf: fixture.armFile), arm) }
+                else { XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.directory.path), []) }
+            }
+        }
+    }
+
     private var request: Data {
         Data(#"{"model":"browser/claude","input":"request-only-secret","tools":[],"stream":false}"#.utf8)
     }
@@ -785,4 +840,12 @@ private final class LockedCaptureResults: @unchecked Sendable {
     private var successes = 0
     func add(_ result: Bool) { lock.lock(); defer { lock.unlock() }; if result { successes += 1 } }
     func successCount() -> Int { lock.lock(); defer { lock.unlock() }; return successes }
+}
+
+private final class LockedRejectedCaptureCurrentness: @unchecked Sendable {
+    private let lock = NSLock()
+    private var active: Bool
+    init(active: Bool) { self.active = active }
+    var isActive: Bool { lock.lock(); defer { lock.unlock() }; return active }
+    func revoke() { lock.lock(); active = false; lock.unlock() }
 }

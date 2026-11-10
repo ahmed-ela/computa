@@ -676,6 +676,44 @@ final class WebsiteAdapterFailureDiagnosticTests: XCTestCase {
         }
     }
 
+    func testGroqContextAttributesNativeIdentityWithoutAdmittingAnAdapterPacket() throws {
+        let f = try WebsiteAdapterFailureFixture(); defer { f.cleanup() }
+        let a = f.admission, choice = GroqOwnedStatusLease.Profile.gptoss120b.choice
+        let admission = WebModelStartAdmission(id: a.id, inferenceID: a.inferenceID,
+            taskID: a.taskID, threadID: a.threadID, turnID: a.turnID,
+            runtimeGeneration: a.runtimeGeneration, preparationID: a.preparationID,
+            transportGeneration: a.transportGeneration, provider: "groq", modelID: choice.modelID,
+            parameters: try JSONSerialization.data(withJSONObject: ["provider": "groq", "modelChoice": choice.canonicalJSONString]),
+            rejectedReplyDirectory: f.directory)
+        let context = try XCTUnwrap(D.Context(admission: admission))
+        XCTAssertEqual(context.taskID.uuidString.lowercased(), a.taskID)
+        XCTAssertEqual(context.threadID.uuidString.lowercased(), a.threadID)
+        XCTAssertEqual(context.turnID.uuidString.lowercased(), a.turnID)
+        XCTAssertEqual(context.runtimeGeneration, a.runtimeGeneration)
+        XCTAssertEqual(context.preparationID, a.preparationID)
+        XCTAssertEqual(context.transportGeneration, a.transportGeneration)
+        XCTAssertEqual(context.inferenceID, a.inferenceID)
+        XCTAssertEqual(context.provider, "groq"); XCTAssertEqual(context.modelID, choice.modelID)
+        for sourceProvider in ["kimi", "qwen", "deepseek", "groq"] {
+            var packet = WebsiteAdapterFailureFixture.packet(sourceProvider)
+            packet["provider"] = "groq"
+            XCTAssertNil(D.sanitize(packet, provider: "groq", error: "unsupported_response_format", detail: "authored_source"))
+            var observed: [String: Any] = ["error": "unsupported_response_format", "detail": "authored_source",
+                "adapterFailureStructure": packet]
+            XCTAssertNil(D.remove(from: &observed, provider: "groq", action: "inspect"))
+            XCTAssertEqual(Set(observed.keys), ["error", "detail"])
+            XCTAssertEqual(observed["error"] as? String, "unsupported_response_format")
+            XCTAssertEqual(observed["detail"] as? String, "authored_source")
+        }
+        // Native attribution cannot make a sibling provider's model belong to Groq.
+        let foreign = WebModelStartAdmission(id: a.id, inferenceID: a.inferenceID,
+            taskID: a.taskID, threadID: a.threadID, turnID: a.turnID,
+            runtimeGeneration: a.runtimeGeneration, preparationID: a.preparationID,
+            transportGeneration: a.transportGeneration, provider: "groq", modelID: a.modelID,
+            parameters: a.parameters, rejectedReplyDirectory: f.directory)
+        XCTAssertNil(D.Context(admission: foreign))
+    }
+
     func testContextRejectsForeignProviderInvalidModelAndNonCanonicalIDs() throws {
         let f = try WebsiteAdapterFailureFixture(); defer { f.cleanup() }
         for field in ["provider", "model", "task"] {

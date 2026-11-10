@@ -337,3 +337,29 @@ four-tool selection; page action schemas intentionally await an open/bind.
 The exact second website projection was not retained, so a delivery defect
 has not been excluded. The next diagnostic measures the admitted discovery
 contract without storing prompt text or changing response/action authority.
+
+### Literal-format rejection before the parser (2026-11-10)
+
+The ordinary build 484 task loaded `exec_command`, `browser_open`,
+`browser_bind` and `browser_tabs`. Its two saved native discovery records
+confirm the loader remained offered and the second request offered both
+browser entry schemas. The second inference failed literal-format verification
+before response parsing. No terminal, editing or browser action was dispatched;
+both website transcripts closed and the failure record was saved. Native
+discovery and prompt fingerprints alone do not prove the website's exact
+received text or the unsupported reply's representation.
+
+The armed rejected-reply capture stayed unused because that writer previously
+ran only after the transport returned a complete reply to the parser. Groq's
+initial and final literal checks throw earlier. This is a diagnostic coverage
+gap; neither the raw reply nor its layout/generation cause was retained.
+
+The follow-up reuses the exact-task arm and atomic private writer at those two
+unchanged checks. It captures only the candidate already returned by the
+adapter, labelled `rendered_nonliteral` with no response authority. The exact
+configured directory and attribution arrive through native admission, never
+page fields. Current task, owner, model, document, submission and deadline
+checks guard publication. No new page read, Copy operation, request, repair,
+replay or acceptance path is introduced. The original format error and cleanup
+rules remain intact. A captured candidate may explain its apparent format;
+it does not establish authored literal bytes or prove a selector cause.

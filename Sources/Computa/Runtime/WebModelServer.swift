@@ -46,6 +46,7 @@ struct WebModelStartAdmission: Equatable, Sendable {
     let parameters: Data
     // Native-only optional sink; absent for ordinary test/custom admissions.
     var adapterFailureDirectory: URL? = nil
+    var rejectedReplyDirectory: URL? = nil
     var retainClaudeTurn = false
 }
 
@@ -2004,7 +2005,8 @@ actor WebModelServer {
                         preparationID: context.preparationID, transportGeneration: transportGeneration,
                         provider: provider, modelID: request.model, parameters: startParameters,
                         adapterFailureDirectory: rejectedReplyDirectory?.deletingLastPathComponent()
-                            .appendingPathComponent(WebsiteAdapterFailureDiagnostic.directoryName), retainClaudeTurn: retainClaudeTurn)
+                            .appendingPathComponent(WebsiteAdapterFailureDiagnostic.directoryName),
+                        rejectedReplyDirectory: provider == "groq" ? rejectedReplyDirectory : nil, retainClaudeTurn: retainClaudeTurn)
                     claudeResponseStream?.revoke()
                     claudeResponseStream = nil
                     if provider == "claude", let task = UUID(uuidString: taskID),
@@ -3753,16 +3755,22 @@ enum WebModelRejectedReplyCapture {
         capture(directory: directory, taskID: taskID, record: record, beforeArmClaim: nil)
     }
 
+    @discardableResult
+    static func capture(directory: URL, taskID: UUID, record: Data, isCurrent: () -> Bool) -> Bool {
+        capture(directory: directory, taskID: taskID, record: record, beforeArmClaim: nil, isCurrent: isCurrent)
+    }
+
     #if DEBUG
     static func capture(directory: URL, taskID: UUID, record: Data,
-                        beforeArmClaimForTesting: @escaping @Sendable () -> Void) -> Bool {
-        capture(directory: directory, taskID: taskID, record: record, beforeArmClaim: beforeArmClaimForTesting)
+                        beforeArmClaimForTesting: @escaping @Sendable () -> Void,
+                        isCurrent: () -> Bool = { true }) -> Bool {
+        capture(directory: directory, taskID: taskID, record: record, beforeArmClaim: beforeArmClaimForTesting, isCurrent: isCurrent)
     }
     #endif
 
     private static func capture(directory: URL, taskID: UUID, record: Data,
-                                beforeArmClaim: (@Sendable () -> Void)?) -> Bool {
-        guard !record.isEmpty, record.count <= maximumRecordBytes,
+                                beforeArmClaim: (@Sendable () -> Void)?, isCurrent: () -> Bool = { true }) -> Bool {
+        guard isCurrent(), !record.isEmpty, record.count <= maximumRecordBytes,
               let object = try? JSONSerialization.jsonObject(with: record) as? [String: Any],
               object["taskID"] as? String == taskID.uuidString.lowercased(),
               let reply = object["replyText"] as? String, reply.utf8.count <= maximumReplyBytes else { return false }
@@ -3774,7 +3782,7 @@ enum WebModelRejectedReplyCapture {
                       let value = try? JSONSerialization.jsonObject(with: arm) as? [String: Any], Set(value.keys) == ["taskID"],
                       let rawTask = value["taskID"] as? String, UUID(uuidString: rawTask) == taskID else { return nil }
                 return record
-            }, beforeArmClaim: beforeArmClaim)
+            }, isCurrent: isCurrent, beforeArmClaim: beforeArmClaim)
     }
 }
 

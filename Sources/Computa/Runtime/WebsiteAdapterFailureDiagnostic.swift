@@ -23,7 +23,8 @@ enum WebsiteAdapterFailureDiagnostic {
         let provider: String, modelID: String
 
         init?(admission: WebModelStartAdmission) {
-            guard ["kimi", "qwen", "deepseek"].contains(admission.provider),
+            // Native attribution only; this does not enroll another packet or purpose.
+            guard ["kimi", "qwen", "deepseek", "groq"].contains(admission.provider),
                   let task = Self.canonicalID(admission.taskID), let thread = Self.canonicalID(admission.threadID),
                   let turn = Self.canonicalID(admission.turnID),
                   WebsiteModelCatalog.inferenceSelection(for: admission.modelID)?.provider == admission.provider else { return nil }

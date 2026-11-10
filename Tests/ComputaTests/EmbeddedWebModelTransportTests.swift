@@ -14720,6 +14720,185 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testGroqPrecodecLiteralCaptureUsesExactNativeTaskBeforeFinishWithoutResponseAuthority() async throws {
+        try await runGroqPrecodecLiteralCapture(stage: "initial_candidate")
+    }
+
+    func testGroqPrecodecFinalRereadCaptureDoesNotReuseInitialLiteralAuthority() async throws {
+        try await runGroqPrecodecLiteralCapture(stage: "final_reread")
+    }
+
+    func testGroqPrecodecCaptureLeavesUnarmedForeignAndContextlessRequestsUncaptured() async throws {
+        for mode in ["unarmed", "foreignTask", "nilContext", "nilDirectory"] {
+            try await runGroqPrecodecLiteralCapture(stage: "initial_candidate", mode: mode)
+        }
+    }
+
+    private func runGroqPrecodecLiteralCapture(stage: String, mode: String = "armed") async throws {
+        XCTAssertTrue(["initial_candidate", "final_reread"].contains(stage))
+        let reply = #"{"type":"tool_calls","calls":[{"name":"fixture_read","arguments":{"text":"A  B é 🌍 \\n"}}]}"#
+        let quoted = String(decoding: try JSONSerialization.data(withJSONObject: reply, options: [.fragmentsAllowed]), as: UTF8.self)
+        let page = try Self.groqFixturePage().replacingOccurrences(of: "window.fixtureReady = true;",
+            with: "f.structuredReply = " + (stage == "initial_candidate" ? "false" : "true")
+                + "; f.reply = " + quoted + "; window.fixtureReady = true;")
+        let fixture = try Fixture(page: page); defer { fixture.shutdown() }
+        let root = try websiteBenchmarkTemporaryDirectory()
+            .appendingPathComponent("GroqPrecodecNative-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("WebsiteReplyDiagnostics-v1")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        let task = UUID(), thread = UUID(), turn = UUID(), generation = UUID()
+        let arm = directory.appendingPathComponent("arm.json"), output = directory.appendingPathComponent("rejected-reply.json")
+        let armBytes = try JSONSerialization.data(withJSONObject:
+            ["taskID": (mode == "foreignTask" ? UUID() : task).uuidString.lowercased()])
+        if mode != "unarmed" {
+            try armBytes.write(to: arm)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: arm.path)
+        }
+        let forwarder = GroqLiteralCaptureTransport(native: fixture.transport, dropsContext: mode == "nilContext")
+        var finalMutationReady = false, mutations = 0
+        if stage == "final_reread" {
+            forwarder.afterFirstCandidate = {
+                // Pause only AFTER a genuine native poll armed its literal
+                // candidate. The next poll crosses the unchanged quiet interval.
+                try await Task.sleep(for: .milliseconds(1_700))
+                finalMutationReady = true
+            }
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                guard action == "verifyModel", finalMutationReady, mutations == 0,
+                      let id = fixture.createdTabs.last, let view = fixture.browser.webView(for: id) else { return }
+                mutations += 1
+                _ = try? await self.evaluate(view, """
+                    const f = groqFixture, text = f.code.textContent, p = document.createElement('p');
+                    p.className = 'text-left mb-4'; p.textContent = text;
+                    f.answer.replaceChildren(p); return true;
+                    """)
+            }
+        }
+        let server = WebModelServer(rejectedReplyDirectory: mode == "nilDirectory" ? nil : directory)
+        await server.configureEmbeddedTransport(forwarder)
+        await server.configureEvidenceDirectory(root.appendingPathComponent("evidence"))
+        await server.configureCleanupReceipts(directory: root.appendingPathComponent("cleanup"), runtimeGeneration: generation) { _ in }
+        let choice = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B")
+        let request = try JSONSerialization.data(withJSONObject: ["model": choice.modelID,
+            "input": "Return one synthetic offered fixture call.", "stream": true,
+            "tools": [["type": "function", "name": "fixture_read", "parameters":
+                ["type": "object", "properties": [String: Any]()]]]] as [String: Any])
+        var released: Data?
+        do {
+            released = try await server.fixtureInfer(request, taskID: task.uuidString.lowercased(),
+                threadID: thread.uuidString.lowercased(), turnID: turn.uuidString.lowercased(), runtimeGeneration: generation)
+            XCTFail("A raw diagnostic cannot release the rendered tool proposal")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFormatUnavailable, mode) }
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        XCTAssertNil(released)
+        XCTAssertEqual(forwarder.pausedCandidate, stage == "final_reread")
+        XCTAssertEqual(mutations, stage == "final_reread" ? 1 : 0)
+        let admission = try XCTUnwrap(forwarder.admission)
+        XCTAssertEqual(admission.taskID, task.uuidString.lowercased())
+        XCTAssertEqual(admission.rejectedReplyDirectory, mode == "nilDirectory" ? nil : directory)
+        let token = try XCTUnwrap(forwarder.token)
+        let id = try XCTUnwrap(fixture.createdTabs.last), view = try XCTUnwrap(fixture.browser.webView(for: id))
+        let physical = try await evaluate(view, "return groqFixture.answer.textContent.trim();") as? String
+        XCTAssertEqual(physical.map { Data($0.utf8) }, Data(reply.utf8))
+        let beforeClear = try await evaluate(view, "return [groqFixture.sendCount, groqFixture.clearCount];") as? [Int]
+        XCTAssertEqual(beforeClear, [1, 0])
+        var reportBytes: Data?
+        if mode == "armed" {
+            let bytes = try Data(contentsOf: output)
+            reportBytes = bytes
+            let record = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+            XCTAssertEqual(record["source"] as? String, "rendered_nonliteral")
+            XCTAssertEqual(record["evidenceClass"] as? String, "rejected_adapter_candidate_only")
+            XCTAssertEqual(record["responseAuthorityGranted"] as? Bool, false)
+            XCTAssertEqual(record["automaticReplay"] as? Bool, false)
+            XCTAssertEqual((record["replyText"] as? String).map { Data($0.utf8) }, Data(reply.utf8))
+            XCTAssertEqual(record["replySHA256"] as? String, GroqOwnedStatusLease.digest(reply))
+            for (key, expected) in ["taskID": admission.taskID, "threadID": admission.threadID, "turnID": admission.turnID,
+                "runtimeGeneration": admission.runtimeGeneration.uuidString.lowercased(),
+                "preparationID": admission.preparationID.uuidString.lowercased(),
+                "transportGeneration": admission.transportGeneration.uuidString.lowercased(),
+                "inferenceID": admission.inferenceID.uuidString.lowercased(), "modelID": choice.modelID,
+                "sessionToken": token.lowercased()] {
+                XCTAssertEqual(record[key] as? String, expected, key)
+            }
+            XCTAssertEqual(record["documentGeneration"] as? String, fixture.browser.documentGeneration(for: id)?.uuidString.lowercased())
+            XCTAssertEqual(record["sequence"] as? Int, 1)
+            let rawBody = try await evaluate(view, "return groqFixture.userBody.textContent;")
+            let body = try XCTUnwrap(rawBody as? String)
+            XCTAssertEqual(record["firstUserFingerprint"] as? String, GroqOwnedStatusLease.digest(body))
+            let diagnostic = try XCTUnwrap(record["diagnostic"] as? [String: Any])
+            XCTAssertEqual(diagnostic["reason"] as? String, "unsupported_website_response")
+            XCTAssertEqual(diagnostic["stage"] as? String, stage)
+            XCTAssertEqual(diagnostic["literalState"] as? String, "false")
+            XCTAssertEqual(diagnostic["literalResponse"] as? Bool, false)
+            XCTAssertEqual(diagnostic["utf8Bytes"] as? Int, reply.utf8.count)
+            XCTAssertEqual(diagnostic["userCount"] as? Int, 1); XCTAssertEqual(diagnostic["responseCount"] as? Int, 1)
+            XCTAssertEqual(diagnostic["busy"] as? Bool, false); XCTAssertEqual(diagnostic["answerComplete"] as? Bool, true)
+            XCTAssertNil(record["codeStructure"], "The current Groq fallback supplies no structural packet to invent")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: arm.path))
+            XCTAssertLessThanOrEqual(bytes.count, WebModelRejectedReplyCapture.maximumRecordBytes)
+        } else {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: output.path), mode)
+            if mode == "unarmed" { XCTAssertFalse(FileManager.default.fileExists(atPath: arm.path)) }
+            else { XCTAssertEqual(try Data(contentsOf: arm), armBytes, mode) }
+        }
+        do {
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTFail("The failed session cannot release a cached response")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFormatUnavailable) }
+        let issues = await server.fixtureFinish(taskID: task.uuidString.lowercased(), runtimeGeneration: generation)
+        XCTAssertTrue(issues.isEmpty)
+        let receipts = await server.latestCleanupReceipts()
+        XCTAssertEqual(receipts.count, 1); XCTAssertEqual(receipts.first?.outcome, .closed)
+        XCTAssertEqual(receipts.first?.reason, .transcriptCleared)
+        let counts = try await evaluate(view, "return [groqFixture.sendCount, groqFixture.clearCount];") as? [Int]
+        XCTAssertEqual(counts, [1, 1])
+        if let reportBytes { XCTAssertEqual(try Data(contentsOf: output), reportBytes, "Cleanup cannot replace the first rejected candidate") }
+        else { XCTAssertFalse(FileManager.default.fileExists(atPath: output.path)) }
+        _ = await server.shutdown()
+        try await assertHumanTabIntact(fixture)
+    }
+
+    @MainActor
+    private final class GroqLiteralCaptureTransport: WebModelTransport {
+        let native: EmbeddedWebModelTransport
+        let dropsContext: Bool
+        var admission: WebModelStartAdmission?
+        var token: String?
+        var pausedCandidate = false
+        var afterFirstCandidate: (() async throws -> Void)?
+        init(native: EmbeddedWebModelTransport, dropsContext: Bool) { self.native = native; self.dropsContext = dropsContext }
+        func start(params: Data, admission: WebModelStartAdmission,
+                   authorization: ChatGPTRequestMetadataLease?) async throws -> Data {
+            self.admission = admission
+            let result: Data
+            if dropsContext { result = try await native.request(operation: "webProviderStart", params: params) }
+            else { result = try await native.start(params: params, admission: admission, authorization: authorization) }
+            token = (try JSONSerialization.jsonObject(with: result) as? [String: Any])?["sessionToken"] as? String
+            return result
+        }
+        func request(operation: String, params: Data) async throws -> Data {
+            let result = try await native.request(operation: operation, params: params)
+            if operation == "webProviderPoll", !pausedCandidate, let afterFirstCandidate,
+               let value = try JSONSerialization.jsonObject(with: result) as? [String: Any],
+               value["state"] as? String == "running", let text = value["text"] as? String, !text.isEmpty {
+                pausedCandidate = true
+                try await afterFirstCandidate()
+            }
+            return result
+        }
+        func changeRevision(sessionToken: String) async throws -> UInt64? {
+            try await native.changeRevision(sessionToken: sessionToken)
+        }
+        func waitForChange(sessionToken: String, after revision: UInt64, until deadline: ContinuousClock.Instant) async throws -> UInt64? {
+            try await native.waitForChange(sessionToken: sessionToken, after: revision, until: deadline)
+        }
+    }
+
     func testGroqRenderedValidToolJSONCannotBecomeACompletedNativeResponse() async throws {
         let reply = #"{"type":"tool_calls","calls":[{"name":"fixture_read","arguments":{"text":"A  B"}}]}"#
         let quoted = String(decoding: try JSONSerialization.data(withJSONObject: reply, options: [.fragmentsAllowed]), as: UTF8.self)

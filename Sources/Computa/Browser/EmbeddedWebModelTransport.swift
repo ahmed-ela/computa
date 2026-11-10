@@ -749,6 +749,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // Exact native attempt identity; never supplied by page JSON or wire Start.
         var adapterFailureContext: WebsiteAdapterFailureDiagnostic.Context?
         var adapterFailureDirectory: URL?
+        var rejectedReplyDirectory: URL?
+        var groqRejectedLiteralCaptureAttempted = false
         var adapterFailureCaptureAttempted = false
         var adapterFailurePublication: WebsiteAdapterFailurePublication?
         let initialDocumentGeneration: UUID
@@ -1817,6 +1819,76 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return .other
     }
 
+    private enum GroqRejectedLiteralStage: String { case initialCandidate = "initial_candidate", finalReread = "final_reread" }
+
+    /// Private exact-task evidence only. The rejected adapter candidate is not
+    /// literal/API text and cannot enter response, tool or cleanup admission.
+    private func captureGroqRejectedLiteralCandidate(_ session: Session, observed: [String: Any],
+        stage: GroqRejectedLiteralStage, deadline: ContinuousClock.Instant) {
+        guard !session.groqRejectedLiteralCaptureAttempted,
+              let directory = session.rejectedReplyDirectory, let context = session.adapterFailureContext,
+              let generation = session.documentGeneration, let model = session.modelChoice,
+              context.modelID.utf8.count <= 2_048,
+              let first = session.firstUserFingerprint, let submission = session.explicitClearSubmission,
+              let text = observed["text"] as? String, !text.isEmpty,
+              text.utf8.count <= WebModelRejectedReplyCapture.maximumReplyBytes,
+              Self.firstUserDiagnosticBool(observed["groqLiteralResponse"]) != true,
+              let token = UUID(uuidString: session.token) else { return }
+        func isCurrent() -> Bool {
+            guard !Task.isCancelled, ContinuousClock.now < deadline,
+                  sessions[session.token] === session, finishingTasks[session.token] == nil,
+                  session.provider == .groq, !session.isDiscovery, !session.isRecoveryProbe, !session.temporary,
+                  session.state == "running", session.terminalFailure == nil,
+                  session.adapterFailureContext == context, session.rejectedReplyDirectory == directory,
+                  context.provider == "groq", context.modelID == model.modelID,
+                  session.modelChoice == model, session.modelSelectionVerified,
+                  case .model(let proof)? = session.selectionEvidence,
+                  proof.selected.key == model.key, proof.selected.label == model.label,
+                  session.documentGeneration == generation,
+                  browser.webView(for: session.tabID) === session.view,
+                  browser.documentGeneration(for: session.tabID) == generation,
+                  session.view.url == submission.url, submission.url == session.provider.startURL(choice: model),
+                  submission.generation == generation,
+                  session.explicitClearSubmission.map({ $0.generation == generation && $0.url == submission.url && $0.outboundFingerprint == first }) == true,
+                  session.explicitClearReady, session.explicitClearOperation == nil,
+                  session.submitted, !session.pendingSubmission, session.sequence == 1, session.acknowledgedSendSequence == 1,
+                  session.confirmedUsers == 1, session.baseline == 0,
+                  session.firstUserFingerprint == first, first == submission.outboundFingerprint else { return false }
+            return true
+        }
+        guard isCurrent(), count(observed, "userCount") == 1, count(observed, "responseCount") == 1,
+              Self.firstUserDiagnosticBool(observed["busy"]) == false,
+              Self.firstUserDiagnosticBool(observed["answerComplete"]) == true else { return }
+        session.groqRejectedLiteralCaptureAttempted = true
+        let flag = Self.firstUserDiagnosticBool(observed["groqLiteralResponse"])
+        let literalState = flag == false ? "false" : observed["groqLiteralResponse"] == nil ? "missing" : "invalid"
+        var facts: [String: Any] = ["reason": "unsupported_website_response", "stage": stage.rawValue,
+            "literalState": literalState, "literalResponse": flag.map { $0 as Any } ?? NSNull(), "utf8Bytes": text.utf8.count]
+        for key in ["userCount", "responseCount"] {
+            if let value = ComputerToolArgumentContract.exactInt64(observed[key]), (0...10_000).contains(value) { facts[key] = value }
+        }
+        for key in ["busy", "answerComplete"] {
+            if let value = Self.firstUserDiagnosticBool(observed[key]) { facts[key] = value }
+        }
+        var record: [String: Any] = ["schemaVersion": 1, "timestamp": ISO8601DateFormatter().string(from: Date()),
+            "evidenceClass": "rejected_adapter_candidate_only", "source": "rendered_nonliteral",
+            "automaticReplay": false, "responseAuthorityGranted": false,
+            "taskID": context.taskID.uuidString.lowercased(), "threadID": context.threadID.uuidString.lowercased(),
+            "turnID": context.turnID.uuidString.lowercased(), "runtimeGeneration": context.runtimeGeneration.uuidString.lowercased(),
+            "preparationID": context.preparationID.uuidString.lowercased(), "transportGeneration": context.transportGeneration.uuidString.lowercased(),
+            "inferenceID": context.inferenceID.uuidString.lowercased(), "provider": "groq", "modelID": context.modelID,
+            "sessionToken": token.uuidString.lowercased(), "documentGeneration": generation.uuidString.lowercased(),
+            "sequence": session.sequence, "firstUserFingerprint": first,
+            "replyText": text, "replySHA256": GroqOwnedStatusLease.digest(text), "diagnostic": facts]
+        if let completion = observed["completionEvidence"] as? [String: Any], let raw = completion["codeStructure"] as? [String: Any],
+           let safe = Self.sanitizedCodeStructure(raw), safe.utf8.count <= 8_192,
+           let value = try? JSONSerialization.jsonObject(with: Data(safe.utf8)) {
+            record["codeStructure"] = value
+        }
+        guard let bytes = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys, .withoutEscapingSlashes]) else { return }
+        _ = WebModelRejectedReplyCapture.capture(directory: directory, taskID: context.taskID, record: bytes, isCurrent: isCurrent)
+    }
+
     // Native-only diagnostic opt-in. No page field or model argument can mint it.
     // Rechecked at dispatch, admission and failure publication, including awaits.
     private func groqFailureProgressLease(_ session: Session, allowingPending: Bool = false, allowingFailed: Bool = false) -> GroqOwnedStatusLease? {
@@ -2087,11 +2159,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         session.coldNamedChatRootRead = coldNamedChatRootRead
         session.retainsClaudeTurn = admission?.retainClaudeTurn == true && provider == .claude
             && choice?.supportsClaudeTurnPilot == true && admission?.modelID == choice?.modelID
-        if let admission, let directory = admission.adapterFailureDirectory,
-           let context = WebsiteAdapterFailureDiagnostic.Context(admission: admission),
+        if let admission, let context = WebsiteAdapterFailureDiagnostic.Context(admission: admission),
            context.modelID == (session.modelChoice?.modelID ?? session.modeChoice?.requestID) {
-            session.adapterFailureContext = context
-            session.adapterFailureDirectory = directory
+            if let directory = admission.adapterFailureDirectory {
+                session.adapterFailureContext = context
+                session.adapterFailureDirectory = directory
+            }
+            if provider == .groq, let directory = admission.rejectedReplyDirectory {
+                session.adapterFailureContext = context
+                session.rejectedReplyDirectory = directory
+            }
         }
         session.groqOwnedStatus=groqLease
         groqRetained=groqLease?.isCurrent==true
@@ -4343,6 +4420,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     // Rendered text may be valid but byte-different JSON. Only
                     // the adapter's current exact literal profile can complete.
                     guard Self.firstUserDiagnosticBool(observed["groqLiteralResponse"]) == true else {
+                        captureGroqRejectedLiteralCandidate(session, observed: observed, stage: .initialCandidate, deadline: deadline)
                         throw Failure.responseFormatUnavailable
                     }
                 }
@@ -4503,6 +4581,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                 // Recheck the last independent final read, never
                                 // a cached flag from the initial quiet candidate.
                                 guard Self.firstUserDiagnosticBool(completionObservation["groqLiteralResponse"]) == true else {
+                                    captureGroqRejectedLiteralCandidate(session, observed: completionObservation, stage: .finalReread, deadline: deadline)
                                     throw Failure.responseFormatUnavailable
                                 }
                             }
