@@ -16561,6 +16561,77 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertClaudeDisabledSendFailure(disableAfterReadiness: true)
     }
 
+    func testClaudeSendReadinessRechecksWhenEnableArrivesBeforeWaitRegistration() async throws {
+        let base = Self.providerPage(.claude)
+        let page = base.replacingOccurrences(of: "setTimeout(() => { send.disabled = !editor.innerText.trim(); }, 15);",
+                                             with: "")
+        XCTAssertNotEqual(page, base)
+        let choice = WebsiteModelChoice.claudeOpus3
+        let fixture = try Fixture(page: Self.modelChoicePage(.claude, basePage: page)
+            .replacingOccurrences(of: "Sonnet 4.6", with: choice.label))
+        defer {
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            fixture.shutdown()
+        }
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let tabID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+        try await waitForFixture(view)
+        let ready = try await waitForState("ready", fixture.transport, token: token)
+        try assertChoiceEvidence(ready, choice: choice)
+        let generation = try XCTUnwrap(fixture.browser.documentGeneration(for: tabID))
+        var actions: [String] = []
+        var readinessReads = 0
+        var signaledBeforeWait = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            actions.append(action)
+            guard action == "sendReady" else { return }
+            readinessReads += 1
+            guard readinessReads == 1 else { return }
+            do {
+                // The first disabled result is already frozen. Drain the input
+                // notifications before changing the exact Send control.
+                let revision = try await self.waitForQuietRevision(fixture.transport, token: token)
+                let before = try XCTUnwrap(fixture.browser.modelSignalProgress(tabID: tabID, view: view,
+                    ownerToken: token, generation: generation))
+                let deadline = ContinuousClock.now + .seconds(1)
+                let enabled = try await self.evaluate(view, """
+                    const send = document.querySelector('button[data-testid="chat-input-send"][aria-label="Send message"]');
+                    if (!send?.disabled || window.fixtureInputCount !== 1 || window.fixturePrompts.length !== 0) return false;
+                    send.disabled = false;
+                    return true;
+                    """, maximumWait: deadline - .now) as? Bool
+                XCTAssertEqual(enabled, true, "Only enable after the first read of the disabled Send")
+                let next = try await fixture.browser.waitForModelChange(tabID: tabID, after: revision, until: deadline)
+                let after = try XCTUnwrap(fixture.browser.modelSignalProgress(tabID: tabID, view: view,
+                    ownerToken: token, generation: generation))
+                signaledBeforeWait = next > revision && after.accepted > before.accepted
+                XCTAssertTrue(signaledBeforeWait, "The real DOM change must reach native before the first result is released")
+            } catch {
+                XCTFail("Could not observe the same-document Send enablement: \(error)")
+            }
+        }
+
+        let prompt = "Read the synthetic fixture after the exact Send becomes enabled."
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+        XCTAssertTrue(signaledBeforeWait)
+        XCTAssertGreaterThanOrEqual(readinessReads, 2)
+        XCTAssertEqual(actions.filter { $0 == "insert" }.count, 1)
+        XCTAssertEqual(actions.filter { $0 == "submit" }.count, 1)
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        try assertChoiceEvidence(complete, choice: choice)
+        let proof = try XCTUnwrap(complete["freshSessionSubmissionProof"] as? [String: Any])
+        XCTAssertEqual(proof["documentGeneration"] as? String, generation.uuidString)
+        XCTAssertEqual(proof["sequence"] as? Int, 1)
+        XCTAssertEqual(proof["submittedPromptFingerprint"] as? String, EmbeddedWebModelTransport.promptFingerprint(prompt))
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        XCTAssertNil(fixture.browser.webView(for: tabID))
+        try await assertHumanTabIntact(fixture)
+    }
+
     private func assertClaudeDisabledSendFailure(disableAfterReadiness: Bool) async throws {
         let base = Self.providerPage(.claude)
         let page = base.replacingOccurrences(of: "setTimeout(() => { send.disabled = !editor.innerText.trim(); }, 15);",
