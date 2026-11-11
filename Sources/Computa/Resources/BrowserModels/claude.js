@@ -2977,17 +2977,25 @@ function modelUsageLimitSurfaces() {
 }
 // This signed-in account card was observed on an empty new chat. It can only
 // abort preflight. It never supplies the physical Incognito proof used by Stop.
+let modelLastFreshResetCardOutcome = null;
 function modelFreshAccountUsageLimited() {
   try {
-    if (input.action === 'stop' || !/^https:\/\/claude\.ai\/new\/?(?:\?incognito)?$/.test(document.URL)
+    const diagnose = input.action === 'inspect' && globalThis.__computaModelFirstPrepared === undefined;
+    if (input.action === 'inspect') modelLastFreshResetCardOutcome = null;
+    if (input.action === 'stop'
       || input.expectedFirstUserFingerprint != null || globalThis.__computaModelFirstSubmitted !== undefined
       || globalThis.__computaModelFirstProof !== undefined || globalThis.__computaModelFirstPrompt !== undefined
       || input.expectedUserCounts?.length !== 1 || input.expectedUserCounts[0] !== 0) return false;
+    const url = document.URL, incognito = url.endsWith('?incognito');
+    const note = outcome => { if (diagnose) modelLastFreshResetCardOutcome = outcome; };
+    const reject = outcome => { note(incognito ? outcome : 'route_ineligible'); return false; };
+    if (!/^https:\/\/claude\.ai\/new\/?(?:\?incognito)?$/.test(url)) { note('route_ineligible'); return false; }
     const authored = '[data-testid="user-message"], [data-testid="assistant-message"], [data-perf-reply-text], [data-message-author-role], [data-markdown-text-style], [data-turn], [data-user-message-bubble], model-response, user-query';
     const excluded = authored + ', [contenteditable], [role="textbox"], textarea, input, pre, code, [role="tooltip"], nav, aside, [role="navigation"], [role="menu"], [role="listbox"]';
     const one = nodes => nodes.length === 1 ? nodes[0] : null;
     const buttons = document.querySelectorAll('button');
-    if (buttons.length > 256 || document.querySelectorAll(authored).length) return false;
+    if (buttons.length > 256) return reject('button_scan_limit');
+    if (document.querySelectorAll(authored).length) return reject('authored_content');
     const chrome = [...buttons].filter(node => modelVisible(node) && !node.closest(excluded));
     const popup = node => ['true', 'menu', 'dialog', 'listbox'].includes(node.getAttribute('aria-haspopup'))
       && node.getAttribute('aria-expanded') !== 'true' && modelEnabled(node);
@@ -3017,39 +3025,49 @@ function modelFreshAccountUsageLimited() {
     const picker = one(chrome.filter(node => popup(node) && /^Model: /.test(websiteModelSafeTriggerLabel(node.getAttribute('aria-label')) || '')));
     const send = one(chrome.filter(node => node.getAttribute('data-testid') === 'chat-input-send' && node.getAttribute('aria-label') === 'Send message'));
     const editor = one(document.querySelectorAll('[data-testid="chat-input"][contenteditable="true"][role="textbox"]'));
-    if (!picker || !send || modelEnabled(send) || !modelVisible(editor) || editor.parentElement?.closest(excluded)) return false;
+    if (!picker) return reject('picker_guard');
+    if (!send || modelEnabled(send)) return reject('send_guard');
+    if (!modelVisible(editor) || editor.parentElement?.closest(excluded)) return reject('editor_guard');
     const empty = editor.childNodes.length === 0 || editor.childNodes.length === 1 && editor.childNodes[0].tagName === 'P'
       && (editor.childNodes[0].childNodes.length === 0 || editor.childNodes[0].childNodes.length === 1 && editor.childNodes[0].childNodes[0].tagName === 'BR');
-    if (!empty) return false;
+    if (!empty) return reject('editor_nonempty');
     const enabled = chrome.filter(modelEnabled).map(node => ({ node, name: label(node) }));
     const named = name => enabled.filter(item => item.name === name).map(item => item.node);
     const offer = one(named('Get more usage'));
-    if (!offer) return false;
+    if (!offer) return reject('offer_missing_or_ambiguous');
 
     // The signed-in Incognito reset card is a fresh preflight abort surface.
     // It does not attest to temporary-mode ownership or completed cleanup.
-    if (document.URL.endsWith('?incognito')) {
+    if (incognito) {
       const about = one(named('About resets'));
-      if (about && popup(about)) {
+      if (!about) note('about_missing_or_ambiguous');
+      else if (!popup(about)) note('about_not_closed_popup');
+      else {
         const exactLink = (node, name, path) => {
           const href = node.getAttribute('href');
           if (node.tagName !== 'A' || !modelEnabled(node) || label(node) !== name) return false;
           try { return new URL(href, node.baseURI ?? document.URL).href === 'https://claude.ai' + path; }
           catch { return false; }
         };
-        let card = offer.parentElement;
+        let card = offer.parentElement, outcome = 'card_scope';
         for (let depth = 0; card && depth < 8; depth++, card = card.parentElement) {
           if (['BODY', 'HTML'].includes(card.tagName) || [picker, send, editor].some(node => card.contains(node))) break;
           if (!card.contains(about) || !modelVisible(card) || card.closest(excluded)) continue;
+          if (outcome === 'card_scope') outcome = 'card_controls';
           const controls = [...card.querySelectorAll('button, a, [role="button"], [role="link"], [role="switch"], textarea, input, select, [contenteditable]')];
           if (controls.length !== 4 || card.querySelector('[aria-checked="true"], [aria-pressed="true"]')) continue;
+          if (outcome === 'card_controls') outcome = 'card_links';
           if (!one(controls.filter(node => exactLink(node, 'limits shared with Claude Code', '/settings/claude-code')))
             || !one(controls.filter(node => exactLink(node, 'Use reset', '/settings/usage?highlight=resets')))) continue;
           const copy = words(card, true);
           if (copy && /^Usage limit reached · Resets (?:[1-9]|1[0-2]):[0-5][0-9] (?:AM|PM) · limits shared with Claude Code You have (?:1 reset|(?:[2-9]|[1-9][0-9]) resets) available\. Use reset$/.test(copy)) return true;
+          // Keep the furthest reached predicate across the bounded candidates.
+          if (copy !== null) outcome = 'copy_mismatch';
+          else if (outcome !== 'copy_mismatch') outcome = 'copy_unavailable';
         }
+        note(outcome);
       }
-    }
+    } else note('route_ineligible');
 
     if (!usage) return false;
     const dismiss = named('Dismiss'), notify = named('Get notified');
@@ -3073,7 +3091,7 @@ function modelFreshAccountUsageLimited() {
   return false;
 }
 function modelUsageLimited() { return modelUsageLimitSurfaces().length > 0 || modelFreshAccountUsageLimited(); }
-function modelQuotaDiagnostic() {
+function modelQuotaDiagnostic(includeFreshResetCard = false) {
   const boundary = '[data-testid="assistant-message"], [data-testid="user-message"]';
   const tags = ['a', 'button', 'div', 'span', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'section', 'main', 'body', 'html', 'dialog'];
   const bounded = count => Math.min(count, 1_000);
@@ -3137,6 +3155,7 @@ function modelQuotaDiagnostic() {
       labelKnownSuffix: modelQuotaLabel(node.textContent) === 'messages (opens in new tab)' })), bannerParents,
     mode: { headerTotal: bounded(header.length), headerVisible: bounded(header.filter(modelVisible).length), headerPhysical: bounded(header.filter(physical).length),
       exitTotal: bounded(exit.length), exitVisible: bounded(exit.filter(modelVisible).length), exitPhysical: bounded(exit.filter(physical).length) } };
+  if (includeFreshResetCard && modelLastFreshResetCardOutcome !== null) result.resetCardOutcome = modelLastFreshResetCardOutcome;
   while (JSON.stringify(result).length > 8_192 && result.popupAncestors.length) result.popupAncestors.pop();
   return JSON.stringify(result);
 }
@@ -3663,7 +3682,7 @@ async function providerPageAction() {
   if (action === 'inspect') {
     const signIn = !composer && [...document.querySelectorAll('a, button')].filter(modelVisible)
       .some(node => /^(?:Log in|Sign in)(?:\s|$)/i.test(node.getAttribute('aria-label') || (node.innerText || '').trim()));
-    return { ...state, signIn, debugStructure: '', quotaDiagnostic: modelQuotaDiagnostic() };
+    return { ...state, signIn, debugStructure: '', quotaDiagnostic: modelQuotaDiagnostic(ownedUserCount === 0) };
   }
   if (action === 'enableTemporary') {
     if (temporary) return { ...state, enabled: true };

@@ -5498,6 +5498,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             counts[key] = count
         }
         safe["mode"] = counts
+        if let rawOutcome = value["resetCardOutcome"] {
+            let outcomes: Set<String> = ["route_ineligible", "button_scan_limit", "authored_content", "picker_guard",
+                "send_guard", "editor_guard", "editor_nonempty", "offer_missing_or_ambiguous", "about_missing_or_ambiguous",
+                "about_not_closed_popup", "card_scope", "card_controls", "card_links", "copy_unavailable", "copy_mismatch"]
+            guard let outcome = rawOutcome as? String, outcomes.contains(outcome) else { return nil }
+            safe["resetCardOutcome"] = outcome
+        }
         if let rawProof = value["temporaryProof"] {
             if rawProof is NSNull {
                 safe["temporaryProof"] = NSNull()

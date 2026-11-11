@@ -943,13 +943,21 @@ describe("embedded Claude fixed adapter", () => {
   });
 
   test("the fresh Incognito reset limit requires the exact complete card and shared preflight guards", async () => {
-    for (const variation of ["ordinary-new", "nonempty-draft", "send-enabled", "open-picker", "submitted", "authored-card",
-      "bad-clock", "different-copy", "zero-resets", "wrong-plural", "hidden-copy", "other-link-origin", "other-reset-query", "about-not-popup", "about-open",
-      "extra-control", "different-card"]) {
+    const outcomes = {
+      "ordinary-new": "route_ineligible", "nonempty-draft": "editor_nonempty", "missing-editor": "editor_guard",
+      "send-enabled": "send_guard", "open-picker": "picker_guard", "submitted": undefined, "authored-card": "authored_content",
+      "bad-clock": "copy_mismatch", "different-copy": "copy_mismatch", "zero-resets": "copy_mismatch", "wrong-plural": "copy_mismatch",
+      "hidden-copy": "copy_unavailable", "clipped-copy": "copy_unavailable", "other-link-origin": "card_links", "other-reset-query": "card_links",
+      "missing-offer": "offer_missing_or_ambiguous", "missing-about": "about_missing_or_ambiguous",
+      "about-not-popup": "about_not_closed_popup", "about-open": "about_not_closed_popup",
+      "extra-control": "card_controls", "different-card": "card_controls", "separate-about": "card_scope", "button-scan-limit": "button_scan_limit"
+    } as const;
+    for (const variation of Object.keys(outcomes) as (keyof typeof outcomes)[]) {
       const f = fixture(provider), { picker, card, clock, shared, available, about, offer, reset, actions } = freshIncognitoResetLimit(f);
       switch (variation) {
         case "ordinary-new": f.temporary(false); break;
         case "nonempty-draft": f.composer.text = "existing draft"; break;
+        case "missing-editor": f.composer.connected = false; break;
         case "send-enabled": f.send.disabled = false; break;
         case "open-picker": picker.trigger.values["aria-expanded"] = "true"; break;
         case "submitted": f.world.__computaModelFirstSubmitted = true; break;
@@ -959,17 +967,35 @@ describe("embedded Claude fixed adapter", () => {
         case "zero-resets": available.text = "You have 0 resets available."; break;
         case "wrong-plural": available.text = "You have 1 resets available."; break;
         case "hidden-copy": available.values.hidden = ""; break;
+        case "clipped-copy": card.append(...Array.from({ length: 97 }, () => new Element("SPAN"))); break;
         case "other-link-origin": shared.values.href = "https://other.example/settings/claude-code"; break;
         case "other-reset-query": reset.values.href = "https://claude.ai/settings/usage?highlight=resets&other=1"; break;
+        case "missing-offer": offer.text = "More options"; break;
+        case "missing-about": about.text = "About usage"; break;
         case "about-not-popup": delete about.values["aria-haspopup"]; break;
         case "about-open": about.values["aria-expanded"] = "true"; break;
-        case "extra-control": actions.append(new Element("BUTTON", {}, "Another action")); break;
+        case "extra-control": card.append(new Element("BUTTON", {}, "Another action")); break;
         case "different-card": actions.children.pop(); f.body.append(reset); break;
+        case "separate-about": actions.children.shift(); f.body.append(about); break;
+        case "button-scan-limit": f.body.append(...Array.from({ length: 257 }, () => new Element("BUTTON"))); break;
       }
       const result = await f.run();
       expect(result.error, variation).not.toBe("website_usage_limit"); expect(result.freshQuotaAbort, variation).toBeUndefined();
+      expect(JSON.parse(result.quotaDiagnostic ?? "{}").resetCardOutcome, variation).toBe(outcomes[variation]);
       for (const control of [about, offer, reset, shared, f.send]) expect(control.clicks).toBe(0);
     }
+  });
+
+  test("the fresh reset-card diagnostic is absent from editor actions and inspections after preparation", async () => {
+    const f = fixture(provider), { available, about, offer, reset, shared } = freshIncognitoResetLimit(f);
+    available.text = "synthetic canary text";
+    const before = await f.run();
+    expect(JSON.parse(before.quotaDiagnostic).resetCardOutcome).toBe("copy_mismatch");
+    expect(before.quotaDiagnostic).not.toContain(available.text);
+    const prepared = await f.run("prepare");
+    expect(prepared.prepared).toBe(true); expect(prepared.quotaDiagnostic).toBeUndefined();
+    expect(JSON.parse((await f.run()).quotaDiagnostic).resetCardOutcome).toBeUndefined();
+    for (const control of [about, offer, reset, shared, f.send]) expect(control.clicks).toBe(0);
   });
 
   test("the exact quota popup reports its limit before any inference action or blocked control click", async () => {

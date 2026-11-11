@@ -17675,6 +17675,17 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let records = try XCTUnwrap(EmbeddedWebModelTransport.quotaStructureDiagnosticRecords(try encode(source), provider: .claude))
         XCTAssertEqual(records.count, 6)
         XCTAssertTrue(records.allSatisfy { $0.utf8.count <= 960 && !$0.contains("private_canary") })
+        var resetCard = source
+        resetCard["resetCardOutcome"] = "copy_unavailable"
+        let resetRecords = try XCTUnwrap(EmbeddedWebModelTransport.quotaStructureDiagnosticRecords(try encode(resetCard), provider: .claude))
+        XCTAssertEqual(resetRecords.count, records.count)
+        let resetSummary = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(resetRecords[0].utf8)) as? [String: Any])
+        XCTAssertEqual(resetSummary["resetCardOutcome"] as? String, "copy_unavailable")
+        let badOutcomes: [Any] = ["private_canary", true, ["outcome": "copy_unavailable"]]
+        for badOutcome in badOutcomes {
+            resetCard["resetCardOutcome"] = badOutcome
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedQuotaStructure(try encode(resetCard), provider: .claude))
+        }
         XCTAssertNil(EmbeddedWebModelTransport.sanitizedQuotaStructure(try encode(source), provider: .gemini))
         XCTAssertNil(EmbeddedWebModelTransport.sanitizedQuotaStructure(String(repeating: "x", count: 8_193), provider: .claude))
         for (section, limit) in [("headings", 4), ("controls", 8), ("popupAncestors", 8), ("support", 4), ("bannerParents", 4)] {
