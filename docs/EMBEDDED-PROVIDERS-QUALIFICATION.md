@@ -4020,3 +4020,22 @@ Cleanup receipts can retain a versioned, closed diagnostic: stage, failure categ
 The metadata survives restoration to explain an unconfirmed cleanup. It grants neither closure proof nor retry authority and does not repair or establish the cause of the earlier DeepThink deletion failure. Existing cleanup verification and terminal failure behavior remain intact.
 
 Validation: all 670 combined Swift methods passed with zero failures or skips in 286.548 seconds. The cleanup subset covers old receipt compatibility, closed-field validation, exact original native error retention and unchanged action counts. This is test-fixture evidence; live diagnosis and qualification remain pending.
+
+### 2026-11-11 — Controlled live qualification on installed 497
+
+These are single controlled invoice runs on signed Computa 0.8.0 (497), built from `7759a8286108b7c7b630d505d345f00576f472fa`, not reliability estimates or attestations of provider backend models. The complete installed bundle (67 files and modes) and Developer ID signature matched the sealed package for each run.
+
+| ChatGPT selection | Result | Duration | Native tool calls | Website inferences | Cleanup |
+| --- | --- | ---: | ---: | ---: | --- |
+| Instant | PASS, 19/19 checks | 72.526 s | 8 | 9 | 9 temporary sessions closed |
+| Medium | PASS, 19/19 checks | 93.960 s | 8 | 9 | 9 sessions closed |
+| High | PASS, 19/19 checks | 135.221 s | 9 | 10 | 10 sessions closed |
+| Extra High | PASS, 19/19 checks | 153.589 s | 9 | 10 | 10 sessions closed |
+| GPT-6 Pro | PASS, 19/19 checks | 505.200 s | 9 | 10 | 10 sessions closed |
+
+DeepSeek DeepThink failed after 220 ms at the pre-creation sign-in gate, with no tools or owned session. Normal navigation independently confirmed the login page; the cause of lost authentication remains unknown.
+
+Groq/120B failed after 70.618 seconds on its second inference, following one schema-only loader call. The owned page showed the generic “Something went wrong” notice and restored draft. No command, edit, browser action or POST followed. Its HTTP cause remains unknown. Inspector approval is pending, and the separate approximately 19 KB normal-page probe remains unsent. Neither blocked run qualifies, and no uncertain submission was replayed.
+All five ChatGPT selections passed the same 19-check independent audit: only the permitted function changed, all six tests passed, the printed reference matched the oracle, exactly one browser POST issued a unique receipt observed in the tool output, the model explicitly closed its task-created tab, and its final answer reported the reference and receipt. The website journals independently verified GPT-6 family, the selected power, Chat product and temporary-session policy throughout. All 48 website exchanges completed with saved closed-session receipts and no recorded website errors. No uncertain action was replayed.
+
+Evidence is retained under `all-models-20261102/current-workflow-preparation/fixtures/cases/invoice-497-chat-*`, including native traces, provider and cleanup journals, code diffs, independent test output and audit results. The broader all-model qualification remains incomplete.
