@@ -334,12 +334,12 @@ function websiteChatObservePinnedMutations(records, pin = globalThis.__computaCh
     }
   }
 }
+const websiteChatPickerBoundary = '[data-message-author-role], [data-markdown-text-style], [data-turn], [data-user-message-bubble], [role="tooltip"]';
 function websiteChatPickerState() {
-  const boundary = '[data-message-author-role], [data-markdown-text-style], [data-turn], [data-user-message-bubble], [role="tooltip"]';
   const physical = node => !!node && node.isConnected && node.getClientRects().length > 0
     && getComputedStyle(node).visibility !== 'hidden';
   const visible = node => physical(node) && !node.closest('[inert], [aria-hidden="true"]');
-  const outside = node => !!node && !node.closest(boundary);
+  const outside = node => !!node && !node.closest(websiteChatPickerBoundary);
   const enabled = node => visible(node) && !node.disabled && node.getAttribute('disabled') === null
     && node.getAttribute('aria-disabled') !== 'true';
   const nodes = selector => [...document.querySelectorAll(selector)].slice(0, 256);
@@ -446,6 +446,83 @@ function websiteChatPickerState() {
     navigationAmbiguous: associated.length > 1 || secondaries.length > 1,
     physical, visible, enabled, family };
 }
+function websiteChatRecordReadinessPopup(trace, records) {
+  const menuRoles = ['menu', 'listbox', 'dialog'];
+  for (const record of records) {
+    const index = trace.recordCount++;
+    if (record.type === 'attributes') {
+      const { target, attributeName, oldValue } = record;
+      if (target === trace.trigger && attributeName === 'aria-expanded') trace.expandedChanges.push({ index, oldValue });
+      if (target === trace.trigger && attributeName === 'aria-controls') trace.controlsChanges.push({ index, oldValue });
+      if (attributeName === 'id') {
+        trace.changedIDs.add(oldValue);
+        trace.changedIDs.add(target.getAttribute('id'));
+      }
+      if (attributeName === 'role' && (menuRoles.includes(oldValue) || menuRoles.includes(target.getAttribute('role')))) return false;
+      if (['id', 'role', 'aria-labelledby', 'data-message-author-role', 'data-markdown-text-style',
+        'data-turn', 'data-user-message-bubble'].includes(attributeName)) trace.identityChanges.add(target);
+      if (target === trace.send && ['disabled', 'aria-disabled'].includes(attributeName)) return false;
+      continue;
+    }
+    if (record.type !== 'childList' || record.addedNodes.length + record.removedNodes.length > 64) return false;
+    for (const [nodes, added] of [[record.removedNodes, false], [record.addedNodes, true]]) {
+      for (const node of nodes) {
+        if ([trace.trigger, trace.composer, trace.send, trace.body].some(pin => node === pin || node.contains?.(pin))) return false;
+        const descendants = node.querySelectorAll?.('[role="menu"], [role="listbox"], [role="dialog"]') ?? [];
+        const menus = menuRoles.includes(node.getAttribute?.('role')) ? [node, ...descendants] : descendants;
+        if (menus.length === 0) continue;
+        const menu = menus[0];
+        if (menus.length !== 1 || menu.getAttribute('role') !== 'menu' || menu.closest(websiteChatPickerBoundary)
+          || record.target !== trace.body
+          || trace.body.isConnected !== true) return false;
+        // Snapshot attributes when the observer delivers the records. A later
+        // mutation of a detached portal must never rewrite its opening history.
+        const id = menu.getAttribute('id');
+        if (menu.getAttribute('aria-labelledby') !== trace.triggerID) return false;
+        if (added) {
+          if (trace.opening) return false;
+          trace.opening = { index, menu, node, id };
+        } else {
+          const opening = trace.opening;
+          if (!opening || trace.removal !== null || menu !== opening.menu || node !== opening.node || id !== opening.id) return false;
+          trace.removal = index;
+        }
+      }
+    }
+  }
+  return true;
+}
+function websiteChatReadinessPopupDetached(trace) {
+  // Allow generated Unicode IDs but reject characters that could escape the
+  // quoted CSS attribute selectors below.
+  const validID = value => typeof value === 'string' && /^[^\s"\\\u0000-\u001F\u007F]{1,256}$/.test(value);
+  const { trigger, opening, removal, expandedChanges, controlsChanges, identityChanges } = trace;
+  if (trace.overflow || trace.invalid || !validID(trace.triggerID) || trigger.getAttribute('id') !== trace.triggerID
+    || trace.body !== document.body || trace.body.isConnected !== true || identityChanges.has(trace.body)
+    || trigger.getAttribute('aria-expanded') !== trace.expanded
+    || trigger.getAttribute('aria-controls') !== trace.controls) return false;
+  if (!opening || removal === null || opening.menu.isConnected !== false || opening.node.isConnected !== false
+    || !opening.node.contains(opening.menu) || identityChanges.has(trigger)
+    || [...identityChanges].some(node => node === opening.menu || node.contains?.(opening.menu))
+    || opening.menu.getAttribute('role') !== 'menu' || opening.menu.getAttribute('id') !== opening.id
+    || opening.menu.getAttribute('aria-labelledby') !== trace.triggerID
+    || expandedChanges.length !== 2 || expandedChanges[0].oldValue !== trace.expanded
+    || expandedChanges[1].oldValue !== 'true') return false;
+  const menuID = opening.id;
+  if (!validID(menuID) || trace.changedIDs.has(menuID) || trace.changedIDs.has(trace.triggerID)) return false;
+  const triggerIDs = document.querySelectorAll(`[id="${trace.triggerID}"]`);
+  if (triggerIDs.length !== 1 || triggerIDs[0] !== trigger
+    || document.querySelector(`[id="${menuID}"]`)) return false;
+  let linkedFrom = -1, linkedUntil = trace.recordCount;
+  if (trace.controls === null) {
+    if (controlsChanges.length !== 2 || controlsChanges[0].oldValue !== null || controlsChanges[1].oldValue !== menuID) return false;
+    linkedFrom = controlsChanges[0].index;
+    linkedUntil = controlsChanges[1].index;
+  } else if (trace.controls !== menuID || controlsChanges.length !== 0) return false;
+  // The three intervals must overlap. This proves only the original popup's
+  // structural lifecycle, never the model or even the popup's visibility.
+  return Math.max(opening.index, expandedChanges[0].index, linkedFrom) < Math.min(removal, expandedChanges[1].index, linkedUntil);
+}
 async function websiteChatObserveSelection(request, expected, freshGuard = null, attempt = null, context = null) {
   const owner = globalThis.__computaModelOwner, url = document.URL, originalDocument = document;
   const mutable = typeof freshGuard === 'function';
@@ -473,6 +550,12 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   let prepareOpening = null, insertOpening = null, genericPowerRecheck = false;
   let firstVerificationOpeningDiagnostic = null;
   let preparedReadinessOpeningDiagnostic = null;
+  let readinessPopupObserver = null, readinessPopupTrace = null, readinessPopupLifecycle = null;
+  const recordReadinessPopup = records => {
+    if (readinessPopupTrace.recordCount + records.length > 64) readinessPopupTrace.overflow = true;
+    if (!readinessPopupTrace.overflow && !readinessPopupTrace.invalid)
+      readinessPopupTrace.invalid = !websiteChatRecordReadinessPopup(readinessPopupTrace, records);
+  };
   const openingCondition = (reason, value, capture = false, rejects = false) => {
     if (capture && (rejects ? value : !value) && firstVerificationOpeningDiagnostic?.reason === null)
       firstVerificationOpeningDiagnostic.reason = reason;
@@ -560,7 +643,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         ...(preparedReadinessOpeningDiagnostic ? { preparedReadinessOpening: {
           ...preparedReadinessOpeningDiagnostic, observedAcknowledgement: verifyAcknowledged,
           acknowledgementSources: { ...acknowledgementSources },
-          recoveryClaimed: insertOpening?.recoveryClaimed === true } } : {}) },
+          recoveryClaimed: insertOpening?.recoveryClaimed === true }, readinessPopupLifecycle } : {}) },
       readAttempt: { primaryOpened, secondaryOpened, closeAttempted, observedProof,
         sameTrigger: !trigger || current.trigger === trigger, popupStillAssociated: !!current.topMenu } }) };
   };
@@ -715,7 +798,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     return paragraph.tagName === 'P' && paragraph.childNodes.length === 1 && br?.tagName === 'BR'
       && br.classList.contains('ProseMirror-trailingBreak') && !br.childNodes.length;
   };
-  const insertOpeningIntact = (current, spent = false) => {
+  const insertOpeningIntact = (current, spent = false, allowAcknowledged = false) => {
     const saved = insertOpening, state = saved?.state, record = saved?.record, prior = saved?.insertProof;
     const composer = saved?.composer, value = insertComposerValue(composer);
     const grant = request.preparedInstantVerificationOpening;
@@ -723,7 +806,8 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     if (prior) {
       recordVerifyOpening(verifyObserver?.takeRecords?.() || []);
       recordDraftChanges(draftObserver?.takeRecords?.() || []);
-      if (draftChanged || !spent && verifyAcknowledged || record.firstInsertOpening !== prior || prior.proved !== true) return false;
+      if (draftChanged || !spent && verifyAcknowledged && !allowAcknowledged
+        || record.firstInsertOpening !== prior || prior.proved !== true) return false;
       if (firstSubmit) {
         if (record.firstSubmitOpening !== saved || record.readyForSubmitOpening !== prior || request.submissionSequence !== 1
           || request.submissionMarker !== record.marker || request.prompt !== saved.prompt
@@ -900,6 +984,18 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         draftObserver = new MutationObserver(recordDraftChanges);
         draftObserver.observe(document.documentElement || document, {subtree:true,childList:true,characterData:true});
         insertOpening.composer.addEventListener?.('input', invalidateDraft, true);
+        if (firstReadiness) {
+          readinessPopupTrace = { trigger, composer: insertOpening.composer, send: chatGPTFirstChatReadinessSnapshot.send,
+            body: document.body,
+            triggerID: trigger.getAttribute('id'), controls: trigger.getAttribute('aria-controls'),
+            expanded: trigger.getAttribute('aria-expanded'), expandedChanges: [], controlsChanges: [],
+            identityChanges: new Set(), changedIDs: new Set(), recordCount: 0, opening: null, removal: null, overflow: false, invalid: false };
+          readinessPopupObserver = new MutationObserver(recordReadinessPopup);
+          readinessPopupObserver.observe(document.documentElement || document, { subtree: true, childList: true,
+            attributes: true, attributeOldValue: true,
+            attributeFilter: ['aria-expanded', 'aria-controls', 'id', 'role', 'aria-labelledby', 'disabled', 'aria-disabled',
+              'data-message-author-role', 'data-markdown-text-style', 'data-turn', 'data-user-message-bubble'] });
+        }
       }
     }
     if (cappedFirstInsert && Date.now() >= until) throw failure('model_unverified');
@@ -922,7 +1018,16 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
           if (firstVerify) readStage = 'first_verification_clock_unconfirmed';
           throw failure('model_unverified');
         }
-        if (firstVerify) recordVerifyOpening(verifyObserver?.takeRecords?.() || []);
+        if (firstVerify || firstReadiness) recordVerifyOpening(verifyObserver?.takeRecords?.() || []);
+        let detachedReadinessPopup = false;
+        if (firstReadiness && readinessPopupObserver) {
+          recordReadinessPopup(readinessPopupObserver.takeRecords?.() || []);
+          readinessPopupObserver.disconnect?.();
+          detachedReadinessPopup = verifyAcknowledged && current.physicalMenus.length === 0
+            && websiteChatReadinessPopupDetached(readinessPopupTrace);
+          readinessPopupLifecycle = readinessPopupTrace.overflow ? 'overflow'
+            : detachedReadinessPopup ? 'detached_associated' : 'unproved';
+        }
         if (firstVerify && verifyAcknowledged) {
           // An acknowledged opening is now positively closed. Only this untouched
           // first-verification slot may spend its existing one recovery on a fresh
@@ -943,7 +1048,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
           });
           if (drifted || Date.now() >= until) throw failure('model_unverified');
         } else {
-          if (!(prepareOpening !== null ? prepareOpeningIntact(current) : insertOpeningIntact(current))) {
+          if (!(prepareOpening !== null ? prepareOpeningIntact(current) : insertOpeningIntact(current, false, detachedReadinessPopup))) {
             if (firstVerify) readStage = 'first_verification_recovery_guard_changed';
             throw failure('model_unverified');
           }
@@ -1331,6 +1436,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   } catch (error) {
     return error?.error ? error : failure('model_unverified');
   } finally {
+    readinessPopupObserver?.disconnect?.();
     verifyObserver?.disconnect?.();
     draftObserver?.disconnect?.();
     initialReadinessObserver?.disconnect?.();

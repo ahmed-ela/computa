@@ -4157,6 +4157,120 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           } finally { prototype.observe = observe; }
         }
       });
+      test('prepared readiness reopens a reciprocally linked picker detached before proof', async () => {
+        for (const mode of ['stable_controls', 'transient_controls', 'menu_only', 'aria_only', 'wrong_id', 'wrong_label',
+          'id_drift', 'disjoint_intervals', 'duplicate_menu', 'dropped_menu_role', 'message_wrapped',
+          'hidden_duplicate_menu_id', 'hidden_duplicate_trigger_id',
+          'detached_repaint', 'foreign_portal', 'remounted_trigger', 'still_connected', 'send_toggled']) {
+          const x = await preparedReadinessRecovery('Pro'), { trigger } = x.picker;
+          const controls = trigger.getAttribute('aria-controls'), triggerID = trigger.getAttribute('id');
+          const stable = mode === 'stable_controls' || mode === 'menu_only';
+          const popup = new Node('DIV', { role: 'menu', id: ['wrong_id', 'detached_repaint'].includes(mode) ? 'foreign-picker' : controls,
+            'aria-labelledby': mode === 'wrong_label' ? 'foreign-trigger' : triggerID });
+          const wrapPopup = ['stable_controls', 'duplicate_menu', 'dropped_menu_role', 'message_wrapped', 'detached_repaint'].includes(mode);
+          const root = wrapPopup ? new Node('SECTION', mode === 'message_wrapped' ? { 'data-turn': 'assistant' } : {}) : popup;
+          const body = x.f.body, portal = mode === 'foreign_portal' ? new Node('SECTION') : body;
+          Object.assign(x.f.document, { body, querySelector: (selector: string) => x.f.document.querySelectorAll(selector)[0] ?? null });
+          if (portal !== body) body.append(portal);
+          if (root !== popup) root.append(popup);
+          const otherMenu = ['duplicate_menu', 'dropped_menu_role'].includes(mode) ? new Node('DIV', { ...popup.values }) : null;
+          if (otherMenu) root.append(otherMenu);
+          const replacement = x.picker.menu;
+          body.children = body.children.filter((node:any) => node !== replacement);
+          replacement.parentElement = null;
+          replacement.connected = false;
+          if (mode === 'hidden_duplicate_menu_id') body.append(new Node('DIV', { ...popup.values, hidden: '' }));
+          if (mode === 'hidden_duplicate_trigger_id') body.append(new Node('BUTTON', { ...trigger.values, hidden: '' }));
+          if (!stable) delete trigger.values['aria-controls'];
+          const click = trigger.onClick, dispatch = replacement.onDispatch;
+          trigger.onClick = () => {
+            if (x.recoveryOpenings() === 1) {
+              trigger.values['aria-controls'] = controls;
+              body.append(replacement);
+            }
+            click();
+          };
+          replacement.onDispatch = (event:any) => {
+            dispatch?.(event);
+            if (!stable && trigger.getAttribute('aria-expanded') === 'false') delete trigger.values['aria-controls'];
+          };
+          const registrations = new Map<any, { target:any, options:any }[]>();
+          const prototype = Object.getPrototypeOf(x.f.observers[0]), observe = prototype.observe;
+          prototype.observe = function(target:any, options:any) {
+            registrations.set(this, [...(registrations.get(this) || []), { target, options }]);
+            return observe.call(this, target, options);
+          };
+          try {
+            const reading = x.f.run('sendReady', x.recoveryRequest);
+            await microtasks(); expect(x.recoveryOpenings(), mode).toBe(1);
+            const slot = x.pending.firstReadinessOpening;
+            expect(slot.insertProof).toBe(x.pending.firstInsertOpening);
+            expect(slot.recoveryClaimed).toBe(false);
+            const records: any[] = [];
+            const attribute = (name: string, value: string | null, target = trigger) => {
+              records.push({ type: 'attributes', target, attributeName: name, oldValue: target.getAttribute(name) });
+              if (value === null) delete target.values[name]; else target.values[name] = value;
+            };
+            const childList = (addedNodes: any[], removedNodes: any[], target = portal) =>
+              records.push({ type: 'childList', target, addedNodes, removedNodes });
+            const mount = () => { portal.append(root); childList([root], []); };
+            if (mode !== 'menu_only') attribute('aria-expanded', 'true');
+            if (!stable) attribute('aria-controls', controls);
+            if (mode !== 'aria_only' && mode !== 'disjoint_intervals') mount();
+            if (mode === 'id_drift') attribute('aria-controls', 'foreign-picker');
+            if (mode === 'dropped_menu_role') attribute('role', null, otherMenu);
+            if (mode === 'send_toggled') { attribute('disabled', '', x.send); attribute('disabled', null, x.send); }
+            if (mode !== 'menu_only') attribute('aria-expanded', 'false');
+            if (!stable) attribute('aria-controls', null);
+            if (mode === 'disjoint_intervals') mount();
+            if (mode !== 'aria_only') {
+              portal.children = portal.children.filter((node:any) => node !== root);
+              root.parentElement = null; root.connected = false; childList([], [root]);
+            }
+            if (mode === 'still_connected') {
+              root.connected = true; root.values.hidden = ''; mount();
+            }
+            if (mode === 'remounted_trigger') {
+              const original = x.picker.replaceTrigger();
+              childList([x.picker.trigger], [original], body);
+            }
+            for (const [observer, scopes] of registrations) {
+              const relevant = records.filter((record, index) => scopes.some(({ target, options }) => options[record.type]
+                && (target === record.target || options.subtree && (target === x.f.document || target.contains?.(record.target)
+                  // Subtree mutations from before removal remain in the delivery batch.
+                  || records.slice(index + 1).some(later => later.type === 'childList' && target.contains?.(later.target)
+                    && later.removedNodes.some((node:any) => node.contains?.(record.target)))))
+                && (record.type !== 'attributes' || !options.attributeFilter || options.attributeFilter.includes(record.attributeName))));
+              if (relevant.length) observer.callback(relevant);
+            }
+            if (mode === 'detached_repaint') {
+              // After observer delivery the detached wrapper can change without another document record.
+              popup.parentElement = null; popup.connected = false; root.children = [];
+              root.append(new Node('DIV', { ...popup.values, id: controls }));
+            }
+            await finishFirstInsertWait(x, 901); await finishFirstInsertWait(x, 901);
+            const result = await reading, accepted = mode === 'stable_controls' || mode === 'transient_controls';
+            expect(x.recoveryOpenings(), mode).toBe(accepted ? 2 : 1);
+            expect(slot.recoveryClaimed, mode).toBe(accepted);
+            expect(x.pending.firstReadinessOpening).toBe(slot);
+            if (accepted) {
+              expect(popup.isConnected, mode).toBe(false); expect(popup.events).toHaveLength(0);
+              expect(result.error, mode).toBeUndefined(); expect(result.sendReady, mode).toBe(true);
+              expect(result.modelEvidence.selected, mode).toEqual(x.expected);
+              expect(result.modelEvidence.chatSelection.family).toEqual({ key: 'GPT-6', label: 'GPT-6' });
+              expect(result.modelEvidence.chatSelection.automaticFamily.policy).toBe('highest_offered_plain_gpt');
+              expect(result.modelEvidence.chatSelection.power.key).toBe('pro');
+              expect(result.productModeEvidence).toMatchObject({ product: 'chatgpt', mode: 'chat', temporaryTransition: 'acknowledged' });
+              expect(x.picker.trigger).toBe(trigger); expect(trigger.getAttribute('aria-expanded')).toBe('false');
+              expect(trigger.getAttribute('aria-controls')).toBe(stable ? controls : null);
+            } else {
+              expect(result.error, mode).toBeDefined(); expect(result.modelEvidence, mode).toBeUndefined();
+              expect(result.sendReady, mode).toBeUndefined();
+            }
+            expect(x.f.composer.textContent).toBe(x.prompt); noReadinessInputReplay(x);
+          } finally { prototype.observe = observe; }
+        }
+      });
       test('a layout LF never substitutes for the full literal submit draft', () => {
         const source = readFileSync(new URL('../Sources/Computa/Resources/BrowserModels/chatgpt.js', import.meta.url), 'utf8');
         const definition = source.slice(source.indexOf('function chatGPTExactSubmitDraft('), source.indexOf('function chatGPTSubmissionPins('));

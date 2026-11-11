@@ -1443,16 +1443,24 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     func testPreparedMediumFinalReadinessRecoversOneIgnoredOpeningBeforeOneSend() async throws {
-        try await assertPreparedMediumFinalReadinessOpening(acknowledged: false)
+        try await assertPreparedFinalReadinessOpening(.ignored)
     }
 
     func testPreparedMediumFinalReadinessDoesNotRepeatAcknowledgedOpeningOrSend() async throws {
-        try await assertPreparedMediumFinalReadinessOpening(acknowledged: true)
-        try await assertPreparedMediumFinalReadinessOpening(acknowledged: false, cancelDuringOpening: true)
+        try await assertPreparedFinalReadinessOpening(.ariaOnly)
+        try await assertPreparedFinalReadinessOpening(.ignored, cancelDuringOpening: true)
     }
 
-    private func assertPreparedMediumFinalReadinessOpening(acknowledged: Bool, cancelDuringOpening: Bool = false) async throws {
-        let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/medium", label: "Medium")
+    func testPreparedProFinalReadinessRecoversExactlyDetachedPopupBeforeOneSend() async throws {
+        try await assertPreparedFinalReadinessOpening(.detachedPopup, power: .pro)
+    }
+
+    private enum PreparedReadinessOpening { case ignored, ariaOnly, detachedPopup }
+
+    private func assertPreparedFinalReadinessOpening(_ opening: PreparedReadinessOpening,
+                                                     cancelDuringOpening: Bool = false,
+                                                     power: WebsiteModelChoice.ChatGPTPower = .medium) async throws {
+        let choice = WebsiteModelChoice(provider: "chatgpt", key: power.modelKey, label: power.label)
         let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
         defer { fixture.transport.setBeforePageResultValidationForTesting(nil); fixture.shutdown() }
         let started = try await startChoice(choice, in: fixture)
@@ -1493,6 +1501,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             let value = try? await self.evaluate(view, """
                 const trigger = document.getElementById('fixture-model-trigger');
                 if (!trigger) return false;
+                const detachedPopup = \(opening == .detachedPopup);
                 globalThis.__fixtureReadinessOpenings = 0;
                 globalThis.__fixtureReadinessPriorProved = false;
                 const interrupt = event => {
@@ -1505,7 +1514,17 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                     && slot.insertProof?.proved === true && slot.insertProof?.exactSubmitDraft === true;
                   if (++globalThis.__fixtureReadinessOpenings === 2) return;
                   event.stopImmediatePropagation(); event.preventDefault();
-                  if (\(acknowledged)) {
+                  if (detachedPopup) {
+                    trigger.setAttribute('aria-expanded', 'true');
+                    const wrapper = document.createElement('section'), menu = document.createElement('div');
+                    menu.id = trigger.getAttribute('aria-controls');
+                    menu.setAttribute('role', 'menu');
+                    menu.setAttribute('aria-labelledby', trigger.id);
+                    wrapper.append(menu);
+                    document.body.append(wrapper);
+                    wrapper.remove();
+                    trigger.setAttribute('aria-expanded', 'false');
+                  } else if (\(opening == .ariaOnly)) {
                     trigger.setAttribute('aria-expanded', 'true');
                     trigger.setAttribute('aria-expanded', 'false');
                   }
@@ -1516,7 +1535,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 """, world: world)
             installed = value as? Bool == true
         }
-        let prompt = "Read the synthetic Medium final-readiness fixture."
+        let prompt = "Read the synthetic \(power.label) final-readiness fixture."
         if cancelDuringOpening {
             let sending = Task<Void, Error> {
                 _ = try await self.call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
@@ -1535,7 +1554,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             XCTAssertEqual(waiting, true)
             // Observe beyond the old 900ms window; no second header opening is allowed.
             _ = try await evaluate(view, "await new Promise(resolve => setTimeout(resolve, 1000)); return true;", world: world)
-        } else if acknowledged {
+        } else if opening == .ariaOnly {
             do {
                 _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
                 XCTFail("A transient acknowledged final opening cannot authorize a second click or Send")
@@ -1557,10 +1576,11 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertTrue(installed)
         // The counter lives with the real prepared state in the isolated content world.
         let scopedOpenings = try await evaluate(view, "return globalThis.__fixtureReadinessOpenings;", world: world) as? Int
-        XCTAssertEqual(scopedOpenings, acknowledged || cancelDuringOpening ? 1 : 2)
+        let failedBeforeSend = opening == .ariaOnly || cancelDuringOpening
+        XCTAssertEqual(scopedOpenings, failedBeforeSend ? 1 : 2)
         let priorProved = try await evaluate(view, "return globalThis.__fixtureReadinessPriorProved;", world: world) as? Bool
         XCTAssertEqual(priorProved, true)
-        try await assertChoiceLedger(view, insertions: 1, sends: acknowledged || cancelDuringOpening ? 0 : 1, selections: initialSelections)
+        try await assertChoiceLedger(view, insertions: 1, sends: failedBeforeSend ? 0 : 1, selections: initialSelections)
         let finish = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
         // Readiness fails before the native submission claim. The ordinary
         // unsent-session proof must establish zero users/answers and close it.
