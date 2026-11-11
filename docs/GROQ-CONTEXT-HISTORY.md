@@ -496,3 +496,41 @@ presentation reductions. Two additional runs of the previously failing native
 matching session closures. These are native-runtime tests with synthetic replies;
 they made no real provider requests or browser actions. Live provider qualification
 remains a separate step.
+
+### Declared custom input and one-call native presentation (2026-11-10)
+
+Live build 493 returned a 2,475-byte literal JSON object missing top-level `type`,
+with eleven future-plan proposals. All eleven were rejected before individual
+call validation or dispatch. One schema load and one seed-test command ran
+earlier; all three website sessions have saved closed receipts. This motivates
+a presentation hypothesis, not an established provider root cause.
+
+The existing API custom-tool transport is shared through a pure helper. In the
+native Groq history path with an allowed registered reader and validated selection
+projection, current allowed custom tools are displayed as functions with exactly
+`arguments: {"input": "literal string"}` and the original grammar verbatim.
+The strict inverse preserves decoded UTF-8 as native `custom_tool_call.input`.
+The same path explicitly permits one tool call per website reply, rejecting the
+whole batch before mapping and during encoding. It never selects a first-call
+prefix. Canonical history/configuration, native tool choice/parallel/max limits,
+permissions and executor checks remain unchanged. Other providers, ordinary Groq
+and partial reader-only paths retain their existing contracts. API-only Alibaba
+rules remain API-only. Two exact terminal error envelopes persist with
+`retryable: false`; no malformed-envelope repair or correction expansion is added.
+
+The initial 562-check run had 561 passes and one failure: an old synthetic
+correction fixture still proposed two calls. Its sequential bounded-output
+migration passed one of two targeted checks; the positive received 200 but had no
+published reader reference. The final fixture honestly narrows its claim to
+closed correction, two separately issued/completed HTTP calls, both exact native
+outputs in the next admitted prompt, and normal completion. It does not claim a
+reader publication/read. Existing genuine bundled and Server history coverage
+retain those separate invariants; no padding, forced references or hooks were added.
+All failed runs remain preserved. The revised targeted pair passed, followed by
+562/562 checks with no failures/skips and unchanged source/helper (144.068 seconds).
+
+The three genuine native-runtime coding/history workflows retained all 1,381 bytes
+in 2/3/2 fragments, with sends and matching closures 12/13/12. Maximum admitted body
+units were 5,812/5,940/5,766 under the unchanged 6,000 limit. These finite results do
+not promise a stable budget margin. Synthetic website replies made zero real
+provider requests or browser actions; live qualification remains separate.
