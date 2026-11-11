@@ -42,6 +42,7 @@ import OSLog
         let excludedConversationCookieCount: Int
         let ignoredOutOfScopeDuplicateCount: Int
         let ignoredExcludedConversationDuplicateCount: Int
+        let ignoredExpiredDuplicateCount: Int
         let selectedPartitionedCookieCount: Int
     }
     enum Failure: Error, LocalizedError, Equatable {
@@ -219,7 +220,7 @@ import OSLog
             receive(ticket) {
                 diagnosticPhase = .sourceSelection; sourceCount = cookies.count
                 let selection = try Self.select(cookies, now: Date(), onFailure: { self.selectionFailure = $0 })
-                Self.failureLog.notice("cookieSeedSelection version=1 sourceCount=\(cookies.count) eligibleCount=\(selection.eligibleCookieCount) selectedCount=\(selection.cookies.count) ignoredOutOfScopeDuplicateCount=\(selection.ignoredOutOfScopeDuplicateCount) ignoredExcludedConversationDuplicateCount=\(selection.ignoredExcludedConversationDuplicateCount) selectedPartitionedCookieCount=\(selection.selectedPartitionedCookieCount)")
+                Self.failureLog.notice("cookieSeedSelection version=1 sourceCount=\(cookies.count) eligibleCount=\(selection.eligibleCookieCount) selectedCount=\(selection.cookies.count) ignoredOutOfScopeDuplicateCount=\(selection.ignoredOutOfScopeDuplicateCount) ignoredExcludedConversationDuplicateCount=\(selection.ignoredExcludedConversationDuplicateCount) selectedPartitionedCookieCount=\(selection.selectedPartitionedCookieCount) ignoredExpiredDuplicateCount=\(selection.ignoredExpiredDuplicateCount)")
                 selected = selection.cookies
                 selectionCounts = Summary(sourceCookieCount: cookies.count, eligibleCookieCount: selection.eligibleCookieCount,
                     excludedConversationCookieCount: selection.excludedConversationCookieCount, seededCookieCount: selected.count,
@@ -336,9 +337,10 @@ import OSLog
     /// are not classified as conversation cookies. No auth-name allowlist is
     /// guessed: all other eligible ChatGPT cookies retain their exact objects.
     static func select(_ cookies: [HTTPCookie], now: Date, onFailure: ((FailureDiagnostic) -> Void)? = nil) throws -> Selection {
-        var bytes = 0, identities: [Identity: HTTPCookie] = [:], selected: [HTTPCookie] = []
+        var bytes = 0, identities: [Identity: (cookie: HTTPCookie, expired: Bool)] = [:], selected: [HTTPCookie] = []
         var selectedPartitioned = 0
         var eligible = 0, excluded = 0, ignoredOutOfScopeDuplicates = 0, ignoredExcludedConversationDuplicates = 0
+        var ignoredExpiredDuplicates = 0
         func reject(_ failure: Failure, _ reason: FailureDiagnostic.Reason,
                     mismatch: (mask: Int, comparison: FailureDiagnostic.Comparison)? = nil,
                     duplicatePartition: FailureDiagnostic.PartitionPresence? = nil) -> Failure {
@@ -370,30 +372,30 @@ import OSLog
             let conversation = ChatGPTTemporaryConversationCookies.canonicalID(name: cookie.name, prefix: "conv_key_") != nil
                 || ChatGPTTemporaryConversationCookies.canonicalID(name: cookie.name, prefix: "history_off_") != nil
             let excludedConversation = host == "chatgpt.com" && cookie.path == "/" && conversation
+            let expiry = cookie.expiresDate
+            if let expiry, !expiry.timeIntervalSince1970.isFinite { throw reject(.invalidSource, .nonfiniteExpiry) }
+            let expired = expiry.map { $0 <= now } ?? false
             let identity = Identity(domain: Data(cookie.domain.utf8), path: Data(cookie.path.utf8), name: Data(cookie.name.utf8), partition: partition)
             if let first = identities[identity] {
-                // Neither foreign cookies nor these exact canonical root
-                // conversation cookies can enter the destination. Keep every
-                // other in-scope identity rejection before expiry; do not pick
-                // a value or mutate either source object to resolve ambiguity.
+                // Foreign, excluded, and expired rows cannot enter the
+                // destination. A live row replaces an expired witness only in
+                // this local index, so two live rows still reject in any order.
                 if excludedConversation {
                     ignoredExcludedConversationDuplicates += 1
-                } else {
-                    guard !inScope else {
-                        let mismatch = onFailure == nil ? nil : attributeMismatch(first, remaining: [cookie])
-                        throw reject(.invalidSource, .duplicateIdentity,
-                            mismatch: mismatch?.comparison == .uniqueIdentity ? mismatch : nil, duplicatePartition: partition.presence)
-                    }
+                } else if !inScope {
                     ignoredOutOfScopeDuplicates += 1
+                } else if expired || first.expired {
+                    ignoredExpiredDuplicates += 1
+                    if !expired { identities[identity] = (cookie, false) }
+                } else {
+                    let mismatch = onFailure == nil ? nil : attributeMismatch(first.cookie, remaining: [cookie])
+                    throw reject(.invalidSource, .duplicateIdentity,
+                        mismatch: mismatch?.comparison == .uniqueIdentity ? mismatch : nil, duplicatePartition: partition.presence)
                 }
             } else {
-                identities[identity] = cookie
+                identities[identity] = (cookie, expired)
             }
-            if let expiry = cookie.expiresDate {
-                guard expiry.timeIntervalSince1970.isFinite else { throw reject(.invalidSource, .nonfiniteExpiry) }
-                if expiry <= now { continue }
-            }
-            guard inScope else { continue }
+            guard inScope, !expired else { continue }
             let labels = host.split(separator: ".", omittingEmptySubsequences: false)
             guard host.utf8.count <= 253, labels.allSatisfy({ label in
                 !label.isEmpty && label.utf8.count <= 63 && label.first != "-" && label.last != "-"
@@ -411,6 +413,7 @@ import OSLog
         return Selection(cookies: selected, eligibleCookieCount: eligible, excludedConversationCookieCount: excluded,
             ignoredOutOfScopeDuplicateCount: ignoredOutOfScopeDuplicates,
             ignoredExcludedConversationDuplicateCount: ignoredExcludedConversationDuplicates,
+            ignoredExpiredDuplicateCount: ignoredExpiredDuplicates,
             selectedPartitionedCookieCount: selectedPartitioned)
     }
 }

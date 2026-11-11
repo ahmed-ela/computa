@@ -1630,15 +1630,20 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             ownerToken: session.token, generation: generation) { binding.revoke() }
     }
 
-    /// No public/memberwise initializer: only this native transport can attest
-    /// rejection before it has reserved or acquired any inference page.
+    /// Only this native transport can attest that the invocation never acquired
+    /// an inference page. The original model error remains separate from that proof.
     struct PrecreationRejection: Error, Sendable {
         let admission: WebModelStartAdmission
-        let failure: Failure
+        let failure: any Error
 
         fileprivate init(admission: WebModelStartAdmission, failure: Failure) {
             self.admission = admission
             self.failure = failure
+        }
+
+        fileprivate init(invalidChatGPTCookieSource admission: WebModelStartAdmission) {
+            self.admission = admission
+            self.failure = ChatGPTInferenceCookieSeed.Failure.invalidSource
         }
     }
 
@@ -2352,8 +2357,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         synchronizeProviderGate(provider)
         let kimiProfileID = provider == .kimi ? browser.kimiModelProfileID : nil
         if let gate = providerGate(provider, kimiProfileID: kimiProfileID) {
-            // Typed no-session rejections are valid only before reservation,
-            // prewarm acquisition, cookie-profile creation, or createSession.
+            // The gate blocks before reservation, prewarm acquisition,
+            // cookie-profile preparation or session creation.
             if let admission { throw PrecreationRejection(admission: admission, failure: gate.failure) }
             throw gate.failure
         }
@@ -2382,7 +2387,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 ? try await browser.takePrewarmedChatGPTInferenceTab(until: .now + .seconds(2), admit: admit) : nil
             coldNamedChatRootRead = Self.permitsInitialChatRootRead(choice, warm: warmTab != nil, diagnostics: requestMetadata != nil)
             if let warmTab { preparedTab = warmTab }
-            else { preparedTab = try await browser.createChatGPTInferenceTab(requestMetadata: requestMetadata, admit: admit) }
+            else {
+                do {
+                    preparedTab = try await browser.createChatGPTInferenceTab(requestMetadata: requestMetadata, admit: admit)
+                } catch ChatGPTInferenceCookieSeed.Failure.invalidSource {
+                    // Source validation fails before any destination access or
+                    // tab creation. Other preparation errors carry no such proof.
+                    if let admission { throw PrecreationRejection(invalidChatGPTCookieSource: admission) }
+                    throw ChatGPTInferenceCookieSeed.Failure.invalidSource
+                }
+            }
         } else { preparedTab = nil }
         let session: Session
         do {

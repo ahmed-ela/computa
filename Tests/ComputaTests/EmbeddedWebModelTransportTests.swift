@@ -5763,7 +5763,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let id = try XCTUnwrap(fixture.createdTabs.last)
         let view = try XCTUnwrap(fixture.browser.webView(for: id))
         _ = try await waitForState("ready", fixture.transport, token: token)
-        _ = try await evaluate(view, "document.getElementById('fixture-quota-banner').hidden = false; return true;")
+        try await revealClaudeQuotaWithUnownedResponse(in: view)
         let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
         XCTAssertEqual(finished["cleanup"] as? String, "failed")
         XCTAssertEqual(finished["state"] as? String, "failed")
@@ -5784,6 +5784,20 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             XCTAssertEqual(value, 0)
         }
         try await assertHumanTabIntact(fixture, retaining: id)
+    }
+
+    private func revealClaudeQuotaWithUnownedResponse(in view: WKWebView) async throws {
+        // A physical response root prevents an empty-page cleanup receipt,
+        // while the empty user side still lets the adapter observe quota.
+        let responseCount = try await evaluate(view, """
+            const response = document.createElement('div');
+            response.setAttribute('data-testid', 'assistant-message');
+            response.hidden = true;
+            document.getElementById('messages').appendChild(response);
+            document.getElementById('fixture-quota-banner').hidden = false;
+            return document.querySelectorAll('[data-testid="assistant-message"]').length;
+            """)
+        XCTAssertEqual(responseCount as? Int, 1)
     }
 
     // Keep XCTestCase on the main actor; only the Sendable server actor and
@@ -5811,7 +5825,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let token = try XCTUnwrap(started["sessionToken"] as? String), id = try XCTUnwrap(fixture.createdTabs.last)
         let view = try XCTUnwrap(fixture.browser.webView(for: id))
         _ = try await waitForState("ready", fixture.transport, token: token)
-        _ = try await evaluate(view, "document.getElementById('fixture-quota-banner').hidden = false; return true;")
+        try await revealClaudeQuotaWithUnownedResponse(in: view)
         let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
         XCTAssertEqual(finished["cleanup"] as? String, "failed")
         return (fixture, token, id)
