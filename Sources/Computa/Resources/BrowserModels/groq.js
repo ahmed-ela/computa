@@ -312,6 +312,21 @@ try {
         case 'lang':
           if (!/^[a-z]{2,8}(?:-[a-z0-9]{1,8}){0,5}$/i.test(value)) return declined('attribute_value');
           break;
+        case 'id': return declined('attribute_id');
+        case 'title': return declined('attribute_title');
+        case 'role': return declined('attribute_role');
+        case 'tabindex': return declined('attribute_tabindex');
+        case 'contenteditable': return declined('attribute_contenteditable');
+        case 'draggable': return declined('attribute_draggable');
+        case 'align': return declined('attribute_align');
+        case 'translate': return declined('attribute_translate');
+        case 'spellcheck': return declined('attribute_spellcheck');
+        case 'popover': return declined('attribute_popover');
+        case 'onclick': case 'ondblclick': case 'oncontextmenu':
+        case 'onkeydown': case 'onkeyup': case 'onfocus': case 'onblur':
+        case 'oninput': case 'onchange': case 'onmousedown': case 'onmouseup':
+        case 'onpointerdown': case 'onpointerup': case 'ontouchstart': case 'ontouchend':
+          return declined('attribute_event_handler');
         default:
           if (name === 'style') return declined('attribute_style');
           if (name.startsWith('data-')) return declined('attribute_data');

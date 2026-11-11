@@ -86,6 +86,7 @@ function computaProviderCore(request, provider, origin, actions) {
 let kimiDraftState = null;
 let kimiComposerGuardDiagnostic = null;
 let kimiDiscoveryProgress = null;
+let kimiFirstRootIDDiagnostic = null;
 try {
   const actions = ['inspect', 'discoverModels', 'selectModel', 'verifyModel', 'prepare',
     'insert', 'sendReady', 'submit', 'stop', 'deleteConversation', 'selectConversationDeletion',
@@ -499,7 +500,21 @@ try {
       const root = users[0], id = root.getAttribute('data-archer-id');
       const body = one(visible(root, '.user-content .user-content__text'), 'first_body_count');
       if (!c.visible(root)) c.fail('conversation_changed', 'first_root_hidden');
-      if (!c.uuid(id)) c.fail('conversation_changed', 'first_root_id_invalid');
+      if (!c.uuid(id)) {
+        if (input.action === 'inspect' && !cleanupInspection && state.submitted && state.submissionAcknowledged === true) {
+          // Classify only the already rejected row. The extra link attribute
+          // read cannot affect the original rejection or pending admission.
+          try {
+            const link = root.getAttribute('data-conversation-turn-id');
+            const invalidIDClass = value => value === null ? 'missing' : value === '' ? 'empty' : 'other';
+            kimiFirstRootIDDiagnostic = {
+              version: 1, routeKind: route.kind, rootIDClass: invalidIDClass(id),
+              turnIDClass: c.uuid(link) ? 'uuid' : invalidIDClass(link), userCount: users.length, assistantCount: answers.length
+            };
+          } catch { /* Keep the original rejection if metadata is unavailable. */ }
+        }
+        c.fail('conversation_changed', 'first_root_id_invalid');
+      }
       if (root.getAttribute('data-conversation-turn-id') !== id) c.fail('conversation_changed', 'first_turn_link_mismatch');
       if (body.tagName !== 'SPAN' || body.children.length !== 0) c.fail('conversation_changed', 'first_body_shape');
       first = { root, body, id, text: body.textContent };
@@ -1117,6 +1132,8 @@ try {
   return error?.computaAdapterFailure ? { error: error.error, ...(error.detail ? { detail: error.detail } : {}),
     ...(error.error === 'composer_not_empty' && kimiComposerGuardDiagnostic
       ? { composerGuardDiagnostic: kimiComposerGuardDiagnostic } : {}),
+    ...(error.error === 'conversation_changed' && error.detail === 'first_root_id_invalid' && kimiFirstRootIDDiagnostic
+      ? { kimiFirstRootIDDiagnostic } : {}),
     ...(error.error === 'model_unverified' && error.modelEvidenceDiagnostic
       ? { modelEvidenceDiagnostic: error.modelEvidenceDiagnostic } : {}),
     ...(error.error === 'unsupported_response_format' && error.adapterFailureStructure

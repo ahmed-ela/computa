@@ -986,10 +986,10 @@ describe('Groq fixed fresh-session adapter', () => {
 
   test('paragraph evidence reports only the first failed predicate and keeps the same rejection', async () => {
     for (const [variant, reason] of [
-      ['too_many_attributes', 'attribute_count'], ['extra_attribute', 'attribute_name'], ['unknown_attribute', 'attribute_name'],
+      ['too_many_attributes', 'attribute_count'], ['extra_attribute', 'attribute_title'], ['unknown_attribute', 'attribute_name'],
       ['unknown_class', 'attribute_value'], ['duplicate_class', 'attribute_value'], ['invalid_dir', 'attribute_value'],
       ['invalid_lang', 'attribute_value'], ['style', 'attribute_style'], ['data', 'attribute_data'], ['aria', 'attribute_aria'],
-      ['role', 'attribute_name'], ['tabindex', 'attribute_name'], ['handler', 'attribute_name'],
+      ['role', 'attribute_role'], ['tabindex', 'attribute_tabindex'], ['handler', 'attribute_event_handler'],
       ['namespaced_class', 'attribute_namespace'], ['hidden', 'paragraph_hidden'], ['inert', 'paragraph_hidden'],
       ['editable', 'paragraph_editable'], ['foreign_namespace', 'paragraph_namespace'], ['wrapper', 'paragraph_tag'],
       ['direct_text', 'answer_text_child'], ['nested', 'leaf_not_text'], ['split_text', 'paragraph_child_count'],
@@ -998,7 +998,7 @@ describe('Groq fixed fresh-session adapter', () => {
       const f = groqFixture(); await f.submit();
       const attributes = variant === 'too_many_attributes' ? Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`data-test-${i}`, '']))
         : variant === 'extra_attribute' ? { class: 'text-left mb-4', title: 'extra' }
-        : variant === 'unknown_attribute' ? { title: 'private-attribute' }
+        : variant === 'unknown_attribute' ? { onward: 'private-attribute' }
         : variant === 'unknown_class' ? { class: 'text-left mb-4 extra' }
         : variant === 'duplicate_class' ? { class: 'text-left mb-4 text-left' }
         : variant === 'invalid_dir' ? { dir: 'private-direction' }
@@ -1027,6 +1027,28 @@ describe('Groq fixed fresh-session adapter', () => {
       expect(observed.groqLiteralResponse).toBe(false);
       expect(observed.answerComplete).toBe(true);
       expect(observed.text).toBe(f.f.reply);
+      expect(f.f.sendCount).toBe(1); expect(f.f.clearCount).toBe(0);
+    }
+  });
+
+  test('rejected HTML attributes report closed names without granting a rendered witness', async () => {
+    const cases = [
+      ['id', 'private-fixture-id', 'attribute_id'],
+      ['contenteditable', 'false', 'attribute_contenteditable'],
+      ['draggable', 'false', 'attribute_draggable'],
+      ['align', 'left', 'attribute_align'],
+      ['translate', 'no', 'attribute_translate'],
+      ['spellcheck', 'false', 'attribute_spellcheck'],
+      ['popover', 'manual', 'attribute_popover'],
+      ['onpointerdown', 'private-handler()', 'attribute_event_handler'],
+    ] as const;
+    for (const [name, value, reason] of cases) {
+      const f = groqFixture(); await f.submit();
+      htmlParagraph(f, f.f.reply, { class: 'text-left mb-4', [name]: value });
+      const observed = await f.run();
+      expect(observed).toMatchObject({ answerComplete: true, firstUserVerified: true,
+        text: f.f.reply, groqLiteralResponse: false, groqRenderedMessageShape: reason });
+      expect(observed.groqRenderedMessageRevision).toBeUndefined();
       expect(f.f.sendCount).toBe(1); expect(f.f.clearCount).toBe(0);
     }
   });

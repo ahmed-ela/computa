@@ -1953,6 +1953,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         case "answer_child_count", "answer_text_child", "answer_child_kind", "paragraph_namespace", "paragraph_tag",
              "paragraph_child_count", "paragraph_editable", "paragraph_hidden", "attribute_count", "attribute_namespace",
              "attribute_name", "attribute_value", "attribute_style", "attribute_data", "attribute_aria",
+             "attribute_id", "attribute_title", "attribute_role", "attribute_tabindex", "attribute_contenteditable",
+             "attribute_draggable", "attribute_align", "attribute_translate", "attribute_spellcheck", "attribute_popover",
+             "attribute_event_handler",
              "leaf_not_text", "text_mismatch", "revision_exhausted", "matched":
             return shape
         default: return nil
@@ -3128,6 +3131,23 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard provider == .kimi, let detail = observed["detail"] as? String,
               kimiFirstUserFailureDetails.contains(detail) else { return false }
         return observed["error"] as? String == (detail == "first_body_count" ? "document_changed" : "conversation_changed")
+    }
+
+    /// Project only the categories available at the existing invalid-ID rejection.
+    static func kimiFirstRootIDDiagnostic(_ raw: Any?, observed: [String: Any],
+                                          provider: Provider, action: String) -> String? {
+        guard provider == .kimi, action == "inspect", observed["error"] as? String == "conversation_changed",
+              observed["detail"] as? String == "first_root_id_invalid",
+              let packet = raw as? [String: Any],
+              Set(packet.keys) == ["version", "routeKind", "rootIDClass", "turnIDClass", "userCount", "assistantCount"],
+              ComputerToolArgumentContract.exactInt64(packet["version"]) == 1,
+              let route = packet["routeKind"] as? String, ["fresh", "provisional", "canonical"].contains(route),
+              let root = packet["rootIDClass"] as? String, ["missing", "empty", "other"].contains(root),
+              let turn = packet["turnIDClass"] as? String, ["missing", "empty", "uuid", "other"].contains(turn),
+              ComputerToolArgumentContract.exactInt64(packet["userCount"]) == 1,
+              let assistants = ComputerToolArgumentContract.exactInt64(packet["assistantCount"]), (0...1).contains(assistants)
+        else { return nil }
+        return "route=\(route) rootID=\(root) turnID=\(turn) users=1 assistants=\(assistants)"
     }
 
     /// Failure-only shared-engine tags. Pairwise allowlists prevent arbitrary
@@ -8087,6 +8107,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             provider: provider.rawValue, action: action)
         let kimiComposerGuard = WebsiteAdapterFailureDiagnostic.removeComposerGuard(from: &observed,
             provider: provider.rawValue, action: action)
+        let kimiRootID = observed.removeValue(forKey: "kimiFirstRootIDDiagnostic")
         let kimiProgress = Self.removeKimiDiscoveryProgressDiagnostic(from: &observed, provider: provider, action: action)
         logKimiDiscoveryProgress(kimiProgress, session: session)
         // This immutable attempt diagnostic is stripped before response or
@@ -8206,6 +8227,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 }
                 if let structure = Self.kimiModelEvidenceDiagnostic(observed, provider: provider) {
                     Self.inspectionLog.error("modelEvidenceDiagnostic version=1 provider=kimi action=\(action == "inspect" ? "inspect" : "other", privacy: .public) sequence=\(session.sequence) structure=\(structure, privacy: .public)")
+                }
+                if !allowBlockedProvider, session.submitted, session.sequence == 1, session.acknowledgedSendSequence == 1,
+                   session.documentGeneration == generation, browser.webView(for: session.tabID) === session.view,
+                   browser.documentGeneration(for: session.tabID) == generation,
+                   let structure = Self.kimiFirstRootIDDiagnostic(kimiRootID, observed: observed, provider: provider, action: action) {
+                    Self.inspectionLog.notice("kimiFirstRootIDFailure version=1 session=\(session.token.lowercased(), privacy: .public) generation=\(generation.uuidString.lowercased(), privacy: .public) pending=\(session.pendingSubmission) \(structure, privacy: .public)")
                 }
                 if let records = Self.deepSeekFirstContainerDiagnosticRecords(observed, provider: provider) {
                     for record in records {

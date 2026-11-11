@@ -3282,6 +3282,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let reasons = ["answer_child_count", "answer_text_child", "answer_child_kind", "paragraph_namespace", "paragraph_tag",
             "paragraph_child_count", "paragraph_editable", "paragraph_hidden", "attribute_count", "attribute_namespace",
             "attribute_name", "attribute_value", "attribute_style", "attribute_data", "attribute_aria",
+            "attribute_id", "attribute_title", "attribute_role", "attribute_tabindex", "attribute_contenteditable",
+            "attribute_draggable", "attribute_align", "attribute_translate", "attribute_spellcheck", "attribute_popover",
+            "attribute_event_handler",
             "leaf_not_text", "text_mismatch", "revision_exhausted", "matched"]
         for reason in reasons {
             XCTAssertEqual(EmbeddedWebModelTransport.sanitizedGroqRenderedMessageShape(reason), reason)
@@ -3289,6 +3292,27 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         for invalid: Any? in [nil, NSNull(), true, 1, ["reason": "matched"], "matched\nprivate text", "arbitrary page text"] {
             XCTAssertNil(EmbeddedWebModelTransport.sanitizedGroqRenderedMessageShape(invalid))
         }
+    }
+
+    func testKimiFirstRootIDDiagnosticOnlyProjectsTheCurrentFailureShape() {
+        let failure = ["error": "conversation_changed", "detail": "first_root_id_invalid"]
+        let valid: [String: Any] = ["version": 1, "routeKind": "canonical", "rootIDClass": "missing",
+            "turnIDClass": "uuid", "userCount": 1, "assistantCount": 0]
+        func project(_ packet: [String: Any], observed: [String: Any] = failure,
+                     provider: EmbeddedWebModelTransport.Provider = .kimi, action: String = "inspect") -> String? {
+            EmbeddedWebModelTransport.kimiFirstRootIDDiagnostic(packet, observed: observed, provider: provider, action: action)
+        }
+        XCTAssertEqual(project(valid), "route=canonical rootID=missing turnID=uuid users=1 assistants=0")
+        for (key, value): (String, Any) in [("routeKind", "private-route"), ("rootIDClass", "uuid"), ("turnIDClass", "private-id"),
+                ("userCount", true), ("assistantCount", 2), ("version", true), ("unrelated", "private text")] {
+            var rejected = valid
+            rejected[key] = value
+            XCTAssertNil(project(rejected), key)
+        }
+        XCTAssertNil(project(valid, observed: ["error": "conversation_changed", "detail": "first_body_shape"]))
+        XCTAssertNil(project(valid, observed: ["error": "document_changed", "detail": "first_root_id_invalid"]))
+        XCTAssertNil(project(valid, provider: .groq))
+        XCTAssertNil(project(valid, action: "deleteInspect"))
     }
 
     func testCodeStructureProjectionRejectsBridgedBooleanCountsAndNumericFlags() throws {

@@ -695,6 +695,7 @@ describe('Kimi saved-conversation adapter', () => {
     const pending = await f.submit(), oldRoot = f.messages.user;
     expect(pending).toMatchObject({ ownershipPending: true, userCount: 1, responseCount: 0, text: '',
       firstUserVerified: false, firstUserMarkerVerified: false, firstUserFingerprint: null, answerComplete: false });
+    expect(pending.kimiFirstRootIDDiagnostic).toBeUndefined();
     expect(f.world.__computaKimiSavedSessionV1.first).toBeNull(); expect(f.fingerprint).toBeUndefined();
     const before = f.counts();
     for (let i = 0; i < 3; i++) expect((await f.run()).ownershipPending).toBe(true);
@@ -1055,10 +1056,61 @@ describe('Kimi saved-conversation adapter', () => {
       if (reason === 'first_marker_suffix') { state.inserted.marker = generation; overrides.expectedFirstUserMarker = generation; }
       if (reason === 'first_binding_not_authorized') overrides.allowFirstUserBinding = false;
       const result = await f.run('inspect',overrides);
-      expect(result).toEqual({error:reason === 'first_body_count' ? 'document_changed' : 'conversation_changed',detail:reason});
+      expect(result).toEqual({error:reason === 'first_body_count' ? 'document_changed' : 'conversation_changed',detail:reason,
+        ...(reason === 'first_root_id_invalid' ? { kimiFirstRootIDDiagnostic: {
+          version: 1, routeKind: 'canonical', rootIDClass: 'other', turnIDClass: 'uuid', userCount: 1, assistantCount: 1,
+        } } : {})});
       expect(JSON.stringify(result)).not.toContain('PRIVATE_'); expect(result.firstUserVerified).toBeUndefined();
       expect((await f.run('inspect')).detail).toBe(reason === 'first_submission_unclaimed' ? reason : 'terminal_operation');
       expect(f.counts()).toEqual({insertions:1,sends:1,confirms:0});
+    }
+  });
+
+  test('invalid first-root IDs report only finite facts from the original rejected transcript', async () => {
+    const cases = [
+      { routeKind: 'fresh', root: '', turn: '', rootIDClass: 'empty', turnIDClass: 'empty', assistantCount: 0 },
+      { routeKind: 'provisional', root: null, turn: '', rootIDClass: 'missing', turnIDClass: 'empty', assistantCount: 0 },
+      { routeKind: 'provisional', root: '', turn: null, rootIDClass: 'empty', turnIDClass: 'missing', assistantCount: 0 },
+      { routeKind: 'provisional', root: 'PRIVATE_ROOT_ID', turn: 'PRIVATE_TURN_ID', rootIDClass: 'other', turnIDClass: 'other', assistantCount: 0 },
+      { routeKind: 'canonical', root: '', turn: marker, rootIDClass: 'empty', turnIDClass: 'uuid', assistantCount: 1 },
+    ] as const;
+    for (const { routeKind, root, turn, rootIDClass, turnIDClass, assistantCount } of cases) {
+      const pending = routeKind !== 'canonical';
+      const f = adapterFixture({ provisional: pending, optimisticUser: pending });
+      await f.select(); await f.run('prepare'); await f.run('insert'); await f.run('submit');
+      if (routeKind === 'fresh') f.document.URL = 'https://www.kimi.ai/';
+      for (const [name, value] of [['data-archer-id', root], ['data-conversation-turn-id', turn]] as const) {
+        if (value === null) f.messages.user.removeAttribute(name);
+        else f.messages.user.setAttribute(name, value);
+      }
+      const result = await f.run();
+      expect(result).toEqual({ error: 'conversation_changed', detail: 'first_root_id_invalid', kimiFirstRootIDDiagnostic: {
+        version: 1, routeKind, rootIDClass, turnIDClass, userCount: 1, assistantCount,
+      } });
+      expect(JSON.stringify(result)).not.toContain('PRIVATE_');
+      expect((await f.run()).detail).toBe('terminal_operation');
+      expect(f.fingerprint).toBeUndefined();
+      expect(f.counts()).toEqual({ insertions: 1, sends: 1, confirms: 0 });
+    }
+  });
+
+  test('cleanup or a failed diagnostic read preserves the bare first-root rejection', async () => {
+    for (const cleanup of [false, true]) {
+      const f = adapterFixture();
+      await f.select(); await f.run('prepare'); await f.run('insert'); await f.run('submit');
+      const root = f.messages.user;
+      root.removeAttribute('data-archer-id');
+      const getAttribute = root.getAttribute.bind(root);
+      let reads = 0;
+      root.getAttribute = name => {
+        if (name === 'data-conversation-turn-id') { reads++; throw new Error('PRIVATE_DIAGNOSTIC_EXCEPTION'); }
+        return getAttribute(name);
+      };
+      expect(await f.run('inspect', { kimiCleanupInspection: cleanup }))
+        .toEqual({ error: 'conversation_changed', detail: 'first_root_id_invalid' });
+      expect(reads).toBe(cleanup ? 0 : 1);
+      expect((await f.run()).detail).toBe('terminal_operation');
+      expect(f.counts()).toEqual({ insertions: 1, sends: 1, confirms: 0 });
     }
   });
 

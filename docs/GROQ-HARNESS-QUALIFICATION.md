@@ -804,3 +804,9 @@ direction and language metadata. It still requires one visible, noneditable
 paragraph and its exact text node. Namespaced attributes, interactive markup,
 inline style, custom data, and ARIA attributes do not qualify. The diagnostic
 can distinguish these categories without recording attribute names or values.
+
+Signed build 511 still declined the live marker on an unrecognized HTML
+attribute outside the style, data, and ARIA categories. No tool ran and the
+inference saved its transcript clear. The next diagnostic distinguishes common
+HTML attribute categories at the same rejection point. The exact-text,
+literal-tool, ownership, and cleanup checks are unchanged.
