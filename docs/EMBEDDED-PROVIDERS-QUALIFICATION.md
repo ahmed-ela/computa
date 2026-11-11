@@ -4145,3 +4145,29 @@ commands. The third conversation regressed to the fresh-chat route and the
 ownership guard stopped the task in 34.200 s before any edit or browser action.
 The first two deletions were confirmed; the third cleanup remains unconfirmed.
 The scoped structure arm published no packet because this was a route failure.
+
+### 2026-11-11 — Gemini live check on installed 501
+
+The cleared Gemini checkpoint stayed clear when signed build 501 (`abe618e`)
+restarted. A new 3.1 Pro invoice run passed all 19 outcome checks in 129.145 s.
+It verified 11 submissions in one owned session, ran ten tools, passed six
+tests, obtained one accepted browser receipt, and explicitly closed its task
+tab. The saved website receipt confirms the temporary session closed.
+
+The outcome involved recovery: the first patch proposed the instruction's
+sample path and was rejected before mutation. The model corrected the patch
+using the fixture path. A read-only browser wait timed out before a later read
+found the receipt. This is a completed workflow with recovered tool errors,
+not an error-free reliability run.
+
+The separate 3.5 Flash-Lite run hit `website_verification_required` in 1.089 s.
+The owned main-frame response was Google's HTTP 429 verification route. It
+created a new checkpoint, distinct from the one cleared on build 500. There
+was no verified submission, tool call, or fixture POST; the owned page closed
+with a saved `not_created` receipt. 3.8 Flash and 4 Argon were left unsent. The
+two adapter fixes address recovery and message lookup; the provider
+verification block can still recur. The request evidence does not establish
+why Google issued it.
+
+DeepSeek's normal build 501 tab still redirected to sign-in. It was left on
+that screen and no DeepSeek inference was sent.
