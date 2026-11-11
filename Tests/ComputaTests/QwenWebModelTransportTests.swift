@@ -1905,11 +1905,11 @@ final class QwenWebModelTransportTests: XCTestCase {
         }
     }
 
-    func testQwenOptimisticComparisonRootReplacementRequiresTheSameResponseNode() async throws {
-        for reuseResponse in [true, false] {
+    func testQwenOptimisticComparisonRootReplacementRequiresExactBodyBeforeChoice() async throws {
+        for (rootHandoff, changedSuffix) in [("reuse", false), ("clone", false), ("clone", true)] {
             let fixture = try Fixture(setup: "qwenFixture.options.firstLongMessageDisplay=true; qwenFixture.options.holdResponseIdentity=true;")
             defer { fixture.shutdown() }
-            let token = try await start(fixture, label: "Qwen3.7-Plus")
+            let token = try await start(fixture, label: "Qwen3.8-Max")
             let prompt = String(repeating: "Literal Qwen disclosure fixture 👋 日本語\n", count: 600)
             _ = try await call(fixture, "webProviderSend", token, prompt: prompt)
             let initial = try await call(fixture, "webProviderPoll", token)
@@ -1918,22 +1918,7 @@ final class QwenWebModelTransportTests: XCTestCase {
             let held = try await call(fixture, "webProviderPoll", token)
             XCTAssertEqual(held["modelVerificationPendingReason"] as? String, "qwen_first_body_expansion_v1")
             XCTAssertNil(held["modelProofContext"])
-            try await installResponseChoice(fixture, scenario: "waiting", rootHandoff: reuseResponse ? "reuse" : "clone")
-
-            if !reuseResponse {
-                do {
-                    _ = try await call(fixture, "webProviderPoll", token)
-                    XCTFail("A copied response cannot transfer an optimistic witness")
-                } catch {
-                    XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser))
-                }
-                let closed = try await call(fixture, "webProviderFinish", token)
-                XCTAssertEqual(closed["cleanup"] as? String, "failed")
-                let counts = try await evaluate(fixture.view, "return [qwenFixture.counts.displayClicks, ...choiceFixture.clicks];") as? [Int]
-                XCTAssertEqual(counts, [0, 0, 0])
-                try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
-                continue
-            }
+            try await installResponseChoice(fixture, scenario: "waiting", rootHandoff: rootHandoff)
 
             let pending = try await call(fixture, "webProviderPoll", token)
             XCTAssertEqual(pending["modelVerificationPendingReason"] as? String, "qwen_first_body_expansion_v1")
@@ -1943,6 +1928,26 @@ final class QwenWebModelTransportTests: XCTestCase {
             let before = try await evaluate(fixture.view, "return [qwenFixture.counts.displayClicks, ...choiceFixture.clicks];") as? [Int]
             XCTAssertEqual(before, [0, 0, 0])
             _ = try await evaluate(fixture.view, "choiceFixture.enable(); return true;")
+            if changedSuffix {
+                _ = try await evaluate(fixture.view, """
+                    document.querySelector('.chat-user-message-expand-toggle').addEventListener('click', () => {
+                      document.querySelector('p.user-message-content').textContent += ' different suffix';
+                    }, {once:true});
+                    return true;
+                    """)
+                do {
+                    _ = try await waitForChoiceSpent(fixture, token)
+                    XCTFail("A matching preview cannot authorize choosing a response after the full prompt changes")
+                } catch {
+                    XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser))
+                }
+                let closed = try await call(fixture, "webProviderFinish", token)
+                XCTAssertEqual(closed["cleanup"] as? String, "failed")
+                let counts = try await evaluate(fixture.view, "return [qwenFixture.counts.displayClicks, ...choiceFixture.clicks];") as? [Int]
+                XCTAssertEqual(counts, [1, 0, 0])
+                try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+                continue
+            }
             _ = try await waitForChoiceSpent(fixture, token)
             let completed = try await wait(fixture, token, state: "complete")
             XCTAssertEqual(completed["text"] as? String, #"{"type":"message","text":"Synthetic Qwen native reply"}"#)

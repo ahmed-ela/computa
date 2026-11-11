@@ -197,6 +197,8 @@ final class QwenFirstUserBindingDiagnosticTests: XCTestCase {
         reject(facts)
         facts["continuity"] = good.merging(["priorResponse": "first_card"]) { _, new in new }
         reject(facts)
+        facts["continuity"] = good.merging(["priorResponse": "detached"]) { _, new in new }
+        reject(facts)
         facts["continuity"] = good
         for changes: [String: Any] in [
             ["path": "claim"], ["comparison": false], ["previous": "null"], ["current": "undefined"],

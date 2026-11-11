@@ -3134,7 +3134,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   ["first_card", "second_card", "detached"].contains(priorResponse),
                   let assistantTurnMatches = firstUserDiagnosticBool(continuity["assistantTurnMatches"]),
                   let pairRootMatches = firstUserDiagnosticBool(continuity["pairRootMatches"]),
-                  !(oldRootDetached && priorResponse == "first_card" && pairRootMatches) else { return nil }
+                  !(oldRootDetached && pairRootMatches && (priorResponse == "first_card"
+                    || priorResponse == "detached")) else { return nil }
             return ancestry + " continuity oldRootDetached=\(oldRootDetached) priorResponse=\(priorResponse) assistantTurnMatches=\(assistantTurnMatches) pairRootMatches=\(pairRootMatches)"
         }
         guard stage == "display_completed", reason == "user_id_changed",

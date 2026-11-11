@@ -14,10 +14,10 @@ async function initial(model="Qwen3.7-Plus"){
  chunk.setAttribute('class','chunked-text-renderer-root chunked-text-renderer-root-with-expand is-collapsed');
  const expand=new f.Node('BUTTON',{class:'chat-user-message-expand-toggle chat-user-message-expand-toggle-pc','aria-label':'Expand'});
  chunk.append(expand);f.userBody.text=body.slice(0,10240);
- f.answer.setAttribute('id','chat-response-message-');const phaseWrapper=f.phase.parentElement!;f.phase.detach();
+ f.answer.setAttribute('id','chat-response-message-');f.phase.detach();
  const loading=new f.Node('DIV',{class:'response-loading'});f.answer.append(loading);
  const input={allowSavedResponseChoice:true,allowQwenInitialResponseIdentity:true,allowQwenFirstBodyExpansion:true,expectedModelChoice:choice(model),savedSubmissionFingerprint:hash};
- return {f,chunk,expand,input,hash,loading,phaseWrapper};
+ return {f,chunk,expand,input,hash,loading};
 }
 function remountAnswerRoot(x:Awaited<ReturnType<typeof initial>>, changedTurn = false){
  const {f}=x,previousTurn=f.answerRoot.parentElement!;
@@ -34,8 +34,13 @@ function mountPair(x:Awaited<ReturnType<typeof initial>>, detached = false, root
  const {f,loading}=x;loading.detach();f.answer.setAttribute('id','chat-response-message-'+answerID);
  f.answer.detach();root.setAttribute('class','qwen-chat-message qwen-chat-message-assistant qwen-chat-message-dual-message');
  const wrapper=new f.Node('DIV',{class:'smrm'}),list=new f.Node('DIV',{class:'smrm-list smrm-list--mac'});
- const first=detached||priorIsSecond?f.answer.cloneNode(true):f.answer;
- const other=priorIsSecond?f.answer:f.answer.cloneNode(true);other.values.id='chat-response-message-'+secondID;
+ const cloneResponse=()=>{
+  const copy=new f.Node(f.answer.tagName,{...f.answer.values});
+  copy.append(...f.answer.children.map(child=>child.cloneNode(true)));
+  return copy;
+ };
+ const first=detached||priorIsSecond?cloneResponse():f.answer;
+ const other=priorIsSecond?f.answer:cloneResponse();other.values.id='chat-response-message-'+secondID;
  const controls:any[]=[];
  for(const [index,response]of[first,other].entries()){
   const id=[answerID,secondID][index],card=new f.Node('DIV',{class:'smrm-card',id:id+'-smrm-card'});
@@ -44,24 +49,28 @@ function mountPair(x:Awaited<ReturnType<typeof initial>>, detached = false, root
   const footer=new f.Node('DIV',{class:'smrm-card__footer'}),control=new f.Node('BUTTON',{class:'smrm-card__prefer-btn'},'I prefer this response');
   control.disabled=true;controls.push(control);content.append(response);body.append(content);footer.append(control);card.append(header,body,footer);list.append(card);
  }
- wrapper.append(list);root.append(wrapper);return {wrapper,controls};
+ wrapper.append(list);root.append(wrapper);return {wrapper,controls,first};
 }
-for(const {model,remounted} of [
- {model:'Qwen3.7-Plus',remounted:false},
- {model:'Qwen3.8-Max',remounted:false},
- {model:'Qwen3.7-Plus',remounted:true}
-])test(model+(remounted?' hands the same pending response through a detached assistant root':' hands an unchanged optimistic presentation')+' to the exact SMRM pair before any response identity',async()=>{
+for(const {model,handoff} of [
+ {model:'Qwen3.7-Plus',handoff:'same_root'},
+ {model:'Qwen3.8-Max',handoff:'same_root'},
+ {model:'Qwen3.7-Plus',handoff:'reused_response'},
+ {model:'Qwen3.8-Max',handoff:'detached_response'}
+])test(model+(handoff==='detached_response'?' independently pins a current SMRM pair after the optimistic answer detaches'
+ :handoff==='reused_response'?' hands the same pending response through a detached assistant root to the exact SMRM pair'
+ :' hands an unchanged optimistic presentation to the exact SMRM pair')+' before any response identity',async()=>{
  const x=await initial(model),{f,input,expand,chunk}=x;
  expect((await f.run('inspect',input)).qwenFirstBodyExpansionPending).toBe(true);
  const state=f.world.__computaQwenSavedSessionV1,original=state.firstDisplayWitness,pins=[...original.pins];
  expect(state.first).toBeNull();expect(state.responseIdentity).toBeNull();
- const root=remounted?remountAnswerRoot(x):f.answerRoot;
- const p=mountPair(x,false,root);
- expect(p.wrapper.contains(f.answer)).toBe(true);
- if(remounted){
+ const detached=handoff==='detached_response',root=handoff==='same_root'?f.answerRoot:remountAnswerRoot(x);
+ const p=mountPair(x,detached,root);
+ expect(p.wrapper.contains(f.answer)).toBe(!detached);
+ if(handoff!=='same_root'){
   expect(f.answerRoot.isConnected).toBe(false);
   expect(root.parentElement).toBe(pins.at(-2));
  }
+ if(detached)expect(f.answer.isConnected).toBe(false);
  const first=await f.run('inspect',input);
  expect(first.qwenFirstUserBindingDiagnostic).toBeUndefined();
  expect(first.qwenFirstBodyExpansionPending).toBe(true);expect(first.error).toBeUndefined();
@@ -79,21 +88,28 @@ for(const {model,remounted} of [
  p.controls.forEach(n=>n.disabled=false);
  const ready=await f.run('inspect',input);expect(ready.savedResponseChoice.state).toBe('ready');
  const grant={version:1,kind:'qwen_smrm',policy:'first_observed_card_v1',grant:'caf8aa04-4bac-438b-9280-a98703ec0bee',candidate:ready.savedResponseChoice.candidate,responseIDs:[answerID,secondID],selectedResponseID:answerID,sequence:1};
- p.controls[0].onClick=()=>{p.wrapper.detach();f.answer.detach();root.append(f.answer);root.setAttribute('class','qwen-chat-message qwen-chat-message-assistant');x.phaseWrapper.append(f.phase);f.complete();};
+ p.controls[0].onClick=()=>{
+  p.first.parentElement!.replaceChildren();p.wrapper.detach();
+  root.append(p.first);root.setAttribute('class','qwen-chat-message qwen-chat-message-assistant');
+  const phaseWrapper=p.first.querySelector('.chat-response-message-render-flow')!.children[1];
+  phaseWrapper.append(detached?f.phase.cloneNode(true):f.phase);f.complete();
+  if(detached)p.first.append(f.answer.querySelector('.response-message-footer-actions')!.cloneNode(true));
+ };
  const dispatched=await f.run('inspect',{...input,savedResponseChoiceGrant:grant,evaluationDeadlineEpochMilliseconds:Date.now()+1000});
  expect(dispatched.savedResponseChoice.state).toBe('dispatched');expect(dispatched.text).toBeUndefined();expect(state.first).toBeNull();
- const accepted=await f.run('inspect',input);expect(accepted.error).toBeUndefined();expect(accepted.firstUserFingerprint).toBe(x.hash);expect(accepted.firstUserVerified).toBe(true);expect(accepted.answerComplete).toBe(true);
+ const accepted=await f.run('inspect',input);expect(accepted.adapterFailureStructure).toBeUndefined();expect(accepted.error).toBeUndefined();expect(accepted.firstUserFingerprint).toBe(x.hash);expect(accepted.firstUserVerified).toBe(true);expect(accepted.answerComplete).toBe(true);
  expect(p.controls.map(n=>n.clicks)).toEqual([1,0]);expect(expand.clicks).toBe(1);expect(f.send.clicks).toBe(1);expect(f.more.clicks).toBe(0);
  const repeated=await f.run('inspect',{...input,savedResponseChoiceGrant:grant,evaluationDeadlineEpochMilliseconds:Date.now()+1000});
  expect(repeated.savedResponseChoice.state).toBe('acknowledged');expect(p.controls.map(n=>n.clicks)).toEqual([1,0]);
 });
 test('a comparison cannot adopt changed witness pins, native grants, prompt, model or controls',async()=>{
- for(const fault of ['body','control','root','user-turn','answer-root','answer-turn','connected-answer-root','prior-in-second-card','editor','composer','model','route','preview','hash','grant','cleanup','foreign-tail','pair-control','double-user']){
+ for(const fault of ['body','control','root','user-turn','answer-turn','detached-answer-turn','connected-answer-root','prior-in-second-card','editor','composer','model','route','preview','hash','grant','cleanup','foreign-tail','pair-control','double-user']){
   const x=await initial(),{f,input,expand}=x;
   expect((await f.run('inspect',input)).qwenFirstBodyExpansionPending).toBe(true);
-  const remounted=['answer-root','answer-turn','connected-answer-root','prior-in-second-card'].includes(fault);
-  const root=remounted?remountAnswerRoot(x,fault==='answer-turn'):f.answerRoot;
-  const p=mountPair(x,fault==='answer-root',root,fault==='prior-in-second-card'),over:any={...input};
+  const changedTurn=fault==='answer-turn'||fault==='detached-answer-turn';
+  const remounted=changedTurn||fault==='connected-answer-root'||fault==='prior-in-second-card';
+  const root=remounted?remountAnswerRoot(x,changedTurn):f.answerRoot;
+  const p=mountPair(x,fault==='detached-answer-turn',root,fault==='prior-in-second-card'),over:any={...input};
   if(fault==='body'){const fresh=new f.Node('P',{...f.userBody.values},f.userBody.text);f.userBody.detach();x.chunk.append(fresh);}
   if(fault==='control'){expand.detach();x.chunk.append(new f.Node('BUTTON',{...expand.values}));}
   if(fault==='root'){const old=f.root;old.detach();f.turn.children[0].append(old.cloneNode(true));}
@@ -103,7 +119,7 @@ test('a comparison cannot adopt changed witness pins, native grants, prompt, mod
   }
   if(remounted){
    expect(f.answerRoot.isConnected).toBe(fault==='connected-answer-root');
-   expect(p.wrapper.contains(f.answer)).toBe(fault!=='answer-root');
+   expect(p.wrapper.contains(f.answer)).toBe(fault!=='detached-answer-turn');
    if(fault==='prior-in-second-card')expect(p.wrapper.querySelectorAll('.smrm-card__content')[1].contains(f.answer)).toBe(true);
   }
   if(fault==='editor'){const old=f.editor;old.detach();f.scope.append(new f.Node('TEXTAREA',{...old.values}));}
@@ -122,10 +138,10 @@ test('a comparison cannot adopt changed witness pins, native grants, prompt, mod
    expect(rejected.qwenFirstUserBindingDiagnostic).toMatchObject({
     stage:'display_held',reason:'answer_ancestry_changed',ancestry:{path:'witness',branch:'pins',comparison:true}});
    const ancestry=rejected.qwenFirstUserBindingDiagnostic.ancestry;
-   if(fault==='answer-turn'){
+   if(changedTurn){
     expect(ancestry.slot).toBe('assistant_turn');expect(ancestry.continuity).toBeUndefined();
    }else{
-    const priorResponse=fault==='answer-root'?'detached':fault==='prior-in-second-card'?'second_card':'first_card';
+    const priorResponse=fault==='prior-in-second-card'?'second_card':'first_card';
     expect(ancestry.slot).toBe('assistant_root');
     expect(ancestry.continuity).toEqual({oldRootDetached:fault!=='connected-answer-root',
       priorResponse,assistantTurnMatches:true,pairRootMatches:true});
@@ -136,6 +152,25 @@ test('a comparison cannot adopt changed witness pins, native grants, prompt, mod
   for(const key of ['text','firstUserVerified','modelEvidence','answerComplete'])expect(rejected[key],fault).toBeUndefined();
   expect(expand.clicks,fault).toBe(0);expect(p.controls.map(n=>n.clicks),fault).toEqual([0,0]);expect(f.send.clicks,fault).toBe(1);expect(f.more.clicks,fault).toBe(0);
  }
+});
+test('a detached comparison cannot gain preference or cleanup from an exact preview with a changed full suffix',async()=>{
+ const x=await initial('Qwen3.8-Max'),{f,input,expand,chunk}=x;
+ expect((await f.run('inspect',input)).qwenFirstBodyExpansionPending).toBe(true);
+ const p=mountPair(x,true,remountAnswerRoot(x));
+ expect(f.answerRoot.isConnected).toBe(false);expect(f.answer.isConnected).toBe(false);
+ expect((await f.run('inspect',input)).qwenFirstBodyExpansionPending).toBe(true);
+ expect(expand.clicks).toBe(0);
+ p.controls.forEach(n=>n.disabled=false);
+ expand.onClick=()=>{
+  chunk.setAttribute('class','chunked-text-renderer-root chunked-text-renderer-root-with-expand');
+  expand.setAttribute('aria-label','Collapse');f.userBody.text=body+' changed suffix';
+ };
+ expect((await f.run('inspect',input)).qwenFirstBodyExpansionPending).toBe(true);
+ const refused=await f.run('inspect',input);
+ expect(refused.error).toBe('conversation_changed');
+ for(const key of ['text','firstUserVerified','modelEvidence','answerComplete','savedResponseChoice'])expect(refused[key]).toBeUndefined();
+ expect(f.world.__computaQwenSavedSessionV1.first).toBeNull();
+ expect(expand.clicks).toBe(1);expect(p.controls.map(n=>n.clicks)).toEqual([0,0]);expect(f.more.clicks).toBe(0);expect(f.send.clicks).toBe(1);
 });
 test('a detached empty-ID presentation may hand off under the same physical user and assistant ancestors',async()=>{
  const x=await initial(),{f,input}=x;

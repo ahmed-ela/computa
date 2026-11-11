@@ -513,16 +513,18 @@ async function computaSavedConversation(input, c, dom, config) {
               path:'witness', branch:'comparison_scope', index:null, count:null, slot:'none', previous:'unknown', current:'unknown', comparison:true }));
           const prior = optimistic.pins.at(-1);
           const priorCardIndex = comparisonPair.rows.findIndex(row => row.response === prior);
-          if (!prior || prior.isConnected !== false && priorCardIndex < 0) refuse('answer_ancestry_changed', () => ({
+          const priorDetached = prior?.isConnected === false;
+          if (!prior || !priorDetached && priorCardIndex < 0) refuse('answer_ancestry_changed', () => ({
               path:'witness', branch:'comparison_prior', index:null, count:null, slot:'none', previous:'unknown', current:'unknown', comparison:true }));
           const pins = [...optimistic.pins.slice(0, -1), comparisonPair.wrapper];
           const rootIndex = pins.length - 3;
           const oldRootDetached = pins[rootIndex]?.isConnected === false;
           const pairRootMatches = comparisonPair.root === view.pins.at(-3);
-          // Only the same pending response object in the first verified card can
-          // carry continuity across a disconnected assistant root. The
-          // assistant turn and all earlier pins still compare by identity.
-          if (priorCardIndex === 0 && oldRootDetached && pairRootMatches)
+          // A disconnected root can hand off the same response in the first
+          // card or yield a detached, unbound placeholder to the current pair.
+          // The assistant turn and every user pin must still match. The pair
+          // earns no preference grant until the full submitted body is proved.
+          if (oldRootDetached && pairRootMatches && (priorCardIndex === 0 || priorCardIndex < 0 && priorDetached))
             pins[rootIndex] = comparisonPair.root;
           requireDisplayPins({ pins }, view, (reason, structure) => {
             if (reason !== 'answer_ancestry_changed') return refuse(reason, structure);

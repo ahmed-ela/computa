@@ -4265,3 +4265,22 @@ In build 504, idle Groq discovery republished the same three Groq choices.
 The normal menu's exact display-name search for GPT OSS 20B yielded no row.
 The direct model route selected GPT OSS 20B, and searching the menu by
 `gpt-oss-20b` found it. Both checks were prompt-free.
+
+### 2026-11-11 — Qwen Max comparison on installed 505
+
+Signed build 505 (`ef3cae2`) completed a clean Qwen Plus workflow with all
+19 checks, one accepted receipt and explicit browser close. All nine owned
+website deletions were saved. A separate Qwen Max marker verified the named
+selection, exact reply and one saved deletion.
+
+The Max coding and browser workflow stopped on its third inference before
+post-patch tests or browser actions. The adapter diagnostic shows a detached
+old assistant root and response node, the same assistant turn, and a matching
+current comparison root. The old empty-ID presentation carried no reply
+identity. The first two deletions were saved and the third remains unconfirmed.
+
+When both old nodes detach, the adapter can now observe the new comparison
+under the original assistant turn and user pins. Before granting one
+preference click, it still verifies the whole submitted prompt and marker,
+the model, and both current response cards. A changed suffix after expansion
+stops before a preference, reply or deletion can be accepted.
