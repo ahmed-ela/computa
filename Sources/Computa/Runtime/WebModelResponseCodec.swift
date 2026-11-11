@@ -714,7 +714,7 @@ enum WebModelResponseCodec {
                                        availability: browserToolAvailability,
                                        capabilities: browserCapabilities)
             : currentBrowserHandoff(tools: offered, policy: policy, availability: browserToolAvailability)
-        let responseContract = compactGroq ? ComputaAgentInstructions.groqResponseContract(currentBrowserHandoff: browserHandoff,
+        let baseResponseContract = compactGroq ? ComputaAgentInstructions.groqResponseContract(currentBrowserHandoff: browserHandoff,
             hasFunctions: offered.values.contains { !$0.isCustom } || !declared.identities.isEmpty,
             hasCustomTools: !wireCustomNames.isEmpty, singleCallProfile: declaredFunctionProfile,
             currentToolHandoff: try currentGroqToolHandoff(projection: displayProjection,
@@ -729,9 +729,11 @@ enum WebModelResponseCodec {
                 || (provider == "kimi" && WebsiteModelCatalog.choice(for: model) ==
                     WebsiteModelChoice(provider: "kimi", key: "k28-instant", label: "Instant"))
                 || claudeChoice == .claudeHaiku55
-                || claudeChoice == WebsiteModelChoice(provider: "claude", key: "Opus 3", label: "Opus 3"),
+                || claudeChoice == .claudeOpus3,
             currentBrowserHandoff: browserHandoff,
             allowedToolNames: policy.allowedNames)
+        let responseContract = baseResponseContract + (claudeChoice == .claudeOpus3
+            ? ComputaAgentInstructions.claudeOpus3OutputBoundary : "")
         let prompt = """
         \(runtimeInstructions)
 

@@ -1002,6 +1002,8 @@ enum ComputaAgentInstructions {
     Put all explanations inside message.text or tool_calls.commentary; include no text or other blocks outside it.
     """
 
+    static let claudeOpus3OutputBoundary = "\n\nStart your visible reply with ```json. Put every result or explanation inside the JSON. Close with ``` on its own line. Write no text outside the code block."
+
     /// Kept after the complete request so long histories cannot bury the local
     /// response handoff. Names come only from the current validated schemas.
     static func webResponseContract(offeredToolNames: [String], customToolNames: Set<String> = [],

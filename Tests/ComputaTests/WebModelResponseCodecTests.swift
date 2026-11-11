@@ -2371,9 +2371,11 @@ final class WebModelResponseCodecTests: XCTestCase {
         let call = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf CLAUDETOOLFIXTURE"}}]}"#
         let fenced = "```json\n" + call + "\n```"
         let boundary = ComputaAgentInstructions.literalFencedResponseBoundary
-        let claudeChoice = WebsiteModelChoice(provider: "claude", key: "Opus 3", label: "Opus 3").modelID
+        let opus3Boundary = ComputaAgentInstructions.claudeOpus3OutputBoundary
+        let opus3 = WebsiteModelChoice.claudeOpus3.modelID
+        let sonnet = WebsiteModelChoice(provider: "claude", key: "Sonnet 4.6", label: "Sonnet 4.6").modelID
         let kimiChoice = WebsiteModelChoice(provider: "kimi", key: "k28-instant", label: "Instant").modelID
-        let literalModels = ["browser/claude", claudeChoice, "browser/kimi", kimiChoice, "browser/deepseek/mode/chat"]
+        let literalModels = ["browser/claude", opus3, sonnet, "browser/kimi", kimiChoice, "browser/deepseek/mode/chat"]
         for model in ["browser/chatgpt", "browser/gemini", "browser/groq"] + literalModels {
             let original = try JSONSerialization.data(withJSONObject: [
                 "model": model, "input": "Use the terminal to print the fixture token.",
@@ -2382,11 +2384,13 @@ final class WebModelResponseCodecTests: XCTestCase {
             let request = try WebModelResponseCodec.prepareRequest(original)
             let needsLiteralBoundary = literalModels.contains(model)
             XCTAssertEqual(request.prompt.contains(boundary), needsLiteralBoundary, model)
+            let expectedOpus3Suffix = model == opus3 ? opus3Boundary : ""
+            XCTAssertEqual(request.prompt.components(separatedBy: opus3Boundary).count, model == opus3 ? 2 : 1, model)
             XCTAssertEqual(request.continuationRequest, original)
-            try assertContiguousRequestValues(original, in: request, expectsFunctionLayout: model == claudeChoice || model == kimiChoice)
+            try assertContiguousRequestValues(original, in: request, expectsFunctionLayout: model == opus3 || model == kimiChoice)
             if needsLiteralBoundary {
                 XCTAssertEqual(request.prompt.components(separatedBy: boundary).count - 1, 1)
-                XCTAssertTrue(request.prompt.hasSuffix(boundary + "\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
+                XCTAssertTrue(request.prompt.hasSuffix(boundary + "\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF." + expectedOpus3Suffix), model)
                 XCTAssertEqual(try WebModelResponseCodec.parseEmbeddedReply(fenced, request: request),
                     .toolCalls([.init(name: "exec_command", argumentsJSON: #"{"cmd":"printf CLAUDETOOLFIXTURE"}"#, namespace: nil)]))
                 // Reproduce the captured authored introduction separately from
@@ -2524,6 +2528,7 @@ final class WebModelResponseCodecTests: XCTestCase {
         XCTAssertEqual(prompt.range(of: displayed, options: .backwards), start..<end, file: file, line: line)
         let suffix = String(decoding: prompt.suffix(from: end), as: UTF8.self)
         let closingFence = ["chatgpt", "claude", "groq"].contains(LocalModelCatalog.webProvider(for: request.model) ?? "") ? "\n```" : ""
+        let opus3Suffix = request.model == WebsiteModelChoice.claudeOpus3.modelID ? ComputaAgentInstructions.claudeOpus3OutputBoundary : ""
         XCTAssertEqual(suffix, closingFence + "\nEND_COMPLETE_RESPONSES_REQUEST_JSON.\n\n" + request.currentUserInstructions + "\n\n" +
                        ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(request.offeredToolNames), customToolNames: request.customToolNames,
                            includedInstructionText: includedInstructionText,
@@ -2533,7 +2538,7 @@ final class WebModelResponseCodecTests: XCTestCase {
                            singleActionRelay: request.singleActionRelay,
                            illustrateFunctionArguments: expectsFunctionLayout || LocalModelCatalog.webProvider(for: request.model) == "qwen",
                            currentBrowserHandoff: expectedCurrentBrowserHandoff,
-                           allowedToolNames: expectedAllowedToolNames),
+                           allowedToolNames: expectedAllowedToolNames) + opus3Suffix,
                        "The fresh response contract and current names follow every complete request", file: file, line: line)
         return suffix
     }

@@ -252,10 +252,13 @@ enum ClaudeRequestCapture {
                       expiry > now, expiry.timeIntervalSince(now) <= maximumLifetime else { return nil }
                 let exec: ExecResult?
                 if trigger == .afterExecCommand {
+                    let expectedPrompt = includesMatchedOutputNote ? WebModelServer.claudePromptWithMatchedOutputNote(request.prompt,
+                        remainingTurnBytes: WebModelResponseCodec.maximumPromptBytes,
+                        modelChoice: WebsiteModelCatalog.choice(for: request.model)) : request.prompt
                     guard value["threadID"] as? String == context.threadID.uuidString.lowercased(),
                           value["userPromptSHA256"] as? String == sha256(Data(syntheticExecUserText(nonce: nonce).utf8)),
                           let marker = value["resultMarker"] as? String,
-                          prompt.utf8.elementsEqual((includesMatchedOutputNote ? request.prompt + WebModelServer.claudeMatchedOutputNote : request.prompt).utf8),
+                          let expectedPrompt, prompt.utf8.elementsEqual(expectedPrompt.utf8),
                           let matched = syntheticExecResult(request, context: context, nonce: nonce, marker: marker) else { return nil }
                     exec = matched
                 } else { exec = nil }

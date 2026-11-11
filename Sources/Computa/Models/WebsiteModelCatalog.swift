@@ -8,6 +8,7 @@ struct WebsiteModelChoice: Codable, Equatable, Sendable {
     let label: String
 
     static let claudeHaiku55 = Self(provider: "claude", key: "Haiku 5.5", label: "Haiku 5.5")
+    static let claudeOpus3 = Self(provider: "claude", key: "Opus 3", label: "Opus 3")
 
     var isValid: Bool {
         provider != "deepseek" && WebsiteModelCatalog.knownProviders.contains(provider)

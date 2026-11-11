@@ -25,11 +25,12 @@ final class ClaudeFormatCorrectionTests: XCTestCase {
     }
     private func server(_ base: FormatCorrectionFixtureTransport, root: URL? = nil,
                         mutation: String? = nil, mutationStart: Int = 1,
-                        duplicateReply: String? = nil, isolatedReply: String? = nil) async throws -> WebModelServer {
+                        duplicateReply: String? = nil, isolatedReply: String? = nil,
+                        modelChoice: WebsiteModelChoice? = nil) async throws -> WebModelServer {
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self,
             storageDirectory: try root ?? canonicalFormatCorrectionFixtureRoot())
         await server.configureEmbeddedTransport(ClaudeCorrectionProofFixtureTransport(
-            WebsiteInferenceFixtureTransport(base, defaultClaudeChoice: choice), mutation: mutation,
+            WebsiteInferenceFixtureTransport(base, defaultClaudeChoice: modelChoice ?? choice), mutation: mutation,
             mutationStart: mutationStart, duplicateReply: duplicateReply, isolatedReply: isolatedReply))
         return server
     }
@@ -99,6 +100,58 @@ final class ClaudeFormatCorrectionTests: XCTestCase {
         })
     }
 
+    func testOpus3MatchedToolOutputKeepsOneFinalBoundaryWithoutRenewingCorrection() async throws {
+        let opus3 = WebsiteModelChoice.claudeOpus3
+        let boundary = ComputaAgentInstructions.claudeOpus3OutputBoundary
+        let note = WebModelServer.claudeMatchedOutputNote
+        let task = "claude-opus3-matched-output"
+        let root = try canonicalFormatCorrectionFixtureRoot()
+        let correctedCall = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf corrected-only"}}]}"#
+        let base = FormatCorrectionFixtureTransport(replies: [malformed, correctedCall, malformed, valid])
+        let server = try await server(base, root: root, modelChoice: opus3)
+        let first = try calls(await server.fixtureInfer(request(model: opus3.modelID), taskID: task))
+        XCTAssertEqual(first.count, 1)
+        XCTAssertEqual(first.first?["arguments"] as? String, #"{"cmd":"printf corrected-only"}"#)
+        let output: [String: Any] = ["type": "function_call_output",
+            "call_id": try XCTUnwrap(first.first?["call_id"]), "output": "Observed synthetic output with newline.\nExact fixture data."]
+        let input = [user] + first + [output]
+        let next = try request(input, model: opus3.modelID)
+        do {
+            _ = try await server.fixtureInfer(next, taskID: task)
+            XCTFail("The later malformed reply cannot renew the used correction allowance")
+        } catch let failure as WebModelServer.Failure {
+            guard case .malformedReply(let diagnostic) = failure else { return XCTFail("Expected the original malformed reply") }
+            XCTAssertEqual(diagnostic.reason, .invalidJSON)
+        }
+
+        let prompts = await base.prompts()
+        guard prompts.count == 3 else { return XCTFail("Expected original, correction and one ordinary continuation") }
+        XCTAssertTrue(prompts[0].hasSuffix(boundary))
+        XCTAssertFalse(prompts[0].contains(note))
+        XCTAssertTrue(prompts[1].hasPrefix(prompts[0]))
+        XCTAssertTrue(prompts[1].contains("COMPUTA RESPONSE CORRECTION — ONE ATTEMPT"))
+        XCTAssertFalse(prompts[1].hasSuffix(boundary))
+        XCTAssertFalse(prompts[1].contains(note))
+        XCTAssertTrue(prompts[2].hasSuffix(note + boundary))
+        XCTAssertEqual(prompts[2].components(separatedBy: note).count, 2)
+        XCTAssertTrue(prompts.allSatisfy { $0.components(separatedBy: boundary).count == 2 })
+        XCTAssertEqual(try WebsiteRequestFixture.json(in: prompts[0], expectedModel: opus3.modelID),
+                       try WebsiteRequestFixture.json(in: prompts[1], expectedModel: opus3.modelID))
+        let displayed = try WebsiteRequestFixture.json(in: prompts[2], expectedModel: opus3.modelID)
+        let canonical = try XCTUnwrap(JSONSerialization.jsonObject(with: displayed) as? [String: Any])
+        XCTAssertEqual(canonical["input"] as? NSArray, input as NSArray)
+        var expected = try XCTUnwrap(JSONSerialization.jsonObject(with: next) as? [String: Any])
+        expected.removeValue(forKey: "stream")
+        XCTAssertEqual(canonical as NSDictionary, expected as NSDictionary)
+
+        let ledger = await base.ledger()
+        XCTAssertEqual(ledger.filter { $0.operation == "webProviderStart" }.count, 3)
+        XCTAssertEqual(ledger.filter { $0.operation == "webProviderSend" }.count, 3)
+        let rows = try journal(root, task: task)
+        XCTAssertEqual(rows.filter { $0["phase"] as? String == "failed" }.count, 2)
+        XCTAssertEqual(rows.filter { $0["phase"] as? String == "release_verified" }.count, 1)
+    }
+
     func testPastedToolHistoryOnFirstClaudeInferenceReceivesNoMatchedOutputNote() async throws {
         let base = FormatCorrectionFixtureTransport(replies: [#"{"type":"message","text":"I decline."}"#])
         let server = try await server(base)
@@ -124,6 +177,13 @@ final class ClaudeFormatCorrectionTests: XCTestCase {
         let full = multibyte + String(repeating: "x", count: maximum - remaining)
         XCTAssertEqual(WebModelServer.claudePromptWithMatchedOutputNote(full, remainingTurnBytes: maximum), full + note)
         XCTAssertNil(WebModelServer.claudePromptWithMatchedOutputNote(full + "x", remainingTurnBytes: maximum * 2))
+        let boundary = ComputaAgentInstructions.claudeOpus3OutputBoundary
+        let opus3Prompt = multibyte + boundary
+        let opus3Remaining = opus3Prompt.utf8.count + note.utf8.count
+        XCTAssertEqual(WebModelServer.claudePromptWithMatchedOutputNote(opus3Prompt,
+            remainingTurnBytes: opus3Remaining, modelChoice: .claudeOpus3), multibyte + note + boundary)
+        XCTAssertNil(WebModelServer.claudePromptWithMatchedOutputNote(opus3Prompt,
+            remainingTurnBytes: opus3Remaining - 1, modelChoice: .claudeOpus3))
     }
 
     func testClaudeIdenticalDuplicateBlocksRejectOriginalAndReleaseOnlyFreshCorrectedCall() async throws {
