@@ -63,12 +63,28 @@ final class GroqNativePublicationLedger: @unchecked Sendable {
     enum PatchStatus: Equatable, Sendable { case completed, failed, declined, inProgress }
     enum Terminal: Equatable, Sendable {
         case command(status: CommandStatus, exitCode: Int?)
+        // Only Core's guarded native command-completed item supplies this fact.
+        // It preserves a known failed result; it does not assert command success.
+        case knownNonzeroCommandResult(status: CommandStatus, exitCode: Int)
         case patch(status: PatchStatus)
         fileprivate func succeeds(for kind: Kind) -> Bool {
             switch (kind, self) {
             case (.execCommand, .command(.completed, let exit)): exit == 0
             case (.applyPatch, .patch(.completed)): true
             default: false
+            }
+        }
+        fileprivate var knownNonzeroExitCode: Int? {
+            guard case let .knownNonzeroCommandResult(status, exit) = self,
+                  status == .failed, exit > 0, exit <= Int(Int32.max) else { return nil }
+            return exit
+        }
+        fileprivate func permitsHistoricalProjection(for kind: Kind) -> Bool {
+            if succeeds(for: kind) { return true }
+            switch (kind, self) {
+            case let (.execCommand, .knownNonzeroCommandResult(status, exit)):
+                return status == .failed && exit > 0 && exit <= Int(Int32.max)
+            default: return false
             }
         }
     }
@@ -117,20 +133,22 @@ final class GroqNativePublicationLedger: @unchecked Sendable {
         let sha256: String
         let byteCount: Int
         let nativeHTTPSourceSHA256: String
+        let knownNonzeroExitCode: Int?
         let valueRange: Range<Int>?
         fileprivate init(ledger: GroqNativePublicationLedger, owner: UUID, epoch: UUID, publicationID: UUID, scope: Scope,
             callID: String, kind: Kind, name: String, namespace: String?, field: Field,
-            rawJSONValue: Data, sha256: String, nativeHTTPSourceSHA256: String, valueRange: Range<Int>) {
+            rawJSONValue: Data, sha256: String, nativeHTTPSourceSHA256: String, knownNonzeroExitCode: Int?, valueRange: Range<Int>) {
             self.ledger = ledger; self.owner = owner; self.epoch = epoch; self.publicationID = publicationID; self.scope = scope
             self.callID = callID; self.kind = kind; self.name = name; self.namespace = namespace; self.field = field
             self.rawJSONValue = rawJSONValue; self.sha256 = sha256; self.byteCount = rawJSONValue.count
-            self.nativeHTTPSourceSHA256 = nativeHTTPSourceSHA256; self.valueRange = valueRange
+            self.nativeHTTPSourceSHA256 = nativeHTTPSourceSHA256; self.knownNonzeroExitCode = knownNonzeroExitCode
+            self.valueRange = valueRange
         }
         /// Identity comparison only. The native owner must still resolve under
         /// its current binding; this does not revive a revoked snapshot.
         func isSameEpoch(as other: Self) -> Bool { owner == other.owner && epoch == other.epoch }
         /// Live provenance only, never action authority. HTTP framing/ranges may
-        /// advance, but this exact field must remain in the successful native call.
+        /// advance, but this exact field must remain in the authenticated completed native call.
         func isCurrent() -> Bool { ledger.isCurrent(self) }
     }
 
@@ -212,7 +230,7 @@ final class GroqNativePublicationLedger: @unchecked Sendable {
     }
 
     /// Stage before HTTP publication; only commitHTTPWrite can make it eligible.
-    /// An unknown/failed/dynamic browser tool is never represented by IssuedCall.
+    /// An unknown or dynamic browser tool is never represented by IssuedCall.
     func stageIssuedResponse(_ authority: ServerAuthority, scope: ScopeHandle, current: Binding,
         responseID: String, encodedResponseSHA256: String, calls: [IssuedCall]) throws -> Ticket {
         lock.lock(); defer { lock.unlock() }
@@ -266,7 +284,7 @@ final class GroqNativePublicationLedger: @unchecked Sendable {
             invalidate(call, in: epoch); settled = takeChangedFactWaiters(in: epoch); return false
         }
         call.terminal = terminal
-        if !terminal.succeeds(for: call.issued.kind) { invalidate(call, in: epoch) }
+        if !terminal.permitsHistoricalProjection(for: call.issued.kind) { invalidate(call, in: epoch) }
         settled = takeChangedFactWaiters(in: epoch)
         return true
     }
@@ -286,7 +304,8 @@ final class GroqNativePublicationLedger: @unchecked Sendable {
     }
 
     /// Wait for ANY new fact among known native-issued IDs, never execution or success.
-    /// Existing typed failed/uncertain facts settle normally and remain INLINE.
+    /// Generic failed/uncertain facts settle normally and remain INLINE.
+    /// Only the distinct known-exit result may publish under the unchanged pair guards.
     /// Caller first tries the normal budget, waits only for older matching fields
     /// still unsettled, and reuses ONE overall deadline across local rebuilds.
     /// One deadline task and one native event subscription; no polling/replay.
@@ -389,7 +408,7 @@ final class GroqNativePublicationLedger: @unchecked Sendable {
         var result: [PublishedPair] = []
         for pair in history.pairs {
             guard let call = epoch.calls[pair.callID], !call.invalid, call.response.state == .committed,
-                  call.terminal?.succeeds(for: call.issued.kind) == true else { continue }
+                  call.terminal?.permitsHistoricalProjection(for: call.issued.kind) == true else { continue }
             guard pair.kind == call.issued.kind, pair.name == call.issued.name,
                   pair.namespace == call.issued.namespace, pair.argumentUTF8 == call.issued.argumentUTF8,
                   let argument = Self.token(history.sourceUTF8, pair.argumentValueRange),
@@ -425,7 +444,7 @@ final class GroqNativePublicationLedger: @unchecked Sendable {
               epoch.binding == current, taskEpochs[current.scope.taskID] == epoch.id,
               let callID = epoch.publications[publication.id], let call = epoch.calls[callID], !call.invalid,
               call.publicationID == publication.id, call.response.state == .committed,
-              call.terminal?.succeeds(for: call.issued.kind) == true,
+              call.terminal?.permitsHistoricalProjection(for: call.issued.kind) == true,
               let sourceSHA256 = call.httpSourceSHA256 else { return nil }
         let bytes: Data?
         let range: Range<Int>?
@@ -437,7 +456,8 @@ final class GroqNativePublicationLedger: @unchecked Sendable {
         guard let bytes, let range else { return nil }
         return LiteralField(ledger: self, owner: owner, epoch: epoch.id, publicationID: publication.id, scope: current.scope,
             callID: callID, kind: call.issued.kind, name: call.issued.name, namespace: call.issued.namespace,
-            field: field, rawJSONValue: bytes, sha256: Self.sha(bytes), nativeHTTPSourceSHA256: sourceSHA256, valueRange: range)
+            field: field, rawJSONValue: bytes, sha256: Self.sha(bytes), nativeHTTPSourceSHA256: sourceSHA256,
+            knownNonzeroExitCode: call.terminal?.knownNonzeroExitCode, valueRange: range)
     }
 
     func revoke(_ authority: ServerAuthority, scope: ScopeHandle, reason: Revocation) {
@@ -473,7 +493,8 @@ final class GroqNativePublicationLedger: @unchecked Sendable {
               taskEpochs[field.scope.taskID] == epoch.id,
               let callID = epoch.publications[field.publicationID], callID == field.callID,
               let call = epoch.calls[callID], !call.invalid, call.publicationID == field.publicationID,
-              call.response.state == .committed, call.terminal?.succeeds(for: call.issued.kind) == true,
+              call.response.state == .committed, call.terminal?.permitsHistoricalProjection(for: call.issued.kind) == true,
+              call.terminal?.knownNonzeroExitCode == field.knownNonzeroExitCode,
               call.issued.kind == field.kind, call.issued.name == field.name,
               call.issued.namespace == field.namespace else { return false }
         let token: Data?

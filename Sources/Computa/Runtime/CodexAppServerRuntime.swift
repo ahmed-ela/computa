@@ -261,6 +261,28 @@ enum AppServerCompletedToolItemContract {
         }
     }
 
+    /// Called only for the native item/completed command after its current-turn guards.
+    /// Historical bytes do not become a successful outcome or an action capability.
+    static func groqHistoryCommandTerminal(_ item: [String: Any]) -> GroqNativePublicationLedger.Terminal {
+        guard item["type"] as? String == "commandExecution" else {
+            return .command(status: .failed, exitCode: nil)
+        }
+        let status: GroqNativePublicationLedger.CommandStatus
+        switch item["status"] as? String {
+        case "completed": status = .completed
+        case "failed": status = .failed
+        case "declined": return .command(status: .declined, exitCode: nil)
+        case "inProgress": return .command(status: .inProgress, exitCode: nil)
+        default: return .command(status: .failed, exitCode: nil)
+        }
+        guard let integer = ComputerToolArgumentContract.exactInt64(item["exitCode"]),
+              let exit = Int32(exactly: integer), exit >= 0 else {
+            return .command(status: .failed, exitCode: nil)
+        }
+        if exit == 0 || status != .failed { return .command(status: status, exitCode: Int(exit)) }
+        return .knownNonzeroCommandResult(status: status, exitCode: Int(exit))
+    }
+
     static func summary(for item: [String: Any], name: String) -> String {
         if let command = item["command"] as? String {
             return command
@@ -2671,13 +2693,13 @@ private extension CodexAppServerRuntime {
         }
 
         private func recordGroqHistoryCompletion(taskID: AgentTask.ID, params: [String: Any],
-            itemID: String, entry: TimelineEntry, isPatch: Bool) {
+            itemID: String, entry: TimelineEntry, isPatch: Bool, completedCommandItem: [String: Any]? = nil) {
             guard var current = currentGroqHistoryCompletion(taskID: taskID, params: params) else { return }
-            // These are typed transcript outcomes, not stdout/summary predicates.
+            // Typed native completion/transcript outcomes; no stdout/summary predicates.
             let successful = entry.toolEvent?.status == .succeeded
             let terminal: GroqNativePublicationLedger.Terminal = isPatch
                 ? .patch(status: successful ? .completed : .failed)
-                : .command(status: successful ? .completed : .failed, exitCode: successful ? 0 : nil)
+                : AppServerCompletedToolItemContract.groqHistoryCommandTerminal(completedCommandItem ?? [:])
             if current.writer.recordCompleted(current: current.scope, itemID: itemID, terminal: terminal) {
                 current.completedItemIDs.insert(itemID)
                 groqHistoryCompletions[taskID] = current
@@ -3879,7 +3901,7 @@ private extension CodexAppServerRuntime {
                           acceptsOwnedCommandNotification(params, taskID: taskID, itemID: itemID)
                             || (commandItemTurns[taskID]?[itemID] == nil && acceptsCommandNotification(params, taskID: taskID)),
                           let entry = commandTranscripts[taskID]?.receive(item: item, completed: true) else { return }
-                    recordGroqHistoryCompletion(taskID: taskID, params: params, itemID: itemID, entry: entry, isPatch: false)
+                    recordGroqHistoryCompletion(taskID: taskID, params: params, itemID: itemID, entry: entry, isPatch: false, completedCommandItem: item)
                     noteOwnedCommand(item, taskID: taskID, completed: true, turnID: params["turnId"] as? String)
                     events.yield(.timelineEntryAppended(taskID: taskID, entry: entry))
                     return

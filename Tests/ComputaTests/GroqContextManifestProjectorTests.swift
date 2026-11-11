@@ -22,7 +22,8 @@ final class GroqContextManifestProjectorTests: XCTestCase {
         let source: Data
         init(arguments: String = #"{"cmd":"read inert source"}"#,
              output: String = String(repeating: "Literal é🙂 `\\n` ", count: 700),
-             patch: Bool = false, completeOld: Bool = true) throws {
+             patch: Bool = false, completeOld: Bool = true,
+             latestTerminal: L.Terminal = .command(status: .completed, exitCode: 0)) throws {
             let owner = L.makeOwner(), ledger = owner.ledger, authority = owner.authority
             let nonce = UUID()
             let scope = L.Scope(taskID: "20000000-0000-4000-8000-000000000001",
@@ -45,7 +46,7 @@ final class GroqContextManifestProjectorTests: XCTestCase {
                     terminal: patch ? .patch(status: .completed) : .command(status: .completed, exitCode: 0)))
             }
             XCTAssertTrue(writer.recordCompleted(current: scope, itemID: calls[1].callID,
-                terminal: .command(status: .completed, exitCode: 0)))
+                terminal: latestTerminal))
             var items: [[String: Any]] = [["role": "developer", "content": "Keep the complete native policy."],
                 ["role": "user", "content": "Exact user café / café 🙂 with `literal` text."]]
             for (index, call) in calls.enumerated() {
@@ -130,6 +131,60 @@ final class GroqContextManifestProjectorTests: XCTestCase {
             for piece in pieces { result.append(piece) }
             return result
         }
+    }
+
+    func testKnownFailedOlderOutputKeepsOutcomeAndWholeBytesWithoutGrantingActionAuthority() throws {
+        let failedText = String(repeating: "FAILED exit1; exact é🙂 literal ", count: 32)
+        let f = try Fixture(output: failedText, completeOld: false,
+            latestTerminal: .knownNonzeroCommandResult(status: .failed, exitCode: 2))
+        XCTAssertTrue(f.writer.recordCompleted(current: f.binding.scope, itemID: "call_old",
+            terminal: .knownNonzeroCommandResult(status: .failed, exitCode: 1)))
+        let native = try J.parse(f.source), plan = try f.plan(f.source), rendered = try J.parse(plan.renderedJSON)
+        let original = try XCTUnwrap(native.items.first { $0.callID == "call_old" && $0.kind == .functionCallOutput }?.payload)
+        let replaced = try XCTUnwrap(rendered.items.first { $0.callID == "call_old" && $0.kind == .functionCallOutput }?.payload)
+        let value = try XCTUnwrap(JSONSerialization.jsonObject(with: replaced.rawJSON) as? [String: Any])
+        XCTAssertEqual(Set(value.keys), ["$computa_history", "status", "exit_code", "historical_only", "action_authority"])
+        XCTAssertEqual(value["status"] as? String, "failed")
+        XCTAssertEqual(value["exit_code"] as? Int, 1)
+        XCTAssertEqual(value["historical_only"] as? Bool, true)
+        XCTAssertEqual(value["action_authority"] as? Bool, false)
+        let ref = try XCTUnwrap(value["$computa_history"] as? String)
+        XCTAssertNotNil(referenceBytes(ref))
+        XCTAssertEqual(plan.replacedFields, 1)
+        // Even an authenticated known failure stays wholly inline while it is latest.
+        let latestItems = native.items.filter { $0.callID == "call_latest" }
+        XCTAssertEqual(latestItems.count, 2)
+        for before in latestItems {
+            let kind = before.kind
+            let after = try XCTUnwrap(rendered.items.first { $0.callID == "call_latest" && $0.kind == kind })
+            XCTAssertEqual(try native.rawBytes(in: before.wholeRange), try rendered.rawBytes(in: after.wholeRange))
+        }
+        let first = try f.read(plan, ref: ref, id: "read_failed_one")
+        try assertReadIdentity(first.1.responseData, plan: plan, ref: ref, callID: "call_old",
+            name: "exec_command", kind: "function", field: "output", rawJSON: original.rawJSON)
+        let response = try XCTUnwrap(JSONSerialization.jsonObject(with: first.1.responseData) as? [String: Any])
+        XCTAssertEqual(response["start_byte"] as? Int, 0)
+        XCTAssertEqual(response["end_byte"] as? Int, original.rawJSON.count)
+        XCTAssertTrue(response["next_ref"] is NSNull)
+        XCTAssertEqual(Data(try XCTUnwrap(response["utf8_fragment"] as? String).utf8), original.rawJSON)
+        // A successful history read of failed data does not itself become a failed command.
+        let frame1 = try f.appendRead(to: f.source, id: "read_failed_one", arguments: first.0, response: first.1.responseData)
+        let next = try f.plan(frame1, previous: plan.snapshot, publications: [first.2])
+        let second = try f.read(next, ref: ref, id: "read_failed_two")
+        let frame2 = try f.appendRead(to: frame1, id: "read_failed_two", arguments: second.0, response: second.1.responseData)
+        let latest = try f.plan(frame2, previous: next.snapshot, publications: [second.2])
+        _ = try reference(latest, id: "read_failed_one", field: .output) // Existing strict single-key oracle.
+        let latestLayout = try J.parse(latest.renderedJSON)
+        XCTAssertEqual(latestLayout.items.first { $0.callID == "read_failed_two" && $0.kind == .functionCallOutput }?.payload?.literalUTF8,
+            second.1.responseData)
+        // Identical text under a native success proof retains the old one-key descriptor.
+        let success = try Fixture(output: failedText), successPlan = try success.plan(success.source)
+        _ = try reference(successPlan, id: "call_old", field: .output)
+        XCTAssertTrue(plan.isCurrent()); XCTAssertTrue(latest.isCurrent())
+        f.writer.revoke(reason: .stopped)
+        XCTAssertFalse(plan.isCurrent()); XCTAssertFalse(latest.isCurrent())
+        XCTAssertThrowsError(try M.prepareRead(plan.snapshot,
+            issued: f.issued(plan.snapshot, arguments: first.0, id: "read_revoked_failed"), maximumBytes: 4_096))
     }
 
     func testOnlyLargeOlderOutputIsReplacedAndEveryOtherByteRemainsVerbatim() throws {

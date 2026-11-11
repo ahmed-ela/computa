@@ -31,7 +31,7 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
             let definitions = [wire(GroqToolCatalog.specification), wire(GroqHistoryTool.specification),
                 ["type": "function", "name": "exec_command", "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]]]]] + browser
             let tools: [[String: Any]] = namespaced ? [["type": "namespace", "name": "functions", "tools": definitions]] : definitions
-            let user = "Keep literal café / café and \\u0061. Inspect the supplied page within scope."
+            let user = "First fix reconcile.py, then run python3 -m unittest -v, then open http://localhost:62341/ in the browser. Keep literal café / café and \\u0061."
             let raw = try encode(["model": model, "input": [["role": "user", "content": user]], "tools": tools,
                 "parallel_tool_calls": false, "max_tool_calls": 1])
             let scope = GroqToolCatalog.Scope(taskID: "81000000-0000-4000-8000-000000000001", threadID: "81000000-0000-4000-8000-000000000002",
@@ -44,7 +44,7 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
             let unbound = try C.prepareRequest(raw, browserToolAvailability: .unbound,
                 groqToolCatalogProjection: catalog.prepare(scope: scope, seed: unboundSeed), groqDirectTools: .loadedOnly, compactHistoryInventory: true)
             assertGroqBrowserState(unbound, bound: false)
-            XCTAssertTrue(unbound.prompt.contains("Supplied URL: call " + prefix + "browser_open."))
+            XCTAssertTrue(unbound.prompt.contains("When browser work is next, supplied URL: call " + prefix + "browser_open."))
             XCTAssertTrue(unbound.prompt.contains("Observed tab_id only: call " + prefix + "browser_bind."))
             let beforeInventory = try groqInventoryNames(unbound)
             XCTAssertEqual(beforeInventory.loaded.intersection(Set(browser.compactMap { $0["name"] as? String }.map { prefix + $0 })),
@@ -82,6 +82,13 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
                 groqDirectTools: .loadedOnly, compactHistoryInventory: true)
             XCTAssertEqual(openUnbound.offeredToolNames, [prefix + GroqToolCatalog.name, prefix + GroqHistoryTool.name, prefix + "browser_open"])
             XCTAssertNoThrow(try C.parseReply(open, request: openUnbound, requireEnvelope: true))
+            XCTAssertTrue(try groqInventoryNames(openUnbound).loadable.contains(prefix + "exec_command"))
+            let command = String(decoding: try encode(["type": "tool_calls", "calls": [["name": prefix + "exec_command",
+                "arguments": ["cmd": "python3 -m unittest -v"]]]]), as: UTF8.self)
+            XCTAssertThrowsError(try C.parseReply(command, request: openUnbound, requireEnvelope: true),
+                "The ordered coding step still needs its currently unloaded command schema") {
+                XCTAssertEqual($0 as? C.Failure, .unknownTool(prefix + "exec_command"))
+            }
             XCTAssertThrowsError(try C.parseReply(read, request: openUnbound, requireEnvelope: true), "Loading REPLACES rather than unions the optional schemas")
 
             // Only the observed runtime binding changes here; definitions, policy, revision and selection stay exact.
@@ -100,6 +107,7 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
                 groqDirectTools: .loadedOnly, compactHistoryInventory: true)
             assertGroqBrowserState(boundOpen, bound: true)
             XCTAssertFalse(boundOpen.prompt.contains("Supplied URL:"))
+            XCTAssertFalse(boundOpen.prompt.contains("When browser work is next, supplied URL:"))
             XCTAssertFalse(boundOpen.prompt.contains("Observed tab_id only:"))
             let allBrowser = Set(browser.compactMap { $0["name"] as? String }.map { prefix + $0 })
             let boundOpenInventory = try groqInventoryNames(boundOpen)
@@ -233,6 +241,7 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
                 Set(["browser_bind", "browser_fill"].map { prefix + $0 }))
             XCTAssertTrue(sparseEntry.prompt.contains("Observed tab_id only: first load " + prefix + "browser_bind."))
             XCTAssertFalse(sparseEntry.prompt.contains("Supplied URL:"))
+            XCTAssertFalse(sparseEntry.prompt.contains("When browser work is next, supplied URL:"))
             let sparseBound = try request([loader, reader, fill], state: .bound, namespace: namespace)
             assertGroqBrowserState(sparseBound, bound: true)
             XCTAssertTrue(try groqInventoryNames(sparseBound).loadable.contains(prefix + "browser_fill"))
@@ -729,7 +738,7 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
             for current in [request, next] {
                 assertGroqBrowserState(current, bound: false)
                 XCTAssertTrue(current.prompt.contains("Observed tab_id only: first load " + prefix + "browser_bind."))
-                XCTAssertTrue(current.prompt.contains("Supplied URL: " + (current.offeredToolNames.contains(open) ? "call " : "first load ") + open + "."))
+                XCTAssertTrue(current.prompt.contains("When browser work is next, supplied URL: " + (current.offeredToolNames.contains(open) ? "call " : "first load ") + open + "."))
                 let browserNames = Set(browser.compactMap { $0["name"] as? String }.map { prefix + $0 })
                 let loadedBrowser = browserNames.intersection(current.offeredToolNames)
                 let inventory = try groqInventoryNames(current)
@@ -832,7 +841,8 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
             XCTAssertFalse(packed.prompt.contains("COMPUTA_BROWSER_CAPABILITIES:"), mode)
             XCTAssertFalse(packed.prompt.contains("Registered page tools await successful open/bind"), mode)
             if expectsEntryRoute {
-                XCTAssertTrue(packed.prompt.contains("Supplied URL: first load browser_open."))
+                let routeLead = mode == "native" ? "When browser work is next, supplied URL: " : "Supplied URL: "
+                XCTAssertTrue(packed.prompt.contains(routeLead + "first load browser_open."))
                 XCTAssertTrue(packed.prompt.contains("Webpages use browser_*; computer_v2_* is native-app UI."))
                 XCTAssertEqual(projection.loaderChoices.contains("browser_read"), mode == "native")
                 let scope = GroqToolCatalog.Scope(taskID: f.binding.scope.taskID, threadID: f.binding.scope.threadID,

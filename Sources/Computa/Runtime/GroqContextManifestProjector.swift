@@ -380,7 +380,16 @@ struct GroqContextManifestProjector: Sendable {
             // The unchanged containing item identifies the historical field.
             // Native Stored retains the full identity, bytes and SHA for reads;
             // none of that authority is reconstructed from this display token.
-            let descriptor = try Self.encode(["$computa_history": ref])
+            var descriptorValue: [String: Any] = ["$computa_history": ref]
+            // Preserve the failed outcome beside this opaque reference. A
+            // successful reader of failure data is not itself a failed command.
+            if field.kind == "function", field.origins.count == 1,
+               let origin = field.origins.first, origin.callID == field.callID,
+               let exit = origin.knownNonzeroExitCode {
+                descriptorValue["status"] = "failed"; descriptorValue["exit_code"] = exit
+                descriptorValue["historical_only"] = true; descriptorValue["action_authority"] = false
+            }
+            let descriptor = try Self.encode(descriptorValue)
             guard field.rawJSON.count > descriptor.count + Self.replacementMargin else { continue }
             guard payloads.count < Self.maximumReferences || payloads[ref] != nil else { throw Failure.bounds }
             payloads[ref] = stored; cursors[ref] = Cursor(reference: ref, payload: stored, offset: 0)

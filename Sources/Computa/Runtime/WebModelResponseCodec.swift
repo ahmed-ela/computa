@@ -901,7 +901,7 @@ enum WebModelResponseCodec {
                 ? " Webpages use browser_*; computer_v2_* is native-app UI." : ""
             if capabilities.state == .unbound {
                 let open = capabilities.entry.first { $0 == "browser_open" || $0 == "functions.browser_open" }.map {
-                    " Supplied URL: " + (capabilities.loaded.contains($0) ? "call " : "first load ") + $0 + "."
+                    " When browser work is next, supplied URL: " + (capabilities.loaded.contains($0) ? "call " : "first load ") + $0 + "."
                 } ?? ""
                 let bind = capabilities.entry.first { $0 == "browser_bind" || $0 == "functions.browser_bind" }.map {
                     " Observed tab_id only: " + (capabilities.loaded.contains($0) ? "call " : "first load ") + $0 + "."

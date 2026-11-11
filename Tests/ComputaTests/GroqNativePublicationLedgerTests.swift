@@ -54,6 +54,117 @@ final class GroqNativePublicationLedgerTests: XCTestCase {
             responseID: response, encodedResponseSHA256: String(repeating: "a", count: 64), calls: calls)
     }
 
+    func testKnownNonzeroCommandHistoryRetainsExactFailureOnlyAfterActualHTTPAck() throws {
+        let statuses: [L.CommandStatus] = [.failed]
+        for status in statuses {
+            for exit in [1, 255, Int(Int32.max)] {
+                let (ledger, authority) = L.makeOwner(), current = binding()
+                let (handle, writer) = try ledger.installScope(authority, binding: current)
+                let call = issued()
+                let terminal = AppServerCompletedToolItemContract.groqHistoryCommandTerminal([
+                    "type": "commandExecution", "status": status == .completed ? "completed" : "failed", "exitCode": exit
+                ])
+                XCTAssertEqual(terminal, .knownNonzeroCommandResult(status: status, exitCode: exit))
+                XCTAssertNotEqual(terminal, .command(status: .completed, exitCode: 0))
+                XCTAssertFalse(writer.recordCompleted(current: current.scope, itemID: call.callID, terminal: terminal),
+                    "A typed native result still cannot invent an unissued call")
+                let ticket = try stage(ledger, authority, handle, current, [call])
+                XCTAssertTrue(writer.recordCompleted(current: current.scope, itemID: call.callID, terminal: terminal))
+                let failedOutput = Data(#"[{"type":"input_text","text":"FAILED\nExit code: \#(exit)\nA\u002DB quoted \"value\""}]"#.utf8)
+                let actual = try history(call, output: failedOutput)
+                XCTAssertTrue(ledger.reconcileValidatedHistory(authority, scope: handle, current: current, history: actual).isEmpty,
+                    "Completion alone is not proof that the issued response reached the native HTTP caller")
+                XCTAssertTrue(ledger.commitHTTPWrite(authority, ticket: ticket, current: current))
+                let pairs = ledger.reconcileValidatedHistory(authority, scope: handle, current: current, history: actual)
+                XCTAssertEqual(pairs.count, 1)
+                let pair = try XCTUnwrap(pairs.first)
+                let output = try XCTUnwrap(ledger.literal(authority, publication: pair, current: current, field: .output))
+                XCTAssertEqual(output.rawJSONValue, failedOutput)
+                XCTAssertEqual(output.byteCount, failedOutput.count)
+                XCTAssertEqual(output.knownNonzeroExitCode, exit)
+                XCTAssertEqual(output.valueRange, actual.pairs[0].outputValueRange)
+                XCTAssertEqual(output.scope, current.scope)
+                XCTAssertEqual(output.callID, call.callID)
+                XCTAssertEqual(output.name, "exec_command")
+                XCTAssertTrue(output.isCurrent())
+                XCTAssertEqual(ledger.literal(authority, publication: pair, current: current, field: .arguments)?.rawJSONValue,
+                    actual.sourceUTF8.subdata(in: actual.pairs[0].argumentValueRange))
+                XCTAssertEqual(ledger.literal(authority, publication: pair, current: current, field: .arguments)?.knownNonzeroExitCode, exit)
+                XCTAssertNil(ledger.literal(authority, publication: pair, current: current, field: .input))
+                let (_, foreignAuthority) = L.makeOwner()
+                XCTAssertNil(ledger.literal(foreignAuthority, publication: pair, current: current, field: .output))
+                let foreign = binding(scope(model: "another-model"))
+                XCTAssertTrue(ledger.reconcileValidatedHistory(authority, scope: handle, current: foreign, history: actual).isEmpty)
+                XCTAssertNil(ledger.literal(authority, publication: pair, current: foreign, field: .output))
+                XCTAssertTrue(output.isCurrent(), "A refused foreign lookup cannot relabel or grant authority to this failure")
+            }
+        }
+    }
+
+    func testKnownNonzeroHistoryStillRejectsUncertaintyAndLosesRevokedOrConflictingProofs() throws {
+        let ineligible: [L.Terminal] = [
+            .knownNonzeroCommandResult(status: .completed, exitCode: 1),
+            .knownNonzeroCommandResult(status: .completed, exitCode: 0),
+            .knownNonzeroCommandResult(status: .failed, exitCode: 0),
+            .knownNonzeroCommandResult(status: .failed, exitCode: -1),
+            .knownNonzeroCommandResult(status: .failed, exitCode: Int(Int32.max) + 1),
+            .knownNonzeroCommandResult(status: .declined, exitCode: 1),
+            .knownNonzeroCommandResult(status: .inProgress, exitCode: 1),
+            .command(status: .failed, exitCode: nil),
+            .command(status: .failed, exitCode: 1),
+            .command(status: .completed, exitCode: 1)
+        ]
+        for terminal in ineligible {
+            let (ledger, authority) = L.makeOwner(), current = binding()
+            let (handle, writer) = try ledger.installScope(authority, binding: current)
+            let call = issued(), ticket = try stage(ledger, authority, handle, current, [call])
+            XCTAssertTrue(ledger.commitHTTPWrite(authority, ticket: ticket, current: current))
+            XCTAssertTrue(writer.recordCompleted(current: current.scope, itemID: call.callID, terminal: terminal))
+            XCTAssertTrue(ledger.reconcileValidatedHistory(authority, scope: handle, current: current, history: try history(call)).isEmpty)
+        }
+        for mode in ["http_abort", "stopped", "stale_scope", "duplicate_completion", "changed_literal", "duplicate_history", "wrong_kind"] {
+            let (ledger, authority) = L.makeOwner(), current = binding()
+            let (handle, writer) = try ledger.installScope(authority, binding: current)
+            let call = issued(mode == "wrong_kind" ? .applyPatch : .execCommand)
+            let ticket = try stage(ledger, authority, handle, current, [call])
+            XCTAssertTrue(ledger.commitHTTPWrite(authority, ticket: ticket, current: current))
+            let terminal: L.Terminal = .knownNonzeroCommandResult(status: .failed, exitCode: 1)
+            if mode == "stale_scope" {
+                XCTAssertFalse(writer.recordCompleted(current: scope(preparation: UUID()), itemID: call.callID, terminal: terminal))
+                XCTAssertTrue(ledger.reconcileValidatedHistory(authority, scope: handle, current: current, history: try history(call)).isEmpty)
+                continue
+            }
+            XCTAssertTrue(writer.recordCompleted(current: current.scope, itemID: call.callID, terminal: terminal))
+            let actual = try history(call)
+            let pairs = ledger.reconcileValidatedHistory(authority, scope: handle, current: current, history: actual)
+            if mode == "wrong_kind" {
+                XCTAssertTrue(pairs.isEmpty)
+                continue
+            }
+            let pair = try XCTUnwrap(pairs.first)
+            let cached = try XCTUnwrap(ledger.literal(authority, publication: pair, current: current, field: .output))
+            switch mode {
+            case "http_abort": ledger.abortHTTPWrite(authority, ticket: ticket, current: current)
+            case "stopped": writer.revoke(reason: .stopped)
+            case "duplicate_completion":
+                XCTAssertFalse(writer.recordCompleted(current: current.scope, itemID: call.callID, terminal: terminal))
+            case "changed_literal":
+                let changed = try history(call, output: Data(#"[{"type":"input_text","text":"A-B\nquoted \"value\""}]"#.utf8))
+                XCTAssertTrue(ledger.reconcileValidatedHistory(authority, scope: handle, current: current, history: changed).isEmpty)
+            case "duplicate_history":
+                XCTAssertTrue(ledger.reconcileValidatedHistory(authority, scope: handle, current: current,
+                    history: .init(sourceUTF8: actual.sourceUTF8, pairs: actual.pairs + actual.pairs)).isEmpty)
+                // Refusing an invalid HTTP layout grants nothing, but does not
+                // revoke the independently authenticated earlier literal.
+                XCTAssertTrue(cached.isCurrent())
+                continue
+            default: XCTFail("Unexpected control")
+            }
+            XCTAssertFalse(cached.isCurrent(), mode)
+            XCTAssertNil(ledger.literal(authority, publication: pair, current: current, field: .output), mode)
+        }
+    }
+
     func testCompletionBeforeHTTPAckRemainsInlineThenPublishesActualTokens() throws {
         let (ledger, authority) = L.makeOwner(), current = binding()
         let (handle, writer) = try ledger.installScope(authority, binding: current)

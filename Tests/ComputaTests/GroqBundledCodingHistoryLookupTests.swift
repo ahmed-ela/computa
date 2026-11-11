@@ -111,6 +111,100 @@ final class GroqBundledCodingHistoryLookupTests: XCTestCase {
             commandOnlyProbe: true)
     }
 
+    /// Genuine native coding-prefix trajectory matching live495's schema/history
+    /// pressure. The unchanged human asks for the complete browser workflow;
+    /// this inert model stops after coding and claims no browser qualification.
+    func testGroq120BFullAccessBaselineFailureBeforePatchWithOmittedLimitAndThreeSchemasFitsNativeBudget() async throws {
+        guard ProcessInfo.processInfo.environment["COMPUTA_TEST_GROQ_CODING_LOOKUP"] == "1" else {
+            throw XCTSkip("Explicit opt-in required: COMPUTA_TEST_GROQ_CODING_LOOKUP=1")
+        }
+        let choice = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B")
+        let artifact = try ComputaRuntimeArtifact.resolve()
+        try GroqCommandPolicyProof.require(artifact: artifact, modelID: choice.modelID)
+        let nonce = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        // Standard private temporary storage with the same meaningful fixture
+        // hierarchy and195-byte cwd as the actual live case; no filler content.
+        let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+            .appendingPathComponent("ComputaNativeInvoiceTests495-" + nonce, isDirectory: true)
+        let home = root.appendingPathComponent("Home", isDirectory: true)
+        let workspace = root.appendingPathComponent("work/all-models-20261102/current-workflow-preparation/fixtures/cases/invoice-495-groq-gptoss120b-" + String(nonce.prefix(16)) + "/coding", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        for (name, bytes) in GroqInvoiceHistorySeed.files { try bytes.write(to: workspace.appendingPathComponent(name)) }
+        XCTAssertEqual(workspace.path.utf8.count, 195)
+        let user = """
+            In \(workspace.path), fix the invoice aggregation bug in reconcile.py according to its README. Keep the tests, sample data, and reference format unchanged. Run python3 -m unittest -v, then run python3 reconcile.py.
+
+            Use the built-in browser to open http://127.0.0.1:50473/, enter the printed reference, and submit it once. Read the resulting receipt, then close the tab you opened. Use browser tools for the website; do not use terminal HTTP requests or inspect the fixture's control directory, server source, or receipt files.
+
+            Return the test result, the reference, and the receipt shown by the page.
+            """
+        XCTAssertEqual(user.utf8.count, 780); XCTAssertEqual(user.filter { $0 == "\n" }.count, 4)
+        let task = UUID().uuidString.lowercased(), marker = "SYNTHETIC_CODING_PREFIX_ONLY_" + nonce
+        let facts = CodingLookupFacts(task: task, choice: choice, user: user, home: home.path, accessMode: .fullAccess)
+        let trajectoryFacts = Coding495TrajectoryFacts()
+        let transport = Coding495TrajectoryTransport(choice: choice, workspace: workspace.path, marker: marker, facts: facts)
+        var config = CodexAppServerRuntime.Configuration.externalLocalQwen
+        config.executable = .bundled; config.model = choice.modelID
+        config.codexHomePath = home.path; config.workspacePath = workspace.path; config.protocolTracePath = nil
+        config.groqPreflightObserverForTesting = { context, event in
+            facts.observe(context, event)
+            trajectoryFacts.observe(context, event, profile: facts.snapshot().profiles.last)
+        }
+        let runtime = CodexAppServerRuntime(configuration: config, visualGrounder: CodingLookupNoVisual())
+        let browser = InertRuntimeBrowser(), audit = CodingLookupAudit(task: task, marker: marker)
+        let watcher = Task { for await event in runtime.events() { audit.receive(event) } }
+        do {
+            await runtime.configureEmbeddedBrowserTools(EmbeddedBrowserToolController(transport: browser))
+            await runtime.configureEmbeddedWebModelTransport(WebsiteInferenceFixtureTransport(transport))
+            await runtime.setGroqSubmissionIntervalForTesting(.zero)
+            let initialTasks = try await runtime.loadTasks(); XCTAssertTrue(initialTasks.isEmpty)
+            try await runtime.configureWorkspace(path: workspace.path, forTaskID: task)
+            try await runtime.submit(prompt: user, toTaskID: task, modelID: choice.modelID, accessMode: .fullAccess)
+            let deadline = ContinuousClock.now + .seconds(180)
+            while !audit.terminal, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+            let shutdown = await runtime.shutdown(); watcher.cancel()
+            let result = await transport.receipt(), observed = facts.snapshot(), counts = await browser.counts()
+            let report = Coding495TrajectoryReport(requestedAccessMode: AccessMode.fullAccess.rawValue, status: audit.status?.rawValue ?? "none", receipt: result,
+                admissions: observed.admitted, rejections: observed.rejections, candidateProfiles: observed.profiles,
+                nativeFailureField: trajectoryFacts.snapshot(), codingPrefixOnly: true, providerQualificationClaimed: false,
+                realProviderRequests: 0, realBrowserActions: 0)
+            var line = Data("groq495TrajectoryFinite=".utf8); line.append(try JSONEncoder().encode(report)); line.append(10)
+            try FileHandle.standardOutput.write(contentsOf: line)
+            // No expected-failure mask: a genuine local budget rejection must
+            // fail this regression before a production fix is considered.
+            XCTAssertTrue(audit.terminal); XCTAssertEqual(audit.status, .completed); XCTAssertTrue(audit.finalSeen)
+            XCTAssertTrue(shutdown.succeeded); XCTAssertEqual(audit.approvals, 0)
+            XCTAssertTrue(observed.issues.isEmpty, observed.issues.joined(separator: ","))
+            XCTAssertGreaterThan(observed.permissionPresentationChecks, 0, "Actual native Full Access permission/profile checks must run")
+            XCTAssertTrue(result.seedFailed26); XCTAssertTrue(result.patchVerified)
+            XCTAssertTrue(result.sixTestsPassed); XCTAssertTrue(result.referenceVerified)
+            XCTAssertEqual(result.omittedLimitCommands, 4); XCTAssertTrue(result.threeOptionalSchemasVerified)
+            XCTAssertEqual(result.sends, 8); XCTAssertEqual(result.starts.count, result.sends)
+            XCTAssertEqual(Set(result.starts), Set(result.finished)); XCTAssertEqual(Set(result.starts).count, result.starts.count)
+            XCTAssertEqual(observed.admitted.count, result.sends); XCTAssertTrue(observed.admitted.allSatisfy { $0.units <= 6_000 })
+            XCTAssertEqual(counts.created, 0); XCTAssertEqual(counts.observations, 0); XCTAssertEqual(counts.mutations, 0)
+            XCTAssertEqual(counts.activations, 0); XCTAssertEqual(counts.humanCloseAttempts, 0); XCTAssertTrue(counts.humanIntact)
+            for name in ["README.md", "test_reconcile.py"] { XCTAssertEqual(try Data(contentsOf: workspace.appendingPathComponent(name)), GroqInvoiceHistorySeed.files[name]) }
+            XCTAssertEqual(try Data(contentsOf: workspace.appendingPathComponent("reconcile.py")), try Coding495TrajectoryPatch.expectedModule())
+            if let thread = audit.thread, let turn = observed.turn {
+                let cleanup = try WebsiteSessionCleanupStore(directory: home.appendingPathComponent("WebsiteSessionCleanup-v1")).transactionRecords(for: task, turnID: turn)
+                let closed = cleanup.filter { $0.outcome == .closed }
+                XCTAssertEqual(closed.count, result.sends)
+                XCTAssertEqual(Set(closed.compactMap(\.sessionToken)), Set(result.finished.map { $0.lowercased() }))
+                XCTAssertTrue(closed.allSatisfy { $0.receiptSaved && $0.threadID == thread && $0.turnID == turn })
+                XCTAssertTrue(CodingLookupTools.retire(home: home, thread: thread, model: choice.modelID))
+            } else { XCTFail("The genuine native thread/turn must be retained") }
+            try FileManager.default.removeItem(at: root)
+        } catch {
+            _ = await runtime.shutdown(); watcher.cancel()
+            for thread in audit.threads { _ = CodingLookupTools.retire(home: home, thread: thread, model: choice.modelID) }
+            try? FileManager.default.removeItem(at: root)
+            throw error
+        }
+    }
+
     private func run(_ choice: WebsiteModelChoice, commandOnlyProbe: Bool = false) async throws {
         guard commandOnlyProbe || ProcessInfo.processInfo.environment["COMPUTA_TEST_GROQ_CODING_LOOKUP"] == "1" else {
             throw XCTSkip("Explicit opt-in required: COMPUTA_TEST_GROQ_CODING_LOOKUP=1")
@@ -495,6 +589,7 @@ private final class CodingLookupFacts: @unchecked Sendable {
         let readerPreviews: [WebModelServer.GroqHistoryReaderPreviewForTesting]
     }
     private let lock = NSLock(), task: String, choice: WebsiteModelChoice, user: String, home: String
+    private let accessMode: AccessMode
     private let expectedNativeNames: Set<String>
     private var issues = Set<String>(), context: String?, thread: String?, turn: String?, previousFields: [CodingField] = []
     private var inferenceIDs = Set<UUID>()
@@ -511,8 +606,8 @@ private final class CodingLookupFacts: @unchecked Sendable {
     private var canonicalSlices: [String: CodingLookupSizedTokens] = [:], nativeInstructionMarkers: [String: Int] = [:]
     private var nativeDeveloperParts: [CodingLookupDeveloperPart] = []
     private var nativeOnRequestTemplate = CodingLookupOnRequestTemplateProbe.inspect([:])
-    init(task: String, choice: WebsiteModelChoice, user: String, home: String) {
-        self.task = task; self.choice = choice; self.user = user; self.home = home
+    init(task: String, choice: WebsiteModelChoice, user: String, home: String, accessMode: AccessMode = .askEveryTime) {
+        self.task = task; self.choice = choice; self.user = user; self.home = home; self.accessMode = accessMode
         expectedNativeNames = Set((ComputerV2ToolContract.referenceSpecs(for: choice.modelID)
             + [ComputerOutcomeToolContract.spec, GroqToolCatalog.specification, GroqHistoryTool.specification]
             + EmbeddedBrowserTools.definitions()).compactMap { $0["name"] as? String })
@@ -635,6 +730,32 @@ private final class CodingLookupFacts: @unchecked Sendable {
         let full = CodingLookupOnRequestTemplateProbe.inspect(native)
         let old = CodingLookupOnRequestTemplateProbe.inspect(displayed)
         let compact = CodingLookupOnRequestTemplateProbe.inspectCompact(displayed)
+        if accessMode == .fullAccess {
+            // Separate matching-live variant: assert the REAL native profile and
+            // exact unchanged Full Access permission block, not only the API flag.
+            func texts(_ object: [String: Any], roles: Set<String>) -> [String] {
+                (object["input"] as? [[String: Any]] ?? []).filter { roles.contains($0["role"] as? String ?? "") }.flatMap { item -> [String] in
+                    if let text = item["content"] as? String { return [text] }
+                    return (item["content"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }
+                }
+            }
+            let expected = "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `danger-full-access`: No filesystem sandboxing - all commands are permitted. Network access is enabled.\nApproval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.\n</permissions instructions>"
+            let nativePermissions = texts(native, roles: ["system", "developer"]).filter { $0.contains("<permissions instructions>") }
+            let displayedPermissions = texts(displayed, roles: ["system", "developer"]).filter { $0.contains("<permissions instructions>") }
+            let environments = texts(native, roles: ["user"]).filter { $0.hasPrefix("<environment_context>\n") }
+            let displayedEnvironments = texts(displayed, roles: ["user"]).filter { $0.hasPrefix("<environment_context>\n") }
+            let unchanged = nativePermissions.map { Data($0.utf8) } == displayedPermissions.map { Data($0.utf8) }
+                && environments.map { Data($0.utf8) } == displayedEnvironments.map { Data($0.utf8) }
+            guard unchanged, nativePermissions.count == 1, displayedPermissions.count == 1,
+                  Data(nativePermissions[0].utf8) == Data(expected.utf8),
+                  Data(displayedPermissions[0].utf8) == Data(expected.utf8),
+                  environments.count == 1, environments[0].contains("<permission_profile type=\"disabled\">"),
+                  environments[0].contains("<file_system type=\"unrestricted\" />"),
+                  full.exactWholeTemplateParts == 0, compact.exactWholeTemplateParts == 0 else {
+                throw CodingLookupFailure("full_access_native_profile")
+            }
+            return .init(nativeFull: full, presentedFull: old, presentedCompact: compact, envelopeRemainderUnchanged: unchanged)
+        }
         func exact(_ probe: CodingLookupOnRequestTemplateProbe) -> Bool {
             probe.frozenSourceValid && probe.permissionParts == 1 && probe.knownSandboxPrefixParts == 1
                 && probe.exactWholeTemplatePresent && probe.exactWholeTemplateParts == 1
@@ -705,10 +826,10 @@ private final class CodingLookupFacts: @unchecked Sendable {
         }
         let sizes = currentFields.enumerated().map { position, field -> CodingLookupFieldSizes in
             let payload = layout.items.first { $0.callID == field.callID && $0.kind == field.kind && $0.payload?.field == field.field }?.payload
-            let descriptor = payload.flatMap { try? JSONSerialization.jsonObject(with: $0.rawJSON) as? [String: Any] }
+            let descriptor = payload.flatMap { try? CodingLookupTools.historyDescriptor($0.rawJSON) }
             return .init(position: position, kind: field.kind.rawValue, field: field.field.rawValue,
                 nativeJSONBytes: field.bytes, presentedJSONBytes: payload?.rawJSON.count,
-                descriptorObject: descriptor.map { Set($0.keys) == ["$computa_history"] } ?? false)
+                descriptorObject: descriptor != nil)
         }
         return .init(inference: inferenceIDs.count, attempt: attempts.count, directTools: directTools,
             compactLoaderHistory: compactHistory, nativeHTTPBodySHA256: canonicalSHA, candidatePromptSHA256: candidateSHA,
@@ -1180,6 +1301,208 @@ private actor CodingLookupTransport: WebModelTransport {
     }
 }
 
+
+private struct Coding495TrajectoryReport: Codable {
+    let requestedAccessMode: String
+    let status: String
+    let receipt: Coding495TrajectoryTransport.Receipt
+    let admissions: [CodingLookupAdmission]
+    let rejections: [CodingLookupRejection]
+    let candidateProfiles: [CodingLookupCandidateProfile]
+    let nativeFailureField: Coding495TrajectoryFacts.Snapshot
+    let codingPrefixOnly: Bool, providerQualificationClaimed: Bool
+    let realProviderRequests: Int, realBrowserActions: Int
+}
+
+/// Diagnostics from the existing test-only native preflight observer. This
+/// records field identity/representation, never manufactures a ledger fact.
+private final class Coding495TrajectoryFacts: @unchecked Sendable {
+    struct Candidate: Codable, Sendable {
+        let inferenceID: String, promptSHA256: String
+        let bodyUnits: Int?, represented: Bool, descriptorObject: Bool
+        let descriptorFailedExitCode: Int?
+        let presentedJSONBytes: Int?, presentedSHA256: String?
+    }
+    struct Snapshot: Codable, Sendable {
+        let callID: String?, nativeJSONBytes: Int?, nativeSHA256: String?, formattedUTF8Bytes: Int?
+        let candidates: [Candidate]
+    }
+    private let lock = NSLock()
+    private var callID: String?, nativeJSONBytes: Int?, nativeSHA256: String?, formattedUTF8Bytes: Int?
+    private var candidates: [Candidate] = []
+    func snapshot() -> Snapshot {
+        lock.lock(); defer { lock.unlock() }
+        return .init(callID: callID, nativeJSONBytes: nativeJSONBytes, nativeSHA256: nativeSHA256,
+            formattedUTF8Bytes: formattedUTF8Bytes, candidates: candidates)
+    }
+    func observe(_ context: WebModelServer.GroqPreflightContextForTesting,
+        _ event: WebModelServer.GroqPreflightEventForTesting, profile: CodingLookupCandidateProfile?) {
+        lock.lock(); defer { lock.unlock() }
+        switch event {
+        case .canonical(let raw):
+            guard let layout = try? GroqContextJSONLayout.parse(raw) else { return }
+            for item in layout.items where item.kind == .functionCallOutput {
+                guard let id = item.callID, let payload = item.payload,
+                      let text = try? CodingLookupTools.outputText(payload),
+                      text.contains("Process exited with code 1"), text.contains("FAILED (failures=26)") else { continue }
+                callID = id; nativeJSONBytes = payload.rawJSON.count
+                nativeSHA256 = CodingLookupTools.hash(payload.rawJSON); formattedUTF8Bytes = text.utf8.count
+            }
+        case .candidate(let request, _, _):
+            guard let callID, candidates.count < 40,
+                  let raw = try? CodingLookupTools.presentedJSON(request.prompt, model: request.model),
+                  let layout = try? GroqContextJSONLayout.parse(raw) else { return }
+            let payload = layout.items.first { $0.callID == callID && $0.kind == .functionCallOutput }?.payload
+            let descriptor = payload.flatMap { try? CodingLookupTools.historyDescriptor($0.rawJSON) }
+            let sha = CodingLookupTools.hash(Data(request.prompt.utf8))
+            candidates.append(.init(inferenceID: context.inferenceID.uuidString.lowercased(), promptSHA256: sha,
+                bodyUnits: profile?.candidatePromptSHA256 == sha ? profile?.fullBodyTokens : nil,
+                represented: payload != nil, descriptorObject: descriptor != nil,
+                descriptorFailedExitCode: descriptor?.failedExitCode,
+                presentedJSONBytes: payload?.rawJSON.count, presentedSHA256: payload.map { CodingLookupTools.hash($0.rawJSON) }))
+        default: break
+        }
+    }
+}
+
+/// Only provider replies are synthetic. Every loader/command/patch and its
+/// native history/writer/admission is performed by the actual bundled engine.
+private actor Coding495TrajectoryTransport: WebModelTransport {
+    struct Receipt: Codable, Sendable {
+        var starts: [String] = [], finished: [String] = []
+        var sends = 0, omittedLimitCommands = 0
+        var seedFailed26 = false, patchVerified = false, sixTestsPassed = false, referenceVerified = false
+        var threeOptionalSchemasVerified = false
+    }
+    private enum Pending { case load([String], String), coding(Int) }
+    private let choice: WebsiteModelChoice, workspace: String, marker: String, facts: CodingLookupFacts
+    private var result = Receipt(), token: String?, reply = "", stage = 0, pending: Pending?
+    private var consumed = Set<String>()
+    init(choice: WebsiteModelChoice, workspace: String, marker: String, facts: CodingLookupFacts) {
+        self.choice = choice; self.workspace = workspace; self.marker = marker; self.facts = facts
+    }
+    func receipt() -> Receipt { result }
+    private func command(_ step: Int) -> String {
+        step == 2 ? "sed -n '1,200p' '\(workspace)/reconcile.py'" : step == 6 ? "python3 reconcile.py" : "python3 -m unittest -v"
+    }
+    func request(operation: String, params: Data) async throws -> Data {
+        let p = try XCTUnwrap(JSONSerialization.jsonObject(with: params) as? [String: String])
+        var snapshot: [String: Any]
+        switch operation {
+        case "webProviderStart":
+            guard token == nil, result.starts.count < 12, p["provider"] == "groq",
+                  p["modelChoice"].flatMap(WebsiteModelChoice.parse) == choice else { throw CodingLookupFailure("trajectory_start") }
+            let id = UUID().uuidString.lowercased(); token = id; result.starts.append(id)
+            snapshot = ["sessionToken": id, "state": "ready"]
+        case "webProviderSend":
+            guard p["sessionToken"] == token, result.sends < 12, let prompt = p["prompt"] else { throw CodingLookupFailure("trajectory_send") }
+            let native = try facts.validatedSend(prompt)
+            let raw = try CodingLookupTools.presentedJSON(prompt, model: choice.modelID)
+            let layout = try GroqContextJSONLayout.parse(raw)
+            try CodingLookupTools.validateDisplay(layout, native: native.fields, referenceRevision: native.referenceRevision)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: raw) as? [String: Any])
+            let tools = try CodingLookupTools.names(object["tools"]), inventory = try CodingLookupTools.inventory(prompt)
+            let revision = try XCTUnwrap(inventory["catalog_revision"] as? String)
+            let inventoryNames = (inventory["inventory"] as? [[String]] ?? []).compactMap(\.first)
+            if let pending {
+                let fresh = layout.items.filter { ($0.kind == .functionCall || $0.kind == .customToolCall) && !consumed.contains($0.callID ?? "") }
+                guard fresh.count == 1, let call = fresh.first, let id = call.callID,
+                      let output = layout.items.first(where: { $0.callID == id && ($0.kind == .functionCallOutput || $0.kind == .customToolCallOutput) })?.payload else {
+                    throw CodingLookupFailure("trajectory_latest_output")
+                }
+                let text = try CodingLookupTools.outputText(output); consumed.insert(id)
+                switch pending {
+                case let .load(names, originalRevision):
+                    guard CodingLookupTools.local(call.name) == GroqToolCatalog.name,
+                          let loaded = try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
+                          loaded["catalog_revision"] as? String == originalRevision,
+                          Set(loaded["loaded"] as? [String] ?? []) == Set(names),
+                          loaded["available"] as? String == "next_request", loaded["execution"] as? Bool == false else {
+                        throw CodingLookupFailure("trajectory_loader")
+                    }
+                case let .coding(step):
+                    guard step == stage else { throw CodingLookupFailure("trajectory_order") }
+                    if step == 4 {
+                        guard call.kind == .customToolCall, CodingLookupTools.local(call.name) == "apply_patch",
+                              call.payload?.literalUTF8 == Data(Coding495TrajectoryPatch.patch(workspace).utf8),
+                              text.contains("Success. Updated the following files:"), text.contains(workspace + "/reconcile.py") else {
+                            throw CodingLookupFailure("trajectory_patch")
+                        }
+                        result.patchVerified = true
+                    } else {
+                        guard call.kind == .functionCall, CodingLookupTools.local(call.name) == "exec_command",
+                              let args = call.payload?.literalUTF8,
+                              let arguments = try JSONSerialization.jsonObject(with: args) as? [String: Any],
+                              Set(arguments.keys) == ["cmd", "workdir"], arguments["cmd"] as? String == command(step),
+                              arguments["workdir"] as? String == workspace else { throw CodingLookupFailure("trajectory_arguments") }
+                        result.omittedLimitCommands += 1
+                        if step == 3 {
+                            guard text.contains("Process exited with code 1"), text.contains("Ran 6 tests"),
+                                  text.contains("FAILED (failures=26)"), text.contains("Warning: truncated output") else {
+                                throw CodingLookupFailure("trajectory_seed_failure")
+                            }
+                            result.seedFailed26 = true
+                        } else {
+                            guard text.contains("Process exited with code 0") else { throw CodingLookupFailure("trajectory_exit") }
+                            if step == 2 {
+                                let seed = String(decoding: try XCTUnwrap(GroqInvoiceHistorySeed.files["reconcile.py"]), as: UTF8.self)
+                                guard text.contains(seed.trimmingCharacters(in: .newlines)) else { throw CodingLookupFailure("trajectory_source") }
+                            }
+                            if step == 5 { guard text.contains("Ran 6 tests"), text.contains("OK") else { throw CodingLookupFailure("trajectory_pass") }; result.sixTestsPassed = true }
+                            if step == 6 { guard text.contains("INV-5DF5A197-600") else { throw CodingLookupFailure("trajectory_reference") }; result.referenceVerified = true }
+                        }
+                    }
+                }
+                self.pending = nil; stage += 1
+            }
+            result.sends += 1
+            if stage <= 1 {
+                let requestedLocal = stage == 0 ? ["browser_open", "browser_fill", "browser_click", "browser_read"] : ["exec_command", "apply_patch", "browser_close"]
+                let requested = try requestedLocal.map { local in try XCTUnwrap(inventoryNames.first { CodingLookupTools.local($0) == local }) }
+                let loader = try XCTUnwrap(tools.first { $0.local == GroqToolCatalog.name })
+                pending = .load(requested, revision)
+                reply = try CodingLookupTools.call(loader.qualified, arguments: ["catalog_revision": revision, "names": requested])
+            } else if stage <= 6 {
+                let optional = Set(tools.map(\.local)).subtracting([GroqToolCatalog.name, GroqHistoryTool.name])
+                guard optional == ["exec_command", "apply_patch", "browser_close"] else { throw CodingLookupFailure("trajectory_three_schemas") }
+                result.threeOptionalSchemasVerified = true; pending = .coding(stage)
+                let tool = try XCTUnwrap(tools.first { $0.local == (stage == 4 ? "apply_patch" : "exec_command") })
+                reply = stage == 4 ? try CodingLookupTools.call(tool, declaredCustomInput: Coding495TrajectoryPatch.patch(workspace))
+                    : try CodingLookupTools.call(tool.qualified, arguments: ["cmd": command(stage), "workdir": workspace])
+            } else {
+                reply = try CodingLookupTools.message(marker) // Coding prefix only, not a workflow completion claim.
+            }
+            snapshot = ["state": "running"]
+        case "webProviderPoll":
+            guard p["sessionToken"] == token else { throw CodingLookupFailure("trajectory_poll") }
+            snapshot = ["state": "complete", "text": reply]
+        case "webProviderFinish", "webProviderCancel":
+            guard let current = token, p["sessionToken"] == current else { throw CodingLookupFailure("trajectory_cleanup") }
+            result.finished.append(current); token = nil; snapshot = ["cleanup": "transcript_cleared"]
+        default: throw CodingLookupFailure("trajectory_operation")
+        }
+        if ["ready", "running", "complete"].contains(snapshot["state"] as? String ?? "") {
+            snapshot["modelEvidence"] = ["selected": ["key": choice.key, "label": choice.label], "source": "selected_model_indicator", "verification": "website_selection"]
+        }
+        return try JSONSerialization.data(withJSONObject: snapshot)
+    }
+}
+
+private enum Coding495TrajectoryPatch {
+    // Exact live custom input SHA8bec4ffe...,1603B. Only its absolute workspace
+    // is substituted with an equally long private fixture path.
+    private static let template = "*** Begin Patch\n*** Update File: __WORKSPACE__/reconcile.py\n@@\n-def summarize(items):\n-    \"\"\"Aggregate normalized SKUs, quantities, and exact integer-cent subtotals.\"\"\"\n-    grouped = {}\n-    for item in items:\n-        sku = item[\"sku\"].strip().upper()\n-        grouped[sku] = {\n-            \"sku\": sku,\n-            \"quantity\": item[\"quantity\"],\n-            \"subtotal_cents\": item[\"quantity\"] * item[\"unit_cents\"],\n-        }\n-    rows = [grouped[sku] for sku in sorted(grouped)]\n-    return {\"items\": rows, \"total_cents\": sum(row[\"subtotal_cents\"] for row in rows)}\n+def summarize(items):\n+    \"\"\"Aggregate normalized SKUs, quantities, and exact integer-cent subtotals.\n+    This function now correctly accumulates quantities and subtotals for duplicate\n+    SKUs instead of overwriting them.\n+    \"\"\"\n+    grouped = {}\n+    for item in items:\n+        sku = item[\"sku\"].strip().upper()\n+        qty = item[\"quantity\"]\n+        subtotal = qty * item[\"unit_cents\"]\n+        if sku in grouped:\n+            grouped[sku][\"quantity\"] += qty\n+            grouped[sku][\"subtotal_cents\"] += subtotal\n+        else:\n+            grouped[sku] = {\n+                \"sku\": sku,\n+                \"quantity\": qty,\n+                \"subtotal_cents\": subtotal,\n+            }\n+    rows = [grouped[sku] for sku in sorted(grouped)]\n+    return {\"items\": rows, \"total_cents\": sum(row[\"subtotal_cents\"] for row in rows)}\n*** End Patch\n"
+    static func patch(_ workspace: String) -> String { template.replacingOccurrences(of: "__WORKSPACE__", with: workspace) }
+    static func expectedModule() throws -> Data {
+        let (source, range) = try CodingLookupTools.originalModuleAndRange()
+        let lines = template.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let removed = lines.filter { $0.hasPrefix("-") }.map { String($0.dropFirst()) }.joined(separator: "\n")
+        let added = lines.filter { $0.hasPrefix("+") }.map { String($0.dropFirst()) }.joined(separator: "\n")
+        guard removed + "\n" == String(source[range]) else { throw CodingLookupFailure("trajectory_patch_scope") }
+        return Data(source.replacingCharacters(in: range, with: added + "\n").utf8)
+    }
+}
+
 private enum CodingLookupTools {
     struct Tool { let local: String; let qualified: String; let definition: [String: Any] }
     static let commands = ["cat README.md", "cat reconcile.py", "cat test_reconcile.py", "", "python3 -m unittest -v", "python3 reconcile.py"]
@@ -1272,12 +1595,22 @@ private enum CodingLookupTools {
     static func isContextRevision(_ value: String) -> Bool {
         value.utf8.count == 64 && value.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) })
     }
-    static func descriptor(_ raw: Data) throws -> String {
-        let wrapper = try XCTUnwrap(JSONSerialization.jsonObject(with: raw) as? [String: Any])
-        guard Set(wrapper.keys) == ["$computa_history"], let ref = wrapper["$computa_history"] as? String,
-              isCanonicalReference(ref) else { throw CodingLookupFailure("descriptor_shape") }
-        return ref
+    static func historyDescriptor(_ raw: Data) throws -> (reference: String, failedExitCode: Int?) {
+        guard let wrapper = try JSONSerialization.jsonObject(with: raw) as? [String: Any],
+              let ref = wrapper["$computa_history"] as? String, isCanonicalReference(ref) else {
+            throw CodingLookupFailure("descriptor_shape")
+        }
+        if Set(wrapper.keys) == ["$computa_history"] { return (ref, nil) }
+        guard Set(wrapper.keys) == ["$computa_history", "status", "exit_code", "historical_only", "action_authority"],
+              wrapper["status"] as? String == "failed", let exit = wrapper["exit_code"] as? NSNumber,
+              CFGetTypeID(exit) != CFBooleanGetTypeID(), exit.doubleValue >= 1,
+              exit.doubleValue <= Double(Int32.max), exit.doubleValue == Double(exit.int64Value),
+              boolean(wrapper["historical_only"], is: true), boolean(wrapper["action_authority"], is: false) else {
+            throw CodingLookupFailure("descriptor_shape")
+        }
+        return (ref, exit.intValue)
     }
+    static func descriptor(_ raw: Data) throws -> String { try historyDescriptor(raw).reference }
     static func validateDisplay(_ layout: GroqContextJSONLayout, native: [CodingField], referenceRevision: String?) throws {
         var references = Set<String>()
         let latest = layout.items.last { $0.kind == .functionCallOutput || $0.kind == .customToolCallOutput }?.callID
