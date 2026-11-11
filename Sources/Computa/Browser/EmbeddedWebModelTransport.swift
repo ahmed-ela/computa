@@ -3795,8 +3795,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // false observation cannot authorize Send or replace a later error.
         var lastGroqDiagnostic: String?
         var lastClaudeObservation: (generation: UUID, reason: ClaudeSendFailureReason)?
-        func timeoutFailure() -> Failure {
-            let reason = lastClaudeObservation.flatMap { $0.generation == session.documentGeneration ? $0.reason : nil }
+        @MainActor func timeoutFailure() -> Failure {
+            let reason: ClaudeSendFailureReason?
+            if let observation = lastClaudeObservation, observation.generation == session.documentGeneration {
+                reason = observation.reason
+            } else {
+                reason = nil
+            }
             logClaudeSendFailure(session, stage: .readinessTimeout, reason: reason)
             return sendReadinessFailure(session, diagnostic: lastGroqDiagnostic)
         }
