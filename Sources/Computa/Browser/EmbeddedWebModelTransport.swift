@@ -733,6 +733,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var revisionChanged: Bool?, waitDeadlineReached: Bool?
         var readTimeoutBaseline = 0
         var last: QwenProgressInspection?
+        var checkedForMissedCompletion = false
     }
 
     /// Finite last observations for a prompt-free probe of a saved Gemini checkpoint.
@@ -1156,6 +1157,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var responseTimeout: Duration = .seconds(300)
     private var inspectionTimeout: Duration = .seconds(30)
     private static let completionQuietInterval: Duration = .milliseconds(1_600)
+    private static let qwenCompletionCheckLead: Duration = .seconds(8)
     private var initialCheckpointSettlementTimeout: Duration = .seconds(3)
     private static let inspectionLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "EmbeddedWebModel")
     private struct InspectionSignature: Equatable {
@@ -2912,6 +2914,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var wake = deadline
         if session.state == "loading" { wake = min(wake, session.created + preparationTimeout) }
         else if session.state == "running" { wake = min(wake, session.turnStarted + responseTimeout) }
+        let responseEnd = wake
         if session.state == "running", let pending = session.qwenCodePayload, session.qwenCodePayloadGrant == nil {
             wake = min(wake, pending.since + Self.completionQuietInterval)
         }
@@ -2922,6 +2925,20 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if let settlement = session.initialCheckpointSettlement, !settlement.finished {
             wake = min(wake, settlement.deadline)
         }
+        let tracksQwen = session.provider == .qwen && session.state == "running" && session.submitted
+        var checksForMissedCompletion = false
+        if tracksQwen, wake == responseEnd, !session.qwenProgress.checkedForMissedCompletion,
+           session.firstUserFingerprint != nil, !session.pendingSubmission, !session.completionCandidate,
+           session.qwenCodePayload == nil, session.savedResponseChoice == nil {
+            // Reserve one ordinary guarded poll in case the terminal DOM change
+            // never wakes the waiter. Leave time for the existing quiet check
+            // and preserve the earlier of the native and server deadlines.
+            let lead = min(Self.qwenCompletionCheckLead, (responseEnd - session.turnStarted) / 2)
+            if lead > Self.completionQuietInterval, ContinuousClock.now < responseEnd - Self.completionQuietInterval {
+                wake = responseEnd - lead
+                checksForMissedCompletion = true
+            }
+        }
         let groqProgress = groqFailureProgressLease(session, allowingPending: true)
         if groqProgress != nil { session.groqFailureProgress.waitStarted() }
         defer {
@@ -2929,7 +2946,6 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         let profileQuietWait = session.state == "running" && session.completionCandidate && session.candidateSince != nil
         if profileQuietWait { session.profileCompletionTransition(.quietWaitStarted) }
-        let tracksQwen = session.provider == .qwen && session.state == "running" && session.submitted
         if tracksQwen {
             session.qwenProgress.waitStarts = min(65_535, session.qwenProgress.waitStarts + 1)
             session.qwenProgress.waitDepth += 1
@@ -2948,8 +2964,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             changed = try await browser.waitForModelChange(tabID: session.tabID, after: revision, until: wake)
         }
         if tracksQwen {
+            let reachedWake = ContinuousClock.now >= wake
             session.qwenProgress.revisionChanged = changed != revision
-            session.qwenProgress.waitDeadlineReached = ContinuousClock.now >= wake
+            session.qwenProgress.waitDeadlineReached = reachedWake
+            if checksForMissedCompletion && reachedWake { session.qwenProgress.checkedForMissedCompletion = true }
         }
         try checkProviderGate(session)
         return changed

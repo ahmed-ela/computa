@@ -1201,6 +1201,73 @@ final class QwenWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testQwenPlusCompletesAfterConsumedWakeBeforeOriginalDeadline() async throws {
+        let marker = "QWEN_SYNTHETIC_WAKE_COMPLETE"
+        let reply = #"{"type":"message","text":"QWEN_SYNTHETIC_WAKE_COMPLETE"}"#
+        for suppressWake in [false, true] {
+            let fixture = try Fixture(setup: "qwenFixture.options.holdResponse=true; qwenFixture.options.reply=\(String(reflecting: reply));")
+            defer { fixture.shutdown() }
+            fixture.transport.setTimeoutsForTesting(preparation: .seconds(12), response: .seconds(8))
+            let transport = CompletionWakeTransport(native: fixture.transport, suppressWake: suppressWake) {
+                let rendered = try await self.evaluate(fixture.view, """
+                    qwenFixture.completeResponse();
+                    return [document.querySelector('.qwen-markdown-text-node')?.textContent,
+                            document.querySelectorAll('.qwen-chat-package-comp-new-action-control').length];
+                    """)
+                let state = try XCTUnwrap(rendered as? [Any])
+                XCTAssertEqual(state.first as? String, reply)
+                XCTAssertEqual(state.last as? Int, 1)
+            }
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+            let server = WebModelServer()
+            addTeardownBlock { _ = await server.shutdown(); try? FileManager.default.removeItem(at: root) }
+            await server.configureEmbeddedTransport(transport)
+            await server.configureEvidenceDirectory(root.appendingPathComponent("evidence"))
+            await server.configureCleanupReceipts(directory: root.appendingPathComponent("cleanup"),
+                runtimeGeneration: websiteInferenceFixtureGeneration) { _ in }
+            await server.setTimeoutsForTesting(readiness: .seconds(12), response: .seconds(5))
+            let choice = WebsiteModelChoice(provider: "qwen", key: "Qwen3.7-Plus", label: "Qwen3.7-Plus")
+            let task = UUID().uuidString.lowercased(), turn = UUID().uuidString.lowercased()
+            let request = try JSONSerialization.data(withJSONObject: ["model": choice.modelID,
+                "input": "Return the synthetic local wake fixture reply.", "tools": [], "stream": true] as [String: Any])
+            let response = try await server.fixtureInfer(request, taskID: task, turnID: turn)
+            let releasedAt = ContinuousClock.now
+            let deadline = try XCTUnwrap(transport.wakeDeadline)
+            XCTAssertLessThan(releasedAt, deadline)
+            if suppressWake {
+                XCTAssertEqual(transport.resumedWithoutRevisionAdvance, true,
+                    "The consumed wake must recover without a second DOM notification")
+            }
+            let events = try String(decoding: response, as: UTF8.self).components(separatedBy: "\n")
+                .filter { $0.hasPrefix("data: {") }.map { line in
+                    try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.dropFirst(6).utf8)) as? [String: Any])
+                }
+            XCTAssertEqual(events.last?["type"] as? String, "response.completed")
+            let text = events.filter { $0["type"] as? String == "response.output_text.delta" }
+                .compactMap { $0["delta"] as? String }.joined()
+            XCTAssertEqual(text, marker)
+            XCTAssertGreaterThan(transport.responsePolls, try XCTUnwrap(transport.pollsAtWake))
+            let journal = try Data(contentsOf: root.appendingPathComponent("evidence/transactions/\(task)/\(turn).jsonl"))
+                .split(separator: 0x0A).map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0)) as? [String: Any]) }
+            let phases = journal.compactMap { $0["phase"] as? String }
+            XCTAssertEqual(phases.filter { $0 == "submission_verified" }.count, 1)
+            XCTAssertEqual(phases.filter { $0 == "release_verified" }.count, 1)
+            XCTAssertFalse(phases.contains("failed"))
+            let receipts = await server.latestCleanupReceipts()
+            XCTAssertEqual(receipts.count, 1)
+            let receipt = try XCTUnwrap(receipts.first)
+            XCTAssertTrue(receipt.isTransactionLinked && receipt.receiptSaved)
+            XCTAssertEqual(receipt.reason, .deleted)
+            XCTAssertEqual(receipt.outcome, .closed)
+            XCTAssertEqual(WebsiteSessionCleanupStore(directory: root.appendingPathComponent("cleanup")).latest(), [receipt])
+            try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+            XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+            XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+            _ = await server.shutdown()
+        }
+    }
+
     func testDiscoveryValidatesFullMenuButExportsOnlyAdmittedPlusAndMax() async throws {
         let fixture = try Fixture(); defer { fixture.shutdown() }
         let choices = try await fixture.transport.discoverModels(provider: "qwen")
@@ -1893,6 +1960,69 @@ final class QwenWebModelTransportTests: XCTestCase {
         }
         return try JSONSerialization.jsonObject(with: data, options: .fragmentsAllowed)
     }
+    @MainActor private final class CompletionWakeTransport: WebModelTransport {
+        private let native: EmbeddedWebModelTransport
+        private let suppressWake: Bool
+        private let render: () async throws -> Void
+        private var sent = false
+        private var sawVerifiedEmptyPoll = false
+        private(set) var responsePolls = 0
+        private(set) var pollsAtWake: Int?
+        private(set) var wakeDeadline: ContinuousClock.Instant?
+        private(set) var resumedWithoutRevisionAdvance: Bool?
+
+        init(native: EmbeddedWebModelTransport, suppressWake: Bool, render: @escaping () async throws -> Void) {
+            self.native = native; self.suppressWake = suppressWake; self.render = render
+        }
+        func start(params: Data, admission: WebModelStartAdmission, authorization: ChatGPTRequestMetadataLease?) async throws -> Data {
+            try await native.start(params: params, admission: admission, authorization: authorization)
+        }
+        func request(operation: String, params: Data) async throws -> Data {
+            try await request(operation: operation, params: params, onReadFailure: nil)
+        }
+        func request(operation: String, params: Data,
+                     onReadFailure: (@Sendable (WebsiteReadFailureDiagnostic) -> Void)?) async throws -> Data {
+            if sent, operation == "webProviderPoll" { responsePolls += 1 }
+            let response = try await native.request(operation: operation, params: params, onReadFailure: onReadFailure)
+            if operation == "webProviderSend" { sent = true }
+            if sent, operation == "webProviderPoll", pollsAtWake == nil,
+               let snapshot = try JSONSerialization.jsonObject(with: response) as? [String: Any],
+               snapshot["state"] as? String == "running", snapshot["text"] as? String == "",
+               let proof = snapshot["modelProofContext"] as? [String: Any],
+               (proof["firstUserFingerprint"] as? String)?.count == 64 {
+                sawVerifiedEmptyPoll = true
+            }
+            return response
+        }
+        func snapshotQwenResponseProgress(sessionToken: String) async -> QwenResponseProgressStatus? {
+            await native.snapshotQwenResponseProgress(sessionToken: sessionToken)
+        }
+        func changeRevision(sessionToken: String) async throws -> UInt64? {
+            try await native.changeRevision(sessionToken: sessionToken)
+        }
+        func waitForChange(sessionToken: String, after revision: UInt64, until deadline: ContinuousClock.Instant) async throws -> UInt64? {
+            guard sawVerifiedEmptyPoll, pollsAtWake == nil else {
+                return try await native.waitForChange(sessionToken: sessionToken, after: revision, until: deadline)
+            }
+            pollsAtWake = responsePolls; wakeDeadline = deadline
+            let current = try await native.changeRevision(sessionToken: sessionToken)
+            let beforeRender = try XCTUnwrap(current)
+            try await render()
+            let observed = try await native.waitForChange(sessionToken: sessionToken, after: beforeRender, until: deadline)
+            let wake = try XCTUnwrap(observed)
+            XCTAssertGreaterThan(wake, beforeRender)
+            XCTAssertGreaterThan(deadline - .now, .seconds(2), "The same reply must have time to pass the ordinary quiet check")
+            // Consume exactly this revision without delivering it to the server.
+            // Native waiting still owns any later signal or deadline wake.
+            if suppressWake {
+                let resumed = try await native.waitForChange(sessionToken: sessionToken, after: wake, until: deadline)
+                resumedWithoutRevisionAdvance = resumed == wake
+                return resumed
+            }
+            return wake
+        }
+    }
+
     private enum FixtureFailure: Error { case timeout }
     private final class Window: NSWindow {
         override var canBecomeKey: Bool { false }

@@ -4171,3 +4171,32 @@ why Google issued it.
 
 DeepSeek's normal build 501 tab still redirected to sign-in. It was left on
 that screen and no DeepSeek inference was sent.
+
+### 2026-11-11 — Qwen completion and interrupted catalog refresh
+
+The earlier Qwen Plus timeout retained an empty response observation from
+64.820 s before the deadline. A local WebKit test rendered the same complete
+owned reply in two runs. The original transport released the reply when it
+received the page notification. It reached the deadline when the test consumed
+that notification. The fixture establishes a missed-notification failure mode.
+The cause of the earlier live timeout remains unknown.
+
+For an already bound Qwen reply without a completion candidate or pending
+response choice or code read, the transport can wake once before the original
+deadline for its regular guarded inspection. The fixture now releases both
+replies within the original deadline and verifies one Send and one saved
+deletion receipt per run.
+
+The Groq website offered Qwen3.8-27B and GPT OSS 120B, while Computa also
+displayed cached GPT OSS 20B. An automatic catalog probe could lose its result
+if native work started during discovery, spending its launch attempt. The
+selected provider can now retry discovery once when idle. Local tests verify
+both a late result and a validator cancellation, with the stale 20B choice
+removed only after fresh discovery. Forty focused Swift tests passed.
+
+A separate build 501 Groq Qwen3.8-27B workflow completed its schema lookup.
+Both requests passed local admission at 2,360 and 4,330 body tokens against
+the 6,000-token cap. The website removed the second message and restored its
+draft. No edit, terminal command, browser action, or fixture POST followed.
+The first transcript cleared and the second cleanup remains unconfirmed. The
+website HTTP status and cause of the rollback remain unknown.

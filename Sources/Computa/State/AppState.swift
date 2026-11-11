@@ -70,6 +70,7 @@ final class AppState {
     @ObservationIgnored private var didStartWebsiteModelDiscovery = false
     @ObservationIgnored private var startupWebsiteModelProviders: [String] = []
     @ObservationIgnored private var startupWebsiteModelAttemptedProviders: Set<String> = []
+    @ObservationIgnored private var startupWebsiteModelInterruptedProviders: Set<String> = []
     @ObservationIgnored private var startupWebsiteModelRefreshTask: Task<Void, Never>?
     @ObservationIgnored private var startupWebsiteModelIdleObservation: UUID?
     @ObservationIgnored private var lastWebsitePrewarmDemand: (taskID: AgentTask.ID, time: ContinuousClock.Instant)?
@@ -338,7 +339,8 @@ final class AppState {
 
     /// Keep missing-provider discovery, then revalidate only the selected
     /// provider's cached menu. Other cached providers wait for selection demand.
-    /// Each provider has at most one automatic attempt per launch, while idle.
+    /// Each provider gets one automatic attempt per launch, with one idle
+    /// retry if native work interrupts discovery that is still needed.
     func refreshWebsiteModelsIfNeeded() {
         guard !cookieMaintenanceOnlyLaunch, !didStartWebsiteModelDiscovery,
               runtime != nil || websiteModelDiscovery != nil || websiteModeDiscovery != nil else { return }
@@ -360,6 +362,18 @@ final class AppState {
               !startupWebsiteModelProviders.contains(provider) else { return }
         startupWebsiteModelProviders.append(provider)
         scheduleStartupWebsiteModelRefresh()
+    }
+
+    private func requeueInterruptedWebsiteModelDiscovery(_ intent: WebsiteModelRefreshIntent) {
+        guard !intent.retryBlocked, intent.candidate == nil, intent.signInRecovery == nil, !isShuttingDown else { return }
+        let provider = intent.provider
+        let demanded = WebsiteModelCatalog.selection(for: selectedTask?.model ?? defaultModel)?.provider
+        let cached = websiteModelChoices.contains { $0.provider == provider }
+            || websiteModeChoices.contains { $0.provider == provider }
+        guard demanded == provider || !cached,
+              startupWebsiteModelInterruptedProviders.insert(provider).inserted else { return }
+        startupWebsiteModelAttemptedProviders.remove(provider)
+        if !startupWebsiteModelProviders.contains(provider) { startupWebsiteModelProviders.append(provider) }
     }
 
     private func scheduleStartupWebsiteModelRefresh() {
@@ -596,6 +610,7 @@ final class AppState {
                     }
                     self.browserSession.recordHumanVerificationRecovery(candidate, phase: .probing, reason: .healthyHumanDocument)
                 }
+                var interruptedByNativeWork = false
                 do {
                     // A real manual/recovery attempt also satisfies the launch
                     // budget, so a pending automatic probe cannot duplicate it.
@@ -612,7 +627,13 @@ final class AppState {
                     } else if requiresIdle {
                         // The shared idle/identity check runs before creation
                         // and immediately before a saved provider gate clears.
-                        validator = { [weak self] in self?.canRefreshWebsiteModels == true }
+                        validator = { [weak self] in
+                            guard self?.canRefreshWebsiteModels == true else {
+                                interruptedByNativeWork = true
+                                return false
+                            }
+                            return true
+                        }
                     }
                     let choices: [WebsiteModelChoice]
                     let modes: [WebsiteModeChoice]
@@ -639,7 +660,10 @@ final class AppState {
                     }
                     guard !Task.isCancelled, !self.isShuttingDown,
                           self.websiteModelRefreshGeneration == generation else { break }
-                    guard !requiresIdle || self.canRefreshWebsiteModels else { continue }
+                    guard !requiresIdle || self.canRefreshWebsiteModels else {
+                        self.requeueInterruptedWebsiteModelDiscovery(intent)
+                        continue
+                    }
                     if let recovery = intent.signInRecovery,
                        !self.providerSignInRecoveryIsCurrent(recovery, afterDiscovery: true) { continue }
                     // Injection is not checkpoint-clearance authority. Production
@@ -679,6 +703,9 @@ final class AppState {
                         }
                     }
                 } catch is CancellationError {
+                    if !Task.isCancelled, requiresIdle, interruptedByNativeWork || !self.canRefreshWebsiteModels {
+                        self.requeueInterruptedWebsiteModelDiscovery(intent)
+                    }
                     if let candidate = intent.candidate {
                         self.browserSession.recordHumanVerificationRecovery(candidate,
                             phase: Task.isCancelled ? .cancelled : .superseded,

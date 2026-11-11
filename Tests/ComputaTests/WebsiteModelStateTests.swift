@@ -315,6 +315,57 @@ final class WebsiteModelStateTests: XCTestCase {
         XCTAssertEqual(state.websiteModelChoices.filter { $0.provider == "chatgpt" }, cached.filter { $0.provider == "chatgpt" })
     }
 
+    func testInterruptedSelectedGroqDemandRetriesOnlyWhenIdle() async throws {
+        let qwen = WebsiteModelChoice(provider: "groq", key: "qwen/qwen3.8-27b", label: "Qwen/Qwen3.8-27B")
+        let oss120 = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B")
+        let oss20 = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-20b", label: "GPT OSS 20B")
+        let old = [qwen, oss120, oss20], fresh = [qwen, oss120]
+        let cached = namedWebsiteModelProviders.filter { $0 != "groq" }.map {
+            modelStateChoice(provider: $0, key: "cached", label: "Cached")
+        } + old
+        for validatorCancelled in [false, true] {
+            let preferences = isolatedTestPreferences()
+            WebsiteModelCatalog.save(cached, to: preferences)
+            WebsiteModeCatalog.save(modelStateModes, to: preferences)
+            preferences.set(LocalModelCatalog.defaultModelID, forKey: "LocalCodex.defaultModelID")
+            let task = AgentTask(id: "groq-demand", title: "Groq", summary: "", status: .draft,
+                                 workspace: "/tmp", model: qwen.modelID)
+            var calls: [String] = [], retries: [Bool] = []
+            var held: CheckedContinuation<[WebsiteModelChoice], Error>?
+            defer { held?.resume(throwing: CancellationError()) }
+            let state = AppState(tasks: [task], preferences: preferences, websiteModelDiscovery: { provider in
+                calls.append(provider)
+                if calls.count == 1 { return try await withCheckedThrowingContinuation { held = $0 } }
+                return provider == "groq" ? fresh : cached.filter { $0.provider == provider }
+            })
+            state.setWebsiteModelRefreshObserverForTesting { _, retry in retries.append(retry) }
+            state.selectTask(nil)
+            state.refreshWebsiteModelsIfNeeded()
+            state.selectTask(task.id)
+            await waitForDiscovery { held != nil }
+            XCTAssertEqual(calls, ["groq"])
+            let first = try XCTUnwrap(held)
+            held = nil
+            state.activeTurnTaskIDs.insert(task.id)
+            XCTAssertFalse(state.canRefreshWebsiteModels)
+            if validatorCancelled { first.resume(throwing: CancellationError()) }
+            else { first.resume(returning: [qwen]) }
+            await waitForDiscovery { !state.websiteModelsRefreshing }
+            XCTAssertEqual(calls, ["groq"], "Native work must defer the automatic retry")
+            XCTAssertEqual(state.websiteModelChoices.filter { $0.provider == "groq" }, old)
+            XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), state.websiteModelChoices)
+
+            state.activeTurnTaskIDs.remove(task.id)
+            await waitForDiscovery { calls.count >= 2 && !state.websiteModelsRefreshing }
+            XCTAssertEqual(calls, ["groq", "groq"], "Idle must recover the same demand without another selection")
+            XCTAssertEqual(retries, [false, false], "An automatic retry may not bypass a provider gate")
+            XCTAssertEqual(state.websiteModelChoices.filter { $0.provider == "groq" }, fresh)
+            XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), state.websiteModelChoices)
+            XCTAssertEqual(state.selectedTask?.model, qwen.modelID)
+            XCTAssertNil(state.websiteModelsError)
+        }
+    }
+
     func testShutdownRevokesDeferredStartupAndCancelsActiveStartup() async {
         var deferredCalls: [String] = []
         let deferred = AppState(tasks: [], preferences: isolatedTestPreferences(), websiteModelDiscovery: { provider in
