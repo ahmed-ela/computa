@@ -972,32 +972,43 @@ describe('Groq fixed fresh-session adapter', () => {
       const f = groqFixture({ key: 'openai/gpt-oss-20b', label: 'GPT OSS 20B' });
       const sent = await f.submit();
       expect(sent.groqRenderedMessageRevision).toBeUndefined();
+      expect(sent.groqRenderedMessageShape).toBeUndefined();
       htmlParagraph(f, reply, attributes);
       const observed = await f.run();
       expect(observed).toMatchObject({ answerComplete: true, busy: false, firstUserVerified: true,
-        text: reply, groqRenderedMessageRevision: 1, groqLiteralResponse: false,
+        text: reply, groqRenderedMessageRevision: 1, groqRenderedMessageShape: 'matched', groqLiteralResponse: false,
         completionEvidence: { codeStructure: { reason: 'pre_count', preCount: 0, codeCount: 0, scanCount: 0 } } });
       expect(f.f.sendCount).toBe(1); expect(f.f.clearCount).toBe(0);
     }
   });
 
-  test('paragraph evidence excludes attributed, hidden, mixed, extra, foreign or inexact content', async () => {
-    for (const variant of ['extra_attribute', 'unknown_class', 'namespaced_class', 'hidden', 'inert', 'foreign_namespace', 'nested',
-      'split_text', 'answer_sibling', 'second_paragraph', 'trimmed'] as const) {
+  test('paragraph evidence reports only the first failed predicate and keeps the same rejection', async () => {
+    for (const [variant, reason] of [
+      ['extra_attribute', 'attribute_count'], ['unknown_attribute', 'attribute_name'], ['unknown_class', 'attribute_value'],
+      ['namespaced_class', 'attribute_namespace'], ['hidden', 'paragraph_hidden'], ['inert', 'paragraph_hidden'],
+      ['editable', 'paragraph_editable'], ['foreign_namespace', 'paragraph_namespace'], ['wrapper', 'paragraph_tag'],
+      ['direct_text', 'answer_text_child'], ['nested', 'leaf_not_text'], ['split_text', 'paragraph_child_count'],
+      ['answer_sibling', 'answer_child_count'], ['second_paragraph', 'answer_child_count'], ['trimmed', 'text_mismatch'],
+    ] as const) {
       const f = groqFixture(); await f.submit();
       const attributes = variant === 'extra_attribute' ? { class: 'text-left mb-4', title: 'extra' }
+        : variant === 'unknown_attribute' ? { title: 'private-attribute' }
         : variant === 'unknown_class' ? { class: 'text-left mb-4 extra' }
         : variant === 'namespaced_class' ? { class: 'text-left mb-4' }
         : variant === 'hidden' ? { hidden: '' } : variant === 'inert' ? { inert: '' } : {};
       const paragraph = htmlParagraph(f, variant === 'trimmed' ? ' ' + f.f.reply : f.f.reply, attributes,
         variant === 'foreign_namespace' ? 'http://www.w3.org/2000/svg' : undefined,
         variant === 'namespaced_class' ? 'urn:fixture-attribute' : null);
+      if (variant === 'editable') Object.defineProperty(paragraph, 'isContentEditable', { value: true });
+      if (variant === 'wrapper') paragraph.tagName = 'DIV';
+      if (variant === 'direct_text') f.f.answer.replaceChildren(new f.Node('#text', {}, f.f.reply));
       if (variant === 'nested') paragraph.replaceChildren(new f.Node('EM', {}, f.f.reply));
       if (variant === 'split_text') paragraph.append(new f.Node('#text', {}, ''));
       if (variant === 'answer_sibling') f.f.answer.append(new f.Node('#text', {}, ' '));
       if (variant === 'second_paragraph') f.f.answer.append(new f.Node('P', {}, ''));
       const observed = await f.run();
       expect(observed.groqRenderedMessageRevision).toBeUndefined();
+      expect(observed.groqRenderedMessageShape).toBe(reason);
       expect(observed.groqLiteralResponse).toBe(false);
       expect(observed.answerComplete).toBe(true);
       expect(observed.text).toBe(f.f.reply);
@@ -1012,14 +1023,17 @@ describe('Groq fixed fresh-session adapter', () => {
     const changed = await f.run();
     expect(changed.answerComplete).toBe(true); expect(changed.text).toBe(f.f.reply);
     expect(changed.groqRenderedMessageRevision).toBeUndefined();
+    expect(changed.groqRenderedMessageShape).toBe('paragraph_child_count');
     htmlParagraph(f); f.f.copy.disabled = true;
     const busy = await f.run();
     expect(busy.answerComplete).toBe(false); expect(busy.groqRenderedMessageRevision).toBeUndefined();
+    expect(busy.groqRenderedMessageShape).toBeUndefined();
     f.f.copy.disabled = false;
     expect((await f.run()).groqRenderedMessageRevision).toBe(1);
     f.f.userBody.textContent = 'Foreign body';
     const foreign = await f.run();
     expect(foreign.error).toBe('conversation_changed'); expect(foreign.groqRenderedMessageRevision).toBeUndefined();
+    expect(foreign.groqRenderedMessageShape).toBeUndefined();
     expect(f.f.sendCount).toBe(1); expect(f.f.clearCount).toBe(0);
   });
 
@@ -1028,7 +1042,9 @@ describe('Groq fixed fresh-session adapter', () => {
     let paragraph = htmlParagraph(f);
     const first = await f.run();
     expect(first.groqRenderedMessageRevision).toBe(1);
-    expect((await f.run('verifyModel')).groqRenderedMessageRevision).toBeUndefined();
+    const modelCheck = await f.run('verifyModel');
+    expect(modelCheck.groqRenderedMessageRevision).toBeUndefined();
+    expect(modelCheck.groqRenderedMessageShape).toBeUndefined();
     expect((await f.run()).groqRenderedMessageRevision).toBe(1);
     paragraph.replaceChildren(new f.Node('#text', {}, f.f.reply));
     expect((await f.run()).groqRenderedMessageRevision).toBe(2);
@@ -1048,6 +1064,11 @@ describe('Groq fixed fresh-session adapter', () => {
     f.onDigest(() => paragraph.removeAttribute('title'));
     expect((await f.run()).groqRenderedMessageRevision).toBe(5);
     expect((await f.run()).groqRenderedMessageRevision).toBe(5);
+    f.world.__computaGroqFreshSessionV1.renderedMessageRevision = 1024;
+    htmlParagraph(f);
+    const exhausted = await f.run();
+    expect(exhausted.groqRenderedMessageRevision).toBeUndefined();
+    expect(exhausted.groqRenderedMessageShape).toBe('revision_exhausted');
     expect(f.f.sendCount).toBe(1); expect(f.f.clearCount).toBe(0);
   });
 
@@ -1058,6 +1079,7 @@ describe('Groq fixed fresh-session adapter', () => {
     expect(observed.text).toBe(f.f.reply); expect(observed.answerComplete).toBe(true);
     expect(observed.groqLiteralResponse).toBe(true);
     expect(observed.groqRenderedMessageRevision).toBeUndefined();
+    expect(observed.groqRenderedMessageShape).toBeUndefined();
     expect(observed.text).not.toContain('Synthetic reasoning');
     expect(JSON.parse(observed.text).calls[0].arguments.literal).toBe('a\n  b_"');
     // Syntax highlighting may split code into spans; textContent retains bytes.

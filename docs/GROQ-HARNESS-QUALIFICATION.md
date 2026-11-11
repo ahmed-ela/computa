@@ -779,3 +779,16 @@ The parser accepts only an unambiguous object with `type: "message"` and string
 `text`. The existing tool-choice policy applies and release requires a saved
 transcript clear for that inference. Tool proposals still require literal
 code-block evidence.
+
+Signed build 509 stopped a fresh live GPT OSS 20B marker after one verified
+submission with `unsupported_website_response`. The observed answer again had
+zero `PRE` and `CODE` elements. The exact inference saved transcript cleanup,
+and Computa released no response or tool call. The recorded legacy structure
+could not identify whether the new paragraph witness or closed-message parser
+declined the reply.
+
+When the Groq transport rejects a current owned completed reply for format, it
+now records the exact failed stage, a finite native reason, and the first
+paragraph predicate where available. The local diagnostic contains only those
+categories and the native inference ID. It requires no additional page read
+and leaves response verification and cleanup unchanged.

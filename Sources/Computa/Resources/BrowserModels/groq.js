@@ -282,19 +282,29 @@ try {
       && c.normalize(node.innerText || node.textContent) === 'Clear chat');
   }
   function renderedMessageShape(answer, text) {
-    if (answer.childNodes.length !== 1) return null;
+    const declined = reason => ({ witness: null, reason });
+    if (answer.childNodes.length !== 1) return declined('answer_child_count');
     const paragraph = answer.childNodes[0];
-    if (paragraph.nodeType !== 1 || paragraph.namespaceURI !== 'http://www.w3.org/1999/xhtml'
-      || paragraph.tagName !== 'P' || paragraph.childNodes.length !== 1 || paragraph.isContentEditable
-      || !c.visible(paragraph)) return null;
+    const kind = paragraph.nodeType;
+    if (kind !== 1) return declined(kind === 3 ? 'answer_text_child' : 'answer_child_kind');
+    if (paragraph.namespaceURI !== 'http://www.w3.org/1999/xhtml') return declined('paragraph_namespace');
+    if (paragraph.tagName !== 'P') return declined('paragraph_tag');
+    if (paragraph.childNodes.length !== 1) return declined('paragraph_child_count');
+    if (paragraph.isContentEditable) return declined('paragraph_editable');
+    if (!c.visible(paragraph)) return declined('paragraph_hidden');
     const attrs = paragraph.attributes;
-    if (attrs.length !== 0 && (attrs.length !== 1 || attrs[0].namespaceURI !== null
-      || attrs[0].name !== 'class' || attrs[0].value !== 'text-left mb-4')) return null;
+    if (attrs.length !== 0) {
+      if (attrs.length !== 1) return declined('attribute_count');
+      if (attrs[0].namespaceURI !== null) return declined('attribute_namespace');
+      if (attrs[0].name !== 'class') return declined('attribute_name');
+      if (attrs[0].value !== 'text-left mb-4') return declined('attribute_value');
+    }
     const body = paragraph.childNodes[0];
     // Native checks message grammar. The paragraph profile never normalizes,
     // truncates or joins text to obtain a matching byte sequence.
-    if (body.nodeType !== 3 || body.textContent !== text) return null;
-    return { answer, paragraph, body };
+    if (body.nodeType !== 3) return declined('leaf_not_text');
+    if (body.textContent !== text) return declined('text_mismatch');
+    return { witness: { answer, paragraph, body }, reason: 'matched' };
   }
   function responseText(answer) {
     const structure = { kind: 'groq_literal_profile_v1', reason: 'absent_answer', preCount: 0, codeCount: 0, scanCount: 0 };
@@ -364,14 +374,16 @@ try {
     const progress = input.action === 'inspect'
       && Object.getOwnPropertyDescriptor(input, 'groqFailureProgress')?.value === true ? { reason: null } : null;
     const extracted = responseText(t.answer), text = extracted.text, answerComplete = responseComplete(t, form, text, progress);
-    const renderedMessage = answerComplete && !extracted.literal && (input.action === 'inspect' || state.renderedMessage)
+    const rendered = answerComplete && !extracted.literal && (input.action === 'inspect' || state.renderedMessage)
       ? renderedMessageShape(t.answer, text) : null;
+    const renderedMessage = rendered?.witness ?? null;
     const prior = state.renderedMessage;
     if (prior && (!renderedMessage || prior.answer !== renderedMessage.answer || prior.paragraph !== renderedMessage.paragraph
       || prior.body !== renderedMessage.body)) state.renderedMessage = null;
     // The terminal conjunction is answer-scoped footer Copy plus an empty,
     // enabled composer and enabled Send. Global speed/code-copy grant nothing.
-    return { t, form, renderedMessage, output: { url: document.URL, sessionLifecycle: 'explicit_clear', temporary: false,
+    return { t, form, renderedMessage, renderedMessageReason: rendered?.reason,
+      output: { url: document.URL, sessionLifecycle: 'explicit_clear', temporary: false,
       modelEvidence, composer: c.enabled(form.editor), userCount: t.users.length, responseCount: t.answers.length,
       conversationIdentity: null, busy: !answerComplete && (t.users.length > 0 || state.submitted && !state.clear),
       interrupted: false, answerComplete, text, groqLiteralResponse: extracted.literal,
@@ -481,6 +493,10 @@ try {
         state.renderedMessageRevision++;
       }
       if (state.renderedMessage) initial.output.groqRenderedMessageRevision = state.renderedMessageRevision;
+    }
+    if (input.action === 'inspect' && current.renderedMessageReason) {
+      initial.output.groqRenderedMessageShape = current.renderedMessage && !state.renderedMessage
+        ? 'revision_exhausted' : current.renderedMessageReason;
     }
   } else if (state.first || input.expectedFirstUserFingerprint != null) c.fail('conversation_changed', 'first_user_message');
   if (['discoverModels', 'selectModel'].includes(input.action)) {

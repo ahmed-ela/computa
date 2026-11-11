@@ -1941,12 +1941,70 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return .other
     }
 
-    private enum GroqRejectedLiteralStage: String { case initialCandidate = "initial_candidate", finalReread = "final_reread" }
+    private enum GroqResponseFormatFailureStage: String {
+        case initialCandidate = "initial_candidate"
+        case finalReread = "final_reread"
+        case nativeProof = "native_proof"
+    }
+
+    nonisolated static func sanitizedGroqRenderedMessageShape(_ raw: Any?) -> String? {
+        guard let shape = raw as? String else { return nil }
+        switch shape {
+        case "answer_child_count", "answer_text_child", "answer_child_kind", "paragraph_namespace", "paragraph_tag",
+             "paragraph_child_count", "paragraph_editable", "paragraph_hidden", "attribute_count", "attribute_namespace",
+             "attribute_name", "attribute_value", "leaf_not_text", "text_mismatch", "revision_exhausted", "matched":
+            return shape
+        default: return nil
+        }
+    }
+
+    /// Record the failed verification gate before cleanup removes the page.
+    /// Only closed categories and the native inference ID may leave this method.
+    private func logGroqResponseFormatFailure(_ session: Session, observed: [String: Any],
+        stage: GroqResponseFormatFailureStage, currentSource: GroqCompletionSource? = nil,
+        expectedSource: GroqCompletionSource? = nil) {
+        guard !Task.isCancelled, session.provider == .groq, session.state == "running",
+              sessions[session.token] === session, let admission = session.groqStartAdmission,
+              admission.modelID == session.modelChoice?.modelID, session.modelSelectionVerified,
+              let binding = session.explicitClearSubmission, session.documentGeneration == binding.generation,
+              browser.webView(for: session.tabID) === session.view,
+              browser.documentGeneration(for: session.tabID) == binding.generation,
+              session.view.url == binding.url, observed["url"] as? String == binding.url.absoluteString,
+              session.submitted, !session.pendingSubmission, session.acknowledgedSendSequence == 1,
+              session.firstUserFingerprint == binding.outboundFingerprint,
+              observed["firstUserFingerprint"] as? String == binding.outboundFingerprint,
+              Self.firstUserDiagnosticBool(observed["firstUserVerified"]) == true,
+              Self.firstUserDiagnosticBool(observed["firstUserMarkerVerified"]) == true,
+              Self.firstUserDiagnosticBool(observed["answerComplete"]) == true,
+              Self.firstUserDiagnosticBool(observed["busy"]) == false,
+              count(observed, "userCount") == 1, count(observed, "responseCount") == 1 else { return }
+
+        let reason: String
+        switch (stage, currentSource, expectedSource) {
+        case (.nativeProof, _, _): reason = "native_proof_unavailable"
+        case (.finalReread, .renderedMessage?, .renderedMessage?): reason = "rendered_revision_changed"
+        case (.finalReread, .some, .some): reason = "source_kind_changed"
+        default:
+            let revision = observed["groqRenderedMessageRevision"]
+            switch Self.firstUserDiagnosticBool(observed["groqLiteralResponse"]) {
+            case true?: reason = "conflicting_witness"
+            case false?:
+                if let value = ComputerToolArgumentContract.exactInt64(revision), (1...1_024).contains(value) {
+                    reason = "closed_message_rejected"
+                } else {
+                    reason = revision == nil ? "rendered_witness_missing" : "rendered_witness_invalid"
+                }
+            case nil: reason = "literal_flag_unverified"
+            }
+        }
+        let shape = Self.sanitizedGroqRenderedMessageShape(observed["groqRenderedMessageShape"]) ?? "unavailable"
+        Self.inspectionLog.notice("groqResponseFormatFailure version=1 inference=\(admission.inferenceID.uuidString.lowercased(), privacy: .public) stage=\(stage.rawValue, privacy: .public) reason=\(reason, privacy: .public) renderedShape=\(shape, privacy: .public)")
+    }
 
     /// Private exact-task evidence only. The rejected adapter candidate is not
     /// literal/API text and cannot enter response, tool or cleanup admission.
     private func captureGroqRejectedLiteralCandidate(_ session: Session, observed: [String: Any],
-        stage: GroqRejectedLiteralStage, deadline: ContinuousClock.Instant) {
+        stage: GroqResponseFormatFailureStage, deadline: ContinuousClock.Instant) {
         guard !session.groqRejectedLiteralCaptureAttempted,
               let directory = session.rejectedReplyDirectory, let context = session.adapterFailureContext,
               let generation = session.documentGeneration, let model = session.modelChoice,
@@ -1986,6 +2044,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let literalState = flag == false ? "false" : observed["groqLiteralResponse"] == nil ? "missing" : "invalid"
         var facts: [String: Any] = ["reason": "unsupported_website_response", "stage": stage.rawValue,
             "literalState": literalState, "literalResponse": flag.map { $0 as Any } ?? NSNull(), "utf8Bytes": text.utf8.count]
+        if let shape = Self.sanitizedGroqRenderedMessageShape(observed["groqRenderedMessageShape"]) {
+            facts["renderedShape"] = shape
+        }
         for key in ["userCount", "responseCount"] {
             if let value = ComputerToolArgumentContract.exactInt64(observed[key]), (0...10_000).contains(value) { facts[key] = value }
         }
@@ -4597,6 +4658,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 let groqSource: GroqCompletionSource?
                 if session.provider == .groq, isComplete {
                     guard let source = Self.groqCompletionSource(observed, text: response) else {
+                        logGroqResponseFormatFailure(session, observed: observed, stage: .initialCandidate)
                         captureGroqRejectedLiteralCandidate(session, observed: observed, stage: .initialCandidate, deadline: deadline)
                         throw Failure.responseFormatUnavailable
                     }
@@ -4764,8 +4826,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             if session.provider == .groq {
                                 // The final read must keep the same literal
                                 // source or the same attached rendered leaf.
-                                guard let groqSource,
-                                      Self.groqCompletionSource(completionObservation, text: response) == groqSource else {
+                                let finalSource = Self.groqCompletionSource(completionObservation, text: response)
+                                guard let groqSource, finalSource == groqSource else {
+                                    logGroqResponseFormatFailure(session, observed: completionObservation, stage: .finalReread,
+                                        currentSource: finalSource, expectedSource: groqSource)
                                     captureGroqRejectedLiteralCandidate(session, observed: completionObservation, stage: .finalReread, deadline: deadline)
                                     throw Failure.responseFormatUnavailable
                                 }
@@ -4792,7 +4856,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             session.freshSubmissionCompletion = freshSubmissionCompletion(session, observation: completionObservation)
                             if let groqSource {
                                 let proof = completedGroqReplyProof(session, observation: completionObservation, source: groqSource)
-                                if case .renderedMessage = groqSource, proof == nil { throw Failure.responseFormatUnavailable }
+                                if case .renderedMessage = groqSource, proof == nil {
+                                    logGroqResponseFormatFailure(session, observed: completionObservation, stage: .nativeProof)
+                                    throw Failure.responseFormatUnavailable
+                                }
                                 session.groqCompletedReplyProof = proof
                             }
                             session.state = "complete"
