@@ -1370,8 +1370,7 @@ enum WebModelResponseCodec {
                                    onRejectedCall: ((RejectedCallShape, Bool) -> Void)? = nil) throws -> Reply {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw Failure.emptyReply }
-        if trimmed.rangeOfCharacter(from: CharacterSet(charactersIn: "{}")) == nil,
-           !trimmed.contains("```"), !trimmed.hasPrefix("["), !trimmed.hasPrefix("\"") {
+        if isPlainEmbeddedReply(trimmed) {
             // This previously accepted prose is not a JSON format correction:
             // a website-native action may have happened outside host history.
             // Do not resend its request automatically.
@@ -1379,6 +1378,11 @@ enum WebModelResponseCodec {
             return try validated(.message(text), request: request)
         }
         return try parseReply(text, request: request, requireEnvelope: true, onRejectedCall: onRejectedCall)
+    }
+
+    private static func isPlainEmbeddedReply(_ trimmed: String) -> Bool {
+        !trimmed.isEmpty && trimmed.rangeOfCharacter(from: CharacterSet(charactersIn: "{}")) == nil
+            && !trimmed.contains("```") && !trimmed.hasPrefix("[") && !trimmed.hasPrefix("\"")
     }
 
     static func malformedEmbeddedReplyDiagnostic(_ text: String, request: Request) -> MalformedEnvelopeDiagnostic? {
@@ -1391,6 +1395,15 @@ enum WebModelResponseCodec {
 
     static func closedGroqRenderedMessage(_ text: String) -> String? {
         closedGroqMessage(text, messageKey: "text", requiresMessageType: true)
+    }
+
+    /// Only an exact message envelope or ordinary text can be released from a
+    /// verified rendered paragraph. Structured replies require literal proof.
+    static func groqRenderedMessageText(_ text: String) -> String? {
+        guard text.utf8.count <= 220_000 else { return nil }
+        if let message = closedGroqRenderedMessage(text) { return message }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return isPlainEmbeddedReply(trimmed) && !trimmed.hasPrefix("]") ? text : nil
     }
 
     /// The server releases this message only with native literal proof and saved cleanup.
@@ -1412,7 +1425,7 @@ enum WebModelResponseCodec {
 
     static func parseGroqRenderedMessage(_ text: String, request: Request) throws -> Reply {
         guard LocalModelCatalog.webProvider(for: request.model) == "groq",
-              let message = closedGroqRenderedMessage(text) else { throw Failure.unsupportedWebsiteResponse }
+              let message = groqRenderedMessageText(text) else { throw Failure.unsupportedWebsiteResponse }
         return try validated(.message(message), request: request)
     }
 

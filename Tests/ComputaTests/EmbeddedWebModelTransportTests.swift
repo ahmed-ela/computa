@@ -15285,23 +15285,31 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     func testGroqRenderedMessageRequiresSavedTranscriptClearBeforeRelease() async throws {
-        try await verifyGroqMessageReleaseRequiresSavedTranscriptClear(usesLiteralOutput: false)
+        try await verifyGroqMessageReleaseRequiresSavedTranscriptClear(format: .renderedEnvelope)
+    }
+
+    func testGroqRenderedPlainMessageRequiresOwnedProofAndSavedTranscriptClear() async throws {
+        try await verifyGroqMessageReleaseRequiresSavedTranscriptClear(format: .renderedPlain)
     }
 
     func testGroqLiteralOutputMessageRequiresOwnedProofAndSavedTranscriptClear() async throws {
-        try await verifyGroqMessageReleaseRequiresSavedTranscriptClear(usesLiteralOutput: true)
+        try await verifyGroqMessageReleaseRequiresSavedTranscriptClear(format: .literalOutput)
     }
 
-    private func verifyGroqMessageReleaseRequiresSavedTranscriptClear(usesLiteralOutput: Bool) async throws {
+    private enum GroqMessageFixtureFormat: Equatable { case renderedEnvelope, renderedPlain, literalOutput }
+
+    private func verifyGroqMessageReleaseRequiresSavedTranscriptClear(format: GroqMessageFixtureFormat) async throws {
         let expected = "GROQ FIXTURE  two spaces e\u{301}"
+        let usesLiteralOutput = format == .literalOutput
         let object = usesLiteralOutput ? ["output": expected] : ["type": "message", "text": expected]
-        let envelope = String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
-        let encoded = String(decoding: try JSONSerialization.data(withJSONObject: envelope, options: [.fragmentsAllowed]), as: UTF8.self)
+        let reply = format == .renderedPlain ? expected : String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+        let encoded = String(decoding: try JSONSerialization.data(withJSONObject: reply, options: [.fragmentsAllowed]), as: UTF8.self)
+        let node = format == .renderedPlain ? "node: '[object Object]', " : ""
         for scenario in ["released", "missingProof", "uncleared"] {
             let canClear = scenario != "uncleared"
             let page = try Self.groqFixturePage()
                 .replacingOccurrences(of: "{ class: 'text-left mb-4' }, f.reply",
-                    with: "{ dir: 'auto', class: 'mb-4 text-left', lang: 'en-US' }, f.reply")
+                    with: "{ \(node)dir: 'auto', class: 'mb-4 text-left', lang: 'en-US' }, f.reply")
                 .replacingOccurrences(of: "window.fixtureReady = true;",
                     with: "f.structuredReply = \(usesLiteralOutput); f.reply = \(encoded); f.ignoreClear = \(!canClear); window.fixtureReady = true;")
             let fixture = try Fixture(page: page); defer { fixture.shutdown() }
@@ -15341,7 +15349,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             let receipts = await server.latestCleanupReceipts()
             XCTAssertEqual(receipts.count, 1)
             XCTAssertEqual(receipts.first?.outcome, canClear ? .closed : .unconfirmed)
-            if canClear { XCTAssertEqual(receipts.first?.reason, .transcriptCleared) }
+            if canClear {
+                XCTAssertEqual(receipts.first?.reason, .transcriptCleared)
+                XCTAssertEqual(receipts.first?.receiptSaved, true)
+            }
             XCTAssertEqual(fixture.createdTabs.count, 1)
             if canClear { _ = await server.shutdown() }
             try await assertHumanTabIntact(fixture, retaining: canClear ? nil : fixture.createdTabs.first)

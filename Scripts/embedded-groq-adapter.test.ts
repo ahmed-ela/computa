@@ -1053,6 +1053,42 @@ describe('Groq fixed fresh-session adapter', () => {
     }
   });
 
+  test('only the exact unnamespaced node sentinel preserves a passive paragraph witness', async () => {
+    const f = groqFixture({ key: 'openai/gpt-oss-20b', label: 'GPT OSS 20B' });
+    await f.submit();
+    const armed = { groqRejectedAttributeNameDiagnostic: true };
+    const sentinel = '[object Object]';
+    const paragraph = htmlParagraph(f, f.f.reply, { class: 'text-left mb-4', node: sentinel });
+    const matched = await f.run('inspect', armed);
+    expect(matched).toMatchObject({ answerComplete: true, firstUserVerified: true, text: f.f.reply,
+      groqLiteralResponse: false, groqRenderedMessageShape: 'matched', groqRenderedMessageRevision: 1 });
+    expect(matched).not.toHaveProperty('groqRejectedAttributeName');
+    expect((await f.run()).groqRenderedMessageRevision).toBe(1);
+
+    for (const value of ['', '[object object]', ' ' + sentinel, sentinel + '\n', 'synthetic-non-sentinel']) {
+      paragraph.setAttribute('node', value);
+      const rejected = await f.run('inspect', armed);
+      expect(rejected).toMatchObject({ answerComplete: true, groqLiteralResponse: false,
+        groqRenderedMessageShape: 'attribute_name', groqRejectedAttributeName: 'node', text: f.f.reply });
+      expect(rejected).not.toHaveProperty('groqRenderedMessageRevision');
+      if (value) expect(JSON.stringify(rejected)).not.toContain(value);
+    }
+    paragraph.setAttribute('node', sentinel);
+    expect((await f.run()).groqRenderedMessageRevision).toBe(2);
+    paragraph.setAttribute('title', 'still disallowed');
+    const extra = await f.run('inspect', armed);
+    expect(extra.groqRenderedMessageShape).toBe('attribute_title');
+    expect(extra).not.toHaveProperty('groqRenderedMessageRevision');
+    expect(extra).not.toHaveProperty('groqRejectedAttributeName');
+
+    htmlParagraph(f, f.f.reply, { node: sentinel }, undefined, 'urn:fixture-attribute');
+    const namespaced = await f.run('inspect', armed);
+    expect(namespaced.groqRenderedMessageShape).toBe('attribute_namespace');
+    expect(namespaced).not.toHaveProperty('groqRenderedMessageRevision');
+    expect(namespaced).not.toHaveProperty('groqRejectedAttributeName');
+    expect(f.f.sendCount).toBe(1); expect(f.f.clearCount).toBe(0);
+  });
+
   test('the optional rejected attribute diagnostic reports only the first exact bounded unknown name', async () => {
     const f = groqFixture({ key: 'openai/gpt-oss-20b', label: 'GPT OSS 20B' });
     await f.submit();

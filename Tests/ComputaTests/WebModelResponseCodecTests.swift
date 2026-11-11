@@ -2191,7 +2191,6 @@ final class WebModelResponseCodecTests: XCTestCase {
             #"{"type":"message","text":{"value":"answer"}}"#,
             #"{"type":"message","text":" \t\n"}"#,
             #"{"type":"message"}"#,
-            marker,
             "Introduction\n" + raw,
             raw + "\n{}",
             "```json\n" + raw + "\n```",
@@ -2206,6 +2205,40 @@ final class WebModelResponseCodecTests: XCTestCase {
         }
         XCTAssertEqual(try Codec.parseEmbeddedReply(fencedTool, request: request),
             .toolCalls([.init(name: "computer_v2_snapshot", argumentsJSON: "{}", namespace: nil)]))
+    }
+
+    func testGroqRenderedPlainTextKeepsExactBytesAndCannotSupplyAToolCall() throws {
+        typealias Codec = WebModelResponseCodec
+        let model = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-20b", label: "GPT OSS 20B").modelID
+        let automatic = try controlledRequest(["model": model, "tool_choice": "auto"])
+        let none = try controlledRequest(["model": model, "tool_choice": "none"])
+        let required = try controlledRequest(["model": model, "tool_choice": "required"])
+        let otherProvider = try controlledRequest(["model": "browser/claude"])
+        let raw = "Read complete: two  spaces, e\u{0301}, and 🌍."
+        XCTAssertNil(Codec.closedGroqRenderedMessage(raw))
+        XCTAssertEqual(Codec.groqRenderedMessageText(raw).map { Data($0.utf8) }, Data(raw.utf8))
+        for request in [automatic, none] {
+            let reply = try Codec.parseGroqRenderedMessage(raw, request: request)
+            XCTAssertEqual(reply, .message(raw))
+            let output = Codec.nativeOutputItems(for: reply, request: request, responseID: "resp_plain")
+            XCTAssertEqual(output.compactMap { $0["type"] as? String }, ["message"])
+            let content = try XCTUnwrap(output.first?["content"] as? [[String: Any]])
+            XCTAssertEqual((content.first?["text"] as? String).map { Data($0.utf8) }, Data(raw.utf8))
+        }
+        XCTAssertThrowsError(try Codec.parseGroqRenderedMessage(raw, request: required)) {
+            XCTAssertEqual($0 as? Codec.Failure, .rejectedToolChoice)
+        }
+        XCTAssertThrowsError(try Codec.parseGroqRenderedMessage(raw, request: otherProvider)) {
+            XCTAssertEqual($0 as? Codec.Failure, .unsupportedWebsiteResponse)
+        }
+        let malformed = ["", " \t\n", "{\"type\":\"tool_calls\"", "[\"command\"]", "]", "\"text\"",
+                         "Text ```json", "Prefix {\"output\":\"answer\"}", String(repeating: "a", count: 220_001)]
+        for candidate in malformed {
+            XCTAssertNil(Codec.groqRenderedMessageText(candidate))
+            XCTAssertThrowsError(try Codec.parseGroqRenderedMessage(candidate, request: automatic)) {
+                XCTAssertEqual($0 as? Codec.Failure, .unsupportedWebsiteResponse)
+            }
+        }
     }
 
     func testGroqRenderedMessageUsesTheExistingMessageToolPolicy() throws {

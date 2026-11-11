@@ -328,6 +328,8 @@ try {
         case 'onpointerdown': case 'onpointerup': case 'ontouchstart': case 'ontouchend':
           return declined('attribute_event_handler');
         default:
+          // An inert, exact object-string sentinel on the otherwise passive paragraph.
+          if (name === 'node' && value === '[object Object]') break;
           if (name === 'style') return declined('attribute_style');
           if (name.startsWith('data-')) return declined('attribute_data');
           if (name.startsWith('aria-')) return declined('attribute_aria');

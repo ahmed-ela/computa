@@ -9941,7 +9941,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let revision = observation["groqRenderedMessageRevision"]
         if literal == true { return revision == nil ? .literal : nil }
         guard literal == false, let revision = ComputerToolArgumentContract.exactInt64(revision),
-              (1...1_024).contains(revision), WebModelResponseCodec.closedGroqRenderedMessage(text) != nil else { return nil }
+              (1...1_024).contains(revision), WebModelResponseCodec.groqRenderedMessageText(text) != nil else { return nil }
         return .renderedMessage(revision: Int(revision))
     }
 
