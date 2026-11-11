@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import SQLite3
 import XCTest
 @testable import Computa
 
@@ -51,6 +52,154 @@ final class WebsiteJournalRetentionStoreTests: XCTestCase {
     }
     private func evidence(_ fixture: Fixture, _ receipt: WebsiteSessionCleanupReceipt) -> URL {
         fixture.evidence.appendingPathComponent("transactions/" + receipt.taskID + "/" + receipt.turnID! + ".jsonl")
+    }
+
+    private func writeEvidence(_ rows: [[String: Any]], to url: URL) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        var bytes = Data()
+        for row in rows {
+            bytes.append(try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]))
+            bytes.append(10)
+        }
+        try bytes.write(to: url)
+    }
+
+    private func unacquired(_ fixture: Fixture, task: String? = nil, thread: String? = nil,
+                            unresolved: Bool = false, timestamp: String? = nil) throws -> WebsiteSessionCleanupReceipt {
+        var receipt = WebsiteSessionCleanupReceipt(taskID: task ?? id(), threadID: thread ?? id(), turnID: id(),
+            runtimeGeneration: UUID(), outcome: unresolved ? .unconfirmed : .noOwnedSession,
+            provider: .gemini, route: .embedded, modelID: "browser/gemini",
+            reason: unresolved ? .cleanupUnverified : .notCreated, trigger: .inference, receiptSaved: true, inferenceID: id())
+        if let timestamp {
+            var value = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(receipt)) as? [String: Any])
+            value["timestamp"] = timestamp
+            receipt = try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self, from: JSONSerialization.data(withJSONObject: value))
+        }
+        XCTAssertTrue(fixture.store.save(receipt))
+        let start: [String: Any] = ["schemaVersion": 2, "taskID": receipt.taskID, "threadID": receipt.threadID!,
+            "turnID": receipt.turnID!, "inferenceID": receipt.inferenceID!, "preparationID": id(),
+            "runtimeGeneration": receipt.runtimeGeneration, "provider": "gemini", "modelID": "browser/gemini",
+            "timestamp": receipt.timestamp, "phase": "start_requested", "transactionMode": "temporary_conversation_per_turn",
+            "transactionVersion": 2, "transactionPolicyEstablished": true, "sequence": 0, "baselineResponseCount": 0]
+        var failure = start
+        failure["phase"] = "failed"
+        failure["errorCode"] = "website_verification_required"
+        try writeEvidence([start, failure], to: evidence(fixture, receipt))
+        return receipt
+    }
+
+    func testPrecreationRejectionArchivesExactBytesAndKeepsUnconfirmedStartupLive() throws {
+        let fixture = try fixture(), rejected = try unacquired(fixture), uncertain = try unacquired(fixture, unresolved: true)
+        let rejectedEvidence = try Data(contentsOf: evidence(fixture, rejected))
+        let uncertainEvidence = try Data(contentsOf: evidence(fixture, uncertain))
+        let rejectedCleanup = fixture.cleanup.appendingPathComponent("transactions/" + rejected.taskID + "/" + rejected.turnID! + ".jsonl")
+        let cleanupBytes = try Data(contentsOf: rejectedCleanup)
+        XCTAssertEqual(rejected.schemaVersion, 4)
+        XCTAssertEqual(uncertain.schemaVersion, 3)
+        let incoming = id()
+        XCTAssertThrowsError(try fixture.retention.admit(taskID: incoming, evidenceDirectory: fixture.evidence,
+            protectedTaskIDs: [rejected.taskID]))
+        try fixture.retention.admit(taskID: incoming, evidenceDirectory: fixture.evidence, protectedTaskIDs: [])
+        XCTAssertEqual(try active(fixture.evidence), [uncertain.taskID, incoming])
+        XCTAssertEqual(try active(fixture.cleanup), [uncertain.taskID, incoming])
+        XCTAssertEqual(try Data(contentsOf: evidence(fixture, uncertain)), uncertainEvidence)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: rejectedCleanup.path))
+        let reopened = WebsiteJournalRetentionStore(cleanupDirectory: fixture.cleanup)
+        try reopened.withWriterLock {
+            XCTAssertEqual(try reopened.archivedBytes(store: "evidence", taskID: rejected.taskID, turnID: rejected.turnID!), rejectedEvidence)
+            XCTAssertEqual(try reopened.archivedBytes(store: "cleanup", taskID: rejected.taskID, turnID: rejected.turnID!), cleanupBytes)
+            XCTAssertEqual(try reopened.latestArchived(), [rejected])
+        }
+        XCTAssertEqual(try fixture.store.transactionRecords(for: rejected.taskID, turnID: rejected.turnID!), [rejected])
+        XCTAssertEqual(try fixture.store.transactionRecords(for: uncertain.taskID, turnID: uncertain.turnID!), [uncertain])
+        XCTAssertEqual(Set(fixture.store.latest().map(\.outcome)), [.unconfirmed, .noOwnedSession])
+        XCTAssertTrue(fixture.store.save(rejected))
+        for outcome: WebsiteSessionCleanupReceipt.Outcome in [.noOwnedSession, .closed] {
+            let rebinding = WebsiteSessionCleanupReceipt(taskID: id(), threadID: id(), turnID: id(),
+                runtimeGeneration: UUID(), outcome: outcome, provider: .gemini, route: .embedded,
+                modelID: "browser/gemini", reason: outcome == .closed ? .deleted : .notCreated,
+                trigger: .inference, receiptSaved: true, inferenceID: rejected.inferenceID,
+                sessionToken: outcome == .closed ? id() : nil)
+            XCTAssertFalse(fixture.store.save(rebinding), "An archived absence proof cannot be assigned to another attempt or lease")
+        }
+        XCTAssertEqual(try active(fixture.cleanup), [uncertain.taskID, incoming])
+    }
+
+    func testPrecreationArchiveKeepsClosedOnlyIndexCompatibleAndRecoversCommittedMove() throws {
+        let fixture = try fixture(), older = try closed(fixture), protected = try unacquired(fixture, unresolved: true)
+        try fixture.retention.admit(taskID: id(), evidenceDirectory: fixture.evidence, protectedTaskIDs: [protected.taskID])
+        try fixture.retention.admit(taskID: older.taskID, evidenceDirectory: fixture.evidence, protectedTaskIDs: [protected.taskID])
+        let rejected = try unacquired(fixture, task: older.taskID, thread: older.threadID, timestamp: "2099-01-01T00:00:00.000Z")
+        let raw = try Data(contentsOf: evidence(fixture, rejected))
+        var interrupted = fixture.retention
+        interrupted.fault = { if $0 == .committed { throw CocoaError(.fileWriteUnknown) } }
+        let incoming = id()
+        XCTAssertThrowsError(try interrupted.admit(taskID: incoming, evidenceDirectory: fixture.evidence, protectedTaskIDs: [protected.taskID]))
+        XCTAssertEqual(try Data(contentsOf: evidence(fixture, rejected)), raw)
+        try fixture.retention.admit(taskID: incoming, evidenceDirectory: fixture.evidence, protectedTaskIDs: [protected.taskID])
+        XCTAssertEqual(try active(fixture.evidence), [protected.taskID, incoming])
+        XCTAssertEqual(try fixture.retention.withWriterLock { try fixture.retention.archivedBytes(store: "evidence",
+            taskID: rejected.taskID, turnID: rejected.turnID!) }, raw)
+        XCTAssertEqual(try fixture.retention.withWriterLock { try fixture.retention.latestArchived() }, [rejected])
+        XCTAssertEqual(try fixture.store.transactionRecords(for: older.taskID, turnID: older.turnID!), [older])
+
+        var database: OpaquePointer?
+        let archive = fixture.cleanup.appendingPathComponent("closed-journals.sqlite")
+        XCTAssertEqual(sqlite3_open_v2(archive.path, &database, SQLITE_OPEN_READONLY, nil), SQLITE_OK)
+        defer { sqlite3_close(database) }
+        var statement: OpaquePointer?
+        XCTAssertEqual(sqlite3_prepare_v2(database, "SELECT bytes FROM latest", -1, &statement, nil), SQLITE_OK)
+        defer { sqlite3_finalize(statement) }
+        XCTAssertEqual(sqlite3_step(statement), SQLITE_ROW)
+        let stored = Data(bytes: try XCTUnwrap(sqlite3_column_blob(statement, 0)), count: Int(sqlite3_column_bytes(statement, 0)))
+        XCTAssertEqual(try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self, from: stored), older)
+        XCTAssertEqual(sqlite3_step(statement), SQLITE_DONE)
+    }
+
+    func testPrecreationArchiveRejectsChangedOrUnconfirmedHistory() throws {
+        for fault in ["scope", "policy", "session", "extra_phase", "duplicate_key", "unconfirmed_summary", "summary_mismatch", "mixed_receipts"] {
+            let fixture = try fixture(), rejected = try unacquired(fixture), protected = try closed(fixture)
+            let url = evidence(fixture, rejected)
+            let original = try Data(contentsOf: url)
+            var rows = try original.split(separator: 10).map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0)) as? [String: Any]) }
+            switch fault {
+            case "scope":
+                rows[1]["preparationID"] = id()
+                try writeEvidence(rows, to: url)
+            case "policy":
+                rows[1]["transactionMode"] = "temporary_conversation_per_inference"
+                rows[1]["transactionVersion"] = 1
+                try writeEvidence(rows, to: url)
+            case "session":
+                rows[1]["sessionToken"] = id()
+                try writeEvidence(rows, to: url)
+            case "extra_phase":
+                var acquired = rows[0]
+                acquired["phase"] = "started"
+                rows.insert(acquired, at: 1)
+                try writeEvidence(rows, to: url)
+            case "duplicate_key":
+                let duplicate = Data("{\"sequence\":0,".utf8) + original.dropFirst()
+                try duplicate.write(to: url)
+            case "unconfirmed_summary":
+                let unresolved = WebsiteSessionCleanupReceipt(taskID: rejected.taskID, runtimeGeneration: UUID(),
+                    outcome: .unconfirmed, reason: .cleanupUnverified, trigger: .manual, receiptSaved: true)
+                XCTAssertTrue(fixture.store.save(unresolved))
+            case "summary_mismatch":
+                var summary = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(rejected)) as? [String: Any])
+                summary["timestamp"] = "2099-01-01T00:00:00.000Z"
+                try writeEvidence([summary], to: fixture.cleanup.appendingPathComponent(rejected.taskID + ".jsonl"))
+            case "mixed_receipts":
+                _ = try closed(fixture, task: rejected.taskID)
+            default: XCTFail("Unknown fixture fault")
+            }
+            let before = try Data(contentsOf: url)
+            XCTAssertThrowsError(try fixture.retention.admit(taskID: id(), evidenceDirectory: fixture.evidence,
+                protectedTaskIDs: [protected.taskID]), fault)
+            XCTAssertEqual(try Data(contentsOf: url), before, fault)
+            XCTAssertTrue(try active(fixture.evidence).contains(rejected.taskID), fault)
+            XCTAssertEqual(try fixture.store.transactionRecords(for: rejected.taskID, turnID: rejected.turnID!), [rejected], fault)
+        }
     }
 
     func testClosedHistoryRollsOverWithoutIncreasingActiveCapacityAndSurvivesRestart() throws {

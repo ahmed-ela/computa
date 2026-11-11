@@ -2,7 +2,7 @@
 
 Website inference evidence and cleanup receipts are partitioned by native task
 and turn. Each store admits at most 256 active task directories. Before a new
-turn starts, the retention store can move verified closed history into its
+turn starts, the retention store can move verified terminal history into its
 SQLite archive, preserving the original journal files as byte-for-byte BLOBs.
 Protected, uncertain, incomplete and unfamiliar histories remain in the live set.
 
@@ -58,3 +58,23 @@ saturated journals in about 0.10 seconds. It retired one verified closed task,
 kept each store at 256 tasks and recovered the exact original evidence, cleanup
 bytes and receipt. The live journals and all 952 frozen source files stayed
 unchanged during that probe.
+
+On 2026-11-11, both installed stores again reached 256 tasks. A fresh Qwen Max
+fixture stopped before native turn dispatch. A disposable copy reproduced the
+capacity error with no protected tasks. The archive contained 721 committed
+operations and had space for additional history.
+
+A saved schema 4 receipt can establish that native startup rejected the
+request before it created a website session. Retention now recognizes the
+matching tokenless `start_requested` and `failed` records. Each inference must
+have exactly one saved rejection with matching scope and a timestamp between
+those records. The original journal bytes and inference identity move into
+the archive together. The receipt keeps its `no_owned_session` outcome, and
+the archive records no session token for that inference. Older builds can
+continue to read the existing closed-receipt index after a rollback.
+
+On a fresh copy of the same snapshot, the repaired store admitted a new task
+in 0.192 seconds and kept both stores at 256 tasks. The archive contained the
+two original journal files byte for byte and the saved rejection. Its existing
+rows and all unresolved live records were preserved, and SQLite integrity
+validation passed.

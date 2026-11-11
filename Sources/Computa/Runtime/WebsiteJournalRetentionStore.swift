@@ -4,7 +4,7 @@ import Darwin
 import Foundation
 import SQLite3
 
-/// Closed inference journals are history, not occupied live-session slots.
+/// Proven terminal inference journals need no live-session slots.
 /// The archive commits exact bytes and identity indexes before removing a live
 /// file. A pending operation is recovered under the same lock as both writers.
 struct WebsiteJournalRetentionStore: Sendable {
@@ -137,11 +137,26 @@ struct WebsiteJournalRetentionStore: Sendable {
 
     func latestArchived() throws -> [WebsiteSessionCleanupReceipt] {
         try database(create: false) { db in
-            try query(db, "SELECT bytes FROM latest ORDER BY timestamp DESC,task LIMIT 256", []).map {
+            let closed = try query(db, "SELECT bytes FROM latest ORDER BY timestamp DESC,task LIMIT 256", []).map {
                 let row = try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self, from: $0[0])
                 guard row.isValid, row.receiptSaved, row.outcome == .closed else { throw Failure.unavailable }
                 return row
             }
+            guard try !query(db, "SELECT name FROM sqlite_master WHERE type='table' AND name='precreation_latest'", []).isEmpty else {
+                return closed
+            }
+            let rejected = try query(db, "SELECT bytes FROM precreation_latest ORDER BY timestamp DESC,task LIMIT 256", []).map {
+                let row = try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self, from: $0[0])
+                guard row.isValid, row.receiptSaved, row.isPrecreationRejectionLinked else { throw Failure.unavailable }
+                return row
+            }
+            let sorted = (closed + rejected).sorted {
+                if $0.timestamp != $1.timestamp { return $0.timestamp > $1.timestamp }
+                if $0.taskID != $1.taskID { return $0.taskID < $1.taskID }
+                return $0.attemptID > $1.attemptID
+            }
+            var tasks = Set<String>()
+            return Array(sorted.filter { tasks.insert($0.taskID).inserted }.prefix(256))
         } ?? []
     }
 
@@ -206,7 +221,13 @@ struct WebsiteJournalRetentionStore: Sendable {
                     if store == "evidence" { evidence.append(row) }
                     else {
                         let receipt = try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self, from: Data(line))
-                        guard receipt.isValid, receipt.receiptSaved, receipt.isTransactionLinked else { throw Failure.unavailable }
+                        guard receipt.isValid, receipt.receiptSaved,
+                              receipt.isTransactionLinked || receipt.isPrecreationRejectionLinked else { throw Failure.unavailable }
+                        if receipt.isPrecreationRejectionLinked {
+                            guard Set(row.keys) == ["schemaVersion", "attemptID", "taskID", "threadID", "turnID", "inferenceID",
+                                "runtimeGeneration", "timestamp", "outcome", "provider", "route", "modelID", "reason", "trigger",
+                                "receiptSaved"] else { throw Failure.unavailable }
+                        }
                         receipts.append(receipt)
                     }
                 }
@@ -215,6 +236,12 @@ struct WebsiteJournalRetentionStore: Sendable {
         let groups = Dictionary(grouping: evidence) { $0["inferenceID"] as? String ?? "" }
         guard !groups.isEmpty, Set(receipts.compactMap(\.inferenceID)).isSubset(of: Set(groups.keys)),
               Set(receipts.map(\.attemptID)).count == receipts.count else { throw Failure.unavailable }
+        if receipts.contains(where: \.isPrecreationRejectionLinked) {
+            let identities = try Self.precreationIdentities(groups, receipts: receipts)
+            try Self.requireUnambiguous(files)
+            try validateSummary(task, receipts: receipts, requireUnambiguous: true)
+            return Bundle(task: task, files: files, receipts: receipts, identities: identities)
+        }
         var tokenOwners: [String: [String]] = [:], identities: [Identity] = []
         let identity = ["taskID", "threadID", "turnID", "runtimeGeneration", "provider", "modelID", "inferenceID"]
         for (inference, rows) in groups {
@@ -226,16 +253,7 @@ struct WebsiteJournalRetentionStore: Sendable {
             tokenOwners[token, default: []].append(inference)
         }
         let hasRetainedLease = tokenOwners.values.contains(where: { $0.count > 1 })
-        if hasRetainedLease {
-            // The successful retained shape must also be unambiguous in the
-            // original evidence and receipt lexemes. Discard comparison bytes;
-            // the exact journal bytes below remain the only archived payload.
-            for file in files {
-                for line in file.bytes.dropLast().split(separator: 10) {
-                    _ = try WebsiteTurnContinuation.canonicalValueDataForDigest(Data(line))
-                }
-            }
-        }
+        if hasRetainedLease { try Self.requireUnambiguous(files) }
         for (token, inferences) in tokenOwners {
             if inferences.count > 1 {
                 let members = Set(inferences)
@@ -265,16 +283,34 @@ struct WebsiteJournalRetentionStore: Sendable {
             identities.append(Identity(kind: "inference", id: receipt.inferenceID!, binding: binding))
             identities.append(Identity(kind: "token", id: receipt.sessionToken!, binding: binding))
         }
-        // Summary-only unresolved evidence is not erased or contradicted by
-        // archiving the transaction directories.
+        try validateSummary(task, receipts: receipts, requireUnambiguous: hasRetainedLease)
+        return Bundle(task: task, files: files, receipts: receipts, identities: identities)
+    }
+
+    // Summary-only unresolved evidence remains live unless the same acquired
+    // inference has a saved closure. A precreation receipt supplies no closure.
+    private func validateSummary(_ task: String, receipts: [WebsiteSessionCleanupReceipt], requireUnambiguous: Bool) throws {
         let summary = cleanupDirectory.appendingPathComponent(task + ".jsonl")
         if Self.exists(summary) {
             let data = try Self.read(summary, maximum: 65_536)
             guard data.last == 10 else { throw Failure.unavailable }
+            let precreation = receipts.filter(\.isPrecreationRejectionLinked)
+            let attempts = Dictionary(uniqueKeysWithValues: precreation.map { ($0.attemptID, $0) })
+            let inferences = Dictionary(uniqueKeysWithValues: precreation.compactMap { receipt in
+                receipt.inferenceID.map { ($0, receipt) }
+            })
+            var seen = Set<String>()
             for line in data.split(separator: 10) {
-                if hasRetainedLease { _ = try WebsiteTurnContinuation.canonicalValueDataForDigest(Data(line)) }
+                if requireUnambiguous { _ = try WebsiteTurnContinuation.canonicalValueDataForDigest(Data(line)) }
                 let receipt = try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self, from: Data(line))
                 guard receipt.isValid, receipt.taskID == task else { throw Failure.unavailable }
+                if !precreation.isEmpty {
+                    guard seen.insert(receipt.attemptID).inserted,
+                          attempts[receipt.attemptID].map({ $0 == receipt }) ?? true,
+                          inferences[receipt.inferenceID ?? ""].map({ $0 == receipt }) ?? true else {
+                        throw Failure.unavailable
+                    }
+                }
                 if receipt.outcome == .unconfirmed {
                     guard receipt.isTransactionLinked, receipts.contains(where: {
                         $0.outcome == .closed && $0.timestamp >= receipt.timestamp && (try? Self.binding($0)) == (try? Self.binding(receipt))
@@ -282,7 +318,73 @@ struct WebsiteJournalRetentionStore: Sendable {
                 }
             }
         }
-        return Bundle(task: task, files: files, receipts: receipts, identities: identities)
+    }
+
+    private static func requireUnambiguous(_ files: [File]) throws {
+        for file in files {
+            for line in file.bytes.dropLast().split(separator: 10) {
+                _ = try WebsiteTurnContinuation.canonicalValueDataForDigest(Data(line))
+            }
+        }
+    }
+
+    /// Only the native pre-Start rejection shape carries exact absence proof.
+    /// A tokenless attempted Start by itself may still have acquired a session.
+    private static func precreationIdentities(_ groups: [String: [[String: Any]]],
+                                              receipts: [WebsiteSessionCleanupReceipt]) throws -> [Identity] {
+        guard receipts.count == groups.count, Set(receipts.compactMap(\.inferenceID)).count == groups.count else {
+            throw Failure.unavailable
+        }
+        let failureCodes: Set<String> = ["website_verification_required", "sign_in_required",
+            "website_usage_limit", "local_website_session_capacity"]
+        return try receipts.map { receipt in
+            guard receipt.isPrecreationRejectionLinked, let inference = receipt.inferenceID, let thread = receipt.threadID,
+                  let turn = receipt.turnID, let provider = receipt.provider, let model = receipt.modelID,
+                  let rows = groups[inference], rows.count == 2, let preparation = rows[0]["preparationID"] as? String,
+                  uuid(preparation), rows[0]["phase"] as? String == "start_requested",
+                  rows[1]["phase"] as? String == "failed",
+                  let failure = rows[1]["errorCode"] as? String, failureCodes.contains(failure),
+                  let start = rows[0]["timestamp"] as? String, let end = rows[1]["timestamp"] as? String,
+                  [start, receipt.timestamp, end].allSatisfy(timestamp), start <= receipt.timestamp, receipt.timestamp <= end else {
+                throw Failure.unavailable
+            }
+            let scope = ["taskID": receipt.taskID, "threadID": thread, "turnID": turn, "provider": provider.rawValue,
+                "modelID": model, "runtimeGeneration": receipt.runtimeGeneration, "inferenceID": inference, "preparationID": preparation]
+            let keys = Set(scope.keys).union(["schemaVersion", "phase", "timestamp", "sequence", "baselineResponseCount",
+                "transactionMode", "transactionVersion", "transactionPolicyEstablished"])
+            guard Set(rows[0].keys) == keys, Set(rows[1].keys) == keys.union(["errorCode"]),
+                  precreationPolicy(rows, provider: provider),
+                  rows.allSatisfy({ row in
+                      scope.allSatisfy { row[$0.key] as? String == $0.value }
+                          && integer(row["schemaVersion"]) == 2 && integer(row["sequence"]) == 0
+                          && integer(row["baselineResponseCount"]) == 0
+                  }) else { throw Failure.unavailable }
+            // The inference index rejects a later lease or altered receipt
+            // for this identity. The attempt index still permits exact retries.
+            let binding = try strings(["precreation_v1", receipt.taskID, thread, turn, receipt.runtimeGeneration,
+                preparation, provider.rawValue, model, inference])
+            return Identity(kind: "inference", id: inference, binding: binding)
+        }
+    }
+
+    private static func precreationPolicy(_ rows: [[String: Any]], provider: WebsiteSessionCleanupReceipt.Provider) -> Bool {
+        let perTurn = "temporary_conversation_per_turn", perInference = "temporary_conversation_per_inference"
+        func matches(_ row: [String: Any], _ mode: String, _ version: Int, _ established: Bool = true) -> Bool {
+            row["transactionMode"] as? String == mode && integer(row["transactionVersion"]) == version
+                && boolean(row["transactionPolicyEstablished"]) == established
+        }
+        func both(_ mode: String, _ version: Int) -> Bool { rows.allSatisfy { matches($0, mode, version) } }
+        switch provider {
+        case .chatgpt:
+            // Start records its requested policy. A rejected Start has no
+            // lease capability, so the failure records capability_pending.
+            return (matches(rows[0], perInference, 1) || matches(rows[0], perTurn, 2))
+                && matches(rows[1], "capability_pending", 0, false)
+        case .gemini: return both(perTurn, 2)
+        case .claude: return both(perInference, 1) || both(perTurn, 2)
+        case .groq: return both("explicit_clear_per_inference", 1)
+        case .kimi, .qwen, .deepseek: return both("saved_conversation_delete_per_inference", 1)
+        }
     }
 
     /// Only the exact successful v2 retained-lease serialization is admitted
@@ -424,9 +526,7 @@ struct WebsiteJournalRetentionStore: Sendable {
                         guard old == identity.binding else { throw Failure.unavailable }
                     } else { try execute(db, "INSERT INTO identities(kind,id,binding) VALUES(?,?,?)", [identity.kind, identity.id, identity.binding]) }
                 }
-                let latest = bundle.receipts.filter { $0.outcome == .closed }.max { ($0.timestamp, $0.attemptID) < ($1.timestamp, $1.attemptID) }!
-                try execute(db, "INSERT INTO latest(task,timestamp,bytes) VALUES(?,?,?) ON CONFLICT(task) DO UPDATE SET timestamp=excluded.timestamp,bytes=excluded.bytes WHERE excluded.timestamp>=latest.timestamp",
-                            [bundle.task, latest.timestamp, try JSONEncoder().encode(latest)])
+                try archiveLatest(bundle, db: db)
                 try execute(db, "COMMIT")
             } catch { try? execute(db, "ROLLBACK"); throw error }
         }
@@ -434,6 +534,19 @@ struct WebsiteJournalRetentionStore: Sendable {
         try fault?(.committed)
         #endif
         try recover(evidenceDirectory: evidenceDirectory, protectedTaskIDs: [])
+    }
+
+    private func archiveLatest(_ bundle: Bundle, db: OpaquePointer) throws {
+        guard let latest = bundle.receipts.filter({ $0.outcome == .closed || $0.isPrecreationRejectionLinked })
+            .max(by: { ($0.timestamp, $0.attemptID) < ($1.timestamp, $1.attemptID) }) else { throw Failure.unavailable }
+        let table: String
+        if latest.isPrecreationRejectionLinked {
+            // Older app versions read only closed receipts from `latest`.
+            try execute(db, "CREATE TABLE IF NOT EXISTS precreation_latest(task TEXT PRIMARY KEY,timestamp TEXT NOT NULL,bytes BLOB NOT NULL)")
+            table = "precreation_latest"
+        } else { table = "latest" }
+        try execute(db, "INSERT INTO \(table)(task,timestamp,bytes) VALUES(?,?,?) ON CONFLICT(task) DO UPDATE SET timestamp=excluded.timestamp,bytes=excluded.bytes WHERE excluded.timestamp>=\(table).timestamp",
+                    [bundle.task, latest.timestamp, try JSONEncoder().encode(latest)])
     }
 
     private func recover(evidenceDirectory: URL, protectedTaskIDs: Set<String>) throws {
