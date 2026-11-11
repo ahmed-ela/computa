@@ -312,6 +312,66 @@ enum ComputaModelToolCatalog {
         }
     }
 
+    /// Native capability discovery, not schemas or a promise of future permission.
+    /// Current eligible names are partitioned once, avoiding duplicate payload.
+    struct BrowserCapabilityDescriptor: Encodable, Equatable, Sendable {
+        enum State: String, Encodable, Equatable, Sendable { case unbound, bound }
+        let state: State
+        let entry: [String]
+        let registeredDeferred: [String]
+        let loaded: [String]
+        let loadable: [String]
+        var eligible: [String] { Array(Set(loaded + loadable)).sorted() }
+        enum CodingKeys: String, CodingKey {
+            case state, entry, registeredDeferred = "registered_deferred", loaded, loadable
+        }
+    }
+
+    static func browserCapabilityDescriptor(_ definitions: [[String: Any]],
+        availability: EmbeddedBrowserToolAvailability?, allowedNames: Set<String>,
+        eligibleNames: Set<String>, loadedNames: Set<String>, loaderAvailable: Bool) -> BrowserCapabilityDescriptor? {
+        guard let availability else { return nil }
+        var native = Set<String>(), pages = Set<String>(), entries = Set<String>(), seen = Set<String>()
+        var ambiguous = false
+        func inspect(_ definition: [String: Any], namespace: String?) {
+            guard let name = definition["name"] as? String else { return }
+            let qualified = namespace.map { $0 + "." + name } ?? name
+            guard seen.insert(qualified).inserted else { ambiguous = true; return }
+            guard nativeBrowserToolName(definition, namespace: namespace) != nil else { return }
+            native.insert(qualified)
+            if requiresBrowserBinding(definition, namespace: namespace) { pages.insert(qualified) }
+            else if ["browser_open", "browser_bind"].contains(name) { entries.insert(qualified) }
+        }
+        for definition in definitions {
+            if definition["type"] as? String == "namespace", let namespace = definition["name"] as? String,
+               let tools = definition["tools"] as? [[String: Any]] {
+                tools.forEach { inspect($0, namespace: namespace) }
+            } else { inspect(definition, namespace: nil) }
+        }
+        guard !ambiguous else { return nil }
+        // Original registered policy narrows discovery only. It does not replace
+        // the separately validated current policy or grant a withheld schema.
+        let permitted = native.intersection(allowedNames)
+        let current = permitted.intersection(eligibleNames)
+            .subtracting(availability == .unbound ? pages : [])
+        let loaded = current.intersection(loadedNames)
+        let loadable = loaderAvailable ? current.subtracting(loaded) : []
+        guard current == loaded.union(loadable) else { return nil }
+        let entry: Set<String>, deferred: Set<String>, state: BrowserCapabilityDescriptor.State
+        switch availability {
+        case .unbound:
+            entry = entries.intersection(current)
+            deferred = pages.intersection(permitted)
+            guard !entry.isEmpty, !deferred.isEmpty else { return nil }
+            state = .unbound
+        case .bound:
+            guard !pages.intersection(current).isEmpty else { return nil }
+            entry = []; deferred = []; state = .bound
+        }
+        return .init(state: state, entry: entry.sorted(), registeredDeferred: deferred.sorted(),
+            loaded: loaded.sorted(), loadable: loadable.sorted())
+    }
+
     /// Explain host-deferred capabilities separately from the callable catalog.
     /// Use the original registered shapes, before projection can refresh them;
     /// a name, historical call or foreign namespace cannot establish capability.

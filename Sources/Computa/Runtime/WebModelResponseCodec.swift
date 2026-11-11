@@ -481,6 +481,7 @@ enum WebModelResponseCodec {
         }
         var schemas: [[String: Any]]
         var registeredDefinitions: [[String: Any]] = []
+        var registeredBrowserAllowedNames: Set<String>?
         let requiresBrowserToolAvailability: Bool
         let deferredBrowserInstructions: String?
         var toolDefinitionsChanged = false
@@ -495,6 +496,7 @@ enum WebModelResponseCodec {
                     for child in children { try insertTool(child, namespace: namespace, into: &historical) }
                 } else { try insertTool(value, namespace: nil, into: &historical) }
             }
+            if isGroq { registeredBrowserAllowedNames = (try? toolPolicy(object["tool_choice"], tools: historical))?.allowedNames }
             requiresBrowserToolAvailability = ComputaModelToolCatalog.requiresBrowserToolAvailability(values)
             deferredBrowserInstructions = ComputaModelToolCatalog.deferredBrowserToolInstructions(values,
                 availability: browserToolAvailability)
@@ -542,6 +544,8 @@ enum WebModelResponseCodec {
                 toolChoiceJSON: try JSONSerialization.data(withJSONObject: object["tool_choice"] ?? "auto",
                     options: [.fragmentsAllowed, .sortedKeys, .withoutEscapingSlashes]))
         } else { groqToolCatalogSeed = nil }
+        // Preserve native current eligibility before optional schema selection.
+        let browserEligibleNames = Set(offered.keys).intersection(policy.allowedNames)
         let displayProjection: GroqToolCatalog.Projection?
         if let loaded = groqToolCatalogProjection {
             guard let seed = groqToolCatalogSeed else { throw Failure.invalidTools }
@@ -584,6 +588,14 @@ enum WebModelResponseCodec {
         let customNames = Set(offered.filter { $0.value.isCustom }.keys)
         let includedInstructionText = trustedInstructionText(in: object)
         let compactGroq = isGroq && displayProjection != nil
+        let browserCapabilities = compactGroq ? registeredBrowserAllowedNames.flatMap {
+            ComputaModelToolCatalog.browserCapabilityDescriptor(registeredDefinitions,
+                availability: browserToolAvailability, allowedNames: $0, eligibleNames: browserEligibleNames,
+                loadedNames: Set(offered.keys).intersection(policy.allowedNames),
+                loaderAvailable: [GroqToolCatalog.name, "functions." + GroqToolCatalog.name].contains {
+                    offered[$0] != nil && policy.allowedNames.contains($0)
+                })
+        } : nil
         var groqDomains = Set<ComputaAgentInstructions.GroqInstructionDomain>()
         for tool in offered.values where tool.namespace == nil || tool.namespace == "functions" {
             if tool.nativeBrowserBit != 0 {
@@ -679,7 +691,7 @@ enum WebModelResponseCodec {
         let browserHandoff = compactGroq
             ? currentGroqBrowserHandoff(tools: offered, policy: policy, entryTools: groqEntryTools,
                                        availability: browserToolAvailability,
-                                       hasDeferredBrowserTools: deferredBrowserInstructions != nil)
+                                       capabilities: browserCapabilities)
             : currentBrowserHandoff(tools: offered, policy: policy, availability: browserToolAvailability)
         let responseContract = compactGroq ? ComputaAgentInstructions.groqResponseContract(currentBrowserHandoff: browserHandoff,
             hasFunctions: offered.values.contains { !$0.isCustom }, hasCustomTools: !customNames.isEmpty,
@@ -834,9 +846,36 @@ enum WebModelResponseCodec {
     private static func currentGroqBrowserHandoff(tools: [String: OfferedTool], policy: ToolPolicy,
                                                   entryTools: [String: OfferedTool],
                                                   availability: EmbeddedBrowserToolAvailability?,
-                                                  hasDeferredBrowserTools: Bool) -> String {
+                                                  capabilities: ComputaModelToolCatalog.BrowserCapabilityDescriptor?) -> String {
+        if let capabilities {
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            if let data = try? encoder.encode(capabilities) {
+                let descriptor = "COMPUTA_BROWSER_CAPABILITIES:\n" + String(decoding: data, as: UTF8.self)
+                let boundary = " Names are discovery, not callable schemas or permission. Use only current offered/allowed schemas."
+                let separation = entryTools.keys.contains { tools[$0] != nil && policy.allowedNames.contains($0) }
+                    ? " Webpages use browser_*; computer_v2_* is native-app UI." : ""
+                if capabilities.state == .unbound {
+                    let open = capabilities.entry.first { $0 == "browser_open" || $0 == "functions.browser_open" }.map {
+                        " Supplied URL: " + (capabilities.loaded.contains($0) ? "call " : "first load ") + $0 + "."
+                    } ?? ""
+                    let bind = capabilities.entry.first { $0 == "browser_bind" || $0 == "functions.browser_bind" }.map {
+                        " Observed tab_id only: " + (capabilities.loaded.contains($0) ? "call " : "first load ") + $0 + "."
+                    } ?? ""
+                    return descriptor + "\nRegistered_deferred requires successful binding and a refreshed catalog." + open + bind
+                        + boundary + " Shell HTTP cannot verify browser state; empty tabs do not prove denial." + separation
+                }
+                let read = capabilities.eligible.first { $0 == "browser_read" || $0 == "functions.browser_read" }.map {
+                    " Fresh " + $0 + " needs no cursor."
+                } ?? ""
+                let continuation = capabilities.eligible.first { $0 == "browser_continue" || $0 == "functions.browser_continue" }.map {
+                    " " + $0 + " requires an observed next_cursor."
+                } ?? ""
+                return descriptor + "\nNative page bound." + read + continuation + boundary + " Use current refs." + separation
+            }
+        }
+        // Preserve the existing narrow route when no descriptor is proved;
+        // never advertise registered-deferred capability from a name alone.
         if availability == .unbound, !entryTools.isEmpty {
-            // Present the supplied URL route first, then a previously observed human tab.
             let routes = entryTools.sorted { ($0.value.name, $0.key) > ($1.value.name, $1.key) }.map { name, tool in
                 let use = tools[name] != nil && policy.allowedNames.contains(name) ? "call" : "first load"
                 return tool.name == "browser_open"
@@ -845,12 +884,7 @@ enum WebModelResponseCodec {
             }
             var result = "Current browser state: unbound. " + routes.joined(separator: " ")
                 + " Loading schemas executes no task tools. Shell HTTP cannot verify browser state. Empty tabs do not prove denial."
-            if hasDeferredBrowserTools {
-                result += " Registered page tools await successful open/bind, which refreshes the next catalog without user enablement; tool_choice and permissions still govern. Then load only offered, allowed schemas with current catalog_revision. Do not call deferred tools now; respect actual denials."
-            } else {
-                result += " After entry check catalog_revision for reads/actions."
-            }
-            // The loader handoff already carries this cue while entry is unloaded.
+                + " After entry check catalog_revision for reads/actions."
             if entryTools.keys.contains(where: { tools[$0] != nil && policy.allowedNames.contains($0) }) {
                 result += " Webpages use browser_*; computer_v2_* is native-app UI."
             }
