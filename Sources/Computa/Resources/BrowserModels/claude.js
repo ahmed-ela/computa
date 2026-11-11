@@ -3715,11 +3715,15 @@ async function providerPageAction() {
   }
   const send = modelFind(['button[data-testid="chat-input-send"][aria-label="Send message"]']);
   const sendUnobstructed = !modelVisibleDialog(true) && (!modelVisibleDialog() || websiteModelHitTestTarget(send));
+  if (action === 'sendReady' && input.claudeRetainedTurn === true && !haikuDraft('sendReady', composer, prompt))
+    return haikuFailure;
+  const sendFailure = !send ? 'no_visible_exact_send' : !modelEnabled(send) ? 'disabled_or_hidden'
+    : !sendUnobstructed ? 'not_unobstructed' : null;
   if (action === 'sendReady') {
-    if (input.claudeRetainedTurn === true && !haikuDraft('sendReady', composer, prompt)) return haikuFailure;
-    return { ...state, sendReady: modelEnabled(send) && sendUnobstructed };
+    return sendFailure ? { ...state, sendReady: false, claudeSendReadiness: sendFailure }
+      : { ...state, sendReady: true };
   }
-  if (!modelEnabled(send) || !sendUnobstructed) return { error: 'send_unavailable' };
+  if (sendFailure) return { error: 'send_unavailable', detail: sendFailure };
   if (globalThis.__computaModelLastSubmissionCount !== undefined
     && ownedUserCount <= globalThis.__computaModelLastSubmissionCount)
     return { error: 'conversation_changed', detail: 'user_count' };

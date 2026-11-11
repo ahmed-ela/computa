@@ -1309,6 +1309,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var routeDiscardDiagnosticsObserverForTesting: (@MainActor ([String]) -> Void)?
     private var boundCertificateDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
     private var claudeCompletionDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
+    private var claudeSendFailureObserverForTesting: (@MainActor (String) -> Void)?
     private var submissionDiagnosticsObserverForTesting: (@MainActor (String, String) -> Void)?
     private var firstUserStructureEmissionObserverForTesting: (@MainActor (Bool, String) -> Void)?
     private var kimiDiscoveryProgressObserverForTesting: (@MainActor (String) -> Void)?
@@ -1446,6 +1447,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setClaudeCompletionDiagnosticsObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
         claudeCompletionDiagnosticsObserverForTesting = observer
+    }
+
+    func setClaudeSendFailureObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
+        claudeSendFailureObserverForTesting = observer
     }
 
     /// Exercise the ordinary full-model observation without the running-answer
@@ -3789,6 +3794,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // Diagnostic only, local to this one bounded readiness wait. A previous
         // false observation cannot authorize Send or replace a later error.
         var lastGroqDiagnostic: String?
+        var lastClaudeObservation: (generation: UUID, reason: ClaudeSendFailureReason)?
+        func timeoutFailure() -> Failure {
+            let reason = lastClaudeObservation.flatMap { $0.generation == session.documentGeneration ? $0.reason : nil }
+            logClaudeSendFailure(session, stage: .readinessTimeout, reason: reason)
+            return sendReadinessFailure(session, diagnostic: lastGroqDiagnostic)
+        }
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
             let remaining = deadline - .now
@@ -3799,21 +3810,57 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 observed = try await page(session, action: "sendReady", prompt: prompt, maximumWait: remaining)
             } catch {
                 if ContinuousClock.now >= deadline, (error as? Failure) == .pageUnavailable {
-                    throw sendReadinessFailure(session, diagnostic: lastGroqDiagnostic)
+                    throw timeoutFailure()
                 }
                 throw error
             }
-            if session.provider == .groq, let ready = observed["sendReady"] as? NSNumber,
-               CFGetTypeID(ready) == CFBooleanGetTypeID(), !ready.boolValue {
-                lastGroqDiagnostic = Self.groqSendFailureDiagnostic(action: "sendReady", stage: "last_observation",
-                    detail: observed["sendReadinessFailure"])
+            if let ready = observed["sendReady"] as? NSNumber, CFGetTypeID(ready) == CFBooleanGetTypeID(), !ready.boolValue {
+                if session.provider == .groq {
+                    lastGroqDiagnostic = Self.groqSendFailureDiagnostic(action: "sendReady", stage: "last_observation",
+                        detail: observed["sendReadinessFailure"])
+                } else if session.provider == .claude, let generation = session.documentGeneration,
+                          observesLifecycle(observed, session: session) {
+                    lastClaudeObservation = (generation, ClaudeSendFailureReason.adapterReason(observed["claudeSendReadiness"]))
+                }
             }
             guard ContinuousClock.now < deadline else { break }
             try requireLifecycle(observed, session: session)
             if observed["sendReady"] as? Bool == true { return }
             _ = try await browser.waitForModelChange(tabID: session.tabID, after: revision, until: deadline)
         }
-        throw sendReadinessFailure(session, diagnostic: lastGroqDiagnostic)
+        throw timeoutFailure()
+    }
+
+    private enum ClaudeSendFailureStage: String {
+        case readinessTimeout = "readiness_timeout"
+        case submitGuard = "submit_guard"
+    }
+
+    private enum ClaudeSendFailureReason: String {
+        case noVisibleExactSend = "no_visible_exact_send"
+        case disabledOrHidden = "disabled_or_hidden"
+        case notUnobstructed = "not_unobstructed"
+        case unknown
+
+        static func adapterReason(_ detail: Any?) -> Self {
+            (detail as? String).flatMap(Self.init(rawValue:)) ?? .unknown
+        }
+    }
+
+    /// Record only finite negative evidence from the current owned document.
+    private func logClaudeSendFailure(_ session: Session, stage: ClaudeSendFailureStage, reason: ClaudeSendFailureReason?) {
+        guard session.provider == .claude, sessions[session.token] === session,
+              !Task.isCancelled, session.terminalFailure == nil, let generation = session.documentGeneration,
+              browser.webView(for: session.tabID) === session.view,
+              browser.documentGeneration(for: session.tabID) == generation else { return }
+        let claimed = session.submitted && session.sequence > session.acknowledgedSendSequence
+        let record = "claudeSendFailure version=1 provider=claude session=\(session.token.lowercased())"
+            + " generation=\(generation.uuidString.lowercased()) nativeSequence=\(session.sequence)"
+            + " stage=\(stage.rawValue) reason=\(reason?.rawValue ?? "not_observed") claimed=\(claimed)"
+        Self.inspectionLog.notice("\(record, privacy: .public)")
+        #if DEBUG
+        claudeSendFailureObserverForTesting?(record)
+        #endif
     }
 
     /// A successful input dispatch can precede Lexical's DOM commit. This
@@ -8711,6 +8758,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 if provider == .groq {
                     throw sendReadinessFailure(session, diagnostic: Self.groqSendFailureDiagnostic(action: action,
                         stage: "current", detail: observed["detail"]))
+                }
+                if provider == .claude, action == "submit" {
+                    logClaudeSendFailure(session, stage: .submitGuard,
+                        reason: ClaudeSendFailureReason.adapterReason(observed["detail"]))
                 }
                 throw Failure.editorFailure(error)
             case "composer_not_empty", "prompt_not_inserted", "caret_unavailable", "insert_command_rejected": throw Failure.editorFailure(error)

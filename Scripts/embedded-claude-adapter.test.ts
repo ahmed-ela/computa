@@ -293,8 +293,33 @@ describe("embedded Claude fixed adapter", () => {
       if (geometry === "occluded") Object.defineProperty(f.send, "getBoundingClientRect", {
         value: () => ({ left: 10, top: 80, width: 40, height: 20 }) });
       f.document.elementFromPoint = (_x: number, y: number) => y === 40 ? f.composer : popup.dialog;
-      expect((await f.run("sendReady", { prompt: outbound })).sendReady).toBe(false);
-      expect((await f.run("submit", { prompt: outbound })).error).toBe("send_unavailable");
+      expect(await f.run("sendReady", { prompt: outbound })).toMatchObject({
+        sendReady: false, claudeSendReadiness: "not_unobstructed" });
+      expect(await f.run("submit", { prompt: outbound })).toMatchObject({
+        error: "send_unavailable", detail: "not_unobstructed" });
+      expect(f.send.clicks).toBe(0); expect(popup.dismiss.clicks).toBe(0);
+      expect(f.world.__computaModelFirstSubmitted).toBeUndefined(); expect(f.composer.textContent).toBe(outbound);
+    }
+  });
+
+  test("missing and disabled exact Send controls take precedence over obstruction", async () => {
+    for (const [attribute, value, reason] of [
+      ["aria-label", "Other button", "no_visible_exact_send"],
+      ["aria-disabled", "true", "disabled_or_hidden"],
+    ]) {
+      const f = fixture(provider);
+      expect((await f.run("insert", { prompt: outbound })).inserted).toBe(true);
+      const ready = await f.run("sendReady", { prompt: outbound });
+      expect(ready.sendReady).toBe(true);
+      expect(ready.claudeSendReadiness).toBeUndefined();
+
+      const popup = unrelatedClaudeDialog(f);
+      f.document.elementFromPoint = () => f.composer;
+      f.send.values[attribute] = value;
+      expect(await f.run("sendReady", { prompt: outbound })).toMatchObject({
+        sendReady: false, claudeSendReadiness: reason });
+      expect(await f.run("submit", { prompt: outbound })).toMatchObject({
+        error: "send_unavailable", detail: reason });
       expect(f.send.clicks).toBe(0); expect(popup.dismiss.clicks).toBe(0);
       expect(f.world.__computaModelFirstSubmitted).toBeUndefined(); expect(f.composer.textContent).toBe(outbound);
     }

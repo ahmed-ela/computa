@@ -16553,6 +16553,86 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testClaudeDisabledSendReadinessReportsOneFailureAtOriginalDeadlineWithoutClicking() async throws {
+        try await assertClaudeDisabledSendFailure(disableAfterReadiness: false)
+    }
+
+    func testClaudeDisabledSendAfterPositiveReadinessReportsOneSubmitGuardWithoutClicking() async throws {
+        try await assertClaudeDisabledSendFailure(disableAfterReadiness: true)
+    }
+
+    private func assertClaudeDisabledSendFailure(disableAfterReadiness: Bool) async throws {
+        let base = Self.providerPage(.claude)
+        let page = base.replacingOccurrences(of: "setTimeout(() => { send.disabled = !editor.innerText.trim(); }, 15);",
+            with: disableAfterReadiness ? "send.disabled = false;" : "")
+        XCTAssertNotEqual(page, base)
+        let choice = WebsiteModelChoice(provider: "claude", key: "Opus 3", label: "Opus 3")
+        let fixture = try Fixture(page: Self.modelChoicePage(.claude, basePage: page)
+            .replacingOccurrences(of: "Sonnet 4.6", with: choice.label))
+        defer {
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            fixture.transport.setClaudeSendFailureObserverForTesting(nil)
+            fixture.shutdown()
+        }
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let tabID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+        try await waitForFixture(view)
+        let ready = try await waitForState("ready", fixture.transport, token: token)
+        try assertChoiceEvidence(ready, choice: choice)
+        let generation = try XCTUnwrap(fixture.browser.documentGeneration(for: tabID))
+        let adapterWorld = WKContentWorld.world(name: "computa-chatgpt-model-v1")
+        _ = try await evaluate(view, """
+            const send = document.getElementById('fixture-send');
+            const click = send.click.bind(send);
+            window.fixtureSendAttempts = 0;
+            send.click = () => { window.fixtureSendAttempts++; click(); };
+            return true;
+            """, world: adapterWorld)
+        var records: [String] = [], actions: [String] = []
+        var firstReadiness: ContinuousClock.Instant?
+        fixture.transport.setClaudeSendFailureObserverForTesting { records.append($0) }
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            actions.append(action)
+            guard action == "sendReady", firstReadiness == nil else { return }
+            firstReadiness = .now
+            guard disableAfterReadiness else { return }
+            let changed = try? await self.evaluate(view, """
+                const send = document.getElementById('fixture-send');
+                if (send.disabled) return false;
+                send.disabled = true;
+                return true;
+                """)
+            XCTAssertEqual(changed as? Bool, true, "Only disable the control after the adapter read an enabled Send")
+        }
+        let began = ContinuousClock.now
+        do {
+            _ = try await call(fixture.transport, "webProviderSend",
+                ["sessionToken": token, "prompt": "SAFE Claude disabled Send fixture"])
+            XCTFail("A disabled Send cannot be dispatched")
+        } catch {
+            XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .editorFailure("send_unavailable"))
+        }
+        let ended = ContinuousClock.now
+        let observedAt = try XCTUnwrap(firstReadiness)
+        if !disableAfterReadiness {
+            XCTAssertGreaterThanOrEqual(ended - began, .seconds(3))
+            XCTAssertLessThan(ended - observedAt, .seconds(4), "The diagnostic cannot renew the readiness deadline")
+        }
+        XCTAssertEqual(actions.filter { $0 == "insert" }.count, 1)
+        XCTAssertEqual(actions.filter { $0 == "submit" }.count, disableAfterReadiness ? 1 : 0)
+        let attempts = try await evaluate(view, "return window.fixtureSendAttempts;", world: adapterWorld) as? Int
+        XCTAssertEqual(attempts, 0)
+        let counts = try await evaluate(view, "return [window.fixturePrompts.length, window.fixtureInputCount];") as? [Int]
+        XCTAssertEqual(counts, [0, 1])
+        let stage = disableAfterReadiness ? "submit_guard" : "readiness_timeout"
+        let sequence = disableAfterReadiness ? 1 : 0
+        XCTAssertEqual(records, ["claudeSendFailure version=1 provider=claude session=\(token.lowercased())"
+            + " generation=\(generation.uuidString.lowercased()) nativeSequence=\(sequence)"
+            + " stage=\(stage) reason=disabled_or_hidden claimed=\(disableAfterReadiness)"])
+    }
+
     func testClaudeAndGeminiOwnedTemporarySessionsSubmitOnceAndKeepHumanTabs() async throws {
         for provider in [EmbeddedWebModelTransport.Provider.claude, .gemini] {
             let fixture = try Fixture(page: Self.providerPage(provider))
