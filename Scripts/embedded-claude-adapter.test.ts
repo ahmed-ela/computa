@@ -1092,6 +1092,98 @@ describe("embedded Claude fixed adapter", () => {
     }
   });
 
+  function claudeDiscoveryQuotaWaitFixture(variation: string, deadline: number) {
+    const f = fixture(provider), picker = installObservedModelPicker(f, provider, Element);
+    const surface = incognitoResetCard(f); surface.card.values.hidden = "";
+    const extra = new Element("BUTTON", {}, "Unexpected action");
+    if (variation === "control_count") surface.card.append(extra);
+    if (variation === "active_control") surface.about.values["aria-pressed"] = "true";
+    if (variation === "accessory") delete surface.about.values["aria-haspopup"];
+    if (variation === "no_canonical_scope") { surface.reset.tagName = "DIV"; surface.reset.values.role = "link"; }
+    for (const menu of [picker.menu, picker.nested]) {
+      const dismiss = menu.onDispatch!;
+      menu.onDispatch = (event: any) => {
+        dismiss(event);
+        if (event.type === "keydown" && event.key === "Escape" && picker.trigger.values["aria-expanded"] === "false"
+          && variation !== "healthy") delete surface.card.values.hidden;
+      };
+    }
+    const waits: { milliseconds: number; expire: () => void }[] = [];
+    f.window.webkit.messageHandlers.computaModelClock = { postMessage: ({ milliseconds }: { milliseconds: number }) =>
+      new Promise<void>(resolve => waits.push({ milliseconds, expire: resolve })) };
+    const run = () => f.run("discoverModels", { operationID: "e05fe31a-e94a-4752-9d68-085b80a2c096", evaluationDeadlineEpochMilliseconds: deadline });
+    return { f, picker, surface, extra, waits, run };
+  }
+
+  test("Claude's post-close quota wait wakes on delayed control repair and rechecks the exact card", async () => {
+    const { f, picker, surface, extra, waits, run } = claudeDiscoveryQuotaWaitFixture("control_count", Date.now() + 5_000);
+    expect((await run()).pending).toBe(true); expect((await run()).pending).toBe(true);
+    const pending = run();
+    for (let tick = 0; tick < 40 && waits.length === 0; tick++) await Promise.resolve();
+    expect(waits).toHaveLength(1); expect(waits[0].milliseconds).toBeGreaterThan(0); expect(waits[0].milliseconds).toBeLessThanOrEqual(1_500);
+    expect(picker.trigger.values["aria-expanded"]).toBe("false");
+    f.observers.at(-1)!.callback([]);
+    surface.card.children = surface.card.children.filter(node => node !== extra); extra.connected = false;
+    f.observers.at(-1)!.callback([]);
+    const result = await pending;
+    expect(Object.keys(result).sort()).toEqual(["error", "quotaDiagnostic"]);
+    expect(result.error).toBe("website_usage_limit");
+    const diagnostic = JSON.parse(result.quotaDiagnostic);
+    expect(diagnostic.resetCardOutcome).toBe("matched_after_menu"); expect(diagnostic.resetCardControlReason).toBeUndefined();
+    waits[0].expire();
+    expect(waits).toHaveLength(1); expect(f.delays).toEqual([]);
+    expect(picker.trigger.clicks).toBe(1); expect(f.send.clicks + surface.about.clicks + surface.offer.clicks + surface.reset.clicks + surface.shared.clicks).toBe(0);
+    expect(f.composer.events).toEqual([]);
+  });
+
+  test("Claude's post-close quota wait uses the original deadline and retains unresolved finite reasons", async () => {
+    for (const variation of ["control_count", "active_control", "accessory", "no_canonical_scope", "healthy", "short-budget"]) {
+      const start = Date.now(), budget = variation === "short-budget" ? 50 : 500;
+      const shape = variation === "short-budget" ? "accessory" : variation;
+      const { f, surface, waits, run } = claudeDiscoveryQuotaWaitFixture(shape, start + budget);
+      expect((await run()).pending).toBe(true); expect((await run()).pending).toBe(true);
+      const pending = run();
+      for (let tick = 0; tick < 40 && waits.length === 0; tick++) await Promise.resolve();
+      if (variation === "healthy" || variation === "short-budget") expect(waits, variation).toHaveLength(0);
+      else {
+        expect(waits, variation).toHaveLength(1);
+        expect(waits[0].milliseconds).toBeGreaterThan(0); expect(waits[0].milliseconds).toBeLessThanOrEqual(budget - 100);
+        waits[0].expire();
+      }
+      const result = await pending;
+      expect(result.error, variation).toBeUndefined(); expect(result.modelChoices?.length ?? 0, variation).toBeGreaterThan(0);
+      const diagnostic = JSON.parse(result.quotaDiagnostic);
+      expect(diagnostic.resetCardControlReason, variation).toBe(variation === "healthy" ? undefined : shape);
+      expect(diagnostic.resetCardOutcome, variation).toBe(variation === "healthy" ? "offer_missing_or_ambiguous" : "card_controls");
+      expect(f.send.clicks + surface.about.clicks + surface.offer.clicks + surface.reset.clicks + surface.shared.clicks).toBe(0);
+      expect(f.delays).toEqual([]);
+    }
+  });
+
+  test("Claude's post-close quota wait latches context loss before any catalog or quota can return", async () => {
+    for (const drift of ["owner", "trigger", "mode", "editor", "route"]) {
+      const { f, picker, surface, extra, waits, run } = claudeDiscoveryQuotaWaitFixture("control_count", Date.now() + 5_000);
+      expect((await run()).pending).toBe(true); expect((await run()).pending).toBe(true);
+      const pending = run();
+      for (let tick = 0; tick < 40 && waits.length === 0; tick++) await Promise.resolve();
+      expect(waits, drift).toHaveLength(1);
+      const owner = f.world.__computaModelOwner, url = f.document.URL;
+      if (drift === "owner") f.world.__computaModelOwner = "foreign";
+      if (drift === "trigger") picker.trigger.connected = false;
+      if (drift === "mode") f.exit.connected = false;
+      if (drift === "editor") f.composer.text = "Foreign draft";
+      if (drift === "route") f.document.URL = f.origin + "/new";
+      f.observers.at(-1)!.callback([]);
+      f.world.__computaModelOwner = owner; f.document.URL = url;
+      picker.trigger.connected = true; f.exit.connected = true; f.composer.text = "";
+      surface.card.children = surface.card.children.filter(node => node !== extra); extra.connected = false;
+      waits[0].expire();
+      const result = await pending;
+      expect(result.error, drift).toBe("model_unverified"); expect(result.quotaDiagnostic).toBeUndefined(); expect(result.modelChoices).toBeUndefined();
+      expect(f.send.clicks + surface.about.clicks + surface.offer.clicks + surface.reset.clicks + surface.shared.clicks).toBe(0);
+    }
+  });
+
   test("the fresh reset-card diagnostic is absent from editor actions and inspections after preparation", async () => {
     const f = fixture(provider), { available, about, offer, reset, shared } = freshIncognitoResetLimit(f);
     available.text = "synthetic canary text";

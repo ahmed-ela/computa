@@ -2978,11 +2978,23 @@ function modelUsageLimitSurfaces() {
 // This signed-in account card was observed on an empty new chat. It can only
 // abort preflight. It never supplies the physical Incognito proof used by Stop.
 let modelLastFreshResetCardOutcome = null;
+let modelLastFreshResetCardControlReason = null, modelLastFreshResetCardControlsReady = null;
+const modelFreshQuotaAuthored = '[data-testid="user-message"], [data-testid="assistant-message"], [data-perf-reply-text], [data-message-author-role], [data-markdown-text-style], [data-turn], [data-user-message-bubble], model-response, user-query';
+const modelFreshQuotaExcluded = modelFreshQuotaAuthored + ', [contenteditable], [role="textbox"], textarea, input, pre, code, [role="tooltip"], nav, aside, [role="navigation"], [role="menu"], [role="listbox"]';
+const modelFreshQuotaEditorSelector = '[data-testid="chat-input"][contenteditable="true"][role="textbox"]';
+function modelFreshQuotaEditorEmpty(editor) {
+  return editor.childNodes.length === 0 || editor.childNodes.length === 1 && editor.childNodes[0].tagName === 'P'
+    && (editor.childNodes[0].childNodes.length === 0 || editor.childNodes[0].childNodes.length === 1 && editor.childNodes[0].childNodes[0].tagName === 'BR');
+}
 function modelFreshAccountUsageLimited(afterClosedDiscovery = false) {
   try {
     const observeResetCard = afterClosedDiscovery || input.action === 'inspect';
     const diagnose = observeResetCard && globalThis.__computaModelFirstPrepared === undefined;
-    if (observeResetCard) modelLastFreshResetCardOutcome = null;
+    if (observeResetCard) {
+      modelLastFreshResetCardOutcome = null;
+      modelLastFreshResetCardControlReason = null;
+      modelLastFreshResetCardControlsReady = null;
+    }
     if (input.action === 'stop'
       || input.expectedFirstUserFingerprint != null || globalThis.__computaModelFirstSubmitted !== undefined
       || globalThis.__computaModelFirstProof !== undefined || globalThis.__computaModelFirstPrompt !== undefined
@@ -2991,12 +3003,11 @@ function modelFreshAccountUsageLimited(afterClosedDiscovery = false) {
     const note = outcome => { if (diagnose) modelLastFreshResetCardOutcome = outcome; };
     const reject = outcome => { note(incognito ? outcome : 'route_ineligible'); return false; };
     if (!/^https:\/\/claude\.ai\/new\/?(?:\?incognito)?$/.test(url)) { note('route_ineligible'); return false; }
-    const authored = '[data-testid="user-message"], [data-testid="assistant-message"], [data-perf-reply-text], [data-message-author-role], [data-markdown-text-style], [data-turn], [data-user-message-bubble], model-response, user-query';
-    const excluded = authored + ', [contenteditable], [role="textbox"], textarea, input, pre, code, [role="tooltip"], nav, aside, [role="navigation"], [role="menu"], [role="listbox"]';
+    const excluded = modelFreshQuotaExcluded;
     const one = nodes => nodes.length === 1 ? nodes[0] : null;
     const buttons = document.querySelectorAll('button');
     if (buttons.length > 256) return reject('button_scan_limit');
-    if (document.querySelectorAll(authored).length) return reject('authored_content');
+    if (document.querySelectorAll(modelFreshQuotaAuthored).length) return reject('authored_content');
     const chrome = [...buttons].filter(node => modelVisible(node) && !node.closest(excluded));
     const popup = node => ['true', 'menu', 'dialog', 'listbox'].includes(node.getAttribute('aria-haspopup'))
       && node.getAttribute('aria-expanded') !== 'true' && modelEnabled(node);
@@ -3025,13 +3036,11 @@ function modelFreshAccountUsageLimited(afterClosedDiscovery = false) {
     const usage = one(chrome.filter(node => popup(node) && label(node) === 'View usage limits · 100% used'));
     const picker = one(chrome.filter(node => popup(node) && /^Model: /.test(websiteModelSafeTriggerLabel(node.getAttribute('aria-label')) || '')));
     const send = one(chrome.filter(node => node.getAttribute('data-testid') === 'chat-input-send' && node.getAttribute('aria-label') === 'Send message'));
-    const editor = one(document.querySelectorAll('[data-testid="chat-input"][contenteditable="true"][role="textbox"]'));
+    const editor = one(document.querySelectorAll(modelFreshQuotaEditorSelector));
     if (!picker) return reject('picker_guard');
     if (!send || modelEnabled(send)) return reject('send_guard');
     if (!modelVisible(editor) || editor.parentElement?.closest(excluded)) return reject('editor_guard');
-    const empty = editor.childNodes.length === 0 || editor.childNodes.length === 1 && editor.childNodes[0].tagName === 'P'
-      && (editor.childNodes[0].childNodes.length === 0 || editor.childNodes[0].childNodes.length === 1 && editor.childNodes[0].childNodes[0].tagName === 'BR');
-    if (!empty) return reject('editor_nonempty');
+    if (!modelFreshQuotaEditorEmpty(editor)) return reject('editor_nonempty');
     const enabled = chrome.filter(modelEnabled).map(node => ({ node, name: label(node) }));
     const named = name => enabled.filter(item => item.name === name).map(item => item.node);
     const offerName = 'Get more usage', offers = named(offerName), offer = one(offers);
@@ -3088,19 +3097,31 @@ function modelFreshAccountUsageLimited(afterClosedDiscovery = false) {
           && (role === 'button' || node.tagName === 'BUTTON' && role === null) && !node.closest(excluded) && popup(node)
           && [null, 'false'].includes(node.getAttribute('aria-expanded')) && [null, 'closed'].includes(node.getAttribute('data-state'));
       };
-      let card = offer.parentElement, outcome = 'card_scope';
-      for (let depth = 0; card && depth < 8; depth++, card = card.parentElement) {
-        if (['BODY', 'HTML'].includes(card.tagName) || [picker, send, editor].some(node => card.contains(node))) break;
-        if (!modelVisible(card) || card.closest(excluded)) continue;
+      function* cardScopes() {
+        let card = offer.parentElement;
+        for (let depth = 0; card && depth < 8; depth++, card = card.parentElement) {
+          if (['BODY', 'HTML'].includes(card.tagName) || [picker, send, editor].some(node => card.contains(node))) break;
+          if (!modelVisible(card) || card.closest(excluded)) continue;
+          const controls = [...card.querySelectorAll(resetCardControls)];
+          const links = controls.filter(node => node.tagName === 'A');
+          const accessory = controls.find(node => node !== offer && node.tagName !== 'A');
+          const issue = controls.length < 3 || controls.length > 4 ? 'control_count'
+            : card.querySelector('[aria-checked="true"], [aria-pressed="true"]') ? 'active_control'
+            : links.length !== 2 ? 'control_count'
+            : accessory && !closedAccessory(accessory) ? 'accessory' : null;
+          yield { card, controls, links, accessory, issue };
+        }
+      }
+      const hasExactLinks = links => !!one(links.filter(sharedLimitLink)) && !!one(links.filter(useResetLink));
+      let outcome = 'card_scope', controlReason = null;
+      for (const { card, controls, links, accessory, issue } of cardScopes()) {
         if (outcome === 'card_scope') outcome = 'card_controls';
-        const controls = [...card.querySelectorAll(resetCardControls)];
-        if (controls.length < 3 || controls.length > 4 || card.querySelector('[aria-checked="true"], [aria-pressed="true"]')) continue;
-        const links = controls.filter(node => node.tagName === 'A');
-        if (links.length !== 2) continue;
-        const accessory = controls.find(node => node !== offer && node.tagName !== 'A');
-        if (accessory && !closedAccessory(accessory)) continue;
+        if (issue) {
+          if (diagnose && afterClosedDiscovery && controlReason === null && controls.length <= 8 && hasExactLinks(links)) controlReason = issue;
+          continue;
+        }
         if (outcome === 'card_controls') outcome = 'card_links';
-        if (!one(links.filter(sharedLimitLink)) || !one(links.filter(useResetLink))) continue;
+        if (!hasExactLinks(links)) continue;
         const copy = words(card, false, true, [offer, accessory]);
         if (copy && /^Usage limit reached · Resets (?:[1-9]|1[0-2]):[0-5][0-9] (?:AM|PM) · limits shared with Claude Code You have (?:1 reset|(?:[2-9]|[1-9][0-9]) resets) available\. Use reset$/.test(copy)) {
           if (afterClosedDiscovery) note('matched_after_menu');
@@ -3111,6 +3132,16 @@ function modelFreshAccountUsageLimited(afterClosedDiscovery = false) {
         else if (outcome !== 'copy_mismatch') outcome = 'copy_unavailable';
       }
       note(outcome);
+      if (diagnose && afterClosedDiscovery && outcome === 'card_controls') {
+        modelLastFreshResetCardControlReason = controlReason ?? 'no_canonical_scope';
+        modelLastFreshResetCardControlsReady = () => {
+          // Wake on the control and link shape. The full predicate runs once after
+          // the wait, including on expiry or a whole-card remount.
+          if (!modelEnabled(offer)) return false;
+          for (const { issue, links } of cardScopes()) if (!issue && hasExactLinks(links)) return true;
+          return false;
+        };
+      }
     } else note('route_ineligible');
 
     if (afterClosedDiscovery || !usage) return false;
@@ -3199,7 +3230,10 @@ function modelQuotaDiagnostic(includeFreshResetCard = false, temporaryProof = mo
       labelKnownSuffix: modelQuotaLabel(node.textContent) === 'messages (opens in new tab)' })), bannerParents,
     mode: { headerTotal: bounded(header.length), headerVisible: bounded(header.filter(modelVisible).length), headerPhysical: bounded(header.filter(physical).length),
       exitTotal: bounded(exit.length), exitVisible: bounded(exit.filter(modelVisible).length), exitPhysical: bounded(exit.filter(physical).length) } };
-  if (includeFreshResetCard && modelLastFreshResetCardOutcome !== null) result.resetCardOutcome = modelLastFreshResetCardOutcome;
+  if (includeFreshResetCard && modelLastFreshResetCardOutcome !== null) {
+    result.resetCardOutcome = modelLastFreshResetCardOutcome;
+    if (modelLastFreshResetCardControlReason !== null) result.resetCardControlReason = modelLastFreshResetCardControlReason;
+  }
   while (JSON.stringify(result).length > 8_192 && result.popupAncestors.length) result.popupAncestors.pop();
   return JSON.stringify(result);
 }
@@ -3628,7 +3662,7 @@ async function haikuRead(observed) {
   return { ...observed, ...proof };
 }
 
-let completionSnapshot = null, claudePendingCheck = null;
+let completionSnapshot = null, claudePendingCheck = null, claudeDiscoveryQuotaRecheckCurrent = null;
 async function providerPageAction() {
   websiteModelDiagnosticPhase('page_action');
   const modelState = websiteModelPickerState('claude');
@@ -3645,14 +3679,48 @@ async function providerPageAction() {
     let limited = false;
     try {
       // A newly complete reset card can abort only after this verified close.
-      if (!freshPickerContext()) return result;
-      const closed = websiteModelPickerState('claude');
-      const trigger = closed.trigger;
-      if (closed.triggerCount !== 1 || trigger !== modelState.trigger || !closed.enabled(trigger) || closed.physicalMenus.length
-        || ![null, 'false'].includes(trigger.getAttribute('aria-expanded'))
-        || ![null, 'closed'].includes(trigger.getAttribute('data-state')) || !modelTemporaryVerified()
-        || !modelFind(['[data-testid="chat-input"][contenteditable="true"][role="textbox"]'])) return result;
+      const readDocument = document;
+      const currentClosedPicker = () => {
+        if (document !== readDocument || !freshPickerContext()) return null;
+        const closed = websiteModelPickerState('claude'), trigger = closed.trigger;
+        if (closed.triggerCount !== 1 || trigger !== modelState.trigger || !closed.enabled(trigger) || closed.physicalMenus.length
+          || ![null, 'false'].includes(trigger.getAttribute('aria-expanded'))
+          || ![null, 'closed'].includes(trigger.getAttribute('data-state')) || !modelTemporaryVerified()
+          || !modelFind([modelFreshQuotaEditorSelector])) return null;
+        return closed;
+      };
+      const closed = currentClosedPicker();
+      if (!closed) return result;
       limited = modelFreshAccountUsageLimited(true);
+      const controlsReady = modelLastFreshResetCardControlsReady;
+      const deadline = input.evaluationDeadlineEpochMilliseconds;
+      if (controlsReady && Number.isSafeInteger(deadline) && typeof input.operationID === 'string'
+        && typeof window.webkit?.messageHandlers?.computaModelClock?.postMessage === 'function') {
+        const now = Date.now(), until = Math.min(now + 1_500, deadline - 100);
+        if (until > now) {
+          let invalidated = false;
+          const current = () => {
+            if (invalidated) return false;
+            try {
+              const picker = currentClosedPicker();
+              const editors = document.querySelectorAll(modelFreshQuotaEditorSelector), editor = editors[0];
+              invalidated = !picker || (closed.selected ? !websiteModelChoiceEqual(picker.selected, closed.selected) : picker.selected != null)
+                || picker.duplicate || picker.conflicting || picker.indicatorInvalid || picker.selectionAmbiguous || picker.navigationAmbiguous
+                || editors.length !== 1 || !modelVisible(editor) || !!editor.parentElement?.closest(modelFreshQuotaExcluded)
+                || !modelFreshQuotaEditorEmpty(editor) || document.querySelectorAll(modelFreshQuotaAuthored).length !== 0;
+            } catch { invalidated = true; }
+            return !invalidated;
+          };
+          claudeDiscoveryQuotaRecheckCurrent = current;
+          let clockFailed = false;
+          await websiteModelWaitForChange(until, () => {
+            if (!current()) return true;
+            try { return controlsReady(); } catch { return false; }
+          }, 'model_wait', () => { clockFailed = true; }, true);
+          if (!current()) return { error: 'model_unverified' };
+          if (!clockFailed && Date.now() < deadline) limited = modelFreshAccountUsageLimited(true);
+        }
+      }
       // Earlier legacy quota counters in the temporary proof predate this close.
       if (modelLastFreshResetCardOutcome !== null) {
         const quotaDiagnostic = modelQuotaDiagnostic(true, null);
@@ -3853,6 +3921,7 @@ async function providerPageAction() {
   return { submitted: true };
 }
 const actionObservation = await providerPageAction();
+if (claudeDiscoveryQuotaRecheckCurrent && !claudeDiscoveryQuotaRecheckCurrent()) return { error: 'model_unverified' };
 const pauseContextIntact = () => window === window.top && document.URL === input.expectedURL
   && globalThis.__computaModelOwner === input.ownerToken && modelUserRoots().length === ownedUserCount;
 if (input.action === 'discoverModels' && actionObservation.error === 'website_usage_limit')

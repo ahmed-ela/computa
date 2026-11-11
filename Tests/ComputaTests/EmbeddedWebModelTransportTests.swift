@@ -14033,31 +14033,70 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     func testClaudeDiscoveryLateQuotaClosesOwnedTabAndBlocksNextStart() async throws {
-        let fixture = try Fixture(page: Self.lateClaudeResetCardPage(discovery: true))
+        for linkDelay in [0, 400] {
+            let fixture = try Fixture(page: Self.lateClaudeResetCardPage(discovery: true, resetLinkDelay: linkDelay))
+            defer { fixture.shutdown() }
+            let discovery = Task { try await fixture.transport.discoverModels(provider: "claude", retryBlocked: true) }
+            for _ in 0..<1_000 where fixture.createdTabs.isEmpty { await Task.yield() }
+            let id = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: id))
+            do {
+                _ = try await discovery.value
+                XCTFail("A late account limit cannot publish a recovered catalog")
+            } catch {
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.claude))
+            }
+            let ledger = try await evaluate(view, """
+                return [window.fixtureModelEscapeClosures, window.fixtureInputCount,
+                  window.fixturePrompts.length, window.fixtureQuotaClicks, Number(window.fixtureResetLinkMounted)];
+                """) as? [Int]
+            XCTAssertEqual(ledger, [1, 0, 0, 0, 1])
+            XCTAssertNil(fixture.browser.webView(for: id))
+            do {
+                _ = try await call(fixture.transport, "webProviderStart", ["provider": "claude"])
+                XCTFail("The observed account limit must block another owned tab")
+            } catch {
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.claude))
+            }
+            XCTAssertEqual(fixture.createdTabs, [id])
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
+    func testClaudeDiscoveryCancellationDuringQuotaRecheckClosesOnlyOwnedTab() async throws {
+        let fixture = try Fixture(page: Self.lateClaudeResetCardPage(discovery: true, resetLinkDelay: 5_000))
         defer { fixture.shutdown() }
-        let discovery = Task { try await fixture.transport.discoverModels(provider: "claude", retryBlocked: true) }
+        let discovery = Task { try await fixture.transport.discoverModels(provider: "claude") }
+        defer { discovery.cancel() }
         for _ in 0..<1_000 where fixture.createdTabs.isEmpty { await Task.yield() }
         let id = try XCTUnwrap(fixture.createdTabs.last)
         let view = try XCTUnwrap(fixture.browser.webView(for: id))
+        let deadline = ContinuousClock.now + .seconds(4)
+        var registered = false
+        while ContinuousClock.now < deadline {
+            let snapshot = fixture.browser.modelDiagnosticSnapshot(tabID: id)
+            if snapshot.contains("model_wait"), snapshot.contains("clocksPending=1"),
+               try await evaluate(view, "return window.fixtureModelEscapeClosures === 1 && window.fixtureResetLinkMounted === false;") as? Bool == true {
+                registered = true
+                break
+            }
+            await Task.yield()
+        }
+        guard registered else { XCTFail("The post-close quota wait must register a native clock"); throw FixtureFailure.timeout }
+
+        discovery.cancel()
         do {
             _ = try await discovery.value
-            XCTFail("A late account limit cannot publish a recovered catalog")
-        } catch {
-            XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.claude))
-        }
-        let ledger = try await evaluate(view, """
-            return [window.fixtureModelEscapeClosures, window.fixtureInputCount,
-              window.fixturePrompts.length, window.fixtureQuotaClicks];
-            """) as? [Int]
-        XCTAssertEqual(ledger, [1, 0, 0, 0])
-        XCTAssertNil(fixture.browser.webView(for: id))
-        do {
-            _ = try await call(fixture.transport, "webProviderStart", ["provider": "claude"])
-            XCTFail("The observed account limit must block another owned tab")
-        } catch {
-            XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.claude))
-        }
-        XCTAssertEqual(fixture.createdTabs, [id])
+            XCTFail("A cancelled recheck must not publish a catalog")
+        } catch is CancellationError { }
+
+        let ledger = try await evaluate(view, "return [window.fixtureInputCount, window.fixturePrompts.length, window.fixtureQuotaClicks];") as? [Int]
+        XCTAssertEqual(ledger, [0, 0, 0])
+        XCTAssertEqual(fixture.browser.modelDiagnosticSnapshot(tabID: id), "state=closed")
+        try await assertHumanTabIntact(fixture)
+        fixture.page = Self.modelChoicePage(.claude)
+        let choices = try await fixture.transport.discoverModels(provider: "claude")
+        XCTAssertEqual(choices.map(\.label), Self.choiceLabels(.claude))
         try await assertHumanTabIntact(fixture)
     }
 
@@ -17747,6 +17786,20 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             resetCard["resetCardOutcome"] = badOutcome
             XCTAssertNil(EmbeddedWebModelTransport.sanitizedQuotaStructure(try encode(resetCard), provider: .claude))
         }
+        resetCard["resetCardOutcome"] = "card_controls"
+        for reason in ["no_canonical_scope", "control_count", "active_control", "accessory"] {
+            resetCard["resetCardControlReason"] = reason
+            let summary = try XCTUnwrap(EmbeddedWebModelTransport.quotaStructureDiagnosticRecords(try encode(resetCard), provider: .claude)?.first)
+            let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(summary.utf8)) as? [String: Any])
+            XCTAssertEqual(fields["resetCardControlReason"] as? String, reason)
+        }
+        for badReason in ["private_canary" as Any, true, ["reason": "accessory"]] {
+            resetCard["resetCardControlReason"] = badReason
+            XCTAssertNil(EmbeddedWebModelTransport.sanitizedQuotaStructure(try encode(resetCard), provider: .claude))
+        }
+        resetCard["resetCardOutcome"] = "matched_after_menu"
+        resetCard["resetCardControlReason"] = "accessory"
+        XCTAssertNil(EmbeddedWebModelTransport.sanitizedQuotaStructure(try encode(resetCard), provider: .claude))
         XCTAssertNil(EmbeddedWebModelTransport.sanitizedQuotaStructure(try encode(source), provider: .gemini))
         XCTAssertNil(EmbeddedWebModelTransport.sanitizedQuotaStructure(String(repeating: "x", count: 8_193), provider: .claude))
         for (section, limit) in [("headings", 4), ("controls", 8), ("popupAncestors", 8), ("support", 4), ("bannerParents", 4)] {
@@ -23199,7 +23252,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 """)
     }
 
-    private static func lateClaudeResetCardPage(discovery: Bool) -> String {
+    private static func lateClaudeResetCardPage(discovery: Bool, resetLinkDelay: Int = 0) -> String {
         let mountAfter = discovery ? "window.fixtureModelEscapeClosures++;"
             : "window.fixtureModelSelect(node.dataset.fixtureModel);"
         let card = """
@@ -23208,14 +23261,23 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             <a href="/settings/claude-code">limits shared with Claude Code</a></p>
             <p>You have 2 resets available.</p>
             <div role="button" aria-haspopup="dialog" aria-expanded="false">Reset information</div>
-            <button>Get more usage</button><a href="/settings/usage?highlight=resets">Use reset</a>
+            <button>Get more usage</button><a id="fixture-late-quota-reset-link" href="/settings/usage?highlight=resets">Use reset</a>
           </section>
         </template>
         <script>
         window.fixtureQuotaClicks = 0;
+        window.fixtureResetLinkMounted = false;
         window.fixtureMountQuota = () => {
           const template = document.getElementById('fixture-late-quota');
           const surface = template.content.firstElementChild.cloneNode(true);
+          const resetLink = surface.querySelector('#fixture-late-quota-reset-link');
+          if (\(resetLinkDelay) > 0) {
+            resetLink.remove();
+            setTimeout(() => {
+              surface.appendChild(resetLink);
+              window.fixtureResetLinkMounted = true;
+            }, \(resetLinkDelay));
+          } else { window.fixtureResetLinkMounted = true; }
           surface.addEventListener('click', () => { window.fixtureQuotaClicks++; });
           template.replaceWith(surface);
           document.querySelector('[data-testid="chat-input-send"]').disabled = true;

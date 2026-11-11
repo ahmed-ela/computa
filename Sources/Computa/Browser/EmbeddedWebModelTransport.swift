@@ -5516,6 +5516,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard let outcome = rawOutcome as? String, outcomes.contains(outcome) else { return nil }
             safe["resetCardOutcome"] = outcome
         }
+        if let rawReason = value["resetCardControlReason"] {
+            guard safe["resetCardOutcome"] as? String == "card_controls", let reason = rawReason as? String,
+                  ["no_canonical_scope", "control_count", "active_control", "accessory"].contains(reason) else { return nil }
+            safe["resetCardControlReason"] = reason
+        }
         if let rawProof = value["temporaryProof"] {
             if rawProof is NSNull {
                 safe["temporaryProof"] = NSNull()
@@ -8184,7 +8189,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         && session.modelChoice != nil && !session.modelSelectionVerified
                         && session.confirmedUsers == 0 && !session.submitted && !session.pendingSubmission
                         && session.firstUserFingerprint == nil
-                    if (provider == .chatgpt && (action == "inspect" || initialChatHeaderReadiness)) || qwenCodePayloadSample != nil || savedResponseChoiceGrant != nil {
+                    let claudeDiscovery = provider == .claude && session.isDiscovery && action == "discoverModels"
+                    if (provider == .chatgpt && (action == "inspect" || initialChatHeaderReadiness)) || claudeDiscovery
+                        || qwenCodePayloadSample != nil || savedResponseChoiceGrant != nil {
                         // A negative-only wall-clock fence for an adapter wait.
                         // Sample wall time first and round down so dispatch
                         // overhead cannot extend the existing native deadline.
