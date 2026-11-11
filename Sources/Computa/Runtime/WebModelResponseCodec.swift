@@ -724,8 +724,11 @@ enum WebModelResponseCodec {
             includedInstructionText: includedInstructionText, responseFormat: responseFormat,
             compactLiteralBoundary: provider == "groq",
             singleActionRelay: isChatGPT,
-            illustrateFunctionArguments: provider == "qwen" || (isClaude && WebsiteModelCatalog.choice(for: model) ==
-                WebsiteModelChoice(provider: "claude", key: "Opus 3", label: "Opus 3")),
+            illustrateFunctionArguments: provider == "qwen"
+                || (provider == "kimi" && WebsiteModelCatalog.choice(for: model) ==
+                    WebsiteModelChoice(provider: "kimi", key: "k28-instant", label: "Instant"))
+                || (isClaude && WebsiteModelCatalog.choice(for: model) ==
+                    WebsiteModelChoice(provider: "claude", key: "Opus 3", label: "Opus 3")),
             currentBrowserHandoff: browserHandoff,
             allowedToolNames: policy.allowedNames)
         let prompt = """

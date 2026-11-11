@@ -1111,6 +1111,7 @@ final class WebModelResponseCodecTests: XCTestCase {
                         ])
                         let request = try WebModelResponseCodec.prepareRequest(original)
                         let handoff = try assertContiguousRequestValues(original, in: request,
+                            expectsFunctionLayout: model == syntheticKimiChoice.modelID && choice == "auto",
                             expectedAllowedToolNames: choice == "none" ? [] : nil)
                         XCTAssertEqual(handoff.components(separatedBy: guidance).count - 1, 1,
                             "Current form guidance follows unchanged history, even with retained native instructions")
@@ -2178,7 +2179,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             let needsLiteralBoundary = literalModels.contains(model)
             XCTAssertEqual(request.prompt.contains(boundary), needsLiteralBoundary, model)
             XCTAssertEqual(request.continuationRequest, original)
-            try assertContiguousRequestValues(original, in: request, expectsFunctionLayout: model == claudeChoice)
+            try assertContiguousRequestValues(original, in: request, expectsFunctionLayout: model == claudeChoice || model == kimiChoice)
             if needsLiteralBoundary {
                 XCTAssertEqual(request.prompt.components(separatedBy: boundary).count - 1, 1)
                 XCTAssertTrue(request.prompt.hasSuffix(boundary + "\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF."))
@@ -3419,6 +3420,7 @@ final class WebModelResponseCodecTests: XCTestCase {
                 let prepared = try WebModelResponseCodec.prepareRequest(original)
                 let handoff = try assertContiguousRequestValues(original, in: prepared,
                     includedInstructionText: ["Retained local instruction text: " + legacy, native],
+                    expectsFunctionLayout: model == syntheticKimiChoice.modelID && toolChoice == "auto",
                     expectedAllowedToolNames: toolChoice == "none" ? [] : nil)
                 XCTAssertEqual(prepared.continuationRequest, original,
                     "Neutral generated wording must not rewrite retained instructions, user strings, receipts or schemas")
@@ -4342,16 +4344,17 @@ final class WebModelResponseCodecTests: XCTestCase {
         let max = WebsiteModelChoice(provider: "qwen", key: "Qwen3.8-Max", label: "Qwen3.8-Max").modelID
         let opus = WebsiteModelChoice(provider: "claude", key: "Opus 3", label: "Opus 3").modelID
         let otherClaude = WebsiteModelChoice(provider: "claude", key: "Opus 4.6", label: "Opus 4.6").modelID
+        let kimi = WebsiteModelChoice(provider: "kimi", key: "k28-instant", label: "Instant").modelID
         let scenarios = [(plus, true), (max, true), ("browser/qwen", true), ("web-qwen", false), (opus, true),
             (otherClaude, false), ("browser/claude", false), ("browser/chatgpt", false), ("browser/gemini", false),
-            ("browser/groq", false), ("browser/kimi", false), ("browser/deepseek/mode/chat", false)]
+            ("browser/groq", false), ("browser/kimi", false), (kimi, true), ("browser/deepseek/mode/chat", false)]
         let inert = #"{"type":"tool_calls","calls":[{"name":null,"arguments":{"sample_field":"sample value"}}]}"#
         for (model, expectsLayout) in scenarios {
             let original = try JSONSerialization.data(withJSONObject: ["model": model, "input": "Keep this exact user request", "tools": [function]])
             let prepared = try WebModelResponseCodec.prepareRequest(original)
             // This existing oracle compares retained request values and the complete
             // response-contract suffix byte-for-byte, including unchanged providers.
-            _ = try assertContiguousRequestValues(original, in: prepared, expectsFunctionLayout: model == opus)
+            _ = try assertContiguousRequestValues(original, in: prepared, expectsFunctionLayout: model == opus || model == kimi)
             XCTAssertEqual(prepared.prompt.contains("Function call layout."), expectsLayout, model)
             XCTAssertEqual(prepared.prompt.contains(inert), expectsLayout, model)
             XCTAssertEqual(prepared.continuationRequest, original)
@@ -4360,6 +4363,61 @@ final class WebModelResponseCodecTests: XCTestCase {
                     XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .malformedEnvelope)
                 }
             }
+        }
+    }
+
+    func testKimiHistoryArgumentStringsRemainHistoryAndNewCallsRequireObjects() throws {
+        let model = WebsiteModelChoice(provider: "kimi", key: "k28-instant", label: "Instant").modelID
+        let command: [String: Any] = ["type": "function", "name": "exec_command", "parameters": [
+            "type": "object", "properties": ["cmd": ["type": "string"], "workdir": ["type": "string"],
+                "max_output_tokens": ["type": "integer"], "yield_time_ms": ["type": "integer"]],
+            "required": ["cmd", "workdir"], "additionalProperties": false]]
+        let priorArguments = #"{"cmd":"cat README.md","workdir":"/synthetic/invoice/coding"}"#
+        let input: [[String: Any]] = [
+            ["role": "user", "content": "Work only on the synthetic invoice fixture."],
+            ["type": "function_call", "name": "exec_command", "call_id": "call_prior", "arguments": priorArguments],
+            ["type": "function_call_output", "call_id": "call_prior", "output": "Synthetic README output"],
+        ]
+        let rawRequest: [String: Any] = ["model": model, "input": input, "tools": [command],
+            "tool_choice": "auto", "parallel_tool_calls": true]
+        let original = try JSONSerialization.data(withJSONObject: rawRequest)
+        let prepared = try WebModelResponseCodec.prepareRequest(original)
+        try assertContiguousRequestValues(original, in: prepared, expectsFunctionLayout: true)
+        XCTAssertTrue(prepared.prompt.contains(#"{"type":"tool_calls","calls":[{"name":null,"arguments":{"sample_field":"sample value"}}]}"#))
+        XCTAssertEqual(prepared.continuationRequest, original)
+
+        // The retained failure used this exact field shape and a string containing
+        // a valid JSON object. These values are synthetic and never executed.
+        let arguments: [String: Any] = ["cmd": "python3 -m unittest -v", "workdir": "/synthetic/invoice/coding",
+            "max_output_tokens": 4_096, "yield_time_ms": 1_000]
+        let serialized = String(decoding: try JSONSerialization.data(withJSONObject: arguments), as: UTF8.self)
+        let bad: [String: Any] = ["name": "exec_command", "arguments": serialized]
+        let good: [String: Any] = ["name": "exec_command", "arguments": arguments]
+        func reply(_ calls: [[String: Any]]) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": calls]), as: UTF8.self)
+        }
+        for calls in [[bad], [good, bad], [bad, good]] {
+            let raw = try reply(calls)
+            XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(raw, request: prepared)) {
+                XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .argumentsMustBeObject)
+            }
+            XCTAssertNil(WebModelResponseCodec.malformedEmbeddedReplyDiagnostic(raw, request: prepared))
+        }
+        let valid = try reply([good])
+        guard case let .toolCalls(calls) = try WebModelResponseCodec.parseEmbeddedReply(valid, request: prepared) else {
+            return XCTFail("Object arguments should produce one tool proposal")
+        }
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?.name, "exec_command")
+        let decoded = try JSONSerialization.jsonObject(with: Data(try XCTUnwrap(calls.first?.argumentsJSON).utf8)) as? NSDictionary
+        XCTAssertEqual(decoded, arguments as NSDictionary)
+
+        var deniedRequest = rawRequest
+        deniedRequest["tool_choice"] = "none"
+        let denied = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: deniedRequest))
+        XCTAssertFalse(denied.prompt.contains("Function call layout."))
+        XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(valid, request: denied)) {
+            XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .rejectedToolChoice)
         }
     }
 
