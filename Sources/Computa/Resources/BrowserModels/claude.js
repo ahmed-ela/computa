@@ -2978,10 +2978,10 @@ function modelUsageLimitSurfaces() {
 // This signed-in account card was observed on an empty new chat. It can only
 // abort preflight. It never supplies the physical Incognito proof used by Stop.
 let modelLastFreshResetCardOutcome = null;
-function modelFreshAccountUsageLimited() {
+function modelFreshAccountUsageLimited(observeResetCard = input.action === 'inspect') {
   try {
-    const diagnose = input.action === 'inspect' && globalThis.__computaModelFirstPrepared === undefined;
-    if (input.action === 'inspect') modelLastFreshResetCardOutcome = null;
+    const diagnose = observeResetCard && globalThis.__computaModelFirstPrepared === undefined;
+    if (observeResetCard) modelLastFreshResetCardOutcome = null;
     if (input.action === 'stop'
       || input.expectedFirstUserFingerprint != null || globalThis.__computaModelFirstSubmitted !== undefined
       || globalThis.__computaModelFirstProof !== undefined || globalThis.__computaModelFirstPrompt !== undefined
@@ -2999,16 +2999,16 @@ function modelFreshAccountUsageLimited() {
     const chrome = [...buttons].filter(node => modelVisible(node) && !node.closest(excluded));
     const popup = node => ['true', 'menu', 'dialog', 'listbox'].includes(node.getAttribute('aria-haspopup'))
       && node.getAttribute('aria-expanded') !== 'true' && modelEnabled(node);
-    // Read only short, visible text nodes in the candidate card or button. A
-    // clipped scan or a quoted/editor subtree cannot contribute any fragment.
-    const words = (root, skipButtons) => {
+    // Admission uses only short, visible text nodes. The rejected-offer
+    // diagnostic may compare bounded hidden button text to its fixed label.
+    const words = (root, skipButtons, requireVisible = true) => {
       const parts = [], stack = [root]; let visited = 0, length = 0;
       while (stack.length) {
         const node = stack.pop();
         if (++visited > 96) return null;
         if (node.nodeType === 3) {
           length += node.length;
-          if (length > 512 || !modelVisible(node.parentElement)) return null;
+          if (length > 512 || requireVisible && !modelVisible(node.parentElement)) return null;
           parts.push(node.textContent);
         } else if (node.nodeType === 1) {
           if (node.closest(excluded)) return null;
@@ -3033,8 +3033,50 @@ function modelFreshAccountUsageLimited() {
     if (!empty) return reject('editor_nonempty');
     const enabled = chrome.filter(modelEnabled).map(node => ({ node, name: label(node) }));
     const named = name => enabled.filter(item => item.name === name).map(item => item.node);
-    const offer = one(named('Get more usage'));
-    if (!offer) return reject('offer_missing_or_ambiguous');
+    const offerName = 'Get more usage', offers = named(offerName), offer = one(offers);
+    const resetCardControls = 'button, a, [role="button"], [role="link"], [role="switch"], textarea, input, select, [contenteditable]';
+    const exactLink = (node, name, path) => {
+      const href = node.getAttribute('href');
+      if (node.tagName !== 'A' || !modelEnabled(node) || label(node) !== name) return false;
+      try { return new URL(href, node.baseURI ?? document.URL).href === 'https://claude.ai' + path; }
+      catch { return false; }
+    };
+    const sharedLimitLink = node => exactLink(node, 'limits shared with Claude Code', '/settings/claude-code');
+    const useResetLink = node => exactLink(node, 'Use reset', '/settings/usage?highlight=resets');
+    if (!offer) {
+      // Profile only a rejected offer in a card independently anchored by the
+      // existing popup and both links. These labels cannot satisfy admission.
+      if (diagnose && incognito) {
+        const about = one(named('About resets'));
+        let card = about && popup(about) ? about.parentElement : null;
+        for (let depth = 0; card && depth < 8; depth++, card = card.parentElement) {
+          if (['BODY', 'HTML'].includes(card.tagName) || [picker, send, editor].some(node => card.contains(node))) break;
+          if (!modelVisible(card) || card.closest(excluded)) continue;
+          const controls = card.querySelectorAll(resetCardControls);
+          if (controls.length < 3 || controls.length > 8) continue;
+          const shared = one([...controls].filter(sharedLimitLink)), reset = one([...controls].filter(useResetLink));
+          if (!shared || !reset) continue;
+          if (offers.length > 1) return reject('offer_ambiguous');
+          const candidates = [...controls].filter(node => {
+            if ([about, shared, reset].includes(node) || node.closest(excluded)) return false;
+            if (node.tagName !== 'BUTTON' && node.tagName !== 'A' && !['button', 'link'].includes(node.getAttribute('role'))) return false;
+            if (node.getAttribute('aria-label') === offerName || node.getAttribute('title') === offerName
+              || words(node, false, modelVisible(node)) === offerName) return true;
+            const labelID = node.getAttribute('aria-labelledby') || '';
+            if (!/^[\w:.\-]{1,96}$/.test(labelID)) return false;
+            const labelledBy = one(card.querySelectorAll(`[id="${labelID}"]`));
+            return !!labelledBy && words(labelledBy, false) === offerName;
+          });
+          if (!candidates.length) return reject('offer_absent');
+          const candidate = one(candidates);
+          if (!candidate) break;
+          if (!modelVisible(candidate)) return reject('offer_hidden');
+          if (!modelEnabled(candidate)) return reject('offer_disabled');
+          return reject(candidate.tagName === 'BUTTON' ? 'offer_alternate_label_source' : 'offer_alternate_role');
+        }
+      }
+      return reject('offer_missing_or_ambiguous');
+    }
 
     // The signed-in Incognito reset card is a fresh preflight abort surface.
     // It does not attest to temporary-mode ownership or completed cleanup.
@@ -3043,24 +3085,20 @@ function modelFreshAccountUsageLimited() {
       if (!about) note('about_missing_or_ambiguous');
       else if (!popup(about)) note('about_not_closed_popup');
       else {
-        const exactLink = (node, name, path) => {
-          const href = node.getAttribute('href');
-          if (node.tagName !== 'A' || !modelEnabled(node) || label(node) !== name) return false;
-          try { return new URL(href, node.baseURI ?? document.URL).href === 'https://claude.ai' + path; }
-          catch { return false; }
-        };
         let card = offer.parentElement, outcome = 'card_scope';
         for (let depth = 0; card && depth < 8; depth++, card = card.parentElement) {
           if (['BODY', 'HTML'].includes(card.tagName) || [picker, send, editor].some(node => card.contains(node))) break;
           if (!card.contains(about) || !modelVisible(card) || card.closest(excluded)) continue;
           if (outcome === 'card_scope') outcome = 'card_controls';
-          const controls = [...card.querySelectorAll('button, a, [role="button"], [role="link"], [role="switch"], textarea, input, select, [contenteditable]')];
+          const controls = [...card.querySelectorAll(resetCardControls)];
           if (controls.length !== 4 || card.querySelector('[aria-checked="true"], [aria-pressed="true"]')) continue;
           if (outcome === 'card_controls') outcome = 'card_links';
-          if (!one(controls.filter(node => exactLink(node, 'limits shared with Claude Code', '/settings/claude-code')))
-            || !one(controls.filter(node => exactLink(node, 'Use reset', '/settings/usage?highlight=resets')))) continue;
+          if (!one(controls.filter(sharedLimitLink)) || !one(controls.filter(useResetLink))) continue;
           const copy = words(card, true);
-          if (copy && /^Usage limit reached · Resets (?:[1-9]|1[0-2]):[0-5][0-9] (?:AM|PM) · limits shared with Claude Code You have (?:1 reset|(?:[2-9]|[1-9][0-9]) resets) available\. Use reset$/.test(copy)) return true;
+          if (copy && /^Usage limit reached · Resets (?:[1-9]|1[0-2]):[0-5][0-9] (?:AM|PM) · limits shared with Claude Code You have (?:1 reset|(?:[2-9]|[1-9][0-9]) resets) available\. Use reset$/.test(copy)) {
+            if (input.action === 'discoverModels') note('matched_after_menu');
+            return true;
+          }
           // Keep the furthest reached predicate across the bounded candidates.
           if (copy !== null) outcome = 'copy_mismatch';
           else if (outcome !== 'copy_mismatch') outcome = 'copy_unavailable';
@@ -3091,7 +3129,7 @@ function modelFreshAccountUsageLimited() {
   return false;
 }
 function modelUsageLimited() { return modelUsageLimitSurfaces().length > 0 || modelFreshAccountUsageLimited(); }
-function modelQuotaDiagnostic(includeFreshResetCard = false) {
+function modelQuotaDiagnostic(includeFreshResetCard = false, temporaryProof = modelLastTemporaryProof) {
   const boundary = '[data-testid="assistant-message"], [data-testid="user-message"]';
   const tags = ['a', 'button', 'div', 'span', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'section', 'main', 'body', 'html', 'dialog'];
   const bounded = count => Math.min(count, 1_000);
@@ -3148,7 +3186,7 @@ function modelQuotaDiagnostic(includeFreshResetCard = false) {
   }
   const header = [...document.querySelectorAll('.animate-incognito-header-in span')].filter(node => !node.closest(boundary));
   const exit = [...document.querySelectorAll('button[aria-label="Exit incognito"]')].filter(node => !node.closest(boundary));
-  const result = { kind: 'quota_structure', provider: 'claude', temporaryProof: modelLastTemporaryProof,
+  const result = { kind: 'quota_structure', provider: 'claude', temporaryProof,
     headings: headings.map(node => ({ ...shape(node), spacedClock: spaced.test(modelQuotaLabel(node.textContent)), joinedClock: joined.test(modelQuotaLabel(node.textContent)) })),
     controls: [...candidates].slice(0, 8).map(controlShape), popupAncestors,
     support: support.map(node => ({ ...shape(node), labelExact: modelQuotaLabel(node.textContent) === 'messages',
@@ -3593,7 +3631,26 @@ async function providerPageAction() {
       && globalThis.__computaModelOwner === input.ownerToken && modelUserRoots().length === 0
       && globalThis.__computaModelFirstSubmitted !== true
       && document.querySelectorAll('[data-testid="assistant-message"]').length === 0;
-    return websiteModelPickerAction(modelState, input, ownedUserCount === 0 && freshPickerContext(), freshPickerContext);
+    if (input.action !== 'discoverModels' || globalThis.__computaModelDiscovery?.completed === true)
+      return websiteModelPickerAction(modelState, input, ownedUserCount === 0 && freshPickerContext(), freshPickerContext);
+    const result = await websiteModelPickerAction(modelState, input, ownedUserCount === 0 && freshPickerContext(), freshPickerContext);
+    if (result.error || result.pending || !Array.isArray(result.modelChoices) || !result.modelChoices.length
+      || globalThis.__computaModelDiscovery?.completed !== true) return result;
+    try {
+      // Sample only the completed close, before any later read or page action.
+      // A lost context suppresses diagnostics without revising the catalog.
+      if (!freshPickerContext()) return result;
+      const closed = websiteModelPickerState('claude');
+      const trigger = closed.trigger;
+      if (closed.triggerCount !== 1 || trigger !== modelState.trigger || !closed.enabled(trigger) || closed.physicalMenus.length
+        || ![null, 'false'].includes(trigger.getAttribute('aria-expanded'))
+        || ![null, 'closed'].includes(trigger.getAttribute('data-state')) || !modelTemporaryVerified()
+        || !modelFind(['[data-testid="chat-input"][contenteditable="true"][role="textbox"]'])) return result;
+      modelFreshAccountUsageLimited(true);
+      // Earlier legacy quota counters in the temporary proof predate this close.
+      if (modelLastFreshResetCardOutcome !== null) return { ...result, quotaDiagnostic: modelQuotaDiagnostic(true, null) };
+    } catch { /* Diagnostic observation cannot change picker completion. */ }
+    return result;
   }
   if (input.action !== 'stop' && input.expectedModelChoice != null) {
     const submittedProof = globalThis.__computaModelFirstProof;

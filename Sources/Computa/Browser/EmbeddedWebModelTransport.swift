@@ -1273,7 +1273,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         private var failureRecorded = false
         private var stopRecorded = false
 
-        mutating func admit(_ records: [String], action: String, force: Bool) -> Bool {
+        mutating func admit(_ records: [String], action: String, force: Bool, discovery: Bool = false) -> Bool {
             if action == "stop" {
                 guard !stopRecorded else { return false }
                 stopRecorded = true
@@ -1281,7 +1281,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 guard !failureRecorded else { return false }
                 failureRecorded = true
             } else {
-                guard records != last || action != lastAction, progressRecords < 3 else { return false }
+                // Reserve the third discovery observation for the closed picker.
+                let limit = discovery && action != "discoverModels" ? 2 : 3
+                guard records != last || action != lastAction, progressRecords < limit else { return false }
                 progressRecords += 1
             }
             last = records; lastAction = action
@@ -2991,6 +2993,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         qualified = provider == .qwen ? parsed.filter(\.isObservedChoice) : parsed
                         guard !qualified.isEmpty, qualified.allSatisfy(\.isObservedChoice) else { throw Failure.modelUnverified }
                         modes = []
+                    }
+                    if provider == .claude, !Task.isCancelled, recoveryCandidateIsCurrent?() != false,
+                       ContinuousClock.now < deadline, sessions[token] === session,
+                       browser.webView(for: session.tabID) === session.view,
+                       let generation = session.documentGeneration, browser.documentGeneration(for: session.tabID) == generation,
+                       let raw = result["quotaDiagnostic"] as? String {
+                        logQuotaDiagnostic(raw, session: session, action: "discoverModels")
                     }
                     let cleanup = await finish(session, cancel: false)
                     guard let receipt = try JSONSerialization.jsonObject(with: cleanup) as? [String: Any],
@@ -5501,6 +5510,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if let rawOutcome = value["resetCardOutcome"] {
             let outcomes: Set<String> = ["route_ineligible", "button_scan_limit", "authored_content", "picker_guard",
                 "send_guard", "editor_guard", "editor_nonempty", "offer_missing_or_ambiguous", "about_missing_or_ambiguous",
+                "offer_absent", "offer_disabled", "offer_hidden", "offer_ambiguous", "offer_alternate_role",
+                "offer_alternate_label_source", "matched_after_menu",
                 "about_not_closed_popup", "card_scope", "card_controls", "card_links", "copy_unavailable", "copy_mismatch"]
             guard let outcome = rawOutcome as? String, outcomes.contains(outcome) else { return nil }
             safe["resetCardOutcome"] = outcome
@@ -5571,9 +5582,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private func logQuotaDiagnostic(_ raw: String, session: Session, action: String, force: Bool = false) {
         guard let safeAction = Self.quotaDiagnosticAction(action),
               let records = Self.quotaStructureDiagnosticRecords(raw, provider: session.provider),
-              session.quotaDiagnosticLog.admit(records, action: safeAction, force: force) else { return }
+              session.quotaDiagnosticLog.admit(records, action: safeAction, force: force, discovery: session.isDiscovery) else { return }
         for (index, record) in records.enumerated() {
-            Self.inspectionLog.error("quotaStructure action=\(safeAction, privacy: .public) sequence=\(session.sequence) index=\(index) \(record, privacy: .public)")
+            Self.inspectionLog.error("quotaStructure action=\(safeAction, privacy: .public) sequence=\(session.sequence) index=\(index) discovery=\(session.isDiscovery) \(record, privacy: .public)")
         }
     }
 

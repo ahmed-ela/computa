@@ -17676,11 +17676,14 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(records.count, 6)
         XCTAssertTrue(records.allSatisfy { $0.utf8.count <= 960 && !$0.contains("private_canary") })
         var resetCard = source
-        resetCard["resetCardOutcome"] = "copy_unavailable"
-        let resetRecords = try XCTUnwrap(EmbeddedWebModelTransport.quotaStructureDiagnosticRecords(try encode(resetCard), provider: .claude))
-        XCTAssertEqual(resetRecords.count, records.count)
-        let resetSummary = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(resetRecords[0].utf8)) as? [String: Any])
-        XCTAssertEqual(resetSummary["resetCardOutcome"] as? String, "copy_unavailable")
+        for outcome in ["copy_unavailable", "offer_absent", "offer_disabled", "offer_hidden", "offer_ambiguous",
+                        "offer_alternate_role", "offer_alternate_label_source", "matched_after_menu"] {
+            resetCard["resetCardOutcome"] = outcome
+            let resetRecords = try XCTUnwrap(EmbeddedWebModelTransport.quotaStructureDiagnosticRecords(try encode(resetCard), provider: .claude))
+            XCTAssertEqual(resetRecords.count, records.count)
+            let resetSummary = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(resetRecords[0].utf8)) as? [String: Any])
+            XCTAssertEqual(resetSummary["resetCardOutcome"] as? String, outcome)
+        }
         let badOutcomes: [Any] = ["private_canary", true, ["outcome": "copy_unavailable"]]
         for badOutcome in badOutcomes {
             resetCard["resetCardOutcome"] = badOutcome
@@ -17824,6 +17827,17 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertTrue(stoppedFirst.admit(["stop"], action: "stop", force: false))
         XCTAssertFalse(stoppedFirst.admit(["changed"], action: "stop", force: true))
         XCTAssertTrue(stoppedFirst.admit(["failure"], action: "prepare", force: true))
+    }
+
+    func testQuotaDiagnosticBudgetReservesDiscoveryObservationAfterTheMenuCloses() {
+        var budget = EmbeddedWebModelTransport.QuotaDiagnosticLogBudget()
+        XCTAssertTrue(budget.admit(["early"], action: "inspect", force: false, discovery: true))
+        XCTAssertTrue(budget.admit(["ready"], action: "inspect", force: false, discovery: true))
+        XCTAssertFalse(budget.admit(["third inspect"], action: "inspect", force: false, discovery: true))
+        XCTAssertTrue(budget.admit(["ready"], action: "discoverModels", force: false, discovery: true))
+        XCTAssertFalse(budget.admit(["another menu"], action: "discoverModels", force: false, discovery: true))
+        XCTAssertTrue(budget.admit(["failure"], action: "inspect", force: true, discovery: true))
+        XCTAssertTrue(budget.admit(["stop"], action: "stop", force: true, discovery: true))
     }
 
     func testInsertionDifferenceDiagnosticsAllowOnlyFiniteIndexAndUnicodeScalars() {

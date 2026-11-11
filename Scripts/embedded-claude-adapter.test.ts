@@ -910,8 +910,7 @@ describe("embedded Claude fixed adapter", () => {
     expect(await fresh.run("stop")).toMatchObject({ error: "temporary_mode_unverified" });
   });
 
-  function freshIncognitoResetLimit(f: ReturnType<typeof fixture>) {
-    const picker = installObservedModelPicker(f, provider, Element); picker.selected("Haiku 5.5");
+  function incognitoResetCard(f: ReturnType<typeof fixture>) {
     const card = new Element("DIV"), heading = new Element("DIV"), actions = new Element("DIV");
     const clock = new Element("#text", {}, "Usage limit reached · Resets 7:00 PM · ");
     const shared = new Element("A", { href: "https://claude.ai/settings/claude-code" }, "limits shared with Claude Code");
@@ -921,7 +920,12 @@ describe("embedded Claude fixed adapter", () => {
     const reset = new Element("A", { href: "https://claude.ai/settings/usage?highlight=resets" }, "Use reset");
     heading.append(clock, shared); actions.append(about, offer, reset);
     card.append(heading, available, actions); f.body.append(card); f.send.disabled = true;
-    return { picker, card, clock, shared, available, about, offer, reset, actions };
+    return { card, clock, shared, available, about, offer, reset, actions };
+  }
+
+  function freshIncognitoResetLimit(f: ReturnType<typeof fixture>) {
+    const picker = installObservedModelPicker(f, provider, Element); picker.selected("Haiku 5.5");
+    return { picker, ...incognitoResetCard(f) };
   }
 
   test("the signed-in Incognito reset card aborts fresh preflight without interacting or proving cleanup", async () => {
@@ -948,7 +952,7 @@ describe("embedded Claude fixed adapter", () => {
       "send-enabled": "send_guard", "open-picker": "picker_guard", "submitted": undefined, "authored-card": "authored_content",
       "bad-clock": "copy_mismatch", "different-copy": "copy_mismatch", "zero-resets": "copy_mismatch", "wrong-plural": "copy_mismatch",
       "hidden-copy": "copy_unavailable", "clipped-copy": "copy_unavailable", "other-link-origin": "card_links", "other-reset-query": "card_links",
-      "missing-offer": "offer_missing_or_ambiguous", "missing-about": "about_missing_or_ambiguous",
+      "missing-offer": "offer_absent", "missing-about": "about_missing_or_ambiguous",
       "about-not-popup": "about_not_closed_popup", "about-open": "about_not_closed_popup",
       "extra-control": "card_controls", "different-card": "card_controls", "separate-about": "card_scope", "button-scan-limit": "button_scan_limit"
     } as const;
@@ -983,6 +987,80 @@ describe("embedded Claude fixed adapter", () => {
       expect(result.error, variation).not.toBe("website_usage_limit"); expect(result.freshQuotaAbort, variation).toBeUndefined();
       expect(JSON.parse(result.quotaDiagnostic ?? "{}").resetCardOutcome, variation).toBe(outcomes[variation]);
       for (const control of [about, offer, reset, shared, f.send]) expect(control.clicks).toBe(0);
+    }
+  });
+
+  test("the rejected offer diagnostic distinguishes exact anchored alternatives without qualifying them", async () => {
+    const outcomes = {
+      disabled: "offer_disabled", hidden: "offer_hidden", duplicate: "offer_ambiguous", role: "offer_alternate_role",
+      title: "offer_alternate_label_source", labelledby: "offer_alternate_label_source", overridden: "offer_alternate_label_source",
+      unrelated: "offer_missing_or_ambiguous", externalLabel: "offer_absent",
+    } as const;
+    for (const variation of Object.keys(outcomes) as (keyof typeof outcomes)[]) {
+      const f = fixture(provider), { card, about, actions, offer, reset, shared, picker } = freshIncognitoResetLimit(f);
+      const labelID = "synthetic-private-offer-id";
+      switch (variation) {
+        case "disabled": offer.values["aria-disabled"] = "true"; break;
+        case "hidden": offer.values.hidden = ""; break;
+        case "duplicate": actions.append(offer.cloneNode()); break;
+        case "role": offer.tagName = "DIV"; offer.values.role = "button"; break;
+        case "title": offer.text = ""; offer.values.title = "Get more usage"; break;
+        case "labelledby":
+        case "externalLabel":
+          offer.text = ""; offer.values["aria-labelledby"] = labelID;
+          (variation === "labelledby" ? card : f.body).append(new Element("SPAN", { id: labelID }, "Get more usage")); break;
+        case "overridden": offer.values["aria-label"] = "synthetic private alternate label"; break;
+        case "unrelated": offer.disabled = true; reset.values.href += "&unrelated=true"; break;
+      }
+      const result = await f.run();
+      expect(result.error, variation).toBeUndefined(); expect(result.freshQuotaAbort).toBeUndefined();
+      expect(JSON.parse(result.quotaDiagnostic).resetCardOutcome, variation).toBe(outcomes[variation]);
+      expect(result.quotaDiagnostic).not.toContain(labelID);
+      expect(result.quotaDiagnostic).not.toContain("synthetic private alternate label");
+      for (const control of [about, offer, reset, shared, picker.trigger, f.send]) expect(control.clicks).toBe(0);
+      expect(f.composer.events).toEqual([]); expect(f.document.activeElement).toBeNull();
+    }
+  });
+
+  test("Claude discovery samples the reset card only after its exact fresh picker has closed", async () => {
+    for (const variation of ["matched", "disabled-offer", "lost-editor", "lost-mode", "lost-owner", "select-model"]) {
+      const f = fixture(provider), picker = installObservedModelPicker(f, provider, Element);
+      const surface = incognitoResetCard(f); surface.card.values.hidden = "";
+      for (const menu of [picker.menu, picker.nested]) {
+        const dismiss = menu.onDispatch!;
+        menu.onDispatch = (event: any) => {
+          dismiss(event);
+          if (event.type !== "keydown" || event.key !== "Escape" || picker.trigger.values["aria-expanded"] !== "false") return;
+          delete surface.card.values.hidden;
+          if (variation === "disabled-offer") surface.offer.disabled = true;
+          if (variation === "lost-editor") f.composer.connected = false;
+          if (variation === "lost-mode") f.exit.connected = false;
+          if (variation === "lost-owner") f.world.__computaModelOwner = "foreign";
+        };
+      }
+      const action = variation === "select-model" ? "selectModel" : "discoverModels";
+      const overrides = variation === "select-model" ? { modelChoice: picker.choice("Sonnet 4.6") } : {};
+      let result = await f.run(action, overrides);
+      expect(result.pending, variation).toBe(true);
+      for (let phase = 0; phase < 4 && result.pending; phase++) {
+        expect(result.quotaDiagnostic, variation).toBeUndefined();
+        result = await f.run(action, overrides);
+      }
+      if (variation === "lost-owner") expect(result.error).toBe("model_unverified");
+      else if (variation === "select-model") expect(result.selected).toBe(true);
+      else {
+        expect(result.error, variation).toBeUndefined();
+        expect(result.modelChoices?.length ?? 0, variation).toBeGreaterThan(0);
+      }
+      if (variation === "matched" || variation === "disabled-offer") {
+        const diagnostic = JSON.parse(result.quotaDiagnostic);
+        expect(diagnostic.resetCardOutcome).toBe(variation === "matched" ? "matched_after_menu" : "offer_disabled");
+        expect(diagnostic.temporaryProof).toBeNull();
+        expect(result.freshQuotaAbort).toBeUndefined(); expect(result.error).toBeUndefined();
+        expect((await f.run(action, overrides)).quotaDiagnostic).toBeUndefined();
+      } else expect(result.quotaDiagnostic, variation).toBeUndefined();
+      expect(f.send.clicks).toBe(0); expect(surface.about.clicks + surface.offer.clicks + surface.reset.clicks + surface.shared.clicks).toBe(0);
+      expect(f.composer.events).toEqual([]);
     }
   });
 
