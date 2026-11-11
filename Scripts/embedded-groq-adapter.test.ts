@@ -18,6 +18,17 @@ const appendObservedShowMore = (f: ReturnType<typeof groqFixture>) => {
   return control;
 };
 
+const htmlParagraph = (f: ReturnType<typeof groqFixture>, text = f.f.reply, attributes = {},
+  namespace = 'http://www.w3.org/1999/xhtml', attributeNamespace: string | null = null) => {
+  const paragraph = new f.Node('P', attributes);
+  Object.defineProperties(paragraph, { namespaceURI: { value: namespace }, attributes: {
+    get: () => Object.entries(paragraph.values).map(([name, value]) => ({ name, value, namespaceURI: attributeNamespace })),
+  } });
+  paragraph.append(new f.Node('#text', {}, text));
+  f.f.answer.replaceChildren(paragraph);
+  return paragraph;
+};
+
 describe('Groq fixed fresh-session adapter', () => {
 
   test('literal structure facts distinguish paragraphs, known code, authored text and misplaced copy without authorizing fallback', async () => {
@@ -952,12 +963,101 @@ describe('Groq fixed fresh-session adapter', () => {
     expect(observed.busy).toBe(false); expect(observed.firstUserVerified).toBe(true);
   });
 
+  test('a completed owned passive paragraph reports exact text without granting literal authority', async () => {
+    for (const [attributes, reply] of [
+      [{}, '{"type":"message","text":"GROQ_FIXTURE_MARKER"}'],
+      [{ class: 'text-left mb-4' }, '{"type":"message","text":"GROQ_FIXTURE_MARKER"}'],
+      [{}, '{"type":"tool_calls","calls":[}'],
+    ] as const) {
+      const f = groqFixture({ key: 'openai/gpt-oss-20b', label: 'GPT OSS 20B' });
+      const sent = await f.submit();
+      expect(sent.groqRenderedMessageRevision).toBeUndefined();
+      htmlParagraph(f, reply, attributes);
+      const observed = await f.run();
+      expect(observed).toMatchObject({ answerComplete: true, busy: false, firstUserVerified: true,
+        text: reply, groqRenderedMessageRevision: 1, groqLiteralResponse: false,
+        completionEvidence: { codeStructure: { reason: 'pre_count', preCount: 0, codeCount: 0, scanCount: 0 } } });
+      expect(f.f.sendCount).toBe(1); expect(f.f.clearCount).toBe(0);
+    }
+  });
+
+  test('paragraph evidence excludes attributed, hidden, mixed, extra, foreign or inexact content', async () => {
+    for (const variant of ['extra_attribute', 'unknown_class', 'namespaced_class', 'hidden', 'inert', 'foreign_namespace', 'nested',
+      'split_text', 'answer_sibling', 'second_paragraph', 'trimmed'] as const) {
+      const f = groqFixture(); await f.submit();
+      const attributes = variant === 'extra_attribute' ? { class: 'text-left mb-4', title: 'extra' }
+        : variant === 'unknown_class' ? { class: 'text-left mb-4 extra' }
+        : variant === 'namespaced_class' ? { class: 'text-left mb-4' }
+        : variant === 'hidden' ? { hidden: '' } : variant === 'inert' ? { inert: '' } : {};
+      const paragraph = htmlParagraph(f, variant === 'trimmed' ? ' ' + f.f.reply : f.f.reply, attributes,
+        variant === 'foreign_namespace' ? 'http://www.w3.org/2000/svg' : undefined,
+        variant === 'namespaced_class' ? 'urn:fixture-attribute' : null);
+      if (variant === 'nested') paragraph.replaceChildren(new f.Node('EM', {}, f.f.reply));
+      if (variant === 'split_text') paragraph.append(new f.Node('#text', {}, ''));
+      if (variant === 'answer_sibling') f.f.answer.append(new f.Node('#text', {}, ' '));
+      if (variant === 'second_paragraph') f.f.answer.append(new f.Node('P', {}, ''));
+      const observed = await f.run();
+      expect(observed.groqRenderedMessageRevision).toBeUndefined();
+      expect(observed.groqLiteralResponse).toBe(false);
+      expect(observed.answerComplete).toBe(true);
+      expect(observed.text).toBe(f.f.reply);
+      expect(f.f.sendCount).toBe(1); expect(f.f.clearCount).toBe(0);
+    }
+  });
+
+  test('paragraph evidence is reread after first-user hashing and requires current completion', async () => {
+    const f = groqFixture(); await f.submit();
+    const paragraph = htmlParagraph(f);
+    f.onDigest(() => { paragraph.append(new f.Node('#text', {}, '')); });
+    const changed = await f.run();
+    expect(changed.answerComplete).toBe(true); expect(changed.text).toBe(f.f.reply);
+    expect(changed.groqRenderedMessageRevision).toBeUndefined();
+    htmlParagraph(f); f.f.copy.disabled = true;
+    const busy = await f.run();
+    expect(busy.answerComplete).toBe(false); expect(busy.groqRenderedMessageRevision).toBeUndefined();
+    f.f.copy.disabled = false;
+    expect((await f.run()).groqRenderedMessageRevision).toBe(1);
+    f.f.userBody.textContent = 'Foreign body';
+    const foreign = await f.run();
+    expect(foreign.error).toBe('conversation_changed'); expect(foreign.groqRenderedMessageRevision).toBeUndefined();
+    expect(f.f.sendCount).toBe(1); expect(f.f.clearCount).toBe(0);
+  });
+
+  test('paragraph evidence keeps only attached answer, paragraph and Text identities across rereads', async () => {
+    const f = groqFixture(); await f.submit();
+    let paragraph = htmlParagraph(f);
+    const first = await f.run();
+    expect(first.groqRenderedMessageRevision).toBe(1);
+    expect((await f.run('verifyModel')).groqRenderedMessageRevision).toBeUndefined();
+    expect((await f.run()).groqRenderedMessageRevision).toBe(1);
+    paragraph.replaceChildren(new f.Node('#text', {}, f.f.reply));
+    expect((await f.run()).groqRenderedMessageRevision).toBe(2);
+    paragraph = htmlParagraph(f);
+    const clone = await f.run();
+    expect(clone.text).toBe(first.text); expect(clone.groqRenderedMessageRevision).toBe(3);
+    const formerAnswer = f.f.answer, block = formerAnswer.parentElement;
+    const nextAnswer = new f.Node('DIV', { ...formerAnswer.values });
+    block.children[block.children.indexOf(formerAnswer)] = nextAnswer;
+    nextAnswer.parentElement = block;
+    formerAnswer.parentElement = null; formerAnswer.connected = false;
+    nextAnswer.append(paragraph); f.f.answer = nextAnswer;
+    expect((await f.run()).groqRenderedMessageRevision).toBe(4);
+    // A break present on the pre-hash read cannot revive the previous witness
+    // when the same paragraph and Text are restored during the await.
+    paragraph.setAttribute('title', 'extra');
+    f.onDigest(() => paragraph.removeAttribute('title'));
+    expect((await f.run()).groqRenderedMessageRevision).toBe(5);
+    expect((await f.run()).groqRenderedMessageRevision).toBe(5);
+    expect(f.f.sendCount).toBe(1); expect(f.f.clearCount).toBe(0);
+  });
+
   test('the observed nested JSON block preserves literal escapes and excludes separate reasoning', async () => {
     const f = groqFixture(); f.f.structuredReply = true;
     f.f.reply = '{"type":"tool_calls","calls":[{"name":"fixture","arguments":{"literal":"a\\n  b\\u005f\\\""}}]}';
     await f.submit(); const observed = await f.run();
     expect(observed.text).toBe(f.f.reply); expect(observed.answerComplete).toBe(true);
     expect(observed.groqLiteralResponse).toBe(true);
+    expect(observed.groqRenderedMessageRevision).toBeUndefined();
     expect(observed.text).not.toContain('Synthetic reasoning');
     expect(JSON.parse(observed.text).calls[0].arguments.literal).toBe('a\n  b_"');
     // Syntax highlighting may split code into spans; textContent retains bytes.

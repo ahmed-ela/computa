@@ -5684,7 +5684,7 @@ private actor GroqMissingNativeProofFixtureTransport: WebModelTransport {
     private var queries = 0
     init(_ base: any WebModelTransport) { self.base = base }
     func proofQueries() -> Int { queries }
-    func snapshotGroqCompletedLiteralProof(sessionToken: String) async -> GroqCompletedLiteralProof? {
+    func snapshotGroqCompletedLiteralProof(sessionToken: String) async -> GroqCompletedReplyProof? {
         queries += 1
         return nil
     }

@@ -83,7 +83,9 @@ function computaProviderCore(request, provider, origin, actions) {
 
 // Groq chat is a fresh explicit-clear session, never a temporary conversation.
 // The native transport owns lifecycle receipts, document generations and URLs.
+const stateKey = '__computaGroqFreshSessionV1';
 let groqUserCountDiagnostic = null;
+let groqSession = globalThis[stateKey];
 try {
   const actions = ['inspect', 'discoverModels', 'selectModel', 'modelDiagnostic', 'verifyModel',
     'prepare', 'insert', 'sendReady', 'submit', 'stop', 'clearTranscript', 'observeClearTranscript'];
@@ -95,11 +97,12 @@ try {
   const validKey = key => typeof key === 'string' && key.length > 0 && key.length <= 160
     && /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(key) && !key.includes('..') && !key.includes('//');
   if (modelKey !== null && !validKey(modelKey)) c.fail('model_unverified');
-  const stateKey = '__computaGroqFreshSessionV1';
   if (globalThis[stateKey] === undefined) globalThis[stateKey] = { owner: input.ownerToken,
     document, generation: input.documentGeneration, url: null, mapping: null, picker: null,
-    prepared: null, inserted: null, submitted: false, first: null, clear: null, sendReveal: null };
+    prepared: null, inserted: null, submitted: false, first: null, clear: null, sendReveal: null,
+    renderedMessage: null, renderedMessageRevision: 0 };
   const state = globalThis[stateKey];
+  groqSession = state;
   const owned = () => c.context() && globalThis[stateKey] === state && state.owner === input.ownerToken
     && state.document === document && state.generation === input.documentGeneration
     && (state.url === null && !state.picker && !state.prepared && !state.inserted && !state.submitted && !state.clear
@@ -278,6 +281,21 @@ try {
     return c.nodes(document, 'button', 128).filter(node => c.visible(node) && !authored(node)
       && c.normalize(node.innerText || node.textContent) === 'Clear chat');
   }
+  function renderedMessageShape(answer, text) {
+    if (answer.childNodes.length !== 1) return null;
+    const paragraph = answer.childNodes[0];
+    if (paragraph.nodeType !== 1 || paragraph.namespaceURI !== 'http://www.w3.org/1999/xhtml'
+      || paragraph.tagName !== 'P' || paragraph.childNodes.length !== 1 || paragraph.isContentEditable
+      || !c.visible(paragraph)) return null;
+    const attrs = paragraph.attributes;
+    if (attrs.length !== 0 && (attrs.length !== 1 || attrs[0].namespaceURI !== null
+      || attrs[0].name !== 'class' || attrs[0].value !== 'text-left mb-4')) return null;
+    const body = paragraph.childNodes[0];
+    // Native checks message grammar. The paragraph profile never normalizes,
+    // truncates or joins text to obtain a matching byte sequence.
+    if (body.nodeType !== 3 || body.textContent !== text) return null;
+    return { answer, paragraph, body };
+  }
   function responseText(answer) {
     const structure = { kind: 'groq_literal_profile_v1', reason: 'absent_answer', preCount: 0, codeCount: 0, scanCount: 0 };
     const result = (text, literal, reason) => { structure.reason = reason; return { text, literal, structure }; };
@@ -346,9 +364,14 @@ try {
     const progress = input.action === 'inspect'
       && Object.getOwnPropertyDescriptor(input, 'groqFailureProgress')?.value === true ? { reason: null } : null;
     const extracted = responseText(t.answer), text = extracted.text, answerComplete = responseComplete(t, form, text, progress);
+    const renderedMessage = answerComplete && !extracted.literal && (input.action === 'inspect' || state.renderedMessage)
+      ? renderedMessageShape(t.answer, text) : null;
+    const prior = state.renderedMessage;
+    if (prior && (!renderedMessage || prior.answer !== renderedMessage.answer || prior.paragraph !== renderedMessage.paragraph
+      || prior.body !== renderedMessage.body)) state.renderedMessage = null;
     // The terminal conjunction is answer-scoped footer Copy plus an empty,
     // enabled composer and enabled Send. Global speed/code-copy grant nothing.
-    return { t, form, output: { url: document.URL, sessionLifecycle: 'explicit_clear', temporary: false,
+    return { t, form, renderedMessage, output: { url: document.URL, sessionLifecycle: 'explicit_clear', temporary: false,
       modelEvidence, composer: c.enabled(form.editor), userCount: t.users.length, responseCount: t.answers.length,
       conversationIdentity: null, busy: !answerComplete && (t.users.length > 0 || state.submitted && !state.clear),
       interrupted: false, answerComplete, text, groqLiteralResponse: extracted.literal,
@@ -450,6 +473,15 @@ try {
       c.fail('conversation_changed', 'first_user_message');
     Object.assign(initial.output, current.output,
       { firstUserVerified: true, firstUserMarkerVerified: true, firstUserFingerprint: fingerprint });
+    // Issue the witness only from the post-hash owned inspection. Losing the
+    // shape even on the pre-hash read invalidates its old revision.
+    if (input.action === 'inspect' && current.renderedMessage) {
+      if (!state.renderedMessage && state.renderedMessageRevision < 1024) {
+        state.renderedMessage = current.renderedMessage;
+        state.renderedMessageRevision++;
+      }
+      if (state.renderedMessage) initial.output.groqRenderedMessageRevision = state.renderedMessageRevision;
+    }
   } else if (state.first || input.expectedFirstUserFingerprint != null) c.fail('conversation_changed', 'first_user_message');
   if (['discoverModels', 'selectModel'].includes(input.action)) {
     if (!fresh()) c.fail('not_fresh');
@@ -560,6 +592,7 @@ try {
   // cannot bind the newly appended user body or prove response completion.
   return { ...initial.output, submitted: true };
 } catch (error) {
+  if (groqSession) groqSession.renderedMessage = null;
   if (error?.computaAdapterFailure === true) return { error: error.error, ...(error.detail ? { detail: error.detail } : {}),
     ...(error.error === 'conversation_changed' && error.detail === 'user_count' && groqUserCountDiagnostic
       ? { groqUserCountDiagnostic } : {}) };

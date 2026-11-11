@@ -8,9 +8,11 @@ import OSLog
 
 /// Native-only completed Groq reply identity. Only this file can mint it;
 /// page JSON, diagnostic packets and custom transports have no initializer.
-/// This grants one narrowly checked correction eligibility, never tool or
-/// cleanup authority and never permission to retain a website conversation.
-struct GroqCompletedLiteralProof: Equatable, Sendable {
+/// Each accessor exposes only its own response source.
+struct GroqCompletedReplyProof: Equatable, Sendable {
+    enum Payload: Equatable, Sendable { case literal, renderedMessage(String) }
+    static let renderedMessageSnapshotKey = "groqRenderedMessage"
+
     let admission: WebModelStartAdmission
     let sessionToken: String
     let documentGeneration: UUID
@@ -19,14 +21,16 @@ struct GroqCompletedLiteralProof: Equatable, Sendable {
     let firstUserFingerprint: String
     let promptFingerprint: String
     let responseSHA256: String
+    let payload: Payload
 
     fileprivate init(admission: WebModelStartAdmission, sessionToken: String, documentGeneration: UUID,
                      modelChoice: WebsiteModelChoice, sequence: Int, firstUserFingerprint: String,
-                     promptFingerprint: String, responseSHA256: String) {
+                     promptFingerprint: String, responseSHA256: String, payload: Payload) {
         self.admission = admission; self.sessionToken = sessionToken
         self.documentGeneration = documentGeneration; self.modelChoice = modelChoice; self.sequence = sequence
         self.firstUserFingerprint = firstUserFingerprint; self.promptFingerprint = promptFingerprint
         self.responseSHA256 = responseSHA256
+        self.payload = payload
     }
 }
 
@@ -771,6 +775,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
     }
 
+    private enum GroqCompletionSource: Equatable {
+        case literal
+        case renderedMessage(revision: Int)
+    }
+
     private final class Session {
         let token = UUID().uuidString
         let firstUserMarker = UUID().uuidString
@@ -892,7 +901,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             let outboundFingerprint: String
         }
         var groqStartAdmission: WebModelStartAdmission?
-        var groqCompletedLiteralProof: GroqCompletedLiteralProof?
+        var groqCompletionSource: GroqCompletionSource?
+        var groqCompletedReplyProof: GroqCompletedReplyProof?
         struct ExplicitClearOperation {
             let id: UUID
             let generation: UUID
@@ -1642,9 +1652,21 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     /// Return only the frozen native completed-reply proof. This performs no
     /// page read and cannot mint a proof from a diagnostic or cached text alone.
-    func snapshotGroqCompletedLiteralProof(sessionToken: String) async -> GroqCompletedLiteralProof? {
+    func snapshotGroqCompletedLiteralProof(sessionToken: String) async -> GroqCompletedReplyProof? {
+        guard let proof = currentGroqCompletedReplyProof(sessionToken: sessionToken),
+              case .literal = proof.payload else { return nil }
+        return proof
+    }
+
+    func snapshotGroqCompletedRenderedMessageProof(sessionToken: String) async -> GroqCompletedReplyProof? {
+        guard let proof = currentGroqCompletedReplyProof(sessionToken: sessionToken),
+              case .renderedMessage = proof.payload else { return nil }
+        return proof
+    }
+
+    private func currentGroqCompletedReplyProof(sessionToken: String) -> GroqCompletedReplyProof? {
         guard !Task.isCancelled, let session = sessions[sessionToken],
-              let proof = session.groqCompletedLiteralProof,
+              let proof = session.groqCompletedReplyProof,
               session.provider == .groq, session.state == "complete", session.terminalFailure == nil,
               !session.isDiscovery, !session.isRecoveryProbe, !session.temporary,
               finishingTasks[sessionToken] == nil, session.explicitClearOperation == nil,
@@ -2590,7 +2612,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 return try await poll(session)
             }
         } catch {
-            session.groqCompletedLiteralProof = nil
+            if case .renderedMessage? = session.groqCompletionSource { session.response = "" }
+            session.groqCompletionSource = nil
+            session.groqCompletedReplyProof = nil
             session.freshSubmissionCompletion = nil
             browser.revokeChatGPTResponseCompletion(tabID: session.tabID, ownerToken: session.token)
             logResponseProgressFailure(session, cause: error is CancellationError ? "cancelled"
@@ -4569,15 +4593,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         throw Failure.ownershipFailure(.javaScriptSubmission)
                     }
                 }
-                if session.provider == .groq, observed["busy"] as? Bool == false,
-                   observed["answerComplete"] as? Bool == true {
-                    // Rendered text may be valid but byte-different JSON. Only
-                    // the adapter's current exact literal profile can complete.
-                    guard Self.firstUserDiagnosticBool(observed["groqLiteralResponse"]) == true else {
+                let isComplete = observed["busy"] as? Bool == false && observed["answerComplete"] as? Bool == true
+                let groqSource: GroqCompletionSource?
+                if session.provider == .groq, isComplete {
+                    guard let source = Self.groqCompletionSource(observed, text: response) else {
                         captureGroqRejectedLiteralCandidate(session, observed: observed, stage: .initialCandidate, deadline: deadline)
                         throw Failure.responseFormatUnavailable
                     }
-                }
+                    groqSource = source
+                } else { groqSource = nil }
                 if !session.profiledFirstPositive {
                     session.profiledFirstPositive = true
                     session.responseProfile?.mark(.firstPositive)
@@ -4588,9 +4612,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         browser.prepareChatGPTInferencePrewarmIfNeeded()
                     }
                 }
-                let responseChanged = (session.modelVerificationPending
+                let responseChanged = (session.modelVerificationPending || session.provider == .groq
                     ? !session.response.utf8.elementsEqual(response.utf8) : session.response != response)
                     || quietCandidateResponseCount.map { count(observed, "responseCount") != $0 } == true
+                    || (groqSource != nil && session.groqCompletionSource != groqSource)
                 if responseChanged {
                     if session.profiledFirstCompletionCandidate { session.profileCompletionTransition(.candidateResponseChanged) }
                     session.response = response; session.lastChanged = .now; session.candidateSince = nil
@@ -4599,7 +4624,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             && Self.firstUserDiagnosticBool(observed["answerComplete"]) == false
                     }
                 }
-                if observed["busy"] as? Bool == false, observed["answerComplete"] as? Bool == true {
+                if isComplete {
+                    session.groqCompletionSource = groqSource
                     if !session.profiledFirstCompletionCandidate {
                         session.profiledFirstCompletionCandidate = true
                         session.responseProfile?.mark(.firstCompletionCandidate)
@@ -4736,9 +4762,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         }
                         if currentAnswerVerified {
                             if session.provider == .groq {
-                                // Recheck the last independent final read, never
-                                // a cached flag from the initial quiet candidate.
-                                guard Self.firstUserDiagnosticBool(completionObservation["groqLiteralResponse"]) == true else {
+                                // The final read must keep the same literal
+                                // source or the same attached rendered leaf.
+                                guard let groqSource,
+                                      Self.groqCompletionSource(completionObservation, text: response) == groqSource else {
                                     captureGroqRejectedLiteralCandidate(session, observed: completionObservation, stage: .finalReread, deadline: deadline)
                                     throw Failure.responseFormatUnavailable
                                 }
@@ -4763,7 +4790,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                 Self.inspectionLog.notice("completionDecision version=1 provider=chatgpt session=\(session.token, privacy: .public) sequence=\(session.sequence) method=\(method, privacy: .public) quietReady=\(quietReady) observerArmed=\(session.completionObserverArmed) initialReceiptPresent=\(terminalCandidate != nil) finalReceiptPresent=\(receiptPresent) initialMatch=\(initialReason, privacy: .public) finalMatch=\(finalReason, privacy: .public) routeKind=\(route, privacy: .public)")
                             }
                             session.freshSubmissionCompletion = freshSubmissionCompletion(session, observation: completionObservation)
-                            session.groqCompletedLiteralProof = completedGroqLiteralProof(session, observation: completionObservation)
+                            if let groqSource {
+                                let proof = completedGroqReplyProof(session, observation: completionObservation, source: groqSource)
+                                if case .renderedMessage = groqSource, proof == nil { throw Failure.responseFormatUnavailable }
+                                session.groqCompletedReplyProof = proof
+                            }
                             session.state = "complete"
                             browser.revokeChatGPTResponseCompletion(tabID: session.tabID, ownerToken: session.token)
                             session.responseProfile?.mark(.transportComplete)
@@ -4800,6 +4831,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             if !session.completionCandidate {
                 if previouslyCandidate { session.profileCompletionTransition(.completionCandidateLost) }
                 session.candidateSince = nil
+                if case .renderedMessage? = session.groqCompletionSource { session.response = "" }
+                session.groqCompletionSource = nil
             }
             guard session.state == "complete" || ContinuousClock.now - session.turnStarted < responseTimeout else {
                 throw Failure.deadline
@@ -9432,7 +9465,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     private func finish(_ session: Session, cancel: Bool,
                         cleanupCause: WebModelCleanupCause = .cancelled) async -> Data {
-        session.groqCompletedLiteralProof = nil
+        session.groqCompletedReplyProof = nil
         session.adapterFailurePublication?.revoke()
         // Cleanup must finish its own fresh ownership proof even when its
         // caller is cancelled. Share one bounded cleanup task and receipt for
@@ -9683,8 +9716,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             ])
         }
         let pendingModel = session.provider == .chatgpt && session.state == "running" && session.modelVerificationPending
+        let renderedGroq: Bool
+        if case .renderedMessage? = session.groqCompletionSource { renderedGroq = true }
+        else { renderedGroq = false }
         var value: [String: Any] = ["sessionToken": session.token, "provider": session.provider.rawValue,
-                                  "state": session.state, "text": pendingModel ? "" : session.response, "sequence": session.sequence]
+                                  "state": session.state, "text": pendingModel || renderedGroq ? "" : session.response, "sequence": session.sequence]
+        if session.state == "complete", case .renderedMessage? = session.groqCompletedReplyProof?.payload {
+            value[GroqCompletedReplyProof.renderedMessageSnapshotKey] = true
+        }
         switch session.provider.lifecycle {
         case .temporary: break
         case .visibleTranscriptClear:
@@ -9731,10 +9770,18 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     private func count(_ observation: [String: Any], _ key: String) -> Int { observation[key] as? Int ?? 0 }
 
-    /// Called only at the existing successful final-completion point, after
-    /// both literal guards and the independent full final observation. Absence
-    /// of native admission affects correction eligibility, never completion.
-    private func completedGroqLiteralProof(_ session: Session, observation: [String: Any]) -> GroqCompletedLiteralProof? {
+    private static func groqCompletionSource(_ observation: [String: Any], text: String) -> GroqCompletionSource? {
+        let literal = firstUserDiagnosticBool(observation["groqLiteralResponse"])
+        let revision = observation["groqRenderedMessageRevision"]
+        if literal == true { return revision == nil ? .literal : nil }
+        guard literal == false, let revision = ComputerToolArgumentContract.exactInt64(revision),
+              (1...1_024).contains(revision), WebModelResponseCodec.closedGroqRenderedMessage(text) != nil else { return nil }
+        return .renderedMessage(revision: Int(revision))
+    }
+
+    /// Freeze the reply source after the matching independent final read.
+    private func completedGroqReplyProof(_ session: Session, observation: [String: Any],
+                                         source: GroqCompletionSource) -> GroqCompletedReplyProof? {
         guard session.provider == .groq, session.state == "running", !Task.isCancelled,
               session.terminalFailure == nil, !session.isDiscovery, !session.isRecoveryProbe,
               !session.temporary, session.explicitClearReady, session.explicitClearOperation == nil,
@@ -9750,7 +9797,6 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               session.sequence == 1, session.baseline == 0, session.submitted,
               session.acknowledgedSendSequence == 1, !session.pendingSubmission,
               session.confirmedUsers == 1, session.observedResponseCount == 1,
-              Self.firstUserDiagnosticBool(observation["groqLiteralResponse"]) == true,
               Self.firstUserDiagnosticBool(observation["busy"]) == false,
               Self.firstUserDiagnosticBool(observation["answerComplete"]) == true,
               Self.firstUserDiagnosticBool(observation["interrupted"]) == false,
@@ -9766,9 +9812,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               case .model(let proof) = model,
               proof.selected.key == choice.key, proof.selected.label == choice.label,
               session.selectionEvidence?.isSameResolvedSelection(as: model) == true else { return nil }
+        let payload: GroqCompletedReplyProof.Payload = switch source {
+        case .literal: .literal
+        case .renderedMessage: .renderedMessage(text)
+        }
         return .init(admission: admission, sessionToken: session.token, documentGeneration: generation,
             modelChoice: choice, sequence: 1, firstUserFingerprint: first,
-            promptFingerprint: binding.promptFingerprint, responseSHA256: Self.promptFingerprint(text))
+            promptFingerprint: binding.promptFingerprint, responseSHA256: Self.promptFingerprint(text), payload: payload)
     }
 
     /// A first completed request only; never a capability to retain or append

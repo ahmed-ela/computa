@@ -1389,6 +1389,23 @@ enum WebModelResponseCodec {
         }
     }
 
+    static func closedGroqRenderedMessage(_ text: String) -> String? {
+        let bytes = Data(text.utf8)
+        guard bytes.count <= 220_000,
+              let envelope = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+              Set(envelope.keys) == ["type", "text"], envelope["type"] as? String == "message",
+              let message = envelope["text"] as? String,
+              !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              APIModelCorrectionJSON.isUnambiguous(bytes) else { return nil }
+        return message
+    }
+
+    static func parseGroqRenderedMessage(_ text: String, request: Request) throws -> Reply {
+        guard LocalModelCatalog.webProvider(for: request.model) == "groq",
+              let message = closedGroqRenderedMessage(text) else { throw Failure.unsupportedWebsiteResponse }
+        return try validated(.message(message), request: request)
+    }
+
     /// Generic callers keep ordinary-text compatibility. Strict envelope
     /// callers never repair or extract JSON.
     static func parseReply(_ text: String, request: Request, requireEnvelope: Bool = false,

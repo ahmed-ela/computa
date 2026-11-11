@@ -2160,6 +2160,76 @@ final class WebModelResponseCodecTests: XCTestCase {
         }
     }
 
+    func testGroqRenderedMessageAcceptsOnlyTheClosedMessageEnvelope() throws {
+        typealias Codec = WebModelResponseCodec
+        let model = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-20b", label: "GPT OSS 20B").modelID
+        let request = try controlledRequest(["model": model, "tool_choice": "auto"])
+        let marker = "0123456789ABCDEF0123456789ABCDEF"
+        let raw = #"{"type":"message","text":"\#(marker)"}"#
+        XCTAssertEqual(raw.utf8.count, 60)
+        XCTAssertEqual(Codec.closedGroqRenderedMessage(raw), marker)
+        let reply = try Codec.parseGroqRenderedMessage(raw, request: request)
+        XCTAssertEqual(reply, .message(marker))
+
+        let data = try Codec.completedResponse(for: reply, request: request, responseID: "resp_rendered", createdAt: 123)
+        let response = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let output = try XCTUnwrap(response["output"] as? [[String: Any]])
+        XCTAssertEqual(output.compactMap { $0["type"] as? String }, ["message"])
+        XCTAssertEqual(response["end_turn"] as? Bool, true)
+
+        let tool = #"{"type":"tool_calls","calls":[{"name":"computer_v2_snapshot","arguments":{}}]}"#
+        let fencedTool = "```json\n" + tool + "\n```"
+        let invalid = [
+            #"{"type":"message","type":"message","text":"same"}"#,
+            #"{"type":"message","text":"first","text":"second"}"#,
+            #"{"type":"message","text":"answer","metadata":{}}"#,
+            #"{"type":"message","text":"answer","phase":"final_answer"}"#,
+            #"{"type":"message","text":"answer","calls":[]}"#,
+            #"{"type":"message","text":"answer","commentary":"extra"}"#,
+            #"{"type":"message","text":null}"#,
+            #"{"type":"message","text":42}"#,
+            #"{"type":"message","text":{"value":"answer"}}"#,
+            #"{"type":"message","text":" \t\n"}"#,
+            #"{"type":"message"}"#,
+            marker,
+            "Introduction\n" + raw,
+            raw + "\n{}",
+            "```json\n" + raw + "\n```",
+            tool,
+            fencedTool,
+        ]
+        for candidate in invalid {
+            XCTAssertNil(Codec.closedGroqRenderedMessage(candidate), candidate)
+            XCTAssertThrowsError(try Codec.parseGroqRenderedMessage(candidate, request: request), candidate) {
+                XCTAssertEqual($0 as? Codec.Failure, .unsupportedWebsiteResponse)
+            }
+        }
+        XCTAssertEqual(try Codec.parseEmbeddedReply(fencedTool, request: request),
+            .toolCalls([.init(name: "computer_v2_snapshot", argumentsJSON: "{}", namespace: nil)]))
+    }
+
+    func testGroqRenderedMessageUsesTheExistingMessageToolPolicy() throws {
+        typealias Codec = WebModelResponseCodec
+        let model = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-20b", label: "GPT OSS 20B").modelID
+        let raw = #"{"text":"answer","type":"message"}"#
+        XCTAssertEqual(Codec.closedGroqRenderedMessage(raw), "answer")
+
+        let required = try controlledRequest(["model": model, "tool_choice": "required"])
+        XCTAssertThrowsError(try Codec.parseGroqRenderedMessage(raw, request: required)) {
+            XCTAssertEqual($0 as? Codec.Failure, .rejectedToolChoice)
+        }
+        let none = try controlledRequest(["model": model, "tool_choice": "none"])
+        let noTools = try controlledRequest(["model": model], tools: [])
+        for request in [none, noTools] {
+            XCTAssertEqual(try Codec.parseGroqRenderedMessage(raw, request: request), .message("answer"))
+        }
+
+        let foreign = try controlledRequest(["model": "browser/claude"], tools: [])
+        XCTAssertThrowsError(try Codec.parseGroqRenderedMessage(raw, request: foreign)) {
+            XCTAssertEqual($0 as? Codec.Failure, .unsupportedWebsiteResponse)
+        }
+    }
+
     func testLiteralHandoffPreservesRequestAndRejectsAuthoredIntroduction() throws {
         let tool: [String: Any] = ["type": "function", "name": "exec_command",
             "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]],

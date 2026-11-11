@@ -15118,8 +15118,26 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 fixture.transport.setBeforePageResultValidationForTesting(nil)
                 XCTAssertTrue(changed)
             } else {
-                do { _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]); XCTFail("Rendered text cannot mint a proof") }
-                catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFormatUnavailable) }
+                let complete = try await waitForState("complete", fixture.transport, token: token)
+                XCTAssertEqual(complete[GroqCompletedReplyProof.renderedMessageSnapshotKey] as? Bool, true)
+                XCTAssertEqual(complete["text"] as? String, "")
+                let rendered = await fixture.transport.snapshotGroqCompletedRenderedMessageProof(sessionToken: token)
+                guard case let .renderedMessage(raw) = try XCTUnwrap(rendered).payload else {
+                    return XCTFail("The native proof must carry only the rendered message")
+                }
+                let observed = try await evaluate(view, "return groqFixture.answer.textContent;") as? String
+                XCTAssertEqual(Data(raw.utf8), observed.map { Data($0.utf8) })
+                let cancelled = Task { @MainActor in
+                    _ = try await self.call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                }
+                cancelled.cancel()
+                do { _ = try await cancelled.value; XCTFail("Cancelled poll must revoke the rendered reply") }
+                catch { XCTAssertTrue(error is CancellationError) }
+                let later = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTAssertEqual(later["text"] as? String, "")
+                XCTAssertNil(later[GroqCompletedReplyProof.renderedMessageSnapshotKey])
+                let revoked = await fixture.transport.snapshotGroqCompletedRenderedMessageProof(sessionToken: token)
+                XCTAssertNil(revoked)
             }
             let missing = await fixture.transport.snapshotGroqCompletedLiteralProof(sessionToken: token)
             XCTAssertNil(missing, mutation)
@@ -15133,6 +15151,102 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             _ = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
             let counts = try await evaluate(view, "return [groqFixture.sendCount, groqFixture.clearCount];") as? [Int]
             XCTAssertEqual(counts, [1, 1]); try await assertHumanTabIntact(fixture)
+        }
+    }
+
+    func testGroqRenderedMessageCannotReuseTheQuietCandidateAfterSameByteSourceChange() async throws {
+        for change in ["clone", "literal"] {
+            let fixture = try Fixture(page: Self.groqFixturePage()); defer { fixture.shutdown() }
+            let (_, token, view) = try await startNativeGroqProofFixture(fixture)
+            _ = try await evaluate(view, "groqFixture.structuredReply = false; return true;")
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "SAFE rendered-message source fixture"])
+            let candidate = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTAssertEqual(candidate["state"] as? String, "running")
+            XCTAssertEqual(candidate["text"] as? String, "")
+            XCTAssertNil(candidate[GroqCompletedReplyProof.renderedMessageSnapshotKey])
+            try await Task.sleep(for: .milliseconds(1_700))
+            var changed = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                guard action == "verifyModel", !changed else { return }; changed = true
+                let mutation = change == "clone"
+                    ? "const p = groqFixture.answer.firstElementChild; p.replaceWith(p.cloneNode(true));"
+                    : """
+                        const answer = groqFixture.answer, text = answer.textContent;
+                        const outer = document.createElement('pre'), wrapper = document.createElement('div');
+                        const inner = document.createElement('pre'), code = document.createElement('code');
+                        inner.className = 'rounded-lg text-sm'; code.className = 'language-json'; code.textContent = text;
+                        const chrome = document.createElement('div');
+                        chrome.className = 'w-min ml-2 cursor-pointer absolute top-2 right-2 text-sm px-2';
+                        const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+                        icon.setAttribute('aria-label', 'copy'); chrome.append(icon);
+                        inner.append(code); wrapper.append(inner, chrome); outer.append(wrapper); answer.replaceChildren(outer);
+                        """
+                _ = try? await self.evaluate(view, mutation + " return true;")
+            }
+            do {
+                _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTFail("A different final source must reject the quiet candidate")
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFormatUnavailable, change) }
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            XCTAssertTrue(changed)
+            let literal = await fixture.transport.snapshotGroqCompletedLiteralProof(sessionToken: token)
+            let rendered = await fixture.transport.snapshotGroqCompletedRenderedMessageProof(sessionToken: token)
+            XCTAssertNil(literal); XCTAssertNil(rendered)
+            let finish = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finish["cleanup"] as? String, "transcript_cleared")
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
+    func testGroqRenderedMessageRequiresSavedTranscriptClearBeforeRelease() async throws {
+        let expected = "GROQ FIXTURE  two spaces e\u{301}"
+        let envelope = String(decoding: try JSONSerialization.data(withJSONObject: ["type": "message", "text": expected]), as: UTF8.self)
+        let encoded = String(decoding: try JSONSerialization.data(withJSONObject: envelope, options: [.fragmentsAllowed]), as: UTF8.self)
+        for scenario in ["released", "missingProof", "uncleared"] {
+            let canClear = scenario != "uncleared"
+            let page = try Self.groqFixturePage().replacingOccurrences(of: "window.fixtureReady = true;",
+                with: "f.structuredReply = false; f.reply = \(encoded); f.ignoreClear = \(!canClear); window.fixtureReady = true;")
+            let fixture = try Fixture(page: page); defer { fixture.shutdown() }
+            let root = try websiteBenchmarkTemporaryDirectory().appendingPathComponent("GroqRenderedMessage-" + UUID().uuidString)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            defer { try? FileManager.default.removeItem(at: root) }
+            let server = WebModelServer(), runtime = UUID()
+            if scenario == "missingProof" {
+                await server.configureEmbeddedTransport(GroqLiteralCaptureTransport(native: fixture.transport, dropsContext: false))
+            } else {
+                await server.configureEmbeddedTransport(fixture.transport)
+            }
+            await server.configureEvidenceDirectory(root.appendingPathComponent("evidence"))
+            await server.configureCleanupReceipts(directory: root.appendingPathComponent("cleanup"), runtimeGeneration: runtime) { _ in }
+            let choice = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B")
+            let request = try JSONSerialization.data(withJSONObject: ["model": choice.modelID, "input": "Return the synthetic message.", "stream": false])
+            let task = UUID().uuidString.lowercased()
+            do {
+                let data = try await server.fixtureInfer(request, taskID: task,
+                    threadID: UUID().uuidString.lowercased(), turnID: UUID().uuidString.lowercased(), runtimeGeneration: runtime)
+                XCTAssertEqual(scenario, "released")
+                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+                let output = try XCTUnwrap(body["output"] as? [[String: Any]])
+                XCTAssertEqual(output.count, 1)
+                XCTAssertEqual(output.first?["type"] as? String, "message")
+                let content = try XCTUnwrap(output.first?["content"] as? [[String: Any]])
+                XCTAssertEqual((content.first?["text"] as? String).map { Data($0.utf8) }, Data(expected.utf8))
+            } catch {
+                if scenario == "missingProof" {
+                    XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFormatUnavailable)
+                    let cleanup = await server.fixtureFinish(taskID: task, runtimeGeneration: runtime)
+                    XCTAssertTrue(cleanup.isEmpty)
+                } else if scenario == "uncleared" {
+                    guard case .cleanupFailed? = error as? WebModelServer.Failure else { throw error }
+                } else { throw error }
+            }
+            let receipts = await server.latestCleanupReceipts()
+            XCTAssertEqual(receipts.count, 1)
+            XCTAssertEqual(receipts.first?.outcome, canClear ? .closed : .unconfirmed)
+            if canClear { XCTAssertEqual(receipts.first?.reason, .transcriptCleared) }
+            XCTAssertEqual(fixture.createdTabs.count, 1)
+            if canClear { _ = await server.shutdown() }
+            try await assertHumanTabIntact(fixture, retaining: canClear ? nil : fixture.createdTabs.first)
         }
     }
 
@@ -15514,7 +15628,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     @MainActor
     private final class GroqProofForwardingTransport: WebModelTransport {
         let native: EmbeddedWebModelTransport
-        var beforeReturningProof: ((GroqCompletedLiteralProof) async -> Void)?
+        var beforeReturningProof: ((GroqCompletedReplyProof) async -> Void)?
         private(set) var proofSnapshots = 0
         init(native: EmbeddedWebModelTransport) { self.native = native }
         func start(params: Data, admission: WebModelStartAdmission, authorization: ChatGPTRequestMetadataLease?) async throws -> Data {
@@ -15523,7 +15637,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         func request(operation: String, params: Data) async throws -> Data {
             try await native.request(operation: operation, params: params)
         }
-        func snapshotGroqCompletedLiteralProof(sessionToken: String) async -> GroqCompletedLiteralProof? {
+        func snapshotGroqCompletedLiteralProof(sessionToken: String) async -> GroqCompletedReplyProof? {
             let proof = await native.snapshotGroqCompletedLiteralProof(sessionToken: sessionToken)
             if let proof { proofSnapshots += 1; await beforeReturningProof?(proof) }
             return proof

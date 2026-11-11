@@ -17,7 +17,8 @@ protocol WebModelTransport: Sendable {
     func revokeRequestMetadata(sessionToken: String) async
     func snapshotResponseChoiceStatus(sessionToken: String) async -> WebsiteResponseChoiceStatus?
     func snapshotQwenResponseProgress(sessionToken: String) async -> QwenResponseProgressStatus?
-    func snapshotGroqCompletedLiteralProof(sessionToken: String) async -> GroqCompletedLiteralProof?
+    func snapshotGroqCompletedLiteralProof(sessionToken: String) async -> GroqCompletedReplyProof?
+    func snapshotGroqCompletedRenderedMessageProof(sessionToken: String) async -> GroqCompletedReplyProof?
     func grantInspectorDiagnostic(_ authorization: ChatGPTInspectorLease, sessionToken: String) async -> Bool
     func revokeInspectorDiagnostic(sessionToken: String) async
     func request(operation: String, params: Data) async throws -> Data
@@ -76,7 +77,8 @@ extension WebModelTransport {
     func revokeRequestMetadata(sessionToken: String) async {}
     func snapshotResponseChoiceStatus(sessionToken: String) async -> WebsiteResponseChoiceStatus? { nil }
     func snapshotQwenResponseProgress(sessionToken: String) async -> QwenResponseProgressStatus? { nil }
-    func snapshotGroqCompletedLiteralProof(sessionToken: String) async -> GroqCompletedLiteralProof? { nil }
+    func snapshotGroqCompletedLiteralProof(sessionToken: String) async -> GroqCompletedReplyProof? { nil }
+    func snapshotGroqCompletedRenderedMessageProof(sessionToken: String) async -> GroqCompletedReplyProof? { nil }
     func request(operation: String, params: Data,
                  onChatSubmissionFailure: (@Sendable (ChatSubmissionFailureDiagnostic) -> Void)?) async throws -> Data {
         try await request(operation: operation, params: params)
@@ -1958,7 +1960,7 @@ actor WebModelServer {
             // A named Haiku Start can be rejected before a token exists. Its
             // failure belongs to the same turn policy as the journaled request.
             var requestedClaudeTurnScope: Bool?
-            var groqCorrectionProof: GroqCompletedLiteralProof?
+            var groqCorrectionProof: GroqCompletedReplyProof?
             var correctionCandidate: (reason: WebsiteModelFormatCorrectionStore.Reason, session: Session,
                 deadline: ContinuousClock.Instant, evidence: WebsiteSelectionEvidence?, snapshot: [String: Any]?)?
             do {
@@ -2384,7 +2386,8 @@ actor WebModelServer {
                             submissionModelVerificationPending = false
                         }
                         guard let text = value["text"] as? String else { throw Failure.providerFailed }
-                        guard !text.isEmpty else {
+                        let renderedMessageMarker = value[GroqCompletedReplyProof.renderedMessageSnapshotKey]
+                        guard !text.isEmpty || renderedMessageMarker != nil else {
                             captureRejectedReply(text, diagnostic: .emptyReply, taskID: taskID,
                                 inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
                             throw Failure.providerFailed
@@ -2393,12 +2396,31 @@ actor WebModelServer {
                         responseProfile?.mark(.codecStart)
                         do {
                             defer { responseProfile?.mark(.codecEnd) }
-                            reply = try WebModelResponseCodec.parseEmbeddedReply(text, request: request) { shape, singleUncommentedCall in
-                                guard provider == "gemini" || session.modelChoice == .claudeHaiku55 else { return }
-                                Self.promptLog.info("rejectedCallShape version=1 provider=\(provider, privacy: .public) inference=\(inferenceID.uuidString.lowercased(), privacy: .public) reason=\(shape.rawValue, privacy: .public) singleUncommentedCall=\(singleUncommentedCall, privacy: .public)")
+                            if let renderedMessageMarker {
+                                guard provider == "groq", text.isEmpty,
+                                      let marker = renderedMessageMarker as? NSNumber,
+                                      CFGetTypeID(marker) == CFBooleanGetTypeID(), marker.boolValue else {
+                                    throw EmbeddedWebModelTransport.Failure.responseFormatUnavailable
+                                }
+                                let proof = await session.transport.snapshotGroqCompletedRenderedMessageProof(sessionToken: session.token)
+                                try requireCurrentContext()
+                                guard ContinuousClock.now < end else { throw Failure.deadline }
+                                guard let proof, case let .renderedMessage(rendered) = proof.payload,
+                                      Self.matchesGroqCompletedReplyProof(proof, taskID: taskID, session: session,
+                                                                          snapshot: value, text: rendered) else {
+                                    throw EmbeddedWebModelTransport.Failure.responseFormatUnavailable
+                                }
+                                reply = try WebModelResponseCodec.parseGroqRenderedMessage(rendered, request: request)
+                            } else {
+                                reply = try WebModelResponseCodec.parseEmbeddedReply(text, request: request) { shape, singleUncommentedCall in
+                                    guard provider == "gemini" || session.modelChoice == .claudeHaiku55 else { return }
+                                    Self.promptLog.info("rejectedCallShape version=1 provider=\(provider, privacy: .public) inference=\(inferenceID.uuidString.lowercased(), privacy: .public) reason=\(shape.rawValue, privacy: .public) singleUncommentedCall=\(singleUncommentedCall, privacy: .public)")
+                                }
+                                try Self.requireChatGPTLiteralToolReply(reply, provider: provider, text: text, snapshot: value)
                             }
-                            try Self.requireChatGPTLiteralToolReply(reply, provider: provider, text: text, snapshot: value)
                         } catch {
+                            // A rendered message has no literal reply to correct.
+                            if renderedMessageMarker != nil { throw error }
                             if case let .toolTextUnverified(reason) = error as? Failure {
                                 captureRejectedReply(text, diagnostic: .toolTextUnverified(reason), taskID: taskID,
                                     inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
@@ -2523,6 +2545,7 @@ actor WebModelServer {
                                     runtimeGeneration: context.runtimeGeneration, trigger: .inference)
                             }
                             guard closed.receipt.outcome == .closed,
+                                  renderedMessageMarker == nil || closed.receipt.reason == .transcriptCleared,
                                   closed.receipt.inferenceID == inferenceID.uuidString.lowercased(),
                                   closed.receipt.sessionToken == session.token.lowercased() else { throw Failure.cleanupFailed }
                             guard closed.receipt.receiptSaved, closed.issues.isEmpty else { throw Failure.persistenceRequired }
@@ -2560,6 +2583,9 @@ actor WebModelServer {
                         }
                         let historyWrite = try stageGroqHistoryHTTPWrite(taskID: taskID, request: request,
                             reply: selection.reply, responseID: responseID, encoded: encoded)
+                        if renderedMessageMarker != nil {
+                            Self.promptLog.notice("groqRenderedMessageRelease version=1 inference=\(inferenceID.uuidString.lowercased(), privacy: .public)")
+                        }
                         return InferenceResult(data: encoded, inferenceID: inferenceID,
                             responseProfile: responseProfile, historyWrite: historyWrite)
                     case "running":
@@ -2864,7 +2890,14 @@ actor WebModelServer {
         return prompt + claudeMatchedOutputNote
     }
 
-    private static func matchesGroqCompletedLiteralProof(_ proof: GroqCompletedLiteralProof,
+    private static func matchesGroqCompletedLiteralProof(_ proof: GroqCompletedReplyProof,
+        taskID: String, session: Session, snapshot: [String: Any], text: String) -> Bool {
+        guard case .literal = proof.payload, snapshot[GroqCompletedReplyProof.renderedMessageSnapshotKey] == nil,
+              (snapshot["text"] as? String).map({ $0.utf8.elementsEqual(text.utf8) }) == true else { return false }
+        return matchesGroqCompletedReplyProof(proof, taskID: taskID, session: session, snapshot: snapshot, text: text)
+    }
+
+    private static func matchesGroqCompletedReplyProof(_ proof: GroqCompletedReplyProof,
         taskID: String, session: Session, snapshot: [String: Any], text: String) -> Bool {
         guard session.provider == "groq", !session.retainsConversation,
               session.sequence == 1, session.baselineResponseCount == 0,
@@ -2883,7 +2916,7 @@ actor WebModelServer {
               !proof.firstUserFingerprint.isEmpty,
               proof.promptFingerprint == session.submittedPromptFingerprint,
               proof.responseSHA256 == historySHA(Data(text.utf8)),
-              snapshot["state"] as? String == "complete", snapshot["text"] as? String == text,
+              snapshot["state"] as? String == "complete",
               let context = snapshot["modelProofContext"] as? [String: Any],
               receiptInteger(context["sequence"], range: 1...1) == 1,
               receiptInteger(context["baselineResponseCount"], range: 0...0) == 0,

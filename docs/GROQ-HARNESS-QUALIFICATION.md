@@ -763,3 +763,19 @@ Candidate368 has not been packaged, installed or exercised live. Installed367
 and the published alpha.363 release remain unchanged. The private finite count
 receipt is `tokenizer368/offline-prompt368-counts.json`, SHA-256
 `245a186ad02eb2801d12decefaadbdcf7266f11a0d3657553a70f5333a20c56d`.
+
+## 2026-11-11 — Rendered GPT OSS 20B message
+
+Build 508 verified the selected model and submitted one fresh marker. Groq's
+completed answer contained the exact closed JSON message in its rendered text.
+The captured observation had zero `PRE` and `CODE` elements. Computa refused
+release and saved the transcript-clear receipt. This evidence covers the
+rendered answer. The provider's original wire bytes remain unknown.
+
+The adapter can now identify a visible plain paragraph with one text node. A
+native completed-message proof requires the same attached nodes and exact UTF-8
+bytes on the final reread, plus the current model and outbound prompt binding.
+The parser accepts only an unambiguous object with `type: "message"` and string
+`text`. The existing tool-choice policy applies and release requires a saved
+transcript clear for that inference. Tool proposals still require literal
+code-block evidence.
