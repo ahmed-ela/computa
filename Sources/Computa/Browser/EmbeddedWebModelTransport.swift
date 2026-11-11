@@ -3101,12 +3101,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if stage == "display_held", reason == "answer_ancestry_changed" {
             guard Set(packet.keys) == ["version", "stage", "reason", "ancestry"],
                   let facts = packet["ancestry"] as? [String: Any],
-                  Set(facts.keys) == ["path", "branch", "index", "count", "slot", "previous", "current", "comparison"],
                   let path = facts["path"] as? String, ["claim", "witness"].contains(path),
                   let branch = facts["branch"] as? String, ["pins", "comparison_scope", "comparison_prior"].contains(branch),
                   let slot = facts["slot"] as? String, let previous = facts["previous"] as? String,
                   let current = facts["current"] as? String,
                   let comparison = firstUserDiagnosticBool(facts["comparison"]) else { return nil }
+            let ancestryKeys: Set<String> = ["path", "branch", "index", "count", "slot", "previous", "current", "comparison"]
+            let keys = Set(facts.keys)
+            guard keys == ancestryKeys || keys == ancestryKeys.union(["continuity"]) else { return nil }
             let index: String, count: String
             if branch == "pins" {
                 guard let i = ComputerToolArgumentContract.exactInt64(facts["index"]),
@@ -3121,7 +3123,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       slot == "none", previous == "unknown", current == "unknown" else { return nil }
                 index = "none"; count = "none"
             }
-            return message + " ancestry path=\(path) branch=\(branch) index=\(index) count=\(count) slot=\(slot) previous=\(previous) current=\(current) comparison=\(comparison)"
+            let ancestry = message + " ancestry path=\(path) branch=\(branch) index=\(index) count=\(count) slot=\(slot) previous=\(previous) current=\(current) comparison=\(comparison)"
+            guard let rawContinuity = facts["continuity"] else { return ancestry }
+            guard path == "witness", branch == "pins", slot == "assistant_root", comparison,
+                  previous == "object", current == "object",
+                  let continuity = rawContinuity as? [String: Any],
+                  Set(continuity.keys) == ["oldRootDetached", "priorResponse", "assistantTurnMatches", "pairRootMatches"],
+                  let oldRootDetached = firstUserDiagnosticBool(continuity["oldRootDetached"]),
+                  let priorResponse = continuity["priorResponse"] as? String,
+                  ["first_card", "second_card", "detached"].contains(priorResponse),
+                  let assistantTurnMatches = firstUserDiagnosticBool(continuity["assistantTurnMatches"]),
+                  let pairRootMatches = firstUserDiagnosticBool(continuity["pairRootMatches"]),
+                  !(oldRootDetached && priorResponse == "first_card" && pairRootMatches) else { return nil }
+            return ancestry + " continuity oldRootDetached=\(oldRootDetached) priorResponse=\(priorResponse) assistantTurnMatches=\(assistantTurnMatches) pairRootMatches=\(pairRootMatches)"
         }
         guard stage == "display_completed", reason == "user_id_changed",
               Set(packet.keys) == ["version", "stage", "reason", "change"],

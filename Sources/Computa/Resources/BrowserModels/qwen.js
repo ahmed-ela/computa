@@ -512,18 +512,30 @@ async function computaSavedConversation(input, c, dom, config) {
             || view.pins.at(-1) !== comparisonPair.wrapper) refuse('answer_ancestry_changed', () => ({
               path:'witness', branch:'comparison_scope', index:null, count:null, slot:'none', previous:'unknown', current:'unknown', comparison:true }));
           const prior = optimistic.pins.at(-1);
-          const priorInPair = comparisonPair.rows.some(row => row.response === prior);
-          if (!prior || prior.isConnected !== false && !priorInPair) refuse('answer_ancestry_changed', () => ({
+          const priorCardIndex = comparisonPair.rows.findIndex(row => row.response === prior);
+          if (!prior || prior.isConnected !== false && priorCardIndex < 0) refuse('answer_ancestry_changed', () => ({
               path:'witness', branch:'comparison_prior', index:null, count:null, slot:'none', previous:'unknown', current:'unknown', comparison:true }));
           const pins = [...optimistic.pins.slice(0, -1), comparisonPair.wrapper];
           const rootIndex = pins.length - 3;
+          const oldRootDetached = pins[rootIndex]?.isConnected === false;
+          const pairRootMatches = comparisonPair.root === view.pins.at(-3);
           // Only the same pending response object in the first verified card can
           // carry continuity across a disconnected assistant root. The
           // assistant turn and all earlier pins still compare by identity.
-          if (comparisonPair.rows[0].response === prior && pins[rootIndex]?.isConnected === false
-            && comparisonPair.root === view.pins.at(-3))
+          if (priorCardIndex === 0 && oldRootDetached && pairRootMatches)
             pins[rootIndex] = comparisonPair.root;
-          requireDisplayPins({ pins }, view, refuse, 'witness', true);
+          requireDisplayPins({ pins }, view, (reason, structure) => {
+            if (reason !== 'answer_ancestry_changed') return refuse(reason, structure);
+            return refuse(reason, () => {
+              const facts = structure();
+              if (facts.slot !== 'assistant_root') return facts;
+              // These finite facts explain a rejected remount. They do not
+              // supply new proof or read anything outside the existing pins.
+              return { ...facts, continuity: { oldRootDetached, pairRootMatches,
+                priorResponse: priorCardIndex === 0 ? 'first_card' : priorCardIndex === 1 ? 'second_card' : 'detached',
+                assistantTurnMatches: optimistic.pins.at(-2) === view.pins.at(-2) } };
+            });
+          }, 'witness', true);
         } else requireDisplayPins(optimistic, view, refuse, 'witness', false);
       }
       if (!Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.length || input.expectedUserCounts.length > 2

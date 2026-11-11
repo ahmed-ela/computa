@@ -139,6 +139,79 @@ final class QwenFirstUserBindingDiagnosticTests: XCTestCase {
         }
     }
 
+    private var rootComparisonAncestry: [String: Any] {
+        ["path": "witness", "branch": "pins", "index": 11, "count": 14, "slot": "assistant_root",
+         "previous": "object", "current": "object", "comparison": true]
+    }
+
+    private func ancestryObservation(_ facts: [String: Any], stage: String = "display_held") -> [String: Any] {
+        ["error": "conversation_changed", "detail": "first_user_message", "qwenFirstUserBindingDiagnostic":
+            ["version": 1, "stage": stage, "reason": "answer_ancestry_changed", "ancestry": facts]]
+    }
+
+    func testComparisonContinuityLogsOnlyFourFiniteFactsAndPreservesOriginalFormat() {
+        let base = "firstUserStage=display_held firstUserReason=answer_ancestry_changed ancestry path=witness branch=pins index=11 count=14 slot=assistant_root previous=object current=object comparison=true"
+        XCTAssertEqual(EmbeddedWebModelTransport.qwenFirstUserBindingDiagnostic(
+            ancestryObservation(rootComparisonAncestry), provider: .qwen), base)
+        for (priorResponse, oldRootDetached, assistantTurnMatches, pairRootMatches) in [
+            ("first_card", true, true, false), ("second_card", true, false, true), ("detached", false, true, true)
+        ] {
+            var facts = rootComparisonAncestry
+            facts["continuity"] = [
+                "oldRootDetached": NSNumber(value: oldRootDetached), "priorResponse": priorResponse,
+                "assistantTurnMatches": assistantTurnMatches, "pairRootMatches": pairRootMatches
+            ] as [String: Any]
+            let value = ancestryObservation(facts)
+            let expected = base + " continuity oldRootDetached=\(oldRootDetached) priorResponse=\(priorResponse) assistantTurnMatches=\(assistantTurnMatches) pairRootMatches=\(pairRootMatches)"
+            XCTAssertEqual(EmbeddedWebModelTransport.qwenFirstUserBindingDiagnostic(value, provider: .qwen), expected)
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(value, provider: .qwen, action: "inspect"),
+                           "action=inspect error=conversation_changed detail=first_user_message " + expected)
+            XCTAssertNil(EmbeddedWebModelTransport.qwenFirstUserBindingDiagnostic(value, provider: .deepseek))
+        }
+    }
+
+    func testMalformedOrMisplacedComparisonContinuityKeepsOriginalFailure() {
+        let good: [String: Any] = [
+            "oldRootDetached": true, "priorResponse": "second_card", "assistantTurnMatches": true, "pairRootMatches": true
+        ]
+        func reject(_ facts: [String: Any], stage: String = "display_held") {
+            let value = ancestryObservation(facts, stage: stage)
+            XCTAssertNil(EmbeddedWebModelTransport.qwenFirstUserBindingDiagnostic(value, provider: .qwen))
+            XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(value, provider: .qwen, action: "inspect"),
+                           "action=inspect error=conversation_changed detail=first_user_message")
+        }
+        var facts = rootComparisonAncestry
+        for key in good.keys {
+            var missing = good
+            missing.removeValue(forKey: key)
+            facts["continuity"] = missing
+            reject(facts)
+            for invalid: Any in [1, 0, NSNull(), "PRIVATE"] {
+                facts["continuity"] = good.merging([key: invalid]) { _, new in new }
+                reject(facts)
+            }
+        }
+        facts["continuity"] = NSNull()
+        reject(facts)
+        facts["continuity"] = good.merging(["extra": "PRIVATE"]) { _, new in new }
+        reject(facts)
+        facts["continuity"] = good.merging(["priorResponse": "first_card"]) { _, new in new }
+        reject(facts)
+        facts["continuity"] = good
+        for changes: [String: Any] in [
+            ["path": "claim"], ["comparison": false], ["previous": "null"], ["current": "undefined"],
+            ["index": 12, "slot": "assistant_turn"], ["index": 13, "slot": "response_content"],
+            ["branch": "comparison_scope", "index": NSNull(), "count": NSNull(),
+             "slot": "none", "previous": "unknown", "current": "unknown"],
+            ["branch": "comparison_prior", "index": NSNull(), "count": NSNull(),
+             "slot": "none", "previous": "unknown", "current": "unknown"],
+            ["extra": "PRIVATE"]
+        ] {
+            reject(facts.merging(changes) { _, new in new })
+        }
+        reject(facts, stage: "display_completed")
+    }
+
     func testMalformedAncestryCannotReplaceOriginalFailureOrLeakPrivateFields() {
         let good: [String: Any] = ["path":"claim","branch":"pins","index":9,"count":10,"slot":"response_content",
             "previous":"object","current":"object","comparison":false]

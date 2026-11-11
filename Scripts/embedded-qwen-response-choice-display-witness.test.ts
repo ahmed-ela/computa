@@ -118,8 +118,19 @@ test('a comparison cannot adopt changed witness pins, native grants, prompt, mod
   if(fault==='pair-control'){expect((await f.run('inspect',input)).qwenFirstBodyExpansionPending).toBe(true);const control=p.controls[0];control.detach();p.wrapper.querySelectorAll('.smrm-card__footer')[0].append(control.cloneNode(true));}
   if(fault==='double-user')f.turn.append(f.root.cloneNode(true));
   const rejected=await f.run('inspect',over);expect(rejected.error,fault).toBeDefined();
-  if(remounted)expect(rejected.qwenFirstUserBindingDiagnostic).toMatchObject({
-   stage:'display_held',reason:'answer_ancestry_changed',ancestry:{path:'witness',branch:'pins',comparison:true}});
+  if(remounted){
+   expect(rejected.qwenFirstUserBindingDiagnostic).toMatchObject({
+    stage:'display_held',reason:'answer_ancestry_changed',ancestry:{path:'witness',branch:'pins',comparison:true}});
+   const ancestry=rejected.qwenFirstUserBindingDiagnostic.ancestry;
+   if(fault==='answer-turn'){
+    expect(ancestry.slot).toBe('assistant_turn');expect(ancestry.continuity).toBeUndefined();
+   }else{
+    const priorResponse=fault==='answer-root'?'detached':fault==='prior-in-second-card'?'second_card':'first_card';
+    expect(ancestry.slot).toBe('assistant_root');
+    expect(ancestry.continuity).toEqual({oldRootDetached:fault!=='connected-answer-root',
+      priorResponse,assistantTurnMatches:true,pairRootMatches:true});
+   }
+  }
   if(fault==='foreign-tail')expect(rejected.qwenFirstUserBindingDiagnostic).toEqual({version:1,stage:'display_held',reason:'answer_ancestry_changed',
     ancestry:{path:'witness',branch:'comparison_prior',index:null,count:null,slot:'none',previous:'unknown',current:'unknown',comparison:true}});
   for(const key of ['text','firstUserVerified','modelEvidence','answerComplete'])expect(rejected[key],fault).toBeUndefined();

@@ -4246,3 +4246,22 @@ The first fully verified literal candidate can now replace buffered text from
 an in-progress Qwen reply. An earlier ordinary completion candidate still
 blocks the switch. The original quiet period, one-sample limit, body and
 selection checks, and deletion before release remain in place.
+
+### 2026-11-11 — Qwen comparison continuity and Groq catalog on 504
+
+The build 504 Qwen Plus workflow stopped at the third website inference.
+The model ran a failing baseline test and applied the patch. The independent
+audit passed all six tests after the fixture stopped. The model never reached
+post-patch tests, browser submission, or the final payload. Two website
+deletions were confirmed and the third remains unconfirmed.
+
+The first changed reference was the assistant root during a two-card
+comparison, as in build 502. The failure diagnostic now records whether the
+old root detached, where the old response appeared, and whether the current
+turn and comparison root matched. It records no response content or identity
+values and leaves the ownership rejection in place.
+
+In build 504, idle Groq discovery republished the same three Groq choices.
+The normal menu's exact display-name search for GPT OSS 20B yielded no row.
+The direct model route selected GPT OSS 20B, and searching the menu by
+`gpt-oss-20b` found it. Both checks were prompt-free.
