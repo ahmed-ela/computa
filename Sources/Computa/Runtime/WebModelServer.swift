@@ -249,6 +249,10 @@ actor WebModelServer {
         var readPublications: [String: GroqHistoryReadPublication] = [:]
         var spentReaderIDs = Set<String>()
         var pendingHTTP: GroqHistoryHTTPWrite?
+        // Diagnostic ordinal of admitted native HTTP frames, not website Sends.
+        // Saturate after the only capturable frame; no prompt is retained here.
+        var preparedPromptNativeInferenceCount = 0
+        var preparedPromptLastInferenceID: UUID?
     }
 
     private struct GroqIssuedReader {
@@ -1910,6 +1914,30 @@ actor WebModelServer {
                 // Admitted Request facts only; a later correction reminder is
                 // not included in requestPromptSHA256. No reply/action authority.
                 Self.promptLog.info("groqToolDiscovery version=1 provider=groq task=\(taskID, privacy: .public) thread=\(context.threadID, privacy: .public) turn=\(context.turnID, privacy: .public) preparation=\(context.preparationID.uuidString.lowercased(), privacy: .public) inference=\(inferenceID.uuidString.lowercased(), privacy: .public) \(diagnostic.logFields, privacy: .public)")
+            }
+        }
+        // Native prepared-prompt diagnostics run once per admitted HTTP frame,
+        // outside the corrective website-attempt loop. This does not attest Start,
+        // Send, provider delivery or any later correction-appended prompt.
+        if provider == "groq", context.isCompactToolThread, !context.isMaintenance,
+           context.historyPreparation != nil, request.model == GroqPreparedPromptCapture.modelID,
+           (try? requireCurrentContext()) != nil,
+           let task = UUID(uuidString: taskID), let thread = UUID(uuidString: context.threadID),
+           let turn = UUID(uuidString: context.turnID), var history = groqHistoryTurns[taskID] {
+            if history.preparedPromptLastInferenceID != inferenceID {
+                history.preparedPromptNativeInferenceCount = min(3, history.preparedPromptNativeInferenceCount + 1)
+                history.preparedPromptLastInferenceID = inferenceID
+                groqHistoryTurns[taskID] = history
+            }
+            if request.usesNativeGroqHistoryPresentation, groqCatalogRequest != nil {
+                let capture = GroqPreparedPromptCapture.prepare(directory: groqRejectedRequestDirectory,
+                    context: .init(taskID: task, threadID: thread, turnID: turn,
+                        runtimeGeneration: context.runtimeGeneration, preparationID: context.preparationID,
+                        transportGeneration: transportGeneration, inferenceID: inferenceID, modelID: request.model),
+                    request: request, nativeInferenceOrdinal: history.preparedPromptNativeInferenceCount,
+                    isCurrent: { (try? requireCurrentContext()) != nil })
+                defer { capture?.revoke() }
+                _ = capture?.capture(isCurrent: { (try? requireCurrentContext()) != nil })
             }
         }
         func verifiedSelectionEvidence(_ snapshot: [String: Any], session: inout Session) throws -> WebsiteSelectionEvidence? {

@@ -68,7 +68,10 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
             XCTAssertThrowsError(try C.parseReply(read, request: unbound, requireEnvelope: true), "The earlier admitted request stays unchanged")
             XCTAssertNoThrow(try C.parseReply(read, request: loadedUnbound, requireEnvelope: true), "Schema admission is not native execution authority")
             assertGroqBrowserState(loadedUnbound, bound: false)
-            XCTAssertTrue(loadedUnbound.prompt.contains("Page tools require native binding"))
+            XCTAssertTrue(loadedUnbound.prompt.contains("Page tools require this task's browser binding"))
+            XCTAssertTrue(loadedUnbound.prompt.contains("browser_* needs no native-app binding or external connection"))
+            XCTAssertFalse(loadedUnbound.prompt.contains("browser_* needs no native binding"))
+            XCTAssertFalse(loadedUnbound.prompt.contains("Page tools require native binding"))
             XCTAssertThrowsError(try catalog.load(scope: scope, arguments: encode(["catalog_revision": initial.revision,
                 "names": four + [prefix + "browser_wait"]])))
             XCTAssertEqual(try catalog.prepare(scope: scope, seed: unboundSeed), selected)
@@ -721,7 +724,7 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
             XCTAssertEqual(next.continuationRequest, data); XCTAssertEqual(request.continuationRequest, data)
             XCTAssertEqual(next.groqToolCatalogSeed?.registeredDefinitionsJSON, seed.registeredDefinitionsJSON)
             XCTAssertTrue(next.prompt.contains("Webpages use browser_*; computer_v2_* is native-app UI."), "A loaded native browser entry still differs from native-app UI")
-            let deferred = "Page tools require native binding"
+            let deferred = "Page tools require this task's browser binding"
             XCTAssertTrue(request.prompt.contains(deferred)); XCTAssertTrue(next.prompt.contains(deferred))
             for current in [request, next] {
                 assertGroqBrowserState(current, bound: false)
@@ -1910,7 +1913,7 @@ private func assertGroqBrowserState(_ request: WebModelResponseCodec.Request, bo
     XCTAssertEqual(request.prompt.contains("Native page bound."), bound, file: file, line: line)
     XCTAssertEqual(request.prompt.contains("Schemas do not bind pages."), !bound, file: file, line: line)
     if !bound {
-        XCTAssertTrue(request.prompt.contains("Current browser state: unbound. Schemas do not bind pages. Page tools require native binding; click/fill also need current refs."), file: file, line: line)
+        XCTAssertTrue(request.prompt.contains("Current browser state: unbound. Schemas do not bind pages. Page tools require this task's browser binding; click/fill also need current refs."), file: file, line: line)
     }
 }
 private func groqInventoryObject(_ request: WebModelResponseCodec.Request) throws -> [String: Any] {

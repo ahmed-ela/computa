@@ -680,7 +680,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertTrue(unbound.prompt.contains("empty tabs do not prove denial."))
             XCTAssertFalse(unbound.prompt.contains("COMPUTA_BROWSER_CAPABILITIES:"))
             XCTAssertTrue(unbound.prompt.contains("Current browser state: unbound. Schemas do not bind pages."))
-            XCTAssertTrue(unbound.prompt.contains("Page tools require native binding; click/fill also need current refs."))
+            XCTAssertTrue(unbound.prompt.contains("Page tools require this task's browser binding; click/fill also need current refs."))
             XCTAssertEqual(Set(try XCTUnwrap(unboundInventory["loaded"] as? [String])), unbound.offeredToolNames)
             for entry in unboundProjection.discoverable {
                 let row = try XCTUnwrap(discovery.first { $0.first == entry.name })
@@ -748,7 +748,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertTrue(policyRequest.prompt.contains("Supplied URL: first load " + prefix + "browser_open."))
             XCTAssertFalse(policyRequest.prompt.contains("Existing human tab with an observed tab_id:"))
             XCTAssertFalse(policyRequest.prompt.contains("COMPUTA_BROWSER_CAPABILITIES:"))
-            XCTAssertFalse(policyRequest.prompt.contains("Page tools require native binding"), "Sparse policy cannot advertise denied registered page capabilities")
+            XCTAssertFalse(policyRequest.prompt.contains("Page tools require this task's browser binding"), "Sparse policy cannot advertise denied registered page capabilities")
             XCTAssertEqual(policyRequest.continuationRequest, restrictedData)
             XCTAssertEqual(try loaderNames(policyRequest), [prefix + "browser_open"])
             let policyDisplay = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(policyRequest.prompt[try requestRange(in: policyRequest)].utf8)) as? [String: Any])

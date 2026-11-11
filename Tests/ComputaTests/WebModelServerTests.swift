@@ -5,6 +5,170 @@ import XCTest
 
 final class WebModelServerTests: XCTestCase {
 
+
+    func testGroqPreparedPromptCaptureUsesOnlyTheSecondAdmittedNativeFrameAndNeverAThirdFrame() async throws {
+        let f = try await makeGroqPreparedPromptFixture(nativeHistory: true)
+        let firstArm = try writeGroqPreparedPromptArm(f)
+        let first = try responseOutput(await f.fixture.server.infer(f.fixture.request(f.original), taskID: f.fixture.task))
+        XCTAssertEqual(first.first?["name"] as? String, GroqToolCatalog.name)
+        let output = f.directory.appendingPathComponent("request.json")
+        let armURL = f.directory.appendingPathComponent("arm.json")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+        XCTAssertEqual(try Data(contentsOf: armURL), firstArm, "The first native frame cannot consume a second-frame arm")
+        let receipt = try await f.fixture.server.loadGroqTools(scope: f.fixture.scope, arguments: f.fixture.loadArguments)
+        let next = f.original + nativeGroqClosedCalls(first) + [["type": "function_call_output",
+            "call_id": try XCTUnwrap(first.first?["call_id"] as? String), "output": String(decoding: receipt, as: UTF8.self)]]
+        let secondCanonical = try f.fixture.request(next)
+        let second = try responseOutput(await f.fixture.server.infer(secondCanonical, taskID: f.fixture.task))
+        XCTAssertEqual(second.first?["name"] as? String, "fixture_read")
+        let saved = try Data(contentsOf: output)
+        let record = try XCTUnwrap(JSONSerialization.jsonObject(with: saved) as? [String: Any])
+        XCTAssertEqual(record["purpose"] as? String, GroqPreparedPromptCapture.purpose)
+        XCTAssertEqual(record["stage"] as? String, "native_prepared_prompt")
+        XCTAssertEqual(record["nativeInferenceOrdinal"] as? Int, 2)
+        XCTAssertEqual(record["taskID"] as? String, f.fixture.task)
+        XCTAssertEqual(record["threadID"] as? String, f.fixture.scope.threadID)
+        XCTAssertEqual(record["turnID"] as? String, f.fixture.scope.turnID)
+        XCTAssertEqual(record["canonicalRequestBase64"] as? String, secondCanonical.base64EncodedString())
+        XCTAssertEqual(record["canonicalRequestSHA256"] as? String, SHA256.hash(data: secondCanonical).map { String(format: "%02x", $0) }.joined())
+        let prompt = try XCTUnwrap(record["displayedPrompt"] as? String)
+        XCTAssertEqual(record["displayedPromptBytes"] as? Int, prompt.utf8.count)
+        XCTAssertEqual(record["displayedPromptSHA256"] as? String, SHA256.hash(data: Data(prompt.utf8)).map { String(format: "%02x", $0) }.joined())
+        let sent = await f.fixture.base.sentPrompts()
+        XCTAssertEqual(sent.count, 2)
+        XCTAssertEqual(Data(prompt.utf8), Data(try XCTUnwrap(sent.last).utf8), "This synthetic successful path independently submits the admitted frame; the diagnostic itself grants no delivery proof")
+        for key in ["submitted", "providerWireAttested", "automaticReplay", "responseAuthority", "cleanupAuthority", "dispatchAuthority"] {
+            XCTAssertEqual(record[key] as? Bool, false)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: armURL.path))
+        // A newly armed third admitted frame must not be confused with the second,
+        // even after the first output is removed from this isolated fixture directory.
+        try FileManager.default.removeItem(at: output)
+        let thirdArm = try writeGroqPreparedPromptArm(f)
+        let finalInput = next + nativeGroqClosedCalls(second) + [["type": "function_call_output",
+            "call_id": try XCTUnwrap(second.first?["call_id"] as? String), "output": "Exact synthetic read result"]]
+        let final = try responseOutput(await f.fixture.server.infer(f.fixture.request(finalInput), taskID: f.fixture.task))
+        XCTAssertEqual(final.first?["type"] as? String, "message")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+        XCTAssertEqual(try Data(contentsOf: armURL), thirdArm)
+        let operations = await f.fixture.base.operations()
+        XCTAssertEqual(operations.filter { $0 == "webProviderStart" }.count, 3)
+        XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 3)
+        XCTAssertEqual(operations.filter { $0 == "webProviderFinish" }.count, 3)
+        let issues = await f.fixture.server.finish(taskID: f.fixture.task)
+        XCTAssertTrue(issues.isEmpty)
+    }
+
+    func testGroqPreparedPromptCaptureCannotBorrowNonNativeHistoryOrPreBudgetAdmission() async throws {
+        for mode in ["no_native_history", "budget_before_start"] {
+            let f = try await makeGroqPreparedPromptFixture(nativeHistory: mode != "no_native_history")
+            let arm = try writeGroqPreparedPromptArm(f)
+            let output = f.directory.appendingPathComponent("request.json")
+            if mode == "budget_before_start" {
+                let first = try responseOutput(await f.fixture.server.infer(f.fixture.request(f.original), taskID: f.fixture.task))
+                // Boundary-only synthetic host output for the locally issued call.
+                // This is not a loader RPC receipt, workflow benchmark or resumed
+                // failed native context. Its latest payload must remain protected.
+                let oversized = f.original + nativeGroqClosedCalls(first) + [["type": "function_call_output",
+                    "call_id": try XCTUnwrap(first.first?["call_id"] as? String),
+                    "output": String(repeating: "protected ", count: 7_000)]]
+                do {
+                    _ = try await f.fixture.server.infer(f.fixture.request(oversized), taskID: f.fixture.task)
+                    XCTFail("The second native frame must fail its unchanged whole-prompt budget before capture or another Start")
+                } catch {
+                    XCTAssertEqual(WebModelServer.errorPresentation(for: error).code, "website_prompt_budget_exceeded")
+                }
+                let operations = await f.fixture.base.operations()
+                XCTAssertEqual(operations.filter { $0 == "webProviderStart" }.count, 1)
+                XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1)
+                XCTAssertEqual(operations.filter { $0 == "webProviderFinish" }.count, 1)
+            } else {
+                let first = try responseOutput(await f.fixture.server.infer(f.fixture.request(f.original), taskID: f.fixture.task))
+                let receipt = try await f.fixture.server.loadGroqTools(scope: f.fixture.scope, arguments: f.fixture.loadArguments)
+                let next = f.original + nativeGroqClosedCalls(first) + [["type": "function_call_output",
+                    "call_id": try XCTUnwrap(first.first?["call_id"] as? String), "output": String(decoding: receipt, as: UTF8.self)]]
+                let second = try responseOutput(await f.fixture.server.infer(f.fixture.request(next), taskID: f.fixture.task))
+                XCTAssertEqual(second.first?["name"] as? String, "fixture_read")
+                let operations = await f.fixture.base.operations()
+                XCTAssertEqual(operations.filter { $0 == "webProviderStart" }.count, 2)
+                XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 2)
+            }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: output.path), mode)
+            XCTAssertEqual(try Data(contentsOf: f.directory.appendingPathComponent("arm.json")), arm, mode)
+            let issues = await f.fixture.server.finish(taskID: f.fixture.task)
+            XCTAssertTrue(issues.isEmpty)
+        }
+    }
+
+    private func makeGroqPreparedPromptFixture(nativeHistory: Bool) async throws ->
+        (fixture: GroqClosedNativeFixture, original: [[String: Any]], human: String, directory: URL) {
+        let root = try websiteBenchmarkTemporaryDirectory().appendingPathComponent("groq-prepared-server-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let directory = root.appendingPathComponent("exact-custom-diagnostics", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let server = WebModelServer(groqRejectedRequestDirectory: directory)
+        addTeardownBlock { _ = await server.shutdown(); try? FileManager.default.removeItem(at: root) }
+        await server.configureEvidenceDirectory(root.appendingPathComponent("evidence"))
+        await server.configureCleanupReceipts(directory: root.appendingPathComponent("cleanup"), runtimeGeneration: websiteInferenceFixtureGeneration) { _ in }
+        await server.setGroqSubmissionIntervalForTesting(.zero)
+        let task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(), turn = UUID().uuidString.lowercased()
+        let preparation = UUID(), core = UUID(), model = GroqPreparedPromptCapture.modelID
+        let scope = GroqToolCatalog.Scope(taskID: task, threadID: thread, turnID: turn,
+            runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: preparation, modelID: model)
+        var tools = [GroqToolCatalog.specification, GroqHistoryTool.specification].map { definition in
+            var wire = definition; wire["parameters"] = wire.removeValue(forKey: "inputSchema"); return wire
+        }
+        tools.append(["type": "function", "name": "fixture_read", "description": "Read an inert synthetic fixture.",
+            "parameters": ["type": "object", "properties": [:], "additionalProperties": false]])
+        let seedBody = try JSONSerialization.data(withJSONObject: ["model": model, "input": "Seed only", "tools": tools])
+        let seed = try XCTUnwrap(WebModelResponseCodec.prepareRequest(seedBody).groqToolCatalogSeed)
+        let arguments: [String: Any] = ["catalog_revision": try GroqToolCatalog.baseline(for: seed).revision, "names": ["fixture_read"]]
+        let loadArguments = try JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys])
+        let loader = String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls",
+            "calls": [["name": GroqToolCatalog.name, "arguments": arguments]]]), as: UTF8.self)
+        let base = FixtureWebModelTransport(replyTexts: [loader,
+            #"{"type":"tool_calls","calls":[{"name":"fixture_read","arguments":{}}]}"#,
+            #"{"type":"message","text":"Synthetic prepared prompt fixture complete"}"#], cleanupResult: "transcript_cleared")
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base))
+        try await server.prepareInferenceTurn(taskID: task, threadID: thread,
+            runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: preparation, isNewThread: true,
+            isCompactToolThread: true, historyPreparation: nativeHistory ? .init(modelID: model, coreGeneration: core) : nil)
+        if nativeHistory {
+            let writer = try await server.prepareGroqHistoryTurn(taskID: task, threadID: thread, turnID: turn,
+                runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: preparation, modelID: model, coreGeneration: core)
+            XCTAssertNotNil(writer)
+        }
+        try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn,
+            runtimeGeneration: websiteInferenceFixtureGeneration, preparationID: preparation)
+        let metadata = try websiteInferenceFixtureMetadata(taskID: task, threadID: thread, turnID: turn)
+        let human = """
+            In /tmp/fixtures/cases/invoice-495-groq-gptoss120b-0123456789abcdef/coding, fix the invoice aggregation bug in reconcile.py according to its README. Keep the tests, sample data, and reference format unchanged. Run python3 -m unittest -v, then run python3 reconcile.py.
+
+            Use the built-in browser to open http://127.0.0.1:50473/, enter the printed reference, and submit it once. Read the resulting receipt, then close the tab you opened. Use browser tools for the website; do not use terminal HTTP requests or inspect the fixture's control directory, server source, or receipt files.
+
+            Return the test result, the reference, and the receipt shown by the page.
+            """
+        func item(_ role: String, _ text: String) -> [String: Any] {
+            ["type": "message", "role": role, "content": [["type": "input_text", "text": text]]]
+        }
+        let original = [item("developer", "Preserve this exact synthetic policy."),
+            item("user", "<environment_context><cwd>/tmp/marker</cwd><shell>zsh</shell></environment_context>"), item("user", human)]
+        return (GroqClosedNativeFixture(server: server, base: base, task: task, scope: scope,
+            tools: tools, loadArguments: loadArguments, metadata: metadata), original, human, directory)
+    }
+
+    private func writeGroqPreparedPromptArm(_ f: (fixture: GroqClosedNativeFixture, original: [[String: Any]], human: String, directory: URL)) throws -> Data {
+        let formatter = ISO8601DateFormatter(); formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let arm = try JSONSerialization.data(withJSONObject: ["schemaVersion": 1, "purpose": GroqPreparedPromptCapture.purpose,
+            "nonce": UUID().uuidString.lowercased(), "taskID": f.fixture.task, "threadID": f.fixture.scope.threadID,
+            "turnID": f.fixture.scope.turnID, "modelID": f.fixture.scope.modelID,
+            "userPromptSHA256": SHA256.hash(data: Data(f.human.utf8)).map { String(format: "%02x", $0) }.joined(),
+            "expiresAt": formatter.string(from: Date().addingTimeInterval(60))], options: [.sortedKeys])
+        let url = f.directory.appendingPathComponent("arm.json")
+        try arm.write(to: url); try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        return arm
+    }
+
     func testGroqUnloadedToolCorrectionRejectsPageProofAndCustomTransportWithoutNativeAuthority() async throws {
         for nativeHistory in [false, true] {
             let root = try websiteBenchmarkTemporaryDirectory()

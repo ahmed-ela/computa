@@ -554,7 +554,7 @@ enum ComputaAgentInstructions {
 
     private static func groqCompactBrowserInstructions(domains: Set<GroqInstructionDomain>) -> String {
         """
-        Browser: each turn open a task page or tabs→bind observed tab_id; prior-turn handles/refs/cursors are invalid. Reopen supplied/observed URLs. browser_* needs no native binding/external connection; localhost is local. Inference pages cannot be targeted. Preserve user tabs; load close and close task pages, report failures; automatic cleanup is not requested close proof. Inputs need current refs and authorized scope; matching receipts prove only their stated result. Never replay uncertain inputs/resubmit for evidence; verify new tied outcomes. Background-only limits delivery, not authorized effects; actual denials/Stop bind, ongoing restrictions persist.
+        Browser: each turn open a task page or tabs→bind observed tab_id; prior-turn handles/refs/cursors are invalid. Reopen supplied/observed URLs. browser_* needs no native-app binding or external connection; localhost is local. Inference pages cannot be targeted. Preserve user tabs; load close and close task pages, report failures; automatic cleanup is not requested close proof. Inputs need current refs and authorized scope; matching receipts prove only their stated result. Never replay uncertain inputs/resubmit for evidence; verify new tied outcomes. Background-only limits delivery, not authorized effects; actual denials/Stop bind, ongoing restrictions persist.
         \(domains.contains(.browserRead) ? groqCompactBrowserReadInstructions : "")
         \(domains.contains(.browserInput) ? groqCompactBrowserInputInstructions : "")
         \(domains.contains(.browserClose) ? groqCompactBrowserCloseInstructions : "")

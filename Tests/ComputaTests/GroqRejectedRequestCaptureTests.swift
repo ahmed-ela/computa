@@ -219,6 +219,163 @@ final class GroqRejectedRequestCaptureTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: racing.output), bytes)
     }
 
+    func testPreparedOrdinalTwoPreservesExactAdmittedPromptCanonicalBytesAndNoAuthority() throws {
+        let f = try fixture(continuation: true), request = try preparedRequest(f)
+        try writePreparedArm(f)
+        XCTAssertTrue(request.usesNativeGroqHistoryPresentation)
+        XCTAssertNotNil(request.groqToolDiscoveryDiagnostic)
+        XCTAssertNil(f.prepare(), "The rejected-budget purpose cannot borrow the prepared-prompt arm")
+        let scope = try XCTUnwrap(GroqPreparedPromptCapture.prepare(directory: f.directory, context: f.context,
+            request: request, nativeInferenceOrdinal: 2, now: f.now, isCurrent: { true }))
+        XCTAssertTrue(scope.capture(isCurrent: { true }))
+        let bytes = try Data(contentsOf: f.output), value = try f.record()
+        XCTAssertEqual(Set(value.keys), ["version", "purpose", "stage", "nativeInferenceOrdinal", "nonce", "taskID", "threadID", "turnID",
+            "runtimeGeneration", "preparationID", "transportGeneration", "inferenceID", "modelID", "userPromptSHA256",
+            "submitted", "providerWireAttested", "automaticReplay", "responseAuthority", "cleanupAuthority", "dispatchAuthority",
+            "canonicalRequestBase64", "canonicalRequestBytes", "canonicalRequestSHA256", "displayedPrompt", "displayedPromptBytes",
+            "displayedPromptSHA256", "statistics"])
+        XCTAssertEqual(value["version"] as? Int, 1)
+        XCTAssertEqual(value["purpose"] as? String, GroqPreparedPromptCapture.purpose)
+        XCTAssertEqual(value["stage"] as? String, "native_prepared_prompt")
+        XCTAssertEqual(value["nativeInferenceOrdinal"] as? Int, 2)
+        XCTAssertEqual(value["nonce"] as? String, f.nonce.uuidString.lowercased())
+        for (key, id) in [("taskID", f.context.taskID), ("threadID", f.context.threadID), ("turnID", f.context.turnID),
+                          ("runtimeGeneration", f.context.runtimeGeneration), ("preparationID", f.context.preparationID),
+                          ("transportGeneration", f.context.transportGeneration), ("inferenceID", f.context.inferenceID)] {
+            XCTAssertEqual(value[key] as? String, id.uuidString.lowercased(), key)
+        }
+        XCTAssertEqual(value["modelID"] as? String, Capture.modelID)
+        XCTAssertEqual(value["userPromptSHA256"] as? String, GroqOwnedStatusLease.digest(f.user))
+        for key in ["submitted", "providerWireAttested", "automaticReplay", "responseAuthority", "cleanupAuthority", "dispatchAuthority"] {
+            XCTAssertEqual(value[key] as? Bool, false, key)
+        }
+        XCTAssertEqual(Data(base64Encoded: try XCTUnwrap(value["canonicalRequestBase64"] as? String)), request.continuationRequest)
+        XCTAssertTrue(String(decoding: request.continuationRequest, as: UTF8.self).contains(#""decimal":1.00"#))
+        XCTAssertTrue(String(decoding: request.continuationRequest, as: UTF8.self).contains(#""escaped":"\u0061""#))
+        XCTAssertEqual(value["canonicalRequestBytes"] as? Int, request.continuationRequest.count)
+        XCTAssertEqual(value["canonicalRequestSHA256"] as? String, digest(request.continuationRequest))
+        XCTAssertEqual(value["displayedPrompt"] as? String, request.prompt)
+        XCTAssertEqual(value["displayedPromptBytes"] as? Int, request.prompt.utf8.count)
+        XCTAssertEqual(value["displayedPromptSHA256"] as? String, GroqOwnedStatusLease.digest(request.prompt))
+        XCTAssertEqual(value["statistics"] as? NSDictionary, try JSONSerialization.jsonObject(with: JSONEncoder().encode(request.promptStatistics)) as? NSDictionary)
+        XCTAssertEqual(try permissions(f.output), 0o600); XCTAssertFalse(f.exists(f.arm))
+        XCTAssertFalse(scope.capture(isCurrent: { true }))
+        XCTAssertNil(GroqPreparedPromptCapture.prepare(directory: f.directory, context: f.context,
+            request: request, nativeInferenceOrdinal: 2, now: f.now, isCurrent: { true }))
+        XCTAssertEqual(try Data(contentsOf: f.output), bytes)
+    }
+
+    func testPreparedCaptureRequiresExactOrdinalPurposeNativeProfileUserAndScopeWithoutSpendingArm() throws {
+        for mode in ["ordinal_zero", "ordinal_one", "ordinal_three", "ordinal_negative", "ordinal_max", "nil_directory", "no_arm",
+                     "old_purpose", "foreign_task", "foreign_thread", "foreign_turn", "context_model", "request_model", "hash", "nonfixture",
+                     "legacy", "no_projection", "no_reader", "no_loader", "duplicate", "extra_key", "missing_key", "expired", "over_ttl", "not_current"] {
+            let f = try fixture(user: mode == "nonfixture" ? Self.user.replacingOccurrences(of: "\n", with: " ") : Self.user,
+                model: mode == "request_model" ? GroqOwnedStatusLease.Profile.gptoss20b.choice.modelID : Capture.modelID)
+            let request = try preparedRequest(f, compact: mode != "legacy", projection: mode != "no_projection",
+                reader: mode != "no_reader", loader: mode != "no_loader")
+            var fields = f.fields(); fields["purpose"] = GroqPreparedPromptCapture.purpose
+            switch mode {
+            case "old_purpose": fields["purpose"] = Capture.purpose
+            case "foreign_task": fields["taskID"] = UUID().uuidString.lowercased()
+            case "foreign_thread": fields["threadID"] = UUID().uuidString.lowercased()
+            case "foreign_turn": fields["turnID"] = UUID().uuidString.lowercased()
+            case "hash": fields["userPromptSHA256"] = GroqOwnedStatusLease.digest("another user")
+            case "extra_key": fields["headers"] = "not permitted"
+            case "missing_key": fields.removeValue(forKey: "threadID")
+            case "expired": fields = f.fields(expiresAt: f.now); fields["purpose"] = GroqPreparedPromptCapture.purpose
+            case "over_ttl": fields = f.fields(expiresAt: f.now.addingTimeInterval(600.001)); fields["purpose"] = GroqPreparedPromptCapture.purpose
+            default: break
+            }
+            if mode == "duplicate" {
+                let encodedFields = String(decoding: try encoded(fields), as: UTF8.self)
+                try f.writeArm(Data(("{\"purpose\":\"foreign\"," + String(encodedFields.dropFirst())).utf8))
+            } else { try f.writeArm(try encoded(fields)) }
+            if mode == "no_arm" { try FileManager.default.removeItem(at: f.arm) }
+            let arm = try? Data(contentsOf: f.arm)
+            let ordinal = ["ordinal_zero": 0, "ordinal_one": 1, "ordinal_three": 3, "ordinal_negative": -1, "ordinal_max": Int.max][mode] ?? 2
+            let context = mode == "context_model" ? f.contextWithModel(GroqOwnedStatusLease.Profile.gptoss20b.choice.modelID) : f.context
+            XCTAssertNil(GroqPreparedPromptCapture.prepare(directory: mode == "nil_directory" ? nil : f.directory,
+                context: context, request: request, nativeInferenceOrdinal: ordinal, now: f.now,
+                isCurrent: { mode != "not_current" }), mode)
+            XCTAssertEqual(try? Data(contentsOf: f.arm), arm, mode)
+            XCTAssertFalse(f.exists(f.output), mode)
+        }
+        let boundary = try fixture(); try writePreparedArm(boundary, expiresAt: boundary.now.addingTimeInterval(600))
+        XCTAssertNotNil(GroqPreparedPromptCapture.prepare(directory: boundary.directory, context: boundary.context,
+            request: try preparedRequest(boundary), nativeInferenceOrdinal: 2, now: boundary.now, isCurrent: { true }))
+    }
+
+    func testPreparedScopeCurrentnessExpiryRevocationCancellationAndAtomicOutputRemainOneShot() async throws {
+        let f = try fixture(); try writePreparedArm(f)
+        let request = try preparedRequest(f), arm = try Data(contentsOf: f.arm)
+        let scope = try XCTUnwrap(GroqPreparedPromptCapture.prepare(directory: f.directory, context: f.context,
+            request: request, nativeInferenceOrdinal: 2, now: f.now, isCurrent: { true }))
+        XCTAssertFalse(scope.capture(isCurrent: { false })); XCTAssertEqual(try Data(contentsOf: f.arm), arm)
+        scope.revoke(); scope.revoke(); XCTAssertFalse(scope.capture(isCurrent: { true }))
+        let cancelledScope = try XCTUnwrap(GroqPreparedPromptCapture.prepare(directory: f.directory, context: f.context,
+            request: request, nativeInferenceOrdinal: 2, now: f.now, isCurrent: { true }))
+        let cancelled = Task { @MainActor in
+            let rejectedPrepare = GroqPreparedPromptCapture.prepare(directory: f.directory, context: f.context,
+                request: request, nativeInferenceOrdinal: 2, now: f.now, isCurrent: { true }) == nil
+            return (Task.isCancelled, rejectedPrepare, !cancelledScope.capture(isCurrent: { true }))
+        }
+        cancelled.cancel(); let cancelledResult = await cancelled.value
+        XCTAssertTrue(cancelledResult.0); XCTAssertTrue(cancelledResult.1); XCTAssertTrue(cancelledResult.2)
+        XCTAssertEqual(try Data(contentsOf: f.arm), arm); XCTAssertFalse(f.exists(f.output))
+        let expiry = try fixture(); try writePreparedArm(expiry, expiresAt: expiry.now.addingTimeInterval(0.05))
+        let expiring = try XCTUnwrap(GroqPreparedPromptCapture.prepare(directory: expiry.directory, context: expiry.context,
+            request: try preparedRequest(expiry), nativeInferenceOrdinal: 2, now: expiry.now, isCurrent: { true }))
+        try await Task.sleep(for: .milliseconds(120))
+        XCTAssertFalse(expiring.capture(isCurrent: { true })); XCTAssertTrue(expiry.exists(expiry.arm)); XCTAssertFalse(expiry.exists(expiry.output))
+        let occupied = try fixture(); try writePreparedArm(occupied)
+        let waiting = try XCTUnwrap(GroqPreparedPromptCapture.prepare(directory: occupied.directory, context: occupied.context,
+            request: try preparedRequest(occupied), nativeInferenceOrdinal: 2, now: occupied.now, isCurrent: { true }))
+        let sentinel = Data("existing private output".utf8); try sentinel.write(to: occupied.output)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: occupied.output.path)
+        XCTAssertFalse(waiting.capture(isCurrent: { true })); XCTAssertEqual(try Data(contentsOf: occupied.output), sentinel)
+        let replaced = try fixture(); try writePreparedArm(replaced)
+        let old = try XCTUnwrap(GroqPreparedPromptCapture.prepare(directory: replaced.directory, context: replaced.context,
+            request: try preparedRequest(replaced), nativeInferenceOrdinal: 2, now: replaced.now, isCurrent: { true }))
+        var changed = replaced.fields(); changed["purpose"] = GroqPreparedPromptCapture.purpose; changed["nonce"] = UUID().uuidString.lowercased()
+        let changedBytes = try encoded(changed); try replaced.writeArm(changedBytes)
+        XCTAssertFalse(old.capture(isCurrent: { true })); XCTAssertEqual(try Data(contentsOf: replaced.arm), changedBytes)
+        XCTAssertFalse(replaced.exists(replaced.output))
+        let racing = try fixture(); try writePreparedArm(racing)
+        let racingRequest = try preparedRequest(racing)
+        let first = try XCTUnwrap(GroqPreparedPromptCapture.prepare(directory: racing.directory, context: racing.context,
+            request: racingRequest, nativeInferenceOrdinal: 2, now: racing.now, isCurrent: { true }))
+        let second = try XCTUnwrap(GroqPreparedPromptCapture.prepare(directory: racing.directory, context: racing.context,
+            request: racingRequest, nativeInferenceOrdinal: 2, now: racing.now, isCurrent: { true }))
+        let results = await withTaskGroup(of: Bool.self, returning: [Bool].self) { group in
+            for candidate in [first, second] { group.addTask { candidate.capture(isCurrent: { true }) } }
+            var results: [Bool] = []; for await result in group { results.append(result) }; return results
+        }
+        XCTAssertEqual(results.filter { $0 }.count, 1)
+        XCTAssertEqual(try racing.record()["stage"] as? String, "native_prepared_prompt")
+        XCTAssertFalse(racing.exists(racing.arm)); XCTAssertFalse(first.capture(isCurrent: { true })); XCTAssertFalse(second.capture(isCurrent: { true }))
+    }
+
+    private func writePreparedArm(_ fixture: Fixture, expiresAt: Date? = nil) throws {
+        var fields = fixture.fields(expiresAt: expiresAt); fields["purpose"] = GroqPreparedPromptCapture.purpose
+        try fixture.writeArm(try encoded(fields))
+    }
+    private func preparedRequest(_ fixture: Fixture, compact: Bool = true, projection: Bool = true,
+                                 reader: Bool = true, loader: Bool = true) throws -> C.Request {
+        let original = fixture.request.continuationRequest
+        let layout = try GroqContextJSONLayout.parse(original), range = try XCTUnwrap(layout.toolsRange)
+        var tools: [[String: Any]] = []
+        for definition in (loader ? [GroqToolCatalog.specification] : []) + (reader ? [GroqHistoryTool.specification] : []) {
+            var wire = definition; wire["parameters"] = wire.removeValue(forKey: "inputSchema"); tools.append(wire)
+        }
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: original) as? [String: Any])
+        tools += try XCTUnwrap(root["tools"] as? [[String: Any]])
+        var raw = original; raw.replaceSubrange(range, with: try encoded(tools))
+        let initial = try C.prepareRequest(raw)
+        guard projection, let seed = initial.groqToolCatalogSeed else { return try C.prepareRequest(raw, compactHistoryInventory: compact) }
+        return try C.prepareRequest(raw, groqToolCatalogProjection: GroqToolCatalog.baseline(for: seed),
+            groqDirectTools: .loadedOnly, compactHistoryInventory: compact)
+    }
+
     private struct Fixture {
         let directory: URL, context: Capture.Context, request: C.Request, user: String, now: Date, nonce: UUID
         var arm: URL { directory.appendingPathComponent("arm.json") }
@@ -270,7 +427,7 @@ final class GroqRejectedRequestCaptureTests: XCTestCase {
         let lexical = Data(("{\n\"retained_fixture_data\":{\"escaped\":\"\\u0061\",\"decimal\":1.00},\n" + String(decoding: base.dropFirst(), as: UTF8.self)).utf8)
         return try C.prepareRequest(lexical)
     }
-    private func encoded(_ value: [String: Any]) throws -> Data { try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]) }
+    private func encoded(_ value: Any) throws -> Data { try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]) }
     private func digest(_ data: Data) -> String { GroqOwnedStatusLease.digest(String(decoding: data, as: UTF8.self)) }
     private func permissions(_ url: URL) throws -> Int { try XCTUnwrap(FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber).intValue }
     private static let user = """

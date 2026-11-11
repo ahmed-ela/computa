@@ -906,7 +906,7 @@ enum WebModelResponseCodec {
                 let bind = capabilities.entry.first { $0 == "browser_bind" || $0 == "functions.browser_bind" }.map {
                     " Observed tab_id only: " + (capabilities.loaded.contains($0) ? "call " : "first load ") + $0 + "."
                 } ?? ""
-                return "Current browser state: unbound. Schemas do not bind pages. Page tools require native binding; click/fill also need current refs." + open + bind
+                return "Current browser state: unbound. Schemas do not bind pages. Page tools require this task's browser binding; click/fill also need current refs." + open + bind
                     + " Shell HTTP cannot verify browser state; empty tabs do not prove denial." + separation
             }
             let read = capabilities.eligible.first { $0 == "browser_read" || $0 == "functions.browser_read" }.map {

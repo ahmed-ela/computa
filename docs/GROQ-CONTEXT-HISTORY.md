@@ -534,3 +534,43 @@ in 2/3/2 fragments, with sends and matching closures 12/13/12. Maximum admitted 
 units were 5,812/5,940/5,766 under the unchanged 6,000 limit. These finite results do
 not promise a stable budget margin. Synthetic website replies made zero real
 provider requests or browser actions; live qualification remains separate.
+
+### Prepared-prompt diagnostics after the 494 refusal (2026-11-10)
+
+Build 494 completed two Groq inferences in 75.342 seconds and ended with “I’m sorry,
+but I can’t fulfill that request.” Its only native call loaded browser_open,
+browser_fill, browser_click and browser_read; schema loading executed none of
+them. No command, edit, browser action or submission followed. Both website
+sessions have saved closed receipts, with no native website error. The fixture
+failed. The refusal supplies no rationale, and admitted-request hashes/counts
+alone do not establish the exact outbound body or a service/model cause.
+
+One source wording ambiguity used “native binding” for both native-app binding
+and this task’s built-in browser-page binding. The clarification distinguishes
+those meanings while retaining the existing binding, permission and current
+reference guards. It adds no refusal override, retry or capability grant, and is
+not claimed as the cause or prevention of the 494 result.
+
+The separate private purpose `groq_120b_fixture_prepared_prompt_v1` reuses
+`GroqRejectedRequestDiagnostics-v1` and its atomic request writer. Its exact
+controlled invoice fixture, task/thread/turn/model/user hash, nonce, current
+native history and expiry of at most 600 seconds remain required. A capped native
+HTTP-frame counter with inference-ID deduplication captures only the second
+successfully budget-admitted frame, outside the corrective website-attempt loop.
+The canonical request, displayed prompt, hashes and statistics are labelled
+`native_prepared_prompt` before this frame’s model-page UI work; they attest neither submission nor
+provider-wire bytes.
+
+Capture is default-off and mutually exclusive with the unchanged rejected-request
+arm. It makes no extra DOM/network/header/cookie/Inspector read and grants no
+response, cleanup or dispatch authority. Canonical data may include prior
+controlled tool output. Later native submission/completion records must be joined
+separately; a prepared record alone proves no model delivery, workflow outcome or
+live qualification. Prompt admission, parser, tool selection and correction rules
+remain unchanged.
+
+Validation: after the retained compile failure (zero methods, 118.642 seconds)
+and test-only encoder parameter fix, all 415 checks passed without failures/skips
+in 176.043 seconds, with source/helper unchanged; the three synthetic native
+workflows closed 12/13/12 sends and recovered all 1,381 bytes in 2/3/2 fragments,
+with admitted maxima 5,774/5,966/5,838 under 6,000 and no real provider/browser actions.
