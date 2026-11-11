@@ -4191,6 +4191,7 @@ final class APIModelResponseCodecTests: XCTestCase {
             XCTAssertNil(detail.patchLocation)
             XCTAssertEqual(probe.tool, .namedApplyPatch)
             XCTAssertEqual(probe.projection, .literalInput)
+            XCTAssertEqual(probe.status, .nonLocal, "A malformed literal wrapper is not the admitted pattern mismatch")
             XCTAssertTrue(probe.isConsistent)
             XCTAssertFalse(String(decoding: try JSONEncoder().encode(probe), as: UTF8.self).contains("PRIVATE"))
             var withoutProbe = details; withoutProbe[0].patchProbe = nil
@@ -4254,12 +4255,86 @@ final class APIModelResponseCodecTests: XCTestCase {
                     XCTAssertEqual(details.count, 1); XCTAssertEqual(details.first?.constraint, .schemaMismatch)
                     XCTAssertEqual(details.first?.path, [.property("input")])
                     XCTAssertEqual(details.first?.patchProbe?.projection, .literalInput)
+                    XCTAssertEqual(details.first?.patchProbe?.status, .literalInputPatternMismatch)
                     XCTAssertThrowsError(try APIModelResponseCodec.decode(result, request: req)) {
                         XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
                     }
                 }
             }
         }
+    }
+
+    func testAlibabaLiteralPatternProbeRejectsFalseAttributionAndRoundTripsFiniteRecord() throws {
+        typealias C = APIModelResponseCodec
+        typealias F = APIModelCorrectionAccounting.FirstValidation
+        let p = literalPatchProvider()
+        let req = try request(["tools": [nativePatch()]], provider: p, toolNaming: .semantic)
+        let literal = "*** Begin Patch\n*** Update File: /synthetic/file\n@@\n-old\n+PRIVATE_LITERAL_PATCH_CONTENT\n@@\n*** End Patch"
+        func arguments(_ value: [String: Any]) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), as: UTF8.self)
+        }
+        let bad = try arguments(["input": literal])
+        var observed: C.ArgumentValidationDiagnostic?
+        guard case .argumentsRejected(_, let details) = try C.decodeForCorrection(correctionResult(req, arguments: bad), request: req,
+            onArgumentRejection: { observed = $0 }) else { return XCTFail("The entire invalid response must remain rejected") }
+        let detail = try XCTUnwrap(details.first), probe = try XCTUnwrap(detail.patchProbe)
+        XCTAssertEqual(details.count, 1)
+        XCTAssertEqual(detail.constraint, .schemaMismatch)
+        XCTAssertEqual(detail.path, [.property("input")])
+        XCTAssertNil(detail.patchLocation)
+        XCTAssertEqual(probe, .init(tool: .namedApplyPatch, projection: .literalInput, path: .input, actual: .string,
+            status: .literalInputPatternMismatch, outer: [.input], keys: .one, operations: .missing))
+        XCTAssertTrue(probe.isConsistent)
+        let observation = try XCTUnwrap(observed)
+        let finite = try XCTUnwrap(F(observation))
+        let encoded = try JSONEncoder().encode(finite)
+        XCTAssertEqual(try JSONDecoder().decode(F.self, from: encoded), finite)
+        let text = String(decoding: encoded, as: UTF8.self)
+        XCTAssertTrue(text.contains("literal_input_pattern_mismatch"))
+        XCTAssertFalse(text.contains("PRIVATE_LITERAL_PATCH_CONTENT"))
+        XCTAssertFalse(text.contains("/synthetic/file"))
+
+        let crossed = C.ArgumentValidationDiagnostic(reason: .schemaMismatch,
+            schemaFailures: [.init(toolIndex: 0, constraint: .typeMismatch, patchProbe: probe)],
+            callCount: 1, rejectedCount: 1, envelopeShapeValid: true, unambiguousJSON: true,
+            streamShapeAndUsageValid: true, knownUsage: true, correctionEligible: true)
+        XCTAssertNil(F(crossed))
+        var envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        var failures = try XCTUnwrap(envelope["schemaFailures"] as? [[String: Any]])
+        failures[0]["constraint"] = "type_mismatch"
+        envelope["schemaFailures"] = failures
+        XCTAssertThrowsError(try JSONDecoder().decode(F.self, from: JSONSerialization.data(withJSONObject: envelope)))
+        let probeObject = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(probe)) as? [String: Any])
+        let invalidProbeFields: [(String, Any)] = [("tool", "other"), ("projection", "local"), ("path", "operations"),
+            ("actual", "integer"), ("outer", ["input", "other"]), ("keys", "multiple"), ("operations", "array")]
+        for (key, value) in invalidProbeFields {
+            var changed = probeObject; changed[key] = value
+            XCTAssertThrowsError(try JSONDecoder().decode(C.PatchSchemaProbe.self, from: JSONSerialization.data(withJSONObject: changed)), key)
+        }
+
+        let foreign = try request(["tools": [["type": "function", "name": "apply_patch", "parameters": req.tools[0].schema]]],
+            provider: p, toolNaming: .semantic)
+        let otherFailures = try [rejectedDetails(foreign, arguments: bad),
+            rejectedDetails(req, arguments: arguments(["input": literal, "extra": true])),
+            rejectedDetails(req, arguments: #"{"input":17}"#), rejectedDetails(req, arguments: "{}")]
+        for failures in otherFailures {
+            XCTAssertFalse(failures.isEmpty)
+            XCTAssertFalse(failures.contains { $0.patchProbe?.status == .literalInputPatternMismatch })
+        }
+        let withoutPattern = try request(["tools": [nativePatch()]], provider: literalPatchProvider(model: "other"), toolNaming: .semantic)
+        XCTAssertNil((withoutPattern.tools[0].schema["properties"] as? [String: [String: Any]])?["input"]?["pattern"])
+        let legacy = try C.decode(correctionResult(withoutPattern, arguments: bad), request: withoutPattern)
+        let item = try XCTUnwrap((legacy.response["output"] as? [[String: Any]])?.first)
+        XCTAssertEqual(Data(try XCTUnwrap(item["input"] as? String).utf8), Data(literal.utf8),
+            "A diagnostic must not extend the admission pattern to an unrelated tool profile")
+
+        let duplicate = String(bad.dropLast()) + #", "input": "other"}"#
+        var duplicateObservation: C.ArgumentValidationDiagnostic?
+        guard case .argumentsRejected(_, let duplicateDetails) = try C.decodeForCorrection(correctionResult(req, arguments: duplicate),
+            request: req, onArgumentRejection: { duplicateObservation = $0 }) else { return XCTFail("Duplicate input is ambiguous") }
+        XCTAssertEqual(duplicateObservation?.reason, .invalidJSON)
+        XCTAssertNil(duplicateObservation?.schemaFailures)
+        XCTAssertTrue(duplicateDetails.isEmpty)
     }
 
     func testAlibabaLiteralPatternPreservesSourcePrefixesAndUninterceptedInputBytes() throws {

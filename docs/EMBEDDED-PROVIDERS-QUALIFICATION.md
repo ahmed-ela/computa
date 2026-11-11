@@ -4039,3 +4039,17 @@ Groq/120B failed after 70.618 seconds on its second inference, following one sch
 All five ChatGPT selections passed the same 19-check independent audit: only the permitted function changed, all six tests passed, the printed reference matched the oracle, exactly one browser POST issued a unique receipt observed in the tool output, the model explicitly closed its task-created tab, and its final answer reported the reference and receipt. The website journals independently verified GPT-6 family, the selected power, Chat product and temporary-session policy throughout. All 48 website exchanges completed with saved closed-session receipts and no recorded website errors. No uncertain action was replayed.
 
 Evidence is retained under `all-models-20261102/current-workflow-preparation/fixtures/cases/invoice-497-chat-*`, including native traces, provider and cleanup journals, code diffs, independent test output and audit results. The broader all-model qualification remains incomplete.
+
+### 2026-11-11 — Additional provider checks on installed 497
+
+| Selection | Controlled workflow outcome |
+| --- | --- |
+| Claude Sonnet 5.5 | Passed all 19 checks in 58.487 s. Eight native tool calls, six passing tests, one observed browser receipt, an explicit model-issued close, and nine verified website releases with saved cleanup receipts. |
+| Claude Opus 5 | The website blocked the first verified submission with a reasoning-extraction warning after 3.946 s. No tool ran or reply was accepted. The temporary session closed; the prompt was not replayed. |
+| Qwen3.7-Plus website | The first verified submission hit the five-minute response deadline (303.081 s overall). No tool ran. A later receipt confirmed deletion. Separate short direct Temporary Chat and native saved-session marker controls passed; the native control took 16.862 s and saved its deletion receipt. The controls do not establish why the full workflow timed out. |
+| Kimi Instant | The initial editor check rejected supported nonwhitespace content before Send (1.552 s). Its origin is unknown. No tool ran. The durable cleanup diagnostic recorded `saved_deletion / ownership / unbound_cleanup`; cleanup remains unconfirmed and was not retried. |
+| Alibaba Qwen3.7 Flash API | Three successful read commands preceded `invalid_arguments` after 28.248 s. A bounded second attempt still rejected one `apply_patch` literal-input argument. No rejected-response call executed, and no edit, browser submission, or final answer was recorded. |
+
+The Qwen timeout journal's last admitted observation was 64.820 s old at the deadline. It contained an empty extraction and no completion candidate. That is an observation gap, not proof that the provider was still generating or that a finished reply was missed. The later marker pass does not qualify the longer workflow.
+
+The Alibaba failure log does not retain the rejected input. New finite metadata distinguishes a mismatch against the exact admitted literal patch pattern from other wrapper or schema failures. It preserves strict validation, corrective feedback, request bytes, retry limits, and the rejection of all calls in a malformed response. It saves no patch text. All 13 focused Codec, correction-store, and server tests passed; the diagnostic change was not installed for the live 497 run and cannot retrospectively identify its missing argument bytes.

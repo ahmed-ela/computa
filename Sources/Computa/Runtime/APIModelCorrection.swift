@@ -100,6 +100,7 @@ struct APIModelCorrectionAccounting: Sendable {
                     patchLocation: keys.contains("patchLocation") ? try values.decode(APIModelResponseCodec.LocalPatchSchemaLocation.self, forKey: .patchLocation) : nil,
                     patchProbe: keys.contains("patchProbe") ? try values.decode(APIModelResponseCodec.PatchSchemaProbe.self, forKey: .patchProbe) : nil)
                 guard (patchLocation == nil || constraint == .schemaMismatch),
+                      (patchProbe?.status != .literalInputPatternMismatch || constraint == .schemaMismatch),
                       location == nil || patchProbe == nil || patchProbe?.tool == .other else { throw APICorrectionDiagnosticCoding.invalid(decoder) }
             }
         }
@@ -114,6 +115,7 @@ struct APIModelCorrectionAccounting: Sendable {
                   failures.count <= 2, failures.allSatisfy({ (0..<128).contains($0.toolIndex) && ($0.location?.isConsistent ?? true)
                     && ($0.patchLocation?.isConsistent ?? true) && ($0.location == nil || $0.patchLocation == nil)
                     && ($0.patchLocation == nil || $0.constraint == .schemaMismatch)
+                    && ($0.patchProbe?.status != .literalInputPatternMismatch || $0.constraint == .schemaMismatch)
                     && ($0.patchProbe?.isConsistent ?? true) && ($0.patchProbe == nil || $0.patchLocation == nil)
                     && ($0.location == nil || $0.patchProbe == nil || $0.patchProbe?.tool == .other) }) else { return nil }
             reason = diagnostic.reason; callCount = diagnostic.callCount; rejectedCount = diagnostic.rejectedCount

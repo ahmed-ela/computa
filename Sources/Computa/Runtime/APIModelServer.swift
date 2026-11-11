@@ -1002,7 +1002,9 @@ actor APIModelServer {
     private static func finiteArgumentValidation(_ value: APIModelResponseCodec.ArgumentValidationDiagnostic) -> Bool {
         (0...128).contains(value.callCount) && (1...128).contains(value.rejectedCount)
             && value.rejectedCount <= value.callCount && (value.schemaFailures?.count ?? 0) <= 2
-            && (value.schemaFailures?.allSatisfy { (0..<128).contains($0.toolIndex) && ($0.location?.isConsistent ?? true) } ?? true)
+            && (value.schemaFailures?.allSatisfy { (0..<128).contains($0.toolIndex) && ($0.location?.isConsistent ?? true)
+                && ($0.patchProbe?.status != .literalInputPatternMismatch
+                    || $0.constraint == .schemaMismatch && $0.patchProbe?.isConsistent == true) } ?? true)
     }
     struct HTTPRequest: Sendable { let method: String; let path: String; let headers: [String: String]; let body: Data }
     static func parseRequest(_ data: Data) throws -> HTTPRequest? {

@@ -312,6 +312,7 @@ enum APIModelResponseCodec {
         enum Count: String, Codable, Sendable { case zero, one, multiple, overLimit = "over_limit" }
         enum Status: String, Codable, Sendable {
             case nonPatch = "non_patch", nonLocal = "non_local", schemaIdentity = "schema_identity"
+            case literalInputPatternMismatch = "literal_input_pattern_mismatch"
             case outerKeys = "outer_keys", operationsType = "operations_type", operationsEmpty = "operations_empty"
             case operationsLimit = "operations_limit", schemaShape = "schema_shape", traversalLimit = "traversal_limit"
             case objectLimit = "object_limit", arrayLimit = "array_limit", unsupportedField = "unsupported_field"
@@ -338,6 +339,10 @@ enum APIModelResponseCodec {
                   keys == .zero || !outer.isEmpty else { return false }
             if status == .nonPatch { return projection == .unrecognized }
             if status == .nonLocal { return projection == .environments || projection == .literalInput }
+            if status == .literalInputPatternMismatch {
+                return projection == .literalInput && path == .input && actual == .string
+                    && outer == [.input] && keys == .one && operations == .missing
+            }
             guard projection == .local else { return false }
             if status == .schemaIdentity { return true }
             if status == .outerKeys { return keys != .one }
@@ -1922,12 +1927,14 @@ enum APIModelResponseCodec {
                 }
                 var violation = localizeSchemaFailure(object, schema: diagnosticSchema, depth: 0, path: [], nodes: &nodes)
                     ?? .init(constraint: .schemaMismatch, path: [])
+                var admittedLiteralPatternMismatch = false
                 // matches() already rejected this exact closed native wrapper.
                 // Localize only its declared pattern, never a foreign string rule.
                 if isAlibabaLiteralPatchPatternTool(tool), object.count == 1,
                    let literal = object["input"] as? String,
                    literal.range(of: alibabaLiteralPatchPattern, options: .regularExpression) == nil {
                     violation = .init(constraint: .schemaMismatch, path: [.property("input")], actualType: .string)
+                    admittedLiteralPatternMismatch = true
                 }
                 // The parsed root is known even when the failing constraint
                 // is not localized. Exact native-schema checks still decide
@@ -1940,7 +1947,9 @@ enum APIModelResponseCodec {
                 var decline: PatchSchemaProbe.Status?
                 violation.patchLocation = localPatchSchemaLocation(object, tool: tool, declined: { decline = $0 })
                 if observingPatchSchema, let decline {
-                    violation.patchProbe = patchSchemaProbe(object, tool: tool, violation: violation, status: decline)
+                    let status: PatchSchemaProbe.Status = admittedLiteralPatternMismatch && decline == .nonLocal
+                        ? .literalInputPatternMismatch : decline
+                    violation.patchProbe = patchSchemaProbe(object, tool: tool, violation: violation, status: status)
                 }
                 onSchemaMismatch(violation)
             }
