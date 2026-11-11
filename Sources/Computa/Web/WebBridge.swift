@@ -334,7 +334,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         }
         guard Set(body.keys) == ["action", "provider"],
               let provider = body["provider"] as? String,
-              WebsiteModelCatalog.providers.contains(provider) else { return }
+              WebsiteModelCatalog.discoveryProviders.contains(provider) else { return }
         await state?.refreshWebsiteModels(provider: provider)
     }
 

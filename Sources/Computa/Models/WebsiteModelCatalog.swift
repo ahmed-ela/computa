@@ -125,6 +125,8 @@ enum WebsiteModelCatalog {
     // the installed pilot. Live tool qualification remains pending; agent modes
     // stay excluded by the exact key/label policy in WebsiteModelChoice.
     static let providers = ["chatgpt", "gemini", "claude", "groq", "kimi", "qwen", "deepseek"]
+    // Groq is temporarily paused in the picker and in catalog discovery.
+    static let discoveryProviders = providers.filter { $0 != "groq" }
     // The pilot exposes only observed Plus/Max names and typed Chat/DeepThink modes.
     static let knownProviders = ["chatgpt", "gemini", "claude", "groq", "kimi", "qwen", "deepseek"]
     static let maximumChoicesPerProvider = 32

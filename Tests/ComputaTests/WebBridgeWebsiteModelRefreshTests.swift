@@ -14,16 +14,16 @@ final class WebBridgeWebsiteModelRefreshTests: XCTestCase {
             return WebsiteModeChoice.DeepSeekMode.allCases.map { WebsiteModeChoice(deepSeekMode: $0) }
         })
         let bridge = WebBridge(state: state)
-        for provider in WebsiteModelCatalog.providers {
+        for provider in WebsiteModelCatalog.discoveryProviders {
             await bridge.refreshWebsiteModels(body: ["action": "refreshWebsiteModels", "provider": provider])
             XCTAssertEqual(calls, [provider])
             calls.removeAll()
         }
         await bridge.refreshWebsiteModels(body: ["action": "refreshWebsiteModels"])
-        XCTAssertEqual(calls, WebsiteModelCatalog.providers)
+        XCTAssertEqual(calls, WebsiteModelCatalog.discoveryProviders)
     }
 
-    func testMalformedScopedRefreshNeverFallsBackToGlobalDiscovery() async {
+    func testMalformedOrPausedScopedRefreshNeverFallsBackToGlobalDiscovery() async {
         var calls: [String] = []
         let state = AppState(tasks: [], preferences: isolatedTestPreferences(), websiteModelDiscovery: { provider in
             calls.append(provider)
@@ -37,6 +37,7 @@ final class WebBridgeWebsiteModelRefreshTests: XCTestCase {
             ["action": "refreshWebsiteModels", "provider": 17],
             ["action": "refreshWebsiteModels", "provider": ["gemini"]],
             ["action": "refreshWebsiteModels", "provider": "unknown"],
+            ["action": "refreshWebsiteModels", "provider": "groq"],
             ["action": "refreshWebsiteModels", "provider": "Gemini"],
             ["action": "refreshWebsiteModels", "provider": " gemini"],
             ["action": "refreshWebsiteModels", "provider": "gemini "],

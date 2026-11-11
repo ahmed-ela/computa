@@ -368,7 +368,7 @@ final class AppState {
               runtime != nil || websiteModelDiscovery != nil || websiteModeDiscovery != nil else { return }
         didStartWebsiteModelDiscovery = true
         updateWebsitePrewarming()
-        let missing = WebsiteModelCatalog.providers.filter { provider in
+        let missing = WebsiteModelCatalog.discoveryProviders.filter { provider in
             !websiteModelChoices.contains { $0.provider == provider }
                 && !websiteModeChoices.contains { $0.provider == provider }
         }
@@ -380,6 +380,7 @@ final class AppState {
     private func requestAutomaticWebsiteModelRefresh(for modelID: String) {
         guard didStartWebsiteModelDiscovery, !cookieMaintenanceOnlyLaunch, !isShuttingDown,
               let provider = WebsiteModelCatalog.selection(for: modelID)?.provider,
+              WebsiteModelCatalog.discoveryProviders.contains(provider),
               !startupWebsiteModelAttemptedProviders.contains(provider),
               !startupWebsiteModelProviders.contains(provider) else { return }
         startupWebsiteModelProviders.append(provider)
@@ -444,11 +445,11 @@ final class AppState {
 
     func refreshWebsiteModels() async {
         guard canRefreshWebsiteModels else { return }
-        await refreshWebsiteModels(providers: WebsiteModelCatalog.providers, retryBlocked: true)
+        await refreshWebsiteModels(providers: WebsiteModelCatalog.discoveryProviders, retryBlocked: true)
     }
 
     func refreshWebsiteModels(provider: String) async {
-        guard WebsiteModelCatalog.providers.contains(provider), canRefreshWebsiteModels else { return }
+        guard WebsiteModelCatalog.discoveryProviders.contains(provider), canRefreshWebsiteModels else { return }
         await refreshWebsiteModels(providers: [provider], retryBlocked: true)
     }
 
