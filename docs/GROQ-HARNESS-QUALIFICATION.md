@@ -792,3 +792,15 @@ now records the exact failed stage, a finite native reason, and the first
 paragraph predicate where available. The local diagnostic contains only those
 categories and the native inference ID. It requires no additional page read
 and leaves response verification and cleanup unchanged.
+
+A fresh, scoped build 510 run captured the exact 60-byte message object and
+saved transcript cleanup after the adapter declined it. The diagnostic
+identified multiple attributes on the visible paragraph. It did not capture
+their names or values. A separate literal response on the same build reached
+the parser and failed because its JSON object lacked a supported `type`.
+
+The paragraph check accepts the known layout class tokens with valid HTML
+direction and language metadata. It still requires one visible, noneditable
+paragraph and its exact text node. Namespaced attributes, interactive markup,
+inline style, custom data, and ARIA attributes do not qualify. The diagnostic
+can distinguish these categories without recording attribute names or values.

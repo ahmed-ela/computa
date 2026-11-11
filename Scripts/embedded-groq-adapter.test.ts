@@ -967,6 +967,8 @@ describe('Groq fixed fresh-session adapter', () => {
     for (const [attributes, reply] of [
       [{}, '{"type":"message","text":"GROQ_FIXTURE_MARKER"}'],
       [{ class: 'text-left mb-4' }, '{"type":"message","text":"GROQ_FIXTURE_MARKER"}'],
+      [{ dir: 'auto', class: 'mb-4  text-left', lang: 'en-US' }, '{"type":"message","text":"GROQ_FIXTURE_MARKER"}'],
+      [{ dir: 'rtl' }, '{"type":"message","text":"GROQ_FIXTURE_MARKER"}'],
       [{}, '{"type":"tool_calls","calls":[}'],
     ] as const) {
       const f = groqFixture({ key: 'openai/gpt-oss-20b', label: 'GPT OSS 20B' });
@@ -984,16 +986,29 @@ describe('Groq fixed fresh-session adapter', () => {
 
   test('paragraph evidence reports only the first failed predicate and keeps the same rejection', async () => {
     for (const [variant, reason] of [
-      ['extra_attribute', 'attribute_count'], ['unknown_attribute', 'attribute_name'], ['unknown_class', 'attribute_value'],
+      ['too_many_attributes', 'attribute_count'], ['extra_attribute', 'attribute_name'], ['unknown_attribute', 'attribute_name'],
+      ['unknown_class', 'attribute_value'], ['duplicate_class', 'attribute_value'], ['invalid_dir', 'attribute_value'],
+      ['invalid_lang', 'attribute_value'], ['style', 'attribute_style'], ['data', 'attribute_data'], ['aria', 'attribute_aria'],
+      ['role', 'attribute_name'], ['tabindex', 'attribute_name'], ['handler', 'attribute_name'],
       ['namespaced_class', 'attribute_namespace'], ['hidden', 'paragraph_hidden'], ['inert', 'paragraph_hidden'],
       ['editable', 'paragraph_editable'], ['foreign_namespace', 'paragraph_namespace'], ['wrapper', 'paragraph_tag'],
       ['direct_text', 'answer_text_child'], ['nested', 'leaf_not_text'], ['split_text', 'paragraph_child_count'],
       ['answer_sibling', 'answer_child_count'], ['second_paragraph', 'answer_child_count'], ['trimmed', 'text_mismatch'],
     ] as const) {
       const f = groqFixture(); await f.submit();
-      const attributes = variant === 'extra_attribute' ? { class: 'text-left mb-4', title: 'extra' }
+      const attributes = variant === 'too_many_attributes' ? Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`data-test-${i}`, '']))
+        : variant === 'extra_attribute' ? { class: 'text-left mb-4', title: 'extra' }
         : variant === 'unknown_attribute' ? { title: 'private-attribute' }
         : variant === 'unknown_class' ? { class: 'text-left mb-4 extra' }
+        : variant === 'duplicate_class' ? { class: 'text-left mb-4 text-left' }
+        : variant === 'invalid_dir' ? { dir: 'private-direction' }
+        : variant === 'invalid_lang' ? { lang: 'private language' }
+        : variant === 'style' ? { style: 'text-align: left' }
+        : variant === 'data' ? { 'data-private-attribute': 'value' }
+        : variant === 'aria' ? { 'aria-label': 'private-label' }
+        : variant === 'role' ? { role: 'button' }
+        : variant === 'tabindex' ? { tabindex: '0' }
+        : variant === 'handler' ? { onclick: 'void 0' }
         : variant === 'namespaced_class' ? { class: 'text-left mb-4' }
         : variant === 'hidden' ? { hidden: '' } : variant === 'inert' ? { inert: '' } : {};
       const paragraph = htmlParagraph(f, variant === 'trimmed' ? ' ' + f.f.reply : f.f.reply, attributes,

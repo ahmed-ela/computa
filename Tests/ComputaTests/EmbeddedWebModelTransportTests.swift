@@ -3281,7 +3281,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     func testGroqRenderedShapeDiagnosticOnlyAcceptsClosedCategories() {
         let reasons = ["answer_child_count", "answer_text_child", "answer_child_kind", "paragraph_namespace", "paragraph_tag",
             "paragraph_child_count", "paragraph_editable", "paragraph_hidden", "attribute_count", "attribute_namespace",
-            "attribute_name", "attribute_value", "leaf_not_text", "text_mismatch", "revision_exhausted", "matched"]
+            "attribute_name", "attribute_value", "attribute_style", "attribute_data", "attribute_aria",
+            "leaf_not_text", "text_mismatch", "revision_exhausted", "matched"]
         for reason in reasons {
             XCTAssertEqual(EmbeddedWebModelTransport.sanitizedGroqRenderedMessageShape(reason), reason)
         }
@@ -15217,8 +15218,11 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let encoded = String(decoding: try JSONSerialization.data(withJSONObject: envelope, options: [.fragmentsAllowed]), as: UTF8.self)
         for scenario in ["released", "missingProof", "uncleared"] {
             let canClear = scenario != "uncleared"
-            let page = try Self.groqFixturePage().replacingOccurrences(of: "window.fixtureReady = true;",
-                with: "f.structuredReply = false; f.reply = \(encoded); f.ignoreClear = \(!canClear); window.fixtureReady = true;")
+            let page = try Self.groqFixturePage()
+                .replacingOccurrences(of: "{ class: 'text-left mb-4' }, f.reply",
+                    with: "{ dir: 'auto', class: 'mb-4 text-left', lang: 'en-US' }, f.reply")
+                .replacingOccurrences(of: "window.fixtureReady = true;",
+                    with: "f.structuredReply = false; f.reply = \(encoded); f.ignoreClear = \(!canClear); window.fixtureReady = true;")
             let fixture = try Fixture(page: page); defer { fixture.shutdown() }
             let root = try websiteBenchmarkTemporaryDirectory().appendingPathComponent("GroqRenderedMessage-" + UUID().uuidString)
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])

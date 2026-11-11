@@ -292,12 +292,32 @@ try {
     if (paragraph.childNodes.length !== 1) return declined('paragraph_child_count');
     if (paragraph.isContentEditable) return declined('paragraph_editable');
     if (!c.visible(paragraph)) return declined('paragraph_hidden');
+    // Language and direction metadata do not add authored nodes or controls.
+    // Only allow the known layout classes and closed passive HTML attributes.
     const attrs = paragraph.attributes;
-    if (attrs.length !== 0) {
-      if (attrs.length !== 1) return declined('attribute_count');
-      if (attrs[0].namespaceURI !== null) return declined('attribute_namespace');
-      if (attrs[0].name !== 'class') return declined('attribute_name');
-      if (attrs[0].value !== 'text-left mb-4') return declined('attribute_value');
+    if (attrs.length > 8) return declined('attribute_count');
+    for (const { namespaceURI, name, value } of attrs) {
+      if (namespaceURI !== null) return declined('attribute_namespace');
+      switch (name) {
+        case 'class': {
+          if (value.length > 64) return declined('attribute_value');
+          const tokens = value.split(/[\t\n\f\r ]+/).filter(Boolean);
+          if (tokens.length !== 2 || !tokens.includes('text-left') || !tokens.includes('mb-4'))
+            return declined('attribute_value');
+          break;
+        }
+        case 'dir':
+          if (!['auto', 'ltr', 'rtl'].includes(value)) return declined('attribute_value');
+          break;
+        case 'lang':
+          if (!/^[a-z]{2,8}(?:-[a-z0-9]{1,8}){0,5}$/i.test(value)) return declined('attribute_value');
+          break;
+        default:
+          if (name === 'style') return declined('attribute_style');
+          if (name.startsWith('data-')) return declined('attribute_data');
+          if (name.startsWith('aria-')) return declined('attribute_aria');
+          return declined('attribute_name');
+      }
     }
     const body = paragraph.childNodes[0];
     // Native checks message grammar. The paragraph profile never normalizes,
