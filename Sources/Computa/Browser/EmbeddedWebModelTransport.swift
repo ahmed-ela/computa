@@ -1310,6 +1310,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var submissionDiagnosticsObserverForTesting: (@MainActor (String, String) -> Void)?
     private var firstUserStructureEmissionObserverForTesting: (@MainActor (Bool, String) -> Void)?
     private var kimiDiscoveryProgressObserverForTesting: (@MainActor (String) -> Void)?
+    private var kimiSavedRouteRejectionObserverForTesting: (@MainActor (String) -> Void)?
     private var modelDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
     private var claudeRemountHostObserverForTesting: (@MainActor (String) -> Void)?
     private var adapterTimeoutObserverForTesting: (@MainActor (String) -> Void)?
@@ -1467,6 +1468,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setKimiDiscoveryProgressObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
         kimiDiscoveryProgressObserverForTesting = observer
+    }
+
+    func setKimiSavedRouteRejectionObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
+        kimiSavedRouteRejectionObserverForTesting = observer
     }
 
     func setModelDiagnosticsObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
@@ -3145,6 +3150,41 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard provider == .kimi, let detail = observed["detail"] as? String,
               kimiFirstUserFailureDetails.contains(detail) else { return false }
         return observed["error"] as? String == (detail == "first_body_count" ? "document_changed" : "conversation_changed")
+    }
+
+    private enum KimiSavedRouteRejectionStage: String { case before, after }
+
+    /// Observe only the original route guard. URL values stay native and are never logged.
+    private func logKimiSavedRouteRejection(_ session: Session, generation: UUID, action: String,
+        cleanupInspection: Bool, stage: KimiSavedRouteRejectionStage, reason: SavedConversationRoutes.Rejection,
+        previous: URL?, attempted: URL) {
+        guard session.provider == .kimi, let token = UUID(uuidString: session.token) else { return }
+        func routeClass(_ url: URL?) -> String {
+            guard let url else { return "none" }
+            switch session.provider.savedConversationRoute(url) {
+            case .fresh?: return "fresh"
+            case .provisional?: return "provisional"
+            case .canonical?: return "canonical"
+            case nil: return "unrecognized"
+            }
+        }
+        let operation: String = switch action {
+        case "inspect": cleanupInspection ? "cleanup_inspect" : "inspect"
+        case "verifyModel": "verify_model"
+        case "submit": "submit"
+        default: "other"
+        }
+        let acknowledged = session.submitted && session.sequence == 1 && session.acknowledgedSendSequence == 1
+        let record = "savedRouteRejection version=2 provider=kimi session=\(token.uuidString.lowercased()) generation=\(generation.uuidString.lowercased())"
+            + " sequence=\(session.sequence) stage=\(stage.rawValue) action=\(operation) reason=\(reason.rawValue)"
+            + " previousRoute=\(routeClass(previous)) attemptedRoute=\(routeClass(attempted))"
+            + " provisionalPinned=\(session.savedRoutes?.provisional != nil) canonicalPinned=\(session.savedRoutes?.canonical != nil)"
+            + " generationBound=\(session.documentGeneration == generation) submitted=\(session.submitted) acknowledged=\(acknowledged)"
+            + " pendingSubmission=\(session.pendingSubmission) firstUserBound=\(session.firstUserFingerprint != nil)"
+        Self.inspectionLog.error("\(record, privacy: .public)")
+        #if DEBUG
+        kimiSavedRouteRejectionObserverForTesting?(record)
+        #endif
     }
 
     /// Project only the categories available at the existing invalid-ID rejection.
@@ -7522,10 +7562,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if provider == .groq {
             guard provider.acceptsGroqModelQuery(url, expectedKey: session.modelChoice?.key) else { throw Failure.modelMismatch }
         }
+        let previousSavedRouteURL = provider == .kimi ? session.savedRoutes?.last : nil
         func routeBefore(_ reason: SavedConversationRoutes.Rejection) -> Failure {
-            if provider == .kimi {
-                Self.inspectionLog.error("savedRouteRejection version=1 provider=kimi stage=before reason=\(reason.rawValue, privacy: .public)")
-            }
+            logKimiSavedRouteRejection(session, generation: generation, action: action,
+                cleanupInspection: allowSavedCleanupInspection, stage: .before, reason: reason,
+                previous: previousSavedRouteURL, attempted: url)
             return .ownershipFailure(.routeBefore)
         }
         if provider.savedConversationPolicy != nil, savedDeleteOperation == nil {
@@ -8048,7 +8089,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             throw Failure.ownershipFailure(.routeAfter)
         }
         if provider.savedConversationPolicy != nil, savedDeleteOperation == nil {
-            guard session.savedRoutes?.observe(currentURL, submitted: session.submitted) == true else { throw Failure.ownershipFailure(.routeAfter) }
+            let previous = provider == .kimi ? session.savedRoutes?.last : nil
+            let decision = session.savedRoutes?.observation(of: currentURL, submitted: session.submitted) ?? .rejected(.trackerMissing)
+            if case .rejected(let reason) = decision {
+                logKimiSavedRouteRejection(session, generation: generation, action: action,
+                    cleanupInspection: allowSavedCleanupInspection, stage: .after, reason: reason,
+                    previous: previous, attempted: currentURL)
+                throw Failure.ownershipFailure(.routeAfter)
+            }
         }
         if qwenCodePayloadSample != nil, currentURL != url { throw Failure.ownershipFailure(.routeAfter) }
         if savedResponseChoiceGrant != nil, currentURL != url { throw Failure.ownershipFailure(.routeAfter) }

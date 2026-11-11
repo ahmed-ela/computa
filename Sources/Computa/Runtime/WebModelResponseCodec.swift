@@ -1394,7 +1394,7 @@ enum WebModelResponseCodec {
     }
 
     static func closedGroqRenderedMessage(_ text: String) -> String? {
-        closedGroqMessage(text, messageKey: "text", requiresMessageType: true)
+        closedGroqMessage(text, messageKeys: ["text"], requiresMessageType: true)
     }
 
     /// Only an exact message envelope or ordinary text can be released from a
@@ -1406,18 +1406,23 @@ enum WebModelResponseCodec {
         return isPlainEmbeddedReply(trimmed) && !trimmed.hasPrefix("]") ? text : nil
     }
 
-    /// The server releases this message only with native literal proof and saved cleanup.
+    /// Groq has returned both sole-string fields as final answers. The server
+    /// releases them only with native literal proof and saved cleanup.
     static func closedGroqLiteralOutputMessage(_ text: String) -> String? {
-        closedGroqMessage(text, messageKey: "output", requiresMessageType: false)
+        closedGroqMessage(text, messageKeys: ["output", "value"], requiresMessageType: false)
     }
 
-    private static func closedGroqMessage(_ text: String, messageKey: String, requiresMessageType: Bool) -> String? {
+    private static func closedGroqMessage(_ text: String, messageKeys: Set<String>, requiresMessageType: Bool) -> String? {
         let bytes = Data(text.utf8)
-        let keys: Set<String> = requiresMessageType ? ["type", messageKey] : [messageKey]
         guard bytes.count <= 220_000,
-              let envelope = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
-              Set(envelope.keys) == keys, !requiresMessageType || envelope["type"] as? String == "message",
-              let message = envelope[messageKey] as? String,
+              let envelope = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { return nil }
+        var keys = Set(envelope.keys)
+        if requiresMessageType {
+            guard envelope["type"] as? String == "message" else { return nil }
+            keys.remove("type")
+        }
+        guard keys.count == 1, let key = keys.first, messageKeys.contains(key),
+              let message = envelope[key] as? String,
               !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               APIModelCorrectionJSON.isUnambiguous(bytes) else { return nil }
         return message

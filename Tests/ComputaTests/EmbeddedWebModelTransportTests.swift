@@ -15296,13 +15296,22 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await verifyGroqMessageReleaseRequiresSavedTranscriptClear(format: .literalOutput)
     }
 
-    private enum GroqMessageFixtureFormat: Equatable { case renderedEnvelope, renderedPlain, literalOutput }
+    func testGroqLiteralValueMessageRequiresOwnedProofAndSavedTranscriptClear() async throws {
+        try await verifyGroqMessageReleaseRequiresSavedTranscriptClear(format: .literalValue)
+    }
+
+    private enum GroqMessageFixtureFormat: Equatable { case renderedEnvelope, renderedPlain, literalOutput, literalValue }
 
     private func verifyGroqMessageReleaseRequiresSavedTranscriptClear(format: GroqMessageFixtureFormat) async throws {
         let expected = "GROQ FIXTURE  two spaces e\u{301}"
-        let usesLiteralOutput = format == .literalOutput
-        let object = usesLiteralOutput ? ["output": expected] : ["type": "message", "text": expected]
-        let reply = format == .renderedPlain ? expected : String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+        let object: [String: String]? = switch format {
+        case .renderedEnvelope: ["type": "message", "text": expected]
+        case .renderedPlain: nil
+        case .literalOutput: ["output": expected]
+        case .literalValue: ["value": expected]
+        }
+        let reply = try object.map { String(decoding: try JSONSerialization.data(withJSONObject: $0), as: UTF8.self) } ?? expected
+        let usesLiteral = format == .literalOutput || format == .literalValue
         let encoded = String(decoding: try JSONSerialization.data(withJSONObject: reply, options: [.fragmentsAllowed]), as: UTF8.self)
         let node = format == .renderedPlain ? "node: '[object Object]', " : ""
         for scenario in ["released", "missingProof", "uncleared"] {
@@ -15311,7 +15320,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 .replacingOccurrences(of: "{ class: 'text-left mb-4' }, f.reply",
                     with: "{ \(node)dir: 'auto', class: 'mb-4 text-left', lang: 'en-US' }, f.reply")
                 .replacingOccurrences(of: "window.fixtureReady = true;",
-                    with: "f.structuredReply = \(usesLiteralOutput); f.reply = \(encoded); f.ignoreClear = \(!canClear); window.fixtureReady = true;")
+                    with: "f.structuredReply = \(usesLiteral); f.reply = \(encoded); f.ignoreClear = \(!canClear); window.fixtureReady = true;")
             let fixture = try Fixture(page: page); defer { fixture.shutdown() }
             let root = try websiteBenchmarkTemporaryDirectory().appendingPathComponent("GroqRenderedMessage-" + UUID().uuidString)
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])

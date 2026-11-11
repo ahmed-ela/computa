@@ -1260,24 +1260,57 @@ final class KimiWebModelTransportTests: XCTestCase {
     }
 
     func testSameDocumentReturnFromProvisionalToFreshStopsBeforePageReadWithoutReplay() async throws {
+        try await assertProvisionalToFreshRejection(afterAdapterEvaluation: false)
+    }
+
+    func testSameDocumentReturnFromProvisionalToFreshAfterPageReadRejectsWithoutReplay() async throws {
+        try await assertProvisionalToFreshRejection(afterAdapterEvaluation: true)
+    }
+
+    private func assertProvisionalToFreshRejection(afterAdapterEvaluation: Bool) async throws {
         let fixture = try Fixture(); defer { fixture.shutdown() }
         let token = try await start(fixture)
         _ = try await evaluate(fixture.view, "kimiFixture.options.holdProvisional = true; return true;")
         _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic route guard fixture")
         let pending = try await call(fixture, "webProviderPoll", token)
         XCTAssertEqual(pending["state"] as? String, "running")
+        XCTAssertEqual(pending["text"] as? String, "")
         let tab = try XCTUnwrap(fixture.createdID)
         let generation = try XCTUnwrap(fixture.browser.documentGeneration(for: tab))
-        _ = try await evaluate(fixture.view, "history.replaceState({}, '', '/'); return true;")
+        let freshRoute = "history.replaceState({}, '', '/'); return true;"
+        var diagnostics: [String] = [], completedInspects = 0, changedInCallback = false
+        fixture.transport.setKimiSavedRouteRejectionObserverForTesting { diagnostics.append($0) }
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard action == "inspect" else { return }
+            completedInspects += 1
+            if afterAdapterEvaluation, completedInspects == 1 {
+                let changed = try? await self.evaluate(fixture.view, freshRoute)
+                changedInCallback = changed as? Bool == true
+            }
+        }
+        if !afterAdapterEvaluation { _ = try await evaluate(fixture.view, freshRoute) }
         do {
             _ = try await call(fixture, "webProviderPoll", token)
             XCTFail("Route regression must not release a response")
         } catch let failure as EmbeddedWebModelTransport.Failure {
-            XCTAssertEqual(failure, .ownershipFailure(.routeBefore))
+            XCTAssertEqual(failure, .ownershipFailure(afterAdapterEvaluation ? .routeAfter : .routeBefore))
         }
+        XCTAssertEqual(changedInCallback, afterAdapterEvaluation)
+        let expectedCompletedInspects = afterAdapterEvaluation ? 1 : 0
+        XCTAssertEqual(completedInspects, expectedCompletedInspects)
         XCTAssertEqual(fixture.browser.documentGeneration(for: tab), generation)
+        func diagnostic(stage: String, action: String) -> String {
+            "savedRouteRejection version=2 provider=kimi session=\(token.lowercased()) generation=\(generation.uuidString.lowercased())"
+                + " sequence=1 stage=\(stage) action=\(action) reason=regressed_to_fresh"
+                + " previousRoute=provisional attemptedRoute=fresh provisionalPinned=true canonicalPinned=false"
+                + " generationBound=true submitted=true acknowledged=true pendingSubmission=true firstUserBound=false"
+        }
+        let pollDiagnostic = diagnostic(stage: afterAdapterEvaluation ? "after" : "before", action: "inspect")
+        XCTAssertEqual(diagnostics, [pollDiagnostic])
         let finished = try await call(fixture, "webProviderFinish", token)
         XCTAssertEqual(finished["cleanup"] as? String, "failed")
+        XCTAssertEqual(diagnostics, [pollDiagnostic, diagnostic(stage: "before", action: "cleanup_inspect")])
+        XCTAssertEqual(completedInspects, expectedCompletedInspects)
         try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
     }
 

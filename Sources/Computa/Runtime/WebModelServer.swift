@@ -2421,7 +2421,7 @@ actor WebModelServer {
                                 } catch let failure as WebModelResponseCodec.Failure {
                                     guard case .malformedEnvelope = failure, provider == "groq",
                                           WebModelResponseCodec.closedGroqLiteralOutputMessage(text) != nil else { throw failure }
-                                    // This exact provider shape can produce only a message. It
+                                    // These exact provider shapes can produce only a message. Each
                                     // needs the same owned literal proof as a correction, with
                                     // the original inference's transcript clear before release.
                                     groqLiteralOutputMessage = true
