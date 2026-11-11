@@ -14032,6 +14032,35 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testClaudeDiscoveryLateQuotaClosesOwnedTabAndBlocksNextStart() async throws {
+        let fixture = try Fixture(page: Self.lateClaudeResetCardPage(discovery: true))
+        defer { fixture.shutdown() }
+        let discovery = Task { try await fixture.transport.discoverModels(provider: "claude", retryBlocked: true) }
+        for _ in 0..<1_000 where fixture.createdTabs.isEmpty { await Task.yield() }
+        let id = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: id))
+        do {
+            _ = try await discovery.value
+            XCTFail("A late account limit cannot publish a recovered catalog")
+        } catch {
+            XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.claude))
+        }
+        let ledger = try await evaluate(view, """
+            return [window.fixtureModelEscapeClosures, window.fixtureInputCount,
+              window.fixturePrompts.length, window.fixtureQuotaClicks];
+            """) as? [Int]
+        XCTAssertEqual(ledger, [1, 0, 0, 0])
+        XCTAssertNil(fixture.browser.webView(for: id))
+        do {
+            _ = try await call(fixture.transport, "webProviderStart", ["provider": "claude"])
+            XCTFail("The observed account limit must block another owned tab")
+        } catch {
+            XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.claude))
+        }
+        XCTAssertEqual(fixture.createdTabs, [id])
+        try await assertHumanTabIntact(fixture)
+    }
+
     func testDiscoveryAuthRedirectClosesOnlyReadonlyOwnedTabAndDoesNotLeakCapacity() async throws {
         let authURL = try XCTUnwrap(URL(string: "https://accounts.google.com/o/oauth2/auth"))
         let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt), initialURL: authURL)
@@ -17048,6 +17077,35 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             XCTAssertEqual(finished["cleanup"] as? String, "failed", condition)
             XCTAssertTrue(fixture.browser.webView(for: tabID) === view)
             XCTAssertTrue(fixture.browser.webView(for: fixture.humanID) === fixture.humanView)
+        }
+    }
+
+    func testClaudeFreshQuotaAfterModelSelectionCleansUpOnlyWithFreshEmptyReceipt() async throws {
+        for editorPrepared in [false, true] {
+            let fixture = try Fixture(page: Self.lateClaudeResetCardPage(discovery: false))
+            defer { fixture.shutdown() }
+            let started = try await startChoice(Self.fixtureChoice(.claude), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let id = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: id))
+            do {
+                _ = try await waitForState("ready", fixture.transport, token: token)
+                XCTFail("The account limit mounted by model selection must block readiness")
+            } catch {
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.claude))
+            }
+            if editorPrepared {
+                _ = try await evaluate(view, "globalThis.__computaModelFirstPrepared = true; return true;",
+                                       world: WKContentWorld.world(name: "computa-chatgpt-model-v1"))
+            }
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, editorPrepared ? "failed" : "not_created")
+            let ledger = try await evaluate(view, """
+                return [window.fixtureModelSelectionClicks, window.fixtureInputCount,
+                  window.fixturePrompts.length, window.fixtureQuotaClicks];
+                """) as? [Int]
+            XCTAssertEqual(ledger, [1, 0, 0, 0])
+            try await assertHumanTabIntact(fixture, retaining: editorPrepared ? id : nil)
         }
     }
 
@@ -23139,6 +23197,34 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                   link.addEventListener('click', () => { window.fixtureQuotaClicks++; }));
                 window.fixtureGeneration = 'initial'; window.fixtureReady = true;
                 """)
+    }
+
+    private static func lateClaudeResetCardPage(discovery: Bool) -> String {
+        let mountAfter = discovery ? "window.fixtureModelEscapeClosures++;"
+            : "window.fixtureModelSelect(node.dataset.fixtureModel);"
+        let card = """
+        <template id="fixture-late-quota">
+          <section><p>Usage limit reached · Resets <strong>7:00 PM</strong> ·
+            <a href="/settings/claude-code">limits shared with Claude Code</a></p>
+            <p>You have 2 resets available.</p>
+            <div role="button" aria-haspopup="dialog" aria-expanded="false">Reset information</div>
+            <button>Get more usage</button><a href="/settings/usage?highlight=resets">Use reset</a>
+          </section>
+        </template>
+        <script>
+        window.fixtureQuotaClicks = 0;
+        window.fixtureMountQuota = () => {
+          const template = document.getElementById('fixture-late-quota');
+          const surface = template.content.firstElementChild.cloneNode(true);
+          surface.addEventListener('click', () => { window.fixtureQuotaClicks++; });
+          template.replaceWith(surface);
+          document.querySelector('[data-testid="chat-input-send"]').disabled = true;
+        };
+        </script>
+        """
+        return modelChoicePage(.claude)
+            .replacingOccurrences(of: mountAfter, with: mountAfter + " window.fixtureMountQuota();")
+            .replacingOccurrences(of: "</body>", with: card + "</body>")
     }
 
     private static func delayedGeminiSecondUserPage(mutatesFirstBody: Bool = false) -> String {

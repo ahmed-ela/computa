@@ -2978,8 +2978,9 @@ function modelUsageLimitSurfaces() {
 // This signed-in account card was observed on an empty new chat. It can only
 // abort preflight. It never supplies the physical Incognito proof used by Stop.
 let modelLastFreshResetCardOutcome = null;
-function modelFreshAccountUsageLimited(observeResetCard = input.action === 'inspect') {
+function modelFreshAccountUsageLimited(afterClosedDiscovery = false) {
   try {
+    const observeResetCard = afterClosedDiscovery || input.action === 'inspect';
     const diagnose = observeResetCard && globalThis.__computaModelFirstPrepared === undefined;
     if (observeResetCard) modelLastFreshResetCardOutcome = null;
     if (input.action === 'stop'
@@ -3001,7 +3002,7 @@ function modelFreshAccountUsageLimited(observeResetCard = input.action === 'insp
       && node.getAttribute('aria-expanded') !== 'true' && modelEnabled(node);
     // Admission uses only short, visible text nodes. The rejected-offer
     // diagnostic may compare bounded hidden button text to its fixed label.
-    const words = (root, skipButtons, requireVisible = true) => {
+    const words = (root, skipButtons, requireVisible = true, omit = null) => {
       const parts = [], stack = [root]; let visited = 0, length = 0;
       while (stack.length) {
         const node = stack.pop();
@@ -3012,7 +3013,7 @@ function modelFreshAccountUsageLimited(observeResetCard = input.action === 'insp
           parts.push(node.textContent);
         } else if (node.nodeType === 1) {
           if (node.closest(excluded)) return null;
-          if (skipButtons && node.tagName === 'BUTTON') continue;
+          if (skipButtons && node.tagName === 'BUTTON' || omit?.includes(node)) continue;
           const children = node.childNodes;
           if (visited + stack.length + children.length > 96) return null;
           for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
@@ -3081,33 +3082,38 @@ function modelFreshAccountUsageLimited(observeResetCard = input.action === 'insp
     // The signed-in Incognito reset card is a fresh preflight abort surface.
     // It does not attest to temporary-mode ownership or completed cleanup.
     if (incognito) {
-      const about = one(named('About resets'));
-      if (!about) note('about_missing_or_ambiguous');
-      else if (!popup(about)) note('about_not_closed_popup');
-      else {
-        let card = offer.parentElement, outcome = 'card_scope';
-        for (let depth = 0; card && depth < 8; depth++, card = card.parentElement) {
-          if (['BODY', 'HTML'].includes(card.tagName) || [picker, send, editor].some(node => card.contains(node))) break;
-          if (!card.contains(about) || !modelVisible(card) || card.closest(excluded)) continue;
-          if (outcome === 'card_scope') outcome = 'card_controls';
-          const controls = [...card.querySelectorAll(resetCardControls)];
-          if (controls.length !== 4 || card.querySelector('[aria-checked="true"], [aria-pressed="true"]')) continue;
-          if (outcome === 'card_controls') outcome = 'card_links';
-          if (!one(controls.filter(sharedLimitLink)) || !one(controls.filter(useResetLink))) continue;
-          const copy = words(card, true);
-          if (copy && /^Usage limit reached · Resets (?:[1-9]|1[0-2]):[0-5][0-9] (?:AM|PM) · limits shared with Claude Code You have (?:1 reset|(?:[2-9]|[1-9][0-9]) resets) available\. Use reset$/.test(copy)) {
-            if (input.action === 'discoverModels') note('matched_after_menu');
-            return true;
-          }
-          // Keep the furthest reached predicate across the bounded candidates.
-          if (copy !== null) outcome = 'copy_mismatch';
-          else if (outcome !== 'copy_mismatch') outcome = 'copy_unavailable';
+      const closedAccessory = node => {
+        const role = node.getAttribute('role');
+        return !['A', 'INPUT', 'TEXTAREA', 'SELECT'].includes(node.tagName) && node.getAttribute('href') === null
+          && (role === 'button' || node.tagName === 'BUTTON' && role === null) && !node.closest(excluded) && popup(node)
+          && [null, 'false'].includes(node.getAttribute('aria-expanded')) && [null, 'closed'].includes(node.getAttribute('data-state'));
+      };
+      let card = offer.parentElement, outcome = 'card_scope';
+      for (let depth = 0; card && depth < 8; depth++, card = card.parentElement) {
+        if (['BODY', 'HTML'].includes(card.tagName) || [picker, send, editor].some(node => card.contains(node))) break;
+        if (!modelVisible(card) || card.closest(excluded)) continue;
+        if (outcome === 'card_scope') outcome = 'card_controls';
+        const controls = [...card.querySelectorAll(resetCardControls)];
+        if (controls.length < 3 || controls.length > 4 || card.querySelector('[aria-checked="true"], [aria-pressed="true"]')) continue;
+        const links = controls.filter(node => node.tagName === 'A');
+        if (links.length !== 2) continue;
+        const accessory = controls.find(node => node !== offer && node.tagName !== 'A');
+        if (accessory && !closedAccessory(accessory)) continue;
+        if (outcome === 'card_controls') outcome = 'card_links';
+        if (!one(links.filter(sharedLimitLink)) || !one(links.filter(useResetLink))) continue;
+        const copy = words(card, false, true, [offer, accessory]);
+        if (copy && /^Usage limit reached · Resets (?:[1-9]|1[0-2]):[0-5][0-9] (?:AM|PM) · limits shared with Claude Code You have (?:1 reset|(?:[2-9]|[1-9][0-9]) resets) available\. Use reset$/.test(copy)) {
+          if (afterClosedDiscovery) note('matched_after_menu');
+          return true;
         }
-        note(outcome);
+        // Keep the furthest reached predicate across the bounded candidates.
+        if (copy !== null) outcome = 'copy_mismatch';
+        else if (outcome !== 'copy_mismatch') outcome = 'copy_unavailable';
       }
+      note(outcome);
     } else note('route_ineligible');
 
-    if (!usage) return false;
+    if (afterClosedDiscovery || !usage) return false;
     const dismiss = named('Dismiss'), notify = named('Get notified');
     if (dismiss.length > 1 || notify.length > 1 || !(dismiss.length || notify.length)) return false;
     const controls = [offer, ...dismiss, ...notify];
@@ -3636,9 +3642,9 @@ async function providerPageAction() {
     const result = await websiteModelPickerAction(modelState, input, ownedUserCount === 0 && freshPickerContext(), freshPickerContext);
     if (result.error || result.pending || !Array.isArray(result.modelChoices) || !result.modelChoices.length
       || globalThis.__computaModelDiscovery?.completed !== true) return result;
+    let limited = false;
     try {
-      // Sample only the completed close, before any later read or page action.
-      // A lost context suppresses diagnostics without revising the catalog.
+      // A newly complete reset card can abort only after this verified close.
       if (!freshPickerContext()) return result;
       const closed = websiteModelPickerState('claude');
       const trigger = closed.trigger;
@@ -3646,11 +3652,14 @@ async function providerPageAction() {
         || ![null, 'false'].includes(trigger.getAttribute('aria-expanded'))
         || ![null, 'closed'].includes(trigger.getAttribute('data-state')) || !modelTemporaryVerified()
         || !modelFind(['[data-testid="chat-input"][contenteditable="true"][role="textbox"]'])) return result;
-      modelFreshAccountUsageLimited(true);
+      limited = modelFreshAccountUsageLimited(true);
       // Earlier legacy quota counters in the temporary proof predate this close.
-      if (modelLastFreshResetCardOutcome !== null) return { ...result, quotaDiagnostic: modelQuotaDiagnostic(true, null) };
-    } catch { /* Diagnostic observation cannot change picker completion. */ }
-    return result;
+      if (modelLastFreshResetCardOutcome !== null) {
+        const quotaDiagnostic = modelQuotaDiagnostic(true, null);
+        return limited ? { error: 'website_usage_limit', quotaDiagnostic } : { ...result, quotaDiagnostic };
+      }
+    } catch { /* Diagnostic collection cannot change an observed quota decision. */ }
+    return limited ? { error: 'website_usage_limit' } : result;
   }
   if (input.action !== 'stop' && input.expectedModelChoice != null) {
     const submittedProof = globalThis.__computaModelFirstProof;
@@ -3846,6 +3855,9 @@ async function providerPageAction() {
 const actionObservation = await providerPageAction();
 const pauseContextIntact = () => window === window.top && document.URL === input.expectedURL
   && globalThis.__computaModelOwner === input.ownerToken && modelUserRoots().length === ownedUserCount;
+if (input.action === 'discoverModels' && actionObservation.error === 'website_usage_limit')
+  return pauseContextIntact() && document.querySelectorAll('[data-testid="assistant-message"]').length === 0
+    ? actionObservation : { error: 'model_unverified' };
 const pageObservation = pauseContextIntact() && !modelOwnershipRejected(actionObservation)
   && input.action !== 'stop' && modelSafeguardsPaused() ? modelSafeguardFailure() : actionObservation;
 // This explicitly negative result releases no model/answer/action proof. All

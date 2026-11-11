@@ -7640,6 +7640,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       allowBoundFirstUserRemountRefresh: Bool = false,
                       allowBlockedProvider: Bool = false, allowPendingModelTemporary: Bool = false,
                       requireClaudeSafeguardPause: Bool = false,
+                      allowFreshClaudeQuotaCleanup: Bool = false,
                       allowPendingChatGPTModelVerification: Bool = true,
                       allowPendingClaudeModelObservation: Bool = false,
                       allowPendingDeepSeekComposerHandoff: Bool = false,
@@ -7682,6 +7683,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if requireClaudeSafeguardPause {
             guard session.provider == .claude, action == "stop", allowBlockedProvider, !enforceModel,
                   session.submitted, session.firstUserFingerprint != nil else { throw Failure.invalidRequest }
+        }
+        if allowFreshClaudeQuotaCleanup {
+            guard session.provider == .claude, action == "inspect", allowBlockedProvider, !enforceModel else {
+                throw Failure.invalidRequest
+            }
         }
         if let explicitClearOperation {
             guard isCurrent(explicitClearOperation, session: session), enforceModel,
@@ -8708,6 +8714,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 }
                 throw failure
             case "website_usage_limit":
+                if provider == .claude, action == "discoverModels", session.isDiscovery,
+                   let raw = observed["quotaDiagnostic"] as? String {
+                    logQuotaDiagnostic(raw, session: session, action: action, force: true)
+                }
                 if provider == .qwen, observed.keys.contains("qwenQuotaScope") {
                     guard let choice = session.modelChoice, session.modelSelectionVerified,
                           let modelID = Self.qwenModelQuotaModelID(observed["qwenQuotaScope"], expected: choice),
@@ -8719,16 +8729,23 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     session.qwenModelQuotaScope = modelID
                     recordQwenModelUsageGate(modelID)
                 }
-                if action == "inspect", session.state == "loading", session.documentGeneration == nil,
-                   session.sequence == 0, session.confirmedUsers == 0,
-                   !session.submitted, !session.pendingSubmission, !session.temporaryRequested, !session.temporary,
+                if action == "inspect", session.sequence == 0, session.confirmedUsers == 0,
+                   !session.submitted, !session.pendingSubmission, !session.temporaryRequested,
                    session.firstUserFingerprint == nil,
                    Self.validFreshQuotaAbort(observed, provider: provider, expectedURL: url, currentURL: currentURL) {
-                    // The fixed adapter proved an untouched, empty fresh page
-                    // after its initial commit. Pin only that document for
-                    // cleanup; quota cannot establish readiness or lineage.
-                    session.documentGeneration = generation
-                    session.routeContext = currentContext
+                    if session.state == "loading", session.documentGeneration == nil, !session.temporary {
+                        // An untouched initial page can be pinned only for cleanup.
+                        session.documentGeneration = generation
+                        session.routeContext = currentContext
+                    } else if allowFreshClaudeQuotaCleanup, session.temporary,
+                              session.documentGeneration == generation, session.routeContext == currentContext,
+                              session.preparedSubmission == nil, session.acknowledgedSendSequence == 0 {
+                        // A quota banner may replace the normal inspect result
+                        // after model selection. Only this cleanup call can use
+                        // the fresh zero-message receipt from the same owned view.
+                        _ = recordedWebsiteBlocker(.usageLimited(provider), session: session)
+                        return observed
+                    }
                 }
                 throw recordedWebsiteBlocker(.usageLimited(provider), session: session)
             case "website_response_blocked":
@@ -10011,7 +10028,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 session.responseProfile?.mark(.cleanupOwnershipInspectStart)
                 do {
                     defer { session.responseProfile?.mark(.cleanupOwnershipInspectEnd) }
-                    observed = try await page(session, action: "inspect", enforceModel: false, allowBlockedProvider: true)
+                    observed = try await page(session, action: "inspect", enforceModel: false, allowBlockedProvider: true,
+                        allowFreshClaudeQuotaCleanup: session.provider == .claude)
                 }
                 catch {
                     guard let failure = error as? Failure,

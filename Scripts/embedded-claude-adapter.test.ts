@@ -946,15 +946,30 @@ describe("embedded Claude fixed adapter", () => {
     expect(f.stop.clicks).toBe(0);
   });
 
+  test("the exact reset card can omit its informational popup or expose it with another button label or role", async () => {
+    for (const variation of ["absent", "renamed", "explicit-role", "outside-card"]) {
+      const f = fixture(provider), { about, actions, offer, reset, shared, picker } = freshIncognitoResetLimit(f);
+      if (variation === "absent" || variation === "outside-card") actions.children.shift();
+      if (variation === "outside-card") f.body.append(about);
+      if (variation === "renamed") about.text = "Reset information";
+      if (variation === "explicit-role") {
+        about.tagName = "DIV"; about.values.role = "button"; about.text = "Reset information";
+      }
+      expect(await f.run(), variation).toEqual(freshQuotaReceipt(f));
+      for (const control of [about, offer, reset, shared, picker.trigger, f.send, f.stop]) expect(control.clicks).toBe(0);
+      expect(f.composer.events).toEqual([]); expect(f.document.activeElement).toBeNull();
+    }
+  });
+
   test("the fresh Incognito reset limit requires the exact complete card and shared preflight guards", async () => {
     const outcomes = {
       "ordinary-new": "route_ineligible", "nonempty-draft": "editor_nonempty", "missing-editor": "editor_guard",
       "send-enabled": "send_guard", "open-picker": "picker_guard", "submitted": undefined, "authored-card": "authored_content",
       "bad-clock": "copy_mismatch", "different-copy": "copy_mismatch", "zero-resets": "copy_mismatch", "wrong-plural": "copy_mismatch",
       "hidden-copy": "copy_unavailable", "clipped-copy": "copy_unavailable", "other-link-origin": "card_links", "other-reset-query": "card_links",
-      "missing-offer": "offer_absent", "missing-about": "about_missing_or_ambiguous",
-      "about-not-popup": "about_not_closed_popup", "about-open": "about_not_closed_popup",
-      "extra-control": "card_controls", "different-card": "card_controls", "separate-about": "card_scope", "button-scan-limit": "button_scan_limit"
+      "missing-offer": "offer_absent", "about-not-popup": "card_controls", "about-open": "card_controls",
+      "about-open-state": "card_controls", "about-link": "card_controls", "about-form-control": "card_controls",
+      "extra-control": "card_controls", "different-card": "card_controls", "extra-visible-copy": "copy_mismatch", "button-scan-limit": "button_scan_limit"
     } as const;
     for (const variation of Object.keys(outcomes) as (keyof typeof outcomes)[]) {
       const f = fixture(provider), { picker, card, clock, shared, available, about, offer, reset, actions } = freshIncognitoResetLimit(f);
@@ -975,12 +990,16 @@ describe("embedded Claude fixed adapter", () => {
         case "other-link-origin": shared.values.href = "https://other.example/settings/claude-code"; break;
         case "other-reset-query": reset.values.href = "https://claude.ai/settings/usage?highlight=resets&other=1"; break;
         case "missing-offer": offer.text = "More options"; break;
-        case "missing-about": about.text = "About usage"; break;
         case "about-not-popup": delete about.values["aria-haspopup"]; break;
         case "about-open": about.values["aria-expanded"] = "true"; break;
+        case "about-open-state": about.values["data-state"] = "open"; break;
+        case "about-link":
+          actions.children.shift(); card.append(about);
+          about.tagName = "A"; about.values.role = "button"; about.values.href = "/settings/usage"; break;
+        case "about-form-control": about.tagName = "SELECT"; about.values.role = "button"; break;
         case "extra-control": card.append(new Element("BUTTON", {}, "Another action")); break;
         case "different-card": actions.children.pop(); f.body.append(reset); break;
-        case "separate-about": actions.children.shift(); f.body.append(about); break;
+        case "extra-visible-copy": card.append(new Element("SPAN", {}, "Credits already enabled")); break;
         case "button-scan-limit": f.body.append(...Array.from({ length: 257 }, () => new Element("BUTTON"))); break;
       }
       const result = await f.run();
@@ -1022,8 +1041,8 @@ describe("embedded Claude fixed adapter", () => {
     }
   });
 
-  test("Claude discovery samples the reset card only after its exact fresh picker has closed", async () => {
-    for (const variation of ["matched", "disabled-offer", "lost-editor", "lost-mode", "lost-owner", "select-model"]) {
+  test("Claude discovery aborts for an exact reset card only after its fresh picker has closed", async () => {
+    for (const variation of ["matched", "matched-explicit-role", "disabled-offer", "non-popup", "lost-editor", "lost-mode", "lost-owner", "select-model"]) {
       const f = fixture(provider), picker = installObservedModelPicker(f, provider, Element);
       const surface = incognitoResetCard(f); surface.card.values.hidden = "";
       for (const menu of [picker.menu, picker.nested]) {
@@ -1032,7 +1051,11 @@ describe("embedded Claude fixed adapter", () => {
           dismiss(event);
           if (event.type !== "keydown" || event.key !== "Escape" || picker.trigger.values["aria-expanded"] !== "false") return;
           delete surface.card.values.hidden;
+          if (variation === "matched-explicit-role") {
+            surface.about.tagName = "DIV"; surface.about.values.role = "button"; surface.about.text = "Reset information";
+          }
           if (variation === "disabled-offer") surface.offer.disabled = true;
+          if (variation === "non-popup") delete surface.about.values["aria-haspopup"];
           if (variation === "lost-editor") f.composer.connected = false;
           if (variation === "lost-mode") f.exit.connected = false;
           if (variation === "lost-owner") f.world.__computaModelOwner = "foreign";
@@ -1048,15 +1071,20 @@ describe("embedded Claude fixed adapter", () => {
       }
       if (variation === "lost-owner") expect(result.error).toBe("model_unverified");
       else if (variation === "select-model") expect(result.selected).toBe(true);
+      else if (variation === "matched" || variation === "matched-explicit-role") {
+        expect(Object.keys(result).sort()).toEqual(["error", "quotaDiagnostic"]);
+        expect(result.error).toBe("website_usage_limit");
+      }
       else {
         expect(result.error, variation).toBeUndefined();
         expect(result.modelChoices?.length ?? 0, variation).toBeGreaterThan(0);
       }
-      if (variation === "matched" || variation === "disabled-offer") {
+      if (["matched", "matched-explicit-role", "disabled-offer", "non-popup"].includes(variation)) {
         const diagnostic = JSON.parse(result.quotaDiagnostic);
-        expect(diagnostic.resetCardOutcome).toBe(variation === "matched" ? "matched_after_menu" : "offer_disabled");
+        expect(diagnostic.resetCardOutcome).toBe(variation === "disabled-offer" ? "offer_disabled"
+          : variation === "non-popup" ? "card_controls" : "matched_after_menu");
         expect(diagnostic.temporaryProof).toBeNull();
-        expect(result.freshQuotaAbort).toBeUndefined(); expect(result.error).toBeUndefined();
+        expect(result.freshQuotaAbort).toBeUndefined();
         expect((await f.run(action, overrides)).quotaDiagnostic).toBeUndefined();
       } else expect(result.quotaDiagnostic, variation).toBeUndefined();
       expect(f.send.clicks).toBe(0); expect(surface.about.clicks + surface.offer.clicks + surface.reset.clicks + surface.shared.clicks).toBe(0);
