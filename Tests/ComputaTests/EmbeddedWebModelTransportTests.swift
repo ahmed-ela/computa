@@ -13292,6 +13292,121 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testClaudeDetachedFirstUserReprovesExactFableReplacement() async throws {
+        try await exerciseClaudeDetachedFirstUserReplacement(changeBody: false, promoteToConversation: false)
+    }
+
+    func testClaudeDetachedFirstUserRejectsFableReplacementWithChangedBody() async throws {
+        try await exerciseClaudeDetachedFirstUserReplacement(changeBody: true, promoteToConversation: true)
+    }
+
+    private func exerciseClaudeDetachedFirstUserReplacement(changeBody: Bool, promoteToConversation: Bool) async throws {
+        let choice = WebsiteModelChoice(provider: "claude", key: "Fable 5.2", label: "Fable 5.2")
+        let expectedRoute = promoteToConversation ? "/chat/owned-fable-first-user?incognito" : "/new?incognito"
+        var page = Self.providerPage(.claude).replacingOccurrences(
+            of: "answer.setAttribute('data-is-streaming', 'false');",
+            with: "answer.setAttribute('data-is-streaming', 'true');")
+        if promoteToConversation {
+            page = page.replacingOccurrences(of: "document.getElementById('messages').appendChild(turn);", with: """
+                document.getElementById('messages').appendChild(turn);
+                history.replaceState({}, '', '\(expectedRoute)');
+                """)
+        }
+        let fixture = try Fixture(page: Self.modelChoicePage(.claude, basePage: page)
+            .replacingOccurrences(of: "Sonnet 4.6", with: "Fable 5.2"))
+        defer { fixture.transport.setBeforePageResultValidationForTesting(nil); fixture.shutdown() }
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let tabID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        let prompt = "Fable exact fixture\nSecond line with e\u{0301} and `literal code`"
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+        let running = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        XCTAssertEqual(running["state"] as? String, "running")
+        XCTAssertNil(running["freshSessionSubmissionProof"])
+        XCTAssertEqual(view.url?.absoluteString, "https://claude.ai\(expectedRoute)")
+        let bound = try XCTUnwrap(running["modelProofContext"] as? [String: Any])
+        let outboundValue = try await evaluate(view, "return window.fixturePrompts[0];")
+        let outbound = try XCTUnwrap(outboundValue as? String)
+        let fingerprint = EmbeddedWebModelTransport.outboundFingerprint(outbound)
+        XCTAssertEqual(bound["firstUserFingerprint"] as? String, fingerprint)
+        try assertChoiceEvidence(running, choice: choice)
+
+        let countAfterDetach = try await evaluate(view, """
+            const root = document.querySelector('[data-testid="user-message"]');
+            if (!root || !root.parentElement) throw new Error('Missing bound fixture root');
+            window.fixtureDetachedUser = root;
+            window.fixtureDetachedUserParent = root.parentElement;
+            root.remove();
+            return document.querySelectorAll('[data-testid="user-message"]').length;
+            """)
+        XCTAssertEqual(countAfterDetach as? Int, 0)
+        var inspectionCount = 0
+        var replacement: [String: Bool]?
+        var fixtureError: (any Error)?
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard action == "inspect" else { return }
+            inspectionCount += 1
+            guard inspectionCount == 1 else { return }
+            do {
+                // WebKit has captured the zero-root observation. Deliver the
+                // mutation before native can register its settlement waiter.
+                replacement = try await self.evaluate(view, """
+                    const old = window.fixtureDetachedUser, parent = window.fixtureDetachedUserParent;
+                    if (!old || !parent?.isConnected || old.isConnected
+                      || document.querySelector('[data-testid="user-message"]')) throw new Error('Expected detached fixture root');
+                    const fresh = old.cloneNode(true);
+                    if (\(changeBody)) fresh.textContent = fresh.textContent.replace('Fable exact fixture', 'Fable changed fixture');
+                    parent.prepend(fresh);
+                    return {oldStillDetached: !old.isConnected, replacementConnected: fresh.isConnected,
+                      identityUnchanged: fresh.id === old.id, bodyUnchanged: fresh.textContent === old.textContent,
+                      markerUnchanged: fresh.textContent.split('\\n').at(-1) === old.textContent.split('\\n').at(-1)};
+                    """) as? [String: Bool]
+            } catch { fixtureError = error }
+        }
+        var settled: [String: Any]?
+        var failure: (any Error)?
+        do { settled = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]) }
+        catch { failure = error }
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        if let fixtureError { throw fixtureError }
+        XCTAssertGreaterThanOrEqual(inspectionCount, 2, "The zero-root result must be discarded before a fresh ownership read")
+        XCTAssertEqual(replacement, ["oldStillDetached": true, "replacementConnected": true, "identityUnchanged": true,
+            "bodyUnchanged": !changeBody, "markerUnchanged": true])
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        if changeBody {
+            XCTAssertNil(settled)
+            XCTAssertEqual(failure as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser))
+            let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finished["cleanup"] as? String, "failed")
+            XCTAssertNil(finished["freshSessionSubmissionProof"])
+            try await assertHumanTabIntact(fixture, retaining: tabID)
+            return
+        }
+        if let failure { throw failure }
+        let restored = try XCTUnwrap(settled)
+        XCTAssertEqual(restored["state"] as? String, "running")
+        XCTAssertNil(restored["freshSessionSubmissionProof"])
+        let restoredProof = try XCTUnwrap(restored["modelProofContext"] as? [String: Any])
+        XCTAssertEqual(restoredProof["firstUserFingerprint"] as? String, fingerprint)
+        try assertChoiceEvidence(restored, choice: choice)
+
+        _ = try await evaluate(view, """
+            document.querySelector('[data-testid="assistant-message"]').setAttribute('data-is-streaming', 'false');
+            return true;
+            """)
+        let completed = try await waitForState("complete", fixture.transport, token: token)
+        XCTAssertEqual(completed["text"] as? String, #"{"type":"message","text":"Fixture reply"}"#)
+        let completionProof = try XCTUnwrap(completed["freshSessionSubmissionProof"] as? [String: Any])
+        XCTAssertEqual(completionProof["firstUserFingerprint"] as? String, fingerprint)
+        XCTAssertEqual(completionProof["submittedPromptFingerprint"] as? String,
+                       EmbeddedWebModelTransport.promptFingerprint(prompt))
+        try assertChoiceEvidence(completed, choice: choice)
+        try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+        try await finishTerminalFixture(fixture, token: token)
+    }
+
     func testClaudeEarlyUserCountFailureEmitsCapturedCountsWithoutReplayOrCleanupAuthority() async throws {
         for count in [0, 2] {
             let page = Self.providerPage(.claude).replacingOccurrences(

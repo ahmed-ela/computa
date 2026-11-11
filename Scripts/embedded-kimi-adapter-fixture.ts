@@ -20,6 +20,7 @@ function kimiFixture() {
   }
   const html = new Node('HTML'), body = new Node('BODY'); html.append(body);
   Object.assign(document, { documentElement: html, body, querySelectorAll: (selector: string) => html.querySelectorAll(selector) });
+  const accountHistory = new Node('A', { href: '/chat/history' }, 'All chats');
   const trigger = new Node('DIV', { class: 'current-model', 'data-testid': 'model-select-trigger',
     id: 'fixture-generated-14', 'aria-controls': 'fixture-generated-menu', 'aria-haspopup': 'menu', 'aria-expanded': 'true' });
   const triggerName = new Node('SPAN', { class: 'name' }, observedChoices.find(row => row.checked === 'true')!.label);
@@ -56,7 +57,7 @@ function kimiFixture() {
       ? editor.children[0].textContent + '\n' : editor.children.length
         ? editor.children.map(paragraph => paragraph.children.length === 1 && paragraph.children[0].tagName === 'BR'
           ? '' : paragraph.textContent).join('\n\n') + '\n\n' : '' });
-  body.append(trigger, menu, moreMenu, scope);
+  body.append(accountHistory, trigger, menu, moreMenu, scope);
   const world: Record<string, any> = {}, location = { origin: 'https://www.kimi.ai' };
   const window: any = { innerWidth: 1000, innerHeight: 800 }; window.top = window;
   const installResponseMarkup = () => {
@@ -97,7 +98,7 @@ function kimiFixture() {
     bottom.append(cancel, confirm); dialog.append(heading, message, bottom); mask.append(dialog); body.append(mask);
     return { mask, dialog, title, message, bottom, cancel, confirm };
   };
-  return { document, window, location, world, body, Node, trigger, triggerName, effort, menu, list, options, more,
+  return { document, window, location, world, body, Node, accountHistory, trigger, triggerName, effort, menu, list, options, more,
     moreCurrent, moreMenu, moreOption, scope, editor,
     installResponseMarkup, installHeader, installTranscript, installConfirmation,
     draftText,

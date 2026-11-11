@@ -18,6 +18,42 @@ final class KimiWebModelTransportTests: XCTestCase {
         XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
     }
 
+    func testDiscoveryRejectsGuestHomeEvenWithCompleteComposerAndModelPicker() async throws {
+        let fixture = try Fixture(); defer { fixture.shutdown() }
+        fixture.guestAtHome = true
+        do {
+            _ = try await fixture.transport.discoverModels(provider: "kimi")
+            XCTFail("A guest can see models but cannot verify the account")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .signInRequired) }
+        let guestTab = try XCTUnwrap(fixture.createdID)
+        let actions = try await evaluate(fixture.view,
+            "return [kimiFixture.counters.modelOpens,kimiFixture.counters.beforeInput,kimiFixture.counters.sends,kimiFixture.counters.confirmations];")
+        XCTAssertEqual(actions as? [Int], [0, 0, 0, 0])
+        XCTAssertNil(fixture.browser.webView(for: guestTab))
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
+    func testFreshGuestInferenceClosesOnlyItsUntouchedOwnedTab() async throws {
+        let fixture = try Fixture(); defer { fixture.shutdown() }
+        fixture.guestAtHome = true
+        let parameters = ["provider": "kimi", "modelChoice": try XCTUnwrap(choice.canonicalJSONString)]
+        let data = try await fixture.transport.request(operation: "webProviderStart", params: JSONSerialization.data(withJSONObject: parameters))
+        let started = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let guestTab = try XCTUnwrap(fixture.createdID)
+        do {
+            _ = try await wait(fixture, token, state: "ready")
+            XCTFail("The guest inference must stop before model selection or Send")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .signInRequired) }
+        let finish = try await call(fixture, "webProviderCancel", token)
+        XCTAssertEqual(finish["cleanup"] as? String, "not_created")
+        let actions = try await evaluate(fixture.view,
+            "return [kimiFixture.counters.modelOpens,kimiFixture.counters.beforeInput,kimiFixture.counters.sends,kimiFixture.counters.confirmations];")
+        XCTAssertEqual(actions as? [Int], [0, 0, 0, 0])
+        XCTAssertNil(fixture.browser.webView(for: guestTab))
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
     func testSeparateProfileRecoversItsOwnSignInAndUsesThatStoreForTheTurn() async throws {
         let fixture = try Fixture(); defer { fixture.shutdown() }
         fixture.regularSignedOut = true
@@ -1883,6 +1919,8 @@ final class KimiWebModelTransportTests: XCTestCase {
         var createdID: UUID?
         var regularSignedOut = false
         var separateSignedOut = false
+        var guestAtHome = false
+        private static let signedInChrome = #"<a href="/chat/history">All chats</a>"#
         private var retainedView: WKWebView?
         var view: WKWebView { retainedView! }
         init(initialControlsPending: Bool = false, initialEditorAttributePending: Bool = false, initialNestedModel: Bool = false) throws {
@@ -1916,7 +1954,9 @@ final class KimiWebModelTransportTests: XCTestCase {
                     """
             let nestedSetup = initialNestedModel ? "<script>kimiFixture.selectNestedInitially();</script>" : ""
             let setup = nestedSetup + (initialControlsPending ? hydrationSetup : initialEditorAttributePending ? attributeSetup : "")
-            let html = KimiFixturePage.html.replacingOccurrences(of: "</body>", with: setup + "</body>")
+            let html = KimiFixturePage.html
+                .replacingOccurrences(of: "<body>", with: "<body>" + Self.signedInChrome)
+                .replacingOccurrences(of: "</body>", with: setup + "</body>")
             transport = EmbeddedWebModelTransport(browser: browser,
                 createKimiTabForTesting: { [unowned self] url, profile in
                     let id = try browser.createUnloadedKimiModelTabForTesting(profileID: profile)
@@ -1934,7 +1974,9 @@ final class KimiWebModelTransportTests: XCTestCase {
             if signedOut {
                 view.loadHTMLString("<h1>Sign in</h1>", baseURL: url.appendingPathComponent("signin"))
             } else {
-                view.loadHTMLString(html, baseURL: url)
+                let page = guestAtHome ? html.replacingOccurrences(of: Self.signedInChrome,
+                    with: "<button>Log in to sync chat history</button>") : html
+                view.loadHTMLString(page, baseURL: url)
             }
             return id
         }

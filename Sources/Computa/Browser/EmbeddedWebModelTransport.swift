@@ -849,6 +849,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         var untouchedGoogleCheckpoint: UntouchedCheckpoint?
         var untouchedChatGPTSignIn: UntouchedCheckpoint?
+        var untouchedKimiSignIn: UntouchedCheckpoint?
         var postBlockDiagnostic: GeminiPostBlockDiagnostic?
         struct InitialCheckpointSettlement {
             let deadline: ContinuousClock.Instant
@@ -861,6 +862,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // A native Send claim precedes dispatch. Only the validated callback
         // below acknowledges that sequence; a lost reply cannot grant recovery.
         var acknowledgedSendSequence = 0
+        var claudeFirstUserSettlementSpent = false
         var temporary = false
         var temporaryRequested = false
         // Explicit clearing is a separate lifecycle, never temporary mode or
@@ -3167,14 +3169,25 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     private func canObserveKimiInitialHydration(_ session: Session) -> Bool {
-        session.provider == .kimi && sessions[session.token] === session && session.terminalFailure == nil && !Task.isCancelled
-            && session.state == "loading" && session.documentGeneration == nil
+        session.state == "loading" && session.terminalFailure == nil && !Task.isCancelled && isUnboundKimiPage(session)
+    }
+
+    private func isUnboundKimiPage(_ session: Session) -> Bool {
+        session.provider == .kimi && sessions[session.token] === session && session.documentGeneration == nil
             && !session.modelSelectionRequested && !session.modelSelectionVerified && session.selectionEvidence == nil
             && !session.savedDeleteReady && session.savedDeleteSubmission == nil && session.savedDeleteOperation == nil
             && !session.temporaryRequested && !session.temporary && !session.submitted && !session.pendingSubmission
             && session.sequence == 0 && session.acknowledgedSendSequence == 0
             && session.firstUserFingerprint == nil && session.conversation == nil && session.conversationIdentity == nil
             && browser.webView(for: session.tabID) === session.view && session.view.url == Provider.kimi.startURL
+    }
+
+    private func canDisposeUntouchedKimiSignIn(_ session: Session) -> Bool {
+        guard session.terminalFailure == .signInRequired, let receipt = session.untouchedKimiSignIn,
+              !session.isDiscovery, !session.isRecoveryProbe, isUnboundKimiPage(session),
+              browser.documentGeneration(for: session.tabID) == receipt.documentGeneration,
+              session.view.url == receipt.url else { return false }
+        return true
     }
 
     /// A closed extension of the existing negative-only Kimi envelope. No
@@ -4637,6 +4650,76 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return try snapshot(session)
     }
 
+    private enum ClaudeFirstUserObservation {
+        case initial, settlement
+    }
+
+    private struct ClaudeDetachedFirstUser: Error {
+        let revision: UInt64
+        let generation: UUID
+        let url: URL
+        let diagnostic: String
+    }
+
+    private func canSettleClaudeFirstUser(_ session: Session) -> Bool {
+        guard session.provider == .claude, session.state == "running", session.terminalFailure == nil,
+              session.submitted, session.sequence == 1, session.acknowledgedSendSequence == 1,
+              session.confirmedUsers == 1, !session.pendingSubmission, session.temporary, session.lifecycleVerified,
+              session.modelSelectionVerified, session.modelChoice != nil, session.selectionEvidence != nil,
+              !session.isDiscovery, !session.isRecoveryProbe, sessions[session.token] === session,
+              let binding = session.freshSubmissionBinding,
+              session.firstUserFingerprint == binding.outboundFingerprint,
+              session.documentGeneration == binding.generation else { return false }
+        return true
+    }
+
+    private func inspectClaudeFirstReply(_ session: Session,
+                                         deadline: ContinuousClock.Instant) async throws -> [String: Any] {
+        let readDeadline = min(deadline, ContinuousClock.now + inspectionTimeout)
+        let original: ClaudeDetachedFirstUser
+        do {
+            return try await page(session, action: "inspect", allowPendingClaudeModelObservation: true,
+                                  claudeFirstUserObservation: .initial, maximumWait: readDeadline - .now)
+        } catch let detached as ClaudeDetachedFirstUser {
+            original = detached
+        }
+
+        session.claudeFirstUserSettlementSpent = true
+        logFirstUserStructure([original.diagnostic], sequence: session.sequence, isFailure: true,
+                              action: "inspect", allowsBlockedProvider: false)
+        let settleDeadline = min(readDeadline, ContinuousClock.now + .milliseconds(450))
+        var revision = original.revision
+        // The removal and unrelated streaming updates can wake the same channel.
+        // A repeated detached observation still grants only another bounded wait.
+        for _ in 0..<2 {
+            guard ContinuousClock.now < settleDeadline else { break }
+            let next = try await browser.waitForModelChange(tabID: session.tabID, after: revision, until: settleDeadline)
+            try Task.checkCancellation()
+            try checkProviderGate(session)
+            guard canSettleClaudeFirstUser(session), browser.webView(for: session.tabID) === session.view else {
+                throw Failure.staleSession
+            }
+            guard session.documentGeneration == original.generation,
+                  browser.documentGeneration(for: session.tabID) == original.generation else {
+                throw Failure.ownershipFailure(.documentGenerationAfter)
+            }
+            guard session.view.url == original.url else { throw Failure.ownershipFailure(.routeAfter) }
+            guard next != revision, ContinuousClock.now < settleDeadline else { break }
+            do {
+                // Reuse ordinary ownership, full first body, model and response
+                // checks. Neither the failed read nor the DOM event is evidence.
+                return try await page(session, action: "inspect", refreshChangedRoute: false,
+                                      claudeFirstUserObservation: .settlement, maximumWait: readDeadline - .now)
+            } catch let detached as ClaudeDetachedFirstUser {
+                guard detached.generation == original.generation, detached.url == original.url else {
+                    throw Failure.ownershipFailure(.routeAfter)
+                }
+                revision = detached.revision
+            }
+        }
+        throw Failure.ownershipFailure(.javaScriptUserCount)
+    }
+
     private func poll(_ session: Session) async throws -> Data {
         try Task.checkCancellation()
         guard ["loading", "running"].contains(session.state) else { return try snapshot(session) }
@@ -4685,6 +4768,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     recheckModelAfterAwait: false, recheckProductAfterAwait: false,
                     preferQuietChatGPTCompletion: true,
                     maximumWait: min(inspectionTimeout, deadline - .now))
+            } else if canSettleClaudeFirstUser(session), !session.claudeFirstUserSettlementSpent {
+                observed = try await inspectClaudeFirstReply(session, deadline: deadline)
             } else {
                 observed = try await page(session, action: "inspect", allowPendingClaudeModelObservation: true,
                     allowPendingDeepSeekComposerHandoff: true,
@@ -6491,6 +6576,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     /// Claude's early count guard precedes body/proof initialization for this
     /// read. Preserve only its captured count decision, never authority.
     static func sanitizedClaudeUserCountDiagnostic(_ raw: String, provider: Provider) -> String? {
+        claudeUserCountDiagnostic(raw, provider: provider)?.text
+    }
+
+    private static func claudeUserCountDiagnostic(_ raw: String, provider: Provider)
+        -> (text: String, count: Int64, detachedWithoutWarning: Bool)? {
         guard provider == .claude, raw.utf8.count <= 512,
               let value = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
               let kind = value["kind"] as? String, value["provider"] as? String == "claude",
@@ -6498,6 +6588,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               let saturated = firstUserDiagnosticBool(value["userCountSaturated"]), !saturated || count == 1_000 else { return nil }
         let baseKeys: Set<String> = ["kind", "provider", "userCount", "userCountSaturated", "expectedCounts"]
         var safe: [String: Any] = ["kind": kind, "provider": "claude", "userCount": count, "userCountSaturated": saturated]
+        var detachedWithoutWarning = false
         if kind == "claude_missing_user_v1" {
             guard count == 0, !saturated, Set(value.keys) == baseKeys.union(["priorRoot", "warningHook"]),
                   let expected = value["expectedCounts"] as? [Any], expected.count == 1,
@@ -6508,6 +6599,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   root != "unavailable" || warning == "unverified" else { return nil }
             safe["priorRoot"] = root
             safe["warningHook"] = warning
+            detachedWithoutWarning = root == "detached" && warning == "none"
         } else {
             guard kind == "claude_user_count_v1", Set(value.keys) == baseKeys else { return nil }
         }
@@ -6519,7 +6611,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             safe["expectedCounts"] = counts
         }
         guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), bytes.count <= 512 else { return nil }
-        return String(decoding: bytes, as: UTF8.self)
+        return (String(decoding: bytes, as: UTF8.self), count, detachedWithoutWarning)
     }
 
     static func sanitizedFirstUserStructure(_ raw: String, provider: Provider) -> String? {
@@ -7710,6 +7802,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       replacingInitialRootFrom: UUID? = nil,
                       qwenCodePayloadSample: String? = nil, savedResponseChoiceGrant: String? = nil,
                       groqRejectedAttributeNameSink: ((String) -> Void)? = nil,
+                      claudeFirstUserObservation: ClaudeFirstUserObservation? = nil,
                       maximumWait: Duration = .seconds(10)) async throws -> [String: Any] {
         if allowSavedCleanupInspection, session.savedResponseChoice != nil, !session.savedResponseChoiceAcknowledged {
             // No independent pre-preference deletion capability is granted by
@@ -8156,6 +8249,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         try browser.beginModelDiagnostic(tabID: session.tabID, ownerToken: session.token, operationID: operationID)
         defer { browser.endModelDiagnostic(tabID: session.tabID, operationID: operationID) }
         let firstUserEntry = firstUserNativeState(session)
+        let claudeFirstUserRevision = claudeFirstUserObservation != nil
+            ? try browser.modelChangeRevision(for: session.tabID) : nil
         func recordFirstUserFailure(_ stage: FirstUserNativeStage, observed: [String: Any]) {
             guard let records = Self.firstUserNativeDiagnosticRecords(provider: provider, action: action, stage: stage,
                 entry: firstUserEntry, current: firstUserNativeState(session), observed: observed,
@@ -8703,9 +8798,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case "document_changed", "conversation_changed":
                 if provider == .claude, error == "conversation_changed", observed["detail"] as? String == "user_count",
                    let raw = observed["debugStructure"] as? String,
-                   let safe = Self.sanitizedClaudeUserCountDiagnostic(raw, provider: provider) {
-                    logFirstUserStructure([safe], sequence: session.sequence, isFailure: true,
-                                          action: action, allowsBlockedProvider: allowBlockedProvider)
+                   let diagnostic = Self.claudeUserCountDiagnostic(raw, provider: provider) {
+                    if let revision = claudeFirstUserRevision, diagnostic.detachedWithoutWarning,
+                       action == "inspect", enforceModel, !allowBlockedProvider, url == currentURL,
+                       session.documentGeneration == generation, canSettleClaudeFirstUser(session) {
+                        throw ClaudeDetachedFirstUser(revision: revision, generation: generation,
+                                                      url: url, diagnostic: diagnostic.text)
+                    }
+                    // The original zero-count packet is already recorded.
+                    // WeakRef collection during settlement adds no new evidence.
+                    if claudeFirstUserObservation != .settlement || diagnostic.count != 0 {
+                        logFirstUserStructure([diagnostic.text], sequence: session.sequence, isFailure: true,
+                                              action: action, allowsBlockedProvider: allowBlockedProvider)
+                    }
                 }
                 if provider == .groq, error == "conversation_changed", observed["detail"] as? String == "user_count",
                    let groqCountRejection {
@@ -8757,7 +8862,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 }
                 throw Failure.ownershipFailure(Self.savedAdapterOwnershipReason(error: error,
                     detail: observed["detail"] as? String, provider: provider, isFirstUserFailure: isFirstUserFailure))
-            case "sign_in_required": throw recordedWebsiteBlocker(.signInRequired, session: session)
+            case "sign_in_required":
+                if action == "inspect", !allowBlockedProvider, !session.isDiscovery, !session.isRecoveryProbe,
+                   canObserveKimiInitialHydration(session), url == currentURL, url == Provider.kimi.startURL,
+                   Set(observed.keys) == ["error", "freshKimiSignInAbort", "url", "userCount", "responseCount"],
+                   Self.firstUserDiagnosticBool(observed["freshKimiSignInAbort"]) == true,
+                   observed["url"] as? String == url.absoluteString,
+                   ComputerToolArgumentContract.exactInt64(observed["userCount"]) == 0,
+                   ComputerToolArgumentContract.exactInt64(observed["responseCount"]) == 0 {
+                    // Only this app-created zero-message guest view may close.
+                    // This negative observation never binds a document or chat.
+                    session.untouchedKimiSignIn = .init(documentGeneration: generation, url: url)
+                }
+                throw recordedWebsiteBlocker(.signInRequired, session: session)
             case "website_verification_required":
                 let failure = recordedWebsiteBlocker(.humanVerificationRequired(provider), session: session)
                 if provider == .gemini {
@@ -10021,15 +10138,17 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             if !session.isDiscovery {
                 // A checkpoint may first arrive after the last poll or before
                 // mode setup. Record it even when cleanup cannot own the page.
-                do { try rejectWebsiteBlocker(session, action: "cleanup", phase: "before") }
-                catch {
+                do {
+                    try rejectWebsiteBlocker(session, action: "cleanup", phase: "before")
+                    if canDisposeUntouchedKimiSignIn(session) { throw Failure.signInRequired }
+                } catch {
                     let googleCheckpoint = (error as? Failure) == .humanVerificationRequired(.gemini)
                         && canDisposeUntouchedGoogleCheckpoint(session)
                     let chatGPTSignIn = (error as? Failure) == .signInRequired && canDisposeUntouchedChatGPTSignIn(session)
-                    guard googleCheckpoint || chatGPTSignIn else { throw error }
-                    // No provider adapter could have focused an editor or sent
-                    // anything. Keep the provider gate, but retire this exact
-                    // app-created view without evaluating the checkpoint.
+                    let kimiSignIn = (error as? Failure) == .signInRequired && canDisposeUntouchedKimiSignIn(session)
+                    guard googleCheckpoint || chatGPTSignIn || kimiSignIn else { throw error }
+                    // No editor or Send action was granted. Keep the provider
+                    // gate and retire only this exact app-created view.
                     browser.closeTab(session.tabID)
                     session.responseProfile?.mark(.physicalClose)
                     guard browser.webView(for: session.tabID) == nil,

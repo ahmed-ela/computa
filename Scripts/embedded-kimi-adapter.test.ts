@@ -11,6 +11,72 @@ describe('Kimi saved-conversation adapter', () => {
     expect(adapterSource).not.toContain('websiteChat');
   });
 
+  test('a guest shell with a complete model picker and composer cannot verify sign-in or Send', async () => {
+    const f = adapterFixture(); f.remove(f.accountHistory);
+    const offer = new f.Node('BUTTON', {}, 'Log in to sync chat history');
+    f.body.append(offer);
+    expect(await f.run('inspect', { expectedUserCounts: [0] })).toEqual({
+      error: 'sign_in_required', freshKimiSignInAbort: true, url: 'https://www.kimi.ai/', userCount: 0, responseCount: 0,
+    });
+    for (const action of ['discoverModels', 'selectModel', 'verifyModel', 'prepare', 'insert', 'sendReady', 'submit']) {
+      expect(await f.run(action)).toEqual({ error: 'sign_in_required' });
+    }
+    expect(f.trigger.clicks).toBe(0); expect(offer.clicks).toBe(0);
+    expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
+  });
+
+  test('guest or draft evidence never borrows an account history link or gets an unsafe disposal receipt', async () => {
+    for (const mutation of ['conflict', 'draft', 'hidden-user', 'hidden-answer', 'claimed']) {
+      const f = adapterFixture();
+      if (mutation === 'claimed') expect((await f.run('selectModel')).pending).toBe(true);
+      else if (mutation === 'draft') f.setDraft('Unsent fixture draft');
+      else if (mutation === 'hidden-user' || mutation === 'hidden-answer') {
+        const t = f.installTranscript();
+        const [hidden, remove] = mutation === 'hidden-user' ? [t.user, t.answer] : [t.answer, t.user];
+        f.remove(remove); hidden.setAttribute('hidden', '');
+      }
+      const dialog = new f.Node('DIV', { role: 'dialog' });
+      dialog.append(new f.Node('BUTTON', {}, 'Log in')); f.body.append(dialog);
+      const observed = await f.run('inspect', { expectedUserCounts: [0] });
+      if (mutation === 'conflict') expect(observed.freshKimiSignInAbort).toBe(true);
+      else expect(observed).toEqual({ error: 'sign_in_required' });
+      expect(observed.error).toBe('sign_in_required');
+      if (mutation === 'draft') expect(f.draftText()).toBe('Unsent fixture draft');
+      expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
+    }
+  });
+
+  test('unknown account state waits for exact signed-in chrome and observes href-only hydration', async () => {
+    const pending = { pending: true, sessionLifecycle: 'saved_conversation_delete', temporary: false, composer: false };
+    for (const mutation of ['missing', 'hidden', 'disabled', 'duplicate', 'foreign', 'query', 'editable', 'wrong-label']) {
+      const f = adapterFixture();
+      switch (mutation) {
+        case 'missing': f.accountHistory.removeAttribute('href'); break;
+        case 'hidden': f.accountHistory.setAttribute('hidden', ''); break;
+        case 'disabled': f.accountHistory.setAttribute('aria-disabled', 'true'); break;
+        case 'duplicate': f.body.append(f.accountHistory.cloneNode(true)); break;
+        case 'foreign': f.accountHistory.setAttribute('href', 'https://example.test/chat/history'); break;
+        case 'query': f.accountHistory.setAttribute('href', '/chat/history?guest'); break;
+        case 'editable': {
+          f.remove(f.accountHistory); f.accountHistory.connected = true;
+          const editor = new f.Node('DIV', { contenteditable: 'true' });
+          editor.append(f.accountHistory); f.body.append(editor); break;
+        }
+        case 'wrong-label': f.accountHistory.text = 'Other chats'; break;
+      }
+      expect(await f.run()).toEqual(pending);
+      expect(await f.run('discoverModels')).toEqual({ error: 'document_changed', detail: 'account_controls' });
+      expect(f.trigger.clicks).toBe(0); expect(f.counts().sends).toBe(0);
+    }
+    const f = adapterFixture(); f.accountHistory.removeAttribute('href');
+    expect(await f.run()).toEqual(pending);
+    f.accountHistory.setAttribute('href', 'https://www.kimi.ai/chat/history'); f.emitAttribute('href');
+    expect(f.signals).toEqual([{ ownerToken: '9fe25e48-2e0b-46cb-84f7-7b4f32e1794f', kind: 'dom_changed' }]);
+    const ready = await f.run();
+    expect(ready.composer).toBe(true); expect(ready.error).toBeUndefined();
+    expect(f.trigger.clicks).toBe(0); expect(f.counts().sends).toBe(0);
+  });
+
   test('a not-yet-mounted fresh page emits only pending metadata then discovers the observed choice', async () => {
     const f = adapterFixture();
     const controls = [f.scope, f.send, f.trigger];

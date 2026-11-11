@@ -73,7 +73,7 @@ function computaProviderCore(request, provider, origin, actions) {
     record.observer.observe(document.documentElement || document, { subtree: true, childList: true,
       characterData: true, attributes: true, attributeFilter: ['disabled', 'aria-disabled', 'aria-hidden', 'aria-busy',
         'aria-label', 'aria-expanded', 'aria-controls', 'aria-selected', 'data-state', 'class', 'style', 'hidden', 'inert',
-        ...(provider === 'kimi' ? ['role', 'contenteditable', 'data-lexical-editor', 'data-testid', 'aria-haspopup', 'id']
+        ...(provider === 'kimi' ? ['role', 'contenteditable', 'data-lexical-editor', 'data-testid', 'aria-haspopup', 'id', 'href']
           : provider === 'qwen' ? ['role', 'aria-haspopup', 'id']
           : provider === 'deepseek' ? ['role', 'placeholder', 'aria-pressed'] : [])] });
     globalThis[signalKey] = record;
@@ -790,7 +790,34 @@ try {
   const fresh = () => !state.submitted && !state.first && !state.deletion && currentRoute().kind === 'fresh'
     && transcript().users.length === 0 && transcript().answers.length === 0 && composer().empty;
 
-  function initialHydrationPending() {
+  function freshAccountStatus() {
+    if (state.submitted || cleanupInspection) return 'authenticated';
+    const accountChrome = node => !authored(node) && !node.closest('[contenteditable="true"], [role="textbox"]');
+    const label = node => c.normalize(node.getAttribute('aria-label') || node.innerText || node.textContent);
+    const offers = visible(document, 'button, [role="button"], [aria-label="Log in to sync chat history"]', 512);
+    if (offers.some(node => accountChrome(node) && (label(node) === 'Log in to sync chat history'
+      || label(node) === 'Log in' && !!node.closest('dialog, [role="dialog"]')))) return 'guest';
+    // Guests can have a working picker and editor. Only the observed account
+    // history link provides positive sign-in evidence on the fresh page.
+    const history = visible(document, 'a[href="/chat/history"], a[href="https://www.kimi.ai/chat/history"]')
+      .filter(node => accountChrome(node) && c.enabled(node) && label(node) === 'All chats');
+    return history.length === 1 ? 'authenticated' : 'unknown';
+  }
+
+  function canCertifyFreshGuest() {
+    if (input.action !== 'inspect' || input.bindOwner !== true || document.URL !== 'https://www.kimi.ai/'
+      || input.expectedUserCounts?.length !== 1 || input.expectedUserCounts[0] !== 0
+      || input.expectedConversation != null || input.expectedFirstUserFingerprint != null
+      || state.initialReadComplete || state.model || state.selection || state.prepared || state.inserted
+      || state.submitted || state.submissionAcknowledged || state.first || state.provisional || state.canonical || state.deletion
+      || document.querySelectorAll('.chat-content-item').length) return false;
+    const editors = document.querySelectorAll('.chat-input-editor');
+    if (!editors.length) return true;
+    try { return editors.length === 1 && composerText(editors[0]) === ''; }
+    catch { return false; }
+  }
+
+  function initialHydrationPending(accountAvailable) {
     // A fresh document can finish navigation before its controls mount. This
     // read-only signal grants no URL, count, model, lifecycle or Send proof.
     // The native preparation deadline and existing DOM observer bound waiting.
@@ -831,9 +858,18 @@ try {
         || label && label.children.length !== 0) reject('model_unverified');
     }
     if (visible(document, 'div.kimi-menu-positioner[role="menu"]').length) reject('model_unverified');
-    return !editor || !send || !trigger || !label;
+    return !accountAvailable || !editor || !send || !trigger || !label;
   }
-  if (initialHydrationPending()) return { pending: true, sessionLifecycle: 'saved_conversation_delete', temporary: false, composer: false };
+  const account = freshAccountStatus();
+  if (account === 'guest') {
+    // Negative-only disposal evidence for this untouched app-owned view.
+    if (canCertifyFreshGuest()) return { error: 'sign_in_required', freshKimiSignInAbort: true,
+      url: document.URL, userCount: 0, responseCount: 0 };
+    c.fail('sign_in_required');
+  }
+  if (initialHydrationPending(account === 'authenticated'))
+    return { pending: true, sessionLifecycle: 'saved_conversation_delete', temporary: false, composer: false };
+  if (account !== 'authenticated') c.fail('document_changed', 'account_controls');
 
   if (['discoverModels', 'selectModel'].includes(input.action)) {
     if (!fresh()) c.fail('not_fresh');
