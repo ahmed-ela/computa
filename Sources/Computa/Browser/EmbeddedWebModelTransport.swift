@@ -735,6 +735,41 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var last: QwenProgressInspection?
     }
 
+    /// Finite last observations for a prompt-free probe of a saved Gemini checkpoint.
+    /// These fields are diagnostic only and cannot satisfy discovery or recovery.
+    private struct GeminiRecoveryPreparation {
+        let checkpointID: UUID
+        var enteredMenu = false
+        var composer: Bool?
+        var temporary: Bool?
+        var temporaryActionAvailable: Bool?
+        var menuPending: Bool?
+
+        private static func bool(_ raw: Any?) -> Bool? {
+            guard let number = raw as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+            return number.boolValue
+        }
+
+        mutating func observeReadiness(_ observed: [String: Any]) {
+            composer = Self.bool(observed["composer"])
+            temporary = Self.bool(observed["temporary"])
+            temporaryActionAvailable = Self.bool(observed["temporaryActionAvailable"])
+        }
+
+        mutating func observeMenu(_ observed: [String: Any]) {
+            menuPending = Self.bool(observed["pending"])
+        }
+
+        func logDescription(temporaryRequested: Bool) -> String {
+            func flag(_ value: Bool?) -> String { value.map { String($0) } ?? "unknown" }
+            return " geminiRecoveryVersion=1 checkpointID=\(checkpointID.uuidString.lowercased())"
+                + " discoveryStage=\(enteredMenu ? "menu" : "readiness")"
+                + " lastComposer=\(flag(composer)) lastTemporary=\(flag(temporary))"
+                + " lastTemporaryActionAvailable=\(flag(temporaryActionAvailable))"
+                + " temporaryRequested=\(temporaryRequested) lastMenuPending=\(flag(menuPending))"
+        }
+    }
+
     private final class Session {
         let token = UUID().uuidString
         let firstUserMarker = UUID().uuidString
@@ -748,6 +783,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let isDiscovery: Bool
         let isRecoveryProbe: Bool
         let view: WKWebView
+        var geminiRecoveryPreparation: GeminiRecoveryPreparation?
         // Passive synthetic metadata only. Neither this lease nor its snapshot
         // can supply model, ownership, completion or response text evidence.
         var groqOwnedStatus: GroqOwnedStatusLease?
@@ -2781,6 +2817,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             try Task.checkCancellation()
         }
         let session = try createSession(provider: provider, choice: nil, isDiscovery: true, isRecoveryProbe: retryBlocked)
+        if provider == .gemini, retryBlocked, let checkpointID = previousVerificationID {
+            session.geminiRecoveryPreparation = GeminiRecoveryPreparation(checkpointID: checkpointID)
+        }
         let token = session.token
         var closed = false
         do {
@@ -2792,11 +2831,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 guard ContinuousClock.now < deadline else { throw preparationFailure(session) }
                 if session.state != "ready" { _ = try await waitForChange(sessionToken: token, after: revision, until: deadline) }
             }
+            session.geminiRecoveryPreparation?.enteredMenu = true
             while ContinuousClock.now < deadline {
                 try Task.checkCancellation()
                 let revision = try browser.modelChangeRevision(for: session.tabID)
                 session.modelSelectionRequested = true
                 let result = try await page(session, action: "discoverModels", maximumWait: min(.seconds(10), deadline - .now))
+                session.geminiRecoveryPreparation?.observeMenu(result)
                 if result["pending"] as? Bool != true {
                     let qualified: [WebsiteModelChoice]
                     let modes: [WebsiteModeChoice]
@@ -3529,7 +3570,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let diagnostic = browser.modelDiagnosticSnapshot(tabID: session.tabID)
         let navigation = browser.modelNavigationDiagnostic(tabID: session.tabID, view: session.view)?.logDescription
             ?? EmbeddedBrowserSession.ModelNavigationDiagnostic.unknownLogDescription
-        Self.inspectionLog.error("preparationTimeout provider=\(session.provider.rawValue, privacy: .public) \(navigation, privacy: .public) \(diagnostic, privacy: .public)")
+        let recovery = session.geminiRecoveryPreparation?.logDescription(temporaryRequested: session.temporaryRequested) ?? ""
+        Self.inspectionLog.error("preparationTimeout provider=\(session.provider.rawValue, privacy: .public)\(recovery, privacy: .public) \(navigation, privacy: .public) \(diagnostic, privacy: .public)")
         return .preparationDeadline
     }
 
@@ -4275,6 +4317,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
             throw error
         }
+        session.geminiRecoveryPreparation?.observeReadiness(observed)
         guard ContinuousClock.now < deadline else { throw session.state == "loading" ? preparationFailure(session) : timeoutFailure }
         if observed["claudeModelObservationPending"] != nil {
             guard session.claudeModelObservationPending else { throw Failure.modelUnverified }

@@ -4045,6 +4045,7 @@ Evidence is retained under `all-models-20261102/current-workflow-preparation/fix
 | Selection | Controlled workflow outcome |
 | --- | --- |
 | Claude Sonnet 5.5 | Passed all 19 checks in 58.487 s. Eight native tool calls, six passing tests, one observed browser receipt, an explicit model-issued close, and nine verified website releases with saved cleanup receipts. |
+| Claude Opus 5.5 | Passed all 19 checks in 103.217 s. Eleven native tool calls, six passing tests, one observed browser receipt, an explicit model-issued close, and nine verified website releases with saved cleanup receipts. |
 | Claude Opus 5 | The website blocked the first verified submission with a reasoning-extraction warning after 3.946 s. No tool ran or reply was accepted. The temporary session closed; the prompt was not replayed. |
 | Qwen3.7-Plus website | The first verified submission hit the five-minute response deadline (303.081 s overall). No tool ran. A later receipt confirmed deletion. Separate short direct Temporary Chat and native saved-session marker controls passed; the native control took 16.862 s and saved its deletion receipt. The controls do not establish why the full workflow timed out. |
 | Kimi Instant | The initial editor check rejected supported nonwhitespace content before Send (1.552 s). Its origin is unknown. No tool ran. The durable cleanup diagnostic recorded `saved_deletion / ownership / unbound_cleanup`; cleanup remains unconfirmed and was not retried. |
@@ -4061,3 +4062,13 @@ The normal Kimi tab restored an older synthetic invoice relay draft. Its parsed 
 A separate fresh 497 task verified four submissions, completed two reads and one valid patch, and saved four website deletion receipts. The fourth reply proposed one `exec_command` with its argument object encoded as a string. The unchanged decoder rejected the reply atomically. The independent audit passed 10 of 19 checks, including the scoped edit, six independent tests, and expected reference. The model never ran the requested tests or browser steps and did not produce a final answer.
 
 Kimi Instant now receives the existing inert argument-object example when functions are offered and allowed. Historical serialized arguments remain byte-identical. String arguments, mixed malformed batches, and tool-choice denials are still rejected. All 141 website Codec tests passed after updating the two exact prompt expectations. The example's live effect remains unverified.
+
+#### Gemini checkpoint recovery on a healthy normal page
+
+The normal build 497 Gemini tab was signed in and displayed the four expected model choices without a challenge. A 3.1 Pro task nevertheless returned `website_verification_required` after 253 ms, before an owned page or website prompt existed. Its saved receipt confirms no owned session was created. This is distinct from a fresh CAPTCHA on an owned model page.
+
+The saved verification checkpoint remained after prompt-free discovery failed. One supported reload of the normal page started a separate discovery attempt; the installed process logged another 30-second preparation timeout within that attempt's recorded probing interval. The same checkpoint remained, and no website prompt was sent. The 497 log does not distinguish readiness from model-menu polling.
+
+The next diagnostic appends the existing checkpoint identity, the active discovery stage, and finite last-observed readiness/menu flags to that timeout record. Missing or non-Boolean values are unknown. It performs no additional page read, wait, prompt, or retry, and leaves every checkpoint-clearance, ownership and cleanup check in place. This is evidence for the next failure, not a recovery or CAPTCHA-prevention fix.
+
+Ten existing native WebKit and app-state recovery checks passed with zero failures or skips. They exercise successful verified recovery, blocked or revoked probes, checkpoint retention across recreation, and the temporary-mode readiness boundary. Live timeout classification with the new fields remains pending.
