@@ -2394,8 +2394,8 @@ actor WebModelServer {
                         do {
                             defer { responseProfile?.mark(.codecEnd) }
                             reply = try WebModelResponseCodec.parseEmbeddedReply(text, request: request) { shape, singleUncommentedCall in
-                                guard provider == "gemini" else { return }
-                                Self.promptLog.info("rejectedCallShape version=1 provider=gemini inference=\(inferenceID.uuidString.lowercased(), privacy: .public) reason=\(shape.rawValue, privacy: .public) singleUncommentedCall=\(singleUncommentedCall, privacy: .public)")
+                                guard provider == "gemini" || session.modelChoice == .claudeHaiku55 else { return }
+                                Self.promptLog.info("rejectedCallShape version=1 provider=\(provider, privacy: .public) inference=\(inferenceID.uuidString.lowercased(), privacy: .public) reason=\(shape.rawValue, privacy: .public) singleUncommentedCall=\(singleUncommentedCall, privacy: .public)")
                             }
                             try Self.requireChatGPTLiteralToolReply(reply, provider: provider, text: text, snapshot: value)
                         } catch {

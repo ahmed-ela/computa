@@ -7,6 +7,8 @@ struct WebsiteModelChoice: Codable, Equatable, Sendable {
     let key: String
     let label: String
 
+    static let claudeHaiku55 = Self(provider: "claude", key: "Haiku 5.5", label: "Haiku 5.5")
+
     var isValid: Bool {
         provider != "deepseek" && WebsiteModelCatalog.knownProviders.contains(provider)
             && Self.validField(key) && Self.validField(label)
@@ -34,7 +36,7 @@ struct WebsiteModelChoice: Codable, Equatable, Sendable {
     }
 
     var supportsClaudeTurnPilot: Bool {
-        provider == "claude" && key == "Haiku 5.5" && label == "Haiku 5.5"
+        self == Self.claudeHaiku55
     }
 
     var isRetired: Bool {

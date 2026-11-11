@@ -4284,3 +4284,19 @@ under the original assistant turn and user pins. Before granting one
 preference click, it still verifies the whole submitted prompt and marker,
 the model, and both current response cards. A changed suffix after expansion
 stops before a preference, reply or deletion can be accepted.
+
+### 2026-11-11 — Claude Haiku 5.5 tool-call fields on installed 507
+
+Claude and Computa displayed the same 13 Claude choices. Haiku 5.5 completed
+two dependent terminal reads in 20.226 s, returned the exact second value,
+and saved three Incognito closure receipts.
+
+The separate invoice workflow stopped before dispatching a tool. Its first
+verified response proposed a tool call with an unsupported field. Computa
+rejected the entire response and saved the Incognito closure. The exact field
+was unavailable in the capture.
+
+The Haiku handoff now includes the existing inert example of a function entry
+with only `name` and `arguments`. When an offered call fails the entry shape
+check, the native log records a finite category for that inference. The codec
+continues to reject the entire proposal when any call contains extra fields.

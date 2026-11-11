@@ -4339,13 +4339,14 @@ final class WebModelResponseCodecTests: XCTestCase {
         }
     }
 
-    func testQwenShowsExistingInertNestedFunctionLayoutAndKeepsOtherProviderContracts() throws {
+    func testSelectedWebsiteModelsShowExistingInertNestedFunctionLayout() throws {
         let plus = WebsiteModelChoice(provider: "qwen", key: "Qwen3.7-Plus", label: "Qwen3.7-Plus").modelID
         let max = WebsiteModelChoice(provider: "qwen", key: "Qwen3.8-Max", label: "Qwen3.8-Max").modelID
         let opus = WebsiteModelChoice(provider: "claude", key: "Opus 3", label: "Opus 3").modelID
+        let haiku = WebsiteModelChoice(provider: "claude", key: "Haiku 5.5", label: "Haiku 5.5").modelID
         let otherClaude = WebsiteModelChoice(provider: "claude", key: "Opus 4.6", label: "Opus 4.6").modelID
         let kimi = WebsiteModelChoice(provider: "kimi", key: "k28-instant", label: "Instant").modelID
-        let scenarios = [(plus, true), (max, true), ("browser/qwen", true), ("web-qwen", false), (opus, true),
+        let scenarios = [(plus, true), (max, true), ("browser/qwen", true), ("web-qwen", false), (opus, true), (haiku, true),
             (otherClaude, false), ("browser/claude", false), ("browser/chatgpt", false), ("browser/gemini", false),
             ("browser/groq", false), ("browser/kimi", false), (kimi, true), ("browser/deepseek/mode/chat", false)]
         let inert = #"{"type":"tool_calls","calls":[{"name":null,"arguments":{"sample_field":"sample value"}}]}"#
@@ -4354,7 +4355,8 @@ final class WebModelResponseCodecTests: XCTestCase {
             let prepared = try WebModelResponseCodec.prepareRequest(original)
             // This existing oracle compares retained request values and the complete
             // response-contract suffix byte-for-byte, including unchanged providers.
-            _ = try assertContiguousRequestValues(original, in: prepared, expectsFunctionLayout: model == opus || model == kimi)
+            _ = try assertContiguousRequestValues(original, in: prepared,
+                expectsFunctionLayout: model == opus || model == haiku || model == kimi)
             XCTAssertEqual(prepared.prompt.contains("Function call layout."), expectsLayout, model)
             XCTAssertEqual(prepared.prompt.contains(inert), expectsLayout, model)
             XCTAssertEqual(prepared.continuationRequest, original)
@@ -4476,6 +4478,7 @@ final class WebModelResponseCodecTests: XCTestCase {
 
     func testOpus3ShowsInertFunctionLayoutOnlyForAnAllowedFunction() throws {
         let opus = WebsiteModelChoice(provider: "claude", key: "Opus 3", label: "Opus 3").modelID
+        let haiku = WebsiteModelChoice(provider: "claude", key: "Haiku 5.5", label: "Haiku 5.5").modelID
         let other = WebsiteModelChoice(provider: "claude", key: "Opus 4.6", label: "Opus 4.6").modelID
         let tools: [[String: Any]] = [["type": "namespace", "name": "fixture", "tools": [
             ["type": "function", "name": "lookup", "parameters": ["type": "object",
@@ -4507,6 +4510,7 @@ final class WebModelResponseCodecTests: XCTestCase {
         for excluded in [
             try controlledRequest(["model": other], tools: tools),
             try controlledRequest(["model": opus, "tool_choice": "none"], tools: tools),
+            try controlledRequest(["model": haiku, "tool_choice": "none"], tools: tools),
             try controlledRequest(["model": opus], tools: [customOnly]),
             try controlledRequest(["model": opus], tools: [])
         ] {

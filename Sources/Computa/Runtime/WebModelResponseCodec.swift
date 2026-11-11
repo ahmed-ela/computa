@@ -461,6 +461,7 @@ enum WebModelResponseCodec {
         }
         let provider = LocalModelCatalog.webProvider(for: model)
         let isChatGPT = provider == "chatgpt", isClaude = provider == "claude", isGroq = provider == "groq"
+        let claudeChoice = isClaude ? WebsiteModelCatalog.choice(for: model) : nil
         if groqHistoryProjection != nil {
             guard isGroq, groqToolCatalogProjection != nil, groqDirectTools == .loadedOnly,
                   !compactGroqLoaderHistory else { throw Failure.invalidTools }
@@ -638,7 +639,7 @@ enum WebModelResponseCodec {
             : [ComputaAgentInstructions.webInferenceContract(offeredFunctions: offered.mapValues(\.name),
             customToolNames: customNames, includedInstructionText: includedInstructionText, compactNativeContext: isChatGPT,
             deduplicateNativeContext: isClaude || isGroq,
-            externalClientContext: isClaude && WebsiteModelCatalog.choice(for: model) ==
+            externalClientContext: claudeChoice ==
                 WebsiteModelChoice(provider: "claude", key: "Opus 4.7", label: "Opus 4.7")),
             deferredBrowserInstructions].compactMap { $0 }.joined(separator: "\n\n")
         let latestUserItemIndex = (object["input"] as? [Any])?.lastIndex { item in
@@ -727,8 +728,8 @@ enum WebModelResponseCodec {
             illustrateFunctionArguments: provider == "qwen"
                 || (provider == "kimi" && WebsiteModelCatalog.choice(for: model) ==
                     WebsiteModelChoice(provider: "kimi", key: "k28-instant", label: "Instant"))
-                || (isClaude && WebsiteModelCatalog.choice(for: model) ==
-                    WebsiteModelChoice(provider: "claude", key: "Opus 3", label: "Opus 3")),
+                || claudeChoice == .claudeHaiku55
+                || claudeChoice == WebsiteModelChoice(provider: "claude", key: "Opus 3", label: "Opus 3"),
             currentBrowserHandoff: browserHandoff,
             allowedToolNames: policy.allowedNames)
         let prompt = """
