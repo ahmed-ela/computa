@@ -2393,6 +2393,7 @@ actor WebModelServer {
                             throw Failure.providerFailed
                         }
                         let reply: WebModelResponseCodec.Reply
+                        var groqLiteralOutputMessage = false
                         responseProfile?.mark(.codecStart)
                         do {
                             defer { responseProfile?.mark(.codecEnd) }
@@ -2412,15 +2413,32 @@ actor WebModelServer {
                                 }
                                 reply = try WebModelResponseCodec.parseGroqRenderedMessage(rendered, request: request)
                             } else {
-                                reply = try WebModelResponseCodec.parseEmbeddedReply(text, request: request) { shape, singleUncommentedCall in
-                                    guard provider == "gemini" || session.modelChoice == .claudeHaiku55 else { return }
-                                    Self.promptLog.info("rejectedCallShape version=1 provider=\(provider, privacy: .public) inference=\(inferenceID.uuidString.lowercased(), privacy: .public) reason=\(shape.rawValue, privacy: .public) singleUncommentedCall=\(singleUncommentedCall, privacy: .public)")
+                                do {
+                                    reply = try WebModelResponseCodec.parseEmbeddedReply(text, request: request) { shape, singleUncommentedCall in
+                                        guard provider == "gemini" || session.modelChoice == .claudeHaiku55 else { return }
+                                        Self.promptLog.info("rejectedCallShape version=1 provider=\(provider, privacy: .public) inference=\(inferenceID.uuidString.lowercased(), privacy: .public) reason=\(shape.rawValue, privacy: .public) singleUncommentedCall=\(singleUncommentedCall, privacy: .public)")
+                                    }
+                                } catch let failure as WebModelResponseCodec.Failure {
+                                    guard case .malformedEnvelope = failure, provider == "groq",
+                                          WebModelResponseCodec.closedGroqLiteralOutputMessage(text) != nil else { throw failure }
+                                    // This exact provider shape can produce only a message. It
+                                    // needs the same owned literal proof as a correction, with
+                                    // the original inference's transcript clear before release.
+                                    groqLiteralOutputMessage = true
+                                    let proof = await session.transport.snapshotGroqCompletedLiteralProof(sessionToken: session.token)
+                                    try requireCurrentContext()
+                                    guard ContinuousClock.now < end else { throw Failure.deadline }
+                                    guard let proof, Self.matchesGroqCompletedLiteralProof(proof, taskID: taskID,
+                                        session: session, snapshot: value, text: text) else {
+                                        throw EmbeddedWebModelTransport.Failure.responseFormatUnavailable
+                                    }
+                                    reply = try WebModelResponseCodec.parseGroqLiteralOutputMessage(text, request: request)
                                 }
                                 try Self.requireChatGPTLiteralToolReply(reply, provider: provider, text: text, snapshot: value)
                             }
                         } catch {
-                            // A rendered message has no literal reply to correct.
-                            if renderedMessageMarker != nil { throw error }
+                            // Verified message-only formats never enter tool correction.
+                            if renderedMessageMarker != nil || groqLiteralOutputMessage { throw error }
                             if case let .toolTextUnverified(reason) = error as? Failure {
                                 captureRejectedReply(text, diagnostic: .toolTextUnverified(reason), taskID: taskID,
                                     inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
@@ -2545,7 +2563,7 @@ actor WebModelServer {
                                     runtimeGeneration: context.runtimeGeneration, trigger: .inference)
                             }
                             guard closed.receipt.outcome == .closed,
-                                  renderedMessageMarker == nil || closed.receipt.reason == .transcriptCleared,
+                                  (renderedMessageMarker == nil && !groqLiteralOutputMessage) || closed.receipt.reason == .transcriptCleared,
                                   closed.receipt.inferenceID == inferenceID.uuidString.lowercased(),
                                   closed.receipt.sessionToken == session.token.lowercased() else { throw Failure.cleanupFailed }
                             guard closed.receipt.receiptSaved, closed.issues.isEmpty else { throw Failure.persistenceRequired }
@@ -2585,6 +2603,8 @@ actor WebModelServer {
                             reply: selection.reply, responseID: responseID, encoded: encoded)
                         if renderedMessageMarker != nil {
                             Self.promptLog.notice("groqRenderedMessageRelease version=1 inference=\(inferenceID.uuidString.lowercased(), privacy: .public)")
+                        } else if groqLiteralOutputMessage {
+                            Self.promptLog.notice("groqLiteralOutputMessageRelease version=1 inference=\(inferenceID.uuidString.lowercased(), privacy: .public)")
                         }
                         return InferenceResult(data: encoded, inferenceID: inferenceID,
                             responseProfile: responseProfile, historyWrite: historyWrite)

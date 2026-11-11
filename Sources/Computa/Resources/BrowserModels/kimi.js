@@ -542,7 +542,7 @@ try {
     if (!state.inserted.prompt.endsWith(`\n\nComputa session marker: ${input.expectedFirstUserMarker}`))
       c.fail('conversation_changed', 'first_marker_suffix');
   }
-  function optimisticFirstUser() {
+  function optimisticFirstUser(allowAssistantPreview = false) {
     // The observed optimistic first user has two present-but-empty IDs. Its
     // replacement receives real UUIDs before the provisional route promotes.
     // Keep that transient root out of transcript(), hashing and first binding.
@@ -552,14 +552,22 @@ try {
       || input.expectedFirstUserFingerprint != null) return null;
     const users = c.nodes(document, '.chat-content-item.chat-content-item-user', 32);
     const answers = c.nodes(document, '.chat-content-item.chat-content-item-assistant', 32);
-    if (users.length !== 1 || answers.length !== 0) return null;
-    const root = users[0];
+    if (users.length !== 1 || answers.length > 1) return null;
+    const root = users[0], preview = answers[0];
+    if (preview) {
+      if (!allowAssistantPreview || state.submissionAcknowledged !== true) return null;
+      const parent = root.parentElement;
+      if (!parent || preview.parentElement !== parent || !c.visible(preview)) return null;
+      // A following row in the same turn only permits waiting. Do not read its text or identity.
+      const siblings = [...parent.children], index = siblings.indexOf(root);
+      if (index < 0 || siblings.indexOf(preview) <= index) return null;
+    }
     if (root.getAttribute('data-archer-id') !== '' || root.getAttribute('data-conversation-turn-id') !== '') return null;
     const body = one(visible(root, '.user-content .user-content__text'), 'first_body_count');
     if (!c.visible(root)) c.fail('conversation_changed', 'first_root_hidden');
     if (body.tagName !== 'SPAN' || body.children.length !== 0) c.fail('conversation_changed', 'first_body_shape');
     verifyUserCount(1); verifyFirstPrompt({ text: body.textContent });
-    return { root, body };
+    return { root, body, hasAssistantPreview: !!preview };
   }
   function initialUserPendingReceipt(form, evidence) {
     // Native accepts this existing negative receipt only after the sole Send
@@ -620,10 +628,10 @@ try {
     return initialUserPendingReceipt(current.form, modelEvidence(true, 'optimistic_first', current.picker));
   }
   function initialUserIdentityPending() {
-    const first = optimisticFirstUser();
+    const first = optimisticFirstUser(true);
     if (!first) return null;
     const form = composer(), p = picker();
-    if (state.model && state.selection === null && p.closed && p.trigger !== state.model.trigger
+    if (!first.hasAssistantPreview && state.model && state.selection === null && p.closed && p.trigger !== state.model.trigger
       && state.model.trigger.isConnected === false && p.label === state.model.choice.label)
       return revalidateInitialModelRemount(first, form, p);
     return initialUserPendingReceipt(form, modelEvidence(true, 'optimistic_first', p));

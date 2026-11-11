@@ -1390,11 +1390,21 @@ enum WebModelResponseCodec {
     }
 
     static func closedGroqRenderedMessage(_ text: String) -> String? {
+        closedGroqMessage(text, messageKey: "text", requiresMessageType: true)
+    }
+
+    /// The server releases this message only with native literal proof and saved cleanup.
+    static func closedGroqLiteralOutputMessage(_ text: String) -> String? {
+        closedGroqMessage(text, messageKey: "output", requiresMessageType: false)
+    }
+
+    private static func closedGroqMessage(_ text: String, messageKey: String, requiresMessageType: Bool) -> String? {
         let bytes = Data(text.utf8)
+        let keys: Set<String> = requiresMessageType ? ["type", messageKey] : [messageKey]
         guard bytes.count <= 220_000,
               let envelope = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
-              Set(envelope.keys) == ["type", "text"], envelope["type"] as? String == "message",
-              let message = envelope["text"] as? String,
+              Set(envelope.keys) == keys, !requiresMessageType || envelope["type"] as? String == "message",
+              let message = envelope[messageKey] as? String,
               !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               APIModelCorrectionJSON.isUnambiguous(bytes) else { return nil }
         return message
@@ -1403,6 +1413,12 @@ enum WebModelResponseCodec {
     static func parseGroqRenderedMessage(_ text: String, request: Request) throws -> Reply {
         guard LocalModelCatalog.webProvider(for: request.model) == "groq",
               let message = closedGroqRenderedMessage(text) else { throw Failure.unsupportedWebsiteResponse }
+        return try validated(.message(message), request: request)
+    }
+
+    static func parseGroqLiteralOutputMessage(_ text: String, request: Request) throws -> Reply {
+        guard LocalModelCatalog.webProvider(for: request.model) == "groq",
+              let message = closedGroqLiteralOutputMessage(text) else { throw Failure.unsupportedWebsiteResponse }
         return try validated(.message(message), request: request)
     }
 

@@ -15237,8 +15237,17 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     func testGroqRenderedMessageRequiresSavedTranscriptClearBeforeRelease() async throws {
+        try await verifyGroqMessageReleaseRequiresSavedTranscriptClear(usesLiteralOutput: false)
+    }
+
+    func testGroqLiteralOutputMessageRequiresOwnedProofAndSavedTranscriptClear() async throws {
+        try await verifyGroqMessageReleaseRequiresSavedTranscriptClear(usesLiteralOutput: true)
+    }
+
+    private func verifyGroqMessageReleaseRequiresSavedTranscriptClear(usesLiteralOutput: Bool) async throws {
         let expected = "GROQ FIXTURE  two spaces e\u{301}"
-        let envelope = String(decoding: try JSONSerialization.data(withJSONObject: ["type": "message", "text": expected]), as: UTF8.self)
+        let object = usesLiteralOutput ? ["output": expected] : ["type": "message", "text": expected]
+        let envelope = String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
         let encoded = String(decoding: try JSONSerialization.data(withJSONObject: envelope, options: [.fragmentsAllowed]), as: UTF8.self)
         for scenario in ["released", "missingProof", "uncleared"] {
             let canClear = scenario != "uncleared"
@@ -15246,7 +15255,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 .replacingOccurrences(of: "{ class: 'text-left mb-4' }, f.reply",
                     with: "{ dir: 'auto', class: 'mb-4 text-left', lang: 'en-US' }, f.reply")
                 .replacingOccurrences(of: "window.fixtureReady = true;",
-                    with: "f.structuredReply = false; f.reply = \(encoded); f.ignoreClear = \(!canClear); window.fixtureReady = true;")
+                    with: "f.structuredReply = \(usesLiteralOutput); f.reply = \(encoded); f.ignoreClear = \(!canClear); window.fixtureReady = true;")
             let fixture = try Fixture(page: page); defer { fixture.shutdown() }
             let root = try websiteBenchmarkTemporaryDirectory().appendingPathComponent("GroqRenderedMessage-" + UUID().uuidString)
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])

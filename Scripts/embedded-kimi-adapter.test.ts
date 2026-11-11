@@ -711,6 +711,79 @@ describe('Kimi saved-conversation adapter', () => {
     expect(f.counts()).toEqual(before); expect(f.counts().sends).toBe(1);
   });
 
+  test('one following provisional assistant stays unread until the exact UUID user binds', async () => {
+    const f = adapterFixture({ provisional: true, optimisticUser: true });
+    await f.select(); await f.run('prepare'); await f.run('insert');
+    expect((await f.run('submit')).submitted).toBe(true);
+    const preview = new f.Node('DIV', { class: 'chat-content-item chat-content-item-assistant' });
+    const getAttribute = preview.getAttribute.bind(preview);
+    preview.getAttribute = name => {
+      if (name === 'data-archer-id') throw new Error('Preview identity must not be read');
+      return getAttribute(name);
+    };
+    Object.defineProperty(preview, 'textContent', { get: () => { throw new Error('Preview text must not be read'); } });
+    f.body.append(new f.Node('DIV'));
+    f.body.append(preview);
+    let digests = 0;
+    f.onDigest(() => { digests++; });
+    const pending = await f.run();
+    expect(pending).toEqual({ url: provisional, sessionLifecycle: 'saved_conversation_delete', temporary: false,
+      composer: true, userCount: 1, responseCount: 0, text: '', answerComplete: false, busy: true, ownershipPending: true,
+      modelEvidence: { selected: instant, verification: 'website_selection', source: 'model_picker_label' },
+      conversationIdentity: null, firstUserIdentity: null, firstUserVerified: false,
+      firstUserMarkerVerified: false, firstUserFingerprint: null });
+    expect(await f.run()).toEqual(pending);
+    expect(digests).toBe(0);
+    expect(f.world.__computaKimiSavedSessionV1.first).toBeNull();
+    expect(f.world.__computaKimiSavedSessionV1.canonical).toBeNull();
+    expect(f.fingerprint).toBeUndefined();
+    expect(f.counts()).toEqual({ insertions: 1, sends: 1, confirms: 0 });
+
+    f.remove(preview); f.replaceOptimisticUser(); f.document.URL = canonical;
+    const complete = await f.run();
+    expect(complete).toMatchObject({ firstUserVerified: true, firstUserFingerprint: submissionFingerprint,
+      conversationIdentity: canonical, answerComplete: true, text: '{"type":"message","text":"Synthetic reply"}' });
+    expect(digests).toBe(1);
+    expect(f.counts()).toEqual({ insertions: 1, sends: 1, confirms: 0 });
+  });
+
+  test('provisional assistant waiting requires the acknowledged ordered row and existing model binding', async () => {
+    for (const kind of ['foreign_parent', 'detached', 'hidden', 'reordered', 'extra', 'prompt', 'unacknowledged',
+      'canonical', 'model_remount', 'cleanup', 'delete'] as const) {
+      const f = adapterFixture({ provisional: true, optimisticUser: true });
+      expect((await f.submit()).ownershipPending).toBe(true);
+      const makePreview = () => new f.Node('DIV', { class: 'chat-content-item chat-content-item-assistant' }, 'PRIVATE_PREVIEW');
+      const preview = makePreview(), state = f.world.__computaKimiSavedSessionV1;
+      if (kind === 'foreign_parent') {
+        const foreign = new f.Node('DIV'); foreign.append(preview); f.body.append(foreign);
+      } else if (kind === 'reordered') {
+        preview.parentElement = f.body; f.body.children.splice(f.body.children.indexOf(f.messages.user), 0, preview);
+      } else {
+        f.body.append(preview);
+      }
+      if (kind === 'detached') preview.connected = false;
+      if (kind === 'hidden') preview.setAttribute('hidden', '');
+      if (kind === 'extra') f.body.append(makePreview());
+      if (kind === 'prompt') f.messages.userBody.text = prompt.replace('Exact', 'Other');
+      if (kind === 'unacknowledged') state.submissionAcknowledged = false;
+      if (kind === 'canonical') f.document.URL = canonical;
+      if (kind === 'model_remount') {
+        const replacement = f.trigger.cloneNode(true); f.remove(f.trigger); f.body.append(replacement);
+      }
+      const result = await f.run(kind === 'delete' ? 'deleteConversation' : 'inspect',
+        kind === 'cleanup' ? { kimiCleanupInspection: true } : {});
+      expect(result.error).toBeDefined();
+      expect(result.ownershipPending).toBeUndefined();
+      expect(result.firstUserVerified).toBeUndefined();
+      expect(result.text).toBeUndefined();
+      expect(JSON.stringify(result)).not.toContain('PRIVATE_PREVIEW');
+      expect(state.first).toBeNull();
+      expect(state.initialModelRemount).toBeNull();
+      expect(f.fingerprint).toBeUndefined();
+      expect(f.counts()).toEqual({ insertions: 1, sends: 1, confirms: 0 });
+    }
+  });
+
   test('optimistic waiting preserves the entire long outbound including its exact marker suffix', async () => {
     const outbound = ('Synthetic tool schema café \\ quoted "value"\n'.repeat(1600)) + '\nComputa session marker: ' + marker;
     const f = adapterFixture({ provisional: true, optimisticUser: true, outbound });
@@ -723,7 +796,7 @@ describe('Kimi saved-conversation adapter', () => {
 
   test('empty-ID wait rejects missing malformed mixed or canonical identities and changed content', async () => {
     for (const kind of ['missing_root', 'missing_turn', 'malformed_root', 'nonempty_turn', 'canonical', 'body',
-      'marker', 'body_shape', 'duplicate_body', 'duplicate_user', 'answer', 'count', 'model']) {
+      'marker', 'body_shape', 'duplicate_body', 'duplicate_user', 'count', 'model']) {
       const f = adapterFixture({ provisional: true, optimisticUser: true });
       await f.select(); await f.run('prepare'); await f.run('insert'); await f.run('submit');
       let extra: Record<string, unknown> = {};
@@ -737,7 +810,6 @@ describe('Kimi saved-conversation adapter', () => {
       if (kind === 'body_shape') f.messages.userBody.append(new f.Node('SPAN', {}, ''));
       if (kind === 'duplicate_body') f.messages.content.append(new f.Node('SPAN', { class: 'user-content__text' }, prompt));
       if (kind === 'duplicate_user') f.installTranscript();
-      if (kind === 'answer') f.body.append(new f.Node('DIV', { class: 'chat-content-item chat-content-item-assistant' }));
       if (kind === 'count') extra = { expectedUserCounts: [0] };
       if (kind === 'model') f.triggerName.text = 'Foreign selection';
       const result = await f.run('inspect', extra);

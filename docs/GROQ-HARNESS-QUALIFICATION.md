@@ -810,3 +810,14 @@ attribute outside the style, data, and ARIA categories. No tool ran and the
 inference saved its transcript clear. The next diagnostic distinguishes common
 HTML attribute categories at the same rejection point. The exact-text,
 literal-tool, ownership, and cleanup checks are unchanged.
+
+Build 512 reproduced a separate literal response failure. The scoped capture
+showed a complete JSON object with a sole `output` string that matched the
+requested text. Native evidence verified the literal code block and saved the
+same inference's transcript clear. The decoder rejected the original reply
+because it had no `type` field.
+
+Computa can now decode that closed Groq response as a message after verifying
+the current native literal proof. The existing tool-choice policy still
+applies. Release requires the original inference's saved transcript clear.
+The rendered paragraph failure remains a separate live case.

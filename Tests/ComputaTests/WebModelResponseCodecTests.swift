@@ -2230,6 +2230,95 @@ final class WebModelResponseCodecTests: XCTestCase {
         }
     }
 
+    func testGroqLiteralOutputMessageUsesOnlyTheClosedOutputEnvelope() throws {
+        typealias Codec = WebModelResponseCodec
+        let model = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-20b", label: "GPT OSS 20B").modelID
+        let request = try controlledRequest(["model": model, "tool_choice": "auto"])
+        let marker = String(repeating: "A", count: 37)
+        let raw = #"{"output":"\#(marker)"}"#
+        XCTAssertEqual(raw.utf8.count, 50)
+        XCTAssertEqual(Codec.closedGroqLiteralOutputMessage(raw), marker)
+        let reply = try Codec.parseGroqLiteralOutputMessage(raw, request: request)
+        XCTAssertEqual(reply, .message(marker))
+        let response = try XCTUnwrap(JSONSerialization.jsonObject(with: Codec.completedResponse(
+            for: reply, request: request, responseID: "resp_output_message", createdAt: 123)) as? [String: Any])
+        let output = try XCTUnwrap(response["output"] as? [[String: Any]])
+        XCTAssertEqual(output.compactMap { $0["type"] as? String }, ["message"])
+        XCTAssertEqual(response["end_turn"] as? Bool, true)
+
+        let call = #"{"type":"tool_calls","calls":[{"name":"computer_v2_snapshot","arguments":{}}]}"#
+        let messageWithCallText = try XCTUnwrap(String(data: JSONSerialization.data(withJSONObject: ["output": call]), encoding: .utf8))
+        XCTAssertEqual(try Codec.parseGroqLiteralOutputMessage(messageWithCallText, request: request), .message(call))
+        let fenced = "```json\n" + raw + "\n```"
+        for candidate in [raw, fenced] {
+            XCTAssertThrowsError(try Codec.parseEmbeddedReply(candidate, request: request)) {
+                XCTAssertEqual($0 as? Codec.Failure, .malformedEnvelope)
+            }
+        }
+        XCTAssertNil(Codec.closedGroqRenderedMessage(raw))
+
+        let invalid = [
+            #"{"output":"one","output":"two"}"#,
+            #"{"\u006futput":"one","output":"two"}"#,
+            #"{"output":"answer","type":"message"}"#,
+            #"{"output":"answer","calls":[]}"#,
+            #"{"output":"answer","metadata":{}}"#,
+            #"{"type":"message","text":"answer"}"#,
+            #"{"output":null}"#,
+            #"{"output":true}"#,
+            #"{"output":7}"#,
+            #"{"output":{"text":"answer"}}"#,
+            #"{"output":["answer"]}"#,
+            #"{"output":""}"#,
+            #"{"output":" \t\n"}"#,
+            #"["answer"]"#,
+            #""answer""#,
+            "Introduction\n" + raw,
+            raw + "\n{}",
+            String(raw.dropLast()),
+            fenced,
+            call,
+        ]
+        for candidate in invalid {
+            XCTAssertNil(Codec.closedGroqLiteralOutputMessage(candidate), candidate)
+            XCTAssertThrowsError(try Codec.parseGroqLiteralOutputMessage(candidate, request: request), candidate) {
+                XCTAssertEqual($0 as? Codec.Failure, .unsupportedWebsiteResponse)
+            }
+        }
+
+        let large = String(repeating: "é", count: 109_993) + "x"
+        let atLimit = #"{"output":"\#(large)"}"#
+        XCTAssertEqual(atLimit.utf8.count, 220_000)
+        XCTAssertEqual(Codec.closedGroqLiteralOutputMessage(atLimit), large)
+        let beyondLimit = #"{"output":"\#(large)x"}"#
+        XCTAssertEqual(beyondLimit.utf8.count, 220_001)
+        XCTAssertNil(Codec.closedGroqLiteralOutputMessage(beyondLimit))
+    }
+
+    func testGroqLiteralOutputMessageIsProviderScopedAndHonorsRequiredTools() throws {
+        typealias Codec = WebModelResponseCodec
+        let model = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-20b", label: "GPT OSS 20B").modelID
+        let raw = #"{"output":"answer"}"#
+        let required = try controlledRequest(["model": model, "tool_choice": "required"])
+        let named = try controlledRequest(["model": model,
+            "tool_choice": ["type": "function", "name": "computer_v2_snapshot"]])
+        for request in [required, named] {
+            XCTAssertThrowsError(try Codec.parseGroqLiteralOutputMessage(raw, request: request)) {
+                XCTAssertEqual($0 as? Codec.Failure, .rejectedToolChoice)
+            }
+        }
+        let none = try controlledRequest(["model": model, "tool_choice": "none"])
+        let noTools = try controlledRequest(["model": model], tools: [])
+        for request in [none, noTools] {
+            XCTAssertEqual(try Codec.parseGroqLiteralOutputMessage(raw, request: request), .message("answer"))
+        }
+
+        let foreign = try controlledRequest(["model": "browser/claude"], tools: [])
+        XCTAssertThrowsError(try Codec.parseGroqLiteralOutputMessage(raw, request: foreign)) {
+            XCTAssertEqual($0 as? Codec.Failure, .unsupportedWebsiteResponse)
+        }
+    }
+
     func testLiteralHandoffPreservesRequestAndRejectsAuthoredIntroduction() throws {
         let tool: [String: Any] = ["type": "function", "name": "exec_command",
             "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]],

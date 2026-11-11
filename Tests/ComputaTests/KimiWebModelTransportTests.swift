@@ -1032,6 +1032,47 @@ final class KimiWebModelTransportTests: XCTestCase {
         XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
     }
 
+    func testOptimisticAssistantRowCannotPublishBeforeCanonicalOwnership() async throws {
+        let fixture = try Fixture(); defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        _ = try await evaluate(fixture.view, "kimiFixture.options.optimisticUser = true; kimiFixture.options.holdProvisional = true; return true;")
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic provisional assistant row")
+        let previewPresent = try await evaluate(fixture.view, """
+            const user = document.querySelector('.chat-content-item-user');
+            const spacer = document.createElement('div');
+            const preview = document.createElement('div');
+            preview.className = 'chat-content-item chat-content-item-assistant';
+            preview.textContent = 'Unverified provisional assistant text';
+            user.after(spacer, preview);
+            return preview.previousElementSibling === spacer && spacer.previousElementSibling === user && user.getAttribute('data-archer-id') === ''
+              && user.getAttribute('data-conversation-turn-id') === '';
+            """) as? Bool
+        XCTAssertEqual(previewPresent, true)
+        for _ in 0 ..< 2 {
+            let pending = try await call(fixture, "webProviderPoll", token)
+            XCTAssertEqual(pending["state"] as? String, "running")
+            XCTAssertEqual(pending["text"] as? String, "")
+            let proof = try XCTUnwrap(pending["modelProofContext"] as? [String: Any])
+            XCTAssertEqual(proof["firstUserFingerprint"] as? String, "")
+            XCTAssertEqual(proof["responseCount"] as? Int, 0)
+        }
+        try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+        _ = try await evaluate(fixture.view, """
+            document.querySelector('.chat-content-item-assistant').remove();
+            kimiFixture.replaceOptimisticUser(); kimiFixture.canonicalize(); return true;
+            """)
+        let complete = try await wait(fixture, token, state: "complete")
+        XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Offline Kimi fixture reply"}"#)
+        let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+        XCTAssertEqual((proof["firstUserFingerprint"] as? String)?.count, 64)
+        XCTAssertEqual(proof["responseCount"] as? Int, 1)
+        let finished = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+        try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+        XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
     func testInitialModelTriggerRemountRemainsPendingUntilExactCanonicalReplyAndDeletion() async throws {
         let fixture = try Fixture(); defer { fixture.shutdown() }
         let token = try await start(fixture)
