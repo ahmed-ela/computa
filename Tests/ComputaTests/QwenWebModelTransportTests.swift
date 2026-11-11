@@ -1650,6 +1650,78 @@ final class QwenWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testQwenFinalCodeCopyReplacesBufferedPartialWithoutPublishingIt() async throws {
+        let fixture = try Fixture(codePayload: true); defer { fixture.shutdown() }
+        let token = try await start(fixture, label: "Qwen3.7-Plus")
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic partial before exact code")
+        let expectedPartial = try await evaluate(fixture.view, """
+            document.querySelector('.response-message-footer-actions').hidden=true;
+            return qwenFixture.options.reply;
+            """) as? String
+        let partial = try await call(fixture, "webProviderPoll", token)
+        XCTAssertEqual(partial["state"] as? String, "running")
+        XCTAssertEqual(partial["text"] as? String, try XCTUnwrap(expectedPartial))
+        XCTAssertFalse(try XCTUnwrap(partial["text"] as? String).isEmpty)
+        _ = try await evaluate(fixture.view, "document.querySelector('.response-message-footer-actions').hidden=false;return true;")
+        let payload = try await installCodePayload(fixture, presentation: "editor")
+        let pending: [String: Any]
+        do {
+            pending = try await call(fixture, "webProviderPoll", token)
+        } catch {
+            XCTFail("Expected a pending code payload after the partial reply; format refusal: \((error as? EmbeddedWebModelTransport.Failure) == .responseFormatUnavailable)")
+            return
+        }
+        XCTAssertEqual(pending["state"] as? String, "running")
+        XCTAssertEqual(pending["text"] as? String, "")
+        let beforeCopy = try await evaluate(fixture.view, "return [fixtureCopyCount,clipboardDelegations];") as? [Int]
+        XCTAssertEqual(beforeCopy, [0, 0])
+        let complete = try await wait(fixture, token, state: "complete")
+        XCTAssertEqual(complete["text"] as? String, payload)
+        let repeated = try await call(fixture, "webProviderPoll", token)
+        XCTAssertEqual(repeated["text"] as? String, payload)
+        let afterCopy = try await evaluate(fixture.view, "return [fixtureCopyCount,clipboardDelegations];") as? [Int]
+        XCTAssertEqual(afterCopy, [1, 0])
+        let finished = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+        try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+        XCTAssertNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
+    func testQwenFinalCodeCopyCannotReplaceAnOrdinaryCompletionCandidate() async throws {
+        let fixture = try Fixture(codePayload: true); defer { fixture.shutdown() }
+        let token = try await start(fixture, label: "Qwen3.7-Plus")
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic ordinary candidate before code")
+        let ordinary = try await call(fixture, "webProviderPoll", token)
+        XCTAssertEqual(ordinary["state"] as? String, "running")
+        XCTAssertFalse(try XCTUnwrap(ordinary["text"] as? String).isEmpty)
+        let progress = await fixture.transport.snapshotQwenResponseProgress(sessionToken: token)
+        XCTAssertEqual((progress?.dictionary["state"] as? [String: Any])?["completionCandidate"] as? Bool, true)
+        let replacement = "Synthetic resumed partial"
+        _ = try await evaluate(fixture.view, """
+            document.querySelector('.response-message-footer-actions').hidden=true;
+            document.querySelector('.qwen-markdown-text-node').textContent=\(String(reflecting: replacement));
+            return true;
+            """)
+        let resumed = try await call(fixture, "webProviderPoll", token)
+        XCTAssertEqual(resumed["state"] as? String, "running")
+        XCTAssertEqual(resumed["text"] as? String, replacement)
+        _ = try await evaluate(fixture.view, "document.querySelector('.response-message-footer-actions').hidden=false;return true;")
+        _ = try await installCodePayload(fixture, presentation: "editor")
+        do {
+            _ = try await call(fixture, "webProviderPoll", token)
+            XCTFail("A completion candidate must not enter the code sampler")
+        } catch {
+            XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .responseFormatUnavailable)
+        }
+        let copyCounts = try await evaluate(fixture.view, "return [fixtureCopyCount,clipboardDelegations];") as? [Int]
+        XCTAssertEqual(copyCounts, [0, 0])
+        let finished = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+        try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
     func testQwenFailedCodeCopyCannotReplayOrEmitPayloadAndKeepsSeparateDeletionProof() async throws {
         for mode in ["async", "double", "transient_mutation", "missing_control_after_failure", "changed_code_body_after_failure"] {
             let fixture = try Fixture(codePayload: true); defer { fixture.shutdown() }

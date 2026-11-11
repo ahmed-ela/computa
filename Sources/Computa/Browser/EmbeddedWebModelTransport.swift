@@ -793,6 +793,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var qwenMarkerWire: QwenMarkerWireLease?
         var qwenMarkerTurn: String?
         var qwenCodePayload: QwenCodePayloadPending?
+        var qwenBufferedResponseIsPartial = false
         var qwenProgress = QwenProgress()
         // Spent before queueing the final source evaluation, including timeout.
         var qwenCodePayloadGrant: String?
@@ -2527,6 +2528,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                           browser.documentGeneration(for: session.tabID) == generation else { throw Failure.staleSession }
                 }
                 session.response = ""
+                session.qwenBufferedResponseIsPartial = false
                 session.responseCodeStructure = nil
                 session.completionCandidate = false
                 session.candidateSince = nil
@@ -4169,13 +4171,24 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     private func pollQwenCodePayload(_ session: Session, observed: [String: Any], deadline: ContinuousClock.Instant) async throws -> Data {
         try requireQwenCodePayloadContext(observed,session:session)
-        guard session.qwenCodePayloadGrant == nil, session.response.isEmpty,
+        guard session.qwenCodePayloadGrant == nil,
               observed["text"] as? String == "", Self.firstUserDiagnosticBool(observed["answerComplete"]) == false,
               Self.firstUserDiagnosticBool(observed["busy"]) == true,
               let identity = Self.qwenCodePayloadIdentity(observed["qwenCodePayload"],state:"pending") else { throw Failure.responseFormatUnavailable }
         if let held = session.qwenCodePayload {
-            guard held.identity == identity else { throw Failure.responseFormatUnavailable }
-        } else { session.qwenCodePayload = .init(identity:identity,since:.now) }
+            guard held.identity == identity, session.response.isEmpty else { throw Failure.responseFormatUnavailable }
+        } else {
+            if !session.response.isEmpty {
+                // Only buffered streaming text may give way to the first exact
+                // source candidate. An ordinary completion candidate stays a refusal.
+                guard session.qwenBufferedResponseIsPartial, !session.profiledFirstCompletionCandidate else {
+                    throw Failure.responseFormatUnavailable
+                }
+                session.response = ""
+                session.qwenBufferedResponseIsPartial = false
+            }
+            session.qwenCodePayload = .init(identity:identity,since:.now)
+        }
         guard let held = session.qwenCodePayload else { throw Failure.responseFormatUnavailable }
         guard ContinuousClock.now - held.since >= Self.completionQuietInterval else { return try snapshot(session) }
         guard ContinuousClock.now < deadline else { throw Failure.deadline }
@@ -4566,6 +4579,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 if responseChanged {
                     if session.profiledFirstCompletionCandidate { session.profileCompletionTransition(.candidateResponseChanged) }
                     session.response = response; session.lastChanged = .now; session.candidateSince = nil
+                    if session.provider == .qwen {
+                        session.qwenBufferedResponseIsPartial = Self.firstUserDiagnosticBool(observed["busy"]) == true
+                            && Self.firstUserDiagnosticBool(observed["answerComplete"]) == false
+                    }
                 }
                 if observed["busy"] as? Bool == false, observed["answerComplete"] as? Bool == true {
                     if !session.profiledFirstCompletionCandidate {

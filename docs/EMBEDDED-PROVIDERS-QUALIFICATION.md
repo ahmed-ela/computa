@@ -4227,3 +4227,22 @@ deletion. A cloned response still fails ownership with zero new actions.
 GPT OSS 20B remained in Computa's cached catalog after restart to 502. A
 successful live discovery that removes it remains to be observed. DeepSeek
 still redirects to sign-in in the normal browser on build 502.
+
+### 2026-11-11 — Qwen Plus final payload on installed 503
+
+The signed build 503 (`7bccc44`) workflow passed 18 of 19 checks in 215.223 s.
+It fixed the fixture, passed all six tests, read the single accepted receipt,
+and explicitly closed its browser tab. The eighth inference stopped at
+`unsupported_website_response` before returning a final answer. Its deletion
+receipt arrived after the terminal capture; all eight deletions are confirmed.
+
+The final inference recorded 37 bytes of in-progress text. A later inspection
+reported a pending literal payload on the same owned response. The native
+failure snapshot shows full first-message ownership and no sampling grant.
+The WebKit regression reproduces the pre-grant refusal when the earlier bytes
+are still buffered.
+
+The first fully verified literal candidate can now replace buffered text from
+an in-progress Qwen reply. An earlier ordinary completion candidate still
+blocks the switch. The original quiet period, one-sample limit, body and
+selection checks, and deletion before release remain in place.
