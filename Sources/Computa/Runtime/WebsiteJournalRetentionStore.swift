@@ -243,6 +243,7 @@ struct WebsiteJournalRetentionStore: Sendable {
             return Bundle(task: task, files: files, receipts: receipts, identities: identities)
         }
         var tokenOwners: [String: [String]] = [:], identities: [Identity] = []
+        var hasClosedCancellation = false
         let identity = ["taskID", "threadID", "turnID", "runtimeGeneration", "provider", "modelID", "inferenceID"]
         for (inference, rows) in groups {
             guard Self.uuid(inference), let first = rows.first,
@@ -261,8 +262,8 @@ struct WebsiteJournalRetentionStore: Sendable {
                     receipts: receipts.filter { members.contains($0.inferenceID ?? "") }, token: token)
                 continue
             }
-            // Existing per-inference admission remains unchanged. A different
-            // inference never supplies its missing cleanup or ownership proof.
+            // Each independent lease must supply its own terminal evidence
+            // and bound cleanup receipt.
             let inference = inferences[0], rows = groups[inference]!, first = rows[0]
             let matching = receipts.filter { $0.inferenceID == inference }
             guard rows.contains(where: { $0["phase"] as? String == "started" }), let receipt = matching.first else { throw Failure.unavailable }
@@ -273,18 +274,63 @@ struct WebsiteJournalRetentionStore: Sendable {
                       return identity.allSatisfy { encoded?[$0] as? String == first[$0] as? String } && receipt.sessionToken == token
                   }), let closed = matching.last, closed.outcome == .closed,
                   rows.allSatisfy({ ($0["timestamp"] as? String).map { $0 <= closed.timestamp } == true || $0["phase"] as? String == "release_verified" }),
-                  matching.allSatisfy({ $0.timestamp <= closed.timestamp }),
-                  rows.contains(where: { $0["phase"] as? String == "failed" }) || rows.contains(where: {
-                      $0["phase"] as? String == "release_verified" && $0["cleanupAttemptID"] as? String == closed.attemptID
-                  }) else { throw Failure.unavailable }
+                  matching.allSatisfy({ $0.timestamp <= closed.timestamp }) else { throw Failure.unavailable }
+            let hasTerminalEvidence = rows.contains(where: { $0["phase"] as? String == "failed" ||
+                ($0["phase"] as? String == "release_verified" && $0["cleanupAttemptID"] as? String == closed.attemptID) })
+            if !hasTerminalEvidence {
+                guard matching.count == 1, Self.isClosedCancellation(rows, receipt: closed) else { throw Failure.unavailable }
+                hasClosedCancellation = true
+            }
         }
+        if hasClosedCancellation && !hasRetainedLease { try Self.requireUnambiguous(files) }
         for receipt in receipts {
             let binding = try Self.binding(receipt)
             identities.append(Identity(kind: "inference", id: receipt.inferenceID!, binding: binding))
             identities.append(Identity(kind: "token", id: receipt.sessionToken!, binding: binding))
         }
-        try validateSummary(task, receipts: receipts, requireUnambiguous: hasRetainedLease)
+        try validateSummary(task, receipts: receipts, requireUnambiguous: hasRetainedLease || hasClosedCancellation)
         return Bundle(task: task, files: files, receipts: receipts, identities: identities)
+    }
+
+    /// Native cancellation can end an acquired lease without producing a
+    /// failed or released response. Only the exact automatic cleanup of a
+    /// temporary per-inference lease supplies closure for this phase shape.
+    private static func isClosedCancellation(_ rows: [[String: Any]], receipt: WebsiteSessionCleanupReceipt) -> Bool {
+        guard receipt.route == .embedded, receipt.trigger == .automatic, receipt.reason == .notCreated,
+              receipt.cleanupDiagnostic == nil, let token = receipt.sessionToken, timestamp(receipt.timestamp),
+              let preparation = rows.first?["preparationID"] as? String, uuid(preparation) else { return false }
+        let phases = rows.compactMap { $0["phase"] as? String }
+        guard phases.count == rows.count, phases == ["start_requested", "started", "cancelled"] ||
+            phases == ["start_requested", "started", "submission_verified", "cancelled"] else { return false }
+        let baseKeys: Set<String> = ["taskID", "threadID", "turnID", "runtimeGeneration", "preparationID", "provider",
+            "modelID", "inferenceID", "schemaVersion", "phase", "timestamp", "sequence", "baselineResponseCount",
+            "transactionMode", "transactionVersion", "transactionPolicyEstablished"]
+        var previousTime: String?
+        for (index, row) in rows.enumerated() {
+            let phase = phases[index]
+            var keys = baseKeys
+            if index > 0 { keys.insert("sessionToken") }
+            if phase == "cancelled" { keys.insert("errorCode") }
+            if phase == "submission_verified" { keys.formUnion(["documentGeneration", "firstUserFingerprint", "modelEvidence", "responseCount"]) }
+            guard Set(row.keys) == keys, row["preparationID"] as? String == preparation,
+                  integer(row["schemaVersion"]) == 2, integer(row["sequence"]) == (index < 2 ? 0 : 1),
+                  integer(row["baselineResponseCount"]) == 0, row["transactionMode"] as? String == "temporary_conversation_per_inference",
+                  integer(row["transactionVersion"]) == 1, boolean(row["transactionPolicyEstablished"]) == true,
+                  index == 0 || row["sessionToken"] as? String == token,
+                  let time = row["timestamp"] as? String, timestamp(time), time <= receipt.timestamp,
+                  previousTime.map({ $0 <= time }) ?? true else { return false }
+            if phase == "cancelled", row["errorCode"] as? String != "internal_error" { return false }
+            if phase == "submission_verified" {
+                guard integer(row["responseCount"]) == 0,
+                      let generation = row["documentGeneration"] as? String, uuid(generation),
+                      let fingerprint = row["firstUserFingerprint"] as? String, hash(fingerprint),
+                      let evidence = row["modelEvidence"] as? [String: Any], Set(evidence.keys) == ["selected", "source", "verification"],
+                      let provider = receipt.provider,
+                      (try? WebsiteModelEvidence.parse(evidence, provider: provider.rawValue)) != nil else { return false }
+            }
+            previousTime = time
+        }
+        return true
     }
 
     // Summary-only unresolved evidence remains live unless the same acquired
@@ -343,7 +389,8 @@ struct WebsiteJournalRetentionStore: Sendable {
                   let rows = groups[inference], rows.count == 2, let preparation = rows[0]["preparationID"] as? String,
                   uuid(preparation), rows[0]["phase"] as? String == "start_requested",
                   rows[1]["phase"] as? String == "failed",
-                  let failure = rows[1]["errorCode"] as? String, failureCodes.contains(failure),
+                  let failure = rows[1]["errorCode"] as? String,
+                  failureCodes.contains(failure) || provider == .chatgpt && failure == "chatgpt_profile_preparation_failed",
                   let start = rows[0]["timestamp"] as? String, let end = rows[1]["timestamp"] as? String,
                   [start, receipt.timestamp, end].allSatisfy(timestamp), start <= receipt.timestamp, receipt.timestamp <= end else {
                 throw Failure.unavailable

@@ -65,10 +65,13 @@ final class WebsiteJournalRetentionStoreTests: XCTestCase {
     }
 
     private func unacquired(_ fixture: Fixture, task: String? = nil, thread: String? = nil,
-                            unresolved: Bool = false, timestamp: String? = nil) throws -> WebsiteSessionCleanupReceipt {
+                            unresolved: Bool = false, timestamp: String? = nil,
+                            provider: WebsiteSessionCleanupReceipt.Provider = .gemini,
+                            failureCode: String = "website_verification_required") throws -> WebsiteSessionCleanupReceipt {
+        let modelID = syntheticWebsiteModelID(provider.rawValue)
         var receipt = WebsiteSessionCleanupReceipt(taskID: task ?? id(), threadID: thread ?? id(), turnID: id(),
             runtimeGeneration: UUID(), outcome: unresolved ? .unconfirmed : .noOwnedSession,
-            provider: .gemini, route: .embedded, modelID: "browser/gemini",
+            provider: provider, route: .embedded, modelID: modelID,
             reason: unresolved ? .cleanupUnverified : .notCreated, trigger: .inference, receiptSaved: true, inferenceID: id())
         if let timestamp {
             var value = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(receipt)) as? [String: Any])
@@ -78,14 +81,35 @@ final class WebsiteJournalRetentionStoreTests: XCTestCase {
         XCTAssertTrue(fixture.store.save(receipt))
         let start: [String: Any] = ["schemaVersion": 2, "taskID": receipt.taskID, "threadID": receipt.threadID!,
             "turnID": receipt.turnID!, "inferenceID": receipt.inferenceID!, "preparationID": id(),
-            "runtimeGeneration": receipt.runtimeGeneration, "provider": "gemini", "modelID": "browser/gemini",
+            "runtimeGeneration": receipt.runtimeGeneration, "provider": provider.rawValue, "modelID": modelID,
             "timestamp": receipt.timestamp, "phase": "start_requested", "transactionMode": "temporary_conversation_per_turn",
             "transactionVersion": 2, "transactionPolicyEstablished": true, "sequence": 0, "baselineResponseCount": 0]
         var failure = start
         failure["phase"] = "failed"
-        failure["errorCode"] = "website_verification_required"
+        failure["errorCode"] = failureCode
+        if provider == .chatgpt {
+            failure["transactionMode"] = "capability_pending"
+            failure["transactionVersion"] = 0
+            failure["transactionPolicyEstablished"] = false
+        }
         try writeEvidence([start, failure], to: evidence(fixture, receipt))
         return receipt
+    }
+
+    func testOnlyChatGPTCanArchiveAnExactPrecreationProfileFailure() throws {
+        let fixture = try fixture()
+        let code = "chatgpt_profile_preparation_failed"
+        let foreign = try unacquired(fixture, failureCode: code)
+        let chat = try unacquired(fixture, provider: .chatgpt, failureCode: code)
+        let raw = try Data(contentsOf: evidence(fixture, chat))
+        let incoming = id()
+        try fixture.retention.admit(taskID: incoming, evidenceDirectory: fixture.evidence, protectedTaskIDs: [])
+        XCTAssertEqual(try active(fixture.evidence), [foreign.taskID, incoming])
+        XCTAssertEqual(try active(fixture.cleanup), [foreign.taskID, incoming])
+        XCTAssertEqual(try fixture.retention.withWriterLock {
+            try fixture.retention.archivedBytes(store: "evidence", taskID: chat.taskID, turnID: chat.turnID!)
+        }, raw)
+        XCTAssertEqual(try fixture.store.transactionRecords(for: chat.taskID, turnID: chat.turnID!), [chat])
     }
 
     func testPrecreationRejectionArchivesExactBytesAndKeepsUnconfirmedStartupLive() throws {
@@ -219,6 +243,88 @@ final class WebsiteJournalRetentionStoreTests: XCTestCase {
         XCTAssertTrue(fixture.store.latest().contains(archived))
         XCTAssertTrue(fixture.store.save(archived), "Exact historical cleanup retry remains idempotent")
         XCTAssertFalse(FileManager.default.fileExists(atPath: evidence(fixture, archived).path))
+    }
+
+    private func cancelledLease(_ fixture: Fixture, submitted: Bool = false, confirmed: Bool = true) throws
+        -> (WebsiteSessionCleanupReceipt, [[String: Any]]) {
+        let provider: WebsiteSessionCleanupReceipt.Provider = submitted ? .claude : .chatgpt
+        let receipt = WebsiteSessionCleanupReceipt(taskID: id(), threadID: id(), turnID: id(), runtimeGeneration: UUID(),
+            outcome: confirmed ? .closed : .unconfirmed, provider: provider, route: .embedded,
+            modelID: syntheticWebsiteModelID(provider.rawValue), reason: confirmed ? .notCreated : .cleanupUnverified,
+            trigger: .automatic, receiptSaved: true, inferenceID: id(), sessionToken: id())
+        XCTAssertTrue(fixture.store.save(receipt))
+        let requested: [String: Any] = ["schemaVersion": 2, "taskID": receipt.taskID, "threadID": receipt.threadID!,
+            "turnID": receipt.turnID!, "inferenceID": receipt.inferenceID!, "preparationID": id(),
+            "runtimeGeneration": receipt.runtimeGeneration, "provider": provider.rawValue, "modelID": receipt.modelID!,
+            "timestamp": receipt.timestamp, "phase": "start_requested", "sequence": 0, "baselineResponseCount": 0,
+            "transactionMode": "temporary_conversation_per_inference", "transactionVersion": 1, "transactionPolicyEstablished": true]
+        var started = requested
+        started["phase"] = "started"
+        started["sessionToken"] = receipt.sessionToken!
+        var cancelled = started
+        cancelled["phase"] = "cancelled"
+        cancelled["sequence"] = 1
+        cancelled["errorCode"] = "internal_error"
+        var rows = [requested, started]
+        if submitted {
+            var verified = started
+            verified["phase"] = "submission_verified"
+            verified["sequence"] = 1
+            verified["responseCount"] = 0
+            verified["documentGeneration"] = id()
+            verified["firstUserFingerprint"] = String(repeating: "a", count: 64)
+            verified["modelEvidence"] = ["selected": ["key": "Sonnet 5", "label": "Sonnet 5"],
+                "verification": "website_selection", "source": "model_picker_label"] as [String: Any]
+            rows.append(verified)
+        }
+        rows.append(cancelled)
+        try writeEvidence(rows, to: evidence(fixture, receipt))
+        return (receipt, rows)
+    }
+
+    func testExactlyClosedCancellationArchivesBeforeAndAfterVerifiedSubmission() throws {
+        for submitted in [false, true] {
+            let fixture = try fixture(), protected = try closed(fixture)
+            let (cancelled, _) = try cancelledLease(fixture, submitted: submitted)
+            let path = evidence(fixture, cancelled), bytes = try Data(contentsOf: path)
+            let cleanupPath = fixture.cleanup.appendingPathComponent("transactions/\(cancelled.taskID)/\(cancelled.turnID!).jsonl")
+            let cleanupBytes = try Data(contentsOf: cleanupPath)
+            let incoming = id()
+            try fixture.retention.admit(taskID: incoming, evidenceDirectory: fixture.evidence, protectedTaskIDs: [protected.taskID])
+            XCTAssertEqual(try active(fixture.evidence), [protected.taskID, incoming])
+            XCTAssertEqual(try active(fixture.cleanup), [protected.taskID, incoming])
+            let reopened = WebsiteJournalRetentionStore(cleanupDirectory: fixture.cleanup)
+            try reopened.withWriterLock {
+                XCTAssertEqual(try reopened.archivedBytes(store: "evidence", taskID: cancelled.taskID, turnID: cancelled.turnID!), bytes)
+                XCTAssertEqual(try reopened.archivedBytes(store: "cleanup", taskID: cancelled.taskID, turnID: cancelled.turnID!), cleanupBytes)
+            }
+            XCTAssertEqual(try fixture.store.transactionRecords(for: cancelled.taskID, turnID: cancelled.turnID!), [cancelled])
+        }
+    }
+
+    func testCancellationWithoutExactTerminalEvidenceAndClosureStaysActive() throws {
+        for fault in ["unconfirmed", "late", "token", "phase", "duplicate_key"] {
+            let fixture = try fixture(), protected = try closed(fixture)
+            let (cancelled, original) = try cancelledLease(fixture, confirmed: fault != "unconfirmed")
+            let path = evidence(fixture, cancelled)
+            var rows = original
+            switch fault {
+            case "late": rows[2]["timestamp"] = "2099-01-01T00:00:00.000Z"
+            case "token": rows[2]["sessionToken"] = id()
+            case "phase": rows.append(rows[2])
+            case "duplicate_key":
+                let bytes = try Data(contentsOf: path)
+                try (Data("{\"sequence\":0,".utf8) + bytes.dropFirst()).write(to: path)
+            default: break
+            }
+            if fault != "duplicate_key" { try writeEvidence(rows, to: path) }
+            let before = try Data(contentsOf: path)
+            XCTAssertThrowsError(try fixture.retention.admit(taskID: id(), evidenceDirectory: fixture.evidence,
+                protectedTaskIDs: [protected.taskID]), fault)
+            XCTAssertEqual(try Data(contentsOf: path), before, fault)
+            XCTAssertEqual(try active(fixture.evidence), [protected.taskID, cancelled.taskID], fault)
+            XCTAssertEqual(try fixture.store.transactionRecords(for: cancelled.taskID, turnID: cancelled.turnID!), [cancelled], fault)
+        }
     }
 
     func testProtectedAndUnconfirmedTasksAreNeverEvicted() throws {
