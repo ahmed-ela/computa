@@ -270,8 +270,10 @@ return {
     { id: modelClaude, label: 'Claude / Sonnet 5.5 · Built-in browser', detail: 'Preview Claude model; no provider request is made.', highMemory: false },
     { id: 'browser/claude/choice/preview-haiku', label: 'Claude / Haiku 5.5 · Built-in browser', detail: 'Preview Claude model; no provider request is made.', highMemory: false },
     { id: 'browser/claude/choice/preview-unavailable', label: 'Claude / Sonnet 4.6 · Built-in browser', detail: 'Unavailable preview choice.', highMemory: false, available: false },
-    { id: 'browser/groq/choice/preview-120b', label: 'Groq / GPT-OSS 120B · Built-in browser', detail: 'Preview Groq model; no provider request is made.', highMemory: false },
-    { id: modelCerebras, label: 'Cerebras / gpt-oss-120b', detail: 'Preview API model; no provider request is made.', highMemory: false },
+    { id: 'browser/groq/choice/preview-120b', label: 'Groq / GPT-OSS 120B · Built-in browser',
+      detail: 'Preview Groq model; no provider request is made.', highMemory: false, selectable: false },
+    { id: modelCerebras, label: 'Cerebras / gpt-oss-120b',
+      detail: 'Preview API model; no provider request is made.', highMemory: false, selectable: false },
     { id: 'api/alibaba/model/cXdlbjMuNy1mbGFzaA', label: 'Alibaba / Qwen3.7 Flash · API', detail: 'Preview API model; no provider request is made.', highMemory: false },
   ],
   showToolPayloads: false,
@@ -301,6 +303,9 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
     receive(snapshot);
   };
   const selectedTask = () => snapshot.tasks.find((task) => task.id === snapshot.selectedTaskID);
+  const isSelectableModel = (id: string) => snapshot.modelOptions.some((option) =>
+    option.id === id && option.available !== false && option.selectable !== false,
+  );
   const updateTask = (id: string, transform: (task: TaskSnapshot) => TaskSnapshot) => {
     publish({
       ...snapshot,
@@ -578,14 +583,14 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
         publish({ ...snapshot, appearance: action.value });
         return;
       case 'setDefaultModel':
-        if (!snapshot.modelOptions.some((option) => option.id === action.modelID)) return;
+        if (!isSelectableModel(action.modelID)) return;
         publish({ ...snapshot, defaultModel: action.modelID });
         return;
       case 'prepareWebsiteModel':
         // Preview never opens a website or submits a prompt.
         return;
       case 'setTaskModel':
-        if (!snapshot.modelOptions.some((option) => option.id === action.modelID)) return;
+        if (!isSelectableModel(action.modelID)) return;
         if (!snapshot.tasks.some((task) => task.id === action.taskID && task.modelSelectable)) return;
         updateTask(action.taskID, (task) => ({ ...task, model: action.modelID }));
         return;
