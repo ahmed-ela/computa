@@ -3315,6 +3315,35 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertNil(project(valid, action: "deleteInspect"))
     }
 
+    func testClaudeUnknownLiteralEnvelopeDiagnosticOnlyProjectsExactFallbackFacts() {
+        let packet: [String: Any] = ["rootKind": "object", "typeClass": "missing", "knownKeys": ["output"], "unknownKeyCount": 1]
+        let structure: [String: Any] = ["preCount": 1, "codeCount": 1, "literalCodeValidJSON": true,
+            "literalCodeKnownEnvelopeType": "unknown", "selectedExtraction": "rendered_fallback",
+            "extractionReason": "unknown_envelope_type", "isolatedJSONCodeBlock": NSNull()]
+        func fields(_ packet: [String: Any], base: [String: Any] = structure) -> String? {
+            var source = base
+            source["unknownLiteralEnvelope"] = packet
+            return EmbeddedWebModelTransport.claudeUnknownLiteralEnvelopeFields(source)
+        }
+        XCTAssertEqual(fields(packet), "root=object type=missing knownKeys=output unknownKeys=1")
+        XCTAssertEqual(fields(["rootKind": "array", "typeClass": "not_applicable", "knownKeys": [String](), "unknownKeyCount": 0]),
+            "root=array type=not_applicable knownKeys=none unknownKeys=0")
+        for (key, value): (String, Any) in [("rootKind", "private"), ("typeClass", "other_string"),
+                ("knownKeys", ["type", "output"]), ("knownKeys", ["content", "output"]), ("knownKeys", ["output", "output"]),
+                ("knownKeys", ["private-key"]), ("unknownKeyCount", true), ("unknownKeyCount", 220_001), ("rawValue", "private")] {
+            var rejected = packet
+            rejected[key] = value
+            XCTAssertNil(fields(rejected), key)
+        }
+        for (key, value): (String, Any) in [("preCount", 2), ("codeCount", 2), ("literalCodeValidJSON", false),
+                ("literalCodeKnownEnvelopeType", "message"), ("selectedExtraction", "literal_code"),
+                ("extractionReason", "outside_content"), ("isolatedJSONCodeBlock", false)] {
+            var rejected = structure
+            rejected[key] = value
+            XCTAssertNil(fields(packet, base: rejected), key)
+        }
+    }
+
     func testCodeStructureProjectionRejectsBridgedBooleanCountsAndNumericFlags() throws {
         let valid: [String: Any] = ["preCount": 1, "codeCount": 1, "codeTextLength": 129,
             "outsideTextLength": 4, "outsideTruncated": false, "preParentTags": ["div"],
@@ -14817,13 +14846,25 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
-    private func runGroqPrecodecLiteralCapture(stage: String, mode: String = "armed") async throws {
+    func testGroqPrecodecCaptureKeepsOnlyTheUnknownAttributeNameForTheArmedTask() async throws {
+        for mode in ["armed", "unarmed", "foreignTask"] {
+            try await runGroqPrecodecLiteralCapture(stage: "initial_candidate", mode: mode, unknownAttribute: true)
+        }
+        try await runGroqPrecodecLiteralCapture(stage: "final_reread", unknownAttribute: true)
+    }
+
+    private func runGroqPrecodecLiteralCapture(stage: String, mode: String = "armed", unknownAttribute: Bool = false) async throws {
         XCTAssertTrue(["initial_candidate", "final_reread"].contains(stage))
         let reply = #"{"type":"tool_calls","calls":[{"name":"fixture_read","arguments":{"text":"A  B é 🌍 \\n"}}]}"#
         let quoted = String(decoding: try JSONSerialization.data(withJSONObject: reply, options: [.fragmentsAllowed]), as: UTF8.self)
-        let page = try Self.groqFixturePage().replacingOccurrences(of: "window.fixtureReady = true;",
+        let attributeName = "relayfixture", attributeValue = "synthetic-attribute-value"
+        var page = try Self.groqFixturePage().replacingOccurrences(of: "window.fixtureReady = true;",
             with: "f.structuredReply = " + (stage == "initial_candidate" ? "false" : "true")
                 + "; f.reply = " + quoted + "; window.fixtureReady = true;")
+        if unknownAttribute && stage == "initial_candidate" {
+            page = page.replacingOccurrences(of: "make('p', { class: 'text-left mb-4' }, f.reply)",
+                with: "make('p', { class: 'text-left mb-4', \(attributeName): '\(attributeValue)' }, f.reply)")
+        }
         let fixture = try Fixture(page: page); defer { fixture.shutdown() }
         let root = try websiteBenchmarkTemporaryDirectory()
             .appendingPathComponent("GroqPrecodecNative-" + UUID().uuidString)
@@ -14857,6 +14898,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 _ = try? await self.evaluate(view, """
                     const f = groqFixture, text = f.code.textContent, p = document.createElement('p');
                     p.className = 'text-left mb-4'; p.textContent = text;
+                    \(unknownAttribute ? "p.setAttribute('\(attributeName)', '\(attributeValue)');" : "")
                     f.answer.replaceChildren(p); return true;
                     """)
             }
@@ -14887,6 +14929,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let id = try XCTUnwrap(fixture.createdTabs.last), view = try XCTUnwrap(fixture.browser.webView(for: id))
         let physical = try await evaluate(view, "return groqFixture.answer.textContent.trim();") as? String
         XCTAssertEqual(physical.map { Data($0.utf8) }, Data(reply.utf8))
+        if unknownAttribute {
+            let value = try await evaluate(view, "return groqFixture.answer.firstElementChild.getAttribute('\(attributeName)');") as? String
+            XCTAssertEqual(value, attributeValue, mode)
+        }
         let beforeClear = try await evaluate(view, "return [groqFixture.sendCount, groqFixture.clearCount];") as? [Int]
         XCTAssertEqual(beforeClear, [1, 0])
         var reportBytes: Data?
@@ -14918,7 +14964,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             XCTAssertEqual(diagnostic["stage"] as? String, stage)
             XCTAssertEqual(diagnostic["literalState"] as? String, "false")
             XCTAssertEqual(diagnostic["literalResponse"] as? Bool, false)
-            XCTAssertEqual(diagnostic["renderedShape"] as? String, "matched")
+            XCTAssertEqual(diagnostic["renderedShape"] as? String, unknownAttribute ? "attribute_name" : "matched")
+            XCTAssertEqual(diagnostic["rejectedAttributeName"] as? String, unknownAttribute ? attributeName : nil)
+            XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains(attributeValue))
             XCTAssertEqual(diagnostic["utf8Bytes"] as? Int, reply.utf8.count)
             XCTAssertEqual(diagnostic["userCount"] as? Int, 1); XCTAssertEqual(diagnostic["responseCount"] as? Int, 1)
             XCTAssertEqual(diagnostic["busy"] as? Bool, false); XCTAssertEqual(diagnostic["answerComplete"] as? Bool, true)

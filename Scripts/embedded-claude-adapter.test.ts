@@ -347,6 +347,7 @@ describe("embedded Claude fixed adapter", () => {
         codeTextLength: raw.length, outsideTextLength: 0, outsideTruncated: false,
         literalCodeValidJSON: true, literalCodeKnownEnvelopeType: envelope.type,
         selectedExtraction: "raw_code", extractionReason: "accepted_literal_code" });
+      expect(result.completionEvidence.codeStructure.unknownLiteralEnvelope).toBeUndefined();
       expect(JSON.stringify(result.completionEvidence.codeStructure)).not.toContain('quoted');
     }
   });
@@ -458,7 +459,9 @@ describe("embedded Claude fixed adapter", () => {
 
   test("finite extraction evidence distinguishes rejected structure without exposing response content", async () => {
     const privateText = "PRIVATE_RESPONSE_PROMPT_HEADER_ACCOUNT_938475";
+    const privateKey = "PRIVATE_UNRECOGNIZED_TOP_LEVEL_KEY";
     const cases: { reason: string; validJSON: boolean | null; type: string | null;
+      unknownEnvelope?: { rootKind: string; typeClass: string; knownKeys: string[]; unknownKeyCount: number };
       configure: (f: ReturnType<typeof fixture>, pre: Element, code: Element) => void }[] = [
       { reason: "missing_pre", validJSON: null, type: null,
         configure: f => { f.answer.children = []; f.answer.text = privateText; } },
@@ -473,17 +476,30 @@ describe("embedded Claude fixed adapter", () => {
       { reason: "invalid_json", validJSON: false, type: null,
         configure: (_f, _pre, code) => { code.text = '{"type":"message","text":"' + privateText + '"unescaped""}'; } },
       { reason: "unknown_envelope_type", validJSON: true, type: "unknown",
-        configure: (_f, _pre, code) => { code.text = JSON.stringify({ type: privateText, text: privateText }); } },
+        unknownEnvelope: { rootKind: "object", typeClass: "other_string", knownKeys: ["type", "text"], unknownKeyCount: 2 },
+        configure: (_f, _pre, code) => { code.text = JSON.stringify({ text: privateText, [privateKey]: privateText,
+          ["__proto__"]: { output: privateText }, type: privateText }); } },
       { reason: "unknown_envelope_type", validJSON: true, type: "unknown",
-        configure: (_f, _pre, code) => { code.text = JSON.stringify([{ type: "message", text: privateText }]); } },
+        unknownEnvelope: { rootKind: "object", typeClass: "missing", unknownKeyCount: 0,
+          knownKeys: ["text", "phase", "calls", "commentary", "tool_calls", "message", "answer", "output", "result", "content"] },
+        configure: (_f, _pre, code) => { code.text = JSON.stringify({ content: privateText, result: privateText,
+          output: privateText, answer: privateText, message: privateText, tool_calls: [], commentary: privateText,
+          calls: [], phase: privateText, text: privateText }); } },
       { reason: "unknown_envelope_type", validJSON: true, type: "unknown",
-        configure: (_f, _pre, code) => { code.text = "null"; } },
+        unknownEnvelope: { rootKind: "object", typeClass: "non_string", knownKeys: ["type", "output"], unknownKeyCount: 0 },
+        configure: (_f, _pre, code) => { code.text = JSON.stringify({ type: null, output: privateText }); } },
+      ...([
+        ["array", [{ type: "message", text: privateText }]], ["null", null], ["string", privateText],
+        ["number", 42], ["bool", true],
+      ] as const).map(([rootKind, value]) => ({ reason: "unknown_envelope_type", validJSON: true, type: "unknown",
+        unknownEnvelope: { rootKind, typeClass: "not_applicable", knownKeys: [], unknownKeyCount: 0 },
+        configure: (_f: ReturnType<typeof fixture>, _pre: Element, code: Element) => { code.text = JSON.stringify(value); } })),
       { reason: "outside_content", validJSON: true, type: "message",
         configure: f => { f.answer.append(new Element("P", { id: privateText, "data-private-header": privateText }, privateText)); } },
       { reason: "outside_scan_limit", validJSON: true, type: "message",
         configure: f => { for (let index = 0; index < 10_001; index++) f.answer.append(new Element("#text", {}, " ")); } },
     ];
-    for (const { reason, validJSON, type, configure } of cases) {
+    for (const { reason, validJSON, type, unknownEnvelope, configure } of cases) {
       const f = fixture(provider, { userPrompt: privateText });
       f.answer.text = ""; f.answer.children = [];
       const pre = new Element("PRE"), code = new Element("CODE", {}, JSON.stringify({ type: "message", text: privateText }));
@@ -494,8 +510,11 @@ describe("embedded Claude fixed adapter", () => {
       expect(result.text).toBe(rendered);
       expect(evidence).toMatchObject({ literalCodeValidJSON: validJSON, literalCodeKnownEnvelopeType: type,
         selectedExtraction: "rendered_fallback", extractionReason: reason });
+      expect(evidence.unknownLiteralEnvelope).toEqual(unknownEnvelope);
+      if (unknownEnvelope) expect(evidence.isolatedJSONCodeBlock).toBeNull();
       const encoded = JSON.stringify(evidence);
       expect(encoded).not.toContain(privateText); expect(encoded).not.toContain(firstMarker);
+      expect(encoded).not.toContain(privateKey); expect(encoded).not.toContain("__proto__");
       expect(encoded).not.toContain("data-private-header"); expect(encoded).not.toContain("unescaped");
       expect(encoded.length).toBeLessThanOrEqual(8192); expect(f.send.clicks).toBe(0);
     }

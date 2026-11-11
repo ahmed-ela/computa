@@ -3959,6 +3959,22 @@ enum WebModelRejectedReplyCapture {
     static let maximumRecordBytes = maximumReplyBytes * 6 + 16_384
     private static let maximumArmBytes = 512
 
+    /// Inspect the exact task arm without claiming it. The writer still checks
+    /// the current arm atomically before it can persist a diagnostic.
+    static func isArmed(directory: URL, taskID: UUID) -> Bool {
+        guard let arm = WebsitePrivateDiagnosticCapture.peekArm(directory: directory, record: .rejectedReply,
+            maximum: maximumArmBytes) else { return false }
+        return matchesArm(arm, taskID: taskID)
+    }
+
+    private static func matchesArm(_ arm: Data, taskID: UUID) -> Bool {
+        guard let armText = String(data: arm, encoding: .utf8),
+              armText.range(of: #"^\s*\{\s*"taskID"\s*:\s*"[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}"\s*\}\s*$"#, options: .regularExpression) != nil,
+              let value = try? JSONSerialization.jsonObject(with: arm) as? [String: Any], Set(value.keys) == ["taskID"],
+              let rawTask = value["taskID"] as? String else { return false }
+        return UUID(uuidString: rawTask) == taskID
+    }
+
     @discardableResult
     static func capture(directory: URL, taskID: UUID, record: Data) -> Bool {
         capture(directory: directory, taskID: taskID, record: record, beforeArmClaim: nil)
@@ -3986,11 +4002,7 @@ enum WebModelRejectedReplyCapture {
         return WebsitePrivateDiagnosticCapture.publish(directory: directory, outputName: "rejected-reply.json",
             maximumArmBytes: maximumArmBytes, maximumRecordBytes: maximumRecordBytes,
             makeRecord: { arm in
-                guard let armText = String(data: arm, encoding: .utf8),
-                      armText.range(of: #"^\s*\{\s*"taskID"\s*:\s*"[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}"\s*\}\s*$"#, options: .regularExpression) != nil,
-                      let value = try? JSONSerialization.jsonObject(with: arm) as? [String: Any], Set(value.keys) == ["taskID"],
-                      let rawTask = value["taskID"] as? String, UUID(uuidString: rawTask) == taskID else { return nil }
-                return record
+                matchesArm(arm, taskID: taskID) ? record : nil
             }, isCurrent: isCurrent, beforeArmClaim: beforeArmClaim)
     }
 }

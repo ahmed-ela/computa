@@ -922,14 +922,14 @@ final class GroqOwnedStatusLease: @unchecked Sendable {
 
 extension WebsitePrivateDiagnosticCapture {
     // Read-only arm eligibility. Publication still uses the original exclusive
-    // claim and revalidates these exact bytes; this grants no capture authority.
-    fileprivate static func groqRejectedRequestArm(directory: URL, maximum: Int) -> Data? {
+    // claim and validates the current arm; this grants no capture authority.
+    static func peekArm(directory: URL, record: Record, maximum: Int) -> Data? {
         let descriptor = openDirectoryWithoutSymlinks(directory)
         guard descriptor >= 0 else { return nil }
         defer { close(descriptor) }
         var directoryInfo = stat(), before = stat(), after = stat(), named = stat(), output = stat()
         guard fstat(descriptor, &directoryInfo) == 0, privateDirectory(directoryInfo),
-              fstatat(descriptor, Record.request.rawValue, &output, AT_SYMLINK_NOFOLLOW) != 0, errno == ENOENT else { return nil }
+              fstatat(descriptor, record.rawValue, &output, AT_SYMLINK_NOFOLLOW) != 0, errno == ENOENT else { return nil }
         let arm = openat(descriptor, "arm.json", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard arm >= 0 else { return nil }
         defer { close(arm) }
@@ -1036,7 +1036,7 @@ enum GroqRejectedRequestCapture {
         let started = ContinuousClock.now
         guard !Task.isCancelled, isCurrent(), let directory, context.modelID == modelID, request.model == modelID,
               !request.continuationRequest.isEmpty, request.continuationRequest.count <= WebModelResponseCodec.maximumPromptBytes,
-              let arm = WebsitePrivateDiagnosticCapture.groqRejectedRequestArm(directory: directory, maximum: maximumArmBytes),
+              let arm = WebsitePrivateDiagnosticCapture.peekArm(directory: directory, record: .request, maximum: maximumArmBytes),
               APIModelCorrectionJSON.isUnambiguous(arm),
               let value = try? JSONSerialization.jsonObject(with: arm) as? [String: Any],
               Set(value.keys) == ["schemaVersion", "purpose", "nonce", "taskID", "threadID", "turnID", "modelID", "userPromptSHA256", "expiresAt"],
@@ -1121,7 +1121,7 @@ enum GroqPreparedPromptCapture {
               !request.continuationRequest.isEmpty, request.continuationRequest.count <= WebModelResponseCodec.maximumPromptBytes,
               !request.prompt.isEmpty, request.prompt.utf8.count <= WebModelResponseCodec.maximumPromptBytes,
               request.prompt.utf8.count == request.promptStatistics.finalPromptBytes,
-              let arm = WebsitePrivateDiagnosticCapture.groqRejectedRequestArm(directory: directory, maximum: maximumArmBytes),
+              let arm = WebsitePrivateDiagnosticCapture.peekArm(directory: directory, record: .request, maximum: maximumArmBytes),
               APIModelCorrectionJSON.isUnambiguous(arm),
               let value = try? JSONSerialization.jsonObject(with: arm) as? [String: Any],
               Set(value.keys) == ["schemaVersion", "purpose", "nonce", "taskID", "threadID", "turnID", "modelID", "userPromptSHA256", "expiresAt"],

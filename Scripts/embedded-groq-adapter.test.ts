@@ -150,7 +150,7 @@ describe('Groq fixed fresh-session adapter', () => {
 
   test('completion progress names only the first original gate and preserves every DOM read and short circuit', () => {
     const source = readFileSync(new URL('../Sources/Computa/Resources/BrowserModels/groq.js', import.meta.url), 'utf8');
-    const body = source.slice(source.indexOf('  function responseComplete('), source.indexOf('  function read()'));
+    const body = source.slice(source.indexOf('  function responseComplete('), source.indexOf('  function read('));
     const reasons = ['not_submitted', 'cleared', 'user_absent', 'answer_absent', 'text_empty',
       'editor_disabled', 'editor_not_empty', 'send_disabled', 'footer_missing', 'footer_shape', 'footer_hidden',
       'copy_count', 'copy_parent', 'copy_disabled', 'copy_icon_count', 'complete'];
@@ -1051,6 +1051,67 @@ describe('Groq fixed fresh-session adapter', () => {
       expect(observed.groqRenderedMessageRevision).toBeUndefined();
       expect(f.f.sendCount).toBe(1); expect(f.f.clearCount).toBe(0);
     }
+  });
+
+  test('the optional rejected attribute diagnostic reports only the first exact bounded unknown name', async () => {
+    const f = groqFixture({ key: 'openai/gpt-oss-20b', label: 'GPT OSS 20B' });
+    await f.submit();
+    const armed = { groqRejectedAttributeNameDiagnostic: true };
+    htmlParagraph(f, f.f.reply, { class: 'text-left mb-4', 'fixture-name-2': 'private-value', 'later-name': 'later-value' });
+    const ordinary = await f.run();
+    expect(ordinary).toMatchObject({ answerComplete: true, busy: false, firstUserVerified: true,
+      groqLiteralResponse: false, groqRenderedMessageShape: 'attribute_name', text: f.f.reply });
+    expect(ordinary.groqRenderedMessageRevision).toBeUndefined();
+    expect(ordinary).not.toHaveProperty('groqRejectedAttributeName');
+    expect(await f.run('inspect', armed)).toEqual({ ...ordinary, groqRejectedAttributeName: 'fixture-name-2' });
+    expect(await f.run('inspect', { groqRejectedAttributeNameDiagnostic: 'true' })).toEqual(ordinary);
+    expect(await f.run('inspect', { groqRejectedAttributeNameDiagnostic: false })).toEqual(ordinary);
+    expect(await f.run('verifyModel', armed)).not.toHaveProperty('groqRejectedAttributeName');
+
+    for (const [name, namespace, reason, expected] of [
+      ['a', null, 'attribute_name', 'a'], ['a'.repeat(32), null, 'attribute_name', 'a'.repeat(32)],
+      ['a'.repeat(33), null, 'attribute_name', undefined], ['éclair', null, 'attribute_name', undefined],
+      ['Bad', null, 'attribute_name', undefined], ['2-name', null, 'attribute_name', undefined],
+      ['bad_name', null, 'attribute_name', undefined], ['bad-name\n', null, 'attribute_name', undefined],
+      ['fixture-name', 'urn:fixture-attribute', 'attribute_namespace', undefined],
+      ['data-fixture', null, 'attribute_data', undefined], ['aria-label', null, 'attribute_aria', undefined],
+      ['title', null, 'attribute_title', undefined], ['onclick', null, 'attribute_event_handler', undefined],
+    ] as const) {
+      htmlParagraph(f, f.f.reply, { [name]: 'private-value' }, undefined, namespace);
+      const observed = await f.run('inspect', armed);
+      expect(observed.groqRenderedMessageShape).toBe(reason);
+      expect(observed.groqRenderedMessageRevision).toBeUndefined();
+      if (expected === undefined) expect(observed).not.toHaveProperty('groqRejectedAttributeName');
+      else expect(observed.groqRejectedAttributeName).toBe(expected);
+      expect(JSON.stringify(observed)).not.toContain('private-value');
+    }
+    expect(f.f.sendCount).toBe(1); expect(f.f.clearCount).toBe(0);
+  });
+
+  test('the rejected attribute diagnostic only reflects the current completed owned nonliteral inspection', async () => {
+    const f = groqFixture(); f.f.structuredReply = true; await f.submit();
+    const armed = { groqRejectedAttributeNameDiagnostic: true };
+    const literal = await f.run('inspect', armed);
+    expect(literal.groqLiteralResponse).toBe(true);
+    expect(literal).not.toHaveProperty('groqRejectedAttributeName');
+
+    const paragraph = htmlParagraph(f, f.f.reply, { 'old-name': 'private-value' });
+    f.onDigest(() => { paragraph.removeAttribute('old-name'); paragraph.setAttribute('current-name', 'private-value'); });
+    const current = await f.run('inspect', armed);
+    expect(current).toMatchObject({ answerComplete: true, firstUserVerified: true, groqLiteralResponse: false,
+      groqRenderedMessageShape: 'attribute_name', groqRejectedAttributeName: 'current-name' });
+    expect(current.groqRenderedMessageRevision).toBeUndefined();
+
+    f.onDigest(() => { f.f.copy.disabled = true; });
+    const busy = await f.run('inspect', armed);
+    expect(busy.answerComplete).toBe(false); expect(busy.busy).toBe(true);
+    expect(busy).not.toHaveProperty('groqRejectedAttributeName');
+    f.f.copy.disabled = false;
+    f.onDigest(() => { f.f.userBody.textContent = 'Foreign body'; });
+    const foreign = await f.run('inspect', armed);
+    expect(foreign.error).toBe('conversation_changed');
+    expect(foreign).not.toHaveProperty('groqRejectedAttributeName');
+    expect(f.f.sendCount).toBe(1); expect(f.f.clearCount).toBe(0);
   });
 
   test('paragraph evidence is reread after first-user hashing and requires current completion', async () => {

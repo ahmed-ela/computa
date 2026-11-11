@@ -567,7 +567,7 @@ try {
     if (!c.visible(root)) c.fail('conversation_changed', 'first_root_hidden');
     if (body.tagName !== 'SPAN' || body.children.length !== 0) c.fail('conversation_changed', 'first_body_shape');
     verifyUserCount(1); verifyFirstPrompt({ text: body.textContent });
-    return { root, body, hasAssistantPreview: !!preview };
+    return { root, body, preview };
   }
   function initialUserPendingReceipt(form, evidence) {
     // Native accepts this existing negative receipt only after the sole Send
@@ -591,6 +591,7 @@ try {
       || !form.empty || !/^[a-f0-9]{64}$/.test(inserted?.outboundFingerprint || ''))
       c.fail('model_unverified', 'initial_model_remount_unbound');
     const choice = { ...model.choice }, prompt = inserted.prompt, fingerprint = inserted.outboundFingerprint;
+    const previewParent = first.preview?.parentElement;
     const remount = { stage: 'checking', previousTrigger: model.trigger, trigger: p.trigger,
       triggerID: p.trigger.getAttribute('id'), menuID: p.trigger.getAttribute('aria-controls') };
     state.initialModelRemount = remount; // Spend before the only awaited check.
@@ -602,8 +603,10 @@ try {
         || !c.equalChoice(model.choice, choice) || !c.equalChoice(choice, input.expectedModelChoice)
         || inserted.prompt !== prompt || inserted.outboundFingerprint !== fingerprint)
         c.fail('model_unverified', 'initial_model_remount_changed');
-      const current = optimisticFirstUser();
-      if (!current || current.root !== first.root || current.body !== first.body)
+      // The waiting row stays negative evidence and must be the same node in the same parent.
+      const current = optimisticFirstUser(first.preview !== undefined);
+      if (!current || current.root !== first.root || current.body !== first.body
+        || current.preview !== first.preview || current.preview?.parentElement !== previewParent)
         c.fail('conversation_changed', 'initial_model_remount_first_changed');
       const now = picker(), currentForm = composer();
       const triggers = c.nodes(document, 'div.current-model[data-testid="model-select-trigger"][aria-haspopup="menu"]')
@@ -631,7 +634,7 @@ try {
     const first = optimisticFirstUser(true);
     if (!first) return null;
     const form = composer(), p = picker();
-    if (!first.hasAssistantPreview && state.model && state.selection === null && p.closed && p.trigger !== state.model.trigger
+    if (state.model && state.selection === null && p.closed && p.trigger !== state.model.trigger
       && state.model.trigger.isConnected === false && p.label === state.model.choice.label)
       return revalidateInitialModelRemount(first, form, p);
     return initialUserPendingReceipt(form, modelEvidence(true, 'optimistic_first', p));

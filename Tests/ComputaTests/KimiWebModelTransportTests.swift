@@ -1033,6 +1033,14 @@ final class KimiWebModelTransportTests: XCTestCase {
     }
 
     func testOptimisticAssistantRowCannotPublishBeforeCanonicalOwnership() async throws {
+        try await verifyOptimisticAssistantRowCannotPublishBeforeCanonicalOwnership(remountPicker: false)
+    }
+
+    func testOptimisticAssistantRowRemountRetainsNegativePendingUntilCanonicalOwnership() async throws {
+        try await verifyOptimisticAssistantRowCannotPublishBeforeCanonicalOwnership(remountPicker: true)
+    }
+
+    private func verifyOptimisticAssistantRowCannotPublishBeforeCanonicalOwnership(remountPicker: Bool) async throws {
         let fixture = try Fixture(); defer { fixture.shutdown() }
         let token = try await start(fixture)
         _ = try await evaluate(fixture.view, "kimiFixture.options.optimisticUser = true; kimiFixture.options.holdProvisional = true; return true;")
@@ -1048,6 +1056,15 @@ final class KimiWebModelTransportTests: XCTestCase {
               && user.getAttribute('data-conversation-turn-id') === '';
             """) as? Bool
         XCTAssertEqual(previewPresent, true)
+        if remountPicker {
+            let remounted = try await evaluate(fixture.view, """
+                const previous = document.querySelector('.current-model');
+                const replacement = previous.cloneNode(true);
+                previous.replaceWith(replacement);
+                return !previous.isConnected && replacement.isConnected;
+                """) as? Bool
+            XCTAssertEqual(remounted, true)
+        }
         for _ in 0 ..< 2 {
             let pending = try await call(fixture, "webProviderPoll", token)
             XCTAssertEqual(pending["state"] as? String, "running")

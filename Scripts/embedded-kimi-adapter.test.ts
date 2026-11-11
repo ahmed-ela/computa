@@ -747,9 +747,9 @@ describe('Kimi saved-conversation adapter', () => {
     expect(f.counts()).toEqual({ insertions: 1, sends: 1, confirms: 0 });
   });
 
-  test('provisional assistant waiting requires the acknowledged ordered row and existing model binding', async () => {
+  test('provisional assistant waiting requires an acknowledged ordered row and grants no action authority', async () => {
     for (const kind of ['foreign_parent', 'detached', 'hidden', 'reordered', 'extra', 'prompt', 'unacknowledged',
-      'canonical', 'model_remount', 'cleanup', 'delete'] as const) {
+      'canonical', 'cleanup', 'delete', 'submit'] as const) {
       const f = adapterFixture({ provisional: true, optimisticUser: true });
       expect((await f.submit()).ownershipPending).toBe(true);
       const makePreview = () => new f.Node('DIV', { class: 'chat-content-item chat-content-item-assistant' }, 'PRIVATE_PREVIEW');
@@ -767,10 +767,7 @@ describe('Kimi saved-conversation adapter', () => {
       if (kind === 'prompt') f.messages.userBody.text = prompt.replace('Exact', 'Other');
       if (kind === 'unacknowledged') state.submissionAcknowledged = false;
       if (kind === 'canonical') f.document.URL = canonical;
-      if (kind === 'model_remount') {
-        const replacement = f.trigger.cloneNode(true); f.remove(f.trigger); f.body.append(replacement);
-      }
-      const result = await f.run(kind === 'delete' ? 'deleteConversation' : 'inspect',
+      const result = await f.run(kind === 'delete' ? 'deleteConversation' : kind === 'submit' ? 'submit' : 'inspect',
         kind === 'cleanup' ? { kimiCleanupInspection: true } : {});
       expect(result.error).toBeDefined();
       expect(result.ownershipPending).toBeUndefined();
@@ -780,6 +777,84 @@ describe('Kimi saved-conversation adapter', () => {
       expect(state.first).toBeNull();
       expect(state.initialModelRemount).toBeNull();
       expect(f.fingerprint).toBeUndefined();
+      expect(f.counts()).toEqual({ insertions: 1, sends: 1, confirms: 0 });
+    }
+  });
+
+  test('the first detached model trigger can remount while the same optimistic assistant stays unread', async () => {
+    const f = adapterFixture({ provisional: true, optimisticUser: true });
+    expect((await f.submit()).ownershipPending).toBe(true);
+    const preview = new f.Node('DIV', { class: 'chat-content-item chat-content-item-assistant' });
+    const getAttribute = preview.getAttribute.bind(preview);
+    preview.getAttribute = name => {
+      if (name === 'data-archer-id') throw new Error('Preview identity must not be read');
+      return getAttribute(name);
+    };
+    Object.defineProperty(preview, 'textContent', { get: () => { throw new Error('Preview text must not be read'); } });
+    f.body.append(new f.Node('DIV'), preview);
+    const replacement = f.trigger.cloneNode(true); f.remove(f.trigger); f.body.append(replacement);
+    const state = f.world.__computaKimiSavedSessionV1;
+    let digests = 0;
+    f.onDigest(() => { digests++; });
+    const pending = await f.run();
+    expect(pending).toMatchObject({ ownershipPending: true, userCount: 1, responseCount: 0, text: '', busy: true,
+      firstUserVerified: false, firstUserMarkerVerified: false, firstUserFingerprint: null, answerComplete: false,
+      firstUserIdentity: null, conversationIdentity: null, modelEvidence: { selected: instant } });
+    expect(state.model.trigger).toBe(replacement);
+    expect(state.initialModelRemount.stage).toBe('verified');
+    expect(state.first).toBeNull(); expect(f.fingerprint).toBeUndefined();
+    expect(digests).toBe(1);
+    const remount = state.initialModelRemount;
+    f.onDigest(() => { digests++; });
+    expect(await f.run()).toEqual(pending);
+    expect(state.initialModelRemount).toBe(remount);
+    expect(digests).toBe(1);
+    expect(f.counts()).toEqual({ insertions: 1, sends: 1, confirms: 0 });
+
+    f.remove(preview); f.replaceOptimisticUser(); f.document.URL = canonical;
+    const complete = await f.run();
+    expect(complete).toMatchObject({ firstUserVerified: true, firstUserFingerprint: submissionFingerprint,
+      conversationIdentity: canonical, answerComplete: true, text: '{"type":"message","text":"Synthetic reply"}' });
+    expect(digests).toBe(2);
+    expect(f.counts()).toEqual({ insertions: 1, sends: 1, confirms: 0 });
+  });
+
+  test('the model remount rejects preview, transcript, route and model changes across its hash', async () => {
+    for (const kind of ['preview_removed', 'preview_replaced', 'preview_hidden', 'second_assistant',
+      'same_nodes_reparented', 'prompt', 'route', 'model_label', 'model_trigger', 'old_trigger'] as const) {
+      const f = adapterFixture({ provisional: true, optimisticUser: true });
+      expect((await f.submit()).ownershipPending).toBe(true);
+      const makePreview = () => new f.Node('DIV', { class: 'chat-content-item chat-content-item-assistant' }, 'PRIVATE_PREVIEW');
+      const preview = makePreview(); f.body.append(preview);
+      const replacement = f.trigger.cloneNode(true); f.remove(f.trigger); f.body.append(replacement);
+      const state = f.world.__computaKimiSavedSessionV1;
+      let digests = 0;
+      f.onDigest(() => {
+        digests++;
+        if (kind === 'preview_removed' || kind === 'preview_replaced') f.remove(preview);
+        if (kind === 'preview_replaced' || kind === 'second_assistant') f.body.append(makePreview());
+        if (kind === 'preview_hidden') preview.setAttribute('hidden', '');
+        if (kind === 'same_nodes_reparented') {
+          const root = f.messages.user, wrapper = new f.Node('DIV');
+          f.body.children = f.body.children.filter(node => node !== root && node !== preview);
+          wrapper.append(root, preview); f.body.append(wrapper);
+        }
+        if (kind === 'prompt') f.messages.userBody.text = prompt.replace('Exact', 'Other');
+        if (kind === 'route') f.document.URL = canonical;
+        if (kind === 'model_label') replacement.querySelector('.name')!.text = 'Foreign selection';
+        if (kind === 'model_trigger') {
+          const other = replacement.cloneNode(true); f.remove(replacement); f.body.append(other);
+        }
+        if (kind === 'old_trigger') { f.trigger.connected = true; f.body.append(f.trigger); }
+      });
+      const result = await f.run();
+      expect(digests).toBe(1);
+      expect(result.error).toBeDefined(); expect(result.ownershipPending).toBeUndefined();
+      expect(result.firstUserVerified).toBeUndefined(); expect(result.text).toBeUndefined();
+      expect(JSON.stringify(result)).not.toContain('PRIVATE_PREVIEW');
+      expect(state.model.trigger).toBe(f.trigger);
+      expect(state.initialModelRemount.stage).toBe('checking');
+      expect(state.first).toBeNull(); expect(f.fingerprint).toBeUndefined();
       expect(f.counts()).toEqual({ insertions: 1, sends: 1, confirms: 0 });
     }
   });

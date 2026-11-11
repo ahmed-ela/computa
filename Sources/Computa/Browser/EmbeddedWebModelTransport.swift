@@ -821,6 +821,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var adapterFailureContext: WebsiteAdapterFailureDiagnostic.Context?
         var adapterFailureDirectory: URL?
         var rejectedReplyDirectory: URL?
+        var groqRejectedAttributeNameDiagnostic = false
         var groqRejectedLiteralCaptureAttempted = false
         var adapterFailureCaptureAttempted = false
         var adapterFailurePublication: WebsiteAdapterFailurePublication?
@@ -1962,6 +1963,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
     }
 
+    nonisolated static func sanitizedGroqRejectedAttributeName(_ raw: Any?) -> String? {
+        guard let name = raw as? String, (1...32).contains(name.utf8.count),
+              let first = name.utf8.first, (97...122).contains(first),
+              name.utf8.dropFirst().allSatisfy({ (97...122).contains($0) || (48...57).contains($0) || $0 == 45 })
+        else { return nil }
+        return name
+    }
+
     /// Record the failed verification gate before cleanup removes the page.
     /// Only closed categories and the native inference ID may leave this method.
     private func logGroqResponseFormatFailure(_ session: Session, observed: [String: Any],
@@ -2008,7 +2017,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     /// Private exact-task evidence only. The rejected adapter candidate is not
     /// literal/API text and cannot enter response, tool or cleanup admission.
     private func captureGroqRejectedLiteralCandidate(_ session: Session, observed: [String: Any],
-        stage: GroqResponseFormatFailureStage, deadline: ContinuousClock.Instant) {
+        stage: GroqResponseFormatFailureStage, deadline: ContinuousClock.Instant, rejectedAttributeName: String? = nil) {
         guard !session.groqRejectedLiteralCaptureAttempted,
               let directory = session.rejectedReplyDirectory, let context = session.adapterFailureContext,
               let generation = session.documentGeneration, let model = session.modelChoice,
@@ -2050,6 +2059,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             "literalState": literalState, "literalResponse": flag.map { $0 as Any } ?? NSNull(), "utf8Bytes": text.utf8.count]
         if let shape = Self.sanitizedGroqRenderedMessageShape(observed["groqRenderedMessageShape"]) {
             facts["renderedShape"] = shape
+            if shape == "attribute_name", let rejectedAttributeName {
+                facts["rejectedAttributeName"] = rejectedAttributeName
+            }
         }
         for key in ["userCount", "responseCount"] {
             if let value = ComputerToolArgumentContract.exactInt64(observed[key]), (0...10_000).contains(value) { facts[key] = value }
@@ -2358,6 +2370,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             if provider == .groq, let directory = admission.rejectedReplyDirectory {
                 session.adapterFailureContext = context
                 session.rejectedReplyDirectory = directory
+                session.groqRejectedAttributeNameDiagnostic = WebModelRejectedReplyCapture.isArmed(
+                    directory: directory, taskID: context.taskID)
             }
         }
         session.groqOwnedStatus=groqLease
@@ -4393,6 +4407,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let inspectsQuietCompletion = canInspectQuietChatGPTCompletion(session)
         let quietCandidateResponse = inspectsQuietCompletion ? session.response : nil
         let quietCandidateResponseCount = inspectsQuietCompletion ? session.observedResponseCount : nil
+        var groqRejectedAttributeName: String?
         // WebKit may queue an inspection while the provider renders its reply.
         // The adapter's own waits remain bounded; allow queue time without
         // extending the inference's preparation or response deadline.
@@ -4418,6 +4433,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     allowPendingQwenProvisionalRoute: true,
                     allowPendingQwenInitialResponseIdentity: true, allowQwenFirstBodyExpansion: true,
                     allowPendingSavedResponseChoice: true,
+                    groqRejectedAttributeNameSink: session.provider == .groq ? { groqRejectedAttributeName = $0 } : nil,
                     maximumWait: min(inspectionTimeout, deadline - .now))
             }
         }
@@ -4680,7 +4696,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 if session.provider == .groq, isComplete {
                     guard let source = Self.groqCompletionSource(observed, text: response) else {
                         logGroqResponseFormatFailure(session, observed: observed, stage: .initialCandidate)
-                        captureGroqRejectedLiteralCandidate(session, observed: observed, stage: .initialCandidate, deadline: deadline)
+                        captureGroqRejectedLiteralCandidate(session, observed: observed, stage: .initialCandidate, deadline: deadline,
+                            rejectedAttributeName: groqRejectedAttributeName)
                         throw Failure.responseFormatUnavailable
                     }
                     groqSource = source
@@ -4804,6 +4821,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                 session.candidateSince = nil
                             }
                         }
+                        var finalGroqRejectedAttributeName: String?
                         if currentAnswerVerified, session.requiresExplicitClear || session.requiresSavedDelete {
                             // Make the optional page-world comparison before the already-required final independent DOM
                             // read. Never stage a result across changed ordinary selection, answer bytes or message IDs.
@@ -4816,6 +4834,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             // answer across changed text or resumed streaming.
                             let final = try await page(session, action: "inspect",
                                 recheckModelAfterAwait: false, recheckProductAfterAwait: false,
+                                groqRejectedAttributeNameSink: session.provider == .groq ? { finalGroqRejectedAttributeName = $0 } : nil,
                                 maximumWait: min(inspectionTimeout, session.turnStarted + responseTimeout - .now))
                             currentAnswerVerified = session.lifecycleVerified && observesLifecycle(final, session: session)
                                 && final["interrupted"] as? Bool == false
@@ -4851,7 +4870,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                 guard let groqSource, finalSource == groqSource else {
                                     logGroqResponseFormatFailure(session, observed: completionObservation, stage: .finalReread,
                                         currentSource: finalSource, expectedSource: groqSource)
-                                    captureGroqRejectedLiteralCandidate(session, observed: completionObservation, stage: .finalReread, deadline: deadline)
+                                    captureGroqRejectedLiteralCandidate(session, observed: completionObservation, stage: .finalReread, deadline: deadline,
+                                        rejectedAttributeName: finalGroqRejectedAttributeName)
                                     throw Failure.responseFormatUnavailable
                                 }
                             }
@@ -4875,6 +4895,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                 Self.inspectionLog.notice("completionDecision version=1 provider=chatgpt session=\(session.token, privacy: .public) sequence=\(session.sequence) method=\(method, privacy: .public) quietReady=\(quietReady) observerArmed=\(session.completionObserverArmed) initialReceiptPresent=\(terminalCandidate != nil) finalReceiptPresent=\(receiptPresent) initialMatch=\(initialReason, privacy: .public) finalMatch=\(finalReason, privacy: .public) routeKind=\(route, privacy: .public)")
                             }
                             session.freshSubmissionCompletion = freshSubmissionCompletion(session, observation: completionObservation)
+                            if session.provider == .claude, let proof = session.freshSubmissionCompletion,
+                               let evidence = completionObservation["completionEvidence"] as? [String: Any],
+                               let structure = evidence["codeStructure"] as? [String: Any],
+                               let diagnostic = Self.claudeUnknownLiteralEnvelopeFields(structure) {
+                                Self.inspectionLog.notice("claudeUnknownLiteralEnvelope version=1 session=\(session.token.lowercased(), privacy: .public) generation=\(proof.binding.generation.uuidString.lowercased(), privacy: .public) sequence=\(session.sequence) \(diagnostic, privacy: .public)")
+                            }
                             if let groqSource {
                                 let proof = completedGroqReplyProof(session, observation: completionObservation, source: groqSource)
                                 if case .renderedMessage = groqSource, proof == nil {
@@ -5372,6 +5398,34 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), bytes.count <= 8_192 else { return nil }
         return String(data: bytes, encoding: .utf8)
+    }
+
+    /// Only the finite shape of a valid literal body at Claude's existing fallback boundary.
+    nonisolated static func claudeUnknownLiteralEnvelopeFields(_ structure: [String: Any]) -> String? {
+        guard ComputerToolArgumentContract.exactInt64(structure["preCount"]) == 1,
+              ComputerToolArgumentContract.exactInt64(structure["codeCount"]) == 1,
+              firstUserDiagnosticBool(structure["literalCodeValidJSON"]) == true,
+              structure["literalCodeKnownEnvelopeType"] as? String == "unknown",
+              structure["selectedExtraction"] as? String == "rendered_fallback",
+              structure["extractionReason"] as? String == "unknown_envelope_type",
+              structure["isolatedJSONCodeBlock"] is NSNull,
+              let packet = structure["unknownLiteralEnvelope"] as? [String: Any],
+              Set(packet.keys) == ["rootKind", "typeClass", "knownKeys", "unknownKeyCount"],
+              let root = packet["rootKind"] as? String, ["object", "array", "null", "string", "number", "bool"].contains(root),
+              let type = packet["typeClass"] as? String, let keys = packet["knownKeys"] as? [String],
+              let unknown = ComputerToolArgumentContract.exactInt64(packet["unknownKeyCount"]), (0...220_000).contains(unknown)
+        else { return nil }
+        let keyOrder = ["type", "text", "phase", "calls", "commentary", "tool_calls", "message", "answer", "output", "result", "content"]
+        let keySet = Set(keys)
+        guard keys == keyOrder.filter(keySet.contains) else { return nil }
+        if root == "object" {
+            guard ["missing", "non_string", "other_string"].contains(type),
+                  keySet.contains("type") == (type != "missing") else { return nil }
+        } else {
+            guard type == "not_applicable", keys.isEmpty, unknown == 0 else { return nil }
+        }
+        let labels = keys.isEmpty ? "none" : keys.joined(separator: ",")
+        return "root=\(root) type=\(type) knownKeys=\(labels) unknownKeys=\(unknown)"
     }
 
     nonisolated static func sanitizedCodeStructure(_ source: [String: Any]) -> String? {
@@ -6054,7 +6108,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private static let firstUserLiteralDOMFailureKeys = ["literalDOMFailureNodeKind", "literalDOMFailureTag", "literalDOMFailureParentTag", "literalDOMFailureRule"]
     private static let firstUserLiteralDOMKeys = firstUserLiteralDOMFlags + firstUserLiteralDOMCounts + ["literalDOMLinkCount", "literalDOMUnavailableReason", "literalDOMPayloadUnavailableReason"] + firstUserLiteralDOMFailureKeys
 
-    private static func firstUserDiagnosticBool(_ value: Any?) -> Bool? {
+    nonisolated private static func firstUserDiagnosticBool(_ value: Any?) -> Bool? {
         guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
         return number.boolValue
     }
@@ -7378,6 +7432,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       allowSavedCleanupInspection: Bool = false,
                       replacingInitialRootFrom: UUID? = nil,
                       qwenCodePayloadSample: String? = nil, savedResponseChoiceGrant: String? = nil,
+                      groqRejectedAttributeNameSink: ((String) -> Void)? = nil,
                       maximumWait: Duration = .seconds(10)) async throws -> [String: Any] {
         if allowSavedCleanupInspection, session.savedResponseChoice != nil, !session.savedResponseChoiceAcknowledged {
             // No independent pre-preference deletion capability is granted by
@@ -7556,6 +7611,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let groqProgress = action == "inspect" && enforceModel && !allowBlockedProvider
             && savedDeleteOperation == nil && !allowSavedCleanupInspection ? groqFailureProgressLease(session, allowingPending: true) : nil
         if groqProgress != nil { input["groqFailureProgress"] = true }
+        let requestsGroqRejectedAttributeName = groqRejectedAttributeNameSink != nil && provider == .groq
+            && action == "inspect" && enforceModel && !allowBlockedProvider && session.state == "running"
+            && session.submitted && session.acknowledgedSendSequence == 1
+            && session.groqRejectedAttributeNameDiagnostic
+        if requestsGroqRejectedAttributeName { input["groqRejectedAttributeNameDiagnostic"] = true }
         if provider == .qwen, let channel = browser.qwenCodePayloadChannel(tabID:session.tabID,view:session.view,
             owner:session.token,generation:generation) { input["qwenCodePayloadChannel"] = channel }
         if let grant = qwenCodePayloadSample {
@@ -8108,6 +8168,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let kimiComposerGuard = WebsiteAdapterFailureDiagnostic.removeComposerGuard(from: &observed,
             provider: provider.rawValue, action: action)
         let kimiRootID = observed.removeValue(forKey: "kimiFirstRootIDDiagnostic")
+        let groqRejectedAttributeName = observed.removeValue(forKey: "groqRejectedAttributeName")
         let kimiProgress = Self.removeKimiDiscoveryProgressDiagnostic(from: &observed, provider: provider, action: action)
         logKimiDiscoveryProgress(kimiProgress, session: session)
         // This immutable attempt diagnostic is stripped before response or
@@ -8938,6 +8999,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
            observed["firstUserFingerprint"] as? String == session.firstUserFingerprint {
             session.groqFailureProgress.admit(progress)
             if let groqAttempt { session.groqFailureProgress.attemptAdmitted(groqAttempt) }
+        }
+        if requestsGroqRejectedAttributeName, let groqRejectedAttributeNameSink,
+           observed["groqRenderedMessageShape"] as? String == "attribute_name",
+           Self.firstUserDiagnosticBool(observed["answerComplete"]) == true,
+           Self.firstUserDiagnosticBool(observed["busy"]) == false,
+           Self.firstUserDiagnosticBool(observed["firstUserVerified"]) == true,
+           Self.firstUserDiagnosticBool(observed["firstUserMarkerVerified"]) == true,
+           let first = session.firstUserFingerprint, observed["firstUserFingerprint"] as? String == first,
+           let name = Self.sanitizedGroqRejectedAttributeName(groqRejectedAttributeName) {
+            groqRejectedAttributeNameSink(name)
         }
         cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection, replyUI: qwenReplyUI)
         return observed

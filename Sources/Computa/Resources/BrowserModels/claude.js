@@ -2578,7 +2578,27 @@ function modelResponseExtraction(answer) {
   if (flags.literalCodeValidJSON) {
     const knownType = envelope && !Array.isArray(envelope) && ['message', 'tool_calls'].includes(envelope.type);
     flags.literalCodeKnownEnvelopeType = knownType ? envelope.type : 'unknown';
-    if (!knownType) return fallback('unknown_envelope_type');
+    if (!knownType) {
+      // Report the shape of the already parsed literal only. Extraction and
+      // correction still use the original rendered fallback and reason.
+      let rootKind = typeof envelope;
+      if (envelope === null) rootKind = 'null';
+      else if (Array.isArray(envelope)) rootKind = 'array';
+      else if (rootKind === 'boolean') rootKind = 'bool';
+      const isObject = rootKind === 'object';
+      const knownKeys = isObject
+        ? ['type', 'text', 'phase', 'calls', 'commentary', 'tool_calls', 'message', 'answer', 'output', 'result', 'content']
+          .filter(key => Object.hasOwn(envelope, key))
+        : [];
+      let typeClass = 'not_applicable';
+      if (isObject) {
+        typeClass = 'missing';
+        if (Object.hasOwn(envelope, 'type')) typeClass = typeof envelope.type === 'string' ? 'other_string' : 'non_string';
+      }
+      flags.unknownLiteralEnvelope = { rootKind, typeClass, knownKeys,
+        unknownKeyCount: isObject ? Object.keys(envelope).length - knownKeys.length : 0 };
+      return fallback('unknown_envelope_type');
+    }
   }
   const inspectCodeScope = () => {
     // Observed Claude code chrome: the language label and icon control are

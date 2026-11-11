@@ -281,7 +281,7 @@ try {
     return c.nodes(document, 'button', 128).filter(node => c.visible(node) && !authored(node)
       && c.normalize(node.innerText || node.textContent) === 'Clear chat');
   }
-  function renderedMessageShape(answer, text) {
+  function renderedMessageShape(answer, text, captureRejectedAttributeName) {
     const declined = reason => ({ witness: null, reason });
     if (answer.childNodes.length !== 1) return declined('answer_child_count');
     const paragraph = answer.childNodes[0];
@@ -331,6 +331,8 @@ try {
           if (name === 'style') return declined('attribute_style');
           if (name.startsWith('data-')) return declined('attribute_data');
           if (name.startsWith('aria-')) return declined('attribute_aria');
+          if (captureRejectedAttributeName && name.match(/^[a-z][a-z0-9-]{0,31}$/)?.[0] === name)
+            return { ...declined('attribute_name'), rejectedAttributeName: name };
           return declined('attribute_name');
       }
     }
@@ -404,13 +406,13 @@ try {
     if (progress) progress.reason = 'complete';
     return true;
   }
-  function read() {
+  function read(captureRejectedAttributeName = false) {
     const t = transcript(), form = composer(), modelEvidence = evidence(false);
     const progress = input.action === 'inspect'
       && Object.getOwnPropertyDescriptor(input, 'groqFailureProgress')?.value === true ? { reason: null } : null;
     const extracted = responseText(t.answer), text = extracted.text, answerComplete = responseComplete(t, form, text, progress);
     const rendered = answerComplete && !extracted.literal && (input.action === 'inspect' || state.renderedMessage)
-      ? renderedMessageShape(t.answer, text) : null;
+      ? renderedMessageShape(t.answer, text, captureRejectedAttributeName) : null;
     const renderedMessage = rendered?.witness ?? null;
     const prior = state.renderedMessage;
     if (prior && (!renderedMessage || prior.answer !== renderedMessage.answer || prior.paragraph !== renderedMessage.paragraph
@@ -418,6 +420,7 @@ try {
     // The terminal conjunction is answer-scoped footer Copy plus an empty,
     // enabled composer and enabled Send. Global speed/code-copy grant nothing.
     return { t, form, renderedMessage, renderedMessageReason: rendered?.reason,
+      rejectedAttributeName: rendered?.rejectedAttributeName,
       output: { url: document.URL, sessionLifecycle: 'explicit_clear', temporary: false,
       modelEvidence, composer: c.enabled(form.editor), userCount: t.users.length, responseCount: t.answers.length,
       conversationIdentity: null, busy: !answerComplete && (t.users.length > 0 || state.submitted && !state.clear),
@@ -515,7 +518,8 @@ try {
     }
     // Hashing yields to the page. Use a fresh terminal observation afterward;
     // a pre-yield enabled footer/composer must not survive resumed streaming.
-    const current = read();
+    const current = read(input.action === 'inspect'
+      && Object.getOwnPropertyDescriptor(input, 'groqRejectedAttributeNameDiagnostic')?.value === true);
     if (!sameFirst(first) || !c.equalChoice(current.output.modelEvidence?.selected, initial.output.modelEvidence?.selected))
       c.fail('conversation_changed', 'first_user_message');
     Object.assign(initial.output, current.output,
@@ -532,6 +536,8 @@ try {
     if (input.action === 'inspect' && current.renderedMessageReason) {
       initial.output.groqRenderedMessageShape = current.renderedMessage && !state.renderedMessage
         ? 'revision_exhausted' : current.renderedMessageReason;
+      if (current.renderedMessageReason === 'attribute_name' && current.rejectedAttributeName)
+        initial.output.groqRejectedAttributeName = current.rejectedAttributeName;
     }
   } else if (state.first || input.expectedFirstUserFingerprint != null) c.fail('conversation_changed', 'first_user_message');
   if (['discoverModels', 'selectModel'].includes(input.action)) {
