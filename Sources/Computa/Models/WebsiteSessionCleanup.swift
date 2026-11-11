@@ -1,6 +1,71 @@
 import Darwin
 import Foundation
 
+/// Finite failure metadata only. It never supplies cleanup or response authority.
+struct WebsiteCleanupFailureDiagnostic: Codable, Equatable, Sendable {
+    enum Stage: String, Codable, Sendable { case preflight, savedDeletion = "saved_deletion", physicalClose = "physical_close", snapshot }
+    enum Failure: String, Codable, Sendable {
+        case ownership, staleSession = "stale_session", invalidRequest = "invalid_request", lifecycleUnverified = "lifecycle_unverified"
+        case modelUnverified = "model_unverified", websiteBlocked = "website_blocked", pageUnavailable = "page_unavailable", cancelled, other
+    }
+    struct Adapter: Codable, Equatable, Sendable {
+        enum Code: String, Codable, Sendable {
+            case documentChanged = "document_changed", conversationChanged = "conversation_changed"
+            case modeUnverified = "mode_unverified", modeMismatch = "mode_mismatch", modelUnverified = "model_unverified", modelMismatch = "model_mismatch"
+            case composerUnavailable = "composer_unavailable", notFresh = "not_fresh", other
+        }
+        enum Detail: String, Codable, Sendable {
+            case ownerToken = "owner_token", conversationURL = "conversation_url", firstUserMessage = "first_user_message", userCount = "user_count"
+            case terminalOperation = "terminal_operation", deletingSession = "deleting_session", deleteOperation = "delete_operation"
+            case deleteOwnership = "delete_ownership", deletePhase = "delete_phase", deleteNotReady = "delete_not_ready", deleteRoute = "delete_route"
+            case deleteHeader = "delete_header", deleteTrigger = "delete_trigger", deleteAnchor = "delete_anchor", deleteMenu = "delete_menu", deleteControl = "delete_control"
+            case deleteConfirmation = "delete_confirmation", deleteDialog = "delete_dialog", deleteTitle = "delete_title", deleteBody = "delete_body", deleteButtons = "delete_buttons"
+            case deleteMenuOpenUnacknowledged = "delete_menu_open_unacknowledged", deleteMenuSelectionSpent = "delete_menu_selection_spent"
+            case deleteConfirmMenuUnacknowledged = "delete_confirm_menu_unacknowledged", deleteConfirmSelectionUnacknowledged = "delete_confirm_selection_unacknowledged"
+            case deleteConfirmMenuUnbound = "delete_confirm_menu_unbound", deleteConfirmMenuStillVisible = "delete_confirm_menu_still_visible", absent, other
+        }
+        let error: Code
+        let detail: Detail
+        init(error: String, detail: String?) {
+            self.error = Code(rawValue: error) ?? .other
+            self.detail = detail.flatMap(Detail.init(rawValue:)) ?? (detail == nil ? .absent : .other)
+        }
+    }
+    let version: Int
+    let stage: Stage
+    let failure: Failure
+    let ownershipReason: EmbeddedWebModelTransport.OwnershipReason?
+    let adapter: Adapter?
+    init(stage: Stage, failure: Failure, ownershipReason: EmbeddedWebModelTransport.OwnershipReason? = nil, adapter: Adapter? = nil) {
+        version = 1; self.stage = stage; self.failure = failure; self.ownershipReason = ownershipReason; self.adapter = adapter
+    }
+    var isValid: Bool { version == 1 && ((failure == .ownership) == (ownershipReason != nil)) }
+    var dictionary: [String: Any] {
+        var value: [String: Any] = ["version": version, "stage": stage.rawValue, "failure": failure.rawValue]
+        if let ownershipReason { value["ownershipReason"] = ownershipReason.rawValue }
+        if let adapter { value["adapter"] = ["error": adapter.error.rawValue, "detail": adapter.detail.rawValue] }
+        return value
+    }
+    static func parse(_ value: Any?) -> Self? {
+        guard let raw = value as? [String: Any],
+              Set(raw.keys).isSuperset(of: ["version", "stage", "failure"]),
+              Set(raw.keys).isSubset(of: ["version", "stage", "failure", "ownershipReason", "adapter"]),
+              ComputerToolArgumentContract.exactInt64(raw["version"]) == 1,
+              let stage = (raw["stage"] as? String).flatMap(Stage.init(rawValue:)),
+              let failure = (raw["failure"] as? String).flatMap(Failure.init(rawValue:)) else { return nil }
+        let reason = (raw["ownershipReason"] as? String).flatMap(EmbeddedWebModelTransport.OwnershipReason.init(rawValue:))
+        guard (failure == .ownership) == (reason != nil),
+              !raw.keys.contains("ownershipReason") || reason != nil else { return nil }
+        if let value = raw["adapter"] {
+            guard let adapter = value as? [String: Any], Set(adapter.keys) == ["error", "detail"],
+                  let error = adapter["error"] as? String, Adapter.Code(rawValue: error) != nil,
+                  let detail = adapter["detail"] as? String, Adapter.Detail(rawValue: detail) != nil else { return nil }
+            return Self(stage: stage, failure: failure, ownershipReason: reason, adapter: .init(error: error, detail: detail))
+        }
+        return Self(stage: stage, failure: failure, ownershipReason: reason)
+    }
+}
+
 /// A cleanup observation, never a model response or evidence of a past deletion.
 struct WebsiteSessionCleanupReceipt: Codable, Equatable, Sendable {
     enum Outcome: String, Codable, Sendable { case closed, noOwnedSession = "no_owned_session", unconfirmed }
@@ -37,10 +102,11 @@ struct WebsiteSessionCleanupReceipt: Codable, Equatable, Sendable {
     let reason: Reason
     let trigger: Trigger
     var receiptSaved: Bool
+    let cleanupDiagnostic: WebsiteCleanupFailureDiagnostic?
 
     init(taskID: String, threadID: String? = nil, turnID: String? = nil, runtimeGeneration: UUID, outcome: Outcome, provider: Provider? = nil,
          route: Route? = nil, modelID: String? = nil, reason: Reason, trigger: Trigger, receiptSaved: Bool = false,
-         inferenceID: String? = nil, sessionToken: String? = nil) {
+         inferenceID: String? = nil, sessionToken: String? = nil, cleanupDiagnostic: WebsiteCleanupFailureDiagnostic? = nil) {
         let rejectedBeforeCreation = inferenceID != nil && sessionToken == nil && threadID != nil && turnID != nil
             && outcome == .noOwnedSession && reason == .notCreated && trigger == .inference
             && provider != nil && route == .embedded && modelID != nil
@@ -55,6 +121,7 @@ struct WebsiteSessionCleanupReceipt: Codable, Equatable, Sendable {
         timestamp = formatter.string(from: Date())
         self.outcome = outcome; self.provider = provider; self.route = route; self.modelID = modelID
         self.reason = reason; self.trigger = trigger; self.receiptSaved = receiptSaved
+        self.cleanupDiagnostic = cleanupDiagnostic
     }
 
     var isValid: Bool { isValid(using: ValidationContext()) }
@@ -77,6 +144,10 @@ struct WebsiteSessionCleanupReceipt: Codable, Equatable, Sendable {
                       reason == .notCreated, trigger == .inference else { return false }
             }
         } else if inferenceID != nil || sessionToken != nil || trigger == .inference { return false }
+        if let cleanupDiagnostic {
+            guard schemaVersion == 2, outcome == .unconfirmed, reason == .cleanupUnverified,
+                  route == .embedded, cleanupDiagnostic.isValid else { return false }
+        }
         guard validation.validTimestamp(timestamp) else { return false }
         if let modelID {
             guard let provider, validation.validModel(modelID, provider: provider) else { return false }
@@ -485,7 +556,8 @@ struct WebsiteSessionCleanupStore: Sendable {
         let result = try lines.map { line in
             guard !line.isEmpty, line.count <= limits.recordBytes,
                   let raw = try JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
-                  Set(raw.keys).isSubset(of: [2, 3, 4].contains(raw["schemaVersion"] as? Int ?? 0) ? legacy.union(["inferenceID", "sessionToken"]) : legacy) else { throw corrupt() }
+                  Set(raw.keys).isSubset(of: [2, 3, 4].contains(raw["schemaVersion"] as? Int ?? 0) ? legacy.union(["inferenceID", "sessionToken", "cleanupDiagnostic"]) : legacy) else { throw corrupt() }
+            if let diagnostic = raw["cleanupDiagnostic"], WebsiteCleanupFailureDiagnostic.parse(diagnostic) == nil { throw corrupt() }
             let value = try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self, from: Data(line))
             guard value.isValid(using: validation), value.receiptSaved, value.taskID.lowercased() == taskID.lowercased(),
                   turnID == nil || value.turnID == turnID,

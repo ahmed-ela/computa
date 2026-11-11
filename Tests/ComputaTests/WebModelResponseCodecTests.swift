@@ -164,6 +164,132 @@ final class WebModelResponseCodecTests: XCTestCase {
             "The stricter presentation is confined to the admitted native history profile")
     }
 
+    func testGroqAlternateEnvelopeIsOnlyACorrectionCandidateAndPreservesTheCanonicalParser() throws {
+        typealias C = WebModelResponseCodec
+        let payload = "*** Begin Patch\r\n+literal \\\"quote\\\"; e\u{0301}; 🌍\r\n*** End Patch\r\n"
+        for namespaced in [false, true] {
+            let fixture = try declaredGroqTransportFixture(namespaced: namespaced)
+            let request = fixture.request, prefix = namespaced ? "functions." : ""
+            let calls: [[String: Any]] = [
+                ["name": prefix + "inspect_literal", "arguments": ["input": "observe current state"]],
+                ["name": prefix + "literal_document", "arguments": ["input": payload]]
+            ]
+            for call in calls {
+                let alternate = String(decoding: try JSONSerialization.data(withJSONObject: ["tool_calls": [call]],
+                    options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
+                for text in [alternate, "```json\n" + alternate + "\n```"] {
+                    XCTAssertTrue(C.isGroqEnvelopeFormatCorrectionCandidate(text, request: request))
+                    XCTAssertThrowsError(try C.parseEmbeddedReply(text, request: request)) {
+                        XCTAssertEqual($0 as? C.Failure, .malformedEnvelope,
+                            "Eligibility must not accept or return a repaired response")
+                    }
+                    XCTAssertEqual(C.malformedEmbeddedReplyDiagnostic(text, request: request)?.reason, .missingOrUnknownType)
+                }
+                let canonical = try declaredGroqEnvelope([call])
+                XCTAssertFalse(C.isGroqEnvelopeFormatCorrectionCandidate(canonical, request: request))
+                guard case let .toolCalls(decoded) = try C.parseEmbeddedReply(canonical, request: request) else {
+                    return XCTFail("Only the separately generated canonical envelope can pass")
+                }
+                XCTAssertEqual(decoded.count, 1)
+                XCTAssertEqual(decoded[0].namespace, namespaced ? "functions" : nil)
+                if call["name"] as? String == prefix + "literal_document" {
+                    XCTAssertEqual(decoded[0].name, "literal_document")
+                    XCTAssertEqual(Data(try XCTUnwrap(decoded[0].customInput).utf8), Data(payload.utf8))
+                    XCTAssertEqual(decoded[0].argumentsJSON, "")
+                } else {
+                    XCTAssertEqual(decoded[0].name, "inspect_literal")
+                    XCTAssertNil(decoded[0].customInput)
+                    XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(decoded[0].argumentsJSON.utf8)) as? [String: String],
+                        ["input": "observe current state"])
+                }
+                XCTAssertEqual(request.continuationRequest, fixture.raw)
+            }
+        }
+        // The retained 496 reply stays malformed; its proposal is not dispatched or name/argument-validated.
+        let retained496 = """
+        {
+          "tool_calls": [
+            {
+              "name": "exec_command",
+              "arguments": {
+                "cmd": "python3 -m unittest -v",
+                "workdir": "/Users/ahmed/Documents/Codex/2026-10-05/testing-testing-okay-the-mic-works/work/all-models-20261102/current-workflow-preparation/fixtures/cases/invoice-496-groq-gptoss120b-64f43b03de804c57/coding"
+              }
+            }
+          ]
+        }
+        """
+        let request = try declaredGroqTransportFixture().request
+        XCTAssertEqual(retained496.utf8.count, 354)
+        XCTAssertThrowsError(try C.parseEmbeddedReply(retained496, request: request)) {
+            XCTAssertEqual($0 as? C.Failure, .malformedEnvelope)
+        }
+        XCTAssertEqual(C.malformedEmbeddedReplyDiagnostic(retained496, request: request)?.reason, .missingOrUnknownType)
+        XCTAssertFalse(C.isGroqEnvelopeFormatCorrectionCandidate(retained496, request: request),
+            "This fixture does not offer exec_command; the missing discriminator never grants tool authority")
+    }
+
+    func testGroqAlternateEnvelopeCorrectionRequiresOneUnambiguousCurrentPermittedCall() throws {
+        typealias C = WebModelResponseCodec
+        func alternate(_ calls: [[String: Any]]) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: ["tool_calls": calls],
+                options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
+        }
+        let request = try declaredGroqTransportFixture().request
+        let function: [String: Any] = ["name": "inspect_literal", "arguments": ["input": "current"]]
+        let custom: [String: Any] = ["name": "literal_document", "arguments": ["input": "exact native input"]]
+        let valid = try alternate([function])
+        let badCalls: [[String: Any]] = [
+            ["name": "inspect_literal", "arguments": "not an object"],
+            ["name": "inspect_literal", "arguments": []],
+            ["name": "inspect_literal"],
+            ["name": "unknown_tool", "arguments": [:]],
+            ["name": "functions.inspect_literal", "arguments": [:]],
+            ["name": "inspect_literal", "arguments": [:], "commentary": "extra"],
+            ["name": "literal_document", "input": "legacy shape"],
+            ["name": "literal_document", "arguments": [:]],
+            ["name": "literal_document", "arguments": ["input": 1]],
+            ["name": "literal_document", "arguments": ["input": ["nested": "text"]]],
+            ["name": "literal_document", "arguments": ["input": "text", "extra": true]]
+        ]
+        for call in badCalls { XCTAssertFalse(C.isGroqEnvelopeFormatCorrectionCandidate(try alternate([call]), request: request)) }
+        for text in [try alternate([]), try alternate([function, custom]),
+            #"{"tool_calls":[],"tool_calls":[{"name":"inspect_literal","arguments":{}}]}"#,
+            #"{"tool_calls":[{"name":"inspect_literal","name":"literal_document","arguments":{"input":"x"}}]}"#,
+            #"{"tool_calls":[{"name":"literal_document","arguments":{"input":"x","input":"y"}}]}"#,
+            #"{"tool_calls":[{"name":"inspect_literal","arguments":{}}],"commentary":"plan"}"#,
+            #"{"tool_calls":[{"name":"inspect_literal","arguments":{}}],"type":"tool_calls"}"#,
+            #"{"calls":[{"name":"inspect_literal","arguments":{}}]}"#,
+            "prose\n" + valid, valid + "\ntrailing prose", "[" + valid + "]"] {
+            XCTAssertFalse(C.isGroqEnvelopeFormatCorrectionCandidate(text, request: request), text)
+        }
+        for fixture in [try declaredGroqTransportFixture(compact: false),
+            try declaredGroqTransportFixture(includeReader: false), try declaredGroqTransportFixture(impostorReader: true),
+            try declaredGroqTransportFixture(project: false), try declaredGroqTransportFixture(includeLoader: false),
+            try declaredGroqTransportFixture(model: "browser/gemini"), try declaredGroqTransportFixture(choice: "none"),
+            try declaredGroqTransportFixture(choice: ["type": "function", "name": "inspect_literal"])] {
+            XCTAssertFalse(C.isGroqEnvelopeFormatCorrectionCandidate(valid, request: fixture.request))
+            XCTAssertEqual(fixture.request.continuationRequest, fixture.raw)
+        }
+        let allowed = try declaredGroqTransportFixture(choice: ["type": "allowed_tools", "mode": "required", "tools": [
+            ["type": "function", "name": GroqToolCatalog.name], ["type": "function", "name": GroqHistoryTool.name],
+            ["type": "custom", "name": "literal_document"]]])
+        XCTAssertTrue(C.isGroqEnvelopeFormatCorrectionCandidate(try alternate([custom]), request: allowed.request))
+        XCTAssertFalse(C.isGroqEnvelopeFormatCorrectionCandidate(valid, request: allowed.request))
+        let fixture = try declaredGroqTransportFixture()
+        let seed = try XCTUnwrap(try C.prepareRequest(fixture.raw).groqToolCatalogSeed)
+        let scope = GroqToolCatalog.Scope(taskID: "92000000-0000-4000-8000-000000000001", threadID: "92000000-0000-4000-8000-000000000002",
+            turnID: "92000000-0000-4000-8000-000000000003", runtimeGeneration: UUID(), preparationID: UUID(), modelID: fixture.request.model)
+        var catalog = GroqToolCatalog()
+        let baseline = try catalog.prepare(scope: scope, seed: seed)
+        let unloaded = try C.prepareRequest(fixture.raw, groqToolCatalogProjection: baseline, groqDirectTools: .loadedOnly, compactHistoryInventory: true)
+        XCTAssertTrue(unloaded.offeredToolNames.contains(GroqToolCatalog.name))
+        XCTAssertTrue(unloaded.offeredToolNames.contains(GroqHistoryTool.name))
+        XCTAssertFalse(unloaded.offeredToolNames.contains("inspect_literal"))
+        XCTAssertFalse(C.isGroqEnvelopeFormatCorrectionCandidate(valid, request: unloaded),
+            "Registration in the native catalog is insufficient without a current offered schema")
+    }
+
     private func declaredGroqEnvelope(_ calls: [[String: Any]]) throws -> String {
         String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": calls], options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
     }

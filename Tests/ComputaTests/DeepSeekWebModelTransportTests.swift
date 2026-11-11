@@ -703,6 +703,35 @@ final class DeepSeekWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testCleanupDiagnosticRetainsOriginalAdapterFailureAcrossRetryWithoutReplay() async throws {
+        let fixture = try Fixture(setup: "deepseekFixture.options.holdDeletionMenu=true; deepseekFixture.options.deleteMenuMutation='foreign'")
+        defer { fixture.shutdown() }
+        let token = try await start(fixture)
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic cleanup diagnostic")
+        _ = try await wait(fixture, token, state: "complete")
+        let first = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(first["cleanup"] as? String, "failed")
+        let original = try XCTUnwrap(WebsiteCleanupFailureDiagnostic.parse(first["cleanupDiagnostic"]))
+        XCTAssertEqual(original.stage, .savedDeletion); XCTAssertEqual(original.failure, .ownership)
+        XCTAssertEqual(original.ownershipReason, .javaScriptConversation)
+        XCTAssertEqual(original.adapter?.error, .conversationChanged)
+        XCTAssertEqual(original.adapter?.detail, .deleteConfirmMenuStillVisible)
+        // The next attempt encounters terminal_operation, but cannot replace
+        // the original diagnostic or replenish any destructive-action claim.
+        let second = try await call(fixture, "webProviderCancel", token)
+        XCTAssertEqual(second["cleanup"] as? String, "failed")
+        XCTAssertEqual(WebsiteCleanupFailureDiagnostic.parse(second["cleanupDiagnostic"]), original)
+        try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 0)
+        XCTAssertNotNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+        let native = EmbeddedWebModelTransport.cleanupFailureDiagnostic(
+            EmbeddedWebModelTransport.Failure.ownershipFailure(.documentGenerationAfter), stage: .savedDeletion)
+        XCTAssertEqual(native.failure, .ownership); XCTAssertEqual(native.ownershipReason, .documentGenerationAfter)
+        XCTAssertEqual(WebsiteCleanupFailureDiagnostic.parse(native.dictionary), native)
+        let unknown = EmbeddedWebModelTransport.cleanupFailureDiagnostic(NSError(domain: "PRIVATE_CANARY", code: 1), stage: .preflight)
+        XCTAssertEqual(unknown.failure, .other); XCTAssertNil(unknown.ownershipReason)
+    }
+
     func testHeldDeletionMenuDOMWakeupsCannotRenewFixedCleanupDeadlineOrRepeatSelection() async throws {
         let fixture = try Fixture(setup: "deepseekFixture.options.holdDeletionMenu=true; deepseekFixture.options.menuWakeupMs=50")
         defer { fixture.shutdown() }

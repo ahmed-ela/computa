@@ -277,7 +277,7 @@ final class WebsiteModelFormatCorrectionStoreTests: XCTestCase {
     }
 
     func testUnofferedReasonPersistsWithoutCreatingAnotherPerNativeTurnAllowance() throws {
-        let reasons: [Store.Reason] = [.invalidJSON, .rendererFailure, .unofferedTool]
+        let reasons: [Store.Reason] = [.invalidJSON, .rendererFailure, .unofferedTool, .envelopeFormat]
         for firstReason in reasons {
             let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
             let directory = root.appendingPathComponent("correction"), store = Store(directory: directory)

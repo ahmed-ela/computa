@@ -15165,7 +15165,15 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await runGroqNativeLiteralCorrection(secondFails: true)
     }
 
-    private func runGroqNativeLiteralCorrection(secondFails: Bool) async throws {
+    func testGroqEnvelopeFormatCorrectionRegeneratesOnlyAfterTheMalformedLiteralIsClosed() async throws {
+        try await runGroqNativeLiteralCorrection(secondFails: false, envelopeFormat: true)
+    }
+
+    func testGroqEnvelopeFormatCorrectionSecondFailureCannotObtainAnotherAllowance() async throws {
+        try await runGroqNativeLiteralCorrection(secondFails: true, envelopeFormat: true)
+    }
+
+    private func runGroqNativeLiteralCorrection(secondFails: Bool, envelopeFormat: Bool = false) async throws {
         let fixture = try Fixture(page: Self.groqFixturePage()); defer { fixture.shutdown() }
         let root = try websiteBenchmarkTemporaryDirectory().appendingPathComponent("GroqLiteralCorrection-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
@@ -15212,8 +15220,15 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         func loader(_ names: [String]) throws -> String {
             try envelope([["name": GroqToolCatalog.name, "arguments": ["catalog_revision": revision, "names": names]]])
         }
-        let bad = try envelope([["name": "exec_command", "arguments": ["cmd": "REJECTED_UNLOADED_NEVER_DISPATCHED"]]])
-        let replies = [try loader(["exec_command"]), try loader(["fixture_other"]), bad,
+        let bad: String
+        if envelopeFormat {
+            bad = String(decoding: try JSONSerialization.data(withJSONObject: ["tool_calls": [
+                ["name": "exec_command", "arguments": ["cmd": "REJECTED_MALFORMED_NEVER_DISPATCHED"]]
+            ]], options: [.sortedKeys]), as: UTF8.self)
+        } else {
+            bad = try envelope([["name": "exec_command", "arguments": ["cmd": "REJECTED_UNLOADED_NEVER_DISPATCHED"]]])
+        }
+        let replies = [try loader(["exec_command"]), try loader([envelopeFormat ? "exec_command" : "fixture_other"]), bad,
             secondFails ? bad : try loader(["exec_command"]),
             try envelope([["name": "exec_command", "arguments": ["cmd": "SYNTHETIC_FIRST_COMPLETION"]]]),
             try envelope([["name": "exec_command", "arguments": ["cmd": "SYNTHETIC_LAST_COMPLETION"]]]),
@@ -15262,7 +15277,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             input += nativeCalls(calls) + [["type": "function_call_output", "call_id": try XCTUnwrap(call["call_id"]),
                 "output": String(decoding: loaded, as: UTF8.self)]]
         }
-        for name in ["exec_command", "fixture_other"] {
+        for name in ["exec_command", envelopeFormat ? "exec_command" : "fixture_other"] {
             let (body, status) = try await post(); XCTAssertEqual(status, 200)
             try await appendLoader(body, expected: name)
         }
@@ -15275,7 +15290,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         if secondFails {
             XCTAssertEqual(status, 500)
             let error = try XCTUnwrap((JSONSerialization.jsonObject(with: corrected) as? [String: Any])?["error"] as? [String: Any])
-            XCTAssertEqual(error["code"] as? String, "invalid_model_output")
+            XCTAssertEqual(error["code"] as? String, envelopeFormat ? "malformed_website_reply" : "invalid_model_output")
             let (_, duplicateStatus) = try await post(); XCTAssertNotEqual(duplicateStatus, 200)
             XCTAssertEqual(pages.count, 4, "A same-context duplicate native HTTP request cannot obtain a third correction")
             let issues = await server.fixtureFinish(taskID: task, runtimeGeneration: runtime); XCTAssertTrue(issues.isEmpty)
@@ -15346,7 +15361,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let files = try FileManager.default.contentsOfDirectory(at: correctionDirectory, includingPropertiesForKeys: nil).filter { $0.pathExtension == "json" }
         XCTAssertEqual(files.count, 3, "Exactly one durable claimed/closed/finished allowance")
         let correctionRows = try files.map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: $0)) as? [String: Any]) }
-        XCTAssertTrue(correctionRows.allSatisfy { $0["reason"] as? String == "unoffered_tool" })
+        XCTAssertTrue(correctionRows.allSatisfy { $0["reason"] as? String == (envelopeFormat ? "envelope_format" : "unoffered_tool") })
         XCTAssertEqual(correctionRows.first { $0["phase"] as? String == "finished" }?["outcome"] as? String,
             secondFails ? "failed" : "response_validated")
         _ = await server.shutdown()
@@ -15363,7 +15378,13 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
-    private func runGroqNativeLiteralCorrectionBarrier(_ barrier: String) async throws {
+    func testGroqEnvelopeFormatCorrectionRetainsNativeCancellationCleanupDeadlineAndBudgetBarriers() async throws {
+        for barrier in ["cancel", "context", "cleanup", "expiry", "budget"] {
+            try await runGroqNativeLiteralCorrectionBarrier(barrier, envelopeFormat: true)
+        }
+    }
+
+    private func runGroqNativeLiteralCorrectionBarrier(_ barrier: String, envelopeFormat: Bool = false) async throws {
         let bad = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"REJECTED_UNLOADED_NEVER_DISPATCHED"}}]}"#
         let quoted = String(decoding: try JSONSerialization.data(withJSONObject: bad, options: [.fragmentsAllowed]), as: UTF8.self)
         let page = try Self.groqFixturePage().replacingOccurrences(of: "window.fixtureReady = true;",
@@ -15420,6 +15441,19 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(try XCTUnwrap(expected).units, 5_990)
             XCTAssertLessThanOrEqual(try XCTUnwrap(expected).units, 6_000)
         }
+        if envelopeFormat {
+            let seed = try XCTUnwrap(WebModelResponseCodec.prepareRequest(body).groqToolCatalogSeed)
+            let revision = try GroqToolCatalog.baseline(for: seed).revision
+            let malformed = String(decoding: try JSONSerialization.data(withJSONObject: ["tool_calls": [
+                ["name": GroqToolCatalog.name, "arguments": ["catalog_revision": revision, "names": ["exec_command"]]]
+            ]], options: [.sortedKeys]), as: UTF8.self)
+            let quoted = String(decoding: try JSONSerialization.data(withJSONObject: malformed, options: [.fragmentsAllowed]), as: UTF8.self)
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                guard action == "prepare", let id = fixture.createdTabs.last,
+                      let view = fixture.browser.webView(for: id) else { return }
+                _ = try? await self.evaluate(view, "groqFixture.reply = " + quoted + "; return true;")
+            }
+        }
         var proofEntered = false, cancelledAtProof = false
         var ownedView: WKWebView?, budgetOutboundBeforeCleanup: String?
         forwarder.beforeReturningProof = { _ in
@@ -15471,6 +15505,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             let sends = try await evaluate(view, "return groqFixture.sendCount;") as? Int
             XCTAssertEqual(sends, 1)
         }
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
         // The cleanup-negative case retains its failed Clear operation;
         // local fixture teardown disposes it without replaying that action.
         if barrier != "cleanup" { _ = await server.shutdown() }

@@ -1111,9 +1111,10 @@ actor WebModelServer {
 
     private func recordCleanupReceipt(taskID: String, session: Session?, runtimeGeneration: UUID,
                                       outcome: WebsiteSessionCleanupReceipt.Outcome, reason: WebsiteSessionCleanupReceipt.Reason,
-                                      trigger: WebsiteSessionCleanupReceipt.Trigger) -> WebsiteSessionCleanupReceipt {
+                                      trigger: WebsiteSessionCleanupReceipt.Trigger,
+                                      cleanupDiagnostic: WebsiteCleanupFailureDiagnostic? = nil) -> WebsiteSessionCleanupReceipt {
         var receipt = makeCleanupReceipt(taskID: taskID, session: session, runtimeGeneration: runtimeGeneration,
-            outcome: outcome, reason: reason, trigger: trigger)
+            outcome: outcome, reason: reason, trigger: trigger, cleanupDiagnostic: cleanupDiagnostic)
         receipt.receiptSaved = true
         if cleanupReceiptStore?.save(receipt) != true { receipt.receiptSaved = false }
         return receipt
@@ -1121,7 +1122,8 @@ actor WebModelServer {
 
     private func makeCleanupReceipt(taskID: String, session: Session?, runtimeGeneration: UUID,
                                     outcome: WebsiteSessionCleanupReceipt.Outcome, reason: WebsiteSessionCleanupReceipt.Reason,
-                                    trigger: WebsiteSessionCleanupReceipt.Trigger) -> WebsiteSessionCleanupReceipt {
+                                    trigger: WebsiteSessionCleanupReceipt.Trigger,
+                                    cleanupDiagnostic: WebsiteCleanupFailureDiagnostic? = nil) -> WebsiteSessionCleanupReceipt {
         let canonicalTask = UUID(uuidString: taskID)?.uuidString.lowercased() ?? taskID
         return WebsiteSessionCleanupReceipt(taskID: taskID,
             threadID: session?.context.threadID ?? evidenceThreads[canonicalTask],
@@ -1130,7 +1132,7 @@ actor WebModelServer {
             provider: session.flatMap { WebsiteSessionCleanupReceipt.Provider(rawValue: $0.provider) },
             route: session.map { _ in .embedded }, modelID: session?.modelID,
             reason: reason, trigger: trigger, inferenceID: session?.inferenceID.uuidString.lowercased(),
-            sessionToken: session?.token)
+            sessionToken: session?.token, cleanupDiagnostic: cleanupDiagnostic)
     }
     // Retained Haiku needs a separate internally built qualification artifact.
     #if COMPUTA_QUALIFY_RETAINED_HAIKU
@@ -1499,12 +1501,16 @@ actor WebModelServer {
             authorization.revoke()
             await session.transport.revokeInspectorDiagnostic(sessionToken: session.token)
         }
+        var cleanupDiagnostic: WebsiteCleanupFailureDiagnostic?
         do {
             var params = ["sessionToken": session.token]
             if cancel { params["cleanupCause"] = cleanupCause.rawValue }
             let reply = try await call(session.transport,
                 operation: cancel ? "webProviderCancel" : "webProviderFinish",
                 params: params)
+            if reply["cleanup"] as? String == "failed" {
+                cleanupDiagnostic = WebsiteCleanupFailureDiagnostic.parse(reply["cleanupDiagnostic"])
+            }
             let reason: WebsiteSessionCleanupReceipt.Reason
             switch reply["cleanup"] as? String {
             case "deleted": reason = .deleted
@@ -1524,7 +1530,7 @@ actor WebModelServer {
             // Retain exact ownership for another cleanup attempt; never claim
             // that closing a tab alone deleted a saved website conversation.
             let receipt = recordCleanupReceipt(taskID: taskID, session: session, runtimeGeneration: runtimeGeneration,
-                outcome: .unconfirmed, reason: .cleanupUnverified, trigger: trigger)
+                outcome: .unconfirmed, reason: .cleanupUnverified, trigger: trigger, cleanupDiagnostic: cleanupDiagnostic)
             await cleanupReceiptObserver?(receipt)
             // Preserve only the existing finite bridge diagnostic, never raw
             // transport text, in the user-facing warning.
@@ -2043,7 +2049,7 @@ actor WebModelServer {
                     } else {
                         prompt = request.prompt
                     }
-                    if correctionTicket?.reason == .unofferedTool { try requireCurrentContext() }
+                    if correctionTicket?.reason.requiresGroqCompletedLiteralProof == true { try requireCurrentContext() }
                     var params = ["provider": provider]
                     if let choice {
                         guard let encoded = choice.canonicalJSONString else { throw Failure.invalidRequest }
@@ -2308,7 +2314,7 @@ actor WebModelServer {
                 if let submissionBodyUnits {
                     do {
                         permit = try await pacer.acquire(cost: submissionBodyUnits + WebModelResponseCodec.groqReservedTokens,
-                            until: correctionTicket?.reason == .unofferedTool ? responseDeadline : nil)
+                            until: correctionTicket?.reason.requiresGroqCompletedLiteralProof == true ? responseDeadline : nil)
                     } catch WebsiteRequestPacer.Failure.deadline {
                         try Task.checkCancellation()
                         throw Failure.deadline
@@ -2404,6 +2410,21 @@ actor WebModelServer {
                                     inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
                                 if diagnostic.reason == .invalidJSON {
                                     correctionCandidate = (.invalidJSON, session, end, evidence, value)
+                                } else if diagnostic.reason == .missingOrUnknownType,
+                                          provider == "groq", correctionTicket == nil,
+                                          context.isCompactToolThread, context.historyPreparation != nil, !context.isMaintenance,
+                                          WebModelResponseCodec.isGroqEnvelopeFormatCorrectionCandidate(text, request: request),
+                                          ContinuousClock.now < end {
+                                    // The original envelope stays rejected. Native proof only
+                                    // permits one fresh, bounded request for canonical output.
+                                    responseDeadline = end
+                                    let proof = await session.transport.snapshotGroqCompletedLiteralProof(sessionToken: session.token)
+                                    try requireCurrentContext()
+                                    if ContinuousClock.now < end, let proof,
+                                       Self.matchesGroqCompletedLiteralProof(proof, taskID: taskID, session: session, snapshot: value, text: text) {
+                                        groqCorrectionProof = proof
+                                        correctionCandidate = (.envelopeFormat, session, end, evidence, value)
+                                    }
                                 }
                                 throw Failure.malformedReply(diagnostic)
                             }
@@ -2556,7 +2577,7 @@ actor WebModelServer {
             } catch {
                 var terminalError = error
                 do {
-                    // Both failure reasons share one durable per-turn allowance.
+                    // All correction reasons share one durable per-turn allowance.
                     // Native renderer errors carry no response or tool authority.
                     if let candidate = correctionCandidate {
                         let reason = candidate.reason
@@ -2567,7 +2588,7 @@ actor WebModelServer {
                             || provider == "claude" && reason == .invalidJSON
                                 && session.provesFreshSessionSubmission && session.freshSessionSubmissionVerified
                                 && Self.isClaudeFormatCorrectionCandidate(candidate.snapshot)
-                            || provider == "groq" && reason == .unofferedTool
+                            || provider == "groq" && reason.requiresGroqCompletedLiteralProof
                                 && context.isCompactToolThread && context.historyPreparation != nil
                                 && groqCorrectionProof != nil
                         if correctionTicket == nil, correctionProof, !context.isMaintenance,
@@ -2658,7 +2679,7 @@ actor WebModelServer {
                     let second = inferenceID == correctionTicket.secondInferenceID ? lease : nil
                     let outcome: WebsiteModelFormatCorrectionStore.Outcome
                     if error is CancellationError { outcome = .cancelled }
-                    else if correctionTicket.reason == .unofferedTool, Self.isGroqHistoryBudgetFailure(error) {
+                    else if correctionTicket.reason.requiresGroqCompletedLiteralProof, Self.isGroqHistoryBudgetFailure(error) {
                         outcome = .budgetExhausted
                     } else if let failure = error as? Failure {
                         switch failure {
@@ -2878,6 +2899,7 @@ actor WebModelServer {
         case .invalidJSON: failure = "The entire previous website reply was rejected as invalid JSON."
         case .rendererFailure: failure = "The website could not render the previous reply. Computa accepted no response or tool calls from that inference."
         case .unofferedTool: failure = "The previous reply called an unloaded tool and was rejected; no call from it executed. Optional tool loads replace the selection. Use currently offered schemas, or request an eligible name through the offered loader and await its next-request schema."
+        case .envelopeFormat: failure = "The previous reply used a tool_calls array instead of the required type and calls envelope and was rejected; no call from it executed. Return one complete envelope with \"type\":\"tool_calls\" and a \"calls\" array containing one call that follows its currently offered schema."
         }
         return """
 

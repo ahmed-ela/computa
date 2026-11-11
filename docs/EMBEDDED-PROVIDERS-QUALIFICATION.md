@@ -4012,3 +4012,11 @@ no matching diagnostic, and existing receipts retain only `cleanup_unverified`.
 Structure and rejected-reply captures were armed after initial successful tool
 calls; neither applies to this cleanup failure, and both unused arms were retired.
 This is a partial workflow result, not a clean DeepThink qualification.
+
+### 2026-11-11 — Durable cleanup failure diagnostics in 497
+
+Cleanup receipts can retain a versioned, closed diagnostic: stage, failure category, exact native OwnershipReason for ownership failures, and optional finite adapter code/detail. Free-form errors, page contents and credentials are excluded. Unknown or inconsistent fields fail validation.
+
+The metadata survives restoration to explain an unconfirmed cleanup. It grants neither closure proof nor retry authority and does not repair or establish the cause of the earlier DeepThink deletion failure. Existing cleanup verification and terminal failure behavior remain intact.
+
+Validation: all 670 combined Swift methods passed with zero failures or skips in 286.548 seconds. The cleanup subset covers old receipt compatibility, closed-field validation, exact original native error retention and unchanged action counts. This is test-fixture evidence; live diagnosis and qualification remain pending.

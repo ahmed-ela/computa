@@ -14,7 +14,9 @@ final class WebsiteSessionCleanupTests: XCTestCase {
 
     func testInferenceRetirementFailureAndExactManualRetryPersistOriginalBindingWithoutInferenceReplay() async throws {
         let root = try directory(), task = UUID().uuidString, thread = UUID().uuidString, turn = UUID().uuidString
-        let generation = UUID(), original = CleanupReceiptTransport(failFirstCleanup: true)
+        let diagnostic = WebsiteCleanupFailureDiagnostic(stage: .savedDeletion, failure: .ownership, ownershipReason: .javaScriptConversation,
+            adapter: .init(error: "conversation_changed", detail: "delete_anchor"))
+        let generation = UUID(), original = CleanupReceiptTransport(failFirstCleanup: true, cleanupDiagnostic: diagnostic)
         let replacement = CleanupReceiptTransport()
         let server = WebModelServer(), audit = CleanupReceiptAudit()
         await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(original))
@@ -28,6 +30,7 @@ final class WebsiteSessionCleanupTests: XCTestCase {
         let lastAutomatic = await audit.last()
         let automatic = try XCTUnwrap(lastAutomatic)
         XCTAssertEqual(automatic.outcome, .unconfirmed); XCTAssertEqual(automatic.trigger, .inference)
+        XCTAssertEqual(automatic.cleanupDiagnostic, diagnostic)
         XCTAssertEqual(automatic.taskID, task.lowercased()); XCTAssertEqual(automatic.threadID, thread.lowercased())
         XCTAssertEqual(automatic.turnID, turn.lowercased()); XCTAssertEqual(automatic.provider, .claude)
         XCTAssertEqual(automatic.route, .embedded); XCTAssertEqual(automatic.modelID, "browser/claude")
@@ -41,6 +44,7 @@ final class WebsiteSessionCleanupTests: XCTestCase {
             await server.retryWebsiteSessionCleanup(taskID: task, runtimeGeneration: generation)
         }
         XCTAssertEqual(closed.outcome, .closed); XCTAssertEqual(closed.reason, .deleted)
+        XCTAssertNil(closed.cleanupDiagnostic, "Successful retry never carries a failure observation")
         XCTAssertEqual(closed.trigger, .manual); XCTAssertTrue(closed.receiptSaved)
         let repeated = await server.retryWebsiteSessionCleanup(taskID: task, runtimeGeneration: generation)
         XCTAssertEqual(repeated, closed, "Turn-end current absence cannot overwrite the exact durable closure")
@@ -54,6 +58,8 @@ final class WebsiteSessionCleanupTests: XCTestCase {
         XCTAssertTrue(raw.contains(originalToken.lowercased())); XCTAssertFalse(raw.contains("PRIVATE_REPLY_CANARY"))
         let records = try raw.split(separator: "\n").map { try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self, from: Data($0.utf8)) }
         XCTAssertEqual(records.map(\.outcome), [.unconfirmed, .closed])
+        XCTAssertEqual(records.first?.cleanupDiagnostic, diagnostic)
+        XCTAssertNil(records.last?.cleanupDiagnostic)
         XCTAssertTrue(records.allSatisfy { $0.inferenceID == automatic.inferenceID && $0.sessionToken == automatic.sessionToken })
         XCTAssertEqual(WebsiteSessionCleanupStore(directory: root).latest(), [closed])
         _ = await server.shutdown()
@@ -794,6 +800,38 @@ final class WebsiteSessionCleanupTransactionStoreTests: XCTestCase {
 
     private func journalFile(_ root: URL, _ scope: Scope, turn: String? = nil) -> URL {
         root.appendingPathComponent("transactions").appendingPathComponent(scope.task).appendingPathComponent((turn ?? scope.turn) + ".jsonl")
+    }
+
+    func testCleanupDiagnosticOldReceiptCompatibilityAndClosedFiniteValidation() throws {
+        let scope = Scope(), old = receipt(scope), oldBytes = try JSONEncoder().encode(old)
+        XCTAssertNil(old.cleanupDiagnostic)
+        XCTAssertFalse(String(decoding: oldBytes, as: UTF8.self).contains("cleanupDiagnostic"))
+        XCTAssertEqual(try JSONDecoder().decode(WebsiteSessionCleanupReceipt.self, from: oldBytes), old)
+        let diagnostic = WebsiteCleanupFailureDiagnostic(stage: .savedDeletion, failure: .ownership, ownershipReason: .javaScriptConversation,
+            adapter: .init(error: "conversation_changed", detail: "delete_confirm_menu_still_visible"))
+        XCTAssertEqual(WebsiteCleanupFailureDiagnostic.parse(diagnostic.dictionary), diagnostic)
+        let mutations: [[String: Any]] = [["version": true], ["version": 2], ["stage": "PRIVATE_CANARY"],
+            ["failure": "PRIVATE_CANARY"], ["pageText": "PRIVATE_CANARY"],
+            ["ownershipReason": "PRIVATE_CANARY"], ["ownershipReason": NSNull()], ["failure": "other"],
+            ["adapter": ["error": "conversation_changed", "detail": "PRIVATE_CANARY"]],
+            ["adapter": ["error": "conversation_changed", "detail": "delete_anchor", "url": "PRIVATE_CANARY"]]]
+        for mutation in mutations {
+            var raw = diagnostic.dictionary; mutation.forEach { raw[$0.key] = $0.value }
+            XCTAssertNil(WebsiteCleanupFailureDiagnostic.parse(raw))
+        }
+        let sanitized = WebsiteCleanupFailureDiagnostic.Adapter(error: "PRIVATE_CANARY", detail: "PRIVATE_CANARY")
+        XCTAssertEqual(sanitized.error, .other); XCTAssertEqual(sanitized.detail, .other)
+        XCTAssertFalse(String(decoding: try JSONEncoder().encode(sanitized), as: UTF8.self).contains("PRIVATE_CANARY"))
+        let failed = try changed(old, ["outcome": "unconfirmed", "reason": "cleanup_unverified", "cleanupDiagnostic": diagnostic.dictionary])
+        let store = WebsiteSessionCleanupStore(directory: try directory())
+        XCTAssertTrue(failed.isValid); XCTAssertTrue(store.save(failed)); XCTAssertEqual(store.latest(), [failed])
+        let forgedSuccess = try changed(failed, ["outcome": "closed", "reason": "deleted"])
+        XCTAssertFalse(forgedSuccess.isValid); XCTAssertFalse(store.save(forgedSuccess))
+        let file = store.directory.appendingPathComponent(scope.task + ".jsonl")
+        var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(failed)) as? [String: Any])
+        var invalid = diagnostic.dictionary; invalid["pageText"] = "PRIVATE_CANARY"; raw["cleanupDiagnostic"] = invalid
+        var bytes = try JSONSerialization.data(withJSONObject: raw); bytes.append(0x0A); try bytes.write(to: file)
+        XCTAssertTrue(store.latest().isEmpty, "Unknown nested diagnostic fields cannot be silently decoded away")
     }
 
     func testLegacyDecodeAndIdenticalRetryRemainCompatibleWithoutInventedTransactionProof() throws {
@@ -1740,10 +1778,11 @@ private actor CleanupReceiptTransport: WebModelTransport {
     private let cleanupGate: CleanupReceiptGate?
     private let malformedReply: Bool
     private let pollFailure: EmbeddedWebModelTransport.Failure?
+    private let cleanupDiagnostic: WebsiteCleanupFailureDiagnostic?
     init(failFirstCleanup: Bool = false, cleanupGate: CleanupReceiptGate? = nil, malformedReply: Bool = false,
-         pollFailure: EmbeddedWebModelTransport.Failure? = nil) {
+         pollFailure: EmbeddedWebModelTransport.Failure? = nil, cleanupDiagnostic: WebsiteCleanupFailureDiagnostic? = nil) {
         self.failFirstCleanup = failFirstCleanup; self.cleanupGate = cleanupGate; self.malformedReply = malformedReply
-        self.pollFailure = pollFailure
+        self.pollFailure = pollFailure; self.cleanupDiagnostic = cleanupDiagnostic
     }
     func token() -> String { ownedToken }
     func calls() -> [(String, String)] { operations }
@@ -1760,7 +1799,12 @@ private actor CleanupReceiptTransport: WebModelTransport {
                 if let pollFailure { throw pollFailure }
                 result = ["state": "complete", "text": malformedReply ? #"{"type":"tool_calls","calls":["# : "{\"type\":\"message\",\"text\":\"OK\"}"]
             case "webProviderFinish", "webProviderCancel":
-                if failFirstCleanup { failFirstCleanup = false; result = ["cleanup": "failed", "error": ["message": "PRIVATE_REPLY_CANARY"]] }
+                if failFirstCleanup {
+                    failFirstCleanup = false
+                    var failed: [String: Any] = ["cleanup": "failed", "error": ["message": "PRIVATE_REPLY_CANARY"]]
+                    if let cleanupDiagnostic { failed["cleanupDiagnostic"] = cleanupDiagnostic.dictionary }
+                    result = failed
+                }
                 else { await cleanupGate?.pause(); result = ["cleanup": "deleted"] }
             default: throw WebModelServer.Failure.invalidRequest
             }

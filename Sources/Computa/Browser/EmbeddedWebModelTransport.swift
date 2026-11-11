@@ -470,7 +470,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
     }
 
-    enum OwnershipReason: String {
+    enum OwnershipReason: String, Codable, Sendable {
         case documentGenerationBefore = "document_generation_before"
         case documentGenerationAfter = "document_generation_after"
         case routeBefore = "route_before"
@@ -836,6 +836,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
         }
         var savedDeleteOperation: SavedDeleteOperation?
+        // The first cleanup failure survives later automatic/manual attempts.
+        var cleanupFailureDiagnostic: WebsiteCleanupFailureDiagnostic?
+        var cleanupFailureStage: WebsiteCleanupFailureDiagnostic.Stage?
+        var cleanupAdapterFailure: WebsiteCleanupFailureDiagnostic.Adapter?
         var lifecycleVerified: Bool {
             switch provider.lifecycle {
             case .temporary: temporary
@@ -7954,6 +7958,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             for record in log.records { Self.inspectionLog.notice("\(record, privacy: .public)") }
         }
         logModelDiagnostic(observed, session: session)
+        if session.requiresSavedDelete, session.cleanupFailureStage != nil, session.cleanupAdapterFailure == nil,
+           allowSavedCleanupInspection || savedDeleteOperation != nil,
+           let error = observed["error"] as? String,
+           WebsiteCleanupFailureDiagnostic.Adapter.Code(rawValue: error) != nil, error != "other" {
+            session.cleanupAdapterFailure = .init(error: error, detail: observed["detail"] as? String)
+        }
         if let safe = Self.sanitizedProductModeDiagnostic(observed["productModeDiagnostic"]),
            safe != session.lastProductModeDiagnostic {
             session.lastProductModeDiagnostic = safe
@@ -9357,6 +9367,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     private func performFinish(_ session: Session, cancel: Bool,
                                cleanupCause: WebModelCleanupCause) async -> Data {
+        if session.requiresSavedDelete { session.cleanupFailureStage = .preflight; session.cleanupAdapterFailure = nil }
+        defer { session.cleanupFailureStage = nil; session.cleanupAdapterFailure = nil }
         defer {
             if sessions[session.token] == nil { observationDiagnosticLogBudgets.removeValue(forKey: session.token) }
         }
@@ -9418,13 +9430,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // a sign-in redirect; inference cleanup authority is unchanged.
                 guard !session.submitted, browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }
             } else if session.requiresSavedDelete {
+                session.cleanupFailureStage = .savedDeletion
                 let cleanup = try await deleteOwnedConversation(session)
+                session.cleanupFailureStage = .physicalClose
                 browser.closeTab(session.tabID)
                 session.responseProfile?.mark(.physicalClose)
                 guard browser.webView(for: session.tabID) == nil,
                       !browser.tabs.contains(where: { $0.id == session.tabID }), session.view.superview == nil else { throw Failure.staleSession }
                 sessions.removeValue(forKey: session.token)
                 session.state = "finished"
+                session.cleanupFailureStage = .snapshot
                 return try snapshot(session, cleanup: cleanup)
             } else if session.requiresExplicitClear {
                 let cleanup = try await clearOwnedTranscript(session)
@@ -9504,8 +9519,35 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
             return try snapshot(session, cleanup: "not_created")
         } catch {
+            // Diagnostic metadata cannot change the original failure or cleanup authority.
+            if session.requiresSavedDelete, session.cleanupFailureDiagnostic == nil {
+                session.cleanupFailureDiagnostic = Self.cleanupFailureDiagnostic(error,
+                    stage: session.cleanupFailureStage ?? .preflight, adapter: session.cleanupAdapterFailure)
+            }
             // Retain the exact owned tab for inspection/retry; never erase a human chat.
             return (try? snapshot(session, cleanup: "failed")) ?? Data("{}".utf8)
+        }
+    }
+
+    static func cleanupFailureDiagnostic(_ error: Error, stage: WebsiteCleanupFailureDiagnostic.Stage,
+                                         adapter: WebsiteCleanupFailureDiagnostic.Adapter? = nil) -> WebsiteCleanupFailureDiagnostic {
+        let reason: OwnershipReason?
+        if let failure = error as? Failure, case .ownershipFailure(let value) = failure { reason = value }
+        else { reason = nil }
+        return .init(stage: stage, failure: cleanupFailureKind(error), ownershipReason: reason, adapter: adapter)
+    }
+
+    private static func cleanupFailureKind(_ error: Error) -> WebsiteCleanupFailureDiagnostic.Failure {
+        guard let failure = error as? Failure else { return error is CancellationError ? .cancelled : .other }
+        switch failure {
+        case .ownershipFailure: return .ownership
+        case .staleSession: return .staleSession
+        case .invalidRequest: return .invalidRequest
+        case .temporaryUnverified, .explicitClearUnverified, .savedDeleteUnverified: return .lifecycleUnverified
+        case .modelUnverified, .modelMismatch, .modelUnavailable: return .modelUnverified
+        case .signInRequired, .humanVerificationRequired, .usageLimited, .unexpectedPage: return .websiteBlocked
+        case .pageUnavailable: return .pageUnavailable
+        default: return .other
         }
     }
 
@@ -9588,6 +9630,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 spent: session.savedResponseChoiceGrant != nil, acknowledged: session.savedResponseChoiceAcknowledged)
         }
         if let cleanup { value["cleanup"] = cleanup }
+        if cleanup == "failed", let diagnostic = session.cleanupFailureDiagnostic {
+            value["cleanupDiagnostic"] = diagnostic.dictionary
+        }
         return try JSONSerialization.data(withJSONObject: value)
     }
 

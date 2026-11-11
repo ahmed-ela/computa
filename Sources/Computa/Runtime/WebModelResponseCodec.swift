@@ -1496,6 +1496,30 @@ enum WebModelResponseCodec {
         return Set(call.keys) == ["name", "arguments"] && call["arguments"] is [String: Any]
     }
 
+    /// Narrow one rejected alternate envelope to a correction request only.
+    /// The original reply remains malformed; no call or repaired reply escapes.
+    static func isGroqEnvelopeFormatCorrectionCandidate(_ text: String, request: Request) -> Bool {
+        guard LocalModelCatalog.webProvider(for: request.model) == "groq",
+              request.limitsWebsiteCallsToOne else { return false }
+        let candidate = removingJSONFence(text.trimmingCharacters(in: .whitespacesAndNewlines))
+        let data = Data(candidate.utf8)
+        guard !data.isEmpty, data.count <= maximumPromptBytes,
+              APIModelCorrectionJSON.isUnambiguous(data),
+              let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(envelope.keys) == ["tool_calls"],
+              let calls = envelope["tool_calls"] as? [[String: Any]], calls.count == 1,
+              let call = calls.first, Set(call.keys) == ["name", "arguments"],
+              let name = call["name"] as? String,
+              request.tools[name] != nil, request.toolPolicy.allowedNames.contains(name),
+              call["arguments"] is [String: Any],
+              let canonical = try? JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": calls],
+                  options: [.sortedKeys, .withoutEscapingSlashes]),
+              let validated = try? parseReply(String(decoding: canonical, as: UTF8.self),
+                  request: request, requireEnvelope: true),
+              case let .toolCalls(validatedCalls) = validated, validatedCalls.count == 1 else { return false }
+        return true
+    }
+
     /// Diagnose exactly the existing malformed-envelope failure without
     /// changing acceptance, repairing JSON, or exposing provider response data.
     /// Other failures (including unoffered tools) keep their existing identity.
