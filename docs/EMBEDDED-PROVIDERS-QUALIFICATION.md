@@ -3993,3 +3993,22 @@ All 16 inferences verified normal Chat/Instant selection, full submission/owners
 The task-created fixture tab closed automatically; the three restored Gmail tabs and normal ChatGPT tab remained. All task-scoped diagnostic arms were archived and removed under the shared lock. Only the recorded fixture process was stopped; its final ledger remained byte-identical to the capture and port62412 had no listener. Final UI and fixture cleanup evidence are in `live301/root-final-ui.json` and `live301/draft-control/fixture-cleanup/result.json`. This qualifies the controlled cases and does not promise universal website-model reliability. Local fixture success does not prove external email delivery. All prior failed captures and uncertain cleanup records remain preserved.
 
 Evidence: `baseline298/marker/capture/summary.json`; `baseline298b/marker/capture/independent-format-failure-review.json`; `live299b/*/capture`; `native-framing-codec-qualification.json`; `native-ordinary-model-qualification.json`; `native-initial-recovery-before-pin-baseline300.json`; `native-initial-recovery-before-pin-candidate-metadata.json`; `native-initial-recovery-qualification.json`; `native-initial-recovery-final-ownership-green.log`; `ownership301-adapter-final.log`, `ownership300-unicode-causal-analysis.json`, `live301/aggregate.json` and per-case independent reviews. The failed build300 case remains in `live300/unicode/capture`. The qualification JSON files bind their source, binary and log hashes. No final live result is inferred from native or adapter tests.
+
+
+### 2026-11-11 — DeepSeek DeepThink cleanup failure on build 495
+
+A fresh signed-in DeepThink invoice workflow edited only the permitted helper,
+passed all six tests, printed the correct reference, submitted it once through
+the built-in browser, observed its unique receipt and explicitly closed its
+task-created browser tab. Independent audit passed 18 of 19 checks. Eleven native
+tool calls ran across nine website inferences in 76.320 seconds.
+
+The first eight website conversations were deleted with saved receipts. The ninth
+response reached `complete`, but its conversation deletion could not be verified;
+two cleanup observations refer to this same session. Computa withheld the final
+answer and kept the task failed. No prompt or cleanup action was manually replayed.
+The exact failed deletion predicate is unknown: bounded system-log queries returned
+no matching diagnostic, and existing receipts retain only `cleanup_unverified`.
+Structure and rejected-reply captures were armed after initial successful tool
+calls; neither applies to this cleanup failure, and both unused arms were retired.
+This is a partial workflow result, not a clean DeepThink qualification.

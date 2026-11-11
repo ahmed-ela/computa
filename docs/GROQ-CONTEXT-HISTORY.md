@@ -74,7 +74,9 @@ The native runtime's optional `command_output_token_limit` now gives Groq
 exec/write-stdin results a 1,024-unit formatter cap. These native units are a
 byte-based estimate; the final Groq tokenizer and 6,000/2,000 admission limits
 remain authoritative. Exit codes and truncation notices remain visible, and
-failed command outputs remain inline and ineligible for history publication.
+latest command outputs remain inline. Older authenticated failed results with a
+known positive exit code may use history references that explicitly preserve
+their failed status; uncertain outcomes remain ineligible.
 The generic 10,000-byte tool policy remains unchanged for structured results.
 The value belongs to each model's metadata, including exact catalog rows, so
 switching providers does not carry a thread-wide scalar limit into another model.
@@ -574,3 +576,13 @@ and test-only encoder parameter fix, all 415 checks passed without failures/skip
 in 176.043 seconds, with source/helper unchanged; the three synthetic native
 workflows closed 12/13/12 sends and recovered all 1,381 bytes in 2/3/2 fragments,
 with admitted maxima 5,774/5,966/5,838 under 6,000 and no real provider/browser actions.
+
+### 2026-11-11 — Known failed command results in Groq history
+
+The installed 495 Groq/120B invoice run reached a successful native patch, then failed local prompt admission at 6,188 units against the unchanged 6,000-unit body limit and 2,000-unit reserve. It never reached a sixth website inference, native retest, reference command or browser receipt. The independent fixture audit later passed all six tests. Both live commands omitted max_output_tokens, but the existing native Groq metadata still capped their formatter at 1,024 units; the saved failing-test output was 4,310 bytes, with an original-size notice of 10,350 tokens. Omission did not bypass that cap.
+
+The source defect was historical-data eligibility requiring command success. An authenticated completed command with a known nonzero exit remained inline even after a later patch. The change records that typed failed result separately from success and permits older data to use the existing authenticated history reader. Its closed descriptor retains status=failed, the exact positive exit code, historical_only=true and action_authority=false. The complete original value/hash, latest entire call, native issuance/HTTP/current-scope checks and all budgets remain intact. Typed declined/pre-execution denials, cancellation, unknown exits, revoked or duplicate facts remain ineligible. A real process failure can contain a sandbox/network denial; archiving its exact failed data neither proves permission nor authorizes retry.
+
+The first native reproduction used the submit overload that defaults to Ask every time. It failed before the patch after four sends at 6,398 units (69.209 seconds), while the failed result was still latest; this change cannot address that earlier protected-latest overflow. A separate explicit Full Access reproduction matched the captured live permission profile and reached five sends plus the successful patch before rejecting at 6,360 units (64.057 seconds). Both failures are retained. Native workspace roots and generated identifiers differ from live, so this is a matching failure class and trajectory, not a byte-exact replay of 6,188.
+
+With the history change and strict test-helper support, the same Full Access coding-prefix test passed in 161.148 seconds: one method, no failures or skips, eight sends and eight closed sessions, the six-test retest, patch oracle and reference verified, and no budget rejections. Maximum admitted body size was 5,622 units. After the patch, the failed 4,395-byte JSON value became a 125-byte failed-result descriptor and the projected request admitted at 5,121 units; while latest, that value remained inline. All 15 source snapshots and the helper stayed unchanged during the run. This used no real provider requests or browser actions and is not a provider or full-workflow qualification pass. The conditional browser-route wording was absent from this comparison. A subsequent combined run, including that wording, passed all 495 affected Swift methods with no failures or skips in 204.218 seconds. The coding prefix again completed eight inferences, with maximum admitted size 5,622 units and 5,115 units after the patch; all three existing full-reader workflows also passed. These remain native regressions, not live provider qualification.
