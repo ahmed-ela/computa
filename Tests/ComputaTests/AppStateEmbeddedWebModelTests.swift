@@ -5,6 +5,37 @@ import XCTest
 
 @MainActor
 final class AppStateEmbeddedWebModelTests: XCTestCase {
+    func testKimiProfileVerificationReportsItsActualOutcomeAndSwitchesOnlyWhenIdle() async throws {
+        let browser = EmbeddedBrowserSession(persistent: false)
+        defer { browser.shutdown() }
+        _ = try browser.openKimiModelSignInForTesting()
+        let profile = try XCTUnwrap(browser.kimiModelProfileID)
+        var signedIn = false
+        var discoveries: [String] = []
+        let state = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: browser,
+            websiteModelDiscovery: { provider in
+                discoveries.append(provider)
+                guard signedIn else { throw EmbeddedWebModelTransport.Failure.signInRequired }
+                return Self.choices(provider)
+            })
+
+        await state.verifyKimiModelSignIn()
+        XCTAssertEqual(state.kimiModelSignInMessage, EmbeddedWebModelTransport.Failure.signInRequired.localizedDescription)
+        signedIn = true
+        await state.verifyKimiModelSignIn()
+        XCTAssertEqual(discoveries, ["kimi", "kimi"])
+        XCTAssertEqual(state.kimiModelSignInMessage, "Kimi sign-in verified for this profile.")
+
+        state.activeTurnTaskIDs.insert("fixture-running")
+        XCTAssertFalse(state.canConfigureKimiProfile)
+        state.useSharedKimiModelProfile()
+        XCTAssertEqual(browser.kimiModelProfileID, profile)
+        state.activeTurnTaskIDs.remove("fixture-running")
+        state.useSharedKimiModelProfile()
+        XCTAssertNil(browser.kimiModelProfileID)
+        XCTAssertNil(state.kimiModelSignInMessage)
+    }
+
     func testWebsitePrewarmingFollowsSelectedProviderOnlyAfterRenderHostReadiness() async {
         let browser = EmbeddedBrowserSession(persistent: false)
         defer { browser.shutdown() }

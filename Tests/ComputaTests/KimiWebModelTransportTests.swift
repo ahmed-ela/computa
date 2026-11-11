@@ -18,6 +18,58 @@ final class KimiWebModelTransportTests: XCTestCase {
         XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
     }
 
+    func testSeparateProfileRecoversItsOwnSignInAndUsesThatStoreForTheTurn() async throws {
+        let fixture = try Fixture(); defer { fixture.shutdown() }
+        fixture.regularSignedOut = true
+        do {
+            _ = try await fixture.transport.discoverModels(provider: "kimi")
+            XCTFail("The signed-out regular profile must fail discovery")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .signInRequired) }
+        let regularTab = try XCTUnwrap(fixture.createdID)
+        let regularStore = fixture.view.configuration.websiteDataStore
+
+        let signInTab = try fixture.browser.openKimiModelSignInForTesting()
+        let signInView = try XCTUnwrap(fixture.browser.webView(for: signInTab))
+        XCTAssertFalse(signInView.configuration.websiteDataStore === regularStore)
+        fixture.separateSignedOut = true
+        do {
+            _ = try await fixture.transport.discoverModels(provider: "kimi")
+            XCTFail("The signed-out separate profile must fail its own discovery")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .signInRequired) }
+        let signedOutTab = try XCTUnwrap(fixture.createdID)
+        XCTAssertNotEqual(signedOutTab, regularTab, "The regular profile's gate must not stop separate discovery")
+        XCTAssertNil(fixture.browser.webView(for: signedOutTab))
+        do {
+            _ = try await start(fixture)
+            XCTFail("The separate profile's own gate must block Start before opening a tab")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .signInRequired) }
+        XCTAssertEqual(fixture.createdID, signedOutTab)
+
+        fixture.separateSignedOut = false
+        let choices = try await fixture.transport.discoverModels(provider: "kimi", retryBlocked: true)
+        XCTAssertEqual(choices, [choice])
+        let token = try await start(fixture)
+        let ownedTab = try XCTUnwrap(fixture.createdID)
+        XCTAssertNotEqual(ownedTab, signInTab)
+        XCTAssertTrue(fixture.view.configuration.websiteDataStore === signInView.configuration.websiteDataStore)
+        _ = try await call(fixture, "webProviderSend", token, prompt: "Synthetic separate-profile turn")
+        let complete = try await wait(fixture, token, state: "complete")
+        XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Offline Kimi fixture reply"}"#)
+        let finished = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+        try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+        XCTAssertNil(fixture.browser.webView(for: ownedTab))
+        XCTAssertTrue(fixture.browser.webView(for: signInTab) === signInView)
+
+        fixture.browser.useSharedKimiModelProfile()
+        do {
+            _ = try await start(fixture)
+            XCTFail("Recovering the separate profile must not clear the regular profile's sign-in gate")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .signInRequired) }
+        XCTAssertEqual(fixture.createdID, ownedTab)
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
     func testDiscoveryFromNestedK3VerifiesItsCheckedRowWithoutSelectingItOrExposingIt() async throws {
         let fixture = try Fixture(initialNestedModel: true); defer { fixture.shutdown() }
         let choices = try await fixture.transport.discoverModels(provider: "kimi")
@@ -1829,6 +1881,8 @@ final class KimiWebModelTransportTests: XCTestCase {
         let humanID: UUID
         var transport: EmbeddedWebModelTransport!
         var createdID: UUID?
+        var regularSignedOut = false
+        var separateSignedOut = false
         private var retainedView: WKWebView?
         var view: WKWebView { retainedView! }
         init(initialControlsPending: Bool = false, initialEditorAttributePending: Bool = false, initialNestedModel: Bool = false) throws {
@@ -1838,11 +1892,7 @@ final class KimiWebModelTransportTests: XCTestCase {
             window.contentView = host; browser.installModelRenderHost(host); window.orderBack(nil)
             humanID = try browser.createTab()
             browser.webView(for: humanID)?.loadHTMLString("<p>Untouched human fixture</p>", baseURL: URL(string: "https://example.test/"))
-            transport = EmbeddedWebModelTransport(browser: browser, createTabForTesting: { [unowned self] url in
-                let id = try self.browser.createUnloadedModelTabForTesting()
-                let view = try XCTUnwrap(self.browser.webView(for: id)); view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
-                self.createdID = id; self.retainedView = view
-                let hydrationSetup = """
+            let hydrationSetup = """
                     <script>(() => {
                       const controls = [...document.body.children].filter(node => node.tagName !== 'SCRIPT');
                       for (const node of controls) node.remove();
@@ -1853,7 +1903,7 @@ final class KimiWebModelTransportTests: XCTestCase {
                       }};
                     })();</script>
                     """
-                let attributeSetup = """
+            let attributeSetup = """
                     <script>(() => {
                       const editor = document.querySelector('.chat-input-editor');
                       editor.removeAttribute('contenteditable');
@@ -1864,12 +1914,29 @@ final class KimiWebModelTransportTests: XCTestCase {
                       }};
                     })();</script>
                     """
-                let nestedSetup = initialNestedModel ? "<script>kimiFixture.selectNestedInitially();</script>" : ""
-                let setup = nestedSetup + (initialControlsPending ? hydrationSetup : initialEditorAttributePending ? attributeSetup : "")
-                let html = KimiFixturePage.html.replacingOccurrences(of: "</body>", with: setup + "</body>")
+            let nestedSetup = initialNestedModel ? "<script>kimiFixture.selectNestedInitially();</script>" : ""
+            let setup = nestedSetup + (initialControlsPending ? hydrationSetup : initialEditorAttributePending ? attributeSetup : "")
+            let html = KimiFixturePage.html.replacingOccurrences(of: "</body>", with: setup + "</body>")
+            transport = EmbeddedWebModelTransport(browser: browser,
+                createKimiTabForTesting: { [unowned self] url, profile in
+                    let id = try browser.createUnloadedKimiModelTabForTesting(profileID: profile)
+                    return try load(id, url: url, html: html, signedOut: separateSignedOut)
+                }, createTabForTesting: { [unowned self] url in
+                    let id = try browser.createUnloadedModelTabForTesting()
+                    return try load(id, url: url, html: html, signedOut: regularSignedOut)
+                })
+        }
+
+        private func load(_ id: UUID, url: URL, html: String, signedOut: Bool) throws -> UUID {
+            let view = try XCTUnwrap(browser.webView(for: id))
+            view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
+            createdID = id; retainedView = view
+            if signedOut {
+                view.loadHTMLString("<h1>Sign in</h1>", baseURL: url.appendingPathComponent("signin"))
+            } else {
                 view.loadHTMLString(html, baseURL: url)
-                return id
-            })
+            }
+            return id
         }
         func shutdown() {
             browser.shutdown(); host.detach(); window.orderOut(nil); window.close()

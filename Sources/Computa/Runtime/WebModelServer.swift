@@ -3618,6 +3618,7 @@ actor WebModelServer {
                 case .popupProfileMismatch: self = .popupProfileMismatch
                 case .inspectionUnavailable: self = .inspectionUnavailable
                 case .cookieMaintenancePending: self = .cookieMaintenancePending
+                case .kimiProfileUnavailable: return nil
                 }
             } else { return nil }
         }

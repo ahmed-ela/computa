@@ -788,6 +788,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let provider: Provider
         let modelChoice: WebsiteModelChoice?
         let modeChoice: WebsiteModeChoice?
+        let kimiProfileID: UUID?
         var selectionIntent: WebsiteSelectionIntent? {
             modeChoice.map(WebsiteSelectionIntent.mode) ?? modelChoice.map(WebsiteSelectionIntent.model)
         }
@@ -1044,11 +1045,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var rendererWorkDiagnostic: (generation: UUID, sequence: Int, expiry: Double, value: [String: Any])?
 
         init(provider: Provider, tabID: UUID, view: WKWebView, documentGeneration: UUID, modelChoice: WebsiteModelChoice? = nil, modeChoice: WebsiteModeChoice? = nil,
-             isDiscovery: Bool = false, isRecoveryProbe: Bool = false) {
+             isDiscovery: Bool = false, isRecoveryProbe: Bool = false, kimiProfileID: UUID? = nil) {
             self.provider = provider
             savedRoutes = provider.savedConversationPolicy.map { SavedConversationRoutes(policy: $0) }
             self.modelChoice = modelChoice
             self.modeChoice = modeChoice
+            self.kimiProfileID = kimiProfileID
             self.isDiscovery = isDiscovery
             self.isRecoveryProbe = isRecoveryProbe
             self.tabID = tabID
@@ -1093,6 +1095,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private let geminiPostBlockDiagnosticEnabled: Bool
     private var geminiPostBlockDiagnosticDuration: Duration = .seconds(5)
     private let createTab: @MainActor (URL) throws -> UUID
+    private let createKimiTab: @MainActor (URL, UUID) throws -> UUID
     private let isolatesChatGPTInference: Bool
     private var pendingInferenceStarts = 0
     private static let maximumActiveInferences = 4
@@ -1115,10 +1118,21 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private struct ProviderGate {
         let id = UUID()
         let failure: Failure
+        let kimiProfileID: UUID?
+
+        init(failure: Failure, kimiProfileID: UUID? = nil) {
+            self.failure = failure
+            self.kimiProfileID = kimiProfileID
+        }
     }
-    // This transport belongs to one shared browser profile. New tasks must not
-    // repeatedly revisit a checkpoint that the profile already encountered.
+    // Verification and quota gates still apply across Kimi profiles. A sign-in
+    // observation belongs only to the store that made it (nil is the regular store).
     private var providerGates: [Provider: ProviderGate] = [:]
+    private var kimiSignInGates: [UUID?: ProviderGate] = [:]
+
+    private func providerGate(_ provider: Provider, kimiProfileID: UUID?) -> ProviderGate? {
+        providerGates[provider] ?? (provider == .kimi ? kimiSignInGates[kimiProfileID] : nil)
+    }
 
     /// A normal human landing may request read-only recovery of one observed
     /// sign-in gate. This token never clears a gate or authorizes a model Send.
@@ -1353,15 +1367,18 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         self.geminiPostBlockDiagnosticEnabled = geminiPostBlockDiagnostic ?? Self.compiledPostBlockDiagnostic
         self.browser = browser
         self.createTab = { try browser.createModelTab(url: $0) }
+        self.createKimiTab = { try browser.createKimiModelTab(url: $0, profileID: $1) }
         self.isolatesChatGPTInference = true
     }
 
     #if DEBUG
     init(browser: EmbeddedBrowserSession, geminiPostBlockDiagnostic: Bool? = nil,
+         createKimiTabForTesting: (@MainActor (URL, UUID) throws -> UUID)? = nil,
          createTabForTesting: @escaping @MainActor (URL) throws -> UUID) {
         self.geminiPostBlockDiagnosticEnabled = geminiPostBlockDiagnostic ?? Self.compiledPostBlockDiagnostic
         self.browser = browser
         self.createTab = createTabForTesting
+        self.createKimiTab = createKimiTabForTesting ?? { try browser.createKimiModelTab(url: $0, profileID: $1) }
         self.isolatesChatGPTInference = false
     }
 
@@ -2331,7 +2348,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             try Task.checkCancellation()
         }
         synchronizeProviderGate(provider)
-        if let gate = providerGates[provider] {
+        let kimiProfileID = provider == .kimi ? browser.kimiModelProfileID : nil
+        if let gate = providerGate(provider, kimiProfileID: kimiProfileID) {
             // Typed no-session rejections are valid only before reservation,
             // prewarm acquisition, cookie-profile creation, or createSession.
             if let admission { throw PrecreationRejection(admission: admission, failure: gate.failure) }
@@ -2369,7 +2387,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             try Task.checkCancellation()
             session = try createSession(provider: provider, choice: choice, modeChoice: modeChoice, isDiscovery: false,
                 requestMetadata: requestMetadata, claudeResponseStream: claudeResponseStream, qwenMarker: qwenLease, groqStatus:groqLease,
-                preparedTab: preparedTab, reservedStart: true)
+                preparedTab: preparedTab, reservedStart: true, kimiProfileID: kimiProfileID)
         } catch {
             if let preparedTab { browser.closeTab(preparedTab) }
             throw error
@@ -2755,19 +2773,26 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return try browser.modelChangeRevision(for: session.tabID)
     }
 
-    private func recordProviderGate(_ error: Error, provider: Provider) {
+    private func recordProviderGate(_ error: Error, provider: Provider, kimiProfileID: UUID? = nil) {
         guard let failure = error as? Failure, failure.blocksProviderUntilRefresh else { return }
         // Propagation of the same gate is not a new website observation and
         // must not invalidate a successful recovery already in progress.
-        guard providerGates[provider]?.failure != failure else { return }
-        if case .humanVerificationRequired = failure {
-            browser.recordHumanVerificationRequired(provider: provider.rawValue)
+        let scopedSignIn = provider == .kimi && failure == .signInRequired
+        if scopedSignIn {
+            guard kimiSignInGates[kimiProfileID] == nil else { return }
+            kimiSignInGates[kimiProfileID] = ProviderGate(failure: failure, kimiProfileID: kimiProfileID)
+        } else {
+            guard providerGates[provider]?.failure != failure else { return }
+            if case .humanVerificationRequired = failure {
+                browser.recordHumanVerificationRequired(provider: provider.rawValue)
+            }
+            providerGates[provider] = ProviderGate(failure: failure, kimiProfileID: kimiProfileID)
         }
-        providerGates[provider] = ProviderGate(failure: failure)
         if provider == .chatgpt {
             browser.setChatGPTInferencePrewarmingEnabled(false, admit: { throw failure })
         }
-        for session in sessions.values where session.provider == provider && !session.isRecoveryProbe {
+        for session in sessions.values where session.provider == provider && !session.isRecoveryProbe
+            && (!scopedSignIn || session.kimiProfileID == kimiProfileID) {
             if session.terminalFailure == nil { session.terminalFailure = failure }
             session.state = "failed"
             session.initialReadRetry = nil
@@ -2821,7 +2846,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         // Cleanup may inspect an old failed page after an explicit recovery.
         // Its already-latched failure cannot invalidate that newer recovery.
-        if session.terminalFailure != failure { recordProviderGate(failure, provider: session.provider) }
+        if session.terminalFailure != failure {
+            recordProviderGate(failure, provider: session.provider, kimiProfileID: session.kimiProfileID)
+        }
         return failure
     }
 
@@ -2833,7 +2860,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if let failure = session.terminalFailure,
            !(allowGroqFormatCleanupModelRead && failure == .responseFormatUnavailable
              && permitsGroqFormatCleanupModelRead(session)) { throw failure }
-        if !session.isRecoveryProbe, let gate = providerGates[session.provider] { throw gate.failure }
+        if !session.isRecoveryProbe, let gate = providerGate(session.provider, kimiProfileID: session.kimiProfileID) {
+            throw gate.failure
+        }
         if session.provider == .qwen, !session.isRecoveryProbe, !session.isDiscovery, let modelID = session.modelChoice?.modelID,
            let gate = qwenModelUsageGates[modelID] {
             session.qwenModelQuotaScope = modelID
@@ -2865,10 +2894,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private func createSession(provider: Provider, choice: WebsiteModelChoice?, modeChoice: WebsiteModeChoice? = nil, isDiscovery: Bool,
                                isRecoveryProbe: Bool = false, requestMetadata: ChatGPTRequestMetadataLease? = nil,
                                claudeResponseStream: ClaudeResponseStreamLease? = nil, qwenMarker: QwenMarkerWireLease? = nil, groqStatus:GroqOwnedStatusLease? = nil,
-                               preparedTab: UUID? = nil, reservedStart: Bool = false) throws -> Session {
+                               preparedTab: UUID? = nil, reservedStart: Bool = false, kimiProfileID: UUID? = nil) throws -> Session {
         closedSessions = closedSessions.filter { ContinuousClock.now - $0.value.created < .seconds(3_600) }
         synchronizeProviderGate(provider)
-        if !isRecoveryProbe, let gate = providerGates[provider] { throw gate.failure }
+        if provider == .kimi, browser.kimiModelProfileID != kimiProfileID { throw CancellationError() }
+        if let gate = providerGate(provider, kimiProfileID: kimiProfileID),
+           !isRecoveryProbe || provider == .kimi && gate.kimiProfileID != kimiProfileID { throw gate.failure }
         if provider == .qwen, !isRecoveryProbe, !isDiscovery, let choice, let gate = qwenModelUsageGates[choice.modelID] { throw gate.failure }
         if isDiscovery {
             guard !sessions.values.contains(where: \.isDiscovery) else { throw Failure.capacity }
@@ -2881,6 +2912,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard script(for: provider) != nil else { throw Failure.pageUnavailable }
         let id: UUID
         if let preparedTab { id = preparedTab }
+        else if provider == .kimi, let kimiProfileID {
+            do { id = try createKimiTab(provider.startURL(choice: choice), kimiProfileID) }
+            catch EmbeddedBrowserSession.Failure.kimiProfileUnavailable { throw Failure.signInRequired }
+        }
         else if let groqStatus,provider == .groq,choice==groqStatus.modelChoice,!isDiscovery,!isRecoveryProbe {
             id=try browser.createGroqStatusTab(url:provider.startURL(choice:choice),lease:groqStatus)
         } else if let qwenMarker, let choice, provider == .qwen, !isDiscovery, !isRecoveryProbe {
@@ -2894,7 +2929,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         } else { id = try createTab(provider.startURL(choice: choice)) }
         guard let view = browser.webView(for: id), let generation = browser.documentGeneration(for: id) else { throw Failure.staleSession }
         let session = Session(provider: provider, tabID: id, view: view, documentGeneration: generation,
-                              modelChoice: choice, modeChoice: modeChoice, isDiscovery: isDiscovery, isRecoveryProbe: isRecoveryProbe)
+                              modelChoice: choice, modeChoice: modeChoice, isDiscovery: isDiscovery,
+                              isRecoveryProbe: isRecoveryProbe, kimiProfileID: kimiProfileID)
         if provider == .claude, !isDiscovery, !isRecoveryProbe, preparedTab == nil,
            claudeResponseStream?.isCurrent == true {
             session.claudeResponseStream = claudeResponseStream
@@ -2936,13 +2972,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // An explicit refresh or validated human recovery can probe a blocked
         // provider. Keep its gate in place until this prompt-free check succeeds.
         synchronizeProviderGate(provider)
+        let kimiProfileID = provider == .kimi ? browser.kimiModelProfileID : nil
+        let previousKimiSignInGateID = provider == .kimi ? kimiSignInGates[kimiProfileID]?.id : nil
         let previousGateID = providerGates[provider]?.id
         let previousVerificationID = browser.savedHumanVerificationCheckpointIDs[provider.rawValue]
         if provider == .chatgpt {
             guard await browser.admitChatGPTAfterCookieCallbacks(until: .now + .seconds(2)) else { throw Failure.cookieMaintenancePending }
             try Task.checkCancellation()
         }
-        let session = try createSession(provider: provider, choice: nil, isDiscovery: true, isRecoveryProbe: retryBlocked)
+        let session = try createSession(provider: provider, choice: nil, isDiscovery: true, isRecoveryProbe: retryBlocked,
+                                        kimiProfileID: kimiProfileID)
         if provider == .gemini, retryBlocked, let checkpointID = previousVerificationID {
             session.geminiRecoveryPreparation = GeminiRecoveryPreparation(checkpointID: checkpointID)
         }
@@ -3010,17 +3049,22 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         // do not report recovery while new tasks remain blocked.
                         throw gate.failure
                     }
+                    if provider == .kimi, let gate = kimiSignInGates[kimiProfileID], gate.id != previousKimiSignInGateID {
+                        throw gate.failure
+                    }
                     if browser.savedHumanVerificationCheckpointIDs[provider.rawValue] != previousVerificationID {
                         // A human tab can observe a new checkpoint while this
                         // read-only recovery awaits. Never erase that observation.
                         throw Failure.humanVerificationRequired(provider)
                     }
                     try Task.checkCancellation()
-                    guard recoveryCandidateIsCurrent?() != false else { throw CancellationError() }
+                    guard recoveryCandidateIsCurrent?() != false,
+                          provider != .kimi || browser.kimiModelProfileID == kimiProfileID else { throw CancellationError() }
                     try Task.checkCancellation()
                     if retryBlocked {
                         browser.clearHumanVerificationRequired(provider: provider.rawValue)
                         providerGates.removeValue(forKey: provider)
+                        if provider == .kimi { kimiSignInGates.removeValue(forKey: kimiProfileID) }
                     }
                     return (qualified, modes)
                 }
@@ -3029,7 +3073,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             throw preparationFailure(session)
         } catch {
             logKimiDiscoveryTerminal(session, error: error)
-            recordProviderGate(error, provider: provider)
+            recordProviderGate(error, provider: provider, kimiProfileID: kimiProfileID)
             if closed { throw error }
             let cleanup = await finish(session, cancel: true)
             guard let result = try? JSONSerialization.jsonObject(with: cleanup) as? [String: Any],

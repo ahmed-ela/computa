@@ -111,6 +111,7 @@ final class AppState {
     var isAPIProvidersPresented = false
     private(set) var websiteModelsRefreshing = false
     private(set) var websiteModelsError: String?
+    private(set) var kimiModelSignInMessage: String?
     var showToolPayloads = false
     var connectionState: RuntimeConnectionState = .disconnected
     var automationPermissions: AutomationPermissionSnapshot
@@ -443,6 +444,37 @@ final class AppState {
     /// dropped, not queued for automatic retry after the native turn ends.
     var canRefreshWebsiteModels: Bool { !cookieMaintenanceOnlyLaunch && humanWebsiteRecoveryIsIdle }
 
+    var canConfigureKimiProfile: Bool { canRefreshWebsiteModels && !websiteModelsRefreshing }
+
+    func openKimiModelSignIn() {
+        guard canConfigureKimiProfile else { return }
+        let previous = browserSession.kimiModelProfileID
+        do {
+            _ = try browserSession.openKimiModelSignIn()
+            if previous != browserSession.kimiModelProfileID || kimiModelSignInMessage == nil {
+                kimiModelSignInMessage = "Sign in to Kimi, then choose Verify Kimi sign-in from Model sign-ins."
+            }
+        } catch {
+            kimiModelSignInMessage = error.localizedDescription
+        }
+    }
+
+    func useSharedKimiModelProfile() {
+        guard canConfigureKimiProfile else { return }
+        browserSession.useSharedKimiModelProfile()
+        kimiModelSignInMessage = nil
+    }
+
+    func verifyKimiModelSignIn() async {
+        guard canConfigureKimiProfile, let profile = browserSession.kimiModelProfileID else { return }
+        let checking = "Checking Kimi sign-in…"
+        kimiModelSignInMessage = checking
+        await refreshWebsiteModels(provider: "kimi")
+        if browserSession.kimiModelProfileID == profile, kimiModelSignInMessage == checking {
+            kimiModelSignInMessage = "Kimi sign-in verification was interrupted. Try again when Computa is idle."
+        }
+    }
+
     func refreshWebsiteModels() async {
         guard canRefreshWebsiteModels else { return }
         await refreshWebsiteModels(providers: WebsiteModelCatalog.discoveryProviders, retryBlocked: true)
@@ -706,6 +738,9 @@ final class AppState {
                         self.websiteModelChoices.append(contentsOf: choices)
                         WebsiteModelCatalog.save(self.websiteModelChoices, to: self.preferences)
                     }
+                    if provider == "kimi", self.browserSession.kimiModelProfileID != nil {
+                        self.kimiModelSignInMessage = "Kimi sign-in verified for this profile."
+                    }
                     errors.removeAll { $0.hasPrefix(WebsiteModelCatalog.providerLabel(provider) + ": ") }
                     self.retireWebsiteModelSelections()
                     if intent.signInRecovery != nil, self.canRefreshWebsiteModels {
@@ -737,6 +772,9 @@ final class AppState {
                     if Task.isCancelled { break }
                 } catch {
                     guard !self.isShuttingDown, self.websiteModelRefreshGeneration == generation else { break }
+                    if provider == "kimi", self.browserSession.kimiModelProfileID != nil {
+                        self.kimiModelSignInMessage = error.localizedDescription
+                    }
                     if let candidate = intent.candidate {
                         self.browserSession.recordHumanVerificationRecovery(candidate, phase: .blocked,
                             reason: self.humanVerificationRecoveryFailureReason(error))

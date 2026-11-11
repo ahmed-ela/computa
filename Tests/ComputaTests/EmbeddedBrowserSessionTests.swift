@@ -5,6 +5,220 @@ import XCTest
 
 @MainActor
 final class EmbeddedBrowserSessionTests: XCTestCase {
+    func testKimiModelProfileIsolatesRealWebKitStorageAndPreservesNormalDraftAcrossSwitches() async throws {
+        let normalProfile = UUID()
+        registerKimiFixtureProfileForCleanup(normalProfile)
+        let preferences = isolatedTestPreferences()
+        let session = EmbeddedBrowserSession(profileID: normalProfile, defaults: preferences)
+        defer { session.shutdown() }
+        XCTAssertNil(session.kimiModelProfileID, "The regular profile is the default")
+
+        let normal = try session.createTab()
+        let normalView = try XCTUnwrap(session.webView(for: normal))
+        let normalStore = normalView.configuration.websiteDataStore
+        XCTAssertEqual(normalStore.identifier, normalProfile)
+        let defaultModel = try session.createUnloadedModelTabForTesting()
+        XCTAssertTrue(try XCTUnwrap(session.webView(for: defaultModel)).configuration.websiteDataStore === normalStore)
+        session.closeTab(defaultModel)
+        try await loadKimiProfileFixture(normalView)
+        let normalGeneration = session.documentGeneration(for: normal)
+        let normalDraft = Data("  Normal draft\nCafe\u{0301}\t🙂  ".utf8)
+        try await writeKimiProfileFixtureDraft(normalDraft, in: normalView)
+        let normalBefore = try await kimiProfileFixtureDraft(in: normalView)
+        XCTAssertEqual(normalBefore, KimiProfileFixtureDraft(editor: normalDraft, stored: normalDraft))
+
+        let signIn = try session.openKimiModelSignInForTesting()
+        let profile = try XCTUnwrap(session.kimiModelProfileID)
+        registerKimiFixtureProfileForCleanup(profile)
+        XCTAssertNotEqual(profile, normalProfile)
+        XCTAssertEqual(session.selectedTabID, signIn)
+        let signInView = try XCTUnwrap(session.webView(for: signIn))
+        let isolatedStore = signInView.configuration.websiteDataStore
+        XCTAssertTrue(isolatedStore.isPersistent)
+        XCTAssertEqual(isolatedStore.identifier, profile)
+        XCTAssertFalse(isolatedStore === normalStore)
+        let initialPrivateModel = try session.createUnloadedKimiModelTabForTesting(profileID: profile)
+        let initialPrivateView = try XCTUnwrap(session.webView(for: initialPrivateModel))
+        XCTAssertTrue(initialPrivateView.configuration.websiteDataStore === isolatedStore)
+        XCTAssertEqual(session.selectedTabID, signIn)
+        try await loadKimiProfileFixture(signInView)
+        try await loadKimiProfileFixture(initialPrivateView)
+        let initialSignIn = try await kimiProfileFixtureDraft(in: signInView)
+        let initialPrivate = try await kimiProfileFixtureDraft(in: initialPrivateView)
+        XCTAssertNil(initialSignIn.stored)
+        XCTAssertNil(initialPrivate.stored)
+        session.closeTab(initialPrivateModel)
+
+        let dedicatedDraft = Data("Dedicated profile fixture\nOnly here".utf8)
+        try await writeKimiProfileFixtureDraft(dedicatedDraft, in: signInView)
+        let committedSignInDraft = try await kimiProfileFixtureDraft(in: signInView)
+        XCTAssertEqual(committedSignInDraft.stored, dedicatedDraft)
+        let laterNormal = try session.createTab(select: false)
+        let laterNormalView = try XCTUnwrap(session.webView(for: laterNormal))
+        XCTAssertTrue(laterNormalView.configuration.websiteDataStore === normalStore)
+        try await loadKimiProfileFixture(laterNormalView)
+        let laterNormalDraft = try await kimiProfileFixtureDraft(in: laterNormalView)
+        XCTAssertEqual(laterNormalDraft.stored, normalDraft)
+        let privateModel = try session.createUnloadedKimiModelTabForTesting(profileID: profile)
+        let privateView = try XCTUnwrap(session.webView(for: privateModel))
+        XCTAssertTrue(privateView.configuration.websiteDataStore === isolatedStore)
+        let storageDeadline = ContinuousClock.now + .seconds(10)
+        try await loadKimiProfileFixture(privateView, until: storageDeadline)
+        var privateAfterSignIn = try await kimiProfileFixtureDraft(in: privateView)
+        while privateAfterSignIn.stored == nil, ContinuousClock.now < storageDeadline {
+            // A fresh document can precede cross-WebView storage propagation.
+            try await loadKimiProfileFixture(privateView, until: storageDeadline)
+            privateAfterSignIn = try await kimiProfileFixtureDraft(in: privateView)
+        }
+        XCTAssertEqual(privateAfterSignIn.stored, dedicatedDraft, "A fresh private document reads the dedicated WebKit store")
+        let restoredEnabled = EmbeddedBrowserSession(profileID: normalProfile, defaults: preferences)
+        XCTAssertEqual(restoredEnabled.kimiModelProfileID, profile)
+        XCTAssertTrue(restoredEnabled.tabs.isEmpty)
+        restoredEnabled.shutdown()
+
+        session.useSharedKimiModelProfile()
+        XCTAssertNil(session.kimiModelProfileID)
+        let restoredShared = EmbeddedBrowserSession(profileID: normalProfile, defaults: preferences)
+        XCTAssertNil(restoredShared.kimiModelProfileID)
+        XCTAssertTrue(restoredShared.tabs.isEmpty)
+        restoredShared.shutdown()
+        XCTAssertThrowsError(try session.createUnloadedKimiModelTabForTesting(profileID: profile))
+        XCTAssertTrue(session.isKimiProfileTab(signIn))
+        XCTAssertTrue(session.webView(for: privateModel) === privateView)
+        let sharedModel = try session.createUnloadedModelTabForTesting()
+        XCTAssertTrue(try XCTUnwrap(session.webView(for: sharedModel)).configuration.websiteDataStore === normalStore)
+        session.closeTab(sharedModel)
+        session.closeTab(privateModel)
+        session.closeTab(signIn)
+
+        let reopened = try session.openKimiModelSignInForTesting()
+        XCTAssertNotEqual(reopened, signIn)
+        XCTAssertEqual(session.kimiModelProfileID, profile)
+        let reopenedView = try XCTUnwrap(session.webView(for: reopened))
+        XCTAssertTrue(reopenedView.configuration.websiteDataStore === isolatedStore)
+        try await loadKimiProfileFixture(reopenedView)
+        let reopenedDraft = try await kimiProfileFixtureDraft(in: reopenedView)
+        XCTAssertEqual(reopenedDraft.stored, dedicatedDraft)
+        let normalAfter = try await kimiProfileFixtureDraft(in: normalView)
+        XCTAssertEqual(normalAfter, normalBefore)
+        XCTAssertTrue(session.webView(for: normal) === normalView)
+        XCTAssertEqual(session.documentGeneration(for: normal), normalGeneration)
+    }
+
+    func testKimiProfileSignInIsHumanVisibleButBothDedicatedViewsRejectBrowserToolAuthority() async throws {
+        let session = EmbeddedBrowserSession(persistent: false, defaults: isolatedTestPreferences())
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+                              styleMask: [], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        window.contentView = host
+        defer { session.shutdown(); window.close() }
+        let normal = try session.createTab()
+        let signIn = try session.openKimiModelSignInForTesting()
+        let profile = try XCTUnwrap(session.kimiModelProfileID)
+        let privateModel = try session.createUnloadedKimiModelTabForTesting(profileID: profile)
+        XCTAssertEqual(session.humanTabs.map(\.id), [normal, signIn])
+        XCTAssertEqual(session.selectedTabID, signIn)
+        XCTAssertFalse(session.isKimiProfileTab(normal))
+        XCTAssertTrue(session.isKimiProfileTab(signIn))
+        XCTAssertTrue(session.isKimiProfileTab(privateModel))
+        let opener = try XCTUnwrap(session.webView(for: signIn))
+        try session.presentTab(signIn, in: host)
+        for id in [normal, signIn, privateModel] {
+            try await loadKimiProfileFixture(XCTUnwrap(session.webView(for: id)))
+        }
+        _ = try await script(opener, """
+            setTimeout(() => { window.fixtureChild = window.open('', 'kimi-profile-fixture'); }, 30);
+            return true;
+            """)
+        try await waitForPopupCount(4, session: session)
+        let popup = try XCTUnwrap(session.humanTabs.first(where: \.isPopup))
+        let popupView = try XCTUnwrap(session.webView(for: popup.id))
+        XCTAssertTrue(popupView.configuration.websiteDataStore === opener.configuration.websiteDataStore)
+        XCTAssertTrue(session.isKimiProfileTab(popup.id))
+        XCTAssertEqual(session.humanTabs.map(\.id), [normal, signIn, popup.id])
+
+        let transport = EmbeddedBrowserTabTransport(session: session)
+        let targets = try await transport.humanTargets()
+        XCTAssertEqual(targets.map(\.targetID), [normal.uuidString])
+        let normalTarget = try await transport.target(id: normal.uuidString)
+        XCTAssertNotNil(normalTarget)
+        for protected in [signIn, privateModel, popup.id] {
+            let target = try await transport.target(id: protected.uuidString)
+            XCTAssertNil(target)
+            let view = try XCTUnwrap(session.webView(for: protected))
+            let forged = BrowserTarget(targetID: protected.uuidString, instanceToken: protected.uuidString,
+                                       title: "Kimi profile fixture", url: try XCTUnwrap(view.url ?? URL(string: "about:blank")))
+            do {
+                _ = try await transport.observe(target: forged)
+                XCTFail("A known profile tab ID must not grant read authority")
+            } catch {
+                XCTAssertEqual(error as? BrowserTabBrokerError, .targetClosed)
+            }
+            let generation = try XCTUnwrap(session.documentGeneration(for: protected))
+            XCTAssertThrowsError(try session.prepareToolMutation(tabID: protected, generation: generation)) {
+                XCTAssertEqual($0 as? BrowserTabBrokerError, .staleDocument)
+            }
+        }
+        session.useSharedKimiModelProfile()
+        XCTAssertTrue(session.isKimiProfileTab(signIn))
+        XCTAssertTrue(session.isKimiProfileTab(popup.id))
+        let afterOptOut = try await transport.humanTargets()
+        XCTAssertEqual(afterOptOut.map(\.targetID), [normal.uuidString])
+    }
+
+    private struct KimiProfileFixtureDraft: Equatable {
+        let editor: Data
+        let stored: Data?
+    }
+
+    private func loadKimiProfileFixture(_ view: WKWebView, until deadline: ContinuousClock.Instant = .now + .seconds(10)) async throws {
+        let url = try XCTUnwrap(URL(string: "https://kimi-profile.example.test/"))
+        let document = UUID().uuidString
+        view.loadHTMLString("<!doctype html><textarea id='draft' data-document='\(document)'></textarea>", baseURL: url)
+        while ContinuousClock.now < deadline {
+            if !view.isLoading, view.url == url,
+               (try? await script(view, "return document.getElementById('draft')?.dataset.document === '\(document)';")) == Data("true".utf8) {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTFail("The local Kimi profile fixture did not load")
+        throw URLError(.timedOut)
+    }
+
+    private func writeKimiProfileFixtureDraft(_ draft: Data, in view: WKWebView) async throws {
+        let value = String(decoding: draft, as: UTF8.self)
+        let encoded = try JSONSerialization.data(withJSONObject: value, options: .fragmentsAllowed)
+        let literal = String(decoding: encoded, as: UTF8.self)
+        _ = try await script(view, """
+            const draft = \(literal);
+            document.getElementById('draft').value = draft;
+            localStorage.setItem('kimi-fixture-draft', draft);
+            return true;
+            """)
+    }
+
+    private func kimiProfileFixtureDraft(in view: WKWebView) async throws -> KimiProfileFixtureDraft {
+        let raw = try await script(view, """
+            return {editor: document.getElementById('draft').value, stored: localStorage.getItem('kimi-fixture-draft')};
+            """)
+        let snapshot = try XCTUnwrap(JSONSerialization.jsonObject(with: raw) as? [String: Any])
+        let editor = try XCTUnwrap(snapshot["editor"] as? String)
+        let stored = (snapshot["stored"] as? String).map { Data($0.utf8) }
+        return KimiProfileFixtureDraft(editor: Data(editor.utf8), stored: stored)
+    }
+
+    private func registerKimiFixtureProfileForCleanup(_ id: UUID) {
+        addTeardownBlock { @MainActor in
+            do {
+                try await WKWebsiteDataStore.remove(forIdentifier: id)
+            } catch {
+                print("KIMI_PROFILE_FIXTURE_CLEANUP_PENDING \(id.uuidString)")
+            }
+        }
+    }
+
     func testBorrowedHumanRenderingRestoresUsableViewportWithoutNavigationSelectionOrFocus() async throws {
         try await verifyBorrowedHumanRendering(presented: false)
     }
