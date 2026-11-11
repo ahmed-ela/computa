@@ -2,6 +2,56 @@ import XCTest
 @testable import Computa
 
 final class BrowserModelCatalogTests: XCTestCase {
+    func testStableGroqSchemaDiscoveryIsExplicitAndCannotBorrowForeignOrUnknownCatalogs() throws {
+        let model = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
+        func wire(_ definition: [String: Any]) -> [String: Any] {
+            var value = definition; value["parameters"] = value.removeValue(forKey: "inputSchema"); return value
+        }
+        let loader = wire(GroqToolCatalog.specification), browser = EmbeddedBrowserTools.definitions().map(wire)
+        for namespace: String? in [nil, "functions"] {
+            func wrap(_ tools: [[String: Any]]) -> [[String: Any]] {
+                namespace.map { [["type": "namespace", "name": $0, "tools": tools]] } ?? tools
+            }
+            let definitions = wrap([loader] + browser)
+            let legacy = ComputaModelToolCatalog.visibleToolDefinitions(definitions, modelID: model, browserToolAvailability: .unbound)
+            let stable = ComputaModelToolCatalog.visibleToolDefinitions(definitions, modelID: model,
+                browserToolAvailability: .unbound, stableGroqBrowserSchemas: true)
+            let bound = ComputaModelToolCatalog.visibleToolDefinitions(definitions, modelID: model, browserToolAvailability: .bound)
+            XCTAssertEqual(stable as NSArray, bound as NSArray, "Schema discovery is independent of binding in the exact opted-in catalog")
+            XCTAssertNotEqual(stable as NSArray, legacy as NSArray)
+            let children: [[String: Any]]
+            if namespace == nil { children = stable }
+            else { children = try XCTUnwrap(stable.first?["tools"] as? [[String: Any]]) }
+            XCTAssertTrue(EmbeddedBrowserTools.names.isSubset(of: Set(children.compactMap { $0["name"] as? String })))
+            XCTAssertEqual(ComputaModelToolCatalog.visibleToolDefinitions(definitions, modelID: model,
+                browserToolAvailability: .unbound, stableGroqBrowserSchemas: false) as NSArray, legacy as NSArray)
+            for state: EmbeddedBrowserToolAvailability? in [nil, .bound] {
+                XCTAssertEqual(ComputaModelToolCatalog.visibleToolDefinitions(definitions, modelID: model,
+                    browserToolAvailability: state, stableGroqBrowserSchemas: true) as NSArray,
+                    ComputaModelToolCatalog.visibleToolDefinitions(definitions, modelID: model, browserToolAvailability: state) as NSArray)
+            }
+            for other in ["browser/chatgpt", "browser/claude", "browser/gemini", "api/fixture/model"] {
+                XCTAssertEqual(ComputaModelToolCatalog.visibleToolDefinitions(definitions, modelID: other,
+                    browserToolAvailability: .unbound, stableGroqBrowserSchemas: true) as NSArray,
+                    ComputaModelToolCatalog.visibleToolDefinitions(definitions, modelID: other, browserToolAvailability: .unbound) as NSArray)
+            }
+            var impostorLoader = loader; impostorLoader["parameters"] = ["type": "object", "properties": [:]]
+            let absentAndForeign = [wrap(browser), wrap([impostorLoader] + browser),
+                [["type": "namespace", "name": "foreign", "tools": [loader] + browser]]]
+            for foreign in absentAndForeign {
+                XCTAssertEqual(ComputaModelToolCatalog.visibleToolDefinitions(foreign, modelID: model,
+                    browserToolAvailability: .unbound, stableGroqBrowserSchemas: true) as NSArray,
+                    ComputaModelToolCatalog.visibleToolDefinitions(foreign, modelID: model, browserToolAvailability: .unbound) as NSArray)
+            }
+            var modified = try XCTUnwrap(browser.first { $0["name"] as? String == "browser_read" })
+            modified["parameters"] = ["type": "object", "properties": ["foreign": ["type": "string"]]]
+            let foreignPage = wrap([loader, modified])
+            XCTAssertEqual(ComputaModelToolCatalog.visibleToolDefinitions(foreignPage, modelID: model,
+                browserToolAvailability: .unbound, stableGroqBrowserSchemas: true) as NSArray,
+                ComputaModelToolCatalog.visibleToolDefinitions(foreignPage, modelID: model, browserToolAvailability: .unbound) as NSArray)
+        }
+    }
+
     func testSavedWaitCatalogsRefreshOnlyExactNativeVersionsAndRetainBindingGate() throws {
         let legacy = try XCTUnwrap(EmbeddedBrowserTools.legacyWaitDefinition["inputSchema"] as? [String: Any])
         let current = try XCTUnwrap(EmbeddedBrowserTools.waitDefinition["inputSchema"] as? [String: Any])

@@ -318,13 +318,12 @@ enum ComputaModelToolCatalog {
         enum State: String, Encodable, Equatable, Sendable { case unbound, bound }
         let state: State
         let entry: [String]
-        let registeredDeferred: [String]
         let loaded: [String]
         let loadable: [String]
         var eligible: [String] { Array(Set(loaded + loadable)).sorted() }
-        enum CodingKeys: String, CodingKey {
-            case state, entry, registeredDeferred = "registered_deferred", loaded, loadable
-        }
+        // Selection and discovery names already appear in the complete inventory
+        // and current schemas. Keep typed sets for exact guidance, without a second copy.
+        enum CodingKeys: String, CodingKey { case state, entry }
     }
 
     static func browserCapabilityDescriptor(_ definitions: [[String: Any]],
@@ -349,27 +348,24 @@ enum ComputaModelToolCatalog {
             } else { inspect(definition, namespace: nil) }
         }
         guard !ambiguous else { return nil }
-        // Original registered policy narrows discovery only. It does not replace
-        // the separately validated current policy or grant a withheld schema.
+        // Original registered policy narrows discovery only. Schema visibility
+        // does not satisfy runtime binding, reference or approval requirements.
         let permitted = native.intersection(allowedNames)
         let current = permitted.intersection(eligibleNames)
-            .subtracting(availability == .unbound ? pages : [])
         let loaded = current.intersection(loadedNames)
         let loadable = loaderAvailable ? current.subtracting(loaded) : []
         guard current == loaded.union(loadable) else { return nil }
-        let entry: Set<String>, deferred: Set<String>, state: BrowserCapabilityDescriptor.State
+        let entry: Set<String>, state: BrowserCapabilityDescriptor.State
         switch availability {
         case .unbound:
             entry = entries.intersection(current)
-            deferred = pages.intersection(permitted)
-            guard !entry.isEmpty, !deferred.isEmpty else { return nil }
+            guard !entry.isEmpty, !pages.intersection(current).isEmpty else { return nil }
             state = .unbound
         case .bound:
             guard !pages.intersection(current).isEmpty else { return nil }
-            entry = []; deferred = []; state = .bound
+            entry = []; state = .bound
         }
-        return .init(state: state, entry: entry.sorted(), registeredDeferred: deferred.sorted(),
-            loaded: loaded.sorted(), loadable: loadable.sorted())
+        return .init(state: state, entry: entry.sorted(), loaded: loaded.sorted(), loadable: loadable.sorted())
     }
 
     /// Explain host-deferred capabilities separately from the callable catalog.
@@ -439,7 +435,13 @@ enum ComputaModelToolCatalog {
     /// unchanged; only the current model's callable tool definitions change.
     static func visibleToolDefinitions(_ definitions: [[String: Any]], modelID: String,
                                        browserToolAvailability: EmbeddedBrowserToolAvailability? = nil,
-                                       browserActionReferences: EmbeddedBrowserCurrentActionReferences? = nil) -> [[String: Any]] {
+                                       browserActionReferences: EmbeddedBrowserCurrentActionReferences? = nil,
+                                       stableGroqBrowserSchemas: Bool = false) -> [[String: Any]] {
+        // Opt-in changes schema discovery only. The native controller retains
+        // binding, current-reference, ownership and approval checks at execution.
+        let stableBrowserSchemas = stableGroqBrowserSchemas
+            && LocalModelCatalog.webProvider(for: modelID) == "groq"
+            && browserToolAvailability != nil && GroqToolCatalog.isRegisteredLoader(definitions)
         let overrides = nativeToolDescriptions(modelID: modelID)
         // Availability is already scoped by the caller's interaction policy.
         // Reject removed names without hiding valid foreground tools that are
@@ -474,7 +476,8 @@ enum ComputaModelToolCatalog {
                 value["tools"] = tools
                 return value
             }
-            if browserToolAvailability == .unbound, requiresBrowserBinding(definition, namespace: namespace) { return nil }
+            if browserToolAvailability == .unbound, !stableBrowserSchemas,
+               requiresBrowserBinding(definition, namespace: namespace) { return nil }
             guard let name = value["name"] as? String else { return value }
             if name == "browser_wait" {
                 guard let variants = browserWaitDefinitionVariants(definition, namespace: namespace) else { return definition }

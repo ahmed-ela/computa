@@ -498,10 +498,15 @@ enum WebModelResponseCodec {
             }
             if isGroq { registeredBrowserAllowedNames = (try? toolPolicy(object["tool_choice"], tools: historical))?.allowedNames }
             requiresBrowserToolAvailability = ComputaModelToolCatalog.requiresBrowserToolAvailability(values)
-            deferredBrowserInstructions = ComputaModelToolCatalog.deferredBrowserToolInstructions(values,
-                availability: browserToolAvailability)
+            let stableGroqBrowserSchemas = isGroq && browserToolAvailability != nil
+                && GroqToolCatalog.isRegisteredLoader(values)
+                && [GroqToolCatalog.name, "functions." + GroqToolCatalog.name].contains {
+                    registeredBrowserAllowedNames?.contains($0) == true
+                }
+            deferredBrowserInstructions = stableGroqBrowserSchemas ? nil
+                : ComputaModelToolCatalog.deferredBrowserToolInstructions(values, availability: browserToolAvailability)
             schemas = ComputaModelToolCatalog.visibleToolDefinitions(values, modelID: model,
-                browserToolAvailability: browserToolAvailability)
+                browserToolAvailability: browserToolAvailability, stableGroqBrowserSchemas: stableGroqBrowserSchemas)
             toolDefinitionsChanged = !NSArray(array: values).isEqual(to: schemas)
             object["tools"] = schemas
         } else {
@@ -763,10 +768,13 @@ enum WebModelResponseCodec {
             ? projection.discoverable.filter { !projection.selectedNames.contains($0.name) }
             : projection.discoverable
         let rowKind = compactHistoryInventory ? "unloaded discovery" : "discovery"
-        let rowFields = compactHistoryInventory ? "name,kind" : "name,purpose,kind"
+        let rowFields = compactHistoryInventory ? "name,kind?" : "name,purpose,kind"
+        let kindRule = compactHistoryInventory ? " Omitted kind uses kind_default." : ""
+        let kindDefault = compactHistoryInventory ? "\"kind_default\":\"function\"," : ""
         let entries = String(decoding: try encoder.encode(discovery.map { entry in
             let kind = entry.isCustom ? "custom" : "function"
-            return compactHistoryInventory ? [entry.name, kind] : [entry.name, String(entry.summary.prefix(40)), kind]
+            if compactHistoryInventory { return entry.isCustom ? [entry.name, kind] : [entry.name] }
+            return [entry.name, String(entry.summary.prefix(40)), kind]
         }), as: UTF8.self)
         let revision = String(decoding: try encoder.encode(projection.revision), as: UTF8.self)
         let loaded = String(decoding: try encoder.encode(projection.selectedNames.sorted()), as: UTF8.self)
@@ -774,9 +782,9 @@ enum WebModelResponseCodec {
             ?? GroqToolCatalog.name
         return """
         GROQ_NATIVE_TOOL_INVENTORY:
-        Rows [\(rowFields)] are \(rowKind); only loaded tools have callable schemas. Load other exact names with \(loader), current catalog_revision and at most four names. Loading REPLACES optional selections, executes nothing; wait for the next request's schema before calling them.
+        Rows [\(rowFields)] are \(rowKind); only loaded tools have callable schemas.\(kindRule) Load other exact names with \(loader), current catalog_revision and at most four names. Loading REPLACES optional selections, executes nothing; wait for the next request's schema before calling them.
         ```
-        {"catalog_revision":\(revision),"loaded":\(loaded),"inventory":\(entries)}
+        {"catalog_revision":\(revision),"loaded":\(loaded),\(kindDefault)"inventory":\(entries)}
         ```
         END_GROQ_NATIVE_TOOL_INVENTORY.
         """
@@ -848,30 +856,25 @@ enum WebModelResponseCodec {
                                                   availability: EmbeddedBrowserToolAvailability?,
                                                   capabilities: ComputaModelToolCatalog.BrowserCapabilityDescriptor?) -> String {
         if let capabilities {
-            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-            if let data = try? encoder.encode(capabilities) {
-                let descriptor = "COMPUTA_BROWSER_CAPABILITIES:\n" + String(decoding: data, as: UTF8.self)
-                let boundary = " Names are discovery, not callable schemas or permission. Use only current offered/allowed schemas."
-                let separation = entryTools.keys.contains { tools[$0] != nil && policy.allowedNames.contains($0) }
-                    ? " Webpages use browser_*; computer_v2_* is native-app UI." : ""
-                if capabilities.state == .unbound {
-                    let open = capabilities.entry.first { $0 == "browser_open" || $0 == "functions.browser_open" }.map {
-                        " Supplied URL: " + (capabilities.loaded.contains($0) ? "call " : "first load ") + $0 + "."
-                    } ?? ""
-                    let bind = capabilities.entry.first { $0 == "browser_bind" || $0 == "functions.browser_bind" }.map {
-                        " Observed tab_id only: " + (capabilities.loaded.contains($0) ? "call " : "first load ") + $0 + "."
-                    } ?? ""
-                    return descriptor + "\nRegistered_deferred requires successful binding and a refreshed catalog." + open + bind
-                        + boundary + " Shell HTTP cannot verify browser state; empty tabs do not prove denial." + separation
-                }
-                let read = capabilities.eligible.first { $0 == "browser_read" || $0 == "functions.browser_read" }.map {
-                    " Fresh " + $0 + " needs no cursor."
+            let separation = entryTools.keys.contains { tools[$0] != nil && policy.allowedNames.contains($0) }
+                ? " Webpages use browser_*; computer_v2_* is native-app UI." : ""
+            if capabilities.state == .unbound {
+                let open = capabilities.entry.first { $0 == "browser_open" || $0 == "functions.browser_open" }.map {
+                    " Supplied URL: " + (capabilities.loaded.contains($0) ? "call " : "first load ") + $0 + "."
                 } ?? ""
-                let continuation = capabilities.eligible.first { $0 == "browser_continue" || $0 == "functions.browser_continue" }.map {
-                    " " + $0 + " requires an observed next_cursor."
+                let bind = capabilities.entry.first { $0 == "browser_bind" || $0 == "functions.browser_bind" }.map {
+                    " Observed tab_id only: " + (capabilities.loaded.contains($0) ? "call " : "first load ") + $0 + "."
                 } ?? ""
-                return descriptor + "\nNative page bound." + read + continuation + boundary + " Use current refs." + separation
+                return "Current browser state: unbound. Schemas do not bind pages. Page tools require native binding; click/fill also need current refs." + open + bind
+                    + " Shell HTTP cannot verify browser state; empty tabs do not prove denial." + separation
             }
+            let read = capabilities.eligible.first { $0 == "browser_read" || $0 == "functions.browser_read" }.map {
+                " Fresh " + $0 + " needs no cursor."
+            } ?? ""
+            let continuation = capabilities.eligible.first { $0 == "browser_continue" || $0 == "functions.browser_continue" }.map {
+                " " + $0 + " requires an observed next_cursor."
+            } ?? ""
+            return "Native page bound." + read + continuation + " Use current refs." + separation
         }
         // Preserve the existing narrow route when no descriptor is proved;
         // never advertise registered-deferred capability from a name alone.

@@ -19,19 +19,10 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
     }
 
 
-    func testBrowserCapabilityDescriptorSurvivesNativeBindingResetWithoutGrantingDeferredSchemas() throws {
+    func testBrowserCapabilityDescriptorKeepsLoadedSchemasAcrossBindingWithoutExecutionAuthority() throws {
         let model = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
         func wire(_ value: [String: Any]) -> [String: Any] {
             var result = value; result["parameters"] = result.removeValue(forKey: "inputSchema"); return result
-        }
-        func descriptor(_ request: C.Request) throws -> [String: Any] {
-            let marker = "COMPUTA_BROWSER_CAPABILITIES:\n"
-            XCTAssertEqual(request.prompt.components(separatedBy: marker).count - 1, 1)
-            let start = try XCTUnwrap(request.prompt.range(of: marker)).upperBound
-            let line = request.prompt[start...].prefix { $0 != "\n" }
-            let value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
-            XCTAssertEqual(Set(value.keys), ["state", "entry", "registered_deferred", "loaded", "loadable"])
-            return value
         }
         let browser = EmbeddedBrowserTools.definitions().map(wire)
         let pageNames = Set(["browser_navigate", "browser_read", "browser_continue", "browser_click", "browser_fill", "browser_wait", "browser_close"])
@@ -52,54 +43,120 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
                 "names": ["exec_command", "browser_open", "browser_bind", "browser_tabs"].map { prefix + $0 }]))
             let unbound = try C.prepareRequest(raw, browserToolAvailability: .unbound,
                 groqToolCatalogProjection: catalog.prepare(scope: scope, seed: unboundSeed), groqDirectTools: .loadedOnly, compactHistoryInventory: true)
-            let before = try descriptor(unbound)
-            XCTAssertEqual(before["state"] as? String, "unbound")
-            XCTAssertEqual(before["entry"] as? [String], ["browser_bind", "browser_open"].map { prefix + $0 })
-            XCTAssertEqual(Set(try XCTUnwrap(before["registered_deferred"] as? [String])), Set(pageNames.map { prefix + $0 }))
-            XCTAssertEqual(before["loaded"] as? [String], ["browser_bind", "browser_open", "browser_tabs"].map { prefix + $0 })
-            XCTAssertEqual(before["loadable"] as? [String], [])
+            assertGroqBrowserState(unbound, bound: false)
+            XCTAssertTrue(unbound.prompt.contains("Supplied URL: call " + prefix + "browser_open."))
+            XCTAssertTrue(unbound.prompt.contains("Observed tab_id only: call " + prefix + "browser_bind."))
+            let beforeInventory = try groqInventoryNames(unbound)
+            XCTAssertEqual(beforeInventory.loaded.intersection(Set(browser.compactMap { $0["name"] as? String }.map { prefix + $0 })),
+                Set(["browser_bind", "browser_open", "browser_tabs"].map { prefix + $0 }))
+            XCTAssertEqual(beforeInventory.loadable.intersection(Set(pageNames.map { prefix + $0 })), Set(pageNames.map { prefix + $0 }))
             let read = String(decoding: try encode(["type": "tool_calls", "calls": [["name": prefix + "browser_read", "arguments": [:]]]]), as: UTF8.self)
             XCTAssertThrowsError(try C.parseReply(read, request: unbound, requireEnvelope: true))
             let open = String(decoding: try encode(["type": "tool_calls", "calls": [["name": prefix + "browser_open", "arguments": ["url": "http://localhost:62341/"]]]]), as: UTF8.self)
             XCTAssertNoThrow(try C.parseReply(open, request: unbound, requireEnvelope: true))
 
-            // A real availability change refreshes the revision and deliberately removes optional schemas.
-            let boundSeed = try XCTUnwrap(C.prepareRequest(raw, browserToolAvailability: .bound).groqToolCatalogSeed)
-            let reset = try catalog.prepare(scope: scope, seed: boundSeed)
-            XCTAssertNotEqual(reset.revision, initial.revision)
-            XCTAssertEqual(reset.selectedNames, [prefix + GroqToolCatalog.name, prefix + GroqHistoryTool.name])
-            XCTAssertThrowsError(try C.prepareRequest(raw, browserToolAvailability: .bound, groqToolCatalogProjection: initial))
-            let boundBaseline = try C.prepareRequest(raw, browserToolAvailability: .bound, groqToolCatalogProjection: reset,
-                groqDirectTools: .loadedOnly, compactHistoryInventory: true)
-            let after = try descriptor(boundBaseline)
-            XCTAssertEqual(after["state"] as? String, "bound")
-            XCTAssertEqual(after["entry"] as? [String], [])
-            XCTAssertEqual(after["registered_deferred"] as? [String], [])
-            XCTAssertEqual(after["loaded"] as? [String], [])
-            let allBrowser = Set(browser.compactMap { $0["name"] as? String }.map { prefix + $0 })
-            XCTAssertEqual(Set(try XCTUnwrap(after["loadable"] as? [String])), allBrowser)
-            XCTAssertEqual(boundBaseline.offeredToolNames, reset.selectedNames)
-            XCTAssertThrowsError(try C.parseReply(read, request: boundBaseline, requireEnvelope: true))
-            let admitted = try C.prepareBudgetedGroqRequest(raw, availability: .bound, projection: reset, model: model,
-                loadedOnly: true, compactHistoryInventory: true, historyProjection: nil)
-            XCTAssertLessThanOrEqual(admitted.units, C.groqMaximumBodyTokens)
-            XCTAssertEqual(admitted.request.continuationRequest, raw)
-            XCTAssertEqual(try descriptor(admitted.request)["state"] as? String, "bound")
-
+            // Loading registers schemas for the NEXT response; neither the load nor a parsed call binds a page.
             let four = ["browser_read", "browser_fill", "browser_click", "browser_close"].map { prefix + $0 }
-            _ = try catalog.load(scope: scope, arguments: encode(["catalog_revision": reset.revision, "names": four]))
-            let selected = try catalog.prepare(scope: scope, seed: boundSeed)
-            XCTAssertEqual(selected.selectedNames.subtracting(reset.selectedNames), Set(four))
-            XCTAssertThrowsError(try catalog.load(scope: scope, arguments: encode(["catalog_revision": reset.revision,
-                "names": four + [prefix + "browser_wait"]])))
-            XCTAssertEqual(try catalog.prepare(scope: scope, seed: boundSeed), selected)
-            let loaded = try C.prepareRequest(raw, browserToolAvailability: .bound, groqToolCatalogProjection: selected,
+            let receipt = try catalog.load(scope: scope, arguments: encode(["catalog_revision": initial.revision, "names": four]),
+                lastOfferedNames: unbound.offeredToolNames)
+            XCTAssertEqual((try XCTUnwrap(JSONSerialization.jsonObject(with: receipt) as? [String: Any]))["execution"] as? Bool, false)
+            let selected = try catalog.prepare(scope: scope, seed: unboundSeed)
+            var pageTransition = catalog
+            XCTAssertEqual(selected.selectedNames, Set(four).union([prefix + GroqToolCatalog.name, prefix + GroqHistoryTool.name]))
+            let loadedUnbound = try C.prepareRequest(raw, browserToolAvailability: .unbound, groqToolCatalogProjection: selected,
                 groqDirectTools: .loadedOnly, compactHistoryInventory: true)
-            let final = try descriptor(loaded)
-            XCTAssertEqual(final["loaded"] as? [String], four.sorted())
-            XCTAssertEqual(Set(try XCTUnwrap(final["loadable"] as? [String])), allBrowser.subtracting(four))
-            XCTAssertNoThrow(try C.parseReply(read, request: loaded, requireEnvelope: true))
-            for request in [unbound, boundBaseline, loaded] {
+            XCTAssertThrowsError(try C.parseReply(read, request: unbound, requireEnvelope: true), "The earlier admitted request stays unchanged")
+            XCTAssertNoThrow(try C.parseReply(read, request: loadedUnbound, requireEnvelope: true), "Schema admission is not native execution authority")
+            assertGroqBrowserState(loadedUnbound, bound: false)
+            XCTAssertTrue(loadedUnbound.prompt.contains("Page tools require native binding"))
+            XCTAssertThrowsError(try catalog.load(scope: scope, arguments: encode(["catalog_revision": initial.revision,
+                "names": four + [prefix + "browser_wait"]])))
+            XCTAssertEqual(try catalog.prepare(scope: scope, seed: unboundSeed), selected)
+
+            _ = try catalog.load(scope: scope, arguments: encode(["catalog_revision": initial.revision, "names": [prefix + "browser_open"]]))
+            let openSelection = try catalog.prepare(scope: scope, seed: unboundSeed)
+            let openUnbound = try C.prepareRequest(raw, browserToolAvailability: .unbound, groqToolCatalogProjection: openSelection,
+                groqDirectTools: .loadedOnly, compactHistoryInventory: true)
+            XCTAssertEqual(openUnbound.offeredToolNames, [prefix + GroqToolCatalog.name, prefix + GroqHistoryTool.name, prefix + "browser_open"])
+            XCTAssertNoThrow(try C.parseReply(open, request: openUnbound, requireEnvelope: true))
+            XCTAssertThrowsError(try C.parseReply(read, request: openUnbound, requireEnvelope: true), "Loading REPLACES rather than unions the optional schemas")
+
+            // Only the observed runtime binding changes here; definitions, policy, revision and selection stay exact.
+            let boundSeed = try XCTUnwrap(C.prepareRequest(raw, browserToolAvailability: .bound).groqToolCatalogSeed)
+            XCTAssertEqual(boundSeed.registeredDefinitionsJSON, unboundSeed.registeredDefinitionsJSON)
+            XCTAssertEqual(boundSeed.callableNames, unboundSeed.callableNames)
+            XCTAssertEqual(boundSeed.allowedNames, unboundSeed.allowedNames)
+            XCTAssertEqual(try pageTransition.prepare(scope: scope, seed: boundSeed), selected)
+            let preservedPages = try C.prepareRequest(raw, browserToolAvailability: .bound,
+                groqToolCatalogProjection: pageTransition.prepare(scope: scope, seed: boundSeed),
+                groqDirectTools: .loadedOnly, compactHistoryInventory: true)
+            XCTAssertEqual(preservedPages.offeredToolNames, loadedUnbound.offeredToolNames)
+            let afterBinding = try catalog.prepare(scope: scope, seed: boundSeed)
+            XCTAssertEqual(afterBinding, openSelection)
+            let boundOpen = try C.prepareRequest(raw, browserToolAvailability: .bound, groqToolCatalogProjection: afterBinding,
+                groqDirectTools: .loadedOnly, compactHistoryInventory: true)
+            assertGroqBrowserState(boundOpen, bound: true)
+            XCTAssertFalse(boundOpen.prompt.contains("Supplied URL:"))
+            XCTAssertFalse(boundOpen.prompt.contains("Observed tab_id only:"))
+            let allBrowser = Set(browser.compactMap { $0["name"] as? String }.map { prefix + $0 })
+            let boundOpenInventory = try groqInventoryNames(boundOpen)
+            XCTAssertEqual(boundOpenInventory.loaded.intersection(allBrowser), [prefix + "browser_open"])
+            XCTAssertEqual(boundOpenInventory.loadable.intersection(allBrowser), allBrowser.subtracting([prefix + "browser_open"]))
+            _ = try catalog.load(scope: scope, arguments: encode(["catalog_revision": initial.revision, "names": four]))
+            let reloaded = try catalog.prepare(scope: scope, seed: boundSeed)
+            XCTAssertEqual(reloaded, selected)
+            let bound = try C.prepareRequest(raw, browserToolAvailability: .bound, groqToolCatalogProjection: reloaded,
+                groqDirectTools: .loadedOnly, compactHistoryInventory: true)
+            XCTAssertEqual(try groqInventoryNames(bound).loaded.intersection(allBrowser), Set(four))
+            XCTAssertEqual(bound.offeredToolNames, selected.selectedNames)
+            XCTAssertNoThrow(try C.parseReply(read, request: bound, requireEnvelope: true))
+            for (availability, projection) in [(EmbeddedBrowserToolAvailability.unbound, selected), (.unbound, openSelection),
+                                               (.bound, afterBinding), (.bound, reloaded)] {
+                let admitted = try C.prepareBudgetedGroqRequest(raw, availability: availability, projection: projection, model: model,
+                    loadedOnly: true, compactHistoryInventory: true, historyProjection: nil)
+                XCTAssertLessThanOrEqual(admitted.units, C.groqMaximumBodyTokens)
+                XCTAssertEqual(admitted.units, try GroqBodyTokenCounter.tokenCount(admitted.request.prompt))
+                XCTAssertEqual(admitted.request.continuationRequest, raw)
+                // Reconstruct the fixed prior Q representation only: the same full payload, revision,
+                // exact inventory names/kinds and callable schemas, with no threshold padding.
+                func json(_ value: Any) throws -> String { String(decoding: try encode(value), as: UTF8.self) }
+                let inventory = try groqInventoryObject(admitted.request)
+                XCTAssertEqual(inventory["catalog_revision"] as? String, projection.revision)
+                let rows = try XCTUnwrap(inventory["inventory"] as? [[String]])
+                let oldRows = try groqCompactInventoryRows(inventory)
+                let revisionJSON = try json(projection.revision), loadedJSON = try json(projection.selectedNames.sorted())
+                let compactLine = "{\"catalog_revision\":\(revisionJSON),\"loaded\":\(loadedJSON),\"kind_default\":\"function\",\"inventory\":\(try json(rows))}"
+                let oldLine = "{\"catalog_revision\":\(revisionJSON),\"loaded\":\(loadedJSON),\"inventory\":\(try json(oldRows))}"
+                let compactHeader = "Rows [name,kind?] are unloaded discovery; only loaded tools have callable schemas. Omitted kind uses kind_default."
+                let oldHeader = "Rows [name,kind] are unloaded discovery; only loaded tools have callable schemas."
+                let boundary = " Names are discovery, not callable schemas or permission. Use only current offered/allowed schemas. Tool names: inventory and current schemas."
+                let isBound = availability == .bound
+                let entry = isBound ? [] : ["browser_bind", "browser_open"].map { prefix + $0 }
+                let descriptor = "COMPUTA_BROWSER_CAPABILITIES:\n" + (try json(["state": isBound ? "bound" : "unbound", "entry": entry]))
+                let currentState = isBound ? "Native page bound." : "Current browser state: unbound. "
+                let oldState = descriptor + (isBound ? "\nNative page bound." : "\n")
+                let boundaryAnchor = isBound ? " Use current refs." : " Shell HTTP cannot verify browser state; empty tabs do not prove denial."
+                for needle in [compactLine, compactHeader, currentState, boundaryAnchor] {
+                    XCTAssertEqual(admitted.request.prompt.components(separatedBy: needle).count - 1, 1)
+                }
+                let legacyPrompt = admitted.request.prompt.replacingOccurrences(of: compactLine, with: oldLine)
+                    .replacingOccurrences(of: compactHeader, with: oldHeader)
+                    .replacingOccurrences(of: currentState, with: oldState)
+                    .replacingOccurrences(of: boundaryAnchor, with: boundary + boundaryAnchor)
+                XCTAssertEqual(legacyPrompt.replacingOccurrences(of: oldLine, with: compactLine)
+                    .replacingOccurrences(of: oldHeader, with: compactHeader)
+                    .replacingOccurrences(of: oldState, with: currentState)
+                    .replacingOccurrences(of: boundary + boundaryAnchor, with: boundaryAnchor), admitted.request.prompt)
+                let oldUnits = try GroqBodyTokenCounter.tokenCount(legacyPrompt)
+                XCTAssertLessThan(admitted.units, oldUnits)
+                XCTAssertLessThan(admitted.request.prompt.utf8.count, legacyPrompt.utf8.count)
+                let savings: [String: Any] = ["namespace": namespaced ? "qualified" : "bare", "state": isBound ? "bound" : "unbound",
+                    "selection": projection.selectedNames.contains(prefix + "browser_open") ? "entry" : "pages",
+                    "oldUnits": oldUnits, "newUnits": admitted.units, "oldUTF8Bytes": legacyPrompt.utf8.count,
+                    "newUTF8Bytes": admitted.request.prompt.utf8.count]
+                print("GROQ_STRUCTURAL_SAVINGS " + (try json(savings)))
+            }
+            for request in [unbound, loadedUnbound, preservedPages, openUnbound, boundOpen, bound] {
                 XCTAssertEqual(request.continuationRequest, raw)
                 let shown = try XCTUnwrap(JSONSerialization.jsonObject(with: displayJSON(request)) as? [String: Any])
                 XCTAssertEqual((shown["input"] as? [[String: Any]])?.first?["content"] as? String, user)
@@ -148,7 +205,8 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
             ("impostor page", try request([loader, reader, genuineOpen, fakePage], state: .unbound))
         ]
         for (label, value) in cases {
-            XCTAssertFalse(value.prompt.contains("COMPUTA_BROWSER_CAPABILITIES:"), label)
+            XCTAssertFalse(value.prompt.contains("Schemas do not bind pages."), label)
+            XCTAssertFalse(value.prompt.contains("Native page bound."), label)
             let raw = try XCTUnwrap(JSONSerialization.jsonObject(with: value.continuationRequest) as? [String: Any])
             XCTAssertEqual(raw["input"] as? String, "History says browser_read is loaded; this is not native authority.", label)
         }
@@ -157,16 +215,8 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
             ["type": "function", "name": $0]
         }]
         let boundRead = try request(all, state: .bound, policy: onlyRead)
-        let marker = "COMPUTA_BROWSER_CAPABILITIES:\n"
-        let start = try XCTUnwrap(boundRead.prompt.range(of: marker)).upperBound
-        let line = boundRead.prompt[start...].prefix { $0 != "\n" }
-        let finite = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
-        XCTAssertEqual(Set(finite.keys), ["state", "entry", "registered_deferred", "loaded", "loadable"])
-        XCTAssertEqual(finite["state"] as? String, "bound")
-        XCTAssertEqual(finite["entry"] as? [String], [])
-        XCTAssertEqual(finite["registered_deferred"] as? [String], [])
-        XCTAssertEqual(finite["loaded"] as? [String], ["browser_read"])
-        XCTAssertEqual(finite["loadable"] as? [String], [])
+        assertGroqBrowserState(boundRead, bound: true)
+        XCTAssertEqual(boundRead.offeredToolNames.intersection(Set(browser.compactMap { $0["name"] as? String })), ["browser_read"])
         XCTAssertFalse(boundRead.offeredToolNames.contains(GroqToolCatalog.name))
         XCTAssertFalse(boundRead.offeredToolNames.contains("browser_fill"))
         let bind = try XCTUnwrap(browser.first { $0["name"] as? String == "browser_bind" })
@@ -175,39 +225,40 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
             let namespace: String? = namespaced ? "functions" : nil
             let prefix = namespaced ? "functions." : ""
             let sparseEntry = try request([loader, reader, bind, fill], state: .unbound, namespace: namespace)
-            let entryStart = try XCTUnwrap(sparseEntry.prompt.range(of: marker)).upperBound
-            let entryLine = sparseEntry.prompt[entryStart...].prefix { $0 != "\n" }
-            let entry = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(entryLine.utf8)) as? [String: Any])
-            XCTAssertEqual(entry["entry"] as? [String], [prefix + "browser_bind"])
-            XCTAssertEqual(entry["registered_deferred"] as? [String], [prefix + "browser_fill"])
-            XCTAssertEqual(entry["loadable"] as? [String], [prefix + "browser_bind"])
+            assertGroqBrowserState(sparseEntry, bound: false)
+            XCTAssertEqual(try groqInventoryNames(sparseEntry).loadable.intersection([prefix + "browser_bind", prefix + "browser_fill"]),
+                Set(["browser_bind", "browser_fill"].map { prefix + $0 }))
             XCTAssertTrue(sparseEntry.prompt.contains("Observed tab_id only: first load " + prefix + "browser_bind."))
             XCTAssertFalse(sparseEntry.prompt.contains("Supplied URL:"))
             let sparseBound = try request([loader, reader, fill], state: .bound, namespace: namespace)
-            let boundStart = try XCTUnwrap(sparseBound.prompt.range(of: marker)).upperBound
-            let boundLine = sparseBound.prompt[boundStart...].prefix { $0 != "\n" }
-            let bound = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(boundLine.utf8)) as? [String: Any])
-            XCTAssertEqual(bound["state"] as? String, "bound")
-            XCTAssertEqual(bound["loadable"] as? [String], [prefix + "browser_fill"])
+            assertGroqBrowserState(sparseBound, bound: true)
+            XCTAssertTrue(try groqInventoryNames(sparseBound).loadable.contains(prefix + "browser_fill"))
             XCTAssertFalse(sparseBound.prompt.contains("needs no cursor."))
             XCTAssertFalse(sparseBound.prompt.contains("requires an observed next_cursor."))
         }
-        // Existing policy admission still rejects a reference to a withheld schema before any descriptor exists.
+        // A loader-permitted page schema can be discovered without borrowing an entry denied by policy.
         let deferredPolicy: [String: Any] = ["type": "allowed_tools", "tools": [GroqToolCatalog.name, "browser_read"].map {
             ["type": "function", "name": $0]
         }]
-        XCTAssertThrowsError(try request(all, state: .unbound, policy: deferredPolicy)) {
+        let pageOnlyRequest = try request(all, state: .unbound, policy: deferredPolicy)
+        XCTAssertFalse(pageOnlyRequest.prompt.contains("Schemas do not bind pages."))
+        XCTAssertFalse(pageOnlyRequest.offeredToolNames.contains("browser_open"))
+        XCTAssertFalse(pageOnlyRequest.offeredToolNames.contains("browser_bind"))
+        XCTAssertTrue(try XCTUnwrap(pageOnlyRequest.groqToolCatalogSeed).callableNames.contains("browser_read"))
+        // Without loader permission the new opt-in is unavailable, preserving ordinary unbound policy admission.
+        XCTAssertThrowsError(try request(all, state: .unbound, policy: onlyRead)) {
             guard case C.Failure.invalidToolChoice = $0 else { return XCTFail("Unexpected policy error: \($0)") }
         }
         for providerModel in ["browser/chatgpt", "browser/claude", "browser/gemini"] {
             let other = try request(all, state: .unbound, providerModel: providerModel)
-            XCTAssertFalse(other.prompt.contains("COMPUTA_BROWSER_CAPABILITIES:"))
+            XCTAssertFalse(other.prompt.contains("Schemas do not bind pages."))
+            XCTAssertFalse(other.prompt.contains("Native page bound."))
             XCTAssertTrue(other.prompt.contains("COMPUTA_DEFERRED_BROWSER_CAPABILITIES:"))
             XCTAssertTrue(other.prompt.contains("these registered page tools from the callable catalog:"))
         }
     }
 
-    func testCompactBaselineRecipeSurvivesBoundCatalogResetAndRejectedLoaderHistoryInBothNamespaces() throws {
+    func testCompactBaselineRecipeSurvivesGenuineCatalogResetAndRejectedLoaderHistoryInBothNamespaces() throws {
         let model = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
         func wire(_ definition: [String: Any]) -> [String: Any] {
             var value = definition; value["parameters"] = value.removeValue(forKey: "inputSchema"); return value
@@ -232,11 +283,18 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
             let beforeBinding = try C.prepareRequest(raw, browserToolAvailability: .unbound,
                 groqToolCatalogProjection: catalog.prepare(scope: scope, seed: unboundSeed), groqDirectTools: .loadedOnly, compactHistoryInventory: true)
             XCTAssertEqual(beforeBinding.offeredToolNames.count, 6)
-            // Native availability, not a loader call or retained claim, changes the revision and resets selection.
-            let boundSeed = try XCTUnwrap(C.prepareRequest(raw, browserToolAvailability: .bound).groqToolCatalogSeed)
+            // Binding alone is stable; a genuinely changed native declaration still resets the selection.
+            let unchangedBoundSeed = try XCTUnwrap(C.prepareRequest(raw, browserToolAvailability: .bound).groqToolCatalogSeed)
+            XCTAssertEqual(try catalog.prepare(scope: scope, seed: unchangedBoundSeed).selectedNames, beforeBinding.offeredToolNames)
+            let extra: [String: Any] = ["type": "function", "name": "fixture_catalog_changed", "parameters": ["type": "object", "properties": [:]]]
+            let changedDefinitions = definitions + [extra]
+            let changedTools: [[String: Any]] = namespaced ? [["type": "namespace", "name": "functions", "tools": changedDefinitions]] : changedDefinitions
+            object["tools"] = changedTools
+            let boundSeed = try XCTUnwrap(C.prepareRequest(encode(object), browserToolAvailability: .bound).groqToolCatalogSeed)
             let reset = try catalog.prepare(scope: scope, seed: boundSeed)
             XCTAssertNotEqual(reset.revision, initial.revision)
             XCTAssertEqual(reset.selectedNames, [prefix + GroqToolCatalog.name, prefix + GroqHistoryTool.name])
+            XCTAssertThrowsError(try C.prepareRequest(encode(object), browserToolAvailability: .bound, groqToolCatalogProjection: initial))
             let failedArguments = try encode(["catalog_revision": reset.revision,
                 "names": ["browser_bind", "browser_fill", "browser_click", "browser_read"].map { prefix + $0 }])
             let failure = try XCTUnwrap(GroqToolCatalog.Failure.selectionTooLarge.errorDescription)
@@ -513,7 +571,7 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
                 groqDirectTools: .loadedOnly, compactHistoryInventory: true)
             let d = try XCTUnwrap(request.groqToolDiscoveryDiagnostic)
             XCTAssertEqual(d.binding, .unbound); XCTAssertEqual(d.revisionSHA256, initial.revision)
-            XCTAssertEqual(d.loadedCount, 6); XCTAssertEqual(d.unloadedDiscoverableCount, 3)
+            XCTAssertEqual(d.loadedCount, 6); XCTAssertEqual(d.unloadedDiscoverableCount, 10)
             XCTAssertTrue(d.loaderOffered); XCTAssertEqual(d.discoverableEntryMask, 6); XCTAssertEqual(d.offeredEntryMask, 0)
             XCTAssertEqual(request.offeredToolNames, Set(exactFour + [prefix + GroqToolCatalog.name, prefix + GroqHistoryTool.name]))
             XCTAssertEqual(request.continuationRequest, raw)
@@ -536,7 +594,7 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
             let entry = try C.prepareRequest(raw, browserToolAvailability: .unbound,
                 groqToolCatalogProjection: catalog.prepare(scope: scope, seed: seed), groqDirectTools: .loadedOnly, compactHistoryInventory: true)
             let e = try XCTUnwrap(entry.groqToolDiscoveryDiagnostic)
-            XCTAssertTrue(e.loaderOffered); XCTAssertEqual(e.loadedCount, 3); XCTAssertEqual(e.unloadedDiscoverableCount, 6)
+            XCTAssertTrue(e.loaderOffered); XCTAssertEqual(e.loadedCount, 3); XCTAssertEqual(e.unloadedDiscoverableCount, 13)
             XCTAssertEqual(e.discoverableEntryMask, 6); XCTAssertEqual(e.offeredEntryMask, 2)
             XCTAssertEqual(entry.continuationRequest, raw)
             let boundSeed = try XCTUnwrap(C.prepareRequest(raw, browserToolAvailability: .bound).groqToolCatalogSeed)
@@ -610,14 +668,6 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
         }
         let exec: [String: Any] = ["type": "function", "name": "exec_command", "parameters": ["type": "object",
             "properties": ["cmd": ["type": "string"]], "required": ["cmd"], "additionalProperties": false]]
-        func capabilities(_ request: C.Request) throws -> [String: Any] {
-            let marker = "COMPUTA_BROWSER_CAPABILITIES:\n"
-            let start = try XCTUnwrap(request.prompt.range(of: marker)).upperBound
-            let line = request.prompt[start...].prefix { $0 != "\n" }
-            let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
-            XCTAssertEqual(Set(fields.keys), ["state", "entry", "registered_deferred", "loaded", "loadable"])
-            return fields
-        }
         for namespaced in [false, true] {
             let prefix = namespaced ? "functions." : ""
             let definitions = [loader, reader, exec] + computers + browser
@@ -640,7 +690,7 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
                 groqDirectTools: .loadedOnly, compactHistoryInventory: true)
             let open = prefix + "browser_open", load = prefix + GroqToolCatalog.name
             XCTAssertEqual(request.offeredToolNames, selected.union([load, prefix + GroqHistoryTool.name]))
-            XCTAssertTrue(loaded.loaderChoices.contains(open)); XCTAssertFalse(loaded.loaderChoices.contains(prefix + "browser_read"))
+            XCTAssertTrue(loaded.loaderChoices.contains(open)); XCTAssertTrue(loaded.loaderChoices.contains(prefix + "browser_read"))
             XCTAssertFalse(request.offeredToolNames.contains(open)); XCTAssertTrue(request.offeredToolNames.contains(load))
             XCTAssertTrue(request.prompt.contains(" Entry if needed: " + String(decoding: try encode(["type": "tool_calls", "calls": [["name": load, "arguments": ["catalog_revision": initial.revision, "names": [open]]]]]), as: UTF8.self)))
             XCTAssertTrue(request.prompt.contains("Load eligible names yourself; no user enablement."))
@@ -650,10 +700,15 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
             XCTAssertThrowsError(try C.parseReply(openReply, request: request, requireEnvelope: true)) {
                 XCTAssertEqual($0 as? C.Failure, .unknownTool(open))
             }
-            XCTAssertThrowsError(try catalog.load(scope: scope, arguments: encode(["catalog_revision": loaded.revision,
-                "names": [prefix + "browser_read"]]), lastOfferedNames: request.offeredToolNames)) {
-                guard case .unavailableSelection = $0 as? GroqToolCatalog.Failure else { return XCTFail("Deferred page tools must remain unavailable until bind") }
-            }
+            var pageProbe = catalog
+            let pageReceipt = try pageProbe.load(scope: scope, arguments: encode(["catalog_revision": loaded.revision,
+                "names": [prefix + "browser_read"]]), lastOfferedNames: request.offeredToolNames)
+            XCTAssertEqual((try XCTUnwrap(JSONSerialization.jsonObject(with: pageReceipt) as? [String: Any]))["execution"] as? Bool, false)
+            let pageRequest = try C.prepareRequest(data, browserToolAvailability: .unbound,
+                groqToolCatalogProjection: pageProbe.prepare(scope: scope, seed: seed), groqDirectTools: .loadedOnly, compactHistoryInventory: true)
+            let pageReply = #"{"type":"tool_calls","calls":[{"name":"\#(prefix)browser_read","arguments":{}}]}"#
+            XCTAssertThrowsError(try C.parseReply(pageReply, request: request, requireEnvelope: true))
+            XCTAssertNoThrow(try C.parseReply(pageReply, request: pageRequest, requireEnvelope: true), "Native execution still requires binding")
             XCTAssertEqual(try catalog.prepare(scope: scope, seed: seed), loaded)
             let loadReply = String(decoding: try encode(["type": "tool_calls", "calls": [["name": load,
                 "arguments": ["catalog_revision": loaded.revision, "names": [open]]]]]), as: UTF8.self)
@@ -666,28 +721,32 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
             XCTAssertEqual(next.continuationRequest, data); XCTAssertEqual(request.continuationRequest, data)
             XCTAssertEqual(next.groqToolCatalogSeed?.registeredDefinitionsJSON, seed.registeredDefinitionsJSON)
             XCTAssertTrue(next.prompt.contains("Webpages use browser_*; computer_v2_* is native-app UI."), "A loaded native browser entry still differs from native-app UI")
-            let deferred = "Registered_deferred requires successful binding and a refreshed catalog."
+            let deferred = "Page tools require native binding"
             XCTAssertTrue(request.prompt.contains(deferred)); XCTAssertTrue(next.prompt.contains(deferred))
             for current in [request, next] {
-                let descriptor = try capabilities(current)
-                XCTAssertEqual(descriptor["state"] as? String, "unbound")
-                XCTAssertEqual(descriptor["entry"] as? [String], ["browser_bind", "browser_open"].map { prefix + $0 })
-                XCTAssertEqual(descriptor["registered_deferred"] as? [String],
-                    ["browser_click", "browser_close", "browser_continue", "browser_fill", "browser_navigate", "browser_read", "browser_wait"].map { prefix + $0 })
-                XCTAssertTrue(current.prompt.contains("Names are discovery, not callable schemas or permission. Use only current offered/allowed schemas."))
+                assertGroqBrowserState(current, bound: false)
+                XCTAssertTrue(current.prompt.contains("Observed tab_id only: first load " + prefix + "browser_bind."))
+                XCTAssertTrue(current.prompt.contains("Supplied URL: " + (current.offeredToolNames.contains(open) ? "call " : "first load ") + open + "."))
+                let browserNames = Set(browser.compactMap { $0["name"] as? String }.map { prefix + $0 })
+                let loadedBrowser = browserNames.intersection(current.offeredToolNames)
+                let inventory = try groqInventoryNames(current)
+                XCTAssertEqual(inventory.loaded.intersection(browserNames), loadedBrowser)
+                XCTAssertEqual(inventory.loadable.intersection(browserNames), browserNames.subtracting(loadedBrowser))
+                XCTAssertFalse(current.prompt.contains("COMPUTA_BROWSER_CAPABILITIES:"))
             }
             XCTAssertEqual(next.prompt.components(separatedBy: "Webpages use browser_*; computer_v2_* is native-app UI.").count - 1, 1)
             let fullUnbound = try C.prepareRequest(data, browserToolAvailability: .unbound)
             let fullBound = try C.prepareRequest(data, browserToolAvailability: .bound)
-            XCTAssertTrue(fullUnbound.runtimeInstructions.contains("COMPUTA_DEFERRED_BROWSER_CAPABILITIES:"))
-            XCTAssertFalse(fullUnbound.offeredToolNames.contains(prefix + "browser_read"))
+            XCTAssertFalse(fullUnbound.runtimeInstructions.contains("COMPUTA_DEFERRED_BROWSER_CAPABILITIES:"))
+            XCTAssertTrue(fullUnbound.offeredToolNames.contains(prefix + "browser_read"))
             XCTAssertTrue(fullBound.offeredToolNames.contains(prefix + "browser_read"))
             XCTAssertFalse(fullBound.runtimeInstructions.contains("COMPUTA_DEFERRED_BROWSER_CAPABILITIES:"))
             XCTAssertEqual(fullUnbound.continuationRequest, data); XCTAssertEqual(fullBound.continuationRequest, data)
-            // Only the trusted native availability change refreshes eligibility;
-            // loading/open arguments above did not pretend to bind a real page.
+            // Runtime binding changes execution readiness, while the schema selection/revision remains stable.
             let boundSeed = try XCTUnwrap(fullBound.groqToolCatalogSeed)
             let boundCatalog = try catalog.prepare(scope: scope, seed: boundSeed)
+            XCTAssertEqual(boundCatalog.revision, initial.revision)
+            XCTAssertEqual(boundCatalog.selectedNames, next.offeredToolNames)
             XCTAssertTrue(boundCatalog.loaderChoices.contains(prefix + "browser_read"))
             let pageNames = ["browser_read", "browser_fill", "browser_click", "browser_close"].map { prefix + $0 }
             _ = try catalog.load(scope: scope, arguments: encode(["catalog_revision": boundCatalog.revision, "names": pageNames]),
@@ -697,8 +756,7 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
                 compactHistoryInventory: true)
             XCTAssertEqual(bound.offeredToolNames, Set(pageNames).union([load, prefix + GroqHistoryTool.name]))
             XCTAssertFalse(bound.prompt.contains(deferred)); XCTAssertTrue(bound.prompt.contains("Native page bound."))
-            XCTAssertEqual(try capabilities(bound)["state"] as? String, "bound")
-            XCTAssertEqual(try capabilities(bound)["registered_deferred"] as? [String], [])
+            assertGroqBrowserState(bound, bound: true)
             XCTAssertEqual(bound.continuationRequest, data)
             let readReply = String(decoding: try encode(["type": "tool_calls", "calls": [["name": prefix + "browser_read", "arguments": [:]]]]), as: UTF8.self)
             XCTAssertNoThrow(try C.parseReply(readReply, request: bound, requireEnvelope: true))
@@ -712,7 +770,7 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
         }
     }
 
-    func testPackedGroqDeferredBrowserHintRequiresRegisteredPagesAndPermittedNativeEntry() throws {
+    func testPackedGroqBrowserHintRequiresRegisteredPagesAndPermittedNativeEntry() throws {
         let f = try Fixture()
         let browser = EmbeddedBrowserTools.definitions().map { value in
             var wire = value; wire["parameters"] = wire.removeValue(forKey: "inputSchema"); return wire
@@ -766,21 +824,31 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
             XCTAssertEqual(packed.continuationRequest, data, mode)
             XCTAssertEqual(packed.groqToolCatalogSeed?.registeredDefinitionsJSON, seed.registeredDefinitionsJSON, mode)
             let expectsEntryRoute = mode == "native" || mode == "allowed_entry_only"
-            XCTAssertEqual(packed.prompt.contains("COMPUTA_BROWSER_CAPABILITIES:"), mode == "native" || mode == "bound", mode)
+            XCTAssertEqual(packed.prompt.contains("Schemas do not bind pages."), mode == "native", mode)
+            XCTAssertEqual(packed.prompt.contains("Native page bound."), mode == "bound", mode)
+            XCTAssertFalse(packed.prompt.contains("COMPUTA_BROWSER_CAPABILITIES:"), mode)
             XCTAssertFalse(packed.prompt.contains("Registered page tools await successful open/bind"), mode)
             if expectsEntryRoute {
                 XCTAssertTrue(packed.prompt.contains("Supplied URL: first load browser_open."))
                 XCTAssertTrue(packed.prompt.contains("Webpages use browser_*; computer_v2_* is native-app UI."))
-                XCTAssertFalse(projection.loaderChoices.contains("browser_read"))
+                XCTAssertEqual(projection.loaderChoices.contains("browser_read"), mode == "native")
                 let scope = GroqToolCatalog.Scope(taskID: f.binding.scope.taskID, threadID: f.binding.scope.threadID,
                     turnID: f.binding.scope.turnID, runtimeGeneration: f.binding.scope.runtimeGeneration,
                     preparationID: f.binding.scope.preparationID, modelID: f.binding.scope.modelID)
                 var catalog = GroqToolCatalog(); let initial = try catalog.prepare(scope: scope, seed: seed)
-                XCTAssertThrowsError(try catalog.load(scope: scope, arguments: encode(["catalog_revision": initial.revision,
-                    "names": ["browser_read"]]), lastOfferedNames: packed.offeredToolNames))
-                XCTAssertEqual(try catalog.prepare(scope: scope, seed: seed), initial)
+                if mode == "native" {
+                    let receipt = try catalog.load(scope: scope, arguments: encode(["catalog_revision": initial.revision,
+                        "names": ["browser_read"]]), lastOfferedNames: packed.offeredToolNames)
+                    XCTAssertEqual((try XCTUnwrap(JSONSerialization.jsonObject(with: receipt) as? [String: Any]))["execution"] as? Bool, false)
+                    XCTAssertEqual(try catalog.prepare(scope: scope, seed: seed).selectedNames,
+                        initial.selectedNames.union(["browser_read"]))
+                } else {
+                    XCTAssertThrowsError(try catalog.load(scope: scope, arguments: encode(["catalog_revision": initial.revision,
+                        "names": ["browser_read"]]), lastOfferedNames: packed.offeredToolNames))
+                    XCTAssertEqual(try catalog.prepare(scope: scope, seed: seed), initial)
+                }
                 if mode == "allowed_entry_only" {
-                    XCTAssertFalse(packed.prompt.contains("COMPUTA_BROWSER_CAPABILITIES:"), "Sparse policy must not advertise denied deferred page capabilities")
+                    XCTAssertFalse(packed.prompt.contains("Schemas do not bind pages."), "Sparse policy must not advertise denied page capabilities")
                     let bound = try C.prepareRequest(data, browserToolAvailability: .bound)
                     let boundSeed = try XCTUnwrap(bound.groqToolCatalogSeed)
                     let boundCatalog = try catalog.prepare(scope: scope, seed: boundSeed)
@@ -798,7 +866,7 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
             if mode == "none" || mode == "allowed_native_only" || mode == "foreign_entry" || mode == "foreign_namespace" {
                 XCTAssertFalse(packed.prompt.contains("Current browser state: unbound."), mode)
             }
-            // Projection never makes a deferred/unloaded browser read callable.
+            // Discovery/loadability never mutates the callable schemas of an already admitted response.
             if mode != "bound" {
                 let read = #"{"type":"tool_calls","calls":[{"name":"browser_read","arguments":{}}]}"#
                 XCTAssertThrowsError(try C.parseReply(read, request: packed, requireEnvelope: true))
@@ -1118,13 +1186,6 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
         let scope = GroqToolCatalog.Scope(taskID: native.taskID, threadID: native.threadID, turnID: native.turnID,
             runtimeGeneration: native.runtimeGeneration, preparationID: native.preparationID, modelID: native.modelID)
         var catalog = GroqToolCatalog()
-        func inventory(_ request: C.Request) throws -> [String: Any] {
-            let runtime = request.runtimeInstructions
-            let start = try XCTUnwrap(runtime.range(of: "GROQ_NATIVE_TOOL_INVENTORY:\n"))
-            let fence = try XCTUnwrap(runtime.range(of: "```\n", range: start.upperBound..<runtime.endIndex))
-            let end = try XCTUnwrap(runtime.range(of: "\n```", range: fence.upperBound..<runtime.endIndex))
-            return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(runtime[fence.upperBound..<end.lowerBound].utf8)) as? [String: Any])
-        }
         for loadedExec in [false, true] {
             var projection = try catalog.prepare(scope: scope, seed: seed)
             if loadedExec {
@@ -1134,14 +1195,19 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
             let legacy = try C.prepareRequest(f.source, groqToolCatalogProjection: projection, groqDirectTools: .loadedOnly)
             let compact = try C.prepareRequest(f.source, groqToolCatalogProjection: projection, groqDirectTools: .loadedOnly,
                 compactHistoryInventory: true)
-            let old = try inventory(legacy), displayed = try inventory(compact)
+            let old = try groqInventoryObject(legacy), displayed = try groqInventoryObject(compact)
             let oldRows = try XCTUnwrap(old["inventory"] as? [[String]])
             let rows = try XCTUnwrap(displayed["inventory"] as? [[String]])
-            XCTAssertTrue(oldRows.allSatisfy { $0.count == 3 }, "Legacy discovery preserves purpose summaries")
-            XCTAssertTrue(rows.allSatisfy { $0.count == 2 }, "Native-history rows keep exact names and kinds")
-            let expectedRows = projection.discoverable.filter { !projection.selectedNames.contains($0.name) }
-                .map { [$0.name, $0.isCustom ? "custom" : "function"] }
+            XCTAssertEqual(Set(old.keys), ["catalog_revision", "loaded", "inventory"])
+            XCTAssertNil(old["kind_default"])
+            XCTAssertEqual(oldRows, projection.discoverable.map { [$0.name, String($0.summary.prefix(40)), $0.isCustom ? "custom" : "function"] },
+                "Rich discovery retains exact names, purposes and explicit kinds")
+            let expected = projection.discoverable.filter { !projection.selectedNames.contains($0.name) }
+            let expectedRows = expected.map { $0.isCustom ? [$0.name, "custom"] : [$0.name] }
             XCTAssertEqual(rows, expectedRows)
+            XCTAssertEqual(try groqCompactInventoryRows(displayed), expected.map { [$0.name, $0.isCustom ? "custom" : "function"] })
+            XCTAssertTrue(rows.contains(["apply_patch", "custom"]), "Custom kind remains explicit")
+            XCTAssertTrue(rows.contains(["exec_command"]) || loadedExec, "Function kind inherits only the fixed default")
             let unloaded = Set(rows.compactMap(\.first)), loaded = Set(try XCTUnwrap(displayed["loaded"] as? [String]))
             let all = Set(projection.discoverable.map(\.name))
             XCTAssertEqual(Set(oldRows.compactMap(\.first)), all)
@@ -1151,7 +1217,9 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
             XCTAssertTrue(loaded.contains(GroqToolCatalog.name)); XCTAssertTrue(loaded.contains(GroqHistoryTool.name))
             XCTAssertEqual(unloaded.contains("exec_command"), !loadedExec)
             XCTAssertEqual(displayed["catalog_revision"] as? String, projection.revision)
-            XCTAssertTrue(compact.runtimeInstructions.contains("Rows [name,kind] are unloaded discovery;"))
+            XCTAssertTrue(compact.runtimeInstructions.contains("Rows [name,kind?] are unloaded discovery;"))
+            XCTAssertTrue(compact.runtimeInstructions.contains("Omitted kind uses kind_default."))
+            XCTAssertFalse(legacy.runtimeInstructions.contains("kind_default"))
             XCTAssertTrue(legacy.runtimeInstructions.contains("Rows [name,purpose,kind] are discovery;"))
             XCTAssertFalse(legacy.runtimeInstructions.contains("are unloaded discovery;"))
             for request in [legacy, compact] {
@@ -1548,7 +1616,9 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
             case "unknown": name = "missing_registered_tool"
             case "foreign_name": name = "foreign.exec_command"
             case "denied": policy = ["type": "allowed_tools", "tools": [["type": "function", "name": GroqToolCatalog.name], ["type": "function", "name": GroqHistoryTool.name], ["type": "custom", "name": "apply_patch"]]]
-            case "unavailable": name = "browser_fill"
+            case "unavailable":
+                name = "computer_v2_unavailable_fixture"
+                definitions.append(["type": "function", "name": name, "parameters": ["type": "object", "properties": [:]]])
             case "already_offered": selected = ["exec_command"]
             case "none": policy = "none"
             case "loader_absent": definitions = [reader, exec, patch] + browser
@@ -1568,6 +1638,23 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
             XCTAssertFalse(C.isGroqUnloadedToolCorrectionCandidate(text, requestedName: name, request: value), mode)
             XCTAssertEqual(value.continuationRequest, raw)
             XCTAssertEqual(value.offeredToolNames, offered)
+        }
+        // A genuinely registered page is now schema-eligible before binding; this is NOT execution authority.
+        for namespaced in [false, true] {
+            let prefix = namespaced ? "functions." : ""
+            let native = [loader, reader, exec, patch] + browser
+            let definitions: [[String: Any]] = namespaced ? [["type": "namespace", "name": "functions", "tools": native]] : native
+            let value = try request(definitions), name = prefix + "browser_read"
+            XCTAssertTrue(try XCTUnwrap(value.groqToolCatalogSeed).callableNames.contains(name))
+            XCTAssertFalse(value.offeredToolNames.contains(name))
+            let call: [String: Any] = ["name": name, "arguments": [String: Any]()]
+            let valid = String(decoding: try encode(["type": "tool_calls", "calls": [call]]), as: UTF8.self)
+            XCTAssertTrue(C.isGroqUnloadedToolCorrectionCandidate(valid, requestedName: name, request: value))
+            XCTAssertThrowsError(try C.parseReply(valid, request: value, requireEnvelope: true))
+            for malformed in [["calls": [call]], ["type": "tool_calls", "calls": [call, call]]] as [[String: Any]] {
+                let text = String(decoding: try encode(malformed), as: UTF8.self)
+                XCTAssertFalse(C.isGroqUnloadedToolCorrectionCandidate(text, requestedName: name, request: value))
+            }
         }
     }
 
@@ -1723,6 +1810,47 @@ private func displayJSON(_ request: WebModelResponseCodec.Request) throws -> Dat
     let tail = request.prompt[start.upperBound...]
     let end = try XCTUnwrap(tail.range(of: "\n```\nEND_" + label + "."))
     return Data(tail[..<end.lowerBound].utf8)
+}
+private func assertGroqBrowserState(_ request: WebModelResponseCodec.Request, bound: Bool,
+                                   file: StaticString = #filePath, line: UInt = #line) {
+    XCTAssertFalse(request.prompt.contains("COMPUTA_BROWSER_CAPABILITIES:"), file: file, line: line)
+    XCTAssertEqual(request.groqToolDiscoveryDiagnostic?.binding, bound ? .bound : .unbound, file: file, line: line)
+    XCTAssertEqual(request.prompt.contains("Native page bound."), bound, file: file, line: line)
+    XCTAssertEqual(request.prompt.contains("Schemas do not bind pages."), !bound, file: file, line: line)
+    if !bound {
+        XCTAssertTrue(request.prompt.contains("Current browser state: unbound. Schemas do not bind pages. Page tools require native binding; click/fill also need current refs."), file: file, line: line)
+    }
+}
+private func groqInventoryObject(_ request: WebModelResponseCodec.Request) throws -> [String: Any] {
+    let runtime = request.runtimeInstructions
+    let start = try XCTUnwrap(runtime.range(of: "GROQ_NATIVE_TOOL_INVENTORY:\n"))
+    let fence = try XCTUnwrap(runtime.range(of: "```\n", range: start.upperBound..<runtime.endIndex))
+    let end = try XCTUnwrap(runtime.range(of: "\n```", range: fence.upperBound..<runtime.endIndex))
+    return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(runtime[fence.upperBound..<end.lowerBound].utf8)) as? [String: Any])
+}
+private func groqCompactInventoryRows(_ value: [String: Any]) throws -> [[String]] {
+    XCTAssertEqual(Set(value.keys), ["catalog_revision", "loaded", "kind_default", "inventory"])
+    XCTAssertEqual(value["kind_default"] as? String, "function")
+    let rows = try XCTUnwrap(value["inventory"] as? [[String]])
+    let decoded = try rows.map { row -> [String] in
+        let name = try XCTUnwrap(row.first)
+        let kind: String
+        if row.count == 1 { kind = "function" }
+        else { kind = try XCTUnwrap(row.dropFirst().first) }
+        XCTAssertEqual(row, kind == "custom" ? [name, "custom"] : [name], "Only a custom kind may override the fixed function default")
+        return [name, kind]
+    }
+    XCTAssertEqual(Set(decoded.map { $0[0] }).count, rows.count, "Inventory names are unique")
+    return decoded
+}
+private func groqInventoryNames(_ request: WebModelResponseCodec.Request) throws -> (loaded: Set<String>, loadable: Set<String>) {
+    let value = try groqInventoryObject(request)
+    let loaded = Set(try XCTUnwrap(value["loaded"] as? [String]))
+    let rows = try groqCompactInventoryRows(value)
+    let loadable = Set(rows.map { $0[0] })
+    XCTAssertEqual(loaded, request.offeredToolNames)
+    XCTAssertTrue(loaded.isDisjoint(with: loadable))
+    return (loaded, loadable)
 }
 private func append(_ items: [[String: Any]], to source: Data) throws -> Data {
     let layout = try GroqContextJSONLayout.parse(source), closing = layout.inputRange.upperBound - 1

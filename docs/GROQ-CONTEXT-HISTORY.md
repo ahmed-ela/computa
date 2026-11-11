@@ -446,3 +446,53 @@ no additional website request, DOM inspection, or header/cookie read. The
 canonical frame may contain tool data already in the controlled task's
 history. A retained request is diagnostic data, never a proposed action to
 execute or proof that the model completed the task.
+
+### Stable schema discovery and variable prompt budgets (2026-11-10)
+
+Build 492 completed three Groq inferences, then rejected a 2,046-byte literal
+JSON response whose top-level `type` was missing. Three schema-loading attempts
+and one read-only source command ran. The two failed loads requested page tools
+before binding; no patch, browser action or receipt completed. All four website
+sessions have saved closed receipts. The rejected proposals were not replayed.
+
+The Groq catalog had coupled schema discovery to browser binding. Binding also
+changed the revision and removed the optional selection. For an exact registered
+Groq loader allowed by the current policy, and a known native browser state,
+registered page schemas now remain discoverable before binding. Loading still
+selects at most four optional schemas for the next request and executes nothing.
+Binding alone preserves that selection; actual declaration or policy changes
+still invalidate it. Other provider and constrained-policy paths keep their
+existing behavior.
+
+Execution remains separate: the native controller requires a current owned
+binding, and click/fill require current published action references. Scope,
+permissions, approval, stale-target, cancellation and turn-lifetime checks remain.
+A newly discoverable page name can meet the existing unloaded-tool correction
+candidate test, but native completed-literal proof, saved cleanup, the shared
+deadline and one per-turn ticket are still required. Malformed and multicall
+responses do not enter that correction path.
+
+The first validation had 523 passes and two failures: an obsolete revision-change
+expectation and a genuine late 27B context-reader budget rejection at 6,033 units.
+A duplicate-descriptor reduction passed all 525 selected checks once, but a later
+run rejected a 64-byte continuation at 6,057 units. That narrow earlier margin
+was insufficient; the one-byte wording change between runs is not established
+as the cause. Every failed run is retained separately.
+
+The follow-up keeps schema discovery stable while reducing repeated presentation
+data. Compact native-history inventory rows use an explicit `kind_default` of
+`function`, with custom kinds retained. The rich inventory's purpose summaries
+are unchanged. Native-derived browser state and entry/read/reference guidance
+remain, while repeated descriptor JSON and boundary text are removed. Canonical
+history, current schemas, literal parsing, the four-name limit and the 6,000-unit
+admission limit are unchanged. Validation and live qualification are recorded
+separately; local synthetic replies do not establish provider reliability.
+
+Final validation passed all 189 affected Swift checks with no failures/skips and
+unchanged source. An earlier broader 525-check run passed before the subsequent
+presentation reductions. Two additional runs of the previously failing native
+27B workflow passed with fresh task IDs. Its three final runs stayed within
+6,000 units (maxima 5,964, 5,999 and 5,951), preserving full history recovery and
+matching session closures. These are native-runtime tests with synthetic replies;
+they made no real provider requests or browser actions. Live provider qualification
+remains a separate step.

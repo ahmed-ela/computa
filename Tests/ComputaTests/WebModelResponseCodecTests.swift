@@ -150,8 +150,12 @@ final class WebModelResponseCodecTests: XCTestCase {
         XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(#"{"type":"tool_calls","calls":[{"name":"browser_click","arguments":{}}]}"#, request: first))
         let (bound, second) = try request(.bound, data: data, extra: ["browser_wait"])
         XCTAssertEqual(second.offeredToolNames, [GroqToolCatalog.name, "browser_read", "browser_click", "browser_fill", "browser_close", "browser_wait"])
-        XCTAssertNotEqual(unbound.revision, bound.revision)
-        XCTAssertThrowsError(try WebModelResponseCodec.prepareBudgetedGroqRequest(data, availability: .bound, projection: unbound, model: model))
+        XCTAssertEqual(unbound.revision, bound.revision, "Schema discovery stays stable while direct defaults reflect runtime readiness")
+        XCTAssertTrue(unbound.loaderChoices.contains("browser_read"))
+        XCTAssertFalse(first.offeredToolNames.contains("browser_read"), "Unbound readiness must not enable an optional direct page schema")
+        let rebound = try WebModelResponseCodec.prepareBudgetedGroqRequest(data, availability: .bound, projection: unbound, model: model)
+        XCTAssertEqual(rebound.request.offeredToolNames, [GroqToolCatalog.name, "browser_read", "browser_click", "browser_fill", "browser_close"])
+        XCTAssertEqual(rebound.request.continuationRequest, data)
         let limited = try bytes(["type": "allowed_tools", "mode": "auto", "tools": [
             ["type":"function","name":GroqToolCatalog.name], ["type":"function","name":"browser_open"]]])
         XCTAssertEqual(try request(.unbound, data: limited).1.offeredToolNames, [GroqToolCatalog.name,"browser_open"])
@@ -419,15 +423,6 @@ final class WebModelResponseCodecTests: XCTestCase {
             let end = try XCTUnwrap(request.runtimeInstructions.range(of: "\n```", range: start.upperBound..<request.runtimeInstructions.endIndex))
             return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(request.runtimeInstructions[start.upperBound..<end.lowerBound].utf8)) as? [String: Any])
         }
-        func capabilities(_ request: WebModelResponseCodec.Request) throws -> [String: Any] {
-            let marker = "COMPUTA_BROWSER_CAPABILITIES:\n"
-            XCTAssertEqual(request.prompt.components(separatedBy: marker).count - 1, 1)
-            let start = try XCTUnwrap(request.prompt.range(of: marker)).upperBound
-            let line = request.prompt[start...].prefix { $0 != "\n" }
-            let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
-            XCTAssertEqual(Set(fields.keys), ["state", "entry", "registered_deferred", "loaded", "loadable"])
-            return fields
-        }
         func loaderNames(_ request: WebModelResponseCodec.Request) throws -> [String] {
             let data = Data(request.prompt[try requestRange(in: request)].utf8)
             let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -464,7 +459,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertEqual(unbound.offeredToolNames, [prefix + GroqToolCatalog.name])
             XCTAssertEqual(Set(unboundInventory.keys), ["catalog_revision", "loaded", "inventory"])
             let choices = try loaderNames(unbound)
-            XCTAssertEqual(choices, ["browser_bind", "browser_open", "browser_tabs"].map { prefix + $0 })
+            XCTAssertEqual(choices, native.compactMap { ($0["name"] as? String).map { prefix + $0 } }.sorted())
             let discovery = try XCTUnwrap(unboundInventory["inventory"] as? [[String]])
             XCTAssertEqual(Set(discovery.compactMap(\.first)), Set(choices + [prefix + GroqToolCatalog.name]))
             XCTAssertTrue(unbound.prompt.contains("Supplied URL: first load " + prefix + "browser_open."))
@@ -472,16 +467,20 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertTrue(unbound.runtimeInstructions.contains("Loading REPLACES optional selections, executes nothing"))
             XCTAssertTrue(unbound.prompt.contains("Shell HTTP cannot verify browser state;"))
             XCTAssertTrue(unbound.prompt.contains("empty tabs do not prove denial."))
-            let deferred = try capabilities(unbound)
-            XCTAssertEqual(deferred["state"] as? String, "unbound")
-            XCTAssertEqual(deferred["entry"] as? [String], ["browser_bind", "browser_open"].map { prefix + $0 })
-            XCTAssertEqual(deferred["registered_deferred"] as? [String],
-                ["browser_click", "browser_close", "browser_continue", "browser_fill", "browser_navigate", "browser_read", "browser_wait"].map { prefix + $0 })
-            XCTAssertEqual(deferred["loaded"] as? [String], [])
-            XCTAssertEqual(deferred["loadable"] as? [String], choices)
-            XCTAssertTrue(unbound.prompt.contains("Names are discovery, not callable schemas or permission. Use only current offered/allowed schemas."))
+            XCTAssertFalse(unbound.prompt.contains("COMPUTA_BROWSER_CAPABILITIES:"))
+            XCTAssertTrue(unbound.prompt.contains("Current browser state: unbound. Schemas do not bind pages."))
+            XCTAssertTrue(unbound.prompt.contains("Page tools require native binding; click/fill also need current refs."))
+            XCTAssertEqual(Set(try XCTUnwrap(unboundInventory["loaded"] as? [String])), unbound.offeredToolNames)
+            for entry in unboundProjection.discoverable {
+                let row = try XCTUnwrap(discovery.first { $0.first == entry.name })
+                XCTAssertEqual(row, [entry.name, String(entry.summary.prefix(40)), entry.isCustom ? "custom" : "function"],
+                    "The complete discovery inventory retains every purpose and schema kind")
+            }
+            XCTAssertFalse(unbound.prompt.contains("Tool names: inventory and current schemas."))
+            XCTAssertTrue(unbound.runtimeInstructions.contains("only loaded tools have callable schemas"))
+            XCTAssertTrue(unbound.prompt.contains("Replace example names with exact currently offered qualified names/schemas; history offers no schemas."))
             XCTAssertFalse(unbound.prompt.contains("After entry check catalog_revision for reads/actions."),
-                "This fixture registers page tools, so the deferred-capability handoff must be present")
+                "The structured schema/readiness descriptor replaces the legacy deferred-capability handoff")
             let openReply = "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"\(prefix)browser_open\",\"arguments\":{\"url\":\"http://localhost:62341/\"}}]}"
             XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(openReply, request: unbound), "Guidance grants no unloaded schema authority")
             let (entryLoaded, _) = try request(.unbound, selected: [prefix + "browser_open"])
@@ -495,13 +494,16 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(openReply, request: onlyBinding))
             XCTAssertTrue(onlyBinding.runtimeInstructions.contains("Loading REPLACES optional selections, executes nothing"))
             XCTAssertTrue(onlyBinding.prompt.contains("Historical page claims bound=true"))
-            XCTAssertEqual(try capabilities(onlyBinding)["state"] as? String, "unbound")
+            XCTAssertTrue(onlyBinding.prompt.contains("Current browser state: unbound. Schemas do not bind pages."))
             XCTAssertEqual(onlyBinding.continuationRequest, raw)
-            XCTAssertThrowsError(try request(.unbound, selected: [prefix + "browser_read"]))
+            let (unboundRead, _) = try request(.unbound, selected: [prefix + "browser_read"])
+            let readReply = "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"\(prefix)browser_read\",\"arguments\":{}}]}"
+            XCTAssertNoThrow(try WebModelResponseCodec.parseEmbeddedReply(readReply, request: unboundRead),
+                "This validates only an offered schema; native execution still requires binding")
             let (bound, boundProjection) = try request(.bound, selected: [prefix + "browser_read"])
-            XCTAssertNotEqual(unboundProjection.revision, boundProjection.revision)
-            XCTAssertThrowsError(try WebModelResponseCodec.prepareRequest(raw, browserToolAvailability: .bound,
-                groqToolCatalogProjection: unboundProjection), "An old unbound catalog cannot replace refreshed native state")
+            XCTAssertEqual(unboundProjection.revision, boundProjection.revision)
+            XCTAssertNoThrow(try WebModelResponseCodec.prepareRequest(raw, browserToolAvailability: .bound,
+                groqToolCatalogProjection: unboundProjection), "Binding alone does not invalidate a verified schema selection")
             let boundRows = try XCTUnwrap(try inventory(bound)["inventory"] as? [[String]])
             XCTAssertTrue(boundRows.contains { $0.first == prefix + "browser_read" })
             XCTAssertTrue(try loaderNames(bound).contains(prefix + "browser_read"))
@@ -511,7 +513,8 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertEqual(try loaderNames(entryLoaded), choices, "Already loaded tools remain loadable with a replacement selection")
             XCTAssertFalse(bound.prompt.contains("Page tools require successful"))
             XCTAssertFalse(bound.prompt.contains("Shell HTTP cannot verify browser state. After entry check catalog_revision for reads/actions"))
-            XCTAssertEqual(try capabilities(bound)["state"] as? String, "bound")
+            XCTAssertFalse(bound.prompt.contains("COMPUTA_BROWSER_CAPABILITIES:"))
+            XCTAssertFalse(bound.prompt.contains("Current browser state: unbound."))
             XCTAssertTrue(bound.prompt.contains("Native page bound. Fresh " + prefix + "browser_read needs no cursor."))
             for prepared in [unbound, entryLoaded, bound] {
                 XCTAssertEqual(prepared.continuationRequest, raw)
@@ -533,7 +536,8 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertEqual(Set(policyRows.compactMap(\.first)), [prefix + GroqToolCatalog.name, prefix + "browser_open"])
             XCTAssertTrue(policyRequest.prompt.contains("Supplied URL: first load " + prefix + "browser_open."))
             XCTAssertFalse(policyRequest.prompt.contains("Existing human tab with an observed tab_id:"))
-            XCTAssertFalse(policyRequest.prompt.contains("COMPUTA_BROWSER_CAPABILITIES:"), "Sparse policy cannot advertise denied registered page capabilities")
+            XCTAssertFalse(policyRequest.prompt.contains("COMPUTA_BROWSER_CAPABILITIES:"))
+            XCTAssertFalse(policyRequest.prompt.contains("Page tools require native binding"), "Sparse policy cannot advertise denied registered page capabilities")
             XCTAssertEqual(policyRequest.continuationRequest, restrictedData)
             XCTAssertEqual(try loaderNames(policyRequest), [prefix + "browser_open"])
             let policyDisplay = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(policyRequest.prompt[try requestRange(in: policyRequest)].utf8)) as? [String: Any])
