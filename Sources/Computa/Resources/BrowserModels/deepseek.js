@@ -506,17 +506,24 @@ async function computaSavedConversation(input, c, dom, config) {
         if (!view) refuse('presentation_missing');
         if (optimistic.canonical !== route.canonical) refuse('route_changed');
         if (comparisonPair) {
-          // No response UUID or full-body proof is bound yet. Preserve every
-          // physical user/control/ancestor pin; only the pending presentation
-          // slot may become the independently validated official SMRM wrapper.
+          // No response UUID or full-body proof is bound yet. Replace the
+          // pending presentation slot with the validated SMRM wrapper.
           if (held || state.responseIdentity || comparisonPair !== t.responseChoice
             || view.pins.at(-1) !== comparisonPair.wrapper) refuse('answer_ancestry_changed', () => ({
               path:'witness', branch:'comparison_scope', index:null, count:null, slot:'none', previous:'unknown', current:'unknown', comparison:true }));
           const prior = optimistic.pins.at(-1);
-          if (!prior || prior.isConnected !== false
-            && !comparisonPair.rows.some(row => row.response === prior)) refuse('answer_ancestry_changed', () => ({
+          const priorInPair = comparisonPair.rows.some(row => row.response === prior);
+          if (!prior || prior.isConnected !== false && !priorInPair) refuse('answer_ancestry_changed', () => ({
               path:'witness', branch:'comparison_prior', index:null, count:null, slot:'none', previous:'unknown', current:'unknown', comparison:true }));
-          requireDisplayPins({ pins: [...optimistic.pins.slice(0, -1), comparisonPair.wrapper] }, view, refuse, 'witness', true);
+          const pins = [...optimistic.pins.slice(0, -1), comparisonPair.wrapper];
+          const rootIndex = pins.length - 3;
+          // Only the same pending response object in the first verified card can
+          // carry continuity across a disconnected assistant root. The
+          // assistant turn and all earlier pins still compare by identity.
+          if (comparisonPair.rows[0].response === prior && pins[rootIndex]?.isConnected === false
+            && comparisonPair.root === view.pins.at(-3))
+            pins[rootIndex] = comparisonPair.root;
+          requireDisplayPins({ pins }, view, refuse, 'witness', true);
         } else requireDisplayPins(optimistic, view, refuse, 'witness', false);
       }
       if (!Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.length || input.expectedUserCounts.length > 2

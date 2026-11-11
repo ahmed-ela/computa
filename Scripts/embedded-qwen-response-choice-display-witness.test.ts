@@ -19,11 +19,23 @@ async function initial(model="Qwen3.7-Plus"){
  const input={allowSavedResponseChoice:true,allowQwenInitialResponseIdentity:true,allowQwenFirstBodyExpansion:true,expectedModelChoice:choice(model),savedSubmissionFingerprint:hash};
  return {f,chunk,expand,input,hash,loading,phaseWrapper};
 }
-function mountPair(x:Awaited<ReturnType<typeof initial>>, detached = false){
+function remountAnswerRoot(x:Awaited<ReturnType<typeof initial>>, changedTurn = false){
+ const {f}=x,previousTurn=f.answerRoot.parentElement!;
+ const root=new f.Node('DIV',{...f.answerRoot.values});
+ f.answerRoot.detach();
+ if(changedTurn){
+  previousTurn.detach();
+  const turn=new f.Node('DIV',{...previousTurn.values});
+  f.turn.append(turn);turn.append(root);
+ }else previousTurn.append(root);
+ return root;
+}
+function mountPair(x:Awaited<ReturnType<typeof initial>>, detached = false, root = x.f.answerRoot, priorIsSecond = false){
  const {f,loading}=x;loading.detach();f.answer.setAttribute('id','chat-response-message-'+answerID);
- f.answer.detach();f.answerRoot.setAttribute('class','qwen-chat-message qwen-chat-message-assistant qwen-chat-message-dual-message');
+ f.answer.detach();root.setAttribute('class','qwen-chat-message qwen-chat-message-assistant qwen-chat-message-dual-message');
  const wrapper=new f.Node('DIV',{class:'smrm'}),list=new f.Node('DIV',{class:'smrm-list smrm-list--mac'});
- const first=detached?f.answer.cloneNode(true):f.answer;const other=f.answer.cloneNode(true);other.values.id='chat-response-message-'+secondID;
+ const first=detached||priorIsSecond?f.answer.cloneNode(true):f.answer;
+ const other=priorIsSecond?f.answer:f.answer.cloneNode(true);other.values.id='chat-response-message-'+secondID;
  const controls:any[]=[];
  for(const [index,response]of[first,other].entries()){
   const id=[answerID,secondID][index],card=new f.Node('DIV',{class:'smrm-card',id:id+'-smrm-card'});
@@ -32,19 +44,33 @@ function mountPair(x:Awaited<ReturnType<typeof initial>>, detached = false){
   const footer=new f.Node('DIV',{class:'smrm-card__footer'}),control=new f.Node('BUTTON',{class:'smrm-card__prefer-btn'},'I prefer this response');
   control.disabled=true;controls.push(control);content.append(response);body.append(content);footer.append(control);card.append(header,body,footer);list.append(card);
  }
- wrapper.append(list);f.answerRoot.append(wrapper);return {wrapper,controls};
+ wrapper.append(list);root.append(wrapper);return {wrapper,controls};
 }
-for(const model of ['Qwen3.7-Plus','Qwen3.8-Max'])test(model+' hands an unchanged optimistic presentation to the exact SMRM pair before any response identity',async()=>{
+for(const {model,remounted} of [
+ {model:'Qwen3.7-Plus',remounted:false},
+ {model:'Qwen3.8-Max',remounted:false},
+ {model:'Qwen3.7-Plus',remounted:true}
+])test(model+(remounted?' hands the same pending response through a detached assistant root':' hands an unchanged optimistic presentation')+' to the exact SMRM pair before any response identity',async()=>{
  const x=await initial(model),{f,input,expand,chunk}=x;
  expect((await f.run('inspect',input)).qwenFirstBodyExpansionPending).toBe(true);
  const state=f.world.__computaQwenSavedSessionV1,original=state.firstDisplayWitness,pins=[...original.pins];
  expect(state.first).toBeNull();expect(state.responseIdentity).toBeNull();
- const p=mountPair(x);
+ const root=remounted?remountAnswerRoot(x):f.answerRoot;
+ const p=mountPair(x,false,root);
+ expect(p.wrapper.contains(f.answer)).toBe(true);
+ if(remounted){
+  expect(f.answerRoot.isConnected).toBe(false);
+  expect(root.parentElement).toBe(pins.at(-2));
+ }
  const first=await f.run('inspect',input);
+ expect(first.qwenFirstUserBindingDiagnostic).toBeUndefined();
  expect(first.qwenFirstBodyExpansionPending).toBe(true);expect(first.error).toBeUndefined();
+ for(const key of ['text','firstUserVerified','modelEvidence','answerComplete'])expect(first[key]).toBeUndefined();
  expect(state.firstDisplayWitness).toBeUndefined();expect(state.firstDisplay.settledPair).toBe(original);
- expect(state.firstDisplay.pins.slice(0,-1)).toEqual(pins.slice(0,-1));
- expect(state.firstDisplay.pins.at(-1)).toBe(p.wrapper);expect(state.responseIdentity).toBeNull();expect(state.first).toBeNull();
+ const expectedPins=[...pins.slice(0,-3),root,pins.at(-2),p.wrapper];
+ for(const [index,pin] of expectedPins.entries())expect(state.firstDisplay.pins[index]).toBe(pin);
+ expect(original.pins.at(-3)).toBe(f.answerRoot);expect(original.pins.at(-1)).toBe(f.answer);
+ expect(state.responseIdentity).toBeNull();expect(state.first).toBeNull();
  expect(expand.clicks).toBe(0);expect(p.controls.map(n=>n.clicks)).toEqual([0,0]);
  expand.onClick=()=>{chunk.setAttribute('class','chunked-text-renderer-root chunked-text-renderer-root-with-expand');expand.setAttribute('aria-label','Collapse');f.userBody.text=body;};
  expect((await f.run('inspect',input)).qwenFirstBodyExpansionPending).toBe(true);expect(expand.clicks).toBe(1);
@@ -53,7 +79,7 @@ for(const model of ['Qwen3.7-Plus','Qwen3.8-Max'])test(model+' hands an unchange
  p.controls.forEach(n=>n.disabled=false);
  const ready=await f.run('inspect',input);expect(ready.savedResponseChoice.state).toBe('ready');
  const grant={version:1,kind:'qwen_smrm',policy:'first_observed_card_v1',grant:'caf8aa04-4bac-438b-9280-a98703ec0bee',candidate:ready.savedResponseChoice.candidate,responseIDs:[answerID,secondID],selectedResponseID:answerID,sequence:1};
- p.controls[0].onClick=()=>{p.wrapper.detach();f.answer.detach();f.answerRoot.append(f.answer);f.answerRoot.setAttribute('class','qwen-chat-message qwen-chat-message-assistant');x.phaseWrapper.append(f.phase);f.complete();};
+ p.controls[0].onClick=()=>{p.wrapper.detach();f.answer.detach();root.append(f.answer);root.setAttribute('class','qwen-chat-message qwen-chat-message-assistant');x.phaseWrapper.append(f.phase);f.complete();};
  const dispatched=await f.run('inspect',{...input,savedResponseChoiceGrant:grant,evaluationDeadlineEpochMilliseconds:Date.now()+1000});
  expect(dispatched.savedResponseChoice.state).toBe('dispatched');expect(dispatched.text).toBeUndefined();expect(state.first).toBeNull();
  const accepted=await f.run('inspect',input);expect(accepted.error).toBeUndefined();expect(accepted.firstUserFingerprint).toBe(x.hash);expect(accepted.firstUserVerified).toBe(true);expect(accepted.answerComplete).toBe(true);
@@ -62,15 +88,24 @@ for(const model of ['Qwen3.7-Plus','Qwen3.8-Max'])test(model+' hands an unchange
  expect(repeated.savedResponseChoice.state).toBe('acknowledged');expect(p.controls.map(n=>n.clicks)).toEqual([1,0]);
 });
 test('a comparison cannot adopt changed witness pins, native grants, prompt, model or controls',async()=>{
- for(const fault of ['body','control','root','user-turn','answer-root','editor','composer','model','route','preview','hash','grant','cleanup','foreign-tail','pair-control','double-user']){
+ for(const fault of ['body','control','root','user-turn','answer-root','answer-turn','connected-answer-root','prior-in-second-card','editor','composer','model','route','preview','hash','grant','cleanup','foreign-tail','pair-control','double-user']){
   const x=await initial(),{f,input,expand}=x;
   expect((await f.run('inspect',input)).qwenFirstBodyExpansionPending).toBe(true);
-  const p=mountPair(x),over:any={...input};
+  const remounted=['answer-root','answer-turn','connected-answer-root','prior-in-second-card'].includes(fault);
+  const root=remounted?remountAnswerRoot(x,fault==='answer-turn'):f.answerRoot;
+  const p=mountPair(x,fault==='answer-root',root,fault==='prior-in-second-card'),over:any={...input};
   if(fault==='body'){const fresh=new f.Node('P',{...f.userBody.values},f.userBody.text);f.userBody.detach();x.chunk.append(fresh);}
   if(fault==='control'){expand.detach();x.chunk.append(new f.Node('BUTTON',{...expand.values}));}
   if(fault==='root'){const old=f.root;old.detach();f.turn.children[0].append(old.cloneNode(true));}
   if(fault==='user-turn'){const prior=f.root.parentElement!;f.root.detach();const fresh=new f.Node('DIV',{...prior.values});f.turn.children.unshift(fresh);fresh.parentElement=f.turn;fresh.append(f.root);}
-  if(fault==='answer-root'){const old=f.answerRoot;old.detach();f.turn.children[1].append(old.cloneNode(true));}
+  if(fault==='connected-answer-root'){
+   f.answerRoot.setAttribute('class','retired-assistant-shell');f.body.append(f.answerRoot);
+  }
+  if(remounted){
+   expect(f.answerRoot.isConnected).toBe(fault==='connected-answer-root');
+   expect(p.wrapper.contains(f.answer)).toBe(fault!=='answer-root');
+   if(fault==='prior-in-second-card')expect(p.wrapper.querySelectorAll('.smrm-card__content')[1].contains(f.answer)).toBe(true);
+  }
   if(fault==='editor'){const old=f.editor;old.detach();f.scope.append(new f.Node('TEXTAREA',{...old.values}));}
   if(fault==='composer')f.editor.value='foreign draft';
   if(fault==='model')f.modelName.text='Qwen3.8-Max';
@@ -83,10 +118,12 @@ test('a comparison cannot adopt changed witness pins, native grants, prompt, mod
   if(fault==='pair-control'){expect((await f.run('inspect',input)).qwenFirstBodyExpansionPending).toBe(true);const control=p.controls[0];control.detach();p.wrapper.querySelectorAll('.smrm-card__footer')[0].append(control.cloneNode(true));}
   if(fault==='double-user')f.turn.append(f.root.cloneNode(true));
   const rejected=await f.run('inspect',over);expect(rejected.error,fault).toBeDefined();
+  if(remounted)expect(rejected.qwenFirstUserBindingDiagnostic).toMatchObject({
+   stage:'display_held',reason:'answer_ancestry_changed',ancestry:{path:'witness',branch:'pins',comparison:true}});
   if(fault==='foreign-tail')expect(rejected.qwenFirstUserBindingDiagnostic).toEqual({version:1,stage:'display_held',reason:'answer_ancestry_changed',
     ancestry:{path:'witness',branch:'comparison_prior',index:null,count:null,slot:'none',previous:'unknown',current:'unknown',comparison:true}});
   for(const key of ['text','firstUserVerified','modelEvidence','answerComplete'])expect(rejected[key],fault).toBeUndefined();
-  expect(expand.clicks,fault).toBe(0);expect(p.controls.map(n=>n.clicks),fault).toEqual([0,0]);expect(f.send.clicks,fault).toBe(1);
+  expect(expand.clicks,fault).toBe(0);expect(p.controls.map(n=>n.clicks),fault).toEqual([0,0]);expect(f.send.clicks,fault).toBe(1);expect(f.more.clicks,fault).toBe(0);
  }
 });
 test('a detached empty-ID presentation may hand off under the same physical user and assistant ancestors',async()=>{

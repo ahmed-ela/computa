@@ -1833,6 +1833,55 @@ final class QwenWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testQwenOptimisticComparisonRootReplacementRequiresTheSameResponseNode() async throws {
+        for reuseResponse in [true, false] {
+            let fixture = try Fixture(setup: "qwenFixture.options.firstLongMessageDisplay=true; qwenFixture.options.holdResponseIdentity=true;")
+            defer { fixture.shutdown() }
+            let token = try await start(fixture, label: "Qwen3.7-Plus")
+            let prompt = String(repeating: "Literal Qwen disclosure fixture 👋 日本語\n", count: 600)
+            _ = try await call(fixture, "webProviderSend", token, prompt: prompt)
+            let initial = try await call(fixture, "webProviderPoll", token)
+            XCTAssertEqual(initial["modelVerificationPendingReason"] as? String, "qwen_first_body_expansion_v1")
+            _ = try await evaluate(fixture.view, "qwenFixture.revealPreview(); return true;")
+            let held = try await call(fixture, "webProviderPoll", token)
+            XCTAssertEqual(held["modelVerificationPendingReason"] as? String, "qwen_first_body_expansion_v1")
+            XCTAssertNil(held["modelProofContext"])
+            try await installResponseChoice(fixture, scenario: "waiting", rootHandoff: reuseResponse ? "reuse" : "clone")
+
+            if !reuseResponse {
+                do {
+                    _ = try await call(fixture, "webProviderPoll", token)
+                    XCTFail("A copied response cannot transfer an optimistic witness")
+                } catch {
+                    XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser))
+                }
+                let closed = try await call(fixture, "webProviderFinish", token)
+                XCTAssertEqual(closed["cleanup"] as? String, "failed")
+                let counts = try await evaluate(fixture.view, "return [qwenFixture.counts.displayClicks, ...choiceFixture.clicks];") as? [Int]
+                XCTAssertEqual(counts, [0, 0, 0])
+                try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+                continue
+            }
+
+            let pending = try await call(fixture, "webProviderPoll", token)
+            XCTAssertEqual(pending["modelVerificationPendingReason"] as? String, "qwen_first_body_expansion_v1")
+            XCTAssertEqual(pending["text"] as? String, "")
+            XCTAssertNil(pending["modelProofContext"])
+            XCTAssertNil(pending["savedResponseChoiceReceipt"])
+            let before = try await evaluate(fixture.view, "return [qwenFixture.counts.displayClicks, ...choiceFixture.clicks];") as? [Int]
+            XCTAssertEqual(before, [0, 0, 0])
+            _ = try await evaluate(fixture.view, "choiceFixture.enable(); return true;")
+            _ = try await waitForChoiceSpent(fixture, token)
+            let completed = try await wait(fixture, token, state: "complete")
+            XCTAssertEqual(completed["text"] as? String, #"{"type":"message","text":"Synthetic Qwen native reply"}"#)
+            let closed = try await call(fixture, "webProviderFinish", token)
+            XCTAssertEqual(closed["cleanup"] as? String, "deleted")
+            let after = try await evaluate(fixture.view, "return [qwenFixture.counts.displayClicks, ...choiceFixture.clicks];") as? [Int]
+            XCTAssertEqual(after, [1, 1, 0])
+            try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+        }
+    }
+
     func testQwenResponseChoiceLostAckKeepsOneSpentClaimAndNativeMemoryStatusDoesNotEvaluatePage() async throws {
         let fixture = try Fixture(); defer { fixture.shutdown() }
         let token = try await start(fixture, label: "Qwen3.7-Plus")
@@ -1892,10 +1941,16 @@ final class QwenWebModelTransportTests: XCTestCase {
         throw FixtureFailure.timeout
     }
 
-    private func installResponseChoice(_ fixture: Fixture, scenario: String) async throws {
+    private func installResponseChoice(_ fixture: Fixture, scenario: String, rootHandoff: String = "none") async throws {
         let source = #"""
-        const first=document.querySelector('.chat-response-message'),root=first.parentElement;
+        const rootHandoff='__ROOT_HANDOFF__';
+        if(rootHandoff!=='none')qwenFixture.completeResponse();
+        let first=document.querySelector('.chat-response-message'),root=first.parentElement;
         const originalFooter=first.querySelector('.response-message-footer-actions');originalFooter.remove();
+        if(rootHandoff!=='none'){
+          const replacement=root.cloneNode(false);root.replaceWith(replacement);root=replacement;
+          if(rootHandoff==='clone')first=first.cloneNode(true);
+        }
         const second=first.cloneNode(true);second.id='chat-response-message-bbf6615b-e58b-4059-a95c-0d711aa4b6ae';
         const node=(tag,cls,text)=>{const n=document.createElement(tag);n.className=cls;if(text)n.textContent=text;return n;};
         const wrapper=node('div','smrm'),list=node('div','smrm-list smrm-list--mac'),controls=[],clicks=[0,0];
@@ -1911,6 +1966,7 @@ final class QwenWebModelTransportTests: XCTestCase {
         window.choiceFixture={clicks,enable:()=>controls.forEach(control=>control.disabled=false)};
         return true;
         """#.replacingOccurrences(of: "__SCENARIO__", with: scenario)
+            .replacingOccurrences(of: "__ROOT_HANDOFF__", with: rootHandoff)
         _ = try await evaluate(fixture.view, source)
     }
 

@@ -4200,3 +4200,30 @@ the 6,000-token cap. The website removed the second message and restored its
 draft. No edit, terminal command, browser action, or fixture POST followed.
 The first transcript cleared and the second cleanup remains unconfirmed. The
 website HTTP status and cause of the rollback remain unknown.
+
+### 2026-11-11 — Qwen Plus response comparison on installed 502
+
+Signed build 502 (`662c054`) verified nine website submissions in a fresh
+Qwen Plus invoice task. Eight inferences completed and their deletions were
+confirmed. The fixture change passed all six tests. One POST produced an
+accepted receipt, which the model read in the browser. The final inference
+stopped at `website_ownership_unverified / first_user_message`, leaving the
+answer, explicit tab close, and ninth website deletion unverified. The audit
+passed 16 of 19 checks in 226.656 s.
+
+The failure occurred while Qwen rendered a two-card comparison. The first
+changed DOM reference was the assistant root pinned during the optimistic
+long-message preview. The live diagnostic records the changed root. Whether
+the original pending response node survived the replacement is unknown.
+
+The adapter accepts a replacement at this stage only when the previous root
+is detached and the original pending response node appears in the first
+validated comparison card. The assistant turn, user-body and control pins
+must still match. The adapter requires exact full-prompt verification before
+choosing a response or releasing output. A real WebKit fixture verifies the
+handoff, one Send, one expansion, one preference selection, and confirmed
+deletion. A cloned response still fails ownership with zero new actions.
+
+GPT OSS 20B remained in Computa's cached catalog after restart to 502. A
+successful live discovery that removes it remains to be observed. DeepSeek
+still redirects to sign-in in the normal browser on build 502.
