@@ -4112,3 +4112,36 @@ evidence and retains the one-click, ownership, and checkpoint clearance guards.
 Thirteen focused native WebKit and recovery checks and 182 Gemini adapter tests
 passed. Live owned recovery must still verify the change; it does not prevent
 or clear a provider CAPTCHA.
+
+### 2026-11-11 — Gemini recovery and first-message markup on installed 500
+
+The prior Gemini checkpoint survived restart to signed build 500 (`84b8029`).
+One normal landing started a new prompt-free owned probe. It verified temporary
+mode and model discovery, closed the probe with `not_created`, and cleared the
+same checkpoint. This establishes recovery on one healthy landing; it does not
+establish CAPTCHA prevention or a model response.
+
+The separate 3.1 Pro invoice task stopped in 2.869 s on
+`website_ownership_unverified / first_user_message`. The website submission was
+claimed but not verified, no tool ran, and cleanup remains unconfirmed. The
+bounded first-user diagnostic showed one rendered message root. Its status
+container had a sole `div.query-bubble-anchor` wrapping the background span.
+The previous lookup required the span directly under the status container and
+found no message body. The retained projection did not contain the body bytes.
+
+The adapter now admits that exact additional layout. The anchor and background
+span must each be the sole direct element at their respective level. Mixed or
+deeper layouts do not qualify. The same exact body, literal payload, marker,
+fingerprint, selected model, and conversation ownership checks still apply.
+No failed prompt or uncertain cleanup action was replayed.
+
+The new positive regression failed against build 500's unchanged adapter and
+passed with the additional wrapper path. All 184 Gemini adapter tests and 12
+focused native WebKit tests passed, including rejection of altered payloads,
+ambiguous wrappers, and replay attempts. Live inference remains to be verified.
+
+Kimi Instant's separate 500 fixture verified three submissions and ran two read
+commands. The third conversation regressed to the fresh-chat route and the
+ownership guard stopped the task in 34.200 s before any edit or browser action.
+The first two deletions were confirmed; the third cleanup remains unconfirmed.
+The scoped structure arm published no packet because this was a route failure.

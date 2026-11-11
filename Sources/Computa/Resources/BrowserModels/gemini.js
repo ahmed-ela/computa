@@ -2673,7 +2673,13 @@ function modelUserBody(root) {
     return matches.length === 1 && modelVisible(matches[0]) ? matches[0] : null;
   };
   const status = child(contents[0], 'div', 'query-bubble-with-status');
-  const bubble = child(status, 'span', 'user-query-bubble-with-background');
+  if (!status) return null;
+  // Gemini also places the bubble in one explicit anchor. A mixed or deeper
+  // layout must not let a descendant substitute for the original message.
+  const hasAnchor = [...status.children].some(node => node.classList.contains('query-bubble-anchor'));
+  const wrapper = hasAnchor ? child(status, 'div', 'query-bubble-anchor') : status;
+  if (!wrapper || hasAnchor && (status.children.length !== 1 || wrapper.children.length !== 1)) return null;
+  const bubble = child(wrapper, 'span', 'user-query-bubble-with-background');
   const body = child(bubble, 'span', 'ng-star-inserted');
   if (!body || body.closest('user-query') !== root
     || body.closest('[contenteditable="true"], [role="textbox"]')

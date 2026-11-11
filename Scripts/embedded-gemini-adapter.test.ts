@@ -736,6 +736,59 @@ describe('Gemini per-submission ownership', () => {
     return { f, styles, shapes, textNode };
   }
 
+  function anchorQueryBubble(body: Element, tag = 'DIV') {
+    const bubble = body.parentElement!, status = bubble.parentElement!;
+    const anchor = new Element(tag, { class: 'query-bubble-anchor ng-star-inserted' });
+    status.children = [];
+    anchor.append(bubble); status.append(anchor);
+    return { status, anchor, bubble };
+  }
+
+  test('direct and anchored query bubbles prove the entire body after one Send', async () => {
+    for (const anchored of [false, true]) {
+      const { f } = queryFixture(), send = f.send.onClick!;
+      f.send.onClick = () => { send(); if (anchored) anchorQueryBubble(f.userBody!); };
+      const text = await stage(f, 1, outbound);
+      const result = await submitThenInspect(f, 1, text), digest = await fingerprint(text);
+      expect(result.firstUserFingerprint).toBe(digest);
+      expect(result.submissionProof).toEqual({ sequence: 1, fingerprint: digest });
+      const verified = f.world.__computaGeminiSubmissionState.lastVerified;
+      expect(verified.body).toBe(f.userBody);
+      expect(verified.canonical).toBe(normalized(text));
+      expect(f.send.clicks).toBe(1);
+    }
+  });
+
+  test('anchored query bubbles reject forged bodies and ambiguous topology without replay', async () => {
+    for (const fault of ['body', 'wrongTag', 'mixed', 'duplicateAnchor', 'extraStatusChild', 'extraAnchorChild']) {
+      // Structural alternatives carry equally valid literal bodies, so either
+      // branch would bind if a permissive selector picked it.
+      const rich = fault === 'body' ? queryFixture() : null;
+      const f = rich?.f ?? fixture(provider, { response: false });
+      const text = await stage(f, 1, outbound), send = f.send.onClick!;
+      f.send.onClick = () => {
+        send();
+        const body = f.userBody!;
+        const { status, anchor, bubble } = anchorQueryBubble(body, fault === 'wrongTag' ? 'SPAN' : 'DIV');
+        if (rich) {
+          rich.shapes[0].rows[0].replaceChildren(rich.textNode('Different authored first row'));
+          Object.defineProperty(body, 'innerText', { configurable: true, get: () => text });
+        } else if (fault === 'mixed') status.append(bubble.cloneNode(true));
+        else if (fault === 'duplicateAnchor') status.append(anchor.cloneNode(true));
+        else if (fault === 'extraStatusChild') status.append(new Element('DIV'));
+        else if (fault === 'extraAnchorChild') anchor.append(new Element('DIV'));
+      };
+      const rejected = await submitThenInspect(f, 1, text);
+      expect(rejected).toMatchObject({ error: 'conversation_changed' });
+      expect(rejected.firstUserVerified).not.toBe(true);
+      expect(rejected.submissionProof).toBeUndefined();
+      expect(f.world.__computaGeminiSubmissionState.lastVerified?.sequence).toBeUndefined();
+      expect(f.send.clicks).toBe(1);
+      expect(await f.run('submit', { ...fields(1), expectedUserCounts: [0], prompt: text })).toHaveProperty('error');
+      expect(f.send.clicks).toBe(1);
+    }
+  });
+
   test('measured query paragraphs preserve all 169 lines and seven independent full-body round proofs', async () => {
     const { f, shapes } = queryFixture();
     const lines = Array.from({ length: 167 }, (_, i) => i === 5 ? '' : `PRIVATE line ${i}: \t  [literal] e\u0301\u00a0\u200b tail `);
