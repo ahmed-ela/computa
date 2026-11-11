@@ -2391,6 +2391,17 @@ final class WebModelResponseCodecTests: XCTestCase {
             if needsLiteralBoundary {
                 XCTAssertEqual(request.prompt.components(separatedBy: boundary).count - 1, 1)
                 XCTAssertTrue(request.prompt.hasSuffix(boundary + "\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF." + expectedOpus3Suffix), model)
+                if model == opus3 {
+                    XCTAssertTrue(expectedOpus3Suffix.contains("use type and calls as the top-level fields. Only commentary is optional at that level."))
+                    let extraField = call.replacingOccurrences(of: #""type":"tool_calls","#,
+                                                                with: #""type":"tool_calls","phase":"commentary","#)
+                    XCTAssertNotEqual(extraField, call)
+                    XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(extraField, request: request)) {
+                        XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .malformedEnvelope)
+                    }
+                    XCTAssertEqual(WebModelResponseCodec.malformedEmbeddedReplyDiagnostic(extraField, request: request)?.reason,
+                                   .invalidEnvelopeFields)
+                }
                 XCTAssertEqual(try WebModelResponseCodec.parseEmbeddedReply(fenced, request: request),
                     .toolCalls([.init(name: "exec_command", argumentsJSON: #"{"cmd":"printf CLAUDETOOLFIXTURE"}"#, namespace: nil)]))
                 // Reproduce the captured authored introduction separately from

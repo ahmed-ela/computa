@@ -1002,7 +1002,12 @@ enum ComputaAgentInstructions {
     Put all explanations inside message.text or tool_calls.commentary; include no text or other blocks outside it.
     """
 
-    static let claudeOpus3OutputBoundary = "\n\nStart your visible reply with ```json. Put every result or explanation inside the JSON. Close with ``` on its own line. Write no text outside the code block."
+    static let claudeOpus3OutputBoundary = "\n\n" + """
+    Start your visible reply with ```json.
+    For tool_calls, use type and calls as the top-level fields. Only commentary is optional at that level.
+    Put every tool parameter inside its call and every result or explanation inside the JSON.
+    Close with ``` on its own line. Write no text outside the code block.
+    """
 
     /// Kept after the complete request so long histories cannot bury the local
     /// response handoff. Names come only from the current validated schemas.
