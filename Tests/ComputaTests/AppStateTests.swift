@@ -320,6 +320,45 @@ final class AppStateTests: XCTestCase {
     }
 
     @MainActor
+    func testPausedProvidersCannotBeSelectedForNewTasksAndKeepSavedSelections() throws {
+        let groq = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-20b", label: "GPT OSS 20B")
+        let cerebras = APIProviderDefinition(id: "alias", name: "My inference", baseURL: APIProviderDefinition.cerebras.baseURL,
+            wireAPI: .chatCompletions, models: [.init(id: "gpt-oss-120b", name: "GPT OSS 120B")])
+        let custom = APIProviderDefinition(id: "cerebras", name: "Custom endpoint",
+            baseURL: try XCTUnwrap(URL(string: "https://example.test/v1")), wireAPI: .chatCompletions,
+            models: [.init(id: "fixture", name: "Fixture")])
+        let cerebrasID = APIProviderCatalog.appModelID(providerID: cerebras.id, modelID: "gpt-oss-120b")
+        let customID = APIProviderCatalog.appModelID(providerID: custom.id, modelID: "fixture")
+        let activeDefault = WebsiteModelCatalog.freshProfileDefaultModelID
+        let chatGPT = try XCTUnwrap(WebsiteModelCatalog.choice(for: activeDefault))
+        for hidden in [groq.modelID, cerebrasID] {
+            let preferences = isolatedTestPreferences()
+            WebsiteModelCatalog.save([groq, chatGPT], to: preferences)
+            try APIProviderCatalog.save([cerebras, custom], to: preferences)
+            preferences.set(hidden, forKey: "LocalCodex.defaultModelID")
+            let saved = AgentTask(title: "Saved", summary: "", status: .completed, workspace: "/tmp", model: hidden)
+            let state = AppState(tasks: [saved], preferences: preferences)
+            XCTAssertEqual(state.defaultModel, activeDefault)
+            XCTAssertEqual(state.selectedTask?.model, hidden)
+            XCTAssertEqual(state.modelOptions.first { $0.id == hidden }?.selectable, false)
+            XCTAssertEqual(state.modelOptions.first { $0.id == hidden }?.available, true)
+            XCTAssertNotEqual(state.modelOptions.first { $0.id == customID }?.selectable, false)
+            XCTAssertEqual(preferences.string(forKey: "LocalCodex.defaultModelID"), hidden)
+            state.createTask()
+            let draft = try XCTUnwrap(state.selectedTask)
+            XCTAssertEqual(draft.model, activeDefault)
+            for option in [groq.modelID, cerebrasID] {
+                XCTAssertFalse(state.setTaskModel(option, taskID: draft.id))
+                XCTAssertFalse(state.setDefaultModel(option))
+            }
+            XCTAssertTrue(state.setTaskModel(customID, taskID: draft.id))
+            state.selectTask(saved.id)
+            XCTAssertEqual(state.selectedTask?.model, hidden)
+            XCTAssertTrue(state.setTaskModel(activeDefault, taskID: saved.id))
+        }
+    }
+
+    @MainActor
     func testModelCannotChangeDuringActiveTurn() throws {
         let state = AppState(tasks: [], preferences: isolatedTestPreferences())
         state.createTask()

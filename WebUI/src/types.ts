@@ -138,6 +138,7 @@ export interface ModelOption {
   detail: string;
   highMemory: boolean;
   available?: boolean;
+  selectable?: boolean;
 }
 
 export interface AppSnapshot {

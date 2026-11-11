@@ -188,15 +188,17 @@ final class AppState {
         self.browserSession = browserSession ?? EmbeddedBrowserSession(defaults: preferences)
         let storedAccessMode = preferences.object(forKey: Self.accessModePreferenceKey) as? String
         accessMode = storedAccessMode.flatMap(AccessMode.init(rawValue:)) ?? .askEveryTime
+        let storedAPIProviders = APIProviderCatalog.load(from: preferences)
+        apiProviders = storedAPIProviders
         let storedModel = preferences.string(forKey: Self.defaultModelPreferenceKey)
         defaultModel = storedModel.flatMap { id in
+            guard !Self.isModelHiddenFromPicker(id, apiProviders: storedAPIProviders) else { return nil }
             // Saved website choices remain selected if an account/menu changes.
             // Invalid ones are visible and rejected, never replaced with Qwen.
-            id.hasPrefix("browser/") || id.hasPrefix("api/") ? id : LocalModelCatalog.option(for: id)?.id
+            return id.hasPrefix("browser/") || id.hasPrefix("api/") ? id : LocalModelCatalog.option(for: id)?.id
         } ?? WebsiteModelCatalog.freshProfileDefaultModelID
         websiteModelChoices = WebsiteModelCatalog.load(from: preferences)
         websiteModeChoices = WebsiteModeCatalog.load(from: preferences)
-        apiProviders = APIProviderCatalog.load(from: preferences)
         automationPermissions = permissionClient.current()
         self.tasks = tasks
         selectedTaskID = tasks.first?.id
@@ -214,6 +216,9 @@ final class AppState {
                     try credentialMutation()
                 }
                 self.apiProviders = providers
+                if Self.isModelHiddenFromPicker(self.defaultModel, apiProviders: providers) {
+                    self.defaultModel = WebsiteModelCatalog.freshProfileDefaultModelID
+                }
             })
         self.browserSession.onHumanVerificationRecoveryCandidate = { [weak self] candidate in
             Task { @MainActor [weak self] in await self?.recoverWebsiteModels(candidate) }
@@ -259,7 +264,24 @@ final class AppState {
                     highMemory: false, available: false))
             }
         }
-        return options
+        return options.map { option in
+            guard Self.isModelHiddenFromPicker(option.id, apiProviders: apiProviders) else { return option }
+            var hidden = option
+            hidden.selectable = false
+            return hidden
+        }
+    }
+
+    /// Pause new Groq and Cerebras selections while saved tasks retain their model identity.
+    private static func isModelHiddenFromPicker(_ id: String, apiProviders: [APIProviderDefinition]) -> Bool {
+        if id == LocalModelCatalog.groqBrowserModelID || id.hasPrefix(LocalModelCatalog.groqBrowserModelID + "/") {
+            return true
+        }
+        guard let identity = APIProviderCatalog.identity(for: id) else { return false }
+        if let provider = apiProviders.first(where: { $0.id == identity.providerID }) {
+            return provider.isCerebrasInference
+        }
+        return identity.providerID == APIProviderDefinition.cerebras.id
     }
 
     private var canEditAPIProviders: Bool {
@@ -1020,7 +1042,8 @@ final class AppState {
 
     @discardableResult
     func setDefaultModel(_ modelID: String) -> Bool {
-        guard let option = modelOptions.first(where: { $0.id == modelID }), option.available != false else { return false }
+        guard let option = modelOptions.first(where: { $0.id == modelID }),
+              option.available != false, option.selectable != false else { return false }
         defaultModel = modelID
         preferences.set(modelID, forKey: Self.defaultModelPreferenceKey)
         requestAutomaticWebsiteModelRefresh(for: modelID)
@@ -1031,6 +1054,7 @@ final class AppState {
     @discardableResult
     func setTaskModel(_ modelID: String, taskID: AgentTask.ID) -> Bool {
         guard let option = modelOptions.first(where: { $0.id == modelID }), option.available != false,
+              option.selectable != false,
               let index = tasks.firstIndex(where: { $0.id == taskID }),
               canChangeModel(for: taskID)
         else { return false }

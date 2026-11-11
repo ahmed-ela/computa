@@ -183,6 +183,63 @@ describe('website model selectors', () => {
     expect(staleElements.some((element) => element.attributes['data-value'] === 'browser/groq')).toBe(false);
   });
 
+  test('native-hidden Groq and aliased Cerebras choices keep saved labels and can be switched away from', async () => {
+    const groq = { ...options[8], selectable: false };
+    const cerebras = { ...options[1], id: 'api/custom-endpoint/model/gpt-oss',
+      label: 'Custom Endpoint / Saved Cerebras · API', selectable: false };
+    const input = [groq, options[1], cerebras, options[3], options[2], options[4]];
+    for (const hidden of [groq, cerebras]) {
+      const selected: string[] = [];
+      selectionHandlers.length = 0;
+      const html = renderToStaticMarkup(h(ModelSelector, { options: input, model: hidden.id, label: 'Task model',
+        onSelect: (value: string) => selected.push(value) })).html;
+      expect((await renderedProviderGroups(html)).map(({ name, ids }) => ({ name, ids }))).toEqual([
+        { name: 'ChatGPT', ids: [options[1].id, options[2].id] },
+        { name: 'Gemini', ids: [options[3].id] },
+        { name: 'Claude', ids: [options[4].id] },
+      ]);
+      const trigger = (await parsedElements(html)).find(({ tag, attributes }) => tag === 'button' && 'aria-label' in attributes);
+      expect(trigger?.attributes['aria-label']).toBe(`Task model: ${hidden.label.split(' · ')[0]}`);
+      expect(trigger?.attributes).not.toHaveProperty('disabled');
+      expect((await textBySelector(html, '.model-option-name'))[0]).toBe(modelOptionLabel(hidden));
+      expect(selected).toEqual([]);
+      const change = selectionHandlers[0];
+      change(groq.id);
+      change(cerebras.id);
+      expect(selected).toEqual([]);
+      change(options[3].id);
+      expect(selected).toEqual([options[3].id]);
+    }
+  });
+
+  test('custom APIs using paused provider IDs retain their configured names and generic marks', async () => {
+    for (const provider of ['cerebras', 'groq']) {
+      const custom = { ...options[1], id: `api/${provider}/model/custom`, label: 'Custom Endpoint / Fixture API · API' };
+      const saved = { ...options[1], id: `api/${provider}/model/saved`,
+        label: `${provider} / Saved paused model · API`, selectable: false };
+      const selected: string[] = [];
+      selectionHandlers.length = 0;
+      const props = { options: [saved, custom, options[8]], label: 'Task model',
+        onSelect: (value: string) => selected.push(value) };
+      const html = renderToStaticMarkup(h(ModelSelector, { ...props, model: custom.id })).html;
+      expect(await renderedProviderGroups(html)).toEqual([
+        { name: 'Custom Endpoint', icons: [], ids: [custom.id] },
+        { name: 'Groq', icons: ['groq'], ids: [options[8].id] },
+      ]);
+      expect(await attributesBySelector(html, 'button[aria-label]', 'aria-label'))
+        .toContain('Task model: Custom Endpoint / Fixture API');
+      expect(await attributesBySelector(html, '.model-option-label [data-provider]', 'data-provider')).toEqual([]);
+      expect(await attributesBySelector(html, '.model-option-label [aria-hidden="true"]', 'aria-hidden')).toEqual(['true']);
+
+      selectionHandlers.length = 0;
+      const savedHTML = renderToStaticMarkup(h(ModelSelector, { ...props, model: saved.id })).html;
+      expect(await attributesBySelector(savedHTML, '.model-option-label [data-provider]', 'data-provider')).toEqual([provider]);
+      expect(await attributesBySelector(savedHTML, '[role="menuitemradio"]', 'data-value')).not.toContain(saved.id);
+      selectionHandlers[0](custom.id);
+      expect(selected).toEqual([custom.id]);
+    }
+  });
+
   test('new website providers display only supplied model choices and preserve missing selections', async () => {
     for (const [provider, name] of [['kimi', 'Kimi'], ['qwen', 'Qwen'], ['deepseek', 'DeepSeek']]) {
       const defaultModel = `browser/${provider}`;

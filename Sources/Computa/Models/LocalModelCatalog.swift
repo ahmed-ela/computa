@@ -6,6 +6,7 @@ struct LocalModelOption: Codable, Equatable, Sendable {
     let detail: String
     let highMemory: Bool
     var available: Bool? = nil
+    var selectable: Bool? = nil
 }
 
 enum LocalModelCatalog {

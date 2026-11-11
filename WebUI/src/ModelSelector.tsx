@@ -19,11 +19,16 @@ export function modelOptionLabel(option: ModelOption): string {
   return separator < 0 ? label : label.slice(separator + 3);
 }
 
+function isCustomAPIWithPausedProviderID(option?: ModelOption): boolean {
+  return option !== undefined && option.available !== false && option.selectable !== false
+    && (option.id.startsWith('api/cerebras/model/') || option.id.startsWith('api/groq/model/'));
+}
+
 export function ModelLabel({ model, option }: { model: string; option?: ModelOption }) {
   const fullLabel = option ? fullModelLabel(option) : model;
   const separator = fullLabel.indexOf(' / ');
   return <span className="model-option-label" title={fullLabel}>
-    <ModelProviderIcon model={model} />
+    {isCustomAPIWithPausedProviderID(option) ? <Icon name="sparkles" size={16} /> : <ModelProviderIcon model={model} />}
     {separator >= 0 && <span className="sr-only">{fullLabel.slice(0, separator)}: </span>}
     <span className="model-option-name">{option ? modelOptionLabel(option) : model}</span>
   </span>;
@@ -51,25 +56,27 @@ const providerNames: Record<string, string> = {
   cerebras: 'Cerebras', alibaba: 'Alibaba', openai: 'OpenAI',
 };
 
-type ModelProviderGroup = { id: string; name: string; iconModel: string; options: ModelOption[] };
+type ModelProviderGroup = { id: string; name: string; iconModel: string; genericAPIIcon: boolean; options: ModelOption[] };
 
 export function groupModelOptions(options: ModelOption[], model: string): ModelProviderGroup[] {
-  const visibleOptions = options.filter((option) => isVisibleModel(option.id));
+  const visibleOptions = options.filter((option) => option.selectable !== false && isVisibleModel(option.id));
   // Preserve an unavailable saved selection without substituting another model.
-  if (isVisibleModel(model) && !visibleOptions.some((option) => option.id === model)) {
+  if (isVisibleModel(model) && !options.some((option) => option.id === model)) {
     visibleOptions.push({ id: model, label: model, detail: model, highMemory: false, available: false });
   }
   const groups = new Map<string, ModelProviderGroup>();
   for (const option of visibleOptions) {
     const provider = option.id.split('/')[1];
-    let group = groups.get(provider);
+    const genericAPIIcon = isCustomAPIWithPausedProviderID(option);
+    const groupID = genericAPIIcon ? `api/${provider}` : provider;
+    let group = groups.get(groupID);
     if (!group) {
       const label = fullModelLabel(option);
       const separator = label.indexOf(' / ');
-      const name = Object.hasOwn(providerNames, provider) ? providerNames[provider]
-        : separator > 0 ? label.slice(0, separator) : provider;
-      group = { id: provider, name, iconModel: option.id, options: [] };
-      groups.set(provider, group);
+      const configuredName = separator > 0 ? label.slice(0, separator) : provider;
+      const name = !genericAPIIcon && Object.hasOwn(providerNames, provider) ? providerNames[provider] : configuredName;
+      group = { id: groupID, name, iconModel: option.id, genericAPIIcon, options: [] };
+      groups.set(groupID, group);
     }
     group.options.push(option);
   }
@@ -102,7 +109,7 @@ export function ModelSelector({ options, model, label, disabled = false, classNa
         {groups.map((group) => <DropdownMenuSub key={group.id}>
           <DropdownMenuSubTrigger disabled={disabled} textValue={group.name} className="model-provider-option"
             data-provider={group.id}>
-            <ModelProviderIcon model={group.iconModel} />
+            {group.genericAPIIcon ? <Icon name="sparkles" size={16} /> : <ModelProviderIcon model={group.iconModel} />}
             <span className="model-provider-name">{group.name}</span>
           </DropdownMenuSubTrigger>
           <DropdownMenuPortal>

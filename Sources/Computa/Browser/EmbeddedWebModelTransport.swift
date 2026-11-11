@@ -4,6 +4,7 @@ import CryptoKit
 import Darwin
 import Foundation
 import OSLog
+import os
 @preconcurrency import WebKit
 
 /// Native-only completed Groq reply identity. Only this file can mint it;
@@ -868,6 +869,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var requiresSavedDelete: Bool { provider.lifecycle == .savedConversationDelete && !isDiscovery }
         var savedDeleteReady = false
         var savedRoutes: SavedConversationRoutes?
+        var kimiProvisionalRouteWaitSpent = false
         var savedDeleteSubmission: FreshSubmissionBinding?
         final class SavedDeleteOperation {
             let id = UUID()
@@ -1311,6 +1313,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private var firstUserStructureEmissionObserverForTesting: (@MainActor (Bool, String) -> Void)?
     private var kimiDiscoveryProgressObserverForTesting: (@MainActor (String) -> Void)?
     private var kimiSavedRouteRejectionObserverForTesting: (@MainActor (String) -> Void)?
+    private var kimiProvisionalRouteWaitObserverForTesting: (@MainActor (String) -> Void)?
     private var modelDiagnosticsObserverForTesting: (@MainActor (String) -> Void)?
     private var claudeRemountHostObserverForTesting: (@MainActor (String) -> Void)?
     private var adapterTimeoutObserverForTesting: (@MainActor (String) -> Void)?
@@ -1472,6 +1475,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     func setKimiSavedRouteRejectionObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
         kimiSavedRouteRejectionObserverForTesting = observer
+    }
+
+    func setKimiProvisionalRouteWaitObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
+        kimiProvisionalRouteWaitObserverForTesting = observer
     }
 
     func setModelDiagnosticsObserverForTesting(_ observer: (@MainActor (String) -> Void)?) {
@@ -3187,6 +3194,111 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         #endif
     }
 
+    private enum KimiProvisionalRouteWaitOutcome: String {
+        case waiting, returned, expired, cancelled
+        case routeChanged = "route_changed"
+        case scopeChanged = "scope_changed"
+    }
+
+    private enum KimiProvisionalRouteObservation: Equatable, Sendable {
+        case fresh, returned, changed
+    }
+
+    private func logKimiProvisionalRouteWait(_ session: Session, generation: UUID, outcome: KimiProvisionalRouteWaitOutcome) {
+        let record = "kimiProvisionalRouteWait version=1 provider=kimi session=\(session.token.lowercased())"
+            + " generation=\(generation.uuidString.lowercased()) sequence=1 outcome=\(outcome.rawValue)"
+        Self.inspectionLog.notice("\(record, privacy: .public)")
+        #if DEBUG
+        kimiProvisionalRouteWaitObserverForTesting?(record)
+        #endif
+    }
+
+    private func isCurrentKimiProvisionalRouteInspection(_ session: Session) -> Bool {
+        sessions[session.token] === session && finishingTasks[session.token] == nil
+            && !session.retainedForCleanup && session.terminalFailure == nil && session.inFlightInferenceRequests == 1
+    }
+
+    /// Wait on the original owned page for its exact provisional URL. The
+    /// rejected route and this wait supply no adapter, response or cleanup proof.
+    private func awaitKimiProvisionalRouteReturn(_ session: Session, from fresh: URL, to previous: URL,
+                                                  generation: UUID, deadline: ContinuousClock.Instant) async throws -> Bool {
+        guard session.provider == .kimi, fresh.absoluteString == session.provider.startURL.absoluteString,
+              !session.kimiProvisionalRouteWaitSpent, let model = session.modelChoice,
+              case .model(let evidence)? = session.selectionEvidence, evidence.response == nil,
+              evidence.selected.key == model.key, evidence.selected.label == model.label,
+              evidence.source == "model_picker_label", evidence.verification == "website_selection",
+              case .provisional(let pinnedPath)? = session.provider.savedConversationRoute(previous),
+              let binding = session.savedDeleteSubmission, binding.generation == generation else { return false }
+        func isCurrent() -> Bool {
+            isCurrentKimiProvisionalRouteInspection(session) && session.requiresSavedDelete && session.savedDeleteReady
+                && !session.isRecoveryProbe && !session.temporary && session.savedDeleteOperation == nil
+                && session.state == "running" && session.submitted && session.pendingSubmission
+                && session.sequence == 1 && session.acknowledgedSendSequence == 1
+                && session.confirmedUsers == 0 && session.baseline == 0 && session.observedResponseCount == 0
+                && session.response.isEmpty && !session.completionCandidate && session.firstUserFingerprint == nil
+                && session.conversation == nil && session.conversationIdentity == nil && !session.promoted
+                && session.modelChoice == model && session.modelSelectionVerified && session.selectionEvidence == .model(evidence)
+                && session.savedDeleteSubmission?.generation == binding.generation
+                && session.savedDeleteSubmission?.promptFingerprint == binding.promptFingerprint
+                && session.savedDeleteSubmission?.outboundFingerprint == binding.outboundFingerprint
+                && session.savedRoutes?.last?.absoluteString == previous.absoluteString
+                && session.savedRoutes?.provisional == pinnedPath && session.savedRoutes?.canonical == nil
+                && session.documentGeneration == generation
+                && browser.modelSignalProgress(tabID: session.tabID, view: session.view,
+                    ownerToken: session.token, generation: generation) != nil
+        }
+        try Task.checkCancellation()
+        let limit = min(deadline, session.turnStarted + responseTimeout, ContinuousClock.now + .seconds(1))
+        guard ContinuousClock.now < limit, session.view.url == fresh, isCurrent() else { return false }
+        session.kimiProvisionalRouteWaitSpent = true
+
+        // The shared model channel wakes the reader. Latch the actual native URL
+        // notifications because a wakeup can coalesce more than one change.
+        let freshURL = fresh.absoluteString, previousURL = previous.absoluteString
+        let route = OSAllocatedUnfairLock(initialState: KimiProvisionalRouteObservation.fresh)
+        let observation = session.view.observe(\.url, options: [.initial, .new]) { _, change in
+            let observed = (change.newValue ?? nil)?.absoluteString
+            route.withLock { state in
+                guard state != .changed else { return }
+                if observed == previousURL { state = .returned }
+                else if observed != freshURL || state == .returned { state = .changed }
+            }
+        }
+        var outcome = KimiProvisionalRouteWaitOutcome.expired
+        defer {
+            observation.invalidate()
+            logKimiProvisionalRouteWait(session, generation: generation, outcome: outcome)
+        }
+        logKimiProvisionalRouteWait(session, generation: generation, outcome: .waiting)
+        do {
+            while ContinuousClock.now < limit {
+                try Task.checkCancellation()
+                guard isCurrent() else { outcome = .scopeChanged; throw Failure.staleSession }
+                let revision = try browser.modelChangeRevision(for: session.tabID)
+                let observed = route.withLock { $0 }
+                let url = session.view.url?.absoluteString
+                if observed == .returned, url == previousURL, ContinuousClock.now < limit {
+                    outcome = .returned
+                    return true
+                }
+                if observed == .changed || url != freshURL && url != previousURL {
+                    outcome = .routeChanged
+                    return false
+                }
+                _ = try await browser.waitForModelChange(tabID: session.tabID, after: revision, until: limit)
+            }
+            try Task.checkCancellation()
+            guard isCurrent() else { outcome = .scopeChanged; throw Failure.staleSession }
+            return false
+        } catch is CancellationError {
+            outcome = .cancelled
+            throw CancellationError()
+        } catch {
+            outcome = .scopeChanged
+            throw Failure.staleSession
+        }
+    }
+
     /// Project only the categories available at the existing invalid-ID rejection.
     static func kimiFirstRootIDDiagnostic(_ raw: Any?, observed: [String: Any],
                                           provider: Provider, action: String) -> String? {
@@ -4441,6 +4553,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         let deadline = session.state == "loading" ? session.created + preparationTimeout : session.turnStarted + responseTimeout
         guard ContinuousClock.now < deadline else { throw session.state == "loading" ? preparationFailure(session) : timeoutFailure }
         let observed: [String: Any]
+        let kimiRouteWaitWasSpent = session.kimiProvisionalRouteWaitSpent
         let readTimeoutCount = session.readTimeoutCount
         let terminalCandidate = terminalCompletionReceipt(session)
         let failureCandidate = terminalFailureReceipt(session)
@@ -4524,6 +4637,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 return try snapshot(session)
             }
             throw error
+        }
+        if !kimiRouteWaitWasSpent, session.kimiProvisionalRouteWaitSpent {
+            try Task.checkCancellation()
+            guard isCurrentKimiProvisionalRouteInspection(session) else { throw Failure.staleSession }
         }
         session.geminiRecoveryPreparation?.observeReadiness(observed)
         guard ContinuousClock.now < deadline else { throw session.state == "loading" ? preparationFailure(session) : timeoutFailure }
@@ -7551,7 +7668,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         let provider = session.provider
         guard var script = script(for: provider) else { throw Failure.pageUnavailable }
-        guard let url = session.view.url, provider.accepts(url.absoluteString) else {
+        guard let initialURL = session.view.url, provider.accepts(initialURL.absoluteString) else {
             // This can precede JavaScript execution after a failed navigation.
             // Record classifications only, without publishing the page URL.
             let candidate = session.view.url
@@ -7560,29 +7677,48 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             throw Failure.pageUnavailable
         }
         if provider == .groq {
-            guard provider.acceptsGroqModelQuery(url, expectedKey: session.modelChoice?.key) else { throw Failure.modelMismatch }
+            guard provider.acceptsGroqModelQuery(initialURL, expectedKey: session.modelChoice?.key) else { throw Failure.modelMismatch }
         }
         let previousSavedRouteURL = provider == .kimi ? session.savedRoutes?.last : nil
-        func routeBefore(_ reason: SavedConversationRoutes.Rejection) -> Failure {
+        func routeBefore(_ reason: SavedConversationRoutes.Rejection, attempted: URL) -> Failure {
             logKimiSavedRouteRejection(session, generation: generation, action: action,
                 cleanupInspection: allowSavedCleanupInspection, stage: .before, reason: reason,
-                previous: previousSavedRouteURL, attempted: url)
+                previous: previousSavedRouteURL, attempted: attempted)
             return .ownershipFailure(.routeBefore)
         }
+        var admittedURL = initialURL
+        var resumedKimiProvisionalRoute = false
         if provider.savedConversationPolicy != nil, savedDeleteOperation == nil {
-            let decision = session.savedRoutes?.observation(of: url, submitted: session.submitted) ?? .rejected(.trackerMissing)
-            if case .rejected(let reason) = decision { throw routeBefore(reason) }
+            let decision = session.savedRoutes?.observation(of: initialURL, submitted: session.submitted) ?? .rejected(.trackerMissing)
+            if case .rejected(let reason) = decision {
+                guard reason == .regressedToFresh, action == "inspect", enforceModel,
+                      !allowBlockedProvider, !allowSavedCleanupInspection, let previous = previousSavedRouteURL,
+                      try await awaitKimiProvisionalRouteReturn(session, from: initialURL, to: previous,
+                          generation: generation, deadline: evaluationDeadline) else {
+                    throw routeBefore(reason, attempted: initialURL)
+                }
+                try Task.checkCancellation()
+                guard isCurrentKimiProvisionalRouteInspection(session), ContinuousClock.now < evaluationDeadline,
+                      session.view.url?.absoluteString == previous.absoluteString else { throw routeBefore(reason, attempted: initialURL) }
+                try checkProviderGate(session)
+                try rejectWebsiteBlocker(session, action: action, phase: "before")
+                if case .rejected(let resumedReason) = session.savedRoutes?.observation(of: previous, submitted: session.submitted)
+                    ?? .rejected(.trackerMissing) { throw routeBefore(resumedReason, attempted: previous) }
+                admittedURL = previous
+                resumedKimiProvisionalRoute = true
+            }
         }
+        let url = admittedURL
         if let pinned = session.qwenPendingFirstBody?.canonicalURL, pinned != url {
             throw Failure.ownershipFailure(.routeBefore)
         }
         let context = provider.routeContext(url.absoluteString)
-        if let pinned = session.routeContext, context != pinned { throw routeBefore(.pinnedContextChanged) }
+        if let pinned = session.routeContext, context != pinned { throw routeBefore(.pinnedContextChanged, attempted: url) }
         let current = provider.conversationURL(url.absoluteString)
         let promotion = provider.isLocalConversation(session.conversation) && current != nil
             && current != session.conversation && !provider.isLocalConversation(current) && !session.promoted
         if let owned = session.conversation, current != owned, !promotion, savedDeleteOperation == nil {
-            throw routeBefore(current == nil ? .ownedConversationMissing : .ownedConversationChanged)
+            throw routeBefore(current == nil ? .ownedConversationMissing : .ownedConversationChanged, attempted: url)
         }
         if current != nil, !session.submitted { throw Failure.notFresh }
         let expectedCounts: [Int] = action == "submit" ? [session.confirmedUsers]
@@ -8035,6 +8171,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         await beforePageResultValidationForTesting?(action)
         await beforePageResultValidationDetailedForTesting?(action, enforceModel)
         #endif
+        if resumedKimiProvisionalRoute {
+            try Task.checkCancellation()
+            guard isCurrentKimiProvisionalRouteInspection(session) else { throw Failure.staleSession }
+        }
         if !allowBlockedProvider {
             try checkProviderGate(session, allowGroqFormatCleanupModelRead: action == "verifyModel")
         }
