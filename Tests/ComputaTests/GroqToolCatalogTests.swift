@@ -252,7 +252,7 @@ final class GroqToolCatalogTests: XCTestCase {
         // Malformed, duplicate, stale and recursive loader requests disclose no suggestions.
         for (rev, badNames, expectedError) in [
             (initial.revision, names + ["browser_open"], GroqToolCatalog.Failure.invalidArguments),
-            (String(repeating: "0", count: 64), names, .staleRevision),
+            (String(repeating: "0", count: 64), names, .staleRevision(currentRevision: initial.revision)),
             (initial.revision, names + [loader], .unavailableTool)
         ] {
             let data = try encode(["catalog_revision":rev, "names":badNames])
@@ -261,6 +261,93 @@ final class GroqToolCatalogTests: XCTestCase {
             }
         }
         XCTAssertEqual(try catalog.prepare(scope: scope, seed: seed), initial)
+    }
+
+    func testStaleFeedbackReportsOnlyTheExactScopedCurrentRevisionAndStillRejects() throws {
+        for namespaced in [false, true] {
+            let prefix = namespaced ? "functions." : ""
+            let loader = prefix + GroqToolCatalog.name
+            let localNames = ["exec_command", "browser_open", "browser_read", "browser_fill", "browser_click", "browser_close", "blocked_tool"]
+            let definitions = [canonicalLoader()] + localNames.map(function)
+            let tools: [[String: Any]] = namespaced
+                ? [["type": "namespace", "name": "functions", "tools": definitions]] : definitions
+            let registered = Set(localNames.map { prefix + $0 } + [loader])
+            let denied = prefix + "blocked_tool", unavailable = prefix + "browser_close"
+            let allowed = registered.subtracting([denied])
+            let unbound = GroqToolCatalog.Seed(registeredDefinitionsJSON: try encode(tools),
+                callableNames: [loader, prefix + "exec_command", prefix + "browser_open", denied],
+                allowedNames: allowed, preloadNames: [], toolChoiceJSON: try encode("auto"))
+            let bound = GroqToolCatalog.Seed(registeredDefinitionsJSON: unbound.registeredDefinitionsJSON,
+                callableNames: registered.subtracting([unavailable]), allowedNames: allowed,
+                preloadNames: [], toolChoiceJSON: unbound.toolChoiceJSON)
+            var catalog = GroqToolCatalog()
+            let scope = makeScope(), initial = try catalog.prepare(scope: scope, seed: unbound)
+            _ = try catalog.load(scope: scope, arguments: args(initial, [prefix + "exec_command"]))
+            let current = try catalog.prepare(scope: scope, seed: bound)
+            XCTAssertNotEqual(current.revision, initial.revision)
+            XCTAssertEqual(current.selectedNames, [loader], "A changed native catalog resets optional selection")
+            let requestedOnly = prefix + "REQUEST_ONLY_PRIVATE_NAME"
+            let stale = try args(initial, [prefix + "browser_read", requestedOnly])
+            var thrown: Error?
+            XCTAssertThrowsError(try catalog.load(scope: scope, arguments: stale)) { thrown = $0 }
+            let failure = try XCTUnwrap(thrown as? GroqToolCatalog.Failure)
+            XCTAssertEqual(failure, .staleRevision(currentRevision: current.revision))
+            let text = try XCTUnwrap(failure.errorDescription)
+            let feedback = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+            XCTAssertEqual(Set(feedback.keys), ["catalog_revision", "code", "execution", "selection_changed"])
+            XCTAssertEqual(feedback["code"] as? String, "stale_catalog_revision")
+            XCTAssertEqual(feedback["catalog_revision"] as? String, current.revision)
+            XCTAssertEqual(feedback["execution"] as? Bool, false)
+            XCTAssertEqual(feedback["selection_changed"] as? Bool, false)
+            XCTAssertEqual(Data(text.utf8), try encode(["catalog_revision": current.revision,
+                "code": "stale_catalog_revision", "execution": false, "selection_changed": false]))
+            XCTAssertLessThanOrEqual(text.utf8.count, 192)
+            XCTAssertFalse(text.contains(initial.revision))
+            XCTAssertFalse(text.contains(requestedOnly))
+            XCTAssertEqual(try catalog.prepare(scope: scope, seed: bound), current)
+
+            // Foreign scope and malformed arguments fail before revision disclosure.
+            let foreign = makeScope(thread: UUID().uuidString.lowercased(), base: scope)
+            for (candidateScope, data, expected) in [
+                (foreign, stale, GroqToolCatalog.Failure.invalidScope),
+                (scope, try args(initial, [prefix + "browser_read", prefix + "browser_read"]), .invalidArguments)
+            ] {
+                XCTAssertThrowsError(try catalog.load(scope: candidateScope, arguments: data)) { error in
+                    XCTAssertEqual(error as? GroqToolCatalog.Failure, expected)
+                    XCTAssertFalse(error.localizedDescription.contains(current.revision))
+                    XCTAssertFalse(error.localizedDescription.contains("stale_catalog_revision"))
+                }
+                XCTAssertEqual(try catalog.prepare(scope: scope, seed: bound), current)
+            }
+
+            // Using the disclosed revision does not waive any membership or policy check.
+            for (name, expected) in [
+                (requestedOnly, GroqToolCatalog.Failure.unavailableSelection(unavailable: [], denied: [], unknownCount: 1, direct: [], loadable: [])),
+                (denied, .unavailableSelection(unavailable: [], denied: [denied], unknownCount: 0, direct: [], loadable: [])),
+                (unavailable, .unavailableSelection(unavailable: [unavailable], denied: [], unknownCount: 0, direct: [], loadable: []))
+            ] {
+                XCTAssertThrowsError(try catalog.load(scope: scope, arguments: args(current, [name]))) {
+                    XCTAssertEqual($0 as? GroqToolCatalog.Failure, expected)
+                }
+                XCTAssertEqual(try catalog.prepare(scope: scope, seed: bound), current)
+            }
+            let five = ["exec_command", "browser_open", "browser_read", "browser_fill", "browser_click"].map { prefix + $0 }
+            XCTAssertThrowsError(try catalog.load(scope: scope, arguments: args(current, five))) { error in
+                guard case let .tooManyNames(count, _, _, ineligible) = error as? GroqToolCatalog.Failure else {
+                    return XCTFail("The current revision must still enforce the native four-name limit")
+                }
+                XCTAssertEqual(count, 5); XCTAssertEqual(ineligible, 0)
+            }
+            XCTAssertEqual(GroqToolCatalog.maximumLoadedTools, 4)
+            XCTAssertEqual(try catalog.prepare(scope: scope, seed: bound), current)
+            let names = [prefix + "browser_read", prefix + "browser_fill"]
+            let receipt = try catalog.load(scope: scope, arguments: args(current, names))
+            let loaded = try XCTUnwrap(JSONSerialization.jsonObject(with: receipt) as? [String: Any])
+            XCTAssertEqual(loaded["available"] as? String, "next_request")
+            XCTAssertEqual(loaded["execution"] as? Bool, false)
+            XCTAssertEqual(loaded["loaded"] as? [String], names.sorted())
+            XCTAssertEqual(try catalog.prepare(scope: scope, seed: bound).selectedNames, Set(names + [loader]))
+        }
     }
 
     func testOnlyExactPinnedEngineLoaderProjectionCanRestoreNativeBounds() throws {
@@ -351,7 +438,7 @@ final class GroqToolCatalogTests: XCTestCase {
             XCTAssertEqual(WebModelServer.errorPresentation(for: $0).code, "website_prompt_budget_exceeded")
         }
         XCTAssertThrowsError(try candidate.load(scope: scope, arguments: load)) {
-            XCTAssertEqual($0 as? GroqToolCatalog.Failure, .staleRevision)
+            XCTAssertEqual($0 as? GroqToolCatalog.Failure, .staleRevision(currentRevision: changed.revision))
         }
         // Discarding the rejected candidate preserves both original revision
         // and loaded selection; the exact previous receipt remains usable.

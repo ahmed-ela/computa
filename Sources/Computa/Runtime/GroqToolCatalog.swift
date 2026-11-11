@@ -81,7 +81,8 @@ struct GroqToolCatalog: Sendable {
     }
 
     enum Failure: Error, LocalizedError, Equatable {
-        case invalidCatalog, invalidScope, staleRevision, invalidArguments, unavailableTool, selectionTooLarge
+        case invalidCatalog, invalidScope, invalidArguments, unavailableTool, selectionTooLarge
+        case staleRevision(currentRevision: String)
         case tooManyNames(count: Int, direct: [String], loadable: [String], ineligible: Int)
         case budgetWithOfferedSchemas([String])
         case unavailableSelection(unavailable: [String], denied: [String], unknownCount: Int, direct: [String], loadable: [String])
@@ -89,7 +90,7 @@ struct GroqToolCatalog: Sendable {
             switch self {
             case .invalidCatalog: "The registered tool catalog could not be verified. No tool was loaded or executed."
             case .invalidScope: "Tool loading does not belong to the current registered Groq turn. No tool was loaded or executed."
-            case .staleRevision: "The tool catalog changed. Use its current revision and inventory; no tool was loaded or executed."
+            case let .staleRevision(currentRevision): Self.staleRevisionJSON(currentRevision)
             case .invalidArguments: "Tool loading requires the current catalog_revision and one to four unique inventory names. No tool was loaded or executed."
             case let .tooManyNames(count, direct, loadable, ineligible):
                 "Requested \(count) names; the limit is four. No tool was loaded or executed. Eligible matches from this request (up to four): call existing schemas directly=\(Self.namesJSON(direct)); load other schemas by exact name=\(Self.namesJSON(loadable)). Ineligible requested names=\(ineligible). Check the current inventory before choosing a tool."
@@ -101,6 +102,14 @@ struct GroqToolCatalog: Sendable {
             case .selectionTooLarge:
                 "Schema load exceeds budget including loader history. No change or execution. Choose another fitting schema or a shorter task."
             }
+        }
+
+        private static func staleRevisionJSON(_ currentRevision: String) -> String {
+            // The exact scoped state supplies this digest, never requested text.
+            let feedback: [String: Any] = ["code": "stale_catalog_revision", "catalog_revision": currentRevision,
+                                           "selection_changed": false, "execution": false]
+            return String(decoding: (try? JSONSerialization.data(withJSONObject: feedback,
+                options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data("{}".utf8), as: UTF8.self)
         }
 
         private static func namesJSON(_ names: [String]) -> String {
@@ -302,7 +311,9 @@ struct GroqToolCatalog: Sendable {
               let names = object["names"] as? [String], !names.isEmpty,
               Set(names).count == names.count,
               names.allSatisfy(Self.validName) else { throw Failure.invalidArguments }
-        guard revision == state.projection.revision else { throw Failure.staleRevision }
+        guard revision == state.projection.revision else {
+            throw Failure.staleRevision(currentRevision: state.projection.revision)
+        }
         let requested = Set(names)
         let baseline = try Self.baseline(for: state.seed)
         let loaderNames = Set(baseline.inventory.filter { $0.name == Self.name || $0.name == "functions." + Self.name }.map(\.name))
