@@ -1129,7 +1129,7 @@ private actor CodingLookupTransport: WebModelTransport {
                 let offered = tools.first { $0.local == local }
                 if let offered {
                     pending = .coding(stage)
-                    reply = stage == 3 ? try CodingLookupTools.call(offered.qualified, input: CodingLookupTools.patch(workspace))
+                    reply = stage == 3 ? try CodingLookupTools.call(offered, declaredCustomInput: CodingLookupTools.patch(workspace))
                         : try CodingLookupTools.call(offered.qualified, arguments: ["cmd": CodingLookupTools.commands[stage], "workdir": workspace, "yield_time_ms": 10_000, "max_output_tokens": 6_000])
                 } else {
                     requestPhase = .loaderReply
@@ -1181,7 +1181,7 @@ private actor CodingLookupTransport: WebModelTransport {
 }
 
 private enum CodingLookupTools {
-    struct Tool { let local: String; let qualified: String }
+    struct Tool { let local: String; let qualified: String; let definition: [String: Any] }
     static let commands = ["cat README.md", "cat reconcile.py", "cat test_reconcile.py", "", "python3 -m unittest -v", "python3 reconcile.py"]
     static func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
     static func local(_ name: String?) -> String { name?.split(separator: ".").last.map(String.init) ?? "" }
@@ -1223,9 +1223,9 @@ private enum CodingLookupTools {
     static func names(_ value: Any?) throws -> [Tool] {
         try XCTUnwrap(value as? [[String: Any]]).flatMap { value in
             if value["type"] as? String == "namespace", let namespace = value["name"] as? String, let children = value["tools"] as? [[String: Any]] {
-                return children.compactMap { child in (child["name"] as? String).map { Tool(local: local($0), qualified: namespace + "." + $0) } }
+                return children.compactMap { child in (child["name"] as? String).map { Tool(local: local($0), qualified: namespace + "." + $0, definition: child) } }
             }
-            return (value["name"] as? String).map { [Tool(local: local($0), qualified: $0)] } ?? []
+            return (value["name"] as? String).map { [Tool(local: local($0), qualified: $0, definition: value)] } ?? []
         }
     }
     static func userTexts(_ object: [String: Any]) -> [String] {
@@ -1298,8 +1298,19 @@ private enum CodingLookupTools {
     static func call(_ name: String, arguments: [String: Any]) throws -> String {
         String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [["name": name, "arguments": arguments]]]), as: UTF8.self)
     }
-    static func call(_ name: String, input: String) throws -> String {
-        String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [["name": name, "input": input]]]), as: UTF8.self)
+    static func call(_ tool: Tool, declaredCustomInput input: String) throws -> String {
+        // The synthetic provider follows the actual current declared schema.
+        // The next real native-history read still requires customToolCall and exact patch bytes.
+        guard tool.definition["type"] as? String == "function",
+              let parameters = tool.definition["parameters"] as? [String: Any],
+              parameters["type"] as? String == "object",
+              let properties = parameters["properties"] as? [String: Any], Set(properties.keys) == ["input"],
+              let property = properties["input"] as? [String: Any], property["type"] as? String == "string",
+              parameters["required"] as? [String] == ["input"],
+              boolean(parameters["additionalProperties"], is: false) else {
+            throw CodingLookupFailure("patch_not_declared_function")
+        }
+        return try call(tool.qualified, arguments: ["input": input])
     }
     static func message(_ text: String) throws -> String {
         String(decoding: try JSONSerialization.data(withJSONObject: ["type": "message", "text": text]), as: UTF8.self)

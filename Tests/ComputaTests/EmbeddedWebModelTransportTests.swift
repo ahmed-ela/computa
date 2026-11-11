@@ -15157,7 +15157,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
-    func testGroqNativeLiteralCorrectionKeepsTheClosedLoaderAndNextHistoryReadLinked() async throws {
+    func testGroqNativeLiteralCorrectionKeepsTheClosedLoaderAndNativeCommandHistoryLinked() async throws {
         try await runGroqNativeLiteralCorrection(secondFails: false)
     }
 
@@ -15215,9 +15215,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let bad = try envelope([["name": "exec_command", "arguments": ["cmd": "REJECTED_UNLOADED_NEVER_DISPATCHED"]]])
         let replies = [try loader(["exec_command"]), try loader(["fixture_other"]), bad,
             secondFails ? bad : try loader(["exec_command"]),
-            try envelope([["name": "exec_command", "arguments": ["cmd": "SYNTHETIC_FIRST_COMPLETION"]],
-                          ["name": "exec_command", "arguments": ["cmd": "SYNTHETIC_LAST_COMPLETION"]]])]
-        var pages: [WKWebView] = [], readerReference: String?, correctivePrompt: String?, firstBadPrompt: String?
+            try envelope([["name": "exec_command", "arguments": ["cmd": "SYNTHETIC_FIRST_COMPLETION"]]]),
+            try envelope([["name": "exec_command", "arguments": ["cmd": "SYNTHETIC_LAST_COMPLETION"]]]),
+            #"{"type":"message","text":"SYNTHETIC_HISTORY_CONTINUATION_CONFIRMED"}"#]
+        var pages: [WKWebView] = [], continuationPrompt: String?, correctivePrompt: String?, firstBadPrompt: String?, protectedLatestPrompt: String?
         fixture.transport.setBeforePageResultValidationForTesting { action in
             guard let id = fixture.createdTabs.last, let view = fixture.browser.webView(for: id) else { return }
             if action == "prepare", !pages.contains(where: { $0 === view }) {
@@ -15232,21 +15233,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 let prompt = (try? await self.evaluate(view, "return groqFixture.editor.value;")) as? String
                 if pages.count == 3 { firstBadPrompt = prompt }
                 if pages.count == 4 { correctivePrompt = prompt }
-                if pages.count == 6, let prompt,
-                   let opening = prompt.range(of: "\nGROQ_CONTEXT_MANIFEST_V1:\n```\n"),
-                   let closing = prompt.range(of: "\n```\nEND_GROQ_CONTEXT_MANIFEST_V1.", range: opening.upperBound..<prompt.endIndex) {
-                    // The request-context guidance has an earlier illustrative
-                    // ref="ref". Read only the actual displayed manifest JSON.
-                    let manifest = String(prompt[opening.upperBound..<closing.lowerBound])
-                    let regex = try? NSRegularExpression(pattern: #""\$computa_history"\s*:\s*"([^"]+)""#)
-                    guard let match = regex?.firstMatch(in: manifest, range: NSRange(manifest.startIndex..., in: manifest)),
-                          let range = Range(match.range(at: 1), in: manifest) else { return }
-                    let ref = String(manifest[range]); readerReference = ref
-                    if let reply = try? envelope([["name": GroqHistoryTool.name, "arguments": ["ref": ref]]]),
-                       let quote = try? JSONSerialization.data(withJSONObject: reply, options: [.fragmentsAllowed]) {
-                        _ = try? await self.evaluate(view, "groqFixture.reply = " + String(decoding: quote, as: UTF8.self) + "; return true;")
-                    }
-                }
+                if pages.count == 6 { protectedLatestPrompt = prompt }
+                if pages.count == 7 { continuationPrompt = prompt }
             }
         }
         let endpoint = try await server.start().appendingPathComponent("responses")
@@ -15294,35 +15282,61 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         } else {
             XCTAssertEqual(status, 200)
             try await appendLoader(corrected, expected: "exec_command")
-            let (executed, executionStatus) = try await post(); XCTAssertEqual(executionStatus, 200)
-            let calls = try output(executed); XCTAssertEqual(calls.count, 2)
-            XCTAssertTrue(calls.allSatisfy { $0["name"] as? String == "exec_command" })
-            let older = "SYNTHETIC_HOST_OUTPUT  two spaces e\u{301} 🌍\n" + String(repeating: "OLDER_PAYLOAD ", count: 2_000)
+            // This integration proves issuance/delivery/reader authority, not a
+            // stress-output budget. Keep a bounded synthetic command result so
+            // its protected latest bytes can fit the intervening ONE-call request.
+            // The genuine bundled full-payload pagination fixtures are separate.
+            let older = "SYNTHETIC_HOST_OUTPUT  two spaces e\u{301} 🌍\n" + String(repeating: "OLDER_PAYLOAD ", count: 64)
             let latest = "SYNTHETIC_LATEST_OUTPUT"
-            input += nativeCalls(calls)
-            for (call, text) in zip(calls, [older, latest]) {
+            XCTAssertGreaterThan(older.utf8.count, 512)
+            XCTAssertLessThanOrEqual(older.utf8.count, 1_024)
+            var calls: [[String: Any]] = []
+            for (command, text) in [("SYNTHETIC_FIRST_COMPLETION", older), ("SYNTHETIC_LAST_COMPLETION", latest)] {
+                let (executed, executionStatus) = try await post(); XCTAssertEqual(executionStatus, 200)
+                let issued = try output(executed); XCTAssertEqual(issued.count, 1)
+                let call = try XCTUnwrap(issued.first); XCTAssertEqual(call["name"] as? String, "exec_command")
+                let arguments = try XCTUnwrap(call["arguments"] as? String)
+                XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(arguments.utf8)) as? [String: String], ["cmd": command])
                 let callID = try XCTUnwrap(call["call_id"] as? String)
                 // Explicit synthetic native completion fixture, not a real
                 // Core command execution or provider qualification claim.
                 XCTAssertTrue(writer.recordCompleted(current: historyScope, itemID: callID, terminal: .command(status: .completed, exitCode: 0)))
-                input.append(["type": "function_call_output", "call_id": callID, "output": text])
+                calls += issued
+                input += nativeCalls(issued) + [["type": "function_call_output", "call_id": callID, "output": text]]
             }
-            let (readBody, readStatus) = try await post(); XCTAssertEqual(readStatus, 200)
-            let readers = try output(readBody), reader = try XCTUnwrap(readers.first)
-            XCTAssertEqual(readers.count, 1); XCTAssertEqual(reader["name"] as? String, GroqHistoryTool.name)
-            XCTAssertNotNil(readerReference)
-            let read = try await server.readGroqHistory(scope: historyScope,
-                callID: try XCTUnwrap(reader["call_id"] as? String),
-                arguments: Data(try XCTUnwrap(reader["arguments"] as? String).utf8))
-            let record = try XCTUnwrap(JSONSerialization.jsonObject(with: read.responseData) as? [String: Any])
-            XCTAssertEqual(record["source_call_id"] as? String, calls[0]["call_id"] as? String)
-            XCTAssertEqual(record["source_name"] as? String, "exec_command"); XCTAssertEqual(record["field"] as? String, "output")
-            XCTAssertEqual(record["historical_only"] as? Bool, true); XCTAssertEqual(record["action_authority"] as? Bool, false)
-            let raw = try JSONSerialization.data(withJSONObject: older, options: [.fragmentsAllowed, .withoutEscapingSlashes])
-            XCTAssertEqual(record["whole_sha256"] as? String, EmbeddedWebModelTransport.promptFingerprint(String(decoding: raw, as: UTF8.self)))
-            XCTAssertTrue(String(decoding: raw, as: UTF8.self).hasPrefix(try XCTUnwrap(record["utf8_fragment"] as? String)))
-            read.publication.abortIfPending() // No Core reader-RPC write is claimed by this fixture.
-            XCTAssertTrue(writer.isCurrent(current: historyScope)); XCTAssertEqual(pages.count, 6)
+            XCTAssertEqual(calls.count, 2)
+            XCTAssertEqual(Set(calls.compactMap { $0["call_id"] as? String }).count, 2)
+            XCTAssertEqual(pages.count, 6)
+            let inlineOlder = try JSONSerialization.data(withJSONObject: older, options: [.fragmentsAllowed, .withoutEscapingSlashes])
+            XCTAssertNotNil(Data(try XCTUnwrap(protectedLatestPrompt).utf8).range(of: inlineOlder),
+                "The first result remains byte-exact inline while latest; only a subsequent real completion makes it historical")
+            let (continuedBody, continuedStatus) = try await post(); XCTAssertEqual(continuedStatus, 200)
+            let continued = try XCTUnwrap(JSONSerialization.jsonObject(with: continuedBody) as? [String: Any])
+            let continuedItems = try output(continuedBody); XCTAssertEqual(continuedItems.count, 1)
+            let message = try XCTUnwrap(continuedItems.first); XCTAssertEqual(message["type"] as? String, "message")
+            XCTAssertEqual((message["content"] as? [[String: Any]])?.first?["text"] as? String, "SYNTHETIC_HISTORY_CONTINUATION_CONFIRMED")
+            XCTAssertEqual(continued["end_turn"] as? Bool, true)
+            let actualPrompt = try XCTUnwrap(continuationPrompt)
+            var presentedJSON: String?
+            for label in ["COMPLETE_RESPONSES_REQUEST_JSON", "GROQ_CONTEXT_MANIFEST_V1"] {
+                if let opening = actualPrompt.range(of: "\n" + label + ":\n```\n"),
+                   let closing = actualPrompt.range(of: "\n```\nEND_" + label + ".", range: opening.upperBound..<actualPrompt.endIndex) {
+                    presentedJSON = String(actualPrompt[opening.upperBound..<closing.lowerBound]); break
+                }
+            }
+            let presented = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(try XCTUnwrap(presentedJSON).utf8)) as? [String: Any])
+            let presentedInput = try XCTUnwrap(presented["input"] as? [[String: Any]])
+            for (call, expected) in zip(calls, [older, latest]) {
+                let id = try XCTUnwrap(call["call_id"] as? String)
+                let matching = presentedInput.filter { $0["type"] as? String == "function_call_output" && $0["call_id"] as? String == id }
+                XCTAssertEqual(matching.count, 1)
+                XCTAssertEqual(Data(try XCTUnwrap(matching.first?["output"] as? String).utf8), Data(expected.utf8),
+                    "The next admitted prompt must contain each exact completed native output, not an invented or forced history reference")
+            }
+            let currentTools = try XCTUnwrap(presented["tools"] as? [[String: Any]])
+            XCTAssertEqual(GroqHistoryTool.registeredName(in: currentTools), GroqHistoryTool.name,
+                "The registered reader remains offered; this bounded continuation fixture makes no publication/read claim")
+            XCTAssertTrue(writer.isCurrent(current: historyScope)); XCTAssertEqual(pages.count, 7)
         }
         fixture.transport.setBeforePageResultValidationForTesting(nil)
         let journal = root.appendingPathComponent("evidence/transactions/" + task + "/" + turn + ".jsonl")

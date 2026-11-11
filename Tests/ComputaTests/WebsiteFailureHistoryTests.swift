@@ -4,6 +4,67 @@ import XCTest
 
 final class WebsiteFailureHistoryTests: XCTestCase {
 
+    func testGroqDeclaredFunctionAndSingleOperationFailuresPersistExactlyAndRejectForeignAlteredEnvelopes() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaGroqDeclaredHistory-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
+        let task = UUID().uuidString, thread = UUID().uuidString
+        let failures: [(WebModelResponseCodec.Failure, String, String)] = [
+            (.websiteCallLimitExceeded, "website_tool_call_limit_exceeded",
+             "This website response permits one tool call. The entire batch was rejected; no call was dispatched."),
+            (.customFunctionArgumentsInvalid, "invalid_custom_function_arguments",
+             "The declared custom-tool function requires exactly one string argument named input. No call was dispatched.")]
+        var expected: [WebsiteTurnFailureStore.Record] = []
+        for (failure, code, message) in failures {
+            let turn = UUID().uuidString
+            let bytes = try WebModelServer.errorBody(for: failure)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+            let fields = try XCTUnwrap(object["error"] as? [String: Any])
+            XCTAssertEqual(Set(object.keys), ["error"])
+            XCTAssertEqual(Set(fields.keys), ["type", "message", "code", "param", "retryable"])
+            XCTAssertEqual(fields["code"] as? String, code); XCTAssertEqual(fields["message"] as? String, message)
+            XCTAssertEqual(fields["type"] as? String, "model_error"); XCTAssertEqual(fields["param"] as? String, "tools")
+            XCTAssertEqual(fields["retryable"] as? Bool, false)
+            let presentation = WebModelServer.errorPresentation(for: failure)
+            XCTAssertEqual(presentation.status, "500 Internal Server Error"); XCTAssertEqual(presentation.param, "tools")
+            let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+                turnID: turn, modelID: model, diagnosticText: String(decoding: bytes, as: UTF8.self)))
+            let store = WebsiteTurnFailureStore(directory: root)
+            XCTAssertTrue(store.append(record)); XCTAssertTrue(store.append(record))
+            expected.append(record)
+            let restored = try WebsiteTurnFailureStore(directory: root).load(threadID: thread)
+            XCTAssertEqual(restored, expected, "Recreation restores both distinct exact failures without duplicates")
+            XCTAssertEqual(record.entry.id, "agent-error:" + turn.lowercased())
+            XCTAssertTrue(NSDictionary(dictionary: try XCTUnwrap(JSONSerialization.jsonObject(with: Data(record.diagnosticText.utf8)) as? [String: Any])).isEqual(to: object))
+            func reject(_ value: [String: Any], selected: String? = nil) throws {
+                let text = String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self)
+                XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turn,
+                    modelID: selected ?? model, diagnosticText: text))
+            }
+            for change in [["param": "input"], ["message": "PRIVATE_PROVIDER_PROSE"], ["retryable": true],
+                           ["retryable": 0], ["type": "server_error"], ["code": "unknown_declared_function_failure"],
+                           ["reply": "PRIVATE_REPLY"]] as [[String: Any]] {
+                var changed = fields; change.forEach { changed[$0.key] = $0.value }
+                try reject(["error": changed])
+            }
+            for key in fields.keys {
+                var changed = fields; changed.removeValue(forKey: key); try reject(["error": changed])
+            }
+            var extra = object; extra["reply"] = "PRIVATE_REPLY"; try reject(extra)
+            for foreign in [syntheticChatGPTModelID, "browser/claude", "browser/gemini", "browser/deepseek", "api/groq/model/fixture", "browser/unknown"] {
+                try reject(object, selected: foreign)
+            }
+            let text = String(decoding: bytes, as: UTF8.self)
+            let needle = "\"code\":\"" + code + "\""
+            let duplicated = text.replacingOccurrences(of: needle, with: needle + "," + needle)
+            XCTAssertNotEqual(duplicated, text)
+            XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread, turnID: turn,
+                modelID: model, diagnosticText: duplicated))
+            XCTAssertEqual(try WebsiteTurnFailureStore(directory: root).load(threadID: thread), expected,
+                "Rejected envelopes never change retained exact native failures")
+        }
+    }
+
     func testPromptBytePreflightDiagnosticPersistsAcrossWebsiteRoutesWithoutAWebsiteJournal() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaPromptBytes-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

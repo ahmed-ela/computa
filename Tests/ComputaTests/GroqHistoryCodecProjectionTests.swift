@@ -117,8 +117,8 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
                 XCTAssertLessThanOrEqual(admitted.units, C.groqMaximumBodyTokens)
                 XCTAssertEqual(admitted.units, try GroqBodyTokenCounter.tokenCount(admitted.request.prompt))
                 XCTAssertEqual(admitted.request.continuationRequest, raw)
-                // Reconstruct the fixed prior Q representation only: the same full payload, revision,
-                // exact inventory names/kinds and callable schemas, with no threshold padding.
+                // Reconstruct the prior Q inventory/browser representation on this current full prompt.
+                // Current profile rules, payload, revision and callable schemas stay exact; no padding.
                 func json(_ value: Any) throws -> String { String(decoding: try encode(value), as: UTF8.self) }
                 let inventory = try groqInventoryObject(admitted.request)
                 XCTAssertEqual(inventory["catalog_revision"] as? String, projection.revision)
@@ -969,6 +969,105 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
         }
     }
 
+    func testNativeHistoryDeclaredCustomFunctionFollowsCurrentSchemaAndMapsOneCallBackToExactNativeCustom() throws {
+        let f = try Fixture(output: "Inert prior native output remains exact.")
+        let patch = "*** Begin Patch\n*** Add File: résumé.txt\n+literal café / cafe\u{301} 🙂 \\\\u0061\n*** End Patch\n"
+        let grammar = "start: /DECLARED_GRAMMAR_café_[\\s\\S]*/"
+        for namespaced in [false, true] {
+            let prefix = namespaced ? "functions." : ""
+            var object = try XCTUnwrap(JSONSerialization.jsonObject(with: f.source) as? [String: Any])
+            var definitions = try XCTUnwrap(object["tools"] as? [[String: Any]])
+            let customIndex = try XCTUnwrap(definitions.firstIndex { $0["name"] as? String == "apply_patch" })
+            definitions[customIndex]["format"] = ["type": "grammar", "syntax": "lark", "definition": grammar]
+            object["tools"] = namespaced ? [["type": "namespace", "name": "functions", "tools": definitions]] : definitions
+            object["parallel_tool_calls"] = true; object["max_tool_calls"] = 7
+            let raw = try encode(object), seed = try XCTUnwrap(C.prepareRequest(raw).groqToolCatalogSeed)
+            let scope = GroqToolCatalog.Scope(taskID: f.binding.scope.taskID, threadID: f.binding.scope.threadID,
+                turnID: f.binding.scope.turnID, runtimeGeneration: f.binding.scope.runtimeGeneration,
+                preparationID: f.binding.scope.preparationID, modelID: f.binding.scope.modelID)
+            var catalog = GroqToolCatalog(); let initial = try catalog.prepare(scope: scope, seed: seed)
+            _ = try catalog.load(scope: scope, arguments: encode(["catalog_revision": initial.revision,
+                "names": [prefix + "exec_command", prefix + "apply_patch"]]))
+            let selected = try catalog.prepare(scope: scope, seed: seed)
+            let admitted = try C.prepareBudgetedGroqRequest(raw, availability: nil, projection: selected,
+                model: f.binding.scope.modelID, loadedOnly: true, compactHistoryInventory: true, historyProjection: nil)
+            let request = admitted.request
+            let legacy = try C.prepareRequest(raw, groqToolCatalogProjection: selected, groqDirectTools: .loadedOnly)
+            XCTAssertTrue(request.usesNativeGroqHistoryPresentation); XCTAssertFalse(legacy.usesNativeGroqHistoryPresentation)
+            XCTAssertEqual(request.continuationRequest, raw); XCTAssertEqual(legacy.continuationRequest, raw)
+            XCTAssertEqual(request.groqToolCatalogSeed?.registeredDefinitionsJSON, seed.registeredDefinitionsJSON)
+            XCTAssertEqual(request.customToolNames, [prefix + "apply_patch"])
+            XCTAssertTrue(request.toolCatalogDiagnostic.parallel); XCTAssertEqual(request.toolCatalogDiagnostic.maxToolCalls, 7)
+            XCTAssertEqual(try catalog.prepare(scope: scope, seed: seed), selected)
+            XCTAssertEqual(admitted.units, try GroqBodyTokenCounter.tokenCount(request.prompt))
+            XCTAssertLessThanOrEqual(admitted.units, C.groqMaximumBodyTokens)
+            let displayed = try XCTUnwrap(JSONSerialization.jsonObject(with: displayJSON(request)) as? [String: Any])
+            XCTAssertEqual(displayed["input"] as? NSArray, object["input"] as? NSArray)
+            XCTAssertEqual(displayed["parallel_tool_calls"] as? Bool, true)
+            XCTAssertEqual(displayed["max_tool_calls"] as? Int, 7)
+            let displayedTools = try XCTUnwrap(displayed["tools"] as? [[String: Any]])
+            let current: [[String: Any]]
+            if namespaced { current = try XCTUnwrap(displayedTools.first?["tools"] as? [[String: Any]]) }
+            else { current = displayedTools }
+            let wrapper = try XCTUnwrap(current.first { $0["name"] as? String == "apply_patch" })
+            XCTAssertEqual(wrapper["type"] as? String, "function")
+            XCTAssertNil(wrapper["format"])
+            let parameters = try XCTUnwrap(wrapper["parameters"] as? [String: Any])
+            XCTAssertEqual(parameters["type"] as? String, "object")
+            let properties = try XCTUnwrap(parameters["properties"] as? [String: Any])
+            XCTAssertEqual(Set(properties.keys), ["input"])
+            XCTAssertEqual((properties["input"] as? [String: Any])?["type"] as? String, "string")
+            XCTAssertEqual(parameters["required"] as? [String], ["input"])
+            XCTAssertEqual(parameters["additionalProperties"] as? Bool, false)
+            func strings(_ value: Any) -> [String] {
+                if let value = value as? String { return [value] }
+                if let value = value as? [Any] { return value.flatMap(strings) }
+                if let value = value as? [String: Any] { return value.values.flatMap(strings) }
+                return []
+            }
+            XCTAssertEqual(strings(wrapper).reduce(0) { $0 + $1.components(separatedBy: grammar).count - 1 }, 1,
+                "The exact native grammar is declared once, without replacing its bytes")
+            let call: [String: Any] = ["name": prefix + "apply_patch", "arguments": ["input": patch]]
+            let text = String(decoding: try encode(["type": "tool_calls", "calls": [call]]), as: UTF8.self)
+            let reply = try C.parseReply(text, request: request, requireEnvelope: true)
+            let native = C.Reply.toolCalls([.init(name: "apply_patch", argumentsJSON: "", namespace: namespaced ? "functions" : nil, customInput: patch)])
+            XCTAssertEqual(reply, native)
+            XCTAssertEqual(try C.completedResponse(for: reply, request: request, responseID: "resp_declared", createdAt: 1),
+                try C.completedResponse(for: native, request: request, responseID: "resp_declared", createdAt: 1))
+            let nativeItem = try XCTUnwrap(C.nativeOutputItems(for: reply, request: request, responseID: "resp_declared").first)
+            XCTAssertEqual(nativeItem["type"] as? String, "custom_tool_call")
+            XCTAssertEqual(nativeItem["input"] as? String, patch); XCTAssertNil(nativeItem["arguments"])
+            let oldCustom: [String: Any] = ["name": prefix + "apply_patch", "input": patch]
+            XCTAssertThrowsError(try C.parseReply(String(decoding: encode(["type": "tool_calls", "calls": [oldCustom]]), as: UTF8.self),
+                request: request, requireEnvelope: true))
+            XCTAssertNoThrow(try C.parseReply(String(decoding: encode(["type": "tool_calls", "calls": [oldCustom]]), as: UTF8.self),
+                request: legacy, requireEnvelope: true), "Unprofiled Groq keeps its original declared custom wire")
+            let command: [String: Any] = ["name": prefix + "exec_command", "arguments": ["cmd": "inert"]]
+            for calls in [[call, command], [command, call]] {
+                XCTAssertThrowsError(try C.parseReply(String(decoding: encode(["type": "tool_calls", "calls": calls]), as: UTF8.self),
+                    request: request, requireEnvelope: true), "Reject the whole reply rather than selecting its first valid operation") {
+                    XCTAssertEqual($0 as? C.Failure, .websiteCallLimitExceeded)
+                }
+            }
+            let nativeBatch = C.Reply.toolCalls([
+                .init(name: "apply_patch", argumentsJSON: "", namespace: namespaced ? "functions" : nil, customInput: patch),
+                .init(name: "exec_command", argumentsJSON: #"{"cmd":"inert"}"#, namespace: namespaced ? "functions" : nil)])
+            XCTAssertThrowsError(try C.completedResponse(for: nativeBatch, request: request, responseID: "resp_denied", createdAt: 1)) {
+                XCTAssertEqual($0 as? C.Failure, .websiteCallLimitExceeded)
+            }
+            XCTAssertThrowsError(try C.streamData(for: nativeBatch, request: request, responseID: "resp_denied", createdAt: 1)) {
+                XCTAssertEqual($0 as? C.Failure, .websiteCallLimitExceeded)
+            }
+            _ = try catalog.load(scope: scope, arguments: encode(["catalog_revision": initial.revision, "names": [prefix + "exec_command"]]))
+            let replaced = try C.prepareRequest(raw, groqToolCatalogProjection: catalog.prepare(scope: scope, seed: seed),
+                groqDirectTools: .loadedOnly, compactHistoryInventory: true)
+            XCTAssertThrowsError(try C.parseReply(text, request: replaced, requireEnvelope: true)) {
+                XCTAssertEqual($0 as? C.Failure, .unknownTool(prefix + "apply_patch"))
+            }
+            XCTAssertEqual(request.continuationRequest, raw); XCTAssertEqual(replaced.continuationRequest, raw)
+        }
+    }
+
     func testTypedPublishedProjectionPreservesExactContinuationPayloadsAndSelectedSchemas() throws {
         let f = try Fixture()
         let request = try f.request(history: f.hook())
@@ -1666,20 +1765,13 @@ final class GroqHistoryCodecProjectionTests: XCTestCase {
     private func nativeIDRequest(_ f: Fixture, compact: Bool, stream: Bool = false, source: Data? = nil) throws -> C.Request {
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: source ?? f.source) as? [String: Any])
         object["stream"] = stream
-        let data = try encode(object), original = try C.prepareRequest(data)
-        guard let seed = original.groqToolCatalogSeed else { return try C.prepareRequest(data, compactHistoryInventory: compact) }
-        let scope = GroqToolCatalog.Scope(taskID: f.binding.scope.taskID, threadID: f.binding.scope.threadID,
-            turnID: f.binding.scope.turnID, runtimeGeneration: f.binding.scope.runtimeGeneration,
-            preparationID: f.binding.scope.preparationID, modelID: original.model)
-        var catalog = GroqToolCatalog()
-        let initial = try catalog.prepare(scope: scope, seed: seed)
-        let desired = ["exec_command", "apply_patch"].compactMap { local in
-            seed.callableNames.intersection(seed.allowedNames).sorted().first { $0 == local || $0 == "functions." + local }
-        }.filter { !initial.selectedNames.contains($0) }
-        if !desired.isEmpty { _ = try catalog.load(scope: scope, arguments: encode(["catalog_revision": initial.revision, "names": desired])) }
-        let loaded = try catalog.prepare(scope: scope, seed: seed)
-        return try C.prepareRequest(data, groqToolCatalogProjection: loaded, groqDirectTools: .loadedOnly,
-            compactHistoryInventory: compact)
+        let data = try encode(object)
+        // These controls encode already-issued native multi-call history, not a new
+        // projected website reply. Keep native compact IDs with the exact reader,
+        // but omit a current selection projection and its new one-operation policy.
+        let request = try C.prepareRequest(data, compactHistoryInventory: compact)
+        XCTAssertNil(request.groqToolDiscoveryDiagnostic)
+        return request
     }
 
     private final class Fixture {

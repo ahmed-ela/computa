@@ -125,6 +125,11 @@ struct WebsiteTurnFailureStore: Sendable {
                     return NSDictionary(dictionary: supplied).isEqual(to: envelope)
                 }) else { return nil }
                 nativeError = fixed
+            case "website_tool_call_limit_exceeded", "invalid_custom_function_arguments":
+                guard provider == "groq", APIModelCorrectionJSON.isUnambiguous(Data(text.utf8)) else { return nil }
+                nativeError = code == "website_tool_call_limit_exceeded"
+                    ? WebModelResponseCodec.Failure.websiteCallLimitExceeded
+                    : WebModelResponseCodec.Failure.customFunctionArgumentsInvalid
             case "unsupported_website_response":
                 if provider == "chatgpt" {
                     nativeError = WebModelResponseCodec.Failure.unsupportedWebsiteResponse

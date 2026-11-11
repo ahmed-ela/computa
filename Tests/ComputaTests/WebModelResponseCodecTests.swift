@@ -3,6 +3,217 @@ import XCTest
 @testable import Computa
 
 final class WebModelResponseCodecTests: XCTestCase {
+
+    func testNativeGroqDeclaredFunctionTransportPreservesCustomInputAndCanonicalContract() throws {
+        typealias C = WebModelResponseCodec
+        let payloads = ["*** Begin Patch\r\n*** Add File: résumé.txt\r\n+quote: \"x\"; slash: \\; 🌍\r\n*** End Patch\r\n",
+            #"{"input":"literal JSON, not another wrapper"}"#, "e\u{0301} / é\n\t\\u0061\n"]
+        for namespaced in [false, true] {
+            let fixture = try declaredGroqTransportFixture(namespaced: namespaced)
+            let request = fixture.request, prefix = namespaced ? "functions." : ""
+            XCTAssertTrue(request.usesNativeGroqHistoryPresentation)
+            XCTAssertFalse(request.singleActionRelay, "The Groq display cap must not select a prefix of a batch")
+            XCTAssertEqual(request.continuationRequest, fixture.raw)
+            XCTAssertEqual(request.customToolNames, [prefix + "literal_document"])
+            let legacy = try C.prepareRequest(fixture.raw)
+            let legacyResponse = try XCTUnwrap(JSONSerialization.jsonObject(with: C.completedResponse(for: .message("native configuration baseline"), request: legacy,
+                responseID: "resp_baseline", createdAt: 123)) as? [String: Any])
+            let nativeConfigurationTools = try XCTUnwrap(legacyResponse["tools"] as? NSArray)
+            let displayed = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(request.prompt[try requestRange(in: request)].utf8)) as? [String: Any])
+            let tools = try XCTUnwrap(displayed["tools"] as? [[String: Any]])
+            let definitions: [[String: Any]]
+            if namespaced { definitions = try XCTUnwrap(tools.first?["tools"] as? [[String: Any]]) }
+            else { definitions = tools }
+            let wrapper = try XCTUnwrap(definitions.first { $0["name"] as? String == "literal_document" })
+            XCTAssertEqual(wrapper["type"] as? String, "function")
+            XCTAssertNil(wrapper["format"])
+            let parameters = try XCTUnwrap(wrapper["parameters"] as? [String: Any])
+            XCTAssertEqual(Set(parameters.keys), ["type", "properties", "required", "additionalProperties"])
+            XCTAssertEqual(parameters["required"] as? [String], ["input"])
+            XCTAssertEqual(parameters["additionalProperties"] as? Bool, false)
+            let properties = try XCTUnwrap(parameters["properties"] as? [String: Any])
+            XCTAssertEqual(Set(properties.keys), ["input"])
+            XCTAssertEqual((properties["input"] as? [String: Any])?["type"] as? String, "string")
+            XCTAssertTrue((wrapper["description"] as? String ?? "").contains(fixture.grammar))
+            for payload in payloads {
+                let envelope = try declaredGroqEnvelope([["name": prefix + "literal_document", "arguments": ["input": payload]]])
+                let reply = try C.parseEmbeddedReply(envelope, request: request)
+                guard case let .toolCalls(calls) = reply else { return XCTFail("The declared wrapper must decode to a native custom call") }
+                XCTAssertEqual(calls.count, 1)
+                XCTAssertEqual(calls[0].name, "literal_document")
+                XCTAssertEqual(calls[0].namespace, namespaced ? "functions" : nil)
+                XCTAssertEqual(calls[0].argumentsJSON, "")
+                XCTAssertEqual(Data(try XCTUnwrap(calls[0].customInput).utf8), Data(payload.utf8))
+                let response = try XCTUnwrap(JSONSerialization.jsonObject(with: C.completedResponse(for: reply, request: request, responseID: "resp_declared", createdAt: 123)) as? [String: Any])
+                let output = try XCTUnwrap((response["output"] as? [[String: Any]])?.first)
+                XCTAssertEqual(output["type"] as? String, "custom_tool_call")
+                XCTAssertEqual(Data(try XCTUnwrap(output["input"] as? String).utf8), Data(payload.utf8))
+                XCTAssertNil(output["arguments"])
+                XCTAssertEqual(response["parallel_tool_calls"] as? Bool, true)
+                XCTAssertEqual(response["max_tool_calls"] as? Int, 8)
+                XCTAssertEqual(response["tools"] as? NSArray, nativeConfigurationTools,
+                    "The display wrapper must not leak into the normalized native response configuration")
+                let stream = try events(C.streamData(for: reply, request: request, responseID: "resp_declared"))
+                let item = try XCTUnwrap(stream.first { $0["type"] as? String == "response.output_item.done" }?["item"] as? [String: Any])
+                XCTAssertEqual(item["type"] as? String, "custom_tool_call")
+                XCTAssertEqual(Data(try XCTUnwrap(item["input"] as? String).utf8), Data(payload.utf8))
+                XCTAssertEqual(Data(try XCTUnwrap(stream.first { $0["type"] as? String == "response.custom_tool_call_input.done" }?["input"] as? String).utf8), Data(payload.utf8))
+            }
+            let native = try XCTUnwrap(JSONSerialization.jsonObject(with: fixture.raw) as? [String: Any])
+            XCTAssertEqual(displayed["input"] as? NSArray, native["input"] as? NSArray, "Prior native calls/results must not be retyped by a current schema wrapper")
+            XCTAssertEqual(request.continuationRequest, fixture.raw)
+        }
+    }
+
+    func testNativeGroqDeclaredFunctionTransportRejectsUndeclaredShapesAndKeepsNativePolicy() throws {
+        typealias C = WebModelResponseCodec
+        let fixture = try declaredGroqTransportFixture()
+        let prepared = fixture.request
+        let badCalls: [[String: Any]] = [
+            ["name": "literal_document", "input": "native-shaped input is not the declared wire wrapper"],
+            ["name": "literal_document", "arguments": [:]],
+            ["name": "literal_document", "arguments": ["input": 1]],
+            ["name": "literal_document", "arguments": ["input": ["nested": "text"]]],
+            ["name": "literal_document", "arguments": ["input": "text", "extra": true]],
+            ["name": "literal_document", "arguments": ["patch": "text"]],
+            ["name": "literal_document", "arguments": ["input": "text"], "input": "text"],
+            ["name": "literal_document", "arguments": ["input": "text"], "commentary": "future plan"],
+            ["name": "functions.literal_document", "arguments": ["input": "wrong namespace"]],
+            ["name": "unknown_custom", "arguments": ["input": "no declaration"]]
+        ]
+        for call in badCalls {
+            XCTAssertThrowsError(try C.parseEmbeddedReply(declaredGroqEnvelope([call]), request: prepared))
+        }
+        for raw in [
+            #"{"type":"tool_calls","calls":[{"name":"literal_document","arguments":{"input":"first","input":"second"}}]}"#,
+            #"{"type":"tool_calls","calls":[{"name":"literal_document","name":"inspect_literal","arguments":{"input":"text"}}]}"#,
+            #"{"type":"tool_calls","type":"message","text":"ambiguous","calls":[{"name":"literal_document","arguments":{"input":"text"}}]}"#
+        ] { XCTAssertThrowsError(try C.parseEmbeddedReply(raw, request: prepared)) }
+        let ordinary = try C.parseEmbeddedReply(declaredGroqEnvelope([["name": "inspect_literal", "arguments": ["input": "ordinary function input"]]]), request: prepared)
+        let ordinaryResponse = try XCTUnwrap(JSONSerialization.jsonObject(with: C.completedResponse(for: ordinary, request: prepared)) as? [String: Any])
+        let ordinaryOutput = try XCTUnwrap((ordinaryResponse["output"] as? [[String: Any]])?.first)
+        XCTAssertEqual(ordinaryOutput["type"] as? String, "function_call")
+        XCTAssertNil(ordinaryOutput["input"])
+        let ordinaryArguments = try XCTUnwrap(ordinaryOutput["arguments"] as? String)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(ordinaryArguments.utf8)) as? [String: String], ["input": "ordinary function input"])
+        // These controls cannot borrow a wrapper merely from a reserved model/name or a Boolean display option.
+        for fixture in [try declaredGroqTransportFixture(compact: false),
+                        try declaredGroqTransportFixture(includeReader: false),
+                        try declaredGroqTransportFixture(impostorReader: true),
+                        try declaredGroqTransportFixture(model: "browser/gemini")] {
+            XCTAssertFalse(fixture.request.usesNativeGroqHistoryPresentation)
+            XCTAssertThrowsError(try C.parseEmbeddedReply(declaredGroqEnvelope([["name": "literal_document", "arguments": ["input": "not declared"]]]), request: fixture.request))
+            XCTAssertNoThrow(try C.parseEmbeddedReply(declaredGroqEnvelope([["name": "literal_document", "input": "legacy native custom input"]]), request: fixture.request))
+            XCTAssertEqual(fixture.request.continuationRequest, fixture.raw)
+        }
+        // The historical presentation marker alone does not declare this adapter.
+        // A partial/no-projection path must retain its established native custom wire shape.
+        for includeLoader in [false, true] {
+            let partial = try declaredGroqTransportFixture(project: false, includeLoader: includeLoader)
+            XCTAssertTrue(partial.request.usesNativeGroqHistoryPresentation)
+            XCTAssertNoThrow(try C.parseEmbeddedReply(declaredGroqEnvelope([["name": "literal_document", "input": "not function-wrapped"]]), request: partial.request))
+            XCTAssertThrowsError(try C.parseEmbeddedReply(declaredGroqEnvelope([["name": "literal_document", "arguments": ["input": "not declared"]]]), request: partial.request))
+            let call: [String: Any] = ["name": "inspect_literal", "arguments": ["input": "old parallel scope"]]
+            XCTAssertNoThrow(try C.parseEmbeddedReply(declaredGroqEnvelope([call, call]), request: partial.request))
+            XCTAssertEqual(partial.request.continuationRequest, partial.raw)
+        }
+        let named = try declaredGroqTransportFixture(choice: ["type": "custom", "name": "literal_document"])
+        XCTAssertFalse(named.request.usesNativeGroqHistoryPresentation, "A forced custom choice does not permit the history reader")
+        XCTAssertNoThrow(try C.parseEmbeddedReply(declaredGroqEnvelope([["name": "literal_document", "input": "native named choice"]]), request: named.request))
+        XCTAssertThrowsError(try C.parseEmbeddedReply(#"{"type":"message","text":"done"}"#, request: named.request))
+        let none = try declaredGroqTransportFixture(choice: "none")
+        XCTAssertThrowsError(try C.parseEmbeddedReply(declaredGroqEnvelope([["name": "literal_document", "arguments": ["input": "denied"]]]), request: none.request))
+        XCTAssertNoThrow(try C.parseEmbeddedReply(#"{"type":"message","text":"No operation permitted."}"#, request: none.request))
+        let allowed = try declaredGroqTransportFixture(choice: ["type": "allowed_tools", "mode": "required", "tools": [
+            ["type": "function", "name": GroqToolCatalog.name], ["type": "function", "name": GroqHistoryTool.name],
+            ["type": "custom", "name": "literal_document"]]])
+        XCTAssertTrue(allowed.request.usesNativeGroqHistoryPresentation)
+        XCTAssertNoThrow(try C.parseEmbeddedReply(declaredGroqEnvelope([["name": "literal_document", "arguments": ["input": "allowed exact wrapper"]]]), request: allowed.request))
+        XCTAssertThrowsError(try C.parseEmbeddedReply(declaredGroqEnvelope([["name": "inspect_literal", "arguments": ["input": "excluded function"]]]), request: allowed.request))
+        XCTAssertThrowsError(try C.parseEmbeddedReply(#"{"type":"message","text":"done"}"#, request: allowed.request))
+    }
+
+    func testNativeGroqOneCallPresentationRejectsWholeBatchesAndMalformedPlanWithoutPrefixSelection() throws {
+        typealias C = WebModelResponseCodec
+        let fixture = try declaredGroqTransportFixture()
+        let request = fixture.request
+        let function: [String: Any] = ["name": "inspect_literal", "arguments": ["input": "observed"]]
+        let custom: [String: Any] = ["name": "literal_document", "arguments": ["input": "literal"]]
+        for calls in [[function, function], [function, custom], [custom, function]] {
+            XCTAssertThrowsError(try C.parseEmbeddedReply(declaredGroqEnvelope(calls), request: request), "Even two individually valid calls must yield no selected prefix")
+        }
+        let nativeCalls: [C.ToolCall] = [.init(name: "inspect_literal", argumentsJSON: #"{"input":"observed"}"#, namespace: nil),
+            .init(name: "literal_document", argumentsJSON: "", namespace: nil, customInput: "literal")]
+        XCTAssertThrowsError(try C.completedResponse(for: .toolCalls(nativeCalls), request: request))
+        XCTAssertThrowsError(try C.streamData(for: .toolCalls(nativeCalls), request: request))
+        XCTAssertFalse(request.singleActionRelay)
+        let native = try XCTUnwrap(JSONSerialization.jsonObject(with: request.continuationRequest) as? [String: Any])
+        XCTAssertEqual(native["parallel_tool_calls"] as? Bool, true)
+        XCTAssertEqual(native["max_tool_calls"] as? Int, 8)
+        let plan = (0..<11).map { index -> [String: Any] in
+            ["name": index == 0 ? "literal_document" : "inspect_literal", "arguments": ["input": "future placeholder step \(index)"]]
+        }
+        let malformed = String(decoding: try JSONSerialization.data(withJSONObject: ["calls": plan]), as: UTF8.self)
+        XCTAssertThrowsError(try C.parseEmbeddedReply(malformed, request: request)) {
+            XCTAssertEqual($0 as? C.Failure, .malformedEnvelope)
+        }
+        XCTAssertEqual(C.malformedEmbeddedReplyDiagnostic(malformed, request: request)?.reason, .missingOrUnknownType,
+            "A493-shaped missing discriminator is not repaired or rescued by a one-call adapter")
+        let legacy = try declaredGroqTransportFixture(compact: false)
+        XCTAssertNoThrow(try C.parseEmbeddedReply(declaredGroqEnvelope([function, function]), request: legacy.request),
+            "The stricter presentation is confined to the admitted native history profile")
+    }
+
+    private func declaredGroqEnvelope(_ calls: [[String: Any]]) throws -> String {
+        String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": calls], options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
+    }
+
+    private func declaredGroqTransportFixture(namespaced: Bool = false, compact: Bool = true,
+        includeReader: Bool = true, impostorReader: Bool = false, project: Bool = true, includeLoader: Bool = true,
+        model: String = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID,
+        choice: Any = "auto") throws -> (raw: Data, request: WebModelResponseCodec.Request, nativeTools: [[String: Any]], grammar: String) {
+        typealias C = WebModelResponseCodec
+        func wire(_ definition: [String: Any]) -> [String: Any] {
+            var value = definition; value["parameters"] = value.removeValue(forKey: "inputSchema"); return value
+        }
+        let grammar = #"start: /[\s\S]+/"#
+        let custom: [String: Any] = ["type": "custom", "name": "literal_document", "description": "Preserve literal native bytes.",
+            "format": ["type": "grammar", "syntax": "lark", "definition": grammar]]
+        let ordinary: [String: Any] = ["type": "function", "name": "inspect_literal", "parameters": ["type": "object",
+            "properties": ["input": ["type": "string"]], "required": ["input"], "additionalProperties": false]]
+        var definitions = [custom, ordinary]
+        if includeLoader { definitions.insert(wire(GroqToolCatalog.specification), at: 0) }
+        if includeReader {
+            var reader = wire(GroqHistoryTool.specification)
+            if impostorReader { reader["description"] = "A foreign reader must not activate native history presentation." }
+            definitions.append(reader)
+        }
+        let prefix = namespaced ? "functions." : ""
+        let nativeTools: [[String: Any]] = namespaced ? [["type": "namespace", "name": "functions", "tools": definitions]] : definitions
+        var prior: [String: Any] = ["type": "custom_tool_call", "call_id": "prior_literal", "name": "literal_document", "input": "prior native input\r\ne\u{0301}"]
+        if namespaced { prior["namespace"] = "functions" }
+        let history: [[String: Any]] = [["role": "user", "content": "Preserve exact previous native results."], prior,
+            ["type": "custom_tool_call_output", "call_id": "prior_literal", "output": "actual native output\r\n"],
+            ["role": "user", "content": "Take the next authorized step using current schemas."]]
+        let raw = try JSONSerialization.data(withJSONObject: ["model": model, "input": history, "tools": nativeTools,
+            "parallel_tool_calls": true, "max_tool_calls": 8, "tool_choice": choice], options: [.sortedKeys, .withoutEscapingSlashes])
+        let initial = try C.prepareRequest(raw)
+        let request: C.Request
+        if project, let seed = initial.groqToolCatalogSeed {
+            let scope = GroqToolCatalog.Scope(taskID: "91000000-0000-4000-8000-000000000001", threadID: "91000000-0000-4000-8000-000000000002",
+                turnID: "91000000-0000-4000-8000-000000000003", runtimeGeneration: UUID(), preparationID: UUID(), modelID: model)
+            var catalog = GroqToolCatalog()
+            let baseline = try catalog.prepare(scope: scope, seed: seed)
+            let names = Set([prefix + "literal_document", prefix + "inspect_literal"]).intersection(seed.allowedNames).subtracting(baseline.selectedNames)
+            if !names.isEmpty, baseline.selectedNames.contains(prefix + GroqToolCatalog.name) {
+                _ = try catalog.load(scope: scope, arguments: JSONSerialization.data(withJSONObject: ["catalog_revision": baseline.revision, "names": names.sorted()]))
+            }
+            request = try C.prepareRequest(raw, groqToolCatalogProjection: catalog.prepare(scope: scope, seed: seed),
+                groqDirectTools: .loadedOnly, compactHistoryInventory: compact)
+        } else { request = try C.prepareRequest(raw, compactHistoryInventory: compact) }
+        return (raw, request, nativeTools, grammar)
+    }
+
     func testGroqFinalRejectionObserverReportsTheSelectedFullHistoryCandidateAndNeverIntermediateFailures() throws {
         typealias C = WebModelResponseCodec
         let model = WebsiteModelChoice(provider: "groq", key: "qwen/qwen3.8-27b", label: "Qwen/Qwen3.8-27B").modelID

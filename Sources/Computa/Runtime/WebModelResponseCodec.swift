@@ -64,6 +64,9 @@ enum WebModelResponseCodec {
         let groqToolDiscoveryDiagnostic: GroqToolDiscoveryDiagnostic?
         let offeredToolNames: Set<String>
         let customToolNames: Set<String>
+        /// Admitted current native custom definitions, never reply-authored aliases.
+        fileprivate let declaredCustomFunctionSchemas: [String: String]
+        fileprivate let limitsWebsiteCallsToOne: Bool
         /// Available only for an exact registered native Groq schema loader.
         /// The server owns selection state; page/model data cannot create it.
         let groqToolCatalogSeed: GroqToolCatalog.Seed?
@@ -261,6 +264,8 @@ enum WebModelResponseCodec {
         case invalidToolChoice
         case rejectedToolChoice
         case parallelToolCallsUnsupported
+        case websiteCallLimitExceeded
+        case customFunctionArgumentsInvalid
         case toolCallLimitExceeded
 
         var errorDescription: String? {
@@ -300,6 +305,8 @@ enum WebModelResponseCodec {
             case .invalidToolChoice: "The requested tool_choice must identify currently offered tools and a supported selection mode. No prompt was submitted."
             case .rejectedToolChoice: "The website reply violated tool_choice. No tool calls from this reply were dispatched."
             case .parallelToolCallsUnsupported: "The website returned multiple calls when parallel_tool_calls was false. No tool calls from this reply were dispatched."
+            case .websiteCallLimitExceeded: "This website response permits one tool call. The entire batch was rejected; no call was dispatched."
+            case .customFunctionArgumentsInvalid: "The declared custom-tool function requires exactly one string argument named input. No call was dispatched."
             case .toolCallLimitExceeded: "The website returned more calls than max_tool_calls allows. No tool calls from this reply were dispatched."
             }
         }
@@ -591,6 +598,12 @@ enum WebModelResponseCodec {
         let nativeGroqHistoryPresentation = compactHistoryInventory && groqHistoryReaderName != nil
         let configuration = try responseConfiguration(object, schemas: schemas, parallel: parallel)
         let customNames = Set(offered.filter { $0.value.isCustom }.keys)
+        // Native policy/configuration above remain exact. Only this existing
+        // trusted native history presentation declares a different wire shape.
+        let declaredFunctionProfile = nativeGroqHistoryPresentation && displayProjection != nil
+        let declared = try declaredCustomFunctionPresentation(schemas, allowedNames: policy.allowedNames,
+            enabled: declaredFunctionProfile)
+        let wireCustomNames = customNames.subtracting(declared.identities.keys)
         let includedInstructionText = trustedInstructionText(in: object)
         let compactGroq = isGroq && displayProjection != nil
         let browserCapabilities = compactGroq ? registeredBrowserAllowedNames.flatMap {
@@ -620,7 +633,8 @@ enum WebModelResponseCodec {
                     compactHistoryInventory: compactHistoryInventory),
                ComputaAgentInstructions.groqNativeSupplement(includedInstructionText: includedInstructionText,
                                                             needsBrowser: requiresBrowserToolAvailability, domains: groqDomains),
-               try displayProjection.map { try groqCatalogNotice($0, compactHistoryInventory: compactHistoryInventory) }].compactMap { $0 }.joined(separator: "\n\n")
+               try displayProjection.map { try groqCatalogNotice($0, compactHistoryInventory: compactHistoryInventory,
+                   declaredCustomFunctions: !declared.identities.isEmpty) }].compactMap { $0 }.joined(separator: "\n\n")
             : [ComputaAgentInstructions.webInferenceContract(offeredFunctions: offered.mapValues(\.name),
             customToolNames: customNames, includedInstructionText: includedInstructionText, compactNativeContext: isChatGPT,
             deduplicateNativeContext: isClaude || isGroq,
@@ -639,7 +653,8 @@ enum WebModelResponseCodec {
             : originalJSON
         var usesLoaderReferences = false
         let taskDisplaySource = try displayProjection.map {
-            try groqTrustedNativeProjection(originalJSON, object: object, schemas: $0.displaySchemas(schemas, compactHistoryInventory: compactHistoryInventory), domains: groqDomains, nativePermissionCompaction: nativeGroqHistoryPresentation, compactLoaderHistory: compactGroqLoaderHistory, usesLoaderReferences: &usesLoaderReferences)
+            try groqTrustedNativeProjection(originalJSON, object: object, schemas: $0.displaySchemas(declared.schemas, compactHistoryInventory: compactHistoryInventory), domains: groqDomains, nativePermissionCompaction: nativeGroqHistoryPresentation, compactLoaderHistory: compactGroqLoaderHistory,
+                declaredCustomFunctionNames: Set(declared.identities.keys), usesLoaderReferences: &usesLoaderReferences)
         } ?? fullDisplaySource
         // API response/transport controls are validated above and retained in
         // the canonical request. They must not become website instructions to
@@ -699,7 +714,8 @@ enum WebModelResponseCodec {
                                        capabilities: browserCapabilities)
             : currentBrowserHandoff(tools: offered, policy: policy, availability: browserToolAvailability)
         let responseContract = compactGroq ? ComputaAgentInstructions.groqResponseContract(currentBrowserHandoff: browserHandoff,
-            hasFunctions: offered.values.contains { !$0.isCustom }, hasCustomTools: !customNames.isEmpty,
+            hasFunctions: offered.values.contains { !$0.isCustom } || !declared.identities.isEmpty,
+            hasCustomTools: !wireCustomNames.isEmpty, singleCallProfile: declaredFunctionProfile,
             currentToolHandoff: try currentGroqToolHandoff(projection: displayProjection,
                 offeredNames: Set(offered.keys), allowedNames: policy.allowedNames,
                 validatedReaderName: groqHistoryReaderName, nativeBrowserEntryNames: Set(groqEntryTools.keys),
@@ -742,6 +758,7 @@ enum WebModelResponseCodec {
                                  availability: browserToolAvailability, prompt: prompt)
                        } : nil,
                        offeredToolNames: Set(offered.keys), customToolNames: customNames,
+                       declaredCustomFunctionSchemas: declared.identities, limitsWebsiteCallsToOne: declaredFunctionProfile,
                        groqToolCatalogSeed: groqToolCatalogSeed,
                        groqHistoryReaderName: groqHistoryReaderName, groqHistoryPlan: groqHistoryPlan,
                        groqHistoryPreviewOnly: groqHistoryPreviewOnly,
@@ -758,8 +775,31 @@ enum WebModelResponseCodec {
         """
     }
 
+    private static func declaredCustomFunctionPresentation(_ schemas: [[String: Any]], allowedNames: Set<String>,
+        enabled: Bool) throws -> (schemas: [[String: Any]], identities: [String: String]) {
+        guard enabled else { return (schemas, [:]) }
+        var identities: [String: String] = [:]
+        func project(_ definition: [String: Any], namespace: String? = nil) throws -> [String: Any] {
+            if definition["type"] as? String == "namespace", let name = definition["name"] as? String,
+               let children = definition["tools"] as? [[String: Any]] {
+                var result = definition; result["tools"] = try children.map { try project($0, namespace: name) }; return result
+            }
+            guard definition["type"] as? String == "custom", let name = definition["name"] as? String else { return definition }
+            let qualified = namespace.map { $0 + "." + name } ?? name
+            guard allowedNames.contains(qualified) else { return definition }
+            let description: String
+            do { description = try LiteralCustomToolTransport.description(for: definition) }
+            catch { throw Failure.invalidTools }
+            let original = try JSONSerialization.data(withJSONObject: definition, options: [.sortedKeys, .withoutEscapingSlashes])
+            identities[qualified] = SHA256.hash(data: original).map { String(format: "%02x", $0) }.joined()
+            return ["type": "function", "name": name, "description": description,
+                    "parameters": LiteralCustomToolTransport.inputSchema(description: LiteralCustomToolTransport.inputDescription)]
+        }
+        return (try schemas.map { try project($0) }, identities)
+    }
+
     private static func groqCatalogNotice(_ projection: GroqToolCatalog.Projection,
-        compactHistoryInventory: Bool = false) throws -> String {
+        compactHistoryInventory: Bool = false, declaredCustomFunctions: Bool = false) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         // Presentation only: loaded names and complete current callable schemas
@@ -769,7 +809,8 @@ enum WebModelResponseCodec {
             : projection.discoverable
         let rowKind = compactHistoryInventory ? "unloaded discovery" : "discovery"
         let rowFields = compactHistoryInventory ? "name,kind?" : "name,purpose,kind"
-        let kindRule = compactHistoryInventory ? " Omitted kind uses kind_default." : ""
+        let kindRule = (compactHistoryInventory ? " Omitted kind uses kind_default." : "")
+            + (declaredCustomFunctions ? " Kinds are native; current schemas declare transport." : "")
         let kindDefault = compactHistoryInventory ? "\"kind_default\":\"function\"," : ""
         let entries = String(decoding: try encoder.encode(discovery.map { entry in
             let kind = entry.isCustom ? "custom" : "function"
@@ -984,7 +1025,8 @@ enum WebModelResponseCodec {
                                                      schemas: [[String: Any]],
                                                      domains: Set<ComputaAgentInstructions.GroqInstructionDomain>,
                                                      nativePermissionCompaction: Bool,
-                                                     compactLoaderHistory: Bool, usesLoaderReferences: inout Bool) throws -> String {
+                                                     compactLoaderHistory: Bool, declaredCustomFunctionNames: Set<String> = [],
+                                                     usesLoaderReferences: inout Bool) throws -> String {
         let permission = GroqNativePermissionPresentation.replacement(in: trustedInstructionText(in: object),
             enabled: nativePermissionCompaction)
         var replacements: [[GroqJSONPath]: (original: String, permission: GroqNativePermissionPresentation.Replacement?)] = [:]
@@ -1043,6 +1085,18 @@ enum WebModelResponseCodec {
             referenceFields.removeAll()
         }
         var earlier = [String: [Data: Int]]()
+        var functionChoicePaths = Set<[GroqJSONPath]>()
+        if let choice = object["tool_choice"] as? [String: Any] {
+            if choice["type"] as? String == "custom", let name = choice["name"] as? String,
+               declaredCustomFunctionNames.contains(name) { functionChoicePaths.insert([.key("tool_choice"), .key("type")]) }
+            if choice["type"] as? String == "allowed_tools", let choices = choice["tools"] as? [[String: Any]] {
+                for (index, value) in choices.enumerated() where value["type"] as? String == "custom" {
+                    if let name = value["name"] as? String, declaredCustomFunctionNames.contains(name) {
+                        functionChoicePaths.insert([.key("tool_choice"), .key("tools"), .index(index), .key("type")])
+                    }
+                }
+            }
+        }
         let projectedTools = try JSONSerialization.data(withJSONObject: schemas, options: [.sortedKeys, .withoutEscapingSlashes])
         let bytes = Array(source.utf8)
         var position = 0, edits: [(Range<Int>, Data)] = []
@@ -1069,6 +1123,7 @@ enum WebModelResponseCodec {
             let start = position
             try body(path, depth: depth)
             if path == [.key("tools")] { edits.append((start..<position, projectedTools)) }
+            if functionChoicePaths.contains(path) { edits.append((start..<position, Data("\"function\"".utf8))) }
         }
         func body(_ path: [GroqJSONPath], depth: Int) throws {
             guard depth <= 256 else { throw ScanFailure.ambiguous }
@@ -1344,6 +1399,7 @@ enum WebModelResponseCodec {
             if requireEnvelope || looksLikeToolEnvelope(candidate) { throw Failure.malformedEnvelope }
             return try validated(.message(text), request: request)
         }
+        if request.limitsWebsiteCallsToOne, !APIModelCorrectionJSON.isUnambiguous(data) { throw Failure.malformedEnvelope }
         switch envelope["type"] as? String {
         case "message":
             guard Set(envelope.keys).isSubset(of: ["type", "text", "phase"]),
@@ -1363,6 +1419,7 @@ enum WebModelResponseCodec {
             if let commentary = envelope["commentary"], !(commentary is String) {
                 throw Failure.malformedEnvelope
             }
+            if request.limitsWebsiteCallsToOne, calls.count != 1 { throw Failure.websiteCallLimitExceeded }
             let singleUncommentedCall = calls.count == 1 && envelope["commentary"] == nil
             let validated = try calls.map { call -> ToolCall in
                 guard let offeredName = call["name"] as? String, !offeredName.isEmpty else {
@@ -1370,6 +1427,14 @@ enum WebModelResponseCodec {
                 }
                 guard let tool = request.tools[offeredName] else { throw Failure.unknownTool(offeredName) }
                 guard request.toolPolicy.allowedNames.contains(offeredName) else { throw Failure.rejectedToolChoice }
+                if request.declaredCustomFunctionSchemas[offeredName] != nil {
+                    guard tool.isCustom, Set(call.keys) == ["name", "arguments"],
+                          let arguments = call["arguments"] as? [String: Any],
+                          let input = LiteralCustomToolTransport.literalInput(in: arguments) else {
+                        throw Failure.customFunctionArgumentsInvalid
+                    }
+                    return ToolCall(name: tool.name, argumentsJSON: "", namespace: tool.namespace, customInput: input)
+                }
                 guard Set(call.keys).isSubset(of: ["name", tool.isCustom ? "input" : "arguments"]) else {
                     onRejectedCall?(.classify(call, custom: tool.isCustom), singleUncommentedCall)
                     throw Failure.unsupportedCallFields
@@ -1566,6 +1631,7 @@ enum WebModelResponseCodec {
             guard !request.toolPolicy.requiresCall else { throw Failure.rejectedToolChoice }
         case let .toolCalls(calls), let .toolCallsWithCommentary(calls, _):
             guard !calls.isEmpty else { throw Failure.malformedEnvelope }
+            if request.limitsWebsiteCallsToOne, calls.count != 1 { throw Failure.websiteCallLimitExceeded }
             guard request.parallelToolCalls || calls.count == 1 else { throw Failure.parallelToolCallsUnsupported }
             if let maximum = request.maximumToolCalls, calls.count > maximum { throw Failure.toolCallLimitExceeded }
             for call in calls {

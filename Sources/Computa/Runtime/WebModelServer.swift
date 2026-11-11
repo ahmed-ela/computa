@@ -3567,6 +3567,8 @@ actor WebModelServer {
             case .rejectedToolChoice: return .init(status: "500 Internal Server Error", type: "model_error", code: "tool_choice_violation", param: "tool_choice")
             case .unsupportedWebsiteResponse: return .init(status: "400 Bad Request", type: "model_error", code: "unsupported_website_response")
             case .parallelToolCallsUnsupported: return .init(status: "500 Internal Server Error", type: "model_error", code: "parallel_tool_calls_violation", param: "parallel_tool_calls")
+            case .websiteCallLimitExceeded: return .init(status: "500 Internal Server Error", type: "model_error", code: "website_tool_call_limit_exceeded", param: "tools")
+            case .customFunctionArgumentsInvalid: return .init(status: "500 Internal Server Error", type: "model_error", code: "invalid_custom_function_arguments", param: "tools")
             case .toolCallLimitExceeded: return .init(status: "500 Internal Server Error", type: "model_error", code: "max_tool_calls_violation", param: "max_tool_calls")
             case .missingModel: return .init(status: "400 Bad Request", type: "invalid_request", code: "missing_model", param: "model")
             case .missingInput: return .init(status: "400 Bad Request", type: "invalid_request", code: "missing_input", param: "input")
@@ -3676,6 +3678,8 @@ actor WebModelServer {
                 fields["body_tokens"] = actual
                 fields["maximum_body_tokens"] = maximum
                 fields["reserved_tokens"] = reserve
+            case .websiteCallLimitExceeded, .customFunctionArgumentsInvalid:
+                fields["retryable"] = false
             case .groqTokenCounterUnavailable:
                 fields["retryable"] = false
             case .groqPromptByteBudgetExceeded(let actual, let maximum, let reserve):

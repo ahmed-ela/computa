@@ -1,7 +1,58 @@
+import CryptoKit
 import XCTest
 @testable import Computa
 
 final class APIModelResponseCodecTests: XCTestCase {
+
+    func testSharedLiteralCustomTransportKeepsTheEstablishedAPIBytesAndFailureBoundary() throws {
+        let grammar = "start: /[a-z]+/\n"
+        let custom: [String: Any] = ["type": "custom", "name": "literal_document", "description": "Literal fixture grammar.",
+            "format": ["type": "grammar", "syntax": "lark", "definition": grammar]]
+        // Fixed hashes were reconstructed from the PRE-extraction API contract,
+        // not derived from the shared helper or from its new output in this test.
+        func digest(_ value: String) -> String { SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined() }
+        let namingGoldens: [(APIModelResponseCodec.ToolNaming, String)] = [(.legacy, "2d0f0a6403fdb0b822af9b1f9c78eb5cafb5c3f038b14e7df31dfbc271fdfc01"),
+            (.semantic, "50b59193c7627ac932c03694e3ebf86b9070823cb5c3b0091b26b6024653d6f8")]
+        for (naming, wireDescriptionSHA256) in namingGoldens {
+            let prepared = try request(["tools": [custom, function]], toolNaming: naming)
+            let wrapped = try XCTUnwrap(wireFunctions(prepared).first)
+            XCTAssertEqual(digest(prepared.tools[0].description), "0971191c7eb8cc7a4d45430682a6fd00f4397fd77139d599413019f77d9e3648")
+            XCTAssertEqual(digest(try XCTUnwrap(wrapped["description"] as? String)), wireDescriptionSHA256)
+            let schema = try XCTUnwrap(wrapped["parameters"] as? [String: Any])
+            let schemaBytes = try JSONSerialization.data(withJSONObject: schema, options: [.sortedKeys, .withoutEscapingSlashes])
+            XCTAssertEqual(SHA256.hash(data: schemaBytes).map { String(format: "%02x", $0) }.joined(), "7a78d967a3844952e15b151b1c7fe16e9f0aa13e738c58b09e8a9d82e825ff48")
+            let input = try XCTUnwrap((schema["properties"] as? [String: Any])?["input"] as? [String: Any])
+            XCTAssertEqual(digest(try XCTUnwrap(input["description"] as? String)), "bbfab460e0d7e6fa83845d0578116df3263b5998086603f3263ac9d455e40d73")
+            let alias = try XCTUnwrap(wrapped["name"] as? String)
+            let payload = "literal \"quote\" \\ slash\r\n\te\u{0301} / é 🌍\n{\"looks\":\"like JSON\"}\n"
+            let arguments = String(decoding: try JSONSerialization.data(withJSONObject: ["input": payload]), as: UTF8.self)
+            let decoded = try decode(["role": "assistant", "tool_calls": [["id": "native-literal-fixture", "type": "function",
+                "function": ["name": alias, "arguments": arguments]]]], finish: "tool_calls", request: prepared)
+            let output = try XCTUnwrap((decoded.response["output"] as? [[String: Any]])?.first)
+            XCTAssertEqual(output["type"] as? String, "custom_tool_call")
+            XCTAssertEqual(Data(try XCTUnwrap(output["input"] as? String).utf8), Data(payload.utf8))
+            XCTAssertNil(output["arguments"])
+            for bad in [#"{"input":"literal","extra":true}"#, #"{"input":{"nested":"literal"}}"#, #"{"patch":"literal"}"#] {
+                XCTAssertThrowsError(try decode(["role": "assistant", "tool_calls": [["id": "bad-literal-fixture", "type": "function",
+                    "function": ["name": alias, "arguments": bad]]]], finish: "tool_calls", request: prepared)) {
+                    XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+                }
+            }
+        }
+        let invalidFormats: [Any] = [["type": "text", "extra": "ignored"], ["type": "grammar", "syntax": "unknown", "definition": "start: /.+/"],
+            ["type": "grammar", "syntax": "lark", "definition": String(repeating: "x", count: 16_385)], NSNull()]
+        for format in invalidFormats {
+            var invalid = custom; invalid["format"] = format
+            XCTAssertThrowsError(try request(["tools": [invalid]])) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
+            }
+        }
+        let nativeProvider = APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL,
+            wireAPI: .responses, models: provider.models)
+        let nativeBody = try XCTUnwrap(JSONSerialization.jsonObject(with: request(["tools": [custom, function]], provider: nativeProvider).body) as? [String: Any])
+        XCTAssertEqual(nativeBody["tools"] as? NSArray, [custom, function] as NSArray)
+    }
+
     private let taskID = "550e8400-e29b-41d4-a716-446655440000"
     private var provider: APIProviderDefinition { .init(id: "fixture", name: "Fixture", baseURL: URL(string: "https://example.invalid/v1")!, wireAPI: .chatCompletions, models: [.init(id: "fixture-model", name: "Fixture", supportsImages: true)]) }
     private var capsules: APIReasoningCapsules { try! .init(key: Data(repeating: 7, count: 32)) }

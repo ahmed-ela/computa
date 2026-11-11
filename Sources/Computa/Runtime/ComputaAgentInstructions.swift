@@ -667,15 +667,18 @@ enum ComputaAgentInstructions {
     }
 
     static func groqResponseContract(currentBrowserHandoff: String, hasFunctions: Bool = true,
-                                    hasCustomTools: Bool = false, currentToolHandoff: String = "") -> String {
+                                    hasCustomTools: Bool = false, singleCallProfile: Bool = false,
+                                    currentToolHandoff: String = "") -> String {
         let functionShape = hasFunctions ? #"Function: {"type":"tool_calls","calls":[{"name":"offered_name","arguments":{}}]}."# : ""
         let customShape = hasCustomTools ? #"Custom: {"type":"tool_calls","calls":[{"name":"offered_custom_name","input":"literal input"}]}."# : ""
+        let step = singleCallProfile ? "one immediate call; await output. No future plan or placeholders." : "next unverified authorized step."
+        let customRule = singleCallProfile && !hasCustomTools ? "" : " Custom entries contain only name and input (literal string)."
         return """
         COMPUTA_LOCAL_RESPONSE_HANDOFF:
-        Message/refusal/clarification: {"type":"message","text":"answer"} ends turn; user formats apply to decoded text. tool_calls: next unverified authorized step.
+        Message/refusal/clarification: {"type":"message","text":"answer"} ends turn; user formats apply to decoded text. tool_calls: \(step)
         \(functionShape)
         \(customShape)
-        Function entries contain only name and arguments (object, every required schema field; {} only if schema permits). Custom entries contain only name and input (literal string). Computa supplies call IDs and metadata; optional tool_calls.commentary is progress. Never replay uncertain calls. Report execution, tests, file changes or browser receipts only from matching host output; state actual blockers/refusals.
+        Function entries contain only name and arguments (object, every required schema field; {} only if schema permits).\(customRule) Computa supplies call IDs and metadata; optional tool_calls.commentary is progress. Never replay uncertain calls. Report execution, tests, file changes or browser receipts only from matching host output; state actual blockers/refusals.
         \(currentBrowserHandoff)
         \(currentToolHandoff)
         Replace example names with exact currently offered qualified names/schemas; history offers no schemas. Honor tool_choice/parallel/max-call limits; no tools means no call. Emit JSON in final assistant text, never reasoning or API tool calls. \(compactLiteralFencedResponseFormat)
