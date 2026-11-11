@@ -17127,7 +17127,8 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     func testGeminiTemporaryToggleNotificationsSurviveBeforeWaitAndDelayedRendering() async throws {
-        for delay in [0, 700] {
+        for (label, delay) in [("Temporary chat", 0), ("Temporary chat", 700),
+                               ("Turn on temporary chat", 0), ("Turn on temporary chat", 700)] {
             let fixture = try Fixture(page: Self.providerPage(.gemini))
             defer { fixture.shutdown() }
             let started = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
@@ -17138,7 +17139,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 document.querySelectorAll('[data-fixture-temporary]').forEach(node => node.remove());
                 window.fixtureToggleCount = 0;
                 const toggle = document.createElement('button');
-                toggle.setAttribute('aria-label', 'Temporary chat'); toggle.textContent = 'Temporary chat';
+                toggle.setAttribute('aria-label', \(String(reflecting: label))); toggle.textContent = 'Temporary chat';
                 toggle.addEventListener('click', () => {
                     window.fixtureToggleCount++;
                     toggle.disabled = true;
@@ -17169,7 +17170,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             }
             _ = try await waitForState("ready", fixture.transport, token: token)
             let toggles = try await evaluate(view, "return window.fixtureToggleCount;") as? Int
-            XCTAssertEqual(toggles, 1, "Read-only waiting must never toggle the mode again")
+            XCTAssertEqual(toggles, 1, "\(label): Read-only waiting must never toggle the mode again")
             let empty = try await capturedUserPrompts(view)
             XCTAssertEqual(empty, [])
             _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Submit only after verified mode"])
@@ -19760,79 +19761,124 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     func testGeminiWaitsForAnEnabledTemporaryActionAfterItsComposerLoads() async throws {
-        let fixture = try Fixture(page: Self.providerPage(.gemini))
-        defer { fixture.shutdown() }
-        let started = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
-        let token = try XCTUnwrap(started["sessionToken"] as? String)
-        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
-        try await waitForFixture(view)
-        _ = try await evaluate(view, """
-            document.querySelectorAll('[data-fixture-temporary]').forEach(node => node.remove());
-            window.fixtureToggleCount = 0; return true;
-            """)
-        let initial = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
-        XCTAssertEqual(initial["state"] as? String, "loading")
-        await assertRejected(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Never send before mode is available"])
-        _ = try await evaluate(view, """
-            const toggle = document.createElement('button');
-            toggle.setAttribute('aria-label', 'Temporary chat'); toggle.textContent = 'Temporary chat';
-            toggle.disabled = true;
-            toggle.addEventListener('click', () => {
-                window.fixtureToggleCount++;
+        for label in ["Temporary chat", "Turn on temporary chat"] {
+            let fixture = try Fixture(page: Self.providerPage(.gemini))
+            defer { fixture.shutdown() }
+            let started = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            try await waitForFixture(view)
+            _ = try await evaluate(view, """
+                document.querySelectorAll('[data-fixture-temporary]').forEach(node => node.remove());
+                window.fixtureToggleCount = 0; return true;
+                """)
+            let initial = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTAssertEqual(initial["state"] as? String, "loading")
+            await assertRejected(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Never send before mode is available"])
+            _ = try await evaluate(view, """
+                const toggle = document.createElement('button');
+                toggle.id = 'fixture-entry'; toggle.setAttribute('aria-label', \(String(reflecting: label))); toggle.textContent = 'Temporary chat';
                 toggle.disabled = true;
-                const exit = document.createElement('button');
-                exit.setAttribute('aria-label', 'Turn off temporary chat'); exit.textContent = 'Temporary Chat';
-                document.body.prepend(exit);
-            }); document.body.prepend(toggle); return true;
-            """)
-        let disabled = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
-        XCTAssertEqual(disabled["state"] as? String, "loading")
-        let noClicks = try await evaluate(view, "return window.fixtureToggleCount;") as? Int
-        XCTAssertEqual(noClicks, 0, "Neither an absent nor a disabled mode control may be claimed")
-        let empty = try await capturedUserPrompts(view)
-        XCTAssertEqual(empty, [])
-        _ = try await evaluate(view, """
-            setTimeout(() => { document.querySelector('button[aria-label="Temporary chat"]').disabled = false; }, 700);
-            return true;
-            """)
-        _ = try await waitForState("ready", fixture.transport, token: token)
-        let oneClick = try await evaluate(view, "return window.fixtureToggleCount;") as? Int
-        XCTAssertEqual(oneClick, 1, "The enabled attribute signal must allow the sole mode activation")
-        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Send after mode activation"])
-        _ = try await waitForState("complete", fixture.transport, token: token)
-        let prompts = try await capturedUserPrompts(view)
-        XCTAssertEqual(prompts?.map { $0.trimmingCharacters(in: .newlines) }, ["Send after mode activation"])
+                toggle.addEventListener('click', () => {
+                    window.fixtureToggleCount++;
+                    toggle.disabled = true;
+                    const exit = document.createElement('button');
+                    exit.setAttribute('aria-label', 'Turn off temporary chat'); exit.textContent = 'Temporary Chat';
+                    document.body.prepend(exit);
+                }); document.body.prepend(toggle); return true;
+                """)
+            let disabled = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTAssertEqual(disabled["state"] as? String, "loading")
+            let noClicks = try await evaluate(view, "return window.fixtureToggleCount;") as? Int
+            XCTAssertEqual(noClicks, 0, "Neither an absent nor a disabled mode control may be claimed")
+            await assertRejected(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Never send while the mode control is disabled"])
+            let empty = try await capturedUserPrompts(view)
+            XCTAssertEqual(empty, [])
+            let inputs = try await evaluate(view, "return window.fixtureInputCount;") as? Int
+            XCTAssertEqual(inputs, 0)
+            _ = try await evaluate(view, """
+                setTimeout(() => { document.getElementById('fixture-entry').disabled = false; }, 700);
+                return true;
+                """)
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            let oneClick = try await evaluate(view, "return window.fixtureToggleCount;") as? Int
+            XCTAssertEqual(oneClick, 1, "The enabled attribute signal must allow the sole mode activation")
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Send after mode activation"])
+            _ = try await waitForState("complete", fixture.transport, token: token)
+            let prompts = try await capturedUserPrompts(view)
+            XCTAssertEqual(prompts?.map { $0.trimmingCharacters(in: .newlines) }, ["Send after mode activation"])
+        }
     }
 
     func testUnconfirmedTemporaryToggleIsNeverClickedAgainDuringReadiness() async throws {
-        let fixture = try Fixture(page: Self.providerPage(.gemini))
-        defer { fixture.shutdown() }
-        fixture.transport.setTimeoutsForTesting(preparation: .seconds(1), response: .seconds(300))
-        let started = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
-        let token = try XCTUnwrap(started["sessionToken"] as? String)
-        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
-        try await waitForFixture(view)
-        _ = try await evaluate(view, """
-            document.querySelectorAll('[data-fixture-temporary]').forEach(node => node.remove());
-            window.fixtureToggleCount = 0;
-            const toggle = document.createElement('button');
-            toggle.setAttribute('aria-label', 'Temporary chat'); toggle.textContent = 'Temporary chat';
-            toggle.addEventListener('click', () => { window.fixtureToggleCount++; toggle.className = 'clicked'; });
-            document.body.prepend(toggle); return true;
-            """)
-        for _ in 0..<3 {
-            let loading = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
-            XCTAssertEqual(loading["state"] as? String, "loading")
+        for label in ["Temporary chat", "Turn on temporary chat"] {
+            let fixture = try Fixture(page: Self.providerPage(.gemini))
+            defer { fixture.shutdown() }
+            fixture.transport.setTimeoutsForTesting(preparation: .seconds(1), response: .seconds(300))
+            let started = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            try await waitForFixture(view)
+            _ = try await evaluate(view, """
+                document.querySelectorAll('[data-fixture-temporary]').forEach(node => node.remove());
+                window.fixtureToggleCount = 0;
+                const toggle = document.createElement('button');
+                toggle.setAttribute('aria-label', \(String(reflecting: label))); toggle.textContent = 'Temporary chat';
+                toggle.addEventListener('click', () => { window.fixtureToggleCount++; toggle.className = 'clicked'; });
+                document.body.prepend(toggle); return true;
+                """)
+            for _ in 0..<3 {
+                let loading = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTAssertEqual(loading["state"] as? String, "loading")
+            }
+            await assertRejected(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Never send on an entry click alone"])
+            let inputs = try await evaluate(view, "return window.fixtureInputCount;") as? Int
+            XCTAssertEqual(inputs, 0)
+            let clicks = try await evaluate(view, "return window.fixtureToggleCount;") as? Int
+            XCTAssertEqual(clicks, 1, "An unconfirmed first click must not be replayed while its control remains enabled")
+            try await Task.sleep(for: .seconds(1))
+            do {
+                _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                XCTFail("Unconfirmed mode activation must end at the preparation deadline")
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .preparationDeadline) }
+            let prompts = try await capturedUserPrompts(view)
+            XCTAssertEqual(prompts, [])
         }
-        let clicks = try await evaluate(view, "return window.fixtureToggleCount;") as? Int
-        XCTAssertEqual(clicks, 1, "An unconfirmed first click must not be replayed while its control remains enabled")
-        try await Task.sleep(for: .seconds(1))
-        do {
-            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
-            XCTFail("Unconfirmed mode activation must end at the preparation deadline")
-        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .preparationDeadline) }
-        let prompts = try await capturedUserPrompts(view)
-        XCTAssertEqual(prompts, [])
+    }
+
+    func testGeminiRejectsAmbiguousAuthoredAndInexactTemporaryEntriesBeforePrompt() async throws {
+        for variant in ["ambiguous", "authored", "inexact"] {
+            let fixture = try Fixture(page: Self.providerPage(.gemini))
+            defer { fixture.shutdown() }
+            let started = try await call(fixture.transport, "webProviderStart", ["provider": "gemini"])
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            try await waitForFixture(view)
+            let count = try await evaluate(view, """
+                document.querySelectorAll('[data-fixture-temporary]').forEach(node => node.remove());
+                window.fixtureToggleCount = 0;
+                const variant = \(String(reflecting: variant));
+                const parent = variant === 'authored' ? document.createElement('model-response') : document.body;
+                if (variant === 'authored') document.body.prepend(parent);
+                const labels = variant === 'ambiguous' ? ['Temporary chat', 'Turn on temporary chat']
+                    : [variant === 'inexact' ? 'Turn on temporary chat now' : 'Turn on temporary chat'];
+                const toggles = labels.map(label => {
+                    const button = document.createElement('button');
+                    button.setAttribute('aria-label', label); button.textContent = 'Temporary chat';
+                    button.addEventListener('click', () => { window.fixtureToggleCount++; });
+                    parent.prepend(button); return button;
+                });
+                return toggles.filter(button => !button.disabled && button.getBoundingClientRect().height > 0).length;
+                """) as? Int
+            XCTAssertEqual(count, variant == "ambiguous" ? 2 : 1, variant)
+            let loading = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTAssertEqual(loading["state"] as? String, "loading", variant)
+            await assertRejected(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Never send without an eligible temporary entry"])
+            let counts = try await evaluate(view, "return [window.fixtureToggleCount, window.fixtureInputCount];") as? [Int]
+            XCTAssertEqual(counts, [0, 0], variant)
+            let prompts = try await capturedUserPrompts(view)
+            XCTAssertEqual(prompts, [], variant)
+        }
     }
 
     func testChatTurnSubmissionProofRetainsOneOwnedViewAcrossThreeExactRounds() async throws {

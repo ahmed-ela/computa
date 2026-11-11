@@ -4072,3 +4072,43 @@ The saved verification checkpoint remained after prompt-free discovery failed. O
 The next diagnostic appends the existing checkpoint identity, the active discovery stage, and finite last-observed readiness/menu flags to that timeout record. Missing or non-Boolean values are unknown. It performs no additional page read, wait, prompt, or retry, and leaves every checkpoint-clearance, ownership and cleanup check in place. This is evidence for the next failure, not a recovery or CAPTCHA-prevention fix.
 
 Ten existing native WebKit and app-state recovery checks passed with zero failures or skips. They exercise successful verified recovery, blocked or revoked probes, checkpoint retention across recreation, and the temporary-mode readiness boundary. Live timeout classification with the new fields remains pending.
+
+### 2026-11-11 — Controlled live qualification on installed 499
+
+Signed Computa 0.8.0 (499) ran from `530b896faa1feae43d215b9eb0edf7e3a63d7b91`.
+All 67 installed files and modes matched the signed package. This was a local
+test installation.
+
+- Alibaba Qwen3.7 Flash passed all 19 independent checks in 48.795 s. Twelve
+  tools completed: seven terminal commands, one scoped patch and four browser
+  actions. The model ran all six tests, submitted the correct reference once,
+  reported the observed receipt and explicitly closed its task tab. The trace
+  proves the configured API model; it does not identify the provider's backend
+  or establish what caused the 497 argument failure.
+- Kimi Instant failed on the second verified submission in 31.754 s, after one
+  successful read. The page adapter rejected `authored_source_json_count`: the
+  recognized Markdown container did not have exactly one `code.language-json`
+  node. The record cannot distinguish zero from multiple matches. The argument
+  decoder was not reached for that reply. No edit or browser action ran, the
+  audit passed 7 of 19 checks, and both deletion receipts were eventually saved.
+- DeepSeek's normal landing still redirected to sign-in. No new DeepSeek
+  inference was attempted.
+
+#### Gemini Temporary Chat entry label
+
+On build 499, one ordinary Gemini landing triggered prompt-free recovery for the
+existing verification checkpoint. It timed out at readiness: composer present,
+temporary mode unverified, no available entry action, no click claimed. The
+checkpoint remained. The normal tab's accessible button name was `Turn on
+temporary chat`, while the adapter accepted only `Temporary chat`. A separate
+normal-tab check used the new control once, observed the temporary title and
+exit control, then returned the tab to normal without sending anything. An
+accessible name does not by itself identify the attribute or prove that the
+owned view has the same markup.
+
+The adapter now recognizes both exact native button labels. It rejects disabled,
+ambiguous, or authored controls. It still requires the independent active-mode
+evidence and retains the one-click, ownership, and checkpoint clearance guards.
+Thirteen focused native WebKit and recovery checks and 182 Gemini adapter tests
+passed. Live owned recovery must still verify the change; it does not prevent
+or clear a provider CAPTCHA.

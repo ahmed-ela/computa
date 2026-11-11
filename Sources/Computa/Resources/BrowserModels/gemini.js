@@ -2651,6 +2651,12 @@ function modelVisible(node) {
 }
 function modelEnabled(node) { return modelVisible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true'; }
 function modelFind(selectors) { return selectors.flatMap(selector => [...document.querySelectorAll(selector)]).find(modelVisible); }
+const modelTemporaryActionSelectors = ['button[aria-label="Temporary chat"]', 'button[aria-label="Turn on temporary chat"]'];
+function modelTemporaryAction() {
+  const controls = [...document.querySelectorAll(modelTemporaryActionSelectors.join(', '))].filter(node =>
+    modelVisible(node) && !node.closest('user-query, model-response, .model-response-text, rich-textarea, [contenteditable], [role="textbox"], [hidden]'));
+  return controls.length === 1 && modelEnabled(controls[0]) ? controls[0] : null;
+}
 function modelUserRoots() {
   const nodes = [...document.querySelectorAll('user-query')];
   return nodes.filter(node => !nodes.some(other => other !== node && other.contains(node)));
@@ -2895,7 +2901,7 @@ function modelReadinessStructure() {
   };
   const result = { kind: 'provider_readiness', provider: 'gemini', nodes,
     composer: count(['[contenteditable="true"][aria-label="Enter a prompt for Gemini"]', 'rich-textarea [contenteditable="true"]', 'div.ql-editor[contenteditable="true"]']),
-    toggle: count(['button[aria-label="Temporary chat"]']),
+    toggle: count(modelTemporaryActionSelectors),
     exit: count(['button[aria-label="Turn off temporary chat"]', 'button[aria-label="Exit temporary chat"]']) };
   while (JSON.stringify(result).length > 8_192 && result.nodes.length) result.nodes.pop();
   return JSON.stringify(result);
@@ -3676,7 +3682,7 @@ async function providerPageAction() {
   const scopedCopies = copies.length, enabledCopies = copies.filter(modelEnabled).length;
   const answerComplete = !busy && enabledCopies > 0;
   const temporary = modelTemporaryVerified();
-  const temporaryActionAvailable = modelEnabled(modelFind(['button[aria-label="Temporary chat"]']));
+  const temporaryActionAvailable = !!modelTemporaryAction();
   const state = { modelEvidence: modelState.evidence, url: document.URL, temporary, temporaryActionAvailable, conversationIdentity: null, composer: !!composer,
     responseCount: answers.length, userCount: ownedUserCount, firstUserIdentity, firstUserFingerprint,
     firstUserVerified: ownedUserCount > 0, firstUserMarkerVerified: ownedUserCount > 0,
@@ -3692,8 +3698,8 @@ async function providerPageAction() {
     if (temporary) return { ...state, enabled: true };
     if (ownedUserCount || answers.length || globalThis.__computaModelFirstSubmitted) return { error: 'not_fresh' };
     if (globalThis.__computaModelTemporaryRequested) return { error: 'temporary_mode_unverified' };
-    const toggle = modelFind(['button[aria-label="Temporary chat"]']);
-    if (!modelEnabled(toggle)) return { error: 'temporary_mode_unavailable' };
+    const toggle = modelTemporaryAction();
+    if (!toggle) return { error: 'temporary_mode_unavailable' };
     // Claim before the single click. A lost acknowledgment cannot toggle back.
     globalThis.__computaModelTemporaryRequested = true;
     toggle.click();
