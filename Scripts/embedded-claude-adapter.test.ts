@@ -910,6 +910,68 @@ describe("embedded Claude fixed adapter", () => {
     expect(await fresh.run("stop")).toMatchObject({ error: "temporary_mode_unverified" });
   });
 
+  function freshIncognitoResetLimit(f: ReturnType<typeof fixture>) {
+    const picker = installObservedModelPicker(f, provider, Element); picker.selected("Haiku 5.5");
+    const card = new Element("DIV"), heading = new Element("DIV"), actions = new Element("DIV");
+    const clock = new Element("#text", {}, "Usage limit reached · Resets 7:00 PM · ");
+    const shared = new Element("A", { href: "https://claude.ai/settings/claude-code" }, "limits shared with Claude Code");
+    const available = new Element("SPAN", {}, "You have 2 resets available.");
+    const about = new Element("BUTTON", { "aria-haspopup": "dialog", "aria-expanded": "false" }, "About resets");
+    const offer = new Element("BUTTON", {}, "Get more usage");
+    const reset = new Element("A", { href: "https://claude.ai/settings/usage?highlight=resets" }, "Use reset");
+    heading.append(clock, shared); actions.append(about, offer, reset);
+    card.append(heading, available, actions); f.body.append(card); f.send.disabled = true;
+    return { picker, card, clock, shared, available, about, offer, reset, actions };
+  }
+
+  test("the signed-in Incognito reset card aborts fresh preflight without interacting or proving cleanup", async () => {
+    for (const action of ["inspect", "discoverModels", "selectModel", "verifyModel", "enableTemporary", "prepare", "insert", "sendReady", "submit"]) {
+      const f = fixture(provider), { picker, about, offer, reset, shared, available } = freshIncognitoResetLimit(f);
+      if (action === "prepare") {
+        reset.values.href = "/settings/usage?highlight=resets"; available.text = "You have 1 reset available.";
+      }
+      const result = await f.run(action, { prompt: outbound, expectedModelChoice: { key: "Haiku 5.5", label: "Haiku 5.5" } });
+      expect(result, action).toEqual(action === "inspect" ? freshQuotaReceipt(f) : { error: "website_usage_limit" });
+      for (const control of [picker.trigger, about, offer, reset, shared, f.send, f.stop, f.exit, f.toggle])
+        expect(control.clicks).toBe(0);
+      expect(f.composer.events).toEqual([]); expect(f.composer.innerText).toBe(""); expect(f.document.activeElement).toBeNull();
+    }
+    const f = fixture(provider, { temporary: false }); freshIncognitoResetLimit(f); f.document.URL += "?incognito";
+    expect(await f.run()).toEqual(freshQuotaReceipt(f));
+    expect(await f.run("stop")).toMatchObject({ error: "temporary_mode_unverified" });
+    expect(f.stop.clicks).toBe(0);
+  });
+
+  test("the fresh Incognito reset limit requires the exact complete card and shared preflight guards", async () => {
+    for (const variation of ["ordinary-new", "nonempty-draft", "send-enabled", "open-picker", "submitted", "authored-card",
+      "bad-clock", "different-copy", "zero-resets", "wrong-plural", "hidden-copy", "other-link-origin", "other-reset-query", "about-not-popup", "about-open",
+      "extra-control", "different-card"]) {
+      const f = fixture(provider), { picker, card, clock, shared, available, about, offer, reset, actions } = freshIncognitoResetLimit(f);
+      switch (variation) {
+        case "ordinary-new": f.temporary(false); break;
+        case "nonempty-draft": f.composer.text = "existing draft"; break;
+        case "send-enabled": f.send.disabled = false; break;
+        case "open-picker": picker.trigger.values["aria-expanded"] = "true"; break;
+        case "submitted": f.world.__computaModelFirstSubmitted = true; break;
+        case "authored-card": card.values["data-testid"] = "assistant-message"; break;
+        case "bad-clock": clock.text = "Usage limit reached · Resets 25:00 PM · "; break;
+        case "different-copy": available.text = "You have 2 rewards available."; break;
+        case "zero-resets": available.text = "You have 0 resets available."; break;
+        case "wrong-plural": available.text = "You have 1 resets available."; break;
+        case "hidden-copy": available.values.hidden = ""; break;
+        case "other-link-origin": shared.values.href = "https://other.example/settings/claude-code"; break;
+        case "other-reset-query": reset.values.href = "https://claude.ai/settings/usage?highlight=resets&other=1"; break;
+        case "about-not-popup": delete about.values["aria-haspopup"]; break;
+        case "about-open": about.values["aria-expanded"] = "true"; break;
+        case "extra-control": actions.append(new Element("BUTTON", {}, "Another action")); break;
+        case "different-card": actions.children.pop(); f.body.append(reset); break;
+      }
+      const result = await f.run();
+      expect(result.error, variation).not.toBe("website_usage_limit"); expect(result.freshQuotaAbort, variation).toBeUndefined();
+      for (const control of [about, offer, reset, shared, f.send]) expect(control.clicks).toBe(0);
+    }
+  });
+
   test("the exact quota popup reports its limit before any inference action or blocked control click", async () => {
     for (const action of ["inspect", "enableTemporary", "prepare", "insert", "sendReady", "submit"]) {
       const f = fixture(provider, { userPrompt: prompt }); await f.run();

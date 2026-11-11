@@ -3014,7 +3014,6 @@ function modelFreshAccountUsageLimited() {
     };
     const label = node => node.getAttribute('aria-label') ?? words(node, false);
     const usage = one(chrome.filter(node => popup(node) && label(node) === 'View usage limits · 100% used'));
-    if (!usage) return false;
     const picker = one(chrome.filter(node => popup(node) && /^Model: /.test(websiteModelSafeTriggerLabel(node.getAttribute('aria-label')) || '')));
     const send = one(chrome.filter(node => node.getAttribute('data-testid') === 'chat-input-send' && node.getAttribute('aria-label') === 'Send message'));
     const editor = one(document.querySelectorAll('[data-testid="chat-input"][contenteditable="true"][role="textbox"]'));
@@ -3024,8 +3023,37 @@ function modelFreshAccountUsageLimited() {
     if (!empty) return false;
     const enabled = chrome.filter(modelEnabled).map(node => ({ node, name: label(node) }));
     const named = name => enabled.filter(item => item.name === name).map(item => item.node);
-    const offer = one(named('Get more usage')), dismiss = named('Dismiss'), notify = named('Get notified');
-    if (!offer || dismiss.length > 1 || notify.length > 1 || !(dismiss.length || notify.length)) return false;
+    const offer = one(named('Get more usage'));
+    if (!offer) return false;
+
+    // The signed-in Incognito reset card is a fresh preflight abort surface.
+    // It does not attest to temporary-mode ownership or completed cleanup.
+    if (document.URL.endsWith('?incognito')) {
+      const about = one(named('About resets'));
+      if (about && popup(about)) {
+        const exactLink = (node, name, path) => {
+          const href = node.getAttribute('href');
+          if (node.tagName !== 'A' || !modelEnabled(node) || label(node) !== name) return false;
+          try { return new URL(href, node.baseURI ?? document.URL).href === 'https://claude.ai' + path; }
+          catch { return false; }
+        };
+        let card = offer.parentElement;
+        for (let depth = 0; card && depth < 8; depth++, card = card.parentElement) {
+          if (['BODY', 'HTML'].includes(card.tagName) || [picker, send, editor].some(node => card.contains(node))) break;
+          if (!card.contains(about) || !modelVisible(card) || card.closest(excluded)) continue;
+          const controls = [...card.querySelectorAll('button, a, [role="button"], [role="link"], [role="switch"], textarea, input, select, [contenteditable]')];
+          if (controls.length !== 4 || card.querySelector('[aria-checked="true"], [aria-pressed="true"]')) continue;
+          if (!one(controls.filter(node => exactLink(node, 'limits shared with Claude Code', '/settings/claude-code')))
+            || !one(controls.filter(node => exactLink(node, 'Use reset', '/settings/usage?highlight=resets')))) continue;
+          const copy = words(card, true);
+          if (copy && /^Usage limit reached · Resets (?:[1-9]|1[0-2]):[0-5][0-9] (?:AM|PM) · limits shared with Claude Code You have (?:1 reset|(?:[2-9]|[1-9][0-9]) resets) available\. Use reset$/.test(copy)) return true;
+        }
+      }
+    }
+
+    if (!usage) return false;
+    const dismiss = named('Dismiss'), notify = named('Get notified');
+    if (dismiss.length > 1 || notify.length > 1 || !(dismiss.length || notify.length)) return false;
     const controls = [offer, ...dismiss, ...notify];
     let card = controls[0].parentElement;
     for (let depth = 0; card && depth < 8; depth++, card = card.parentElement) {

@@ -16921,6 +16921,24 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertInitialClaudeQuotaAborts(page: Self.modelChoicePage(.claude, basePage: page), choice: Self.fixtureChoice(.claude))
     }
 
+    func testClaudeInitialIncognitoResetCardAbortsBeforePickerAndClosesOnlyFreshOwnedTab() async throws {
+        let surface = """
+        <section>
+          <p>Usage limit reached · Resets <strong>7:00 PM</strong> ·
+            <a href="/settings/claude-code" data-fixture-quota-link>limits shared with Claude Code</a>
+          </p>
+          <p>You have 2 resets available.</p>
+          <button aria-haspopup="dialog" data-fixture-quota-link>About resets</button>
+          <button data-fixture-quota-link>Get more usage</button>
+          <a href="/settings/usage?highlight=resets" data-fixture-quota-link>Use reset</a>
+        </section>
+        """
+        let page = Self.freshClaudeQuotaBannerPage.replacingOccurrences(of: Self.claudeQuotaBannerMarkup, with: surface)
+        let choice = WebsiteModelChoice.claudeHaiku55
+        let pickerPage = Self.modelChoicePage(.claude, basePage: page).replacingOccurrences(of: "Sonnet 4.6", with: choice.label)
+        try await assertInitialClaudeQuotaAborts(page: pickerPage, choice: choice)
+    }
+
     private func assertInitialClaudeQuotaAborts(page: String, choice: WebsiteModelChoice? = nil) async throws {
         let fixture = try Fixture(page: page)
         defer { fixture.shutdown() }
