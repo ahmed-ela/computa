@@ -2392,7 +2392,16 @@ final class WebModelResponseCodecTests: XCTestCase {
                 XCTAssertEqual(request.prompt.components(separatedBy: boundary).count - 1, 1)
                 XCTAssertTrue(request.prompt.hasSuffix(boundary + "\nEND_COMPUTA_LOCAL_RESPONSE_HANDOFF." + expectedOpus3Suffix), model)
                 if model == opus3 {
-                    XCTAssertTrue(expectedOpus3Suffix.contains("use type and calls as the top-level fields. Only commentary is optional at that level."))
+                    XCTAssertEqual(expectedOpus3Suffix, "\n\n" + """
+                    Start your visible reply with ```json.
+                    For a tool reply, use only type, calls, and optional commentary at the top level.
+                    Request only the next offered operation in calls, even when parallel_tool_calls is enabled.
+                    Wait for its matching output before choosing another operation.
+                    Function entries use only name and arguments. Custom entries use only name and input.
+                    Place optional commentary beside calls as one string.
+                    Use a separate message envelope with type and text for a verified final answer, clarification, or refusal.
+                    Close with ``` on its own line. Write no text outside the code block.
+                    """)
                     let extraField = call.replacingOccurrences(of: #""type":"tool_calls","#,
                                                                 with: #""type":"tool_calls","phase":"commentary","#)
                     XCTAssertNotEqual(extraField, call)
@@ -4705,7 +4714,10 @@ final class WebModelResponseCodecTests: XCTestCase {
                 "properties": ["query": ["type": "string"]], "required": ["query"]]],
             ["type": "custom", "name": "literal"]
         ]]]
-        let request = try controlledRequest(["model": opus], tools: tools)
+        let original = try JSONSerialization.data(withJSONObject: ["model": opus, "input": "Perform the authorized task",
+            "tools": tools, "parallel_tool_calls": true])
+        let request = try WebModelResponseCodec.prepareRequest(original)
+        try assertContiguousRequestValues(original, in: request, expectsFunctionLayout: true)
         let lines = request.prompt.components(separatedBy: "\n")
         let intro = try XCTUnwrap(lines.firstIndex { $0.hasPrefix("Function call layout.") })
         let nextAction = "Request just the next operation in calls."
@@ -4720,8 +4732,13 @@ final class WebModelResponseCodecTests: XCTestCase {
         XCTAssertEqual(call["arguments"] as? [String: String], ["sample_field": "sample value"])
         XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(example, request: request))
         let valid = #"{"type":"tool_calls","calls":[{"name":"fixture.lookup","arguments":{"query":"today"}}]}"#
-        XCTAssertEqual(try WebModelResponseCodec.parseEmbeddedReply(valid, request: request),
-                       .toolCalls([.init(name: "lookup", argumentsJSON: #"{"query":"today"}"#, namespace: "fixture")]))
+        let lookup = WebModelResponseCodec.ToolCall(name: "lookup", argumentsJSON: #"{"query":"today"}"#, namespace: "fixture")
+        XCTAssertEqual(try WebModelResponseCodec.parseEmbeddedReply(valid, request: request), .toolCalls([lookup]))
+        let commentary = #"{"type":"tool_calls","calls":[{"name":"fixture.lookup","arguments":{"query":"today"}}],"commentary":"Checking the record."}"#
+        XCTAssertEqual(try WebModelResponseCodec.parseEmbeddedReply(commentary, request: request),
+                       .toolCallsWithCommentary([lookup], "Checking the record."))
+        let message = #"{"type":"message","text":"The record is verified."}"#
+        XCTAssertEqual(try WebModelResponseCodec.parseEmbeddedReply(message, request: request), .message("The record is verified."))
         let flat = #"{"type":"tool_calls","calls":[{"name":"fixture.lookup","query":"today"}]}"#
         XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(flat, request: request)) {
             XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .unsupportedCallFields)
@@ -4748,9 +4765,14 @@ final class WebModelResponseCodecTests: XCTestCase {
         let selection = try WebsiteToolCallSelection.select(validatedReply: validBatch, singleAction: request.singleActionRelay)
         XCTAssertEqual(selection.selectedCount, 13)
         XCTAssertEqual(selection.reply, validBatch)
-        calls[3]["synthetic_unrecognized_field"] = true
+        calls[3]["commentary"] = "Progress belongs beside calls."
         XCTAssertThrowsError(try parseBatch()) {
             XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .unsupportedCallFields)
+        }
+        calls[3].removeValue(forKey: "commentary")
+        calls.append(["name": "message", "text": "The record is verified."])
+        XCTAssertThrowsError(try parseBatch()) {
+            XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .unknownTool("message"))
         }
     }
 

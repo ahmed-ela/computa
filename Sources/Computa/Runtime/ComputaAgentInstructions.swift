@@ -1004,8 +1004,12 @@ enum ComputaAgentInstructions {
 
     static let claudeOpus3OutputBoundary = "\n\n" + """
     Start your visible reply with ```json.
-    For tool_calls, use type and calls as the top-level fields. Only commentary is optional at that level.
-    Put every tool parameter inside its call and every result or explanation inside the JSON.
+    For a tool reply, use only type, calls, and optional commentary at the top level.
+    Request only the next offered operation in calls, even when parallel_tool_calls is enabled.
+    Wait for its matching output before choosing another operation.
+    Function entries use only name and arguments. Custom entries use only name and input.
+    Place optional commentary beside calls as one string.
+    Use a separate message envelope with type and text for a verified final answer, clarification, or refusal.
     Close with ``` on its own line. Write no text outside the code block.
     """
 
