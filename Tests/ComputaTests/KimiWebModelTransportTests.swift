@@ -1305,6 +1305,64 @@ final class KimiWebModelTransportTests: XCTestCase {
         XCTAssertEqual(outcomes, kimiRouteWaitRecords(token, generation, "returned"))
     }
 
+    func testFinishRevokesResumedProvisionalCallbackWithoutPublishingOrDeleting() async throws {
+        let fixture = try Fixture(); defer { fixture.shutdown() }
+        let (token, previous, generation) = try await startProvisionalFreshHop(fixture)
+        let tab = try XCTUnwrap(fixture.createdID)
+        let expected = kimiRouteWaitRecords(token, generation, "returned")
+        var outcomes: [String] = []
+        var restoration: Task<Bool, Error>?
+        var resumeInspection: CheckedContinuation<Void, Never>?
+        fixture.transport.setKimiProvisionalRouteWaitObserverForTesting { record in
+            outcomes.append(record)
+            if record == expected[0] {
+                restoration = Task {
+                    try await self.evaluate(fixture.view,
+                        "history.replaceState({}, '', fixturePriorProvisionalURL); return true;") as? Bool == true
+                }
+            }
+        }
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            // The original evaluation has returned. Hold only its callback so
+            // Finish can perform its own inspection of the same document.
+            guard action == "inspect", outcomes == expected, resumeInspection == nil else { return }
+            await withCheckedContinuation { resumeInspection = $0 }
+        }
+        let poll = Task { try await self.call(fixture, "webProviderPoll", token)["state"] as? String }
+        defer {
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            fixture.transport.setKimiProvisionalRouteWaitObserverForTesting(nil)
+            poll.cancel(); restoration?.cancel()
+            resumeInspection?.resume()
+        }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while resumeInspection == nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        let resume = try XCTUnwrap(resumeInspection, "The exact returned route must reach a real inspection callback")
+        let restoring = try XCTUnwrap(restoration)
+        let restored = try await restoring.value
+        XCTAssertTrue(restored)
+        XCTAssertEqual(outcomes, expected)
+        XCTAssertEqual(fixture.view.url, previous)
+        XCTAssertEqual(fixture.browser.documentGeneration(for: tab), generation)
+
+        let finished = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "failed")
+        XCTAssertTrue(fixture.browser.webView(for: tab) === fixture.view)
+        XCTAssertEqual(fixture.view.url, previous)
+        XCTAssertEqual(fixture.browser.documentGeneration(for: tab), generation)
+        resumeInspection = nil
+        resume.resume()
+        do {
+            _ = try await poll.value
+            XCTFail("The revoked callback must not return a snapshot")
+        } catch let failure as EmbeddedWebModelTransport.Failure {
+            XCTAssertEqual(failure, .staleSession)
+        }
+        XCTAssertEqual(outcomes, expected)
+        try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
     func testProvisionalRouteWaitRejectsChangedQueryAndNeverRenewsAfterReturn() async throws {
         for returnExactly in [false, true] {
             let fixture = try Fixture(); defer { fixture.shutdown() }
