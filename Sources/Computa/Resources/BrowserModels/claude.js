@@ -3162,6 +3162,73 @@ function modelFreshQuotaEditorEmpty(editor) {
   return editor.childNodes.length === 0 || editor.childNodes.length === 1 && editor.childNodes[0].tagName === 'P'
     && (editor.childNodes[0].childNodes.length === 0 || editor.childNodes[0].childNodes.length === 1 && editor.childNodes[0].childNodes[0].tagName === 'BR');
 }
+// Abort only on the observed five-hour card, including after exact insertion.
+// This surface never supplies Stop's physical Incognito proof.
+function modelFiveHourUsageLimited() {
+  try {
+    if (input.action === 'stop' || input.expectedFirstUserFingerprint != null
+      || globalThis.__computaModelFirstSubmitted !== undefined || globalThis.__computaModelFirstProof !== undefined
+      || input.expectedUserCounts?.length !== 1 || input.expectedUserCounts[0] !== 0
+      || !/^https:\/\/claude\.ai\/new\/?(?:\?incognito)?$/.test(document.URL)
+      || document.querySelectorAll(modelFreshQuotaAuthored).length) return false;
+    const excluded = modelFreshQuotaExcluded + ', [hidden], [inert], [aria-hidden="true"]';
+    const eligible = node => modelVisible(node) && !node.closest(excluded);
+    const one = nodes => nodes.length === 1 ? nodes[0] : null;
+    const editor = one(document.querySelectorAll(modelFreshQuotaEditorSelector));
+    const send = one(document.querySelectorAll(modelClaudeSendSelector));
+    if (!modelVisible(editor) || editor.parentElement?.closest(excluded) || !eligible(send) || send.disabled !== true) return false;
+    const inserted = globalThis.__computaModelFirstPrompt;
+    if (inserted !== undefined) {
+      const draft = (editor.innerText ?? '').replace(/\r\n?/g, '\n').trim();
+      if (!['sendReady', 'submit'].includes(input.action) || typeof input.prompt !== 'string' || !input.prompt.trim()
+        || inserted !== input.prompt || draft !== input.prompt.replace(/\r\n?/g, '\n').trim()
+        || typeof input.expectedFirstUserMarker !== 'string'
+        || !input.prompt.endsWith(`\n\nComputa session marker: ${input.expectedFirstUserMarker}`)) return false;
+    } else if (!modelFreshQuotaEditorEmpty(editor)) return false;
+    const words = (root, omit = []) => {
+      const parts = [], stack = [root]; let visited = 0, length = 0;
+      while (stack.length) {
+        const node = stack.pop();
+        if (++visited > 96) return null;
+        if (omit.includes(node)) continue;
+        if (node.nodeType === 3) {
+          length += node.length;
+          if (length > 512 || !eligible(node.parentElement)) return null;
+          parts.push(node.textContent);
+        } else if (node.nodeType === 1) {
+          if (!eligible(node) || visited + stack.length + node.childNodes.length > 96) return null;
+          for (let i = node.childNodes.length - 1; i >= 0; i--) stack.push(node.childNodes[i]);
+        }
+      }
+      return modelQuotaLabel(parts.join(' ')).replace(/ ([.,])/g, '$1');
+    };
+    const label = node => node.getAttribute('aria-label') ?? words(node);
+    const popup = node => ['true', 'menu', 'dialog', 'listbox'].includes(node.getAttribute('aria-haspopup'))
+      && [null, 'false'].includes(node.getAttribute('aria-expanded')) && [null, 'closed'].includes(node.getAttribute('data-state'));
+    const all = document.querySelectorAll('button, a, [role="button"]');
+    if (all.length > 256) return false;
+    const controls = [...all].filter(node => eligible(node) && modelEnabled(node));
+    const named = name => controls.filter(node => label(node) === name);
+    const usage = one(controls.filter(node => node.tagName === 'BUTTON' && popup(node)
+      && /^View usage limits · 100% used · (?:1 limit reset|(?:[2-9]|[1-9][0-9]) limit resets) available$/.test(label(node) || '')));
+    const notify = one(named('Turn on notifications').filter(node => node.tagName === 'BUTTON'));
+    const about = one(named('About resets').filter(popup));
+    const offer = one(named('Get more usage').filter(node => node.tagName === 'BUTTON'));
+    const dismiss = one(named('Dismiss').filter(node => node.tagName === 'BUTTON'));
+    const reset = one(named('Use reset').filter(node => node.tagName === 'A'));
+    if (!usage || !notify || !about || !offer || !dismiss || !reset
+      || new URL(reset.getAttribute('href'), document.URL).href !== 'https://claude.ai/settings/usage?highlight=resets') return false;
+    const members = [notify, about, offer, reset, dismiss];
+    for (let card = reset.parentElement, depth = 0; card && depth < 8; card = card.parentElement, depth++) {
+      if (['BODY', 'HTML'].includes(card.tagName) || [usage, send, editor].some(node => card.contains(node))) break;
+      if (!eligible(card) || !members.every(node => card.contains(node))) continue;
+      if (card.querySelectorAll('button, a, [role="button"], [role="link"], [role="switch"], input, textarea, select, [contenteditable]').length !== 5) continue;
+      const copy = words(card, members);
+      if (copy && /^You[’']ve hit your 5-hour limit\. It resets at (?:[1-9]|1[0-2]):[0-5][0-9] (?:AM|PM)\. and Claude will notify you, or reset now and keep going\.$/.test(copy)) return true;
+    }
+  } catch { /* Unknown or changed UI cannot establish a quota. */ }
+  return false;
+}
 function modelFreshAccountUsageLimited(afterClosedDiscovery = false) {
   try {
     const observeResetCard = afterClosedDiscovery || input.action === 'inspect';
@@ -3341,7 +3408,7 @@ function modelFreshAccountUsageLimited(afterClosedDiscovery = false) {
   } catch { /* An unknown account surface cannot establish a limit. */ }
   return false;
 }
-function modelUsageLimited() { return modelUsageLimitSurfaces().length > 0 || modelFreshAccountUsageLimited(); }
+function modelUsageLimited() { return modelUsageLimitSurfaces().length > 0 || modelFreshAccountUsageLimited() || modelFiveHourUsageLimited(); }
 function modelQuotaDiagnostic(includeFreshResetCard = false, temporaryProof = modelLastTemporaryProof) {
   const boundary = '[data-testid="assistant-message"], [data-testid="user-message"]';
   const tags = ['a', 'button', 'div', 'span', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'section', 'main', 'body', 'html', 'dialog'];
@@ -3867,7 +3934,7 @@ async function providerPageAction() {
       };
       const closed = currentClosedPicker();
       if (!closed) return result;
-      limited = modelFreshAccountUsageLimited(true);
+      limited = modelFreshAccountUsageLimited(true) || modelFiveHourUsageLimited();
       const controlsReady = modelLastFreshResetCardControlsReady;
       const deadline = input.evaluationDeadlineEpochMilliseconds;
       if (controlsReady && Number.isSafeInteger(deadline) && typeof input.operationID === 'string'
@@ -3891,10 +3958,10 @@ async function providerPageAction() {
           let clockFailed = false;
           await websiteModelWaitForChange(until, () => {
             if (!current()) return true;
-            try { return controlsReady(); } catch { return false; }
+            try { return modelFiveHourUsageLimited() || controlsReady(); } catch { return false; }
           }, 'model_wait', () => { clockFailed = true; }, true);
           if (!current()) return { error: 'model_unverified' };
-          if (!clockFailed && Date.now() < deadline) limited = modelFreshAccountUsageLimited(true);
+          if (!clockFailed && Date.now() < deadline) limited = modelFreshAccountUsageLimited(true) || modelFiveHourUsageLimited();
         }
       }
       // Earlier legacy quota counters in the temporary proof predate this close.

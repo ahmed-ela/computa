@@ -831,6 +831,102 @@ describe("embedded Claude fixed adapter", () => {
   });
 
 
+  function fiveHourLimit(f: ReturnType<typeof fixture>, apostrophe = '’') {
+    const usage = new Element('BUTTON', { 'aria-haspopup': 'dialog', 'aria-expanded': 'false',
+      'aria-label': 'View usage limits · 100% used · 2 limit resets available' });
+    const card = new Element('SECTION'), heading = new Element('P', {}, `You${apostrophe}ve hit your 5-hour limit. It resets at 5:00 AM.`);
+    const notify = new Element('BUTTON', {}, 'Turn on notifications');
+    const detail = new Element('SPAN', {}, 'and Claude will notify you, or reset now and keep going.');
+    const about = new Element('BUTTON', { 'aria-haspopup': 'dialog', 'aria-expanded': 'false' }, 'About resets');
+    const offer = new Element('BUTTON', {}, 'Get more usage');
+    const reset = new Element('A', { href: 'https://claude.ai/settings/usage?highlight=resets' }, 'Use reset');
+    const dismiss = new Element('BUTTON', {}, 'Dismiss');
+    card.append(heading, notify, detail, about, offer, reset, dismiss); f.body.append(usage, card); f.send.disabled = true;
+    return { usage, card, heading, notify, detail, about, offer, reset, dismiss, controls: [usage, notify, about, offer, reset, dismiss] };
+  }
+
+  test('five-hour quota aborts before and after exact insertion with cleanup witness only on pristine inspect', async () => {
+    for (const apostrophe of ["'", '’']) for (const inserted of [false, true]) {
+      for (const action of inserted ? ['sendReady', 'submit'] : ['inspect', 'insert', 'sendReady', 'submit']) {
+        const f = fixture(provider);
+        if (inserted) expect((await f.run('insert', { prompt: outbound })).inserted).toBe(true);
+        const surface = fiveHourLimit(f, apostrophe), draft = f.composer.innerText, events = f.composer.events.length;
+        expect(await f.run(action, { prompt: outbound }), `${inserted}/${action}`).toEqual(
+          !inserted && action === 'inspect' ? freshQuotaReceipt(f) : { error: 'website_usage_limit' });
+        expect(f.composer.innerText).toBe(draft); expect(f.composer.events.length).toBe(events);
+        expect([...surface.controls, f.send, f.stop, f.exit, f.toggle].every(node => node.clicks === 0)).toBe(true);
+        expect(f.world.__computaModelFirstSubmitted).toBeUndefined();
+      }
+    }
+    const f = fixture(provider, { temporary: false }); fiveHourLimit(f);
+    expect(await f.run('inspect')).toEqual(freshQuotaReceipt(f));
+    expect(await f.run('stop')).toMatchObject({ error: 'temporary_mode_unverified' });
+    expect(f.stop.clicks).toBe(0);
+  });
+
+  test('five-hour quota requires the independent visible usage and exact bounded banner controls', async () => {
+    for (const variation of ['authored', 'quoted', 'hidden-card', 'hidden-copy', 'inert', 'aria-hidden', 'duplicate-banner',
+      'duplicate-usage', 'hidden-usage', 'non-100', 'open-usage', 'wrong-link', 'extra-query', 'foreign-link', 'missing-control',
+      'extra-control', 'disabled-control', 'open-about', 'bad-clock', 'wrong-copy', 'enabled-send', 'duplicate-send',
+      'hidden-send', 'unowned-draft', 'clipped', 'foreign-owner', 'wrong-route']) {
+      const f = fixture(provider), s = fiveHourLimit(f);
+      switch (variation) {
+        case 'authored': s.card.values['data-testid'] = 'assistant-message'; break;
+        case 'quoted': s.card.tagName = 'PRE'; break;
+        case 'hidden-card': s.card.values.hidden = ''; break;
+        case 'hidden-copy': s.detail.values.hidden = ''; break;
+        case 'inert': s.card.values.inert = ''; break;
+        case 'aria-hidden': s.detail.values['aria-hidden'] = 'true'; break;
+        case 'duplicate-banner': f.body.append(s.card.cloneNode(true)); break;
+        case 'duplicate-usage': f.body.append(s.usage.cloneNode()); break;
+        case 'hidden-usage': s.usage.values.hidden = ''; break;
+        case 'non-100': s.usage.values['aria-label'] = s.usage.values['aria-label'].replace('100%', '99%'); break;
+        case 'open-usage': s.usage.values['aria-expanded'] = 'true'; break;
+        case 'wrong-link': s.reset.values.href = 'https://claude.ai/settings/usage'; break;
+        case 'extra-query': s.reset.values.href += '&other=true'; break;
+        case 'foreign-link': s.reset.values.href = 'https://example.invalid/settings/usage?highlight=resets'; break;
+        case 'missing-control': s.notify.text = 'Notify'; break;
+        case 'extra-control': s.card.append(new Element('BUTTON', {}, 'Other')); break;
+        case 'disabled-control': s.offer.disabled = true; break;
+        case 'open-about': s.about.values['aria-expanded'] = 'true'; break;
+        case 'bad-clock': s.heading.text = s.heading.text.replace('5:00 AM', '25:00 AM'); break;
+        case 'wrong-copy': s.detail.text = 'Your usage credits are enabled.'; break;
+        case 'enabled-send': f.send.disabled = false; break;
+        case 'duplicate-send': f.body.append(f.send.cloneNode()); break;
+        case 'hidden-send': f.send.values.hidden = ''; break;
+        case 'unowned-draft': f.composer.text = outbound; break;
+        case 'clipped': s.card.append(...Array.from({ length: 97 }, () => new Element('SPAN'))); break;
+        case 'foreign-owner': f.world.__computaModelOwner = 'foreign'; break;
+        case 'wrong-route': f.location.pathname = '/chat/other'; f.document.URL = f.origin + f.location.pathname; break;
+      }
+      const result = await f.run('inspect', { prompt: outbound });
+      expect(result.error, variation).not.toBe('website_usage_limit'); expect(result.freshQuotaAbort, variation).toBeUndefined();
+      expect([...s.controls, f.send, f.stop].every(node => node.clicks === 0), variation).toBe(true);
+    }
+  });
+
+  test('five-hour quota cannot classify a changed inserted draft, submitted turn or lost ownership', async () => {
+    for (const variation of ['draft', 'prompt', 'private-prompt', 'submitted', 'proof', 'owner', 'authored', 'inspect']) {
+      const f = fixture(provider);
+      expect((await f.run('insert', { prompt: outbound })).inserted).toBe(true);
+      const s = fiveHourLimit(f); let sentPrompt = outbound;
+      switch (variation) {
+        case 'draft': f.composer.text += 'changed'; break;
+        case 'prompt': sentPrompt += 'changed'; break;
+        case 'private-prompt': f.world.__computaModelFirstPrompt += 'changed'; break;
+        case 'submitted': f.world.__computaModelFirstSubmitted = true; break;
+        case 'proof': f.world.__computaModelFirstProof = {}; break;
+        case 'owner': f.world.__computaModelOwner = 'foreign'; break;
+        case 'authored': f.body.append(new Element('DIV', { 'data-testid': 'user-message' })); break;
+      }
+      const draft = f.composer.innerText, events = f.composer.events.length;
+      const result = await f.run(variation === 'inspect' ? 'inspect' : 'sendReady', { prompt: sentPrompt });
+      expect(result.error, variation).not.toBe('website_usage_limit'); expect(result.freshQuotaAbort, variation).toBeUndefined();
+      expect(f.composer.innerText).toBe(draft); expect(f.composer.events.length).toBe(events);
+      expect([...s.controls, f.send, f.stop].every(node => node.clicks === 0)).toBe(true);
+    }
+  });
+
   function freshAccountLimit(f: ReturnType<typeof fixture>) {
     const picker = installObservedModelPicker(f, provider, Element); picker.selected("Sonnet 5");
     const usage = new Element("BUTTON", { "aria-haspopup": "dialog", "aria-label": "View usage limits · 100% used" });
@@ -1096,6 +1192,30 @@ describe("embedded Claude fixed adapter", () => {
     }
   });
 
+  test('Claude discovery rechecks five-hour quota at verified picker close without overriding owner loss', async () => {
+    for (const drift of [false, true]) {
+      const f = fixture(provider), picker = installObservedModelPicker(f, provider, Element), surface = fiveHourLimit(f);
+      surface.card.values.hidden = ''; surface.usage.values.hidden = '';
+      for (const menu of [picker.menu, picker.nested]) {
+        const dismiss = menu.onDispatch!;
+        menu.onDispatch = (event: any) => {
+          dismiss(event);
+          if (event.type !== 'keydown' || event.key !== 'Escape' || picker.trigger.values['aria-expanded'] !== 'false') return;
+          delete surface.card.values.hidden; delete surface.usage.values.hidden;
+          if (drift) f.world.__computaModelOwner = 'foreign';
+        };
+      }
+      let result = await f.run('discoverModels');
+      expect(result.pending).toBe(true);
+      for (let phase = 0; phase < 4 && result.pending; phase++) result = await f.run('discoverModels');
+      expect(result.error).toBe(drift ? 'model_unverified' : 'website_usage_limit');
+      expect(result.modelChoices).toBeUndefined(); expect(result.freshQuotaAbort).toBeUndefined();
+      expect(picker.trigger.values['aria-expanded']).toBe('false'); expect(picker.trigger.clicks).toBe(1);
+      expect([...surface.controls, f.send, f.stop].every(node => node.clicks === 0)).toBe(true);
+      expect(f.composer.events).toEqual([]);
+    }
+  });
+
   function claudeDiscoveryQuotaWaitFixture(variation: string, deadline: number) {
     const f = fixture(provider), picker = installObservedModelPicker(f, provider, Element);
     const surface = incognitoResetCard(f); surface.card.values.hidden = "";
@@ -1138,6 +1258,27 @@ describe("embedded Claude fixed adapter", () => {
     expect(waits).toHaveLength(1); expect(f.delays).toEqual([]);
     expect(picker.trigger.clicks).toBe(1); expect(f.send.clicks + surface.about.clicks + surface.offer.clicks + surface.reset.clicks + surface.shared.clicks).toBe(0);
     expect(f.composer.events).toEqual([]);
+  });
+
+  test('Claude existing post-close wait wakes for five-hour quota and revalidates ownership', async () => {
+    for (const drift of [false, true]) {
+      const { f, picker, surface, waits, run } = claudeDiscoveryQuotaWaitFixture('control_count', Date.now() + 5_000);
+      expect((await run()).pending).toBe(true); expect((await run()).pending).toBe(true);
+      const pending = run();
+      for (let tick = 0; tick < 40 && waits.length === 0; tick++) await Promise.resolve();
+      expect(waits).toHaveLength(1);
+      surface.card.connected = false;
+      const quota = fiveHourLimit(f);
+      if (drift) f.world.__computaModelOwner = 'foreign';
+      f.observers.at(-1)!.callback([]);
+      const result = await pending;
+      expect(result.error).toBe(drift ? 'model_unverified' : 'website_usage_limit');
+      expect(result.modelChoices).toBeUndefined(); expect(result.freshQuotaAbort).toBeUndefined();
+      waits[0].expire(); expect(waits).toHaveLength(1); expect(f.delays).toEqual([]);
+      expect(picker.trigger.clicks).toBe(1); expect(picker.trigger.values['aria-expanded']).toBe('false');
+      expect([...quota.controls, f.send, f.stop].every(node => node.clicks === 0)).toBe(true);
+      expect(f.composer.events).toEqual([]);
+    }
   });
 
   test("Claude's post-close quota wait uses the original deadline and retains unresolved finite reasons", async () => {
