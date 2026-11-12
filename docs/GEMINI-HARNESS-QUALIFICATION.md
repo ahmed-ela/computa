@@ -96,6 +96,26 @@ before model selection, prompt submission, or tool execution. Computa saved
 closure of the unused session. The provider's reason for challenging that
 request remains unknown.
 
+A second graceful restart of the same signed build reproduced verification at
+17:06 EST, this time on the first ordinary Gemini load. The native incident
+record shows one initial `GET` to Gemini, the redirect to Google `/sorry`, and
+HTTP 429 with a recent `Date` and `no-store`, `no-cache`, and `must-revalidate`.
+The challenge was left open for manual verification; no Gemini task was sent.
+All seven scoped cookie metadata vectors matched at the earlier healthy launch,
+the in-process model challenge, shutdown, the second launch, and its ordinary
+challenge. These samples do not identify the cookies sent on either request.
+
+A separate loopback WebKit test used two disposable persistent profiles and
+distinct writer/reader processes. After graceful exit and restart, the local
+server observed the synthetic persistent cookie on both the initial request
+and redirected landing for ordinary-first and model-first view creation. This
+exercises the profile API and first-request persistence with synthetic data.
+It does not model Google's cross-site cookie rules or verification decision.
+Taken together, the live and local checks do not establish a restart-induced
+profile reset, stale cached redirect, or a Computa change that prevents the
+challenge. Verification and cleanup requirements are unchanged. All four
+models still need a full workflow pass after verified recovery.
+
 ## Ownership failure and repair
 
 The installed 0.7.0 (321) baseline displayed a healthy signed-in Gemini page.
