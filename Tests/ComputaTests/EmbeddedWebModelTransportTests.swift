@@ -7526,6 +7526,123 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testFirstMessagePreclickRemountUsesOneCertifiedRouteAndOriginalExposureBudget() async throws {
+        for corruption in ["none", "prefix", "full_body"] {
+            let reveal = "setTimeout(() => { cover.remove(); window.fixtureExposureChanges++; }, 45);"
+            let page = Self.collapsedFirstUserPage(exposureDelayMilliseconds: 45)
+                .replacingOccurrences(of: reveal, with: """
+                    setTimeout(() => {
+                      const replacement = user.cloneNode(true);
+                      const body = replacement.querySelector('[data-markdown-text-style="user-message"]');
+                      const more = replacement.querySelector('button[aria-label="Show more"]');
+                      if ('\(corruption)' === 'prefix') body.textContent += '!';
+                      more.addEventListener('click', () => {
+                        window.fixtureExpansionClicks++;
+                        setTimeout(() => {
+                          body.textContent = prompt + ('\(corruption)' === 'full_body' ? '!' : '');
+                          more.remove();
+                        }, 25);
+                      });
+                      user.replaceWith(replacement);
+                      history.pushState({}, '', '/c/local-chatgpt%3Apreclick-remount?temporary-chat=true');
+                      cover.remove(); window.fixtureExposureChanges++;
+                      window.fixtureRemountOldDetached = !user.isConnected && !userBody.isConnected && !expand.isConnected;
+                    }, 45);
+                    """)
+            XCTAssertFalse(page.contains(reveal), "The fixture must replace the actual exposure timer")
+            let fixture = try Fixture(page: page)
+            defer { fixture.shutdown() }
+            let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/extra-high", label: "Extra High")
+            let started = try await startChoice(choice, in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            let view = try XCTUnwrap(fixture.browser.webView(for: ownedID))
+            try await waitForFixture(view)
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            let generation = fixture.browser.documentGeneration(for: ownedID)
+            let privateWorld = WKContentWorld.world(name: "computa-chatgpt-model-v1")
+            _ = try await evaluate(view, """
+                const scroll = Element.prototype.scrollIntoView;
+                Element.prototype.scrollIntoView = function(options) {
+                  scroll.call(this, options);
+                  if (this.getAttribute('aria-label') === 'Show more') this.setAttribute('data-fixture-expansion-scroll', 'true');
+                }; return true;
+                """, world: privateWorld)
+            var acceptedRoutes = 0
+            var originalDeadline: Double?
+            fixture.transport.setFirstUserExpansionRouteCheckpointForTesting { checkpoint in
+                guard checkpoint == .routeAccepted else { return }
+                acceptedRoutes += 1
+                let before = try? await self.evaluate(view, """
+                    const candidate = globalThis.__computaModelFirstExpansion;
+                    return { clicked:candidate?.clicked, witnessed:!!candidate?.exposureRemount,
+                      deadline:candidate?.exposureDeadline, phase:globalThis.__computaChatSubmissionState?.pending?.phase,
+                      fullProof:!!globalThis.__computaModelFirstProof };
+                    """, world: privateWorld) as? [String: Any]
+                XCTAssertEqual(before?["clicked"] as? Bool, false)
+                XCTAssertEqual(before?["phase"] as? String, "send_claimed")
+                XCTAssertEqual(before?["fullProof"] as? Bool, false)
+                if corruption != "prefix" { XCTAssertEqual(before?["witnessed"] as? Bool, true) }
+                originalDeadline = before?["deadline"] as? Double
+            }
+            defer { fixture.transport.setFirstUserExpansionRouteCheckpointForTesting(nil) }
+            do {
+                let prompt = String(repeating: "Owned café 東京 pre-click remount payload.\n", count: 600)
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+                let complete = try await waitForState("complete", fixture.transport, token: token)
+                XCTAssertEqual(corruption, "none", "A remount cannot authorize a changed prefix or full body")
+                XCTAssertEqual(complete["text"] as? String, Self.fixtureToolReply)
+                try assertChoiceEvidence(complete, choice: choice)
+                let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+                XCTAssertEqual((proof["firstUserFingerprint"] as? String)?.count, 64)
+                XCTAssertEqual((proof["submittedPromptFingerprint"] as? String)?.count, 64)
+            } catch {
+                XCTAssertNotEqual(corruption, "none", "The certified unchanged remount must complete: \(error)")
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser))
+            }
+            let physical = try await evaluate(view, """
+                return {clicks:window.fixtureExpansionClicks, scrolls:window.fixtureExposureScrolls,
+                  changes:window.fixtureExposureChanges, covered:window.fixtureCoveredAtScroll,
+                  oldDetached:window.fixtureRemountOldDetached};
+                """) as? [String: Any]
+            XCTAssertEqual(physical?["clicks"] as? Int, corruption == "prefix" ? 0 : 1)
+            XCTAssertEqual(physical?["scrolls"] as? Int, 1)
+            XCTAssertEqual(physical?["changes"] as? Int, 1)
+            XCTAssertEqual(physical?["covered"] as? Bool, true)
+            XCTAssertEqual(physical?["oldDetached"] as? Bool, true)
+            XCTAssertEqual(fixture.createdTabs.count, 1)
+            XCTAssertEqual(fixture.browser.documentGeneration(for: ownedID), generation)
+            try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            if corruption == "none" {
+                XCTAssertEqual(acceptedRoutes, 1)
+                let final = try await evaluate(view, """
+                    const candidate = globalThis.__computaModelFirstExpansion;
+                    const state = globalThis.__computaChatSubmissionState, record = state?.lastVerified;
+                    return {consumed:candidate?.exposureRemountConsumed, resumed:candidate?.exposureResumed,
+                      deadline:candidate?.exposureDeadline, expansionDeadline:candidate?.deadline,
+                      clicked:candidate?.clicked, outcome:candidate?.outcome,
+                      sameRoot:record?.root === candidate?.root, sameBody:record?.body === candidate?.body,
+                      phase:record?.phase, pendingCleared:state?.pending == null};
+                    """, world: privateWorld) as? [String: Any]
+                XCTAssertNotNil(originalDeadline)
+                XCTAssertEqual(final?["deadline"] as? Double, originalDeadline)
+                XCTAssertEqual(final?["expansionDeadline"] as? Double, originalDeadline)
+                for key in ["consumed", "resumed", "clicked", "sameRoot", "sameBody", "pendingCleared"] {
+                    XCTAssertEqual(final?[key] as? Bool, true, key)
+                }
+                XCTAssertEqual(final?["outcome"] as? String, "expanded")
+                XCTAssertEqual(final?["phase"] as? String, "verified")
+                fixture.transport.setFirstUserExpansionRouteCheckpointForTesting(nil)
+                let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+                XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+            } else {
+                await assertRejected(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Never replay the rejected request"])
+                try await assertChoiceLedger(view, insertions: 1, sends: 1, selections: 1)
+            }
+            try await assertHumanTabIntact(fixture, retaining: corruption == "none" ? nil : ownedID)
+        }
+    }
+
     func testBoundFirstMessageDisplayRecoveryReprovesWholeBodyWithoutResending() async throws {
         let (fixture, view, token, fingerprint) = try await readyBoundFirstUserFixture()
         defer { fixture.shutdown() }

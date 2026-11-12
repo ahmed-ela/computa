@@ -5430,6 +5430,121 @@ describe('ChatGPT first-message expansion after a failed center hit', () => {
     }
   });
 
+  test('a certified pre-click remount spends only the original exposure claim', async () => {
+    for (const mutation of ['none', 'utf8', 'settles', 'prefix', 'old_prefix', 'old_connected', 'owner', 'work', 'model',
+      'fingerprint', 'no_certificate', 'wrong_edge', 'expired', 'stale_lease', 'replacement_root', 'replacement_body',
+      'replacement_control', 'duplicate_control', 'disabled', 'result', 'late_pending', 'second_after_click']) {
+      const x = await chatTurnFixture(choice), first = await x.dispatch(
+        (mutation === 'utf8' ? 'Owned café — 東京 😀 remount.\n' : 'Owned pre-click remount.\n').repeat(1_200));
+      const oldRoot = x.f.document.querySelectorAll('article[data-turn="user"]')[0], oldBody = oldRoot.children[0];
+      oldBody.text = first.outbound.slice(0, 10_240);
+      const oldControl = new Element('BUTTON', { 'aria-label': 'Show more' }); oldRoot.append(oldControl);
+      const overlay = new Element('DIV'); x.f.body.append(overlay); x.f.setHit(overlay);
+      let scrolls = 0;
+      oldControl.getBoundingClientRect = () => ({ left: 20, top: 80, width: 100, height: 30 });
+      (oldControl as any).scrollIntoView = () => { scrolls++; };
+      x.f.window.innerWidth = 1_000; x.f.window.innerHeight = 800; x.f.window.requestAnimationFrame = () => 1;
+      const listeners = new Map<string, Set<Function>>();
+      for (const target of [x.f.document, x.f.window] as any[]) {
+        target.addEventListener = (name: string, callback: Function) => {
+          if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name)!.add(callback);
+        };
+        target.removeEventListener = (name: string, callback: Function) => listeners.get(name)?.delete(callback);
+      }
+      const allowance = { allowFirstUserExpansion: true, firstUserExpansionModelChoice: choice };
+      const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/local-chatgpt%3Apreclick-remount?temporary-chat=true';
+      const pending = x.observe(first, allowance);
+      for (let i = 0; i < 100 && !(x.f.world.__computaModelFirstExpansion as any)?.exposureDiagnostic?.waited; i++) await Bun.sleep(1);
+      const candidate = x.f.world.__computaModelFirstExpansion as any;
+      expect(candidate.exposureDiagnostic.waited).toBe(true);
+      const deadline = candidate.exposureDeadline;
+      const root = new Element('ARTICLE', { 'data-turn': 'user' });
+      const body = new Element('DIV', { class: 'whitespace-pre-wrap' }, oldBody.text);
+      const control = new Element('BUTTON', { 'aria-label': 'Show more' }); root.append(body, control);
+      (control as any).scrollIntoView = () => { scrolls++; };
+      control.getBoundingClientRect = oldControl.getBoundingClientRect;
+      control.onClick = () => {
+        body.text = first.outbound + (mutation === 'result' ? '!' : '');
+        if (mutation === 'second_after_click') {
+          const secondRoot = new Element('ARTICLE', { 'data-turn': 'user' });
+          secondRoot.append(new Element('DIV', { class: 'whitespace-pre-wrap' }, first.outbound));
+          secondRoot.parentElement = x.f.messages;
+          x.f.messages.children = x.f.messages.children.map(node => node === root ? secondRoot : node); root.connected = false;
+        }
+      };
+      root.parentElement = x.f.messages;
+      x.f.messages.children = x.f.messages.children.map(node => node === oldRoot ? root : node); oldRoot.connected = false;
+      x.f.document.URL = toURL; x.f.location.pathname = '/c/local-chatgpt%3Apreclick-remount'; x.f.setHit(control);
+      if (mutation === 'old_prefix') oldBody.text += '!';
+      if (mutation === 'old_connected') oldRoot.connected = true;
+      for (const callback of listeners.get('scroll') || []) callback();
+      const crossed = await pending;
+      expect(crossed.error).toBeDefined(); expect(crossed).not.toHaveProperty('submissionProof');
+      expect(oldControl.clicks + control.clicks).toBe(0); expect(x.send.clicks).toBe(1);
+      const record = (x.f.world.__computaChatSubmissionState as any).pending;
+      let replacement: Element | undefined;
+      if (mutation === 'prefix') body.text += '!';
+      if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign-owner';
+      if (mutation === 'work') { x.f.chatMode.values['aria-pressed'] = 'false'; x.f.workMode.values['aria-pressed'] = 'true'; }
+      if (mutation === 'model') (x.f.world.__computaChatPresetPin as any).invalidated = true;
+      if (mutation === 'fingerprint') record.fingerprint = '0'.repeat(64);
+      if (mutation === 'expired') x.f.advanceTime(1_801);
+      if (mutation === 'replacement_root') {
+        replacement = new Element('ARTICLE', { 'data-turn': 'user' });
+        replacement.append(new Element('DIV', { class: 'whitespace-pre-wrap' }, body.text), new Element('BUTTON', { 'aria-label': 'Show more' }));
+        replacement.parentElement = x.f.messages;
+        x.f.messages.children = x.f.messages.children.map(node => node === root ? replacement! : node); root.connected = false;
+      }
+      if (mutation === 'replacement_body') {
+        replacement = new Element('DIV', { class: 'whitespace-pre-wrap' }, body.text); replacement.parentElement = root;
+        root.children = root.children.map(node => node === body ? replacement! : node); body.connected = false;
+      }
+      if (mutation === 'replacement_control') {
+        replacement = new Element('BUTTON', { 'aria-label': 'Show more' }); replacement.parentElement = root;
+        root.children = root.children.map(node => node === control ? replacement! : node); control.connected = false;
+      }
+      if (mutation === 'duplicate_control') root.append(new Element('BUTTON', { 'aria-label': 'Show more' }));
+      if (mutation === 'disabled') control.disabled = true;
+      if (mutation === 'settles') x.f.setHit(overlay);
+      if (mutation === 'stale_lease' || mutation === 'late_pending') {
+        const hit = x.f.document.elementFromPoint;
+        x.f.document.elementFromPoint = (left, top) => {
+          const target = hit(left, top);
+          if (left === 70 && top === 95) {
+            if (mutation === 'stale_lease') x.f.world.__computaChatActiveInvocation = { document: x.f.document };
+            else record.phase = 'verified';
+          }
+          return target;
+        };
+      }
+      const certificate = mutation === 'no_certificate' ? {} : {
+        firstUserExpansionRouteContinuation: [{ fromURL: mutation === 'wrong_edge' ? toURL : fromURL, toURL }] };
+      const resumedRead = x.observe(first, { ...allowance, ...certificate });
+      if (mutation === 'settles') {
+        for (let i = 0; i < 100 && !listeners.get('scroll')?.size; i++) await Bun.sleep(1);
+        expect(listeners.get('scroll')?.size).toBe(1); expect(control.clicks).toBe(0);
+        x.f.setHit(control); for (const callback of listeners.get('scroll') || []) callback();
+      }
+      const resumed = await resumedRead;
+      const succeeds = ['none', 'utf8', 'settles'].includes(mutation);
+      if (succeeds) {
+        expect(resumed.error, mutation).toBeUndefined(); expect(resumed.firstUserVerified).toBe(true);
+        expect(resumed.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+        expect(candidate.root).toBe(root); expect(candidate.body).toBe(body); expect(candidate.deadline).toBe(deadline);
+        expect(record.root).toBe(root); expect(record.body).toBe(body); expect(record.phase).toBe('verified');
+        expect((await x.observe(first)).error).toBeUndefined();
+      } else {
+        expect(resumed.error, mutation).toBeDefined(); expect(resumed).not.toHaveProperty('firstUserVerified', true);
+        expect(resumed).not.toHaveProperty('submissionProof'); expect(resumed).not.toHaveProperty('answerComplete', true);
+        expect((await x.observe(first, { ...allowance, ...certificate })).error, mutation).toBeDefined();
+      }
+      expect(x.f.world.__computaModelFirstExpansion).toBe(candidate); expect(candidate.exposureDeadline).toBe(deadline);
+      expect(scrolls, mutation).toBe(1); expect(oldControl.clicks, mutation).toBe(0);
+      expect(control.clicks, mutation).toBe(succeeds || ['result', 'second_after_click'].includes(mutation) ? 1 : 0);
+      expect(replacement?.clicks ?? 0).toBe(0); expect(x.send.clicks, mutation).toBe(1);
+    }
+  });
+
   test('a certified first route resumes the same exposure wait before its only display click', async () => {
     for (const mutation of ['none', 'settles', 'control', 'body', 'work', 'stale_lease', 'late', 'uncertified', 'output']) {
       const x = await staged(); let scrolls = 0;

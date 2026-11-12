@@ -7822,6 +7822,41 @@ async function chatGPTObserveFirstUserExpansion(candidate) {
   candidate.outcome = 'expanded';
   return true;
 }
+function chatGPTExposureSubmissionIntact(candidate, state, record, fingerprint) {
+  return !!state && state === globalThis.__computaChatSubmissionState && !state.revoked
+    && state.document === document && state.owner === candidate.owner && state.pending === record && state.lastVerified == null
+    && record?.document === document && record.owner === candidate.owner && record.sequence === 1
+    && record.phase === 'send_claimed' && record.root == null && record.body == null && record.replacement == null
+    && record.nativeFirstPinned !== true && record.fingerprint === fingerprint && chatGPTSubmissionPins(record)
+    && record.marker === candidate.marker && state.firstMarker === candidate.marker && record.canonical === candidate.canonical
+    && input.submissionSequence === 1 && input.submissionMarker === candidate.marker
+    && input.expectedFirstUserFingerprint == null && globalThis.__computaModelFirstProof == null
+    && globalThis.__computaModelBoundFirstExpansion == null
+    && websiteModelChoiceEqual(state.modelChoice, candidate.modelChoice)
+    && websiteModelChoiceEqual(input.expectedModelChoice, candidate.modelChoice);
+}
+function chatGPTExposureRemountIntact(candidate, witness, expectedContext) {
+  const roots = chatGPTMessageRoots('user'), root = roots[0], body = root && chatGPTUserBody(root);
+  const controls = root ? chatGPTFirstUserExpandControls(root, [root], 0) : [], control = controls[0];
+  return chatGPTExpansionLeaseCurrent() && candidate === globalThis.__computaModelFirstExpansion
+    && !candidate.bound && candidate.clicked === false && !candidate.modelFailure
+    && candidate.exposureResumed !== true && candidate.exposureRemountConsumed !== true
+    && candidate.exposureDeadline === witness.deadline && Date.now() < witness.deadline
+    && candidate.root === witness.oldRoot && candidate.body === witness.oldBody && candidate.exposureControl === witness.oldControl
+    && !witness.oldRoot.isConnected && !witness.oldBody.isConnected && !witness.oldControl.isConnected
+    && witness.oldRoot.contains(witness.oldBody) && witness.oldRoot.contains(witness.oldControl)
+    && normalizedFirstBody(witness.oldBody) === candidate.rendered
+    && roots.length === 1 && root === witness.root && body === witness.body
+    && root !== witness.oldRoot && body !== witness.oldBody && root.isConnected && body.isConnected
+    && normalizedFirstBody(body) === candidate.rendered
+    && controls.length === 1 && control === witness.control && control !== witness.oldControl
+    && (control.tagName === 'BUTTON' || control.getAttribute('role') === 'button')
+    && !control.disabled && control.getAttribute('aria-disabled') !== 'true' && getComputedStyle(control).pointerEvents !== 'none'
+    && candidate.routeURL === witness.fromURL && document.URL === witness.toURL && witness.fromURL !== witness.toURL
+    && chatGPTExposureSubmissionIntact(candidate, witness.state, witness.record, witness.fingerprint)
+    && globalThis.__computaChatPresetPin === witness.pin && chatGPTFirstRouteModelPins(candidate)
+    && chatGPTFirstUserExpansionContextFailure({ ...candidate, root, body }) === expectedContext;
+}
 async function chatGPTContinueFirstUserExpansion(candidate) {
   const latch = () => { candidate.initialTransitionDiagnostic ||= chatGPTInitialExpansionFacts(candidate); };
   const edges = input.firstUserExpansionRouteContinuation;
@@ -7839,13 +7874,27 @@ async function chatGPTContinueFirstUserExpansion(candidate) {
   const resumeExposure = interrupted && candidate.clicked === false && candidate.exposureRouteInterrupted === true
     && candidate.exposureResumed !== true && chatGPTExpansionLeaseCurrent()
     && Number.isFinite(candidate.exposureDeadline) && Date.now() < candidate.exposureDeadline;
+  const witness = candidate.exposureRemount;
+  const resumeRemount = candidate.outcome === 'node_changed' && ['root', 'body'].includes(candidate.contextFailure)
+    && witness && routeStart === 0 && edges.length === 1
+    && edges[0].fromURL === witness.fromURL && edges[0].toURL === witness.toURL
+    && chatGPTExposureRemountIntact(candidate, witness, null);
   if (input.action !== 'inspect' || input.allowFirstUserExpansion !== true || input.allowFirstUserBinding !== true
     || input.expectedFirstUserFingerprint != null || globalThis.__computaModelFirstProof != null
     || routeStart < 0
-    || (candidate.clicked !== true && !resumeExposure)
+    || (candidate.clicked !== true && !resumeExposure && !resumeRemount)
     || !websiteModelChoiceEqual(candidate.modelChoice, input.firstUserExpansionModelChoice)) {
     latch();
     return chatGPTRejectFirstUserExpansion(candidate, 'context_changed', 'continuation');
+  }
+  if (resumeRemount) {
+    // One positively witnessed replacement spends the existing unclicked claim.
+    // Keep its original exposure deadline; full body/hash/model proof still follows.
+    candidate.exposureRemountConsumed = true;
+    candidate.root = witness.root; candidate.body = witness.body; candidate.exposureControl = witness.control;
+    candidate.routeURL = witness.toURL; candidate.contextFailure = null; candidate.outcome = 'claimed';
+    candidate.exposureResumed = true;
+    return chatGPTExpandFirstUser(candidate, true);
   }
   if (!completed && !interrupted) {
     latch();
@@ -7898,6 +7947,9 @@ async function chatGPTWaitForExpansionExposure(candidate, control, intact, avail
     : Math.min(started + 1_800, Number.isFinite(candidate.deadline) ? candidate.deadline : Infinity);
   candidate.exposureDeadline = until;
   const pin = globalThis.__computaChatPresetPin;
+  const state = globalThis.__computaChatSubmissionState, record = state?.pending;
+  const submission = chatGPTExposureSubmissionIntact(candidate, state, record, record?.fingerprint)
+    ? Object.freeze({ state, record, fingerprint: record.fingerprint }) : null;
   diagnostic.waited = true;
   websiteModelDiagnosticPhase('first_user_exposure_wait');
   const result = await new Promise(resolve => {
@@ -7922,6 +7974,13 @@ async function chatGPTWaitForExpansionExposure(candidate, control, intact, avail
           && normalizedFirstBody(candidate.body) === candidate.rendered && available()) {
           websiteChatDrainPinnedMutations(pin);
           if (globalThis.__computaChatPresetPin === pin && pin && !pin.invalidated) candidate.exposureRouteInterrupted = true;
+        } else if (submission && !candidate.exposureRemount && candidate.outcome === 'claimed'
+          && ['root', 'body'].includes(chatGPTFirstUserExpansionContextFailure(candidate))) {
+          const roots = chatGPTMessageRoots('user'), root = roots[0], body = root && chatGPTUserBody(root);
+          const controls = root ? chatGPTFirstUserExpandControls(root, [root], 0) : [];
+          const witness = { ...submission, pin, oldRoot: candidate.root, oldBody: candidate.body, oldControl: control,
+            root, body, control: controls[0], fromURL: input.expectedURL, toURL: document.URL, deadline: until };
+          if (chatGPTExposureRemountIntact(candidate, witness, 'url')) candidate.exposureRemount = Object.freeze(witness);
         }
         return finish('context_changed');
       }
@@ -7965,7 +8024,10 @@ async function chatGPTExpandFirstUser(candidate, resumeExposure = false) {
   const reject = outcome => chatGPTRejectFirstUserExpansion(candidate, outcome);
   try {
     const intact = () => (!resumeExposure || chatGPTExpansionLeaseCurrent()) && chatGPTFirstUserExpansionContext(candidate)
-      && normalizedFirstBody(candidate.body) === candidate.rendered;
+      && normalizedFirstBody(candidate.body) === candidate.rendered
+      && (!candidate.exposureRemountConsumed || chatGPTExposureSubmissionIntact(candidate,
+        candidate.exposureRemount.state, candidate.exposureRemount.record, candidate.exposureRemount.fingerprint)
+        && globalThis.__computaChatPresetPin === candidate.exposureRemount.pin && !candidate.exposureRemount.pin.invalidated);
     // Only descendants of the captured physical message can receive a click.
     // The wider diagnostic ancestry never grants mutation authority.
     const localControls = () => chatGPTFirstUserExpandControls(candidate.root, [candidate.root], 0);
@@ -8028,7 +8090,7 @@ async function chatGPTExpandFirstUser(candidate, resumeExposure = false) {
     candidate.exposureDiagnostic.final = chatGPTExpansionExposure(control);
     if (candidate.exposureDiagnostic.waited && Date.now() >= candidate.exposureDeadline) return reject('obstructed');
     if (!chatGPTControlExposed(control)) return reject('obstructed');
-    if (resumeExposure && !chatGPTExpansionLeaseCurrent()) return reject('context_changed');
+    if (resumeExposure && !intact()) return reject('context_changed');
     candidate.clicked = true;
     if (!candidate.initialRoute && !candidate.pendingPrivate && !candidate.userRootGap)
       candidate.deadline = resumeExposure ? candidate.exposureDeadline : Date.now() + 1_800;
