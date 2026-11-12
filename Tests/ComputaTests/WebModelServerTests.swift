@@ -4018,6 +4018,67 @@ final class WebModelServerTests: XCTestCase {
         _ = await server.shutdown()
     }
 
+    func testKimiAndDeepSeekSignInGuidancePreservesNativeWireAndSavedFailures() async throws {
+        let failure = EmbeddedWebModelTransport.Failure.signInRequired
+        let kimi = syntheticKimiChoice.modelID
+        let deepSeek = WebsiteModeChoice(deepSeekMode: .chat).requestID
+        let cases = [
+            (kimi, deepSeek, "In Computa's browser, choose Model sign-ins, then Kimi sign-in. Sign in on that tab, then choose Verify Kimi sign-in. Start a new task once verification succeeds."),
+            (deepSeek, kimi, "Sign in to DeepSeek in a regular tab in Computa's browser. With Computa idle, return to the DeepSeek chat home at chat.deepseek.com so Computa can verify your sign-in before you start a new task."),
+        ]
+        let legacy = #"{"error":{"code":"sign_in_required","message":"Sign in to the selected AI website in Computa's built-in browser, then refresh website models before retrying.","param":null,"required_action":"sign_in","retryable":false,"type":"model_error"}}"#
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaSignInHistory-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = WebsiteTurnFailureStore(directory: root)
+
+        for (model, foreign, message) in cases {
+            let transport = ExternalGateWebModelTransport(point: .start, failure: failure)
+            let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+            await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport, defaultChatChoice: syntheticChatGPTChoice))
+            let endpoint = try await server.start().appendingPathComponent("responses")
+            let task = "contextual-sign-in-gate"
+            let taskID = try await bindWebsiteInferenceFixtureTurn(server, taskID: task)
+            var request = URLRequest(url: endpoint)
+            request.httpMethod = "POST"
+            request.httpBody = try JSONSerialization.data(withJSONObject: [
+                "model": model, "input": [["role": "user", "content": "Synthetic sign-in gate"]],
+                "tools": [], "stream": true,
+            ])
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("Bearer " + server.bearerToken, forHTTPHeaderField: "Authorization")
+            request.setValue(taskID, forHTTPHeaderField: "X-Computa-Task-ID")
+            request.setValue(try websiteInferenceFixtureMetadata(taskID: task), forHTTPHeaderField: "x-codex-turn-metadata")
+            let (data, response) = try await URLSession.shared.data(for: request)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 403)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let expected: [String: Any] = ["error": ["type": "model_error", "message": message,
+                "code": "sign_in_required", "param": NSNull(), "retryable": false, "required_action": "sign_in"] as [String: Any]]
+            XCTAssertTrue(NSDictionary(dictionary: body).isEqual(to: expected))
+            let diagnostic = try XCTUnwrap(server.takeFailureDiagnostic(taskID: taskID))
+            let diagnosticBody = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(diagnostic.utf8)) as? [String: Any])
+            XCTAssertTrue(NSDictionary(dictionary: diagnosticBody).isEqual(to: expected))
+            XCTAssertNil(server.takeFailureDiagnostic(taskID: taskID))
+            let operations = await transport.operations()
+            XCTAssertEqual(operations, ["webProviderStart"], "The sign-in instruction cannot initiate recovery or replay the task")
+
+            let thread = UUID().uuidString
+            func record(_ text: String, modelID: String) -> WebsiteTurnFailureStore.Record? {
+                WebsiteTurnFailureStore.Record.make(taskID: taskID, threadID: thread, turnID: UUID().uuidString,
+                    modelID: modelID, diagnosticText: text)
+            }
+            let current = try XCTUnwrap(record(diagnostic, modelID: model))
+            let previous = try XCTUnwrap(record(legacy, modelID: model))
+            XCTAssertEqual(previous.diagnosticText, legacy)
+            XCTAssertTrue(store.append(current))
+            XCTAssertTrue(store.append(previous))
+            XCTAssertEqual(try store.load(threadID: thread), [current, previous])
+            XCTAssertNil(record(diagnostic, modelID: foreign))
+            XCTAssertNil(record(diagnostic.replacingOccurrences(of: message, with: "PRIVATE PAGE PROSE"), modelID: model))
+            XCTAssertNil(record(legacy.replacingOccurrences(of: "false", with: "true"), modelID: model))
+            _ = await server.shutdown()
+        }
+    }
+
     func testExternalWebsiteGatesAreFiniteHTTPFailuresWithoutInferenceRetriesOrToolOutput() async throws {
         for (model, failure, code, action) in externalGateCases {
             for point in [DiagnosticFailurePoint.start, .readinessPoll, .sendThrown, .responsePoll] {

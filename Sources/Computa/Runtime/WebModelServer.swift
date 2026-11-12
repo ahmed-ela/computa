@@ -3574,6 +3574,7 @@ actor WebModelServer {
                     close(id); return
                 }
                 let diagnosticEpoch = failureDiagnostics.epoch(taskID: taskID)
+                var modelID: String?
                 do {
                     guard request.method == "POST", request.path == "/v1/responses" else { throw HTTPFailure.notFound }
                     let contentType = request.headers["content-type"]?.split(separator: ";", maxSplits: 1).first?
@@ -3588,6 +3589,7 @@ actor WebModelServer {
                         retireMalformedRequest(taskID: taskID)
                         throw error
                     }
+                    modelID = prepared.model
                     let body = try await infer(prepared, taskID: taskID, identity: identity)
                     failureDiagnostics.clear(taskID: taskID)
                     body.responseProfile?.mark(.httpWriteStart)
@@ -3603,10 +3605,10 @@ actor WebModelServer {
                         throw error
                     }
                 } catch {
-                    if !shuttingDown, Self.hasFiniteDiagnostic(error), let diagnostic = try? Self.errorBody(for: error) {
+                    if !shuttingDown, Self.hasFiniteDiagnostic(error), let diagnostic = try? Self.errorBody(for: error, modelID: modelID) {
                         failureDiagnostics.record(diagnostic, taskID: taskID, epoch: diagnosticEpoch)
                     }
-                    try await Self.sendError(connection, error: error)
+                    try await Self.sendError(connection, error: error, modelID: modelID)
                 }
             } catch {
                 if !(error is CancellationError) { try? await Self.sendError(connection, error: error) }
@@ -3799,9 +3801,9 @@ actor WebModelServer {
         return .init(status: "500 Internal Server Error", type: "server_error", code: "internal_error")
     }
 
-    private static func sendError(_ connection: NWConnection, error: any Error) async throws {
+    private static func sendError(_ connection: NWConnection, error: any Error, modelID: String? = nil) async throws {
         try await send(connection, status: errorPresentation(for: error).status,
-                       type: "application/json", body: errorBody(for: error))
+                       type: "application/json", body: errorBody(for: error, modelID: modelID))
     }
 
     private static func hasFiniteDiagnostic(_ error: any Error) -> Bool {
@@ -3815,6 +3817,10 @@ actor WebModelServer {
     /// Only native finite classifications can add recovery metadata. Website
     /// copy, URLs and response prose cannot populate these protocol fields.
     static func errorBody(for error: any Error) throws -> Data {
+        try errorBody(for: error, modelID: nil)
+    }
+
+    static func errorBody(for error: any Error, modelID: String?) throws -> Data {
         let presentation = errorPresentation(for: error)
         let nativeBrowserFailure = NativeBrowserFailure(error)
         var fields: [String: Any] = ["type": presentation.type, "message": nativeBrowserFailure?.localizedDescription ?? error.localizedDescription,
@@ -3858,6 +3864,15 @@ actor WebModelServer {
             fields["code"] = code
             fields["retryable"] = false
             fields["required_action"] = action
+        }
+        if error as? EmbeddedWebModelTransport.Failure == .signInRequired, let modelID {
+            switch provider(for: modelID) {
+            case "kimi":
+                fields["message"] = "In Computa's browser, choose Model sign-ins, then Kimi sign-in. Sign in on that tab, then choose Verify Kimi sign-in. Start a new task once verification succeeds."
+            case "deepseek":
+                fields["message"] = "Sign in to DeepSeek in a regular tab in Computa's browser. With Computa idle, return to the DeepSeek chat home at chat.deepseek.com so Computa can verify your sign-in before you start a new task."
+            default: break
+            }
         }
         if case let .ownershipFailure(reason) = error as? EmbeddedWebModelTransport.Failure {
             fields["ownership_reason"] = reason.rawValue

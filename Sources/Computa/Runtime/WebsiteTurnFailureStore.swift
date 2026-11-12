@@ -176,8 +176,15 @@ struct WebsiteTurnFailureStore: Sendable {
                 nativeError = EmbeddedWebModelTransport.Failure.productModeUnverified
             default: return nil
             }
-            guard let native = try? WebModelServer.errorBody(for: nativeError),
+            guard let native = try? WebModelServer.errorBody(for: nativeError, modelID: modelID),
                   var expected = try? JSONSerialization.jsonObject(with: native) as? [String: Any] else { return nil }
+            if code == "sign_in_required", provider == "kimi" || provider == "deepseek",
+               let legacyBytes = try? WebModelServer.errorBody(for: nativeError),
+               let legacy = try? JSONSerialization.jsonObject(with: legacyBytes) as? [String: Any],
+               NSDictionary(dictionary: supplied).isEqual(to: legacy) {
+                // Preserve the exact generic sign-in envelope saved by older builds.
+                expected = legacy
+            }
             if code == "website_usage_limit", var legacyError = expected["error"] as? [String: Any] {
                 // The refresh controls were hidden after this exact historical
                 // message shipped. Retain saved diagnostics without admitting
