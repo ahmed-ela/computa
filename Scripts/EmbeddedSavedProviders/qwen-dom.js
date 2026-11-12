@@ -510,6 +510,70 @@ function computaQwenDOM(c) {
       point.describeCover = (scope, user, answer) => displayCover(misses, probe, clip, scope, user, answer);
     return reason === 'occluded' && blocker ? 'occluded_' + blocker : reason;
   }
+  // Observe only the direct children of the pinned transcript. A current
+  // sibling match alone cannot prove that an old assistant turn was replaced.
+  function watchAssistantTurnReplacement(outer, userTurn, oldTurn) {
+    if (!outer?.isConnected || userTurn?.parentElement !== outer || oldTurn?.parentElement !== outer
+      || oldTurn.previousElementSibling !== userTurn || typeof MutationObserver !== 'function') return null;
+    const before = oldTurn.previousSibling, after = oldTurn.nextSibling;
+    const ancestors = new Map();
+    for (let node = outer; node.parentNode; node = node.parentNode) {
+      if (ancestors.size === 32) return null;
+      ancestors.set(node.parentNode, node);
+    }
+    if (!ancestors.has(document)) return null;
+    let records = [], observer, closed = false;
+    const close = () => { closed = true; observer?.disconnect(); records = []; };
+    const collect = batch => {
+      if (closed) return;
+      if (batch.length > 64) { close(); return; }
+      const direct = [];
+      for (const record of batch) {
+        if (record.target === outer) {
+          if (record.type !== 'childList' || direct.length === 2
+            || record.addedNodes.length > 1 || record.removedNodes.length > 1
+            || record.previousSibling !== before || record.nextSibling !== after) { close(); return; }
+          direct.push(record);
+        } else {
+          const anchor = ancestors.get(record.target);
+          // A moved ancestor or any change inside the pinned user turn ends
+          // this witness, even if the page later restores the same nodes.
+          if (!anchor || record.type !== 'childList'
+            || record.addedNodes.length > 64 || record.removedNodes.length > 64
+            || Array.prototype.includes.call(record.addedNodes, anchor)
+            || Array.prototype.includes.call(record.removedNodes, anchor)) { close(); return; }
+        }
+      }
+      if (!direct.length) return;
+      // A split remove/insert must arrive in a single observer delivery.
+      if (records.length) { close(); return; }
+      records = direct;
+    };
+    try {
+      observer = new MutationObserver(collect);
+      observer.observe(outer, { childList: true });
+      observer.observe(userTurn, { childList: true, characterData: true, subtree: true });
+      for (const ancestor of ancestors.keys()) observer.observe(ancestor, { childList: true });
+    }
+    catch { close(); return null; }
+    return {
+      close,
+      consume(currentTurn) {
+        if (!closed) collect(observer.takeRecords());
+        const [first, second] = records;
+        const removed = first?.removedNodes.length === 1 && first.removedNodes[0] === oldTurn;
+        const inserted = record => record.addedNodes.length === 1 && record.addedNodes[0] === currentTurn;
+        const replaced = !closed && removed && (records.length === 1 && inserted(first)
+          || records.length === 2 && first.addedNodes.length === 0 && second.removedNodes.length === 0 && inserted(second));
+        close();
+        return replaced && oldTurn.isConnected === false && oldTurn.parentElement === null
+          && currentTurn.isConnected && currentTurn.parentElement === outer && userTurn.parentElement === outer
+          && currentTurn.previousElementSibling === userTurn
+          && currentTurn.previousSibling === before && currentTurn.nextSibling === after;
+      }
+    };
+  }
+
   // The long user message has a display-only toggle inside this exact chunk.
   // A missing/ambiguous shape is never an invitation to click another button.
   function firstBodyPresentation(transcript) {
@@ -1343,7 +1407,8 @@ function computaQwenDOM(c) {
     setter.call(form.editor, prompt);
     form.editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));
   }
-  return { rejectUserCount, rejectSelectionBinding, firstDisplayReplacement, watchDisplayRender, displayHitFailure, firstBodyPresentation, firstBodyFailureStructure,
+  return { rejectUserCount, rejectSelectionBinding, firstDisplayReplacement, watchDisplayRender, watchAssistantTurnReplacement,
+    displayHitFailure, firstBodyPresentation, firstBodyFailureStructure,
     responseChoiceTranscript: () => transcript(true, null, true),
     hasResponseChoice: () => c.nodes(document, '.qwen-chat-message-assistant .smrm', 2).length !== 0,
     initialResponseIdentityTranscript: emptyContainerPrompt => transcript(true, emptyContainerPrompt), route, authored, initialReady, picker, modelRows, composer, transcript, modelQuotaTV, replyProgressUI, completionCandidate, rawAnswer, codePayloadFailure, sampleCodePayload, authoredSourceCandidate,

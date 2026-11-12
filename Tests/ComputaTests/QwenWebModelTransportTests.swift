@@ -1905,8 +1905,12 @@ final class QwenWebModelTransportTests: XCTestCase {
         }
     }
 
-    func testQwenOptimisticComparisonRootReplacementRequiresExactBodyBeforeChoice() async throws {
-        for (rootHandoff, changedSuffix) in [("reuse", false), ("clone", false), ("clone", true)] {
+    func testQwenOptimisticComparisonReplacementRequiresExactBodyBeforeChoice() async throws {
+        for (rootHandoff, changedSuffix) in [("reuse", false), ("clone", false), ("clone", true),
+                                            ("turn", false), ("turn_split", false), ("turn", true),
+                                            ("turn_clone", false), ("turn_noise", false),
+                                            ("turn_split_delayed", false), ("turn_outer_move", false)] {
+            print("Qwen comparison fixture handoff=\(rootHandoff) changedSuffix=\(changedSuffix)")
             let fixture = try Fixture(setup: "qwenFixture.options.firstLongMessageDisplay=true; qwenFixture.options.holdResponseIdentity=true;")
             defer { fixture.shutdown() }
             let token = try await start(fixture, label: "Qwen3.8-Max")
@@ -1920,6 +1924,20 @@ final class QwenWebModelTransportTests: XCTestCase {
             XCTAssertNil(held["modelProofContext"])
             try await installResponseChoice(fixture, scenario: "waiting", rootHandoff: rootHandoff)
 
+            if ["turn_clone", "turn_noise", "turn_split_delayed", "turn_outer_move"].contains(rootHandoff) {
+                do {
+                    _ = try await call(fixture, "webProviderPoll", token)
+                    XCTFail("An unverified transcript transition cannot carry the assistant turn")
+                } catch {
+                    XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptFirstUser))
+                }
+                let closed = try await call(fixture, "webProviderFinish", token)
+                XCTAssertEqual(closed["cleanup"] as? String, "failed")
+                let counts = try await evaluate(fixture.view, "return [qwenFixture.counts.displayClicks, ...choiceFixture.clicks];") as? [Int]
+                XCTAssertEqual(counts, [0, 0, 0])
+                try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+                continue
+            }
             let pending = try await call(fixture, "webProviderPoll", token)
             XCTAssertEqual(pending["modelVerificationPendingReason"] as? String, "qwen_first_body_expansion_v1")
             XCTAssertEqual(pending["text"] as? String, "")
@@ -2025,8 +2043,25 @@ final class QwenWebModelTransportTests: XCTestCase {
         let first=document.querySelector('.chat-response-message'),root=first.parentElement;
         const originalFooter=first.querySelector('.response-message-footer-actions');originalFooter.remove();
         if(rootHandoff!=='none'){
-          const replacement=root.cloneNode(false);root.replaceWith(replacement);root=replacement;
-          if(rootHandoff==='clone')first=first.cloneNode(true);
+          const replacement=root.cloneNode(false);
+          if(rootHandoff.startsWith('turn')){
+            const oldTurn=root.parentElement,newTurn=oldTurn.cloneNode(false);
+            const outer=oldTurn.parentElement,after=oldTurn.nextSibling;
+            newTurn.append(replacement);
+            if(rootHandoff==='turn_split'||rootHandoff==='turn_split_delayed'){
+              oldTurn.remove();
+              if(rootHandoff==='turn_split_delayed')await Promise.resolve();
+              outer.insertBefore(newTurn,after);
+            }else if(rootHandoff==='turn_outer_move'){
+              const parent=outer.parentNode,slot=outer.nextSibling;
+              outer.remove();oldTurn.replaceWith(newTurn);parent.insertBefore(outer,slot);
+            }else oldTurn.replaceWith(newTurn);
+            if(rootHandoff==='turn_noise'){
+              const spacer=document.createElement('div');newTurn.before(spacer);spacer.remove();
+            }
+          }else root.replaceWith(replacement);
+          root=replacement;
+          if(rootHandoff==='clone'||rootHandoff==='turn_clone')first=first.cloneNode(true);
         }
         const second=first.cloneNode(true);second.id='chat-response-message-bbf6615b-e58b-4059-a95c-0d711aa4b6ae';
         const node=(tag,cls,text)=>{const n=document.createElement(tag);n.className=cls;if(text)n.textContent=text;return n;};

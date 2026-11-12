@@ -175,7 +175,9 @@ enum QwenFixturePage {
     const footer = node('div', { class: 'response-message-footer-actions' });
     const rail = node('div', { class: 'qwen-chat-package-comp-new-action-control', 'data-chat-id': conversationID, 'data-msg-id': answerID });
     for (const label of ['Copy', 'Good Response', 'Bad Response', 'Share', 'Regenerate', 'More actions']) rail.append(node('button', { 'aria-label': label }, label));
-    footer.append(rail); assistant.append(footer); root.append(assistant); answerTurn.append(root); turn.append(answerTurn); sendScope.replaceChildren();
+    footer.append(rail); assistant.append(footer); root.append(assistant); answerTurn.append(root);
+    if (answerTurn.parentElement !== turn) turn.append(answerTurn);
+    sendScope.replaceChildren();
   }
   function canonicalize() {
     if (!submitted) return;

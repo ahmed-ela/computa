@@ -439,10 +439,15 @@ async function computaSavedConversation(input, c, dom, config) {
           const pairRootMatches = comparisonPair.root === view.pins.at(-3);
           // A disconnected root can hand off the same response in the first
           // card or yield a detached, unbound placeholder to the current pair.
-          // The assistant turn and every user pin must still match. The pair
-          // earns no preference grant until the full submitted body is proved.
+          // The pair earns no preference grant until the full submitted body
+          // is proved, including when an observed turn replacement is adopted.
           if (oldRootDetached && pairRootMatches && (priorCardIndex === 0 || priorCardIndex < 0 && priorDetached))
             pins[rootIndex] = comparisonPair.root;
+          const previousTurn = optimistic.pins.at(-2), currentTurn = view.pins.at(-2);
+          if (previousTurn !== currentTurn && oldRootDetached && pairRootMatches
+            && priorCardIndex === 0 && prior.isConnected === true && comparisonPair.pins[1] === currentTurn
+            && optimistic.turnWatch?.consume(currentTurn))
+            pins[rootIndex + 1] = currentTurn;
           requireDisplayPins({ pins }, view, (reason, structure) => {
             if (reason !== 'answer_ancestry_changed') return refuse(reason, structure);
             return refuse(reason, () => {
@@ -452,7 +457,6 @@ async function computaSavedConversation(input, c, dom, config) {
               if (facts.slot === 'assistant_root') return { ...facts, continuity: { oldRootDetached, pairRootMatches,
                 priorResponse, assistantTurnMatches: optimistic.pins.at(-2) === view.pins.at(-2) } };
               if (facts.slot === 'assistant_turn' && facts.previous === 'object' && facts.current === 'object') {
-                const previousTurn = optimistic.pins.at(-2), currentTurn = view.pins.at(-2);
                 const outer = optimistic.pins.at(-4), userTurn = optimistic.pins.at(-5);
                 const sameOuter = currentTurn.parentElement === outer;
                 return { ...facts, turnContinuity: { oldRootDetached, oldTurnDetached: previousTurn.isConnected === false,
@@ -492,9 +496,16 @@ async function computaSavedConversation(input, c, dom, config) {
         if (witness.sawPreview && !preview) reject('preview_prefix_mismatch');
         if (preview) witness.sawPreview = true;
         checkFirstDisplaySelection('display_before_click', !optimistic, witness);
-        if (t.pendingAnswer) return true;
+        if (t.pendingAnswer) {
+          if (preview && input.allowSavedResponseChoice === true && !witness.turnWatch
+            && config.firstDisplayTurnReplacementChoice && c.equalChoice(state.model.choice, config.firstDisplayTurnReplacementChoice))
+            witness.turnWatch = dom.watchAssistantTurnReplacement(view.pins.at(-4), view.pins.at(-5), view.pins.at(-2));
+          return true;
+        }
         // First genuine pair. Spend a separate, unchanged native-granted read
         // after pinning it. No action or response is released by this receipt.
+        witness.turnWatch?.close();
+        delete witness.turnWatch;
         state.firstDisplay = { ...view, canonical:route.canonical, settledPair:witness, replacement:witness.replacement,
           clicked:false, sawExpanded:false, complete:false };
         delete state.firstDisplayWitness;
@@ -1195,6 +1206,10 @@ async function computaSavedConversation(input, c, dom, config) {
     if (state && (!error?.computaAdapterFailure || state.deletion || (state.submitted || state.initialReadComplete
       || state.model || state.selection || state.mode || state.modeSelection || state.prepared || state.inserted)
       && ['conversation_changed', 'document_changed', 'model_mismatch', 'model_unverified', 'mode_mismatch', 'mode_unverified'].includes(error.error))) state.terminal = true;
+    if (state?.terminal && state.firstDisplayWitness?.turnWatch) {
+      state.firstDisplayWitness.turnWatch.close();
+      delete state.firstDisplayWitness.turnWatch;
+    }
     if (state?.terminal && state.firstDisplay?.settlement) {
       state.firstDisplay.settlement.watch.consume();
       delete state.firstDisplay.settlement;
