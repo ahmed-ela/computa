@@ -45,6 +45,34 @@ recovery period; intervening native follow-ups prevent isolating verification ag
 Earlier staged/installed statements below describe historical evidence, not the
 current installation.
 
+## November 12: restart comparison and renewed verification
+
+On build 540, one normal Gemini navigation received a fresh Google verification
+HTTP 429 at 11:56 EST. Later that same process loaded the signed-in composer;
+the first normal Gemini navigation after a controlled restart also returned
+HTTP 200. The persisted WebKit profile identifier and all seven scoped cookie
+category counts matched across the restart. Those counts do not establish
+cookie contents or what the request sent. No Gemini model response was logged
+before the successful post-restart human load.
+
+Build 541 refuses automatic recovery when the current ordinary Gemini landing
+actually rendered an HTTP error. A fresh healthy landing must still be followed
+by verified discovery and cleanup before a saved checkpoint can be cleared.
+The change covers an unnecessary extra request after a same-origin HTTP error;
+it does not prevent a Google `/sorry` redirect.
+
+After a fresh build 541 launch, the normal Gemini tab, provider model discovery,
+and a Flash-Lite session each reached Gemini with HTTP 200. Computa discovered
+3.5 Flash-Lite, 4 Hydrogen, 3.1 Pro and 4 Argon. The ordinary website picker
+also showed 4 Carbon, which this discovery did not offer. The Flash-Lite
+session completed and closed, but the workflow failed because the model passed
+a nonexistent working directory to two terminal calls. During the next model's
+startup, Hydrogen received a Google verification HTTP 429 before submission.
+Its unused website session closed with a saved receipt. One subsequent normal
+Gemini reload received the same verification HTTP 429. No blocked prompt was
+replayed. These observations show that restart alone is insufficient to explain
+the challenge; Google's triggering condition remains unverified.
+
 ## Ownership failure and repair
 
 The installed 0.7.0 (321) baseline displayed a healthy signed-in Gemini page.
