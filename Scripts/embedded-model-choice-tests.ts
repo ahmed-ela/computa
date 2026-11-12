@@ -4157,12 +4157,18 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           } finally { prototype.observe = observe; }
         }
       });
-      test('prepared readiness reopens a reciprocally linked picker detached before proof', async () => {
-        for (const mode of ['stable_controls', 'transient_controls', 'menu_only', 'aria_only', 'wrong_id', 'wrong_label',
+      for (const action of ['sendReady', 'submit'] as const) test(`prepared ${action} reopens a reciprocally linked picker detached before proof`, async () => {
+        const submitting = action === 'submit';
+        const modes = ['stable_controls', 'transient_controls', 'menu_only', 'aria_only', 'wrong_id', 'wrong_label',
           'id_drift', 'disjoint_intervals', 'duplicate_menu', 'dropped_menu_role', 'message_wrapped',
           'hidden_duplicate_menu_id', 'hidden_duplicate_trigger_id',
-          'detached_repaint', 'foreign_portal', 'remounted_trigger', 'still_connected', 'send_toggled']) {
-          const x = await preparedReadinessRecovery('Pro'), { trigger } = x.picker;
+          'detached_repaint', 'foreign_portal', 'remounted_trigger', 'still_connected', 'send_toggled'];
+        if (submitting) modes.unshift('send_replaced_after_proof', 'send_duplicated_after_proof');
+        for (const mode of modes) {
+          const x = submitting ? await preparedSubmit('Medium') : await preparedReadinessRecovery('Pro');
+          const { trigger } = x.picker;
+          const openings = submitting ? x.openings : x.recoveryOpenings;
+          const readRequest = submitting ? x.request : x.recoveryRequest;
           const controls = trigger.getAttribute('aria-controls'), triggerID = trigger.getAttribute('id');
           const stable = mode === 'stable_controls' || mode === 'menu_only';
           const popup = new Node('DIV', { role: 'menu', id: ['wrong_id', 'detached_repaint'].includes(mode) ? 'foreign-picker' : controls,
@@ -4184,9 +4190,9 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           if (!stable) delete trigger.values['aria-controls'];
           const click = trigger.onClick, dispatch = replacement.onDispatch;
           trigger.onClick = () => {
-            if (x.recoveryOpenings() === 1) {
+            if (openings() >= 1) {
               trigger.values['aria-controls'] = controls;
-              body.append(replacement);
+              if (!body.children.includes(replacement)) body.append(replacement);
             }
             click();
           };
@@ -4200,10 +4206,31 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
             registrations.set(this, [...(registrations.get(this) || []), { target, options }]);
             return observe.call(this, target, options);
           };
+          const changeAfterProof = mode === 'send_replaced_after_proof' || mode === 'send_duplicated_after_proof';
+          const query = x.f.document.querySelectorAll;
+          let lateSend: any = null;
+          if (changeAfterProof) x.f.document.querySelectorAll = function(selector: string) {
+            // This single-selector lookup belongs to providerPageAction, after
+            // its awaited recovered precheck. The picker proof uses a union.
+            if (!lateSend && selector === 'button[aria-label="Send prompt"]' && openings() === 2
+              && x.pending.firstSubmitOpening?.recoveryClaimed === true
+              && trigger.getAttribute('aria-expanded') === 'false') {
+              expect(x.pending.phase, mode).toBe('prepared');
+              expect(x.f.world.__computaModelFirstSubmitted, mode).toBeUndefined();
+              lateSend = new Node('BUTTON', { ...x.send.values });
+              if (mode === 'send_replaced_after_proof') {
+                body.children = body.children.filter((node:any) => node !== x.send);
+                x.send.parentElement = null; x.send.connected = false;
+              }
+              body.append(lateSend);
+            }
+            return query.call(this, selector);
+          };
           try {
-            const reading = x.f.run('sendReady', x.recoveryRequest);
-            await microtasks(); expect(x.recoveryOpenings(), mode).toBe(1);
-            const slot = x.pending.firstReadinessOpening;
+            const reading = x.f.run(action, readRequest);
+            await microtasks(); expect(openings(), mode).toBe(1);
+            const slotName = submitting ? 'firstSubmitOpening' : 'firstReadinessOpening';
+            const slot = x.pending[slotName];
             expect(slot.insertProof).toBe(x.pending.firstInsertOpening);
             expect(slot.recoveryClaimed).toBe(false);
             const records: any[] = [];
@@ -4248,26 +4275,46 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
               popup.parentElement = null; popup.connected = false; root.children = [];
               root.append(new Node('DIV', { ...popup.values, id: controls }));
             }
+            expect(x.send.clicks, mode).toBe(0);
             await finishFirstInsertWait(x, 901); await finishFirstInsertWait(x, 901);
             const result = await reading, accepted = mode === 'stable_controls' || mode === 'transient_controls';
-            expect(x.recoveryOpenings(), mode).toBe(accepted ? 2 : 1);
-            expect(slot.recoveryClaimed, mode).toBe(accepted);
-            expect(x.pending.firstReadinessOpening).toBe(slot);
+            if (changeAfterProof) {
+              expect(lateSend, mode).not.toBeNull();
+              expect(lateSend.clicks + x.send.clicks, mode).toBe(0);
+              expect(x.pending.phase, mode).toBe('prepared');
+              expect(x.f.world.__computaModelFirstSubmitted, mode).toBeUndefined();
+              expect(result.error, mode).toBe('send_unavailable');
+            }
+            expect(openings(), mode).toBe(accepted ? (submitting ? 3 : 2) : changeAfterProof ? 2 : 1);
+            expect(slot.recoveryClaimed, mode).toBe(accepted || changeAfterProof);
+            expect(x.pending[slotName]).toBe(slot);
             if (accepted) {
               expect(popup.isConnected, mode).toBe(false); expect(popup.events).toHaveLength(0);
-              expect(result.error, mode).toBeUndefined(); expect(result.sendReady, mode).toBe(true);
-              expect(result.modelEvidence.selected, mode).toEqual(x.expected);
-              expect(result.modelEvidence.chatSelection.family).toEqual({ key: 'GPT-6', label: 'GPT-6' });
-              expect(result.modelEvidence.chatSelection.automaticFamily.policy).toBe('highest_offered_plain_gpt');
-              expect(result.modelEvidence.chatSelection.power.key).toBe('pro');
-              expect(result.productModeEvidence).toMatchObject({ product: 'chatgpt', mode: 'chat', temporaryTransition: 'acknowledged' });
+              expect(result.error, mode).toBeUndefined();
+              if (submitting) expect(result.submitted, mode).toBe(true);
+              else expect(result.sendReady, mode).toBe(true);
+              if (!submitting) {
+                expect(result.modelEvidence.selected, mode).toEqual(x.expected);
+                expect(result.modelEvidence.chatSelection.family).toEqual({ key: 'GPT-6', label: 'GPT-6' });
+                expect(result.modelEvidence.chatSelection.automaticFamily.policy).toBe('highest_offered_plain_gpt');
+                expect(result.modelEvidence.chatSelection.power.key).toBe('pro');
+                expect(result.productModeEvidence).toMatchObject({ product: 'chatgpt', mode: 'chat', temporaryTransition: 'acknowledged' });
+              }
               expect(x.picker.trigger).toBe(trigger); expect(trigger.getAttribute('aria-expanded')).toBe('false');
               expect(trigger.getAttribute('aria-controls')).toBe(stable ? controls : null);
             } else {
               expect(result.error, mode).toBeDefined(); expect(result.modelEvidence, mode).toBeUndefined();
               expect(result.sendReady, mode).toBeUndefined();
             }
-            expect(x.f.composer.textContent).toBe(x.prompt); noReadinessInputReplay(x);
+            if (submitting) {
+              expect(x.send.clicks, mode).toBe(accepted ? 1 : 0);
+              if (!accepted) expect(x.f.composer.textContent, mode).toBe(x.prompt);
+              expect(x.counts().insertions, mode).toBe(1);
+              expect(x.picker.familyOptions.map((node:any) => node.clicks), mode).toEqual(x.familyBefore);
+              expect(arrows(x.picker), mode).toHaveLength(x.powerBefore);
+            } else {
+              expect(x.f.composer.textContent).toBe(x.prompt); noReadinessInputReplay(x);
+            }
           } finally { prototype.observe = observe; }
         }
       });

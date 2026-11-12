@@ -523,6 +523,15 @@ function websiteChatReadinessPopupDetached(trace) {
   // structural lifecycle, never the model or even the popup's visibility.
   return Math.max(opening.index, expandedChanges[0].index, linkedFrom) < Math.min(removal, expandedChanges[1].index, linkedUntil);
 }
+function websiteChatVisibleSendControls(visible) {
+  return [...new Set(document.querySelectorAll(
+    'button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"], button[aria-label="Send"]'))]
+    .filter(visible);
+}
+function websiteChatSameVisibleSend(send, visible, enabled) {
+  const controls = websiteChatVisibleSendControls(visible);
+  return controls.length === 1 && controls[0] === send && enabled(send);
+}
 async function websiteChatObserveSelection(request, expected, freshGuard = null, attempt = null, context = null) {
   const owner = globalThis.__computaModelOwner, url = document.URL, originalDocument = document;
   const mutable = typeof freshGuard === 'function';
@@ -551,6 +560,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   let firstVerificationOpeningDiagnostic = null;
   let preparedReadinessOpeningDiagnostic = null;
   let readinessPopupObserver = null, readinessPopupTrace = null, readinessPopupLifecycle = null;
+  let detachedSubmitSend = null;
   const recordReadinessPopup = records => {
     if (readinessPopupTrace.recordCount + records.length > 64) readinessPopupTrace.overflow = true;
     if (!readinessPopupTrace.overflow && !readinessPopupTrace.invalid)
@@ -798,6 +808,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     return paragraph.tagName === 'P' && paragraph.childNodes.length === 1 && br?.tagName === 'BR'
       && br.classList.contains('ProseMirror-trailingBreak') && !br.childNodes.length;
   };
+  const exactVisibleSend = (current, send) => websiteChatSameVisibleSend(send, current.visible, current.enabled);
   const insertOpeningIntact = (current, spent = false, allowAcknowledged = false) => {
     const saved = insertOpening, state = saved?.state, record = saved?.record, prior = saved?.insertProof;
     const composer = saved?.composer, value = insertComposerValue(composer);
@@ -812,7 +823,8 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         if (record.firstSubmitOpening !== saved || record.readyForSubmitOpening !== prior || request.submissionSequence !== 1
           || request.submissionMarker !== record.marker || request.prompt !== saved.prompt
           || !prior.exactSubmitDraft || !chatGPTExactSubmitDraft(composer, value, request.prompt)
-          || globalThis.__computaModelLastSubmissionCount !== undefined) return false;
+          || globalThis.__computaModelLastSubmissionCount !== undefined
+          || detachedSubmitSend && !exactVisibleSend(current, detachedSubmitSend)) return false;
       } else if (firstReadiness) {
         const readinessGrant = request.preparedChatReadinessOpening;
         const snapshot = typeof chatGPTFirstChatReadinessSnapshot === 'undefined' ? null : chatGPTFirstChatReadinessSnapshot;
@@ -827,9 +839,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
           || !snapshot || snapshot.document !== originalDocument || snapshot.state !== state || snapshot.record !== record
           || snapshot.composer !== composer || snapshot.value !== value || snapshot.ready !== true
           || !current.enabled(snapshot.send)) return false;
-        const sends = [...new Set(document.querySelectorAll('button[data-testid="send-button"], button[aria-label="Send prompt"], '
-          + 'button[aria-label="Send message"], button[aria-label="Send"]'))].filter(current.visible);
-        if (sends.length !== 1 || sends[0] !== snapshot.send) return false;
+        if (!exactVisibleSend(current, snapshot.send)) return false;
       } else if (request.action !== 'verifyModel' || expected.key !== 'chat/latest/instant'
         || !grant || typeof grant !== 'object' || Array.isArray(grant) || Object.keys(grant).sort().join(',') !== 'fingerprint,marker,sequence' || grant.sequence !== 1
         || grant.marker !== record.marker || !/^[a-f0-9]{64}$/.test(grant.fingerprint) || grant.fingerprint !== record.fingerprint
@@ -984,8 +994,14 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         draftObserver = new MutationObserver(recordDraftChanges);
         draftObserver.observe(document.documentElement || document, {subtree:true,childList:true,characterData:true});
         insertOpening.composer.addEventListener?.('input', invalidateDraft, true);
-        if (firstReadiness) {
-          readinessPopupTrace = { trigger, composer: insertOpening.composer, send: chatGPTFirstChatReadinessSnapshot.send,
+        const submitControls = firstSubmit && typeof context?.recordRecoveredSubmitSend === 'function'
+          ? websiteChatVisibleSendControls(current.visible) : [];
+        const popupSend = firstReadiness ? chatGPTFirstChatReadinessSnapshot.send
+          : submitControls.length === 1 && current.enabled(submitControls[0]) ? submitControls[0] : null;
+        if (popupSend) {
+          // Require a fresh model read after a proved detachment and bind
+          // the currently visible Send control across that recovery.
+          readinessPopupTrace = { trigger, composer: insertOpening.composer, send: popupSend,
             body: document.body,
             triggerID: trigger.getAttribute('id'), controls: trigger.getAttribute('aria-controls'),
             expanded: trigger.getAttribute('aria-expanded'), expandedChanges: [], controlsChanges: [],
@@ -1018,13 +1034,15 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
           if (firstVerify) readStage = 'first_verification_clock_unconfirmed';
           throw failure('model_unverified');
         }
-        if (firstVerify || firstReadiness) recordVerifyOpening(verifyObserver?.takeRecords?.() || []);
+        if (firstVerify || firstReadiness || firstSubmit) recordVerifyOpening(verifyObserver?.takeRecords?.() || []);
         let detachedReadinessPopup = false;
-        if (firstReadiness && readinessPopupObserver) {
+        if ((firstReadiness || firstSubmit) && readinessPopupObserver) {
           recordReadinessPopup(readinessPopupObserver.takeRecords?.() || []);
           readinessPopupObserver.disconnect?.();
           detachedReadinessPopup = verifyAcknowledged && current.physicalMenus.length === 0
-            && websiteChatReadinessPopupDetached(readinessPopupTrace);
+            && websiteChatReadinessPopupDetached(readinessPopupTrace)
+            && (!firstSubmit || exactVisibleSend(current, readinessPopupTrace.send));
+          if (firstSubmit && detachedReadinessPopup) detachedSubmitSend = readinessPopupTrace.send;
           readinessPopupLifecycle = readinessPopupTrace.overflow ? 'overflow'
             : detachedReadinessPopup ? 'detached_associated' : 'unproved';
         }
@@ -1436,6 +1454,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       && provedPin.headerTrigger === trigger && provedPin.invalidated !== true
       && websiteChatResolvedSelectionEqual(provedPin.selection, evidence.chatSelection))
       provedPin.genericHeaderVerified = final.headerPresentation && !final.headerPower ? trigger : null;
+    if (detachedSubmitSend) context.recordRecoveredSubmitSend(detachedSubmitSend);
     return { modelEvidence: evidence, modelChoices: websiteChatPowers.map(power => websiteChatPresetChoice(family, power)), modelDiagnostic };
   } catch (error) {
     return error?.error ? error : failure('model_unverified');
@@ -6334,14 +6353,15 @@ async function providerPageAction(input, readLineageFingerprint = null) {
   if (chatReadinessFinalGuardOnly && !chatGPTFirstChatReadinessFinalGuard(input)) return { error: 'not_fresh' };
   const readinessFinalGuardOnly = instantReadinessFinalGuardOnly || chatReadinessFinalGuardOnly;
   chatGPTPreparationRecord('providerEntryMs', entryStarted);
-  let setupStarted = null;
+  let setupStarted = null, recoveredSubmitSend = null;
   // Focus-only preparation, model-only verification and scoped read-only
   // first-Instant readiness need the full final proof. Mutating editor and
   // response actions retain their proof before and after the action.
   if (!['stop', 'prepare', 'verifyModel'].includes(input.action) && input.expectedModelChoice != null
     && !readinessFinalGuardOnly) {
-    const proof = await websiteModelReadEvidence('chatgpt', input.expectedModelChoice, null,
-      { scope: 'action_precheck', action: input.action });
+    const context = { scope: 'action_precheck', action: input.action };
+    if (input.action === 'submit') context.recordRecoveredSubmitSend = send => { recoveredSubmitSend = send; };
+    const proof = await websiteModelReadEvidence('chatgpt', input.expectedModelChoice, null, context);
     setupStarted = chatGPTPreparationNow();
     if (proof.error) return proof;
     if (!chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
@@ -6688,6 +6708,9 @@ async function providerPageAction(input, readLineageFingerprint = null) {
     if (globalThis.__computaModelLastSubmissionCount !== undefined
       && userCount <= globalThis.__computaModelLastSubmissionCount)
       return chatGPTUserCountFailure('repeated_submit', ownedUserCount, userCount);
+    const recoveredSendCurrent = recoveredSubmitSend && (() => send === recoveredSubmitSend
+      && websiteChatSameVisibleSend(send, visible, enabled));
+    if (recoveredSendCurrent && !recoveredSendCurrent()) return { error: 'send_unavailable' };
     if (userCount === 0) {
       if (globalThis.__computaModelFirstSubmitted || globalThis.__computaModelFirstPrompt !== prompt
         || !prompt.endsWith(`\n\nComputa session marker: ${expectedFirstUserMarker}`))
@@ -6709,6 +6732,7 @@ async function providerPageAction(input, readLineageFingerprint = null) {
       globalThis.__computaChatResourceTimingClaim = Object.freeze({ document, owner: input.ownerToken,
         userCount, sequence: userCount + 1, mark: Number.isFinite(mark) && mark >= 0 ? mark : null });
     } catch { /* A missing clock cannot alter submission behavior. */ }
+    if (recoveredSendCurrent && !recoveredSendCurrent()) return { error: 'send_unavailable' };
     send.click();
     const resourceTimingDiagnostic = chatGPTResourceTimingDiagnostic('send');
     return { submitted: true, ...(resourceTimingDiagnostic ? { resourceTimingDiagnostic } : {}) };

@@ -1353,93 +1353,129 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     func testFreshMediumSubmitPrecheckRecoversIgnoredOpeningButRejectsTransientAcknowledgement() async throws {
+        try await assertFreshMediumSubmitOpening(.ignored)
+        try await assertFreshMediumSubmitOpening(.ariaOnly)
+    }
+
+    func testFreshMediumSubmitPrecheckKeepsExactSendAcrossDetachedPopupRecovery() async throws {
+        try await assertFreshMediumSubmitOpening(.detached)
+        try await assertFreshMediumSubmitOpening(.replaceSend)
+    }
+
+    private enum PreparedSubmitOpening { case ignored, ariaOnly, detached, replaceSend }
+
+    private func assertFreshMediumSubmitOpening(_ opening: PreparedSubmitOpening) async throws {
         let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/medium", label: "Medium")
-        for acknowledged in [false, true] {
-            let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
-            defer { fixture.transport.setBeforePageResultValidationForTesting(nil); fixture.shutdown() }
-            let started = try await startChoice(choice, in: fixture)
-            let token = try XCTUnwrap(started["sessionToken"] as? String)
-            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
-            let ready = try await waitForState("ready", fixture.transport, token: token)
-            try assertChoiceEvidence(ready, choice: choice)
-            let initialSelections = try await evaluate(view, "return window.fixtureModelSelectionClicks;") as? Int
-            var readinessReturned = false, installed = false
-            fixture.transport.setBeforePageResultValidationForTesting { action in
-                if action == "insert" {
-                    // The fixture normalizes its editor asynchronously. Wait for that
-                    // real handoff so the interrupted opening belongs to submit.
-                    let enabled = try? await self.evaluate(view, """
-                        const send = document.querySelector('[data-testid="send-button"]');
-                        if (!send || !send.disabled) return !!send;
-                        return await new Promise(resolve => {
-                          const observer = new MutationObserver(() => {
-                            if (!send.disabled) { observer.disconnect(); clearTimeout(deadline); resolve(true); }
-                          });
-                          const deadline = setTimeout(() => { observer.disconnect(); resolve(false); }, 1000);
-                          observer.observe(send, {attributes:true, attributeFilter:['disabled']});
-                        });
-                        """)
-                    XCTAssertEqual(enabled as? Bool, true)
-                    return
-                }
-                if action == "sendReady" { readinessReturned = true; return }
-                // sendReady itself has a post-await model read. Interrupt only the next
-                // opening, after that proof and before the distinct native submit action.
-                guard readinessReturned, !installed, action == "verifyModel" else { return }
-                let prerequisites = try? await self.evaluate(view, """
-                    const pending = globalThis.__computaChatSubmissionState?.pending;
-                    const prior = pending?.firstInsertOpening, editor = document.getElementById('fixture-editor');
-                    // The editor has a presentation-only terminal LF. Its literal text is unchanged.
-                    return prior?.proved === true && prior.exactSubmitDraft === true
-                      && pending.readyForSubmitOpening === prior && prior.composer === editor
-                      && editor.innerText === prior.prompt + '\\n' && prior.editorValue === editor.innerText;
-                    """, world: WKContentWorld.world(name: "computa-chatgpt-model-v1"))
-                XCTAssertEqual(prerequisites as? Bool, true, "A verified, ready literal draft must precede submit")
-                let value = try? await self.evaluate(view, """
-                    const trigger = document.getElementById('fixture-model-trigger');
-                    if (!trigger || window.fixtureInputCount !== 1 || window.fixturePrompts.length !== 0) return false;
-                    window.fixtureSubmitPrecheckOpens = 0;
-                    trigger.addEventListener('click', function interrupt(event) {
-                      if (++window.fixtureSubmitPrecheckOpens === 2) {
-                        trigger.removeEventListener('click', interrupt, true);
-                        return;
-                      }
-                      event.stopImmediatePropagation();
-                      event.preventDefault();
-                      if (\(acknowledged)) {
-                        trigger.setAttribute('aria-expanded', 'true');
-                        trigger.setAttribute('aria-expanded', 'false');
-                      }
-                    }, true);
-                    return true;
+        let fixture = try Fixture(page: Self.modelChoicePage(.chatgpt))
+        defer { fixture.transport.setBeforePageResultValidationForTesting(nil); fixture.shutdown() }
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        let ready = try await waitForState("ready", fixture.transport, token: token)
+        try assertChoiceEvidence(ready, choice: choice)
+        let initialSelections = try await evaluate(view, "return window.fixtureModelSelectionClicks;") as? Int
+        let world = WKContentWorld.world(name: "computa-chatgpt-model-v1")
+        let detached = opening == .detached || opening == .replaceSend
+        var readinessReturned = false, installed = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "insert" {
+                // Wait for the fixture's real asynchronous editor acknowledgement
+                // so the interrupted picker opening belongs to native submit.
+                let enabled = try? await self.evaluate(view, """
+                    const send = document.querySelector('[data-testid="send-button"]');
+                    if (!send || !send.disabled) return !!send;
+                    return await new Promise(resolve => {
+                      const observer = new MutationObserver(() => {
+                        if (!send.disabled) { observer.disconnect(); clearTimeout(deadline); resolve(true); }
+                      });
+                      const deadline = setTimeout(() => { observer.disconnect(); resolve(false); }, 1000);
+                      observer.observe(send, {attributes:true, attributeFilter:['disabled']});
+                    });
                     """)
-                installed = value as? Bool == true
+                XCTAssertEqual(enabled as? Bool, true)
+                return
             }
-            let prompt = "Read the synthetic Medium submit fixture."
-            if acknowledged {
-                do {
-                    _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
-                    XCTFail("A transient acknowledged opening cannot authorize another header click or Send")
-                } catch {
-                    XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelUnverified)
+            if action == "sendReady" { readinessReturned = true; return }
+            // sendReady has a post-await model read. Arm only the next opening,
+            // after that proof and before the distinct native submit action.
+            guard readinessReturned, !installed, action == "verifyModel" else { return }
+            let inputs = try? await self.evaluate(view, "return window.fixtureInputCount === 1 && window.fixturePrompts.length === 0;")
+            XCTAssertEqual(inputs as? Bool, true)
+            let value = try? await self.evaluate(view, """
+                const pending = globalThis.__computaChatSubmissionState?.pending;
+                const prior = pending?.firstInsertOpening, editor = document.getElementById('fixture-editor');
+                const trigger = document.getElementById('fixture-model-trigger');
+                if (!trigger || prior?.proved !== true || prior.exactSubmitDraft !== true
+                  || pending.readyForSubmitOpening !== prior || prior.composer !== editor
+                  || editor.innerText !== prior.prompt + '\\n' || prior.editorValue !== editor.innerText) return false;
+                const ledger = globalThis.__fixtureSubmitPrecheck = {openings: 0, replaced: false, clicks: 0};
+                trigger.addEventListener('click', function interrupt(event) {
+                  if (++ledger.openings === 2) {
+                    trigger.removeEventListener('click', interrupt, true);
+                    return;
+                  }
+                  event.stopImmediatePropagation(); event.preventDefault();
+                  if (\(detached) || \(opening == .ariaOnly)) {
+                    trigger.setAttribute('aria-expanded', 'true');
+                    if (\(detached)) {
+                      const wrapper = document.createElement('section'), menu = document.createElement('div');
+                      menu.id = trigger.getAttribute('aria-controls');
+                      menu.setAttribute('role', 'menu'); menu.setAttribute('aria-labelledby', trigger.id);
+                      wrapper.append(menu); document.body.append(wrapper); wrapper.remove();
+                    }
+                    trigger.setAttribute('aria-expanded', 'false');
+                  }
+                }, true);
+                if (\(opening == .replaceSend)) {
+                  const query = document.querySelectorAll;
+                  document.querySelectorAll = function(selector) {
+                    // This single-selector lookup follows the recovered precheck.
+                    // The picker proof uses a distinct union of Send selectors.
+                    if (selector === 'button[aria-label="Send prompt"]' && ledger.openings === 2
+                      && pending.firstSubmitOpening?.recoveryClaimed === true
+                      && trigger.getAttribute('aria-expanded') === 'false') {
+                      document.querySelectorAll = query;
+                      const original = document.querySelector('[data-testid="send-button"]');
+                      const replacement = original.cloneNode(true);
+                      replacement.addEventListener('click', () => ledger.clicks++);
+                      original.replaceWith(replacement); ledger.replaced = true;
+                    }
+                    return query.call(this, selector);
+                  };
                 }
-            } else {
-                let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
-                try assertRunningOrVerifiedChoice(sent, choice: choice)
-                let complete = try await waitForState("complete", fixture.transport, token: token)
-                try assertChoiceEvidence(complete, choice: choice)
-            }
-            XCTAssertTrue(installed)
-            let openings = try await evaluate(view, "return window.fixtureSubmitPrecheckOpens;") as? Int
-            XCTAssertEqual(openings, acknowledged ? 1 : 2)
-            try await assertChoiceLedger(view, insertions: 1, sends: acknowledged ? 0 : 1,
-                                         selections: XCTUnwrap(initialSelections))
-            let finish = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
-            // The denied precheck follows the native submission claim. Without a
-            // verified first user, the retained private tab cannot claim cleanup.
-            XCTAssertEqual(finish["cleanup"] as? String, acknowledged ? "failed" : "not_created")
-            try await assertHumanTabIntact(fixture, retaining: acknowledged ? fixture.createdTabs.last : nil)
+                return true;
+                """, world: world)
+            installed = value as? Bool == true
         }
+        let prompt = "Read the synthetic Medium submit fixture."
+        let refused = opening == .ariaOnly || opening == .replaceSend
+        if refused {
+            do {
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+                XCTFail("The unproved opening or replacement Send cannot receive a click")
+            } catch {
+                let expected: EmbeddedWebModelTransport.Failure = opening == .ariaOnly ? .modelUnverified : .editorFailure("send_unavailable")
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, expected)
+            }
+        } else {
+            let sent = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+            try assertRunningOrVerifiedChoice(sent, choice: choice)
+            let complete = try await waitForState("complete", fixture.transport, token: token)
+            try assertChoiceEvidence(complete, choice: choice)
+        }
+        XCTAssertTrue(installed)
+        let result = try await evaluate(view, "return globalThis.__fixtureSubmitPrecheck;", world: world)
+        let ledger = try XCTUnwrap(result as? [String: Any])
+        XCTAssertEqual(ledger["openings"] as? Int, opening == .ariaOnly ? 1 : 2)
+        XCTAssertEqual(ledger["replaced"] as? Bool, opening == .replaceSend)
+        XCTAssertEqual(ledger["clicks"] as? Int, 0)
+        try await assertChoiceLedger(view, insertions: 1, sends: refused ? 0 : 1,
+                                     selections: XCTUnwrap(initialSelections))
+        let finish = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        // The denied precheck follows the native submission claim. Without a
+        // verified first user, the retained private tab cannot claim cleanup.
+        XCTAssertEqual(finish["cleanup"] as? String, refused ? "failed" : "not_created")
+        try await assertHumanTabIntact(fixture, retaining: refused ? fixture.createdTabs.last : nil)
     }
 
     func testPreparedMediumFinalReadinessRecoversOneIgnoredOpeningBeforeOneSend() async throws {
