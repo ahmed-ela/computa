@@ -1040,6 +1040,11 @@ final class ComputaAgentInstructionsTests: XCTestCase {
     func testCommandChecksFollowCurrentTerminalCapabilityAndRemainInFreshHandoff() {
         // Instruction delivery, not a semantic model-adherence test.
         let checks = ComputaAgentInstructions.commandChecks
+        let normalized = checks.replacingOccurrences(of: "\n", with: " ")
+        for rule in ["copy a requested absolute workdir verbatim", "Use the native <cwd> if no project directory is given",
+                     "Never prepend <cwd> or private HOME to an absolute path"] {
+            XCTAssertTrue(normalized.contains(rule), rule)
+        }
         for referenceTools in [true, false] {
             let native = ComputaAgentInstructions.developerInstructions(referenceTools: referenceTools)
             XCTAssertEqual(native.components(separatedBy: checks).count - 1, 1)
@@ -1068,30 +1073,35 @@ final class ComputaAgentInstructionsTests: XCTestCase {
 
     func testCommandGuidancePreservesCanonicalHistoryAndLiteralShellArguments() throws {
         let command = "printf 'literal;value'"
-        let original = try JSONSerialization.data(withJSONObject: [
-            "model": "browser/chatgpt", "input": [
-                ["role": "developer", "content": ComputaAgentInstructions.developerInstructions()],
-                ["role": "user", "content": "Run the requested literal command"],
-            ], "tools": [["type": "namespace", "name": "relay", "tools": [
-                ["type": "function", "name": "exec_command", "parameters": ["type": "object"]],
-            ]]],
-        ])
-        let request = try WebModelResponseCodec.prepareRequest(original)
-        _ = try assertRequestValuesAndHandoff(original, request: request,
-            includedInstructionText: [ComputaAgentInstructions.developerInstructions()])
-        XCTAssertTrue(request.prompt.contains(ComputaAgentInstructions.commandChecks))
-        let requestEnd = try XCTUnwrap(request.prompt.range(of: "END_COMPLETE_RESPONSES_REQUEST_JSON."))
-        let currentChecks = try XCTUnwrap(request.prompt.range(of: ComputaAgentInstructions.commandChecks,
-            range: requestEnd.upperBound..<request.prompt.endIndex))
-        XCTAssertGreaterThan(currentChecks.lowerBound, requestEnd.upperBound,
-            "Current command rules follow the complete unchanged native history")
+        let workdir = "/private/project/Fixture With Spaces"
+        let nativeContext = "<environment_context>\n<cwd>/private/default/Workspace</cwd>\n</environment_context>"
+        let developer = ComputaAgentInstructions.developerInstructions()
         let envelope = try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [
-            ["name": "relay.exec_command", "arguments": ["cmd": command]],
+            ["name": "relay.exec_command", "arguments": ["cmd": command, "workdir": workdir]],
         ]])
-        let reply = try WebModelResponseCodec.parseReply(String(decoding: envelope, as: UTF8.self), request: request, requireEnvelope: true)
-        guard case let .toolCalls(calls) = reply else { return XCTFail("Expected an unchanged offered command") }
-        XCTAssertEqual(calls.count, 1)
-        XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(calls[0].argumentsJSON.utf8)) as? [String: String], ["cmd": command])
+        for provider in ["chatgpt", "gemini"] {
+            let original = try JSONSerialization.data(withJSONObject: [
+                "model": "browser/\(provider)", "input": [
+                    ["role": "developer", "content": developer],
+                    ["role": "user", "content": nativeContext],
+                    ["role": "user", "content": "In \(workdir), run the requested literal command."],
+                ], "tools": [["type": "namespace", "name": "relay", "tools": [
+                    ["type": "function", "name": "exec_command", "parameters": ["type": "object"]],
+                ]]],
+            ])
+            let request = try WebModelResponseCodec.prepareRequest(original)
+            _ = try assertRequestValuesAndHandoff(original, request: request, includedInstructionText: [developer])
+            let requestEnd = try XCTUnwrap(request.prompt.range(of: "END_COMPLETE_RESPONSES_REQUEST_JSON."))
+            let currentChecks = try XCTUnwrap(request.prompt.range(of: ComputaAgentInstructions.commandChecks,
+                range: requestEnd.upperBound..<request.prompt.endIndex))
+            XCTAssertGreaterThan(currentChecks.lowerBound, requestEnd.upperBound,
+                "Current command rules follow the complete unchanged native history")
+            let reply = try WebModelResponseCodec.parseReply(String(decoding: envelope, as: UTF8.self), request: request, requireEnvelope: true)
+            guard case let .toolCalls(calls) = reply else { return XCTFail("Expected an unchanged offered command") }
+            XCTAssertEqual(calls.count, 1)
+            XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(calls[0].argumentsJSON.utf8)) as? [String: String],
+                ["cmd": command, "workdir": workdir])
+        }
     }
 
     func testBrowserAddressChecksStaySharedAndFreshDespiteTrustedNativeDeduplication() {

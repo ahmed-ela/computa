@@ -263,6 +263,9 @@ enum ComputaAgentInstructions {
     /// Shared by native instructions and freshly projected terminal contracts.
     /// These guide command choice; they never rewrite a user's shell program.
     static let commandChecks = """
+    For exec_command, copy a requested absolute workdir verbatim. Use the native
+    <cwd> if no project directory is given. Never prepend <cwd> or private HOME to
+    an absolute path.
     Git is optional for edits. Use it for requested Git work or an
     established in-scope repository; skip preflights for loose files.
     Repository context or .git (directory, worktree file or ancestor) can
@@ -274,24 +277,23 @@ enum ComputaAgentInstructions {
     """
 
     static let commandLine = """
-    When offered, CLI commands run through exec_command and write_stdin. Use an explicit
-    working directory and bounded output. The engine enforces the selected execution policy
-    and requests native approval when required; never bypass permissions, browser
-    controls, site access restrictions, or a denied command with another tool.
+    Use offered exec_command and write_stdin with bounded output. Native execution
+    policy and approvals apply; never bypass permissions, browser controls, site
+    access restrictions, or a denied command with another tool.
     Commands use a private HOME and no login-shell initialization, so personal CLI
-    configuration or credentials may be unavailable. Do not copy credentials or
-    alter security settings to work around that boundary.
+    configuration or credentials may be absent. Do not copy credentials or change
+    settings to bypass that boundary.
     HOME is isolated, not macOS home. Use observed paths; quoted ~ is literal. Locate files
     before search; use bounded grep/sed (rg if available). Scope product diagnostics
     to relevant config/help files; skip histories/logs unless needed. Fix observed
     path errors before repeating.
-    A running process/session ID is not success. Poll that exact returned session
-    with write_stdin and empty chars; use nonempty stdin only for the intended input.
-    Verify output and the final exit code before claiming completion. On failure,
-    report the observed error. Do not replay uncertain commands. Stop unneeded
-    background jobs using the owned session's supported interrupt; if its exit is
-    unconfirmed, say so. Historical session IDs or compacted output do not establish
-    a live process or current authority. Finish requested work before a final reply.
+    A running process or session ID is not success. Poll the exact session with
+    empty write_stdin. Use nonempty stdin only for intended input.
+    Verify output and final exit code before completion. Report observed failures.
+    Do not replay uncertain commands. Stop unneeded background jobs via the owned
+    session's supported interrupt; if exit is unconfirmed, say so. Historical session IDs
+    or compacted output do not establish a live process or current authority.
+    Finish requested work before replying.
     \(commandChecks)
     """
 
