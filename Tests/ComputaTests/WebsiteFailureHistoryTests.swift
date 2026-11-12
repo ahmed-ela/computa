@@ -902,6 +902,45 @@ final class WebsiteFailureHistoryTests: XCTestCase {
         }
     }
 
+    func testInvalidChatGPTCookieSourcePreservesGuidanceAndLegacyEnvelopeAcrossReload() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaProfileGuidance-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let task = UUID().uuidString, thread = UUID().uuidString
+        let data = try WebModelServer.errorBody(for: ChatGPTInferenceCookieSeed.Failure.invalidSource)
+        let current = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        var legacy = current, legacyError = try XCTUnwrap(current["error"] as? [String: Any])
+        legacyError["message"] = "Private ChatGPT browser profile preparation rejected the source cookie state. No prompt was replayed."
+        legacy["error"] = legacyError
+        XCTAssertFalse(NSDictionary(dictionary: current).isEqual(to: legacy))
+        var records: [WebsiteTurnFailureStore.Record] = []
+        for envelope in [legacy, current] {
+            let text = String(decoding: try JSONSerialization.data(withJSONObject: envelope,
+                options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
+            let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+                turnID: UUID().uuidString, modelID: syntheticChatGPTModelID, diagnosticText: text))
+            XCTAssertEqual(record.diagnosticText, text, "Legacy saved text must not be rewritten into new advice")
+            XCTAssertTrue(WebsiteTurnFailureStore(directory: root).append(record))
+            records.append(record)
+            for model in ["browser/gemini", "browser/claude", "api/cerebras/model/fixture"] {
+                XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+                    turnID: UUID().uuidString, modelID: model, diagnosticText: text))
+            }
+            let mutations: [[String: Any]] = [["message": "PRIVATE_COOKIE_CANARY"], ["reason": "bounds"],
+                ["code": "website_browser_session_failed"], ["type": "server_error"], ["param": "input"],
+                ["retryable": true], ["retryable": 0], ["required_action": "retry_send"], ["cleanup": "not_created"]]
+            for mutation in mutations {
+                var changed = envelope, fields = try XCTUnwrap(envelope["error"] as? [String: Any])
+                mutation.forEach { fields[$0.key] = $0.value }; changed["error"] = fields
+                XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+                    turnID: UUID().uuidString, modelID: syntheticChatGPTModelID,
+                    diagnosticText: String(decoding: try JSONSerialization.data(withJSONObject: changed), as: UTF8.self)))
+            }
+        }
+        let restored = try WebsiteTurnFailureStore(directory: root).load(threadID: thread)
+        XCTAssertEqual(restored, records)
+        XCTAssertEqual(restored.map(\.entry.body), records.map(\.diagnosticText))
+    }
+
     func testNativeBrowserFailureStoreRejectsUnknownReasonsPrivateDataAndCrossFamilyClaims() throws {
         let task = UUID().uuidString, thread = UUID().uuidString, turnID = UUID().uuidString
         for failure in [WebModelServer.NativeBrowserFailure.profileVerificationFailed, .tabClosed] {

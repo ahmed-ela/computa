@@ -3689,7 +3689,7 @@ actor WebModelServer {
             switch self {
             case .profileUnavailable: "Private ChatGPT browser profile preparation is unavailable. No prompt was replayed."
             case .profileBounds: "Private ChatGPT browser profile preparation exceeded its fixed local bounds. No prompt was replayed."
-            case .profileInvalidSource: "Private ChatGPT browser profile preparation rejected the source cookie state. No prompt was replayed."
+            case .profileInvalidSource: "Private ChatGPT browser profile preparation rejected the source cookie state. No prompt was replayed. In a regular ChatGPT tab in Computa, try signing out and back in before starting a new task."
             case .profileDestinationNotEmpty: "Private ChatGPT browser profile preparation found a nonempty destination. No prompt was replayed."
             case .profileVerificationFailed: "The private ChatGPT browser profile could not be verified. No prompt was replayed."
             case .profileDeadline: "Private ChatGPT browser profile preparation reached its deadline. No prompt was replayed."

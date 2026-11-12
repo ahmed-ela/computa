@@ -185,6 +185,15 @@ struct WebsiteTurnFailureStore: Sendable {
                 // Preserve the exact generic sign-in envelope saved by older builds.
                 expected = legacy
             }
+            if nativeError as? WebModelServer.NativeBrowserFailure == .profileInvalidSource,
+               var legacyError = expected["error"] as? [String: Any] {
+                // Keep the exact pre-guidance diagnostic; saved failures are not
+                // rewritten into new advice or accepted from message text alone.
+                legacyError["message"] = "Private ChatGPT browser profile preparation rejected the source cookie state. No prompt was replayed."
+                var legacy = expected
+                legacy["error"] = legacyError
+                if NSDictionary(dictionary: supplied).isEqual(to: legacy) { expected = legacy }
+            }
             if code == "website_usage_limit", var legacyError = expected["error"] as? [String: Any] {
                 // The refresh controls were hidden after this exact historical
                 // message shipped. Retain saved diagnostics without admitting

@@ -44,8 +44,23 @@ final class WebModelFailureDiagnosticTests: XCTestCase {
         XCTAssertEqual(WebModelServer.errorPresentation(for: arbitrary).code, "internal_error")
     }
 
+    func testInvalidChatGPTCookieSourceOffersOptionalManualRecoveryOnly() throws {
+        let expected = "Private ChatGPT browser profile preparation rejected the source cookie state. No prompt was replayed. In a regular ChatGPT tab in Computa, try signing out and back in before starting a new task."
+        let failure = ChatGPTInferenceCookieSeed.Failure.invalidSource
+        let body = try WebModelServer.errorBody(for: failure)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let expectedFields: [String: Any] = ["type": "model_error", "code": "chatgpt_profile_preparation_failed",
+            "reason": "invalid_source", "message": expected, "param": NSNull(), "retryable": false]
+        XCTAssertTrue(NSDictionary(dictionary: object).isEqual(to: ["error": expectedFields]))
+        XCTAssertEqual(WebModelServer.errorPresentation(for: failure).status, "400 Bad Request")
+        for other in WebModelServer.NativeBrowserFailure.allCases where other != .profileInvalidSource {
+            XCTAssertFalse(other.localizedDescription.contains("signing out"), "Do not broaden recovery advice to other failures")
+        }
+    }
+
     func testNativeStartupFailureIsRecordedWithoutSubmissionOrAssumedCleanup() async throws {
         let failures: [any Error] = [ChatGPTInferenceCookieSeed.Failure.verificationFailed,
+                                   ChatGPTInferenceCookieSeed.Failure.invalidSource,
                                    EmbeddedBrowserSession.Failure.cookieMaintenancePending]
         for failure in failures {
             let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
