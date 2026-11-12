@@ -2387,6 +2387,10 @@ actor WebModelServer {
                             }
                             submissionModelVerificationPending = false
                         }
+                        if !context.isMaintenance, evidence != nil, let diagnostic = request.geminiFlashLiteRepairDiagnostic,
+                           (value["modelProofContext"] as? [String: Any])?["submittedPromptFingerprint"] as? String == session.submittedPromptFingerprint {
+                            Self.promptLog.notice("geminiFlashLiteRepairProjection version=1 task=\(taskID, privacy: .public) thread=\(context.threadID, privacy: .public) turn=\(context.turnID, privacy: .public) inference=\(inferenceID.uuidString.lowercased(), privacy: .public) sequence=\(session.sequence, privacy: .public) \(diagnostic.logFields, privacy: .public)")
+                        }
                         guard let text = value["text"] as? String else { throw Failure.providerFailed }
                         let renderedMessageMarker = value[GroqCompletedReplyProof.renderedMessageSnapshotKey]
                         guard !text.isEmpty || renderedMessageMarker != nil else {

@@ -5320,6 +5320,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             XCTAssertTrue(gate.blocksProviderUntilRefresh)
             if case .usageLimited = gate {
                 XCTAssertTrue(gate.localizedDescription.contains("After your account's limit resets, restart Computa, then start a fresh task"))
+            } else if case .humanVerificationRequired(.gemini) = gate {
+                XCTAssertTrue(gate.localizedDescription.contains("While Computa is idle, open or reload https://gemini.google.com/app"))
+                XCTAssertFalse(gate.localizedDescription.contains("refresh website models"))
             } else {
                 XCTAssertTrue(gate.localizedDescription.contains("refresh website models"))
             }

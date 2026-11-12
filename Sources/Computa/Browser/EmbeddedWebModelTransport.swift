@@ -606,6 +606,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 ? "ChatGPT finished its response stream without an answer. No prompt was replayed and no tool calls were released."
                 : "ChatGPT reported an error and ended its response stream without an answer. No prompt was replayed and no tool calls were released."
             case .usageLimited(let provider): "\(provider.displayName)'s website usage limit has been reached. After your account's limit resets, restart Computa, then start a fresh task."
+            case .humanVerificationRequired(.gemini):
+                "Gemini requires website verification. Complete any Google challenge in Computa's built-in browser. While Computa is idle, open or reload https://gemini.google.com/app so Computa can check model access before you retry."
             case .humanVerificationRequired(let provider): "\(provider.displayName) has a saved or current website-verification block. Check its website in Computa's built-in browser and resolve any challenge shown. Once the page is clear, refresh website models before retrying. No prompt was replayed."
             case .unexpectedPage(let provider): "\(provider.displayName)'s website opened an unexpected page. Check its page in Computa's built-in browser before retrying. No prompt was replayed."
             case .preparationDeadline: "The website did not prepare a verified chat session before the 45-second deadline. This website inference was not submitted."

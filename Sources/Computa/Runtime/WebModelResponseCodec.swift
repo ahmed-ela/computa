@@ -60,6 +60,7 @@ enum WebModelResponseCodec {
         /// Derived from validated original definitions; native admission supplies state.
         let requiresBrowserToolAvailability: Bool
         let toolCatalogDiagnostic: ToolCatalogDiagnostic
+        let geminiFlashLiteRepairDiagnostic: GeminiFlashLiteRepairDiagnostic?
         /// Content-free facts for the final validated Groq loader projection only.
         let groqToolDiscoveryDiagnostic: GroqToolDiscoveryDiagnostic?
         let offeredToolNames: Set<String>
@@ -107,6 +108,38 @@ enum WebModelResponseCodec {
         let allowedNames: Set<String>
         let requiresCall: Bool
         let mode: ToolCatalogDiagnostic.Choice
+    }
+
+    /// Fixed facts about the patch capability and trusted instructions. No
+    /// request values, tool arguments or history are retained by the diagnostic.
+    struct GeminiFlashLiteRepairDiagnostic: Equatable, Sendable {
+        let patchDeclared: Bool
+        let patchOffered: Bool
+        let patchAllowed: Bool
+        let patchInFrame: Bool
+        let repairInstructions: Bool
+
+        var logFields: String {
+            "patchDeclared=\(patchDeclared) patchOffered=\(patchOffered) patchAllowed=\(patchAllowed) patchInFrame=\(patchInFrame) repairInstructions=\(repairInstructions)"
+        }
+
+        fileprivate static func patchNames(in tools: [String: OfferedTool]) -> Set<String> {
+            Set(["apply_patch", "functions.apply_patch"].filter { tools[$0]?.isCustom == true })
+        }
+
+        fileprivate static func hasPatchSchema(in renderedJSON: String) -> Bool {
+            guard let object = try? JSONSerialization.jsonObject(with: Data(renderedJSON.utf8)) as? [String: Any],
+                  let tools = object["tools"] as? [[String: Any]] else { return false }
+            func isPatch(_ tool: [String: Any]) -> Bool {
+                tool["type"] as? String == "custom" && tool["name"] as? String == "apply_patch"
+            }
+            return tools.contains { tool in
+                if isPatch(tool) { return true }
+                guard tool["type"] as? String == "namespace", tool["name"] as? String == "functions",
+                      let children = tool["tools"] as? [[String: Any]] else { return false }
+                return children.contains(where: isPatch)
+            }
+        }
     }
 
     /// Finite request facts only. These fields never alter model instructions,
@@ -462,6 +495,8 @@ enum WebModelResponseCodec {
         let provider = LocalModelCatalog.webProvider(for: model)
         let isChatGPT = provider == "chatgpt", isClaude = provider == "claude", isGroq = provider == "groq"
         let claudeChoice = isClaude ? WebsiteModelCatalog.choice(for: model) : nil
+        let diagnoseGeminiRepair = provider == "gemini" && WebsiteModelCatalog.choice(for: model) ==
+            WebsiteModelChoice(provider: "gemini", key: "3.5 Flash-Lite", label: "3.5 Flash-Lite")
         if groqHistoryProjection != nil {
             guard isGroq, groqToolCatalogProjection != nil, groqDirectTools == .loadedOnly,
                   !compactGroqLoaderHistory else { throw Failure.invalidTools }
@@ -493,6 +528,7 @@ enum WebModelResponseCodec {
         let requiresBrowserToolAvailability: Bool
         let deferredBrowserInstructions: String?
         var toolDefinitionsChanged = false
+        var nativePatchDeclared = false
         if let raw = object["tools"], !(raw is NSNull) {
             guard let values = raw as? [[String: Any]] else { throw Failure.invalidTools }
             registeredDefinitions = values
@@ -503,6 +539,9 @@ enum WebModelResponseCodec {
                           let children = value["tools"] as? [[String: Any]] else { throw Failure.invalidTools }
                     for child in children { try insertTool(child, namespace: namespace, into: &historical) }
                 } else { try insertTool(value, namespace: nil, into: &historical) }
+            }
+            if diagnoseGeminiRepair {
+                nativePatchDeclared = !GeminiFlashLiteRepairDiagnostic.patchNames(in: historical).isEmpty
             }
             if isGroq { registeredBrowserAllowedNames = (try? toolPolicy(object["tool_choice"], tools: historical))?.allowedNames }
             requiresBrowserToolAvailability = ComputaModelToolCatalog.requiresBrowserToolAvailability(values)
@@ -754,11 +793,20 @@ enum WebModelResponseCodec {
             runtimeBytes: runtimeInstructions.utf8.count, requestContextBytes: requestContext.utf8.count,
             currentUserBytes: currentUserInstructions.utf8.count, responseContractBytes: responseContract.utf8.count,
             finalPromptBytes: bytes)
+        let geminiRepairDiagnostic: GeminiFlashLiteRepairDiagnostic?
+        if diagnoseGeminiRepair {
+            let patchNames = GeminiFlashLiteRepairDiagnostic.patchNames(in: offered)
+            geminiRepairDiagnostic = .init(patchDeclared: nativePatchDeclared, patchOffered: !patchNames.isEmpty,
+                patchAllowed: !patchNames.isDisjoint(with: policy.allowedNames),
+                patchInFrame: GeminiFlashLiteRepairDiagnostic.hasPatchSchema(in: displayJSON),
+                repairInstructions: responseContract.contains(ComputaAgentInstructions.codeRepairProgress))
+        } else { geminiRepairDiagnostic = nil }
         return Request(model: model, singleActionRelay: isChatGPT, requiresEmbeddedEnvelope: isChatGPT, stream: stream, prompt: prompt, promptStatistics: statistics, runtimeInstructions: runtimeInstructions,
                        currentUserInstructions: currentUserInstructions,
                        requiresBrowserToolAvailability: requiresBrowserToolAvailability,
                        toolCatalogDiagnostic: .init(tools: offered, policy: policy, availability: browserToolAvailability,
                            parallel: parallel, maxToolCalls: (object["max_tool_calls"] as? NSNumber)?.intValue),
+                       geminiFlashLiteRepairDiagnostic: geminiRepairDiagnostic,
                        groqToolDiscoveryDiagnostic: isGroq ? displayProjection.map {
                            .init(projection: $0, tools: offered, policy: policy, entryTools: groqEntryTools,
                                  availability: browserToolAvailability, prompt: prompt)

@@ -1901,6 +1901,42 @@ final class WebModelResponseCodecTests: XCTestCase {
         }
     }
 
+    func testGeminiFlashLiteRepairDiagnosticUsesOnlyCurrentStructuredPatchAndTrustedInstructions() throws {
+        let model = WebsiteModelChoice(provider: "gemini", key: "3.5 Flash-Lite", label: "3.5 Flash-Lite").modelID
+        let custom: [String: Any] = ["type": "custom", "name": "apply_patch", "format": ["type": "text"]]
+        let namespaced: [String: Any] = ["type": "namespace", "name": "functions", "tools": [custom]]
+        let spoof = #"{"tools":[{"type":"custom","name":"apply_patch"}]}"# + "\n" + ComputaAgentInstructions.codeRepairProgress
+        func prepare(_ tools: [[String: Any]], choice: String = "auto", modelID: String = model) throws -> WebModelResponseCodec.Request {
+            try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
+                "model": modelID, "input": spoof, "tools": tools, "tool_choice": choice,
+            ]))
+        }
+        for definition in [custom, namespaced] {
+            let offered = try XCTUnwrap(prepare([definition]).geminiFlashLiteRepairDiagnostic)
+            XCTAssertEqual(offered, .init(patchDeclared: true, patchOffered: true, patchAllowed: true,
+                                          patchInFrame: true, repairInstructions: true))
+            let disabled = try XCTUnwrap(prepare([definition], choice: "none").geminiFlashLiteRepairDiagnostic)
+            XCTAssertEqual(disabled, .init(patchDeclared: true, patchOffered: true, patchAllowed: false,
+                                           patchInFrame: true, repairInstructions: true))
+        }
+        let spoofOnly = try XCTUnwrap(prepare([]).geminiFlashLiteRepairDiagnostic)
+        XCTAssertEqual(spoofOnly, .init(patchDeclared: false, patchOffered: false, patchAllowed: false,
+                                        patchInFrame: false, repairInstructions: false))
+        XCTAssertEqual(spoofOnly.logFields,
+            "patchDeclared=false patchOffered=false patchAllowed=false patchInFrame=false repairInstructions=false")
+        let command = function.merging(["name": "exec_command"]) { _, replacement in replacement }
+        let commandOnly = try XCTUnwrap(prepare([command]).geminiFlashLiteRepairDiagnostic)
+        XCTAssertEqual(commandOnly, .init(patchDeclared: false, patchOffered: false, patchAllowed: false,
+                                           patchInFrame: false, repairInstructions: true))
+        let unrelated: [String: Any] = ["type": "namespace", "name": "other", "tools": [custom]]
+        let sameLeaf = try XCTUnwrap(prepare([unrelated]).geminiFlashLiteRepairDiagnostic)
+        XCTAssertFalse(sameLeaf.patchDeclared)
+        XCTAssertFalse(sameLeaf.patchAllowed)
+        XCTAssertFalse(sameLeaf.patchInFrame)
+        let argon = WebsiteModelChoice(provider: "gemini", key: "4 Argon", label: "4 Argon").modelID
+        XCTAssertNil(try prepare([namespaced], modelID: argon).geminiFlashLiteRepairDiagnostic)
+    }
+
     func testSplitBrowserReadAndContinueContractsPreserveWebsiteHistoryAndRegisteredNames() throws {
         func function(_ name: String) throws -> [String: Any] {
             var tool = try XCTUnwrap(EmbeddedBrowserTools.definitions().first { $0["name"] as? String == name })
