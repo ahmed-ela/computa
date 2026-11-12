@@ -17,6 +17,88 @@ final class ClaudeFormatCorrectionTests: XCTestCase {
         "\u{E056}\njson\n" + #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf rejected-one"}}},{"name":"exec_command","arguments":{"cmd":"printf rejected-two"}}},{"name":"exec_command","arguments":{"cmd":"printf rejected-three"}}]}"#
     }
 
+    private var rejectedShape: [String: Any] {
+        ["preCount": 2, "codeCount": 2, "codeTextLength": 0, "outsideTextLength": 4_086,
+         "outsideTruncated": false, "preParentTags": ["div"], "literalCodeValidJSON": NSNull(),
+         "repeatedIdenticalToolCalls": false, "isolatedJSONCodeBlock": NSNull(),
+         "literalCodeKnownEnvelopeType": NSNull(), "selectedExtraction": "rendered_fallback",
+         "extractionReason": "multiple_pre"]
+    }
+
+    private func rejectionEvent(_ structure: [String: Any], provider: String = "claude",
+                                ownership: Bool = true, model: Bool = true,
+                                state: String = "complete", bytes: Int = 4_086) -> String? {
+        WebModelServer.claudeMalformedReplyShapeDiagnostic(provider: provider, ownershipVerified: ownership,
+            modelVerified: model, inferenceID: UUID(uuidString: "00000000-0000-4000-8000-000000000001")!,
+            diagnostic: .init(reason: .invalidJSON, utf8Bytes: bytes, fenced: false),
+            snapshot: ["state": state, "text": "PRIVATE_REPLY_CANARY",
+                       "completionEvidence": ["codeStructure": structure]])
+    }
+
+    func testClaudeRejectedShapeKeepsDecisionFieldsBelowLogLimitWithoutAncestryOrContent() throws {
+        var structure = rejectedShape
+        let parent: [String: Any] = ["tag": "private-element", "classes": Array(repeating: "PRIVATE_CLASS_CANARY", count: 6),
+            "preDescendants": 2, "copyControls": 2]
+        structure["outsideNodes"] = Array(repeating: ["kind": "other", "textLength": 70,
+            "text": "PRIVATE_NODE_CANARY", "ancestors": Array(repeating: parent, count: 4)] as [String: Any], count: 2)
+        structure["replyText"] = "PRIVATE_EXTRA_CANARY"
+        let full = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedCodeStructure(structure))
+        XCTAssertGreaterThan(full.utf8.count, 1_024, "Reproduce the observed unified-log truncation risk")
+        let event = try XCTUnwrap(rejectionEvent(structure))
+        XCTAssertLessThanOrEqual(event.utf8.count, 768)
+        XCTAssertTrue(event.hasPrefix("claudeRejectedReplyShape "))
+        let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(event.dropFirst("claudeRejectedReplyShape ".count).utf8)) as? [String: Any])
+        var expected = rejectedShape
+        expected.removeValue(forKey: "preParentTags")
+        expected.merge(["version": 1, "inference": "00000000-0000-4000-8000-000000000001",
+                        "reason": "invalid_json", "replyBytes": 4_086, "jsonFenced": false]) { _, new in new }
+        XCTAssertEqual(fields as NSDictionary, expected as NSDictionary)
+        for omitted in ["PRIVATE", "private-element", "outsideNodes", "ancestors", "classes", "preParentTags", "replyText"] {
+            XCTAssertFalse(event.contains(omitted), omitted)
+        }
+        XCTAssertEqual(rejectionEvent(structure), event, "Projection is deterministic and does not mutate evidence")
+        XCTAssertEqual(structure["replyText"] as? String, "PRIVATE_EXTRA_CANARY")
+    }
+
+    func testClaudeRejectedShapeRequiresCurrentVerifiedClaudeCompletionAndFiniteStructure() throws {
+        for provider in ["chatgpt", "groq", "claude ", "Claude"] { XCTAssertNil(rejectionEvent(rejectedShape, provider: provider)) }
+        XCTAssertNil(rejectionEvent(rejectedShape, ownership: false))
+        XCTAssertNil(rejectionEvent(rejectedShape, model: false))
+        XCTAssertNil(rejectionEvent(rejectedShape, state: "running"))
+        XCTAssertNil(rejectionEvent(rejectedShape, bytes: -1))
+        XCTAssertNil(rejectionEvent(rejectedShape, bytes: WebModelRejectedReplyCapture.maximumReplyBytes + 1))
+        XCTAssertNil(rejectionEvent([:]))
+        let invalid: [(String, Any)] = [("kind", "groq_literal_profile_v1"), ("preCount", true),
+            ("codeCount", 1_001), ("outsideTextLength", 220_002), ("outsideTruncated", 0),
+            ("literalCodeValidJSON", 1), ("repeatedIdenticalToolCalls", "false"), ("isolatedJSONCodeBlock", 0),
+            ("literalCodeKnownEnvelopeType", "PRIVATE_TYPE"), ("selectedExtraction", "PRIVATE_EXTRACTION"),
+            ("extractionReason", "PRIVATE_REASON")]
+        for (key, value) in invalid {
+            var structure = rejectedShape; structure[key] = value
+            XCTAssertNil(rejectionEvent(structure), key)
+        }
+    }
+
+    func testClaudeRejectedShapePreservesBooleanNullAndAbsentFactsAndWorstCaseBound() throws {
+        let keys = ["literalCodeValidJSON", "repeatedIdenticalToolCalls", "isolatedJSONCodeBlock"]
+        for value in [true, false, NSNull()] as [Any] {
+            var structure = rejectedShape
+            structure["preCount"] = 1_000; structure["codeCount"] = 1_000
+            structure["codeTextLength"] = 220_001; structure["outsideTextLength"] = 220_001
+            structure["literalCodeKnownEnvelopeType"] = "tool_calls"
+            structure["extractionReason"] = "unknown_envelope_type"
+            for key in keys { structure[key] = value }
+            let event = try XCTUnwrap(rejectionEvent(structure, bytes: WebModelRejectedReplyCapture.maximumReplyBytes))
+            XCTAssertLessThanOrEqual(event.utf8.count, 768)
+            let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(event.dropFirst("claudeRejectedReplyShape ".count).utf8)) as? [String: Any])
+            for key in keys { XCTAssertEqual(fields[key] as? NSObject, value as? NSObject, key) }
+        }
+        var historical = rejectedShape
+        for key in keys { historical.removeValue(forKey: key) }
+        let event = try XCTUnwrap(rejectionEvent(historical))
+        for key in keys { XCTAssertFalse(event.contains(key), "Missing evidence must not become false or null") }
+    }
+
     private func request(_ input: [[String: Any]]? = nil, model: String? = nil, toolChoice: String = "auto") throws -> Data {
         try JSONSerialization.data(withJSONObject: ["model": model ?? choice.modelID, "stream": false,
             "input": input ?? [user], "tool_choice": toolChoice,

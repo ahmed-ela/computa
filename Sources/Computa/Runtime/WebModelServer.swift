@@ -2452,6 +2452,13 @@ actor WebModelServer {
                             }
                             let diagnostic = WebModelResponseCodec.malformedEmbeddedReplyDiagnostic(text, request: request)
                             if let diagnostic {
+                                if let shape = Self.claudeMalformedReplyShapeDiagnostic(provider: provider,
+                                    ownershipVerified: session.provesNativeContinuation ||
+                                        (session.provesFreshSessionSubmission && session.freshSessionSubmissionVerified),
+                                    modelVerified: evidence != nil, inferenceID: inferenceID,
+                                    diagnostic: diagnostic, snapshot: value) {
+                                    Self.promptLog.notice("\(shape, privacy: .public)")
+                                }
                                 captureRejectedReply(text, diagnostic: .malformed(diagnostic), taskID: taskID,
                                     inferenceID: inferenceID, session: session, evidence: evidence, snapshot: value)
                                 if diagnostic.reason == .invalidJSON {
@@ -3018,6 +3025,32 @@ actor WebModelServer {
             expectedModel: session.modelChoice, expectedMode: session.modeChoice) }
         catch WebsiteSelectionEvidence.Failure.mismatch { throw Failure.modelMismatch }
         catch { throw Failure.modelUnverified }
+    }
+
+    /// Scalar-only rejection evidence stays below unified-log truncation even
+    /// when the separately sanitized widget ancestry is large. Never authority.
+    nonisolated static func claudeMalformedReplyShapeDiagnostic(provider: String,
+        ownershipVerified: Bool, modelVerified: Bool, inferenceID: UUID,
+        diagnostic: WebModelResponseCodec.MalformedEnvelopeDiagnostic, snapshot: [String: Any]) -> String? {
+        guard provider == "claude", ownershipVerified, modelVerified,
+              snapshot["state"] as? String == "complete",
+              (0...WebModelRejectedReplyCapture.maximumReplyBytes).contains(diagnostic.utf8Bytes),
+              let completion = snapshot["completionEvidence"] as? [String: Any],
+              let raw = completion["codeStructure"] as? [String: Any], raw["kind"] == nil,
+              let sanitized = EmbeddedWebModelTransport.sanitizedCodeStructure(raw),
+              let structure = try? JSONSerialization.jsonObject(with: Data(sanitized.utf8)) as? [String: Any]
+        else { return nil }
+        var fields: [String: Any] = ["version": 1, "inference": inferenceID.uuidString.lowercased(),
+            "reason": diagnostic.reason.rawValue, "replyBytes": diagnostic.utf8Bytes, "jsonFenced": diagnostic.fenced]
+        for key in ["preCount", "codeCount", "codeTextLength", "outsideTextLength", "outsideTruncated",
+                    "literalCodeValidJSON", "repeatedIdenticalToolCalls", "isolatedJSONCodeBlock",
+                    "literalCodeKnownEnvelopeType", "selectedExtraction", "extractionReason"] {
+            fields[key] = structure[key]
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys]),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        let event = "claudeRejectedReplyShape " + json
+        return event.utf8.count <= 768 ? event : nil
     }
 
     private enum RejectedReplyDiagnostic {
