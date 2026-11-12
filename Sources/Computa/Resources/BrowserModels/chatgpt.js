@@ -7812,10 +7812,13 @@ async function chatGPTContinueFirstUserExpansion(candidate) {
     && chatGPTMessageRoots('user')[0] === candidate.root && chatGPTUserBody(candidate.root) === candidate.body
     && normalizedFirstBody(candidate.body) === candidate.expandedText;
   const interrupted = candidate.outcome === 'context_changed' && candidate.contextFailure === 'url';
+  const resumeExposure = interrupted && candidate.clicked === false && candidate.exposureRouteInterrupted === true
+    && candidate.exposureResumed !== true && chatGPTExpansionLeaseCurrent()
+    && Number.isFinite(candidate.exposureDeadline) && Date.now() < candidate.exposureDeadline;
   if (input.action !== 'inspect' || input.allowFirstUserExpansion !== true || input.allowFirstUserBinding !== true
     || input.expectedFirstUserFingerprint != null || globalThis.__computaModelFirstProof != null
     || routeStart < 0
-    || candidate.clicked !== true
+    || (candidate.clicked !== true && !resumeExposure)
     || !websiteModelChoiceEqual(candidate.modelChoice, input.firstUserExpansionModelChoice)) {
     latch();
     return chatGPTRejectFirstUserExpansion(candidate, 'context_changed', 'continuation');
@@ -7831,6 +7834,13 @@ async function chatGPTContinueFirstUserExpansion(candidate) {
   // consumed its receipt. Neither the deadline nor click claim is reset.
   for (const edge of edges.slice(routeStart)) candidate.routeURL = edge.toURL;
   candidate.contextFailure = null;
+  if (resumeExposure) {
+    // Continue only the unspent display claim and original exposure budget.
+    // Recheck the physical control, exact prefix and selected model before a click.
+    candidate.exposureResumed = true;
+    candidate.outcome = 'claimed';
+    return chatGPTExpandFirstUser(candidate, true);
+  }
   // Display completion does not grant lineage. The caller must still hash the
   // unchanged body and complete the ordinary current model/product/temporary
   // guards before installing any first-user proof. Do not wait or click again.
@@ -7838,6 +7848,9 @@ async function chatGPTContinueFirstUserExpansion(candidate) {
   candidate.outcome = 'claimed';
   try { return await chatGPTObserveFirstUserExpansion(candidate); }
   catch { return chatGPTRejectFirstUserExpansion(candidate, 'failed'); }
+}
+function chatGPTExpansionLeaseCurrent() {
+  return websiteChatInvocationLease != null && globalThis.__computaChatActiveInvocation === websiteChatInvocationLease;
 }
 function chatGPTExpansionExposure(control) {
   // Finite geometry/hit relationships only; never retain an obstruction's
@@ -7857,7 +7870,8 @@ function chatGPTExpansionExposure(control) {
 }
 async function chatGPTWaitForExpansionExposure(candidate, control, intact, available) {
   const diagnostic = candidate.exposureDiagnostic, started = Date.now();
-  const until = Math.min(started + 1_800, Number.isFinite(candidate.deadline) ? candidate.deadline : Infinity);
+  const until = candidate.exposureResumed ? candidate.exposureDeadline
+    : Math.min(started + 1_800, Number.isFinite(candidate.deadline) ? candidate.deadline : Infinity);
   candidate.exposureDeadline = until;
   const pin = globalThis.__computaChatPresetPin;
   diagnostic.waited = true;
@@ -7878,7 +7892,15 @@ async function chatGPTWaitForExpansionExposure(candidate, control, intact, avail
       diagnostic.final = chatGPTExpansionExposure(control);
       // Failure is latched on the first observation. Later restoration cannot
       // revive a different control, changed body, product, owner or model pin.
-      if (!intact()) return finish('context_changed');
+      if (!intact()) {
+        if (!candidate.bound && !candidate.clicked && !candidate.exposureResumed && chatGPTExpansionLeaseCurrent() && Date.now() < until
+          && chatGPTFirstUserExpansionContextFailure(candidate) === 'url'
+          && normalizedFirstBody(candidate.body) === candidate.rendered && available()) {
+          websiteChatDrainPinnedMutations(pin);
+          if (globalThis.__computaChatPresetPin === pin && pin && !pin.invalidated) candidate.exposureRouteInterrupted = true;
+        }
+        return finish('context_changed');
+      }
       if (!available()) return finish('control_changed');
       websiteChatDrainPinnedMutations(pin);
       if (globalThis.__computaChatPresetPin !== pin || pin?.invalidated === true) return finish('model_changed');
@@ -7911,14 +7933,14 @@ async function chatGPTWaitForExpansionExposure(candidate, control, intact, avail
   websiteModelDiagnosticPhase('first_user_exposure_done');
   return result;
 }
-async function chatGPTExpandFirstUser(candidate) {
+async function chatGPTExpandFirstUser(candidate, resumeExposure = false) {
   // One private claim survives timeout/reinspection. It grants only this local
   // display expansion, never Send, lineage, cleanup, or another attempt.
   if (candidate.bound) globalThis.__computaModelBoundFirstExpansion = candidate;
   else globalThis.__computaModelFirstExpansion = candidate;
   const reject = outcome => chatGPTRejectFirstUserExpansion(candidate, outcome);
   try {
-    const intact = () => chatGPTFirstUserExpansionContext(candidate)
+    const intact = () => (!resumeExposure || chatGPTExpansionLeaseCurrent()) && chatGPTFirstUserExpansionContext(candidate)
       && normalizedFirstBody(candidate.body) === candidate.rendered;
     // Only descendants of the captured physical message can receive a click.
     // The wider diagnostic ancestry never grants mutation authority.
@@ -7932,6 +7954,7 @@ async function chatGPTExpandFirstUser(candidate) {
     if (!intact()) return chatGPTRejectFirstUserExpansionContext(candidate);
     if (!control) return reject(controls.length ? 'ambiguous' : 'unavailable');
     if (!available()) return reject('disabled');
+    if (resumeExposure && (control !== candidate.exposureControl || Date.now() >= candidate.exposureDeadline)) return reject('obstructed');
     const model = await websiteModelReadEvidence('chatgpt', input.firstUserExpansionModelChoice, null,
       { scope: 'action_precheck', action: input.action });
     if (model.error) {
@@ -7940,22 +7963,27 @@ async function chatGPTExpandFirstUser(candidate) {
     }
     if (!intact()) return chatGPTRejectFirstUserExpansionContext(candidate);
     if (!available()) return reject('unavailable');
-    candidate.exposureDiagnostic = { beforeScroll: chatGPTExpansionExposure(control), afterScroll: 'not_scrolled',
-      final: chatGPTExpansionExposure(control), scrolled: false, waited: false, waitOutcome: 'not_needed', waitMilliseconds: 0 };
+    if (!resumeExposure) {
+      candidate.exposureControl = control;
+      candidate.exposureDiagnostic = { beforeScroll: chatGPTExpansionExposure(control), afterScroll: 'not_scrolled',
+        final: chatGPTExpansionExposure(control), scrolled: false, waited: false, waitOutcome: 'not_needed', waitMilliseconds: 0 };
+    }
     if (!chatGPTControlExposed(control)) {
-      const rect = control.getBoundingClientRect();
-      const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
-      // A center inside the window can still be clipped by a nested scroller
-      // or covered. One scroll may expose it; the same hit test must then pass.
-      const scrollable = [rect.left, rect.top, x, y, rect.width, rect.height].every(Number.isFinite)
-        && rect.width > 0 && rect.height > 0;
-      if (!scrollable || typeof control.scrollIntoView !== 'function') return reject('obstructed');
-      candidate.exposureDiagnostic.scrolled = true;
-      control.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
-      candidate.exposureDiagnostic.afterScroll = chatGPTExpansionExposure(control);
-      candidate.exposureDiagnostic.final = candidate.exposureDiagnostic.afterScroll;
-      if (!intact()) return chatGPTRejectFirstUserExpansionContext(candidate);
-      if (!available()) return reject('unavailable');
+      if (!resumeExposure) {
+        const rect = control.getBoundingClientRect();
+        const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
+        // A center inside the window can still be clipped by a nested scroller
+        // or covered. One scroll may expose it; the same hit test must then pass.
+        const scrollable = [rect.left, rect.top, x, y, rect.width, rect.height].every(Number.isFinite)
+          && rect.width > 0 && rect.height > 0;
+        if (!scrollable || typeof control.scrollIntoView !== 'function') return reject('obstructed');
+        candidate.exposureDiagnostic.scrolled = true;
+        control.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+        candidate.exposureDiagnostic.afterScroll = chatGPTExpansionExposure(control);
+        candidate.exposureDiagnostic.final = candidate.exposureDiagnostic.afterScroll;
+        if (!intact()) return chatGPTRejectFirstUserExpansionContext(candidate);
+        if (!available()) return reject('unavailable');
+      }
       if (!chatGPTControlExposed(control)) {
         const exposure = await chatGPTWaitForExpansionExposure(candidate, control, intact, available);
         if (exposure === 'context_changed') return chatGPTRejectFirstUserExpansionContext(candidate);
@@ -7976,8 +8004,10 @@ async function chatGPTExpandFirstUser(candidate) {
     candidate.exposureDiagnostic.final = chatGPTExpansionExposure(control);
     if (candidate.exposureDiagnostic.waited && Date.now() >= candidate.exposureDeadline) return reject('obstructed');
     if (!chatGPTControlExposed(control)) return reject('obstructed');
+    if (resumeExposure && !chatGPTExpansionLeaseCurrent()) return reject('context_changed');
     candidate.clicked = true;
-    if (!candidate.initialRoute && !candidate.pendingPrivate && !candidate.userRootGap) candidate.deadline = Date.now() + 1_800;
+    if (!candidate.initialRoute && !candidate.pendingPrivate && !candidate.userRootGap)
+      candidate.deadline = resumeExposure ? candidate.exposureDeadline : Date.now() + 1_800;
     chatGPTSubmissionPresentationPins.delete(candidate.body);
     control.click();
     return await chatGPTObserveFirstUserExpansion(candidate);

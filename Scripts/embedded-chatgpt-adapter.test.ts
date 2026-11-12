@@ -5430,6 +5430,67 @@ describe('ChatGPT first-message expansion after a failed center hit', () => {
     }
   });
 
+  test('a certified first route resumes the same exposure wait before its only display click', async () => {
+    for (const mutation of ['none', 'settles', 'control', 'body', 'work', 'stale_lease', 'late', 'uncertified', 'output']) {
+      const x = await staged(); let scrolls = 0;
+      x.f.window.requestAnimationFrame = () => 1;
+      (x.expand as any).scrollIntoView = () => { scrolls++; };
+      const fromURL = x.f.document.URL;
+      const toURL = 'https://chatgpt.com/c/local-chatgpt%3Aexposure?temporary-chat=true';
+      const pending = x.inspect(); await waiting(x);
+      const candidate = x.f.world.__computaModelFirstExpansion as any;
+      const deadline = candidate.exposureDeadline;
+      x.f.document.URL = toURL; x.f.location.pathname = '/c/local-chatgpt%3Aexposure';
+      x.emit('scroll');
+      const crossed = await pending;
+      expect(crossed.error, mutation).toBeDefined(); expect(crossed).not.toHaveProperty('firstUserVerified', true);
+      expect(candidate).toMatchObject({ contextFailure: 'url', clicked: false });
+      expect(x.expand.clicks, mutation).toBe(0);
+      if (mutation !== 'settles') x.f.setHit(x.expand);
+      const certificate = mutation === 'uncertified' ? {} : { firstUserExpansionRouteContinuation: [{ fromURL, toURL }] };
+      let replacement: Element | undefined;
+      if (mutation === 'control') {
+        const parent = x.expand.parentElement!;
+        replacement = new Element('BUTTON', { 'aria-label': 'Show more' });
+        replacement.parentElement = parent; parent.children[parent.children.indexOf(x.expand)] = replacement;
+        x.expand.connected = false; x.f.setHit(replacement);
+      }
+      if (mutation === 'body') x.f.userBody!.text += '!';
+      if (mutation === 'work') { x.f.chatMode.values['aria-pressed'] = 'false'; x.f.workMode.values['aria-pressed'] = 'true'; }
+      if (mutation === 'stale_lease') {
+        const hit = x.f.document.elementFromPoint;
+        x.f.document.elementFromPoint = (left, top) => {
+          const target = hit(left, top);
+          if (left === 70 && top === 95) x.f.world.__computaChatActiveInvocation = { document: x.f.document };
+          return target;
+        };
+      }
+      if (mutation === 'late') x.f.advanceTime(1_801);
+      if (mutation === 'output') x.expand.onClick = () => { x.f.userBody!.text = x.outbound + '!'; };
+      const resumedRead = x.inspect(certificate);
+      if (mutation === 'settles') {
+        for (let i = 0; i < 100 && !x.listeners.get('scroll')?.size; i++) await Bun.sleep(1);
+        expect(x.listeners.get('scroll')?.size).toBe(1); expect(x.expand.clicks).toBe(0);
+        x.f.setHit(x.expand); x.emit('scroll');
+      }
+      const resumed = await resumedRead;
+      if (mutation === 'none' || mutation === 'settles') {
+        expect(resumed.error).toBeUndefined(); expect(resumed.firstUserVerified).toBe(true);
+        expect(resumed.firstUserMarkerVerified).toBe(true);
+        expect((await x.inspect()).error).toBeUndefined();
+      } else {
+        expect(resumed.error, mutation).toBeDefined();
+        expect(resumed, mutation).not.toHaveProperty('firstUserVerified', true);
+      }
+      expect(x.f.world.__computaModelFirstExpansion).toBe(candidate);
+      expect(candidate.exposureDeadline).toBe(deadline);
+      expect(scrolls, mutation).toBe(1);
+      expect(x.expand.clicks, mutation).toBe(['none', 'settles', 'output'].includes(mutation) ? 1 : 0);
+      expect(replacement?.clicks ?? 0).toBe(0);
+      expect(x.send.clicks, mutation).toBe(0); expect(x.f.composer.events, mutation).toHaveLength(0);
+    }
+  });
+
   test('readiness latches changed controls body owner Work model and an expired deadline without clicking', async () => {
     for (const mutation of ['control', 'body', 'owner', 'work', 'model', 'late']) {
       const x = await staged(); x.f.window.requestAnimationFrame = () => 1;
