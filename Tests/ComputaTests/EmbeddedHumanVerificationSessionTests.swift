@@ -356,6 +356,72 @@ final class EmbeddedHumanVerificationSessionTests: XCTestCase {
         XCTAssertNotNil(session.savedHumanVerificationCheckpointIDs["gemini"])
     }
 
+    func testGeminiHTTPErrorDocumentsDoNotOfferAutomaticRecovery() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        session.recordHumanVerificationRequired(provider: "gemini")
+        let checkpoint = try XCTUnwrap(session.savedHumanVerificationCheckpointIDs["gemini"])
+        var candidates: [EmbeddedBrowserSession.HumanVerificationRecoveryCandidate] = []
+        session.onHumanVerificationRecoveryCandidate = { candidates.append($0) }
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        let delegate = RecoveryFixtureDelegate(forwardingTo: try XCTUnwrap(view.navigationDelegate))
+        view.navigationDelegate = delegate
+        let landing = try XCTUnwrap(URL(string: "https://gemini.google.com/app"))
+        let otherLanding = try XCTUnwrap(URL(string: "https://gemini.google.com/u/1/app"))
+        let rateLimited = try XCTUnwrap(HTTPURLResponse(url: landing, statusCode: 429, httpVersion: nil, headerFields: nil))
+        let timedOut = try XCTUnwrap(HTTPURLResponse(url: landing, statusCode: 504, httpVersion: nil, headerFields: nil))
+        let successful = try XCTUnwrap(HTTPURLResponse(url: landing, statusCode: 200, httpVersion: nil, headerFields: nil))
+        let stale = try XCTUnwrap(HTTPURLResponse(url: otherLanding, statusCode: 504, httpVersion: nil, headerFields: nil))
+        let unavailable = URLResponse(url: landing, mimeType: "text/html", expectedContentLength: 0, textEncodingName: nil)
+
+        for (index, response) in [rateLimited, timedOut].enumerated() {
+            delegate.beforeCommit = { view in
+                session.recordGeminiRecoveryHTTPFailureForTesting(response, isMainFrame: true, view: view, tabID: id)
+            }
+            try await loadLocalFixture(view, at: landing)
+            try await waitForRecovery { delegate.finishes == index + 1 }
+            XCTAssertTrue(candidates.isEmpty, "Rendered HTTP \(response.statusCode) is not a recovery source")
+            XCTAssertEqual(session.savedHumanVerificationCheckpointIDs["gemini"], checkpoint)
+        }
+
+        delegate.beforeCommit = { view in
+            session.recordGeminiRecoveryHTTPFailureForTesting(stale, isMainFrame: true, view: view, tabID: id)
+            session.recordGeminiRecoveryHTTPFailureForTesting(unavailable, isMainFrame: true, view: view, tabID: id)
+            session.recordGeminiRecoveryHTTPFailureForTesting(successful, isMainFrame: true, view: view, tabID: id)
+            session.recordGeminiRecoveryHTTPFailureForTesting(timedOut, isMainFrame: false, view: view, tabID: id)
+        }
+        try await loadLocalFixture(view, at: landing)
+        try await waitForRecovery { delegate.finishes == 3 && candidates.count == 1 }
+        let candidate = try XCTUnwrap(candidates.first)
+        XCTAssertTrue(session.isHumanVerificationRecoveryCandidateCurrent(candidate))
+        session.recordGeminiRecoveryHTTPFailureForTesting(timedOut, isMainFrame: true, view: view, tabID: id)
+        XCTAssertTrue(session.isHumanVerificationRecoveryCandidateCurrent(candidate), "A response outside a provisional navigation has no authority")
+        XCTAssertEqual(session.savedHumanVerificationCheckpointIDs["gemini"], checkpoint)
+        XCTAssertEqual(session.tabs.map(\.id), [id], "Recovery intent alone never opens a provider probe")
+    }
+
+    @MainActor private final class RecoveryFixtureDelegate: NSObject, WKNavigationDelegate {
+        let delegate: any WKNavigationDelegate
+        var beforeCommit: ((WKWebView) -> Void)?
+        private(set) var finishes = 0
+
+        init(forwardingTo delegate: any WKNavigationDelegate) { self.delegate = delegate }
+
+        func webView(_ view: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            delegate.webView?(view, didStartProvisionalNavigation: navigation)
+        }
+
+        func webView(_ view: WKWebView, didCommit navigation: WKNavigation!) {
+            beforeCommit?(view)
+            delegate.webView?(view, didCommit: navigation)
+        }
+
+        func webView(_ view: WKWebView, didFinish navigation: WKNavigation!) {
+            delegate.webView?(view, didFinish: navigation)
+            finishes += 1
+        }
+    }
+
     private func waitForRecovery(_ condition: @MainActor () -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(5)
         while !condition(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }

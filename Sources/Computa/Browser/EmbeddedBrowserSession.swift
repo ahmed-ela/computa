@@ -288,6 +288,8 @@ final class EmbeddedBrowserSession {
         var humanCommittedNavigation: WKNavigation?
         var recoveryCommittedGeneration: UUID?
         var recoverySettledGeneration: UUID?
+        var pendingGeminiRecoveryHTTPFailure: (navigation: WKNavigation, generation: UUID, url: URL)?
+        var geminiRecoveryHTTPFailureGeneration: UUID?
         var recoveryToolUsed = false
         var geminiCookieObservationGeneration: UUID?
         var recoveryAttemptedCheckpointID: UUID?
@@ -490,6 +492,7 @@ final class EmbeddedBrowserSession {
               entry.tab.documentID == candidate.documentID, entry.tab.documentGeneration == candidate.documentGeneration,
               entry.recoveryCommittedGeneration == candidate.documentGeneration,
               entry.recoverySettledGeneration == candidate.documentGeneration,
+              entry.geminiRecoveryHTTPFailureGeneration != candidate.documentGeneration,
               entry.navigation == nil, !entry.view.isLoading, !entry.tab.isLoading, entry.tab.error == nil,
               EmbeddedHumanVerificationStore.recoveryProvider(forTrustedHumanURL: entry.view.url) == candidate.provider else { return false }
         return true
@@ -940,6 +943,7 @@ final class EmbeddedBrowserSession {
         revokeModelInspector(entry, reason: .navigation)
         revokeGroqFixtureInspector(entry, reason: .navigation)
         resetModelNavigationDiagnostic(entry)
+        entry.pendingGeminiRecoveryHTTPFailure = nil
         entry.navigation = nil
         entry.preparedDocumentNavigation = false
         entry.tab.documentID = UUID()
@@ -3549,6 +3553,7 @@ final class EmbeddedBrowserSession {
         revokeModelInspector(entry, reason: .navigation)
         revokeGroqFixtureInspector(entry, reason: .navigation)
         resetModelNavigationDiagnostic(entry)
+        entry.pendingGeminiRecoveryHTTPFailure = nil
         entry.recoverySettledGeneration = nil
         entry.tab.documentID = UUID()
         entry.preparedDocumentNavigation = replacesDocument
@@ -3811,6 +3816,18 @@ final class EmbeddedBrowserSession {
     }
     #endif
 
+    fileprivate func recordGeminiRecoveryHTTPFailure(_ response: URLResponse, isMainFrame: Bool,
+                                                     view: WKWebView, tabID: UUID) {
+        guard !isShutdown, isMainFrame, let entry = entries[tabID], entry.view === view,
+              entry.isAvailableToBrowserTools, !entry.isToolOwned, let navigation = entry.navigation,
+              entry.recoveryCommittedGeneration != entry.tab.documentGeneration,
+              let response = response as? HTTPURLResponse, (400..<600).contains(response.statusCode),
+              let url = response.url, EmbeddedHumanVerificationStore.recoveryProvider(forTrustedHumanURL: url) == "gemini" else { return }
+        // WebKit's response callback has no navigation token. Treat this only
+        // as a veto, and only if the current navigation commits this resource.
+        entry.pendingGeminiRecoveryHTTPFailure = (navigation, entry.tab.documentGeneration, url)
+    }
+
     /// A small callback-time sample, not a complete redirect trace. WebKit's
     /// response-policy callback supplies neither a navigation token nor cache
     /// provenance or the outgoing Cookie header. No observation affects policy.
@@ -3853,6 +3870,11 @@ final class EmbeddedBrowserSession {
 
     func setGeminiNavigationResponseClockForTesting(_ clock: @escaping @MainActor () -> ContinuousClock.Instant) {
         geminiResponseObservationClock = clock
+    }
+
+    func recordGeminiRecoveryHTTPFailureForTesting(_ response: URLResponse, isMainFrame: Bool,
+                                                   view: WKWebView, tabID: UUID) {
+        recordGeminiRecoveryHTTPFailure(response, isMainFrame: isMainFrame, view: view, tabID: tabID)
     }
 
     func observeGeminiNavigationResponseForTesting(response: URLResponse, isMainFrame: Bool,
@@ -3911,6 +3933,7 @@ final class EmbeddedBrowserSession {
             }
         }
         entry.navigation = nil
+        entry.pendingGeminiRecoveryHTTPFailure = nil
         entry.pendingConversationURL = nil
         entry.preparedDocumentNavigation = false
         refresh(tabID, view: view)
@@ -3943,6 +3966,14 @@ final class EmbeddedBrowserSession {
             }
         }
         if !entry.isModelOwned, let navigation, entry.humanCommittedNavigation !== navigation {
+            let generation = entry.tab.documentGeneration
+            if let failure = entry.pendingGeminiRecoveryHTTPFailure,
+               failure.navigation === navigation, failure.generation == generation,
+               let url = view.url, var resource = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+                resource.fragment = nil
+                if resource.url == failure.url { entry.geminiRecoveryHTTPFailureGeneration = generation }
+            }
+            entry.pendingGeminiRecoveryHTTPFailure = nil
             entry.humanCommittedNavigation = navigation
             entry.humanCommittedDocumentID = UUID()
             entry.recoveryCommittedGeneration = entry.tab.documentGeneration
@@ -3963,6 +3994,7 @@ final class EmbeddedBrowserSession {
         revokeModelInspector(entry, reason: .navigation)
         revokeGroqFixtureInspector(entry, reason: .navigation)
         resetModelNavigationDiagnostic(entry)
+        entry.pendingGeminiRecoveryHTTPFailure = nil
         entry.navigation = nil
         entry.preparedDocumentNavigation = false
         entry.tab.documentID = UUID()
@@ -4437,6 +4469,8 @@ private final class EmbeddedBrowserDelegate: NSObject, WKNavigationDelegate, WKU
             return
         }
         if navigationResponse.isForMainFrame, let url = navigationResponse.response.url {
+            session?.recordGeminiRecoveryHTTPFailure(navigationResponse.response, isMainFrame: true,
+                                                     view: webView, tabID: tabID)
             admitChatGPT(url, view: webView) { decisionHandler($0 ? .allow : .cancel) }
         } else { decisionHandler(.allow) }
     }
