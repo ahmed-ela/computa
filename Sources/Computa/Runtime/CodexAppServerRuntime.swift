@@ -1305,7 +1305,14 @@ private extension CodexAppServerRuntime {
             let submission: UUID?
         }
         private var embeddedBrowserTurnKeys = [AgentTask.ID: EmbeddedBrowserTurnLease]()
-        private var embeddedBrowserTaskCleanups = [AgentTask.ID: (turnID: String, task: Task<[String], Never>)]()
+        private struct EmbeddedBrowserTaskCleanup {
+            let id: UUID
+            let turnID: String
+            let task: Task<[String], Never>
+        }
+        private static let browserCleanupPersistenceIssue = "Built-in browser cleanup evidence could not be saved."
+        private var embeddedBrowserTaskCleanups = [AgentTask.ID: EmbeddedBrowserTaskCleanup]()
+        private var unsavedBrowserCleanupReceipts = [AgentTask.ID: EmbeddedBrowserCleanupReceipt]()
         private let visualGrounder: any VisualGroundingClient
         private var fileChangeTranscripts = [AgentTask.ID: AppServerFileChangeTranscript]()
         private var initializedDiffTurns = [AgentTask.ID: Set<String>]()
@@ -1738,7 +1745,19 @@ private extension CodexAppServerRuntime {
             }
             let threadID = threadForTask[taskID]
             let turnID = turnIdentity.latestTurnID(for: taskID)
+            let browserGeneration = serverGeneration
             let operation = Task {
+                if let browserCleanup = embeddedBrowserTaskCleanups[taskID], browserCleanup.turnID == turnID {
+                    _ = await browserCleanup.task.value
+                }
+                if let receipt = persistPendingBrowserCleanupReceipt(taskID: taskID, threadID: threadID,
+                    turnID: turnID, generation: browserGeneration) {
+                    events.yield(.timelineEntryAppended(taskID: taskID, entry: TimelineEntry(
+                        id: "embedded-browser-cleanup-persisted:\(receipt.turnID)", kind: .system,
+                        title: "Browser cleanup evidence saved",
+                        body: "Computa saved the original built-in browser cleanup report for this turn.",
+                        turnID: receipt.turnID)))
+                }
                 await webModelServer.registerCleanupTurn(taskID: taskID, threadID: threadID, turnID: turnID)
                 return await webModelServer.retryWebsiteSessionCleanup(taskID: taskID, runtimeGeneration: generation)
             }
@@ -1878,8 +1897,10 @@ private extension CodexAppServerRuntime {
             apiCleanupTasks.removeAll()
             for cleanup in Array(webCleanupTasks.values) { _ = await cleanup.value }
             webCleanupTasks.removeAll()
+            let browserPersistenceIssues = unsavedBrowserCleanupReceipts.isEmpty ? [] : [Self.browserCleanupPersistenceIssue]
             let issues = Array(Set(
-                processIssues + inferenceIssues + webIssues + childCleanupIssues + embeddedBrowserIssues + grounder
+                processIssues + inferenceIssues + webIssues + childCleanupIssues
+                    + embeddedBrowserIssues + browserPersistenceIssues + grounder
             )).sorted()
             events.yield(.connectionChanged(.disconnected))
             events.finish()
@@ -1895,17 +1916,24 @@ private extension CodexAppServerRuntime {
                 let result = Task<[String], Never> {
                     let report = await controller.releaseReport(taskKey: lease.key, trigger: trigger)
                     var issues = report.issues
+                    var retainedUnsavedReceipt = false
                     if report.wasUsed {
                         let receipt = EmbeddedBrowserCleanupReceipt(taskID: taskID, threadID: lease.threadID,
                             turnID: lease.turnID, runtimeGeneration: lease.generation, report: report)
                         let store = EmbeddedBrowserCleanupReceiptStore(codexHomePath: configuration.codexHomePath)
                         let saved = store?.save(receipt) ?? false
-                        if !saved { issues.append("Built-in browser cleanup evidence could not be saved.") }
+                        if !saved { issues.append(Self.browserCleanupPersistenceIssue) }
                         // A late old-turn disposal is still saved above, but
                         // cannot describe the current turn's resource state.
                         if serverGeneration == lease.generation,
                            latestSubmissionClaims[taskID] == lease.submission,
                            turnIdentity.latestTurnID(for: taskID) == lease.turnID {
+                            if !saved, embeddedBrowserTaskCleanups[taskID]?.id == id {
+                                if unsavedBrowserCleanupReceipts.updateValue(receipt, forKey: taskID) != nil {
+                                    childCleanupIssues.append(Self.browserCleanupPersistenceIssue)
+                                }
+                                retainedUnsavedReceipt = true
+                            }
                             let closed = report.targets.filter(\.closed)
                             let automatic = closed.filter { $0.trigger != .explicit }.count
                             let body: String
@@ -1924,10 +1952,10 @@ private extension CodexAppServerRuntime {
                                 body: body, turnID: lease.turnID)))
                         }
                     }
-                    childCleanupIssues.append(contentsOf: issues)
+                    childCleanupIssues.append(contentsOf: retainedUnsavedReceipt ? report.issues : issues)
                     return issues
                 }
-                embeddedBrowserTaskCleanups[taskID] = (lease.turnID, result)
+                embeddedBrowserTaskCleanups[taskID] = .init(id: id, turnID: lease.turnID, task: result)
                 let cleanup = Task<Void, Never> {
                     _ = await result.value
                     browserCleanupTasks.removeValue(forKey: id)
@@ -1950,6 +1978,19 @@ private extension CodexAppServerRuntime {
                 events.yield(.approvalResolved(requestID: requestID))
             }
             return embeddedCleanup
+        }
+
+        /// Save the original report after a local write failure. No browser
+        /// controller, model request, or turn completion is involved.
+        private func persistPendingBrowserCleanupReceipt(taskID: AgentTask.ID, threadID: String?,
+                                                         turnID: String?, generation: UUID) -> EmbeddedBrowserCleanupReceipt? {
+            guard let receipt = unsavedBrowserCleanupReceipts[taskID],
+                  receipt.taskID == taskID, receipt.threadID == threadID, receipt.turnID == turnID,
+                  receipt.runtimeGeneration == generation, serverGeneration == generation,
+                  threadForTask[taskID] == threadID, turnIdentity.latestTurnID(for: taskID) == turnID,
+                  EmbeddedBrowserCleanupReceiptStore(codexHomePath: configuration.codexHomePath)?.save(receipt) == true else { return nil }
+            unsavedBrowserCleanupReceipts.removeValue(forKey: taskID)
+            return receipt
         }
 
         private func headlessWorkState(excludingSubmissionFor taskID: AgentTask.ID? = nil) -> HeadlessMLXWorkState {
@@ -2031,10 +2072,12 @@ private extension CodexAppServerRuntime {
             if let cleanup = apiCleanupTasks[taskID] { _ = await cleanup.value }
             if let cleanup = embeddedBrowserTaskCleanups[taskID] {
                 _ = await cleanup.task.value
-                if embeddedBrowserTaskCleanups[taskID]?.turnID == cleanup.turnID {
+                if embeddedBrowserTaskCleanups[taskID]?.id == cleanup.id {
                     embeddedBrowserTaskCleanups.removeValue(forKey: taskID)
                 }
             }
+            _ = persistPendingBrowserCleanupReceipt(taskID: taskID, threadID: threadForTask[taskID],
+                turnID: turnIdentity.latestTurnID(for: taskID), generation: serverGeneration)
             guard !isPreparingCommandShutdown, !commandCleanupTasks.contains(taskID) else {
                 throw RuntimeError.serverError("Wait for this task's command cleanup to finish.")
             }
