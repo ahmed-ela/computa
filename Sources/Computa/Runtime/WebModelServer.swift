@@ -204,6 +204,7 @@ actor WebModelServer {
         let resolvedSelection: WebsiteSelectionEvidence?
         let turnInferenceCount: Int
         let cumulativePromptUTF8Count: Int
+        var hasValidatedOpus3FormatCorrection = false
         var ambiguousHandoff = false
     }
 
@@ -2043,13 +2044,18 @@ actor WebModelServer {
                         prompt = request.prompt + Self.correctionReminder(for: correctionTicket.reason)
                         submissionBodyUnits = try WebModelResponseCodec.validateGroqPromptBudget(model: request.model, prompt: prompt)
                     } else if provesFreshSessionSubmission, !context.isMaintenance, let closed,
-                              closed.continuation.pendingToolCallCount > 0,
-                              let annotated = Self.claudePromptWithMatchedOutputNote(request.prompt,
-                                remainingTurnBytes: Self.maximumTurnPromptUTF8Bytes - closed.cumulativePromptUTF8Count,
-                                modelChoice: choice) {
-                        // validate(next:) above joined only these appended outputs to the prior released calls.
-                        prompt = annotated
-                        includesClaudeOutputNote = true
+                              closed.continuation.pendingToolCallCount > 0 {
+                        // validate(next:) joined only these appended outputs to the prior released calls.
+                        let budget = min(WebModelResponseCodec.maximumPromptBytes,
+                            Self.maximumTurnPromptUTF8Bytes - closed.cumulativePromptUTF8Count)
+                        let annotated = Self.claudePromptWithMatchedOutputNote(request.prompt,
+                            remainingTurnBytes: budget, modelChoice: choice)
+                        let continuationPrompt = annotated ?? request.prompt
+                        let reminder = Self.claudeOpus3ContinuationFormatReminder
+                        prompt = choice == .claudeOpus3 && closed.hasValidatedOpus3FormatCorrection
+                            && continuationPrompt.utf8.count + reminder.utf8.count <= budget
+                            ? continuationPrompt + reminder : continuationPrompt
+                        includesClaudeOutputNote = annotated != nil
                     } else {
                         prompt = request.prompt
                     }
@@ -2595,7 +2601,9 @@ actor WebModelServer {
                             if let continuation {
                                 closedTurns[taskID] = ClosedTurn(inferenceID: inferenceID, context: context, continuation: continuation,
                                     transportGeneration: session.transportGeneration, resolvedSelection: session.resolvedSelection,
-                                    turnInferenceCount: session.turnInferenceCount, cumulativePromptUTF8Count: session.cumulativePromptUTF8Count)
+                                    turnInferenceCount: session.turnInferenceCount, cumulativePromptUTF8Count: session.cumulativePromptUTF8Count,
+                                    hasValidatedOpus3FormatCorrection: session.modelChoice == .claudeOpus3
+                                        && continuation.pendingToolCallCount > 0 && closedHandoff?.hasValidatedOpus3FormatCorrection == true)
                             }
                         }
                         try requireCurrentContext()
@@ -2604,6 +2612,10 @@ actor WebModelServer {
                                 secondSessionToken: token, outcome: .responseValidated) }
                             catch { throw Failure.persistenceRequired }
                             correctionFinished = true
+                            if session.modelChoice == .claudeOpus3, correctionTicket.reason == .invalidJSON,
+                               (continuation?.pendingToolCallCount ?? 0) > 0, closedTurns[taskID]?.inferenceID == inferenceID {
+                                closedTurns[taskID]?.hasValidatedOpus3FormatCorrection = true
+                            }
                         }
                         try requireCurrentContext()
                         responseProfile?.mark(.inferenceReturnReady)
@@ -2964,6 +2976,9 @@ actor WebModelServer {
         return true
     }
 
+    private static let correctedEnvelopeInstruction = "exactly one complete JSON response envelope inside one json code fence. Put every result or explanation inside the envelope; place no headings, prose, or summaries outside the fence."
+    private static let claudeOpus3ContinuationFormatReminder = "\n\nReturn " + correctedEnvelopeInstruction
+
     private static func correctionReminder(for reason: WebsiteModelFormatCorrectionStore.Reason) -> String {
         let failure: String
         switch reason {
@@ -2976,7 +2991,7 @@ actor WebModelServer {
 
 
         COMPUTA RESPONSE CORRECTION — ONE ATTEMPT
-        \(failure) Fulfil the unchanged canonical request above using exactly one complete JSON response envelope inside one json code fence. Put every result or explanation inside the envelope; place no headings, prose, or summaries outside the fence. Keep the original offered tools, tool choice, permissions, arguments, and history authoritative. Do not invent results or repeat actions already completed in the canonical history.
+        \(failure) Fulfil the unchanged canonical request above using \(correctedEnvelopeInstruction) Keep the original offered tools, tool choice, permissions, arguments, and history authoritative. Do not invent results or repeat actions already completed in the canonical history.
         """
     }
 

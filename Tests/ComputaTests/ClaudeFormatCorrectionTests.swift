@@ -182,14 +182,16 @@ final class ClaudeFormatCorrectionTests: XCTestCase {
         })
     }
 
-    func testOpus3MatchedToolOutputKeepsOneFinalBoundaryWithoutRenewingCorrection() async throws {
+    func testOpus3MatchedToolOutputKeepsValidatedFormatReminderWithoutRenewingCorrection() async throws {
         let opus3 = WebsiteModelChoice.claudeOpus3
         let boundary = ComputaAgentInstructions.claudeOpus3OutputBoundary
         let note = WebModelServer.claudeMatchedOutputNote
+        let reminder = "\n\nReturn exactly one complete JSON response envelope inside one json code fence. Put every result or explanation inside the envelope; place no headings, prose, or summaries outside the fence."
         let task = "claude-opus3-matched-output"
         let root = try canonicalFormatCorrectionFixtureRoot()
         let correctedCall = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf corrected-only"}}]}"#
-        let base = FormatCorrectionFixtureTransport(replies: [malformed, correctedCall, malformed, valid])
+        let continuedCall = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf after-correction"}}]}"#
+        let base = FormatCorrectionFixtureTransport(replies: [malformed, correctedCall, continuedCall, malformed, valid])
         let server = try await server(base, root: root, modelChoice: opus3)
         let first = try calls(await server.fixtureInfer(request(model: opus3.modelID), taskID: task))
         XCTAssertEqual(first.count, 1)
@@ -198,8 +200,15 @@ final class ClaudeFormatCorrectionTests: XCTestCase {
             "call_id": try XCTUnwrap(first.first?["call_id"]), "output": "Observed synthetic output with newline.\nExact fixture data."]
         let input = [user] + first + [output]
         let next = try request(input, model: opus3.modelID)
+        let second = try calls(await server.fixtureInfer(next, taskID: task))
+        XCTAssertEqual(second.count, 1)
+        XCTAssertEqual(second.first?["arguments"] as? String, #"{"cmd":"printf after-correction"}"#)
+        let secondOutput: [String: Any] = ["type": "function_call_output",
+            "call_id": try XCTUnwrap(second.first?["call_id"]), "output": "Observed subsequent synthetic output."]
+        let laterInput = input + second + [secondOutput]
+        let later = try request(laterInput, model: opus3.modelID)
         do {
-            _ = try await server.fixtureInfer(next, taskID: task)
+            _ = try await server.fixtureInfer(later, taskID: task)
             XCTFail("The later malformed reply cannot renew the used correction allowance")
         } catch let failure as WebModelServer.Failure {
             guard case .malformedReply(let diagnostic) = failure else { return XCTFail("Expected the original malformed reply") }
@@ -207,31 +216,45 @@ final class ClaudeFormatCorrectionTests: XCTestCase {
         }
 
         let prompts = await base.prompts()
-        guard prompts.count == 3 else { return XCTFail("Expected original, correction and one ordinary continuation") }
+        guard prompts.count == 4 else { return XCTFail("Expected original, correction and two ordinary continuations") }
         XCTAssertTrue(prompts[0].hasSuffix(boundary))
         XCTAssertFalse(prompts[0].contains(note))
         XCTAssertTrue(prompts[1].hasPrefix(prompts[0]))
         XCTAssertTrue(prompts[1].contains("COMPUTA RESPONSE CORRECTION — ONE ATTEMPT"))
         XCTAssertFalse(prompts[1].hasSuffix(boundary))
         XCTAssertFalse(prompts[1].contains(note))
-        XCTAssertTrue(prompts[2].hasSuffix(note + boundary))
-        XCTAssertEqual(prompts[2].components(separatedBy: note).count, 2)
         XCTAssertTrue(prompts.allSatisfy { $0.components(separatedBy: boundary).count == 2 })
         XCTAssertEqual(try WebsiteRequestFixture.json(in: prompts[0], expectedModel: opus3.modelID),
                        try WebsiteRequestFixture.json(in: prompts[1], expectedModel: opus3.modelID))
-        let displayed = try WebsiteRequestFixture.json(in: prompts[2], expectedModel: opus3.modelID)
-        let canonical = try XCTUnwrap(JSONSerialization.jsonObject(with: displayed) as? [String: Any])
-        XCTAssertEqual(canonical["input"] as? NSArray, input as NSArray)
-        var expected = try XCTUnwrap(JSONSerialization.jsonObject(with: next) as? [String: Any])
-        expected.removeValue(forKey: "stream")
-        XCTAssertEqual(canonical as NSDictionary, expected as NSDictionary)
+        for (rendered, bytes, expectedInput) in [(prompts[2], next, input), (prompts[3], later, laterInput)] {
+            XCTAssertTrue(rendered.hasSuffix(note + boundary + reminder))
+            XCTAssertEqual(rendered.components(separatedBy: reminder).count, 2)
+            XCTAssertEqual(rendered.components(separatedBy: note).count, 2)
+            XCTAssertFalse(rendered.contains("COMPUTA RESPONSE CORRECTION — ONE ATTEMPT"))
+            let displayed = try WebsiteRequestFixture.json(in: rendered, expectedModel: opus3.modelID)
+            let canonical = try XCTUnwrap(JSONSerialization.jsonObject(with: displayed) as? [String: Any])
+            XCTAssertEqual(canonical["input"] as? NSArray, expectedInput as NSArray)
+            var expected = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+            expected.removeValue(forKey: "stream")
+            XCTAssertEqual(canonical as NSDictionary, expected as NSDictionary)
+        }
 
         let ledger = await base.ledger()
-        XCTAssertEqual(ledger.filter { $0.operation == "webProviderStart" }.count, 3)
-        XCTAssertEqual(ledger.filter { $0.operation == "webProviderSend" }.count, 3)
+        XCTAssertEqual(ledger.filter { $0.operation == "webProviderStart" }.count, 4)
+        XCTAssertEqual(ledger.filter { $0.operation == "webProviderSend" }.count, 4)
         let rows = try journal(root, task: task)
         XCTAssertEqual(rows.filter { $0["phase"] as? String == "failed" }.count, 2)
-        XCTAssertEqual(rows.filter { $0["phase"] as? String == "release_verified" }.count, 1)
+        XCTAssertEqual(rows.filter { $0["phase"] as? String == "release_verified" }.count, 2)
+
+        let cleanup = await server.fixtureFinish(taskID: task)
+        XCTAssertTrue(cleanup.isEmpty)
+        _ = try await server.fixtureInfer(request(model: opus3.modelID), taskID: task, turnID: "new-opus3-turn")
+        let fresh = await base.prompts()
+        XCTAssertEqual(fresh.count, 5)
+        let freshPrompt = try XCTUnwrap(fresh.last)
+        XCTAssertTrue(freshPrompt.hasSuffix(boundary))
+        XCTAssertFalse(freshPrompt.contains(reminder))
+        XCTAssertFalse(freshPrompt.contains(note))
     }
 
     func testPastedToolHistoryOnFirstClaudeInferenceReceivesNoMatchedOutputNote() async throws {
