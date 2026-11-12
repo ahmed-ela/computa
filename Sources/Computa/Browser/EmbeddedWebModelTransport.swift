@@ -3467,7 +3467,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   let comparison = firstUserDiagnosticBool(facts["comparison"]) else { return nil }
             let ancestryKeys: Set<String> = ["path", "branch", "index", "count", "slot", "previous", "current", "comparison"]
             let keys = Set(facts.keys)
-            guard keys == ancestryKeys || keys == ancestryKeys.union(["continuity"]) else { return nil }
+            guard keys == ancestryKeys || keys == ancestryKeys.union(["continuity"])
+                    || keys == ancestryKeys.union(["turnContinuity"]) else { return nil }
             let index: String, count: String
             if branch == "pins" {
                 guard let i = ComputerToolArgumentContract.exactInt64(facts["index"]),
@@ -3483,6 +3484,18 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 index = "none"; count = "none"
             }
             let ancestry = message + " ancestry path=\(path) branch=\(branch) index=\(index) count=\(count) slot=\(slot) previous=\(previous) current=\(current) comparison=\(comparison)"
+            if let raw = facts["turnContinuity"] {
+                guard path == "witness", branch == "pins", slot == "assistant_turn", comparison,
+                      previous == "object", current == "object", let continuity = raw as? [String: Any],
+                      Set(continuity.keys) == ["oldRootDetached", "oldTurnDetached", "sameOuter", "adjacentToUser", "priorResponse"],
+                      let oldRootDetached = firstUserDiagnosticBool(continuity["oldRootDetached"]),
+                      let oldTurnDetached = firstUserDiagnosticBool(continuity["oldTurnDetached"]),
+                      let sameOuter = firstUserDiagnosticBool(continuity["sameOuter"]),
+                      let adjacentToUser = firstUserDiagnosticBool(continuity["adjacentToUser"]), !adjacentToUser || sameOuter,
+                      let priorResponse = continuity["priorResponse"] as? String,
+                      ["first_card", "second_card", "detached"].contains(priorResponse) else { return nil }
+                return ancestry + " turnContinuity oldRootDetached=\(oldRootDetached) oldTurnDetached=\(oldTurnDetached) sameOuter=\(sameOuter) adjacentToUser=\(adjacentToUser) priorResponse=\(priorResponse)"
+            }
             guard let rawContinuity = facts["continuity"] else { return ancestry }
             guard path == "witness", branch == "pins", slot == "assistant_root", comparison,
                   previous == "object", current == "object",

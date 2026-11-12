@@ -103,11 +103,12 @@ for(const {model,handoff} of [
  expect(repeated.savedResponseChoice.state).toBe('acknowledged');expect(p.controls.map(n=>n.clicks)).toEqual([1,0]);
 });
 test('a comparison cannot adopt changed witness pins, native grants, prompt, model or controls',async()=>{
- for(const fault of ['body','control','root','user-turn','answer-turn','detached-answer-turn','connected-answer-root','prior-in-second-card','editor','composer','model','route','preview','hash','grant','cleanup','foreign-tail','pair-control','double-user']){
+ for(const fault of ['body','control','root','user-turn','answer-turn','detached-answer-turn','nonadjacent-answer-turn','connected-answer-root','prior-in-second-card','editor','composer','model','route','preview','hash','grant','cleanup','foreign-tail','pair-control','double-user']){
   const x=await initial(),{f,input,expand}=x;
   expect((await f.run('inspect',input)).qwenFirstBodyExpansionPending).toBe(true);
-  const changedTurn=fault==='answer-turn'||fault==='detached-answer-turn';
+  const changedTurn=fault==='answer-turn'||fault==='detached-answer-turn'||fault==='nonadjacent-answer-turn';
   const remounted=changedTurn||fault==='connected-answer-root'||fault==='prior-in-second-card';
+  if(fault==='nonadjacent-answer-turn')f.turn.append(new f.Node('DIV'));
   const root=remounted?remountAnswerRoot(x,changedTurn):f.answerRoot;
   const p=mountPair(x,fault==='detached-answer-turn',root,fault==='prior-in-second-card'),over:any={...input};
   if(fault==='body'){const fresh=new f.Node('P',{...f.userBody.values},f.userBody.text);f.userBody.detach();x.chunk.append(fresh);}
@@ -140,6 +141,8 @@ test('a comparison cannot adopt changed witness pins, native grants, prompt, mod
    const ancestry=rejected.qwenFirstUserBindingDiagnostic.ancestry;
    if(changedTurn){
     expect(ancestry.slot).toBe('assistant_turn');expect(ancestry.continuity).toBeUndefined();
+    expect(ancestry.turnContinuity).toEqual({oldRootDetached:true,oldTurnDetached:true,sameOuter:true,
+      adjacentToUser:fault!=='nonadjacent-answer-turn',priorResponse:fault==='detached-answer-turn'?'detached':'first_card'});
    }else{
     const priorResponse=fault==='prior-in-second-card'?'second_card':'first_card';
     expect(ancestry.slot).toBe('assistant_root');

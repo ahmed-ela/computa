@@ -447,12 +447,18 @@ async function computaSavedConversation(input, c, dom, config) {
             if (reason !== 'answer_ancestry_changed') return refuse(reason, structure);
             return refuse(reason, () => {
               const facts = structure();
-              if (facts.slot !== 'assistant_root') return facts;
-              // These finite facts explain a rejected remount. They do not
-              // supply new proof or read anything outside the existing pins.
-              return { ...facts, continuity: { oldRootDetached, pairRootMatches,
-                priorResponse: priorCardIndex === 0 ? 'first_card' : priorCardIndex === 1 ? 'second_card' : 'detached',
-                assistantTurnMatches: optimistic.pins.at(-2) === view.pins.at(-2) } };
+              const priorResponse = priorCardIndex === 0 ? 'first_card' : priorCardIndex === 1 ? 'second_card' : 'detached';
+              // These facts describe a rejection and never grant ownership.
+              if (facts.slot === 'assistant_root') return { ...facts, continuity: { oldRootDetached, pairRootMatches,
+                priorResponse, assistantTurnMatches: optimistic.pins.at(-2) === view.pins.at(-2) } };
+              if (facts.slot === 'assistant_turn' && facts.previous === 'object' && facts.current === 'object') {
+                const previousTurn = optimistic.pins.at(-2), currentTurn = view.pins.at(-2);
+                const outer = optimistic.pins.at(-4), userTurn = optimistic.pins.at(-5);
+                const sameOuter = currentTurn.parentElement === outer;
+                return { ...facts, turnContinuity: { oldRootDetached, oldTurnDetached: previousTurn.isConnected === false,
+                  sameOuter, adjacentToUser: sameOuter && currentTurn.previousElementSibling === userTurn, priorResponse } };
+              }
+              return facts;
             });
           }, 'witness', true);
         } else requireDisplayPins(optimistic, view, refuse, 'witness', false);

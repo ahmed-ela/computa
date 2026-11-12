@@ -24,6 +24,10 @@ export function fixture(options: { completeOnSend?: boolean; modelQuota?: boolea
     _value = '';
     get value() { return this._value; }
     set value(value: string) { this._value = value; }
+    get previousElementSibling() {
+      const siblings = this.parentElement?.children.filter(child => child.nodeType === 1) ?? [];
+      return siblings[siblings.indexOf(this) - 1] ?? null;
+    }
     setAttribute(name: string, value: string) { this.values[name] = value; }
     removeAttribute(name: string) { delete this.values[name]; }
     detach() { if (this.parentElement) this.parentElement.children = this.parentElement.children.filter(node => node !== this); this.parentElement = null; this.connected = false; }
