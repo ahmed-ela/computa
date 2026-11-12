@@ -2443,6 +2443,52 @@ final class APIModelResponseCodecTests: XCTestCase {
         XCTAssertFalse(encoded.contains("PRIVATE"))
     }
 
+    func testAlibabaFlashSemanticCatalogLeadsWithExactCallableNameAndStillRejectsNativeNames() throws {
+        let originalInstruction = "Use the native read operation for this authorized file."
+        let originalUser = "Keep the word read unchanged."
+        let requestFields: [String: Any] = [
+            "instructions": originalInstruction,
+            "input": [["role": "user", "content": originalUser]],
+            "tool_choice": ["type": "function", "name": "read", "namespace": "files"],
+        ]
+        let prepared = try request(requestFields, provider: literalPatchProvider(), toolNaming: .semantic)
+        let hostInstruction = "Host policy describes files.read and applies the current permissions."
+        let projected = try APIModelResponseCodec.appendingHostDeveloperMessage(hostInstruction, to: prepared)
+        let declarations = try wireFunctions(projected)
+        let read = try XCTUnwrap(declarations.first)
+        let callable = try XCTUnwrap(read["name"] as? String)
+        XCTAssertEqual(projected.allowedTools, [callable])
+        XCTAssertTrue(try XCTUnwrap(read["description"] as? String).hasPrefix("Callable API function: \(callable).\n"))
+        XCTAssertTrue(try XCTUnwrap(declarations.last?["description"] as? String).hasPrefix("Native tool: apply_patch.\n"))
+
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: projected.body) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.compactMap { $0["role"] as? String }, ["system", "user", "system"])
+        let opening = try XCTUnwrap(messages.first?["content"] as? String)
+        XCTAssertTrue(opening.hasPrefix("For tool calls, copy the exact offered function name, including its entire suffix."))
+        XCTAssertTrue(opening.hasSuffix(originalInstruction))
+        XCTAssertEqual(messages[1]["content"] as? String, originalUser)
+        XCTAssertEqual(messages[2]["content"] as? String, hostInstruction)
+
+        func response(name: String) throws -> APIModelResponseCodec.Reply {
+            try decode(["role": "assistant", "tool_calls": [["id": "fixture-read", "type": "function",
+                "function": ["name": name, "arguments": #"{"path":"fixture"}"#]]]],
+                finish: "tool_calls", request: projected, model: "qwen3.7-flash")
+        }
+        for unoffered in ["read", "files.read", try XCTUnwrap(declarations.last?["name"] as? String)] {
+            XCTAssertThrowsError(try response(name: unoffered)) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
+            }
+        }
+        let accepted = try response(name: callable)
+        let output = try XCTUnwrap((accepted.response["output"] as? [[String: Any]])?.first)
+        XCTAssertEqual(output["name"] as? String, "read")
+        XCTAssertEqual(output["namespace"] as? String, "files")
+
+        let legacy = try request(requestFields, provider: literalPatchProvider(), toolNaming: .legacy)
+        XCTAssertTrue(try XCTUnwrap(wireFunctions(legacy).first?["description"] as? String).hasPrefix("Native tool: files.read.\n"))
+    }
+
     func testSemanticToolNamesStayStableAcrossFilteringReorderingAndNamedChoice() throws {
         let chrome: [String: Any] = ["type": "function", "name": "computer_v2_tabs", "parameters": ["type": "object", "properties": [:], "additionalProperties": false]]
         let browser: [String: Any] = ["type": "function", "name": "browser_open", "description": "Open the requested built-in page.",

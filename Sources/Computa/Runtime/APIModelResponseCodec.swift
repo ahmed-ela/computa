@@ -717,8 +717,8 @@ enum APIModelResponseCodec {
         // calls and current declarations share one stable provider identity.
         let historyByIdentity = Dictionary(uniqueKeysWithValues: historyTools.map { ($0.identity, $0) })
         let alibabaPatchGuidance = selection.provider.wireAPI == .chatCompletions && selection.provider.isAlibabaModelStudioInference
-        let literalPatch = alibabaPatchGuidance && selection.model.id == "qwen3.7-flash"
-        let tools = try parseTools(raw["tools"], naming: toolNaming, alibabaPatchGuidance: alibabaPatchGuidance, literalPatch: literalPatch).map { visible -> Tool in
+        let alibabaFlash = alibabaPatchGuidance && selection.model.id == "qwen3.7-flash"
+        let tools = try parseTools(raw["tools"], naming: toolNaming, alibabaPatchGuidance: alibabaPatchGuidance, literalPatch: alibabaFlash).map { visible -> Tool in
             guard let original = historyByIdentity[visible.identity] else { throw Failure.invalidTool }
             return Tool(name: visible.name, namespace: visible.namespace, wireName: original.wireName,
                         custom: visible.custom, schema: visible.schema, description: visible.description, patchProjection: visible.patchProjection,
@@ -755,9 +755,22 @@ enum APIModelResponseCodec {
             // adapter's locally sealed continuation is never sent to a different wire API.
             body["stream"] = false
         } else {
-            body = ["model": selection.model.id, "messages": history.messages, "stream": stream, "n": 1]
+            let clarifyToolNames = alibabaFlash && toolNaming == .semantic && !allowed.isEmpty
+            var messages = history.messages
+            if clarifyToolNames {
+                let guidance = "For tool calls, copy the exact offered function name, including its entire suffix. Use native operation names in the instructions only to find the matching offered function."
+                if messages.first?["role"] as? String == "system", let instructions = messages[0]["content"] as? String {
+                    messages[0]["content"] = guidance + "\n\n" + instructions
+                } else {
+                    messages.insert(["role": "system", "content": guidance], at: 0)
+                }
+            }
+            body = ["model": selection.model.id, "messages": messages, "stream": stream, "n": 1]
             if !tools.isEmpty {
-                body["tools"] = try tools.map { ["type": "function", "function": ["name": $0.wireName, "description": try chatCompletionToolDescription($0), "parameters": $0.schema]] as [String: Any] }
+                body["tools"] = try tools.map { tool in
+                    let description = try chatCompletionToolDescription(tool, callableNameFirst: clarifyToolNames && allowed.contains(tool.wireName))
+                    return ["type": "function", "function": ["name": tool.wireName, "description": description, "parameters": tool.schema]] as [String: Any]
+                }
                 body["tool_choice"] = wireChoice
                 body["parallel_tool_calls"] = parallel
             } else if required { throw Failure.invalidTool }
@@ -856,11 +869,16 @@ enum APIModelResponseCodec {
                 "service_tier": "default", "metadata": metadata, "safety_identifier": NSNull(), "prompt_cache_key": NSNull()]
     }
 
-    private static func chatCompletionToolDescription(_ tool: Tool) throws -> String {
+    private static func chatCompletionToolDescription(_ tool: Tool, callableNameFirst: Bool) throws -> String {
         // Describe the final alias only after active tools have been rebound to
         // their original history indices. Native Responses keeps its own names.
         let qualified = tool.namespace.map { $0 + "." + tool.name } ?? tool.name
-        let identity = "Native tool: \(qualified).\nNative namespace: \(tool.namespace ?? "(none)"); native name: \(tool.name).\nCallable API function: \(tool.wireName).\nWhen instructions refer to this native tool, call this API function with its declared arguments.\n\n"
+        let identity: String
+        if callableNameFirst {
+            identity = "Callable API function: \(tool.wireName).\nCopy this exact identifier in function.name. Native instructions describe this operation as \(qualified).\n\n"
+        } else {
+            identity = "Native tool: \(qualified).\nNative namespace: \(tool.namespace ?? "(none)"); native name: \(tool.name).\nCallable API function: \(tool.wireName).\nWhen instructions refer to this native tool, call this API function with its declared arguments.\n\n"
+        }
         // Existing tool descriptions (including custom grammars) remain intact
         // at their existing limit; the separately bounded identity is additive.
         guard identity.utf8.count <= 1_024, tool.description.utf8.count <= 64_000 else { throw Failure.invalidTool }
