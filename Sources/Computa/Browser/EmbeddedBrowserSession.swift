@@ -288,6 +288,7 @@ final class EmbeddedBrowserSession {
         var humanCommittedNavigation: WKNavigation?
         var recoveryCommittedGeneration: UUID?
         var recoverySettledGeneration: UUID?
+        var geminiRecoveryNavigationStart: (checkpointID: UUID, generation: UUID)?
         var pendingGeminiRecoveryHTTPFailure: (navigation: WKNavigation, generation: UUID, url: URL)?
         var geminiRecoveryHTTPFailureGeneration: UUID?
         var recoveryToolUsed = false
@@ -492,6 +493,8 @@ final class EmbeddedBrowserSession {
               entry.tab.documentID == candidate.documentID, entry.tab.documentGeneration == candidate.documentGeneration,
               entry.recoveryCommittedGeneration == candidate.documentGeneration,
               entry.recoverySettledGeneration == candidate.documentGeneration,
+              entry.geminiRecoveryNavigationStart?.generation == candidate.documentGeneration,
+              entry.geminiRecoveryNavigationStart?.checkpointID == candidate.checkpointID,
               entry.geminiRecoveryHTTPFailureGeneration != candidate.documentGeneration,
               entry.navigation == nil, !entry.view.isLoading, !entry.tab.isLoading, entry.tab.error == nil,
               EmbeddedHumanVerificationStore.recoveryProvider(forTrustedHumanURL: entry.view.url) == candidate.provider else { return false }
@@ -501,7 +504,7 @@ final class EmbeddedBrowserSession {
     private func observeHumanVerificationRecovery(_ entry: Entry) {
         guard let callback = onHumanVerificationRecoveryCandidate,
               let provider = EmbeddedHumanVerificationStore.recoveryProvider(forTrustedHumanURL: entry.view.url),
-              let checkpointID = savedHumanVerificationCheckpointIDs[provider] else { return }
+              let checkpointID = entry.geminiRecoveryNavigationStart?.checkpointID else { return }
         let candidate = HumanVerificationRecoveryCandidate(provider: provider, checkpointID: checkpointID,
             tabID: entry.tab.id, committedDocumentID: entry.humanCommittedDocumentID,
             documentID: entry.tab.documentID, documentGeneration: entry.tab.documentGeneration)
@@ -943,6 +946,7 @@ final class EmbeddedBrowserSession {
         revokeModelInspector(entry, reason: .navigation)
         revokeGroqFixtureInspector(entry, reason: .navigation)
         resetModelNavigationDiagnostic(entry)
+        entry.geminiRecoveryNavigationStart = nil
         entry.pendingGeminiRecoveryHTTPFailure = nil
         entry.navigation = nil
         entry.preparedDocumentNavigation = false
@@ -3553,6 +3557,7 @@ final class EmbeddedBrowserSession {
         revokeModelInspector(entry, reason: .navigation)
         revokeGroqFixtureInspector(entry, reason: .navigation)
         resetModelNavigationDiagnostic(entry)
+        entry.geminiRecoveryNavigationStart = nil
         entry.pendingGeminiRecoveryHTTPFailure = nil
         entry.recoverySettledGeneration = nil
         entry.tab.documentID = UUID()
@@ -3898,8 +3903,15 @@ final class EmbeddedBrowserSession {
         entry.authorizedChatRootRequest = nil
         entry.initialChatRootTransition = exactRoot ? (prior, entry.tab.documentGeneration) : nil
         entry.navigation = navigation
-        if entry.isModelOwned, navigation != nil {
-            entry.modelNavigationGeneration = entry.tab.documentGeneration
+        if navigation != nil {
+            if entry.isModelOwned {
+                entry.modelNavigationGeneration = entry.tab.documentGeneration
+            } else if entry.isAvailableToBrowserTools, !entry.isToolOwned,
+                      let checkpointID = savedHumanVerificationCheckpointIDs["gemini"] {
+                // Title and same-document URL changes cannot pair an older
+                // landing page with a checkpoint seen after navigation started.
+                entry.geminiRecoveryNavigationStart = (checkpointID, entry.tab.documentGeneration)
+            }
         }
         refresh(tabID, view: view)
         emitGeminiPostBlockNativeEvent(entry, .started)
@@ -3933,6 +3945,7 @@ final class EmbeddedBrowserSession {
             }
         }
         entry.navigation = nil
+        if error != nil { entry.geminiRecoveryNavigationStart = nil }
         entry.pendingGeminiRecoveryHTTPFailure = nil
         entry.pendingConversationURL = nil
         entry.preparedDocumentNavigation = false
@@ -3994,6 +4007,7 @@ final class EmbeddedBrowserSession {
         revokeModelInspector(entry, reason: .navigation)
         revokeGroqFixtureInspector(entry, reason: .navigation)
         resetModelNavigationDiagnostic(entry)
+        entry.geminiRecoveryNavigationStart = nil
         entry.pendingGeminiRecoveryHTTPFailure = nil
         entry.navigation = nil
         entry.preparedDocumentNavigation = false

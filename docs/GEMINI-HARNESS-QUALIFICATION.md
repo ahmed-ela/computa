@@ -73,6 +73,15 @@ Gemini reload received the same verification HTTP 429. No blocked prompt was
 replayed. These observations show that restart alone is insufficient to explain
 the challenge; Google's triggering condition remains unverified.
 
+Local WebKit tests reproduced a separate recovery bug. A title change on an
+already-open Gemini page could offer a new discovery probe after Computa saved
+a checkpoint. A navigation already in progress could also offer a probe if
+the checkpoint was replaced before the page committed. Automatic recovery now
+requires the same checkpoint at ordinary navigation start and when the probe
+is offered. The existing verified discovery and cleanup still control when
+Computa clears the checkpoint. The retained live records did not show either
+local bug preceding Google's HTTP 429.
+
 ## Ownership failure and repair
 
 The installed 0.7.0 (321) baseline displayed a healthy signed-in Gemini page.
