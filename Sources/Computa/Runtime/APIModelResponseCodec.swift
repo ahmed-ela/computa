@@ -9,6 +9,12 @@ enum APIModelResponseCodec {
     enum ToolNaming: String, Codable, Sendable {
         case legacy = "legacy_index_v1"
         case semantic = "semantic_v2"
+        case alibabaShort = "alibaba_short_v1"
+
+        init(selection: APIProviderCatalog.Selection, fresh: Bool) {
+            guard fresh else { self = .legacy; return }
+            self = selection.isAlibabaQwen37FlashChat ? .alibabaShort : .semantic
+        }
     }
     enum Failure: String, Error, LocalizedError, Sendable {
         case invalidRequest, unsupportedParameter, unsupportedModality, invalidTool, invalidArguments
@@ -141,7 +147,7 @@ enum APIModelResponseCodec {
         if allowedNames.contains(where: { name == $0 + $0 }) { return .doubled }
         var match: InvalidToolDiagnostic.OfferedNameShape?
         for wire in allowedNames {
-            // semanticToolName appends "__" and exactly 24 hex digits.
+            // The semantic catalog uses "__" followed by exactly 24 hex digits.
             let stemAndSeparator = wire.dropLast(24)
             guard name.hasPrefix(stemAndSeparator) else { continue }
             let suffix = name.dropFirst(stemAndSeparator.count)
@@ -717,7 +723,7 @@ enum APIModelResponseCodec {
         // calls and current declarations share one stable provider identity.
         let historyByIdentity = Dictionary(uniqueKeysWithValues: historyTools.map { ($0.identity, $0) })
         let alibabaPatchGuidance = selection.provider.wireAPI == .chatCompletions && selection.provider.isAlibabaModelStudioInference
-        let alibabaFlash = alibabaPatchGuidance && selection.model.id == "qwen3.7-flash"
+        let alibabaFlash = selection.isAlibabaQwen37FlashChat
         let tools = try parseTools(raw["tools"], naming: toolNaming, alibabaPatchGuidance: alibabaPatchGuidance, literalPatch: alibabaFlash).map { visible -> Tool in
             guard let original = historyByIdentity[visible.identity] else { throw Failure.invalidTool }
             return Tool(name: visible.name, namespace: visible.namespace, wireName: original.wireName,
@@ -755,10 +761,11 @@ enum APIModelResponseCodec {
             // adapter's locally sealed continuation is never sent to a different wire API.
             body["stream"] = false
         } else {
-            let clarifyToolNames = alibabaFlash && toolNaming == .semantic && !allowed.isEmpty
+            let clarifyToolNames = alibabaFlash && toolNaming != .legacy && !allowed.isEmpty
             var messages = history.messages
             if clarifyToolNames {
-                let guidance = "For tool calls, copy the exact offered function name, including its entire suffix. Use native operation names in the instructions only to find the matching offered function."
+                let affix = toolNaming == .alibabaShort ? "any prefix or suffix" : "its entire suffix"
+                let guidance = "For tool calls, copy the exact offered function name, including \(affix). Use native operation names in the instructions only to find the matching offered function."
                 if messages.first?["role"] as? String == "system", let instructions = messages[0]["content"] as? String {
                     messages[0]["content"] = guidance + "\n\n" + instructions
                 } else {
@@ -885,14 +892,21 @@ enum APIModelResponseCodec {
         return identity + tool.description
     }
 
-    private static func semanticToolName(name: String, namespace: String?) -> String {
+    private static func stableToolName(name: String, namespace: String?, naming: ToolNaming) -> String {
+        let prefix = naming == .alibabaShort ? "scoped_" : ""
+        if naming == .alibabaShort, namespace == nil, !name.hasPrefix(prefix), name.utf8.count <= 64,
+           name.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) ||
+               (48...57).contains($0) || $0 == 95 || $0 == 45 }) {
+            return name
+        }
         // Native names are validated ASCII. Dots are legal natively but not in
-        // Chat Completions; the digest retains their exact qualified identity.
-        let stem = String(name.replacingOccurrences(of: ".", with: "_").prefix(38))
+        // Chat Completions. The digest retains their exact qualified identity.
+        // The reserved prefix keeps scoped aliases distinct from plain names.
+        let stem = String(name.replacingOccurrences(of: ".", with: "_").prefix(38 - prefix.utf8.count))
         let identity = (namespace ?? "") + "\u{0}" + name
         let suffix = SHA256.hash(data: Data(identity.utf8)).prefix(12)
             .map { String(format: "%02x", $0) }.joined()
-        return stem + "__" + suffix
+        return prefix + stem + "__" + suffix
     }
 
     private static func parseTools(_ value: Any?, naming: ToolNaming, alibabaPatchGuidance: Bool = false, literalPatch: Bool = false) throws -> [Tool] {
@@ -939,7 +953,7 @@ enum APIModelResponseCodec {
                 schema = parameters
             }
             let description = custom ? try customToolDescription(definition) : (definition["description"] as? String ?? "")
-            let wireName = naming == .legacy ? "computa_tool_\(result.count)" : semanticToolName(name: name, namespace: namespace)
+            let wireName = naming == .legacy ? "computa_tool_\(result.count)" : stableToolName(name: name, namespace: namespace, naming: naming)
             let tool = Tool(name: name, namespace: namespace, wireName: wireName, custom: custom,
                             schema: schema, description: description, requiresUnambiguousArguments: admittedLiteralPatch,
                             browserWaitHistoricalSchemas: ComputaModelToolCatalog.browserWaitDefinitionVariants(
@@ -1051,7 +1065,7 @@ enum APIModelResponseCodec {
                         guard uncataloguedKinds.count < 256 else { throw Failure.invalidHistory }
                         uncataloguedKinds[identity] = custom
                     }
-                    wireName = semanticToolName(name: name, namespace: namespace)
+                    wireName = stableToolName(name: name, namespace: namespace, naming: toolNaming)
                 }
                 let arguments: String
                 if custom {
@@ -2160,7 +2174,7 @@ enum APIModelResponseCodec {
         }
     }
     private static func equalJSON(_ lhs: Any, _ rhs: Any) -> Bool { (try? JSONSerialization.data(withJSONObject: lhs, options: [.fragmentsAllowed, .sortedKeys])) == (try? JSONSerialization.data(withJSONObject: rhs, options: [.fragmentsAllowed, .sortedKeys])) }
-    private static func validName(_ value: String) -> Bool { !value.isEmpty && value.utf8.count <= 128 && value.range(of: #"^[A-Za-z0-9_.-]+$"#, options: .regularExpression) != nil }
+    private static func validName(_ value: String) -> Bool { !value.isEmpty && value.utf8.count <= 128 && value.range(of: #"\A[A-Za-z0-9_.-]+\z"#, options: .regularExpression) != nil }
     private static func validCallID(_ value: String) -> Bool { !value.isEmpty && value.utf8.count <= 256 && !value.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) } }
     private static func absent(_ value: Any?) -> Bool { value == nil || value is NSNull }
     private static func strictBool(_ value: Any?) -> Bool? { guard let n = value as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() else { return nil }; return n.boolValue }

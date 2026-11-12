@@ -2443,6 +2443,80 @@ final class APIModelResponseCodecTests: XCTestCase {
         XCTAssertFalse(encoded.contains("PRIVATE"))
     }
 
+    func testFreshToolNamingUsesShortNamesOnlyForAlibabaFlashChat() {
+        let alibaba = literalPatchProvider()
+        let flash = alibaba.models[0]
+        let responses = APIProviderDefinition(id: alibaba.id, name: alibaba.name, baseURL: alibaba.baseURL,
+            wireAPI: .responses, models: alibaba.models)
+        let unrelated = APIProviderDefinition(id: alibaba.id, name: alibaba.name, baseURL: provider.baseURL,
+            wireAPI: .chatCompletions, models: alibaba.models)
+        let selection = APIProviderCatalog.Selection(provider: alibaba, model: flash)
+        XCTAssertEqual(APIModelResponseCodec.ToolNaming(selection: selection, fresh: true), .alibabaShort)
+        XCTAssertEqual(APIModelResponseCodec.ToolNaming(selection: selection, fresh: false), .legacy)
+        for other in [
+            APIProviderCatalog.Selection(provider: responses, model: flash),
+            .init(provider: unrelated, model: flash),
+            .init(provider: alibaba, model: .init(id: "other-qwen", name: "Other Qwen")),
+        ] {
+            XCTAssertEqual(APIModelResponseCodec.ToolNaming(selection: other, fresh: true), .semantic)
+        }
+    }
+
+    func testAlibabaShortCatalogKeepsPlainNamesAndRequiresExactScopedAliases() throws {
+        let alibaba = literalPatchProvider()
+        func definition(_ name: String) -> [String: Any] {
+            function.merging(["name": name]) { _, new in new }
+        }
+        let maximumPlain = String(repeating: "a", count: 64)
+        let tooLong = maximumPlain + "a"
+        let definitions: [[String: Any]] = [
+            definition("read"), definition(maximumPlain), definition(tooLong),
+            definition("files.read"), definition("scoped_read"),
+            ["type": "namespace", "name": "files", "tools": [function]],
+            ["type": "namespace", "name": "logs", "tools": [function]],
+        ]
+        let prepared = try request(["tools": definitions], provider: alibaba, toolNaming: .alibabaShort)
+        let names = prepared.tools.map(\.wireName)
+        XCTAssertEqual(names.count, 7)
+        XCTAssertEqual(Array(names.prefix(2)), ["read", maximumPlain])
+        XCTAssertEqual(Set(names).count, names.count)
+        for scoped in names.dropFirst(2) {
+            XCTAssertTrue(scoped.hasPrefix("scoped_"))
+            XCTAssertLessThanOrEqual(scoped.utf8.count, 64)
+            XCTAssertNotNil(scoped.range(of: #"^[A-Za-z0-9_-]+$"#, options: .regularExpression))
+        }
+        let reversed = try request(["tools": Array(definitions.reversed())], provider: alibaba, toolNaming: .alibabaShort)
+        XCTAssertEqual(reversed.tools.map(\.wireName), Array(names.reversed()))
+        let forced = try request(["tools": definitions,
+            "tool_choice": ["type": "function", "name": "read", "namespace": "files"]],
+            provider: alibaba, toolNaming: .alibabaShort)
+        let callable = names[5]
+        XCTAssertEqual(forced.allowedTools, [callable])
+        let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: forced.body) as? [String: Any])
+        XCTAssertEqual((wire["tool_choice"] as? [String: Any])?["function"] as? [String: String], ["name": callable])
+        func response(_ name: String, for request: APIModelResponseCodec.Request) throws -> [String: Any] {
+            let reply = try decode(["role": "assistant", "tool_calls": [["id": "fixture-read", "type": "function",
+                "function": ["name": name, "arguments": #"{"path":"fixture"}"#]]]],
+                finish: "tool_calls", request: request, model: alibaba.models[0].id)
+            return try XCTUnwrap((reply.response["output"] as? [[String: Any]])?.first)
+        }
+        let plain = try response("read", for: prepared)
+        XCTAssertEqual(plain["name"] as? String, "read")
+        XCTAssertNil(plain["namespace"])
+        let scoped = try response(callable, for: forced)
+        XCTAssertEqual(scoped["name"] as? String, "read")
+        XCTAssertEqual(scoped["namespace"] as? String, "files")
+        let semantic = try request(["tools": definitions], provider: alibaba, toolNaming: .semantic)
+        for unoffered in ["read", "files.read", names[6], semantic.tools[5].wireName, callable + "x"] {
+            XCTAssertThrowsError(try response(unoffered, for: forced)) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
+            }
+        }
+        XCTAssertThrowsError(try request(["tools": [definition("read\n")]], provider: alibaba, toolNaming: .alibabaShort)) {
+            XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
+        }
+    }
+
     func testAlibabaFlashSemanticCatalogLeadsWithExactCallableNameAndStillRejectsNativeNames() throws {
         let originalInstruction = "Use the native read operation for this authorized file."
         let originalUser = "Keep the word read unchanged."
@@ -3178,7 +3252,7 @@ final class APIModelResponseCodecTests: XCTestCase {
         XCTAssertThrowsError(try request(["input": [call]]))
     }
     func testNoToolsCompactionPreservesCompletedCallsResultsAndReasoningWithoutGrantingTools() throws {
-        for naming in [APIModelResponseCodec.ToolNaming.legacy, .semantic] {
+        for naming in [APIModelResponseCodec.ToolNaming.legacy, .semantic, .alibabaShort] {
             let initial = try request(toolNaming: naming)
             let functions = try wireFunctions(initial)
             let arguments = "{\"path\":\"/tmp/synthetic fixture\",\"note\":\"literal\\nvalue\"}"
@@ -3208,6 +3282,11 @@ final class APIModelResponseCodecTests: XCTestCase {
             let read = try XCTUnwrap(calls[0]["function"] as? [String: Any])
             XCTAssertEqual(read["arguments"] as? String, readArguments)
             let custom = try XCTUnwrap(calls[1]["function"] as? [String: Any])
+            if naming == .alibabaShort {
+                XCTAssertEqual(read["name"] as? String, functions[0]["name"] as? String)
+                XCTAssertEqual(custom["name"] as? String, "apply_patch")
+                XCTAssertEqual(custom["name"] as? String, functions[1]["name"] as? String)
+            }
             let customArguments = try XCTUnwrap(custom["arguments"] as? String)
             XCTAssertEqual((try JSONSerialization.jsonObject(with: Data(customArguments.utf8)) as? [String: String])?["input"], patch)
             XCTAssertEqual(messages[3]["tool_call_id"] as? String, "read-completed")

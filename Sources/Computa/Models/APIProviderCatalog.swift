@@ -77,6 +77,10 @@ enum APIProviderCatalog {
         let provider: APIProviderDefinition
         let model: APIModelDefinition
 
+        var isAlibabaQwen37FlashChat: Bool {
+            provider.wireAPI == .chatCompletions && provider.isAlibabaModelStudioInference && model.id == "qwen3.7-flash"
+        }
+
         var chatCompletionsInstructionRole: APIProviderDefinition.ChatCompletionsInstructionRole {
             provider.wireAPI == .chatCompletions && provider.isCerebrasInference && model.id == "qwen-3.8-27b"
                 ? .system : provider.chatCompletionsInstructionRole

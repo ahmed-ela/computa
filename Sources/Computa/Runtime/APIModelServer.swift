@@ -603,7 +603,8 @@ actor APIModelServer {
                       admissions[taskID] == admissionID, browserToolStateProviderRevision == providerRevision
                 else { throw Failure.inferenceContextRequired }
             } else { browserToolState = nil }
-            let proposedNaming: APIModelResponseCodec.ToolNaming = context.isNewThread && Self.hasOnlyUnmodeledInput(object) ? .semantic : .legacy
+            let proposedNaming = APIModelResponseCodec.ToolNaming(selection: selection,
+                fresh: context.isNewThread && Self.hasOnlyUnmodeledInput(object))
             failureStage = .prepare
             let translated: APIModelResponseCodec.Request
             if let toolNamingDirectory {
