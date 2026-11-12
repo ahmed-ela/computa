@@ -4640,8 +4640,14 @@ final class WebModelResponseCodecTests: XCTestCase {
         let haiku = WebsiteModelChoice(provider: "claude", key: "Haiku 5.5", label: "Haiku 5.5").modelID
         let otherClaude = WebsiteModelChoice(provider: "claude", key: "Opus 4.6", label: "Opus 4.6").modelID
         let kimi = WebsiteModelChoice(provider: "kimi", key: "k28-instant", label: "Instant").modelID
+        let flashLite = WebsiteModelChoice(provider: "gemini", key: "3.5 Flash-Lite", label: "3.5 Flash-Lite").modelID
+        let otherGemini = WebsiteModelChoice(provider: "gemini", key: "4 Argon", label: "4 Argon").modelID
+        let hydrogen = WebsiteModelChoice(provider: "gemini", key: "4 Hydrogen", label: "4 Hydrogen").modelID
+        let pro = WebsiteModelChoice(provider: "gemini", key: "3.1 Pro", label: "3.1 Pro").modelID
+        let mismatchedGemini = WebsiteModelChoice(provider: "gemini", key: "3.5 Flash-Lite", label: "4 Argon").modelID
         let scenarios = [(plus, true), (max, true), ("browser/qwen", true), ("web-qwen", false), (opus, true), (haiku, true),
             (otherClaude, false), ("browser/claude", false), ("browser/chatgpt", false), ("browser/gemini", false),
+            (flashLite, true), (otherGemini, false), (hydrogen, false), (pro, false), (mismatchedGemini, false),
             ("browser/groq", false), ("browser/kimi", false), (kimi, true), ("browser/deepseek/mode/chat", false)]
         let inert = #"{"type":"tool_calls","calls":[{"name":null,"arguments":{"sample_field":"sample value"}}]}"#
         for (model, expectsLayout) in scenarios {
@@ -4650,7 +4656,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             // This existing oracle compares retained request values and the complete
             // response-contract suffix byte-for-byte, including unchanged providers.
             _ = try assertContiguousRequestValues(original, in: prepared,
-                expectsFunctionLayout: model == opus || model == haiku || model == kimi)
+                expectsFunctionLayout: model == opus || model == haiku || model == kimi || model == flashLite)
             XCTAssertEqual(prepared.prompt.contains("Function call layout."), expectsLayout, model)
             XCTAssertEqual(prepared.prompt.contains(inert), expectsLayout, model)
             XCTAssertEqual(prepared.continuationRequest, original)
@@ -4659,6 +4665,52 @@ final class WebModelResponseCodecTests: XCTestCase {
                     XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .malformedEnvelope)
                 }
             }
+        }
+    }
+
+    func testGeminiFlashLiteFunctionLayoutPreservesStrictEntryValidationAndToolChoice() throws {
+        let model = WebsiteModelChoice(provider: "gemini", key: "3.5 Flash-Lite", label: "3.5 Flash-Lite").modelID
+        let original = try JSONSerialization.data(withJSONObject: ["model": model, "input": "Read this synthetic record.",
+            "tools": [function], "parallel_tool_calls": true])
+        let prepared = try WebModelResponseCodec.prepareRequest(original)
+        try assertContiguousRequestValues(original, in: prepared, expectsFunctionLayout: true)
+        XCTAssertTrue(prepared.prompt.contains(#"{"name":null,"arguments":{"sample_field":"sample value"}}"#))
+        XCTAssertFalse(prepared.singleActionRelay)
+        let good: [String: Any] = ["name": "computer_v2_snapshot", "arguments": ["view": "content"]]
+        // Live evidence identifies only function_extra_keys, not the actual key.
+        // These synthetic variants must remain rejected as a whole reply.
+        let badCalls: [[String: Any]] = [
+            good.merging(["call_id": "synthetic_id"]) { _, new in new },
+            good.merging(["commentary": "synthetic progress"]) { _, new in new },
+            ["name": "computer_v2_snapshot", "view": "content"],
+        ]
+        func envelope(_ calls: [[String: Any]]) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": calls]), as: UTF8.self)
+        }
+        for bad in badCalls {
+            for calls in [[bad], [good, bad], [bad, good]] {
+                let raw = try envelope(calls)
+                var shapes: [WebModelResponseCodec.RejectedCallShape] = []
+                XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(raw, request: prepared) { shape, single in
+                    shapes.append(shape)
+                    XCTAssertEqual(single, calls.count == 1)
+                }) { XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .unsupportedCallFields) }
+                XCTAssertEqual(shapes, [.functionExtraKeys])
+                XCTAssertNil(WebModelResponseCodec.malformedEmbeddedReplyDiagnostic(raw, request: prepared))
+            }
+        }
+        let valid = try envelope([good])
+        XCTAssertEqual(try WebModelResponseCodec.parseEmbeddedReply(valid, request: prepared),
+            .toolCalls([.init(name: "computer_v2_snapshot", argumentsJSON: #"{"view":"content"}"#, namespace: nil)]))
+        XCTAssertEqual(try WebModelResponseCodec.parseEmbeddedReply(#"{"type":"message","text":"I cannot perform that action."}"#,
+            request: prepared), .message("I cannot perform that action."))
+        let denied = try controlledRequest(["model": model, "tool_choice": "none"], tools: [function])
+        XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(valid, request: denied)) {
+            XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .rejectedToolChoice)
+        }
+        for request in [denied, try controlledRequest(["model": model], tools: []),
+            try controlledRequest(["model": model], tools: [["type": "custom", "name": "literal"]])] {
+            XCTAssertFalse(request.prompt.contains("Function call layout."))
         }
     }
 

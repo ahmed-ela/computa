@@ -6231,8 +6231,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let profileID = UUID()
-        let firstBrowser = EmbeddedBrowserSession(persistent: true, profileID: profileID, defaults: defaults)
+        addTeardownBlock { @MainActor in try await WKWebsiteDataStore.remove(forIdentifier: profileID) }
+        let firstBrowser = try makePersistentBrowserTestSession(profileID: profileID, defaults: defaults)
         let first = try Fixture(page: Self.modelChoicePage(.gemini), initialURL: URL(string: "https://google.com/sorry/"), browser: firstBrowser)
+        defer { first.shutdown() }
         let started = try await call(first.transport, "webProviderStart", ["provider": "gemini"])
         let token = try XCTUnwrap(started["sessionToken"] as? String)
         let blockedID = try XCTUnwrap(first.createdTabs.last)
@@ -6249,7 +6251,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         first.shutdown()
 
         let restoredDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        let nextBrowser = EmbeddedBrowserSession(persistent: true, profileID: profileID, defaults: restoredDefaults)
+        let nextBrowser = try makePersistentBrowserTestSession(profileID: profileID, defaults: restoredDefaults)
         let next = try Fixture(page: Self.modelChoicePage(.gemini), browser: nextBrowser)
         defer { next.shutdown() }
         XCTAssertEqual(nextBrowser.savedHumanVerificationCheckpointIDs["gemini"], savedID)
@@ -6262,7 +6264,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(choices.map(\.label), Self.choiceLabels(.gemini))
         XCTAssertEqual(next.createdTabs.count, 1, "Only the explicit read-only recovery may create a page")
         XCTAssertTrue(nextBrowser.savedHumanVerificationProviders.isEmpty)
-        let reopenedBrowser = EmbeddedBrowserSession(persistent: true, profileID: profileID, defaults: restoredDefaults)
+        let reopenedBrowser = try makePersistentBrowserTestSession(profileID: profileID, defaults: restoredDefaults)
         defer { reopenedBrowser.shutdown() }
         XCTAssertTrue(reopenedBrowser.savedHumanVerificationProviders.isEmpty, "Verified recovery must clear the persisted checkpoint too")
         let recovered = try await call(next.transport, "webProviderStart", ["provider": "gemini"])

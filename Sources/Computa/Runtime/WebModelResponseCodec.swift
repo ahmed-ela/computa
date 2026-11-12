@@ -495,7 +495,7 @@ enum WebModelResponseCodec {
         let provider = LocalModelCatalog.webProvider(for: model)
         let isChatGPT = provider == "chatgpt", isClaude = provider == "claude", isGroq = provider == "groq"
         let claudeChoice = isClaude ? WebsiteModelCatalog.choice(for: model) : nil
-        let diagnoseGeminiRepair = provider == "gemini" && WebsiteModelCatalog.choice(for: model) ==
+        let isGeminiFlashLite = provider == "gemini" && WebsiteModelCatalog.choice(for: model) ==
             WebsiteModelChoice(provider: "gemini", key: "3.5 Flash-Lite", label: "3.5 Flash-Lite")
         if groqHistoryProjection != nil {
             guard isGroq, groqToolCatalogProjection != nil, groqDirectTools == .loadedOnly,
@@ -540,7 +540,7 @@ enum WebModelResponseCodec {
                     for child in children { try insertTool(child, namespace: namespace, into: &historical) }
                 } else { try insertTool(value, namespace: nil, into: &historical) }
             }
-            if diagnoseGeminiRepair {
+            if isGeminiFlashLite {
                 nativePatchDeclared = !GeminiFlashLiteRepairDiagnostic.patchNames(in: historical).isEmpty
             }
             if isGroq { registeredBrowserAllowedNames = (try? toolPolicy(object["tool_choice"], tools: historical))?.allowedNames }
@@ -771,6 +771,7 @@ enum WebModelResponseCodec {
             compactLiteralBoundary: provider == "groq",
             singleActionRelay: isChatGPT,
             illustrateFunctionArguments: provider == "qwen" || instantToolContinuation
+                || isGeminiFlashLite
                 || (provider == "kimi" && WebsiteModelCatalog.choice(for: model) ==
                     WebsiteModelChoice(provider: "kimi", key: "k28-instant", label: "Instant"))
                 || claudeChoice == .claudeHaiku55
@@ -800,7 +801,7 @@ enum WebModelResponseCodec {
             currentUserBytes: currentUserInstructions.utf8.count, responseContractBytes: responseContract.utf8.count,
             finalPromptBytes: bytes)
         let geminiRepairDiagnostic: GeminiFlashLiteRepairDiagnostic?
-        if diagnoseGeminiRepair {
+        if isGeminiFlashLite {
             let patchNames = GeminiFlashLiteRepairDiagnostic.patchNames(in: offered)
             geminiRepairDiagnostic = .init(patchDeclared: nativePatchDeclared, patchOffered: !patchNames.isEmpty,
                 patchAllowed: !patchNames.isDisjoint(with: policy.allowedNames),

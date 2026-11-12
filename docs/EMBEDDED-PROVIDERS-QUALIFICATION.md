@@ -4300,3 +4300,29 @@ The Haiku handoff now includes the existing inert example of a function entry
 with only `name` and `arguments`. When an offered call fails the entry shape
 check, the native log records a finite category for that inference. The codec
 continues to reject the entire proposal when any call contains extra fields.
+
+### 2026-11-12 — Qwen Plus workflow and Max verification diagnostics
+
+Signed build 543 (`19b0dd6`) rejected a 1,243-byte Qwen Plus response as
+invalid JSON after three read-only commands. Both owned website sessions
+were deleted. The failure record did not retain the reply bytes, so the source
+of the formatting error remains unknown.
+
+A fresh Qwen Plus case on the same signed build passed all 19 checks in
+224.258 seconds. It used one native patch, passed all six tests, submitted one
+reference in the built-in browser, observed the matching receipt, and closed
+its browser tab. All nine website selections and deletions were verified.
+The task's private rejected-reply capture was unused and retired.
+
+Signed build 544 (`ef10b23`) adds an attributable record for Qwen model
+verification errors after Send. The record identifies the rejecting check on
+the current owned page without reading the reply or granting authority to
+release it. A native WebKit test covered six cases, including stale views and
+cleanup, and all 20 Qwen adapter tests passed.
+
+Qwen Max on build 544 verified three submissions and made a correct file edit.
+The third inference rejected the picker binding before post-edit tests or
+browser actions. The new record identified the adapter's first-body inspection,
+and the matching adapter record named `selection_binding`. The two earlier
+deletions were confirmed. The third cleanup was unconfirmed. The audit passed
+10 of 19 checks in 63.226 seconds.

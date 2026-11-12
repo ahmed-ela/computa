@@ -9,7 +9,7 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         let normalProfile = UUID()
         registerKimiFixtureProfileForCleanup(normalProfile)
         let preferences = isolatedTestPreferences()
-        let session = EmbeddedBrowserSession(profileID: normalProfile, defaults: preferences)
+        let session = try makePersistentBrowserTestSession(profileID: normalProfile, defaults: preferences)
         defer { session.shutdown() }
         XCTAssertNil(session.kimiModelProfileID, "The regular profile is the default")
 
@@ -71,14 +71,14 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
             privateAfterSignIn = try await kimiProfileFixtureDraft(in: privateView)
         }
         XCTAssertEqual(privateAfterSignIn.stored, dedicatedDraft, "A fresh private document reads the dedicated WebKit store")
-        let restoredEnabled = EmbeddedBrowserSession(profileID: normalProfile, defaults: preferences)
+        let restoredEnabled = try makePersistentBrowserTestSession(profileID: normalProfile, defaults: preferences)
         XCTAssertEqual(restoredEnabled.kimiModelProfileID, profile)
         XCTAssertTrue(restoredEnabled.tabs.isEmpty)
         restoredEnabled.shutdown()
 
         session.useSharedKimiModelProfile()
         XCTAssertNil(session.kimiModelProfileID)
-        let restoredShared = EmbeddedBrowserSession(profileID: normalProfile, defaults: preferences)
+        let restoredShared = try makePersistentBrowserTestSession(profileID: normalProfile, defaults: preferences)
         XCTAssertNil(restoredShared.kimiModelProfileID)
         XCTAssertTrue(restoredShared.tabs.isEmpty)
         restoredShared.shutdown()
