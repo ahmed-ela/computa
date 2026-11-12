@@ -1583,26 +1583,70 @@ final class WebModelServerTests: XCTestCase {
 
     func testChatFreshInferenceLeasesKeepSixToolResultsAndCloseBeforeEachHandoff() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("chat-fresh-six-" + UUID().uuidString)
-        let replies = (0..<6).map { #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"round-"# + String($0) + #""}}]}"# }
-            + [#"{"type":"message","text":"All six results verified"}"#]
+        let instant = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
+        let patch = "*** Begin Patch\n*** Update File: /fixture/reconcile.py\n@@\n-    return {}\n+    return totals\n*** End Patch"
+        let patchResult = "Exit code: 0\nWall time: 0 seconds\nOutput:\nSuccess. Updated the following files:\nM /fixture/reconcile.py\n"
+        let tools: [[String: Any]] = [
+            ["type": "function", "name": "exec_command", "parameters": ["type": "object",
+                "properties": ["cmd": ["type": "string"]], "required": ["cmd"], "additionalProperties": false]],
+            ["type": "custom", "name": "apply_patch", "format": ["type": "text"]],
+        ]
+        let commands = ["cat README.md reconcile.py", "", "python3 -m unittest -v", "round-3", "round-4", "round-5"]
+        var replies = try (0..<6).map { round in
+            let call: [String: Any] = round == 1
+                ? ["name": "apply_patch", "input": patch]
+                : ["name": "exec_command", "arguments": ["cmd": commands[round]]]
+            return String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [call]]), as: UTF8.self)
+        }
+        replies.append(#"{"type":"message","text":"All six results verified"}"#)
         let base = FixtureWebModelTransport(replyTexts: replies)
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self, storageDirectory: root)
-        await server.configureEmbeddedTransport(ChatContinuationFixtureTransport(base: base))
+        await server.configureEmbeddedTransport(ChatContinuationFixtureTransport(base: base, choice: instant))
         var input: [[String: Any]] = [["role": "user", "content": "Complete six observed tool rounds"]]
+        var callIDs = Set<String>()
         for round in 0..<7 {
-            let output = try await server.fixtureInfer(turnRequest(input: input, model: syntheticChatGPTModelID), taskID: "fresh-six")
+            let request = try JSONSerialization.data(withJSONObject: ["model": instant.modelID, "input": input,
+                "stream": false, "instructions": "Keep exact controlled scope", "tools": tools, "tool_choice": "auto"])
+            let output = try await server.fixtureInfer(request, taskID: "fresh-six")
             let prompts = await base.sentPrompts()
-            XCTAssertEqual((try canonicalRequest(in: XCTUnwrap(prompts.last)))["input"] as? NSArray, input as NSArray)
+            let prompt = try XCTUnwrap(prompts.last)
+            let projected = try canonicalRequest(in: prompt)
+            XCTAssertEqual(projected["input"] as? NSArray, input as NSArray)
+            XCTAssertEqual(projected["tools"] as? NSArray, tools as NSArray)
+            XCTAssertEqual(projected["tool_choice"] as? String, "auto")
+            if round == 2 {
+                // The custom patch receipt must not remove the next terminal action.
+                XCTAssertEqual(input.last?["type"] as? String, "custom_tool_call_output")
+                XCTAssertEqual(input.last?["output"] as? String, patchResult)
+                XCTAssertEqual(input.last?["call_id"] as? String, input[input.count - 2]["call_id"] as? String)
+                XCTAssertTrue(prompt.contains("Exact currently offered local function names: exec_command"))
+                XCTAssertTrue(prompt.contains("Exact currently offered custom names: apply_patch"))
+            }
             let operations = await base.operations()
             XCTAssertEqual(operations.filter { $0 == "webProviderStart" }.count, round + 1)
+            XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, round + 1)
             XCTAssertEqual(operations.filter { $0 == "webProviderFinish" }.count, round + 1,
                 "A tool call must not leave the website before its exact lease closes durably")
             let items = try responseOutput(output)
+            XCTAssertEqual(items.count, 1, "Only the current proposal is released; prior actions are not replayed")
             if round < 6 {
-                input += items + [["type": "function_call_output", "call_id": try XCTUnwrap(items.first?["call_id"] as? String),
-                    "output": "Observed result-\(round); exit 0"]]
+                let item = try XCTUnwrap(items.first)
+                let callID = try XCTUnwrap(item["call_id"] as? String)
+                XCTAssertTrue(callIDs.insert(callID).inserted)
+                XCTAssertEqual(item["type"] as? String, round == 1 ? "custom_tool_call" : "function_call")
+                XCTAssertEqual(item["name"] as? String, round == 1 ? "apply_patch" : "exec_command")
+                if round == 1 { XCTAssertEqual(item["input"] as? String, patch) }
+                else {
+                    let arguments = try XCTUnwrap(item["arguments"] as? String)
+                    XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(arguments.utf8)) as? [String: String], ["cmd": commands[round]])
+                }
+                input += items + [["type": round == 1 ? "custom_tool_call_output" : "function_call_output", "call_id": callID,
+                    "output": round == 1 ? patchResult : "Observed result-\(round); exit 0"]]
+            } else {
+                XCTAssertEqual(items.first?["type"] as? String, "message")
             }
         }
+        XCTAssertEqual(callIDs.count, 6)
         let journal = try turnJournal(root: root, task: "fresh-six")
         let completed = journal.filter { $0["phase"] as? String == "complete" }
         XCTAssertEqual(completed.count, 7)
@@ -4888,8 +4932,8 @@ private actor ChatContinuationFixtureTransport: WebModelTransport {
     let mutation: TurnSnapshotMutation?
     private var fingerprint = ""
     private var sends = 0
-    init(base: FixtureWebModelTransport, mutation: TurnSnapshotMutation? = nil) {
-        transport = WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice)
+    init(base: FixtureWebModelTransport, mutation: TurnSnapshotMutation? = nil, choice: WebsiteModelChoice = syntheticChatGPTChoice) {
+        transport = WebsiteInferenceFixtureTransport(base, defaultChatChoice: choice)
         self.mutation = mutation
     }
     func request(operation: String, params: Data) async throws -> Data {
