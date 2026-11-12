@@ -156,13 +156,9 @@ enum QwenFixturePage {
     if (!options.holdResponseContainer) root.append(assistant);
     answerTurn.append(root); turn.append(answerTurn);
   }
-  function completeResponse() {
-    if (!turn || assistant?.querySelector('.phase-answer')) return;
-    const root = assistant?.parentElement || node('div', { class: 'qwen-chat-message qwen-chat-message-assistant' });
-    const answerTurn = root.parentElement || node('div', { class: 'qwen-chat-message-select-turn-message' });
-    if (!assistant) assistant = node('div', { class: 'chat-response-message' });
-    assistant.id = 'chat-response-message-' + answerID;
-    assistant.replaceChildren();
+  function populateCompletedResponse(response) {
+    response.id = 'chat-response-message-' + answerID;
+    response.replaceChildren();
     const flow = node('div', { class: 'chat-response-message-render-flow' });
     flow.append(node('div', { class: 'qwen-chat-thinking-tool-status-card-wraper' }, 'Synthetic status chrome'));
     const phase = node('div', { class: 'response-message-content t2t phase-answer' });
@@ -171,11 +167,20 @@ enum QwenFixturePage {
     const paragraph = node('div', { class: 'qwen-markdown-paragraph' });
     const text = node('span', { class: 'qwen-markdown-text' });
     text.append(node('span', { class: 'qwen-markdown-text-node' }, options.reply));
-    paragraph.append(text); markdown.append(paragraph); custom.append(markdown); phase.append(custom); flow.append(phase); assistant.append(flow);
+    paragraph.append(text); markdown.append(paragraph); custom.append(markdown); phase.append(custom); flow.append(phase); response.append(flow);
     const footer = node('div', { class: 'response-message-footer-actions' });
     const rail = node('div', { class: 'qwen-chat-package-comp-new-action-control', 'data-chat-id': conversationID, 'data-msg-id': answerID });
     for (const label of ['Copy', 'Good Response', 'Bad Response', 'Share', 'Regenerate', 'More actions']) rail.append(node('button', { 'aria-label': label }, label));
-    footer.append(rail); assistant.append(footer); root.append(assistant); answerTurn.append(root);
+    footer.append(rail); response.append(footer);
+    return response;
+  }
+  function completeResponse() {
+    if (!turn || assistant?.querySelector('.phase-answer')) return;
+    const root = assistant?.parentElement || node('div', { class: 'qwen-chat-message qwen-chat-message-assistant' });
+    const answerTurn = root.parentElement || node('div', { class: 'qwen-chat-message-select-turn-message' });
+    if (!assistant) assistant = node('div', { class: 'chat-response-message' });
+    populateCompletedResponse(assistant);
+    root.append(assistant); answerTurn.append(root);
     if (answerTurn.parentElement !== turn) turn.append(answerTurn);
     sendScope.replaceChildren();
   }
@@ -195,6 +200,8 @@ enum QwenFixturePage {
     } else if (!options.holdRoot) delayed(options.canonicalDelayMs, canonicalize);
   });
   window.qwenFixture = { options, counts, canonicalize, appendUser, completeResponse,
+    newCompletedResponse: () => populateCompletedResponse(node('div', { class: 'chat-response-message' })),
+    clearStop: () => sendScope.replaceChildren(),
     revealPreview: () => { userBody.textContent = sent.slice(0, 10240); },
     mountResponseContainer: () => document.querySelector('.qwen-chat-message-assistant').append(assistant),
     settleResponseIdentity: () => { assistant.id = "chat-response-message-" + answerID; },

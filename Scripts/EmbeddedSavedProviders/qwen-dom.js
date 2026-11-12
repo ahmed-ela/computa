@@ -510,6 +510,33 @@ function computaQwenDOM(c) {
       point.describeCover = (scope, user, answer) => displayCover(misses, probe, clip, scope, user, answer);
     return reason === 'occluded' && blocker ? 'occluded_' + blocker : reason;
   }
+  // A detached pending response can supply absence of prior authored bytes
+  // only while its original empty loading shell remains physically unchanged.
+  function watchEmptyPendingAnswer({turn, root, content}) {
+    const loading = content?.firstChild;
+    const exact = () => turn?.childNodes.length === 1 && turn.firstChild === root
+      && root?.childNodes.length === 1 && root.firstChild === content
+      && content?.getAttribute('id') === 'chat-response-message-'
+      && content.getAttribute('class') === 'chat-response-message' && content.attributes.length === 2
+      && content.childNodes.length === 1 && content.firstChild === loading
+      && loading?.tagName === 'DIV' && loading.getAttribute('class') === 'response-loading'
+      && loading.attributes.length === 1 && loading.childNodes.length === 0;
+    if (!turn?.isConnected || !exact() || typeof MutationObserver !== 'function') return null;
+    let changed = false, observer;
+    try {
+      observer = new MutationObserver(() => { changed = true; observer.disconnect(); });
+      observer.observe(turn, { childList:true, characterData:true, attributes:true, subtree:true });
+    } catch { observer?.disconnect(); return null; }
+    return {
+      close: () => observer.disconnect(),
+      retired() {
+        const unchanged = !changed && observer.takeRecords().length === 0
+          && turn.isConnected === false && turn.parentElement === null && exact();
+        observer.disconnect();
+        return unchanged;
+      }
+    };
+  }
   // Observe only the direct children of the pinned transcript. A current
   // sibling match alone cannot prove that an old assistant turn was replaced.
   function watchAssistantTurnReplacement(outer, userTurn, oldTurn) {
@@ -1407,7 +1434,8 @@ function computaQwenDOM(c) {
     setter.call(form.editor, prompt);
     form.editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));
   }
-  return { rejectUserCount, rejectSelectionBinding, firstDisplayReplacement, watchDisplayRender, watchAssistantTurnReplacement,
+  return { rejectUserCount, rejectSelectionBinding, firstDisplayReplacement, watchDisplayRender,
+    watchAssistantTurnReplacement, watchEmptyPendingAnswer,
     displayHitFailure, firstBodyPresentation, firstBodyFailureStructure,
     responseChoiceTranscript: () => transcript(true, null, true),
     hasResponseChoice: () => c.nodes(document, '.qwen-chat-message-assistant .smrm', 2).length !== 0,

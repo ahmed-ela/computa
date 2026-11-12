@@ -527,10 +527,15 @@ async function computaSavedConversation(input, c, dom, config) {
           if (oldRootDetached && pairRootMatches && (priorCardIndex === 0 || priorCardIndex < 0 && priorDetached))
             pins[rootIndex] = comparisonPair.root;
           const previousTurn = optimistic.pins.at(-2), currentTurn = view.pins.at(-2);
-          if (previousTurn !== currentTurn && oldRootDetached && pairRootMatches
-            && priorCardIndex === 0 && prior.isConnected === true && comparisonPair.pins[1] === currentTurn
-            && optimistic.turnWatch?.consume(currentTurn))
-            pins[rootIndex + 1] = currentTurn;
+          if (previousTurn !== currentTurn && oldRootDetached && pairRootMatches && comparisonPair.pins[1] === currentTurn) {
+            const reused = priorCardIndex === 0 && prior.isConnected === true;
+            const emptyRetired = priorCardIndex < 0 && priorDetached && currentTurn.childNodes.length === 1
+              && currentTurn.firstChild === comparisonPair.root && optimistic.emptyPendingWatch?.retired();
+            if ((reused || emptyRetired) && optimistic.turnWatch?.consume(currentTurn)) {
+              pins[rootIndex + 1] = currentTurn;
+              if (emptyRetired) state.responseChoice.replacedEmptyPendingTurn = true;
+            }
+          }
           requireDisplayPins({ pins }, view, (reason, structure) => {
             if (reason !== 'answer_ancestry_changed') return refuse(reason, structure);
             return refuse(reason, () => {
@@ -576,19 +581,24 @@ async function computaSavedConversation(input, c, dom, config) {
       if (!held && (optimistic || t.pendingAnswer && config.deferDisplayUntilAnswer?.some(choice => c.equalChoice(state.model.choice, choice)))) {
         const witness = optimistic || (state.firstDisplayWitness = { pins:view.pins, canonical:route.canonical,
           editor:form.editor, scope:form.scope, inserted:state.inserted, send:state.send, model:state.model });
+        const observeReplacement = input.allowSavedResponseChoice === true && config.firstDisplayTurnReplacementChoice
+          && c.equalChoice(state.model.choice, config.firstDisplayTurnReplacementChoice);
+        if (!optimistic && t.pendingAnswer && observeReplacement)
+          witness.emptyPendingWatch = dom.watchEmptyPendingAnswer(t.pendingAnswer);
         if (witness.sawPreview && !preview) reject('preview_prefix_mismatch');
         if (preview) witness.sawPreview = true;
         checkFirstDisplaySelection('display_before_click', !optimistic, witness);
         if (t.pendingAnswer) {
-          if (preview && input.allowSavedResponseChoice === true && !witness.turnWatch
-            && config.firstDisplayTurnReplacementChoice && c.equalChoice(state.model.choice, config.firstDisplayTurnReplacementChoice))
+          if (preview && observeReplacement && !witness.turnWatch)
             witness.turnWatch = dom.watchAssistantTurnReplacement(view.pins.at(-4), view.pins.at(-5), view.pins.at(-2));
           return true;
         }
         // First genuine pair. Spend a separate, unchanged native-granted read
         // after pinning it. No action or response is released by this receipt.
         witness.turnWatch?.close();
+        witness.emptyPendingWatch?.close();
         delete witness.turnWatch;
+        delete witness.emptyPendingWatch;
         state.firstDisplay = { ...view, canonical:route.canonical, settledPair:witness, replacement:witness.replacement,
           clicked:false, sawExpanded:false, complete:false };
         delete state.firstDisplayWitness;
@@ -707,6 +717,10 @@ async function computaSavedConversation(input, c, dom, config) {
       const t = dom.transcript(), form = dom.composer(), evidence = selectionEvidence(false);
       validateInitialResponseIdentity(t, 'ordinary_read');
       let extracted = dom.rawAnswer(t.answer), rawSourceFailure = null;
+      const literal = state.responseChoice?.selectedLiteral;
+      if (literal && state.responseChoice.acknowledged && !state.deletion
+        && (!extracted.finalMarkup || t.answer?.content !== literal.content || extracted.text !== literal.text))
+        c.fail('conversation_changed', 'response_choice_scope');
       state.initialReadComplete = true;
       const terminalUI = !!state.first && !!evidence && !state.deletion && dom.completionCandidate(t.answer);
       if (terminalUI && extracted.formatIssue && qwenCodeEnabled
@@ -1003,6 +1017,15 @@ async function computaSavedConversation(input, c, dom, config) {
           if (!samePair(readChoice())) refuse('reveal_scope');
         }
         const modelEvidence = selectionEvidence(true, 'response_choice_ready');
+        if (ready && held.replacedEmptyPendingTurn) {
+          // This handoff only admits a directly observable literal. Keep the
+          // selected physical card and exact bytes through acknowledgement.
+          const literal = dom.rawAnswer({root:held.root, content:row.response, id:row.id});
+          if (!literal.finalMarkup || !literal.text.trim()
+            || held.selectedLiteral && (held.selectedLiteral.content !== row.response
+              || held.selectedLiteral.text !== literal.text)) refuse('pair_after_hash');
+          held.selectedLiteral = {content:row.response, text:literal.text};
+        }
         if (input.savedResponseChoiceGrant != null) {
           const grant = input.savedResponseChoiceGrant;
           if (!ready || held.spent || !grant || Object.keys(grant).sort().join(',') !== 'candidate,grant,kind,policy,responseIDs,selectedResponseID,sequence,version'
@@ -1028,6 +1051,11 @@ async function computaSavedConversation(input, c, dom, config) {
         || !current.answer || current.answer.id !== held.ids[0]
         || c.nodes(current.answer.root, '.chat-response-message', 2).length !== 1
         || c.nodes(current.answer.root, '.smrm, .cmrm', 1).length) refuse('selected_ack');
+      if (held.replacedEmptyPendingTurn) {
+        const pinned = held.selectedLiteral, literal = dom.rawAnswer(current.answer);
+        if (!pinned || current.answer.content !== pinned.content || !literal.finalMarkup || literal.text !== pinned.text)
+          refuse('selected_ack');
+      }
       // Only the acknowledged official preference can replace comparison
       // content. Every user/ancestor pin survives; the sole reply UUID is fixed.
       if (state.firstDisplay) {
@@ -1289,9 +1317,11 @@ async function computaSavedConversation(input, c, dom, config) {
     if (state && (!error?.computaAdapterFailure || state.deletion || (state.submitted || state.initialReadComplete
       || state.model || state.selection || state.mode || state.modeSelection || state.prepared || state.inserted)
       && ['conversation_changed', 'document_changed', 'model_mismatch', 'model_unverified', 'mode_mismatch', 'mode_unverified'].includes(error.error))) state.terminal = true;
-    if (state?.terminal && state.firstDisplayWitness?.turnWatch) {
-      state.firstDisplayWitness.turnWatch.close();
+    if (state?.terminal && state.firstDisplayWitness) {
+      state.firstDisplayWitness.turnWatch?.close();
+      state.firstDisplayWitness.emptyPendingWatch?.close();
       delete state.firstDisplayWitness.turnWatch;
+      delete state.firstDisplayWitness.emptyPendingWatch;
     }
     if (state?.terminal && state.firstDisplay?.settlement) {
       state.firstDisplay.settlement.watch.consume();

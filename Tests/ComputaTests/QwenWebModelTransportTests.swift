@@ -1908,6 +1908,8 @@ final class QwenWebModelTransportTests: XCTestCase {
     func testQwenOptimisticComparisonReplacementRequiresExactBodyBeforeChoice() async throws {
         for (rootHandoff, changedSuffix) in [("reuse", false), ("clone", false), ("clone", true),
                                             ("turn", false), ("turn_split", false), ("turn", true),
+                                            ("turn_empty", false), ("turn_empty", true), ("turn_empty_touched", false),
+                                            ("turn_empty_changed_answer", false),
                                             ("turn_clone", false), ("turn_noise", false),
                                             ("turn_split_delayed", false), ("turn_outer_move", false)] {
             print("Qwen comparison fixture handoff=\(rootHandoff) changedSuffix=\(changedSuffix)")
@@ -1924,7 +1926,7 @@ final class QwenWebModelTransportTests: XCTestCase {
             XCTAssertNil(held["modelProofContext"])
             try await installResponseChoice(fixture, scenario: "waiting", rootHandoff: rootHandoff)
 
-            if ["turn_clone", "turn_noise", "turn_split_delayed", "turn_outer_move"].contains(rootHandoff) {
+            if ["turn_clone", "turn_noise", "turn_split_delayed", "turn_outer_move", "turn_empty_touched"].contains(rootHandoff) {
                 do {
                     _ = try await call(fixture, "webProviderPoll", token)
                     XCTFail("An unverified transcript transition cannot carry the assistant turn")
@@ -1967,6 +1969,20 @@ final class QwenWebModelTransportTests: XCTestCase {
                 continue
             }
             _ = try await waitForChoiceSpent(fixture, token)
+            if rootHandoff == "turn_empty_changed_answer" {
+                do {
+                    _ = try await wait(fixture, token, state: "complete")
+                    XCTFail("A comparison choice cannot substitute different authored text")
+                } catch {
+                    XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.qwenResponseChoiceScope))
+                }
+                let closed = try await call(fixture, "webProviderFinish", token)
+                XCTAssertEqual(closed["cleanup"] as? String, "failed")
+                let counts = try await evaluate(fixture.view, "return [qwenFixture.counts.displayClicks, ...choiceFixture.clicks];") as? [Int]
+                XCTAssertEqual(counts, [1, 1, 0])
+                try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+                continue
+            }
             let completed = try await wait(fixture, token, state: "complete")
             XCTAssertEqual(completed["text"] as? String, #"{"type":"message","text":"Synthetic Qwen native reply"}"#)
             let closed = try await call(fixture, "webProviderFinish", token)
@@ -2039,8 +2055,16 @@ final class QwenWebModelTransportTests: XCTestCase {
     private func installResponseChoice(_ fixture: Fixture, scenario: String, rootHandoff: String = "none") async throws {
         let source = #"""
         const rootHandoff='__ROOT_HANDOFF__';
-        if(rootHandoff!=='none')qwenFixture.completeResponse();
+        const emptyReplacement=rootHandoff.startsWith('turn_empty');
+        if(rootHandoff!=='none'&&!emptyReplacement)qwenFixture.completeResponse();
         let first=document.querySelector('.chat-response-message'),root=first.parentElement;
+        if(emptyReplacement){
+          if(rootHandoff==='turn_empty_touched'){
+            const loading=first.querySelector('.response-loading');
+            loading.textContent='Transient synthetic output';loading.textContent='';
+          }
+          first=qwenFixture.newCompletedResponse();
+        }
         const originalFooter=first.querySelector('.response-message-footer-actions');originalFooter.remove();
         if(rootHandoff!=='none'){
           const replacement=root.cloneNode(false);
@@ -2072,7 +2096,9 @@ final class QwenWebModelTransportTests: XCTestCase {
           const content=node('div','smrm-card__content'),footer=node('div','smrm-card__footer'),control=node('button','smrm-card__prefer-btn','I prefer this response');
           control.disabled='__SCENARIO__'==='waiting';controls.push(control);content.append(response);body.append(content);footer.append(control);card.append(header,body,footer);list.append(card);
           control.addEventListener('click',()=>{clicks[index]++;if('__SCENARIO__'==='lost')return;
-            root.classList.remove('qwen-chat-message-dual-message');root.replaceChildren(response);response.append(originalFooter);});
+            if(rootHandoff==='turn_empty_changed_answer')response.querySelector('.qwen-markdown-text-node').textContent='Different synthetic answer';
+            root.classList.remove('qwen-chat-message-dual-message');root.replaceChildren(response);response.append(originalFooter);
+            if(emptyReplacement)qwenFixture.clearStop();});
         });
         wrapper.append(list);root.classList.add('qwen-chat-message-dual-message');root.replaceChildren(wrapper);
         window.choiceFixture={clicks,enable:()=>controls.forEach(control=>control.disabled=false)};
