@@ -82,6 +82,20 @@ is offered. The existing verified discovery and cleanup still control when
 Computa clears the checkpoint. The retained live records did not show either
 local bug preceding Google's HTTP 429.
 
+The first ordinary Gemini load after installing signed build 543 returned
+HTTP 200 at 16:36 EST. A separate model discovery also returned HTTP 200 and
+cleared the saved checkpoint after verification and cleanup. Flash-Lite,
+Hydrogen, 3.1 Pro and Argon each returned their exact test reply with verified
+model selection and a saved temporary-session closure. These four checks sent
+one prompt each and used zero tools.
+
+About 84 seconds after the Argon session was released, a fresh Flash-Lite
+workflow received Google's verification HTTP 429 on its initial navigation.
+The bounded native capture recorded the Gemini request and Google redirect
+before model selection, prompt submission, or tool execution. Computa saved
+closure of the unused session. The provider's reason for challenging that
+request remains unknown.
+
 ## Ownership failure and repair
 
 The installed 0.7.0 (321) baseline displayed a healthy signed-in Gemini page.
