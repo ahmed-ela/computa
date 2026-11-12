@@ -16770,6 +16770,249 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testClaudeOpus3CorrectionWaitsForTheFreshComposerToEnableItsSend() async throws {
+        try await assertClaudeOpus3CorrectionWithFreshDisabledSend(enables: true)
+    }
+
+    func testClaudeOpus3CorrectionNeverSendsThroughAPermanentlyDisabledComposer() async throws {
+        try await assertClaudeOpus3CorrectionWithFreshDisabledSend(enables: false)
+    }
+
+    private func assertClaudeOpus3CorrectionWithFreshDisabledSend(enables: Bool) async throws {
+        let choice = WebsiteModelChoice.claudeOpus3
+        let rejected = #"{"type":"tool_calls","calls":[{"name":"fixture_read","arguments":{"value":"rejected-first-only"}}}]}"#
+        let corrected = #"{"type":"tool_calls","calls":[{"name":"fixture_read","arguments":{"value":"corrected-second-only"}}]}"#
+        let firstPage = try claudeCorrectionComposerPage(reply: rejected, enableAfterInput: 15)
+        let correctionPage = try claudeCorrectionComposerPage(reply: corrected, enableAfterInput: enables ? 160 : nil)
+        let fixture = try Fixture(page: firstPage)
+        defer { fixture.transport.setBeforePageResultValidationForTesting(nil); fixture.shutdown() }
+        let root = try canonicalFormatCorrectionFixtureRoot()
+        let server = try await makePrecreationFixtureServer(storageDirectory: root)
+        let task = "claude-opus3-correction-fresh-send-\(enables)"
+        let taskID = websiteInferenceFixtureTaskID(task), turnID = websiteInferenceFixtureTaskID(task + ":turn")
+        let cleanup = WebsiteSessionCleanupStore(directory: root.appendingPathComponent("cleanup"))
+        func corrections() throws -> [WebsiteModelFormatCorrectionStore.Record] {
+            try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("evidence/format-corrections-v1"),
+                includingPropertiesForKeys: nil).map { try JSONDecoder().decode(WebsiteModelFormatCorrectionStore.Record.self, from: Data(contentsOf: $0)) }
+        }
+        let observer = ClaudeCorrectionComposerTransport(fixture: fixture, correctionPage: correctionPage)
+        observer.beforeCorrection = { firstToken in
+            let receipts = try cleanup.transactionRecords(for: taskID, turnID: turnID)
+            XCTAssertEqual(receipts.count, 1, "The first physical session must close before the new tab opens")
+            let first = try XCTUnwrap(receipts.first)
+            XCTAssertEqual(first.sessionToken, firstToken.lowercased())
+            XCTAssertEqual(first.outcome, .closed)
+            XCTAssertTrue(first.receiptSaved)
+            let records = try corrections()
+            XCTAssertEqual(Set(records.map(\.phase)), [.claimed, .firstClosed])
+            XCTAssertEqual(records.first { $0.phase == .firstClosed }?.cleanupAttemptID, UUID(uuidString: first.attemptID))
+        }
+        observer.readComposer = { view in
+            let result = try await self.evaluate(view, """
+                const f = window.fixtureCorrectionComposer;
+                return {sameNodes: f.editor === document.getElementById('fixture-editor')
+                  && f.send === document.getElementById('fixture-send') && f.editor.classList.contains('ProseMirror'),
+                  initiallyDisabled: f.initiallyDisabled, disabled: f.send.disabled,
+                  inputs: window.fixtureInputCount, inputsWhileDisabled: f.inputsWhileDisabled,
+                  enables: f.enables, sends: window.fixturePrompts.length};
+                """)
+            return try XCTUnwrap(result as? [String: Any])
+        }
+        await server.configureEmbeddedTransport(observer)
+        var actions: [UUID: [String]] = [:]
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard let tab = fixture.createdTabs.last, ["insert", "submit"].contains(action) else { return }
+            actions[tab, default: []].append(action)
+        }
+        let request = try JSONSerialization.data(withJSONObject: ["model": choice.modelID, "stream": false,
+            "input": [["role": "user", "content": "Read the synthetic value once with the offered fixture tool."]],
+            "tools": [["type": "function", "name": "fixture_read", "parameters": ["type": "object",
+                "properties": ["value": ["type": "string"]], "required": ["value"]]]]] as [String: Any])
+        do {
+            let data = try await server.fixtureInfer(request, taskID: task)
+            XCTAssertTrue(enables, "A permanently disabled Send cannot release a reply")
+            let result = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let output = try XCTUnwrap(result["output"] as? [[String: Any]])
+            XCTAssertEqual(output.count, 1)
+            XCTAssertEqual(output.first?["type"] as? String, "function_call")
+            XCTAssertEqual(output.first?["name"] as? String, "fixture_read")
+            XCTAssertEqual(output.first?["arguments"] as? String, #"{"value":"corrected-second-only"}"#)
+            XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("rejected-first-only"))
+        } catch {
+            if enables { throw error }
+            XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .editorFailure("send_unavailable"))
+        }
+        let issues = await server.fixtureFinish(taskID: task)
+        XCTAssertTrue(issues.isEmpty)
+        XCTAssertEqual(observer.startCount, 2)
+        guard observer.sessions.count == 2 else { return XCTFail("Expected an original session and one fresh correction session") }
+        let first = observer.sessions[0], second = observer.sessions[1]
+        XCTAssertEqual(fixture.createdTabs, [first.tab, second.tab])
+        XCTAssertNotEqual(first.token, second.token)
+        XCTAssertEqual(observer.operations, ["send", "close", "send", "close"])
+        XCTAssertEqual(actions[first.tab], ["insert", "submit"])
+        XCTAssertEqual(actions[second.tab], enables ? ["insert", "submit"] : ["insert"])
+        for (index, session) in observer.sessions.enumerated() {
+            let before = try XCTUnwrap(session.beforeSend), after = try XCTUnwrap(session.beforeClose)
+            let expectedSends = index == 0 || enables ? 1 : 0
+            for sample in [before, after] {
+                XCTAssertEqual(sample["sameNodes"] as? Bool, true)
+                XCTAssertEqual(sample["initiallyDisabled"] as? Bool, true)
+            }
+            XCTAssertEqual(before["disabled"] as? Bool, true)
+            for key in ["inputs", "inputsWhileDisabled", "enables", "sends"] { XCTAssertEqual(before[key] as? Int, 0, key) }
+            XCTAssertEqual(after["inputs"] as? Int, 1)
+            XCTAssertEqual(after["inputsWhileDisabled"] as? Int, 1)
+            XCTAssertEqual(after["enables"] as? Int, expectedSends)
+            XCTAssertEqual(after["sends"] as? Int, expectedSends)
+            XCTAssertNil(fixture.browser.webView(for: session.tab))
+        }
+        let firstPrompt = try XCTUnwrap(first.prompt), secondPrompt = try XCTUnwrap(second.prompt)
+        XCTAssertTrue(secondPrompt.hasPrefix(firstPrompt))
+        XCTAssertEqual(secondPrompt.components(separatedBy: "COMPUTA RESPONSE CORRECTION — ONE ATTEMPT").count, 2)
+        XCTAssertFalse(secondPrompt.contains("rejected-first-only"))
+        XCTAssertEqual(try WebsiteRequestFixture.json(in: firstPrompt, expectedModel: choice.modelID),
+                       try WebsiteRequestFixture.json(in: secondPrompt, expectedModel: choice.modelID))
+
+        let receipts = try cleanup.transactionRecords(for: taskID, turnID: turnID)
+        XCTAssertEqual(receipts.map(\.sessionToken), [first.token.lowercased(), second.token.lowercased()])
+        XCTAssertTrue(receipts.allSatisfy { $0.outcome == .closed && $0.receiptSaved && $0.provider == .claude && $0.modelID == choice.modelID })
+        let firstReceipt = try XCTUnwrap(receipts.first), secondReceipt = try XCTUnwrap(receipts.last)
+        let records = try corrections()
+        XCTAssertEqual(records.count, 3)
+        XCTAssertEqual(Set(records.map(\.phase)), [.claimed, .firstClosed, .finished])
+        let final = try XCTUnwrap(records.first { $0.phase == .finished })
+        XCTAssertTrue(final.isValid && final.secondStarted)
+        XCTAssertEqual(final.reason, .invalidJSON)
+        XCTAssertEqual(final.outcome, enables ? .responseValidated : .failed)
+        XCTAssertEqual(final.firstInferenceID.uuidString.lowercased(), firstReceipt.inferenceID)
+        XCTAssertEqual(final.secondInferenceID.uuidString.lowercased(), secondReceipt.inferenceID)
+        XCTAssertEqual(final.firstSessionToken, UUID(uuidString: first.token))
+        XCTAssertEqual(final.secondSessionToken, UUID(uuidString: second.token))
+        XCTAssertEqual(final.cleanupAttemptID, UUID(uuidString: firstReceipt.attemptID))
+
+        let journal = root.appendingPathComponent("evidence/transactions/\(taskID)/\(turnID).jsonl")
+        let rows: [[String: Any]] = try Data(contentsOf: journal).split(separator: 10).map {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0)) as? [String: Any])
+        }
+        let firstRows = rows.filter { $0["inferenceID"] as? String == firstReceipt.inferenceID }
+        let secondRows = rows.filter { $0["inferenceID"] as? String == secondReceipt.inferenceID }
+        let firstFailure = try XCTUnwrap(firstRows.first { $0["phase"] as? String == "failed" })
+        XCTAssertEqual(firstFailure["submissionProofPolicy"] as? String, "fresh_session_submission_v1")
+        XCTAssertEqual(firstFailure["submittedPromptFingerprint"] as? String, EmbeddedWebModelTransport.promptFingerprint(firstPrompt))
+        XCTAssertEqual(firstFailure["responseCount"] as? Int, 1)
+        XCTAssertTrue(firstRows.allSatisfy { !["complete", "release_verified", "yield_verified"].contains($0["phase"] as? String ?? "") })
+        let released = secondRows.filter { $0["phase"] as? String == "release_verified" }
+        XCTAssertEqual(released.count, enables ? 1 : 0)
+        if enables {
+            let row = try XCTUnwrap(released.first)
+            XCTAssertEqual(row["cleanupAttemptID"] as? String, secondReceipt.attemptID)
+            XCTAssertEqual(row["submissionProofPolicy"] as? String, "fresh_session_submission_v1")
+            XCTAssertEqual(row["submittedPromptFingerprint"] as? String, EmbeddedWebModelTransport.promptFingerprint(secondPrompt))
+        } else {
+            XCTAssertTrue(secondRows.allSatisfy { $0["submissionProofPolicy"] == nil })
+            XCTAssertEqual(secondRows.filter { $0["phase"] as? String == "failed" }.count, 1)
+        }
+        _ = await server.shutdown()
+        try await assertHumanTabIntact(fixture)
+    }
+
+    private func claudeCorrectionComposerPage(reply: String, enableAfterInput delay: Int?) throws -> String {
+        let base = Self.providerPage(.claude)
+        let input = "setTimeout(() => { send.disabled = !editor.innerText.trim(); }, 15);"
+        let append = "document.getElementById('messages').appendChild(turn);"
+        let sendDeclaration = "const send = document.getElementById('fixture-send');"
+        XCTAssertTrue([input, append, sendDeclaration].allSatisfy { base.components(separatedBy: $0).count == 2 })
+        let enable = delay.map { """
+            setTimeout(() => {
+              if (send.disabled && editor.innerText.trim()) { window.fixtureCorrectionComposer.enables++; send.disabled = false; }
+            }, \($0));
+            """ } ?? ""
+        let page = base.replacingOccurrences(of: sendDeclaration, with: sendDeclaration + """
+
+            window.fixtureCorrectionComposer = {editor, send, initiallyDisabled: send.disabled, inputsWhileDisabled: 0, enables: 0};
+            editor.addEventListener('input', () => {
+              if (send.disabled) window.fixtureCorrectionComposer.inputsWhileDisabled++;
+            });
+            """)
+            .replacingOccurrences(of: input, with: enable)
+            .replacingOccurrences(of: append, with: """
+                const wrapper = document.createElement('div'); wrapper.className = 'relative border-border-400';
+                const controls = document.createElement('div'); controls.className = 'absolute right-0 h-8 px-2 items-center inline-flex';
+                const copyCode = document.createElement('button'); copyCode.className = 'cds-reset relative isolate inline-flex shrink-0 items-center';
+                copyCode.setAttribute('aria-label', 'Copy to clipboard');
+                const icon = document.createElement('span'); icon.textContent = '\u{E000}'; copyCode.append(icon); controls.append(copyCode);
+                const caption = document.createElement('div'); caption.className = 'text-secondary text-caption-regular font-sans pb-0'; caption.textContent = 'json';
+                const pre = document.createElement('pre'), code = document.createElement('code');
+                code.textContent = \(try matchedProbeJSON(reply)); pre.append(code); wrapper.append(controls, caption, pre);
+                body.replaceChildren(wrapper);
+                \(append)
+                """)
+        return Self.modelChoicePage(.claude, basePage: page).replacingOccurrences(of: "Sonnet 4.6", with: WebsiteModelChoice.claudeOpus3.label)
+    }
+
+    @MainActor
+    private final class ClaudeCorrectionComposerTransport: WebModelTransport {
+        struct Session {
+            let tab: UUID
+            let token: String
+            var prompt: String?
+            var beforeSend: [String: Any]?
+            var beforeClose: [String: Any]?
+        }
+
+        let fixture: Fixture
+        let correctionPage: String
+        var sessions: [Session] = []
+        var startCount = 0
+        var operations: [String] = []
+        var beforeCorrection: ((String) throws -> Void)?
+        var readComposer: ((WKWebView) async throws -> [String: Any])?
+
+        init(fixture: Fixture, correctionPage: String) { self.fixture = fixture; self.correctionPage = correctionPage }
+
+        func start(params: Data, admission: WebModelStartAdmission, authorization: ChatGPTRequestMetadataLease?) async throws -> Data {
+            startCount += 1
+            if let first = sessions.first {
+                XCTAssertNil(fixture.browser.webView(for: first.tab))
+                try beforeCorrection?(first.token)
+                fixture.page = correctionPage
+            }
+            let data = try await fixture.transport.start(params: params, admission: admission, authorization: authorization)
+            let value = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let token = try XCTUnwrap(value["sessionToken"] as? String)
+            sessions.append(.init(tab: try XCTUnwrap(fixture.createdTabs.last), token: token))
+            return data
+        }
+
+        func request(operation: String, params: Data) async throws -> Data {
+            if ["webProviderSend", "webProviderFinish", "webProviderCancel"].contains(operation) {
+                let values = try XCTUnwrap(JSONSerialization.jsonObject(with: params) as? [String: String])
+                let index = try XCTUnwrap(sessions.firstIndex { $0.token == values["sessionToken"] })
+                let view = try XCTUnwrap(fixture.browser.webView(for: sessions[index].tab))
+                if operation == "webProviderSend" {
+                    operations.append("send")
+                    XCTAssertNil(sessions[index].prompt)
+                    sessions[index].prompt = try XCTUnwrap(values["prompt"])
+                    sessions[index].beforeSend = try await readComposer?(view)
+                } else {
+                    operations.append("close")
+                    XCTAssertNil(sessions[index].beforeClose)
+                    sessions[index].beforeClose = try await readComposer?(view)
+                }
+            }
+            return try await fixture.transport.request(operation: operation, params: params)
+        }
+
+        func changeRevision(sessionToken: String) async throws -> UInt64? {
+            try await fixture.transport.changeRevision(sessionToken: sessionToken)
+        }
+
+        func waitForChange(sessionToken: String, after revision: UInt64, until deadline: ContinuousClock.Instant) async throws -> UInt64? {
+            try await fixture.transport.waitForChange(sessionToken: sessionToken, after: revision, until: deadline)
+        }
+    }
+
     func testClaudeDisabledSendReadinessReportsOneFailureAtOriginalDeadlineWithoutClicking() async throws {
         try await assertClaudeDisabledSendFailure(disableAfterReadiness: false)
     }

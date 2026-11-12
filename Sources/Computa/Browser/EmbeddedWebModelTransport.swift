@@ -3874,15 +3874,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // Diagnostic only, local to this one bounded readiness wait. A previous
         // false observation cannot authorize Send or replace a later error.
         var lastGroqDiagnostic: String?
-        var lastClaudeObservation: (generation: UUID, reason: ClaudeSendFailureReason)?
+        var lastClaudeObservation: (generation: UUID, reason: ClaudeSendFailureReason, diagnostic: String?)?
         @MainActor func timeoutFailure() -> Failure {
-            let reason: ClaudeSendFailureReason?
-            if let observation = lastClaudeObservation, observation.generation == session.documentGeneration {
-                reason = observation.reason
-            } else {
-                reason = nil
-            }
-            logClaudeSendFailure(session, stage: .readinessTimeout, reason: reason)
+            let observation = lastClaudeObservation?.generation == session.documentGeneration ? lastClaudeObservation : nil
+            logClaudeSendFailure(session, stage: .readinessTimeout, reason: observation?.reason, diagnostic: observation?.diagnostic)
             return sendReadinessFailure(session, diagnostic: lastGroqDiagnostic)
         }
         while ContinuousClock.now < deadline {
@@ -3905,7 +3900,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                         detail: observed["sendReadinessFailure"])
                 } else if session.provider == .claude, let generation = session.documentGeneration,
                           observesLifecycle(observed, session: session) {
-                    lastClaudeObservation = (generation, ClaudeSendFailureReason.adapterReason(observed["claudeSendReadiness"]))
+                    lastClaudeObservation = (generation, ClaudeSendFailureReason.adapterReason(observed["claudeSendReadiness"]),
+                        Self.claudeSendDiagnostic(observed["claudeSendDiagnostic"]))
                 }
             }
             guard ContinuousClock.now < deadline else { break }
@@ -3932,8 +3928,35 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
     }
 
+    /// Project fixed structure from the failed adapter read. No content, DOM
+    /// identifiers or site-controlled strings can enter the diagnostic log.
+    private static func claudeSendDiagnostic(_ raw: Any?) -> String? {
+        let flags = ["selectedVisible", "sendHasLayout", "sendCSSHidden", "sendAriaHidden", "sendInert", "sendNativeDisabled",
+            "sendAriaDisabled", "firstChildParagraph", "nativeDisabledCleared", "ariaDisabledCleared"]
+        let counts: [String: ClosedRange<Int64>] = ["candidateCount": 0...4, "editorChildElements": 0...16,
+            "draftUTF8Bytes": 1...540_000, "draftLines": 1...4_096]
+        guard let packet = raw as? [String: Any],
+              Set(packet.keys) == Set(flags + Array(counts.keys) + ["version", "editorKind", "mutationTracking"]),
+              ComputerToolArgumentContract.exactInt64(packet["version"]) == 1,
+              let editorKind = packet["editorKind"] as? String, ["textarea", "prosemirror", "contenteditable"].contains(editorKind),
+              let tracking = packet["mutationTracking"] as? String,
+              ["unavailable", "different_target", "overflow", "same_target"].contains(tracking) else { return nil }
+        var projected: [String: Any] = ["version": 1, "editorKind": editorKind, "mutationTracking": tracking]
+        for key in flags {
+            guard let value = firstUserDiagnosticBool(packet[key]) else { return nil }
+            projected[key] = value
+        }
+        for (key, range) in counts {
+            guard let value = ComputerToolArgumentContract.exactInt64(packet[key]), range.contains(value) else { return nil }
+            projected[key] = value
+        }
+        guard let encoded = try? JSONSerialization.data(withJSONObject: projected, options: .sortedKeys), encoded.count <= 768 else { return nil }
+        return String(data: encoded, encoding: .utf8)
+    }
+
     /// Record only finite negative evidence from the current owned document.
-    private func logClaudeSendFailure(_ session: Session, stage: ClaudeSendFailureStage, reason: ClaudeSendFailureReason?) {
+    private func logClaudeSendFailure(_ session: Session, stage: ClaudeSendFailureStage,
+                                      reason: ClaudeSendFailureReason?, diagnostic: String?) {
         guard session.provider == .claude, sessions[session.token] === session,
               !Task.isCancelled, session.terminalFailure == nil, let generation = session.documentGeneration,
               browser.webView(for: session.tabID) === session.view,
@@ -3943,6 +3966,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             + " generation=\(generation.uuidString.lowercased()) nativeSequence=\(session.sequence)"
             + " stage=\(stage.rawValue) reason=\(reason?.rawValue ?? "not_observed") claimed=\(claimed)"
         Self.inspectionLog.notice("\(record, privacy: .public)")
+        if let diagnostic {
+            Self.inspectionLog.notice("claudeSendReadinessDiagnostic session=\(session.token.lowercased(), privacy: .public) generation=\(generation.uuidString.lowercased(), privacy: .public) stage=\(stage.rawValue, privacy: .public) structure=\(diagnostic, privacy: .public)")
+        }
         #if DEBUG
         claudeSendFailureObserverForTesting?(record)
         #endif
@@ -8983,7 +9009,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 }
                 if provider == .claude, action == "submit" {
                     logClaudeSendFailure(session, stage: .submitGuard,
-                        reason: ClaudeSendFailureReason.adapterReason(observed["detail"]))
+                        reason: ClaudeSendFailureReason.adapterReason(observed["detail"]),
+                        diagnostic: Self.claudeSendDiagnostic(observed["claudeSendDiagnostic"]))
                 }
                 throw Failure.editorFailure(error)
             case "composer_not_empty", "prompt_not_inserted", "caret_unavailable", "insert_command_rejected": throw Failure.editorFailure(error)

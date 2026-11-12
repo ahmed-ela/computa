@@ -930,7 +930,9 @@ describe("embedded Claude fixed adapter", () => {
 
   test("the signed-in Incognito reset card aborts fresh preflight without interacting or proving cleanup", async () => {
     for (const action of ["inspect", "discoverModels", "selectModel", "verifyModel", "enableTemporary", "prepare", "insert", "sendReady", "submit"]) {
-      const f = fixture(provider), { picker, about, offer, reset, shared, available } = freshIncognitoResetLimit(f);
+      const f = fixture(provider), { picker, about, offer, reset, shared, available, clock } = freshIncognitoResetLimit(f);
+      if (["inspect", "sendReady", "submit"].includes(action))
+        clock.text = "Usage limit reached · Resets tomorrow at 12:00 AM · ";
       if (action === "prepare") {
         reset.values.href = "/settings/usage?highlight=resets"; available.text = "You have 1 reset available.";
       }
@@ -965,7 +967,8 @@ describe("embedded Claude fixed adapter", () => {
     const outcomes = {
       "ordinary-new": "route_ineligible", "nonempty-draft": "editor_nonempty", "missing-editor": "editor_guard",
       "send-enabled": "send_guard", "open-picker": "picker_guard", "submitted": undefined, "authored-card": "authored_content",
-      "bad-clock": "copy_mismatch", "different-copy": "copy_mismatch", "zero-resets": "copy_mismatch", "wrong-plural": "copy_mismatch",
+      "bad-clock": "copy_mismatch", "bad-relative-clock": "copy_mismatch",
+      "different-copy": "copy_mismatch", "zero-resets": "copy_mismatch", "wrong-plural": "copy_mismatch",
       "hidden-copy": "copy_unavailable", "clipped-copy": "copy_unavailable", "other-link-origin": "card_links", "other-reset-query": "card_links",
       "missing-offer": "offer_absent", "about-not-popup": "card_controls", "about-open": "card_controls",
       "about-open-state": "card_controls", "about-link": "card_controls", "about-form-control": "card_controls",
@@ -982,6 +985,7 @@ describe("embedded Claude fixed adapter", () => {
         case "submitted": f.world.__computaModelFirstSubmitted = true; break;
         case "authored-card": card.values["data-testid"] = "assistant-message"; break;
         case "bad-clock": clock.text = "Usage limit reached · Resets 25:00 PM · "; break;
+        case "bad-relative-clock": clock.text = "Usage limit reached · Resets tomorrow at 12:60 AM · "; break;
         case "different-copy": available.text = "You have 2 rewards available."; break;
         case "zero-resets": available.text = "You have 0 resets available."; break;
         case "wrong-plural": available.text = "You have 1 resets available."; break;

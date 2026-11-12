@@ -2837,6 +2837,72 @@ function modelVisible(node) {
 }
 function modelEnabled(node) { return modelVisible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true'; }
 function modelFind(selectors) { return selectors.flatMap(selector => [...document.querySelectorAll(selector)]).find(modelVisible); }
+const modelClaudeSendSelector = 'button[data-testid="chat-input-send"][aria-label="Send message"]';
+function modelClaudeEndSendTrace() {
+  try {
+    globalThis.__computaClaudeSendTrace?.observer.disconnect?.();
+    globalThis.__computaClaudeSendTrace = null;
+  } catch { /* Diagnostics cannot affect editor actions. */ }
+}
+function modelClaudeStartSendTrace(composer) {
+  modelClaudeEndSendTrace();
+  try {
+    const candidates = document.querySelectorAll(modelClaudeSendSelector);
+    if (candidates.length !== 1) return;
+    const send = candidates[0];
+    const trace = { owner: input.ownerToken, document, url: document.URL, composer, send,
+      count: 0, overflow: false, nativeDisabledCleared: false, ariaDisabledCleared: false };
+    trace.consume = records => {
+      trace.count += records.length;
+      if (trace.count > 64) {
+        trace.overflow = true;
+        trace.observer.disconnect?.();
+        return;
+      }
+      let disabled = send.getAttribute('disabled'), ariaDisabled = send.getAttribute('aria-disabled');
+      // Old values preserve a clear-and-restore within one observer delivery.
+      for (let index = records.length - 1; index >= 0; index--) {
+        const { attributeName, oldValue } = records[index];
+        if (attributeName === 'disabled') {
+          if (oldValue !== null && disabled === null) trace.nativeDisabledCleared = true;
+          disabled = oldValue;
+        } else if (attributeName === 'aria-disabled') {
+          if (oldValue === 'true' && ariaDisabled !== 'true') trace.ariaDisabledCleared = true;
+          ariaDisabled = oldValue;
+        }
+      }
+    };
+    trace.observer = new MutationObserver(trace.consume);
+    trace.observer.observe(send, { attributes: true, attributeOldValue: true, attributeFilter: ['disabled', 'aria-disabled'] });
+    globalThis.__computaClaudeSendTrace = trace;
+  } catch { /* Diagnostics cannot affect editor actions. */ }
+}
+function modelClaudeSendDiagnostic(composer, actual, candidates, selected) {
+  try {
+    const send = selected || candidates[0];
+    const trace = globalThis.__computaClaudeSendTrace;
+    const matchingTrace = !!trace && trace.owner === input.ownerToken && trace.document === document
+      && trace.url === document.URL && trace.composer === composer;
+    const sameTarget = matchingTrace && trace.send === send;
+    if (sameTarget) trace.consume(trace.observer.takeRecords?.() || []);
+    let lines = 1;
+    for (let i = 0; i < actual.length && lines < 4096; i++) if (actual[i] === '\n') lines++;
+    // Four candidates means four or more. Text counts use the existing draft comparison's normalized value.
+    return { version: 1, candidateCount: Math.min(candidates.length, 4), selectedVisible: !!selected,
+      // When no candidate is visible, describe the first exact match only.
+      sendHasLayout: !!send?.getClientRects().length, sendCSSHidden: !!send && getComputedStyle(send).visibility === 'hidden',
+      sendAriaHidden: !!send?.closest('[aria-hidden="true"]'), sendInert: !!send?.closest('[inert]'),
+      sendNativeDisabled: send?.disabled === true, sendAriaDisabled: send?.getAttribute('aria-disabled') === 'true',
+      editorKind: composer instanceof HTMLTextAreaElement ? 'textarea'
+        : composer.classList.contains('ProseMirror') ? 'prosemirror' : 'contenteditable',
+      editorChildElements: Math.min(composer.childElementCount, 16),
+      firstChildParagraph: composer.children[0]?.tagName === 'P',
+      draftUTF8Bytes: new TextEncoder().encode(actual).length, draftLines: lines,
+      mutationTracking: !matchingTrace ? 'unavailable' : !sameTarget ? 'different_target' : trace.overflow ? 'overflow' : 'same_target',
+      nativeDisabledCleared: sameTarget && trace.nativeDisabledCleared === true,
+      ariaDisabledCleared: sameTarget && trace.ariaDisabledCleared === true };
+  } catch { return undefined; }
+}
 // Abort-only recognition of the observed provider safeguard pause. No authored
 // message, editor, quoted code, or arbitrary surrounding text supplies authority.
 // The observed warning wrapper admits only its isolated fixed reason CODE;
@@ -3229,7 +3295,7 @@ function modelFreshAccountUsageLimited(afterClosedDiscovery = false) {
         if (outcome === 'card_controls') outcome = 'card_links';
         if (!hasExactLinks(links)) continue;
         const copy = words(card, false, true, [offer, accessory]);
-        if (copy && /^Usage limit reached · Resets (?:[1-9]|1[0-2]):[0-5][0-9] (?:AM|PM) · limits shared with Claude Code You have (?:1 reset|(?:[2-9]|[1-9][0-9]) resets) available\. Use reset$/.test(copy)) {
+        if (copy && /^Usage limit reached · Resets (?:tomorrow at )?(?:[1-9]|1[0-2]):[0-5][0-9] (?:AM|PM) · limits shared with Claude Code You have (?:1 reset|(?:[2-9]|[1-9][0-9]) resets) available\. Use reset$/.test(copy)) {
           if (afterClosedDiscovery) note('matched_after_menu');
           return true;
         }
@@ -3967,6 +4033,7 @@ async function providerPageAction() {
         return { error: 'conversation_changed', detail: 'first_user_message' };
       globalThis.__computaModelFirstPrompt = prompt;
     }
+    modelClaudeStartSendTrace(composer);
     composer.focus();
     if (composer instanceof HTMLTextAreaElement) {
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(composer, prompt);
@@ -4000,17 +4067,20 @@ async function providerPageAction() {
     return { error: 'prompt_not_inserted', detail, ...modelEditorDifference(actual, expected), actualLength: actual.length, expectedLength: expected.length,
       actualLines: actual.split('\n').length, expectedLines: expected.split('\n').length };
   }
-  const send = modelFind(['button[data-testid="chat-input-send"][aria-label="Send message"]']);
+  const sendCandidates = [...document.querySelectorAll(modelClaudeSendSelector)];
+  const send = sendCandidates.find(modelVisible);
   const sendUnobstructed = !modelVisibleDialog(true) && (!modelVisibleDialog() || websiteModelHitTestTarget(send));
   if (action === 'sendReady' && input.claudeRetainedTurn === true && !haikuDraft('sendReady', composer, prompt))
     return haikuFailure;
   const sendFailure = !send ? 'no_visible_exact_send' : !modelEnabled(send) ? 'disabled_or_hidden'
     : !sendUnobstructed ? 'not_unobstructed' : null;
+  const claudeSendDiagnostic = sendFailure ? modelClaudeSendDiagnostic(composer, actual, sendCandidates, send) : undefined;
   if (action === 'sendReady') {
-    return sendFailure ? { ...state, sendReady: false, claudeSendReadiness: sendFailure }
+    return sendFailure ? { ...state, sendReady: false, claudeSendReadiness: sendFailure, claudeSendDiagnostic }
       : { ...state, sendReady: true };
   }
-  if (sendFailure) return { error: 'send_unavailable', detail: sendFailure };
+  modelClaudeEndSendTrace();
+  if (sendFailure) return { error: 'send_unavailable', detail: sendFailure, claudeSendDiagnostic };
   if (globalThis.__computaModelLastSubmissionCount !== undefined
     && ownedUserCount <= globalThis.__computaModelLastSubmissionCount)
     return { error: 'conversation_changed', detail: 'user_count' };
