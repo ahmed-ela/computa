@@ -3181,6 +3181,15 @@ function modelFreshQuotaEditorEmpty(editor) {
   return editor.childNodes.length === 0 || editor.childNodes.length === 1 && editor.childNodes[0].tagName === 'P'
     && (editor.childNodes[0].childNodes.length === 0 || editor.childNodes[0].childNodes.length === 1 && editor.childNodes[0].childNodes[0].tagName === 'BR');
 }
+function modelUnsubmittedQuotaDraftMatches(editor) {
+  const inserted = globalThis.__computaModelFirstPrompt;
+  if (inserted === undefined) return modelFreshQuotaEditorEmpty(editor);
+  const draft = (editor.innerText ?? '').replace(/\r\n?/g, '\n').trim();
+  return ['sendReady', 'submit'].includes(input.action) && typeof input.prompt === 'string' && !!input.prompt.trim()
+    && inserted === input.prompt && draft === input.prompt.replace(/\r\n?/g, '\n').trim()
+    && typeof input.expectedFirstUserMarker === 'string'
+    && input.prompt.endsWith(`\n\nComputa session marker: ${input.expectedFirstUserMarker}`);
+}
 // Abort only on the observed five-hour card, including after exact insertion.
 // This surface never supplies Stop's physical Incognito proof.
 function modelFiveHourUsageLimited() {
@@ -3196,14 +3205,7 @@ function modelFiveHourUsageLimited() {
     const editor = one(document.querySelectorAll(modelFreshQuotaEditorSelector));
     const send = one(document.querySelectorAll(modelClaudeSendSelector));
     if (!modelVisible(editor) || editor.parentElement?.closest(excluded) || !eligible(send) || send.disabled !== true) return false;
-    const inserted = globalThis.__computaModelFirstPrompt;
-    if (inserted !== undefined) {
-      const draft = (editor.innerText ?? '').replace(/\r\n?/g, '\n').trim();
-      if (!['sendReady', 'submit'].includes(input.action) || typeof input.prompt !== 'string' || !input.prompt.trim()
-        || inserted !== input.prompt || draft !== input.prompt.replace(/\r\n?/g, '\n').trim()
-        || typeof input.expectedFirstUserMarker !== 'string'
-        || !input.prompt.endsWith(`\n\nComputa session marker: ${input.expectedFirstUserMarker}`)) return false;
-    } else if (!modelFreshQuotaEditorEmpty(editor)) return false;
+    if (!modelUnsubmittedQuotaDraftMatches(editor)) return false;
     const words = (root, omit = []) => {
       const parts = [], stack = [root]; let visited = 0, length = 0;
       while (stack.length) {
@@ -3259,9 +3261,12 @@ function modelFreshAccountUsageLimited(afterClosedDiscovery = false) {
     }
     if (input.action === 'stop'
       || input.expectedFirstUserFingerprint != null || globalThis.__computaModelFirstSubmitted !== undefined
-      || globalThis.__computaModelFirstProof !== undefined || globalThis.__computaModelFirstPrompt !== undefined
+      || globalThis.__computaModelFirstProof !== undefined
       || input.expectedUserCounts?.length !== 1 || input.expectedUserCounts[0] !== 0) return false;
     const url = document.URL, incognito = url.endsWith('?incognito');
+    const insertedDraft = globalThis.__computaModelFirstPrompt !== undefined;
+    if (insertedDraft && (afterClosedDiscovery || !incognito || !['sendReady', 'submit'].includes(input.action)
+      || !modelTemporaryVerified())) return false;
     const note = outcome => { if (diagnose) modelLastFreshResetCardOutcome = outcome; };
     const reject = outcome => { note(incognito ? outcome : 'route_ineligible'); return false; };
     if (!/^https:\/\/claude\.ai\/new\/?(?:\?incognito)?$/.test(url)) { note('route_ineligible'); return false; }
@@ -3300,9 +3305,9 @@ function modelFreshAccountUsageLimited(afterClosedDiscovery = false) {
     const send = one(chrome.filter(node => node.getAttribute('data-testid') === 'chat-input-send' && node.getAttribute('aria-label') === 'Send message'));
     const editor = one(document.querySelectorAll(modelFreshQuotaEditorSelector));
     if (!picker) return reject('picker_guard');
-    if (!send || modelEnabled(send)) return reject('send_guard');
+    if (!send || modelEnabled(send) || insertedDraft && send.disabled !== true) return reject('send_guard');
     if (!modelVisible(editor) || editor.parentElement?.closest(excluded)) return reject('editor_guard');
-    if (!modelFreshQuotaEditorEmpty(editor)) return reject('editor_nonempty');
+    if (!modelUnsubmittedQuotaDraftMatches(editor)) return reject('editor_nonempty');
     const enabled = chrome.filter(modelEnabled).map(node => ({ node, name: label(node) }));
     const named = name => enabled.filter(item => item.name === name).map(item => item.node);
     const offerName = 'Get more usage', offers = named(offerName), offer = one(offers);
@@ -3350,8 +3355,8 @@ function modelFreshAccountUsageLimited(afterClosedDiscovery = false) {
       return reject('offer_missing_or_ambiguous');
     }
 
-    // The signed-in Incognito reset card is a fresh preflight abort surface.
-    // It does not attest to temporary-mode ownership or completed cleanup.
+    // The signed-in Incognito reset card can abort before Send, including
+    // after exact insertion. Its presence does not attest to mode or cleanup.
     if (incognito) {
       const closedAccessory = node => {
         const role = node.getAttribute('role');
@@ -3406,7 +3411,7 @@ function modelFreshAccountUsageLimited(afterClosedDiscovery = false) {
       }
     } else note('route_ineligible');
 
-    if (afterClosedDiscovery || !usage) return false;
+    if (afterClosedDiscovery || insertedDraft || !usage) return false;
     const dismiss = named('Dismiss'), notify = named('Get notified');
     if (dismiss.length > 1 || notify.length > 1 || !(dismiss.length || notify.length)) return false;
     const controls = [offer, ...dismiss, ...notify];

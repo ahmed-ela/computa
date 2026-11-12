@@ -1044,6 +1044,53 @@ describe("embedded Claude fixed adapter", () => {
     expect(f.stop.clicks).toBe(0);
   });
 
+  test("the exact Incognito reset card blocks an already-inserted draft before Send", async () => {
+    for (const action of ["sendReady", "submit"]) for (const resetTime of ["8:30 PM", "tomorrow at 8:30 PM"]) {
+      const f = fixture(provider);
+      expect((await f.run("insert", { prompt: outbound })).inserted).toBe(true);
+      const { picker, clock, shared, about, offer, reset } = freshIncognitoResetLimit(f);
+      clock.text = `Usage limit reached · Resets ${resetTime} · `;
+      const draft = f.composer.innerText, events = f.composer.events.length;
+      expect(await f.run(action, { prompt: outbound }), `${action}/${resetTime}`).toEqual({ error: "website_usage_limit" });
+      expect(f.composer.innerText).toBe(draft);
+      expect(f.composer.events.length).toBe(events);
+      expect(f.world.__computaModelFirstSubmitted).toBeUndefined();
+      const inspected = await f.run("inspect");
+      expect(inspected.error).not.toBe("website_usage_limit");
+      expect(inspected.freshQuotaAbort).toBeUndefined();
+      for (const control of [picker.trigger, shared, about, offer, reset, f.send, f.stop, f.exit])
+        expect(control.clicks).toBe(0);
+    }
+  });
+
+  test("an inserted draft does not widen the Incognito reset card proof", async () => {
+    for (const variation of ["changed-draft", "changed-prompt", "wrong-owner", "wrong-link", "missing-reset", "copy",
+        "non-incognito", "missing-incognito", "aria-only-disabled", "duplicate-send", "submitted", "physical-message"]) {
+      const f = fixture(provider);
+      expect((await f.run("insert", { prompt: outbound })).inserted).toBe(true);
+      const { clock, shared, reset } = freshIncognitoResetLimit(f);
+      let prompt = outbound;
+      switch (variation) {
+        case "changed-draft": f.composer.text = "Other draft"; f.composer.children = []; break;
+        case "changed-prompt": prompt = "Other prompt\n\n" + markerLine; break;
+        case "wrong-owner": f.world.__computaModelOwner = "foreign"; break;
+        case "wrong-link": shared.values.href = "/settings/usage"; break;
+        case "missing-reset": reset.connected = false; break;
+        case "copy": clock.text = "Usage limit reached · Resets in a few hours · "; break;
+        case "non-incognito": f.document.URL = f.origin + "/new"; break;
+        case "missing-incognito": f.badge.connected = false; break;
+        case "aria-only-disabled": f.send.disabled = false; f.send.values["aria-disabled"] = "true"; break;
+        case "duplicate-send": f.body.append(f.send.cloneNode(true)); break;
+        case "submitted": f.world.__computaModelFirstSubmitted = true; break;
+        case "physical-message": f.body.append(new Element("DIV", { "data-testid": "assistant-message", hidden: "" })); break;
+      }
+      const result = await f.run("sendReady", { prompt });
+      expect(result.error, variation).not.toBe("website_usage_limit");
+      expect(result.freshQuotaAbort, variation).toBeUndefined();
+      expect(f.send.clicks + f.stop.clicks + shared.clicks + reset.clicks, variation).toBe(0);
+    }
+  });
+
   test("the exact reset card can omit its informational popup or expose it with another button label or role", async () => {
     for (const variation of ["absent", "renamed", "explicit-role", "outside-card"]) {
       const f = fixture(provider), { about, actions, offer, reset, shared, picker } = freshIncognitoResetLimit(f);
