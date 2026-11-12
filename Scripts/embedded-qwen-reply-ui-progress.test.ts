@@ -16,7 +16,10 @@ function tv(f:any,reason='update_member',text=notice){
 }
 function withoutUI(r:any){const value={...r};delete value.qwenReplyUI;return value;}
 function safe(ui:any){
- expect(Object.keys(ui).sort()).toEqual(['version','scope','stop','loading','footer','tv','alert','reason','daily','terminal','capped','visibility','hidden'].sort());
+ const keys = ['version','scope','stop','loading','footer','tv','alert','reason','daily','terminal','capped','visibility','hidden'];
+ expect([1, 2]).toContain(ui.version);
+ if (ui.version === 2) keys.push('completionBlocker');
+ expect(Object.keys(ui).sort()).toEqual(keys.sort());
  for(const word of ['PRIVATE','https://','chat.qwen.ai',conversationID,answerID,notice])expect(JSON.stringify(ui)).not.toContain(word);
 }
 test('actual Stop/loading/footer facts are separate from derived engine busy and preserve the ordinary reply',async()=>{
@@ -28,15 +31,65 @@ test('actual Stop/loading/footer facts are separate from derived engine busy and
   const old=await run(false),current=await run(true),ui=current.qwenReplyUI;safe(ui);
   expect(withoutUI(current)).toEqual(old);expect(ui.scope).toBe('single');expect(ui.stop).toBe(phase!=='finished');
   expect(ui.loading).toBe(phase==='loading'?1:0);expect(ui.footer).toBe(phase==='finished'?1:0);expect(ui.terminal).toBe(phase==='finished');
+  expect(ui.version).toBe(phase==='finished'?1:2);
+  expect(ui.completionBlocker).toBe(phase==='finished'?undefined:'rail_missing');
   expect(ui.tv).toBe(0);expect(ui.alert).toBe(0);expect(ui.reason).toBe('none');expect(ui.daily).toBeNull();expect(ui.capped).toBe(false);
  }
+});
+test('completion blockers come from the same verified Qwen predicate without another read', async () => {
+ for (const blocker of ['rail_missing', 'rail_ambiguous', 'stop_present', 'composer_unavailable', 'composer_not_empty',
+    'footer_action_missing', 'footer_action_ambiguous', 'footer_action_disabled']) {
+  const {f,inspect}=await sent();
+  const first=await inspect();
+  expect(first.firstUserFingerprint).toBeDefined();
+  f.complete();
+  switch (blocker) {
+   case 'rail_missing': f.rail.detach(); break;
+   case 'rail_ambiguous': f.rail.parentElement!.append(new f.Node('DIV', {class:'qwen-chat-package-comp-new-action-control'})); break;
+   case 'stop_present': f.sendScope.append(f.stop); break;
+   case 'composer_unavailable': f.editor.disabled=true; break;
+   case 'composer_not_empty': f.editor.value='PRIVATE_DRAFT'; break;
+   case 'footer_action_missing': f.actions[0].detach(); break;
+   case 'footer_action_ambiguous': f.rail.append(new f.Node('BUTTON', {'aria-label':'Copy'})); break;
+   case 'footer_action_disabled': f.actions[0].disabled=true; break;
+  }
+  const query = f.answer.querySelectorAll.bind(f.answer);
+  let railReads = 0;
+  f.answer.querySelectorAll = (selector: string) => {
+   if (selector === '.response-message-footer-actions > .qwen-chat-package-comp-new-action-control') railReads++;
+   return query(selector);
+  };
+  const bound = {allowFirstUserBinding:false,expectedFirstUserFingerprint:first.firstUserFingerprint};
+  const ordinary = await inspect({...bound,qwenProgressUI:false});
+  const ordinaryReads = railReads;
+  expect(ordinaryReads, blocker).toBeGreaterThan(0);
+  const diagnostic = await inspect(bound);
+  expect(railReads - ordinaryReads, blocker).toBe(ordinaryReads);
+  expect(withoutUI(diagnostic), blocker).toEqual(ordinary);
+  safe(diagnostic.qwenReplyUI);
+  expect(diagnostic.qwenReplyUI, blocker).toMatchObject({version:2,scope:'single',terminal:false,completionBlocker:blocker});
+  expect(diagnostic.error, blocker).toBeUndefined();
+  expect(f.send.clicks, blocker).toBe(1);
+ }
+});
+test('a foreign completion rail preserves the existing ownership refusal without diagnostics', async () => {
+ const {f,inspect}=await sent();
+ const first=await inspect(); f.complete();
+ f.rail.setAttribute('data-msg-id', 'PRIVATE_RAIL');
+ const bound = {allowFirstUserBinding:false,expectedFirstUserFingerprint:first.firstUserFingerprint};
+ const result = await inspect(bound);
+ expect(result).toMatchObject({error:'conversation_changed',detail:'response_actions'});
+ expect(result.qwenReplyUI).toBeUndefined();
+ expect(f.send.clicks).toBe(1);
 });
 test('no physical reply and empty-root pending receipts keep unavailable fields null, never false zeros',async()=>{
  const noReply=await sent();noReply.f.answerRoot.detach();const missing=await noReply.inspect();safe(missing.qwenReplyUI);
  expect(missing.qwenReplyUI.scope).toBe('none');expect(missing.qwenReplyUI.stop).toBe(true);
+ expect(missing.qwenReplyUI.version).toBe(1);expect(missing.qwenReplyUI.completionBlocker).toBeUndefined();
  for(const key of ['loading','footer','tv','alert','reason','daily','terminal'])expect(missing.qwenReplyUI[key]).toBeNull();
  const empty=await sent({model:'Qwen3.8-Max'});empty.f.answer.detach();const pending=await empty.inspect();safe(pending.qwenReplyUI);
  expect(pending.qwenInitialResponseIdentityPending).toBe(true);expect(pending.qwenReplyUI.scope).toBe('empty_root');
+ expect(pending.qwenReplyUI.version).toBe(1);expect(pending.qwenReplyUI.completionBlocker).toBeUndefined();
  for(const key of ['stop','loading','footer','tv','alert','reason','daily','terminal'])expect(pending.qwenReplyUI[key]).toBeNull();
  expect(empty.f.world.__computaQwenSavedSessionV1.first).toBeNull();expect(empty.f.world.__computaQwenSavedSessionV1.responseIdentity).toBeDefined();
 });

@@ -727,6 +727,8 @@ function computaQwenDOM(c) {
         choice: { key: 'Qwen3.8-Max', label: 'Qwen3.8-Max' } };
     } catch { return null; } // A nonmatch preserves the original guarded path.
   }
+  // One adapter invocation owns this observation. It never outlives its reply read.
+  let lastCompletionBlocker = null;
   // Optional diagnostics on an already-read physical reply. No text/ID/attribute
   // values leave this helper; these facts never participate in admission.
   function replyProgressUI(t, form = null, terminal = null, maxNotice = false) {
@@ -746,6 +748,10 @@ function computaQwenDOM(c) {
       if (!host.isConnected || !c.visible(host) || !host.classList.contains('chat-response-message')
         || host.closest('.qwen-chat-message') !== answer.root) return null;
       ui.scope='single';ui.terminal=typeof terminal === 'boolean' ? terminal : null;
+      if (ui.terminal === false && lastCompletionBlocker?.answer === answer) {
+        ui.version = 2;
+        ui.completionBlocker = lastCompletionBlocker.reason;
+      }
       const outsideAuthored=node => !node.closest('.response-message-content, .custom-qwen-markdown, .qwen-markdown');
       const count=nodes => Math.min(3,nodes.length); // 3 is saturated: at least three.
       ui.loading=count(c.nodes(host,'.response-loading').filter(node => c.visible(node) && outsideAuthored(node)));
@@ -779,18 +785,27 @@ function computaQwenDOM(c) {
     } catch { return null; } // Diagnostic failure preserves the original read/result.
   }
   function completionCandidate(answer) {
+    lastCompletionBlocker = null;
     if (!answer) return false;
+    const blocked = reason => {
+      lastCompletionBlocker = { answer, reason };
+      return false;
+    };
     const current = route(), form = composer();
     const rails = visible(answer.content, '.response-message-footer-actions > .qwen-chat-package-comp-new-action-control');
-    if (rails.length !== 1) return false;
+    if (rails.length !== 1) return blocked(rails.length ? 'rail_ambiguous' : 'rail_missing');
     const rail = rails[0];
     if (rail.getAttribute('data-chat-id') !== current.id || rail.getAttribute('data-msg-id') !== answer.id)
       c.fail('conversation_changed', 'response_actions');
-    const actions = ['Copy', 'Good Response', 'Bad Response', 'Share', 'Regenerate'];
-    return !form.stop && c.enabled(form.editor) && form.empty && actions.every(label => {
+    if (form.stop) return blocked('stop_present');
+    if (!c.enabled(form.editor)) return blocked('composer_unavailable');
+    if (!form.empty) return blocked('composer_not_empty');
+    for (const label of ['Copy', 'Good Response', 'Bad Response', 'Share', 'Regenerate']) {
       const controls = visible(rail, `button[aria-label="${label}"]`);
-      return controls.length === 1 && c.enabled(controls[0]);
-    });
+      if (controls.length !== 1) return blocked(controls.length ? 'footer_action_ambiguous' : 'footer_action_missing');
+      if (!c.enabled(controls[0])) return blocked('footer_action_disabled');
+    }
+    return true;
   }
   function rawAnswer(answer) {
     if (!answer) return { text: '', finalMarkup: false, formatIssue: false };

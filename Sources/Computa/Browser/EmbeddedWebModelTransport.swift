@@ -77,10 +77,17 @@ struct QwenResponseProgressStatus: Sendable {
     }
     /// DOM protocol metadata only. Values cannot supply model/output/body proof.
     static func sanitizedReplyUI(_ raw: Any?) -> [String: Any]? {
-        guard let value = raw as? [String: Any], Set(value.keys) == ["version", "scope", "stop", "loading", "footer", "tv", "alert", "reason", "daily", "terminal", "capped", "visibility", "hidden"],
-              integer(value["version"], 1...1) == 1, let scope = value["scope"] as? String,
-              ["none", "empty_root", "single", "comparison"].contains(scope), let capped = bool(value["capped"]),
-              let visibility = value["visibility"] as? String, ["unknown", "visible", "hidden", "prerender"].contains(visibility) else { return nil }
+        let v1Keys: Set<String> = ["version", "scope", "stop", "loading", "footer", "tv", "alert", "reason", "daily", "terminal", "capped", "visibility", "hidden"]
+        guard let value = raw as? [String: Any], let version = integer(value["version"], 1...2),
+              Set(value.keys) == (version == 1 ? v1Keys : v1Keys.union(["completionBlocker"])),
+              let scope = value["scope"] as? String, ["none", "empty_root", "single", "comparison"].contains(scope),
+              let capped = bool(value["capped"]), let visibility = value["visibility"] as? String,
+              ["unknown", "visible", "hidden", "prerender"].contains(visibility) else { return nil }
+        if version == 2 {
+            guard scope == "single", bool(value["terminal"]) == false, let blocker = value["completionBlocker"] as? String,
+                  ["rail_missing", "rail_ambiguous", "stop_present", "composer_unavailable", "composer_not_empty",
+                   "footer_action_missing", "footer_action_ambiguous", "footer_action_disabled"].contains(blocker) else { return nil }
+        }
         for key in ["stop", "terminal", "daily", "hidden"] { guard value[key] is NSNull || bool(value[key]) != nil else { return nil } }
         let counts = ["loading", "footer", "tv", "alert"]
         for key in counts { guard value[key] is NSNull || integer(value[key], 0...3) != nil else { return nil } }

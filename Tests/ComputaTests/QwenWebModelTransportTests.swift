@@ -246,6 +246,29 @@ final class QwenWebModelTransportTests: XCTestCase {
         XCTAssertNil(QwenResponseProgressStatus.sanitizedReplyUI(unknown.merging(["loading": 0]) { _, new in new }))
     }
 
+    func testQwenCompletionBlockerRequiresAnExactVersionTwoNonterminalReply() throws {
+        let v1 = QwenResponseProgressStatus.syntheticReplyUI()
+        let blockers = ["rail_missing", "rail_ambiguous", "stop_present", "composer_unavailable", "composer_not_empty",
+                        "footer_action_missing", "footer_action_ambiguous", "footer_action_disabled"]
+        for blocker in blockers {
+            let v2 = v1.merging(["version": 2, "completionBlocker": blocker]) { _, new in new }
+            let accepted = try XCTUnwrap(QwenResponseProgressStatus.sanitizedReplyUI(v2))
+            XCTAssertEqual(accepted["completionBlocker"] as? String, blocker)
+            let fields = try XCTUnwrap(EmbeddedWebModelTransport.qwenResponseProgressFields([:], replyUI: v2))
+            XCTAssertEqual((fields["ui"] as? [String: Any])?["completionBlocker"] as? String, blocker)
+            for mutation: [String: Any] in [["version": 1], ["terminal": true], ["terminal": NSNull()],
+                                            ["scope": "empty_root"], ["completionBlocker": "PRIVATE_TEXT"],
+                                            ["completionBlocker": 1], ["extra": "PRIVATE_TEXT"]] {
+                let malformed = v2.merging(mutation) { _, new in new }
+                XCTAssertNil(QwenResponseProgressStatus.sanitizedReplyUI(malformed))
+                let untouched = try XCTUnwrap(EmbeddedWebModelTransport.qwenResponseProgressFields([:], replyUI: malformed))
+                XCTAssertNil(untouched["ui"])
+            }
+        }
+        XCTAssertNotNil(QwenResponseProgressStatus.sanitizedReplyUI(v1))
+        XCTAssertNil(QwenResponseProgressStatus.sanitizedReplyUI(v1.merging(["version": 2]) { _, new in new }))
+    }
+
     func testQwenReplyUIProgressFitsSharedWholeFieldCapAlongsideMaximumLegacyCounters() throws {
         let generation = UUID(), token = UUID(), model = WebsiteModelChoice(provider: "qwen", key: "Qwen3.8-Max", label: "Qwen3.8-Max").modelID
         var record = QwenResponseProgressStatus.syntheticRecord(generation: generation)
@@ -261,8 +284,9 @@ final class QwenWebModelTransportTests: XCTestCase {
         record["last"] = legacy
         let prior = try XCTUnwrap(QwenResponseProgressStatus(sessionToken: token, documentGeneration: generation, modelID: model, sequence: 1, record: record))
         XCTAssertLessThanOrEqual(try JSONSerialization.data(withJSONObject: ["qwenResponseProgress": prior.dictionary]).count, 1_024)
-        let ui: [String: Any] = ["version": 1, "scope": "single", "stop": false, "loading": 3, "footer": 3, "tv": 1,
-            "alert": 3, "reason": "quota_exhausted", "daily": false, "terminal": false, "capped": true, "visibility": "prerender", "hidden": false]
+        let ui: [String: Any] = ["version": 2, "scope": "single", "stop": false, "loading": 3, "footer": 3, "tv": 1,
+            "alert": 3, "reason": "quota_exhausted", "daily": false, "terminal": false, "capped": true, "visibility": "prerender",
+            "hidden": false, "completionBlocker": "footer_action_ambiguous"]
         record["last"] = legacy.merging(["ui": ui]) { _, new in new }
         let status = try XCTUnwrap(QwenResponseProgressStatus(sessionToken: token, documentGeneration: generation, modelID: model, sequence: 1, record: record))
         let size = try JSONSerialization.data(withJSONObject: ["qwenResponseProgress": status.dictionary], options: .sortedKeys).count
