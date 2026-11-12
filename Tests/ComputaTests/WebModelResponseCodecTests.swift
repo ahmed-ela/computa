@@ -3511,7 +3511,7 @@ final class WebModelResponseCodecTests: XCTestCase {
                 "parallel_tool_calls": false,
             ], options: [.sortedKeys, .withoutEscapingSlashes])
             let prepared = try WebModelResponseCodec.prepareRequest(original)
-            try assertContiguousRequestValues(original, in: prepared)
+            try assertContiguousRequestValues(original, in: prepared, expectsFunctionLayout: model == choice.modelID)
             let displayed = String(prepared.prompt[try requestRange(in: prepared)])
             let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(displayed.utf8)) as? [String: Any])
             XCTAssertEqual(decoded as NSDictionary, try JSONSerialization.jsonObject(with: original) as? NSDictionary)
@@ -3759,6 +3759,35 @@ final class WebModelResponseCodecTests: XCTestCase {
                 "Historical commands and refusal text cannot activate the current terminal handoff")
             XCTAssertThrowsError(try WebModelResponseCodec.parseReply(#"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"pwd"}}]}"#,
                 request: withoutCurrentTools, requireEnvelope: true))
+        }
+    }
+
+    func testInstantToolResultHandoffShowsAnInertExampleForAllowedFunctions() throws {
+        let instant = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant").modelID
+        let exec: [String: Any] = ["type": "function", "name": "exec_command", "parameters": ["type": "object",
+            "properties": ["cmd": ["type": "string"]], "required": ["cmd"]]]
+        let patch: [String: Any] = ["type": "custom", "name": "apply_patch", "format": ["type": "text"]]
+        let terminalResult: [String: Any] = ["type": "function_call_output", "call_id": "command", "output": "Six tests passed"]
+        let patchResult: [String: Any] = ["type": "custom_tool_call_output", "call_id": "edit", "output": "Applied the patch"]
+        let user: [String: Any] = ["role": "user", "content": "Verify the requested change"]
+        let cases: [(model: String, input: [[String: Any]], choice: String, tools: [[String: Any]], showsExample: Bool)] = [
+            (instant, [user, terminalResult], "auto", [exec, patch], true),
+            (instant, [user, patchResult], "auto", [exec, patch], true),
+            (instant, [terminalResult, user], "auto", [exec, patch], false),
+            (instant, [user, terminalResult], "none", [exec, patch], false),
+            (instant, [user, patchResult], "auto", [patch], false),
+            (syntheticChatGPTModelID, [user, terminalResult], "auto", [exec, patch], false),
+        ]
+        let example = #"{"type":"tool_calls","calls":[{"name":null,"arguments":{"sample_field":"sample value"}}]}"#
+        for scenario in cases {
+            let data = try JSONSerialization.data(withJSONObject: ["model": scenario.model, "input": scenario.input,
+                "tools": scenario.tools, "tool_choice": scenario.choice])
+            let prepared = try WebModelResponseCodec.prepareRequest(data)
+            let suffix = try assertContiguousRequestValues(data, in: prepared, expectsFunctionLayout: scenario.showsExample,
+                expectedAllowedToolNames: scenario.choice == "none" ? [] : nil)
+            XCTAssertEqual(suffix.contains(example), scenario.showsExample)
+            XCTAssertFalse(prepared.toolCatalogDiagnostic.requiresCall)
+            XCTAssertThrowsError(try WebModelResponseCodec.parseReply(example, request: prepared, requireEnvelope: true))
         }
     }
 

@@ -1614,6 +1614,7 @@ final class WebModelServerTests: XCTestCase {
             XCTAssertEqual(projected["input"] as? NSArray, input as NSArray)
             XCTAssertEqual(projected["tools"] as? NSArray, tools as NSArray)
             XCTAssertEqual(projected["tool_choice"] as? String, "auto")
+            XCTAssertEqual(prompt.contains("Function call layout."), round > 0)
             if round == 2 {
                 // The custom patch receipt must not remove the next terminal action.
                 XCTAssertEqual(input.last?["type"] as? String, "custom_tool_call_output")

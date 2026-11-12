@@ -753,6 +753,12 @@ enum WebModelResponseCodec {
                                        availability: browserToolAvailability,
                                        capabilities: browserCapabilities)
             : currentBrowserHandoff(tools: offered, policy: policy, availability: browserToolAvailability)
+        let latestItem = (object["input"] as? [Any])?.last as? [String: Any]
+        let latestItemType = latestItem?["type"] as? String
+        // Refresh the function-call example after Instant receives a tool result.
+        // The example uses the same current policy as the other provider handoffs.
+        let instantToolContinuation = isChatGPT && WebsiteModelCatalog.choice(for: model)?.key == "chat/latest/instant"
+            && (latestItemType == "function_call_output" || latestItemType == "custom_tool_call_output")
         let baseResponseContract = compactGroq ? ComputaAgentInstructions.groqResponseContract(currentBrowserHandoff: browserHandoff,
             hasFunctions: offered.values.contains { !$0.isCustom } || !declared.identities.isEmpty,
             hasCustomTools: !wireCustomNames.isEmpty, singleCallProfile: declaredFunctionProfile,
@@ -764,7 +770,7 @@ enum WebModelResponseCodec {
             includedInstructionText: includedInstructionText, responseFormat: responseFormat,
             compactLiteralBoundary: provider == "groq",
             singleActionRelay: isChatGPT,
-            illustrateFunctionArguments: provider == "qwen"
+            illustrateFunctionArguments: provider == "qwen" || instantToolContinuation
                 || (provider == "kimi" && WebsiteModelCatalog.choice(for: model) ==
                     WebsiteModelChoice(provider: "kimi", key: "k28-instant", label: "Instant"))
                 || claudeChoice == .claudeHaiku55
