@@ -3733,6 +3733,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             "composer_unavailable", "composer_not_empty", "prompt_not_inserted", "send_unavailable", "unsupported_response_format",
             "not_fresh", "response_too_large", "unknown_action"]
             + (provider == .deepseek ? ["mode_unverified", "mode_mismatch"] : [])
+            + (provider == .kimi && action == "inspect" ? ["sign_in_required"] : [])
         let commonDetails = ["composer", "composer_scope", "send_control", "structure_limit", "owner_token", "document_url",
             "ambiguous_structure", "conversation_url", "first_user_container", "first_user_message", "user_count",
             "response_scope", "authored_source", "terminal_operation", "deleting_session", "delete_operation", "delete_ownership",

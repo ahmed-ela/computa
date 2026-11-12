@@ -20,11 +20,14 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
             })
 
         await state.verifyKimiModelSignIn()
-        XCTAssertEqual(state.kimiModelSignInMessage, EmbeddedWebModelTransport.Failure.signInRequired.localizedDescription)
+        let instructions = "Sign in on the Kimi sign-in tab, then choose Verify Kimi sign-in from Model sign-ins."
+        XCTAssertEqual(state.kimiModelSignInMessage, instructions)
+        XCTAssertEqual(state.websiteModelsError, "Kimi: " + instructions)
         signedIn = true
         await state.verifyKimiModelSignIn()
         XCTAssertEqual(discoveries, ["kimi", "kimi"])
         XCTAssertEqual(state.kimiModelSignInMessage, "Kimi sign-in verified for this profile.")
+        XCTAssertNil(state.websiteModelsError)
 
         state.activeTurnTaskIDs.insert("fixture-running")
         XCTAssertFalse(state.canConfigureKimiProfile)

@@ -480,6 +480,17 @@ final class SavedAdapterFailureDiagnosticTests: XCTestCase {
         XCTAssertEqual(EmbeddedWebModelTransport.kimiAdapterFailureDiagnostic(value, action: "discoverModels"),
             EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(value, provider: .kimi, action: "discoverModels"))
     }
+
+    @MainActor func testKimiGuestInspectionPreservesOnlyTheFixedSignInReason() {
+        let guest = ["error": "sign_in_required", "url": "https://private.invalid/PRIVATE_PAGE_CANARY"]
+        XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(guest, provider: .kimi, action: "inspect"),
+            "action=inspect error=sign_in_required detail=absent")
+        XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(guest, provider: .kimi, action: "submit"),
+            "action=submit error=other detail=absent")
+        XCTAssertEqual(EmbeddedWebModelTransport.savedAdapterFailureDiagnostic(guest, provider: .qwen, action: "inspect"),
+            "action=inspect error=other detail=absent")
+    }
+
     @MainActor func testKimiEditorHitReasonsAreFiniteAndProviderScoped() {
         for reason in ["disabled", "invalid_geometry", "outside_viewport", "ancestor_limit", "ancestor_changed", "outside_clip", "occluded"] {
             let detail = "editor_hit_" + reason

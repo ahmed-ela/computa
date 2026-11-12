@@ -446,13 +446,16 @@ final class AppState {
 
     var canConfigureKimiProfile: Bool { canRefreshWebsiteModels && !websiteModelsRefreshing }
 
+    private static let kimiModelSignInInstructions =
+        "Sign in on the Kimi sign-in tab, then choose Verify Kimi sign-in from Model sign-ins."
+
     func openKimiModelSignIn() {
         guard canConfigureKimiProfile else { return }
         let previous = browserSession.kimiModelProfileID
         do {
             _ = try browserSession.openKimiModelSignIn()
             if previous != browserSession.kimiModelProfileID || kimiModelSignInMessage == nil {
-                kimiModelSignInMessage = "Sign in to Kimi, then choose Verify Kimi sign-in from Model sign-ins."
+                kimiModelSignInMessage = Self.kimiModelSignInInstructions
             }
         } catch {
             kimiModelSignInMessage = error.localizedDescription
@@ -772,14 +775,18 @@ final class AppState {
                     if Task.isCancelled { break }
                 } catch {
                     guard !self.isShuttingDown, self.websiteModelRefreshGeneration == generation else { break }
+                    var message = error.localizedDescription
                     if provider == "kimi", self.browserSession.kimiModelProfileID != nil {
-                        self.kimiModelSignInMessage = error.localizedDescription
+                        if (error as? EmbeddedWebModelTransport.Failure) == .signInRequired {
+                            message = Self.kimiModelSignInInstructions
+                        }
+                        self.kimiModelSignInMessage = message
                     }
                     if let candidate = intent.candidate {
                         self.browserSession.recordHumanVerificationRecovery(candidate, phase: .blocked,
                             reason: self.humanVerificationRecoveryFailureReason(error))
                     }
-                    errors.append("\(WebsiteModelCatalog.providerLabel(provider)): \(error.localizedDescription)")
+                    errors.append("\(WebsiteModelCatalog.providerLabel(provider)): \(message)")
                 }
             }
             guard self.websiteModelRefreshGeneration == generation else { return }
