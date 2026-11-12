@@ -735,6 +735,33 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return true
     }
 
+    private struct QwenModelRejection {
+        enum Stage: String {
+            case adapter
+            case provisionalRoute = "provisional_route"
+            case firstBodyExpansion = "first_body_expansion"
+            case initialResponseIdentity = "initial_response_identity"
+            case responseChoiceObservation = "response_choice_observation"
+            case responseChoicePoll = "response_choice_poll"
+            case responseChoiceGrant = "response_choice_grant"
+            case responseChoiceDispatch = "response_choice_dispatch"
+            case responseChoiceAcknowledgement = "response_choice_acknowledgement"
+            case pendingBodyObservation = "pending_body_observation"
+            case pendingBodyBinding = "pending_body_binding"
+            case pendingBodySnapshot = "pending_body_snapshot"
+            case selectionEvidence = "selection_evidence"
+            case selectionRecheck = "selection_recheck"
+            case quotaScope = "quota_scope"
+        }
+
+        enum Action: String { case inspect, verifyModel }
+
+        let stage: Stage
+        let action: Action
+        let generation: UUID
+        let route: URL
+    }
+
     private struct QwenProgressInspection {
         let at: ContinuousClock.Instant
         let generation: UUID
@@ -815,6 +842,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var qwenCodePayload: QwenCodePayloadPending?
         var qwenBufferedResponseIsPartial = false
         var qwenProgress = QwenProgress()
+        var qwenModelRejection: QwenModelRejection?
+        var loggedQwenModelRejection = false
         // Spent before queueing the final source evaluation, including timeout.
         var qwenCodePayloadGrant: String?
         var savedResponseChoice: SavedResponseChoiceIdentity?
@@ -2490,7 +2519,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard !session.retainedForCleanup, finishingTasks[token] == nil else { throw Failure.staleSession }
             session.inFlightInferenceRequests += 1
         }
-        defer { if !isCleanup { session.inFlightInferenceRequests -= 1 } }
+        defer {
+            if !isCleanup { session.inFlightInferenceRequests -= 1 }
+            if operation == "webProviderPoll" { session.qwenModelRejection = nil }
+        }
         do {
             switch operation {
             case "webProviderFinish", "webProviderCancel":
@@ -2753,6 +2785,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 return try await poll(session)
             }
         } catch {
+            if operation == "webProviderPoll", (error as? Failure) == .modelUnverified {
+                logQwenModelRejection(session)
+            }
             if case .renderedMessage? = session.groqCompletionSource { session.response = "" }
             session.groqCompletionSource = nil
             session.groqCompletedReplyProof = nil
@@ -4685,14 +4720,64 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return try snapshot(session)
     }
 
+    /// Remember a native refusal until this poll returns its original error.
+    /// A reclassified deadline or a later cleanup read cannot publish it.
+    private func qwenModelUnverified(_ session: Session, stage: QwenModelRejection.Stage,
+                                     action: String = "inspect") -> Failure {
+        if session.provider == .qwen, let action = QwenModelRejection.Action(rawValue: action),
+           !session.loggedQwenModelRejection, session.qwenModelRejection == nil,
+           let generation = session.documentGeneration, let route = session.savedRoutes?.last,
+           qwenModelRejectionContext(session, generation: generation, route: route) != nil {
+            session.qwenModelRejection = .init(stage: stage, action: action, generation: generation, route: route)
+        }
+        return .modelUnverified
+    }
+
+    private func qwenModelRejectionContext(_ session: Session, generation: UUID,
+                                           route: URL) -> WebsiteAdapterFailureDiagnostic.Context? {
+        guard session.provider == .qwen, !Task.isCancelled, !session.isDiscovery, !session.isRecoveryProbe,
+              !session.retainedForCleanup, session.terminalFailure == nil, session.state == "running",
+              session.inFlightInferenceRequests == 1, session.submitted, session.sequence == 1,
+              session.acknowledgedSendSequence == 1, session.requiresSavedDelete, session.savedDeleteReady,
+              session.lifecycleVerified, session.savedDeleteOperation == nil,
+              session.documentGeneration == generation, session.savedDeleteSubmission?.generation == generation,
+              sessions[session.token] === session, finishingTasks[session.token] == nil,
+              browser.webView(for: session.tabID) === session.view,
+              browser.documentGeneration(for: session.tabID) == generation,
+              session.view.url == route, session.savedRoutes?.last == route,
+              let context = session.adapterFailureContext, context.provider == "qwen",
+              context.modelID == session.modelChoice?.modelID else { return nil }
+        return context
+    }
+
+    private func logQwenModelRejection(_ session: Session) {
+        guard !session.loggedQwenModelRejection, let rejection = session.qwenModelRejection,
+              let context = qwenModelRejectionContext(session, generation: rejection.generation,
+                                                       route: rejection.route) else { return }
+        session.loggedQwenModelRejection = true
+        let record = "qwenModelRejection version=1 provider=qwen action=\(rejection.action.rawValue)"
+            + " stage=\(rejection.stage.rawValue) sequence=1 firstBodyBound=\(session.firstUserFingerprint != nil)"
+            + " task=\(context.taskID.uuidString.lowercased()) thread=\(context.threadID.uuidString.lowercased())"
+            + " turn=\(context.turnID.uuidString.lowercased()) inference=\(context.inferenceID.uuidString.lowercased())"
+            + " session=\(session.token.lowercased()) generation=\(rejection.generation.uuidString.lowercased())"
+        Self.inspectionLog.error("\(record, privacy: .public)")
+        #if DEBUG
+        modelDiagnosticsObserverForTesting?(record)
+        #endif
+    }
+
     private func pollSavedResponseChoice(_ session: Session, observed: [String: Any], deadline: ContinuousClock.Instant) async throws -> Data {
         guard canObservePendingQwenProvisionalRoute(session),
               let pending = Self.savedResponseChoiceObservation(observed["savedResponseChoice"]),
               pending.identity == session.savedResponseChoice,
-              pending.identity.fingerprint == session.savedDeleteSubmission?.outboundFingerprint else { throw Failure.modelUnverified }
+              pending.identity.fingerprint == session.savedDeleteSubmission?.outboundFingerprint else {
+            throw qwenModelUnverified(session, stage: .responseChoicePoll)
+        }
         if pending.state == "ready" {
             guard session.savedResponseChoiceGrant == nil, !session.savedResponseChoiceAcknowledged,
-                  ContinuousClock.now < deadline else { throw Failure.modelUnverified }
+                  ContinuousClock.now < deadline else {
+                throw qwenModelUnverified(session, stage: .responseChoiceGrant)
+            }
             let grant = UUID().uuidString.lowercased()
             session.savedResponseChoiceGrant = grant
             Self.inspectionLog.notice("savedResponseChoice version=1 provider=qwen phase=grant_spent policy=first_observed_card_v1 sequence=1")
@@ -4703,12 +4788,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             try Task.checkCancellation()
             guard ContinuousClock.now < deadline,
                   let receipt = Self.savedResponseChoiceObservation(dispatched["savedResponseChoice"]),
-                  receipt.identity == pending.identity, receipt.state == "dispatched", receipt.grant == grant else { throw Failure.modelUnverified }
+                  receipt.identity == pending.identity, receipt.state == "dispatched", receipt.grant == grant else {
+                throw qwenModelUnverified(session, stage: .responseChoiceDispatch)
+            }
             // Official acknowledgement is a separate read. This receipt cannot
             // accept either card or renew the original response deadline.
         } else {
             guard pending.state == "waiting" && session.savedResponseChoiceGrant == nil
-                || pending.state == "dispatched" && pending.grant == session.savedResponseChoiceGrant else { throw Failure.modelUnverified }
+                || pending.state == "dispatched" && pending.grant == session.savedResponseChoiceGrant else {
+                throw qwenModelUnverified(session, stage: .responseChoicePoll)
+            }
         }
         return try snapshot(session)
     }
@@ -4913,7 +5002,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if observed["qwenProvisionalRoutePending"] != nil || observed["qwenFirstBodyExpansionPending"] != nil
             || observed["qwenInitialResponseIdentityPending"] != nil {
             // page validated the exact four-field receipt and retained its phase.
-            guard session.qwenPendingFirstBody != nil else { throw Failure.modelUnverified }
+            guard session.qwenPendingFirstBody != nil else {
+                throw qwenModelUnverified(session, stage: .pendingBodyObservation)
+            }
             return try snapshot(session)
         }
         session.initialReadRetry = nil
@@ -8793,7 +8884,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case "product_mode_unverified": throw Failure.productModeUnverified
             case "mode_unverified" where provider.usesWebsiteModes: throw Failure.modelUnverified
             case "mode_mismatch" where provider.usesWebsiteModes: throw Failure.modelMismatch
-            case "model_unverified": throw Failure.modelUnverified
+            case "model_unverified": throw qwenModelUnverified(session, stage: .adapter, action: action)
             case "model_mismatch":
                 logModelMismatch(observed, session: session, action: action, stage: "adapter_error")
                 throw Failure.modelMismatch
@@ -8954,9 +9045,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                           let modelID = Self.qwenModelQuotaModelID(observed["qwenQuotaScope"], expected: choice),
                           session.qwenModelQuotaScope == modelID || session.submitted && session.acknowledgedSendSequence == 1 && session.sequence == 1,
                           let evidence = observed["modelEvidence"] as? [String: Any], evidence["source"] as? String == "model_picker_label" else {
-                        throw Failure.modelUnverified
+                        throw qwenModelUnverified(session, stage: .quotaScope, action: action)
                     }
-                    _ = try validatedSelectionEvidence(observed, session: session, action: action)
+                    _ = try validatedSelectionEvidence(observed, session: session, action: action, rejectionStage: .quotaScope)
                     session.qwenModelQuotaScope = modelID
                     recordQwenModelUsageGate(modelID)
                 }
@@ -9080,8 +9171,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   !session.savedResponseChoiceAcknowledged,
                   (choice.state == "dispatched" ? choice.grant == session.savedResponseChoiceGrant
                     : session.savedResponseChoiceGrant == nil),
-                  ContinuousClock.now < evaluationDeadline else { throw Failure.modelUnverified }
-            _ = try validatedSelectionEvidence(observed, session: session, action: action)
+                  ContinuousClock.now < evaluationDeadline else {
+                throw qwenModelUnverified(session, stage: .responseChoiceObservation, action: action)
+            }
+            _ = try validatedSelectionEvidence(observed, session: session, action: action, rejectionStage: .responseChoiceObservation)
             session.savedResponseChoice = choice.identity
             session.qwenPendingFirstBody = .responseChoice(currentURL)
             cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection, replyUI: qwenReplyUI)
@@ -9093,7 +9186,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   currentURL == url, savedDeleteOperation == nil,
                   session.qwenPendingFirstBody?.canonicalURL == nil,
                   Self.isQwenProvisionalRoutePendingObservation(observed, url: currentURL.absoluteString),
-                  ContinuousClock.now < evaluationDeadline else { throw Failure.modelUnverified }
+                  ContinuousClock.now < evaluationDeadline else {
+                throw qwenModelUnverified(session, stage: .provisionalRoute, action: action)
+            }
             session.qwenPendingFirstBody = .provisionalRoute
             cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection, replyUI: qwenReplyUI)
             return observed
@@ -9103,7 +9198,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   session.documentGeneration == generation, currentURL == url, savedDeleteOperation == nil,
                   session.qwenPendingFirstBody != .responseIdentity(currentURL),
                   Self.isQwenFirstBodyExpansionPendingObservation(observed, url: currentURL.absoluteString),
-                  ContinuousClock.now < evaluationDeadline else { throw Failure.modelUnverified }
+                  ContinuousClock.now < evaluationDeadline else {
+                throw qwenModelUnverified(session, stage: .firstBodyExpansion, action: action)
+            }
             session.qwenPendingFirstBody = .displayExpansion(currentURL)
             cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection, replyUI: qwenReplyUI)
             return observed
@@ -9115,7 +9212,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   canObservePendingQwenProvisionalRoute(session), session.documentGeneration == generation,
                   currentURL == url, savedDeleteOperation == nil,
                   Self.isQwenInitialResponseIdentityPendingObservation(observed, url: currentURL.absoluteString),
-                  ContinuousClock.now < evaluationDeadline else { throw Failure.modelUnverified }
+                  ContinuousClock.now < evaluationDeadline else {
+                throw qwenModelUnverified(session, stage: .initialResponseIdentity, action: action)
+            }
             session.qwenPendingFirstBody = .responseIdentity(currentURL)
             cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection, replyUI: qwenReplyUI)
             return observed
@@ -9191,7 +9290,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   provider.savedConversationRoute(currentURL)?.conversation == nil,
                   (0...1).contains(count(observed, "userCount")), observed["text"] as? String == "",
                   observed["answerComplete"] as? Bool == false else { throw Failure.ownershipFailure(.javaScriptFirstUser) }
-            session.selectionEvidence = try validatedSelectionEvidence(observed, session: session, action: action)
+            session.selectionEvidence = try validatedSelectionEvidence(observed, session: session, action: action,
+                                                                         rejectionStage: .selectionEvidence)
             cacheQwenResponseProgress(observed, session: session, action: action, cleanup: allowSavedCleanupInspection, replyUI: qwenReplyUI)
             return ["temporary": false, "sessionLifecycle": "saved_conversation_delete", "userCount": 0,
                 "responseCount": session.baseline, "text": "", "busy": true, "answerComplete": false, "ownershipPending": true]
@@ -9273,8 +9373,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard let grant = session.savedResponseChoiceGrant,
                   held.fingerprint == session.savedDeleteSubmission?.outboundFingerprint,
                   Self.validSavedResponseChoiceAcknowledgement(observed, identity: held, grant: grant,
-                    codeSampleGrant: qwenCodePayloadSample) else { throw Failure.modelUnverified }
-            _ = try validatedSelectionEvidence(observed, session: session, action: action)
+                    codeSampleGrant: qwenCodePayloadSample) else {
+                throw qwenModelUnverified(session, stage: .responseChoiceAcknowledgement, action: action)
+            }
+            _ = try validatedSelectionEvidence(observed, session: session, action: action, rejectionStage: .responseChoiceAcknowledgement)
         }
         let betweenChecksStarted = ContinuousClock.now
         // Submit returns only its acknowledgment; observations carry ownership state.
@@ -9493,8 +9595,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard session.firstUserFingerprint == session.savedDeleteSubmission?.outboundFingerprint,
                   session.confirmedUsers == 1, !session.pendingSubmission,
                   observed["firstUserVerified"] as? Bool == true,
-                  observed["firstUserMarkerVerified"] as? Bool == true else { throw Failure.modelUnverified }
-            _ = try validatedSelectionEvidence(observed, session: session, action: action)
+                  observed["firstUserMarkerVerified"] as? Bool == true else {
+                throw qwenModelUnverified(session, stage: .pendingBodyBinding, action: action)
+            }
+            _ = try validatedSelectionEvidence(observed, session: session, action: action, rejectionStage: .pendingBodyBinding)
             session.deepSeekComposerHandoffPending = false
             session.qwenPendingFirstBody = nil
         }
@@ -9761,7 +9865,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             return
         }
         if enforceModel, session.modelSelectionVerified, !["stop", "cleanup", "discoverModels"].contains(action) {
-            let evidence = try validatedSelectionEvidence(observed, session: session, action: action)
+            let evidence = try validatedSelectionEvidence(observed, session: session, action: action, rejectionStage: .selectionEvidence)
             // A native await can cross a model change without navigation. Read
             // the fixed proof again, rather than accepting the earlier result.
             if recheck, action != "verifyModel" {
@@ -9784,7 +9888,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                            preparedReadinessRequest: preparedReadinessRequest,
                                            preparedReadinessSink: preparedReadinessSink,
                                            maximumWait: maximumWait)
-                let currentEvidence = try validatedSelectionEvidence(fresh, session: session, action: freshAction)
+                let currentEvidence = try validatedSelectionEvidence(fresh, session: session, action: freshAction, rejectionStage: .selectionRecheck)
                 guard evidence.isSameResolvedSelection(as: currentEvidence) else {
                     logModelMismatch(fresh, session: session, action: freshAction, stage: "after_await")
                     throw Failure.modelMismatch
@@ -9794,7 +9898,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
     }
 
-    private func validatedSelectionEvidence(_ observation: [String: Any], session: Session, action: String = "other") throws -> WebsiteSelectionEvidence {
+    private func validatedSelectionEvidence(_ observation: [String: Any], session: Session, action: String = "other",
+                                            rejectionStage: QwenModelRejection.Stage? = nil) throws -> WebsiteSelectionEvidence {
         let current: WebsiteSelectionEvidence
         do { current = try WebsiteSelectionEvidence.parse(snapshot: observation, provider: session.provider.rawValue,
             expectedModel: session.modelChoice, expectedMode: session.modeChoice) }
@@ -9804,6 +9909,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         catch {
             logDeepSeekModeObservation(observation, session: session, action: action)
+            if let rejectionStage { throw qwenModelUnverified(session, stage: rejectionStage, action: action) }
             throw Failure.modelUnverified
         }
         guard session.selectionEvidence.map({ $0.isSameResolvedSelection(as: current) }) ?? true else {
@@ -10364,7 +10470,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   session.deepSeekComposerHandoffPending == (session.provider == .deepseek),
                   (session.qwenPendingFirstBody != nil) == (session.provider == .qwen),
                   let binding = session.savedDeleteSubmission else {
-                throw Failure.modelUnverified
+                throw qwenModelUnverified(session, stage: .pendingBodySnapshot)
             }
             var value: [String: Any] = [
                 "provider": session.provider.rawValue, "sessionToken": session.token, "state": "running", "text": "", "sequence": 1,

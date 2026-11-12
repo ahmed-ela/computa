@@ -2050,6 +2050,79 @@ final class QwenWebModelTransportTests: XCTestCase {
         try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
     }
 
+    func testQwenModelRejectionRecordsOnlyCurrentOwnedPostSubmitFailure() async throws {
+        for scenario in ["initial_response_identity", "response_choice_observation", "selection_evidence", "cleanup", "wire", "detached"] {
+            let fixture = try Fixture(setup: "qwenFixture.options.holdRoot=true")
+            defer { fixture.shutdown() }
+            let admission = try rejectionDiagnosticAdmission()
+            let token = try await start(fixture, admission: scenario == "wire" ? nil : admission)
+            let sent = try await call(fixture, "webProviderSend", token, prompt: "PRIVATE_SYNTHETIC_PROMPT")
+            let proof = try XCTUnwrap(sent["modelProofContext"] as? [String: Any])
+            let generation = try XCTUnwrap(proof["documentGeneration"] as? String).lowercased()
+
+            var actions = [String](), records = [String]()
+            fixture.transport.setModelDiagnosticsObserverForTesting { records.append($0) }
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                actions.append(action)
+                if scenario == "detached", action == "inspect", let tab = fixture.createdID {
+                    fixture.browser.closeTab(tab)
+                }
+            }
+            fixture.transport.setQwenQuotaObservationTransformForTesting { observation in
+                if scenario == "response_choice_observation" {
+                    return ["savedResponseChoice": ["PRIVATE_SYNTHETIC_VALUE": "unrecognized"],
+                        "url": observation["url"] ?? NSNull(),
+                        "sessionLifecycle": "saved_conversation_delete", "temporary": false]
+                }
+                var observed = observation
+                if scenario == "selection_evidence" { observed["modelEvidence"] = nil }
+                else { observed["qwenInitialResponseIdentityPending"] = true }
+                return observed
+            }
+
+            if scenario == "cleanup" {
+                let result = try await call(fixture, "webProviderFinish", token)
+                XCTAssertEqual(result["cleanup"] as? String, "failed")
+                XCTAssertTrue(records.isEmpty, scenario)
+                continue
+            }
+            do {
+                _ = try await call(fixture, "webProviderPoll", token)
+                XCTFail("Unverified observation must still refuse: " + scenario)
+            } catch {
+                if scenario == "detached" { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .staleSession) }
+                else { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelUnverified, scenario) }
+            }
+            XCTAssertEqual(actions, ["inspect"], scenario)
+            if scenario == "wire" || scenario == "detached" {
+                XCTAssertTrue(records.isEmpty, scenario)
+                continue
+            }
+            let expected = "qwenModelRejection version=1 provider=qwen action=inspect stage=\(scenario) sequence=1 firstBodyBound=false"
+                + " task=\(admission.taskID) thread=\(admission.threadID) turn=\(admission.turnID)"
+                + " inference=\(admission.inferenceID.uuidString.lowercased()) session=\(token.lowercased()) generation=\(generation)"
+            XCTAssertEqual(records, [expected])
+            do {
+                _ = try await call(fixture, "webProviderPoll", token)
+                XCTFail("The original rejection must remain unchanged")
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelUnverified) }
+            let result = try await call(fixture, "webProviderFinish", token)
+            XCTAssertEqual(result["cleanup"] as? String, "failed")
+            XCTAssertEqual(records, [expected], "A later poll or cleanup cannot overwrite the first record")
+            try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+        }
+    }
+
+    private func rejectionDiagnosticAdmission() throws -> WebModelStartAdmission {
+        let choice = WebsiteModelChoice(provider: "qwen", key: "Qwen3.8-Max", label: "Qwen3.8-Max")
+        let parameters = try JSONSerialization.data(withJSONObject:
+            ["provider": "qwen", "modelChoice": try XCTUnwrap(choice.canonicalJSONString)])
+        return WebModelStartAdmission(id: UUID(), inferenceID: UUID(), taskID: UUID().uuidString.lowercased(),
+            threadID: UUID().uuidString.lowercased(), turnID: UUID().uuidString.lowercased(), runtimeGeneration: UUID(),
+            preparationID: UUID(), transportGeneration: UUID(), provider: "qwen", modelID: choice.modelID, parameters: parameters,
+            adapterFailureDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+    }
+
     func testQwenMalformedPreferenceAckCannotCommitFirstUserOrCleanupAuthority() async throws {
         let fixture = try Fixture(); defer { fixture.shutdown() }
         let token = try await start(fixture, label: "Qwen3.7-Plus")
@@ -2132,10 +2205,15 @@ final class QwenWebModelTransportTests: XCTestCase {
         _ = try await evaluate(fixture.view, source)
     }
 
-    private func start(_ fixture: Fixture, label: String = "Qwen3.8-Max") async throws -> String {
-        let choice = WebsiteModelChoice(provider: "qwen", key: label, label: label)
-        let parameters = ["provider": "qwen", "modelChoice": try XCTUnwrap(choice.canonicalJSONString)]
-        let data = try await fixture.transport.request(operation: "webProviderStart", params: JSONSerialization.data(withJSONObject: parameters))
+    private func start(_ fixture: Fixture, label: String = "Qwen3.8-Max", admission: WebModelStartAdmission? = nil) async throws -> String {
+        let data: Data
+        if let admission {
+            data = try await fixture.transport.start(params: admission.parameters, admission: admission, authorization: nil)
+        } else {
+            let choice = WebsiteModelChoice(provider: "qwen", key: label, label: label)
+            let parameters = ["provider": "qwen", "modelChoice": try XCTUnwrap(choice.canonicalJSONString)]
+            data = try await fixture.transport.request(operation: "webProviderStart", params: JSONSerialization.data(withJSONObject: parameters))
+        }
         let snapshot = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         let token = try XCTUnwrap(snapshot["sessionToken"] as? String)
         _ = try await wait(fixture, token, state: "ready")
