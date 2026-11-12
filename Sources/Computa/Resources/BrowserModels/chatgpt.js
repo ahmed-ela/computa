@@ -3,7 +3,7 @@
 // This private-world notification carries no page content and grants no authority.
 function websiteModelDiagnosticPhase(phase) {
   try {
-    const phases = ['adapter_entry', 'model_proof', 'model_wait', 'model_wait_done', 'first_user_hash',
+    const phases = ['adapter_entry', 'model_proof', 'model_wait', 'model_wait_initial_disabled', 'model_wait_done', 'first_user_hash',
       'first_user_expand', 'first_user_expand_wait', 'page_action', 'final_model_guard'];
     if (typeof input !== 'object' || input === null || !phases.includes(phase)
       || !/^[a-f0-9-]{36}$/i.test(input.ownerToken || '') || !/^[a-f0-9-]{36}$/i.test(input.operationID || '')
@@ -1269,7 +1269,11 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         if (!disabled(trigger)) return reject('state_changed');
         return false;
       };
-      const changed = await websiteModelWaitForChange(readinessUntil, ready, 'model_wait', () => { rejected = 'clock_failed'; });
+      // Leave native-bound expiry time to return the negative diagnostic. The
+      // original readiness/model proof deadline and standalone clock stay intact.
+      const waitUntil = nativeDeadline === undefined ? readinessUntil : readinessUntil - 150;
+      const waitPhase = nativeDeadline === undefined ? 'model_wait' : 'model_wait_initial_disabled';
+      const changed = await websiteModelWaitForChange(waitUntil, ready, waitPhase, () => { rejected = 'clock_failed'; });
       if (!ready() && changed) rejected ||= 'state_changed';
       if (!changed || Date.now() >= readinessUntil || rejected) {
         headerReadiness.outcome = 'rejected'; headerReadiness.reason = rejected || 'deadline';

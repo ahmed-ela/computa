@@ -4803,6 +4803,8 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         picker.trigger.values['data-state'] = 'closed';
         beforeSelection?.(f, picker, form);
         const clocks: { milliseconds: number; expire: () => void }[] = [];
+        const phases: string[] = [];
+        f.window.webkit.messageHandlers.computaModelDiagnostic = { postMessage: (body: { phase: string }) => phases.push(body.phase) };
         let registered!: () => void;
         const registration = new Promise<void>(resolve => { registered = resolve; });
         f.window.webkit.messageHandlers.computaModelClock = { postMessage: (body: any) => new Promise(resolve => {
@@ -4819,7 +4821,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         const wake = (records?: any[]) => { for (const observer of [...f.observers]) observer.callback(records || [
           { type: 'attributes', target: picker.trigger, attributeName: 'disabled', oldValue: '' }]); };
         const enable = () => { picker.trigger.disabled = false; delete picker.trigger.values.disabled; delete picker.trigger.values['aria-disabled']; wake(); };
-        return { f, picker, form, clocks, pending, wake, enable };
+        return { f, picker, form, clocks, phases, pending, wake, enable };
       };
       test('425 finite disabled composite header already enters the pinned readiness wait', async () => {
         for (const requested of ['Extra High', 'Instant']) {
@@ -5012,7 +5014,10 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       });
       test('native initial readiness budget expires without actions and cannot renew a selection attempt', async () => {
         const x = await pendingDisabledHeader(true, 'aria-disabled', 'Extra High', 3_000);
-        x.f.advanceTime(3_001); x.clocks[0].expire(); const result = await x.pending;
+        expect(x.phases).toContain('model_wait_initial_disabled');
+        expect(x.clocks[0].milliseconds).toBeLessThanOrEqual(2_850);
+        x.f.advanceTime(x.clocks[0].milliseconds); x.clocks[0].expire(); const result = await x.pending;
+        expect(x.phases).toContain('model_wait_done');
         expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
         expect(result.modelDiagnostic.chatHeader.readiness.reason).toBe('deadline');
         x.enable(); expect((await x.f.run('selectModel', { modelChoice: choice('Extra High'),

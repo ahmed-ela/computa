@@ -2595,6 +2595,7 @@ final class EmbeddedBrowserSession {
         case adapterEntry = "adapter_entry"
         case modelProof = "model_proof"
         case modelWait = "model_wait"
+        case modelWaitInitialDisabled = "model_wait_initial_disabled"
         case modelWaitDone = "model_wait_done"
         case firstUserHash = "first_user_hash"
         case firstUserExpand = "first_user_expand"

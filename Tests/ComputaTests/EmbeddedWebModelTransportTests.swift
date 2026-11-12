@@ -11891,7 +11891,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     func testChatGPTInitialDisabledPickerNeverEnabledExhaustsOneModelDeadlineWithoutActions() async throws {
-        let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
+        let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/medium", label: "Medium")
         let fixture = try Fixture(page: Self.disabledTemporaryChatPickerPage)
         defer { fixture.shutdown() }
         fixture.transport.setTimeoutsForTesting(preparation: .milliseconds(2_500), response: .seconds(300))
@@ -11910,25 +11910,17 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             // XCTest failure reporting can itself take seconds. Measure the
             // original request before any assertion or failure formatting.
             elapsed = ContinuousClock.now - began
-            let failure = error as? EmbeddedWebModelTransport.Failure
-            if failure == .pageUnavailable {
-                XCTAssertEqual(nativeTimeouts.count, 1, "Only the original native evaluation timeout may win this race")
-                XCTAssertTrue(nativeTimeouts.first?.contains("model_wait") == true)
-                XCTAssertTrue(nativeTimeouts.first?.contains("clocksPending=1") == true)
-                XCTAssertTrue(nativeTimeouts.first?.contains("generationCurrent=true") == true)
-            } else {
-                XCTAssertTrue(failure == .modelUnverified || failure == .preparationDeadline,
-                    "Only the unchanged deadline or the exact unverified header can terminate this wait: \(error)")
-            }
+            XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelUnverified)
         }
+        XCTAssertTrue(nativeTimeouts.isEmpty, "The disabled-picker rejection should return before the native watchdog")
         XCTAssertGreaterThan(elapsed, .milliseconds(1_800))
         XCTAssertLessThan(elapsed, .seconds(4), "Initial model waiting cannot renew the original preparation deadline")
         let readiness = try diagnostics.compactMap { line -> [String: Any]? in
             let value = try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
             return (value?["chatHeader"] as? [String: Any])?["readiness"] as? [String: Any]
         }
-        XCTAssertTrue(readiness.allSatisfy { $0["startedDisabled"] as? Bool == true && $0["outcome"] as? String == "rejected"
-            && $0["reason"] as? String == "deadline" }, "The native deadline may win; a diagnostic cannot claim readiness")
+        XCTAssertTrue(readiness.contains { $0["startedDisabled"] as? Bool == true && $0["outcome"] as? String == "rejected"
+            && $0["reason"] as? String == "deadline" }, "Return the exact readiness rejection without claiming model proof")
         let ledger = try await evaluate(view, "return {temporary: window.fixtureTemporaryModeClicks, opens: window.fixtureModelTriggerClicks, selections: window.fixtureModelSelectionClicks, inputs: window.fixtureInputCount, sends: window.fixturePrompts.length};") as? [String: Int]
         XCTAssertEqual(ledger, ["temporary": 1, "opens": 0, "selections": 0, "inputs": 0, "sends": 0])
     }
