@@ -9816,7 +9816,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard let value = raw as? [String: Any], Set(value.keys) == ["key", "label"],
                   let key = value["key"] as? String, let label = value["label"] as? String,
                   key == label, key.utf8.count <= 120,
-                  key.range(of: #"^[0-9]+(?:\.[0-9]+)? (?:Flash-Lite|Flash|Pro|Argon)$"#, options: .regularExpression) != nil,
+                  key.range(of: #"^[0-9]+(?:\.[0-9]+)? (?:Flash-Lite|Flash|Pro|Argon|Hydrogen|Carbon)$"#, options: .regularExpression) != nil,
                   WebsiteModelChoice(provider: "gemini", key: key, label: label).isValid else { return nil }
             return ["key": key, "label": label]
         }

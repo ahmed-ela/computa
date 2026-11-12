@@ -1676,6 +1676,61 @@ describe("observed Gemini Argon family identity", () => {
   });
 });
 
+describe("observed Gemini Hydrogen and Carbon families", () => {
+  const labels = ["3.5 Flash-Lite", "4 Hydrogen", "3.1 Pro", "4 Argon", "4 Carbon"];
+  const choice = (label: string) => ({ key: label, label });
+  function observedCatalog() {
+    const { f, picker } = observedGeminiArgonPicker();
+    const oldFlash = picker.options.find(option => option.children[0].text === "3.8 Flash")!;
+    const hydrogen = picker.add(picker.menu, "4 Hydrogen", "Everyday help");
+    const carbon = picker.add(picker.menu, "4 Carbon", "Most complex work");
+    picker.menu.children.splice(picker.menu.children.indexOf(hydrogen), 1);
+    picker.menu.children.splice(picker.menu.children.indexOf(oldFlash), 1, hydrogen);
+    picker.options.splice(picker.options.indexOf(oldFlash), 1);
+    oldFlash.connected = false;
+    for (const option of [hydrogen, carbon]) {
+      const select = option.onClick!;
+      option.onClick = () => {
+        select();
+        picker.trigger.values["aria-label"] = "Open mode picker, currently Gemini " + option.children[0].text.slice(2);
+      };
+    }
+    return { f, picker, hydrogen, carbon };
+  }
+
+  test("discovery reports all five observed choices and does not return the removed Flash row", async () => {
+    const { f, picker } = observedCatalog();
+    expect(await advanceGeminiPicker(f, "discoverModels")).toMatchObject({
+      modelChoices: labels.map(choice), modelEvidence: { selected: choice("4 Argon") },
+    });
+    expect(picker.options.every(option => option.clicks === 0)).toBe(true);
+    expect(f.send.clicks).toBe(0);
+  });
+
+  test("Hydrogen and Carbon each require their own exact selection and do not substitute for removed Flash", async () => {
+    for (const label of ["4 Hydrogen", "4 Carbon"]) {
+      const { f, picker, hydrogen, carbon } = observedCatalog();
+      const expected = choice(label);
+      expect(await advanceGeminiPicker(f, "selectModel", { modelChoice: expected })).toMatchObject({
+        selected: true, modelEvidence: { selected: expected },
+      });
+      expect(await f.run("verifyModel", { expectedModelChoice: expected })).toMatchObject({
+        modelEvidence: { selected: expected },
+      });
+      expect(await f.run("verifyModel", { expectedModelChoice: choice("4 Argon") })).toMatchObject({ error: "model_mismatch" });
+      expect(hydrogen.clicks).toBe(label === "4 Hydrogen" ? 1 : 0);
+      expect(carbon.clicks).toBe(label === "4 Carbon" ? 1 : 0);
+      picker.trigger.values["aria-label"] = "Open mode picker, currently Gemini " + label.slice(2) + " Work";
+      expect(await f.run("verifyModel", { expectedModelChoice: expected })).toMatchObject({ error: "model_unverified" });
+      expect(f.send.clicks).toBe(0);
+    }
+    const { f, hydrogen, carbon } = observedCatalog();
+    expect(await advanceGeminiPicker(f, "selectModel", { modelChoice: choice("3.8 Flash") })).toMatchObject({ error: "model_unavailable" });
+    expect(hydrogen.clicks).toBe(0); expect(carbon.clicks).toBe(0);
+    expect(f.send.clicks).toBe(0);
+  });
+});
+
 function observedGeminiCodeBlock(f: ReturnType<typeof fixture>, raw: string) {
   f.answer.text = ""; f.answer.children = [];
   const wrapper = new Element("DIV", { class: "formatted-code-block-internal-container ng-tns-c3545353930-13" });
