@@ -220,7 +220,7 @@ struct WebsiteSessionCleanupStore: Sendable {
         var summaryTasks = 256
         var transactionRecords = 1_024
         var transactionBytes = 2_097_152
-        var transactionTasks = 256
+        var transactionTasks = WebsiteJournalRetentionStore.activeTaskLimit
         var transactionTurnsPerTask = 1_024
         var transactionFiles = 16_384
         var transactionDirectoryBytes = 134_217_728

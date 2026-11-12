@@ -399,7 +399,7 @@ actor WebModelServer {
     private var readinessTimeout: Duration = .seconds(45)
     private var responseTimeout: Duration = .seconds(300)
     private var evidenceDirectory: URL?
-    private var journalTaskLimit = 256
+    private var journalTaskLimit = WebsiteJournalRetentionStore.activeTaskLimit
     private let rejectedReplyDirectory: URL?
     private let groqRejectedRequestDirectory: URL?
     private var inspectorAuthorizations: [String: ChatGPTInspectorLease] = [:]
@@ -1335,7 +1335,7 @@ actor WebModelServer {
     }
 
     func setJournalTaskLimitForTesting(_ value: Int) {
-        journalTaskLimit = max(1, min(256, value))
+        journalTaskLimit = max(1, min(WebsiteJournalRetentionStore.activeTaskLimit, value))
         if let store = cleanupReceiptStore {
             var limits = store.limits; limits.transactionTasks = journalTaskLimit
             cleanupReceiptStore = WebsiteSessionCleanupStore(directory: store.directory, limits: limits)

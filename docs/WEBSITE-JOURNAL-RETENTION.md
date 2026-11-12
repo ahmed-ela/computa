@@ -1,10 +1,13 @@
 # Website journal retention
 
 Website inference evidence and cleanup receipts are partitioned by native task
-and turn. Each store admits at most 256 active task directories. Before a new
+and turn. Each store admits at most 512 active task directories. Before a new
 turn starts, the retention store can move verified terminal history into its
 SQLite archive, preserving the original journal files as byte-for-byte BLOBs.
 Protected, uncertain, incomplete and unfamiliar histories remain in the live set.
+The UI summary stays limited to 256 tasks. Builds with the old 256-directory
+transaction limit will refuse oversized inventories until verified retirement
+brings them back under that limit.
 
 On 2026-11-09, both installed stores reached 256 tasks. A private copy reproduced
 the capacity refusal even with no protected tasks. The old archive validator

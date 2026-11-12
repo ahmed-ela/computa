@@ -355,6 +355,58 @@ final class WebsiteJournalRetentionStoreTests: XCTestCase {
         XCTAssertTrue(fixture.store.latest().contains(unresolved))
     }
 
+    func testDefaultTransactionCapacityPreservesUnresolvedEvidencePastLegacyLimit() throws {
+        let fixture = try fixture()
+        let unresolved = try unacquired(fixture, unresolved: true)
+        let evidenceFile = evidence(fixture, unresolved)
+        let cleanupFile = fixture.cleanup.appendingPathComponent("transactions/\(unresolved.taskID)/\(unresolved.turnID!).jsonl")
+        let originalEvidence = try Data(contentsOf: evidenceFile)
+        let originalCleanup = try Data(contentsOf: cleanupFile)
+        let retention = WebsiteJournalRetentionStore(cleanupDirectory: fixture.cleanup)
+        XCTAssertEqual(retention.limits.activeTasks, 512)
+        XCTAssertEqual(fixture.store.limits.transactionTasks, retention.limits.activeTasks)
+        XCTAssertEqual(fixture.store.limits.summaryTasks, 256)
+
+        var protected = Set([unresolved.taskID])
+        func fillProtectedSlots(to count: Int) throws {
+            while protected.count < count {
+                let task = id()
+                for root in [fixture.evidence, fixture.cleanup] {
+                    try FileManager.default.createDirectory(at: root.appendingPathComponent("transactions/" + task),
+                        withIntermediateDirectories: false)
+                }
+                protected.insert(task)
+            }
+        }
+
+        try fillProtectedSlots(to: 256)
+        let incoming = id()
+        var legacy = retention
+        legacy.limits.activeTasks = 256
+        XCTAssertThrowsError(try legacy.admit(taskID: incoming, evidenceDirectory: fixture.evidence, protectedTaskIDs: protected)) { error in
+            guard case WebsiteJournalRetentionStore.Failure.capacity = error else {
+                return XCTFail("Expected legacy capacity, got \(error)")
+            }
+        }
+        try retention.admit(taskID: incoming, evidenceDirectory: fixture.evidence, protectedTaskIDs: protected)
+        let newReceipt = try unacquired(fixture, task: incoming, unresolved: true)
+        protected.insert(incoming)
+        XCTAssertEqual(try active(fixture.evidence), protected)
+        XCTAssertEqual(try active(fixture.cleanup), protected)
+        XCTAssertEqual(try fixture.store.transactionRecords(for: incoming, turnID: newReceipt.turnID!), [newReceipt])
+
+        try fillProtectedSlots(to: retention.limits.activeTasks)
+        XCTAssertThrowsError(try retention.admit(taskID: id(), evidenceDirectory: fixture.evidence, protectedTaskIDs: protected)) { error in
+            guard case WebsiteJournalRetentionStore.Failure.capacity = error else {
+                return XCTFail("Expected shared capacity, got \(error)")
+            }
+        }
+        XCTAssertEqual(try active(fixture.evidence), protected)
+        XCTAssertEqual(try active(fixture.cleanup), protected)
+        XCTAssertEqual(try Data(contentsOf: evidenceFile), originalEvidence)
+        XCTAssertEqual(try Data(contentsOf: cleanupFile), originalCleanup)
+    }
+
     @MainActor
     func testRealCapacityAdmissionFailureProjectsFailedBeforeProviderDispatch() async throws {
         let fixture = try fixture(), first = try closed(fixture), second = try closed(fixture)

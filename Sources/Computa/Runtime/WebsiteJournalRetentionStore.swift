@@ -8,9 +8,12 @@ import SQLite3
 /// The archive commits exact bytes and identity indexes before removing a live
 /// file. A pending operation is recovered under the same lock as both writers.
 struct WebsiteJournalRetentionStore: Sendable {
+    // Admission and both transaction writers must accept the same inventory.
+    static let activeTaskLimit = 512
+
     enum Failure: Error { case unavailable, capacity }
     struct Limits: Sendable {
-        var activeTasks = 256
+        var activeTasks = WebsiteJournalRetentionStore.activeTaskLimit
         var archiveBytes = 536_870_912
         var taskFiles = 2_048
         var taskBytes = 268_435_456
