@@ -789,6 +789,94 @@ describe('Gemini per-submission ownership', () => {
     }
   });
 
+  function directAnchorQueryBubble(body: Element, tag = 'DIV') {
+    const { status, anchor, bubble } = anchorQueryBubble(body, tag);
+    const content = status.parentElement!;
+    status.children = []; status.connected = false;
+    content.children = []; content.append(anchor);
+    return { content, status, anchor, bubble };
+  }
+
+  test('direct content anchors bind exact first and continuation payloads without a status wrapper', async () => {
+    for (const rich of [false, true]) {
+      const f = rich ? queryFixture(true).f : fixture(provider, { response: false });
+      const send = f.send.onClick!;
+      f.send.onClick = () => { send(); directAnchorQueryBubble(f.userBody!); };
+      const first = await finishRound(f, 1, outbound);
+      const current = await finishRound(f, 2);
+      expect(current.firstUserFingerprint).toBe(first.firstUserFingerprint);
+      expect(current.submissionProof).toEqual({ sequence: 2, fingerprint: await fingerprint(roundPrompt(2)) });
+      expect(f.world.__computaGeminiSubmissionState.lastVerified.body).toBe(f.userBody);
+      expect(f.send.clicks).toBe(2);
+      const cleanupRead = await f.run('inspect', { ...fields(2), expectedUserCounts: [2], allowFirstUserBinding: false });
+      expect(cleanupRead.firstUserVerified).toBe(true);
+      expect(cleanupRead.submissionProof).toEqual(current.submissionProof);
+    }
+  });
+
+  test('direct content anchors reject mixed topology, forged payloads and changed ownership without replay', async () => {
+    for (const fault of ['wrongTag', 'duplicateAnchor', 'extraContentChild', 'extraAnchorChild',
+      'mixedStatus', 'dualClass', 'nestedAnchor', 'hiddenAnchor', 'hiddenContent', 'hiddenBody', 'editableBody',
+      'controlledBody', 'duplicateBody', 'foreignRoot', 'changedPayload', 'duplicateMarker', 'changedOwner', 'changedRoute']) {
+      const f = fixture(provider, { response: false }), text = await stage(f, 1, outbound), send = f.send.onClick!;
+      f.send.onClick = () => {
+        send(); const body = f.userBody!;
+        const { content, status, anchor, bubble } = directAnchorQueryBubble(body, fault === 'wrongTag' ? 'SPAN' : 'DIV');
+        if (fault === 'duplicateAnchor') content.append(anchor.cloneNode(true));
+        else if (fault === 'extraContentChild') content.append(new Element('DIV'));
+        else if (fault === 'extraAnchorChild') anchor.append(new Element('DIV'));
+        else if (fault === 'mixedStatus') { status.connected = true; status.append(bubble.cloneNode(true)); content.append(status); }
+        else if (fault === 'dualClass') anchor.values.class += ' query-bubble-with-status';
+        else if (fault === 'nestedAnchor') { const wrapper = new Element('DIV'); content.children = []; wrapper.append(anchor); content.append(wrapper); }
+        else if (fault === 'hiddenAnchor') anchor.values.hidden = '';
+        else if (fault === 'hiddenContent') content.values.hidden = '';
+        else if (fault === 'hiddenBody') body.values.hidden = '';
+        else if (fault === 'editableBody') body.values.contenteditable = 'true';
+        else if (fault === 'controlledBody') body.append(new Element('BUTTON'));
+        else if (fault === 'duplicateBody') bubble.append(body.cloneNode(true));
+        else if (fault === 'foreignRoot') { content.children = []; const foreign = new Element('USER-QUERY'); foreign.append(anchor); content.append(foreign); }
+        else if (fault === 'changedPayload') body.text = text.replace('C++', 'changed');
+        else if (fault === 'duplicateMarker') body.text += '\n' + markerLine;
+      };
+      await submitPending(f, 1, text);
+      if (fault === 'changedOwner') f.world.__computaModelOwner = 'foreign';
+      if (fault === 'changedRoute') f.document.URL += '/foreign';
+      const rejected = await f.run('inspect', { ...fields(1), expectedUserCounts: [1],
+        ...(fault === 'changedRoute' ? { expectedURL: f.origin + '/app' } : {}) });
+      expect(rejected.error, fault).toBeDefined();
+      expect(rejected.firstUserVerified, fault).not.toBe(true);
+      expect(rejected.submissionProof, fault).toBeUndefined();
+      expect(f.world.__computaGeminiSubmissionState.lastVerified?.sequence, fault).toBeUndefined();
+      expect(f.send.clicks, fault).toBe(1);
+      expect(await f.run('submit', { ...fields(1), expectedUserCounts: [0], prompt: text }), fault).toHaveProperty('error');
+      expect(f.send.clicks, fault).toBe(1);
+    }
+  });
+
+  test('bound direct anchors reject physical replacement and payload changes during later verification', async () => {
+    for (const fault of ['bodyReplacement', 'rootReplacement', 'payloadDuringDigest']) {
+      const f = fixture(provider, { response: false }), send = f.send.onClick!;
+      f.send.onClick = () => { send(); directAnchorQueryBubble(f.userBody!); };
+      await finishRound(f, 1, outbound);
+      if (fault === 'bodyReplacement') {
+        const body = f.userBody!, bubble = body.parentElement!, replacement = body.cloneNode(true);
+        bubble.children[bubble.children.indexOf(body)] = replacement;
+        replacement.parentElement = bubble; body.connected = false;
+      } else if (fault === 'rootReplacement') {
+        const root = f.userRoot!, parent = root.parentElement!, replacement = root.cloneNode(true);
+        parent.children[parent.children.indexOf(root)] = replacement;
+        replacement.parentElement = parent; root.connected = false;
+      } else f.onDigest(() => { f.userBody!.text += ' changed after digest'; });
+      const rejected = await f.run('inspect', { ...fields(1), expectedUserCounts: [1], allowFirstUserBinding: false });
+      expect(rejected.error, fault).toBeDefined();
+      expect(rejected.firstUserVerified, fault).not.toBe(true);
+      expect(rejected.submissionProof, fault).toBeUndefined();
+      expect(f.send.clicks, fault).toBe(1);
+      expect(await f.run('submit', { ...fields(1), expectedUserCounts: [0], prompt: outbound }), fault).toHaveProperty('error');
+      expect(f.send.clicks, fault).toBe(1);
+    }
+  });
+
   test('measured query paragraphs preserve all 169 lines and seven independent full-body round proofs', async () => {
     const { f, shapes } = queryFixture();
     const lines = Array.from({ length: 167 }, (_, i) => i === 5 ? '' : `PRIVATE line ${i}: \t  [literal] e\u0301\u00a0\u200b tail `);

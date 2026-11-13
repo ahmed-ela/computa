@@ -2801,13 +2801,23 @@ function modelUserBody(root) {
     const matches = [...parent.children].filter(node => node.tagName.toLowerCase() === tag && node.classList.contains(name));
     return matches.length === 1 && modelVisible(matches[0]) ? matches[0] : null;
   };
-  const status = child(contents[0], 'div', 'query-bubble-with-status');
-  if (!status) return null;
-  // Gemini also places the bubble in one explicit anchor. A mixed or deeper
-  // layout must not let a descendant substitute for the original message.
-  const hasAnchor = [...status.children].some(node => node.classList.contains('query-bubble-anchor'));
-  const wrapper = hasAnchor ? child(status, 'div', 'query-bubble-anchor') : status;
-  if (!wrapper || hasAnchor && (status.children.length !== 1 || wrapper.children.length !== 1)) return null;
+  const content = contents[0];
+  const directAnchor = [...content.children].some(node => node.classList.contains('query-bubble-anchor'));
+  let wrapper;
+  if (directAnchor) {
+    // The observed alternate layout omits the status wrapper. Admit only its
+    // exact direct anchor path, never a competing status branch or sibling.
+    wrapper = child(content, 'div', 'query-bubble-anchor');
+    if (content.children.length !== 1 || !wrapper || wrapper.children.length !== 1
+      || wrapper.classList.contains('query-bubble-with-status')) return null;
+  } else {
+    const status = child(content, 'div', 'query-bubble-with-status');
+    if (!status) return null;
+    // The original layout can place its bubble inside one explicit anchor.
+    const hasAnchor = [...status.children].some(node => node.classList.contains('query-bubble-anchor'));
+    wrapper = hasAnchor ? child(status, 'div', 'query-bubble-anchor') : status;
+    if (!wrapper || hasAnchor && (status.children.length !== 1 || wrapper.children.length !== 1)) return null;
+  }
   const bubble = child(wrapper, 'span', 'user-query-bubble-with-background');
   const body = child(bubble, 'span', 'ng-star-inserted');
   if (!body || body.closest('user-query') !== root

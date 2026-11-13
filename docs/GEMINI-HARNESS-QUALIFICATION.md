@@ -5,14 +5,60 @@ shared Responses interface and browser, terminal and file tools, retaining
 one owned temporary website conversation across tool rounds. Claude and the
 broader browser-engine expansion in issue #9 remain outside this work.
 
-Current checkpoint (November 12, 2026, build 544): Google verification remains
-intermittent and unresolved. After a fresh restart, the ordinary Gemini page
-and model discovery loaded successfully. Hydrogen passed its complete code,
-terminal and browser workflow. Flash-Lite's tool-call shape was rejected,
-Argon received a new Google HTTP 429 before Send, and Pro was held by the saved
-verification checkpoint. See [the restart comparison](#november-12-restart-comparison-and-renewed-verification)
-for the per-model evidence. A healthy page or successful restart does not
-establish prevention of the next challenge.
+Current checkpoint (November 13, 2026, build 545): a fresh ordinary Gemini
+load and an inspected normal reload succeeded on unchanged build 544; a fresh
+restart into signed build 545 also loaded the ordinary page. The first fresh
+Flash-Lite workflow then stopped at first-message ownership verification after
+Google returned HTTP 200. No tool ran, no fixture submission occurred, and
+website cleanup remains unconfirmed. This is an adapter-layout failure, not a
+CAPTCHA in that run. The recurring CAPTCHA trigger is still unresolved; these
+successful navigations do not prove permanent prevention. See the
+[November 13 inspection and layout evidence](#november-13-inspector-capture-and-message-layout-change).
+
+### November 13: Inspector capture and message layout change
+
+With explicit Inspector approval, one new ordinary Gemini tab loaded on the
+unchanged signed build 544. One normal reload captured `GET /app` returning
+HTTP 200 from Network in 251 ms, zero redirects, response Date
+`Fri, 13 Nov 2026 12:41:55 GMT`, and
+`Cache-Control: no-cache, no-store, max-age=0, must-revalidate`. The Cookie header
+was present, but Safari's accessibility text stopped at 512 characters; complete
+cookie-name membership cannot be inferred from that truncated view. No raw
+cookie values or HAR were retained. The existing UA/profile/network and cache
+settings were unchanged. Safari developer features and the tab's Inspector
+permission were restored off. The local saved Gemini gate was clear before
+restart, through normal application recovery; it was not edited manually.
+
+Build 545, source `7a1346bcb863f5abd4cabd6ee62d6493169e5be1`, was installed from
+its verified 67-file signed package and started as a new process. The normal
+Gemini page loaded. Its live picker presented 3.5 Flash-Lite, 4 Hydrogen,
+3.1 Pro, 4 Argon, and the additional 4 Carbon. The test binder was updated to
+allow additional well-formed catalog choices while still requiring every
+requested target exactly once and retaining saved-gate/profile checks; the
+requested four-model qualification scope did not expand.
+
+The independent Flash-Lite fixture started at 12:50:08.506 UTC and stopped in
+2.743 seconds with `website_ownership_unverified / first_user_message`, no
+native tools and no accepted local fixture POST. Its initial Gemini document
+returned HTTP 200. The bounded structural diagnostic showed one
+`div.query-content > div.query-bubble-anchor >
+span.user-query-bubble-with-background > span.ng-star-inserted` message path.
+The adapter required an intervening `div.query-bubble-with-status`, so it
+returned `body_empty` despite the observed direct anchor. One cleanup-only
+recheck a minute later retained the same structure and failure; no prompt was
+replayed. The code/terminal/browser fixture therefore did not pass, and cleanup
+is recorded separately as unconfirmed.
+
+The follow-up accepts only the observed direct, unique anchor path. It rejects
+competing status/anchor branches and extra anchor/content children, retaining
+the existing body, exact-text, marker, fingerprint, owner, route, model and
+cleanup checks. This repair addresses the evidenced layout rejection; it does
+not claim to prevent Google's intermittent challenge. Four fresh build 546
+fixtures are prepared for independent post-restart qualification. The focused
+baseline reproduced the layout rejection; the candidate passed all 189 Gemini
+adapter tests, including exact first/continuation proofs and post-binding
+replacement rejection. Nine version tests passed. No native ownership, model,
+cleanup or CAPTCHA-admission policy was relaxed.
 
 Historical checkpoint (October 31, 2026, 10:41:17.909 UTC / 06:41:17.909 EDT):
 Computa 0.7.0 build 333, executable source
