@@ -5,14 +5,15 @@ shared Responses interface and browser, terminal and file tools, retaining
 one owned temporary website conversation across tool rounds. Claude and the
 broader browser-engine expansion in issue #9 remain outside this work.
 
-Current checkpoint (November 13, 2026, build 545): a fresh ordinary Gemini
-load and an inspected normal reload succeeded on unchanged build 544; a fresh
-restart into signed build 545 also loaded the ordinary page. The first fresh
-Flash-Lite workflow then stopped at first-message ownership verification after
-Google returned HTTP 200. No tool ran, no fixture submission occurred, and
-website cleanup remains unconfirmed. This is an adapter-layout failure, not a
-CAPTCHA in that run. The recurring CAPTCHA trigger is still unresolved; these
-successful navigations do not prove permanent prevention. See the
+Current checkpoint (November 13, 2026, build 546): after a fresh restart,
+3.5 Flash-Lite passed all 19 file, terminal and browser workflow checks with
+ten verified website inferences and durable cleanup. The next fresh Hydrogen
+session received Google's verification HTTP 429 before model selection or Send;
+its unused website session closed. Pro and Argon remain unstarted behind the
+saved verification checkpoint. A bounded ordinary navigation under Inspector
+also captured a network 302 to Google's challenge and HTTP 429. The recurring
+CAPTCHA trigger is still unresolved. The fixed message-layout rejection is a
+separate issue; the successful workflow does not prove CAPTCHA prevention. See the
 [November 13 inspection and layout evidence](#november-13-inspector-capture-and-message-layout-change).
 
 ### November 13: Inspector capture and message layout change
@@ -53,12 +54,61 @@ The follow-up accepts only the observed direct, unique anchor path. It rejects
 competing status/anchor branches and extra anchor/content children, retaining
 the existing body, exact-text, marker, fingerprint, owner, route, model and
 cleanup checks. This repair addresses the evidenced layout rejection; it does
-not claim to prevent Google's intermittent challenge. Four fresh build 546
-fixtures are prepared for independent post-restart qualification. The focused
+not claim to prevent Google's intermittent challenge. The focused
 baseline reproduced the layout rejection; the candidate passed all 189 Gemini
 adapter tests, including exact first/continuation proofs and post-binding
 replacement rejection. Nine version tests passed. No native ownership, model,
 cleanup or CAPTCHA-admission policy was relaxed.
+
+Signed build 546, source `aaf60676b574437eb27bf509a223550e2abe3e30`, was
+installed from its verified 67-file package and launched as a new process.
+The first fresh 3.5 Flash-Lite workflow passed all 19 independent fixture checks:
+only the intended aggregation function changed, all six tests passed, the
+reference matched the independent oracle, one browser form submission produced
+the matching receipt, and the model explicitly closed its task-created browser
+tab. All ten website inferences retained exact model and ownership proofs; the
+final release joined a saved closed website-session receipt. The model recovered
+from an initial terminal call with an incorrectly prefixed working directory;
+this was a completed workflow pass, not a run with zero failed tool calls.
+
+At 13:08:02.454 UTC, the next fresh Hydrogen view recorded its initial Gemini GET.
+The native view/generation callback sequence recorded a redirect to Google's
+`/sorry` and HTTP 429 by 13:08:02.924, before model selection, prompt submission
+or tools; exact navigation identity remains unknown in this diagnostic. The native task
+ended after 1.090 seconds with `website_verification_required`. Its unused session
+closed with a saved receipt. The local Responses endpoint's HTTP 403 translates
+this failure; it is not Google's status. Both fixture servers were stopped and
+their listeners verified absent. Pro and Argon were held before dispatch.
+
+The new challenge appeared in the same app process, about 111 seconds after
+the successful Flash-Lite website session closed. The retained cookie samples
+already had zero verification-exemption candidates during the successful run
+and after its close. Scoped counts remained 28 Gemini-eligible and 18
+Google-challenge-eligible cookies. These metadata samples do not prove cookie
+contents or actual outgoing headers. Source review found no per-session store
+reset or Google-cookie deletion: both views share the same cached store;
+Gemini cleanup closes its verified view, and the separate ChatGPT cookie
+retirement filter cannot match Google cookies.
+
+One approved ordinary navigation was inspected at 13:11:37 UTC, after completing
+an inert `about:blank` document before attachment. Inspector showed a 302 from
+`GET /app`, followed by a 429 from Google's challenge, with Source **Network**,
+current response Dates and `no-store, no-cache, must-revalidate` on both responses.
+The UA was unchanged from the earlier successful reload. The Cookies pane listed
+18 request-cookie names for the final challenge request, with no verification
+exemption and no response cookies. The initial redirected Gemini request's
+complete cookie headers remain unavailable. This is consistent with WebKit's
+[tracked redirect-metrics limitation](https://bugs.webkit.org/show_bug.cgi?id=190214),
+not evidence that the initial request omitted its cookies. No raw cookie values,
+HAR, or challenge query were retained in the diagnostic artifact. Cache behavior
+was unchanged; Safari developer features and per-tab Inspector access were
+restored off. The displayed CAPTCHA was left pending explicit completion approval.
+
+Local evidence: `qualification546-next/inspector546-failing-navigation-20261113.json`,
+`qualification546-next/hydrogen-captcha-incident.json`, and the separately sealed
+`invoice-546-gemini-*` cases retain package/process bindings, native traces,
+model/cleanup journals and independent audits. The preserved build 545 failure
+remains separate from the passing build 546 layout repair.
 
 Historical checkpoint (October 31, 2026, 10:41:17.909 UTC / 06:41:17.909 EDT):
 Computa 0.7.0 build 333, executable source
