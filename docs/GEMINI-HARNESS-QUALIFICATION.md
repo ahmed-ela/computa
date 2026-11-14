@@ -5,16 +5,126 @@ shared Responses interface and browser, terminal and file tools, retaining
 one owned temporary website conversation across tool rounds. Claude and the
 broader browser-engine expansion in issue #9 remain outside this work.
 
-Current checkpoint (November 13, 2026, build 546): after a fresh restart,
-3.5 Flash-Lite passed all 19 file, terminal and browser workflow checks with
-ten verified website inferences and durable cleanup. The next fresh Hydrogen
-session received Google's verification HTTP 429 before model selection or Send;
-its unused website session closed. Pro and Argon remain unstarted behind the
-saved verification checkpoint. A bounded ordinary navigation under Inspector
-also captured a network 302 to Google's challenge and HTTP 429. The recurring
-CAPTCHA trigger is still unresolved. The fixed message-layout rejection is a
-separate issue; the successful workflow does not prove CAPTCHA prevention. See the
-[November 13 inspection and layout evidence](#november-13-inspector-capture-and-message-layout-change).
+Current checkpoint (November 14, 2026, build 547): the approved fresh CAPTCHA
+cleared and an unexpired exemption candidate was present after the next restart. The app no longer
+opens an extra Gemini catalog page for cached startup/restoration/selection
+demand; the bounded startup capture recorded zero Gemini navigation-response
+events before the first Send. All four fresh model pages returned HTTP 200 without
+another CAPTCHA. Pro, Argon and Hydrogen passed the complete workflow; Flash-Lite
+failed response-format validation before tools, then passed a separate diagnostic
+run without a protocol change. This removes a measured
+unnecessary request, not a proven cause of Google's recurring challenge.
+
+### November 14: stale clearance and redundant startup discovery
+
+The approved challenge left open from November 13 cleared at 17:58 UTC on
+November 14. Its return URL carried an exemption expiry of November 13 at
+16:11:36 UTC, already past. Subsequent native samples contained zero exemption
+candidates, although the ordinary page and verified recovery discovery returned
+HTTP 200. Query metadata is not proof of the cookie that WebKit installed.
+This repeats the historical stale-challenge observation; it cannot explain
+earlier recurrences while an unexpired exemption was present.
+
+After restarting unchanged build 546, Flash-Lite completed ten verified website
+inferences and passed its code/terminal checks, but failed the browser workflow
+(12/19 independent checks). It filled an invented reference before fixing the
+code and paired the fill with a click using the consumed observation. The click
+correctly rejected without dispatch. Later reads supplied usable fresh controls,
+but the model did not refill with the actual printed reference or submit. No
+POST occurred. App cleanup closed the fixture tab; durable website cleanup was
+confirmed. The next fresh Hydrogen session received Google HTTP 429 before Send,
+and its unused session closed. Pro and Argon remained unstarted in this round.
+
+The user then approved the new challenge visible at 18:07:57 UTC. Completion at
+18:10:57 UTC returned the ordinary Gemini composer, followed by successful
+verified recovery discovery. Both ordinary and model samples now contained one
+unexpired exemption with more than one hour remaining. No cookie value, expiry,
+profile or checkpoint was manually manipulated. The saved checkpoint cleared
+only through normal verified recovery. Cookie-store metadata does not prove
+that an exemption was transmitted on any particular request.
+
+The startup trace exposed a separate avoidable request. Web UI readiness and
+asynchronous restoration automatically revalidated the selected provider's
+catalog even when validated choices were already cached. On build 546 this
+created and closed a Gemini discovery page before the actual task's separate
+navigation. Build 547, source `3aac96d65eb8473aad0bddd8706fd867a04b4f76`, skips
+that automatic demand only for cached Gemini choices. Missing-catalog discovery,
+explicit discovery, verified human recovery, and every live inference's model
+selection/ownership checks remain unchanged. Other providers retain their policy.
+
+The UI freshness tradeoff is explicit: cached Gemini choices remain until
+existing explicit discovery or verified human recovery refreshes them. Refresh
+buttons remain hidden by request; this change adds no new user refresh control.
+A removed or mismatched live model still fails verification. Publishing the
+catalog from an already-open owned model picker is a possible follow-up that
+could avoid an additional discovery page.
+
+Three new native regressions failed on unchanged source; the missing-catalog
+control passed. The candidate passed all 60 model-state/recovery tests and nine
+version tests. Its signed 67-file package changed only the main executable and
+Info.plist from build 546. After installation and a fresh launch, restoration and
+Pro selection produced zero Gemini navigation-response events before Send, while
+the startup cookie sample retained the future exemption. The source/test proof
+and bounded runtime observation support removal of the extra request; they do
+not establish Google's risk decision or permanent CAPTCHA prevention.
+
+All four requested choices were then tested independently in that same freshly
+started build 547 process. Native response metadata records four Gemini document
+loads with HTTP 200 and current response dates. No CAPTCHA was observed in these
+four attempts. This bounded result does not establish that the exemption was
+sent in a request or distinguish fresh clearance from the effect of removing the
+extra startup request.
+
+| Model | Duration | Website inferences | Independent fixture result |
+| --- | ---: | ---: | --- |
+| 3.1 Pro | 80.371 s | 8 | Pass, 19/19 checks |
+| 4 Argon | 114.802 s | 7 | Pass, 19/19 checks |
+| 4 Hydrogen | 64.800 s | 8 | Pass, 19/19 checks |
+| 3.5 Flash-Lite | 7.173 s | 1 attempted | Failed: `malformed_website_reply / invalid_json`, no tools |
+
+Each passing model made only the intended `summarize` edit, passed the six
+protected tests on independent rerun, returned the independent reference,
+submitted exactly once through the built-in browser, read its unique receipt,
+and explicitly closed its task-created browser tab. All 23 completed inferences
+retained exact selected-model, ownership, response and yield/release proofs.
+There were no failed native tool calls in these three runs. Durable closed
+website-session receipts were verified separately from fixture-tab cleanup.
+
+Flash-Lite's first submission proved the selected model and owned document, but
+the extracted 309-byte response failed JSON parsing. No tool was dispatched, no
+code was changed, and no fixture POST occurred. Its seven passing audit checks
+were protection/nonexecution checks; the workflow did not pass. The initial
+capture preceded the durable cleanup record by 131 ms. A separate later capture
+joins the exact task, thread, turn, inference, session, runtime and model to an
+automatic saved `closed` receipt; the original failure capture is unchanged.
+No successful completion or release proof is inferred from that cleanup. The actual
+rejected reply was not retained in this capture, so generation versus extraction
+is not established. This protocol failure is separate from Google verification.
+The existing bounded format-correction policy does not admit Gemini; no automatic
+format correction was attempted or added.
+
+One separately prepared Flash-Lite diagnostic fixture then armed the existing
+private rejected-reply capture for its exact new task, with the same signed build
+and process. It completed in 67.816 seconds with ten verified website inferences
+and passed all 19 independent checks. Its only nonzero tool result was the
+pre-edit test run exposing the seeded bug; the post-edit six-test rerun passed.
+The format error did not recur, so no
+rejected reply was captured; the unused one-shot arm was retired. This is a
+separate pass, not a repair of the first failure. No parsing, correction or
+verification rule changed between these two attempts.
+
+All five fixture servers were stopped and their listeners checked. The original
+ChatGPT homepage was restored without sending a message. Inspector remained
+disabled throughout these runs. Each of the four requested models now has a
+completed workflow in this post-restart process, but Flash-Lite's failed first
+attempt remains unresolved. These results do not establish repeat reliability
+or permanent CAPTCHA prevention.
+
+Local evidence is retained under `qualification546-restart-20261114` and
+`qualification547-next`, with separate fresh fixture cases, signed package and
+launch bindings, `four-model-native-metadata.json`, `provider-review.json`,
+`flash-lite-late-cleanup.json`, the separate `qualification547-flash-diagnostic`
+case and capture-retirement records, and the unchanged independent 19-check auditor.
 
 ### November 13: Inspector capture and message layout change
 
