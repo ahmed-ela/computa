@@ -5,21 +5,20 @@ shared Responses interface and browser, terminal and file tools, retaining
 one owned temporary website conversation across tool rounds. Claude and the
 broader browser-engine expansion in issue #9 remain outside this work.
 
-Current checkpoint (November 14, 2026, installed build 548): the separate native
-lifetime fix is installed from source
-`fbcbd28c43b8fa11fcab1dfad98fa25d2098c440`; all 14 focused current-resource native
-checks and nine version tests pass. The post-restart Pro workflow failed exact
-model verification on its sixth inference, after successful code, terminal and
-browser submission work. The other three models remain unstarted in this round.
-A subsequent ordinary Gemini tab received Google's HTTP 429 CAPTCHA despite an
-unexpired exemption candidate and no observed adapter timeout. The lifetime fix
-therefore does not resolve the recurring CAPTCHA, whose cause remains unproven.
+Current checkpoint (November 14, 2026, installed build 549): source
+`9549bef227b1532faf9def2b14a191ed01b5348d` removes one redundant Gemini model-only
+picker read. Local real-WebKit measurements reduce generic-header polling from
+four to three open/close cycles while retaining the final exact model proof and
+the separate native post-await recheck. Fresh Flash-Lite response checks passed
+after two normal launches in 6.829 and 6.845 seconds, without an observed CAPTCHA.
+Hydrogen, Pro and Argon were not sent because the website reported a usage limit;
+its picker displayed a reset of November 14 at 4:42 PM local.
 
-Build 549 candidate removes one redundant Gemini model-only picker read. Local
-real-WebKit measurements reduce generic-header polling from four to three
-open/close cycles, while retaining the final exact model proof and the separate
-native post-await recheck. Provider traffic and CAPTCHA effects are not yet
-measured; this is not a prevention claim.
+The ordinary website recovered before the changed model-only verification path
+ran, so that recovery cannot be attributed to the picker optimization. These
+response-only checks do not establish tool qualification or permanent CAPTCHA
+prevention. The build 548 Pro verification failure and subsequent ordinary-tab
+HTTP 429 remain preserved below; the recurring challenge's cause remains unknown.
 
 Prior checkpoint (November 14, 2026, build 547): the approved fresh CAPTCHA
 cleared and an unexpired exemption candidate was present after the next restart. The app no longer
@@ -30,6 +29,67 @@ another CAPTCHA. Pro, Argon and Hydrogen passed the complete workflow; Flash-Lit
 failed response-format validation before tools, then passed a separate diagnostic
 run without a protocol change. This removes a measured
 unnecessary request, not a proven cause of Google's recurring challenge.
+
+### November 14: build 549 response checks across two normal launches
+
+Build 549 was signed and installed from source
+`9549bef227b1532faf9def2b14a191ed01b5348d`, with main executable SHA-256
+`df0b5e43d7fa6fa2527cbed37ce8ceae095b5d9f68d49bc23479aff63122544f`.
+Both launches used that same artifact and separate fresh synthetic prompts.
+
+| Check | Native interval (UTC) | Duration | Verified result |
+| --- | --- | ---: | --- |
+| First launch, 3.5 Flash-Lite | 21:04:18.063–21:04:24.892 | 6.829 s | Exact marker, one inference, zero tools, closed cleanup |
+| Second normal restart, 3.5 Flash-Lite | 21:10:53.510–21:11:00.355 | 6.845 s | Exact fresh marker, one inference, zero tools, closed cleanup |
+
+Both journals contain ordered `start_requested`, `started`,
+`submission_verified`, `complete` and `release_verified` records. Submission,
+completion and release retain the exact requested website model, stable session,
+preparation and document identity, and both ownership fingerprints. Each release
+joins its saved cleanup attempt; cleanup follows completion and precedes release.
+There was no native terminal error or saved website failure, and no prompt was
+replayed. These checks exercise direct responses, not browser, terminal or file
+tools.
+
+The first launch's ordinary Gemini page returned HTTP 200 at 21:00:31.386 UTC,
+before the changed model-only verification path ran. A separate model-role page
+returned HTTP 200 at 21:00:32.655 UTC, before the marker task's own HTTP 200 at
+21:04:18.728 UTC. This was not a run with no preceding Gemini navigation, and
+the ordinary-page recovery does not establish a causal benefit from the picker
+change. Callback-time shared-store samples retained one future exemption
+candidate; they do not prove what the initial request transmitted or Google
+accepted.
+
+The second restart's bounded pre-Send capture recorded zero Gemini navigation
+events. Its later capture recorded one model-role HTTP 200 at 21:10:54.214 UTC;
+the document generation directly joins that task's ownership proofs. Initial,
+settled and closure samples all contained zero exemption candidates. That differs
+from the first launch but does not explain the state change, prove wire-cookie
+absence, or establish why Google accepted this request. Neither bounded interval
+recorded a CAPTCHA. Callback metadata is not a complete network-traffic capture.
+
+At the first launch's model check, only Flash-Lite was selectable. The website
+reported a usage limit for 4 Hydrogen, 3.1 Pro and 4 Argon, so none received a
+test prompt. The picker displayed “Limit resets Nov 14 at 4:42 PM,” while the
+composer displayed “Resets 1:42 PM.” The local picker time is recorded without
+assuming the account's timezone. This is a usage-limit block, not a CAPTCHA;
+it does not retrospectively prove that the build 548 Pro failure was quota-related.
+All-model qualification and permanent CAPTCHA prevention remain incomplete.
+
+Qualification-tool correction: the original first-run collector falsely failed
+three checks by requiring `yield_verified`, which production emits only for a
+retained conversation with pending tool calls. Final responses close cleanup
+and emit `release_verified`. A separate corrected audit passed against the exact
+same native and journal byte hashes. The original failed capture and collector
+remain intact; no model request or ownership check was bypassed.
+
+Private evidence is under `work/gemini-captcha-20261114/qualification549` and
+`qualification549-restart2`, including the artifact/launch receipts, first-load,
+pre-Send and after-response metadata. `response-check549` retains the first
+capture, separate corrected audit and `quota-blocked-choices.json`;
+`response-check549-restart2` contains the independent plan, binding and passing
+capture. These successes do not replace the retained HTTP 429 evidence or
+identify the recurring CAPTCHA's root cause.
 
 ### November 14: closed pages retained by pending adapter callbacks
 
