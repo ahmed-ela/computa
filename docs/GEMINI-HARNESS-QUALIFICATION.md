@@ -5,12 +5,15 @@ shared Responses interface and browser, terminal and file tools, retaining
 one owned temporary website conversation across tool rounds. Claude and the
 broader browser-engine expansion in issue #9 remain outside this work.
 
-Current checkpoint (November 14, 2026, build 548 candidate): a separate native
-lifetime defect was reproduced and fixed. Timed-out or cancelled adapter callbacks
-retained closed model pages solely through an error-log capture. Four regression
-cases fail on unchanged code and pass with the scalar capture; all 14 focused
-current-resource native checks and nine version tests pass. Installation and live
-restart qualification are pending. This does not establish Google's CAPTCHA cause.
+Current checkpoint (November 14, 2026, installed build 548): the separate native
+lifetime fix is installed from source
+`fbcbd28c43b8fa11fcab1dfad98fa25d2098c440`; all 14 focused current-resource native
+checks and nine version tests pass. The post-restart Pro workflow failed exact
+model verification on its sixth inference, after successful code, terminal and
+browser submission work. The other three models remain unstarted in this round.
+A subsequent ordinary Gemini tab received Google's HTTP 429 CAPTCHA despite an
+unexpired exemption candidate and no observed adapter timeout. The lifetime fix
+therefore does not resolve the recurring CAPTCHA, whose cause remains unproven.
 
 Prior checkpoint (November 14, 2026, build 547): the approved fresh CAPTCHA
 cleared and an unexpired exemption candidate was present after the next restart. The app no longer
@@ -60,6 +63,63 @@ retention. Permanent website CAPTCHA prevention remains unproven. Local evidence
 is retained under `work/gemini-captcha-20261114/closed-view-retention`, including
 the separate `baseline-final2` and `candidate-final2` logs, resource/source/object
 hashes and bounded teardown results.
+
+### November 14: build 548 restart, Pro failure and CAPTCHA recurrence
+
+Build 548 was signed, installed and started as a new process from source
+`fbcbd28c43b8fa11fcab1dfad98fa25d2098c440`. Its main executable SHA-256 is
+`994a4d42de8d482df013aa4c7718c382381cd1fba0751aa3cc24a0becca30d8a`.
+The package, installation and launch receipts retain the exact artifact and
+process bindings. This changes the preceding lifetime-fix checkpoint from a
+tested candidate to an installed build; it does not turn local lifecycle tests
+into evidence of Google's risk decision.
+
+The fresh Pro case `invoice-548-pro-b6e33c8c4bb3` ran for 67.284 seconds. Its
+initial Gemini document returned HTTP 200. Five website inferences completed;
+the sixth was submitted but failed the final exact-model verification read.
+The Pro trigger remained visible, while the checked picker row was disabled
+and lacked a recognized model-family container. The adapter correctly refused
+to substitute the generic trigger label for selected-model proof. This snapshot
+does not establish a quota failure, a model switch or the cause of the changed
+row structure. No prompt was replayed.
+
+The independent fixture audit passed 16 of 19 checks. Only `summarize` changed,
+all six protected tests passed on independent rerun, and exactly one accepted
+browser POST produced a unique receipt that the browser observed. The run did
+not issue the required explicit browser-close tool call or deliver its final
+receipt/reference reply. App cleanup closed the fixture tab, and durable website
+cleanup was recorded separately as `closed`; those cleanup outcomes do not
+replace the missing workflow actions. The fixture server was stopped and its
+listener absence verified. Flash-Lite, Hydrogen and Argon were not started in
+this build's qualification round.
+
+At 20:21:47 UTC, a new ordinary Gemini tab reached Google's `/sorry/index`
+with HTTP 429 and a current response date. The native shared-store samples
+still contained one future exemption candidate and no expired candidate.
+The bounded native evidence contained zero adapter-timeout records. Automatic
+CAPTCHA diagnostics were saved before teardown. This recurrence after installing
+the lifetime fix is evidence against treating that fix as sufficient prevention;
+native cookie-store presence still does not prove the initial request header or
+server acceptance.
+
+The approved Web Inspector comparison made one normal reload, with caches left
+enabled and no prompt or CAPTCHA action. The redirected resource's Request
+Cookies section displayed the `GOOGLE_ABUSE_EXEMPTION` name and the final
+document again returned HTTP 429. That observation belongs to the final
+redirected resource, not a captured initial Gemini Cookie header. The metadata
+capture interval was 134.799 seconds, exceeding the approved two-minute bound
+by 14.799 seconds; this overrun is retained explicitly. The tab's Inspector
+permission, Safari developer features and Preserve Log were restored off;
+restoration made no additional navigation. Saved request metadata retains the
+cookie name and finite status/timing fields, not cookie values.
+
+Evidence is retained under
+`work/gemini-captcha-20261114/qualification548`: package/install/launch receipts,
+`pro-verification-review.json`, `pro-terminal-native-metadata.json`,
+`recurrence-native-metadata.json`, `inspector-request-metadata.json` and
+`inspector-settings.json`, plus the separate Pro fixture's unchanged 19-check
+audit. Neither the Pro failure nor this inspection proves the recurring CAPTCHA's
+root cause. Further provider qualification remains incomplete.
 
 ### November 14: stale clearance and redundant startup discovery
 
