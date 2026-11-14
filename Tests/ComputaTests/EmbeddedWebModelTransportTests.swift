@@ -6,6 +6,142 @@ import XCTest
 
 @MainActor
 final class EmbeddedWebModelTransportTests: XCTestCase {
+
+    @MainActor
+    private final class ClosedPageHeartbeat: NSObject, WKScriptMessageHandler {
+        var ticks = 0
+        var settled = false
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            if message.body as? String == "tick" { ticks += 1 }
+            if message.body as? String == "settled" { settled = true }
+        }
+    }
+    private final class ClosedPageWeakView {
+        weak var view: WKWebView?
+        init(_ view: WKWebView) { self.view = view }
+    }
+    func testClosedTimedOutGeminiAdapterReleasesViewBeforeLateCallback() async throws {
+        try await closedTimedOutAdapterProbe(.gemini)
+    }
+    func testClosedTimedOutChatGPTAdapterReleasesViewBeforeLateCallback() async throws {
+        try await closedTimedOutAdapterProbe(.chatgpt)
+    }
+    func testClosedCancelledGeminiAdapterReleasesViewBeforeLateCallback() async throws {
+        try await closedTimedOutAdapterProbe(.gemini, cancel: true)
+    }
+    func testClosedCancelledChatGPTAdapterReleasesViewBeforeLateCallback() async throws {
+        try await closedTimedOutAdapterProbe(.chatgpt, cancel: true)
+    }
+    func testClosedResolvedGeminiAdapterReleasesView() async throws {
+        try await closedResolvedAdapterProbe(.gemini)
+    }
+    func testClosedResolvedChatGPTAdapterReleasesView() async throws {
+        try await closedResolvedAdapterProbe(.chatgpt)
+    }
+    private func closedResolvedAdapterProbe(_ provider: EmbeddedWebModelTransport.Provider) async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(provider))
+        defer { fixture.shutdown() }
+        let weakView = try await createAndCloseResolvedAdapter(provider, fixture: fixture)
+        for _ in 0..<40 where weakView.view != nil { try await Task.sleep(for: .milliseconds(25)) }
+        XCTAssertNil(weakView.view, "Ordinary completed callbacks must release the closed model view")
+        try await assertHumanTabIntact(fixture)
+    }
+    private func createAndCloseResolvedAdapter(_ provider: EmbeddedWebModelTransport.Provider,
+                                               fixture: Fixture) async throws -> ClosedPageWeakView {
+        let started = try await startChoice(Self.fixtureChoice(provider), in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let tabID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+        let weakView = ClosedPageWeakView(view)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Synthetic resolved lifetime control"])
+        _ = try await waitForState("complete", fixture.transport, token: token)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        XCTAssertNil(fixture.browser.webView(for: tabID)); XCTAssertNil(view.superview)
+        return weakView
+    }
+    private func closedTimedOutAdapterProbe(_ provider: EmbeddedWebModelTransport.Provider, cancel: Bool = false) async throws {
+        let fixture = try Fixture(page: Self.modelChoicePage(provider))
+        defer { fixture.shutdown() }
+        let heartbeat = ClosedPageHeartbeat()
+        let weakView = try await createAndCloseStalledAdapter(provider, fixture: fixture, heartbeat: heartbeat, cancel: cancel)
+        let ticksAtClose = heartbeat.ticks
+        for _ in 0..<40 where weakView.view != nil { try await Task.sleep(for: .milliseconds(25)) }
+        let retained = weakView.view != nil
+        let ticksAfterClose = heartbeat.ticks - ticksAtClose
+        print("CLOSED_ADAPTER_PROBE provider=\(provider.rawValue) retainedAfterOneSecond=\(retained) ticksAfterClose=\(ticksAfterClose) settled=\(heartbeat.settled)")
+        XCTAssertFalse(heartbeat.settled, "The bounded synthetic promise must still be unresolved during the release assertion")
+        XCTAssertNil(weakView.view, "A timed-out WebKit callback must not keep a physically closed model page alive")
+        if retained {
+            // If retention regresses, let the bounded synthetic work settle
+            // before teardown rather than strand a page in the test process.
+            for _ in 0..<480 where weakView.view != nil { try await Task.sleep(for: .milliseconds(25)) }
+            print("CLOSED_ADAPTER_DRAIN provider=\(provider.rawValue) released=\(weakView.view == nil) settled=\(heartbeat.settled)")
+        }
+        XCTAssertNil(weakView.view, "A retained view must drain after its bounded promise completes")
+        try await assertHumanTabIntact(fixture)
+    }
+    private func createAndCloseStalledAdapter(_ provider: EmbeddedWebModelTransport.Provider, fixture: Fixture,
+                                              heartbeat: ClosedPageHeartbeat, cancel: Bool = false) async throws -> ClosedPageWeakView {
+        let started = try await startChoice(Self.fixtureChoice(provider), in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let tabID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+        let weakView = ClosedPageWeakView(view)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Synthetic lifetime probe"])
+        let world = WKContentWorld.world(name: "computa-chatgpt-model-v1")
+        view.configuration.userContentController.add(heartbeat, contentWorld: world, name: "closedPageHeartbeat")
+        _ = try await evaluate(view, """
+            const original = crypto.subtle.digest.bind(crypto.subtle);
+            globalThis.fixtureDigestStalls = 0;
+            crypto.subtle.digest = (...args) => {
+              crypto.subtle.digest = original;
+              globalThis.fixtureDigestStalls++;
+              const beat = () => window.webkit.messageHandlers.closedPageHeartbeat.postMessage('tick');
+              beat();
+              const timer = setInterval(beat, 100);
+              return new Promise(resolve => setTimeout(async () => {
+                clearInterval(timer);
+                window.webkit.messageHandlers.closedPageHeartbeat.postMessage('settled');
+                resolve(await original(...args));
+              }, 10_000));
+            };
+            return true;
+            """, world: world)
+        fixture.transport.setInspectionTimeoutForTesting(cancel ? .seconds(30) : .milliseconds(250))
+        var timeouts = [String]()
+        fixture.transport.setAdapterTimeoutObserverForTesting { timeouts.append($0) }
+        if cancel {
+            let pending = Task { @MainActor in
+                _ = try await self.call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            }
+            for _ in 0..<200 where heartbeat.ticks == 0 { try await Task.sleep(for: .milliseconds(10)) }
+            pending.cancel()
+            do { _ = try await pending.value; XCTFail("The cancelled native read must not return a reply") }
+            catch { XCTAssertTrue(error is CancellationError) }
+        } else {
+            do { _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]) }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .pageUnavailable) }
+        }
+        XCTAssertEqual(timeouts.count, cancel ? 0 : 1, "Only the requested native terminal path must fire")
+        let stalls = try await evaluate(view, "return globalThis.fixtureDigestStalls;", world: world)
+        XCTAssertEqual(stalls as? Int, 1)
+        XCTAssertGreaterThan(heartbeat.ticks, 0, "The stalled adapter must actually have begun executing")
+        XCTAssertFalse(heartbeat.settled)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created", "Fresh ordinary ownership proof must still authorize cleanup")
+        XCTAssertNil(fixture.browser.webView(for: tabID))
+        XCTAssertEqual(fixture.browser.tabs.map(\.id), [fixture.humanID])
+        XCTAssertNil(view.superview)
+        XCTAssertFalse(heartbeat.settled)
+        let repeated = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(repeated["cleanup"] as? String, "not_created")
+        fixture.transport.setAdapterTimeoutObserverForTesting(nil)
+        return weakView
+    }
+
     func testClaudeResponseStreamSavesBeforeOwnedCleanupOnEveryTerminalPath() async throws {
         for outcome in ["success", "malformed", "provider_pause", "cancelled_caller"] {
             let choice = Self.fixtureChoice(.claude)

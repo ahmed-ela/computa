@@ -5,7 +5,14 @@ shared Responses interface and browser, terminal and file tools, retaining
 one owned temporary website conversation across tool rounds. Claude and the
 broader browser-engine expansion in issue #9 remain outside this work.
 
-Current checkpoint (November 14, 2026, build 547): the approved fresh CAPTCHA
+Current checkpoint (November 14, 2026, build 548 candidate): a separate native
+lifetime defect was reproduced and fixed. Timed-out or cancelled adapter callbacks
+retained closed model pages solely through an error-log capture. Four regression
+cases fail on unchanged code and pass with the scalar capture; all 14 focused
+current-resource native checks and nine version tests pass. Installation and live
+restart qualification are pending. This does not establish Google's CAPTCHA cause.
+
+Prior checkpoint (November 14, 2026, build 547): the approved fresh CAPTCHA
 cleared and an unexpired exemption candidate was present after the next restart. The app no longer
 opens an extra Gemini catalog page for cached startup/restoration/selection
 demand; the bounded startup capture recorded zero Gemini navigation-response
@@ -14,6 +21,45 @@ another CAPTCHA. Pro, Argon and Hydrogen passed the complete workflow; Flash-Lit
 failed response-format validation before tools, then passed a separate diagnostic
 run without a protocol change. This removes a measured
 unnecessary request, not a proven cause of Google's recurring challenge.
+
+### November 14: closed pages retained by pending adapter callbacks
+
+`EmbeddedWebModelTransport.page` passed WebKit a completion closure that referenced
+`session.sequence` only for error logging. The closure therefore retained the
+whole Session, which owns its WKWebView. Native timeout and cancellation resume
+the caller, but cannot cancel an already-running WebKit Promise. Even after
+ordinary ownership-verified finish removed the tab and its host, the callback
+could keep that closed model page alive.
+
+The fix captures the dispatch sequence number before evaluation and logs that
+scalar. No ownership, selected-model, response, deadline, retry, cleanup or cookie
+rule changes. No blank navigation or forced abandonment of unverified cleanup
+was added.
+
+The regression uses real local WebKit pages and the real transport, with one
+synthetic digest delayed for a bounded ten seconds. Both Gemini and ChatGPT were
+tested through timeout, cancellation and ordinary completion. On unchanged source,
+the four interrupted-read cases retained the removed view past one second and
+posted four to seven additional JavaScript heartbeats. They released only when
+the old Promise settled. Both ordinary-completion controls passed.
+
+With the fix, all six lifecycle cases passed; interrupted reads released their
+view before the Promise settled, with zero further heartbeats observed in the
+release window. Eight existing regressions also passed, covering bounded read
+recovery, response deadlines, late replies, cancellation, changed ownership and
+lost temporary-session proof. The final pair compiled current transport and
+browser sources against the same test object and 20 pinned current adapter
+resources; unaffected native objects were reused. Earlier compile/setup failures
+and an older-resource comparison are retained separately, not counted as final
+qualification.
+
+This establishes a closed-page lifetime defect, not extra Google requests or a
+CAPTCHA trigger. The saved challenge incidents do not prove a preceding adapter
+timeout or retained-page traffic. A full app restart also ends in-process
+retention. Permanent website CAPTCHA prevention remains unproven. Local evidence
+is retained under `work/gemini-captcha-20261114/closed-view-retention`, including
+the separate `baseline-final2` and `candidate-final2` logs, resource/source/object
+hashes and bounded teardown results.
 
 ### November 14: stale clearance and redundant startup discovery
 

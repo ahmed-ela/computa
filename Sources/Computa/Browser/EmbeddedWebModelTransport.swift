@@ -8501,12 +8501,15 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     }
                     if session.coldNamedChatRootRead, action != "inspect" { session.initialRootActionDispatched = true }
                     session.providerAdapterEverDispatched = true
+                    // WebKit's callback can outlive native timeout or cancellation.
+                    // Retaining Session just for logging would keep its closed view alive.
+                    let dispatchedSequence = session.sequence
                     session.view.callAsyncJavaScript(script, arguments: ["input": pageInput], in: nil, in: world) { reply in
                         switch reply {
                         case .success(let value):
                             do { result.complete(.success(try JSONSerialization.data(withJSONObject: value))) }
                             catch {
-                                Self.inspectionLog.error("adapterResultInvalid provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence)")
+                                Self.inspectionLog.error("adapterResultInvalid provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(dispatchedSequence)")
                                 result.complete(.failure(Failure.pageUnavailable))
                             }
                         case .failure(let error):
