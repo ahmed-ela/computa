@@ -19,7 +19,10 @@ Gemini navigation then returned Google's HTTP 429 CAPTCHA at 21:42:15 UTC, befor
 any of the four planned marker prompts. After that specifically approved
 challenge was completed, a third normal launch passed four fresh model response checks
 at 22:51–22:54 UTC. This demonstrates recovery across that restart, not a fix for
-the recurring challenge; its root cause remains unproven.
+the recurring challenge. Subsequent controlled comparisons reproduced original
+profile HTTP 429, fresh unsigned profile HTTP 200, then restored original
+profile HTTP 429 on the identical build. Profile/authentication state is now the
+main isolated difference; the specific cause and signed-in remedy remain unproven.
 
 Prior checkpoint (November 14, 2026, installed build 549): source
 `9549bef227b1532faf9def2b14a191ed01b5348d` removes one redundant Gemini model-only
@@ -45,6 +48,67 @@ another CAPTCHA. Pro, Argon and Hydrogen passed the complete workflow; Flash-Lit
 failed response-format validation before tools, then passed a separate diagnostic
 run without a protocol change. This removes a measured
 unnecessary request, not a proven cause of Google's recurring challenge.
+
+### November 14: systematic browser, network and profile comparisons
+
+The challenge returned in the same build-550 process at 23:04:36.887 UTC,
+10 minutes 35.600 seconds after the last successful Argon marker. No intervening
+restart or new model prompt was required to reproduce it: the failed request was
+a fresh ordinary human navigation to the queryless Gemini `/app` route. No
+challenge was completed during the following comparisons.
+
+| Control | Observation | What remains different or unmeasured |
+| --- | --- | --- |
+| Computa → ordinary Safari → Computa | HTTP 429 at 23:04:36.887, healthy Safari UI observed at 23:07:03.124, HTTP 429 at 23:07:27.081 | Safari initially signed out; its HTTP status was not captured |
+| Safari after existing Google SSO → Computa | Healthy signed-in Gemini at 23:12:43.058, HTTP 429 at 23:12:44.964 | Safari account address matches the original account's visible prefix; Computa's full address is visually truncated |
+| Installed engine identity | Safari 26.5 and system WebKit both build `21624.2.5.11.4` | Browser configuration and stored profile state differ |
+| Paired Cloudflare diagnostic pages | Same observed public IPv6 address, HTTP/3, WARP off, approximately four seconds apart | This measures that diagnostic destination, not Google-specific routing |
+| Original → fresh → restored original Computa profile | HTTP 429 at 23:12:44.964, HTTP 200 at 23:18:08.388, HTTP 429 at 23:19:47.710 | Fresh profile unsigned; original authenticated |
+
+The profile comparison used the exact installed signed build, unchanged browser
+factory and application identity. Each profile switch occurred only after normal
+quit and verified process exit. The operator backed up the original profile UUID,
+temporarily changed only the profile-reference preference, restored its exact
+value, and verified the restored launch. Original website data was neither
+copied nor deleted. Both new processes recorded zero Gemini navigation callbacks
+before their intended load. Independent artifact and outcome review passed.
+
+Fresh-profile native cookie counts began at zero and became 6 for Gemini and 1
+for each Google scope. The original profile retained counts of 27/18; exemption
+categories were zero throughout. These counts are not identities or wire proof.
+The `429 → 200 → 429` result narrows the failure to profile/authentication state
+under these conditions; neither the engine version nor application identity
+alone is sufficient to force it. It does not identify one corrupt cookie, prove
+an account-wide restriction, or establish a fresh profile as a signed-in remedy.
+
+The next control reopens the preserved fresh profile and signs into the same
+Google account normally. Its unsigned page again returned HTTP 200 after restart.
+Google then required the user's password, so authenticated comparison is pending
+user input in the visible browser. No credential was read or transferred. The
+original profile remains preserved and has already passed the exact restoration
+check; the temporary reference is active only for this pending experiment.
+
+Six checks in one local WebKit probe passed in 18.3 seconds using isolated,
+nonpersistent stores and seven loopback requests. A URL-token-only redirect
+created no cookie. A future-expiring, non-session HttpOnly/Lax cookie issued on
+an intermediate HTTP 302 was accepted and sent on the next request; this does
+not test disk persistence. Three synthetic cookie paths were stored, while
+the unchanged production `/app` projection correctly excluded `/app/`. Thus zero
+projected candidates is not a claim that no named cookie exists at another path.
+
+Crucially, native redirect notifications fired, but response-policy callbacks
+showed only the final HTTP 200 responses, not the 302 `Set-Cookie` header. Adding
+cookie-header inspection only to that callback would not capture issuance.
+This local HTTP test does not reproduce Google's HTTPS, cookie attributes or
+server-side risk decision. It identifies an evidence boundary, not a rejection
+bug or CAPTCHA fix. The local server and temporary build files were cleaned up.
+
+Private evidence is under `work/gemini-captcha-20261114/systematic550`. The
+independent profile audit SHA-256 is
+`7bfcb5b940e46e825d94b9fb98b988c307a66923419f30698e784c12a6b21ff7`;
+the local cookie-control report is
+`bd61e9039756600d86b09f9b74c83d06a9299873cc4d8ce08f945b4a1301dd97`.
+No product-source change or permanent prevention claim follows from these tests.
 
 ### November 14: bounded clearance and third-launch response check
 

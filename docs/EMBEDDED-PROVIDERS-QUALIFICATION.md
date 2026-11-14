@@ -23,6 +23,15 @@ unresolved. No product-source change caused this latest recovery. The Gemini
 record preserves the earlier build 548 failure, build 549 response checks and
 their separate collector correction.
 
+Later November 14 comparisons reproduced a narrower difference on unchanged
+build 550: the original browser profile returned HTTP 429, a fresh unsigned
+profile returned HTTP 200, and restoring the original profile returned HTTP 429
+again. Safari loaded Gemini during the same episode, including after existing
+Google SSO. This localizes the investigation toward profile/authentication state;
+normal same-account sign-in to the fresh Computa profile is pending user input.
+The original profile data remains preserved. These are access controls, not new
+model/tool qualification or proof of permanent CAPTCHA prevention.
+
 ## Candidate261: verified ChatGPT renderer failure recovery
 
 The October 25 local / October 26 UTC reproduction ran the unchanged installed
