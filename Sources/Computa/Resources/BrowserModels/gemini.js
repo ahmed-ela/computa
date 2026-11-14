@@ -3797,7 +3797,10 @@ async function providerPageAction() {
     return websiteModelPickerAction(modelState, input, ownedUserCount === 0
       && globalThis.__computaModelFirstSubmitted !== true
       && document.querySelectorAll('model-response, .model-response-text').length === 0);
-  if (input.action !== 'stop' && input.expectedModelChoice != null) {
+  // verifyModel performs no editor or response action. Its final guard below
+  // supplies the fresh selection proof; an earlier proof only opens the same
+  // picker twice. Keep both guards for actions that use the observed state.
+  if (!['stop', 'verifyModel'].includes(input.action) && input.expectedModelChoice != null) {
     const proof = await websiteModelReadEvidence('gemini', input.expectedModelChoice, null,
       { scope: 'action_precheck', action: input.action });
     if (proof.error) return proof;

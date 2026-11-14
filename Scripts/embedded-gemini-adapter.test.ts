@@ -1695,6 +1695,55 @@ async function advanceGeminiPicker(f: ReturnType<typeof fixture>, action: string
   return result;
 }
 
+describe('Gemini model-only verification', () => {
+  function ownedGenericPicker() {
+    const f = fixture(provider, { userPrompt: prompt });
+    const picker = installObservedModelPicker(f, provider, Element,
+      { genericHeader: true, geminiMenuitemMarkers: true, unmountMenus: true });
+    return { f, picker };
+  }
+  const expectedModelChoice = { key: '3.1 Pro', label: '3.1 Pro' };
+
+  test('a model-only read opens and closes the associated picker once, without selecting or sending', async () => {
+    const { f, picker } = ownedGenericPicker();
+    expect(await f.run('inspect')).toMatchObject({ firstUserVerified: true });
+    const before = picker.trigger.clicks;
+    expect(await f.run('verifyModel', { expectedModelChoice })).toMatchObject({
+      firstUserVerified: true, modelEvidence: { selected: expectedModelChoice, source: 'selected_model_indicator' },
+    });
+    expect(picker.trigger.clicks - before).toBe(2);
+    expect(picker.menu.connected).toBe(false);
+    expect(picker.options.every(option => option.clicks === 0)).toBe(true);
+    expect(f.send.clicks).toBe(0);
+  });
+
+  test('the single proof read still rejects model or ownership drift while its picker opens', async () => {
+    for (const fault of ['model', 'disabled', 'owner', 'route', 'temporary', 'body']) {
+      const { f, picker } = ownedGenericPicker();
+      expect(await f.run('inspect')).toMatchObject({ firstUserVerified: true });
+      const toggle = picker.trigger.onClick!;
+      let changed = false;
+      picker.trigger.onClick = () => {
+        toggle();
+        if (changed || picker.menu.values.hidden !== undefined) return;
+        changed = true;
+        if (fault === 'model') picker.selected('3.8 Flash');
+        else if (fault === 'disabled') picker.options.find(option => option.children[0].text === '3.1 Pro')!.disabled = true;
+        else if (fault === 'owner') f.world.__computaModelOwner = 'different-owner';
+        else if (fault === 'route') f.document.URL += '/different';
+        else if (fault === 'temporary') f.temporary(false);
+        else f.userBody!.text = 'Changed owned prompt';
+      };
+      const rejected = await f.run('verifyModel', { expectedModelChoice });
+      expect(changed).toBe(true);
+      expect(rejected.error).toBeDefined();
+      expect(rejected.firstUserVerified).not.toBe(true);
+      expect(picker.options.every(option => option.clicks === 0)).toBe(true);
+      expect(f.send.clicks).toBe(0);
+    }
+  });
+});
+
 describe("observed Gemini Argon family identity", () => {
   test("the observed Argon picker discovers all four families without sending or changing selection", async () => {
     const { f, picker } = observedGeminiArgonPicker();

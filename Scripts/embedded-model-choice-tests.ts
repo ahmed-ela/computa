@@ -9,6 +9,9 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
     ? { key: 'chat/latest/' + (label === 'GPT-6 Pro' ? 'pro' : label.toLowerCase().replace(' ', '-')), label }
     : { key: label, label };
   const selectionSource = provider === 'chatgpt' ? 'selected_model_indicator' : 'checked_model_option';
+  // Model-only ChatGPT and Gemini reads prove selection once in the final guard.
+  const modelOnlyOpens = provider === 'claude' ? 2 : 1;
+  const proofOpenings = (action: string) => action === 'verifyModel' && modelOnlyOpens === 1 ? [1] : [1, 2];
   const setup = (owned = false, behavior: { genericHeader?: boolean; closedGenericHeader?: boolean; closedCompositeHeader?: boolean; resetToPowerOnClose?: boolean; unmountMenus?: boolean; replacePrimaryOnSecondary?: boolean;
     geminiMenuitemMarkers?: boolean; escapeOnlyClose?: boolean; inlineFamilyPanel?: boolean; parentReturnAfterSelection?: boolean } = {}) => {
     const f = make(owned);
@@ -1113,14 +1116,14 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       const click = picker.trigger.onClick; let opens = 0;
       picker.trigger.onClick = () => {
         const opening = picker.menu.values.hidden !== undefined; click();
-        if (opening && ++opens === (provider === 'chatgpt' ? 1 : 2)) {
+        if (opening && ++opens === modelOnlyOpens) {
           if (provider === 'chatgpt') f.temporary.connected = false;
           else { f.badge.connected = false; f.exit.connected = false; }
         }
       };
       const result = await f.run('verifyModel', { expectedModelChoice: choice(initial) });
       expect(result.error).toBe('temporary_mode_unverified'); expect(result.modelEvidence).toBeUndefined();
-      expect(opens).toBe(provider === 'chatgpt' ? 1 : 2); expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
+      expect(opens).toBe(modelOnlyOpens); expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
       expect(f.composer.textContent).toBe(''); if (f.send) expect(f.send.clicks).toBe(0);
     });
 
@@ -1143,13 +1146,13 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       }
       const result = await f.run('verifyModel', { expectedModelChoice: choice(initial) });
       expect(result.error).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(choice(initial));
-      expect(opens).toBe(provider === 'chatgpt' ? 1 : 2); expect(background.values['aria-hidden']).toBeUndefined();
+      expect(opens).toBe(modelOnlyOpens); expect(background.values['aria-hidden']).toBeUndefined();
       expect(picker.options.every((option: any) => option.clicks === 0)).toBe(true);
       if (f.send) expect(f.send.clicks).toBe(0);
     });
 
-    test('first acknowledged bubbles during either fresh model read discard only the read observation', async () => {
-      for (const action of ['inspect', 'verifyModel']) for (const appendOnOpen of provider === 'chatgpt' && action === 'verifyModel' ? [1] : [1, 2]) {
+    test('first acknowledged bubbles during each fresh model read discard only the read observation', async () => {
+      for (const action of ['inspect', 'verifyModel']) for (const appendOnOpen of proofOpenings(action)) {
         const { f, picker } = setup(false, { genericHeader: true });
         const prompt = 'Synthetic pending first\n\n' + markerLine;
         Object.assign(f.world, { __computaModelFirstSubmitted: true, __computaModelFirstMarker: firstMarker,
@@ -1168,8 +1171,8 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       }
     });
 
-    test('acknowledged continuation bubbles during either model read retain exact first-message pins', async () => {
-      for (const action of ['inspect', 'verifyModel']) for (const appendOnOpen of provider === 'chatgpt' && action === 'verifyModel' ? [1] : [1, 2]) {
+    test('acknowledged continuation bubbles during each model read retain exact first-message pins', async () => {
+      for (const action of ['inspect', 'verifyModel']) for (const appendOnOpen of proofOpenings(action)) {
         const { f, picker } = setup(true, { genericHeader: true });
         const first = await f.run('inspect', { expectedUserCounts: [1], expectedModelChoice: choice(initial) });
         const pin = f.world.__computaModelFirstProof;
@@ -1203,8 +1206,8 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       }
     });
 
-    test('an exact disconnected first-root replacement during either model read is discarded for a fresh pinned inspect', async () => {
-      for (const action of ['inspect', 'verifyModel']) for (const replaceOnOpen of provider === 'chatgpt' && action === 'verifyModel' ? [1] : [1, 2]) {
+    test('an exact disconnected first-root replacement during each model read is discarded for a fresh pinned inspect', async () => {
+      for (const action of ['inspect', 'verifyModel']) for (const replaceOnOpen of proofOpenings(action)) {
         const { f, picker } = setup(true, { genericHeader: true });
         const first = await f.run('inspect', { expectedUserCounts: [1], expectedModelChoice: choice(initial) });
         const originalRoot = firstRoot(f), originalBody = f.userBody, pin = f.world.__computaModelFirstProof;
@@ -2970,7 +2973,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       }
       const result = await observing;
       expect(result).toMatchObject({ error: 'model_unverified', modelDiagnostic: { readContext: {
-        scope: provider === 'chatgpt' ? 'action_final_guard' : 'action_precheck', action: 'verifyModel', selectionAttemptPresent: true,
+        scope: provider === 'claude' ? 'action_precheck' : 'action_final_guard', action: 'verifyModel', selectionAttemptPresent: true,
         selectionClicked: false, selectionSettled: false, selectionCompleted: false, recoveryEligible: false,
       } } });
       expect(JSON.stringify(result.modelDiagnostic)).not.toContain('PRIVATE');

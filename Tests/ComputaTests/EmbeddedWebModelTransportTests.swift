@@ -6,6 +6,82 @@ import XCTest
 
 @MainActor
 final class EmbeddedWebModelTransportTests: XCTestCase {
+    func testGeminiGenericHeaderPickerReadCounts() async throws {
+        try await assertGeminiPickerReadCounts(genericHeader: true)
+    }
+
+    func testGeminiExactHeaderPickerReadCountControl() async throws {
+        try await assertGeminiPickerReadCounts(genericHeader: false)
+    }
+
+    private func assertGeminiPickerReadCounts(genericHeader: Bool) async throws {
+        let append = "document.getElementById('messages').appendChild(turn);"
+        let base = Self.providerPage(.gemini)
+        XCTAssertEqual(base.components(separatedBy: append).count, 2)
+        let held = base.replacingOccurrences(of: append, with: append + """
+            body.textContent = '';
+            const stop = document.createElement('button'); stop.id = 'fixture-picker-probe-stop';
+            stop.setAttribute('aria-label', 'Stop response'); stop.textContent = 'Stop response';
+            stop.addEventListener('click', () => stop.remove()); document.body.appendChild(stop);
+            """)
+        let fixture = try Fixture(page: Self.modelChoicePage(.gemini, genericHeader: genericHeader, basePage: held))
+        defer { fixture.shutdown() }
+        let choice = Self.fixtureChoice(.gemini)
+        let started = try await startChoice(choice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let tabID = try XCTUnwrap(fixture.createdTabs.last)
+        let view = try XCTUnwrap(fixture.browser.webView(for: tabID))
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Synthetic picker accounting"])
+        // Count the real fixture's UI events without supplying any model proof.
+        _ = try await evaluate(view, """
+            window.fixturePickerProbeOpens = 0; window.fixturePickerProbeCloses = 0;
+            document.getElementById('fixture-model-trigger').addEventListener('click', () => {
+              if (document.getElementById('fixture-model-trigger').getAttribute('aria-expanded') === 'true')
+                window.fixturePickerProbeOpens++;
+              else window.fixturePickerProbeCloses++;
+            }); return true;
+            """)
+        var completedActions = [String]()
+        var validations = [EmbeddedWebModelTransport.ModelValidationObservationForTesting]()
+        fixture.transport.setBeforePageResultValidationForTesting { completedActions.append($0) }
+        fixture.transport.setModelValidationObserverForTesting { validations.append($0) }
+        for phase in ["awaiting_first", "awaiting_unchanged", "streaming", "complete_candidate", "complete_publish"] {
+            if phase == "streaming" {
+                _ = try await evaluate(view, "document.querySelector('model-response .markdown').textContent = '{\"type\":\"message\",\"text\":\"Fixture reply\"}'; return true;")
+            } else if phase == "complete_candidate" {
+                _ = try await evaluate(view, "document.getElementById('fixture-picker-probe-stop').remove(); return true;")
+            } else if phase == "complete_publish" {
+                try await Task.sleep(for: .milliseconds(1_700))
+            }
+            _ = try await evaluate(view, "window.fixturePickerProbeOpens = 0; window.fixturePickerProbeCloses = 0; return true;")
+            completedActions.removeAll(); validations.removeAll()
+            let observed = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            try assertChoiceEvidence(observed, choice: choice)
+            let sampledCounts = try await evaluate(view, "return {opens: window.fixturePickerProbeOpens, closes: window.fixturePickerProbeCloses, sends: window.fixturePrompts.length, selections: window.fixtureModelSelectionClicks, expanded: document.getElementById('fixture-model-trigger').getAttribute('aria-expanded')};")
+            let counts = try XCTUnwrap(sampledCounts as? [String: Any])
+            let opens = try XCTUnwrap(counts["opens"] as? Int), closes = try XCTUnwrap(counts["closes"] as? Int)
+            XCTAssertEqual(opens, closes, "Every proof must close only its own picker")
+            XCTAssertEqual(counts["sends"] as? Int, 1)
+            XCTAssertEqual(counts["selections"] as? Int, 1)
+            XCTAssertEqual(counts["expanded"] as? String, "false")
+            XCTAssertTrue(validations.contains { $0.enforceModel }, "The probe must use model-enforced native inspection")
+            XCTAssertEqual(opens, genericHeader ? 3 : 0, "Each ordinary read retains its pre/final proof and one independent native model recheck")
+            XCTAssertEqual(observed["state"] as? String, phase == "complete_publish" ? "complete" : "running")
+            let encodedValidations = try JSONSerialization.jsonObject(with: JSONEncoder().encode(validations))
+            let record: [String: Any] = ["kind": "gemini_picker_read_probe_v1", "genericHeader": genericHeader,
+                "phase": phase, "state": observed["state"] as? String ?? "unknown", "opens": opens, "closes": closes,
+                "actions": completedActions, "nativeModelValidations": encodedValidations]
+            print("GEMINI_PICKER_PROBE " + String(decoding: try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]), as: UTF8.self))
+        }
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        fixture.transport.setModelValidationObserverForTesting(nil)
+        let finished = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(finished["cleanup"] as? String, "not_created")
+        XCTAssertNil(fixture.browser.webView(for: tabID))
+        try await assertHumanTabIntact(fixture)
+    }
+
 
     @MainActor
     private final class ClosedPageHeartbeat: NSObject, WKScriptMessageHandler {

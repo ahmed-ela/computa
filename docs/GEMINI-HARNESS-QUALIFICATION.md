@@ -15,6 +15,12 @@ A subsequent ordinary Gemini tab received Google's HTTP 429 CAPTCHA despite an
 unexpired exemption candidate and no observed adapter timeout. The lifetime fix
 therefore does not resolve the recurring CAPTCHA, whose cause remains unproven.
 
+Build 549 candidate removes one redundant Gemini model-only picker read. Local
+real-WebKit measurements reduce generic-header polling from four to three
+open/close cycles, while retaining the final exact model proof and the separate
+native post-await recheck. Provider traffic and CAPTCHA effects are not yet
+measured; this is not a prevention claim.
+
 Prior checkpoint (November 14, 2026, build 547): the approved fresh CAPTCHA
 cleared and an unexpired exemption candidate was present after the next restart. The app no longer
 opens an extra Gemini catalog page for cached startup/restoration/selection
@@ -63,6 +69,46 @@ retention. Permanent website CAPTCHA prevention remains unproven. Local evidence
 is retained under `work/gemini-captcha-20261114/closed-view-retention`, including
 the separate `baseline-final2` and `candidate-final2` logs, resource/source/object
 hashes and bounded teardown results.
+
+### November 14: redundant model-only picker verification
+
+With a generic Gemini header such as `Pro`, the adapter must open the associated
+picker to establish the exact versioned family. An ordinary native poll runs an
+`inspect` action and an independent `verifyModel` after returning across the
+native await. Each action previously performed a precheck and a final guard,
+producing four picker open/close cycles. The model-only action has no editor or
+response operation between those proofs.
+
+Build 549 omits only that model-only precheck. The fresh final guard, temporary
+mode check, first/current-message ownership checks and native post-await model
+comparison remain. Inspection and all editor actions keep their prechecks. The
+change does not cache selection evidence, infer an exact model from `Pro`, defer
+model verification until completion, or replay a Send.
+
+The real-WebKit comparison measured four to three open/close cycles in each of
+five phases: first awaiting response, unchanged awaiting response, streaming,
+completion candidate and completion publication. An exact versioned-header
+control required zero cycles before and after. Both variants retained the
+native `inspect` then `verifyModel` chain, one Send and one model selection,
+valid exact-model evidence, completed output and verified local cleanup.
+Seven candidate native checks passed, including five existing regressions for
+model drift across a native await, cancellation, changed first/current query
+ownership and lost temporary-mode proof. The two baseline count controls also
+passed against their separate measured expectations.
+
+All 191 Gemini adapter tests, 380 shared ChatGPT/Claude model-selection tests and
+nine version tests pass. Existing fault-injection tests target each remaining
+proof read: removing a redundant opening must not make a fault scheduled on that
+opening silently disappear. New tests explicitly reject model, disabled-row,
+owner, route, temporary-mode and first-body changes during the remaining read.
+
+Private evidence is under `work/gemini-captcha-20261114/picker-read-counts`, with
+both variants using the same compiled native test object and differing only in
+the pinned Gemini adapter resource. A first exploratory runner passed its tests
+but rejected the expected later working-tree resource change; that runner outcome
+is preserved separately from the completed pinned comparison. These are local
+UI-action counts, not HTTP-request counts. No Google request was made by the
+fixtures, and no CAPTCHA-causality or prevention conclusion follows from them.
 
 ### November 14: build 548 restart, Pro failure and CAPTCHA recurrence
 
