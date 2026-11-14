@@ -16,8 +16,10 @@ browser, terminal and file-editing workflow in 49.356 seconds, with all 19
 independent fixture checks and eight verified inference rounds. A second normal
 build-550 quit/relaunch exercised the new termination path. Its first ordinary
 Gemini navigation then returned Google's HTTP 429 CAPTCHA at 21:42:15 UTC, before
-any of the four planned marker prompts. The four-model restart check is blocked;
-this lifecycle fix does not resolve the recurring challenge.
+any of the four planned marker prompts. After that specifically approved
+challenge was completed, a third normal launch passed four fresh model response checks
+at 22:51–22:54 UTC. This demonstrates recovery across that restart, not a fix for
+the recurring challenge; its root cause remains unproven.
 
 Prior checkpoint (November 14, 2026, installed build 549): source
 `9549bef227b1532faf9def2b14a191ed01b5348d` removes one redundant Gemini model-only
@@ -43,6 +45,62 @@ another CAPTCHA. Pro, Argon and Hydrogen passed the complete workflow; Flash-Lit
 failed response-format validation before tools, then passed a separate diagnostic
 run without a protocol change. This removes a measured
 unnecessary request, not a proven cause of Google's recurring challenge.
+
+### November 14: bounded clearance and third-launch response check
+
+The specifically approved CAPTCHA cleared at approximately 22:42:38 UTC. Its
+visible return parameter contained an expiry of November 15 at 00:42:14 UTC,
+still in the future. Only expiry and finite route metadata were retained; the
+return token and raw IP address were not saved. The exemption's address matched
+a current `en0` IPv6 address, which supplies no evidence of an obvious local
+address-family mismatch but does not establish every request's network route.
+
+Available native samples after clearance still reported zero named exemption
+cookie candidates in every scope. Both the human return page and a separate,
+queryless model discovery page returned HTTP 200. An unexpired URL token is not
+proof that a cookie was issued or stored. This repeats the earlier build-330
+future-return/zero-cookie observation; it does not identify a new cookie-loss
+defect. No cookie was copied or synthesized, and no network or browser-identity
+setting was changed.
+
+The app quit normally from PID 36065, was verified absent, and relaunched the
+same signed build as PID 60154. The third-launch receipt is pinned to the existing
+package, source, executable and installed signature. Its first ordinary Gemini
+navigation returned HTTP 200 at 22:50:20.973 UTC. The website picker exposed
+3.5 Flash-Lite, 4 Hydrogen, 3.1 Pro and 4 Argon; 4 Carbon remained locked and was
+not tested. Each following task was fresh and sent exactly once:
+
+| Model | Response check | Native duration |
+| --- | --- | ---: |
+| 3.5 Flash-Lite | Exact marker, model/ownership proofs and closed cleanup passed | 6.345 s |
+| 4 Hydrogen | Exact marker, model/ownership proofs and closed cleanup passed | 7.249 s |
+| 3.1 Pro | Exact marker, model/ownership proofs and closed cleanup passed | 11.090 s |
+| 4 Argon | Exact marker, model/ownership proofs and closed cleanup passed | 10.127 s |
+
+Independent review joined every canonical prompt and exact final answer to the
+hash-pinned native transcript, website evidence and durable cleanup receipt.
+Each completed one inference with zero tools. The bounded capture contains
+five Gemini HTTP-200 navigation callbacks (one human and four model), no CAPTCHA
+incident and no adapter timeout. Eleven available cookie samples report zero
+exemption candidates, matching the zero pre-quit baseline. Equal counts do not
+prove other cookies' identities or transmission; this is an outcome check, not
+a fresh-exemption persistence experiment. The original Gemini and ChatGPT tabs
+were restored; Inspector remained off.
+
+No product-source change was made during this bounded investigation. Recovery
+after completing a challenge does not establish its trigger or permanent
+prevention. The missing discriminating evidence is whether a successful
+clearance transaction issues the exemption cookie and whether WebKit accepts
+or rejects it; the previous transaction cannot be reconstructed from a later
+cookie count. Repeating the known-incomplete initial-redirect Inspector capture
+or applying another speculative patch is not evidence of a fix.
+
+Private evidence is in `qualification550-restart3`, `response-check550-outcome`
+and `response-check550-fresh-clearance` under `work/gemini-captcha-20261114`.
+The independent four-model audit SHA-256 is
+`fbfdff128118990eb162de3120f7f329d0197fb9c8aeed657c6a1194b61f39ab`.
+The earlier failed restart and its unsent four-model plan remain preserved.
+These response-only checks do not newly qualify terminal, file or browser tools.
 
 ### November 14: installed build 550 tool workflow
 

@@ -14,8 +14,12 @@ cleanup. The fresh Flash-Lite browser, terminal and file-editing workflow passed
 all 19 fixture checks in 49.356 seconds, with eight verified inference rounds and
 closed website cleanup. After a second normal restart, the first ordinary Gemini
 navigation returned Google's HTTP 429 CAPTCHA at 21:42:15 UTC, before any of the
-four planned marker prompts. All-model restart checks are blocked. No CAPTCHA
-appeared in the earlier workflow; permanent prevention is not resolved. The Gemini
+four planned marker prompts. After the approved challenge was completed, a third
+normal restart passed fresh response checks for Flash-Lite (6.345 s), Hydrogen
+(7.249 s), Pro (11.090 s) and Argon (10.127 s), each with exact model/ownership
+proofs and closed cleanup. No CAPTCHA appeared in these four checks or the
+earlier workflow; the recurring trigger and permanent prevention remain
+unresolved. No product-source change caused this latest recovery. The Gemini
 record preserves the earlier build 548 failure, build 549 response checks and
 their separate collector correction.
 
