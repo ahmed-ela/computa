@@ -5,6 +5,15 @@ shared Responses interface and browser, terminal and file tools, retaining
 one owned temporary website conversation across tool rounds. Claude and the
 broader browser-engine expansion in issue #9 remain outside this work.
 
+Build 550 candidate fixes a separate restart-persistence defect: application
+termination now retains already-created persistent WebKit data stores until
+process exit, while normal shutdown still closes every page. The local
+production-path comparison reproduced lost newly-issued cookies without that
+retention and preserved them with it. Three lifecycle tests, eight cold-process
+wire/cleanup stages and nine version tests pass. Installed-provider qualification
+is still pending; this does not explain the earlier HTTP 429 with an already
+persisted exemption candidate.
+
 Current checkpoint (November 14, 2026, installed build 549): source
 `9549bef227b1532faf9def2b14a191ed01b5348d` removes one redundant Gemini model-only
 picker read. Local real-WebKit measurements reduce generic-header polling from
@@ -90,6 +99,46 @@ capture, separate corrected audit and `quota-blocked-choices.json`;
 `response-check549-restart2` contains the independent plan, binding and passing
 capture. These successes do not replace the retained HTTP 429 evidence or
 identify the recurring CAPTCHA's root cause.
+
+### November 14: persistent profile lifetime during application termination
+
+Normal browser shutdown releases its shared `WKWebsiteDataStore`. If a process
+exits immediately afterward, newly-issued persistent cookies can be absent from
+the next process's first request. Reading `getAllCookies` is not a disk-flush
+acknowledgement; a separate local control that observed future-expiring cookies
+in memory still lost them on restart.
+
+The application delegate now retains only already-created persistent stores
+before starting its existing shutdown task. This covers the shared profile and
+an existing dedicated Kimi profile, excludes nonpersistent profiles, and creates
+no profile eagerly. Normal `shutdown()` is unchanged: pages, hosts, observers and
+tasks close as before. The delegate keeps the stores through the final termination
+reply. There is no added sleep, private WebKit API, cookie copying, altered user
+agent, retry or relaxed ownership/model check.
+
+The final paired experiment used the actual delegate and
+`AppState.shutdownRuntime()` in fresh local test processes. Both writers received
+the same synthetic server-set HttpOnly cookies and confirmed their names on a
+request. Without termination preparation, both persistent cookies disappeared
+from the next human and model factories' initial GET and same-origin redirect.
+With preparation, both were present on all four requests; the session cookie
+remained absent after restart. All eight wire/cleanup stages passed. Three
+separate lifecycle tests prove that all four shared/dedicated human/model views
+release while only persistent stores remain, unused/private profiles are not
+retained, and ordinary shutdown still releases the shared store.
+
+The final run freshly compiled the app delegate, AppState, browser session,
+browser identity, cookie timeline, module and new tests; unrelated support
+objects were reused. All source and 20 adapter-resource hashes were checked.
+This is a local XCTest process-exit experiment, not a Google request or complete
+AppKit quit/relaunch proof. Synthetic profiles and defaults were removed, scratch
+was deleted and the local server stopped. Evidence is retained under
+`work/gemini-captcha-20261114/cold-profile-termination-current`.
+
+This fixes a demonstrated cookie-persistence lifecycle defect. It cannot explain
+the retained-cookie build 548 HTTP 429, and build 549 already passed a request
+with zero callback-time exemption candidates. Permanent CAPTCHA prevention and
+the provider's reason for recurring challenges remain unproven.
 
 ### November 14: closed pages retained by pending adapter callbacks
 

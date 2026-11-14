@@ -3497,6 +3497,12 @@ final class EmbeddedBrowserSession {
         }
     }
 
+    /// Only application termination retains these stores beyond normal teardown.
+    /// Enumerate existing profiles without opening one or retaining any web view.
+    var persistentDataStoresForApplicationTermination: [WKWebsiteDataStore] {
+        [websiteDataStore, kimiDedicatedStore].compactMap { $0 }.filter(\.isPersistent)
+    }
+
     func shutdown() {
         guard !isShutdown else { return }
         #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC

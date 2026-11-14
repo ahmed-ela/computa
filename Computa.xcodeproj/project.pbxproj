@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		6346526664BB4CAA96EC969D /* BrowserTerminationLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C967BB6825CF47E5A75F2A87 /* BrowserTerminationLifecycleTests.swift */; };
 		0018954F5EE183994F43E971 /* NativeApprovalGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87CC204021B3BD470EF28344 /* NativeApprovalGate.swift */; };
 		00F794BFB3573529D912C8EC /* EmbeddedHumanVerificationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEBD18662D62FB7B8D89AFFB /* EmbeddedHumanVerificationStore.swift */; };
 		013E8F85BB224C8AD681A58D /* ApplicationWindowReaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7DCC7F168E8E71F07732209 /* ApplicationWindowReaderTests.swift */; };
@@ -436,6 +437,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		C967BB6825CF47E5A75F2A87 /* BrowserTerminationLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserTerminationLifecycleTests.swift; sourceTree = "<group>"; };
 		01B0E0DC5BB8E34E0499B5B9 /* KimiFixturePage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KimiFixturePage.swift; sourceTree = "<group>"; };
 		01C90147F65413698351E946 /* PermissionGuardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionGuardTests.swift; sourceTree = "<group>"; };
 		01C9A1A3371E98358999B992 /* WebModelServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebModelServer.swift; sourceTree = "<group>"; };
@@ -1056,6 +1058,7 @@
 				2944FF18817B3C9306476D88 /* EmbeddedBrowserIdentityTests.swift */,
 				AD7B5116BD029D10AA97D611 /* EmbeddedBrowserInitialRequestTests.swift */,
 				41B680D766583EBC222C2B8C /* EmbeddedBrowserPaneStateTests.swift */,
+				C967BB6825CF47E5A75F2A87 /* BrowserTerminationLifecycleTests.swift */,
 				3A107647010B18727D57D939 /* EmbeddedBrowserSessionTests.swift */,
 				900A9A870A8117FA479012B2 /* EmbeddedBrowserTabTransportTests.swift */,
 				44A2F566A0E6B82B4C5EEB52 /* EmbeddedBrowserToolControllerTests.swift */,
@@ -1831,6 +1834,7 @@
 				567C7C786B5F79FED66810D6 /* EmbeddedBrowserIdentityTests.swift in Sources */,
 				08C77C413F5011E8434D097E /* EmbeddedBrowserInitialRequestTests.swift in Sources */,
 				3DB54B01761DB276FF2DDF22 /* EmbeddedBrowserPaneStateTests.swift in Sources */,
+				6346526664BB4CAA96EC969D /* BrowserTerminationLifecycleTests.swift in Sources */,
 				788D4CD2F79B41DE341EEF57 /* EmbeddedBrowserSessionTests.swift in Sources */,
 				63003F13426BE7E4FFC2DBC2 /* EmbeddedBrowserTabTransportTests.swift in Sources */,
 				17FBB5BBE4DB729682D7B3E6 /* EmbeddedBrowserToolControllerTests.swift in Sources */,
