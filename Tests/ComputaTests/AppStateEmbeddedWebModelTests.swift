@@ -427,6 +427,33 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         await Task.yield()
     }
 
+    func testCachedGeminiStillOffersHumanRecoveryWithoutStartupDiscovery() async throws {
+        let browser = EmbeddedBrowserSession(persistent: false)
+        defer { browser.shutdown() }
+        browser.recordHumanVerificationRequired(provider: "gemini")
+        let checkpoint = browser.savedHumanVerificationCheckpointIDs["gemini"]
+        let preferences = isolatedTestPreferences()
+        WebsiteModelCatalog.save(namedWebsiteModelProviders.flatMap(Self.choices), to: preferences)
+        WebsiteModeCatalog.save(Self.modes, to: preferences)
+        preferences.set(Self.choices("gemini")[0].modelID, forKey: "LocalCodex.defaultModelID")
+        let runtime = EmbeddedConfigurationRuntime(browser: browser)
+        var observed: [(String, Bool)] = []
+        let state = AppState(tasks: [], runtime: runtime, preferences: preferences, browserSession: browser,
+            websiteModelDiscovery: { Self.choices($0) }, websiteModeDiscovery: { _ in Self.modes })
+        state.setWebsiteModelRefreshObserverForTesting { observed.append(($0, $1)) }
+        state.refreshWebsiteModelsIfNeeded()
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertTrue(observed.isEmpty)
+        _ = try await healthyHumanPage(browser)
+        try await waitUntil { observed.contains { $0.0 == "gemini" && $0.1 } && !state.websiteModelsRefreshing }
+        XCTAssertEqual(observed.map { $0.0 }, ["gemini"])
+        XCTAssertEqual(observed.map { $0.1 }, [true], "The human recovery path retains its explicit blocked-provider probe")
+        XCTAssertEqual(browser.savedHumanVerificationCheckpointIDs["gemini"], checkpoint,
+                       "A synthetic menu cannot replace verified recovery and cleanup authority")
+        XCTAssertEqual(runtime.submissions, 0)
+        XCTAssertEqual(browser.tabs.count, 1)
+    }
+
     func testHumanRecoveryMergedIntoStartupCanRetryOnlyGeminiAndNeverSubmit() async throws {
         let browser = EmbeddedBrowserSession(persistent: false)
         defer { browser.shutdown() }

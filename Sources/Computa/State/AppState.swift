@@ -360,8 +360,9 @@ final class AppState {
         else { embeddedModelTransport?.setChatGPTPrewarmingEnabled(false, preserveUnusedRoot: preserveUnusedRoot) }
     }
 
-    /// Keep missing-provider discovery, then revalidate only the selected
-    /// provider's cached menu. Other cached providers wait for selection demand.
+    /// Keep missing-provider discovery, then revalidate the selected provider's
+    /// cached menu except Gemini. Cached Gemini choices wait for explicit
+    /// discovery or verified human recovery; inference still verifies its model.
     /// Each provider gets one automatic attempt per launch, with one idle
     /// retry if native work interrupts discovery that is still needed.
     func refreshWebsiteModelsIfNeeded() {
@@ -384,6 +385,11 @@ final class AppState {
               WebsiteModelCatalog.discoveryProviders.contains(provider),
               !startupWebsiteModelAttemptedProviders.contains(provider),
               !startupWebsiteModelProviders.contains(provider) else { return }
+        // A cached Gemini menu needs no extra page just because the app starts,
+        // restores a chat, or changes selection. Keep those displayed choices
+        // until explicit discovery or human recovery refreshes them. Every
+        // inference still selects and verifies its model on its live owned page.
+        if provider == "gemini", websiteModelChoices.contains(where: { $0.provider == provider }) { return }
         startupWebsiteModelProviders.append(provider)
         scheduleStartupWebsiteModelRefresh()
     }

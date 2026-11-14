@@ -108,6 +108,115 @@ final class WebsiteModelStateTests: XCTestCase {
         XCTAssertTrue(state.queuedPrompts[busy.id]?.isEmpty == true)
     }
 
+    func testCachedGeminiStartupKeepsCatalogAndCheckpointUntilExplicitRefresh() async throws {
+        let browser = EmbeddedBrowserSession(persistent: false)
+        defer { browser.shutdown() }
+        browser.recordHumanVerificationRequired(provider: "gemini")
+        let checkpoint = browser.savedHumanVerificationCheckpointIDs["gemini"]
+        let preferences = isolatedTestPreferences()
+        let cached = namedWebsiteModelProviders.map { modelStateChoice(provider: $0, key: "cached", label: "Cached") }
+        let gemini = try XCTUnwrap(cached.first { $0.provider == "gemini" })
+        let refreshed = WebsiteModelChoice(provider: "gemini", key: "4 Hydrogen", label: "4 Hydrogen")
+        WebsiteModelCatalog.save(cached, to: preferences)
+        WebsiteModeCatalog.save(modelStateModes, to: preferences)
+        preferences.set(gemini.modelID, forKey: "LocalCodex.defaultModelID")
+        let savedCatalog = preferences.data(forKey: WebsiteModelCatalog.preferenceKey)
+        let entry = TimelineEntry(kind: .assistant, title: "Saved", body: "Preserve this completed chat")
+        let task = AgentTask(id: "cached-gemini", title: "Saved", summary: "", status: .completed,
+                             workspace: "/tmp", model: gemini.modelID, entries: [entry])
+        var calls: [String] = [], retries: [Bool] = []
+        let state = AppState(tasks: [task], preferences: preferences, browserSession: browser,
+            websiteModelDiscovery: { provider in
+                calls.append(provider)
+                return provider == "gemini" ? [refreshed] : cached.filter { $0.provider == provider }
+            }, websiteModeDiscovery: { _ in modelStateModes })
+        state.setWebsiteModelRefreshObserverForTesting { _, retry in retries.append(retry) }
+        state.refreshWebsiteModelsIfNeeded()
+        state.selectTask(task.id)
+        XCTAssertTrue(state.setDefaultModel(gemini.modelID))
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertTrue(calls.isEmpty, "Opening the app with a cached Gemini selection must not create a discovery page")
+        XCTAssertTrue(state.websiteModelRefreshIntentsForTesting.isEmpty)
+        XCTAssertEqual(state.websiteModelChoices, cached)
+        XCTAssertEqual(preferences.data(forKey: WebsiteModelCatalog.preferenceKey), savedCatalog)
+        XCTAssertEqual(state.selectedTask?.model, gemini.modelID)
+        XCTAssertEqual(state.selectedTask?.entries, [entry])
+        XCTAssertEqual(browser.savedHumanVerificationCheckpointIDs["gemini"], checkpoint)
+        XCTAssertTrue(browser.tabs.isEmpty)
+
+        await state.refreshWebsiteModels(provider: "gemini")
+        XCTAssertEqual(calls, ["gemini"], "Explicit discovery still refreshes a cached Gemini menu")
+        XCTAssertEqual(retries, [true])
+        XCTAssertEqual(state.websiteModelChoices.filter { $0.provider == "gemini" }, [refreshed])
+        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), state.websiteModelChoices)
+        XCTAssertEqual(state.selectedTask?.model, gemini.modelID, "A stale saved selection is never silently replaced")
+        XCTAssertEqual(state.selectedTask?.entries, [entry])
+        XCTAssertEqual(browser.savedHumanVerificationCheckpointIDs["gemini"], checkpoint,
+                       "An injected catalog is not permission to clear verification")
+    }
+
+    func testCachedGeminiRestorationAndSelectionDoNotAddProviderRequests() async throws {
+        let preferences = isolatedTestPreferences()
+        let cached = namedWebsiteModelProviders.map { modelStateChoice(provider: $0, key: "cached", label: "Cached") }
+        WebsiteModelCatalog.save(cached, to: preferences)
+        WebsiteModeCatalog.save(modelStateModes, to: preferences)
+        let gemini = try XCTUnwrap(cached.first { $0.provider == "gemini" })
+        let claude = try XCTUnwrap(cached.first { $0.provider == "claude" })
+        var calls: [String] = []
+        let state = AppState(tasks: [], preferences: preferences, websiteModelDiscovery: { provider in
+            calls.append(provider)
+            return cached.filter { $0.provider == provider }
+        }, websiteModeDiscovery: { _ in modelStateModes })
+        state.refreshWebsiteModelsIfNeeded()
+        await waitForDiscovery { calls == ["chatgpt"] && !state.websiteModelsRefreshing }
+        let entry = TimelineEntry(kind: .assistant, title: "Saved", body: "Preserve restored history")
+        let restored = AgentTask(id: "restored-gemini", title: "Saved", summary: "", status: .completed,
+                                 workspace: "/tmp", model: gemini.modelID, entries: [entry])
+        state.replaceTasks(with: [restored])
+        state.apply(.tasksSnapshot([restored]))
+        state.selectTask(restored.id)
+        XCTAssertTrue(state.setTaskModel(gemini.modelID, taskID: restored.id))
+        XCTAssertTrue(state.setDefaultModel(gemini.modelID))
+        state.selectTask(nil)
+        state.selectTask(restored.id)
+        // A positive non-Gemini demand drains queued startup work too, avoiding
+        // an assertion based solely on absence during a short scheduling window.
+        XCTAssertTrue(state.setDefaultModel(claude.modelID))
+        await waitForDiscovery { calls.contains("claude") && !state.websiteModelsRefreshing }
+        XCTAssertEqual(calls, ["chatgpt", "claude"], "Restoration and selection must not request a cached Gemini catalog")
+        XCTAssertEqual(state.selectedTask?.model, gemini.modelID)
+        XCTAssertEqual(state.selectedTask?.entries, [entry])
+        XCTAssertEqual(state.websiteModelChoices.filter { $0.provider == "gemini" }, [gemini])
+        XCTAssertTrue(state.websiteModelRefreshIntentsForTesting.isEmpty)
+    }
+
+    func testMissingGeminiCatalogStillDiscoversOnceThenUsesCachedSelection() async throws {
+        let preferences = isolatedTestPreferences()
+        let others = namedWebsiteModelProviders.filter { $0 != "gemini" }.map {
+            modelStateChoice(provider: $0, key: "cached", label: "Cached")
+        }
+        let gemini = WebsiteModelChoice(provider: "gemini", key: "4 Hydrogen", label: "4 Hydrogen")
+        WebsiteModelCatalog.save(others, to: preferences)
+        WebsiteModeCatalog.save(modelStateModes, to: preferences)
+        preferences.set(gemini.modelID, forKey: "LocalCodex.defaultModelID")
+        var calls: [String] = [], retries: [Bool] = []
+        let state = AppState(tasks: [], preferences: preferences, websiteModelDiscovery: { provider in
+            calls.append(provider)
+            return provider == "gemini" ? [gemini] : others.filter { $0.provider == provider }
+        }, websiteModeDiscovery: { _ in modelStateModes })
+        state.setWebsiteModelRefreshObserverForTesting { _, retry in retries.append(retry) }
+        state.refreshWebsiteModelsIfNeeded()
+        await waitForDiscovery { calls.contains("gemini") && !state.websiteModelsRefreshing }
+        XCTAssertEqual(calls, ["gemini"])
+        XCTAssertEqual(retries, [false])
+        XCTAssertEqual(state.websiteModelChoices.filter { $0.provider == "gemini" }, [gemini])
+        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), state.websiteModelChoices)
+        XCTAssertTrue(state.setDefaultModel(gemini.modelID))
+        state.refreshWebsiteModelsIfNeeded()
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(calls, ["gemini"], "Populating the missing catalog must not schedule a second automatic page")
+    }
+
     func testStartupRevalidatesCompleteCachedCatalogOnceAndPreservesSavedAbsentSelection() async throws {
         let preferences = isolatedTestPreferences()
         let old = WebsiteModelChoice(provider: "claude", key: "Haiku 4.5", label: "Haiku 4.5")
