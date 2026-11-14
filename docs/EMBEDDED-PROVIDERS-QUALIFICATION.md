@@ -8,15 +8,16 @@ resumed on October 31 in the [Claude qualification record](CLAUDE-HARNESS-QUALIF
 The remaining remote API cases remain outside this work. Existing provider
 options were not removed by these scope changes.
 
-Gemini's November 14 checkpoint is installed build 549: fresh Flash-Lite
-response-only checks passed after two normal launches in 6.829 and 6.845 seconds,
-with exact model/ownership proof and closed cleanup. Hydrogen, Pro and Argon
-remain untested in this round because the website reported a usage limit, with
-its picker showing a local 4:42 PM reset. No CAPTCHA was observed in the two
-bounded checks, but ordinary-page recovery preceded the changed model-only
-verification path, so permanent prevention is not established. The Gemini
-record preserves the earlier build 548 failure and the separate collector
-correction; these response checks do not qualify native tools.
+Gemini's November 14 checkpoint is installed build 550. It fixes a reproduced
+persistent-cookie loss during process termination while preserving normal page
+cleanup. The fresh Flash-Lite browser, terminal and file-editing workflow passed
+all 19 fixture checks in 49.356 seconds, with eight verified inference rounds and
+closed website cleanup. After a second normal restart, the first ordinary Gemini
+navigation returned Google's HTTP 429 CAPTCHA at 21:42:15 UTC, before any of the
+four planned marker prompts. All-model restart checks are blocked. No CAPTCHA
+appeared in the earlier workflow; permanent prevention is not resolved. The Gemini
+record preserves the earlier build 548 failure, build 549 response checks and
+their separate collector correction.
 
 ## Candidate261: verified ChatGPT renderer failure recovery
 

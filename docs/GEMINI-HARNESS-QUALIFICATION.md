@@ -5,16 +5,21 @@ shared Responses interface and browser, terminal and file tools, retaining
 one owned temporary website conversation across tool rounds. Claude and the
 broader browser-engine expansion in issue #9 remain outside this work.
 
-Build 550 candidate fixes a separate restart-persistence defect: application
+Current checkpoint (November 14, 2026, installed build 550, source
+`1a1f8d563960d2aa6ef0b07714d4ba03833f11b4`) fixes a separate restart-persistence defect: application
 termination now retains already-created persistent WebKit data stores until
 process exit, while normal shutdown still closes every page. The local
 production-path comparison reproduced lost newly-issued cookies without that
 retention and preserved them with it. Three lifecycle tests, eight cold-process
-wire/cleanup stages and nine version tests pass. Installed-provider qualification
-is still pending; this does not explain the earlier HTTP 429 with an already
-persisted exemption candidate.
+wire/cleanup stages and nine version tests pass. Flash-Lite passed a full local
+browser, terminal and file-editing workflow in 49.356 seconds, with all 19
+independent fixture checks and eight verified inference rounds. A second normal
+build-550 quit/relaunch exercised the new termination path. Its first ordinary
+Gemini navigation then returned Google's HTTP 429 CAPTCHA at 21:42:15 UTC, before
+any of the four planned marker prompts. The four-model restart check is blocked;
+this lifecycle fix does not resolve the recurring challenge.
 
-Current checkpoint (November 14, 2026, installed build 549): source
+Prior checkpoint (November 14, 2026, installed build 549): source
 `9549bef227b1532faf9def2b14a191ed01b5348d` removes one redundant Gemini model-only
 picker read. Local real-WebKit measurements reduce generic-header polling from
 four to three open/close cycles while retaining the final exact model proof and
@@ -38,6 +43,67 @@ another CAPTCHA. Pro, Argon and Hydrogen passed the complete workflow; Flash-Lit
 failed response-format validation before tools, then passed a separate diagnostic
 run without a protocol change. This removes a measured
 unnecessary request, not a proven cause of Google's recurring challenge.
+
+### November 14: installed build 550 tool workflow
+
+The signed build passed its 67-file inventory and strict deep Developer ID
+signature checks. Only the main executable and Info.plist differ from build 549;
+all browser adapters are unchanged. Installation preserved and verified the
+previous app. The first new process matched source
+`1a1f8d563960d2aa6ef0b07714d4ba03833f11b4` and main executable SHA-256
+`3b684b99597ade1b457f434a794678fb33d716e7f53c0939bd46b15edc8ff58d`.
+
+The fresh Flash-Lite invoice fixture ran from 21:29:51.635 to 21:30:40.991 UTC.
+It reproduced the seeded bug, edited only `summarize`, passed six protected
+tests, printed the independent reference, opened the loopback form, submitted
+exactly once, observed the matching receipt and closed its fixture tab. The
+final response reported the reference and receipt. All 19 independent checks
+passed after the exact fixture server was stopped; neither its PID nor listener
+remained. The diff and native/browser command semantics were reviewed separately.
+
+Eight inference rounds retained one session, document and first-user identity.
+Every completed reply had the exact checked 3.5 Flash-Lite selection, matching
+current-submission fingerprint and one new response. Seven retained tool rounds
+ended in verified yields, followed by a final release joined to durable closed
+cleanup. The initial failing unit-test command intentionally reproduced the
+fixture defect; its later six-test run passed. No provider error or CAPTCHA was
+observed. The bounded native capture recorded zero Gemini navigation events
+before Send, one HTTP 200 model-page navigation and no adapter timeout.
+
+The app then quit normally and relaunched the same signed build, exercising
+build 550's termination preparation. This differs from the first installation,
+which quit build 549. The second launch's initial and idle captures recorded zero
+Gemini navigation events. After the previously displayed quota-reset time, its
+first ordinary human navigation to `/app` returned Google's `/sorry` HTTP 429 at
+21:42:15.071 UTC. No model prompt was sent in that process, and all four prepared
+marker checks were stopped. Automatic incident
+`0672f5d1-200f-4e10-b408-0fd2f6f0d3af` was saved before teardown. No CAPTCHA was
+completed and Inspector remained off.
+
+All seven scoped cookie-count rows matched across the first process's successful
+workflow, shutdown, second-process initial sample and settled challenge. The
+overall/scoped counts were 27/18, and exemption candidates were zero throughout.
+Equal counts do not prove cookie identity or wire transmission; they do not show
+a cookie lost in this restart. No adapter timeout was recorded. The recurrence
+shows that the verified fixes are insufficient to prevent Google's challenge.
+This page's picker/adapter actions had not run; earlier provider/account/network
+activity and Google's risk decision remain unresolved.
+
+The previous Inspector work also documented missing refined headers for initial
+redirect hops, reproduced locally and consistent with WebKit issue 190214. Another
+identical Inspector capture would not supply the missing initial Cookie header.
+Historical default-WebKit-identity challenges predate build 295, while the current
+identity has both failures and successes; no new compatibility mismatch was found
+that justifies reverting the Gmail compatibility fix or guessing browser versions.
+
+Private evidence is under `qualification550`, `qualification550-restart2` and
+`workflow550` in `work/gemini-captcha-20261114`; the fixture is
+`invoice-550-flash-lite-da982dbedd05` under the existing workflow cases directory.
+Its immutable native capture, independent 19-check audit and separate lifecycle
+review agree. The separate `response-check550/challenge-blocked-before-send.json`
+preserves the blocked four-model plan without inventing response results. This is
+one successful local workflow, not general website coverage, provider backend
+attestation or permanent CAPTCHA prevention.
 
 ### November 14: build 549 response checks across two normal launches
 
@@ -134,6 +200,14 @@ This is a local XCTest process-exit experiment, not a Google request or complete
 AppKit quit/relaunch proof. Synthetic profiles and defaults were removed, scratch
 was deleted and the local server stopped. Evidence is retained under
 `work/gemini-captcha-20261114/cold-profile-termination-current`.
+
+A separate bounded repeat reused the exact pinned current-source objects with
+three fresh synthetic profiles. All 12 additional wire/cleanup stages passed:
+one baseline again lost both cookies on four cold requests, while two candidates
+preserved both on all eight. Together, two baseline writers lost cookies and
+three candidate writers preserved them. No persistence wait, provider traffic
+or production change was introduced. Profiles, defaults, server and scratch
+were removed; evidence remains in `cold-profile-termination-repeat`.
 
 This fixes a demonstrated cookie-persistence lifecycle defect. It cannot explain
 the retained-cookie build 548 HTTP 429, and build 549 already passed a request
