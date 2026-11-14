@@ -77,7 +77,7 @@ pub fn render(snapshot: &AppSnapshot, local: &LocalState, now: f64) -> Rendered 
     ));
     r.push("<aside class=\"sidebar\" aria-label=\"Task navigation\"><div class=\"window-drag-strip\"></div><div class=\"sidebar-brand-row\"><strong>Computa</strong></div><nav class=\"primary-nav\" aria-label=\"Primary\">");
     r.native(
-        "New task  ⇧⌘N",
+        "New task",
         "nav-button new-task-button",
         NativeAction::CreateTask,
     );
@@ -112,7 +112,6 @@ pub fn render(snapshot: &AppSnapshot, local: &LocalState, now: f64) -> Rendered 
         r.push("<div class=\"sidebar-empty\">No tasks found</div>");
     }
     r.push(&format!("</div><div class=\"sidebar-footer\"><div class=\"runtime-state\"><span class=\"connection-dot {}\"></span><span>{}</span></div>",tone(snapshot.connection.tone),escape(&snapshot.connection.label)));
-    r.native("Settings  ⌘,", "profile-button", NativeAction::ShowSettings);
     r.push("</div></aside><main class=\"workspace\">");
     let task = snapshot
         .tasks
@@ -583,4 +582,37 @@ fn settings(r: &mut Renderer, s: &AppSnapshot) {
     r.push("</section></div><footer>");
     r.native("Done", "button", NativeAction::DismissSettings);
     r.push("</footer></section></div>");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sidebar_new_task_keeps_its_action_without_duplicating_native_footer_settings() {
+        let snapshot = serde_json::from_value(serde_json::json!({
+            "revision": 0, "tasks": [], "promptReceipts": [], "pendingApprovalCount": 0,
+            "connection": {"state":"connected","label":"Connected","tone":"neutral"},
+            "permissions":{"accessibility":"Not granted","screenRecording":"Not granted"},
+            "appearance":"system","accessMode":"askEveryTime","defaultModel":"browser/chatgpt",
+            "modelOptions":[], "showToolPayloads":false, "isInspectorPresented":false,
+            "isBrowserPresented":false, "isSettingsPresented":false
+        }))
+        .unwrap();
+        let rendered = render(&snapshot, &LocalState::default(), 0.);
+        let (sidebar, _) = rendered.html.split_once("</aside>").unwrap();
+        let create = rendered
+            .actions
+            .iter()
+            .position(|action| matches!(action, UiAction::Native(NativeAction::CreateTask)))
+            .unwrap();
+        assert!(sidebar.contains(&format!("data-action=\"{create}\" >New task</button>")));
+        assert!(!sidebar.contains('⌘'));
+        assert!(
+            !rendered
+                .actions
+                .iter()
+                .any(|action| matches!(action, UiAction::Native(NativeAction::ShowSettings)))
+        );
+    }
 }

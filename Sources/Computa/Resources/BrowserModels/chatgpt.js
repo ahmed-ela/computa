@@ -3,7 +3,7 @@
 // This private-world notification carries no page content and grants no authority.
 function websiteModelDiagnosticPhase(phase) {
   try {
-    const phases = ['adapter_entry', 'model_proof', 'model_wait', 'model_wait_done', 'first_user_hash',
+    const phases = ['adapter_entry', 'model_proof', 'model_wait', 'model_wait_initial_disabled', 'model_wait_done', 'first_user_hash',
       'first_user_expand', 'first_user_expand_wait', 'page_action', 'final_model_guard'];
     if (typeof input !== 'object' || input === null || !phases.includes(phase)
       || !/^[a-f0-9-]{36}$/i.test(input.ownerToken || '') || !/^[a-f0-9-]{36}$/i.test(input.operationID || '')
@@ -334,12 +334,12 @@ function websiteChatObservePinnedMutations(records, pin = globalThis.__computaCh
     }
   }
 }
+const websiteChatPickerBoundary = '[data-message-author-role], [data-markdown-text-style], [data-turn], [data-user-message-bubble], [role="tooltip"]';
 function websiteChatPickerState() {
-  const boundary = '[data-message-author-role], [data-markdown-text-style], [data-turn], [data-user-message-bubble], [role="tooltip"]';
   const physical = node => !!node && node.isConnected && node.getClientRects().length > 0
     && getComputedStyle(node).visibility !== 'hidden';
   const visible = node => physical(node) && !node.closest('[inert], [aria-hidden="true"]');
-  const outside = node => !!node && !node.closest(boundary);
+  const outside = node => !!node && !node.closest(websiteChatPickerBoundary);
   const enabled = node => visible(node) && !node.disabled && node.getAttribute('disabled') === null
     && node.getAttribute('aria-disabled') !== 'true';
   const nodes = selector => [...document.querySelectorAll(selector)].slice(0, 256);
@@ -446,6 +446,92 @@ function websiteChatPickerState() {
     navigationAmbiguous: associated.length > 1 || secondaries.length > 1,
     physical, visible, enabled, family };
 }
+function websiteChatRecordReadinessPopup(trace, records) {
+  const menuRoles = ['menu', 'listbox', 'dialog'];
+  for (const record of records) {
+    const index = trace.recordCount++;
+    if (record.type === 'attributes') {
+      const { target, attributeName, oldValue } = record;
+      if (target === trace.trigger && attributeName === 'aria-expanded') trace.expandedChanges.push({ index, oldValue });
+      if (target === trace.trigger && attributeName === 'aria-controls') trace.controlsChanges.push({ index, oldValue });
+      if (attributeName === 'id') {
+        trace.changedIDs.add(oldValue);
+        trace.changedIDs.add(target.getAttribute('id'));
+      }
+      if (attributeName === 'role' && (menuRoles.includes(oldValue) || menuRoles.includes(target.getAttribute('role')))) return false;
+      if (['id', 'role', 'aria-labelledby', 'data-message-author-role', 'data-markdown-text-style',
+        'data-turn', 'data-user-message-bubble'].includes(attributeName)) trace.identityChanges.add(target);
+      if (target === trace.send && ['disabled', 'aria-disabled'].includes(attributeName)) return false;
+      continue;
+    }
+    if (record.type !== 'childList' || record.addedNodes.length + record.removedNodes.length > 64) return false;
+    for (const [nodes, added] of [[record.removedNodes, false], [record.addedNodes, true]]) {
+      for (const node of nodes) {
+        if ([trace.trigger, trace.composer, trace.send, trace.body].some(pin => node === pin || node.contains?.(pin))) return false;
+        const descendants = node.querySelectorAll?.('[role="menu"], [role="listbox"], [role="dialog"]') ?? [];
+        const menus = menuRoles.includes(node.getAttribute?.('role')) ? [node, ...descendants] : descendants;
+        if (menus.length === 0) continue;
+        const menu = menus[0];
+        if (menus.length !== 1 || menu.getAttribute('role') !== 'menu' || menu.closest(websiteChatPickerBoundary)
+          || record.target !== trace.body
+          || trace.body.isConnected !== true) return false;
+        // Snapshot attributes when the observer delivers the records. A later
+        // mutation of a detached portal must never rewrite its opening history.
+        const id = menu.getAttribute('id');
+        if (menu.getAttribute('aria-labelledby') !== trace.triggerID) return false;
+        if (added) {
+          if (trace.opening) return false;
+          trace.opening = { index, menu, node, id };
+        } else {
+          const opening = trace.opening;
+          if (!opening || trace.removal !== null || menu !== opening.menu || node !== opening.node || id !== opening.id) return false;
+          trace.removal = index;
+        }
+      }
+    }
+  }
+  return true;
+}
+function websiteChatReadinessPopupDetached(trace) {
+  // Allow generated Unicode IDs but reject characters that could escape the
+  // quoted CSS attribute selectors below.
+  const validID = value => typeof value === 'string' && /^[^\s"\\\u0000-\u001F\u007F]{1,256}$/.test(value);
+  const { trigger, opening, removal, expandedChanges, controlsChanges, identityChanges } = trace;
+  if (trace.overflow || trace.invalid || !validID(trace.triggerID) || trigger.getAttribute('id') !== trace.triggerID
+    || trace.body !== document.body || trace.body.isConnected !== true || identityChanges.has(trace.body)
+    || trigger.getAttribute('aria-expanded') !== trace.expanded
+    || trigger.getAttribute('aria-controls') !== trace.controls) return false;
+  if (!opening || removal === null || opening.menu.isConnected !== false || opening.node.isConnected !== false
+    || !opening.node.contains(opening.menu) || identityChanges.has(trigger)
+    || [...identityChanges].some(node => node === opening.menu || node.contains?.(opening.menu))
+    || opening.menu.getAttribute('role') !== 'menu' || opening.menu.getAttribute('id') !== opening.id
+    || opening.menu.getAttribute('aria-labelledby') !== trace.triggerID
+    || expandedChanges.length !== 2 || expandedChanges[0].oldValue !== trace.expanded
+    || expandedChanges[1].oldValue !== 'true') return false;
+  const menuID = opening.id;
+  if (!validID(menuID) || trace.changedIDs.has(menuID) || trace.changedIDs.has(trace.triggerID)) return false;
+  const triggerIDs = document.querySelectorAll(`[id="${trace.triggerID}"]`);
+  if (triggerIDs.length !== 1 || triggerIDs[0] !== trigger
+    || document.querySelector(`[id="${menuID}"]`)) return false;
+  let linkedFrom = -1, linkedUntil = trace.recordCount;
+  if (trace.controls === null) {
+    if (controlsChanges.length !== 2 || controlsChanges[0].oldValue !== null || controlsChanges[1].oldValue !== menuID) return false;
+    linkedFrom = controlsChanges[0].index;
+    linkedUntil = controlsChanges[1].index;
+  } else if (trace.controls !== menuID || controlsChanges.length !== 0) return false;
+  // The three intervals must overlap. This proves only the original popup's
+  // structural lifecycle, never the model or even the popup's visibility.
+  return Math.max(opening.index, expandedChanges[0].index, linkedFrom) < Math.min(removal, expandedChanges[1].index, linkedUntil);
+}
+function websiteChatVisibleSendControls(visible) {
+  return [...new Set(document.querySelectorAll(
+    'button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"], button[aria-label="Send"]'))]
+    .filter(visible);
+}
+function websiteChatSameVisibleSend(send, visible, enabled) {
+  const controls = websiteChatVisibleSendControls(visible);
+  return controls.length === 1 && controls[0] === send && enabled(send);
+}
 async function websiteChatObserveSelection(request, expected, freshGuard = null, attempt = null, context = null) {
   const owner = globalThis.__computaModelOwner, url = document.URL, originalDocument = document;
   const mutable = typeof freshGuard === 'function';
@@ -471,7 +557,59 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   let headerExpected = null, proofLocked = false, headerObserved = false, finalPowerState = null;
   let remount = null, remountClaimed = false;
   let prepareOpening = null, insertOpening = null, genericPowerRecheck = false;
-  let headerReadiness = null, changingPowerHeader = null, changingPowerSlider = null;
+  let firstVerificationOpeningDiagnostic = null;
+  let preparedReadinessOpeningDiagnostic = null;
+  let readinessPopupObserver = null, readinessPopupTrace = null, readinessPopupLifecycle = null;
+  let detachedSubmitSend = null;
+  const recordReadinessPopup = records => {
+    if (readinessPopupTrace.recordCount + records.length > 64) readinessPopupTrace.overflow = true;
+    if (!readinessPopupTrace.overflow && !readinessPopupTrace.invalid)
+      readinessPopupTrace.invalid = !websiteChatRecordReadinessPopup(readinessPopupTrace, records);
+  };
+  const openingCondition = (reason, value, capture = false, rejects = false) => {
+    if (capture && (rejects ? value : !value) && firstVerificationOpeningDiagnostic?.reason === null)
+      firstVerificationOpeningDiagnostic.reason = reason;
+    return value;
+  };
+  let verifyObserver = null, verifyAcknowledged = false, passiveFirstVerification = null;
+  // Diagnostic-only identities at the original short-circuit operands. Never
+  // inspect a second node/attribute to explain an acknowledgement or grant proof.
+  const acknowledgementSources = { triggerAriaExpanded:false, triggerDataState:false, menuRoot:false, menuDescendant:false };
+  const openingAcknowledgement = (source, value) => {
+    if (value) acknowledgementSources[source] = true;
+    return value;
+  };
+  let draftObserver = null, draftChanged = false, firstVerificationEditor = null, initialReadinessObserver = null;
+  const invalidateDraft = () => { draftChanged = true; };
+  const recordDraftChanges = records => {
+    const composer = insertOpening?.composer || firstVerificationEditor;
+    if (!composer || !records.length) return;
+    if (records.length > 64) { draftChanged = true; return; }
+    for (const r of records) {
+      if (r.target === composer || composer.contains(r.target)) draftChanged = true;
+      if (r.type !== 'childList') continue;
+      if (r.addedNodes.length + r.removedNodes.length > 64) { draftChanged = true; return; }
+      for (const node of [...r.addedNodes, ...r.removedNodes]) {
+        if (node === composer || node.contains?.(composer) || node === trigger || node.contains?.(trigger)) draftChanged = true;
+        if (insertOpening && (openingAcknowledgement('menuRoot', ['menu','listbox'].includes(node.getAttribute?.('role'))) ||
+          openingAcknowledgement('menuDescendant', node.querySelector?.('[role="menu"],[role="listbox"]')))) verifyAcknowledged = true;
+      }
+    }
+  };
+  const recordInitialReadinessRemovals = records => {
+    const pinned = initialReadinessBinding?.nodes;
+    if (!pinned) return;
+    // Observe only the fixed ancestor child lists. Unrelated hydration cannot
+    // consume the composer's relevant-record bound or change these pins.
+    for (const record of records) if (record.type === 'childList'
+      && [...record.addedNodes, ...record.removedNodes].some(node => pinned.has(node))) draftChanged = true;
+  };
+  const recordVerifyOpening = records => {
+    if (records.some(record => record.target === trigger && (openingAcknowledgement('triggerAriaExpanded', record.attributeName === 'aria-expanded' && record.oldValue === 'true')
+      || openingAcknowledgement('triggerDataState', record.attributeName === 'data-state' && record.oldValue === 'open')))) verifyAcknowledged = true;
+  };
+  let headerReadiness = null, changingPowerHeader = null, changingPowerSlider = null, initialReadinessBinding = null;
+  let initialReadinessFacts = null;
   const tracked = new Map();
   const observeHeader = records => {
     const diagnostic = {};
@@ -501,7 +639,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     attributeFilter: ['aria-valuenow', 'aria-checked', 'aria-selected'] });
   const failure = code => {
     const current = websiteChatPickerState(), selection = globalThis.__computaModelSelection;
-    return { error: code, modelDiagnostic: websiteModelDiagnostic(current, { readStage, headerReadiness,
+    return { error: code, modelDiagnostic: websiteModelDiagnostic(current, { readStage, headerReadiness, initialReadinessFacts,
       readContext: {
         scope: ['action_precheck', 'action_final_guard', 'completed_selection', 'post_selection'].includes(context?.scope)
           ? context.scope : 'unknown',
@@ -510,7 +648,12 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         selectionAttemptPresent: !!selection && typeof selection === 'object',
         selectionClicked: selection?.familyClicked === true || Number.isInteger(selection?.powerEvents) && selection.powerEvents > 0,
         selectionSettled: selection?.completed === true, selectionCompleted: selection?.completed === true,
-        recoveryEligible: prepareOpening !== null || insertOpening !== null },
+        recoveryEligible: prepareOpening !== null || insertOpening !== null,
+        firstVerificationOpening: firstVerificationOpeningDiagnostic,
+        ...(preparedReadinessOpeningDiagnostic ? { preparedReadinessOpening: {
+          ...preparedReadinessOpeningDiagnostic, observedAcknowledgement: verifyAcknowledged,
+          acknowledgementSources: { ...acknowledgementSources },
+          recoveryClaimed: insertOpening?.recoveryClaimed === true }, readinessPopupLifecycle } : {}) },
       readAttempt: { primaryOpened, secondaryOpened, closeAttempted, observedProof,
         sameTrigger: !trigger || current.trigger === trigger, popupStillAssociated: !!current.topMenu } }) };
   };
@@ -523,6 +666,10 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     if (selectionChanged || pin?.owner === owner && pin.document === document && pin.invalidated === true)
       throw failure('model_mismatch');
     const current = websiteChatPickerState();
+    recordInitialReadinessRemovals(initialReadinessObserver?.takeRecords?.() || []);
+    if (initialReadinessBinding && (trigger.parentElement !== initialReadinessBinding.parent
+      || !websiteModelChoiceEqual(attempt?.choice, expected)
+      || !passiveEditorIntact(initialReadinessBinding, current))) throw failure('model_unverified');
     let remountFailure = null;
     const rejectRemount = (rule, value) => { if (value && remountFailure == null) remountFailure = rule; return value; };
     if (remount && (rejectRemount('previous_connected', remount.previous.isConnected !== false)
@@ -588,54 +735,126 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       throw failure('model_unverified');
     attempt.familyCloseAcknowledged = true;
   };
-  const readonlyOpeningSelectionIntact = (saved, current) => {
+  const readonlyOpeningSelectionIntact = (saved, current, spent = false, capture = false) => {
     const pin = globalThis.__computaChatPresetPin;
     const choice = saved && websiteChatPresetChoice(saved.resolved.family, saved.resolved.power);
-    return saved != null && !mutable && owned() && !selectionChanged && Date.now() < until
-      && document.URL === request.expectedURL && location.pathname === '/'
-      && saved.owner === owner && saved.document === originalDocument
-      && globalThis.__computaModelSelection === saved.attempt && saved.attempt.started === true
-      && saved.attempt.completed === true && saved.recoveryClaimed !== true
-      && websiteModelChoiceEqual(saved.attempt.choice, expected)
-      && pin === saved.pin && pin?.owner === owner && pin.document === originalDocument
-      && pin.invalidated !== true && !pin.provisionalHeader && pin.selection === saved.selection
-      && websiteChatResolvedSelectionEqual(pin.selection, saved.resolved)
-      && websiteChatPresetIntentValid(expected) && choice && expected.key === choice.key
-      && (expected.label === choice.label || saved.resolved.power.key === 'pro' && expected.label === 'Pro')
-      && pin.headerTrigger === trigger && trigger === saved.header && trigger.isConnected === true
-      && pickerClosed(current) && websiteChatClosedHeaderMatches(current, saved.resolved.power, pin)
-      && Array.isArray(request.expectedUserCounts) && request.expectedUserCounts.length === 1 && request.expectedUserCounts[0] === 0
-      && request.expectedFirstUserFingerprint == null && request.expectedConversation == null
-      && globalThis.__computaModelFirstSubmitted !== true && !globalThis.__computaModelFirstProof
-      && chatGPTMessageRoots('user').length === 0 && chatGPTMessageRoots('assistant').length === 0
-      && !!chatGPTProductModeProof() && chatGPTTemporaryVerified();
+    return openingCondition('fresh_context', saved != null && !mutable && owned() && !selectionChanged && Date.now() < until, capture)
+      && openingCondition('route', document.URL === request.expectedURL && location.pathname === '/', capture)
+      && openingCondition('selection_attempt', saved.owner === owner && saved.document === originalDocument
+        && globalThis.__computaModelSelection === saved.attempt && saved.attempt.started === true
+        && saved.attempt.completed === true && (spent ? saved.recoveryClaimed === true : saved.recoveryClaimed !== true), capture)
+      && openingCondition('selection_choice', websiteModelChoiceEqual(saved.attempt.choice, expected), capture)
+      && openingCondition('pin_context', pin === saved.pin && pin?.owner === owner && pin.document === originalDocument
+        && pin.invalidated !== true && !pin.provisionalHeader, capture)
+      && openingCondition('pin_selection', pin.selection === saved.selection
+        && websiteChatResolvedSelectionEqual(pin.selection, saved.resolved), capture)
+      && openingCondition('choice', websiteChatPresetIntentValid(expected) && choice && expected.key === choice.key
+        && (expected.label === choice.label || saved.resolved.power.key === 'pro' && expected.label === 'Pro'), capture)
+      && openingCondition('header', pin.headerTrigger === trigger && trigger === saved.header && trigger.isConnected === true, capture)
+      && openingCondition('popup', pickerClosed(current) && websiteChatClosedHeaderMatches(current, saved.resolved.power, pin), capture)
+      && openingCondition('user_context', Array.isArray(request.expectedUserCounts) && request.expectedUserCounts.length === 1
+        && request.expectedUserCounts[0] === 0 && request.expectedFirstUserFingerprint == null && request.expectedConversation == null, capture)
+      && openingCondition('submission', globalThis.__computaModelFirstSubmitted !== true && !globalThis.__computaModelFirstProof, capture)
+      && openingCondition('message_roots', chatGPTMessageRoots('user').length === 0 && chatGPTMessageRoots('assistant').length === 0, capture)
+      && openingCondition('mode', !!chatGPTProductModeProof() && chatGPTTemporaryVerified(), capture);
   };
-  const prepareOpeningIntact = current => readonlyOpeningSelectionIntact(prepareOpening, current)
-    && request.action === 'prepare' && context?.action === 'prepare' && context.scope === 'action_final_guard'
-    && globalThis.__computaChatFirstPrepareOpening === prepareOpening && !globalThis.__computaChatSubmissionState;
-  const insertComposer = current => {
+  const prepareOpeningIntact = (current, opening = prepareOpening, allowAcknowledged = false, spent = false, capture = false) => {
+    if (!readonlyOpeningSelectionIntact(opening, current, spent, capture)
+      || openingCondition('context', context?.action !== request.action, capture, true)
+      || openingCondition('context', context.scope !== 'action_final_guard', capture, true)
+      || openingCondition('context', globalThis.__computaChatSubmissionState, capture, true)) return false;
+    if (request.action === 'prepare') return globalThis.__computaChatFirstPrepareOpening === opening;
+    const composer = opening.composer;
+    recordVerifyOpening(verifyObserver?.takeRecords?.() || []);
+    recordDraftChanges(draftObserver?.takeRecords?.() || []);
+    return openingCondition('editor_changed', !draftChanged, capture)
+      && openingCondition('verification_context', request.action === 'verifyModel' && request.allowFirstChatVerificationOpening === true
+        && opening.attempt.firstVerificationOpening === opening && (allowAcknowledged || !verifyAcknowledged), capture)
+      && openingCondition('editor_unavailable', composer && composer.isConnected && insertComposer(current) === composer, capture)
+      && openingCondition('editor_not_empty', firstVerificationComposerEmpty(composer), capture);
+  };
+  const passiveEditorIntact = (opening, current) => {
+    recordDraftChanges(draftObserver?.takeRecords?.() || []);
+    return !draftChanged && opening?.composer?.isConnected === true && firstVerificationComposerEmpty(opening.composer)
+      && globalThis.__computaChatSubmissionState == null && ![...document.querySelectorAll('button[data-testid="stop-button"],'
+        + 'button[aria-label="Stop streaming"],button[aria-label="Stop generating"],button[aria-label="Stop"]')].some(current.visible);
+  };
+  const insertComposer = (current, facts = null) => {
     const candidates = [...new Set(document.querySelectorAll('#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, '
-      + '#prompt-textarea [contenteditable="true"], [contenteditable="true"][aria-label="Ask ChatGPT"], textarea[data-testid="prompt-textarea"]'))]
-      .filter(node => current.enabled(node));
-    return candidates.length === 1 ? candidates[0] : null;
+      + '#prompt-textarea [contenteditable="true"], [contenteditable="true"][aria-label="Ask ChatGPT"], textarea[data-testid="prompt-textarea"]'))];
+    const enabled = candidates.filter(node => current.enabled(node));
+    if (facts) {
+      // Counts only, from this original candidate read. Three means three or
+      // more; diagnostic reads cannot change the selected composer or refusal.
+      try {
+        facts.candidateCount = Math.min(candidates.length, 3);
+        facts.enabledCount = Math.min(enabled.length, 3);
+        facts.physicalCount = Math.min(candidates.filter(current.physical).length, 3);
+        facts.visibleCount = Math.min(candidates.filter(current.visible).length, 3);
+      } catch { }
+    }
+    return enabled.length === 1 ? enabled[0] : null;
   };
   const insertComposerValue = composer => composer instanceof HTMLTextAreaElement ? composer.value : composer?.innerText;
-  const insertOpeningIntact = current => {
-    const saved = insertOpening, state = saved?.state, record = saved?.record;
-    const composer = saved?.composer;
+  const firstVerificationComposerEmpty = composer => {
     const value = insertComposerValue(composer);
-    return readonlyOpeningSelectionIntact(saved, current)
-      && request.action === 'insert' && context?.action === 'insert' && context.scope === 'action_final_guard'
+    if (value === '') return composer instanceof HTMLTextAreaElement || composer.textContent === '' && !composer.childNodes.length;
+    // WebKit renders ProseMirror's sole empty-paragraph caret sentinel as one LF.
+    // Neither trimming a draft nor ignoring a second element proves emptiness.
+    if (value !== '\n' || composer instanceof HTMLTextAreaElement || composer.textContent !== ''
+      || composer.getAttribute('contenteditable') !== 'true' || !composer.classList.contains('ProseMirror')
+      || composer.childNodes.length !== 1) return false;
+    const paragraph = composer.childNodes[0], br = paragraph.childNodes?.[0];
+    return paragraph.tagName === 'P' && paragraph.childNodes.length === 1 && br?.tagName === 'BR'
+      && br.classList.contains('ProseMirror-trailingBreak') && !br.childNodes.length;
+  };
+  const exactVisibleSend = (current, send) => websiteChatSameVisibleSend(send, current.visible, current.enabled);
+  const insertOpeningIntact = (current, spent = false, allowAcknowledged = false) => {
+    const saved = insertOpening, state = saved?.state, record = saved?.record, prior = saved?.insertProof;
+    const composer = saved?.composer, value = insertComposerValue(composer);
+    const grant = request.preparedInstantVerificationOpening;
+    const firstSubmit = request.action === 'submit', firstReadiness = request.action === 'sendReady';
+    if (prior) {
+      recordVerifyOpening(verifyObserver?.takeRecords?.() || []);
+      recordDraftChanges(draftObserver?.takeRecords?.() || []);
+      if (draftChanged || !spent && verifyAcknowledged && !allowAcknowledged
+        || record.firstInsertOpening !== prior || prior.proved !== true) return false;
+      if (firstSubmit) {
+        if (record.firstSubmitOpening !== saved || record.readyForSubmitOpening !== prior || request.submissionSequence !== 1
+          || request.submissionMarker !== record.marker || request.prompt !== saved.prompt
+          || !prior.exactSubmitDraft || !chatGPTExactSubmitDraft(composer, value, request.prompt)
+          || globalThis.__computaModelLastSubmissionCount !== undefined
+          || detachedSubmitSend && !exactVisibleSend(current, detachedSubmitSend)) return false;
+      } else if (firstReadiness) {
+        const readinessGrant = request.preparedChatReadinessOpening;
+        const snapshot = typeof chatGPTFirstChatReadinessSnapshot === 'undefined' ? null : chatGPTFirstChatReadinessSnapshot;
+        if (request.firstChatReadinessFinalGuardOnly !== true
+          || typeof chatGPTFirstChatReadinessFinalGuard !== 'function' || !chatGPTFirstChatReadinessFinalGuard(request)
+          || !readinessGrant || typeof readinessGrant !== 'object' || Array.isArray(readinessGrant)
+          || Object.keys(readinessGrant).sort().join(',') !== 'fingerprint,marker,sequence' || readinessGrant.sequence !== 1
+          || readinessGrant.marker !== record.marker || !/^[a-f0-9]{64}$/.test(readinessGrant.fingerprint)
+          || readinessGrant.fingerprint !== record.fingerprint || record.firstReadinessOpening !== saved
+          || record.readyForSubmitOpening !== prior || !prior.exactSubmitDraft || prior.prompt !== request.prompt
+          || !chatGPTExactSubmitDraft(composer, value, request.prompt)
+          || !snapshot || snapshot.document !== originalDocument || snapshot.state !== state || snapshot.record !== record
+          || snapshot.composer !== composer || snapshot.value !== value || snapshot.ready !== true
+          || !current.enabled(snapshot.send)) return false;
+        if (!exactVisibleSend(current, snapshot.send)) return false;
+      } else if (request.action !== 'verifyModel' || expected.key !== 'chat/latest/instant'
+        || !grant || typeof grant !== 'object' || Array.isArray(grant) || Object.keys(grant).sort().join(',') !== 'fingerprint,marker,sequence' || grant.sequence !== 1
+        || grant.marker !== record.marker || !/^[a-f0-9]{64}$/.test(grant.fingerprint) || grant.fingerprint !== record.fingerprint
+        || record.firstPreparedVerificationOpening !== saved) return false;
+    } else if (request.action !== 'insert' || record?.firstInsertOpening !== saved || request.submissionSequence !== 1
+      || record.marker !== request.submissionMarker || typeof request.prompt !== 'string' || request.prompt !== saved.prompt) return false;
+    return readonlyOpeningSelectionIntact(saved, current, spent)
+      && context?.action === request.action && context.scope === (firstSubmit ? 'action_precheck' : 'action_final_guard')
       && chatGPTSubmissionContext(state) && state.pending === record && state.lastVerified == null
-      && record.firstInsertOpening === saved && record.document === originalDocument && record.owner === owner
-      && record.sequence === 1 && request.submissionSequence === 1 && record.phase === 'prepared'
-      && record.marker === request.submissionMarker && record.marker === request.expectedFirstUserMarker
-      && record.root === null && record.body === null && record.expansionAttempted === false
-      && Array.isArray(request.expectedSubmissionProofs) && request.expectedSubmissionProofs.length === 0
-      && typeof request.prompt === 'string' && request.prompt === saved.prompt
+      && record.document === originalDocument && record.owner === owner && record.sequence === 1 && record.phase === 'prepared'
+      && record.marker === request.expectedFirstUserMarker && record.root === null && record.body === null && record.expansionAttempted === false
+      && Array.isArray(request.expectedSubmissionProofs) && (firstSubmit
+        ? request.expectedSubmissionProofs.length === 1 && chatGPTSubmissionPins(record) : request.expectedSubmissionProofs.length === 0)
       && record.canonical === saved.canonical && record.fingerprint === saved.fingerprint
-      && chatGPTSubmissionCanonical(request.prompt) === record.canonical
-      && globalThis.__computaModelFirstPrompt === request.prompt
+      && chatGPTSubmissionCanonical(saved.prompt) === record.canonical && globalThis.__computaModelFirstPrompt === saved.prompt
       && composer?.isConnected === true && insertComposer(current) === composer && current.enabled(composer)
       && value === saved.editorValue && chatGPTSubmissionCanonical(value) === record.canonical;
   };
@@ -680,18 +899,47 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       && attempt.postFamilyOpeningClaimed !== true;
     if (recoveryEligible) attempt.postFamilyOpeningClaimed = true;
     const completed = globalThis.__computaModelSelection;
-    if (!genericPowerRecheck && !mutable && request.action === 'prepare' && context?.scope === 'action_final_guard'
-      && completed?.completed === true && globalThis.__computaChatFirstPrepareOpening == null) {
-      // Spend the first prepare observation even when its opening succeeds.
-      // Later prepares cannot acquire a new recovery allowance.
+    const firstVerify = request.action === 'verifyModel' && request.allowFirstChatVerificationOpening === true;
+    // Negative-only facts from this original decision. No guard is reread and
+    // these fields never establish an opening slot, model proof or readiness.
+    if (request.action === 'verifyModel' && firstVerificationOpeningDiagnostic === null)
+      firstVerificationOpeningDiagnostic = { nativeGrant: firstVerify, slot: 'not_claimed', reason: null };
+    const captureOpening = firstVerificationOpeningDiagnostic !== null && firstVerificationOpeningDiagnostic.slot === 'not_claimed';
+    if (openingCondition('generic_recheck', !genericPowerRecheck, captureOpening)
+      && openingCondition('mutable_read', !mutable, captureOpening)
+      && openingCondition('context', context?.action === request.action && context.scope === 'action_final_guard', captureOpening)
+      && openingCondition('selection_incomplete', completed?.completed === true, captureOpening)
+      && (request.action === 'prepare' && globalThis.__computaChatFirstPrepareOpening == null
+        || openingCondition('native_grant_absent', firstVerify, captureOpening)
+          && openingCondition('slot_existing', completed.firstVerificationOpening == null, captureOpening))) {
+      // Claim only the first opening of this phase, including an acknowledged opening.
       const pin = globalThis.__computaChatPresetPin;
       prepareOpening = { owner, document: originalDocument, attempt: completed, pin, selection: pin?.selection, header: trigger,
         recoveryClaimed: false,
         resolved: { family: { ...pin?.selection?.family }, power: { ...pin?.selection?.power } } };
-      globalThis.__computaChatFirstPrepareOpening = prepareOpening;
+      if (firstVerify) {
+        completed.firstVerificationOpening = prepareOpening;
+        prepareOpening.composer = insertComposer(current);
+      } else globalThis.__computaChatFirstPrepareOpening = prepareOpening;
       current = drainOpeningEvidence();
-      if (!prepareOpeningIntact(current)) prepareOpening = null;
+      if (!prepareOpeningIntact(current, prepareOpening, false, false, firstVerify)) {
+        if (firstVerify) firstVerificationOpeningDiagnostic.slot = 'ineligible';
+        prepareOpening = null;
+      } else if (firstVerify) {
+        firstVerificationOpeningDiagnostic.slot = 'established';
+        // Retain the first opening's acknowledgment and editor history. Any bounded
+        // recovery below shares this phase's single recovery claim and deadline.
+        firstVerificationEditor = prepareOpening.composer;
+        draftObserver = new MutationObserver(recordDraftChanges);
+        draftObserver.observe(document.documentElement || document, {subtree:true,childList:true});
+        draftObserver.observe(firstVerificationEditor, {subtree:true,childList:true,characterData:true});
+        firstVerificationEditor.addEventListener?.('input', invalidateDraft, true);
+        verifyObserver = new MutationObserver(recordVerifyOpening);
+        verifyObserver.observe(trigger, { attributes: true, attributeOldValue: true, attributeFilter: ['aria-expanded', 'data-state'] });
+      }
     }
+    if (firstVerificationOpeningDiagnostic?.reason === 'slot_existing')
+      firstVerificationOpeningDiagnostic.slot = 'existing';
     const submission = globalThis.__computaChatSubmissionState, prepared = submission?.pending;
     if (!genericPowerRecheck && !mutable && request.action === 'insert' && context?.scope === 'action_final_guard'
       && completed?.completed === true && prepared?.phase === 'prepared' && prepared.firstInsertOpening == null) {
@@ -703,31 +951,130 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         recoveryClaimed: false, state: submission, record: prepared, composer, editorValue: insertComposerValue(composer), prompt: request.prompt,
         canonical: prepared.canonical, fingerprint: prepared.fingerprint,
         resolved: { family: { ...pin?.selection?.family }, power: { ...pin?.selection?.power } } };
+      insertOpening.exactSubmitDraft = chatGPTExactSubmitDraft(composer, insertOpening.editorValue, request.prompt);
       prepared.firstInsertOpening = insertOpening;
       current = drainOpeningEvidence();
       if (!insertOpeningIntact(current)) insertOpening = null;
     }
+    const firstSubmit = request.action === 'submit' && context?.action === 'submit' && context.scope === 'action_precheck'
+      && prepared?.readyForSubmitOpening === prepared?.firstInsertOpening && prepared?.firstSubmitOpening == null;
+    const preparedVerify = !firstVerify && request.action === 'verifyModel' && request.preparedInstantVerificationOpening
+      && context?.action === 'verifyModel' && context.scope === 'action_final_guard' && prepared?.firstPreparedVerificationOpening == null;
+    const readinessScope = request.action === 'sendReady' && request.firstChatReadinessFinalGuardOnly === true
+      && context?.action === 'sendReady' && context.scope === 'action_final_guard';
+    const readinessGrant = request.preparedChatReadinessOpening;
+    const readinessGranted = readinessScope && readinessGrant && typeof readinessGrant === 'object' && !Array.isArray(readinessGrant)
+      && Object.keys(readinessGrant).sort().join(',') === 'fingerprint,marker,sequence' && readinessGrant.sequence === 1
+      && readinessGrant.marker === prepared?.marker && /^[a-f0-9]{64}$/.test(readinessGrant.fingerprint)
+      && readinessGrant.fingerprint === prepared?.fingerprint;
+    const noPriorReadinessEffect = !primaryOpened && !secondaryOpened && !closeAttempted && !observedProof;
+    const firstReadiness = readinessGranted && noPriorReadinessEffect && prepared?.firstReadinessOpening == null;
+    if (readinessScope && preparedReadinessOpeningDiagnostic === null)
+      preparedReadinessOpeningDiagnostic = { nativeGrant: readinessGranted === true,
+        slot: prepared?.firstReadinessOpening != null ? 'existing' : !noPriorReadinessEffect ? 'prior_effect'
+          : readinessGranted ? 'not_claimed' : 'grant_refused',
+        clockRejected: false, clockUnconfirmed: false };
+    if (!genericPowerRecheck && !mutable && (firstSubmit || preparedVerify || firstReadiness) && prepared?.firstInsertOpening?.proved === true) {
+      // The just-proved insertion already identifies the physical editor, header,
+      // selected pair and exact draft. Consume the verification slot before the
+      // first opening, even when it succeeds, and never reconstruct those pins.
+      const prior = prepared.firstInsertOpening;
+      insertOpening = { ...prior, insertProof:prior, recoveryClaimed:false };
+      if (firstSubmit) prepared.firstSubmitOpening = insertOpening;
+      else if (firstReadiness) prepared.firstReadinessOpening = insertOpening;
+      else prepared.firstPreparedVerificationOpening = insertOpening;
+      current = drainOpeningEvidence();
+      if (!insertOpeningIntact(current)) {
+        if (firstReadiness) preparedReadinessOpeningDiagnostic.slot = 'ineligible';
+        insertOpening = null;
+      } else {
+        if (firstReadiness) preparedReadinessOpeningDiagnostic.slot = 'established';
+        verifyObserver = new MutationObserver(recordVerifyOpening);
+        verifyObserver.observe(trigger, { attributes:true, attributeOldValue:true, attributeFilter:['aria-expanded','data-state'] });
+        draftObserver = new MutationObserver(recordDraftChanges);
+        draftObserver.observe(document.documentElement || document, {subtree:true,childList:true,characterData:true});
+        insertOpening.composer.addEventListener?.('input', invalidateDraft, true);
+        const submitControls = firstSubmit && typeof context?.recordRecoveredSubmitSend === 'function'
+          ? websiteChatVisibleSendControls(current.visible) : [];
+        const popupSend = firstReadiness ? chatGPTFirstChatReadinessSnapshot.send
+          : submitControls.length === 1 && current.enabled(submitControls[0]) ? submitControls[0] : null;
+        if (popupSend) {
+          // Require a fresh model read after a proved detachment and bind
+          // the currently visible Send control across that recovery.
+          readinessPopupTrace = { trigger, composer: insertOpening.composer, send: popupSend,
+            body: document.body,
+            triggerID: trigger.getAttribute('id'), controls: trigger.getAttribute('aria-controls'),
+            expanded: trigger.getAttribute('aria-expanded'), expandedChanges: [], controlsChanges: [],
+            identityChanges: new Set(), changedIDs: new Set(), recordCount: 0, opening: null, removal: null, overflow: false, invalid: false };
+          readinessPopupObserver = new MutationObserver(recordReadinessPopup);
+          readinessPopupObserver.observe(document.documentElement || document, { subtree: true, childList: true,
+            attributes: true, attributeOldValue: true,
+            attributeFilter: ['aria-expanded', 'aria-controls', 'id', 'role', 'aria-labelledby', 'disabled', 'aria-disabled',
+              'data-message-author-role', 'data-markdown-text-style', 'data-turn', 'data-user-message-bubble'] });
+        }
+      }
+    }
     if (cappedFirstInsert && Date.now() >= until) throw failure('model_unverified');
     primaryOpened = true; readStage = 'primary_open_requested';
     trigger.click();
-    const powerAcknowledged = () => {
-      const observed = websiteChatPickerState();
-      return observed.mode === 'power' || observed.mode === 'family' || observed.powerUnavailable;
-    };
+    const powerAcknowledged = (observed = websiteChatPickerState()) =>
+      observed.mode === 'power' || observed.mode === 'family' || observed.powerUnavailable;
     if (!genericPowerRecheck && (prepareOpening !== null || insertOpening !== null)) {
       const acknowledgementDeadline = Math.min(until, Date.now() + 900);
       let clockRejected = false;
       const acknowledged = await websiteModelWaitForChange(acknowledgementDeadline,
-        () => !owned() || selectionChanged || powerAcknowledged(), 'model_wait', () => { clockRejected = true; });
+        () => !owned() || selectionChanged || powerAcknowledged(), 'model_wait', () => {
+          clockRejected = true; if (firstReadiness) preparedReadinessOpeningDiagnostic.clockRejected = true;
+        });
       current = drainOpeningEvidence();
       // A delayed acknowledgement wins; never toggle an already opened menu.
       if (!acknowledged && !powerAcknowledged()) {
-        if (clockRejected || Date.now() < acknowledgementDeadline
-          || !(prepareOpening !== null ? prepareOpeningIntact(current) : insertOpeningIntact(current))) throw failure('model_unverified');
-        (prepareOpening || insertOpening).recoveryClaimed = true;
-        readStage = prepareOpening !== null ? 'prepare_open_recovery_requested' : 'insert_open_recovery_requested';
-        trigger.click();
-        current = await wait(powerAcknowledged);
+        if (clockRejected || Date.now() < acknowledgementDeadline) {
+          if (firstReadiness) preparedReadinessOpeningDiagnostic.clockUnconfirmed = true;
+          if (firstVerify) readStage = 'first_verification_clock_unconfirmed';
+          throw failure('model_unverified');
+        }
+        if (firstVerify || firstReadiness || firstSubmit) recordVerifyOpening(verifyObserver?.takeRecords?.() || []);
+        let detachedReadinessPopup = false;
+        if ((firstReadiness || firstSubmit) && readinessPopupObserver) {
+          recordReadinessPopup(readinessPopupObserver.takeRecords?.() || []);
+          readinessPopupObserver.disconnect?.();
+          detachedReadinessPopup = verifyAcknowledged && current.physicalMenus.length === 0
+            && websiteChatReadinessPopupDetached(readinessPopupTrace)
+            && (!firstSubmit || exactVisibleSend(current, readinessPopupTrace.send));
+          if (firstSubmit && detachedReadinessPopup) detachedSubmitSend = readinessPopupTrace.send;
+          readinessPopupLifecycle = readinessPopupTrace.overflow ? 'overflow'
+            : detachedReadinessPopup ? 'detached_associated' : 'unproved';
+        }
+        if (firstVerify && verifyAcknowledged) {
+          // An acknowledged opening is now positively closed. Only this untouched
+          // first-verification slot may spend its existing one recovery on a fresh
+          // opening; an open/ambiguous picker or a changed pin/editor still refuses.
+          readStage = 'first_verification_acknowledged_closed';
+          if (!prepareOpeningIntact(current, prepareOpening, true) || !passiveEditorIntact(prepareOpening, current))
+            throw failure('model_unverified');
+          passiveFirstVerification = prepareOpening;
+          prepareOpening.recoveryClaimed = true; // Claim before the reversible chrome action.
+          readStage = 'primary_open_recovery_requested';
+          trigger.click();
+          let drifted = false;
+          current = await wait(() => {
+            const observed = websiteChatPickerState();
+            if (!passiveEditorIntact(passiveFirstVerification, observed)
+              || !observed.topMenu && !prepareOpeningIntact(observed, passiveFirstVerification, true, true)) drifted = true;
+            return drifted || powerAcknowledged(observed);
+          });
+          if (drifted || Date.now() >= until) throw failure('model_unverified');
+        } else {
+          if (!(prepareOpening !== null ? prepareOpeningIntact(current) : insertOpeningIntact(current, false, detachedReadinessPopup))) {
+            if (firstVerify) readStage = 'first_verification_recovery_guard_changed';
+            throw failure('model_unverified');
+          }
+          (prepareOpening || insertOpening).recoveryClaimed = true;
+          readStage = firstVerify || insertOpening?.insertProof ? 'primary_open_recovery_requested' : prepareOpening !== null ? 'prepare_open_recovery_requested' : 'insert_open_recovery_requested';
+          trigger.click();
+          current = await wait(powerAcknowledged);
+        }
       }
     } else if (recoveryEligible) {
       // Preserve the existing fresh post-family allowance within the original
@@ -832,12 +1179,88 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       && [null, 'false'].includes(current.trigger?.getAttribute('aria-expanded'))
       && [null, 'closed'].includes(current.trigger?.getAttribute('data-state'));
     const disabledHeaderRecognized = websiteChatHeaderPresentation(initial.trigger?.innerText).power !== null;
+    const initialEligibility = (reason, passed) => {
+      if (!passed) {
+        headerReadiness = { startedDisabled: true, outcome: 'rejected', reason };
+        readStage = 'initial_trigger_disabled_rejected';
+      }
+      return passed;
+    };
     if (mutable && request.action === 'selectModel' && context?.scope === 'post_selection'
       && initial.visible(trigger) && disabled(trigger) && closedShape(initial) && disabledHeaderRecognized
-      && freshGuard() === true && !globalThis.__computaChatPresetPin && globalThis.__computaModelSelection === attempt
-      && attempt?.started === true && attempt.completed === false && attempt.powerEvents === 0 && attempt.familyClicked === false
-      && !primaryOpened && !secondaryOpened && !closeAttempted && !observedProof) {
+      && initialEligibility('fresh_context', freshGuard() === true)
+      && initialEligibility('prior_pin', !globalThis.__computaChatPresetPin)
+      && initialEligibility('attempt_identity', globalThis.__computaModelSelection === attempt)
+      && initialEligibility('attempt_state', attempt?.started === true && attempt.completed === false
+        && attempt.powerEvents === 0 && attempt.familyClicked === false)
+      && initialEligibility('prior_effect', !primaryOpened && !secondaryOpened && !closeAttempted && !observedProof)) {
       const form = trigger.closest('form');
+      const nativeDeadline = request.initialModelReadinessDeadlineEpochMilliseconds;
+      initialReadinessFacts = { nativeDeadline: nativeDeadline === undefined ? 'absent' : 'unchecked' };
+      const rejectInitialReadiness = (reason, composer = null) => {
+        headerReadiness = { startedDisabled: true, outcome: 'rejected', reason };
+        readStage = 'initial_trigger_disabled_rejected';
+        // A bounded structural snapshot after the original guard rejected.
+        // No text, attributes, IDs or coordinates leave this diagnostic.
+        if (composer) try {
+          const children = composer.childNodes, first = children.length === 1 ? children[0] : null;
+          const paragraph = first?.tagName === 'P' ? first : null;
+          const leaf = paragraph?.childNodes.length === 1 ? paragraph.childNodes[0] : null;
+          const kind = node => node?.nodeType === 3 ? 'text'
+            : ['P', 'BR', 'SPAN', 'DIV'].includes(node?.tagName) ? node.tagName.toLowerCase() : 'other';
+          const childTags = [];
+          for (let index = 0; index < Math.min(children.length, 3); index++) childTags.push(kind(children[index]));
+          const value = insertComposerValue(composer);
+          initialReadinessFacts.composer = {
+            kind: composer instanceof HTMLTextAreaElement ? 'textarea'
+              : composer.getAttribute('contenteditable') === 'true' ? 'contenteditable' : 'other',
+            rendered: value === '' ? 'empty' : value === '\n' ? 'line_feed' : typeof value === 'string' ? 'other' : 'unavailable',
+            literalEmpty: composer.textContent === '', prosemirror: composer.classList.contains('ProseMirror'),
+            childCount: Math.min(children.length, 3), childTags,
+            soleParagraph: !!paragraph, paragraphChildCount: paragraph ? Math.min(paragraph.childNodes.length, 3) : null,
+            paragraphAttributeCount: paragraph ? Math.min(paragraph.attributes.length, 3) : null,
+            paragraphDir: !paragraph || paragraph.getAttribute('dir') === null ? 'absent'
+              : paragraph.getAttribute('dir') === 'auto' ? 'auto' : 'other',
+            soleBR: leaf?.tagName === 'BR', trailingBreak: leaf?.tagName === 'BR' && leaf.classList.contains('ProseMirror-trailingBreak')
+          };
+        } catch { }
+        return failure('model_unverified');
+      };
+      let readinessUntil = until, readinessComposer = null, readinessParent = null;
+      if (nativeDeadline !== undefined) {
+        // Native supplies only the remainder of this existing selection call,
+        // already capped by the original preparation deadline. No retry budget.
+        const now = Date.now();
+        initialReadinessFacts.nativeDeadline = !Number.isSafeInteger(nativeDeadline) ? 'invalid'
+          : nativeDeadline <= now ? 'expired' : nativeDeadline - now > 10_000 ? 'over_budget' : 'within_budget';
+        if (!Number.isSafeInteger(nativeDeadline) || nativeDeadline <= now || nativeDeadline - now > 10_000)
+          return rejectInitialReadiness('native_deadline');
+        readinessUntil = nativeDeadline;
+        readinessComposer = insertComposer(initial, initialReadinessFacts); readinessParent = trigger.parentElement;
+        if (!readinessComposer) return rejectInitialReadiness('composer_unavailable');
+        if (!readinessParent) return rejectInitialReadiness('trigger_parent_missing', readinessComposer);
+        if (!firstVerificationComposerEmpty(readinessComposer)) return rejectInitialReadiness('composer_not_empty', readinessComposer);
+        if (!passiveEditorIntact({ composer: readinessComposer }, initial)) return rejectInitialReadiness('passive_editor_changed', readinessComposer);
+        firstVerificationEditor = readinessComposer;
+        const nodes = new Set(), parents = new Set();
+        for (const held of [trigger, readinessComposer]) for (let node = held; node; node = node.parentElement) {
+          if (nodes.has(node)) break;
+          // Track every ancestor in both paths, including deeply nested layouts.
+          // Reject if their complete union exceeds this bound.
+          if (nodes.size >= 256) return rejectInitialReadiness('ancestor_limit', readinessComposer);
+          nodes.add(node); if (node.parentElement) parents.add(node.parentElement);
+          // documentElement has no parentElement. Observe its actual parent as
+          // well so removing and restoring the same root cannot erase history.
+          if (node === document.documentElement) parents.add(document);
+        }
+        initialReadinessBinding = { composer: readinessComposer, parent: readinessParent, nodes };
+        draftObserver = new MutationObserver(records => recordDraftChanges(records.filter(record =>
+          record.target === readinessComposer || readinessComposer.contains(record.target))));
+        draftObserver.observe(readinessComposer, { subtree: true, childList: true, characterData: true });
+        initialReadinessObserver = new MutationObserver(recordInitialReadinessRemovals);
+        for (const parent of parents) initialReadinessObserver.observe(parent, { childList: true });
+        readinessComposer.addEventListener?.('input', invalidateDraft, true);
+      }
       // No selection has been observed yet. Hydration may replace this
       // canonical placeholder with another canonical remembered preset;
       // neither disabled value can pin or authorize a model selection.
@@ -855,19 +1278,29 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         try { current = state(); } catch { return reject('state_changed'); }
         if (current.trigger !== trigger || !current.visible(trigger) || !closedShape(current)
           || trigger.closest('form') !== form || form && !current.physical(form)) return reject('state_changed');
+        if (readinessComposer && (trigger.parentElement !== readinessParent || insertComposer(current) !== readinessComposer
+          || !websiteModelChoiceEqual(attempt.choice, expected)
+          || !passiveEditorIntact({ composer: readinessComposer }, current))) return reject('state_changed');
         const power = websiteChatHeaderPresentation(trigger.innerText).power;
         if (!power) return reject('unknown_header');
         if (current.enabled(trigger)) return true;
         if (!disabled(trigger)) return reject('state_changed');
         return false;
       };
-      const changed = await websiteModelWaitForChange(until, ready, 'model_wait', () => { rejected = 'clock_failed'; });
+      // Leave native-bound expiry time to return the negative diagnostic. The
+      // original readiness/model proof deadline and standalone clock stay intact.
+      const waitUntil = nativeDeadline === undefined ? readinessUntil : readinessUntil - 150;
+      const waitPhase = nativeDeadline === undefined ? 'model_wait' : 'model_wait_initial_disabled';
+      const changed = await websiteModelWaitForChange(waitUntil, ready, waitPhase, () => { rejected = 'clock_failed'; });
       if (!ready() && changed) rejected ||= 'state_changed';
-      if (!changed || Date.now() >= until || rejected) {
+      if (!changed || Date.now() >= readinessUntil || rejected) {
         headerReadiness.outcome = 'rejected'; headerReadiness.reason = rejected || 'deadline';
         readStage = 'initial_trigger_disabled_rejected';
         return failure(rejected === 'ownership_changed' ? 'document_changed' : 'model_unverified');
       }
+      // The full picker keeps its ordinary 1.8-second proof budget and cannot
+      // outlive the original native call. Enabling supplies no model evidence.
+      if (nativeDeadline !== undefined) until = Math.min(readinessUntil, Date.now() + 1_800);
       initial = state();
       // The newly enabled current header starts the ordinary full picker proof.
       // Its associated Power and checked family still must independently agree.
@@ -1010,16 +1443,27 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       if (finalPowerState) websiteChatTrackPinnedControls(globalThis.__computaChatPresetPin, finalPowerState);
       websiteChatTrackPinnedHeader(globalThis.__computaChatPresetPin, trigger);
     }
+    if (passiveFirstVerification && (!passiveEditorIntact(passiveFirstVerification, final)
+      || !prepareOpeningIntact(final, passiveFirstVerification, true, true))) return failure('model_unverified');
     if (cappedFirstInsert && Date.now() >= until) return failure('model_unverified');
+    if (insertOpening?.insertProof && insertOpening.recoveryClaimed && !insertOpeningIntact(final, true))
+      return failure('model_unverified');
+    if (insertOpening && request.action === 'insert') insertOpening.proved = true;
     const provedPin = globalThis.__computaChatPresetPin;
     if (provedPin?.owner === owner && provedPin.document === originalDocument
       && provedPin.headerTrigger === trigger && provedPin.invalidated !== true
       && websiteChatResolvedSelectionEqual(provedPin.selection, evidence.chatSelection))
       provedPin.genericHeaderVerified = final.headerPresentation && !final.headerPower ? trigger : null;
+    if (detachedSubmitSend) context.recordRecoveredSubmitSend(detachedSubmitSend);
     return { modelEvidence: evidence, modelChoices: websiteChatPowers.map(power => websiteChatPresetChoice(family, power)), modelDiagnostic };
   } catch (error) {
     return error?.error ? error : failure('model_unverified');
   } finally {
+    readinessPopupObserver?.disconnect?.();
+    verifyObserver?.disconnect?.();
+    draftObserver?.disconnect?.();
+    initialReadinessObserver?.disconnect?.();
+    if (draftObserver) (insertOpening?.composer || firstVerificationEditor)?.removeEventListener?.('input', invalidateDraft, true);
     observer.disconnect?.();
     headerObserver.disconnect?.();
     if (owned() && (primaryOpened || secondaryOpened || closeAttempted)) {
@@ -1140,7 +1584,7 @@ function websiteModelFamilyLabel(provider, value) {
   const label = websiteModelNormalize(value);
   if (!label || label.length > 120 || /[\u0000-\u001F\u007F]/.test(label)) return null;
   const pattern = provider === 'chatgpt' ? /^(?:Latest|GPT-[0-9]+(?:\.[0-9]+)?(?: [A-Za-z][A-Za-z0-9-]*)?)$/
-    : provider === 'gemini' ? /^[0-9]+(?:\.[0-9]+)? (?:Flash-Lite|Flash|Pro|Argon)$/
+    : provider === 'gemini' ? /^[0-9]+(?:\.[0-9]+)? (?:Flash-Lite|Flash|Pro|Argon|Hydrogen|Carbon)$/
       : /^(?:Sonnet|Haiku|Opus|Fable) [0-9]+(?:\.[0-9]+)?$/;
   return pattern.test(label) ? label : null;
 }
@@ -1148,7 +1592,7 @@ function websiteModelSafeTriggerLabel(value) {
   const label = websiteModelNormalize(value);
   if (!label || label.length > 160 || /[\u0000-\u001F\u007F]/.test(label)) return null;
   if (label === 'Select ChatGPT model') return label;
-  if (/^Open mode picker, currently (?:Gemini )?(?:(?:[0-9]+(?:\.[0-9]+)? )?(?:Pro|Flash|Flash-Lite|Argon))$/.test(label)) return label;
+  if (/^Open mode picker, currently (?:Gemini )?(?:(?:[0-9]+(?:\.[0-9]+)? )?(?:Pro|Flash|Flash-Lite|Argon|Hydrogen|Carbon))$/.test(label)) return label;
   if (/^Model: (?:Sonnet|Haiku|Opus|Fable) [0-9]+(?:\.[0-9]+)?(?: (?:Low|Medium|High|Extra|Extended|Max))?$/.test(label)) return label;
   return null;
 }
@@ -1164,10 +1608,11 @@ function websiteModelPickerState(provider) {
   const isTrigger = node => {
     const label = websiteModelSafeTriggerLabel(node.getAttribute('aria-label')) || '';
     return provider === 'chatgpt' ? label === 'Select ChatGPT model'
-      : provider === 'gemini' ? /^Open mode picker, currently (?:Gemini )?(?:[0-9]+(?:\.[0-9]+)? )?(?:Pro|Flash|Flash-Lite|Argon)$/.test(label)
+      : provider === 'gemini' ? /^Open mode picker, currently (?:Gemini )?(?:[0-9]+(?:\.[0-9]+)? )?(?:Pro|Flash|Flash-Lite|Argon|Hydrogen|Carbon)$/.test(label)
         : /^Model: (?:Sonnet|Haiku|Opus|Fable) [0-9]+(?:\.[0-9]+)?(?: (?:Low|Medium|High|Extra|Extended|Max))?$/.test(label);
   };
-  const triggers = nodes('button[aria-label], [role="button"][aria-label]').filter(node => physical(node) && outside(node) && isTrigger(node));
+  const triggerScan = nodes('button[aria-label], [role="button"][aria-label]');
+  const triggers = triggerScan.filter(node => physical(node) && outside(node) && isTrigger(node));
   const triggerCandidates = nodes('button[aria-label], [role="button"][aria-label]').filter(node => physical(node) && outside(node)
     && /^(?:Select ChatGPT model(?:$|[ ,])|Open mode picker(?:$|[ ,])|Model: )/.test(websiteModelNormalize(node.getAttribute('aria-label'))));
   const trigger = triggers.length === 1 ? triggers[0] : null;
@@ -1217,6 +1662,12 @@ function websiteModelPickerState(provider) {
     const options = [...menu.querySelectorAll(selector)].slice(0, 128);
     for (const option of options) {
       if (!enabled(option) || !outside(option) || option.closest('[role="menu"], [role="listbox"], [role="dialog"]') !== menu) continue;
+      // An enabled menu action can advertise a model name without being a
+      // selectable model. Claude rows must expose an actual checked/selected state.
+      if (provider === 'claude') {
+        const state = option.getAttribute(option.getAttribute('role') === 'option' ? 'aria-selected' : 'aria-checked');
+        if (state !== 'true' && state !== 'false') continue;
+      }
       const upgrades = [option, ...option.querySelectorAll('span, div, button, a')].slice(0, 128)
         .some(node => physical(node) && /^(?:Upgrade|Upgrade to .+|Locked|Unavailable)$/.test(websiteModelNormalize(node.getAttribute('aria-label') || node.textContent)));
       // Purchase labels may use any element tag. Text must come from
@@ -1228,7 +1679,7 @@ function websiteModelPickerState(provider) {
       const purchaseLabel = node => {
         if (!purchaseScope(node)) return false;
         const aria = node.getAttribute('aria-label');
-        if (aria) return /^Buy credits$/.test(websiteModelNormalize(aria));
+        if (aria && /^Buy credits$/.test(websiteModelNormalize(aria))) return true;
         let remaining = 128, text = '', complete = true;
         const visit = (current, depth) => {
           if (!complete) return;
@@ -1280,7 +1731,128 @@ function websiteModelPickerState(provider) {
     ? checked[0].indicatorSelected ? 'selected_model_indicator' : 'checked_model_option' : 'model_picker_label' } : null;
   return { provider, trigger, triggerCount: triggers.length, triggerCandidates, topMenu, secondary, nestedMenu, menus, allMenus, physicalMenus, choices: duplicate ? [] : choices,
     controls: duplicate ? [] : controls, selected, evidence, duplicate, conflicting, indicatorInvalid, selectionAmbiguous,
-    navigationAmbiguous: secondaries.length > 1, physical, visible, enabled, family };
+    navigationAmbiguous: secondaries.length > 1, physical, visible, enabled, family, triggerScan, outside };
+}
+function websiteClaudeRememberModelTrigger(provider, trigger, owner, url) {
+  if (provider !== 'claude') return;
+  try {
+    if (!trigger || typeof owner !== 'string' || !/^[a-f0-9-]{36}$/i.test(owner)
+      || globalThis.__computaModelOwner !== owner || document.URL !== url) return;
+    // Reference written only after an existing positive proof, for diagnostics
+    // and detached-node wait eligibility. Never selection, response, action,
+    // or cleanup authority: a replacement still requires fresh current proof.
+    globalThis.__computaClaudeLastModelTrigger = { node: trigger, owner, document, url };
+  } catch { /* Diagnostics cannot change the already evaluated proof. */ }
+}
+function websiteClaudeModelTriggerDiagnostic(state) {
+  const empty = scope => ({ kind: 'claude_last_model_trigger_v1', scope,
+    connected: null, physical: null, visible: null, nodeKind: null, labelKind: null,
+    authored: null, inTriggerScan: null, triggerScanAtLimit: null });
+  try {
+    const record = globalThis.__computaClaudeLastModelTrigger;
+    if (!record) return empty('missing');
+    if (typeof record.owner !== 'string' || !/^[a-f0-9-]{36}$/i.test(record.owner)
+      || record.owner !== globalThis.__computaModelOwner || record.document !== document || record.url !== document.URL)
+      return empty('different_context');
+    const node = record.node;
+    if (!node || typeof node.getAttribute !== 'function' || typeof node.closest !== 'function') return empty('unavailable');
+    const raw = node.getAttribute('aria-label');
+    const label = typeof raw === 'string' && raw.length <= 512 ? websiteModelNormalize(raw) : null;
+    const labelKind = raw == null || label === '' ? 'missing'
+      : label?.startsWith('Model: ') && websiteModelSafeTriggerLabel(label) ? 'recognized'
+      : label?.startsWith('Model: ') ? 'known_prefix_unrecognized' : 'other';
+    return { kind: 'claude_last_model_trigger_v1', scope: 'same_context',
+      connected: node.isConnected === true, physical: state.physical(node), visible: state.visible(node),
+      nodeKind: node.tagName === 'BUTTON' ? 'button' : node.getAttribute('role') === 'button' ? 'role_button' : 'other',
+      labelKind, authored: !state.outside(node),
+      inTriggerScan: state.triggerScan.includes(node), triggerScanAtLimit: state.triggerScan.length === 256 };
+  } catch { return empty('unavailable'); }
+}
+// Failure-only structural inventory. These sampled DOM facts are not ownership,
+// model, completion or cleanup evidence. Never read text, arbitrary classes or
+// attribute values into the result; a failed read preserves the original error.
+function websiteClaudeRemountSurfaceDiagnostic(guard) {
+  try {
+    if (typeof guard !== 'function' || guard() !== true) return null;
+    const limit = 64;
+    const physical = node => !!node && node.isConnected === true && node.getClientRects().length > 0
+      && !['hidden', 'collapse'].includes(getComputedStyle(node).visibility);
+    const visible = node => physical(node) && !node.closest('[hidden], [inert], [aria-hidden="true"]');
+    const enabled = node => visible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true';
+    // Only fixed selector queries; do not enumerate the whole document or its text.
+    const scan = (selector, scope = document) => {
+      const matches = scope.querySelectorAll(selector), nodes = [];
+      for (let index = 0; index < Math.min(matches.length, limit); index++) nodes.push(matches[index]);
+      return { nodes, truncated: matches.length > limit };
+    };
+    const counts = sample => ({ sampled: sample.nodes.length, truncated: sample.truncated,
+      physical: sample.nodes.filter(physical).length, visible: sample.nodes.filter(visible).length,
+      enabled: sample.nodes.filter(enabled).length });
+    const number = (value, min = 0) => typeof value === 'number' && Number.isFinite(value)
+      ? { value: Math.max(min, Math.min(100_000, Math.trunc(value))), saturated: value < min || value > 100_000 }
+      : { value: null, saturated: false };
+    const enumValue = (value, allowed) => value == null ? 'unavailable' : allowed.includes(value) ? value : 'other';
+    // CharacterData.length supplies UTF-16 occupancy without concatenating or
+    // reading page text. Both traversal and sum are capped, including deep trees.
+    const textNodes = root => {
+      const stack = [{ node: root, index: 0 }];
+      let utf16Units = 0, saturated = false, nodesVisited = 0, truncated = false;
+      while (stack.length) {
+        const frame = stack.at(-1), children = frame.node.childNodes;
+        if (frame.index >= children.length) { stack.pop(); continue; }
+        if (nodesVisited === limit) { truncated = true; break; }
+        const child = children[frame.index++]; nodesVisited++;
+        if (child.nodeType === 3) {
+          const length = child.length;
+          if (!Number.isSafeInteger(length) || length < 0) throw new Error('text_length_unavailable');
+          saturated = saturated || utf16Units + length > 180_201;
+          utf16Units = Math.min(180_201, utf16Units + length);
+        } else if (child.nodeType === 1) stack.push({ node: child, index: 0 });
+      }
+      return { utf16Units, saturated, nodesVisited, truncated };
+    };
+    const shape = node => {
+      const tag = node.tagName?.toLowerCase(), role = node.getAttribute('role'), testID = node.getAttribute('data-testid');
+      return { tag: ['div', 'span', 'p', 'section', 'article', 'main', 'form', 'button', 'pre', 'code', 'h2', 'svg'].includes(tag) ? tag : 'other',
+        role: role === null ? 'absent' : ['article', 'group', 'main', 'log', 'feed', 'region', 'presentation', 'status', 'button', 'textbox'].includes(role) ? role : 'other',
+        testID: testID === null ? 'absent' : ['assistant-message', 'user-message', 'message-actions', 'action-bar-copy',
+          'response-status-announcer', 'chat-input', 'chat-input-send'].includes(testID) ? testID : 'other',
+        replyText: node.getAttribute('data-perf-reply-text') !== null,
+        physical: physical(node), visible: visible(node), textNodes: textNodes(node) };
+    };
+    const labeled = scan('button[aria-label], [role="button"][aria-label]');
+    const prefix = [], kinds = { recognized: 0, known_prefix_unrecognized: 0, other: 0 };
+    for (const node of labeled.nodes) {
+      const raw = node.getAttribute('aria-label');
+      // Limit normalization work; oversized labels can establish only a literal
+      // known prefix, never a recognized model. No label bytes leave this scope.
+      const label = typeof raw === 'string' && raw.length <= 512 ? websiteModelNormalize(raw) : null;
+      const knownPrefix = label?.startsWith('Model: ') || typeof raw === 'string' && raw.startsWith('Model: ');
+      const kind = knownPrefix ? label && websiteModelSafeTriggerLabel(label) ? 'recognized' : 'known_prefix_unrecognized' : 'other';
+      kinds[kind]++;
+      if (knownPrefix) prefix.push(node);
+    }
+    const roots = scan('[data-testid="assistant-message"]');
+    const rootSamples = roots.nodes.slice(0, 2).map(node => {
+      const children = node.children, samples = [];
+      for (let index = 0; index < Math.min(children.length, 6); index++) samples.push(shape(children[index]));
+      return { ...shape(node), childrenSampled: samples.length, childrenTruncated: children.length > 6, children: samples };
+    });
+    const result = { kind: 'claude_remount_surface_v1', scanLimit: limit,
+      document: { hidden: typeof document.hidden === 'boolean' ? document.hidden : null,
+        visibility: enumValue(document.visibilityState, ['visible', 'hidden', 'prerender']),
+        ready: enumValue(document.readyState, ['loading', 'interactive', 'complete']),
+        width: number(window.innerWidth), height: number(window.innerHeight),
+        scrollX: number(window.scrollX, -100_000), scrollY: number(window.scrollY, -100_000) },
+      composers: counts(scan('[data-testid="chat-input"][contenteditable="true"][role="textbox"]')),
+      stopButtons: counts(scan('button[aria-label="Stop response"]')),
+      sendButtons: counts(scan('button[aria-label="Send message"]')),
+      modelControls: { labeledScan: counts(labeled), labelKinds: kinds, prefix: counts({ nodes: prefix, truncated: labeled.truncated }) },
+      responseRoots: { ...counts(roots), shapesTruncated: roots.truncated || roots.nodes.length > 2, shapes: rootSamples },
+      renderedReplies: counts(scan('[data-testid="assistant-message"] [data-perf-reply-text]')),
+      replyTextNodes: counts(scan('[data-perf-reply-text]')) };
+    return guard() === true ? result : null;
+  } catch { return null; }
 }
 function websiteModelDiagnostic(state, readObservation = null) {
   const allowedTags = ['button', 'div', 'span', 'p', 'ul', 'li', 'dialog', 'section', 'svg', 'path', 'mat-icon'];
@@ -1346,7 +1918,10 @@ function websiteModelDiagnostic(state, readObservation = null) {
     diagnostic.readStage = readObservation.readStage;
     diagnostic.readAttempt = readObservation.readAttempt;
     diagnostic.readContext = readObservation.readContext;
+    if (state.provider === 'claude' && readObservation.remountObservation)
+      diagnostic.remountObservation = readObservation.remountObservation;
   }
+  if (state.provider === 'claude') diagnostic.lastModelTrigger = websiteClaudeModelTriggerDiagnostic(state);
   if (state.provider === 'chatgpt') {
     diagnostic.chatPower = state.powerDiagnostic;
     const pin = globalThis.__computaChatPresetPin;
@@ -1385,8 +1960,31 @@ function websiteModelDiagnostic(state, readObservation = null) {
     if ((readiness?.startedEmpty === true || readiness?.startedDisabled === true)
       && ['waiting', 'recognized', 'rejected'].includes(readiness.outcome))
       diagnostic.chatHeader.readiness = { ...(readiness.startedDisabled === true ? { startedDisabled: true } : { startedEmpty: true }), outcome: readiness.outcome,
-        reason: ['ownership_changed', 'state_changed', 'unknown_header', 'deadline', 'clock_failed'].includes(readiness.reason)
+        reason: ['ownership_changed', 'state_changed', 'unknown_header', 'deadline', 'clock_failed', 'native_deadline',
+          'fresh_context', 'prior_pin', 'attempt_identity', 'attempt_state', 'prior_effect',
+          'composer_unavailable', 'trigger_parent_missing', 'composer_not_empty', 'passive_editor_changed', 'ancestor_limit'].includes(readiness.reason)
           ? readiness.reason : null };
+    const facts = readObservation?.initialReadinessFacts;
+    if (diagnostic.chatHeader.readiness && facts) {
+      const safe = {};
+      if (['absent', 'unchecked', 'invalid', 'expired', 'over_budget', 'within_budget'].includes(facts.nativeDeadline))
+        safe.nativeDeadline = facts.nativeDeadline;
+      for (const key of ['candidateCount', 'enabledCount', 'physicalCount', 'visibleCount'])
+        if (Number.isInteger(facts[key]) && facts[key] >= 0 && facts[key] <= 3) safe[key] = facts[key];
+      const c = facts.composer;
+      if (c && ['textarea', 'contenteditable', 'other'].includes(c.kind)
+        && ['empty', 'line_feed', 'other', 'unavailable'].includes(c.rendered)
+        && ['absent', 'auto', 'other'].includes(c.paragraphDir)
+        && ['literalEmpty', 'prosemirror', 'soleParagraph', 'soleBR', 'trailingBreak'].every(key => typeof c[key] === 'boolean')
+        && Number.isInteger(c.childCount) && c.childCount >= 0 && c.childCount <= 3
+        && ['paragraphChildCount', 'paragraphAttributeCount'].every(key => c[key] === null
+          || Number.isInteger(c[key]) && c[key] >= 0 && c[key] <= 3)
+        && Array.isArray(c.childTags) && c.childTags.length <= 3
+        && c.childTags.every(tag => ['text', 'p', 'br', 'span', 'div', 'other'].includes(tag)))
+        safe.composer = Object.fromEntries(['kind', 'rendered', 'literalEmpty', 'prosemirror', 'childCount', 'childTags',
+          'soleParagraph', 'paragraphChildCount', 'paragraphAttributeCount', 'paragraphDir', 'soleBR', 'trailingBreak'].map(key => [key, c[key]]));
+      diagnostic.chatHeader.initialReadiness = safe;
+    }
   }
   const responseRoots = state.provider === 'chatgpt' ? chatGPTMessageRoots('assistant')
     : [...document.querySelectorAll(state.provider === 'claude' ? '[data-testid="assistant-message"]' : 'model-response')];
@@ -1592,8 +2190,33 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
   const recovery = provider === 'chatgpt' && openingRecovery?.attempt?.clicked === true
     && openingRecovery.attempt.settled === true && openingRecovery.attempt.completed !== true
     && typeof openingRecovery.guard === 'function' ? openingRecovery : null;
-  const unchanged = () => window === window.top && document.URL === url && globalThis.__computaModelOwner === owner
-    && (!recovery || recovery.guard(false) === true);
+  const readDocument = document;
+  let claudeRemountStarted = false, claudeRemountTrigger = null, remountObservation = null;
+  const submittedReadIntact = () => {
+    try { return context.claudeSubmittedReadGuard() === true; } catch { return false; }
+  };
+  const unchanged = () => window === window.top && document === readDocument && document.URL === url && globalThis.__computaModelOwner === owner
+    && (!recovery || recovery.guard(false) === true) && (!claudeRemountStarted || submittedReadIntact());
+  const detachedClaudeTrigger = () => {
+    try {
+      const record = globalThis.__computaClaudeLastModelTrigger;
+      if (!record || typeof record !== 'object' || Object.keys(record).length !== 4
+        || !['node', 'owner', 'document', 'url'].every(key => Object.getOwnPropertyDescriptor(record, key)?.value !== undefined)
+        || record.owner !== owner || record.document !== readDocument || record.url !== url) return false;
+      const node = record.node;
+      return !!node && node.nodeType === 1 && typeof node.getAttribute === 'function'
+        && typeof node.closest === 'function' && node.isConnected === false;
+    } catch { return false; }
+  };
+  const remountProofError = current => {
+    if (Date.now() >= until || !unchanged() || current.trigger !== claudeRemountTrigger
+      || current.triggerScan.length >= 256 || current.triggerCount !== 1 || current.triggerCandidates.length !== 1 || current.triggerCandidates[0] !== current.trigger
+      || current.duplicate || current.conflicting || current.indicatorInvalid || current.selectionAmbiguous || current.navigationAmbiguous
+      || current.physicalMenus.length || current.allMenus.length || !current.enabled(current.trigger)
+      || ![null, 'false'].includes(current.trigger.getAttribute('aria-expanded'))
+      || ![null, 'closed'].includes(current.trigger.getAttribute('data-state')) || !current.evidence) return 'model_unverified';
+    return websiteModelChoiceEqual(current.evidence.selected, expected) ? null : 'model_mismatch';
+  };
   const until = recovery ? recovery.until : Date.now() + 1_800;
   let primaryOpened = false, secondaryOpened = false, closeAttempted = false, trigger = null, captured = null;
   const ownedMenus = new Set(), popupOwners = new Set(), ownedMenuIDs = new Set(), popupOwnerIDs = new Set();
@@ -1623,6 +2246,7 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
         selectionAttemptPresent: selectionPresent, selectionClicked: selectionPresent && selection.clicked === true,
         selectionSettled: selectionPresent && selection.settled === true, selectionCompleted: selectionPresent && selection.completed === true,
         recoveryEligible: !!recovery },
+      ...(remountObservation ? { remountObservation } : {}),
       readAttempt: { primaryOpened, secondaryOpened, closeAttempted, observedProof: !!captured,
         sameTrigger: !trigger || current.trigger === trigger, popupStillAssociated: !!current.topMenu } }),
       ...(captured ? { modelEvidence: captured } : {}) };
@@ -1668,6 +2292,9 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
   const closeOwned = async () => {
     const current = websiteModelPickerState(provider);
     if (!unchanged()) return false;
+    // This new read-only branch must never dismiss or open a popup, even if
+    // one appears after the replacement header was observed.
+    if (claudeRemountStarted) return remountProofError(current) === null;
     if (!trigger || current.trigger !== trigger || !current.physical(trigger) || trigger.disabled
       || trigger.getAttribute('aria-disabled') === 'true') return false;
     if (!current.topMenu) {
@@ -1686,9 +2313,96 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
     return waitForClosedPicker();
   };
   try {
+    // Claude can detach its model header after the acknowledged first Send.
+    // A bounded, action-free DOM wait may observe its replacement, but never
+    // promotes the remembered diagnostic node or a timer into model evidence.
+    if (provider === 'claude' && context?.scope === 'action_precheck'
+      && ['inspect', 'verifyModel'].includes(context.action) && typeof context.claudeSubmittedReadGuard === 'function'
+      && !state.trigger && state.triggerCount === 0 && state.triggerCandidates.length === 0
+      && state.triggerScan.length < 256 && detachedClaudeTrigger()) {
+      claudeRemountStarted = true;
+      readStage = 'trigger_remount_waiting';
+      let rejection = null;
+      // Losing absence eligibility is permanent for this read, but does not
+      // reject a later exact header with ordinary fresh positive proof.
+      let noOutputPendingEligible = input.allowClaudeModelObservationPending === true
+        && context.action === 'inspect' && typeof context.claudeNoOutputPending === 'function';
+      // Diagnostic rereads only. No extra observer, timer or action is installed,
+      // and these snapshots never supply model, ownership or completion proof.
+      const diagnosticStarted = Date.now();
+      let observations = 0;
+      const completionDiagnostic = () => {
+        try { return context.claudeRemountCompletionDiagnostic?.() ?? null; } catch { return null; }
+      };
+      const entry = completionDiagnostic();
+      const observeRemount = () => {
+        observations = Math.min(observations + 1, 1_000);
+        if (rejection) return true;
+        if (!unchanged()) { rejection = 'model_unverified'; return true; }
+        if (noOutputPendingEligible) {
+          try {
+            const absent = context.claudeNoOutputPending();
+            if (!absent || typeof absent.busy !== 'boolean') noOutputPendingEligible = false;
+          } catch { noOutputPendingEligible = false; }
+        }
+        const current = websiteModelPickerState(provider);
+        if (current.triggerScan.length >= 256 || current.duplicate || current.conflicting || current.indicatorInvalid || current.selectionAmbiguous
+          || current.navigationAmbiguous || current.physicalMenus.length || current.allMenus.length) {
+          rejection = 'model_unverified'; return true;
+        }
+        if (!current.trigger && current.triggerCount === 0 && current.triggerCandidates.length === 0) return false;
+        if (current.triggerCount !== 1 || current.triggerCandidates.length !== 1
+          || current.triggerCandidates[0] !== current.trigger || !current.enabled(current.trigger)
+          || ![null, 'false'].includes(current.trigger.getAttribute('aria-expanded'))
+          || ![null, 'closed'].includes(current.trigger.getAttribute('data-state')) || !current.evidence) {
+          rejection = 'model_unverified'; return true;
+        }
+        if (!websiteModelChoiceEqual(current.evidence.selected, expected)) {
+          rejection = 'model_mismatch'; return true;
+        }
+        // Identity is pinned only after this current node provides exact proof;
+        // the ordinary read below must independently observe it again.
+        if (claudeRemountTrigger && claudeRemountTrigger !== current.trigger) {
+          rejection = 'model_unverified'; return true;
+        }
+        claudeRemountTrigger = current.trigger;
+        return true;
+      };
+      const changed = await websiteModelWaitForChange(until, observeRemount, 'model_wait',
+        () => { rejection = 'model_unverified'; });
+      if (!changed || Date.now() >= until || !observeRemount() || rejection) {
+        // Only an expired absence observation may return no-output pending.
+        // The native permission and fresh semantic callback cannot convert a
+        // mismatch, clock error, popup or previously observed context loss.
+        if (changed === false && !rejection && !claudeRemountTrigger && noOutputPendingEligible
+          && input.allowClaudeModelObservationPending === true && context.scope === 'action_precheck'
+          && context.action === 'inspect' && typeof context.claudeNoOutputPending === 'function'
+          && unchanged() && detachedClaudeTrigger() && observeRemount() === false) {
+          let pending = null;
+          try { pending = context.claudeNoOutputPending(); } catch { /* Preserve failure. */ }
+          if (pending && typeof pending.busy === 'boolean' && !rejection
+            && unchanged() && detachedClaudeTrigger() && observeRemount() === false && !rejection && noOutputPendingEligible)
+            return { claudeModelObservationPending: true };
+        }
+        readStage = rejection ? 'trigger_remount_rejected' : 'trigger_remount_timeout';
+        try {
+          const elapsed = Date.now() - diagnosticStarted;
+          remountObservation = { kind: 'claude_remount_observation_v1',
+            elapsedMs: Number.isFinite(elapsed) ? Math.max(0, Math.min(10_000, Math.floor(elapsed))) : null,
+            observations, entry, terminal: completionDiagnostic(),
+            surface: websiteClaudeRemountSurfaceDiagnostic(context.claudeSubmittedReadGuard) };
+        } catch { /* Unavailable diagnostics cannot replace the original failure. */ }
+        return failure(rejection || 'model_unverified');
+      }
+      readStage = 'trigger_remount_observed';
+    }
     while (Date.now() < until) {
       if (!unchanged()) return recovery ? failure('model_unverified') : { error: 'document_changed', detail: 'owner_token' };
       state = websiteModelPickerState(provider);
+      if (claudeRemountStarted) {
+        const invalid = remountProofError(state);
+        if (invalid) return failure(invalid);
+      }
       trackOwnedMenus(state);
       websiteModelTrackReadUI(state);
       if (state.duplicate || state.conflicting || state.indicatorInvalid || state.selectionAmbiguous || state.navigationAmbiguous)
@@ -1699,9 +2413,16 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
         trigger = trigger || state.trigger;
         if (!(await closeOwned()) || !unchanged() || recovery && recovery.guard() !== true) return failure('model_unverified');
         const after = websiteModelPickerState(provider);
+        if (claudeRemountStarted) {
+          const invalid = remountProofError(after);
+          if (invalid) return failure(invalid);
+        }
         if (after.selected && !websiteModelChoiceEqual(after.selected, captured.selected)) return failure('model_mismatch');
-        return websiteModelChoiceEqual(captured.selected, expected) ? { modelEvidence: captured }
-          : { error: 'model_mismatch', modelEvidence: captured };
+        if (websiteModelChoiceEqual(captured.selected, expected)) {
+          websiteClaudeRememberModelTrigger(provider, trigger, owner, url);
+          return { modelEvidence: captured };
+        }
+        return { error: 'model_mismatch', modelEvidence: captured };
       }
       if (!state.trigger || state.triggerCount !== 1) return failure('model_unverified');
       if (trigger && trigger !== state.trigger) return failure('model_unverified');
@@ -1756,7 +2477,7 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
   } finally {
     // Close only a popup associated with this observation's exact controlled
     // trigger. This never selects a family or replays a failed editor operation.
-    if (unchanged() && trigger && !closeAttempted) {
+    if (!claudeRemountStarted && unchanged() && trigger && !closeAttempted) {
       const current = websiteModelPickerState(provider);
       if (current.topMenu && current.trigger === trigger && current.physical(trigger)
         && !trigger.disabled && trigger.getAttribute('aria-disabled') !== 'true') {
@@ -1774,7 +2495,18 @@ async function websiteClaudeCloseDiscoveryMenus(state, attempt, freshGuard) {
   const selected = state.selected, owned = [top, nested].filter(Boolean);
   const until = Date.now() + 1_800; // One shared deadline, including both distinct popups.
   const current = () => websiteModelPickerState('claude');
-  let invalidated = false;
+  let invalidated = false, catalog = null;
+  const controlsFor = (view, menu) => view.controls.filter(control =>
+    control.node.closest('[role="menu"], [role="listbox"], [role="dialog"]') === menu);
+  const eligibilityUnchanged = view => !catalog || catalog.every(snapshot => {
+    // A verified child dismissal may also close its parent. Only menus still
+    // physically present can contribute a later eligibility observation.
+    if (!view.physical(snapshot.menu)) return true;
+    if (!view.menus.includes(snapshot.menu)) return false;
+    const controls = controlsFor(view, snapshot.menu);
+    return controls.length === snapshot.controls.length && snapshot.controls.every(expected =>
+      controls.some(current => current.node === expected.node && websiteModelChoiceEqual(current.choice, expected.choice)));
+  });
   const unchanged = view => {
     const valid = window === window.top && document.URL === url
       && globalThis.__computaModelOwner === owner && globalThis.__computaModelFirstSubmitted !== true
@@ -1783,13 +2515,24 @@ async function websiteClaudeCloseDiscoveryMenus(state, attempt, freshGuard) {
       && view.trigger === trigger && view.triggerCount === 1 && view.enabled(trigger)
       && !view.duplicate && !view.conflicting && !view.indicatorInvalid && !view.selectionAmbiguous && !view.navigationAmbiguous
       && (selected ? websiteModelChoiceEqual(view.selected, selected) : view.selected == null)
-      && view.physicalMenus.every(menu => owned.includes(menu));
+      && view.physicalMenus.every(menu => owned.includes(menu)) && eligibilityUnchanged(view);
     // A wakeup can observe drift that is restored before the await resumes.
     // Its negative evidence remains decisive for this claimed close attempt.
     invalidated ||= !valid;
     return !invalidated;
   };
   try {
+    const initial = current();
+    if (Date.now() >= until || !unchanged(initial) || initial.topMenu !== top || initial.nestedMenu !== nested
+      || initial.secondary !== secondary || owned.some(menu => !initial.menus.includes(menu) || !initial.visible(menu))) return false;
+    // Earlier reads are provisional. Publish only this fresh, complete owned
+    // picker snapshot, then keep each still-open menu's eligibility unchanged
+    // throughout the existing guarded close. Never revive an accumulated row.
+    catalog = owned.map(menu => ({ menu, controls: controlsFor(initial, menu)
+      .map(control => ({ node: control.node, choice: { ...control.choice } })) }));
+    const choices = catalog.flatMap(snapshot => snapshot.controls.map(control => control.choice));
+    if (!choices.length || choices.length > 32 || choices.some((choice, index) =>
+      choices.some((other, otherIndex) => otherIndex !== index && websiteModelChoiceEqual(choice, other)))) return false;
     // A nested menu can consume Escape without closing its parent. Dismiss
     // each exact observed popup once, child first, with physical closure and
     // fresh context checks before the separate parent's dismissal.
@@ -1807,10 +2550,12 @@ async function websiteClaudeCloseDiscoveryMenus(state, attempt, freshGuard) {
       if (Date.now() >= until || !unchanged(after) || after.physical(menu)) return false;
     }
     const after = current();
-    return Date.now() < until && unchanged(after) && !after.topMenu && !after.nestedMenu
+    const closed = Date.now() < until && unchanged(after) && !after.topMenu && !after.nestedMenu
       && owned.every(menu => !after.physical(menu))
       && [null, 'false'].includes(trigger.getAttribute('aria-expanded'))
       && [null, 'closed'].includes(trigger.getAttribute('data-state'));
+    if (closed) attempt.choices = choices;
+    return closed;
   } catch { return false; }
 }
 async function websiteModelPickerAction(state, request, fresh, freshGuard = null) {
@@ -2477,8 +3222,10 @@ function chatGPTResponseReadSnapshot() {
   const scope = chatGPTAnswerCopyScope(answer, answers, chatGPTMessageRoots('user'), visible, enabled);
   const footer = scope.footer;
   const copies = footer ? scope.copies.map(node => ({ node, enabled: enabled(node) })) : [];
+  const extraction = modelResponseExtraction(answer);
   return { roots, answers, answer, footer, copies, association: scope.association || null,
-    text: modelResponseText(answer, modelResponseExtraction(answer)).slice(0, 220_001),
+    text: modelResponseText(answer, extraction).slice(0, 220_001),
+    literalDIL: extraction.flags?.selectedExtraction === 'literal_dil',
     busy: [...document.querySelectorAll('button[data-testid="stop-button"], button[aria-label="Stop streaming"], button[aria-label="Stop generating"], button[aria-label="Stop"]')].some(visible),
     users: chatGPTMessageRoots('user').map(root => {
       const body = chatGPTUserBody(root);
@@ -2489,6 +3236,10 @@ function chatGPTResponseSnapshotMatches(captured, observed) {
   const current = chatGPTResponseReadSnapshot();
   const same = (left, right) => left.length === right.length && left.every((value, index) => value === right[index]);
   return observed.busy === false && observed.answerComplete === true && observed.text === captured.text
+    // Matching fallback bytes cannot retain a literal source proof whose
+    // current source visibility/structure changed during the final picker await.
+    && (observed.completionEvidence?.codeStructure?.selectedExtraction !== 'literal_dil'
+      || captured.literalDIL === true && current.literalDIL === true)
     && observed.responseCount === captured.answers.length && observed.userCount === captured.users.length
     && captured.busy === false && current.busy === false && !!captured.answer && captured.answer.isConnected
     && !!captured.footer && captured.footer.isConnected && current.answer === captured.answer && current.footer === captured.footer
@@ -2548,10 +3299,26 @@ function chatGPTSingleJSONFence(text) {
   return value && !Array.isArray(value) && ['message', 'tool_calls'].includes(value.type) ? body : null;
 }
 
+// Raw envelopes are admitted only by the separately identified stream-run
+// renderer below. Parsing validates the entire source without rewriting bytes;
+// the native response codec still validates the envelope and allowed tools.
+function chatGPTWholeJSONEnvelope(text) {
+  if (typeof text !== 'string' || !text.length || text.length > 220_000
+    || new TextEncoder().encode(text).length > 220_000) return false;
+  let value;
+  try { value = JSON.parse(text); } catch { return false; }
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    && ['message', 'tool_calls'].includes(value.type);
+}
+
 // This is the observed text-only renderer shape, not a DIL/Markdown parser.
 // Every text leaf is accounted for; a hidden placeholder must be truly empty.
-function chatGPTLiteralDILText(answer, messageID) {
-  if (!answer?.isConnected || typeof messageID !== 'string') return null;
+function chatGPTLiteralDILDecline(report, reason, detail = null) {
+  try { if (report) report(reason, detail); } catch { /* Diagnostics cannot alter extraction. */ }
+  return null;
+}
+function chatGPTLiteralDILText(answer, messageID, report = null) {
+  if (!answer?.isConnected || typeof messageID !== 'string') return chatGPTLiteralDILDecline(report, 'text_context');
   const children = node => [...node.childNodes];
   const only = (node, expected) => {
     const actual = children(node);
@@ -2568,54 +3335,227 @@ function chatGPTLiteralDILText(answer, messageID) {
     return true;
   };
   for (let node = answer.parentElement, depth = 0; node; node = node.parentElement) {
-    if (++depth > 64 || !node.isConnected || node.closest('[inert], [aria-hidden="true"], [hidden]')) return null;
+    if (++depth > 64) return chatGPTLiteralDILDecline(report, 'text_ancestor_limit');
+    if (!node.isConnected || node.closest('[inert], [aria-hidden="true"], [hidden]')) return chatGPTLiteralDILDecline(report, 'text_ancestor_visibility');
     const style = getComputedStyle(node);
-    if (style.display === 'none' || style.visibility !== 'visible' || !(Number(style.opacity) > 0)) return null;
+    if (style.display === 'none' || style.visibility !== 'visible' || !(Number(style.opacity) > 0)) return chatGPTLiteralDILDecline(report, 'text_ancestor_visibility');
   }
   const sources = [...answer.querySelectorAll('[data-dil-source-message-id]')];
-  if (sources.length !== 1) return null;
+  if (sources.length !== 1) return chatGPTLiteralDILDecline(report, 'text_source_count');
   const source = sources[0], layout = source.children[0], hidden = layout?.children[0], portal = layout?.children[1];
   const dil = portal?.children[0], paragraph = dil?.children[0];
+  const run = source.childNodes.length === 2, tail = run ? source.childNodes[1] : null;
+  const classes = (node, fixed, prefixes) => {
+    if (node.classList.length !== fixed.length + prefixes.length) return false;
+    const names = [...node.classList];
+    return names.length === fixed.length + prefixes.length && fixed.every(name => names.includes(name))
+      && prefixes.every(prefix => names.some(name => name.startsWith(prefix)
+        && /^[A-Za-z0-9_-]{1,64}$/.test(name.slice(prefix.length))));
+  };
+  const customStyle = (node, pattern) => {
+    const value = node.getAttribute('style');
+    return typeof value === 'string' && value.length <= 128 && pattern.test(value);
+  };
+  const emptyContents = node => {
+    if (!node?.isConnected || node.tagName !== 'DIV' || node.namespaceURI !== 'http://www.w3.org/1999/xhtml'
+      || node.getAttribute('class') !== 'contents' || !attrs(node, ['class'])
+      || node.childNodes.length !== 0 || node.textContent !== ''
+      || node.closest('[inert], [aria-hidden="true"], [hidden]')) return false;
+    const style = getComputedStyle(node);
+    return style.display === 'contents' && style.visibility === 'visible' && style.opacity === '1'
+      && ['::before', '::after'].every(pseudo => ['none', 'normal', '""', "''"].includes(getComputedStyle(node, pseudo).content));
+  };
   if (source.tagName !== 'DIV' || source.getAttribute('data-dil-source-message-id') !== messageID
     || source.getAttribute('data-chatgpt-copy-reference') !== '0' || source.getAttribute('data-markdown-copy') !== 'contents'
     || !attrs(source, ['class', 'data-dil-source-message-id', 'data-chatgpt-copy-reference', 'data-markdown-copy'])
-    || !only(answer, [source]) || !layout || layout.tagName !== 'DIV' || !attrs(layout, ['class'])
-    || !only(source, [layout]) || !hidden || hidden.tagName !== 'DIV' || hidden.getAttribute('hidden') !== ''
+    || !only(answer, [source])) return chatGPTLiteralDILDecline(report, 'text_source_shape');
+  if (!layout || layout.tagName !== 'DIV' || !attrs(layout, ['class'])
+    || (run ? !only(source, [layout, tail]) || !emptyContents(tail)
+      || layout.getAttribute('class') !== '[--entity-prose-inset:0px]'
+      || !classes(source, ['my-4', 'first:mt-0', 'last:mb-0', 'empty:hidden'], [])
+      : !only(source, [layout]))) return chatGPTLiteralDILDecline(report, 'text_layout_shape');
+  if (!hidden || hidden.tagName !== 'DIV' || hidden.getAttribute('hidden') !== ''
     || !attrs(hidden, ['hidden']) || children(hidden).length !== 0 || hidden.textContent !== ''
-    || hidden.getClientRects().length !== 0 || getComputedStyle(hidden).display !== 'none'
-    || !portal || portal.tagName !== 'DIV' || !attrs(portal, ['class', 'data-theme', 'style'])
-    || !only(layout, [hidden, portal]) || !dil || dil.tagName !== 'DIV' || !only(portal, [dil])
-    || dil.getAttribute('data-dil-message-id') !== messageID || dil.getAttribute('data-d-inline-reveal') !== ''
-    || dil.getAttribute('data-d-direction') !== 'col' || dil.getAttribute('dir') !== 'auto'
-    || !attrs(dil, ['class', 'dir', 'data-d-inline-reveal', 'data-d-direction', 'data-dil-message-id'])
-    || !paragraph || paragraph.tagName !== 'P' || !only(dil, [paragraph])
+    || hidden.getClientRects().length !== 0 || getComputedStyle(hidden).display !== 'none') return chatGPTLiteralDILDecline(report, 'text_hidden_placeholder');
+  if (!portal || portal.tagName !== 'DIV' || !attrs(portal, ['class', 'data-theme', 'style'])
+    || !only(layout, [hidden, portal])
+    || run && !customStyle(portal, /^\s*--puik-portal-zoom:\s*1\s*;?\s*$/))
+    return chatGPTLiteralDILDecline(report, 'text_portal_shape');
+  if (!dil) return chatGPTLiteralDILDecline(report, 'text_dil_missing');
+  if (dil.tagName !== 'DIV') return chatGPTLiteralDILDecline(report, 'text_dil_tag');
+  if (!only(portal, [dil])) return chatGPTLiteralDILDecline(report, 'text_dil_children');
+  if (dil.getAttribute('data-dil-message-id') !== messageID) return chatGPTLiteralDILDecline(report, 'text_dil_message_id');
+  if (dil.getAttribute(run ? 'data-dil-response' : 'data-d-inline-reveal') !== '')
+    return chatGPTLiteralDILDecline(report, 'text_dil_marker');
+  if (dil.getAttribute('data-d-direction') !== 'col') return chatGPTLiteralDILDecline(report, 'text_dil_direction');
+  if (dil.getAttribute('dir') !== 'auto') return chatGPTLiteralDILDecline(report, 'text_dil_dir');
+  const dilAttributes = ['class', 'dir', run ? 'data-dil-response' : 'data-d-inline-reveal', 'data-d-direction', 'data-dil-message-id'];
+  if (!attrs(dil, dilAttributes)) {
+    // Distinguish only this exact extra empty marker; both shapes stay rejected.
+    const oppositeMarker = run ? 'data-d-inline-reveal' : 'data-dil-response';
+    try {
+      if (dil.attributes.length <= dilAttributes.length + 1 && dil.getAttribute(oppositeMarker) === ''
+        && attrs(dil, [...dilAttributes, oppositeMarker]))
+        return chatGPTLiteralDILDecline(report, 'text_dil_opposite_marker_empty');
+    } catch { /* Diagnostic failure retains the original attribute rejection. */ }
+    return chatGPTLiteralDILDecline(report, 'text_dil_attributes');
+  }
+  if (!paragraph || paragraph.tagName !== 'P' || !only(dil, [paragraph])
     || paragraph.getAttribute('data-d-text-flow') !== '' || paragraph.getAttribute('data-d-component') !== 'text'
-    || !attrs(paragraph, ['class', 'data-d-text-flow', 'data-d-component'])) return null;
+    || !attrs(paragraph, ['class', 'data-d-text-flow', 'data-d-component'])) return chatGPTLiteralDILDecline(report, 'text_paragraph_shape');
   const pair = (node, prefixes) => prefixes.every(prefix => [...node.classList]
     .some(name => name.startsWith(prefix) && /^[A-Za-z0-9_-]{1,64}$/.test(name.slice(prefix.length))));
-  if (!pair(portal, ['PortalBoundary-', 'Renderer-']) || !pair(dil, ['DilRenderer-', 'DilResponseRoot-'])) return null;
+  if (!pair(portal, ['PortalBoundary-', 'Renderer-']) || !pair(dil, ['DilRenderer-', 'DilResponseRoot-'])
+    || run && (!classes(portal, ['relative'], ['PortalBoundary-', 'Renderer-'])
+      || !classes(dil, [], ['DilRenderer-', 'DilResponseRoot-', 'Reveal-'])
+      || !classes(paragraph, [], ['TextBase-', 'Text-']))) return chatGPTLiteralDILDecline(report, 'text_renderer_classes');
+  // A separate plaintext profile accounts for every original direct Text
+  // child. Reading data preserves literal whitespace without rendered-text
+  // reconstruction; neither an element nor even an empty comment is ignored.
+  const directCount = paragraph.childNodes.length;
+  if (directCount >= 1 && directCount <= 128) {
+    const nodes = children(paragraph);
+    if (nodes.length !== directCount) return chatGPTLiteralDILDecline(report, 'text_span_count');
+    if (nodes.every(node => node.nodeType === 3)) {
+      if (paragraph.ownerDocument !== document) return chatGPTLiteralDILDecline(report, 'text_context');
+      if (![answer, source, layout, portal, dil, paragraph].every(physical))
+        return chatGPTLiteralDILDecline(report, 'text_physical');
+      let text = '';
+      const fragments = [];
+      for (const node of nodes) {
+        if (!node.isConnected || node.parentNode !== paragraph || node.parentElement !== paragraph
+          || node.ownerDocument !== document)
+          return chatGPTLiteralDILDecline(report, 'text_span_shape');
+        const fragment = node.data;
+        if (typeof fragment !== 'string') return chatGPTLiteralDILDecline(report, 'text_span_shape');
+        if (fragment.length > 220_000 - text.length) return chatGPTLiteralDILDecline(report, 'text_size');
+        fragments.push(fragment); text += fragment;
+      }
+      if (!text.length) return chatGPTLiteralDILDecline(report, 'text_span_shape');
+      // Lone UTF-16 surrogates have no byte-exact UTF-8 representation.
+      for (let index = 0; index < text.length; index++) {
+        const unit = text.charCodeAt(index);
+        if (unit >= 0xD800 && unit <= 0xDBFF) {
+          const next = text.charCodeAt(++index);
+          if (!(next >= 0xDC00 && next <= 0xDFFF)) return chatGPTLiteralDILDecline(report, 'text_context');
+        } else if (unit >= 0xDC00 && unit <= 0xDFFF) return chatGPTLiteralDILDecline(report, 'text_context');
+      }
+      if (new TextEncoder().encode(text).length > 220_000) return chatGPTLiteralDILDecline(report, 'text_size');
+      if (text !== paragraph.textContent || text !== source.textContent || text !== answer.textContent)
+        return chatGPTLiteralDILDecline(report, 'text_mismatch');
+      const current = children(paragraph);
+      if (current.length !== nodes.length || current.some((node, index) => node !== nodes[index]
+        || !node.isConnected || node.parentNode !== paragraph || node.parentElement !== paragraph
+        || node.ownerDocument !== document || node.data !== fragments[index]))
+        return chatGPTLiteralDILDecline(report, 'text_mismatch');
+      return { text, displayed: null, directText: true };
+    }
+  }
+  // The observed run profile has one text leaf; do not inventory unknown siblings.
+  if (run && paragraph.childNodes.length !== 1) return chatGPTLiteralDILDecline(report, 'text_span_count');
   const spans = children(paragraph);
-  if (!spans.length || spans.length > 128 || ![answer, source, layout, portal, dil, paragraph].every(physical)) return null;
+  if (!spans.length || spans.length > 128) return chatGPTLiteralDILDecline(report, 'text_span_count');
+  if (![answer, source, layout, portal, dil, paragraph].every(physical)) return chatGPTLiteralDILDecline(report, 'text_physical');
+  if (run) {
+    const span = spans[0];
+    if (spans.length !== 1 || span.nodeType !== 1 || span.tagName !== 'SPAN' || !physical(span)
+      || span.getAttribute('data-d-stream-run') !== '' || span.getAttribute('data-d-text-flow') !== 'run'
+      || !attrs(span, ['data-d-stream-run', 'data-d-text-flow', 'style'])
+      || !customStyle(span, /^\s*--d-stream-ink:\s*rgb\(\s*13\s*,\s*13\s*,\s*13\s*\)\s*;?\s*$/)
+      || span.childNodes.length !== 1 || span.childNodes[0].nodeType !== 3 || !span.textContent.length)
+      return chatGPTLiteralDILDecline(report, 'text_span_shape');
+    const text = span.textContent;
+    if (text.length > 220_000) return chatGPTLiteralDILDecline(report, 'text_size');
+    if (text !== answer.textContent || text !== source.textContent || text !== paragraph.textContent)
+      return chatGPTLiteralDILDecline(report, 'text_mismatch');
+    return { text, displayed: null, run: true };
+  }
   let text = '', displayed = '';
   for (const span of spans) {
     if (span.nodeType !== 1 || span.tagName !== 'SPAN' || !physical(span)
       || span.getAttribute('data-d-text-flow') !== 'word' || span.getAttribute('data-d-stream-word') !== ''
       || !attrs(span, ['data-d-text-flow', 'data-d-stream-word']) || span.childElementCount !== 0
-      || children(span).some(node => node.nodeType !== 3) || !span.textContent.length) return null;
+      || children(span).some(node => node.nodeType !== 3) || !span.textContent.length) return chatGPTLiteralDILDecline(report, 'text_span_shape');
     text += span.textContent;
     // Only the terminal line break of each observed word span is a presentation
     // separator. Internal whitespace, JSON escapes and string bytes stay exact.
     displayed += span.textContent.replace(/\r?\n$/, ' ');
-    if (text.length > 220_000) return null;
+    if (text.length > 220_000) return chatGPTLiteralDILDecline(report, 'text_size');
   }
   if (displayed.endsWith(' ')) displayed = displayed.slice(0, -1);
-  if (text !== answer.textContent || text !== source.textContent || text !== paragraph.textContent) return null;
+  if (text !== answer.textContent || text !== source.textContent || text !== paragraph.textContent) return chatGPTLiteralDILDecline(report, 'text_mismatch');
   return { text, displayed };
+}
+
+// Read exact JSON bytes only from the two fully accounted observed DIL
+// text shapes. These DOM IDs establish structural consistency, never native
+// submission/model/response authority. The ordinary completion proof still runs.
+function chatGPTLiteralDILResponse(answer, expectedMessageID = null, report = null) {
+  const sources = answer ? [...answer.querySelectorAll('[data-dil-source-message-id]')] : [];
+  if (sources.length !== 1) return chatGPTLiteralDILDecline(report, 'response_source_count');
+  const id = sources[0].getAttribute('data-dil-source-message-id');
+  if (typeof id !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(id)
+    || expectedMessageID !== null && id !== expectedMessageID) return chatGPTLiteralDILDecline(report, 'response_source_id');
+  let scope = null;
+  for (let node = answer, depth = 0; node && depth < 5; depth++, node = node.parentElement)
+    if (node.getAttribute('data-chatgpt-selection-message-id') !== null) { scope = node; break; }
+  if (!scope?.isConnected || scope.getAttribute('data-chatgpt-selection-message-id') !== id) return chatGPTLiteralDILDecline(report, 'response_selection_scope');
+  const assistantSelector = '[data-message-author-role="assistant"], [data-markdown-text-style="assistant-message"], article[data-turn="assistant"]';
+  const candidates = [...(scope.matches(assistantSelector) ? [scope] : []), ...scope.querySelectorAll(assistantSelector)];
+  if (candidates.length > 64) return chatGPTLiteralDILDecline(report, 'response_assistant_limit');
+  const roots = candidates.filter(node => !candidates.some(other => other !== node && other.contains(node)));
+  if (roots.length !== 1 || !(roots[0] === answer || roots[0].contains(answer))
+    || scope.querySelector('[data-message-author-role="user"], [data-markdown-text-style="user-message"], article[data-turn="user"], [data-user-message-bubble]')) return chatGPTLiteralDILDecline(report, 'response_assistant_scope');
+  const literal = chatGPTLiteralDILText(answer, id, report);
+  if (!literal) return null;
+  if (chatGPTSingleJSONFence(literal.text) === null && !((literal.run || literal.directText === true) && chatGPTWholeJSONEnvelope(literal.text)))
+    return chatGPTLiteralDILDecline(report, 'response_fence');
+  const plainFailure = (node, outerAncestor = false) => {
+    if (node.namespaceURI !== 'http://www.w3.org/1999/xhtml') return 'namespace';
+    const style = getComputedStyle(node);
+    if (style.textTransform !== 'none') return 'text_transform';
+    if (style.webkitTextSecurity !== 'none') return 'text_security';
+    if (style.contentVisibility === 'hidden') return 'content_visibility';
+    if (style.filter !== 'none') return 'filter';
+    if (!outerAncestor && style.clipPath !== 'none') return 'clip_path';
+    return null;
+  };
+  // The literal helper has already bounded and accounted for this whole tree.
+  // Its one truly empty hidden placeholder supplies no source bytes.
+  if ([answer, ...answer.querySelectorAll('*')].some(node => !node.hasAttribute('hidden') && plainFailure(node) !== null)) return chatGPTLiteralDILDecline(report, 'response_masking');
+  // Clipping outside the fully accounted answer changes painting, not its
+  // authored text bytes. Ordinary offscreen/scrolling source reads retain
+  // their existing semantics; this is not a claim that every pixel is visible.
+  // Source-local clipping and all other visibility/identity checks remain.
+  for (let node = answer, depth = 0; node; node = node.parentElement) {
+    if (++depth > 64) return chatGPTLiteralDILDecline(report, 'response_ancestor_limit');
+    const property = plainFailure(node, node !== answer);
+    if (property !== null) {
+      // First failed predicate only; no computed value or arbitrary tag leaves this read.
+      let detail = null;
+      try {
+        const tag = String(node.tagName).toLowerCase();
+        detail = { depth, tag: ['div', 'span', 'article', 'section', 'main', 'body', 'html', 'form', 'aside'].includes(tag) ? tag : 'other', property };
+      } catch { /* Keep the original rejection if diagnostics are unavailable. */ }
+      return chatGPTLiteralDILDecline(report, 'response_ancestor_masking', detail);
+    }
+    const selectionID = node.getAttribute('data-chatgpt-selection-message-id');
+    if (selectionID !== null && selectionID !== id) return chatGPTLiteralDILDecline(report, 'response_selection_id');
+  }
+  return literal.text;
 }
 
 function chatGPTTerminalResponseTextRelation(source, answer, extraction, messageID) {
   if (typeof source !== 'string' || source.length > 220_000 || new TextEncoder().encode(source).length > 220_000
     || typeof extraction?.text !== 'string') return null;
+  if (extraction.flags?.selectedExtraction === 'literal_dil') {
+    // Equal bytes cannot substitute for the independent terminal message-ID join.
+    const literal = chatGPTLiteralDILResponse(answer, messageID);
+    if (literal === null || literal !== extraction.text) return null;
+    const fenced = chatGPTSingleJSONFence(literal) !== null;
+    if (source === literal) return fenced ? 'dil_literal_json_fence' : 'exact';
+    return fenced && source === '<escape>' + literal + '</escape>' ? 'dil_escaped_literal_json_fence' : null;
+  }
   if (source === extraction.text) return 'exact';
   const fence = chatGPTSingleJSONFence(source);
   if (fence !== null && extraction.flags?.selectedExtraction === 'raw_code'
@@ -2925,7 +3865,17 @@ function modelResponseExtraction(answer) {
   const codes = [...answer.querySelectorAll('code')];
   if (codes.length === 1) code = codes[0];
   if (blocks.length > 1) return fallback('multiple_pre');
-  if (codes.length !== 1) return fallback(codes.length ? 'multiple_code' : 'missing_code');
+  if (codes.length !== 1) {
+    if (codes.length === 0 && blocks.length === 0) {
+      const literal = chatGPTLiteralDILResponse(answer, null, (reason, detail) => {
+        flags.literalDILDecline = reason;
+        if (detail !== null) flags.literalDILAncestorMasking = detail;
+      });
+      if (literal !== null) return { text: literal, blocks, code, flags: { ...flags,
+        selectedExtraction: 'literal_dil', extractionReason: 'accepted_literal_dil' } };
+    }
+    return fallback(codes.length ? 'multiple_code' : 'missing_code');
+  }
   const raw = code.textContent || '';
   if (blocks.length === 1 && !blocks[0].contains(code)) return fallback('outside_content');
   const noPre = blocks.length === 0;
@@ -3383,6 +4333,29 @@ function chatGPTSubmissionBodyText(body, expected = chatGPTSubmissionExpectedBod
     return reconstructed;
   } catch { return null; }
 }
+// WebKit appends one layout LF to a lone paragraph's innerText. Accept that
+// representation only if the entire literal DOM separately matches the prompt.
+function chatGPTExactSubmitDraft(editor, rendered, prompt) {
+  if (typeof prompt !== 'string' || typeof rendered !== 'string') return false;
+  if (rendered === prompt) return true;
+  if (rendered !== prompt + '\n' || !editor?.isConnected
+    || editor.getAttribute('contenteditable') !== 'true' || !editor.classList.contains('ProseMirror')
+    || editor.childNodes.length !== 1) return false;
+  const paragraph = editor.firstChild;
+  if (paragraph?.tagName !== 'P' || paragraph.attributes.length || paragraph.childNodes.length > 4096) return false;
+  let offset = 0;
+  for (const node of paragraph.childNodes) {
+    let text;
+    if (node.nodeType === 3) text = node.data;
+    else if (node.tagName === 'BR' && !node.attributes.length && !node.childNodes.length) text = '\n';
+    else if (node.tagName === 'SPAN' && node.getAttributeNames().every(name => name.startsWith('data-'))
+      && node.childNodes.length === 1 && node.firstChild.nodeType === 3) text = node.firstChild.data;
+    else return false;
+    if (!prompt.startsWith(text, offset)) return false;
+    offset += text.length;
+  }
+  return offset === prompt.length;
+}
 function chatGPTSubmissionPins(record) {
   const pins = input.expectedSubmissionProofs;
   if (!Array.isArray(pins) || pins.length > 2) return false;
@@ -3803,23 +4776,41 @@ function chatGPTProductModeStateUnprofiled() {
   const forms = [...document.querySelectorAll('form[data-chatgpt-composer], form[data-thread-find-composer]')];
   const activeForms = forms.length <= 64 ? forms.filter(node => physical(node) && !node.closest(boundary)) : [];
   const markedForm = activeForms.length === 1 ? activeForms[0] : null;
-  const markerShape = node => !!node && node.tagName?.toLowerCase() === 'form'
-    && node.getAttribute('data-chatgpt-composer') === '' && node.getAttribute('data-thread-find-composer') === 'true'
-    && ['home', 'thread'].includes(node.getAttribute('data-composer-placement'));
+  const formIssue = node => {
+    if (!node || node.tagName?.toLowerCase() !== 'form') return 'form';
+    if (node.getAttribute('data-chatgpt-composer') !== '') return 'chat_marker';
+    if (node.getAttribute('data-thread-find-composer') !== 'true') return 'thread_marker';
+    if (!['home', 'thread'].includes(node.getAttribute('data-composer-placement'))) return 'placement';
+    return null;
+  };
+  const markerShape = node => formIssue(node) === null;
   const editorCandidates = markedForm ? [...document.querySelectorAll('[contenteditable="true"][role="textbox"][aria-label="Ask ChatGPT"]')] : [];
   const triggerCandidates = markedForm ? [...document.querySelectorAll('button[aria-label="Select ChatGPT model"]')] : [];
   const editors = editorCandidates.length <= 64 ? editorCandidates.filter(node => physical(node) && !node.closest(boundary)) : [];
   const triggers = triggerCandidates.length <= 64 ? triggerCandidates.filter(node => physical(node) && !node.closest(boundary)) : [];
   const markedEditor = editors.length === 1 && editors[0].closest('form') === markedForm ? editors[0] : null;
   const markedTrigger = triggers.length === 1 && triggers[0].closest('form') === markedForm ? triggers[0] : null;
-  const markerRecognized = markerShape(markedForm) && visible(markedForm) && visible(markedEditor) && visible(markedTrigger);
+  const firstFormIssue = formIssue(markedForm);
+  const markerRecognized = firstFormIssue === null && visible(markedForm) && visible(markedEditor) && visible(markedTrigger);
+  const markerInputs = () => {
+    if (groups.length || !markedForm || markerRecognized) return {};
+    const control = (raw, physical, owned) => {
+      if (!raw.length) return 'no_exact_match';
+      if (raw.length > 64) return 'overflow';
+      if (!physical.length) return 'no_physical_match';
+      if (physical.length > 1) return 'multiple';
+      return owned ? 'owned' : 'outside_form';
+    };
+    return { markerInputs: { form: firstFormIssue || 'matches',
+      editor: control(editorCandidates, editors, markedEditor), picker: control(triggerCandidates, triggers, markedTrigger) } };
+  };
   const markerReady = markerRecognized && enabled(markedEditor) && enabled(markedTrigger);
   return { group, groups, chat: chat[0] || null, work: work[0] || null, recognized, chatSelected, workSelected,
     ready: recognized && enabled(chat[0]) && enabled(work[0]),
     contradictory: groups.length > 1 || !!group && (!recognized || workSelected === true), physical, visible, enabled,
     outside: node => !!node && node.nodeType === 1 && !node.closest(boundary),
     namedGroup: node => !!node && node.nodeType === 1 && !node.closest(boundary) && labelledGroup(node),
-    labelledGroup, markedForm, markedEditor, markedTrigger, markerRecognized, markerReady, markerShape,
+    labelledGroup, markedForm, markedEditor, markedTrigger, markerRecognized, markerReady, markerShape, markerInputs,
     markerActiveForms: Math.min(activeForms.length, 16),
     markerCandidateOverflow: forms.length > 64 || editorCandidates.length > 64 || triggerCandidates.length > 64,
     modeControl: (node, trackedGroup = false) => !!node && node.nodeType === 1 && (trackedGroup || !node.closest(boundary)) && label(node) === 'Work'
@@ -3835,6 +4826,7 @@ function chatGPTProductModeDiagnostic(state) {
   return { kind: 'chatgpt_product_mode_structure', groupCount: Math.min(state.groups.length, 16),
     groupVisible: state.visible(state.group), recognized: state.recognized, contradictory: state.contradictory,
     chat: control(state.chat), work: control(state.work),
+    ...state.markerInputs(),
     markerDiagnostic: { version: 1, activeForms: state.markerActiveForms, candidateOverflow: state.markerCandidateOverflow,
       recognized: state.markerRecognized, enabled: state.markerReady,
       proofSource: ['composer_mode_control', 'chat_composer_marker'].includes(globalThis.__computaChatProductMode?.source)
@@ -3926,7 +4918,7 @@ function chatGPTObserveProductMutations(proof, state, records) {
     return [];
   };
   const charge = () => ++visits <= limits.visits || (unavailable('mutation_scan_overflow'), false);
-  const subtrees = new Map(), candidateLists = new Map(), groupNames = new Map();
+  const subtrees = new Map(), groupNames = new Map();
   const ancestry = new Map(), containments = new Map();
   const contains = (ancestor, node) => {
     if (!ancestor || !node) return false;
@@ -3945,42 +4937,72 @@ function chatGPTObserveProductMutations(proof, state, records) {
     const result = ancestry.get(node).has(ancestor), values = cached || new Map();
     values.set(node, result); containments.set(ancestor, values); return result;
   };
-  // Inspect actual nodes before considering semantic candidates. No selector
-  // result or added/removed list may silently discard an unexamined tail.
-  const elements = root => {
+  // A synchronous mutation batch has a fixed DOM. Index the actual children
+  // once so a record target and its added subtree can share the same scan.
+  // Removed subtrees outside the document get their own bounded inventory.
+  const control = node => node?.nodeType === 1 && (node.tagName?.toLowerCase() === 'button'
+    || ['button', 'radio', 'switch', 'checkbox'].includes(node.getAttribute('role')));
+  const inventory = root => {
+    if (analysisFailure) return null;
     if (subtrees.has(root)) return subtrees.get(root);
-    const result = [], stack = [{ node: root, depth: 0 }], seen = new Set();
+    const lists = { elements: [], labels: [], controls: [] };
+    const stack = [{ node: root, depth: 0 }], open = [], seen = new Set();
+    const offsets = () => ({ elements: lists.elements.length, labels: lists.labels.length, controls: lists.controls.length });
+    const close = () => {
+      const item = open.pop();
+      item.end = offsets();
+      subtrees.set(item.node, item);
+    };
     try {
       while (stack.length) {
         const { node, depth } = stack.pop();
-        if (!charge()) return [];
-        if (!node || seen.has(node) || ![1, 3, 8, 9, 11].includes(node.nodeType)) return unavailable('mutation_uninspectable', 'node_shape', node);
-        if (depth > limits.depth) return unavailable('mutation_scan_overflow');
+        while (open.length > depth) close();
+        if (!charge()) return null;
+        if (!node || seen.has(node) || ![1, 3, 8, 9, 11].includes(node.nodeType)) {
+          unavailable('mutation_uninspectable', 'node_shape', node); return null;
+        }
+        if (depth > limits.depth) { unavailable('mutation_scan_overflow'); return null; }
         seen.add(node);
-        if (node.nodeType === 1) result.push(node);
+        open.push({ node, lists, start: offsets() });
+        if (node.nodeType === 1) {
+          lists.elements.push(node);
+          if (node.getAttribute('aria-label') != null || node.getAttribute('aria-labelledby') != null) lists.labels.push(node);
+          if (control(node)) lists.controls.push(node);
+        }
         if (![1, 9, 11].includes(node.nodeType)) continue;
         const children = node.childNodes;
-        if (!children || !Number.isInteger(children.length) || children.length < 0) return unavailable('mutation_uninspectable', 'children_shape', node);
-        if (children.length > limits.children || stack.length + children.length > limits.visits - visits)
-          return unavailable('mutation_scan_overflow');
+        if (!children || !Number.isInteger(children.length) || children.length < 0) {
+          unavailable('mutation_uninspectable', 'children_shape', node); return null;
+        }
+        if (children.length > limits.children || stack.length + children.length > limits.visits - visits) {
+          unavailable('mutation_scan_overflow'); return null;
+        }
         for (let index = children.length - 1; index >= 0; index--) stack.push({ node: children[index], depth: depth + 1 });
       }
-      subtrees.set(root, result); return result;
-    } catch { return unavailable('mutation_uninspectable', 'read_exception', root); }
+      while (open.length) close();
+      return subtrees.get(root);
+    } catch { unavailable('mutation_uninspectable', 'read_exception', root); return null; }
   };
-  const control = node => node?.nodeType === 1 && (node.tagName?.toLowerCase() === 'button'
-    || ['button', 'radio', 'switch', 'checkbox'].includes(node.getAttribute('role')));
   const candidates = (root, kind) => {
-    const cached = candidateLists.get(root) || {};
-    if (cached[kind]) return cached[kind];
-    const result = [];
-    for (const node of elements(root)) {
-      if (!charge()) return [];
-      if (kind === 'controls' ? control(node) : node.getAttribute('aria-label') != null || node.getAttribute('aria-labelledby') != null)
-        result.push(node);
-    }
-    cached[kind] = result; candidateLists.set(root, cached); return result;
+    const range = inventory(root);
+    if (!range) return [];
+    const list = range.lists[kind], start = range.start[kind], end = range.end[kind];
+    if (start === end) return [];
+    if (start === 0 && end === list.length) return list;
+    // Account for each partial range we materialize, including repeated
+    // historical edges. A cached physical scan cannot erase the work limit.
+    visits += end - start;
+    if (visits > limits.visits) return unavailable('mutation_scan_overflow');
+    return list.slice(start, end);
   };
+  const hasCandidate = (root, kind, match) => {
+    for (const node of candidates(root, kind)) {
+      if (!charge()) return false;
+      if (match(node)) return true;
+    }
+    return false;
+  };
+  const elements = root => candidates(root, 'elements');
   let labelInventory = null;
   const labelData = () => {
     if (labelInventory) return labelInventory;
@@ -4021,7 +5043,7 @@ function chatGPTObserveProductMutations(proof, state, records) {
     || contains(control, node) || contains(node, control));
   const containsGroup = node => {
     if (node?.nodeType !== 1) return false;
-    return candidates(node, 'labels').some(labelledGroup) || !!analysisFailure;
+    return hasCandidate(node, 'labels', labelledGroup) || !!analysisFailure;
   };
   const messageOnly = record => {
     // State transitions stay relevant until structural records establish which
@@ -4088,12 +5110,13 @@ function chatGPTObserveProductMutations(proof, state, records) {
     return false;
   };
   const presentationBatchSafe = () => {
+    if (records.length > 4_096 || !records.some(presentationAttribute)) return false;
     // A Chat marker lives on the editor's enclosing form. That relationship
     // does not make the exact editor's class/style presentation product state;
     // all marker, ancestry and editor-identity mutations stay relevant below.
     const presentationProductNodes = proof.source === 'chat_composer_marker' && state.markerRecognized
       && composer === state.markedEditor ? productNodes.filter(node => node !== state.markedForm && node !== composer) : productNodes;
-    if (!composer || records.length > 4_096 || composer.closest(messageBoundary)
+    if (!composer || composer.closest(messageBoundary)
       || presentationProductNodes.some(node => intersects(node, composer)) || containsGroup(composer)
       || candidates(composer, 'controls').length
       || editorCanAffectReferencedLabel()) return false;
@@ -4242,7 +5265,7 @@ function chatGPTObserveProductMutations(proof, state, records) {
     const ownedTarget = groups.has(record.target) || [...groups].some(group => contains(group, record.target));
     if (record.addedNodes.length + record.removedNodes.length > limits.children) { unavailable('mutation_scan_overflow'); break; }
     for (const node of [...record.addedNodes, ...record.removedNodes]) {
-      elements(node);
+      if (!charge() || !inventory(node)) break;
       register(node, allowNewGroups, true);
       if (ownedTarget) for (const descendant of elements(node)) {
         if (!charge()) break;
@@ -4275,7 +5298,7 @@ function chatGPTObserveProductMutations(proof, state, records) {
   const potentialReferrer = node => {
     if (productReferrers.has(node)) return productReferrers.get(node);
     const potential = potentialLabelHistory || groups.has(node) || ownedControls.has(node)
-      || candidates(node, 'controls').some(candidate => candidate !== node && ['Chat', 'Work'].includes(controlName(candidate)));
+      || hasCandidate(node, 'controls', candidate => candidate !== node && ['Chat', 'Work'].includes(controlName(candidate)));
     productReferrers.set(node, potential); return potential;
   };
   let productReferenceData = null;
@@ -5212,6 +6235,58 @@ function chatGPTFirstInstantReadinessFinalGuard(request) {
     && request.prepareFirstInstantInInsert !== true && request.deferModelVerification !== true
     && chatGPTFreshInstantInsert({ ...request, action: 'insert', prepareFirstInstantInInsert: true });
 }
+let chatGPTFirstChatReadinessSnapshot = null;
+function chatGPTFirstChatReadinessFinalGuard(request) {
+  // The other current Chat powers share only this read-only duplicate-proof
+  // consolidation. Instant insertion and prepared-verification grants stay separate.
+  const state = globalThis.__computaChatSubmissionState, pending = state?.pending;
+  return request.firstChatReadinessFinalGuardOnly === true && request.action === 'sendReady'
+    && request.firstInstantReadinessFinalGuardOnly !== true
+    && request.prepareFirstInstantInInsert !== true && request.deferModelVerification !== true
+    && websiteModelChoiceValid(request.expectedModelChoice)
+    && [['chat/latest/medium', 'Medium'], ['chat/latest/high', 'High'],
+      ['chat/latest/extra-high', 'Extra High'], ['chat/latest/pro', 'Pro']]
+      .some(([key, label]) => request.expectedModelChoice.key === key && request.expectedModelChoice.label === label)
+    && request.submissionSequence === 1 && request.submissionMarker === request.expectedFirstUserMarker
+    && Array.isArray(request.expectedUserCounts) && request.expectedUserCounts.length === 1 && request.expectedUserCounts[0] === 0
+    && Array.isArray(request.expectedSubmissionProofs) && request.expectedSubmissionProofs.length === 0
+    && request.expectedFirstUserFingerprint == null && request.expectedConversation == null
+    && window === window.top && location.origin === 'https://chatgpt.com'
+    && document.URL === request.expectedURL && new URL(document.URL).pathname === '/'
+    && globalThis.__computaModelOwner === request.ownerToken
+    && websiteChatInvocationLease != null && globalThis.__computaChatActiveInvocation === websiteChatInvocationLease
+    && globalThis.__computaModelFirstSubmitted !== true && !globalThis.__computaModelFirstProof
+    && chatGPTMessageRoots('user').length === 0 && chatGPTMessageRoots('assistant').length === 0
+    && state && chatGPTSubmissionContext(state) && state.lastVerified == null
+    && pending?.sequence === 1 && pending.marker === request.submissionMarker && pending.phase === 'prepared'
+    && pending.root === null && pending.body === null && !pending.expansionAttempted
+    && pending.canonical === chatGPTSubmissionCanonical(request.prompt);
+}
+function chatGPTFirstChatReadinessResult(observed) {
+  if (input.firstChatReadinessFinalGuardOnly !== true || observed.error) return observed;
+  const saved = chatGPTFirstChatReadinessSnapshot, state = globalThis.__computaChatSubmissionState;
+  if (!saved || !chatGPTFirstChatReadinessFinalGuard(input) || saved.document !== document
+    || state !== saved.state || state.pending !== saved.record
+    || saved.record.canonical !== saved.canonical || saved.record.fingerprint !== saved.fingerprint)
+    return { error: 'not_fresh' };
+  const visible = node => !!node && node.isConnected && node.getClientRects().length > 0
+    && getComputedStyle(node).visibility !== 'hidden' && !node.closest('[inert], [aria-hidden="true"]');
+  const editors = [...new Set(document.querySelectorAll('#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, '
+    + '#prompt-textarea [contenteditable="true"], [contenteditable="true"][aria-label="Ask ChatGPT"], textarea[data-testid="prompt-textarea"]'))].filter(visible);
+  const composer = saved.composer;
+  if (editors.length !== 1 || editors[0] !== composer || composer.disabled || composer.getAttribute('aria-disabled') === 'true')
+    return { error: 'composer_unavailable' };
+  const value = composer instanceof HTMLTextAreaElement ? composer.value : composer.innerText;
+  if (value !== saved.value || !chatGPTExactSubmitDraft(composer, value, input.prompt))
+    return { error: 'prompt_not_inserted' };
+  if (observed.sendReady === true) {
+    const sends = [...new Set(document.querySelectorAll('button[data-testid="send-button"], button[aria-label="Send prompt"], '
+      + 'button[aria-label="Send message"], button[aria-label="Send"]'))].filter(visible);
+    if (sends.length !== 1 || sends[0] !== saved.send || saved.send.disabled || saved.send.getAttribute('aria-disabled') === 'true')
+      return { ...observed, sendReady: false };
+  }
+  return observed;
+}
 function chatGPTProcessSignalRecords(signal, records) {
   const observerStarted = chatGPTSyncWorkStart();
   try {
@@ -5272,17 +6347,21 @@ async function providerPageAction(input, readLineageFingerprint = null) {
   }
   const focusFirstInstantInInsert = input.prepareFirstInstantInInsert === true;
   if (focusFirstInstantInInsert && !chatGPTFreshInstantInsert(input)) return { error: 'not_fresh' };
-  const readinessFinalGuardOnly = input.firstInstantReadinessFinalGuardOnly === true;
-  if (readinessFinalGuardOnly && !chatGPTFirstInstantReadinessFinalGuard(input)) return { error: 'not_fresh' };
+  const instantReadinessFinalGuardOnly = input.firstInstantReadinessFinalGuardOnly === true;
+  if (instantReadinessFinalGuardOnly && !chatGPTFirstInstantReadinessFinalGuard(input)) return { error: 'not_fresh' };
+  const chatReadinessFinalGuardOnly = input.firstChatReadinessFinalGuardOnly === true;
+  if (chatReadinessFinalGuardOnly && !chatGPTFirstChatReadinessFinalGuard(input)) return { error: 'not_fresh' };
+  const readinessFinalGuardOnly = instantReadinessFinalGuardOnly || chatReadinessFinalGuardOnly;
   chatGPTPreparationRecord('providerEntryMs', entryStarted);
-  let setupStarted = null;
+  let setupStarted = null, recoveredSubmitSend = null;
   // Focus-only preparation, model-only verification and scoped read-only
   // first-Instant readiness need the full final proof. Mutating editor and
   // response actions retain their proof before and after the action.
   if (!['stop', 'prepare', 'verifyModel'].includes(input.action) && input.expectedModelChoice != null
     && !readinessFinalGuardOnly) {
-    const proof = await websiteModelReadEvidence('chatgpt', input.expectedModelChoice, null,
-      { scope: 'action_precheck', action: input.action });
+    const context = { scope: 'action_precheck', action: input.action };
+    if (input.action === 'submit') context.recordRecoveredSubmitSend = send => { recoveredSubmitSend = send; };
+    const proof = await websiteModelReadEvidence('chatgpt', input.expectedModelChoice, null, context);
     setupStarted = chatGPTPreparationNow();
     if (proof.error) return proof;
     if (!chatGPTProductModeProof()) return { error: 'product_mode_unverified' };
@@ -5439,7 +6518,23 @@ async function providerPageAction(input, readLineageFingerprint = null) {
       const structureStarted = chatGPTSyncWorkStart();
       try { debugStructure = chatGPTStructure(visible); } finally { chatGPTSyncWorkEnd(2, structureStarted); }
     }
-    return { ...state, signIn, ...(includeDebugStructure ? { debugStructure } : {}),
+    // A private cold-start observation. It proves only an empty, untouched editor in
+    // this document and cannot authorize mode changes, insertion or Send.
+    let untouchedInitialRoot;
+    if (input.checkUntouchedChatRoot === true) {
+      const editors = document.querySelectorAll('#prompt-textarea[contenteditable="true"],textarea#prompt-textarea,#prompt-textarea [contenteditable="true"],[contenteditable="true"][aria-label="Ask ChatGPT"],textarea[data-testid="prompt-textarea"]');
+      const matches = editors.length <= 8 ? Array.from(editors).filter(visible) : [];
+      const p = composer?.childNodes.length === 1 ? composer.firstChild : null;
+      const br = p?.childNodes.length === 1 ? p.firstChild : null;
+      const blank = composer instanceof HTMLTextAreaElement ? composer.value === ''
+        : composer?.isContentEditable && composer.classList.contains('ProseMirror') && (composer.childNodes.length === 0 ||
+            p?.tagName === 'P' && !p.attributes.length && (p.childNodes.length === 0 ||
+              br?.tagName === 'BR' && br.attributes.length === 1 && br.getAttribute('class') === 'ProseMirror-trailingBreak' && !br.childNodes.length));
+      untouchedInitialRoot = document.URL === 'https://chatgpt.com/' && !signIn && !temporary && matches.length === 1
+        && matches[0] === composer && enabled(composer) && !!blank && !stop && !interrupted && !responseLoadFailed && !conversationIdentity
+        && userCount === 0 && answers.length === 0 && !globalThis.__computaModelFirstSubmitted && !globalThis.__computaModelTemporaryRequested;
+    }
+    return { ...state, signIn, ...(untouchedInitialRoot === undefined ? {} : { untouchedInitialRoot }), ...(includeDebugStructure ? { debugStructure } : {}),
       ...(resourceTimingDiagnostic ? { resourceTimingDiagnostic } : {}) };
   }
   if (action === "enableTemporary") {
@@ -5589,14 +6684,33 @@ async function providerPageAction(input, readLineageFingerprint = null) {
       return { error: "prompt_not_inserted", detail, ...modelEditorDifference(actual, expected), actualLength: actual.length,
         expectedLength: expected.length, actualLines: actual.split("\n").length, expectedLines: expected.split("\n").length };
     }
+    if (chatReadinessFinalGuardOnly && !chatGPTExactSubmitDraft(composer, value, prompt))
+      return { error: "prompt_not_inserted" };
     const send = provider === "chatgpt" ? find(['button[data-testid="send-button"]', 'button[aria-label="Send prompt"]', 'button[aria-label="Send message"]', 'button[aria-label="Send"]'])
       : provider === "claude" ? find(['button[data-testid="chat-input-send"][aria-label="Send message"]'])
       : find(['button[aria-label="Send message"]', 'button[aria-label="Send"]', 'button.send-button']);
-    if (action === "sendReady") return { ...state, sendReady: enabled(send) };
+    if (action === "sendReady") {
+      const ready = enabled(send), pending = globalThis.__computaChatSubmissionState?.pending, prior = pending?.firstInsertOpening;
+      if (chatReadinessFinalGuardOnly) {
+        const state = globalThis.__computaChatSubmissionState;
+        chatGPTFirstChatReadinessSnapshot = { document, state, record: pending, composer, value, send, ready,
+          canonical: pending.canonical, fingerprint: pending.fingerprint };
+      }
+      // Pin the prior verified insertion only when this readiness read sees the identical editor and exact outbound text.
+      if (ready && prior?.proved === true && pending.phase === 'prepared' && pending.sequence === 1
+        && input.submissionSequence === 1 && pending.marker === input.submissionMarker && prior.composer === composer
+        && prior.exactSubmitDraft && prior.prompt === prompt && prior.editorValue === value
+        && chatGPTExactSubmitDraft(composer, value, prompt))
+        pending.readyForSubmitOpening = prior;
+      return { ...state, sendReady: ready };
+    }
     if (!enabled(send)) return { error: "send_unavailable" };
     if (globalThis.__computaModelLastSubmissionCount !== undefined
       && userCount <= globalThis.__computaModelLastSubmissionCount)
       return chatGPTUserCountFailure('repeated_submit', ownedUserCount, userCount);
+    const recoveredSendCurrent = recoveredSubmitSend && (() => send === recoveredSubmitSend
+      && websiteChatSameVisibleSend(send, visible, enabled));
+    if (recoveredSendCurrent && !recoveredSendCurrent()) return { error: 'send_unavailable' };
     if (userCount === 0) {
       if (globalThis.__computaModelFirstSubmitted || globalThis.__computaModelFirstPrompt !== prompt
         || !prompt.endsWith(`\n\nComputa session marker: ${expectedFirstUserMarker}`))
@@ -5618,6 +6732,7 @@ async function providerPageAction(input, readLineageFingerprint = null) {
       globalThis.__computaChatResourceTimingClaim = Object.freeze({ document, owner: input.ownerToken,
         userCount, sequence: userCount + 1, mark: Number.isFinite(mark) && mark >= 0 ? mark : null });
     } catch { /* A missing clock cannot alter submission behavior. */ }
+    if (recoveredSendCurrent && !recoveredSendCurrent()) return { error: 'send_unavailable' };
     send.click();
     const resourceTimingDiagnostic = chatGPTResourceTimingDiagnostic('send');
     return { submitted: true, ...(resourceTimingDiagnostic ? { resourceTimingDiagnostic } : {}) };
@@ -5930,6 +7045,20 @@ function chatGPTFirstRouteModelPins(candidate) {
     || reject('model_checked_family', picker.checkedFamily && picker.checkedFamily.key !== pin.selection.family.key)) return false;
   return true;
 }
+function chatGPTFirstRouteModelRemount(candidate) {
+  const pin = chatGPTFirstRouteModelFailurePin, picker = chatGPTFirstRouteModelFailurePicker;
+  const diagnostic = {};
+  const fail = rule => { chatGPTFirstRouteModelFailureRule = rule; return null; };
+  if (chatGPTFirstRouteModelFailureRule !== 'model_trigger_identity') return null;
+  if (globalThis.__computaChatPresetPin !== pin) return fail('model_remount_pin_changed');
+  if (candidate.routeModelRemount && !chatGPTBoundRouteModelRemountIntact(candidate))
+    return fail('model_remount_pending_replaced');
+  // Retain negative history of this exact successor. Only the existing fresh
+  // full model read can transfer the original header pin.
+  if (!websiteChatClaimProvisionalHeader(pin, picker, diagnostic))
+    return fail(diagnostic.rule === 'pending_invalidated' ? 'model_pin_invalidated' : 'model_remount_' + diagnostic.rule);
+  return { pin, pending: pin.provisionalHeader };
+}
 // While native's first submission is pending, its dispatched outbound hash
 // can retain a completed display across the second route edge. Either no
 // first-message pin exists yet, or the existing private pin must match that
@@ -6015,8 +7144,9 @@ function chatGPTPendingFirstRouteDiscard(candidate, fingerprint, stage) {
     || reject('predecessor_model_choice', !websiteModelChoiceEqual(predecessor.modelChoice, candidate.modelChoice))
     || reject('expected_model', !websiteModelChoiceEqual(input.expectedModelChoice, candidate.modelChoice))
     || reject('expansion_model', !websiteModelChoiceEqual(input.firstUserExpansionModelChoice, candidate.modelChoice))
-    || reject('product', !chatGPTProductModeProof()) || reject('temporary', !chatGPTTemporaryVerified())
-    || reject('model_pins', !chatGPTFirstRouteModelPins(candidate))) return null;
+    || reject('product', !chatGPTProductModeProof()) || reject('temporary', !chatGPTTemporaryVerified())) return null;
+  const modelPins = chatGPTFirstRouteModelPins(candidate);
+  if (reject('model_pins', !modelPins && (!(initial || pendingPrivate) || chatGPTFirstRouteModelFailureRule !== 'model_trigger_identity'))) return null;
   const roots = chatGPTMessageRoots('user'), root = roots[0], body = root && chatGPTUserBody(root);
   try { candidate.pendingRouteNodes = { invocation: websiteChatInvocationLease, currentNodesObserved: true,
     currentRootMatches: root === candidate.root, currentBodyMatches: body === candidate.body }; } catch { }
@@ -6027,6 +7157,14 @@ function chatGPTPendingFirstRouteDiscard(candidate, fingerprint, stage) {
       || reject('old_body_detached', candidate.oldBody?.isConnected !== false) || reject('root_replaced', root === candidate.oldRoot)
       || reject('body_replaced', body === candidate.oldBody)
       : reject('root_same', root !== candidate.oldRoot) || reject('body_same', body !== candidate.oldBody))) return null;
+  // Neither admitted pending mode has accepted submission proof yet. Complete
+  // every body/route check before retaining the same bounded header witness.
+  if (!modelPins) {
+    const remount = chatGPTFirstRouteModelRemount(candidate);
+    if (reject('model_pins', !remount)) return null;
+    candidate.routeModelPin = remount.pin;
+    candidate.routeModelRemount = remount.pending;
+  }
   // Retain the already certified first edge; the existing continuation consumes
   // only its second edge. Neither the two-edge budget nor deadline is renewed.
   candidate.routeContinuationEdges = edges.map(edge => Object.freeze({ ...edge }));
@@ -6071,6 +7209,31 @@ const chatGPTPendingRouteDiagnosticRules = Object.freeze([
 // First rejected operand only; diagnostics never supply ownership authority.
 let chatGPTBoundRouteFailureRule = 'not_attempted';
 let chatGPTBoundRouteFailureStage = null, chatGPTBoundRouteFailureCandidate = null;
+// A privately verified first record can precede native adoption. Its original
+// physical pins remain authoritative until the replacement's fresh full read.
+function chatGPTProvisionalRecoveryRecord(candidate, state) {
+  const record = candidate?.record;
+  return candidate?.provisional === true && candidate.pendingPrivate !== true
+    && candidate.remount === true && candidate.awaitingNativeRefresh !== true
+    && state?.pending == null && state?.lastVerified === record
+    && record?.phase === 'verified' && record.replacement == null
+    && record.root === candidate.oldRoot && record.body === candidate.oldBody
+    && candidate.oldRoot?.isConnected === false && candidate.oldBody?.isConnected === false;
+}
+function chatGPTProvisionalRoutePrefix(candidate) {
+  const edges = input.firstUserExpansionRouteContinuation, first = globalThis.__computaModelFirstExpansion;
+  return Array.isArray(edges) && edges.length === 1 && Object.keys(edges).join(',') === '0'
+    && edges[0] && typeof edges[0] === 'object' && !Array.isArray(edges[0])
+    && Object.keys(edges[0]).sort().join(',') === 'fromURL,toURL'
+    && typeof edges[0].fromURL === 'string' && typeof edges[0].toURL === 'string'
+    && edges[0].fromURL !== edges[0].toURL && edges[0].fromURL !== document.URL
+    && edges[0].toURL === input.expectedURL && edges[0].toURL === candidate.routeURL
+    && first?.outcome === 'expanded' && first.contextFailure == null && first.clicked === true
+    && first.routeURL === edges[0].fromURL && first.document === document && first.owner === candidate.owner
+    && first.prompt === candidate.prompt && first.canonical === candidate.canonical
+    && first.expandedText === candidate.canonical && first.marker === candidate.marker
+    && first.root === candidate.oldRoot && first.body === candidate.oldBody;
+}
 function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage, certifiedDiscard = null) {
   chatGPTBoundRouteFailureRule = 'none';
   chatGPTBoundRouteFailureStage = stage; chatGPTBoundRouteFailureCandidate = candidate;
@@ -6081,6 +7244,7 @@ function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage, certifiedD
   let receiptRule = 'none';
   const receiptCheck = (rule, value) => { if (!value && receiptRule === 'none') receiptRule = rule; return value; };
   const state = candidate?.state, record = candidate?.record, pinned = globalThis.__computaModelFirstProof;
+  const provisional = candidate?.provisional === true;
   // The replacement helper may install its one certificate just before this
   // caller resumes on a promoted URL. Preserve that exact unclaimed receipt
   // for native's existing fresh-read handoff, never manufacture another one.
@@ -6120,12 +7284,13 @@ function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage, certifiedD
   if (reject('candidate_missing', !candidate)
     || reject('candidate_current', candidate !== globalThis.__computaModelBoundFirstExpansion)
     || reject('bound', !candidate.bound)
-    || reject('provisional', candidate.provisional)
+    || reject('provisional', provisional && !chatGPTProvisionalRecoveryRecord(candidate, state))
     || reject('initial_route', candidate.initialRoute)
     || reject('pending_private', candidate.pendingPrivate)
     || reject('recovery_shape', !candidate.remount && !sameNodeRecovery)
     || reject('unconsumed_route', candidate.routeDiscard && candidate.routeDiscardConsumed !== candidate.routeDiscard)
-    || reject('route_budget', (candidate.routeContinuationEdges?.length || 0) >= 2)
+    || reject('route_budget', (candidate.routeContinuationEdges?.length || 0) >= 2
+      || provisional && (candidate.routeContinuationEdges != null || !chatGPTProvisionalRoutePrefix(candidate)))
     || reject('model_failure', candidate.modelFailure)
     || reject('context_failure', candidate.contextFailure)
     || reject('outcome', candidate.outcome !== 'expanded')
@@ -6133,12 +7298,12 @@ function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage, certifiedD
     || reject('deadline_finite', !Number.isFinite(candidate.deadline))
     || reject('deadline_expired', Date.now() > candidate.deadline)
     || reject('action', input.action !== 'inspect')
-    || reject('bound_permission', input.allowBoundFirstUserExpansion !== true)
+    || reject('bound_permission', provisional ? input.allowBoundFirstUserExpansion === true : input.allowBoundFirstUserExpansion !== true)
     || reject('refresh_permission', !returningReceipt && (input.allowBoundFirstUserRemountRefresh === true) !== (candidate.awaitingNativeRefresh === true))
     || reject('suppressed', input.suppressFirstUserExpansionClaim === true)
-    || reject('binding_permission', input.allowFirstUserBinding !== false)
-    || reject('expansion_permission', input.allowFirstUserExpansion === true)
-    || reject('provisional_permission', input.allowProvisionalFirstUserExpansion === true)
+    || reject('binding_permission', provisional ? input.allowFirstUserBinding !== true : input.allowFirstUserBinding !== false)
+    || reject('expansion_permission', provisional ? input.allowFirstUserExpansion !== true : input.allowFirstUserExpansion === true)
+    || reject('provisional_permission', provisional ? input.allowProvisionalFirstUserExpansion !== true : input.allowProvisionalFirstUserExpansion === true)
     || reject('frame', window !== window.top)
     || reject('provider', input.provider !== 'chatgpt')
     || reject('origin', location.origin !== 'https://chatgpt.com')
@@ -6181,7 +7346,9 @@ function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage, certifiedD
     || reject('record_canonical', record.canonical !== candidate.canonical)
     || reject('record_fingerprint', record.fingerprint !== fingerprint)
     || reject('candidate_fingerprint', candidate.fingerprint !== fingerprint)
-    || reject('native_fingerprint', input.expectedFirstUserFingerprint !== fingerprint)
+    || reject('native_fingerprint', provisional
+      ? input.expectedFirstUserFingerprint != null || record.nativeFirstPinned === true
+      : input.expectedFirstUserFingerprint !== fingerprint)
     || reject('private_fingerprint', pinned?.fingerprint !== fingerprint)
     || reject('private_marker', pinned.marker !== candidate.marker)
     || reject('native_marker', input.expectedFirstUserMarker !== candidate.marker)
@@ -6194,20 +7361,17 @@ function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage, certifiedD
     || reject('expansion_model', !websiteModelChoiceEqual(input.firstUserExpansionModelChoice, candidate.modelChoice))
     || reject('product', !chatGPTProductModeProof())
     || reject('temporary', !chatGPTTemporaryVerified())) return null;
+  if (provisional) {
+    chatGPTSubmissionContext(state);
+    const context = chatGPTSubmissionContextFailure;
+    if (reject('context_failure', context?.state !== state || context.checks.urlMatches !== false
+      || !chatGPTSubmissionContextCheckKeys.slice(0, chatGPTSubmissionContextCheckKeys.indexOf('urlMatches'))
+        .every(key => context.checks[key] === true))) return null;
+  }
   let modelRemount = null;
   if (!chatGPTFirstRouteModelPins(candidate)) {
-    const pin = chatGPTFirstRouteModelFailurePin, picker = chatGPTFirstRouteModelFailurePicker;
-    const diagnostic = {};
-    const failModel = rule => { chatGPTFirstRouteModelFailureRule = rule; reject(rule, true); return null; };
-    if (chatGPTFirstRouteModelFailureRule !== 'model_trigger_identity') return failModel(chatGPTFirstRouteModelFailureRule);
-    if (globalThis.__computaChatPresetPin !== pin) return failModel('model_remount_pin_changed');
-    if (candidate.routeModelRemount && !chatGPTBoundRouteModelRemountIntact(candidate))
-      return failModel('model_remount_pending_replaced');
-    // Do not adopt the replacement picker here. Reuse the existing single
-    // provisional-header observer, retaining the old pin and all negatives.
-    if (!websiteChatClaimProvisionalHeader(pin, picker, diagnostic))
-      return failModel(diagnostic.rule === 'pending_invalidated' ? 'model_pin_invalidated' : 'model_remount_' + diagnostic.rule);
-    modelRemount = { pin, pending: pin.provisionalHeader };
+    modelRemount = chatGPTFirstRouteModelRemount(candidate);
+    if (!modelRemount) { reject(chatGPTFirstRouteModelFailureRule, true); return null; }
   }
   // Any non-route conversation identity remains a hard boundary. Route-only
   // lineage is independently checked against the original URL by native.
@@ -6228,10 +7392,14 @@ function chatGPTBoundFirstRouteDiscard(candidate, fingerprint, stage, certifiedD
   if (modelRemount) {
     candidate.routeModelPin = modelRemount.pin;
     candidate.routeModelRemount = modelRemount.pending;
+    // A completed display is not proof of its replacement header. Keep the
+    // original deadline and full-model requirement through the fresh read.
+    if (provisional) candidate.verified = false;
   }
   // No new witness or claim: native already knows how to carry this discarded
   // certificate across its bounded route chain and require a fresh full proof.
   if (returningReceipt) return certifiedDiscard;
+  if (provisional) candidate.routeContinuationEdges = input.firstUserExpansionRouteContinuation.map(edge => Object.freeze({ ...edge }));
   candidate.routeDiscard = Object.freeze({ fromURL: input.expectedURL, toURL: document.URL, stage });
   return chatGPTWithRecoveryLifecycle({ error: 'document_changed', detail: 'model_read_context' });
 }
@@ -6248,6 +7416,12 @@ function chatGPTBoundRouteModelRemountIntact(candidate) {
 function chatGPTConsumeBoundFirstRoute(candidate, witness = null) {
   if (!chatGPTBoundRouteModelRemountIntact(candidate)) return false;
   const start = chatGPTFirstUserExpansionRouteStart(candidate), edges = input.firstUserExpansionRouteContinuation;
+  // This provisional discard retained the first native edge. Its continuation
+  // must carry that exact prefix and one second edge, without resetting either.
+  if (candidate.provisional && candidate.routeContinuationEdges?.length === 1
+    && (start !== 1 || edges?.length !== 2
+      || edges[0].fromURL !== candidate.routeContinuationEdges[0].fromURL
+      || edges[0].toURL !== candidate.routeContinuationEdges[0].toURL)) return false;
   if (start < 0 || (candidate.routeContinuationEdges?.length || 0) + edges.length - start > 2
     || witness && (edges[start].fromURL !== witness.fromURL || edges[start].toURL !== witness.toURL)) return false;
   candidate.routeContinuationEdges = [...(candidate.routeContinuationEdges || []), ...edges.slice(start)];
@@ -6648,6 +7822,41 @@ async function chatGPTObserveFirstUserExpansion(candidate) {
   candidate.outcome = 'expanded';
   return true;
 }
+function chatGPTExposureSubmissionIntact(candidate, state, record, fingerprint) {
+  return !!state && state === globalThis.__computaChatSubmissionState && !state.revoked
+    && state.document === document && state.owner === candidate.owner && state.pending === record && state.lastVerified == null
+    && record?.document === document && record.owner === candidate.owner && record.sequence === 1
+    && record.phase === 'send_claimed' && record.root == null && record.body == null && record.replacement == null
+    && record.nativeFirstPinned !== true && record.fingerprint === fingerprint && chatGPTSubmissionPins(record)
+    && record.marker === candidate.marker && state.firstMarker === candidate.marker && record.canonical === candidate.canonical
+    && input.submissionSequence === 1 && input.submissionMarker === candidate.marker
+    && input.expectedFirstUserFingerprint == null && globalThis.__computaModelFirstProof == null
+    && globalThis.__computaModelBoundFirstExpansion == null
+    && websiteModelChoiceEqual(state.modelChoice, candidate.modelChoice)
+    && websiteModelChoiceEqual(input.expectedModelChoice, candidate.modelChoice);
+}
+function chatGPTExposureRemountIntact(candidate, witness, expectedContext) {
+  const roots = chatGPTMessageRoots('user'), root = roots[0], body = root && chatGPTUserBody(root);
+  const controls = root ? chatGPTFirstUserExpandControls(root, [root], 0) : [], control = controls[0];
+  return chatGPTExpansionLeaseCurrent() && candidate === globalThis.__computaModelFirstExpansion
+    && !candidate.bound && candidate.clicked === false && !candidate.modelFailure
+    && candidate.exposureResumed !== true && candidate.exposureRemountConsumed !== true
+    && candidate.exposureDeadline === witness.deadline && Date.now() < witness.deadline
+    && candidate.root === witness.oldRoot && candidate.body === witness.oldBody && candidate.exposureControl === witness.oldControl
+    && !witness.oldRoot.isConnected && !witness.oldBody.isConnected && !witness.oldControl.isConnected
+    && witness.oldRoot.contains(witness.oldBody) && witness.oldRoot.contains(witness.oldControl)
+    && normalizedFirstBody(witness.oldBody) === candidate.rendered
+    && roots.length === 1 && root === witness.root && body === witness.body
+    && root !== witness.oldRoot && body !== witness.oldBody && root.isConnected && body.isConnected
+    && normalizedFirstBody(body) === candidate.rendered
+    && controls.length === 1 && control === witness.control && control !== witness.oldControl
+    && (control.tagName === 'BUTTON' || control.getAttribute('role') === 'button')
+    && !control.disabled && control.getAttribute('aria-disabled') !== 'true' && getComputedStyle(control).pointerEvents !== 'none'
+    && candidate.routeURL === witness.fromURL && document.URL === witness.toURL && witness.fromURL !== witness.toURL
+    && chatGPTExposureSubmissionIntact(candidate, witness.state, witness.record, witness.fingerprint)
+    && globalThis.__computaChatPresetPin === witness.pin && chatGPTFirstRouteModelPins(candidate)
+    && chatGPTFirstUserExpansionContextFailure({ ...candidate, root, body }) === expectedContext;
+}
 async function chatGPTContinueFirstUserExpansion(candidate) {
   const latch = () => { candidate.initialTransitionDiagnostic ||= chatGPTInitialExpansionFacts(candidate); };
   const edges = input.firstUserExpansionRouteContinuation;
@@ -6662,13 +7871,30 @@ async function chatGPTContinueFirstUserExpansion(candidate) {
     && chatGPTMessageRoots('user')[0] === candidate.root && chatGPTUserBody(candidate.root) === candidate.body
     && normalizedFirstBody(candidate.body) === candidate.expandedText;
   const interrupted = candidate.outcome === 'context_changed' && candidate.contextFailure === 'url';
+  const resumeExposure = interrupted && candidate.clicked === false && candidate.exposureRouteInterrupted === true
+    && candidate.exposureResumed !== true && chatGPTExpansionLeaseCurrent()
+    && Number.isFinite(candidate.exposureDeadline) && Date.now() < candidate.exposureDeadline;
+  const witness = candidate.exposureRemount;
+  const resumeRemount = candidate.outcome === 'node_changed' && ['root', 'body'].includes(candidate.contextFailure)
+    && witness && routeStart === 0 && edges.length === 1
+    && edges[0].fromURL === witness.fromURL && edges[0].toURL === witness.toURL
+    && chatGPTExposureRemountIntact(candidate, witness, null);
   if (input.action !== 'inspect' || input.allowFirstUserExpansion !== true || input.allowFirstUserBinding !== true
     || input.expectedFirstUserFingerprint != null || globalThis.__computaModelFirstProof != null
     || routeStart < 0
-    || candidate.clicked !== true
+    || (candidate.clicked !== true && !resumeExposure && !resumeRemount)
     || !websiteModelChoiceEqual(candidate.modelChoice, input.firstUserExpansionModelChoice)) {
     latch();
     return chatGPTRejectFirstUserExpansion(candidate, 'context_changed', 'continuation');
+  }
+  if (resumeRemount) {
+    // One positively witnessed replacement spends the existing unclicked claim.
+    // Keep its original exposure deadline; full body/hash/model proof still follows.
+    candidate.exposureRemountConsumed = true;
+    candidate.root = witness.root; candidate.body = witness.body; candidate.exposureControl = witness.control;
+    candidate.routeURL = witness.toURL; candidate.contextFailure = null; candidate.outcome = 'claimed';
+    candidate.exposureResumed = true;
+    return chatGPTExpandFirstUser(candidate, true);
   }
   if (!completed && !interrupted) {
     latch();
@@ -6681,6 +7907,13 @@ async function chatGPTContinueFirstUserExpansion(candidate) {
   // consumed its receipt. Neither the deadline nor click claim is reset.
   for (const edge of edges.slice(routeStart)) candidate.routeURL = edge.toURL;
   candidate.contextFailure = null;
+  if (resumeExposure) {
+    // Continue only the unspent display claim and original exposure budget.
+    // Recheck the physical control, exact prefix and selected model before a click.
+    candidate.exposureResumed = true;
+    candidate.outcome = 'claimed';
+    return chatGPTExpandFirstUser(candidate, true);
+  }
   // Display completion does not grant lineage. The caller must still hash the
   // unchanged body and complete the ordinary current model/product/temporary
   // guards before installing any first-user proof. Do not wait or click again.
@@ -6688,6 +7921,9 @@ async function chatGPTContinueFirstUserExpansion(candidate) {
   candidate.outcome = 'claimed';
   try { return await chatGPTObserveFirstUserExpansion(candidate); }
   catch { return chatGPTRejectFirstUserExpansion(candidate, 'failed'); }
+}
+function chatGPTExpansionLeaseCurrent() {
+  return websiteChatInvocationLease != null && globalThis.__computaChatActiveInvocation === websiteChatInvocationLease;
 }
 function chatGPTExpansionExposure(control) {
   // Finite geometry/hit relationships only; never retain an obstruction's
@@ -6707,9 +7943,13 @@ function chatGPTExpansionExposure(control) {
 }
 async function chatGPTWaitForExpansionExposure(candidate, control, intact, available) {
   const diagnostic = candidate.exposureDiagnostic, started = Date.now();
-  const until = Math.min(started + 1_800, Number.isFinite(candidate.deadline) ? candidate.deadline : Infinity);
+  const until = candidate.exposureResumed ? candidate.exposureDeadline
+    : Math.min(started + 1_800, Number.isFinite(candidate.deadline) ? candidate.deadline : Infinity);
   candidate.exposureDeadline = until;
   const pin = globalThis.__computaChatPresetPin;
+  const state = globalThis.__computaChatSubmissionState, record = state?.pending;
+  const submission = chatGPTExposureSubmissionIntact(candidate, state, record, record?.fingerprint)
+    ? Object.freeze({ state, record, fingerprint: record.fingerprint }) : null;
   diagnostic.waited = true;
   websiteModelDiagnosticPhase('first_user_exposure_wait');
   const result = await new Promise(resolve => {
@@ -6728,7 +7968,22 @@ async function chatGPTWaitForExpansionExposure(candidate, control, intact, avail
       diagnostic.final = chatGPTExpansionExposure(control);
       // Failure is latched on the first observation. Later restoration cannot
       // revive a different control, changed body, product, owner or model pin.
-      if (!intact()) return finish('context_changed');
+      if (!intact()) {
+        if (!candidate.bound && !candidate.clicked && !candidate.exposureResumed && chatGPTExpansionLeaseCurrent() && Date.now() < until
+          && chatGPTFirstUserExpansionContextFailure(candidate) === 'url'
+          && normalizedFirstBody(candidate.body) === candidate.rendered && available()) {
+          websiteChatDrainPinnedMutations(pin);
+          if (globalThis.__computaChatPresetPin === pin && pin && !pin.invalidated) candidate.exposureRouteInterrupted = true;
+        } else if (submission && !candidate.exposureRemount && candidate.outcome === 'claimed'
+          && ['root', 'body'].includes(chatGPTFirstUserExpansionContextFailure(candidate))) {
+          const roots = chatGPTMessageRoots('user'), root = roots[0], body = root && chatGPTUserBody(root);
+          const controls = root ? chatGPTFirstUserExpandControls(root, [root], 0) : [];
+          const witness = { ...submission, pin, oldRoot: candidate.root, oldBody: candidate.body, oldControl: control,
+            root, body, control: controls[0], fromURL: input.expectedURL, toURL: document.URL, deadline: until };
+          if (chatGPTExposureRemountIntact(candidate, witness, 'url')) candidate.exposureRemount = Object.freeze(witness);
+        }
+        return finish('context_changed');
+      }
       if (!available()) return finish('control_changed');
       websiteChatDrainPinnedMutations(pin);
       if (globalThis.__computaChatPresetPin !== pin || pin?.invalidated === true) return finish('model_changed');
@@ -6761,15 +8016,18 @@ async function chatGPTWaitForExpansionExposure(candidate, control, intact, avail
   websiteModelDiagnosticPhase('first_user_exposure_done');
   return result;
 }
-async function chatGPTExpandFirstUser(candidate) {
+async function chatGPTExpandFirstUser(candidate, resumeExposure = false) {
   // One private claim survives timeout/reinspection. It grants only this local
   // display expansion, never Send, lineage, cleanup, or another attempt.
   if (candidate.bound) globalThis.__computaModelBoundFirstExpansion = candidate;
   else globalThis.__computaModelFirstExpansion = candidate;
   const reject = outcome => chatGPTRejectFirstUserExpansion(candidate, outcome);
   try {
-    const intact = () => chatGPTFirstUserExpansionContext(candidate)
-      && normalizedFirstBody(candidate.body) === candidate.rendered;
+    const intact = () => (!resumeExposure || chatGPTExpansionLeaseCurrent()) && chatGPTFirstUserExpansionContext(candidate)
+      && normalizedFirstBody(candidate.body) === candidate.rendered
+      && (!candidate.exposureRemountConsumed || chatGPTExposureSubmissionIntact(candidate,
+        candidate.exposureRemount.state, candidate.exposureRemount.record, candidate.exposureRemount.fingerprint)
+        && globalThis.__computaChatPresetPin === candidate.exposureRemount.pin && !candidate.exposureRemount.pin.invalidated);
     // Only descendants of the captured physical message can receive a click.
     // The wider diagnostic ancestry never grants mutation authority.
     const localControls = () => chatGPTFirstUserExpandControls(candidate.root, [candidate.root], 0);
@@ -6782,6 +8040,7 @@ async function chatGPTExpandFirstUser(candidate) {
     if (!intact()) return chatGPTRejectFirstUserExpansionContext(candidate);
     if (!control) return reject(controls.length ? 'ambiguous' : 'unavailable');
     if (!available()) return reject('disabled');
+    if (resumeExposure && (control !== candidate.exposureControl || Date.now() >= candidate.exposureDeadline)) return reject('obstructed');
     const model = await websiteModelReadEvidence('chatgpt', input.firstUserExpansionModelChoice, null,
       { scope: 'action_precheck', action: input.action });
     if (model.error) {
@@ -6790,22 +8049,27 @@ async function chatGPTExpandFirstUser(candidate) {
     }
     if (!intact()) return chatGPTRejectFirstUserExpansionContext(candidate);
     if (!available()) return reject('unavailable');
-    candidate.exposureDiagnostic = { beforeScroll: chatGPTExpansionExposure(control), afterScroll: 'not_scrolled',
-      final: chatGPTExpansionExposure(control), scrolled: false, waited: false, waitOutcome: 'not_needed', waitMilliseconds: 0 };
+    if (!resumeExposure) {
+      candidate.exposureControl = control;
+      candidate.exposureDiagnostic = { beforeScroll: chatGPTExpansionExposure(control), afterScroll: 'not_scrolled',
+        final: chatGPTExpansionExposure(control), scrolled: false, waited: false, waitOutcome: 'not_needed', waitMilliseconds: 0 };
+    }
     if (!chatGPTControlExposed(control)) {
-      const rect = control.getBoundingClientRect();
-      const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
-      // A center inside the window can still be clipped by a nested scroller
-      // or covered. One scroll may expose it; the same hit test must then pass.
-      const scrollable = [rect.left, rect.top, x, y, rect.width, rect.height].every(Number.isFinite)
-        && rect.width > 0 && rect.height > 0;
-      if (!scrollable || typeof control.scrollIntoView !== 'function') return reject('obstructed');
-      candidate.exposureDiagnostic.scrolled = true;
-      control.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
-      candidate.exposureDiagnostic.afterScroll = chatGPTExpansionExposure(control);
-      candidate.exposureDiagnostic.final = candidate.exposureDiagnostic.afterScroll;
-      if (!intact()) return chatGPTRejectFirstUserExpansionContext(candidate);
-      if (!available()) return reject('unavailable');
+      if (!resumeExposure) {
+        const rect = control.getBoundingClientRect();
+        const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
+        // A center inside the window can still be clipped by a nested scroller
+        // or covered. One scroll may expose it; the same hit test must then pass.
+        const scrollable = [rect.left, rect.top, x, y, rect.width, rect.height].every(Number.isFinite)
+          && rect.width > 0 && rect.height > 0;
+        if (!scrollable || typeof control.scrollIntoView !== 'function') return reject('obstructed');
+        candidate.exposureDiagnostic.scrolled = true;
+        control.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+        candidate.exposureDiagnostic.afterScroll = chatGPTExpansionExposure(control);
+        candidate.exposureDiagnostic.final = candidate.exposureDiagnostic.afterScroll;
+        if (!intact()) return chatGPTRejectFirstUserExpansionContext(candidate);
+        if (!available()) return reject('unavailable');
+      }
       if (!chatGPTControlExposed(control)) {
         const exposure = await chatGPTWaitForExpansionExposure(candidate, control, intact, available);
         if (exposure === 'context_changed') return chatGPTRejectFirstUserExpansionContext(candidate);
@@ -6826,8 +8090,10 @@ async function chatGPTExpandFirstUser(candidate) {
     candidate.exposureDiagnostic.final = chatGPTExpansionExposure(control);
     if (candidate.exposureDiagnostic.waited && Date.now() >= candidate.exposureDeadline) return reject('obstructed');
     if (!chatGPTControlExposed(control)) return reject('obstructed');
+    if (resumeExposure && !intact()) return reject('context_changed');
     candidate.clicked = true;
-    if (!candidate.initialRoute && !candidate.pendingPrivate && !candidate.userRootGap) candidate.deadline = Date.now() + 1_800;
+    if (!candidate.initialRoute && !candidate.pendingPrivate && !candidate.userRootGap)
+      candidate.deadline = resumeExposure ? candidate.exposureDeadline : Date.now() + 1_800;
     chatGPTSubmissionPresentationPins.delete(candidate.body);
     control.click();
     return await chatGPTObserveFirstUserExpansion(candidate);
@@ -7433,12 +8699,7 @@ if (ownedUserCount > 0) {
   // A provisional remount can start after JS verified the first submission
   // but before native adopted it. Its URL-discarded rehash still retains the
   // detached original physical pins; it has no bound replacement certificate.
-  const provisionalRecoveryRecord = boundRecovery?.provisional === true && boundRecovery.pendingPrivate !== true
-    && boundRecovery.remount === true && boundRecovery.awaitingNativeRefresh !== true
-    && finalizationState?.pending == null && finalizationState?.lastVerified === recoveryRecord
-    && recoveryRecord?.phase === 'verified' && recoveryRecord.replacement == null
-    && recoveryRecord.root === boundRecovery.oldRoot && recoveryRecord.body === boundRecovery.oldBody
-    && boundRecovery.oldRoot?.isConnected === false && boundRecovery.oldBody?.isConnected === false;
+  const provisionalRecoveryRecord = chatGPTProvisionalRecoveryRecord(boundRecovery, finalizationState);
   const discardedURLRead = finalized.error === 'document_changed' && finalized.detail === 'model_read_context'
     && input.action === 'inspect' && (pendingRecoveryRecord || provisionalRecoveryRecord)
     && input.allowProvisionalFirstUserExpansion === true && input.allowFirstUserBinding === true
@@ -7496,4 +8757,4 @@ if (['inspect', 'verifyModel', 'verifyProductMode'].includes(input.action)) {
 const result = { ...observed, firstUserVerified, firstUserFingerprint };
 const finalized = chatGPTFinalizeResponseRead(globalThis.__computaChatSubmissionState != null ? await chatGPTSubmissionResult(input, result) : result);
 chatGPTPreparationRecord('outerFinalizationMs', outerFinalizationStarted);
-return chatGPTPreparationResult(chatGPTPreparedEditorReadinessResult(finalized));
+return chatGPTPreparationResult(chatGPTPreparedEditorReadinessResult(chatGPTFirstChatReadinessResult(finalized)));

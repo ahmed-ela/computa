@@ -997,16 +997,58 @@ final class RuntimeEmbeddedBrowserToolsTests: XCTestCase {
     }
 
     func testCleanupPersistenceFailureCannotPublishCompletedOrRepeatPhysicalClose() async throws {
-        try await withHarness(approval: true, allowsCleanupFailure: true) { harness in
-            try Data("not a directory".utf8).write(to: harness.root.appendingPathComponent("EmbeddedBrowserCleanup-v1"))
-            try await harness.submit([["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]]])
+        try await withHarness(approval: true) { harness in
+            let blockedStore = harness.root.appendingPathComponent("EmbeddedBrowserCleanup-v1")
+            try Data("not a directory".utf8).write(to: blockedStore)
+            try await harness.submit([
+                ["tool": "browser_open", "arguments": ["url": "https://example.invalid/flight"]],
+                ["tool": "browser_read", "arguments": ["view": "all"]],
+                ["tool": "browser_click", "arguments": ["click_ref": "@buttonClickRef"]],
+            ])
             try await self.waitFor { harness.audit.status == .waiting }
             let counts = await harness.backend.counts()
             XCTAssertEqual(counts.ownedClosed, 1)
+            XCTAssertEqual(counts.presses, 1)
             XCTAssertTrue(counts.humanIntact)
             XCTAssertTrue(harness.audit.entries.contains {
                 $0.title == "Browser cleanup unconfirmed" && $0.body.contains("evidence could not be saved")
             })
+            let originalToolResults = try Data(contentsOf: harness.root.appendingPathComponent("results.json"))
+            let wire = harness.root.appendingPathComponent("protocol.jsonl")
+            let originalTurnStarts = try AppServerWireTrace.load(wire).messages.filter {
+                $0.direction == .clientToServer && $0.method == "turn/start"
+            }.count
+            XCTAssertEqual(originalTurnStarts, 1)
+
+            _ = await harness.runtime.retryWebsiteSessionCleanup(taskID: Harness.taskID)
+            XCTAssertFalse(harness.audit.entries.contains { $0.title == "Browser cleanup evidence saved" })
+            do {
+                try await harness.runtime.submit(prompt: "Unused", toTaskID: Harness.taskID, modelID: "browser/invalid")
+                XCTFail("An invalid model must not start a new turn")
+            } catch WebsiteModelCatalog.Failure.invalidModelID { }
+            try FileManager.default.removeItem(at: blockedStore)
+            _ = await harness.runtime.retryWebsiteSessionCleanup(taskID: UUID().uuidString)
+            XCTAssertTrue(try harness.cleanupReceipts().isEmpty)
+            _ = await harness.runtime.retryWebsiteSessionCleanup(taskID: Harness.taskID)
+            try await self.waitFor { harness.audit.entries.contains { $0.title == "Browser cleanup evidence saved" } }
+            let receipts = try harness.cleanupReceipts()
+            let receipt = try XCTUnwrap(receipts.first)
+            XCTAssertEqual(receipt.taskID, Harness.taskID)
+            XCTAssertEqual(receipt.threadID, "02000000-0000-4000-8000-000000000001")
+            XCTAssertEqual(receipt.turnID, "03000000-0000-4000-8000-000000000001")
+            XCTAssertTrue(receipt.report.isSettled)
+            XCTAssertEqual(receipt.report.targets.map(\.trigger), [.automatic])
+
+            _ = await harness.runtime.retryWebsiteSessionCleanup(taskID: Harness.taskID)
+            XCTAssertEqual(try harness.cleanupReceipts(), [receipt])
+            XCTAssertEqual(harness.audit.entries.filter { $0.title == "Browser cleanup evidence saved" }.count, 1)
+            XCTAssertEqual(try Data(contentsOf: harness.root.appendingPathComponent("results.json")), originalToolResults)
+            XCTAssertEqual(try AppServerWireTrace.load(wire).messages.filter {
+                $0.direction == .clientToServer && $0.method == "turn/start"
+            }.count, originalTurnStarts)
+            let countsAfterRetry = await harness.backend.counts()
+            XCTAssertEqual(countsAfterRetry, counts)
+            XCTAssertEqual(harness.audit.status, .waiting)
         }
     }
 

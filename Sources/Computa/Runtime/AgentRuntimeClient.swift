@@ -100,6 +100,9 @@ enum AgentRuntimeEvent: Sendable {
     case websiteSessionCleanupUpdated(WebsiteSessionCleanupReceipt)
     case tasksSnapshot([AgentTask])
     case taskUpserted(AgentTask)
+    case taskThreadBound(taskID: AgentTask.ID, threadID: String)
+    /// A newly observed successful user turn, never a restored history status.
+    case taskCompletionObserved(taskID: AgentTask.ID, threadID: String, turnID: String)
     case timelineEntryAppended(taskID: AgentTask.ID, entry: TimelineEntry)
     case turnDiffUpdated(taskID: AgentTask.ID, turnID: String, diff: String)
     case assistantMessageDelta(taskID: AgentTask.ID, itemID: String, delta: String)

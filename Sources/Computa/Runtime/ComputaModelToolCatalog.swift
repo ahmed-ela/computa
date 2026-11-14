@@ -6,9 +6,10 @@ import CoreFoundation
 /// producer contract and command editing support. Other fields mirror pinned
 /// fallback metadata; context/provider configuration remain in thread config.
 /// The pinned engine's models-manager matches the longest catalog slug prefix,
-/// then retains the complete requested slug. Thus browser/<provider>/choice/...
-/// inherits the already-admitted browser/<provider> freeform patch metadata even
-/// when discovered after launch. No cached catalog reload or restart is assumed.
+/// then retains the complete requested slug. Both named /choice/ IDs and typed
+/// /mode/ IDs inherit their registered browser/<provider> patch metadata even
+/// when discovered after launch. Metadata prefixes do not admit an inference
+/// request or expose a selectable default. No catalog reload is assumed.
 enum ComputaModelToolCatalog {
     enum BrowserReadMode: Sendable, Equatable { case fresh, continuation }
 
@@ -311,6 +312,62 @@ enum ComputaModelToolCatalog {
         }
     }
 
+    /// Native capability discovery, not schemas or a promise of future permission.
+    /// Current eligible names are partitioned once, avoiding duplicate payload.
+    struct BrowserCapabilityDescriptor: Encodable, Equatable, Sendable {
+        enum State: String, Encodable, Equatable, Sendable { case unbound, bound }
+        let state: State
+        let entry: [String]
+        let loaded: [String]
+        let loadable: [String]
+        var eligible: [String] { Array(Set(loaded + loadable)).sorted() }
+        // Selection and discovery names already appear in the complete inventory
+        // and current schemas. Keep typed sets for exact guidance, without a second copy.
+        enum CodingKeys: String, CodingKey { case state, entry }
+    }
+
+    static func browserCapabilityDescriptor(_ definitions: [[String: Any]],
+        availability: EmbeddedBrowserToolAvailability?, allowedNames: Set<String>,
+        eligibleNames: Set<String>, loadedNames: Set<String>, loaderAvailable: Bool) -> BrowserCapabilityDescriptor? {
+        guard let availability else { return nil }
+        var native = Set<String>(), pages = Set<String>(), entries = Set<String>(), seen = Set<String>()
+        var ambiguous = false
+        func inspect(_ definition: [String: Any], namespace: String?) {
+            guard let name = definition["name"] as? String else { return }
+            let qualified = namespace.map { $0 + "." + name } ?? name
+            guard seen.insert(qualified).inserted else { ambiguous = true; return }
+            guard nativeBrowserToolName(definition, namespace: namespace) != nil else { return }
+            native.insert(qualified)
+            if requiresBrowserBinding(definition, namespace: namespace) { pages.insert(qualified) }
+            else if ["browser_open", "browser_bind"].contains(name) { entries.insert(qualified) }
+        }
+        for definition in definitions {
+            if definition["type"] as? String == "namespace", let namespace = definition["name"] as? String,
+               let tools = definition["tools"] as? [[String: Any]] {
+                tools.forEach { inspect($0, namespace: namespace) }
+            } else { inspect(definition, namespace: nil) }
+        }
+        guard !ambiguous else { return nil }
+        // Original registered policy narrows discovery only. Schema visibility
+        // does not satisfy runtime binding, reference or approval requirements.
+        let permitted = native.intersection(allowedNames)
+        let current = permitted.intersection(eligibleNames)
+        let loaded = current.intersection(loadedNames)
+        let loadable = loaderAvailable ? current.subtracting(loaded) : []
+        guard current == loaded.union(loadable) else { return nil }
+        let entry: Set<String>, state: BrowserCapabilityDescriptor.State
+        switch availability {
+        case .unbound:
+            entry = entries.intersection(current)
+            guard !entry.isEmpty, !pages.intersection(current).isEmpty else { return nil }
+            state = .unbound
+        case .bound:
+            guard !pages.intersection(current).isEmpty else { return nil }
+            entry = []; state = .bound
+        }
+        return .init(state: state, entry: entry.sorted(), loaded: loaded.sorted(), loadable: loadable.sorted())
+    }
+
     /// Explain host-deferred capabilities separately from the callable catalog.
     /// Use the original registered shapes, before projection can refresh them;
     /// a name, historical call or foreign namespace cannot establish capability.
@@ -378,7 +435,13 @@ enum ComputaModelToolCatalog {
     /// unchanged; only the current model's callable tool definitions change.
     static func visibleToolDefinitions(_ definitions: [[String: Any]], modelID: String,
                                        browserToolAvailability: EmbeddedBrowserToolAvailability? = nil,
-                                       browserActionReferences: EmbeddedBrowserCurrentActionReferences? = nil) -> [[String: Any]] {
+                                       browserActionReferences: EmbeddedBrowserCurrentActionReferences? = nil,
+                                       stableGroqBrowserSchemas: Bool = false) -> [[String: Any]] {
+        // Opt-in changes schema discovery only. The native controller retains
+        // binding, current-reference, ownership and approval checks at execution.
+        let stableBrowserSchemas = stableGroqBrowserSchemas
+            && LocalModelCatalog.webProvider(for: modelID) == "groq"
+            && browserToolAvailability != nil && GroqToolCatalog.isRegisteredLoader(definitions)
         let overrides = nativeToolDescriptions(modelID: modelID)
         // Availability is already scoped by the caller's interaction policy.
         // Reject removed names without hiding valid foreground tools that are
@@ -413,7 +476,8 @@ enum ComputaModelToolCatalog {
                 value["tools"] = tools
                 return value
             }
-            if browserToolAvailability == .unbound, requiresBrowserBinding(definition, namespace: namespace) { return nil }
+            if browserToolAvailability == .unbound, !stableBrowserSchemas,
+               requiresBrowserBinding(definition, namespace: namespace) { return nil }
             guard let name = value["name"] as? String else { return value }
             if name == "browser_wait" {
                 guard let variants = browserWaitDefinitionVariants(definition, namespace: namespace) else { return definition }
@@ -544,12 +608,16 @@ enum ComputaModelToolCatalog {
 
     static func catalogData(additionalModelID: String? = nil) throws -> Data {
         var ids = Set(LocalModelCatalog.options.map(\.id))
+        // Provider capabilities must not depend on UI defaults: typed-mode
+        // providers intentionally have no selectable/default LocalModelOption.
+        let websitePrefixes = Set(WebsiteModelCatalog.providers.map { "browser/" + $0 })
+        ids.formUnion(websitePrefixes)
         // The engine matches slug prefixes. Future configured API models use
         // the same native patch executor without reloading its model catalog.
         ids.insert("api/")
         if let additionalModelID, !additionalModelID.isEmpty { ids.insert(additionalModelID) }
         let models = ids.sorted().map { id -> [String: Any] in
-            [
+            var model: [String: Any] = [
                 "slug": id, "display_name": id, "description": NSNull(),
                 "default_reasoning_level": NSNull(), "supported_reasoning_levels": [String](),
                 "shell_type": "unified_exec", "visibility": "none", "supported_in_api": true,
@@ -563,7 +631,7 @@ enum ComputaModelToolCatalog {
                 "include_skills_usage_instructions": false, "include_plugin_usage_instructions": false,
                 "include_apps_usage_instructions": false, "supports_reasoning_summary_parameter": true,
                 "default_reasoning_summary": "auto", "support_verbosity": false,
-                "default_verbosity": NSNull(), "apply_patch_tool_type": LocalModelCatalog.isWebBrowser(id) || id.hasPrefix("api/") ? "freeform" : NSNull(),
+                "default_verbosity": NSNull(), "apply_patch_tool_type": websitePrefixes.contains(id) || LocalModelCatalog.isWebBrowser(id) || id.hasPrefix("api/") ? "freeform" : NSNull(),
                 "web_search_tool_type": "text", "truncation_policy": ["mode": "bytes", "limit": 10_000],
                 "supports_image_detail_original": false, "context_window": 272_000,
                 "effective_context_window_percent": 95, "experimental_supported_tools": [String](),
@@ -571,6 +639,13 @@ enum ComputaModelToolCatalog {
                 "supports_experimental_context": false, "use_responses_lite": false,
                 "node_repl_auto_review_required": false, "node_repl_disabled": false,
             ]
+            // Exact provider classification covers both the prefix and any
+            // longer additional/choice row that wins native metadata lookup.
+            // This caps command text only; structured tool policy stays exact.
+            if LocalModelCatalog.webProvider(for: id) == "groq" {
+                model["command_output_token_limit"] = 1_024
+            }
+            return model
         }
         return try JSONSerialization.data(withJSONObject: ["models": models], options: [.sortedKeys, .withoutEscapingSlashes])
     }

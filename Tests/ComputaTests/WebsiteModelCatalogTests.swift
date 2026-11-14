@@ -3,6 +3,34 @@ import XCTest
 @testable import Computa
 
 final class WebsiteModelCatalogTests: XCTestCase {
+    func testSharedInferenceFixturesUseSelectableChoicesForEveryNamedProvider() {
+        for provider in namedWebsiteModelProviders {
+            XCTAssertNotNil(WebsiteModelCatalog.inferenceSelection(for: syntheticWebsiteModelID(provider)), provider)
+            for intent in ["fixture-old", "fixture-new", "fixture-fast"] {
+                let choice = syntheticWebsiteChoice(provider: provider, key: intent, label: "Fixture Choice")
+                XCTAssertEqual(WebsiteModelCatalog.inferenceSelection(for: choice.modelID)?.choice, choice, provider)
+            }
+        }
+    }
+
+    func testPublicDeepSeekUsesTypedModeIdentitiesInsteadOfNamedChoicesOrDefaults() throws {
+        let configuration = CodexAppServerRuntime.Configuration.localQwen
+        for kind in WebsiteModeChoice.DeepSeekMode.allCases {
+            let mode = WebsiteModeChoice(deepSeekMode: kind)
+            XCTAssertEqual(WebsiteModelCatalog.inferenceSelection(for: mode.requestID)?.modeChoice, mode)
+            XCTAssertNil(WebsiteModelCatalog.choice(for: mode.requestID))
+            XCTAssertEqual(LocalModelCatalog.webProvider(for: mode.requestID), "deepseek")
+            XCTAssertEqual(configuration.modelProvider(for: mode.requestID), "web_browser")
+            XCTAssertNoThrow(try configuration.validateSelectedModel(mode.requestID))
+            XCTAssertEqual(LocalThreadContext.forModel(mode.requestID), .webBrowser)
+            XCTAssertEqual(LocalModelCatalog.option(for: mode.requestID)?.label,
+                "DeepSeek / \(mode.label) · Built-in browser")
+            XCTAssertFalse(WebsiteModelChoice(provider: "deepseek", key: mode.key, label: mode.label).isValid)
+        }
+        XCTAssertNil(WebsiteModelCatalog.inferenceSelection(for: "browser/deepseek"))
+        XCTAssertNil(LocalModelCatalog.option(for: "browser/deepseek"))
+    }
+
     func testGroqUsesObservedChoicesWithoutSeedingOrAliasingAnotherProvider() throws {
         let preferences = isolatedTestPreferences()
         XCTAssertTrue(WebsiteModelCatalog.load(from: preferences).isEmpty)
@@ -26,17 +54,34 @@ final class WebsiteModelCatalogTests: XCTestCase {
         }
     }
 
-    func testPriorCatalogDropsOnlyUnprovenChatGPTChoicesBeforeGuardedRefresh() throws {
+    func testPriorCatalogDropsUnprovenChatGPTAndClaudeChoicesBeforeGuardedRefresh() throws {
         let preferences = isolatedTestPreferences()
         let normalLabelAlsoOfferedInWork = WebsiteModelChoice(provider: "chatgpt", key: "GPT-5.5", label: "GPT-5.5")
         let others = [WebsiteModelChoice(provider: "gemini", key: "3.1 Pro", label: "3.1 Pro"),
                       WebsiteModelChoice(provider: "claude", key: "Sonnet 5.5", label: "Sonnet 5.5")]
         preferences.set(try JSONEncoder().encode([normalLabelAlsoOfferedInWork] + others), forKey: WebsiteModelCatalog.legacyPreferenceKey)
-        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), others)
+        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), [others[0]])
         XCTAssertNotNil(preferences.data(forKey: WebsiteModelCatalog.preferenceKey))
         WebsiteModelCatalog.save([normalLabelAlsoOfferedInWork] + others, to: preferences)
         XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), others,
                        "A family-only choice no longer proves a Chat power preset")
+    }
+
+    func testV3ClaudeRequiresFreshRowsWhileChatPresetsAndOtherProvidersSurvive() throws {
+        let preferences = isolatedTestPreferences()
+        let fable = WebsiteModelChoice(provider: "claude", key: "Fable 5.1", label: "Fable 5.1")
+        let opus = WebsiteModelChoice(provider: "claude", key: "Opus 5", label: "Opus 5")
+        let others = [WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/medium", label: "Medium"),
+                      WebsiteModelChoice(provider: "groq", key: "test", label: "Test")]
+        let prior = try JSONEncoder().encode([fable, opus] + others)
+        preferences.set(prior, forKey: WebsiteModelCatalog.priorSelectableRowsPreferenceKey)
+        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), others)
+        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), others)
+        XCTAssertEqual(preferences.data(forKey: WebsiteModelCatalog.priorSelectableRowsPreferenceKey), prior)
+        XCTAssertEqual(WebsiteModelCatalog.choice(for: fable.modelID), fable)
+        XCTAssertEqual(WebsiteModelCatalog.option(for: fable, available: false).available, false)
+        WebsiteModelCatalog.save(others + [fable, opus], to: preferences)
+        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), others + [fable, opus])
     }
 
     func testLegacyCatalogValidationCannotBeHiddenByProductMigration() throws {
@@ -51,9 +96,11 @@ final class WebsiteModelCatalogTests: XCTestCase {
 
     func testConcreteChoicesRoundTripWithoutARegisteredOrGuessedModelList() throws {
         let configuration = CodexAppServerRuntime.Configuration.localQwen
-        for provider in WebsiteModelCatalog.providers {
+        for provider in namedWebsiteModelProviders {
             let choice = provider == "chatgpt"
                 ? WebsiteModelChoice(provider: provider, key: "chat/latest/medium", label: "Medium")
+                : provider == "kimi" ? WebsiteModelChoice(provider: provider, key: "k28-instant", label: "Instant")
+                : provider == "qwen" ? syntheticWebsiteChoice(provider: provider, key: "fixture", label: "Fixture")
                 : WebsiteModelChoice(provider: provider, key: "fixture-key/with-symbols", label: "Fixture Model 東京 👋")
             XCTAssertTrue(choice.isValid)
             XCTAssertEqual(WebsiteModelCatalog.choice(for: choice.modelID), choice)
@@ -71,7 +118,7 @@ final class WebsiteModelCatalogTests: XCTestCase {
     }
 
     func testLegacyIDsKeepExplicitDefaultSemanticsAndOriginalPersistenceIDs() {
-        for provider in WebsiteModelCatalog.providers {
+        for provider in namedWebsiteModelProviders {
             let id = "browser/\(provider)"
             XCTAssertEqual(WebsiteModelCatalog.selection(for: id)?.provider, provider)
             XCTAssertNil(WebsiteModelCatalog.choice(for: id))
@@ -146,7 +193,9 @@ final class WebsiteModelCatalogTests: XCTestCase {
 
     func testObservedMenuCachePersistsExactChoicesAndRejectsCorruptData() throws {
         let preferences = isolatedTestPreferences()
-        let choices = WebsiteModelCatalog.providers.map {  $0 == "chatgpt" ? WebsiteModelChoice(provider: $0, key: "chat/latest/medium", label: "Medium")
+        let choices = namedWebsiteModelProviders.map {  $0 == "chatgpt" ? WebsiteModelChoice(provider: $0, key: "chat/latest/medium", label: "Medium")
+                : $0 == "kimi" ? WebsiteModelChoice(provider: $0, key: "k28-instant", label: "Instant")
+                : $0 == "qwen" ? syntheticWebsiteChoice(provider: $0, key: "fixture", label: "Fixture")
                 : WebsiteModelChoice(provider: $0, key: "fixture-key", label: "Fixture Label") }
         WebsiteModelCatalog.save(choices, to: preferences)
         XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), choices)
@@ -240,21 +289,82 @@ final class WebsiteModelCatalogTests: XCTestCase {
         }
     }
 
+    func testOnlyCanonicalGroqRowsHaveCommandLimitAndKeepGenericStructuredPolicy() throws {
+        let choices = [
+            WebsiteModelChoice(provider: "groq", key: "qwen/qwen3.8-27b", label: "Qwen/Qwen3.8-27B"),
+            WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B"),
+        ]
+        for additional in [nil] + choices.map({ Optional($0.modelID) }) {
+            let root = try XCTUnwrap(JSONSerialization.jsonObject(
+                with: ComputaModelToolCatalog.catalogData(additionalModelID: additional)) as? [String: Any])
+            let rows = try XCTUnwrap(root["models"] as? [[String: Any]])
+            for row in rows {
+                let id = try XCTUnwrap(row["slug"] as? String)
+                XCTAssertEqual(row["truncation_policy"] as? NSDictionary,
+                    ["mode": "bytes", "limit": 10_000] as NSDictionary,
+                    "Browser/schema/tool JSON output policy must not be lowered")
+                if LocalModelCatalog.webProvider(for: id) == "groq" {
+                    XCTAssertEqual(row["command_output_token_limit"] as? Int, 1_024)
+                } else { XCTAssertNil(row["command_output_token_limit"], id) }
+            }
+            for choice in choices {
+                let selected = try XCTUnwrap(rows.filter {
+                    choice.modelID.hasPrefix($0["slug"] as? String ?? "\0")
+                }.max { ($0["slug"] as? String ?? "").count < ($1["slug"] as? String ?? "").count })
+                XCTAssertEqual(selected["command_output_token_limit"] as? Int, 1_024)
+                if additional == choice.modelID { XCTAssertEqual(selected["slug"] as? String, choice.modelID) }
+            }
+        }
+    }
+
+    func testCommandLimitClassificationRejectsGroqLikeForeignAndMalformedAdditionalRows() throws {
+        let canonical = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
+        let foreign = ["browser/groq-foreign", "browser/groq/choice/not-canonical",
+            canonical + "=", "api/groq/model", syntheticChatGPTModelID,
+            WebsiteModeChoice(deepSeekMode: .chat).requestID]
+        for id in foreign {
+            let root = try XCTUnwrap(JSONSerialization.jsonObject(
+                with: ComputaModelToolCatalog.catalogData(additionalModelID: id)) as? [String: Any])
+            let rows = try XCTUnwrap(root["models"] as? [[String: Any]])
+            let row = try XCTUnwrap(rows.first { $0["slug"] as? String == id })
+            XCTAssertNil(row["command_output_token_limit"], id)
+            XCTAssertEqual(row["truncation_policy"] as? NSDictionary,
+                ["mode": "bytes", "limit": 10_000] as NSDictionary)
+        }
+    }
+
     func testPinnedLongestPrefixAdmissionRetainsPatchAndTerminalForFutureChoices() throws {
         let catalog = try XCTUnwrap(JSONSerialization.jsonObject(with: ComputaModelToolCatalog.catalogData()) as? [String: Any])
         let models = try XCTUnwrap(catalog["models"] as? [[String: Any]])
         // This is the reviewed pinned engine's metadata lookup contract. Live
         // qualification separately observes actual offered tools for new IDs.
         for provider in WebsiteModelCatalog.providers {
-            let id = WebsiteModelChoice(provider: provider, key: "never-listed-before-launch", label: "Fixture Future Model").modelID
-            XCTAssertFalse(models.contains { $0["slug"] as? String == id })
-            let matches = models.filter { id.hasPrefix($0["slug"] as? String ?? "\0") }
-                .sorted { ($0["slug"] as? String ?? "").count > ($1["slug"] as? String ?? "").count }
-            let metadata = try XCTUnwrap(matches.first)
-            XCTAssertEqual(metadata["slug"] as? String, "browser/\(provider)")
-            XCTAssertEqual(metadata["apply_patch_tool_type"] as? String, "freeform")
-            XCTAssertEqual(metadata["shell_type"] as? String, "unified_exec")
+            let ids: [String]
+            if provider == "deepseek" {
+                ids = WebsiteModeChoice.DeepSeekMode.allCases.map { WebsiteModeChoice(deepSeekMode: $0).requestID }
+            } else {
+                ids = [WebsiteModelChoice(provider: provider, key: "never-listed-before-launch", label: "Fixture Future Model").modelID]
+                    + (provider == "qwen" ? ["Qwen3.7-Plus", "Qwen3.8-Max"].map {
+                        WebsiteModelChoice(provider: provider, key: $0, label: $0).modelID
+                    } : [])
+            }
+            for id in ids {
+                XCTAssertFalse(models.contains { $0["slug"] as? String == id })
+                let matches = models.filter { id.hasPrefix($0["slug"] as? String ?? "\0") }
+                    .sorted { ($0["slug"] as? String ?? "").count > ($1["slug"] as? String ?? "").count }
+                let metadata = try XCTUnwrap(matches.first, id)
+                XCTAssertEqual(metadata["slug"] as? String, "browser/\(provider)")
+                XCTAssertEqual(metadata["apply_patch_tool_type"] as? String, "freeform")
+                XCTAssertEqual(metadata["shell_type"] as? String, "unified_exec")
+                XCTAssertEqual(metadata["visibility"] as? String, "none")
+            }
         }
+        // Internal engine-prefix metadata must not manufacture a selectable
+        // default or bypass the exact named-choice / typed-mode admission.
+        for provider in ["qwen", "deepseek"] {
+            XCTAssertNil(WebsiteModelCatalog.inferenceSelection(for: "browser/" + provider))
+        }
+        XCTAssertNil(LocalModelCatalog.option(for: "browser/deepseek"))
     }
 
     private func encoded(_ text: String) -> String {

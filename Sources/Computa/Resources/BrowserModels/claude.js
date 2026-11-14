@@ -3,7 +3,7 @@
 // This private-world notification carries no page content and grants no authority.
 function websiteModelDiagnosticPhase(phase) {
   try {
-    const phases = ['adapter_entry', 'model_proof', 'model_wait', 'model_wait_done', 'first_user_hash',
+    const phases = ['adapter_entry', 'model_proof', 'model_wait', 'model_wait_initial_disabled', 'model_wait_done', 'first_user_hash',
       'first_user_expand', 'first_user_expand_wait', 'page_action', 'final_model_guard'];
     if (typeof input !== 'object' || input === null || !phases.includes(phase)
       || !/^[a-f0-9-]{36}$/i.test(input.ownerToken || '') || !/^[a-f0-9-]{36}$/i.test(input.operationID || '')
@@ -334,12 +334,12 @@ function websiteChatObservePinnedMutations(records, pin = globalThis.__computaCh
     }
   }
 }
+const websiteChatPickerBoundary = '[data-message-author-role], [data-markdown-text-style], [data-turn], [data-user-message-bubble], [role="tooltip"]';
 function websiteChatPickerState() {
-  const boundary = '[data-message-author-role], [data-markdown-text-style], [data-turn], [data-user-message-bubble], [role="tooltip"]';
   const physical = node => !!node && node.isConnected && node.getClientRects().length > 0
     && getComputedStyle(node).visibility !== 'hidden';
   const visible = node => physical(node) && !node.closest('[inert], [aria-hidden="true"]');
-  const outside = node => !!node && !node.closest(boundary);
+  const outside = node => !!node && !node.closest(websiteChatPickerBoundary);
   const enabled = node => visible(node) && !node.disabled && node.getAttribute('disabled') === null
     && node.getAttribute('aria-disabled') !== 'true';
   const nodes = selector => [...document.querySelectorAll(selector)].slice(0, 256);
@@ -446,6 +446,92 @@ function websiteChatPickerState() {
     navigationAmbiguous: associated.length > 1 || secondaries.length > 1,
     physical, visible, enabled, family };
 }
+function websiteChatRecordReadinessPopup(trace, records) {
+  const menuRoles = ['menu', 'listbox', 'dialog'];
+  for (const record of records) {
+    const index = trace.recordCount++;
+    if (record.type === 'attributes') {
+      const { target, attributeName, oldValue } = record;
+      if (target === trace.trigger && attributeName === 'aria-expanded') trace.expandedChanges.push({ index, oldValue });
+      if (target === trace.trigger && attributeName === 'aria-controls') trace.controlsChanges.push({ index, oldValue });
+      if (attributeName === 'id') {
+        trace.changedIDs.add(oldValue);
+        trace.changedIDs.add(target.getAttribute('id'));
+      }
+      if (attributeName === 'role' && (menuRoles.includes(oldValue) || menuRoles.includes(target.getAttribute('role')))) return false;
+      if (['id', 'role', 'aria-labelledby', 'data-message-author-role', 'data-markdown-text-style',
+        'data-turn', 'data-user-message-bubble'].includes(attributeName)) trace.identityChanges.add(target);
+      if (target === trace.send && ['disabled', 'aria-disabled'].includes(attributeName)) return false;
+      continue;
+    }
+    if (record.type !== 'childList' || record.addedNodes.length + record.removedNodes.length > 64) return false;
+    for (const [nodes, added] of [[record.removedNodes, false], [record.addedNodes, true]]) {
+      for (const node of nodes) {
+        if ([trace.trigger, trace.composer, trace.send, trace.body].some(pin => node === pin || node.contains?.(pin))) return false;
+        const descendants = node.querySelectorAll?.('[role="menu"], [role="listbox"], [role="dialog"]') ?? [];
+        const menus = menuRoles.includes(node.getAttribute?.('role')) ? [node, ...descendants] : descendants;
+        if (menus.length === 0) continue;
+        const menu = menus[0];
+        if (menus.length !== 1 || menu.getAttribute('role') !== 'menu' || menu.closest(websiteChatPickerBoundary)
+          || record.target !== trace.body
+          || trace.body.isConnected !== true) return false;
+        // Snapshot attributes when the observer delivers the records. A later
+        // mutation of a detached portal must never rewrite its opening history.
+        const id = menu.getAttribute('id');
+        if (menu.getAttribute('aria-labelledby') !== trace.triggerID) return false;
+        if (added) {
+          if (trace.opening) return false;
+          trace.opening = { index, menu, node, id };
+        } else {
+          const opening = trace.opening;
+          if (!opening || trace.removal !== null || menu !== opening.menu || node !== opening.node || id !== opening.id) return false;
+          trace.removal = index;
+        }
+      }
+    }
+  }
+  return true;
+}
+function websiteChatReadinessPopupDetached(trace) {
+  // Allow generated Unicode IDs but reject characters that could escape the
+  // quoted CSS attribute selectors below.
+  const validID = value => typeof value === 'string' && /^[^\s"\\\u0000-\u001F\u007F]{1,256}$/.test(value);
+  const { trigger, opening, removal, expandedChanges, controlsChanges, identityChanges } = trace;
+  if (trace.overflow || trace.invalid || !validID(trace.triggerID) || trigger.getAttribute('id') !== trace.triggerID
+    || trace.body !== document.body || trace.body.isConnected !== true || identityChanges.has(trace.body)
+    || trigger.getAttribute('aria-expanded') !== trace.expanded
+    || trigger.getAttribute('aria-controls') !== trace.controls) return false;
+  if (!opening || removal === null || opening.menu.isConnected !== false || opening.node.isConnected !== false
+    || !opening.node.contains(opening.menu) || identityChanges.has(trigger)
+    || [...identityChanges].some(node => node === opening.menu || node.contains?.(opening.menu))
+    || opening.menu.getAttribute('role') !== 'menu' || opening.menu.getAttribute('id') !== opening.id
+    || opening.menu.getAttribute('aria-labelledby') !== trace.triggerID
+    || expandedChanges.length !== 2 || expandedChanges[0].oldValue !== trace.expanded
+    || expandedChanges[1].oldValue !== 'true') return false;
+  const menuID = opening.id;
+  if (!validID(menuID) || trace.changedIDs.has(menuID) || trace.changedIDs.has(trace.triggerID)) return false;
+  const triggerIDs = document.querySelectorAll(`[id="${trace.triggerID}"]`);
+  if (triggerIDs.length !== 1 || triggerIDs[0] !== trigger
+    || document.querySelector(`[id="${menuID}"]`)) return false;
+  let linkedFrom = -1, linkedUntil = trace.recordCount;
+  if (trace.controls === null) {
+    if (controlsChanges.length !== 2 || controlsChanges[0].oldValue !== null || controlsChanges[1].oldValue !== menuID) return false;
+    linkedFrom = controlsChanges[0].index;
+    linkedUntil = controlsChanges[1].index;
+  } else if (trace.controls !== menuID || controlsChanges.length !== 0) return false;
+  // The three intervals must overlap. This proves only the original popup's
+  // structural lifecycle, never the model or even the popup's visibility.
+  return Math.max(opening.index, expandedChanges[0].index, linkedFrom) < Math.min(removal, expandedChanges[1].index, linkedUntil);
+}
+function websiteChatVisibleSendControls(visible) {
+  return [...new Set(document.querySelectorAll(
+    'button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"], button[aria-label="Send"]'))]
+    .filter(visible);
+}
+function websiteChatSameVisibleSend(send, visible, enabled) {
+  const controls = websiteChatVisibleSendControls(visible);
+  return controls.length === 1 && controls[0] === send && enabled(send);
+}
 async function websiteChatObserveSelection(request, expected, freshGuard = null, attempt = null, context = null) {
   const owner = globalThis.__computaModelOwner, url = document.URL, originalDocument = document;
   const mutable = typeof freshGuard === 'function';
@@ -471,7 +557,59 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   let headerExpected = null, proofLocked = false, headerObserved = false, finalPowerState = null;
   let remount = null, remountClaimed = false;
   let prepareOpening = null, insertOpening = null, genericPowerRecheck = false;
-  let headerReadiness = null, changingPowerHeader = null, changingPowerSlider = null;
+  let firstVerificationOpeningDiagnostic = null;
+  let preparedReadinessOpeningDiagnostic = null;
+  let readinessPopupObserver = null, readinessPopupTrace = null, readinessPopupLifecycle = null;
+  let detachedSubmitSend = null;
+  const recordReadinessPopup = records => {
+    if (readinessPopupTrace.recordCount + records.length > 64) readinessPopupTrace.overflow = true;
+    if (!readinessPopupTrace.overflow && !readinessPopupTrace.invalid)
+      readinessPopupTrace.invalid = !websiteChatRecordReadinessPopup(readinessPopupTrace, records);
+  };
+  const openingCondition = (reason, value, capture = false, rejects = false) => {
+    if (capture && (rejects ? value : !value) && firstVerificationOpeningDiagnostic?.reason === null)
+      firstVerificationOpeningDiagnostic.reason = reason;
+    return value;
+  };
+  let verifyObserver = null, verifyAcknowledged = false, passiveFirstVerification = null;
+  // Diagnostic-only identities at the original short-circuit operands. Never
+  // inspect a second node/attribute to explain an acknowledgement or grant proof.
+  const acknowledgementSources = { triggerAriaExpanded:false, triggerDataState:false, menuRoot:false, menuDescendant:false };
+  const openingAcknowledgement = (source, value) => {
+    if (value) acknowledgementSources[source] = true;
+    return value;
+  };
+  let draftObserver = null, draftChanged = false, firstVerificationEditor = null, initialReadinessObserver = null;
+  const invalidateDraft = () => { draftChanged = true; };
+  const recordDraftChanges = records => {
+    const composer = insertOpening?.composer || firstVerificationEditor;
+    if (!composer || !records.length) return;
+    if (records.length > 64) { draftChanged = true; return; }
+    for (const r of records) {
+      if (r.target === composer || composer.contains(r.target)) draftChanged = true;
+      if (r.type !== 'childList') continue;
+      if (r.addedNodes.length + r.removedNodes.length > 64) { draftChanged = true; return; }
+      for (const node of [...r.addedNodes, ...r.removedNodes]) {
+        if (node === composer || node.contains?.(composer) || node === trigger || node.contains?.(trigger)) draftChanged = true;
+        if (insertOpening && (openingAcknowledgement('menuRoot', ['menu','listbox'].includes(node.getAttribute?.('role'))) ||
+          openingAcknowledgement('menuDescendant', node.querySelector?.('[role="menu"],[role="listbox"]')))) verifyAcknowledged = true;
+      }
+    }
+  };
+  const recordInitialReadinessRemovals = records => {
+    const pinned = initialReadinessBinding?.nodes;
+    if (!pinned) return;
+    // Observe only the fixed ancestor child lists. Unrelated hydration cannot
+    // consume the composer's relevant-record bound or change these pins.
+    for (const record of records) if (record.type === 'childList'
+      && [...record.addedNodes, ...record.removedNodes].some(node => pinned.has(node))) draftChanged = true;
+  };
+  const recordVerifyOpening = records => {
+    if (records.some(record => record.target === trigger && (openingAcknowledgement('triggerAriaExpanded', record.attributeName === 'aria-expanded' && record.oldValue === 'true')
+      || openingAcknowledgement('triggerDataState', record.attributeName === 'data-state' && record.oldValue === 'open')))) verifyAcknowledged = true;
+  };
+  let headerReadiness = null, changingPowerHeader = null, changingPowerSlider = null, initialReadinessBinding = null;
+  let initialReadinessFacts = null;
   const tracked = new Map();
   const observeHeader = records => {
     const diagnostic = {};
@@ -501,7 +639,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     attributeFilter: ['aria-valuenow', 'aria-checked', 'aria-selected'] });
   const failure = code => {
     const current = websiteChatPickerState(), selection = globalThis.__computaModelSelection;
-    return { error: code, modelDiagnostic: websiteModelDiagnostic(current, { readStage, headerReadiness,
+    return { error: code, modelDiagnostic: websiteModelDiagnostic(current, { readStage, headerReadiness, initialReadinessFacts,
       readContext: {
         scope: ['action_precheck', 'action_final_guard', 'completed_selection', 'post_selection'].includes(context?.scope)
           ? context.scope : 'unknown',
@@ -510,7 +648,12 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         selectionAttemptPresent: !!selection && typeof selection === 'object',
         selectionClicked: selection?.familyClicked === true || Number.isInteger(selection?.powerEvents) && selection.powerEvents > 0,
         selectionSettled: selection?.completed === true, selectionCompleted: selection?.completed === true,
-        recoveryEligible: prepareOpening !== null || insertOpening !== null },
+        recoveryEligible: prepareOpening !== null || insertOpening !== null,
+        firstVerificationOpening: firstVerificationOpeningDiagnostic,
+        ...(preparedReadinessOpeningDiagnostic ? { preparedReadinessOpening: {
+          ...preparedReadinessOpeningDiagnostic, observedAcknowledgement: verifyAcknowledged,
+          acknowledgementSources: { ...acknowledgementSources },
+          recoveryClaimed: insertOpening?.recoveryClaimed === true }, readinessPopupLifecycle } : {}) },
       readAttempt: { primaryOpened, secondaryOpened, closeAttempted, observedProof,
         sameTrigger: !trigger || current.trigger === trigger, popupStillAssociated: !!current.topMenu } }) };
   };
@@ -523,6 +666,10 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     if (selectionChanged || pin?.owner === owner && pin.document === document && pin.invalidated === true)
       throw failure('model_mismatch');
     const current = websiteChatPickerState();
+    recordInitialReadinessRemovals(initialReadinessObserver?.takeRecords?.() || []);
+    if (initialReadinessBinding && (trigger.parentElement !== initialReadinessBinding.parent
+      || !websiteModelChoiceEqual(attempt?.choice, expected)
+      || !passiveEditorIntact(initialReadinessBinding, current))) throw failure('model_unverified');
     let remountFailure = null;
     const rejectRemount = (rule, value) => { if (value && remountFailure == null) remountFailure = rule; return value; };
     if (remount && (rejectRemount('previous_connected', remount.previous.isConnected !== false)
@@ -588,54 +735,126 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       throw failure('model_unverified');
     attempt.familyCloseAcknowledged = true;
   };
-  const readonlyOpeningSelectionIntact = (saved, current) => {
+  const readonlyOpeningSelectionIntact = (saved, current, spent = false, capture = false) => {
     const pin = globalThis.__computaChatPresetPin;
     const choice = saved && websiteChatPresetChoice(saved.resolved.family, saved.resolved.power);
-    return saved != null && !mutable && owned() && !selectionChanged && Date.now() < until
-      && document.URL === request.expectedURL && location.pathname === '/'
-      && saved.owner === owner && saved.document === originalDocument
-      && globalThis.__computaModelSelection === saved.attempt && saved.attempt.started === true
-      && saved.attempt.completed === true && saved.recoveryClaimed !== true
-      && websiteModelChoiceEqual(saved.attempt.choice, expected)
-      && pin === saved.pin && pin?.owner === owner && pin.document === originalDocument
-      && pin.invalidated !== true && !pin.provisionalHeader && pin.selection === saved.selection
-      && websiteChatResolvedSelectionEqual(pin.selection, saved.resolved)
-      && websiteChatPresetIntentValid(expected) && choice && expected.key === choice.key
-      && (expected.label === choice.label || saved.resolved.power.key === 'pro' && expected.label === 'Pro')
-      && pin.headerTrigger === trigger && trigger === saved.header && trigger.isConnected === true
-      && pickerClosed(current) && websiteChatClosedHeaderMatches(current, saved.resolved.power, pin)
-      && Array.isArray(request.expectedUserCounts) && request.expectedUserCounts.length === 1 && request.expectedUserCounts[0] === 0
-      && request.expectedFirstUserFingerprint == null && request.expectedConversation == null
-      && globalThis.__computaModelFirstSubmitted !== true && !globalThis.__computaModelFirstProof
-      && chatGPTMessageRoots('user').length === 0 && chatGPTMessageRoots('assistant').length === 0
-      && !!chatGPTProductModeProof() && chatGPTTemporaryVerified();
+    return openingCondition('fresh_context', saved != null && !mutable && owned() && !selectionChanged && Date.now() < until, capture)
+      && openingCondition('route', document.URL === request.expectedURL && location.pathname === '/', capture)
+      && openingCondition('selection_attempt', saved.owner === owner && saved.document === originalDocument
+        && globalThis.__computaModelSelection === saved.attempt && saved.attempt.started === true
+        && saved.attempt.completed === true && (spent ? saved.recoveryClaimed === true : saved.recoveryClaimed !== true), capture)
+      && openingCondition('selection_choice', websiteModelChoiceEqual(saved.attempt.choice, expected), capture)
+      && openingCondition('pin_context', pin === saved.pin && pin?.owner === owner && pin.document === originalDocument
+        && pin.invalidated !== true && !pin.provisionalHeader, capture)
+      && openingCondition('pin_selection', pin.selection === saved.selection
+        && websiteChatResolvedSelectionEqual(pin.selection, saved.resolved), capture)
+      && openingCondition('choice', websiteChatPresetIntentValid(expected) && choice && expected.key === choice.key
+        && (expected.label === choice.label || saved.resolved.power.key === 'pro' && expected.label === 'Pro'), capture)
+      && openingCondition('header', pin.headerTrigger === trigger && trigger === saved.header && trigger.isConnected === true, capture)
+      && openingCondition('popup', pickerClosed(current) && websiteChatClosedHeaderMatches(current, saved.resolved.power, pin), capture)
+      && openingCondition('user_context', Array.isArray(request.expectedUserCounts) && request.expectedUserCounts.length === 1
+        && request.expectedUserCounts[0] === 0 && request.expectedFirstUserFingerprint == null && request.expectedConversation == null, capture)
+      && openingCondition('submission', globalThis.__computaModelFirstSubmitted !== true && !globalThis.__computaModelFirstProof, capture)
+      && openingCondition('message_roots', chatGPTMessageRoots('user').length === 0 && chatGPTMessageRoots('assistant').length === 0, capture)
+      && openingCondition('mode', !!chatGPTProductModeProof() && chatGPTTemporaryVerified(), capture);
   };
-  const prepareOpeningIntact = current => readonlyOpeningSelectionIntact(prepareOpening, current)
-    && request.action === 'prepare' && context?.action === 'prepare' && context.scope === 'action_final_guard'
-    && globalThis.__computaChatFirstPrepareOpening === prepareOpening && !globalThis.__computaChatSubmissionState;
-  const insertComposer = current => {
+  const prepareOpeningIntact = (current, opening = prepareOpening, allowAcknowledged = false, spent = false, capture = false) => {
+    if (!readonlyOpeningSelectionIntact(opening, current, spent, capture)
+      || openingCondition('context', context?.action !== request.action, capture, true)
+      || openingCondition('context', context.scope !== 'action_final_guard', capture, true)
+      || openingCondition('context', globalThis.__computaChatSubmissionState, capture, true)) return false;
+    if (request.action === 'prepare') return globalThis.__computaChatFirstPrepareOpening === opening;
+    const composer = opening.composer;
+    recordVerifyOpening(verifyObserver?.takeRecords?.() || []);
+    recordDraftChanges(draftObserver?.takeRecords?.() || []);
+    return openingCondition('editor_changed', !draftChanged, capture)
+      && openingCondition('verification_context', request.action === 'verifyModel' && request.allowFirstChatVerificationOpening === true
+        && opening.attempt.firstVerificationOpening === opening && (allowAcknowledged || !verifyAcknowledged), capture)
+      && openingCondition('editor_unavailable', composer && composer.isConnected && insertComposer(current) === composer, capture)
+      && openingCondition('editor_not_empty', firstVerificationComposerEmpty(composer), capture);
+  };
+  const passiveEditorIntact = (opening, current) => {
+    recordDraftChanges(draftObserver?.takeRecords?.() || []);
+    return !draftChanged && opening?.composer?.isConnected === true && firstVerificationComposerEmpty(opening.composer)
+      && globalThis.__computaChatSubmissionState == null && ![...document.querySelectorAll('button[data-testid="stop-button"],'
+        + 'button[aria-label="Stop streaming"],button[aria-label="Stop generating"],button[aria-label="Stop"]')].some(current.visible);
+  };
+  const insertComposer = (current, facts = null) => {
     const candidates = [...new Set(document.querySelectorAll('#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, '
-      + '#prompt-textarea [contenteditable="true"], [contenteditable="true"][aria-label="Ask ChatGPT"], textarea[data-testid="prompt-textarea"]'))]
-      .filter(node => current.enabled(node));
-    return candidates.length === 1 ? candidates[0] : null;
+      + '#prompt-textarea [contenteditable="true"], [contenteditable="true"][aria-label="Ask ChatGPT"], textarea[data-testid="prompt-textarea"]'))];
+    const enabled = candidates.filter(node => current.enabled(node));
+    if (facts) {
+      // Counts only, from this original candidate read. Three means three or
+      // more; diagnostic reads cannot change the selected composer or refusal.
+      try {
+        facts.candidateCount = Math.min(candidates.length, 3);
+        facts.enabledCount = Math.min(enabled.length, 3);
+        facts.physicalCount = Math.min(candidates.filter(current.physical).length, 3);
+        facts.visibleCount = Math.min(candidates.filter(current.visible).length, 3);
+      } catch { }
+    }
+    return enabled.length === 1 ? enabled[0] : null;
   };
   const insertComposerValue = composer => composer instanceof HTMLTextAreaElement ? composer.value : composer?.innerText;
-  const insertOpeningIntact = current => {
-    const saved = insertOpening, state = saved?.state, record = saved?.record;
-    const composer = saved?.composer;
+  const firstVerificationComposerEmpty = composer => {
     const value = insertComposerValue(composer);
-    return readonlyOpeningSelectionIntact(saved, current)
-      && request.action === 'insert' && context?.action === 'insert' && context.scope === 'action_final_guard'
+    if (value === '') return composer instanceof HTMLTextAreaElement || composer.textContent === '' && !composer.childNodes.length;
+    // WebKit renders ProseMirror's sole empty-paragraph caret sentinel as one LF.
+    // Neither trimming a draft nor ignoring a second element proves emptiness.
+    if (value !== '\n' || composer instanceof HTMLTextAreaElement || composer.textContent !== ''
+      || composer.getAttribute('contenteditable') !== 'true' || !composer.classList.contains('ProseMirror')
+      || composer.childNodes.length !== 1) return false;
+    const paragraph = composer.childNodes[0], br = paragraph.childNodes?.[0];
+    return paragraph.tagName === 'P' && paragraph.childNodes.length === 1 && br?.tagName === 'BR'
+      && br.classList.contains('ProseMirror-trailingBreak') && !br.childNodes.length;
+  };
+  const exactVisibleSend = (current, send) => websiteChatSameVisibleSend(send, current.visible, current.enabled);
+  const insertOpeningIntact = (current, spent = false, allowAcknowledged = false) => {
+    const saved = insertOpening, state = saved?.state, record = saved?.record, prior = saved?.insertProof;
+    const composer = saved?.composer, value = insertComposerValue(composer);
+    const grant = request.preparedInstantVerificationOpening;
+    const firstSubmit = request.action === 'submit', firstReadiness = request.action === 'sendReady';
+    if (prior) {
+      recordVerifyOpening(verifyObserver?.takeRecords?.() || []);
+      recordDraftChanges(draftObserver?.takeRecords?.() || []);
+      if (draftChanged || !spent && verifyAcknowledged && !allowAcknowledged
+        || record.firstInsertOpening !== prior || prior.proved !== true) return false;
+      if (firstSubmit) {
+        if (record.firstSubmitOpening !== saved || record.readyForSubmitOpening !== prior || request.submissionSequence !== 1
+          || request.submissionMarker !== record.marker || request.prompt !== saved.prompt
+          || !prior.exactSubmitDraft || !chatGPTExactSubmitDraft(composer, value, request.prompt)
+          || globalThis.__computaModelLastSubmissionCount !== undefined
+          || detachedSubmitSend && !exactVisibleSend(current, detachedSubmitSend)) return false;
+      } else if (firstReadiness) {
+        const readinessGrant = request.preparedChatReadinessOpening;
+        const snapshot = typeof chatGPTFirstChatReadinessSnapshot === 'undefined' ? null : chatGPTFirstChatReadinessSnapshot;
+        if (request.firstChatReadinessFinalGuardOnly !== true
+          || typeof chatGPTFirstChatReadinessFinalGuard !== 'function' || !chatGPTFirstChatReadinessFinalGuard(request)
+          || !readinessGrant || typeof readinessGrant !== 'object' || Array.isArray(readinessGrant)
+          || Object.keys(readinessGrant).sort().join(',') !== 'fingerprint,marker,sequence' || readinessGrant.sequence !== 1
+          || readinessGrant.marker !== record.marker || !/^[a-f0-9]{64}$/.test(readinessGrant.fingerprint)
+          || readinessGrant.fingerprint !== record.fingerprint || record.firstReadinessOpening !== saved
+          || record.readyForSubmitOpening !== prior || !prior.exactSubmitDraft || prior.prompt !== request.prompt
+          || !chatGPTExactSubmitDraft(composer, value, request.prompt)
+          || !snapshot || snapshot.document !== originalDocument || snapshot.state !== state || snapshot.record !== record
+          || snapshot.composer !== composer || snapshot.value !== value || snapshot.ready !== true
+          || !current.enabled(snapshot.send)) return false;
+        if (!exactVisibleSend(current, snapshot.send)) return false;
+      } else if (request.action !== 'verifyModel' || expected.key !== 'chat/latest/instant'
+        || !grant || typeof grant !== 'object' || Array.isArray(grant) || Object.keys(grant).sort().join(',') !== 'fingerprint,marker,sequence' || grant.sequence !== 1
+        || grant.marker !== record.marker || !/^[a-f0-9]{64}$/.test(grant.fingerprint) || grant.fingerprint !== record.fingerprint
+        || record.firstPreparedVerificationOpening !== saved) return false;
+    } else if (request.action !== 'insert' || record?.firstInsertOpening !== saved || request.submissionSequence !== 1
+      || record.marker !== request.submissionMarker || typeof request.prompt !== 'string' || request.prompt !== saved.prompt) return false;
+    return readonlyOpeningSelectionIntact(saved, current, spent)
+      && context?.action === request.action && context.scope === (firstSubmit ? 'action_precheck' : 'action_final_guard')
       && chatGPTSubmissionContext(state) && state.pending === record && state.lastVerified == null
-      && record.firstInsertOpening === saved && record.document === originalDocument && record.owner === owner
-      && record.sequence === 1 && request.submissionSequence === 1 && record.phase === 'prepared'
-      && record.marker === request.submissionMarker && record.marker === request.expectedFirstUserMarker
-      && record.root === null && record.body === null && record.expansionAttempted === false
-      && Array.isArray(request.expectedSubmissionProofs) && request.expectedSubmissionProofs.length === 0
-      && typeof request.prompt === 'string' && request.prompt === saved.prompt
+      && record.document === originalDocument && record.owner === owner && record.sequence === 1 && record.phase === 'prepared'
+      && record.marker === request.expectedFirstUserMarker && record.root === null && record.body === null && record.expansionAttempted === false
+      && Array.isArray(request.expectedSubmissionProofs) && (firstSubmit
+        ? request.expectedSubmissionProofs.length === 1 && chatGPTSubmissionPins(record) : request.expectedSubmissionProofs.length === 0)
       && record.canonical === saved.canonical && record.fingerprint === saved.fingerprint
-      && chatGPTSubmissionCanonical(request.prompt) === record.canonical
-      && globalThis.__computaModelFirstPrompt === request.prompt
+      && chatGPTSubmissionCanonical(saved.prompt) === record.canonical && globalThis.__computaModelFirstPrompt === saved.prompt
       && composer?.isConnected === true && insertComposer(current) === composer && current.enabled(composer)
       && value === saved.editorValue && chatGPTSubmissionCanonical(value) === record.canonical;
   };
@@ -680,18 +899,47 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       && attempt.postFamilyOpeningClaimed !== true;
     if (recoveryEligible) attempt.postFamilyOpeningClaimed = true;
     const completed = globalThis.__computaModelSelection;
-    if (!genericPowerRecheck && !mutable && request.action === 'prepare' && context?.scope === 'action_final_guard'
-      && completed?.completed === true && globalThis.__computaChatFirstPrepareOpening == null) {
-      // Spend the first prepare observation even when its opening succeeds.
-      // Later prepares cannot acquire a new recovery allowance.
+    const firstVerify = request.action === 'verifyModel' && request.allowFirstChatVerificationOpening === true;
+    // Negative-only facts from this original decision. No guard is reread and
+    // these fields never establish an opening slot, model proof or readiness.
+    if (request.action === 'verifyModel' && firstVerificationOpeningDiagnostic === null)
+      firstVerificationOpeningDiagnostic = { nativeGrant: firstVerify, slot: 'not_claimed', reason: null };
+    const captureOpening = firstVerificationOpeningDiagnostic !== null && firstVerificationOpeningDiagnostic.slot === 'not_claimed';
+    if (openingCondition('generic_recheck', !genericPowerRecheck, captureOpening)
+      && openingCondition('mutable_read', !mutable, captureOpening)
+      && openingCondition('context', context?.action === request.action && context.scope === 'action_final_guard', captureOpening)
+      && openingCondition('selection_incomplete', completed?.completed === true, captureOpening)
+      && (request.action === 'prepare' && globalThis.__computaChatFirstPrepareOpening == null
+        || openingCondition('native_grant_absent', firstVerify, captureOpening)
+          && openingCondition('slot_existing', completed.firstVerificationOpening == null, captureOpening))) {
+      // Claim only the first opening of this phase, including an acknowledged opening.
       const pin = globalThis.__computaChatPresetPin;
       prepareOpening = { owner, document: originalDocument, attempt: completed, pin, selection: pin?.selection, header: trigger,
         recoveryClaimed: false,
         resolved: { family: { ...pin?.selection?.family }, power: { ...pin?.selection?.power } } };
-      globalThis.__computaChatFirstPrepareOpening = prepareOpening;
+      if (firstVerify) {
+        completed.firstVerificationOpening = prepareOpening;
+        prepareOpening.composer = insertComposer(current);
+      } else globalThis.__computaChatFirstPrepareOpening = prepareOpening;
       current = drainOpeningEvidence();
-      if (!prepareOpeningIntact(current)) prepareOpening = null;
+      if (!prepareOpeningIntact(current, prepareOpening, false, false, firstVerify)) {
+        if (firstVerify) firstVerificationOpeningDiagnostic.slot = 'ineligible';
+        prepareOpening = null;
+      } else if (firstVerify) {
+        firstVerificationOpeningDiagnostic.slot = 'established';
+        // Retain the first opening's acknowledgment and editor history. Any bounded
+        // recovery below shares this phase's single recovery claim and deadline.
+        firstVerificationEditor = prepareOpening.composer;
+        draftObserver = new MutationObserver(recordDraftChanges);
+        draftObserver.observe(document.documentElement || document, {subtree:true,childList:true});
+        draftObserver.observe(firstVerificationEditor, {subtree:true,childList:true,characterData:true});
+        firstVerificationEditor.addEventListener?.('input', invalidateDraft, true);
+        verifyObserver = new MutationObserver(recordVerifyOpening);
+        verifyObserver.observe(trigger, { attributes: true, attributeOldValue: true, attributeFilter: ['aria-expanded', 'data-state'] });
+      }
     }
+    if (firstVerificationOpeningDiagnostic?.reason === 'slot_existing')
+      firstVerificationOpeningDiagnostic.slot = 'existing';
     const submission = globalThis.__computaChatSubmissionState, prepared = submission?.pending;
     if (!genericPowerRecheck && !mutable && request.action === 'insert' && context?.scope === 'action_final_guard'
       && completed?.completed === true && prepared?.phase === 'prepared' && prepared.firstInsertOpening == null) {
@@ -703,31 +951,130 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         recoveryClaimed: false, state: submission, record: prepared, composer, editorValue: insertComposerValue(composer), prompt: request.prompt,
         canonical: prepared.canonical, fingerprint: prepared.fingerprint,
         resolved: { family: { ...pin?.selection?.family }, power: { ...pin?.selection?.power } } };
+      insertOpening.exactSubmitDraft = chatGPTExactSubmitDraft(composer, insertOpening.editorValue, request.prompt);
       prepared.firstInsertOpening = insertOpening;
       current = drainOpeningEvidence();
       if (!insertOpeningIntact(current)) insertOpening = null;
     }
+    const firstSubmit = request.action === 'submit' && context?.action === 'submit' && context.scope === 'action_precheck'
+      && prepared?.readyForSubmitOpening === prepared?.firstInsertOpening && prepared?.firstSubmitOpening == null;
+    const preparedVerify = !firstVerify && request.action === 'verifyModel' && request.preparedInstantVerificationOpening
+      && context?.action === 'verifyModel' && context.scope === 'action_final_guard' && prepared?.firstPreparedVerificationOpening == null;
+    const readinessScope = request.action === 'sendReady' && request.firstChatReadinessFinalGuardOnly === true
+      && context?.action === 'sendReady' && context.scope === 'action_final_guard';
+    const readinessGrant = request.preparedChatReadinessOpening;
+    const readinessGranted = readinessScope && readinessGrant && typeof readinessGrant === 'object' && !Array.isArray(readinessGrant)
+      && Object.keys(readinessGrant).sort().join(',') === 'fingerprint,marker,sequence' && readinessGrant.sequence === 1
+      && readinessGrant.marker === prepared?.marker && /^[a-f0-9]{64}$/.test(readinessGrant.fingerprint)
+      && readinessGrant.fingerprint === prepared?.fingerprint;
+    const noPriorReadinessEffect = !primaryOpened && !secondaryOpened && !closeAttempted && !observedProof;
+    const firstReadiness = readinessGranted && noPriorReadinessEffect && prepared?.firstReadinessOpening == null;
+    if (readinessScope && preparedReadinessOpeningDiagnostic === null)
+      preparedReadinessOpeningDiagnostic = { nativeGrant: readinessGranted === true,
+        slot: prepared?.firstReadinessOpening != null ? 'existing' : !noPriorReadinessEffect ? 'prior_effect'
+          : readinessGranted ? 'not_claimed' : 'grant_refused',
+        clockRejected: false, clockUnconfirmed: false };
+    if (!genericPowerRecheck && !mutable && (firstSubmit || preparedVerify || firstReadiness) && prepared?.firstInsertOpening?.proved === true) {
+      // The just-proved insertion already identifies the physical editor, header,
+      // selected pair and exact draft. Consume the verification slot before the
+      // first opening, even when it succeeds, and never reconstruct those pins.
+      const prior = prepared.firstInsertOpening;
+      insertOpening = { ...prior, insertProof:prior, recoveryClaimed:false };
+      if (firstSubmit) prepared.firstSubmitOpening = insertOpening;
+      else if (firstReadiness) prepared.firstReadinessOpening = insertOpening;
+      else prepared.firstPreparedVerificationOpening = insertOpening;
+      current = drainOpeningEvidence();
+      if (!insertOpeningIntact(current)) {
+        if (firstReadiness) preparedReadinessOpeningDiagnostic.slot = 'ineligible';
+        insertOpening = null;
+      } else {
+        if (firstReadiness) preparedReadinessOpeningDiagnostic.slot = 'established';
+        verifyObserver = new MutationObserver(recordVerifyOpening);
+        verifyObserver.observe(trigger, { attributes:true, attributeOldValue:true, attributeFilter:['aria-expanded','data-state'] });
+        draftObserver = new MutationObserver(recordDraftChanges);
+        draftObserver.observe(document.documentElement || document, {subtree:true,childList:true,characterData:true});
+        insertOpening.composer.addEventListener?.('input', invalidateDraft, true);
+        const submitControls = firstSubmit && typeof context?.recordRecoveredSubmitSend === 'function'
+          ? websiteChatVisibleSendControls(current.visible) : [];
+        const popupSend = firstReadiness ? chatGPTFirstChatReadinessSnapshot.send
+          : submitControls.length === 1 && current.enabled(submitControls[0]) ? submitControls[0] : null;
+        if (popupSend) {
+          // Require a fresh model read after a proved detachment and bind
+          // the currently visible Send control across that recovery.
+          readinessPopupTrace = { trigger, composer: insertOpening.composer, send: popupSend,
+            body: document.body,
+            triggerID: trigger.getAttribute('id'), controls: trigger.getAttribute('aria-controls'),
+            expanded: trigger.getAttribute('aria-expanded'), expandedChanges: [], controlsChanges: [],
+            identityChanges: new Set(), changedIDs: new Set(), recordCount: 0, opening: null, removal: null, overflow: false, invalid: false };
+          readinessPopupObserver = new MutationObserver(recordReadinessPopup);
+          readinessPopupObserver.observe(document.documentElement || document, { subtree: true, childList: true,
+            attributes: true, attributeOldValue: true,
+            attributeFilter: ['aria-expanded', 'aria-controls', 'id', 'role', 'aria-labelledby', 'disabled', 'aria-disabled',
+              'data-message-author-role', 'data-markdown-text-style', 'data-turn', 'data-user-message-bubble'] });
+        }
+      }
+    }
     if (cappedFirstInsert && Date.now() >= until) throw failure('model_unverified');
     primaryOpened = true; readStage = 'primary_open_requested';
     trigger.click();
-    const powerAcknowledged = () => {
-      const observed = websiteChatPickerState();
-      return observed.mode === 'power' || observed.mode === 'family' || observed.powerUnavailable;
-    };
+    const powerAcknowledged = (observed = websiteChatPickerState()) =>
+      observed.mode === 'power' || observed.mode === 'family' || observed.powerUnavailable;
     if (!genericPowerRecheck && (prepareOpening !== null || insertOpening !== null)) {
       const acknowledgementDeadline = Math.min(until, Date.now() + 900);
       let clockRejected = false;
       const acknowledged = await websiteModelWaitForChange(acknowledgementDeadline,
-        () => !owned() || selectionChanged || powerAcknowledged(), 'model_wait', () => { clockRejected = true; });
+        () => !owned() || selectionChanged || powerAcknowledged(), 'model_wait', () => {
+          clockRejected = true; if (firstReadiness) preparedReadinessOpeningDiagnostic.clockRejected = true;
+        });
       current = drainOpeningEvidence();
       // A delayed acknowledgement wins; never toggle an already opened menu.
       if (!acknowledged && !powerAcknowledged()) {
-        if (clockRejected || Date.now() < acknowledgementDeadline
-          || !(prepareOpening !== null ? prepareOpeningIntact(current) : insertOpeningIntact(current))) throw failure('model_unverified');
-        (prepareOpening || insertOpening).recoveryClaimed = true;
-        readStage = prepareOpening !== null ? 'prepare_open_recovery_requested' : 'insert_open_recovery_requested';
-        trigger.click();
-        current = await wait(powerAcknowledged);
+        if (clockRejected || Date.now() < acknowledgementDeadline) {
+          if (firstReadiness) preparedReadinessOpeningDiagnostic.clockUnconfirmed = true;
+          if (firstVerify) readStage = 'first_verification_clock_unconfirmed';
+          throw failure('model_unverified');
+        }
+        if (firstVerify || firstReadiness || firstSubmit) recordVerifyOpening(verifyObserver?.takeRecords?.() || []);
+        let detachedReadinessPopup = false;
+        if ((firstReadiness || firstSubmit) && readinessPopupObserver) {
+          recordReadinessPopup(readinessPopupObserver.takeRecords?.() || []);
+          readinessPopupObserver.disconnect?.();
+          detachedReadinessPopup = verifyAcknowledged && current.physicalMenus.length === 0
+            && websiteChatReadinessPopupDetached(readinessPopupTrace)
+            && (!firstSubmit || exactVisibleSend(current, readinessPopupTrace.send));
+          if (firstSubmit && detachedReadinessPopup) detachedSubmitSend = readinessPopupTrace.send;
+          readinessPopupLifecycle = readinessPopupTrace.overflow ? 'overflow'
+            : detachedReadinessPopup ? 'detached_associated' : 'unproved';
+        }
+        if (firstVerify && verifyAcknowledged) {
+          // An acknowledged opening is now positively closed. Only this untouched
+          // first-verification slot may spend its existing one recovery on a fresh
+          // opening; an open/ambiguous picker or a changed pin/editor still refuses.
+          readStage = 'first_verification_acknowledged_closed';
+          if (!prepareOpeningIntact(current, prepareOpening, true) || !passiveEditorIntact(prepareOpening, current))
+            throw failure('model_unverified');
+          passiveFirstVerification = prepareOpening;
+          prepareOpening.recoveryClaimed = true; // Claim before the reversible chrome action.
+          readStage = 'primary_open_recovery_requested';
+          trigger.click();
+          let drifted = false;
+          current = await wait(() => {
+            const observed = websiteChatPickerState();
+            if (!passiveEditorIntact(passiveFirstVerification, observed)
+              || !observed.topMenu && !prepareOpeningIntact(observed, passiveFirstVerification, true, true)) drifted = true;
+            return drifted || powerAcknowledged(observed);
+          });
+          if (drifted || Date.now() >= until) throw failure('model_unverified');
+        } else {
+          if (!(prepareOpening !== null ? prepareOpeningIntact(current) : insertOpeningIntact(current, false, detachedReadinessPopup))) {
+            if (firstVerify) readStage = 'first_verification_recovery_guard_changed';
+            throw failure('model_unverified');
+          }
+          (prepareOpening || insertOpening).recoveryClaimed = true;
+          readStage = firstVerify || insertOpening?.insertProof ? 'primary_open_recovery_requested' : prepareOpening !== null ? 'prepare_open_recovery_requested' : 'insert_open_recovery_requested';
+          trigger.click();
+          current = await wait(powerAcknowledged);
+        }
       }
     } else if (recoveryEligible) {
       // Preserve the existing fresh post-family allowance within the original
@@ -832,12 +1179,88 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       && [null, 'false'].includes(current.trigger?.getAttribute('aria-expanded'))
       && [null, 'closed'].includes(current.trigger?.getAttribute('data-state'));
     const disabledHeaderRecognized = websiteChatHeaderPresentation(initial.trigger?.innerText).power !== null;
+    const initialEligibility = (reason, passed) => {
+      if (!passed) {
+        headerReadiness = { startedDisabled: true, outcome: 'rejected', reason };
+        readStage = 'initial_trigger_disabled_rejected';
+      }
+      return passed;
+    };
     if (mutable && request.action === 'selectModel' && context?.scope === 'post_selection'
       && initial.visible(trigger) && disabled(trigger) && closedShape(initial) && disabledHeaderRecognized
-      && freshGuard() === true && !globalThis.__computaChatPresetPin && globalThis.__computaModelSelection === attempt
-      && attempt?.started === true && attempt.completed === false && attempt.powerEvents === 0 && attempt.familyClicked === false
-      && !primaryOpened && !secondaryOpened && !closeAttempted && !observedProof) {
+      && initialEligibility('fresh_context', freshGuard() === true)
+      && initialEligibility('prior_pin', !globalThis.__computaChatPresetPin)
+      && initialEligibility('attempt_identity', globalThis.__computaModelSelection === attempt)
+      && initialEligibility('attempt_state', attempt?.started === true && attempt.completed === false
+        && attempt.powerEvents === 0 && attempt.familyClicked === false)
+      && initialEligibility('prior_effect', !primaryOpened && !secondaryOpened && !closeAttempted && !observedProof)) {
       const form = trigger.closest('form');
+      const nativeDeadline = request.initialModelReadinessDeadlineEpochMilliseconds;
+      initialReadinessFacts = { nativeDeadline: nativeDeadline === undefined ? 'absent' : 'unchecked' };
+      const rejectInitialReadiness = (reason, composer = null) => {
+        headerReadiness = { startedDisabled: true, outcome: 'rejected', reason };
+        readStage = 'initial_trigger_disabled_rejected';
+        // A bounded structural snapshot after the original guard rejected.
+        // No text, attributes, IDs or coordinates leave this diagnostic.
+        if (composer) try {
+          const children = composer.childNodes, first = children.length === 1 ? children[0] : null;
+          const paragraph = first?.tagName === 'P' ? first : null;
+          const leaf = paragraph?.childNodes.length === 1 ? paragraph.childNodes[0] : null;
+          const kind = node => node?.nodeType === 3 ? 'text'
+            : ['P', 'BR', 'SPAN', 'DIV'].includes(node?.tagName) ? node.tagName.toLowerCase() : 'other';
+          const childTags = [];
+          for (let index = 0; index < Math.min(children.length, 3); index++) childTags.push(kind(children[index]));
+          const value = insertComposerValue(composer);
+          initialReadinessFacts.composer = {
+            kind: composer instanceof HTMLTextAreaElement ? 'textarea'
+              : composer.getAttribute('contenteditable') === 'true' ? 'contenteditable' : 'other',
+            rendered: value === '' ? 'empty' : value === '\n' ? 'line_feed' : typeof value === 'string' ? 'other' : 'unavailable',
+            literalEmpty: composer.textContent === '', prosemirror: composer.classList.contains('ProseMirror'),
+            childCount: Math.min(children.length, 3), childTags,
+            soleParagraph: !!paragraph, paragraphChildCount: paragraph ? Math.min(paragraph.childNodes.length, 3) : null,
+            paragraphAttributeCount: paragraph ? Math.min(paragraph.attributes.length, 3) : null,
+            paragraphDir: !paragraph || paragraph.getAttribute('dir') === null ? 'absent'
+              : paragraph.getAttribute('dir') === 'auto' ? 'auto' : 'other',
+            soleBR: leaf?.tagName === 'BR', trailingBreak: leaf?.tagName === 'BR' && leaf.classList.contains('ProseMirror-trailingBreak')
+          };
+        } catch { }
+        return failure('model_unverified');
+      };
+      let readinessUntil = until, readinessComposer = null, readinessParent = null;
+      if (nativeDeadline !== undefined) {
+        // Native supplies only the remainder of this existing selection call,
+        // already capped by the original preparation deadline. No retry budget.
+        const now = Date.now();
+        initialReadinessFacts.nativeDeadline = !Number.isSafeInteger(nativeDeadline) ? 'invalid'
+          : nativeDeadline <= now ? 'expired' : nativeDeadline - now > 10_000 ? 'over_budget' : 'within_budget';
+        if (!Number.isSafeInteger(nativeDeadline) || nativeDeadline <= now || nativeDeadline - now > 10_000)
+          return rejectInitialReadiness('native_deadline');
+        readinessUntil = nativeDeadline;
+        readinessComposer = insertComposer(initial, initialReadinessFacts); readinessParent = trigger.parentElement;
+        if (!readinessComposer) return rejectInitialReadiness('composer_unavailable');
+        if (!readinessParent) return rejectInitialReadiness('trigger_parent_missing', readinessComposer);
+        if (!firstVerificationComposerEmpty(readinessComposer)) return rejectInitialReadiness('composer_not_empty', readinessComposer);
+        if (!passiveEditorIntact({ composer: readinessComposer }, initial)) return rejectInitialReadiness('passive_editor_changed', readinessComposer);
+        firstVerificationEditor = readinessComposer;
+        const nodes = new Set(), parents = new Set();
+        for (const held of [trigger, readinessComposer]) for (let node = held; node; node = node.parentElement) {
+          if (nodes.has(node)) break;
+          // Track every ancestor in both paths, including deeply nested layouts.
+          // Reject if their complete union exceeds this bound.
+          if (nodes.size >= 256) return rejectInitialReadiness('ancestor_limit', readinessComposer);
+          nodes.add(node); if (node.parentElement) parents.add(node.parentElement);
+          // documentElement has no parentElement. Observe its actual parent as
+          // well so removing and restoring the same root cannot erase history.
+          if (node === document.documentElement) parents.add(document);
+        }
+        initialReadinessBinding = { composer: readinessComposer, parent: readinessParent, nodes };
+        draftObserver = new MutationObserver(records => recordDraftChanges(records.filter(record =>
+          record.target === readinessComposer || readinessComposer.contains(record.target))));
+        draftObserver.observe(readinessComposer, { subtree: true, childList: true, characterData: true });
+        initialReadinessObserver = new MutationObserver(recordInitialReadinessRemovals);
+        for (const parent of parents) initialReadinessObserver.observe(parent, { childList: true });
+        readinessComposer.addEventListener?.('input', invalidateDraft, true);
+      }
       // No selection has been observed yet. Hydration may replace this
       // canonical placeholder with another canonical remembered preset;
       // neither disabled value can pin or authorize a model selection.
@@ -855,19 +1278,29 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         try { current = state(); } catch { return reject('state_changed'); }
         if (current.trigger !== trigger || !current.visible(trigger) || !closedShape(current)
           || trigger.closest('form') !== form || form && !current.physical(form)) return reject('state_changed');
+        if (readinessComposer && (trigger.parentElement !== readinessParent || insertComposer(current) !== readinessComposer
+          || !websiteModelChoiceEqual(attempt.choice, expected)
+          || !passiveEditorIntact({ composer: readinessComposer }, current))) return reject('state_changed');
         const power = websiteChatHeaderPresentation(trigger.innerText).power;
         if (!power) return reject('unknown_header');
         if (current.enabled(trigger)) return true;
         if (!disabled(trigger)) return reject('state_changed');
         return false;
       };
-      const changed = await websiteModelWaitForChange(until, ready, 'model_wait', () => { rejected = 'clock_failed'; });
+      // Leave native-bound expiry time to return the negative diagnostic. The
+      // original readiness/model proof deadline and standalone clock stay intact.
+      const waitUntil = nativeDeadline === undefined ? readinessUntil : readinessUntil - 150;
+      const waitPhase = nativeDeadline === undefined ? 'model_wait' : 'model_wait_initial_disabled';
+      const changed = await websiteModelWaitForChange(waitUntil, ready, waitPhase, () => { rejected = 'clock_failed'; });
       if (!ready() && changed) rejected ||= 'state_changed';
-      if (!changed || Date.now() >= until || rejected) {
+      if (!changed || Date.now() >= readinessUntil || rejected) {
         headerReadiness.outcome = 'rejected'; headerReadiness.reason = rejected || 'deadline';
         readStage = 'initial_trigger_disabled_rejected';
         return failure(rejected === 'ownership_changed' ? 'document_changed' : 'model_unverified');
       }
+      // The full picker keeps its ordinary 1.8-second proof budget and cannot
+      // outlive the original native call. Enabling supplies no model evidence.
+      if (nativeDeadline !== undefined) until = Math.min(readinessUntil, Date.now() + 1_800);
       initial = state();
       // The newly enabled current header starts the ordinary full picker proof.
       // Its associated Power and checked family still must independently agree.
@@ -1010,16 +1443,27 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       if (finalPowerState) websiteChatTrackPinnedControls(globalThis.__computaChatPresetPin, finalPowerState);
       websiteChatTrackPinnedHeader(globalThis.__computaChatPresetPin, trigger);
     }
+    if (passiveFirstVerification && (!passiveEditorIntact(passiveFirstVerification, final)
+      || !prepareOpeningIntact(final, passiveFirstVerification, true, true))) return failure('model_unverified');
     if (cappedFirstInsert && Date.now() >= until) return failure('model_unverified');
+    if (insertOpening?.insertProof && insertOpening.recoveryClaimed && !insertOpeningIntact(final, true))
+      return failure('model_unverified');
+    if (insertOpening && request.action === 'insert') insertOpening.proved = true;
     const provedPin = globalThis.__computaChatPresetPin;
     if (provedPin?.owner === owner && provedPin.document === originalDocument
       && provedPin.headerTrigger === trigger && provedPin.invalidated !== true
       && websiteChatResolvedSelectionEqual(provedPin.selection, evidence.chatSelection))
       provedPin.genericHeaderVerified = final.headerPresentation && !final.headerPower ? trigger : null;
+    if (detachedSubmitSend) context.recordRecoveredSubmitSend(detachedSubmitSend);
     return { modelEvidence: evidence, modelChoices: websiteChatPowers.map(power => websiteChatPresetChoice(family, power)), modelDiagnostic };
   } catch (error) {
     return error?.error ? error : failure('model_unverified');
   } finally {
+    readinessPopupObserver?.disconnect?.();
+    verifyObserver?.disconnect?.();
+    draftObserver?.disconnect?.();
+    initialReadinessObserver?.disconnect?.();
+    if (draftObserver) (insertOpening?.composer || firstVerificationEditor)?.removeEventListener?.('input', invalidateDraft, true);
     observer.disconnect?.();
     headerObserver.disconnect?.();
     if (owned() && (primaryOpened || secondaryOpened || closeAttempted)) {
@@ -1140,7 +1584,7 @@ function websiteModelFamilyLabel(provider, value) {
   const label = websiteModelNormalize(value);
   if (!label || label.length > 120 || /[\u0000-\u001F\u007F]/.test(label)) return null;
   const pattern = provider === 'chatgpt' ? /^(?:Latest|GPT-[0-9]+(?:\.[0-9]+)?(?: [A-Za-z][A-Za-z0-9-]*)?)$/
-    : provider === 'gemini' ? /^[0-9]+(?:\.[0-9]+)? (?:Flash-Lite|Flash|Pro|Argon)$/
+    : provider === 'gemini' ? /^[0-9]+(?:\.[0-9]+)? (?:Flash-Lite|Flash|Pro|Argon|Hydrogen|Carbon)$/
       : /^(?:Sonnet|Haiku|Opus|Fable) [0-9]+(?:\.[0-9]+)?$/;
   return pattern.test(label) ? label : null;
 }
@@ -1148,7 +1592,7 @@ function websiteModelSafeTriggerLabel(value) {
   const label = websiteModelNormalize(value);
   if (!label || label.length > 160 || /[\u0000-\u001F\u007F]/.test(label)) return null;
   if (label === 'Select ChatGPT model') return label;
-  if (/^Open mode picker, currently (?:Gemini )?(?:(?:[0-9]+(?:\.[0-9]+)? )?(?:Pro|Flash|Flash-Lite|Argon))$/.test(label)) return label;
+  if (/^Open mode picker, currently (?:Gemini )?(?:(?:[0-9]+(?:\.[0-9]+)? )?(?:Pro|Flash|Flash-Lite|Argon|Hydrogen|Carbon))$/.test(label)) return label;
   if (/^Model: (?:Sonnet|Haiku|Opus|Fable) [0-9]+(?:\.[0-9]+)?(?: (?:Low|Medium|High|Extra|Extended|Max))?$/.test(label)) return label;
   return null;
 }
@@ -1164,10 +1608,11 @@ function websiteModelPickerState(provider) {
   const isTrigger = node => {
     const label = websiteModelSafeTriggerLabel(node.getAttribute('aria-label')) || '';
     return provider === 'chatgpt' ? label === 'Select ChatGPT model'
-      : provider === 'gemini' ? /^Open mode picker, currently (?:Gemini )?(?:[0-9]+(?:\.[0-9]+)? )?(?:Pro|Flash|Flash-Lite|Argon)$/.test(label)
+      : provider === 'gemini' ? /^Open mode picker, currently (?:Gemini )?(?:[0-9]+(?:\.[0-9]+)? )?(?:Pro|Flash|Flash-Lite|Argon|Hydrogen|Carbon)$/.test(label)
         : /^Model: (?:Sonnet|Haiku|Opus|Fable) [0-9]+(?:\.[0-9]+)?(?: (?:Low|Medium|High|Extra|Extended|Max))?$/.test(label);
   };
-  const triggers = nodes('button[aria-label], [role="button"][aria-label]').filter(node => physical(node) && outside(node) && isTrigger(node));
+  const triggerScan = nodes('button[aria-label], [role="button"][aria-label]');
+  const triggers = triggerScan.filter(node => physical(node) && outside(node) && isTrigger(node));
   const triggerCandidates = nodes('button[aria-label], [role="button"][aria-label]').filter(node => physical(node) && outside(node)
     && /^(?:Select ChatGPT model(?:$|[ ,])|Open mode picker(?:$|[ ,])|Model: )/.test(websiteModelNormalize(node.getAttribute('aria-label'))));
   const trigger = triggers.length === 1 ? triggers[0] : null;
@@ -1217,6 +1662,12 @@ function websiteModelPickerState(provider) {
     const options = [...menu.querySelectorAll(selector)].slice(0, 128);
     for (const option of options) {
       if (!enabled(option) || !outside(option) || option.closest('[role="menu"], [role="listbox"], [role="dialog"]') !== menu) continue;
+      // An enabled menu action can advertise a model name without being a
+      // selectable model. Claude rows must expose an actual checked/selected state.
+      if (provider === 'claude') {
+        const state = option.getAttribute(option.getAttribute('role') === 'option' ? 'aria-selected' : 'aria-checked');
+        if (state !== 'true' && state !== 'false') continue;
+      }
       const upgrades = [option, ...option.querySelectorAll('span, div, button, a')].slice(0, 128)
         .some(node => physical(node) && /^(?:Upgrade|Upgrade to .+|Locked|Unavailable)$/.test(websiteModelNormalize(node.getAttribute('aria-label') || node.textContent)));
       // Purchase labels may use any element tag. Text must come from
@@ -1228,7 +1679,7 @@ function websiteModelPickerState(provider) {
       const purchaseLabel = node => {
         if (!purchaseScope(node)) return false;
         const aria = node.getAttribute('aria-label');
-        if (aria) return /^Buy credits$/.test(websiteModelNormalize(aria));
+        if (aria && /^Buy credits$/.test(websiteModelNormalize(aria))) return true;
         let remaining = 128, text = '', complete = true;
         const visit = (current, depth) => {
           if (!complete) return;
@@ -1280,7 +1731,128 @@ function websiteModelPickerState(provider) {
     ? checked[0].indicatorSelected ? 'selected_model_indicator' : 'checked_model_option' : 'model_picker_label' } : null;
   return { provider, trigger, triggerCount: triggers.length, triggerCandidates, topMenu, secondary, nestedMenu, menus, allMenus, physicalMenus, choices: duplicate ? [] : choices,
     controls: duplicate ? [] : controls, selected, evidence, duplicate, conflicting, indicatorInvalid, selectionAmbiguous,
-    navigationAmbiguous: secondaries.length > 1, physical, visible, enabled, family };
+    navigationAmbiguous: secondaries.length > 1, physical, visible, enabled, family, triggerScan, outside };
+}
+function websiteClaudeRememberModelTrigger(provider, trigger, owner, url) {
+  if (provider !== 'claude') return;
+  try {
+    if (!trigger || typeof owner !== 'string' || !/^[a-f0-9-]{36}$/i.test(owner)
+      || globalThis.__computaModelOwner !== owner || document.URL !== url) return;
+    // Reference written only after an existing positive proof, for diagnostics
+    // and detached-node wait eligibility. Never selection, response, action,
+    // or cleanup authority: a replacement still requires fresh current proof.
+    globalThis.__computaClaudeLastModelTrigger = { node: trigger, owner, document, url };
+  } catch { /* Diagnostics cannot change the already evaluated proof. */ }
+}
+function websiteClaudeModelTriggerDiagnostic(state) {
+  const empty = scope => ({ kind: 'claude_last_model_trigger_v1', scope,
+    connected: null, physical: null, visible: null, nodeKind: null, labelKind: null,
+    authored: null, inTriggerScan: null, triggerScanAtLimit: null });
+  try {
+    const record = globalThis.__computaClaudeLastModelTrigger;
+    if (!record) return empty('missing');
+    if (typeof record.owner !== 'string' || !/^[a-f0-9-]{36}$/i.test(record.owner)
+      || record.owner !== globalThis.__computaModelOwner || record.document !== document || record.url !== document.URL)
+      return empty('different_context');
+    const node = record.node;
+    if (!node || typeof node.getAttribute !== 'function' || typeof node.closest !== 'function') return empty('unavailable');
+    const raw = node.getAttribute('aria-label');
+    const label = typeof raw === 'string' && raw.length <= 512 ? websiteModelNormalize(raw) : null;
+    const labelKind = raw == null || label === '' ? 'missing'
+      : label?.startsWith('Model: ') && websiteModelSafeTriggerLabel(label) ? 'recognized'
+      : label?.startsWith('Model: ') ? 'known_prefix_unrecognized' : 'other';
+    return { kind: 'claude_last_model_trigger_v1', scope: 'same_context',
+      connected: node.isConnected === true, physical: state.physical(node), visible: state.visible(node),
+      nodeKind: node.tagName === 'BUTTON' ? 'button' : node.getAttribute('role') === 'button' ? 'role_button' : 'other',
+      labelKind, authored: !state.outside(node),
+      inTriggerScan: state.triggerScan.includes(node), triggerScanAtLimit: state.triggerScan.length === 256 };
+  } catch { return empty('unavailable'); }
+}
+// Failure-only structural inventory. These sampled DOM facts are not ownership,
+// model, completion or cleanup evidence. Never read text, arbitrary classes or
+// attribute values into the result; a failed read preserves the original error.
+function websiteClaudeRemountSurfaceDiagnostic(guard) {
+  try {
+    if (typeof guard !== 'function' || guard() !== true) return null;
+    const limit = 64;
+    const physical = node => !!node && node.isConnected === true && node.getClientRects().length > 0
+      && !['hidden', 'collapse'].includes(getComputedStyle(node).visibility);
+    const visible = node => physical(node) && !node.closest('[hidden], [inert], [aria-hidden="true"]');
+    const enabled = node => visible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true';
+    // Only fixed selector queries; do not enumerate the whole document or its text.
+    const scan = (selector, scope = document) => {
+      const matches = scope.querySelectorAll(selector), nodes = [];
+      for (let index = 0; index < Math.min(matches.length, limit); index++) nodes.push(matches[index]);
+      return { nodes, truncated: matches.length > limit };
+    };
+    const counts = sample => ({ sampled: sample.nodes.length, truncated: sample.truncated,
+      physical: sample.nodes.filter(physical).length, visible: sample.nodes.filter(visible).length,
+      enabled: sample.nodes.filter(enabled).length });
+    const number = (value, min = 0) => typeof value === 'number' && Number.isFinite(value)
+      ? { value: Math.max(min, Math.min(100_000, Math.trunc(value))), saturated: value < min || value > 100_000 }
+      : { value: null, saturated: false };
+    const enumValue = (value, allowed) => value == null ? 'unavailable' : allowed.includes(value) ? value : 'other';
+    // CharacterData.length supplies UTF-16 occupancy without concatenating or
+    // reading page text. Both traversal and sum are capped, including deep trees.
+    const textNodes = root => {
+      const stack = [{ node: root, index: 0 }];
+      let utf16Units = 0, saturated = false, nodesVisited = 0, truncated = false;
+      while (stack.length) {
+        const frame = stack.at(-1), children = frame.node.childNodes;
+        if (frame.index >= children.length) { stack.pop(); continue; }
+        if (nodesVisited === limit) { truncated = true; break; }
+        const child = children[frame.index++]; nodesVisited++;
+        if (child.nodeType === 3) {
+          const length = child.length;
+          if (!Number.isSafeInteger(length) || length < 0) throw new Error('text_length_unavailable');
+          saturated = saturated || utf16Units + length > 180_201;
+          utf16Units = Math.min(180_201, utf16Units + length);
+        } else if (child.nodeType === 1) stack.push({ node: child, index: 0 });
+      }
+      return { utf16Units, saturated, nodesVisited, truncated };
+    };
+    const shape = node => {
+      const tag = node.tagName?.toLowerCase(), role = node.getAttribute('role'), testID = node.getAttribute('data-testid');
+      return { tag: ['div', 'span', 'p', 'section', 'article', 'main', 'form', 'button', 'pre', 'code', 'h2', 'svg'].includes(tag) ? tag : 'other',
+        role: role === null ? 'absent' : ['article', 'group', 'main', 'log', 'feed', 'region', 'presentation', 'status', 'button', 'textbox'].includes(role) ? role : 'other',
+        testID: testID === null ? 'absent' : ['assistant-message', 'user-message', 'message-actions', 'action-bar-copy',
+          'response-status-announcer', 'chat-input', 'chat-input-send'].includes(testID) ? testID : 'other',
+        replyText: node.getAttribute('data-perf-reply-text') !== null,
+        physical: physical(node), visible: visible(node), textNodes: textNodes(node) };
+    };
+    const labeled = scan('button[aria-label], [role="button"][aria-label]');
+    const prefix = [], kinds = { recognized: 0, known_prefix_unrecognized: 0, other: 0 };
+    for (const node of labeled.nodes) {
+      const raw = node.getAttribute('aria-label');
+      // Limit normalization work; oversized labels can establish only a literal
+      // known prefix, never a recognized model. No label bytes leave this scope.
+      const label = typeof raw === 'string' && raw.length <= 512 ? websiteModelNormalize(raw) : null;
+      const knownPrefix = label?.startsWith('Model: ') || typeof raw === 'string' && raw.startsWith('Model: ');
+      const kind = knownPrefix ? label && websiteModelSafeTriggerLabel(label) ? 'recognized' : 'known_prefix_unrecognized' : 'other';
+      kinds[kind]++;
+      if (knownPrefix) prefix.push(node);
+    }
+    const roots = scan('[data-testid="assistant-message"]');
+    const rootSamples = roots.nodes.slice(0, 2).map(node => {
+      const children = node.children, samples = [];
+      for (let index = 0; index < Math.min(children.length, 6); index++) samples.push(shape(children[index]));
+      return { ...shape(node), childrenSampled: samples.length, childrenTruncated: children.length > 6, children: samples };
+    });
+    const result = { kind: 'claude_remount_surface_v1', scanLimit: limit,
+      document: { hidden: typeof document.hidden === 'boolean' ? document.hidden : null,
+        visibility: enumValue(document.visibilityState, ['visible', 'hidden', 'prerender']),
+        ready: enumValue(document.readyState, ['loading', 'interactive', 'complete']),
+        width: number(window.innerWidth), height: number(window.innerHeight),
+        scrollX: number(window.scrollX, -100_000), scrollY: number(window.scrollY, -100_000) },
+      composers: counts(scan('[data-testid="chat-input"][contenteditable="true"][role="textbox"]')),
+      stopButtons: counts(scan('button[aria-label="Stop response"]')),
+      sendButtons: counts(scan('button[aria-label="Send message"]')),
+      modelControls: { labeledScan: counts(labeled), labelKinds: kinds, prefix: counts({ nodes: prefix, truncated: labeled.truncated }) },
+      responseRoots: { ...counts(roots), shapesTruncated: roots.truncated || roots.nodes.length > 2, shapes: rootSamples },
+      renderedReplies: counts(scan('[data-testid="assistant-message"] [data-perf-reply-text]')),
+      replyTextNodes: counts(scan('[data-perf-reply-text]')) };
+    return guard() === true ? result : null;
+  } catch { return null; }
 }
 function websiteModelDiagnostic(state, readObservation = null) {
   const allowedTags = ['button', 'div', 'span', 'p', 'ul', 'li', 'dialog', 'section', 'svg', 'path', 'mat-icon'];
@@ -1346,7 +1918,10 @@ function websiteModelDiagnostic(state, readObservation = null) {
     diagnostic.readStage = readObservation.readStage;
     diagnostic.readAttempt = readObservation.readAttempt;
     diagnostic.readContext = readObservation.readContext;
+    if (state.provider === 'claude' && readObservation.remountObservation)
+      diagnostic.remountObservation = readObservation.remountObservation;
   }
+  if (state.provider === 'claude') diagnostic.lastModelTrigger = websiteClaudeModelTriggerDiagnostic(state);
   if (state.provider === 'chatgpt') {
     diagnostic.chatPower = state.powerDiagnostic;
     const pin = globalThis.__computaChatPresetPin;
@@ -1385,8 +1960,31 @@ function websiteModelDiagnostic(state, readObservation = null) {
     if ((readiness?.startedEmpty === true || readiness?.startedDisabled === true)
       && ['waiting', 'recognized', 'rejected'].includes(readiness.outcome))
       diagnostic.chatHeader.readiness = { ...(readiness.startedDisabled === true ? { startedDisabled: true } : { startedEmpty: true }), outcome: readiness.outcome,
-        reason: ['ownership_changed', 'state_changed', 'unknown_header', 'deadline', 'clock_failed'].includes(readiness.reason)
+        reason: ['ownership_changed', 'state_changed', 'unknown_header', 'deadline', 'clock_failed', 'native_deadline',
+          'fresh_context', 'prior_pin', 'attempt_identity', 'attempt_state', 'prior_effect',
+          'composer_unavailable', 'trigger_parent_missing', 'composer_not_empty', 'passive_editor_changed', 'ancestor_limit'].includes(readiness.reason)
           ? readiness.reason : null };
+    const facts = readObservation?.initialReadinessFacts;
+    if (diagnostic.chatHeader.readiness && facts) {
+      const safe = {};
+      if (['absent', 'unchecked', 'invalid', 'expired', 'over_budget', 'within_budget'].includes(facts.nativeDeadline))
+        safe.nativeDeadline = facts.nativeDeadline;
+      for (const key of ['candidateCount', 'enabledCount', 'physicalCount', 'visibleCount'])
+        if (Number.isInteger(facts[key]) && facts[key] >= 0 && facts[key] <= 3) safe[key] = facts[key];
+      const c = facts.composer;
+      if (c && ['textarea', 'contenteditable', 'other'].includes(c.kind)
+        && ['empty', 'line_feed', 'other', 'unavailable'].includes(c.rendered)
+        && ['absent', 'auto', 'other'].includes(c.paragraphDir)
+        && ['literalEmpty', 'prosemirror', 'soleParagraph', 'soleBR', 'trailingBreak'].every(key => typeof c[key] === 'boolean')
+        && Number.isInteger(c.childCount) && c.childCount >= 0 && c.childCount <= 3
+        && ['paragraphChildCount', 'paragraphAttributeCount'].every(key => c[key] === null
+          || Number.isInteger(c[key]) && c[key] >= 0 && c[key] <= 3)
+        && Array.isArray(c.childTags) && c.childTags.length <= 3
+        && c.childTags.every(tag => ['text', 'p', 'br', 'span', 'div', 'other'].includes(tag)))
+        safe.composer = Object.fromEntries(['kind', 'rendered', 'literalEmpty', 'prosemirror', 'childCount', 'childTags',
+          'soleParagraph', 'paragraphChildCount', 'paragraphAttributeCount', 'paragraphDir', 'soleBR', 'trailingBreak'].map(key => [key, c[key]]));
+      diagnostic.chatHeader.initialReadiness = safe;
+    }
   }
   const responseRoots = state.provider === 'chatgpt' ? chatGPTMessageRoots('assistant')
     : [...document.querySelectorAll(state.provider === 'claude' ? '[data-testid="assistant-message"]' : 'model-response')];
@@ -1592,8 +2190,33 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
   const recovery = provider === 'chatgpt' && openingRecovery?.attempt?.clicked === true
     && openingRecovery.attempt.settled === true && openingRecovery.attempt.completed !== true
     && typeof openingRecovery.guard === 'function' ? openingRecovery : null;
-  const unchanged = () => window === window.top && document.URL === url && globalThis.__computaModelOwner === owner
-    && (!recovery || recovery.guard(false) === true);
+  const readDocument = document;
+  let claudeRemountStarted = false, claudeRemountTrigger = null, remountObservation = null;
+  const submittedReadIntact = () => {
+    try { return context.claudeSubmittedReadGuard() === true; } catch { return false; }
+  };
+  const unchanged = () => window === window.top && document === readDocument && document.URL === url && globalThis.__computaModelOwner === owner
+    && (!recovery || recovery.guard(false) === true) && (!claudeRemountStarted || submittedReadIntact());
+  const detachedClaudeTrigger = () => {
+    try {
+      const record = globalThis.__computaClaudeLastModelTrigger;
+      if (!record || typeof record !== 'object' || Object.keys(record).length !== 4
+        || !['node', 'owner', 'document', 'url'].every(key => Object.getOwnPropertyDescriptor(record, key)?.value !== undefined)
+        || record.owner !== owner || record.document !== readDocument || record.url !== url) return false;
+      const node = record.node;
+      return !!node && node.nodeType === 1 && typeof node.getAttribute === 'function'
+        && typeof node.closest === 'function' && node.isConnected === false;
+    } catch { return false; }
+  };
+  const remountProofError = current => {
+    if (Date.now() >= until || !unchanged() || current.trigger !== claudeRemountTrigger
+      || current.triggerScan.length >= 256 || current.triggerCount !== 1 || current.triggerCandidates.length !== 1 || current.triggerCandidates[0] !== current.trigger
+      || current.duplicate || current.conflicting || current.indicatorInvalid || current.selectionAmbiguous || current.navigationAmbiguous
+      || current.physicalMenus.length || current.allMenus.length || !current.enabled(current.trigger)
+      || ![null, 'false'].includes(current.trigger.getAttribute('aria-expanded'))
+      || ![null, 'closed'].includes(current.trigger.getAttribute('data-state')) || !current.evidence) return 'model_unverified';
+    return websiteModelChoiceEqual(current.evidence.selected, expected) ? null : 'model_mismatch';
+  };
   const until = recovery ? recovery.until : Date.now() + 1_800;
   let primaryOpened = false, secondaryOpened = false, closeAttempted = false, trigger = null, captured = null;
   const ownedMenus = new Set(), popupOwners = new Set(), ownedMenuIDs = new Set(), popupOwnerIDs = new Set();
@@ -1623,6 +2246,7 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
         selectionAttemptPresent: selectionPresent, selectionClicked: selectionPresent && selection.clicked === true,
         selectionSettled: selectionPresent && selection.settled === true, selectionCompleted: selectionPresent && selection.completed === true,
         recoveryEligible: !!recovery },
+      ...(remountObservation ? { remountObservation } : {}),
       readAttempt: { primaryOpened, secondaryOpened, closeAttempted, observedProof: !!captured,
         sameTrigger: !trigger || current.trigger === trigger, popupStillAssociated: !!current.topMenu } }),
       ...(captured ? { modelEvidence: captured } : {}) };
@@ -1668,6 +2292,9 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
   const closeOwned = async () => {
     const current = websiteModelPickerState(provider);
     if (!unchanged()) return false;
+    // This new read-only branch must never dismiss or open a popup, even if
+    // one appears after the replacement header was observed.
+    if (claudeRemountStarted) return remountProofError(current) === null;
     if (!trigger || current.trigger !== trigger || !current.physical(trigger) || trigger.disabled
       || trigger.getAttribute('aria-disabled') === 'true') return false;
     if (!current.topMenu) {
@@ -1686,9 +2313,96 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
     return waitForClosedPicker();
   };
   try {
+    // Claude can detach its model header after the acknowledged first Send.
+    // A bounded, action-free DOM wait may observe its replacement, but never
+    // promotes the remembered diagnostic node or a timer into model evidence.
+    if (provider === 'claude' && context?.scope === 'action_precheck'
+      && ['inspect', 'verifyModel'].includes(context.action) && typeof context.claudeSubmittedReadGuard === 'function'
+      && !state.trigger && state.triggerCount === 0 && state.triggerCandidates.length === 0
+      && state.triggerScan.length < 256 && detachedClaudeTrigger()) {
+      claudeRemountStarted = true;
+      readStage = 'trigger_remount_waiting';
+      let rejection = null;
+      // Losing absence eligibility is permanent for this read, but does not
+      // reject a later exact header with ordinary fresh positive proof.
+      let noOutputPendingEligible = input.allowClaudeModelObservationPending === true
+        && context.action === 'inspect' && typeof context.claudeNoOutputPending === 'function';
+      // Diagnostic rereads only. No extra observer, timer or action is installed,
+      // and these snapshots never supply model, ownership or completion proof.
+      const diagnosticStarted = Date.now();
+      let observations = 0;
+      const completionDiagnostic = () => {
+        try { return context.claudeRemountCompletionDiagnostic?.() ?? null; } catch { return null; }
+      };
+      const entry = completionDiagnostic();
+      const observeRemount = () => {
+        observations = Math.min(observations + 1, 1_000);
+        if (rejection) return true;
+        if (!unchanged()) { rejection = 'model_unverified'; return true; }
+        if (noOutputPendingEligible) {
+          try {
+            const absent = context.claudeNoOutputPending();
+            if (!absent || typeof absent.busy !== 'boolean') noOutputPendingEligible = false;
+          } catch { noOutputPendingEligible = false; }
+        }
+        const current = websiteModelPickerState(provider);
+        if (current.triggerScan.length >= 256 || current.duplicate || current.conflicting || current.indicatorInvalid || current.selectionAmbiguous
+          || current.navigationAmbiguous || current.physicalMenus.length || current.allMenus.length) {
+          rejection = 'model_unverified'; return true;
+        }
+        if (!current.trigger && current.triggerCount === 0 && current.triggerCandidates.length === 0) return false;
+        if (current.triggerCount !== 1 || current.triggerCandidates.length !== 1
+          || current.triggerCandidates[0] !== current.trigger || !current.enabled(current.trigger)
+          || ![null, 'false'].includes(current.trigger.getAttribute('aria-expanded'))
+          || ![null, 'closed'].includes(current.trigger.getAttribute('data-state')) || !current.evidence) {
+          rejection = 'model_unverified'; return true;
+        }
+        if (!websiteModelChoiceEqual(current.evidence.selected, expected)) {
+          rejection = 'model_mismatch'; return true;
+        }
+        // Identity is pinned only after this current node provides exact proof;
+        // the ordinary read below must independently observe it again.
+        if (claudeRemountTrigger && claudeRemountTrigger !== current.trigger) {
+          rejection = 'model_unverified'; return true;
+        }
+        claudeRemountTrigger = current.trigger;
+        return true;
+      };
+      const changed = await websiteModelWaitForChange(until, observeRemount, 'model_wait',
+        () => { rejection = 'model_unverified'; });
+      if (!changed || Date.now() >= until || !observeRemount() || rejection) {
+        // Only an expired absence observation may return no-output pending.
+        // The native permission and fresh semantic callback cannot convert a
+        // mismatch, clock error, popup or previously observed context loss.
+        if (changed === false && !rejection && !claudeRemountTrigger && noOutputPendingEligible
+          && input.allowClaudeModelObservationPending === true && context.scope === 'action_precheck'
+          && context.action === 'inspect' && typeof context.claudeNoOutputPending === 'function'
+          && unchanged() && detachedClaudeTrigger() && observeRemount() === false) {
+          let pending = null;
+          try { pending = context.claudeNoOutputPending(); } catch { /* Preserve failure. */ }
+          if (pending && typeof pending.busy === 'boolean' && !rejection
+            && unchanged() && detachedClaudeTrigger() && observeRemount() === false && !rejection && noOutputPendingEligible)
+            return { claudeModelObservationPending: true };
+        }
+        readStage = rejection ? 'trigger_remount_rejected' : 'trigger_remount_timeout';
+        try {
+          const elapsed = Date.now() - diagnosticStarted;
+          remountObservation = { kind: 'claude_remount_observation_v1',
+            elapsedMs: Number.isFinite(elapsed) ? Math.max(0, Math.min(10_000, Math.floor(elapsed))) : null,
+            observations, entry, terminal: completionDiagnostic(),
+            surface: websiteClaudeRemountSurfaceDiagnostic(context.claudeSubmittedReadGuard) };
+        } catch { /* Unavailable diagnostics cannot replace the original failure. */ }
+        return failure(rejection || 'model_unverified');
+      }
+      readStage = 'trigger_remount_observed';
+    }
     while (Date.now() < until) {
       if (!unchanged()) return recovery ? failure('model_unverified') : { error: 'document_changed', detail: 'owner_token' };
       state = websiteModelPickerState(provider);
+      if (claudeRemountStarted) {
+        const invalid = remountProofError(state);
+        if (invalid) return failure(invalid);
+      }
       trackOwnedMenus(state);
       websiteModelTrackReadUI(state);
       if (state.duplicate || state.conflicting || state.indicatorInvalid || state.selectionAmbiguous || state.navigationAmbiguous)
@@ -1699,9 +2413,16 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
         trigger = trigger || state.trigger;
         if (!(await closeOwned()) || !unchanged() || recovery && recovery.guard() !== true) return failure('model_unverified');
         const after = websiteModelPickerState(provider);
+        if (claudeRemountStarted) {
+          const invalid = remountProofError(after);
+          if (invalid) return failure(invalid);
+        }
         if (after.selected && !websiteModelChoiceEqual(after.selected, captured.selected)) return failure('model_mismatch');
-        return websiteModelChoiceEqual(captured.selected, expected) ? { modelEvidence: captured }
-          : { error: 'model_mismatch', modelEvidence: captured };
+        if (websiteModelChoiceEqual(captured.selected, expected)) {
+          websiteClaudeRememberModelTrigger(provider, trigger, owner, url);
+          return { modelEvidence: captured };
+        }
+        return { error: 'model_mismatch', modelEvidence: captured };
       }
       if (!state.trigger || state.triggerCount !== 1) return failure('model_unverified');
       if (trigger && trigger !== state.trigger) return failure('model_unverified');
@@ -1756,7 +2477,7 @@ async function websiteModelReadEvidence(provider, expected, openingRecovery = nu
   } finally {
     // Close only a popup associated with this observation's exact controlled
     // trigger. This never selects a family or replays a failed editor operation.
-    if (unchanged() && trigger && !closeAttempted) {
+    if (!claudeRemountStarted && unchanged() && trigger && !closeAttempted) {
       const current = websiteModelPickerState(provider);
       if (current.topMenu && current.trigger === trigger && current.physical(trigger)
         && !trigger.disabled && trigger.getAttribute('aria-disabled') !== 'true') {
@@ -1774,7 +2495,18 @@ async function websiteClaudeCloseDiscoveryMenus(state, attempt, freshGuard) {
   const selected = state.selected, owned = [top, nested].filter(Boolean);
   const until = Date.now() + 1_800; // One shared deadline, including both distinct popups.
   const current = () => websiteModelPickerState('claude');
-  let invalidated = false;
+  let invalidated = false, catalog = null;
+  const controlsFor = (view, menu) => view.controls.filter(control =>
+    control.node.closest('[role="menu"], [role="listbox"], [role="dialog"]') === menu);
+  const eligibilityUnchanged = view => !catalog || catalog.every(snapshot => {
+    // A verified child dismissal may also close its parent. Only menus still
+    // physically present can contribute a later eligibility observation.
+    if (!view.physical(snapshot.menu)) return true;
+    if (!view.menus.includes(snapshot.menu)) return false;
+    const controls = controlsFor(view, snapshot.menu);
+    return controls.length === snapshot.controls.length && snapshot.controls.every(expected =>
+      controls.some(current => current.node === expected.node && websiteModelChoiceEqual(current.choice, expected.choice)));
+  });
   const unchanged = view => {
     const valid = window === window.top && document.URL === url
       && globalThis.__computaModelOwner === owner && globalThis.__computaModelFirstSubmitted !== true
@@ -1783,13 +2515,24 @@ async function websiteClaudeCloseDiscoveryMenus(state, attempt, freshGuard) {
       && view.trigger === trigger && view.triggerCount === 1 && view.enabled(trigger)
       && !view.duplicate && !view.conflicting && !view.indicatorInvalid && !view.selectionAmbiguous && !view.navigationAmbiguous
       && (selected ? websiteModelChoiceEqual(view.selected, selected) : view.selected == null)
-      && view.physicalMenus.every(menu => owned.includes(menu));
+      && view.physicalMenus.every(menu => owned.includes(menu)) && eligibilityUnchanged(view);
     // A wakeup can observe drift that is restored before the await resumes.
     // Its negative evidence remains decisive for this claimed close attempt.
     invalidated ||= !valid;
     return !invalidated;
   };
   try {
+    const initial = current();
+    if (Date.now() >= until || !unchanged(initial) || initial.topMenu !== top || initial.nestedMenu !== nested
+      || initial.secondary !== secondary || owned.some(menu => !initial.menus.includes(menu) || !initial.visible(menu))) return false;
+    // Earlier reads are provisional. Publish only this fresh, complete owned
+    // picker snapshot, then keep each still-open menu's eligibility unchanged
+    // throughout the existing guarded close. Never revive an accumulated row.
+    catalog = owned.map(menu => ({ menu, controls: controlsFor(initial, menu)
+      .map(control => ({ node: control.node, choice: { ...control.choice } })) }));
+    const choices = catalog.flatMap(snapshot => snapshot.controls.map(control => control.choice));
+    if (!choices.length || choices.length > 32 || choices.some((choice, index) =>
+      choices.some((other, otherIndex) => otherIndex !== index && websiteModelChoiceEqual(choice, other)))) return false;
     // A nested menu can consume Escape without closing its parent. Dismiss
     // each exact observed popup once, child first, with physical closure and
     // fresh context checks before the separate parent's dismissal.
@@ -1807,10 +2550,12 @@ async function websiteClaudeCloseDiscoveryMenus(state, attempt, freshGuard) {
       if (Date.now() >= until || !unchanged(after) || after.physical(menu)) return false;
     }
     const after = current();
-    return Date.now() < until && unchanged(after) && !after.topMenu && !after.nestedMenu
+    const closed = Date.now() < until && unchanged(after) && !after.topMenu && !after.nestedMenu
       && owned.every(menu => !after.physical(menu))
       && [null, 'false'].includes(trigger.getAttribute('aria-expanded'))
       && [null, 'closed'].includes(trigger.getAttribute('data-state'));
+    if (closed) attempt.choices = choices;
+    return closed;
   } catch { return false; }
 }
 async function websiteModelPickerAction(state, request, fresh, freshGuard = null) {
@@ -1926,7 +2671,7 @@ async function websiteModelFinalGuard(provider, request, observed, currentTempor
 // A fenced envelope keeps JSON escapes out of the website's Markdown parser.
 // Admit only one literal code body with no author prose elsewhere in this answer.
 function modelResponseExtraction(answer) {
-  const flags = { literalCodeValidJSON: null, literalCodeKnownEnvelopeType: null, repeatedIdenticalToolCalls: null,
+  const flags = { literalCodeValidJSON: null, literalCodeKnownEnvelopeType: null, repeatedIdenticalToolCalls: null, isolatedJSONCodeBlock: null,
     selectedExtraction: 'rendered_fallback', extractionReason: 'absent_answer' };
   let rendered = '', blocks = [], code = null;
   const fallback = reason => ({ text: rendered, blocks, code, flags: { ...flags, extractionReason: reason } });
@@ -1958,34 +2703,88 @@ function modelResponseExtraction(answer) {
   if (raw.length > 220_000) return fallback('oversized_code');
   let envelope;
   try { envelope = JSON.parse(raw); flags.literalCodeValidJSON = true; }
-  catch { flags.literalCodeValidJSON = false; return fallback('invalid_json'); }
-  const knownType = envelope && !Array.isArray(envelope) && ['message', 'tool_calls'].includes(envelope.type);
-  flags.literalCodeKnownEnvelopeType = knownType ? envelope.type : 'unknown';
-  if (!knownType) return fallback('unknown_envelope_type');
-  // Observed Claude code chrome: the language label and icon control are
-  // siblings of this sole pre inside the provider's exact code-block wrapper.
-  // Only these verified nodes can be skipped; authored surrounding text cannot.
-  const wrapper = blocks[0].closest('div.relative.border-border-400');
-  const chrome = new Set();
-  if (wrapper && wrapper !== answer && answer.contains(wrapper)
-    && wrapper.querySelectorAll('pre').length === 1 && wrapper.querySelectorAll('code').length === 1) {
-    const labels = [...wrapper.querySelectorAll('div.text-text-500.font-small.pb-0, div.text-secondary.text-caption-regular.font-sans.pb-0')].filter(node =>
-      modelVisible(node) && !node.closest('pre') && node.childElementCount === 0 && (node.textContent || '').trim() === 'json');
-    const controls = [...wrapper.querySelectorAll('div.absolute.right-0.h-8.px-2.items-center.inline-flex button.cds-reset.relative.isolate.inline-flex.shrink-0.items-center')]
-      .filter(node => modelVisible(node) && !node.closest('pre') && /^[\uE000-\uF8FF]$/u.test((node.textContent || '').trim()));
-    if (labels.length === 1 && controls.length === 1) { chrome.add(labels[0]); chrome.add(controls[0]); }
+  catch { flags.literalCodeValidJSON = false; }
+  if (flags.literalCodeValidJSON) {
+    const knownType = envelope && !Array.isArray(envelope) && ['message', 'tool_calls'].includes(envelope.type);
+    flags.literalCodeKnownEnvelopeType = knownType ? envelope.type : 'unknown';
+    if (!knownType) {
+      // Report the shape of the already parsed literal only. Extraction and
+      // correction still use the original rendered fallback and reason.
+      let rootKind = typeof envelope;
+      if (envelope === null) rootKind = 'null';
+      else if (Array.isArray(envelope)) rootKind = 'array';
+      else if (rootKind === 'boolean') rootKind = 'bool';
+      const isObject = rootKind === 'object';
+      const knownKeys = isObject
+        ? ['type', 'text', 'phase', 'calls', 'commentary', 'tool_calls', 'message', 'answer', 'output', 'result', 'content']
+          .filter(key => Object.hasOwn(envelope, key))
+        : [];
+      let typeClass = 'not_applicable';
+      if (isObject) {
+        typeClass = 'missing';
+        if (Object.hasOwn(envelope, 'type')) typeClass = typeof envelope.type === 'string' ? 'other_string' : 'non_string';
+      }
+      flags.unknownLiteralEnvelope = { rootKind, typeClass, knownKeys,
+        unknownKeyCount: isObject ? Object.keys(envelope).length - knownKeys.length : 0 };
+      return fallback('unknown_envelope_type');
+    }
   }
-  let visited = 0, scanLimit = false;
-  const onlyCodeAndWhitespace = node => {
-    if (++visited > 10_000) { scanLimit = true; return false; }
-    if (node === code || chrome.has(node)) return true;
-    if (node.nodeType === 3) return /^\s*$/.test(node.textContent || '');
-    if (node.nodeType !== 1) return true;
-    // Actual controls inside this pre are code-block chrome, never surrounding prose.
-    if (node.tagName.toLowerCase() === 'button' && blocks[0].contains(node)) return true;
-    return [...node.childNodes].every(onlyCodeAndWhitespace);
+  const inspectCodeScope = () => {
+    // Observed Claude code chrome: the language label and icon control are
+    // siblings of this sole pre inside the provider's exact code-block wrapper.
+    // Only these verified nodes can be skipped; authored surrounding text cannot.
+    const wrapper = blocks[0].closest('div.relative.border-border-400');
+    const chrome = new Set();
+    if (wrapper && wrapper !== answer && answer.contains(wrapper)
+      && wrapper.querySelectorAll('pre').length === 1 && wrapper.querySelectorAll('code').length === 1) {
+      const labels = [...wrapper.querySelectorAll('div.text-text-500.font-small.pb-0, div.text-secondary.text-caption-regular.font-sans.pb-0')].filter(node =>
+        modelVisible(node) && !node.closest('pre') && node.childElementCount === 0 && (node.textContent || '').trim() === 'json');
+      const controls = [...wrapper.querySelectorAll('div.absolute.right-0.h-8.px-2.items-center.inline-flex button.cds-reset.relative.isolate.inline-flex.shrink-0.items-center')]
+        .filter(node => modelVisible(node) && !node.closest('pre') && /^[\uE000-\uF8FF]$/u.test((node.textContent || '').trim()));
+      if (labels.length === 1 && controls.length === 1) { chrome.add(labels[0]); chrome.add(controls[0]); }
+    }
+    let visited = 0, scanLimit = false, unrecognizedControl = false, controlDiagnosticUnavailable = false;
+    const onlyCodeAndWhitespace = node => {
+      if (++visited > 10_000) { scanLimit = true; return false; }
+      if (node === code || chrome.has(node)) return true;
+      if (node.nodeType === 3) return /^\s*$/.test(node.textContent || '');
+      if (node.nodeType !== 1) return true;
+      // Empty controls must not qualify as isolated JSON. This extra fact is
+      // diagnostic only; preserve the existing text-extraction traversal.
+      try {
+        const tag = node.tagName.toLowerCase(), role = node.getAttribute('role');
+        unrecognizedControl ||= ['button', 'input', 'select', 'textarea', 'summary', 'iframe', 'object', 'embed'].includes(tag)
+          || tag === 'a' && node.getAttribute('href') !== null
+          || ['button', 'link', 'textbox', 'checkbox', 'radio', 'switch', 'slider', 'spinbutton', 'combobox', 'listbox', 'menuitem', 'menuitemradio', 'menuitemcheckbox'].includes(role)
+          || node.getAttribute('contenteditable') !== null && node.getAttribute('contenteditable') !== 'false';
+      } catch { controlDiagnosticUnavailable = true; }
+      // Actual controls inside this pre are code-block chrome for the legacy
+      // extraction path, but are not recognized isolation chrome above.
+      if (node.tagName.toLowerCase() === 'button' && blocks[0].contains(node)) return true;
+      return [...node.childNodes].every(onlyCodeAndWhitespace);
+    };
+    const isolated = onlyCodeAndWhitespace(answer);
+    return { isolated, scanLimit, unrecognizedControl, controlDiagnosticUnavailable, chrome };
   };
-  if (!onlyCodeAndWhitespace(answer)) return fallback(scanLimit ? 'outside_scan_limit' : 'outside_content');
+  let scope;
+  try { scope = inspectCodeScope(); }
+  catch (error) {
+    // Unavailable diagnostic shape cannot change the malformed reply's error.
+    if (!flags.literalCodeValidJSON) return fallback('invalid_json');
+    throw error;
+  }
+  try {
+    // This structural fact restricts the existing one-shot format correction.
+    // Malformed JSON still returns the complete rendered reply, never repaired,
+    // extracted or dispatched. Only observed JSON chrome can surround this code.
+    if (!scope.controlDiagnosticUnavailable) flags.isolatedJSONCodeBlock = scope.isolated && !scope.scanLimit
+      && !scope.unrecognizedControl && scope.chrome.size === 2
+      && answer.querySelectorAll('code').length === 1 && raw.trim().length > 0
+      && new TextEncoder().encode(raw).length <= 220_000
+      && [...code.classList].filter(name => name.startsWith('language-')).every(name => name === 'language-json');
+  } catch { flags.isolatedJSONCodeBlock = null; }
+  if (!flags.literalCodeValidJSON) return fallback('invalid_json');
+  if (!scope.isolated) return fallback(scope.scanLimit ? 'outside_scan_limit' : 'outside_content');
   return { text: raw, blocks, code, flags: { ...flags, selectedExtraction: 'raw_code', extractionReason: 'accepted_literal_code' } };
 }
 
@@ -2061,6 +2860,155 @@ function modelVisible(node) {
 }
 function modelEnabled(node) { return modelVisible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true'; }
 function modelFind(selectors) { return selectors.flatMap(selector => [...document.querySelectorAll(selector)]).find(modelVisible); }
+const modelClaudeSendSelector = 'button[data-testid="chat-input-send"][aria-label="Send message"]';
+function modelClaudeEndSendTrace() {
+  try {
+    globalThis.__computaClaudeSendTrace?.observer.disconnect?.();
+    globalThis.__computaClaudeSendTrace = null;
+  } catch { /* Diagnostics cannot affect editor actions. */ }
+}
+function modelClaudeStartSendTrace(composer) {
+  modelClaudeEndSendTrace();
+  try {
+    const candidates = document.querySelectorAll(modelClaudeSendSelector);
+    if (candidates.length !== 1) return;
+    const send = candidates[0];
+    const trace = { owner: input.ownerToken, document, url: document.URL, composer, send,
+      count: 0, overflow: false, nativeDisabledCleared: false, ariaDisabledCleared: false };
+    trace.consume = records => {
+      trace.count += records.length;
+      if (trace.count > 64) {
+        trace.overflow = true;
+        trace.observer.disconnect?.();
+        return;
+      }
+      let disabled = send.getAttribute('disabled'), ariaDisabled = send.getAttribute('aria-disabled');
+      // Old values preserve a clear-and-restore within one observer delivery.
+      for (let index = records.length - 1; index >= 0; index--) {
+        const { attributeName, oldValue } = records[index];
+        if (attributeName === 'disabled') {
+          if (oldValue !== null && disabled === null) trace.nativeDisabledCleared = true;
+          disabled = oldValue;
+        } else if (attributeName === 'aria-disabled') {
+          if (oldValue === 'true' && ariaDisabled !== 'true') trace.ariaDisabledCleared = true;
+          ariaDisabled = oldValue;
+        }
+      }
+    };
+    trace.observer = new MutationObserver(trace.consume);
+    trace.observer.observe(send, { attributes: true, attributeOldValue: true, attributeFilter: ['disabled', 'aria-disabled'] });
+    globalThis.__computaClaudeSendTrace = trace;
+  } catch { /* Diagnostics cannot affect editor actions. */ }
+}
+function modelClaudeSendDiagnostic(composer, actual, candidates, selected) {
+  try {
+    const send = selected || candidates[0];
+    const trace = globalThis.__computaClaudeSendTrace;
+    const matchingTrace = !!trace && trace.owner === input.ownerToken && trace.document === document
+      && trace.url === document.URL && trace.composer === composer;
+    const sameTarget = matchingTrace && trace.send === send;
+    if (sameTarget) trace.consume(trace.observer.takeRecords?.() || []);
+    let lines = 1;
+    for (let i = 0; i < actual.length && lines < 4096; i++) if (actual[i] === '\n') lines++;
+    // Four candidates means four or more. Text counts use the existing draft comparison's normalized value.
+    return { version: 1, candidateCount: Math.min(candidates.length, 4), selectedVisible: !!selected,
+      // When no candidate is visible, describe the first exact match only.
+      sendHasLayout: !!send?.getClientRects().length, sendCSSHidden: !!send && getComputedStyle(send).visibility === 'hidden',
+      sendAriaHidden: !!send?.closest('[aria-hidden="true"]'), sendInert: !!send?.closest('[inert]'),
+      sendNativeDisabled: send?.disabled === true, sendAriaDisabled: send?.getAttribute('aria-disabled') === 'true',
+      editorKind: composer instanceof HTMLTextAreaElement ? 'textarea'
+        : composer.classList.contains('ProseMirror') ? 'prosemirror' : 'contenteditable',
+      editorChildElements: Math.min(composer.childElementCount, 16),
+      firstChildParagraph: composer.children[0]?.tagName === 'P',
+      draftUTF8Bytes: new TextEncoder().encode(actual).length, draftLines: lines,
+      mutationTracking: !matchingTrace ? 'unavailable' : !sameTarget ? 'different_target' : trace.overflow ? 'overflow' : 'same_target',
+      nativeDisabledCleared: sameTarget && trace.nativeDisabledCleared === true,
+      ariaDisabledCleared: sameTarget && trace.ariaDisabledCleared === true };
+  } catch { return undefined; }
+}
+// Abort-only recognition of the observed provider safeguard pause. No authored
+// message, editor, quoted code, or arbitrary surrounding text supplies authority.
+// The observed warning wrapper admits only its isolated fixed reason CODE;
+// all ordinary code and authored content remain excluded.
+let modelObservedSafeguardPause = false;
+function modelSafeguardsPaused() {
+  if (modelObservedSafeguardPause) return true;
+  try {
+    const authoredBoundary = '[data-testid="assistant-message"], [data-testid="user-message"], [data-perf-reply-text], [data-message-author-role], [data-markdown-text-style], [data-turn], [data-user-message-bubble], model-response, user-query, [contenteditable], [role="textbox"], textarea, input, pre, [role="tooltip"]';
+    const boundary = authoredBoundary + ', code';
+    const excluded = (node, scope = boundary) => !!node.closest(scope + ', [hidden], [inert], [aria-hidden="true"]')
+      || ['hidden', 'collapse'].includes(getComputedStyle(node).visibility) || getComputedStyle(node).display === 'none';
+    const normalized = value => value.replace(/\s+/g, ' ').trim().replace(/’/g, "'");
+    const labels = [], controls = [];
+    // Traverse only bounded non-authored UI. A clipped scan cannot establish
+    // the complete conjunction or unique controls. Never retain page text.
+    const stack = [{ node: document.body, index: 0 }];
+    if (!document.body) return false;
+    let visited = 0;
+    const controlLabel = node => {
+      const aria = node.getAttribute('aria-label');
+      if (aria !== null) return aria.length <= 160 ? normalized(aria) : null;
+      const parts = [], frames = [{ node, index: 0 }]; let count = 0, length = 0;
+      while (frames.length) {
+        const frame = frames.at(-1), children = frame.node.childNodes;
+        if (frame.index >= children.length) { frames.pop(); continue; }
+        if (++count > 32) return null;
+        const child = children[frame.index++];
+        if (child.nodeType === 3) {
+          if (!modelVisible(child.parentElement) || child.length > 160) continue;
+          const text = child.textContent || ''; length += text.length;
+          if (length > 160) return null;
+          parts.push(text);
+        } else if (child.nodeType === 1 && !excluded(child)) frames.push({ node: child, index: 0 });
+      }
+      return normalized(parts.join(''));
+    };
+    while (stack.length) {
+      const frame = stack.at(-1), children = frame.node.childNodes;
+      if (frame.index >= children.length) { stack.pop(); continue; }
+      if (++visited > 2_048) return false;
+      const child = children[frame.index++];
+      if (child.nodeType === 3) {
+        if (child.length > 256 || !modelVisible(child.parentElement)) continue;
+        const label = normalized(child.textContent || '');
+        if (label) labels.push(label);
+      } else if (child.nodeType === 1) {
+        // Observed provider chrome uses CODE for this fixed reason. Do not
+        // traverse code or admit quoted reasons outside the warning wrapper.
+        if (child.tagName === 'CODE') {
+          if (!excluded(child, authoredBoundary) && !child.parentElement?.closest('code')
+            && modelVisible(child) && modelVisible(child.closest('[data-testid="asl3-stop-warning"]'))) {
+            const nodes = child.childNodes, reason = '[reasoning_extraction]';
+            if (nodes.length === 1 && nodes[0].nodeType === 3 && nodes[0].length === reason.length
+              && nodes[0].textContent === reason) labels.push(reason);
+          }
+          continue;
+        }
+        if (excluded(child)) continue;
+        if ((child.tagName === 'BUTTON' || child.getAttribute('role') === 'button') && modelEnabled(child)) {
+          const label = controlLabel(child);
+          if (label !== null) controls.push(label);
+        }
+        stack.push({ node: child, index: 0 });
+      }
+    }
+    const warnings = labels.map(label => label.match(/^(.+)'s safeguards flagged this message\. This sometimes happens with safe, normal conversations\.$/))
+      .filter(match => match && websiteModelFamilyLabel('claude', match[1]) === match[1]);
+    if (warnings.length !== 1 || labels.filter(label => label === 'Paused').length !== 1
+      || labels.filter(label => label === '[reasoning_extraction]').length !== 1) return false;
+    const family = warnings[0][1], retry = controls.filter(label => label.startsWith('Retry with ') || label.startsWith('Edit and retry with '));
+    const continuation = controls.filter(label => label.startsWith('Continue with '));
+    if (retry.length !== 1 || !['Retry with ' + family, 'Edit and retry with ' + family].includes(retry[0]) || continuation.length !== 1) return false;
+    const other = continuation[0].slice('Continue with '.length);
+    if (other === family || websiteModelFamilyLabel('claude', other) !== other) return false;
+    modelObservedSafeguardPause = true;
+    return true;
+  } catch { return false; }
+}
+function modelSafeguardFailure() { return { error: 'website_response_blocked', detail: 'reasoning_extraction' }; }
+function modelOwnershipRejected(observed) {
+  return ['document_changed', 'conversation_changed', 'first_user_observation_replaced'].includes(observed.error);
+}
 // Completion belongs to the latest response's single message-actions bar.
 // Claude has changed the Copy button's testid; its observed accessible name
 // remains Copy. Author content and unrelated/nested toolbars cannot supply it.
@@ -2097,6 +3045,23 @@ function modelCompletionObservation() {
   const scopedCopies = copies.length, enabledCopies = copy && barEnabled && modelEnabled(copy) ? 1 : 0;
   const answerComplete = !busy && !interrupted && message?.getAttribute('data-is-streaming') === 'false' && enabledCopies === 1;
   return { answers, answer, stop, message, article, actionBar, copy, busy, interrupted, scopedCopies, enabledCopies, answerComplete };
+}
+// Only the detached-header wait requests this content-free reread.
+// A complete-looking snapshot remains diagnostic; current model proof is still
+// required by the original action and final guards before publishing any text.
+function modelRemountCompletionDiagnostic(guard) {
+  try {
+    if (guard() !== true) return null;
+    const current = modelCompletionObservation();
+    const streaming = current.message?.getAttribute('data-is-streaming');
+    const count = value => Math.max(0, Math.min(value, 1_000));
+    return { logicalAnswerCount: count(current.answers.length), busy: current.busy,
+      interrupted: current.interrupted,
+      messageStreamingState: !current.message ? 'no_message' : streaming === null ? 'absent'
+        : ['true', 'false'].includes(streaming) ? streaming : 'other',
+      scopedCopies: count(current.scopedCopies), enabledCopies: count(current.enabledCopies),
+      answerComplete: current.answerComplete };
+  } catch { return null; }
 }
 // Diagnostic only: explain the existing completion guard without granting
 // completion from a missing, renamed, moved, hidden or disabled control.
@@ -2205,8 +3170,270 @@ function modelUsageLimitSurfaces() {
   } catch { modelLastUsageLimitObservation = null; }
   return surfaces;
 }
-function modelUsageLimited() { return modelUsageLimitSurfaces().length > 0; }
-function modelQuotaDiagnostic() {
+// This signed-in account card was observed on an empty new chat. It can only
+// abort preflight. It never supplies the physical Incognito proof used by Stop.
+let modelLastFreshResetCardOutcome = null;
+let modelLastFreshResetCardControlReason = null, modelLastFreshResetCardControlsReady = null;
+const modelFreshQuotaAuthored = '[data-testid="user-message"], [data-testid="assistant-message"], [data-perf-reply-text], [data-message-author-role], [data-markdown-text-style], [data-turn], [data-user-message-bubble], model-response, user-query';
+const modelFreshQuotaExcluded = modelFreshQuotaAuthored + ', [contenteditable], [role="textbox"], textarea, input, pre, code, [role="tooltip"], nav, aside, [role="navigation"], [role="menu"], [role="listbox"]';
+const modelFreshQuotaEditorSelector = '[data-testid="chat-input"][contenteditable="true"][role="textbox"]';
+function modelFreshQuotaEditorEmpty(editor) {
+  return editor.childNodes.length === 0 || editor.childNodes.length === 1 && editor.childNodes[0].tagName === 'P'
+    && (editor.childNodes[0].childNodes.length === 0 || editor.childNodes[0].childNodes.length === 1 && editor.childNodes[0].childNodes[0].tagName === 'BR');
+}
+function modelUnsubmittedQuotaDraftMatches(editor) {
+  const inserted = globalThis.__computaModelFirstPrompt;
+  if (inserted === undefined) return modelFreshQuotaEditorEmpty(editor);
+  const draft = (editor.innerText ?? '').replace(/\r\n?/g, '\n').trim();
+  return ['sendReady', 'submit'].includes(input.action) && typeof input.prompt === 'string' && !!input.prompt.trim()
+    && inserted === input.prompt && draft === input.prompt.replace(/\r\n?/g, '\n').trim()
+    && typeof input.expectedFirstUserMarker === 'string'
+    && input.prompt.endsWith(`\n\nComputa session marker: ${input.expectedFirstUserMarker}`);
+}
+// Abort only on the observed five-hour card, including after exact insertion.
+// This surface never supplies Stop's physical Incognito proof.
+function modelFiveHourUsageLimited() {
+  try {
+    if (input.action === 'stop' || input.expectedFirstUserFingerprint != null
+      || globalThis.__computaModelFirstSubmitted !== undefined || globalThis.__computaModelFirstProof !== undefined
+      || input.expectedUserCounts?.length !== 1 || input.expectedUserCounts[0] !== 0
+      || !/^https:\/\/claude\.ai\/new\/?(?:\?incognito)?$/.test(document.URL)
+      || document.querySelectorAll(modelFreshQuotaAuthored).length) return false;
+    const excluded = modelFreshQuotaExcluded + ', [hidden], [inert], [aria-hidden="true"]';
+    const eligible = node => modelVisible(node) && !node.closest(excluded);
+    const one = nodes => nodes.length === 1 ? nodes[0] : null;
+    const editor = one(document.querySelectorAll(modelFreshQuotaEditorSelector));
+    const send = one(document.querySelectorAll(modelClaudeSendSelector));
+    if (!modelVisible(editor) || editor.parentElement?.closest(excluded) || !eligible(send) || send.disabled !== true) return false;
+    if (!modelUnsubmittedQuotaDraftMatches(editor)) return false;
+    const words = (root, omit = []) => {
+      const parts = [], stack = [root]; let visited = 0, length = 0;
+      while (stack.length) {
+        const node = stack.pop();
+        if (++visited > 96) return null;
+        if (omit.includes(node)) continue;
+        if (node.nodeType === 3) {
+          length += node.length;
+          if (length > 512 || !eligible(node.parentElement)) return null;
+          parts.push(node.textContent);
+        } else if (node.nodeType === 1) {
+          if (!eligible(node) || visited + stack.length + node.childNodes.length > 96) return null;
+          for (let i = node.childNodes.length - 1; i >= 0; i--) stack.push(node.childNodes[i]);
+        }
+      }
+      return modelQuotaLabel(parts.join(' ')).replace(/ ([.,])/g, '$1');
+    };
+    const label = node => node.getAttribute('aria-label') ?? words(node);
+    const popup = node => ['true', 'menu', 'dialog', 'listbox'].includes(node.getAttribute('aria-haspopup'))
+      && [null, 'false'].includes(node.getAttribute('aria-expanded')) && [null, 'closed'].includes(node.getAttribute('data-state'));
+    const all = document.querySelectorAll('button, a, [role="button"]');
+    if (all.length > 256) return false;
+    const controls = [...all].filter(node => eligible(node) && modelEnabled(node));
+    const named = name => controls.filter(node => label(node) === name);
+    const usage = one(controls.filter(node => node.tagName === 'BUTTON' && popup(node)
+      && /^View usage limits · 100% used · (?:1 limit reset|(?:[2-9]|[1-9][0-9]) limit resets) available$/.test(label(node) || '')));
+    const notify = one(named('Turn on notifications').filter(node => node.tagName === 'BUTTON'));
+    const about = one(named('About resets').filter(popup));
+    const offer = one(named('Get more usage').filter(node => node.tagName === 'BUTTON'));
+    const dismiss = one(named('Dismiss').filter(node => node.tagName === 'BUTTON'));
+    const reset = one(named('Use reset').filter(node => node.tagName === 'A'));
+    if (!usage || !notify || !about || !offer || !dismiss || !reset
+      || new URL(reset.getAttribute('href'), document.URL).href !== 'https://claude.ai/settings/usage?highlight=resets') return false;
+    const members = [notify, about, offer, reset, dismiss];
+    for (let card = reset.parentElement, depth = 0; card && depth < 8; card = card.parentElement, depth++) {
+      if (['BODY', 'HTML'].includes(card.tagName) || [usage, send, editor].some(node => card.contains(node))) break;
+      if (!eligible(card) || !members.every(node => card.contains(node))) continue;
+      if (card.querySelectorAll('button, a, [role="button"], [role="link"], [role="switch"], input, textarea, select, [contenteditable]').length !== 5) continue;
+      const copy = words(card, members);
+      if (copy && /^You[’']ve hit your 5-hour limit\. It resets at (?:[1-9]|1[0-2]):[0-5][0-9] (?:AM|PM)\. and Claude will notify you, or reset now and keep going\.$/.test(copy)) return true;
+    }
+  } catch { /* Unknown or changed UI cannot establish a quota. */ }
+  return false;
+}
+function modelFreshAccountUsageLimited(afterClosedDiscovery = false) {
+  try {
+    const observeResetCard = afterClosedDiscovery || input.action === 'inspect';
+    const diagnose = observeResetCard && globalThis.__computaModelFirstPrepared === undefined;
+    if (observeResetCard) {
+      modelLastFreshResetCardOutcome = null;
+      modelLastFreshResetCardControlReason = null;
+      modelLastFreshResetCardControlsReady = null;
+    }
+    if (input.action === 'stop'
+      || input.expectedFirstUserFingerprint != null || globalThis.__computaModelFirstSubmitted !== undefined
+      || globalThis.__computaModelFirstProof !== undefined
+      || input.expectedUserCounts?.length !== 1 || input.expectedUserCounts[0] !== 0) return false;
+    const url = document.URL, incognito = url.endsWith('?incognito');
+    const insertedDraft = globalThis.__computaModelFirstPrompt !== undefined;
+    if (insertedDraft && (afterClosedDiscovery || !incognito || !['sendReady', 'submit'].includes(input.action)
+      || !modelTemporaryVerified())) return false;
+    const note = outcome => { if (diagnose) modelLastFreshResetCardOutcome = outcome; };
+    const reject = outcome => { note(incognito ? outcome : 'route_ineligible'); return false; };
+    if (!/^https:\/\/claude\.ai\/new\/?(?:\?incognito)?$/.test(url)) { note('route_ineligible'); return false; }
+    const excluded = modelFreshQuotaExcluded;
+    const one = nodes => nodes.length === 1 ? nodes[0] : null;
+    const buttons = document.querySelectorAll('button');
+    if (buttons.length > 256) return reject('button_scan_limit');
+    if (document.querySelectorAll(modelFreshQuotaAuthored).length) return reject('authored_content');
+    const chrome = [...buttons].filter(node => modelVisible(node) && !node.closest(excluded));
+    const popup = node => ['true', 'menu', 'dialog', 'listbox'].includes(node.getAttribute('aria-haspopup'))
+      && node.getAttribute('aria-expanded') !== 'true' && modelEnabled(node);
+    // Admission uses only short, visible text nodes. The rejected-offer
+    // diagnostic may compare bounded hidden button text to its fixed label.
+    const words = (root, skipButtons, requireVisible = true, omit = null) => {
+      const parts = [], stack = [root]; let visited = 0, length = 0;
+      while (stack.length) {
+        const node = stack.pop();
+        if (++visited > 96) return null;
+        if (node.nodeType === 3) {
+          length += node.length;
+          if (length > 512 || requireVisible && !modelVisible(node.parentElement)) return null;
+          parts.push(node.textContent);
+        } else if (node.nodeType === 1) {
+          if (node.closest(excluded)) return null;
+          if (skipButtons && node.tagName === 'BUTTON' || omit?.includes(node)) continue;
+          const children = node.childNodes;
+          if (visited + stack.length + children.length > 96) return null;
+          for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
+        }
+      }
+      return modelQuotaLabel(parts.join(' ')).replace(/ ([.,])/g, '$1');
+    };
+    const label = node => node.getAttribute('aria-label') ?? words(node, false);
+    const usage = one(chrome.filter(node => popup(node) && label(node) === 'View usage limits · 100% used'));
+    const picker = one(chrome.filter(node => popup(node) && /^Model: /.test(websiteModelSafeTriggerLabel(node.getAttribute('aria-label')) || '')));
+    const send = one(chrome.filter(node => node.getAttribute('data-testid') === 'chat-input-send' && node.getAttribute('aria-label') === 'Send message'));
+    const editor = one(document.querySelectorAll(modelFreshQuotaEditorSelector));
+    if (!picker) return reject('picker_guard');
+    if (!send || modelEnabled(send) || insertedDraft && send.disabled !== true) return reject('send_guard');
+    if (!modelVisible(editor) || editor.parentElement?.closest(excluded)) return reject('editor_guard');
+    if (!modelUnsubmittedQuotaDraftMatches(editor)) return reject('editor_nonempty');
+    const enabled = chrome.filter(modelEnabled).map(node => ({ node, name: label(node) }));
+    const named = name => enabled.filter(item => item.name === name).map(item => item.node);
+    const offerName = 'Get more usage', offers = named(offerName), offer = one(offers);
+    const resetCardControls = 'button, a, [role="button"], [role="link"], [role="switch"], textarea, input, select, [contenteditable]';
+    const exactLink = (node, name, path) => {
+      const href = node.getAttribute('href');
+      if (node.tagName !== 'A' || !modelEnabled(node) || label(node) !== name) return false;
+      try { return new URL(href, node.baseURI ?? document.URL).href === 'https://claude.ai' + path; }
+      catch { return false; }
+    };
+    const sharedLimitLink = node => exactLink(node, 'limits shared with Claude Code', '/settings/claude-code');
+    const useResetLink = node => exactLink(node, 'Use reset', '/settings/usage?highlight=resets');
+    if (!offer) {
+      // Profile only a rejected offer in a card independently anchored by the
+      // existing popup and both links. These labels cannot satisfy admission.
+      if (diagnose && incognito) {
+        const about = one(named('About resets'));
+        let card = about && popup(about) ? about.parentElement : null;
+        for (let depth = 0; card && depth < 8; depth++, card = card.parentElement) {
+          if (['BODY', 'HTML'].includes(card.tagName) || [picker, send, editor].some(node => card.contains(node))) break;
+          if (!modelVisible(card) || card.closest(excluded)) continue;
+          const controls = card.querySelectorAll(resetCardControls);
+          if (controls.length < 3 || controls.length > 8) continue;
+          const shared = one([...controls].filter(sharedLimitLink)), reset = one([...controls].filter(useResetLink));
+          if (!shared || !reset) continue;
+          if (offers.length > 1) return reject('offer_ambiguous');
+          const candidates = [...controls].filter(node => {
+            if ([about, shared, reset].includes(node) || node.closest(excluded)) return false;
+            if (node.tagName !== 'BUTTON' && node.tagName !== 'A' && !['button', 'link'].includes(node.getAttribute('role'))) return false;
+            if (node.getAttribute('aria-label') === offerName || node.getAttribute('title') === offerName
+              || words(node, false, modelVisible(node)) === offerName) return true;
+            const labelID = node.getAttribute('aria-labelledby') || '';
+            if (!/^[\w:.\-]{1,96}$/.test(labelID)) return false;
+            const labelledBy = one(card.querySelectorAll(`[id="${labelID}"]`));
+            return !!labelledBy && words(labelledBy, false) === offerName;
+          });
+          if (!candidates.length) return reject('offer_absent');
+          const candidate = one(candidates);
+          if (!candidate) break;
+          if (!modelVisible(candidate)) return reject('offer_hidden');
+          if (!modelEnabled(candidate)) return reject('offer_disabled');
+          return reject(candidate.tagName === 'BUTTON' ? 'offer_alternate_label_source' : 'offer_alternate_role');
+        }
+      }
+      return reject('offer_missing_or_ambiguous');
+    }
+
+    // The signed-in Incognito reset card can abort before Send, including
+    // after exact insertion. Its presence does not attest to mode or cleanup.
+    if (incognito) {
+      const closedAccessory = node => {
+        const role = node.getAttribute('role');
+        return !['A', 'INPUT', 'TEXTAREA', 'SELECT'].includes(node.tagName) && node.getAttribute('href') === null
+          && (role === 'button' || node.tagName === 'BUTTON' && role === null) && !node.closest(excluded) && popup(node)
+          && [null, 'false'].includes(node.getAttribute('aria-expanded')) && [null, 'closed'].includes(node.getAttribute('data-state'));
+      };
+      function* cardScopes() {
+        let card = offer.parentElement;
+        for (let depth = 0; card && depth < 8; depth++, card = card.parentElement) {
+          if (['BODY', 'HTML'].includes(card.tagName) || [picker, send, editor].some(node => card.contains(node))) break;
+          if (!modelVisible(card) || card.closest(excluded)) continue;
+          const controls = [...card.querySelectorAll(resetCardControls)];
+          const links = controls.filter(node => node.tagName === 'A');
+          const accessory = controls.find(node => node !== offer && node.tagName !== 'A');
+          const issue = controls.length < 3 || controls.length > 4 ? 'control_count'
+            : card.querySelector('[aria-checked="true"], [aria-pressed="true"]') ? 'active_control'
+            : links.length !== 2 ? 'control_count'
+            : accessory && !closedAccessory(accessory) ? 'accessory' : null;
+          yield { card, controls, links, accessory, issue };
+        }
+      }
+      const hasExactLinks = links => !!one(links.filter(sharedLimitLink)) && !!one(links.filter(useResetLink));
+      let outcome = 'card_scope', controlReason = null;
+      for (const { card, controls, links, accessory, issue } of cardScopes()) {
+        if (outcome === 'card_scope') outcome = 'card_controls';
+        if (issue) {
+          if (diagnose && afterClosedDiscovery && controlReason === null && controls.length <= 8 && hasExactLinks(links)) controlReason = issue;
+          continue;
+        }
+        if (outcome === 'card_controls') outcome = 'card_links';
+        if (!hasExactLinks(links)) continue;
+        const copy = words(card, false, true, [offer, accessory]);
+        if (copy && /^Usage limit reached · Resets (?:tomorrow at )?(?:[1-9]|1[0-2]):[0-5][0-9] (?:AM|PM) · limits shared with Claude Code You have (?:1 reset|(?:[2-9]|[1-9][0-9]) resets) available\. Use reset$/.test(copy)) {
+          if (afterClosedDiscovery) note('matched_after_menu');
+          return true;
+        }
+        // Keep the furthest reached predicate across the bounded candidates.
+        if (copy !== null) outcome = 'copy_mismatch';
+        else if (outcome !== 'copy_mismatch') outcome = 'copy_unavailable';
+      }
+      note(outcome);
+      if (diagnose && afterClosedDiscovery && outcome === 'card_controls') {
+        modelLastFreshResetCardControlReason = controlReason ?? 'no_canonical_scope';
+        modelLastFreshResetCardControlsReady = () => {
+          // Wake on the control and link shape. The full predicate runs once after
+          // the wait, including on expiry or a whole-card remount.
+          if (!modelEnabled(offer)) return false;
+          for (const { issue, links } of cardScopes()) if (!issue && hasExactLinks(links)) return true;
+          return false;
+        };
+      }
+    } else note('route_ineligible');
+
+    if (afterClosedDiscovery || insertedDraft || !usage) return false;
+    const dismiss = named('Dismiss'), notify = named('Get notified');
+    if (dismiss.length > 1 || notify.length > 1 || !(dismiss.length || notify.length)) return false;
+    const controls = [offer, ...dismiss, ...notify];
+    let card = controls[0].parentElement;
+    for (let depth = 0; card && depth < 8; depth++, card = card.parentElement) {
+      if (['BODY', 'HTML'].includes(card.tagName) || [usage, picker, send, editor].some(node => card.contains(node))) return false;
+      if (!controls.every(node => card.contains(node))) continue;
+      const count = card.querySelectorAll('button, a, [role="button"], textarea, input, [contenteditable], [role="switch"]').length;
+      if (!modelVisible(card) || card.closest(excluded) || count < controls.length || count > 3
+        || card.querySelectorAll('[aria-checked="true"], [aria-pressed="true"], input, [role="switch"]').length) return false;
+      const copy = words(card, true);
+      // The provider offers credits as an alternative. Notification and pricing
+      // copy can change; a banner saying that credits are already active is different.
+      if (copy && /^You[’']ve reached your usage limit\. Your limit resets at (?:[1-9]|1[0-2]):[0-5][0-9] (?:AM|PM)\./.test(copy)
+        && /(?:^|\. )Wait for the reset, or keep working now with usage credits[.,]/.test(copy)
+        && !/\b(?:active|enabled|using)\b/i.test(copy)) return true;
+    }
+  } catch { /* An unknown account surface cannot establish a limit. */ }
+  return false;
+}
+function modelUsageLimited() { return modelUsageLimitSurfaces().length > 0 || modelFreshAccountUsageLimited() || modelFiveHourUsageLimited(); }
+function modelQuotaDiagnostic(includeFreshResetCard = false, temporaryProof = modelLastTemporaryProof) {
   const boundary = '[data-testid="assistant-message"], [data-testid="user-message"]';
   const tags = ['a', 'button', 'div', 'span', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'section', 'main', 'body', 'html', 'dialog'];
   const bounded = count => Math.min(count, 1_000);
@@ -2263,13 +3490,17 @@ function modelQuotaDiagnostic() {
   }
   const header = [...document.querySelectorAll('.animate-incognito-header-in span')].filter(node => !node.closest(boundary));
   const exit = [...document.querySelectorAll('button[aria-label="Exit incognito"]')].filter(node => !node.closest(boundary));
-  const result = { kind: 'quota_structure', provider: 'claude', temporaryProof: modelLastTemporaryProof,
+  const result = { kind: 'quota_structure', provider: 'claude', temporaryProof,
     headings: headings.map(node => ({ ...shape(node), spacedClock: spaced.test(modelQuotaLabel(node.textContent)), joinedClock: joined.test(modelQuotaLabel(node.textContent)) })),
     controls: [...candidates].slice(0, 8).map(controlShape), popupAncestors,
     support: support.map(node => ({ ...shape(node), labelExact: modelQuotaLabel(node.textContent) === 'messages',
       labelKnownSuffix: modelQuotaLabel(node.textContent) === 'messages (opens in new tab)' })), bannerParents,
     mode: { headerTotal: bounded(header.length), headerVisible: bounded(header.filter(modelVisible).length), headerPhysical: bounded(header.filter(physical).length),
       exitTotal: bounded(exit.length), exitVisible: bounded(exit.filter(modelVisible).length), exitPhysical: bounded(exit.filter(physical).length) } };
+  if (includeFreshResetCard && modelLastFreshResetCardOutcome !== null) {
+    result.resetCardOutcome = modelLastFreshResetCardOutcome;
+    if (modelLastFreshResetCardControlReason !== null) result.resetCardControlReason = modelLastFreshResetCardControlReason;
+  }
   while (JSON.stringify(result).length > 8_192 && result.popupAncestors.length) result.popupAncestors.pop();
   return JSON.stringify(result);
 }
@@ -2374,8 +3605,47 @@ if (input.expectedConversation && cleanURL !== input.expectedConversation)
   return { error: 'conversation_changed', detail: 'conversation_route' };
 const ownedMessages = modelUserRoots();
 const ownedUserCount = ownedMessages.length;
-if (!Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.includes(ownedUserCount))
-  return { error: 'conversation_changed', detail: 'user_count' };
+if (!Array.isArray(input.expectedUserCounts) || !input.expectedUserCounts.includes(ownedUserCount)) {
+  const failure = { error: 'conversation_changed', detail: 'user_count' };
+  try {
+    // Record the count used by this exact guard, without rereading the DOM or
+    // accessing first-message bindings that have not been initialized yet.
+    const expected = input.expectedUserCounts;
+    failure.debugStructure = JSON.stringify({ kind: 'claude_user_count_v1', provider: 'claude',
+      userCount: Math.min(ownedUserCount, 1_000), userCountSaturated: ownedUserCount > 1_000,
+      expectedCounts: Array.isArray(expected) && expected.length <= 3
+        && expected.every(count => Number.isInteger(count) && count >= 0 && count <= 1_000) ? [...expected] : null });
+  } catch { /* Diagnostics cannot change the original ownership rejection. */ }
+  // Once native has already bound this first body, describe only the prior
+  // physical root and a known structural warning hook. Missing markup leaves
+  // the cause unknown. Do not rerun any text-based page classifier here.
+  try {
+    const proof = globalThis.__computaModelFirstProof;
+    if (failure.debugStructure && input.action === 'inspect' && ownedUserCount === 0
+      && input.expectedUserCounts.length === 1 && input.expectedUserCounts[0] === 1
+      && globalThis.__computaModelFirstSubmitted === true && proof?.marker === input.expectedFirstUserMarker
+      && /^[a-f0-9]{64}$/.test(proof?.fingerprint || '') && input.expectedFirstUserFingerprint === proof.fingerprint) {
+      const prior = proof.diagnosticRoot?.deref();
+      let priorRoot = 'unavailable', warningHook = 'unverified';
+      if (prior) {
+        priorRoot = prior.isConnected === false ? 'detached' : !document.documentElement.contains(prior) ? 'outside_tree'
+          : prior.getAttribute('data-testid') !== 'user-message' ? 'marker_lost' : 'indeterminate';
+        const warnings = document.querySelectorAll('[data-testid="asl3-stop-warning"]');
+        if (!warnings.length) warningHook = 'none';
+        else if (warnings.length > 1) warningHook = 'ambiguous';
+        else {
+          const w = warnings[0];
+          if (!prior.contains(w) && !w.contains(prior) && modelVisible(w) && !w.closest(
+            '[data-testid="assistant-message"], [data-testid="user-message"], [data-perf-reply-text], [data-message-author-role], [data-markdown-text-style], [data-turn], [data-user-message-bubble], model-response, user-query, [contenteditable], [role="textbox"], textarea, input, pre, code, [role="tooltip"], [hidden], [inert], [aria-hidden="true"]'))
+            warningHook = 'single_visible';
+        }
+      }
+      failure.debugStructure = JSON.stringify({ kind: 'claude_missing_user_v1', provider: 'claude', userCount: 0,
+        userCountSaturated: false, expectedCounts: [1], priorRoot, warningHook });
+    }
+  } catch { /* Preserve the original count observation and rejection. */ }
+  return failure;
+}
 let usageLimited = modelUsageLimited();
 function modelUsageLimitFailure() {
   // This is only an empty initial-page abort receipt, never readiness or Send
@@ -2475,8 +3745,191 @@ if (ownedUserCount > 0) {
 } else if (input.expectedFirstUserFingerprint != null || globalThis.__computaModelFirstProof)
   return modelFirstUserFailure('first_missing');
 if (usageLimited && input.action !== 'stop') return modelUsageLimitFailure();
+if (input.action !== 'stop' && modelSafeguardsPaused()) return modelSafeguardFailure();
 
-let completionSnapshot = null;
+// A fresh negative decision, independent of diagnostic snapshots. Any reply
+// markup (even hidden), text in an alternative assistant wrapper, interruption,
+// sign-in, quota or dialog prevents this narrow zero-output state.
+function modelClaudeNoOutputPending(guard) {
+  try {
+    if (guard() !== true || modelUsageLimited() || modelSafeguardsPaused() || modelVisibleDialog()) return null;
+    const authControls = document.querySelectorAll('a, button');
+    if (authControls.length > 256) return null;
+    for (const node of authControls) if (modelVisible(node)
+      && /^(?:Log in|Sign in)(?:\s|$)/i.test(node.getAttribute('aria-label') || (node.innerText || '').trim())) return null;
+    if (document.querySelectorAll('[data-perf-reply-text]').length !== 0) return null;
+    const roots = document.querySelectorAll('[data-testid="assistant-message"]');
+    if (roots.length > 1) return null;
+    let visited = 0;
+    for (const root of roots) {
+      const stack = [{ node: root, index: 0 }];
+      while (stack.length) {
+        const frame = stack.at(-1), children = frame.node.childNodes;
+        if (frame.index >= children.length) { stack.pop(); continue; }
+        if (visited === 64) return null; // Incomplete traversal is not absence.
+        const child = children[frame.index++]; visited++;
+        if (child.nodeType === 3 && child.length !== 0) return null;
+        if (child.nodeType === 1) stack.push({ node: child, index: 0 });
+      }
+    }
+    const current = modelCompletionObservation();
+    if (current.answers.length !== 0 || current.answer || current.message || current.copy
+      || current.scopedCopies !== 0 || current.enabledCopies !== 0 || current.interrupted
+      || current.answerComplete || typeof current.busy !== 'boolean' || guard() !== true) return null;
+    return { busy: current.busy };
+  } catch { return null; }
+}
+// The native turn lease is restricted to the exact named Haiku pilot. Keep
+// physical message pins in this isolated document only, through its final close.
+const haikuFailure = { error: 'conversation_changed', detail: 'submission_message' };
+// Attach one fixed reason to the existing first-readiness rejection. This never rereads the page.
+function haikuDraftRejected(reason) {
+  if (input.claudeRetainedTurn === true && input.action === 'sendReady' && input.submissionSequence === 1)
+    haikuFailure.haikuFirstReadyReason = reason;
+  return false;
+}
+const haikuCapability = { submissionOwnershipCapability: 'per_submission_ownership_v1' };
+const haikuExactChoice = choice => choice?.key === 'Haiku 5.5' && choice.label === 'Haiku 5.5';
+const haikuRaw = node => node?.innerText;
+function haikuContext(turn) {
+  return globalThis.__computaClaudeTurn === turn && turn.owner === input.ownerToken && turn.document === document && window === window.top
+    && globalThis.__computaModelOwner === turn.owner && document.URL === input.expectedURL
+    && (!turn.url || turn.url === document.URL) && modelTemporaryVerified();
+}
+function haikuPicker() {
+  if (!haikuExactChoice(input.expectedModelChoice)) return null;
+  const picker = websiteModelPickerState('claude');
+  return picker.triggerCount === 1 && !picker.physicalMenus.length && !picker.conflicting && !picker.duplicate
+    && haikuExactChoice(picker.evidence?.selected) ? picker.trigger : null;
+}
+function haikuTranscript(turn) {
+  if (!haikuContext(turn)) return null;
+  const users = modelUserRoots(), completion = modelCompletionObservation(), answers = completion.answers;
+  const rows = turn.rows;
+  const messages = document.querySelectorAll('[data-testid="assistant-message"]');
+  const rawUsers = document.querySelectorAll('[data-testid="user-message"]');
+  if (rawUsers.length !== users.length || users.length > rows.length || answers.length > users.length || messages.length !== answers.length
+    || answers.some((answer, i) => answer.closest('[data-testid="assistant-message"]') !== messages[i])) return null;
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i], user = users[i], answer = answers[i];
+    if (row.user && row.user !== user || row.answer && row.answer !== answer) return null;
+    if (user && (!row.sent || !user.isConnected || !modelVisible(user) || haikuRaw(user) !== row.outbound
+        || i && answers[i-1]?.compareDocumentPosition(user) !== 4)) return null;
+    if (answer && (!answer.isConnected || user.compareDocumentPosition(answer) !== 4)) return null;
+    if (row.answer && (answer.closest('[data-testid="assistant-message"]') !== row.message
+        || answer.closest('[role="article"]') !== row.article
+        || row.message.getAttribute('data-is-streaming') !== 'false'
+        || modelResponseText(answer, modelResponseExtraction(answer)) !== row.text)) return null;
+  }
+  return { users, completion };
+}
+// Check the exact authored text of the one ProseMirror paragraph we inserted.
+// WebKit may render block spacing after that paragraph; it is never removed
+// from a user-message echo, and an authored extra newline still fails.
+function haikuExactEditor(composer, prompt) {
+  const rendered = composer.innerText;
+  if (rendered !== prompt && rendered !== prompt + '\n' && rendered !== prompt + '\n\n') return haikuDraftRejected('editor_rendered');
+  const paragraph = composer.childNodes.length === 1 && composer.childNodes[0];
+  if (!composer.classList.contains('ProseMirror') || !paragraph || paragraph.tagName !== 'P'
+    || !paragraph.childNodes.length || paragraph.childNodes.length > 8_192) return haikuDraftRejected('editor_paragraph');
+  // The provider reconciles its single literal paragraph with dir=auto after input.
+  const autoDirection = paragraph.attributes.length === 1 && paragraph.getAttribute('dir') === 'auto';
+  if (paragraph.attributes.length && (!autoDirection || paragraph.namespaceURI !== 'http://www.w3.org/1999/xhtml'
+    || paragraph.attributes[0].namespaceURI !== null || !modelVisible(paragraph)
+    || !paragraph.checkVisibility?.({ opacityProperty: true, visibilityProperty: true, contentVisibilityAuto: true })))
+    return haikuDraftRejected('editor_paragraph');
+  let offset = 0;
+  for (const node of paragraph.childNodes) {
+    const text = node.nodeType === 3 ? node.textContent
+      : node.tagName === 'BR' && !node.attributes.length && !node.childNodes.length
+        && (!autoDirection || node.namespaceURI === paragraph.namespaceURI && modelVisible(node)
+          && node.checkVisibility?.({ opacityProperty: true, visibilityProperty: true, contentVisibilityAuto: true })) ? '\n' : null;
+    if (text === null) return haikuDraftRejected('editor_node');
+    if (!prompt.startsWith(text, offset)) return haikuDraftRejected('editor_text');
+    offset += text.length;
+  }
+  return offset === prompt.length || haikuDraftRejected('editor_text');
+}
+function haikuDraft(action, composer, prompt) {
+  let turn = globalThis.__computaClaudeTurn;
+  const seq = input.submissionSequence, marker = input.submissionMarker;
+  if (!Number.isInteger(seq) || seq < 1 || seq > 16 || typeof marker !== 'string'
+    || !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(marker)
+    || !prompt.endsWith('\n\nComputa session marker: ' + marker)) return haikuDraftRejected('marker');
+  if (!turn && action === 'insert' && seq === 1 && marker === input.expectedFirstUserMarker) {
+    turn = { owner: input.ownerToken, document, url: null, rows: [] };
+    globalThis.__computaClaudeTurn = turn;
+  }
+  if (!turn) return haikuDraftRejected('turn');
+  const captured = haikuTranscript(turn), trigger = haikuPicker(), prior = turn.rows[seq-2];
+  if (!captured) return haikuDraftRejected('transcript');
+  if (!trigger) return haikuDraftRejected('picker');
+  if (captured.users.length !== seq-1
+      || captured.completion.answers.length !== seq-1 || captured.completion.busy || captured.completion.interrupted
+      || (seq > 1 && (!prior?.answer || !captured.completion.answerComplete
+        || captured.completion.answer !== prior.answer || captured.completion.message !== prior.message
+        || captured.completion.article !== prior.article || captured.completion.copy !== prior.copy
+        || captured.completion.actionBar !== prior.actionBar || prior.completedPicker !== trigger
+        || !input.expectedSubmissionProofs?.some(pin => pin.sequence === seq-1 && pin.fingerprint === prior.fingerprint)))) return haikuDraftRejected('prior_state');
+  if (action === 'insert') {
+    if (turn.rows.length !== seq-1 || turn.rows.some(row => row.marker === marker)) return false;
+    turn.rows.push({ marker, outbound: prompt, composer, trigger, sent: false });
+    return true;
+  }
+  const row = turn.rows[seq-1];
+  if (turn.rows.length !== seq || !row || row.sent) return haikuDraftRejected('row');
+  if (row.composer !== composer) return haikuDraftRejected('composer_pin');
+  if (row.trigger !== trigger) return haikuDraftRejected('picker_pin');
+  if (row.outbound !== prompt || row.marker !== marker) return haikuDraftRejected('draft_binding');
+  if (!composer.isConnected) return haikuDraftRejected('composer_detached');
+  if (!haikuExactEditor(composer, prompt)) return false;
+  if (action === 'submit') row.sent = true; // Claim once before dispatch, including an uncertain acknowledgment.
+  return true;
+}
+async function haikuRead(observed) {
+  if (observed.error) return observed;
+  const turn = globalThis.__computaClaudeTurn;
+  if (!turn) return observed.userCount || input.action === 'submit' ? haikuFailure : observed;
+  if (input.action === 'submit') return observed.submitted === true && haikuContext(turn)
+    ? { ...observed, ...haikuCapability } : haikuFailure;
+  const view = haikuTranscript(turn);
+  if (!view) {
+    haikuDraftRejected('final_transcript');
+    return haikuFailure;
+  }
+  const count = view.users.length, row = turn.rows[count-1];
+  if (!count) return { ...observed, ...haikuCapability };
+  const user = view.users[count-1], pin = input.expectedSubmissionProofs?.find(pin => pin.sequence === count);
+  const cleanup = input.claudeRetainedCleanup === true && ['inspect', 'stop'].includes(input.action);
+  if (!row || !pin || !cleanup && !haikuPicker()) return haikuFailure;
+  if (!row.user) {
+    if (input.action !== 'inspect' || !row.sent || row.fingerprint) return haikuFailure;
+    const canonical = row.outbound.replace(/\r\n?/g, '\n').normalize('NFC').trim();
+    const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonical));
+    const digest = [...new Uint8Array(bytes)].map(b => b.toString(16).padStart(2,'0')).join('');
+    const after = haikuTranscript(turn);
+    if (digest !== pin.fingerprint || !after || after.users.length !== count || after.users[count-1] !== user
+      || !cleanup && !haikuPicker() || !observed.firstUserVerified) return haikuFailure;
+    row.user = user; row.fingerprint = digest; turn.url ??= document.URL;
+  }
+  if (pin.fingerprint !== row.fingerprint) return haikuFailure;
+  const proof = { ...haikuCapability, submissionProof: { sequence: count, fingerprint: row.fingerprint } };
+  if (cleanup) return { ...observed, ...proof, text: '', answerComplete: false };
+  if (observed.answerComplete === true) {
+    if (!row.answer && input.action !== 'inspect') return haikuFailure;
+    const current = modelCompletionObservation();
+    const picker = haikuPicker();
+    if (!picker || !current.answerComplete || current.answers.length !== count || !current.answer || !current.copy
+      || !['answer', 'message', 'article', 'actionBar', 'copy'].every(key => current[key] === view.completion[key]) || (row.answer && row.answer !== current.answer)
+      || modelResponseText(current.answer, modelResponseExtraction(current.answer)) !== observed.text
+      || !haikuTranscript(turn)) return haikuFailure;
+    if (!row.answer) Object.assign(row, { answer: current.answer, message: current.message, article: current.article,
+      copy: current.copy, actionBar: current.actionBar, completedPicker: picker, text: observed.text });
+  }
+  return { ...observed, ...proof };
+}
+
+let completionSnapshot = null, claudePendingCheck = null, claudeDiscoveryQuotaRecheckCurrent = null;
 async function providerPageAction() {
   websiteModelDiagnosticPhase('page_action');
   const modelState = websiteModelPickerState('claude');
@@ -2485,11 +3938,101 @@ async function providerPageAction() {
       && globalThis.__computaModelOwner === input.ownerToken && modelUserRoots().length === 0
       && globalThis.__computaModelFirstSubmitted !== true
       && document.querySelectorAll('[data-testid="assistant-message"]').length === 0;
-    return websiteModelPickerAction(modelState, input, ownedUserCount === 0 && freshPickerContext(), freshPickerContext);
+    if (input.action !== 'discoverModels' || globalThis.__computaModelDiscovery?.completed === true)
+      return websiteModelPickerAction(modelState, input, ownedUserCount === 0 && freshPickerContext(), freshPickerContext);
+    const result = await websiteModelPickerAction(modelState, input, ownedUserCount === 0 && freshPickerContext(), freshPickerContext);
+    if (result.error || result.pending || !Array.isArray(result.modelChoices) || !result.modelChoices.length
+      || globalThis.__computaModelDiscovery?.completed !== true) return result;
+    let limited = false;
+    try {
+      // A newly complete reset card can abort only after this verified close.
+      const readDocument = document;
+      const currentClosedPicker = () => {
+        if (document !== readDocument || !freshPickerContext()) return null;
+        const closed = websiteModelPickerState('claude'), trigger = closed.trigger;
+        if (closed.triggerCount !== 1 || trigger !== modelState.trigger || !closed.enabled(trigger) || closed.physicalMenus.length
+          || ![null, 'false'].includes(trigger.getAttribute('aria-expanded'))
+          || ![null, 'closed'].includes(trigger.getAttribute('data-state')) || !modelTemporaryVerified()
+          || !modelFind([modelFreshQuotaEditorSelector])) return null;
+        return closed;
+      };
+      const closed = currentClosedPicker();
+      if (!closed) return result;
+      limited = modelFreshAccountUsageLimited(true) || modelFiveHourUsageLimited();
+      const controlsReady = modelLastFreshResetCardControlsReady;
+      const deadline = input.evaluationDeadlineEpochMilliseconds;
+      if (controlsReady && Number.isSafeInteger(deadline) && typeof input.operationID === 'string'
+        && typeof window.webkit?.messageHandlers?.computaModelClock?.postMessage === 'function') {
+        const now = Date.now(), until = Math.min(now + 1_500, deadline - 100);
+        if (until > now) {
+          let invalidated = false;
+          const current = () => {
+            if (invalidated) return false;
+            try {
+              const picker = currentClosedPicker();
+              const editors = document.querySelectorAll(modelFreshQuotaEditorSelector), editor = editors[0];
+              invalidated = !picker || (closed.selected ? !websiteModelChoiceEqual(picker.selected, closed.selected) : picker.selected != null)
+                || picker.duplicate || picker.conflicting || picker.indicatorInvalid || picker.selectionAmbiguous || picker.navigationAmbiguous
+                || editors.length !== 1 || !modelVisible(editor) || !!editor.parentElement?.closest(modelFreshQuotaExcluded)
+                || !modelFreshQuotaEditorEmpty(editor) || document.querySelectorAll(modelFreshQuotaAuthored).length !== 0;
+            } catch { invalidated = true; }
+            return !invalidated;
+          };
+          claudeDiscoveryQuotaRecheckCurrent = current;
+          let clockFailed = false;
+          await websiteModelWaitForChange(until, () => {
+            if (!current()) return true;
+            try { return modelFiveHourUsageLimited() || controlsReady(); } catch { return false; }
+          }, 'model_wait', () => { clockFailed = true; }, true);
+          if (!current()) return { error: 'model_unverified' };
+          if (!clockFailed && Date.now() < deadline) limited = modelFreshAccountUsageLimited(true) || modelFiveHourUsageLimited();
+        }
+      }
+      // Earlier legacy quota counters in the temporary proof predate this close.
+      if (modelLastFreshResetCardOutcome !== null) {
+        const quotaDiagnostic = modelQuotaDiagnostic(true, null);
+        return limited ? { error: 'website_usage_limit', quotaDiagnostic } : { ...result, quotaDiagnostic };
+      }
+    } catch { /* Diagnostic collection cannot change an observed quota decision. */ }
+    return limited ? { error: 'website_usage_limit' } : result;
   }
   if (input.action !== 'stop' && input.expectedModelChoice != null) {
+    const submittedProof = globalThis.__computaModelFirstProof;
+    const submittedMarker = globalThis.__computaModelFirstMarker;
+    const submittedReadGuard = () => snapshotUnchanged() && modelTemporaryVerified()
+      && globalThis.__computaModelFirstSubmitted === true
+      && globalThis.__computaModelFirstMarker === submittedMarker
+      && globalThis.__computaModelFirstProof === submittedProof
+      && (!submittedProof || submittedProof.marker === submittedMarker
+        && submittedProof.fingerprint === firstUserFingerprint && submittedProof.identity === firstUserIdentity);
+    const pendingAllowed = input.allowClaudeModelObservationPending === true && input.action === 'inspect'
+      && input.allowFirstUserBinding === false && ownedUserCount === 1 && firstSnapshot && submittedProof
+      && Array.isArray(input.expectedUserCounts) && input.expectedUserCounts.length === 1 && input.expectedUserCounts[0] === 1
+      && typeof input.expectedFirstUserFingerprint === 'string' && input.expectedFirstUserFingerprint === firstUserFingerprint
+      && submittedProof.fingerprint === firstUserFingerprint && submittedProof.identity === firstUserIdentity;
+    let rememberedTrigger = null;
+    if (pendingAllowed) {
+      try { rememberedTrigger = globalThis.__computaClaudeLastModelTrigger; } catch { /* No pending privilege. */ }
+    }
+    const pendingGuard = () => {
+      if (!pendingAllowed || !submittedReadGuard() || globalThis.__computaClaudeLastModelTrigger !== rememberedTrigger
+        || !rememberedTrigger || rememberedTrigger.owner !== input.ownerToken || rememberedTrigger.document !== document
+        || rememberedTrigger.url !== document.URL || rememberedTrigger.node?.isConnected !== false) return false;
+      const current = websiteModelPickerState('claude');
+      return !current.trigger && current.triggerCount === 0 && current.triggerCandidates.length === 0
+        && current.triggerScan.length < 256 && !current.duplicate && !current.conflicting && !current.indicatorInvalid
+        && !current.selectionAmbiguous && !current.navigationAmbiguous && current.physicalMenus.length === 0 && current.allMenus.length === 0
+        && submittedReadGuard();
+    };
+    const pendingCheck = () => modelClaudeNoOutputPending(pendingGuard);
     const proof = await websiteModelReadEvidence('claude', input.expectedModelChoice, null,
-      { scope: 'action_precheck', action: input.action });
+      { scope: 'action_precheck', action: input.action,
+        ...(pendingAllowed ? { claudeNoOutputPending: pendingCheck } : {}),
+        ...(['inspect', 'verifyModel'].includes(input.action) && firstSnapshot && firstUserFingerprint !== null
+          && globalThis.__computaModelFirstSubmitted === true ? {
+            claudeSubmittedReadGuard: submittedReadGuard,
+            claudeRemountCompletionDiagnostic: () => modelRemountCompletionDiagnostic(submittedReadGuard)
+          } : {}) });
     if (proof.error) return proof;
     // Reading a freshly mounted picker yields. Before any editor mutation,
     // recheck the same native ownership and first-message snapshot again.
@@ -2502,6 +4045,14 @@ async function providerPageAction() {
       { roots: modelUserRoots, body: modelUserBody, text: normalizedBody,
         identity: root => root.closest('[id]')?.getAttribute('id'), temporary: modelTemporaryVerified })
       || modelFirstUserFailure('snapshot_after_model_read');
+    if (proof.claudeModelObservationPending === true) {
+      const pending = pendingCheck();
+      if (!pending) return { error: 'model_unverified' };
+      claudePendingCheck = pendingCheck;
+      return { claudeModelObservationPending: true, url: document.URL, temporary: true, conversationIdentity: null,
+        userCount: 1, firstUserIdentity, firstUserFingerprint, firstUserVerified: true, firstUserMarkerVerified: true,
+        responseCount: 0, text: '', answerComplete: false, busy: pending.busy, interrupted: false };
+    }
     modelState.evidence = proof.modelEvidence;
   }
   if (input.action === 'verifyModel') return { modelEvidence: modelState.evidence };
@@ -2509,6 +4060,12 @@ async function providerPageAction() {
   const { action, prompt, expectedFirstUserMarker } = input;
   const usageLimited = modelUsageLimited();
   if (usageLimited && action !== 'stop') return modelUsageLimitFailure();
+  const safeguardsPaused = modelSafeguardsPaused();
+  if (safeguardsPaused && action !== 'stop') return modelSafeguardFailure();
+  // Native's pause-cleanup read may only observe the same block. If it vanished,
+  // it must never fall through to the ordinary clickable Stop branch.
+  if (action === 'stop' && input.requireClaudeSafeguardPause === true && !safeguardsPaused)
+    return { error: 'model_unverified' };
   const composer = modelFind(['[data-testid="chat-input"][contenteditable="true"][role="textbox"]']);
   const completion = modelCompletionObservation();
   const { answers, answer, stop, message, article, busy, interrupted, scopedCopies, enabledCopies, answerComplete } = completion;
@@ -2526,7 +4083,7 @@ async function providerPageAction() {
   if (action === 'inspect') {
     const signIn = !composer && [...document.querySelectorAll('a, button')].filter(modelVisible)
       .some(node => /^(?:Log in|Sign in)(?:\s|$)/i.test(node.getAttribute('aria-label') || (node.innerText || '').trim()));
-    return { ...state, signIn, debugStructure: '', quotaDiagnostic: modelQuotaDiagnostic() };
+    return { ...state, signIn, debugStructure: '', quotaDiagnostic: modelQuotaDiagnostic(ownedUserCount === 0) };
   }
   if (action === 'enableTemporary') {
     if (temporary) return { ...state, enabled: true };
@@ -2541,7 +4098,13 @@ async function providerPageAction() {
   }
   if (!temporary) return modelTemporaryFailure('temporary_mode_unverified');
   if (action === 'stop') {
+    if (safeguardsPaused) return { ...state, responseBlocked: true, busy: false, stopped: false, text: '', answerComplete: false };
     if (usageLimited) return { ...state, usageLimited: true, busy: false, stopped: false };
+    if (input.claudeRetainedTurn === true && modelEnabled(stop)) {
+      const turn = globalThis.__computaClaudeTurn, count = turn?.rows.length, last = turn?.rows.at(-1);
+      if (input.claudeRetainedCleanup !== true || !last?.user || haikuTranscript(turn)?.users.length !== count
+        || !input.expectedSubmissionProofs?.some(pin => pin.sequence === count && pin.fingerprint === last.fingerprint)) return haikuFailure;
+    }
     if (modelEnabled(stop)) stop.click();
     return { ...state, stopped: !!stop };
   }
@@ -2557,6 +4120,7 @@ async function providerPageAction() {
   if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 180_000) return { error: 'prompt_not_inserted' };
   if (action === 'insert') {
     if (value?.trim()) return { error: 'composer_not_empty' };
+    if (input.claudeRetainedTurn === true && !haikuDraft('insert', composer, prompt)) return haikuFailure;
     if (ownedUserCount === 0) {
       if (globalThis.__computaModelFirstSubmitted || typeof expectedFirstUserMarker !== 'string'
         || !/^[a-f0-9-]{36}$/i.test(expectedFirstUserMarker)
@@ -2564,6 +4128,7 @@ async function providerPageAction() {
         return { error: 'conversation_changed', detail: 'first_user_message' };
       globalThis.__computaModelFirstPrompt = prompt;
     }
+    modelClaudeStartSendTrace(composer);
     composer.focus();
     if (composer instanceof HTMLTextAreaElement) {
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(composer, prompt);
@@ -2597,13 +4162,24 @@ async function providerPageAction() {
     return { error: 'prompt_not_inserted', detail, ...modelEditorDifference(actual, expected), actualLength: actual.length, expectedLength: expected.length,
       actualLines: actual.split('\n').length, expectedLines: expected.split('\n').length };
   }
-  const send = modelFind(['button[data-testid="chat-input-send"][aria-label="Send message"]']);
+  const sendCandidates = [...document.querySelectorAll(modelClaudeSendSelector)];
+  const send = sendCandidates.find(modelVisible);
   const sendUnobstructed = !modelVisibleDialog(true) && (!modelVisibleDialog() || websiteModelHitTestTarget(send));
-  if (action === 'sendReady') return { ...state, sendReady: modelEnabled(send) && sendUnobstructed };
-  if (!modelEnabled(send) || !sendUnobstructed) return { error: 'send_unavailable' };
+  if (action === 'sendReady' && input.claudeRetainedTurn === true && !haikuDraft('sendReady', composer, prompt))
+    return haikuFailure;
+  const sendFailure = !send ? 'no_visible_exact_send' : !modelEnabled(send) ? 'disabled_or_hidden'
+    : !sendUnobstructed ? 'not_unobstructed' : null;
+  const claudeSendDiagnostic = sendFailure ? modelClaudeSendDiagnostic(composer, actual, sendCandidates, send) : undefined;
+  if (action === 'sendReady') {
+    return sendFailure ? { ...state, sendReady: false, claudeSendReadiness: sendFailure, claudeSendDiagnostic }
+      : { ...state, sendReady: true };
+  }
+  modelClaudeEndSendTrace();
+  if (sendFailure) return { error: 'send_unavailable', detail: sendFailure, claudeSendDiagnostic };
   if (globalThis.__computaModelLastSubmissionCount !== undefined
     && ownedUserCount <= globalThis.__computaModelLastSubmissionCount)
     return { error: 'conversation_changed', detail: 'user_count' };
+  if (input.claudeRetainedTurn === true && !haikuDraft('submit', composer, prompt)) return haikuFailure;
   if (ownedUserCount === 0) {
     if (globalThis.__computaModelFirstSubmitted || globalThis.__computaModelFirstPrompt !== prompt
       || !prompt.endsWith(`\n\nComputa session marker: ${expectedFirstUserMarker}`))
@@ -2615,7 +4191,19 @@ async function providerPageAction() {
   send.click();
   return { submitted: true };
 }
-const observed = await websiteModelFinalGuard('claude', input, await providerPageAction(), modelTemporaryVerified);
+const actionObservation = await providerPageAction();
+if (claudeDiscoveryQuotaRecheckCurrent && !claudeDiscoveryQuotaRecheckCurrent()) return { error: 'model_unverified' };
+const pauseContextIntact = () => window === window.top && document.URL === input.expectedURL
+  && globalThis.__computaModelOwner === input.ownerToken && modelUserRoots().length === ownedUserCount;
+if (input.action === 'discoverModels' && actionObservation.error === 'website_usage_limit')
+  return pauseContextIntact() && document.querySelectorAll('[data-testid="assistant-message"]').length === 0
+    ? actionObservation : { error: 'model_unverified' };
+const pageObservation = pauseContextIntact() && !modelOwnershipRejected(actionObservation)
+  && input.action !== 'stop' && modelSafeguardsPaused() ? modelSafeguardFailure() : actionObservation;
+// This explicitly negative result releases no model/answer/action proof. All
+// outer first-body, owner, count, mode and quota guards below still apply.
+const observed = pageObservation.claudeModelObservationPending === true && claudePendingCheck
+  ? pageObservation : await websiteModelFinalGuard('claude', input, pageObservation, modelTemporaryVerified);
 // The final model proof can yield while opening/closing the picker. Never
 // admit a stale completed response if its exact physical landmarks, text, latest
 // answer, or streaming state changed during that proof. A fresh read may qualify
@@ -2650,15 +4238,32 @@ if (firstSnapshot) {
   if (observed.error === 'website_usage_limit' || input.action !== 'stop' && modelUsageLimited())
     return { error: 'website_usage_limit' };
   if (!modelTemporaryVerified()) return modelTemporaryFailure('temporary_mode_unverified');
+  if (!modelOwnershipRejected(observed) && input.action !== 'stop' && modelSafeguardsPaused()) return modelSafeguardFailure();
   if (observed.error) return observed;
+  if (observed.claudeModelObservationPending === true) {
+    const pending = claudePendingCheck?.();
+    if (!pending) return { error: 'model_unverified' };
+    observed.busy = pending.busy;
+  }
   if (!globalThis.__computaModelFirstProof) {
     if (observed.temporary !== true) return modelTemporaryFailure('temporary_mode_unverified');
     globalThis.__computaModelFirstProof = { marker: input.expectedFirstUserMarker, fingerprint: firstUserFingerprint,
       identity: firstUserIdentity };
   }
+  // A disappearing first-user marker can be diagnosed without retaining an
+  // authored DOM subtree after unmount. Never use this handle for ownership.
+  try {
+    const proof = globalThis.__computaModelFirstProof;
+    if (typeof WeakRef === 'function' && proof.diagnosticRoot?.deref() !== firstSnapshot.root)
+      proof.diagnosticRoot = new WeakRef(firstSnapshot.root);
+  } catch { /* Diagnostics cannot affect a verified submission or response. */ }
   // Submit intentionally exposes its acknowledgment only, as in the native contract.
-  if (input.action === 'submit') return observed;
-  return { ...observed, firstUserVerified: true, firstUserFingerprint, firstUserMarkerVerified: true };
+  if (input.action === 'submit') return input.claudeRetainedTurn === true ? haikuRead(observed) : observed;
+  const verified = { ...observed, firstUserVerified: true, firstUserFingerprint, firstUserMarkerVerified: true };
+  return input.claudeRetainedTurn === true ? haikuRead(verified) : verified;
 }
 if (observed.freshQuotaAbort === true) return observed;
-return { ...observed, firstUserVerified: false, firstUserFingerprint: null };
+if (pauseContextIntact() && !modelOwnershipRejected(observed) && input.action !== 'stop' && modelSafeguardsPaused())
+  return modelSafeguardFailure();
+const fresh = { ...observed, firstUserVerified: false, firstUserFingerprint: null };
+return input.claudeRetainedTurn === true ? haikuRead(fresh) : fresh;

@@ -156,7 +156,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
     });
 
     if (provider === 'claude') test('discovery never retries an uncertain popup dismissal or dismisses a changed parent', async () => {
-      for (const failure of ['ignored_child', 'ignored_parent', 'lost_ack', 'owner', 'url', 'model', 'user', 'parent', 'foreign_menu']) {
+      for (const failure of ['ignored_child', 'ignored_parent', 'lost_ack', 'owner', 'url', 'model', 'user', 'parent', 'foreign_menu', 'foreign_dialog']) {
         const { f, picker } = setup();
         const originalURL = f.document.URL, originalOwner = f.world.__computaModelOwner;
         if (failure === 'ignored_parent') picker.menu.onDispatch = () => {};
@@ -174,6 +174,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
             f.body.append(new Node('DIV', { role: 'menu', id: 'model-picker-menu', 'aria-labelledby': 'model-picker-button' }));
           }
           if (failure === 'foreign_menu') f.body.append(new Node('DIV', { role: 'menu', id: 'unrelated' }));
+          if (failure === 'foreign_dialog') f.body.append(new Node('DIV', { role: 'dialog' }));
         };
         expect((await f.run('discoverModels')).pending).toBe(true);
         expect((await f.run('discoverModels')).pending).toBe(true);
@@ -291,6 +292,277 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       }
     });
 
+    if (provider === 'claude') {
+      const choice = (label: string) => ({ key: label, label });
+      const setup = () => {
+        const f = make();
+        const picker = installObservedModelPicker(f, 'claude', Node);
+        const fable = picker.add(picker.menu, 'Fable 5.1', '');
+        const opus = picker.add(picker.menu, 'Opus 5.5', '');
+        const oldOpus = picker.add(picker.nested, 'Opus 4.6', '');
+        return { f, picker, fable, opus, oldOpus };
+      };
+      const advance = async (f: any) => {
+        for (let index = 0; index < 6; index++) {
+          const result = await f.run('discoverModels');
+          if (!result.pending) return result;
+        }
+        throw new Error('Synthetic discovery exceeded six reads');
+      };
+      const noActions = (x: ReturnType<typeof setup>) => {
+        expect(x.picker.options.every((row: any) => row.clicks === 0)).toBe(true);
+        expect(x.f.composer.textContent).toBe('');
+        expect(x.f.send.clicks).toBe(0);
+      };
+      const distinctClose = (x: ReturnType<typeof setup>, afterChild: () => void = () => {}) => {
+        const events: string[] = [], parentClose = x.picker.menu.onDispatch!;
+        x.picker.nested!.onDispatch = (event: any) => {
+          if (event.type !== 'keydown' || event.key !== 'Escape') return;
+          events.push('child');
+          x.picker.nested!.values.hidden = '';
+          afterChild();
+        };
+        x.picker.menu.onDispatch = (event: any) => {
+          if (event.type !== 'keydown' || event.key !== 'Escape') return;
+          events.push('parent'); parentClose(event);
+        };
+        return events;
+      };
+
+      describe('Claude current discovery eligibility', () => {
+        for (const drift of ['purchase_label', 'purchase_role', 'disabled', 'removed']) {
+          test(`revalidation removes a primary choice that becomes ${drift} while More models opens`, async () => {
+            const x = setup();
+            const openNested = x.picker.secondary!.onClick!;
+            x.picker.secondary!.onClick = () => {
+              // This callback occurs after the primary choices were accumulated,
+              // before the next ordinary discovery read sees both associated menus.
+              openNested();
+              if (drift === 'purchase_label' || drift === 'purchase_role')
+                x.fable.append(new Node('P', {}, 'Buy credits'));
+              if (drift === 'purchase_role') {
+                x.fable.values.role = 'menuitem';
+                delete x.fable.values['aria-checked'];
+              }
+              if (drift === 'disabled') x.fable.values['aria-disabled'] = 'true';
+              if (drift === 'removed') x.fable.connected = false;
+            };
+            const result = await advance(x.f);
+            expect(result.error).toBeUndefined();
+            expect(result.modelChoices).toContainEqual(choice('Opus 5.5'));
+            expect(result.modelChoices).toContainEqual(choice('Opus 4.6'));
+            noActions(x);
+            expect(result.modelChoices).not.toContainEqual(choice('Fable 5.1'));
+          });
+        }
+
+        for (const drift of ['purchase_label', 'purchase_role', 'disabled', 'removed', 'replacement']) {
+          test(`eligibility ${drift} during child dismissal fails without parent Escape or catalog publication`, async () => {
+            const x = setup();
+            const events = distinctClose(x, () => {
+              if (drift === 'purchase_label' || drift === 'purchase_role') x.fable.append(new Node('P', {}, 'Buy credits'));
+              if (drift === 'purchase_role') { x.fable.values.role = 'menuitem'; delete x.fable.values['aria-checked']; }
+              if (drift === 'disabled') x.fable.values['aria-disabled'] = 'true';
+              if (drift === 'removed' || drift === 'replacement') x.fable.connected = false;
+              if (drift === 'replacement') x.picker.add(x.picker.menu, 'Fable 5.1', '');
+            });
+            const result = await advance(x.f);
+            expect(result.error).toBe('model_unverified'); expect(result.modelChoices).toBeUndefined();
+            expect(events).toEqual(['child']);
+            await x.f.run('discoverModels');
+            expect(events).toEqual(['child']);
+            expect(x.picker.trigger.clicks).toBe(1); expect(x.picker.secondary!.clicks).toBe(1); noActions(x);
+          });
+        }
+
+        test('new hidden or inert purchase labels do not change ordinary eligibility during close', async () => {
+          const x = setup();
+          const events = distinctClose(x, () => {
+            for (const values of [{ 'aria-hidden': 'true' }, { inert: '' }]) {
+              const wrapper = new Node('SECTION'); wrapper.append(new Node('P', values, 'Buy credits')); x.opus.append(wrapper);
+            }
+          });
+          const result = await advance(x.f);
+          expect(result.error).toBeUndefined(); expect(result.modelChoices).toContainEqual(choice('Opus 5.5'));
+          expect(result.modelChoices).toContainEqual(choice('Opus 4.6'));
+          expect(events).toEqual(['child', 'parent']); noActions(x);
+        });
+      });
+    }
+
+    if (provider === 'claude') {
+      const expectedModelChoice = { key: 'Opus 5', label: 'Opus 5' };
+      const prompt = 'Offline synthetic display marker\n\n' + markerLine;
+      async function submitted() {
+        const { f, picker } = setup();
+        picker.add(picker.nested, 'Opus 5');
+        let selection: any;
+        for (let index = 0; index < 5; index++) {
+          selection = await f.run('selectModel', { modelChoice: expectedModelChoice });
+          if (selection.selected) break;
+        }
+        expect(selection.selected).toBe(true);
+        expect((await f.run('insert', { expectedModelChoice, prompt })).inserted).toBe(true);
+        expect((await f.run('submit', { expectedModelChoice, prompt })).submitted).toBe(true);
+        f.messages.append(f.article);
+        const before = await f.run('inspect', { expectedModelChoice });
+        expect(before.firstUserVerified).toBe(true);
+        expect(before.modelEvidence.selected).toEqual(expectedModelChoice);
+        expect(f.send.clicks).toBe(1);
+        return { f, picker, before, triggerClicks: picker.trigger.clicks, waits: f.delays.length };
+      }
+
+      // Expire only the new detached-header wait. The native clock is a negative
+      // deadline, never restored model evidence or permission to retry Send.
+      async function expiredDetachedRead(x: any) {
+        const clocks: any[] = [];
+        x.f.window.webkit.messageHandlers.computaModelClock = { postMessage: (request: any) => { clocks.push(request); return Promise.resolve(true); } };
+        const result = await x.f.run('inspect', { expectedModelChoice, operationID: 'b90afc30-7aee-411e-b8b4-4efeafceddb1' });
+        expect(clocks).toHaveLength(1); expect(clocks[0].milliseconds).toBeGreaterThan(0); expect(clocks[0].milliseconds).toBeLessThanOrEqual(1800);
+        return result;
+      }
+
+      describe('Claude post-submission header diagnostics', () => {
+        for (const variant of ['detached', 'display_none', 'visibility_hidden', 'aria_label_removed', 'new_label_prefix', 'nonbutton_layout', 'scan_cap']) {
+          test(`${variant} retains zero-trigger rejection with only detached-header bounded settling`, async () => {
+            const x = await submitted();
+            if (variant === 'detached') x.picker.trigger.connected = false;
+            if (variant === 'display_none') x.picker.trigger.values.hidden = '';
+            if (variant === 'visibility_hidden') x.picker.trigger.values.visibility = 'hidden';
+            if (variant === 'aria_label_removed') delete x.picker.trigger.values['aria-label'];
+            if (variant === 'new_label_prefix') x.picker.trigger.values['aria-label'] = 'Selected model Opus 5';
+            if (variant === 'nonbutton_layout') x.picker.trigger.tagName = 'DIV';
+            if (variant === 'scan_cap') {
+              const noise = new Node('DIV');
+              for (let i = 0; i < 256; i++) noise.append(new Node('BUTTON', { 'aria-label': 'Synthetic unrelated control' }));
+              noise.parentElement = x.f.body; x.f.body.children.unshift(noise);
+            }
+            const result = variant === 'detached' ? await expiredDetachedRead(x) : await x.f.run('inspect', { expectedModelChoice });
+            expect(result.error).toBe('model_unverified');
+            expect(result.modelDiagnostic).toMatchObject({ trigger: null, triggerCount: 0, triggerCandidates: [],
+              readStage: variant === 'detached' ? 'trigger_remount_timeout' : 'initial_observation', readContext: { scope: 'action_precheck', action: 'inspect' },
+              readAttempt: { observedProof: false, primaryOpened: false, secondaryOpened: false, closeAttempted: false } });
+            expect(result.modelEvidence).toBeUndefined();
+            const facts = result.modelDiagnostic.lastModelTrigger;
+            expect(facts.scope).toBe('same_context');
+            expect(facts.connected).toBe(variant !== 'detached');
+            expect(facts.physical).toBe(!['detached', 'display_none', 'visibility_hidden'].includes(variant));
+            expect(facts.labelKind).toBe(variant === 'aria_label_removed' ? 'missing' : variant === 'new_label_prefix' ? 'other' : 'recognized');
+            expect(facts.nodeKind).toBe(variant === 'nonbutton_layout' ? 'other' : 'button');
+            expect(facts.inTriggerScan).toBe(!['aria_label_removed', 'nonbutton_layout', 'scan_cap'].includes(variant));
+            expect(facts.triggerScanAtLimit).toBe(variant === 'scan_cap');
+            expect(JSON.stringify(facts).length).toBeLessThan(400);
+            expect(result.text).toBeUndefined();
+            expect(x.f.delays.length).toBe(x.waits);
+            expect(x.f.send.clicks).toBe(1); expect(x.picker.trigger.clicks).toBe(x.triggerClicks);
+          });
+        }
+        for (const variant of ['disabled', 'inert', 'unknown_effort_suffix']) {
+          test(`${variant} alone differs from the retained zero-candidate observation`, async () => {
+            const x = await submitted();
+            if (variant === 'disabled') x.picker.trigger.disabled = true;
+            if (variant === 'inert') x.picker.trigger.values.inert = '';
+            if (variant === 'unknown_effort_suffix') x.picker.trigger.values['aria-label'] = 'Model: Opus 5 Unobserved';
+            const result = await x.f.run('inspect', { expectedModelChoice });
+            expect(result.error).toBe('model_unverified');
+            expect(result.modelDiagnostic.triggerCandidates.length).toBe(1);
+            expect(result.modelDiagnostic.triggerCount).toBe(variant === 'unknown_effort_suffix' ? 0 : 1);
+            expect(x.f.send.clicks).toBe(1); expect(x.picker.trigger.clicks).toBe(x.triggerClicks);
+          });
+        }
+        test('an expired detached read is terminal; later exact proof is independently recomputed', async () => {
+          const x = await submitted();
+          x.picker.trigger.connected = false;
+          const missing = await expiredDetachedRead(x);
+          expect(missing.error).toBe('model_unverified');
+          expect(missing.modelEvidence).toBeUndefined();
+          expect(x.f.delays.length).toBe(x.waits);
+          // Offline later read only, not an authorized app/provider retry.
+          x.picker.trigger.connected = true;
+          const restored = await x.f.run('inspect', { expectedModelChoice });
+          expect(restored.error).toBeUndefined(); expect(restored.firstUserVerified).toBe(true);
+          expect(restored.firstUserFingerprint).toBe(x.before.firstUserFingerprint);
+          expect(restored.modelEvidence.selected).toEqual(expectedModelChoice);
+          expect(x.f.send.clicks).toBe(1); expect(x.picker.trigger.clicks).toBe(x.triggerClicks);
+        });
+        test('restoration with a different model cannot use the cached selection', async () => {
+          const x = await submitted();
+          x.picker.trigger.connected = false;
+          expect((await expiredDetachedRead(x)).error).toBe('model_unverified');
+          x.picker.trigger.connected = true; x.picker.selected('Sonnet 5');
+          const mismatch = await x.f.run('inspect', { expectedModelChoice });
+          expect(mismatch.error).toBe('model_mismatch'); expect(mismatch.text).toBeUndefined();
+          expect(x.f.send.clicks).toBe(1); expect(x.picker.trigger.clicks).toBe(x.triggerClicks);
+        });
+      });
+
+      const shared = "const input = { provider: 'claude' };\n" + readFileSync(new URL('./embedded-model-choice-helper.js', import.meta.url), 'utf8');
+      const diagnose = new Function('globalThis', 'document', 'state', shared + '\nreturn websiteClaudeModelTriggerDiagnostic(state);');
+      const remember = new Function('globalThis', 'document', 'provider', 'trigger', 'owner', 'url', shared + '\nwebsiteClaudeRememberModelTrigger(provider, trigger, owner, url);');
+      const privateOwner = 'f33c8869-a5d3-4b9d-b29e-7b6f591a8e30';
+      function rawFixture() {
+        const node = new Node('BUTTON', {'aria-label':'Model: Opus 5 High'});
+        const document = {URL:'https://claude.ai/new?incognito'};
+        const world:any = {__computaModelOwner:privateOwner};
+        const state = {physical:() => true, visible:() => true, outside:() => true, triggerScan:[node]};
+        return {node, document, world, state};
+      }
+      describe('finite diagnostic projection and noninterference', () => {
+        test('no recorded current proof preserves unknown rather than false/zero', () => {
+          const x = rawFixture(), output = diagnose(x.world,x.document,x.state);
+          expect(output.scope).toBe('missing');
+          expect(Object.values(output).filter(v => v === null).length).toBe(8);
+        });
+        for (const drift of ['owner','document','URL']) test(`${drift} does not disclose or borrow another context's node`, () => {
+          const x = rawFixture(); remember(x.world,x.document,'claude',x.node,privateOwner,x.document.URL);
+          if(drift==='owner') x.world.__computaModelOwner='foreign-owner';
+          if(drift==='document') x.world.__computaClaudeLastModelTrigger.document={URL:x.document.URL};
+          if(drift==='URL') x.document.URL+='&changed';
+          const output=diagnose(x.world,x.document,x.state);
+          expect(output.scope).toBe('different_context'); expect(output.connected).toBeNull(); expect(output.labelKind).toBeNull();
+        });
+        test('hostile values never serialize raw labels, roles, IDs, content or oversized strings', () => {
+          const x=rawFixture();remember(x.world,x.document,'claude',x.node,privateOwner,x.document.URL);
+          x.node.tagName='PRIVATE_TAG';x.node.values.role='PRIVATE_ROLE';x.node.values.id='PRIVATE_ID';x.node.text='PRIVATE_BODY';
+          for(const label of ['PRIVATE_SECRET', 'x'.repeat(100000), 'Model: PRIVATE_SECRET', 'Select ChatGPT model']) {
+            x.node.values['aria-label']=label;
+            const output=diagnose(x.world,x.document,x.state), serialized=JSON.stringify(output);
+            expect(Object.keys(output).sort()).toEqual(['kind','scope','connected','physical','visible','nodeKind','labelKind','authored','inTriggerScan','triggerScanAtLimit'].sort());
+            expect(serialized).not.toContain('PRIVATE');expect(serialized.length).toBeLessThan(400);
+            expect(['other','known_prefix_unrecognized']).toContain(output.labelKind);expect(output.nodeKind).toBe('other');
+          }
+        });
+        test('diagnostic collection exceptions remain finite unknowns', () => {
+          const x=rawFixture();remember(x.world,x.document,'claude',x.node,privateOwner,x.document.URL);
+          x.node.getAttribute=() => {throw new Error('PRIVATE_ERROR');};
+          const output=diagnose(x.world,x.document,x.state);
+          expect(output.scope).toBe('unavailable');expect(output.connected).toBeNull();expect(JSON.stringify(output)).not.toContain('PRIVATE');
+        });
+        test('record write exceptions cannot alter successful inspection or add actions', async () => {
+          const x=await submitted();
+          Object.defineProperty(x.f.world,'__computaClaudeLastModelTrigger',{configurable:true,get:()=>undefined,set:()=>{throw new Error('PRIVATE_ERROR');}});
+          const result=await x.f.run('inspect',{expectedModelChoice});
+          expect(result.error).toBeUndefined();expect(result.firstUserVerified).toBe(true);expect(result.modelEvidence.selected).toEqual(expectedModelChoice);
+          expect(x.f.send.clicks).toBe(1);expect(x.picker.trigger.clicks).toBe(x.triggerClicks);
+        });
+        test('forged diagnostic state cannot promote missing model evidence or emit a response', async () => {
+          const x=await submitted();
+          x.f.world.__computaClaudeLastModelTrigger={owner:privateOwner,document:x.f.document,url:x.f.document.URL,node:x.picker.trigger};
+          x.picker.trigger.connected=false;
+          const result=await expiredDetachedRead(x);
+          expect(result.error).toBe('model_unverified');expect(result.modelEvidence).toBeUndefined();expect(result.text).toBeUndefined();
+          expect(x.f.send.clicks).toBe(1);expect(x.picker.trigger.clicks).toBe(x.triggerClicks);
+        });
+        test('other providers cannot acquire a Claude diagnostic reference', () => {
+          for (const other of ['chatgpt', 'gemini']) {
+            const x = rawFixture();
+            remember(x.world, x.document, other, x.node, privateOwner, x.document.URL);
+            expect(x.world.__computaClaudeLastModelTrigger).toBeUndefined();
+          }
+        });
+      });
+    }
+
     if (provider === 'claude') test('discovery excludes credits-gated rows without excluding enabled Opus choices', async () => {
       const { f, picker } = setup();
       const fable = picker.add(picker.menu, 'Fable 5.1', 'For your toughest challenges');
@@ -319,6 +591,36 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       expect(opus.clicks).toBe(0);
     });
 
+
+    if (provider === 'claude') test('Claude choices require an owned selectable row and can include entitled Fable', async () => {
+      for (const attributes of [
+        { role: 'menuitem' }, { role: 'menuitemradio' }, { role: 'radio', 'aria-checked': 'mixed' },
+        { role: 'option', 'aria-checked': 'false' }, { role: 'option', 'aria-selected': 'invalid' },
+      ]) {
+        const { f, picker } = setup();
+        const unavailable = picker.add(picker.menu, 'Fable 5.1', '');
+        delete unavailable.values['aria-checked'];
+        Object.assign(unavailable.values, attributes);
+        const action = picker.add(picker.nested, 'Opus 5', '', { role: 'menuitem' });
+        const entitled = picker.add(picker.nested, 'Fable 5', '', { role: 'radio', 'aria-checked': 'false' });
+        const option = picker.add(picker.menu, 'Haiku 5.5', '', { role: 'option', 'aria-selected': 'false' });
+        const found = await advance(f, 'discoverModels');
+        expect(found.error).toBeUndefined();
+        expect(found.modelChoices).not.toContainEqual(choice('Fable 5.1'));
+        expect(found.modelChoices).not.toContainEqual(choice('Opus 5'));
+        expect(found.modelChoices).toContainEqual(choice('Fable 5'));
+        expect(found.modelChoices).toContainEqual(choice('Haiku 5.5'));
+        expect([unavailable, action, entitled, option].every(o => o.clicks === 0)).toBe(true);
+        const selected = await advance(f, 'selectModel', { modelChoice: choice('Fable 5.1') });
+        expect(selected.error).toBe('model_unavailable');
+        expect(unavailable.clicks).toBe(0); expect(f.send.clicks).toBe(0);
+      }
+      const { f, picker } = setup();
+      const genuine = picker.add(picker.nested, 'Fable 5', '', { role: 'menuitemradio', 'aria-checked': 'false' });
+      const result = await advance(f, 'selectModel', { modelChoice: choice('Fable 5') });
+      expect(result.selected).toBe(true); expect(result.modelEvidence.selected).toEqual(choice('Fable 5'));
+      expect(genuine.clicks).toBe(1); expect(f.send.clicks).toBe(0);
+    });
 
     if (provider === 'claude') test('Claude purchase exclusion reads exact visible labels on any element tag', async () => {
       for (const tag of ['P', 'LABEL', 'SMALL', 'STRONG', 'EM', 'CREDITS-LABEL']) {
@@ -399,6 +701,25 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       const result = await advance(f, 'discoverModels');
       expect(result.error).toBeUndefined(); expect(result.modelChoices).not.toContainEqual(choice('Fable 5.1'));
       expect(fable.clicks).toBe(0); expect(f.composer.textContent).toBe(''); expect(f.send.clicks).toBe(0);
+    });
+
+    if (provider === 'claude') test('Claude reads the exact visible purchase label independently of a different accessible name', async () => {
+      for (const variant of ['explicit', 'split', 'accessibleOnly', 'hidden', 'foreign', 'footer', 'creditRequirementOnly', 'entitled']) {
+        const { f, picker } = setup();
+        const row = picker.add(picker.menu, 'Fable 5.1', '');
+        const offer = new Node('BUTTON', { 'aria-label': variant === 'accessibleOnly' ? 'Buy credits' : 'Billing details' },
+          variant === 'split' ? 'Buy ' : variant === 'accessibleOnly' ? 'Details' : 'Buy credits');
+        if (variant === 'split') offer.append(new Node('STRONG', {}, 'credits'));
+        if (variant === 'hidden') offer.values.hidden = '';
+        if (variant !== 'entitled') row.append(new Node('SPAN', {}, 'Requires usage credits'));
+        if (variant === 'footer') picker.menu.append(new Node('P', {}, 'Model access uses usage credits billed separately.'));
+        if (variant === 'foreign') picker.menu.append(offer);
+        else if (!['footer','creditRequirementOnly','entitled'].includes(variant)) row.append(offer);
+        const result = await advance(f, 'discoverModels');
+        expect(result.error).toBeUndefined();
+        expect(result.modelChoices.some((item: any) => item.key === 'Fable 5.1')).toBe(!['explicit','split','accessibleOnly'].includes(variant));
+        expect(row.clicks).toBe(0); expect(offer.clicks).toBe(0); expect(f.send.clicks).toBe(0);
+      }
     });
 
     if (provider === 'claude') test('Claude hidden fragments and truncated descendants cannot manufacture purchase text', async () => {
@@ -1366,6 +1687,46 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           };
           const result = await f.run('inspect', expansionInput); rejected(result);
           expect(JSON.parse(result.debugStructure).productProofFailure).toBe(kind === 'records' ? 'mutation_overflow' : 'mutation_scan_overflow');
+          expect(f.world.__computaModelFirstProof).toBeUndefined(); noSend(f, picker, send);
+        }
+      });
+
+      test('indexed child subtrees keep the last Work control and charge repeated historical edges', async () => {
+        for (const kind of ['work_tail', 'repeated_edges', 'overlapping_labels']) {
+          const { f, picker, expand, send, prompt } = await collapsed();
+          expand.onClick = () => {
+            f.userBody.text = prompt;
+            const branch = new Node('DIV');
+            const siblings = Array.from({ length: 1_400 }, () => new Node('SPAN'));
+            branch.append(...siblings);
+            const row = new Node('DIV');
+            row.append(branch);
+            let records;
+            if (kind === 'work_tail') {
+              const work = new Node('BUTTON', { 'aria-pressed': 'false' }, 'Work');
+              branch.append(work);
+              records = [{ type: 'childList', target: f.modeGroup, addedNodes: [row], removedNodes: [] },
+                { type: 'childList', target: row, addedNodes: [branch], removedNodes: [] },
+                { type: 'attributes', target: work, attributeName: 'aria-pressed', oldValue: 'true' }];
+            } else if (kind === 'repeated_edges') {
+              records = Array.from({ length: 24 }, (_, index) => ({ type: 'childList', target: branch,
+                addedNodes: index % 2 ? siblings : [], removedNodes: index % 2 ? [] : siblings }));
+            } else {
+              // Each range shares the same sparse label list. Reading its
+              // candidates repeatedly still consumes the batch's work budget.
+              const roots = [new Node('DIV')];
+              for (let i = 0; i < 35; i++) {
+                const child = new Node('DIV'); roots[roots.length - 1].append(child); roots.push(child);
+              }
+              roots[roots.length - 1].append(...Array.from({ length: 1_000 },
+                () => new Node('SPAN', { 'aria-label': 'Unrelated label' })));
+              records = roots.map(root => ({ type: 'childList', target: f.userBody, addedNodes: [root], removedNodes: [] }));
+            }
+            productRecords(f, records);
+          };
+          const result = await f.run('inspect', expansionInput); rejected(result);
+          expect(JSON.parse(result.debugStructure).productProofFailure)
+            .toBe(kind === 'work_tail' ? 'work_selected' : 'mutation_scan_overflow');
           expect(f.world.__computaModelFirstProof).toBeUndefined(); noSend(f, picker, send);
         }
       });
@@ -2623,10 +2984,10 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         await microtasks(); f.advanceTime(1_801); f.flush(); await microtasks(); f.flush(); return pending;
       };
       const arrows = (picker: any) => picker.powerItem.events.filter((event: any) => event.type === 'keydown' && event.key.startsWith('Arrow'));
-      const noSelection = (f: any, picker: any) => {
+      const noSelection = (f: any, picker: any, expectedDraft = '') => {
         expect(arrows(picker)).toHaveLength(0);
         expect(picker.familyOptions.every((node: any) => node.clicks === 0)).toBe(true);
-        expect(f.composer.textContent).toBe(''); expect(f.world.__computaModelFirstSubmitted).toBeUndefined();
+        expect(f.composer.textContent).toBe(expectedDraft); expect(f.world.__computaModelFirstSubmitted).toBeUndefined();
       };
       const closed = (picker: any, callback: () => void) => {
         const dismiss = picker.menu.onDispatch; let count = 0;
@@ -2873,7 +3234,19 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           expect(x.f.world.__computaModelFirstSubmitted).toBeUndefined();
         }
       });
-      const firstInsertReadiness = async (ignoreWhenReady = false, rejectClock = false, missing = '') => {
+      // Wait for the actual insertion/prepared-record signal, not an arbitrary
+      // number of event-loop turns: real WebCrypto completion is independent.
+      // This host-only bound never advances or extends the adapter's clock.
+      const firstInsertHostSignal = async (signal: Promise<void>, operation: Promise<unknown>) => {
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([signal, operation.then(() => undefined), new Promise<void>((_, reject) => {
+            timeout = setTimeout(() => reject(new Error('first-insert fixture acknowledgement host deadline')), 1_000);
+          })]);
+        } finally { if (timeout !== undefined) clearTimeout(timeout); }
+      };
+      const firstInsertReadiness = async (ignoreWhenReady = false, rejectClock = false, missing = '',
+        beforeDigestReturns?: () => void | Promise<void>) => {
         const { f, picker } = setup(); picker.selected('Instant'); const expected = choice('Instant');
         expect((await f.run('selectModel', { modelChoice: expected })).selected).toBe(true);
         expect((await f.run('prepare', { expectedModelChoice: expected })).prepared).toBe(true);
@@ -2882,8 +3255,11 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         f.window.getSelection = () => selection;
         f.document.createRange = () => ({ selectNodeContents(node: any) { selection.anchorNode = node; selection.focusNode = node; }, collapse() {} });
         let insertions = 0, openings = 0;
+        let acknowledgeInsertion!: () => void;
+        const insertionAcknowledged = new Promise<void>(resolve => { acknowledgeInsertion = resolve; });
         f.document.execCommand = (command: string, _ui: boolean, text: string) => {
           expect(command).toBe('insertText'); expect(text).toBe(prompt); insertions++; f.composer.text = text;
+          if (insertions === 1 && f.world.__computaChatSubmissionState?.pending?.phase === 'prepared') acknowledgeInsertion();
           if (['composer', 'both'].includes(missing)) {
             f.composer.parentElement.children = f.composer.parentElement.children.filter((node: any) => node !== f.composer);
             f.composer.connected = false;
@@ -2906,10 +3282,9 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         if (rejectClock) f.window.webkit.messageHandlers.computaModelClock = {
           postMessage: () => Promise.reject(new Error('PRIVATE_READINESS_CLOCK_CANARY')) };
         let settled = false;
+        if (beforeDigestReturns) f.onDigest(beforeDigestReturns, prompt);
         const inserting = f.run('insert', request).then((value: any) => { settled = true; return value; });
-        for (let tick = 0; tick < 20 && (insertions === 0 || !f.world.__computaChatSubmissionState?.pending); tick++) {
-          await microtasks(); await new Promise(resolve => setImmediate(resolve));
-        }
+        await firstInsertHostSignal(insertionAcknowledged, inserting);
         await microtasks();
         expect(insertions).toBe(1);
         const state = f.world.__computaChatSubmissionState, pending = state.pending;
@@ -2929,6 +3304,27 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         return { f, picker, expected, prompt, request, send, inserting, state, pending, notify, expire, noReplay,
           openings: () => openings, settled: () => settled };
       };
+      test('first Instant readiness fixture awaits the actual prepared insertion across a delayed digest', async () => {
+        let releaseDigest!: () => void, reachedDigest!: () => void;
+        const digestHeld = new Promise<void>(resolve => { releaseDigest = resolve; });
+        const digestEntered = new Promise<void>(resolve => { reachedDigest = resolve; });
+        let entered = false, returned = false;
+        const starting = firstInsertReadiness(false, false, '', async () => {
+          entered = true; reachedDigest(); await digestHeld;
+        }).then(value => { returned = true; return value; });
+        try {
+          await firstInsertHostSignal(digestEntered, starting);
+          expect(entered).toBe(true);
+          // Exceed the previous driver turn limit while the real digest's
+          // existing hook is held. No provider/adapter clock is advanced.
+          for (let tick = 0; tick < 20; tick++) { await microtasks(); await new Promise(resolve => setImmediate(resolve)); }
+          expect(returned).toBe(false);
+        } finally { releaseDigest(); }
+        const x = await starting;
+        expect(x.pending.phase).toBe('prepared'); expect(x.openings()).toBe(0); x.noReplay();
+        // The ordinary unready-Send deadline remains the production refusal.
+        expect((await x.expire()).error).toBe('send_unavailable'); expect(x.openings()).toBe(0); x.noReplay();
+      });
       test('first Instant insert waits for editor acknowledgement before its sole final picker opening', async () => {
         const x = await firstInsertReadiness();
         // A controlled site ignores picker actions while its Send is disabled.
@@ -3047,9 +3443,301 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         x.f.advanceTime(801); x.f.flush(); await microtasks();
         expect((await x.expire()).error).toBeDefined(); expect(x.openings()).toBe(1); x.noReplay();
       });
-      const firstInsertOpening = async (behavior: 'ignore_once' | 'late' | 'never' = 'ignore_once', editorSuffix = '') => {
-        const { f, picker } = setup(); picker.selected('Instant');
-        const expected = choice('Instant');
+      const firstVerification = async (label = 'Medium', recoveryOpens = true) => {
+        const { f, picker } = setup(); picker.selected(label); const expected = choice(label);
+        expect((await f.run('selectModel', { modelChoice: expected })).selected).toBe(true);
+        const open = picker.trigger.onClick; let openings = 0;
+        const root = {f, picker, expected, open, count: () => openings,
+          request: {expectedModelChoice:expected, allowFirstChatVerificationOpening:true}};
+        picker.trigger.onClick = () => { openings++; if (openings === 2 && recoveryOpens) open(); };
+        return root;
+      };
+      const tickVerification = async (f:any, ms:number) => {
+        await microtasks(); f.advanceTime(ms); f.flush(); await microtasks(); f.flush(); await microtasks();
+      };
+      test('first verification failures report only the original closed eligibility decision', async () => {
+        const cases = [
+          ['no_grant', false, 'not_claimed', 'native_grant_absent'],
+          ['existing', true, 'existing', 'slot_existing'],
+          ['spent', true, 'existing', 'slot_existing'],
+          ['draft', true, 'ineligible', 'editor_not_empty'],
+          ['counts', true, 'ineligible', 'user_context'],
+          ['prepared', true, 'ineligible', 'context'],
+        ] as const;
+        for (const [variant, nativeGrant, slot, reason] of cases) {
+          const x = await firstVerification('Medium', false);
+          if (variant === 'no_grant') x.request.allowFirstChatVerificationOpening = false;
+          if (variant === 'existing' || variant === 'spent')
+            x.f.world.__computaModelSelection.firstVerificationOpening = { recoveryClaimed: variant === 'spent' };
+          if (variant === 'draft') x.f.composer.text = 'PRIVATE_ELIGIBILITY_DRAFT';
+          if (variant === 'counts') (x.request as any).expectedUserCounts = [0, 1];
+          if (variant === 'prepared') x.f.world.__computaChatSubmissionState = { pending: { phase: 'prepared' } };
+          const checking = x.f.run('verifyModel', x.request);
+          await tickVerification(x.f, 901); await tickVerification(x.f, 901);
+          const result = await checking;
+          expect(result.error, variant).toBe('model_unverified'); expect(result.modelEvidence, variant).toBeUndefined();
+          expect(result.modelDiagnostic.readContext.firstVerificationOpening, variant).toEqual({ nativeGrant, slot, reason });
+          expect(x.count(), variant).toBe(1);
+          const diagnostic = JSON.stringify(result.modelDiagnostic);
+          expect(diagnostic, variant).not.toContain('PRIVATE_ELIGIBILITY_DRAFT');
+          expect(diagnostic.length, variant).toBeLessThanOrEqual(8_192);
+          noSelection(x.f, x.picker, variant === 'draft' ? 'PRIVATE_ELIGIBILITY_DRAFT' : '');
+        }
+      });
+      test('first verification diagnostics do not inspect an existing slot or grant proof to changed guards', async () => {
+        const x = await firstVerification('Medium', false); let slotReads = 0, privateReads = 0;
+        const existing: any = {};
+        Object.defineProperty(existing, 'PRIVATE_ELIGIBILITY_SLOT', { enumerable: true, get() { privateReads++; throw new Error('private slot read'); } });
+        Object.defineProperty(x.f.world.__computaModelSelection, 'firstVerificationOpening', {
+          configurable: true, get() { slotReads++; return existing; },
+        });
+        const checking = x.f.run('verifyModel', x.request);
+        await tickVerification(x.f, 901); await tickVerification(x.f, 901);
+        const result = await checking;
+        expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+        expect(result.modelDiagnostic.readContext.firstVerificationOpening).toEqual({ nativeGrant: true, slot: 'existing', reason: 'slot_existing' });
+        expect(slotReads).toBe(1); expect(privateReads).toBe(0); expect(x.count()).toBe(1);
+        expect(JSON.stringify(result.modelDiagnostic)).not.toContain('PRIVATE_ELIGIBILITY_SLOT');
+        expect(JSON.stringify(result.modelDiagnostic).length).toBeLessThanOrEqual(8_192); noSelection(x.f, x.picker);
+        // These original guards may reject before the first-slot decision. No
+        // missing decision is converted into an eligibility or recovery grant.
+        for (const variant of ['mode', 'pin', 'invocation']) {
+          const y = await firstVerification('Medium', false);
+          if (variant === 'mode') { y.f.chatMode.values['aria-pressed'] = 'false'; y.f.workMode.values['aria-pressed'] = 'true'; }
+          if (variant === 'pin') y.f.world.__computaChatPresetPin.invalidated = true;
+          const rejected = y.f.run('verifyModel', y.request); await microtasks();
+          if (variant === 'invocation') y.f.world.__computaChatActiveInvocation = {};
+          await tickVerification(y.f, 901); await tickVerification(y.f, 901);
+          const failed = await rejected;
+          expect(failed.error, variant).toBeDefined(); expect(failed.modelEvidence, variant).toBeUndefined();
+          expect(y.count(), variant).toBeLessThanOrEqual(1); noSelection(y.f, y.picker);
+        }
+        const valid = await firstVerification(), verified = valid.f.run('verifyModel', valid.request);
+        await tickVerification(valid.f, 901); await tickVerification(valid.f, 901);
+        expect((await verified).modelEvidence.selected).toEqual(valid.expected);
+        expect(valid.count()).toBe(2); noSelection(valid.f, valid.picker);
+      });
+      test('fresh post-selection verification recovers one lost opening and proves the complete selected family and power', async () => {
+        const x=await firstVerification(), checking=x.f.run('verifyModel',x.request);
+        await tickVerification(x.f,901); await tickVerification(x.f,901);
+        const result=await checking;
+        expect(result.error).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(x.expected);
+        expect(result.modelEvidence.chatSelection.family.key).toBe('GPT-6');
+        expect(result.modelEvidence.chatSelection.power.key).toBe('medium');
+        expect(x.count()).toBe(2); noSelection(x.f,x.picker);
+        const again=x.f.run('verifyModel',x.request); expect((await expire(x.f,again)).error).toBe('model_unverified');
+        expect(x.count()).toBe(3); noSelection(x.f,x.picker);
+      });
+      test('fresh Pro verification shares one recovery for an ignored or acknowledged closed opener', async () => {
+        for (const transient of [false, true]) {
+          const x = await firstVerification('Pro'), checking = x.f.run('verifyModel', x.request);
+          await microtasks(); expect(x.count()).toBe(1);
+          if (transient) x.f.observers.forEach((observer:any) => observer.callback([
+            {type:'attributes',target:x.picker.trigger,attributeName:'aria-expanded',oldValue:'true'}
+          ]));
+          await tickVerification(x.f,901); await tickVerification(x.f,901);
+          const result=await checking;
+          expect(result.error).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(choice('Pro'));
+          expect(result.modelEvidence.chatSelection.power.key).toBe('pro'); expect(x.count()).toBe(2);
+          expect(x.f.world.__computaModelSelection.firstVerificationOpening.recoveryClaimed).toBe(true);
+          noSelection(x.f,x.picker);
+        }
+      });
+      test('fresh Pro verification requires complete proof after one acknowledged closed-menu recovery', async () => {
+        for (const variant of ['same_pro', 'closed', 'late', 'wrong_power', 'wrong_family', 'work', 'replaced', 'owner', 'route', 'draft', 'restored', 'busy']) {
+          const x=await firstVerification('Pro', false), checking=x.f.run('verifyModel',x.request);
+          await microtasks(); expect(x.count()).toBe(1);
+          // The original header briefly acknowledged opening but the menu is still closed.
+          x.f.observers.forEach((o:any)=>o.callback([{type:'attributes',target:x.picker.trigger,attributeName:'aria-expanded',oldValue:'true'}]));
+          x.f.advanceTime(901); x.f.flush(); await microtasks(); expect(x.count()).toBe(2);
+          if (variant==='late') await tickVerification(x.f,901);
+          if (variant==='draft') x.f.composer.text='unrelated unsent draft';
+          if (variant==='busy') x.f.body.append(new Node('BUTTON',{'data-testid':'stop-button'}));
+          if (variant==='owner') x.f.world.__computaModelOwner='foreign';
+          if (variant==='route') x.f.document.URL='https://chatgpt.com/c/foreign-route';
+          if (variant==='wrong_power') x.picker.selected('High');
+          if (variant==='wrong_family') x.picker.selected('GPT-5.6 Sol');
+          if (variant==='work') { x.f.chatMode.values['aria-pressed']='false'; x.f.workMode.values['aria-pressed']='true'; }
+          if (variant==='replaced') x.f.composer.connected=false;
+          if (variant==='restored') x.f.observers.forEach((o:any)=>o.callback([{type:'characterData',target:x.f.composer}]));
+          if (variant!=='closed') {
+            // After the one fresh opening, only the website supplies the eventual associated popup.
+            x.open();
+            x.f.observers.forEach((o:any)=>o.callback([{type:'childList',target:x.f.body,addedNodes:[x.picker.menu],removedNodes:[]}]));
+          }
+          await tickVerification(x.f,variant==='same_pro'?20:901);
+          const result=await checking;
+          if (variant==='same_pro') {
+            expect(result.error).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(x.expected);
+            expect(result.modelEvidence.chatSelection.family.key).toBe('GPT-6');
+            expect(result.modelEvidence.chatSelection.power.key).toBe('pro');
+          } else { expect(result.error,variant).toBeDefined(); expect(result.modelEvidence,variant).toBeUndefined(); }
+          expect(x.count(),variant).toBe(2); noSelection(x.f,x.picker,variant==='draft'?'unrelated unsent draft':'');
+        }
+      });
+      test('fresh verification remembers same-editor detach or transient draft before and after the acknowledged close', async () => {
+        for (const phase of ['before', 'after']) for (const kind of ['reinsert', 'draft']) {
+          const x = await firstVerification('Pro', false);
+          // Dispatch only to observers registered for the actual mutation target.
+          const registrations = new Map<any, any[]>();
+          const prototype = Object.getPrototypeOf(x.f.observers[0]), observe = prototype.observe;
+          prototype.observe = function (target:any, options:any) {
+            registrations.set(this, [...(registrations.get(this) || []), {target, options}]);
+            return observe.call(this, target, options);
+          };
+          const checking = x.f.run('verifyModel', x.request); await microtasks();
+          const editor = x.f.composer, parent = editor.parentElement;
+          const target = kind==='reinsert' ? parent : editor;
+          const records = kind==='reinsert' ? [
+            {type:'childList',target,removedNodes:[editor],addedNodes:[]},
+            {type:'childList',target,removedNodes:[],addedNodes:[editor]},
+          ] : [{type:'characterData',target}];
+          const change = () => {
+            for (const [observer, scopes] of registrations) {
+              if (scopes.some(({target: root,options}) => options[records[0].type] &&
+                  (root===target || options.subtree && (root===x.f.document || root.contains?.(target))))) observer.callback(records);
+            }
+          };
+          if (phase==='before') change();
+          x.f.observers.forEach((o:any)=>o.callback([{type:'attributes',target:x.picker.trigger,attributeName:'aria-expanded',oldValue:'true'}]));
+          x.f.advanceTime(901); x.f.flush(); await microtasks();
+          if (phase==='after') change();
+          x.open();
+          x.f.observers.forEach((o:any)=>o.callback([{type:'childList',target:x.f.body,addedNodes:[x.picker.menu],removedNodes:[]}]));
+          await tickVerification(x.f,30); const result=await checking;
+          expect(result.error,phase+' '+kind).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+          expect(x.count()).toBe(phase==='before'?1:2); noSelection(x.f,x.picker);
+        }
+      });
+      test('acknowledged closed first verification opens once for all powers without input or selection replay', async () => {
+        for (const label of ['Instant','Medium','High','Extra High','Pro']) {
+          const x=await firstVerification(label), checking=x.f.run('verifyModel',x.request);
+          await microtasks();
+          x.f.observers.forEach((o:any)=>o.callback([{type:'attributes',target:x.picker.trigger,attributeName:'aria-expanded',oldValue:'true'}]));
+          await tickVerification(x.f,901);
+          const result=await checking;
+          expect(result.error,label).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(x.expected);
+          expect(result.modelEvidence.chatSelection.family.key).toBe('GPT-6'); expect(x.count()).toBe(2);
+          expect(x.f.world.__computaModelSelection.firstVerificationOpening.recoveryClaimed).toBe(true);
+          noSelection(x.f,x.picker);
+          const again=x.f.run('verifyModel',x.request); expect((await expire(x.f,again)).error).toBeDefined();
+          expect(x.count()).toBe(3); noSelection(x.f,x.picker);
+        }
+      });
+      test('acknowledged closed first verification refuses a second close without a third opening or renewed deadline', async () => {
+        const x=await firstVerification('Medium',false), checking=x.f.run('verifyModel',x.request);
+        await microtasks();
+        const acknowledged=()=>x.f.observers.forEach((o:any)=>o.callback([{type:'attributes',target:x.picker.trigger,attributeName:'aria-expanded',oldValue:'true'}]));
+        acknowledged(); await tickVerification(x.f,901); expect(x.count()).toBe(2);
+        expect(x.f.scheduledDelays.at(-1)).toBeGreaterThan(0);
+        expect(x.f.scheduledDelays.at(-1)).toBeLessThanOrEqual(899);
+        acknowledged(); await tickVerification(x.f,901);
+        const result=await checking;
+        expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+        expect(x.count()).toBe(2); expect(x.f.world.__computaModelSelection.firstVerificationOpening.recoveryClaimed).toBe(true);
+        noSelection(x.f,x.picker);
+      });
+      test('acknowledged closed first verification rejects pre-recovery identity draft mode and popup ambiguity', async () => {
+        for (const mutation of ['owner','route','invocation','pin','power','work','temporary','draft','restored',
+          'reinsert','busy','foreign_menu','user','assistant','submitted','prepared','spent','expired','disabled']) {
+          const x=await firstVerification('Medium'), checking=x.f.run('verifyModel',x.request);
+          await microtasks();
+          x.f.observers.forEach((o:any)=>o.callback([{type:'attributes',target:x.picker.trigger,attributeName:'aria-expanded',oldValue:'true'}]));
+          if (mutation==='owner') x.f.world.__computaModelOwner='foreign';
+          if (mutation==='route') x.f.document.URL='https://chatgpt.com/c/foreign';
+          if (mutation==='invocation') x.f.world.__computaChatActiveInvocation={};
+          if (mutation==='pin') x.f.world.__computaChatPresetPin={...x.f.world.__computaChatPresetPin};
+          if (mutation==='power') x.picker.selected('High');
+          if (mutation==='work') { x.f.chatMode.values['aria-pressed']='false';x.f.workMode.values['aria-pressed']='true'; }
+          if (mutation==='temporary') x.f.temporary.connected=false;
+          if (mutation==='draft') x.f.composer.text='unrelated unsent draft';
+          if (mutation==='restored') x.f.observers.forEach((o:any)=>o.callback([{type:'characterData',target:x.f.composer}]));
+          if (mutation==='reinsert') x.f.observers.forEach((o:any)=>o.callback([{type:'childList',target:x.f.composer.parentElement,removedNodes:[x.f.composer],addedNodes:[x.f.composer]}]));
+          if (mutation==='busy') x.f.body.append(new Node('BUTTON',{'data-testid':'stop-button'}));
+          if (mutation==='foreign_menu') x.f.body.append(new Node('DIV',{role:'menu'}));
+          if (mutation==='user' || mutation==='assistant') x.f.body.append(new Node('ARTICLE',{'data-turn':mutation}));
+          if (mutation==='submitted') x.f.world.__computaModelFirstSubmitted=true;
+          if (mutation==='prepared') x.f.world.__computaChatSubmissionState={pending:{phase:'prepared'}};
+          if (mutation==='spent') x.f.world.__computaModelSelection.firstVerificationOpening.recoveryClaimed=true;
+          if (mutation==='disabled') x.picker.trigger.disabled=true;
+          await tickVerification(x.f,mutation==='expired'?1801:901); await tickVerification(x.f,901);
+          const result=await checking;
+          expect(result.error,mutation).toBeDefined(); expect(result.modelEvidence,mutation).toBeUndefined();
+          expect(x.count(),mutation).toBe(1);
+          if (mutation==='submitted') {
+            expect(x.f.world.__computaModelFirstSubmitted).toBe(true);
+            expect(arrows(x.picker)).toHaveLength(0); expect(x.picker.familyOptions.every((node:any)=>node.clicks===0)).toBe(true);
+            expect(x.f.composer.textContent).toBe('');
+          } else noSelection(x.f,x.picker,mutation==='draft'?'unrelated unsent draft':'');
+        }
+      });
+      test('fresh post-selection verification recognizes only the empty WebKit ProseMirror caret sentinel', async () => {
+        for (const shape of ['sentinel', 'space', 'extra_line', 'image', 'hidden_draft', 'unmarked_br']) {
+          const x = await firstVerification();
+          const editor = x.f.composer;
+          editor.values.class = 'ProseMirror';
+          const paragraph = new Node('P');
+          const br = new Node('BR', shape === 'unmarked_br' ? {} : { class: 'ProseMirror-trailingBreak' });
+          paragraph.append(br); editor.append(paragraph);
+          if (shape === 'space') paragraph.text = ' ';
+          if (shape === 'extra_line') editor.append(new Node('P'));
+          if (shape === 'image') paragraph.append(new Node('IMG'));
+          if (shape === 'hidden_draft') editor.append(new Node('SPAN', { hidden: '' }, 'unsent draft'));
+          Object.defineProperty(editor, 'innerText', { get: () => shape === 'hidden_draft' ? '' : '\n' });
+          const checking = x.f.run('verifyModel', x.request);
+          await tickVerification(x.f, 901); await tickVerification(x.f, 901);
+          const result = await checking;
+          if (shape === 'sentinel') {
+            expect(result.error).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(x.expected);
+            expect(x.count()).toBe(2);
+          } else {
+            expect(result.error, shape).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+            expect(x.count(), shape).toBe(1);
+          }
+        }
+      });
+      test('fresh post-selection verification accepts a late first open without a second click', async () => {
+        const x=await firstVerification(), checking=x.f.run('verifyModel',x.request);
+        await microtasks(); expect(x.count()).toBe(1); x.f.advanceTime(850); x.open();
+        x.f.observers.forEach((o:any)=>o.callback([{type:'childList',target:x.f.body,addedNodes:[x.picker.menu],removedNodes:[]}]));
+        await microtasks(); await tickVerification(x.f,51);
+        const result=await checking; expect(result.error).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(x.expected);
+        expect(x.count()).toBe(1); noSelection(x.f,x.picker);
+      });
+      test('fresh post-selection verification rejects the wrong checked family after a valid second opening', async () => {
+        const x=await firstVerification(); let openings=0;
+        x.picker.trigger.onClick=()=>{ if(++openings===2) { x.picker.selected('GPT-5.6 Sol'); x.open(); } };
+        const checking=x.f.run('verifyModel',x.request); await tickVerification(x.f,901); await tickVerification(x.f,901);
+        const result=await checking;
+        expect(result.error).toBe('model_mismatch'); expect(result.modelEvidence).toBeUndefined();
+        expect(openings).toBe(2); noSelection(x.f,x.picker);
+      });
+      test('fresh post-selection verification stops at two unanswered openings within the original deadline', async () => {
+        const x=await firstVerification(); let openings=0; x.picker.trigger.onClick=()=>{openings++};
+        const checking=x.f.run('verifyModel',x.request); await tickVerification(x.f,901);
+        expect(openings).toBe(2); await tickVerification(x.f,901);
+        const result=await checking; expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+        expect(openings).toBe(2); noSelection(x.f,x.picker);
+      });
+      test('fresh post-selection verification never recovers after pin, owner, draft, or submission drift', async () => {
+        for(const variant of ['owner','pin','wrong_model','draft','post_submit','no_native_grant']) {
+          const x=await firstVerification();
+          if(variant==='no_native_grant') x.request.allowFirstChatVerificationOpening=false;
+          if(variant==='post_submit') x.f.world.__computaModelFirstSubmitted=true;
+          const checking=x.f.run('verifyModel',x.request); await microtasks();
+          if(variant==='owner') x.f.world.__computaModelOwner='foreign-owner-token';
+          if(variant==='pin') x.picker.trigger.connected=false;
+          if(variant==='wrong_model') x.picker.selected('High');
+          if(variant==='draft') x.f.composer.text='different draft';
+          await tickVerification(x.f,901); await tickVerification(x.f,901);
+          const result=await checking; expect(result.error,variant).toBeDefined(); expect(result.modelEvidence).toBeUndefined();
+          expect(x.count(),variant).toBeLessThanOrEqual(1);
+          expect(arrows(x.picker)).toHaveLength(0); expect(x.picker.familyOptions.every((node:any)=>node.clicks===0)).toBe(true);
+        }
+      });
+      const firstInsertOpening = async (behavior: 'ignore_once' | 'late' | 'never' = 'ignore_once', editorSuffix = '', label = 'Instant') => {
+        const { f, picker } = setup(); picker.selected(label);
+        const expected = choice(label);
         expect((await f.run('selectModel', { modelChoice: expected })).selected).toBe(true);
         expect((await f.run('prepare', { expectedModelChoice: expected })).prepared).toBe(true);
         const prompt = 'Synthetic literal first insert opening request\n\n' + markerLine;
@@ -3091,6 +3779,670 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect(x.picker.familyOptions.map((node: any) => node.clicks)).toEqual(x.familyBefore);
         expect(x.f.world.__computaModelFirstSubmitted).toBeUndefined();
       };
+      const preparedVerification = async () => {
+        const x=await firstInsertOpening();
+        await finishFirstInsertWait(x);
+        expect((await x.inserting).inserted).toBe(true);
+        expect(x.pending.firstInsertOpening.proved).toBe(true);
+        let calls=0;
+        x.picker.trigger.onClick=()=>{calls++; if(calls===2)x.open();};
+        const grant={sequence:1,marker:firstMarker,fingerprint:x.pending.fingerprint};
+        const verify=(overrides={})=>x.f.run('verifyModel',{expectedModelChoice:x.expected,expectedSubmissionProofs:[],
+          preparedInstantVerificationOpening:grant,...overrides});
+        return {...x,grant,verify,calls:()=>calls};
+      };
+      const preparedSubmit = async (label = 'Medium', skipReady = false) => {
+        const x = await firstInsertOpening('ignore_once', '', label);
+        await finishFirstInsertWait(x);
+        expect((await x.inserting).inserted).toBe(true);
+        x.picker.trigger.onClick = x.open;
+        if (!skipReady) expect((await x.f.run('sendReady', x.request)).sendReady).toBe(true);
+        let openings = 0;
+        x.picker.trigger.onClick = () => { if (++openings > 1) x.open(); };
+        return { ...x, request:{...x.request,expectedSubmissionProofs:[{sequence:1,fingerprint:x.pending.fingerprint}]}, openings: () => openings };
+      };
+      const preparedFirstChatReadiness = async (label = 'Medium') => {
+        const x = await firstInsertOpening('ignore_once', '', label);
+        await finishFirstInsertWait(x); expect((await x.inserting).inserted).toBe(true);
+        let openings = 0;
+        x.picker.trigger.onClick = () => { openings++; x.open(); };
+        return { ...x, request: { ...x.request, firstChatReadinessFinalGuardOnly: true, preparationTiming: true },
+          readinessOpenings: () => openings };
+      };
+      test('fresh non-Instant readonly readiness replaces only the duplicate precheck and still rejects an ignored final opening', async () => {
+        // Reproduce the old Medium action_precheck refusal, without treating a
+        // successful first insert as proof that another popup actually opened.
+        for (const finalOnly of [false, true]) {
+          const x = await preparedFirstChatReadiness(); let ignored = 0;
+          x.picker.trigger.onClick = () => { ignored++; };
+          const reading = x.f.run('sendReady', { ...x.request, firstChatReadinessFinalGuardOnly: finalOnly });
+          await microtasks(); expect(ignored).toBe(1);
+          await finishFirstInsertWait(x, 901); await finishFirstInsertWait(x, 901);
+          const result = await reading;
+          expect(result.error).toBeDefined(); expect(result.sendReady).toBeUndefined(); expect(result.modelEvidence).toBeUndefined();
+          expect(result.modelDiagnostic.readContext.scope).toBe(finalOnly ? 'action_final_guard' : 'action_precheck');
+          expect(result.modelDiagnostic.readContext.action).toBe('sendReady');
+          expect(ignored).toBe(1); expect(x.counts().insertions).toBe(1); expect(x.send.clicks).toBe(0);
+          expect(x.f.composer.textContent).toBe(x.prompt); expect(x.f.world.__computaModelFirstSubmitted).toBeUndefined();
+        }
+        for (const label of ['Medium', 'High', 'Extra High', 'Pro']) {
+          const x = await preparedFirstChatReadiness(label), result = await x.f.run('sendReady', x.request);
+          expect(result.error, label).toBeUndefined(); expect(result.sendReady, label).toBe(true);
+          expect(result.modelEvidence.selected, label).toEqual(x.expected);
+          expect(result.modelEvidence.chatSelection.family).toEqual({ key: 'GPT-6', label: 'GPT-6' });
+          expect(result.modelEvidence.chatSelection.power.key).toBe(label.toLowerCase().replace(' ', '-'));
+          expect(result.productModeEvidence).toMatchObject({ product: 'chatgpt', mode: 'chat', temporaryTransition: 'acknowledged' });
+          expect(result.preparationTiming.modelPrecheckMs).toBeNull(); expect(result.preparationTiming.finalGuardMs).not.toBeNull();
+          expect(x.readinessOpenings(), label).toBe(1); expect(x.counts().insertions).toBe(1); expect(x.send.clicks).toBe(0);
+          expect(x.f.composer.textContent).toBe(x.prompt); expect(x.f.world.__computaModelFirstSubmitted).toBeUndefined();
+          expect(x.picker.familyOptions.map((node:any) => node.clicks)).toEqual(x.familyBefore);
+          expect(arrows(x.picker)).toHaveLength(x.powerBefore);
+        }
+      });
+      test('fresh non-Instant readiness requires exact native context and literal draft while legacy readiness remains unchanged', async () => {
+        for (const flag of [undefined, false, 1, 'true']) {
+          const x = await preparedFirstChatReadiness();
+          const result = await x.f.run('sendReady', { ...x.request, firstChatReadinessFinalGuardOnly: flag });
+          expect(result.error).toBeUndefined(); expect(result.sendReady).toBe(true);
+          expect(result.preparationTiming.modelPrecheckMs).not.toBeNull(); expect(x.readinessOpenings()).toBe(2);
+          expect(x.counts().insertions).toBe(1); expect(x.send.clicks).toBe(0);
+        }
+        const invalid: [string, Record<string, unknown>, string][] = [
+          ['instant_is_separate', { expectedModelChoice: choice('Instant') }, 'sendReady'],
+          ['foreign_label', { expectedModelChoice: { key: 'chat/latest/medium', label: 'Foreign' } }, 'sendReady'],
+          ['wrong_key_label', { expectedModelChoice: { key: 'chat/latest/high', label: 'Medium' } }, 'sendReady'],
+          ['observed_pro_label_is_not_native_key', { expectedModelChoice: choice('GPT-6 Pro') }, 'sendReady'],
+          ['later_sequence', { submissionSequence: 2 }, 'sendReady'],
+          ['other_marker', { submissionMarker: '00000000-0000-4000-8000-000000000009' }, 'sendReady'],
+          ['retained_counts', { expectedUserCounts: [0, 1] }, 'sendReady'],
+          ['retained_proofs', { expectedSubmissionProofs: [{ sequence: 1, fingerprint: 'a'.repeat(64) }] }, 'sendReady'],
+          ['retained_conversation', { expectedConversation: 'https://chatgpt.com/' }, 'sendReady'],
+          ['retained_first_fingerprint', { expectedFirstUserFingerprint: 'a'.repeat(64) }, 'sendReady'],
+          ['deferred_model', { deferModelVerification: true }, 'sendReady'],
+          ['focus_flag_collision', { prepareFirstInstantInInsert: true }, 'sendReady'],
+          ['instant_flag_collision', { firstInstantReadinessFinalGuardOnly: true }, 'sendReady'],
+          ['not_readonly', {}, 'submit'],
+        ];
+        for (const [name, override, action] of invalid) {
+          const x = await preparedFirstChatReadiness();
+          const result = await x.f.run(action, { ...x.request, ...override });
+          expect(result.error, name).toBeDefined(); expect(result.sendReady, name).toBeUndefined();
+          expect(x.readinessOpenings(), name).toBe(0); expect(x.counts().insertions).toBe(1); expect(x.send.clicks).toBe(0);
+          expect(x.f.world.__computaModelFirstSubmitted).toBeUndefined();
+        }
+        for (const change of ['outer_space', 'extra_lf', 'crlf', 'changed_text']) {
+          const x = await preparedFirstChatReadiness();
+          if (change === 'outer_space') x.f.composer.text = ' ' + x.prompt;
+          if (change === 'extra_lf') x.f.composer.text = x.prompt + '\n\n';
+          if (change === 'crlf') x.f.composer.text = x.prompt.replace(/\n/g, '\r\n');
+          if (change === 'changed_text') x.f.composer.text = x.prompt + ' foreign';
+          const result = await x.f.run('sendReady', x.request);
+          expect(result.error, change).toBe('prompt_not_inserted'); expect(result.sendReady, change).toBeUndefined();
+          expect(x.readinessOpenings(), change).toBe(0); expect(x.counts().insertions).toBe(1); expect(x.send.clicks).toBe(0);
+        }
+      });
+      test('fresh non-Instant readiness retains current final model product ownership and enabled-Send checks', async () => {
+        for (const drift of ['power', 'family', 'owner', 'route', 'work', 'temporary', 'user']) {
+          const x = await preparedFirstChatReadiness(); const open = x.picker.trigger.onClick; let changed = false;
+          x.picker.trigger.onClick = () => {
+            open(); if (changed) return; changed = true;
+            if (drift === 'power') x.picker.selected('High');
+            if (drift === 'family') x.picker.selected('GPT-5.5');
+            if (drift === 'owner') x.f.world.__computaModelOwner = 'different-owner';
+            if (drift === 'route') x.f.document.URL = 'https://chatgpt.com/c/foreign-readiness';
+            if (drift === 'work') { x.f.chatMode.values['aria-pressed'] = 'false'; x.f.workMode.values['aria-pressed'] = 'true'; }
+            if (drift === 'temporary') x.f.temporary.values['aria-label'] = 'Temporary chat';
+            if (drift === 'user') x.f.appendUser('Foreign readiness user');
+          };
+          const reading = x.f.run('sendReady', x.request); await microtasks();
+          await finishFirstInsertWait(x, 901); await finishFirstInsertWait(x, 901);
+          const result = await reading;
+          expect(changed, drift).toBe(true); expect(result.error, drift).toBeDefined(); expect(result.sendReady, drift).toBeUndefined();
+          expect(x.counts().insertions).toBe(1); expect(x.send.clicks).toBe(0); expect(x.f.world.__computaModelFirstSubmitted).toBeUndefined();
+        }
+        for (const drift of ['draft', 'same_text_composer', 'duplicate_composer', 'disabled_composer', 'state_clone', 'pending_clone', 'pending_canonical', 'pending_fingerprint']) {
+          const x = await preparedFirstChatReadiness(), open = x.picker.trigger.onClick; let changed = false;
+          x.picker.trigger.onClick = () => {
+            open(); if (changed) return; changed = true;
+            if (drift === 'draft') x.f.composer.text += ' changed during final proof';
+            if (drift === 'same_text_composer') {
+              const old = x.f.composer, replacement = new Node(old.tagName, { ...old.values }, x.prompt), parent = old.parentElement;
+              parent.children = parent.children.map((node:any) => node === old ? replacement : node);
+              replacement.parentElement = parent; old.connected = false; old.parentElement = null; x.f.document.activeElement = replacement;
+            }
+            if (drift === 'duplicate_composer') x.f.body.append(new Node(x.f.composer.tagName, { ...x.f.composer.values }, x.prompt));
+            if (drift === 'disabled_composer') x.f.composer.disabled = true;
+            if (drift === 'state_clone') x.f.world.__computaChatSubmissionState = { ...x.state };
+            if (drift === 'pending_clone') x.state.pending = { ...x.pending };
+            if (drift === 'pending_canonical') x.pending.canonical += ' different canonical';
+            if (drift === 'pending_fingerprint') x.pending.fingerprint = '0'.repeat(64);
+          };
+          const reading = x.f.run('sendReady', x.request); await microtasks();
+          await finishFirstInsertWait(x, 901); await finishFirstInsertWait(x, 901);
+          const result = await reading;
+          expect(changed, drift).toBe(true); expect(result.error, drift).toBeDefined(); expect(result.sendReady, drift).toBeUndefined();
+          expect(x.readinessOpenings(), drift).toBe(1); expect(x.counts().insertions).toBe(1); expect(x.send.clicks).toBe(0);
+          expect(x.f.world.__computaModelFirstSubmitted).toBeUndefined();
+        }
+        for (const drift of ['disabled', 'remounted', 'duplicate', 'missing']) {
+          const x = await preparedFirstChatReadiness(), open = x.picker.trigger.onClick; let changed = false, replacement:any = null;
+          x.picker.trigger.onClick = () => {
+            open(); if (changed) return; changed = true;
+            if (drift === 'disabled') x.send.disabled = true;
+            if (drift === 'remounted' || drift === 'missing') {
+              const parent = x.send.parentElement;
+              parent.children = parent.children.filter((node:any) => node !== x.send);
+              x.send.parentElement = null; x.send.connected = false;
+            }
+            if (drift === 'remounted' || drift === 'duplicate') {
+              replacement = new Node('BUTTON', { 'aria-label': 'Send prompt' }); x.f.body.append(replacement);
+            }
+          };
+          const reading = x.f.run('sendReady', x.request); await microtasks();
+          await finishFirstInsertWait(x, 901); await finishFirstInsertWait(x, 901);
+          const result = await reading;
+          expect(changed, drift).toBe(true); expect(result.error, drift).toBeUndefined(); expect(result.sendReady, drift).toBe(false);
+          expect(result.modelEvidence.selected).toEqual(x.expected); expect(x.readinessOpenings()).toBe(1);
+          expect(x.counts().insertions).toBe(1); expect(x.send.clicks).toBe(0); expect(replacement?.clicks ?? 0).toBe(0);
+          expect(x.f.world.__computaModelFirstSubmitted).toBeUndefined();
+        }
+        const waiting = await preparedFirstChatReadiness(); waiting.send.disabled = true;
+        const result = await waiting.f.run('sendReady', waiting.request);
+        expect(result.error).toBeUndefined(); expect(result.sendReady).toBe(false);
+        expect(result.modelEvidence.selected).toEqual(waiting.expected); expect(waiting.readinessOpenings()).toBe(1);
+        expect(waiting.counts().insertions).toBe(1); expect(waiting.send.clicks).toBe(0);
+      });
+      const preparedReadinessRecovery = async (label = 'Medium') => {
+        const x = await preparedFirstChatReadiness(label);
+        const grant = { sequence: 1, marker: firstMarker, fingerprint: x.pending.fingerprint };
+        let openings = 0, claimedBeforeFirst = false;
+        x.picker.trigger.onClick = () => {
+          openings++;
+          if (openings === 1) claimedBeforeFirst = x.pending.firstReadinessOpening?.insertProof === x.pending.firstInsertOpening
+            && x.pending.firstReadinessOpening?.recoveryClaimed === false;
+          if (openings === 2) x.open();
+        };
+        return { ...x, grant, recoveryRequest: { ...x.request, preparedChatReadinessOpening: grant },
+          recoveryOpenings: () => openings, claimedBeforeFirst: () => claimedBeforeFirst };
+      };
+      const noReadinessInputReplay = (x:any) => {
+        expect(x.counts().insertions).toBe(1); expect(x.send.clicks).toBe(0);
+        expect(x.f.world.__computaModelFirstSubmitted).toBeUndefined();
+        expect(x.picker.familyOptions.map((node:any) => node.clicks)).toEqual(x.familyBefore);
+        expect(arrows(x.picker)).toHaveLength(x.powerBefore);
+      };
+      test('prepared non-Instant readiness spends one native-bound recovery and requires a fresh complete final model proof', async () => {
+        for (const label of ['Medium', 'High', 'Extra High', 'Pro']) {
+          const x = await preparedReadinessRecovery(label), reading = x.f.run('sendReady', x.recoveryRequest);
+          await microtasks(); expect(x.recoveryOpenings(), label).toBe(1); expect(x.claimedBeforeFirst()).toBe(true);
+          const slot = x.pending.firstReadinessOpening;
+          expect(slot.insertProof).toBe(x.pending.firstInsertOpening); expect(slot.recoveryClaimed).toBe(false);
+          await finishFirstInsertWait(x, 901); await finishFirstInsertWait(x, 100);
+          const result = await reading;
+          expect(result.error, label).toBeUndefined(); expect(result.sendReady, label).toBe(true);
+          expect(result.modelEvidence.selected, label).toEqual(x.expected);
+          expect(result.modelEvidence.chatSelection.family.key).toBe('GPT-6');
+          expect(result.modelEvidence.chatSelection.automaticFamily.policy).toBe('highest_offered_plain_gpt');
+          expect(result.modelEvidence.chatSelection.power.key).toBe(label.toLowerCase().replace(' ', '-'));
+          expect(x.recoveryOpenings()).toBe(2); expect(x.pending.firstReadinessOpening).toBe(slot); expect(slot.recoveryClaimed).toBe(true);
+          expect(x.picker.trigger.values['aria-expanded']).toBe('false'); expect(x.f.composer.textContent).toBe(x.prompt);
+          noReadinessInputReplay(x);
+          // The same native grant cannot mint another recovery on a later read.
+          let repeatedOpenings = 0; x.picker.trigger.onClick = () => { repeatedOpenings++; };
+          const repeat = x.f.run('sendReady', x.recoveryRequest); await microtasks();
+          await finishFirstInsertWait(x, 901); await finishFirstInsertWait(x, 901);
+          const refused = await repeat;
+          expect(refused.error).toBeDefined(); expect(refused.modelEvidence).toBeUndefined(); expect(repeatedOpenings).toBe(1);
+          expect(refused.modelDiagnostic.readContext.preparedReadinessOpening.slot).toBe('existing');
+          expect(x.pending.firstReadinessOpening).toBe(slot); noReadinessInputReplay(x);
+        }
+        for (const wrongProof of ['power', 'family']) {
+          const x = await preparedReadinessRecovery(); let openings = 0;
+          x.picker.trigger.onClick = () => {
+            if (++openings === 2) { x.picker.selected(wrongProof === 'power' ? 'High' : 'GPT-5.5'); x.open(); }
+          };
+          const reading = x.f.run('sendReady', x.recoveryRequest); await microtasks();
+          await finishFirstInsertWait(x, 901); await finishFirstInsertWait(x, 901);
+          const result = await reading;
+          expect(result.error, wrongProof).toBeDefined(); expect(result.modelEvidence, wrongProof).toBeUndefined(); expect(openings).toBe(2);
+          noReadinessInputReplay(x);
+        }
+      });
+      test('prepared readiness opening rejects missing forged stale or previously affected grants without extra input', async () => {
+        for (const mode of ['missing', 'hash', 'marker', 'sequence', 'extra', 'array', 'old_grant', 'no_ready', 'unproved_insert', 'preopened']) {
+          const x = await preparedReadinessRecovery(); let openings = 0, initialEscapes = 0;
+          x.picker.trigger.onClick = () => { openings++; };
+          const request:any = { ...x.recoveryRequest, preparedChatReadinessOpening: { ...x.grant } };
+          if (mode === 'missing') delete request.preparedChatReadinessOpening;
+          if (mode === 'hash') request.preparedChatReadinessOpening.fingerprint = '0'.repeat(64);
+          if (mode === 'marker') request.preparedChatReadinessOpening.marker = '00000000-0000-4000-8000-000000000009';
+          if (mode === 'sequence') request.preparedChatReadinessOpening.sequence = 2;
+          if (mode === 'extra') request.preparedChatReadinessOpening.extra = true;
+          if (mode === 'array') request.preparedChatReadinessOpening = [x.grant];
+          if (mode === 'old_grant') { delete request.preparedChatReadinessOpening; request.preparedInstantVerificationOpening = x.grant; }
+          if (mode === 'no_ready') x.send.disabled = true;
+          if (mode === 'unproved_insert') x.pending.firstInsertOpening.proved = false;
+          if (mode === 'preopened') {
+            const dispatch = x.picker.menu.onDispatch;
+            x.picker.menu.onDispatch = (event:any) => { if (event.type === 'keydown' && event.key === 'Escape') initialEscapes++; dispatch?.(event); };
+            x.open();
+          }
+          const reading = x.f.run('sendReady', request); await microtasks();
+          await finishFirstInsertWait(x, 901); await finishFirstInsertWait(x, 901);
+          const result = await reading;
+          expect(result.error, mode).toBeDefined(); expect(result.modelEvidence, mode).toBeUndefined(); expect(openings, mode).toBe(1);
+          expect(x.pending.firstReadinessOpening?.recoveryClaimed ?? false).toBe(false);
+          const diagnostic = result.modelDiagnostic.readContext.preparedReadinessOpening;
+          expect(Object.keys(diagnostic).sort()).toEqual(['acknowledgementSources', 'clockRejected', 'clockUnconfirmed', 'nativeGrant', 'observedAcknowledgement', 'recoveryClaimed', 'slot']);
+          expect(Object.keys(diagnostic.acknowledgementSources).sort()).toEqual(['menuDescendant', 'menuRoot', 'triggerAriaExpanded', 'triggerDataState']);
+          for (const value of Object.values(diagnostic.acknowledgementSources)) expect(typeof value).toBe('boolean');
+          for (const field of ['clockRejected', 'clockUnconfirmed', 'nativeGrant', 'observedAcknowledgement', 'recoveryClaimed']) expect(typeof diagnostic[field]).toBe('boolean');
+          expect(['existing', 'not_claimed', 'grant_refused', 'ineligible', 'established', 'prior_effect']).toContain(diagnostic.slot);
+          if (['missing', 'hash', 'marker', 'sequence', 'extra', 'array', 'old_grant'].includes(mode)) expect(diagnostic.nativeGrant).toBe(false);
+          if (mode === 'preopened') { expect(initialEscapes).toBe(1); expect(diagnostic.slot).toBe('prior_effect'); }
+          for (const secret of [x.prompt, firstMarker, x.grant.fingerprint]) expect(JSON.stringify(diagnostic)).not.toContain(secret);
+          noReadinessInputReplay(x);
+        }
+      });
+      test('prepared readiness recovery retains transient acknowledgement draft native-clock and original-deadline refusals', async () => {
+        for (const mode of ['aria', 'menu', 'transient_draft', 'draft', 'owner', 'composer', 'pending', 'prior', 'ready_link', 'send_disabled', 'send_replaced', 'header', 'expired', 'clock']) {
+          const x = await preparedReadinessRecovery();
+          const registrations = new Map<any, any[]>(), prototype = Object.getPrototypeOf(x.f.observers[0]), observe = prototype.observe;
+          prototype.observe = function(target:any, options:any) {
+            registrations.set(this, [...(registrations.get(this) || []), { target, options }]); return observe.call(this, target, options);
+          };
+          try {
+            const notify = (records:any[]) => {
+              for (const [observer, scopes] of registrations) if (scopes.some(({target: root, options}) => records.some(record =>
+                options[record.type] && (root === record.target || options.subtree && (root === x.f.document || root.contains?.(record.target)))
+                && (record.type !== 'attributes' || !options.attributeFilter || options.attributeFilter.includes(record.attributeName))))) observer.callback(records);
+            };
+            const request:any = { ...x.recoveryRequest };
+            if (mode === 'clock') {
+              request.operationID = 'a909845c-2857-4b22-a66b-261b22281513';
+              x.f.window.webkit.messageHandlers.computaModelClock = { postMessage: () => Promise.reject(new Error('PRIVATE_READINESS_CLOCK_CANARY')) };
+            }
+            const reading = x.f.run('sendReady', request); await microtasks(); expect(x.recoveryOpenings(), mode).toBe(1);
+            if (mode === 'aria') notify([{ type: 'attributes', target: x.picker.trigger, attributeName: 'aria-expanded', oldValue: 'true' }]);
+            if (mode === 'menu') {
+              const menu = new Node('DIV', { role: 'menu', 'aria-labelledby': x.picker.trigger.values.id });
+              x.f.body.append(menu); x.f.body.children = x.f.body.children.filter((node:any) => node !== menu); menu.parentElement = null; menu.connected = false;
+              notify([{ type: 'childList', target: x.f.body, addedNodes: [menu], removedNodes: [] },
+                { type: 'childList', target: x.f.body, addedNodes: [], removedNodes: [menu] }]);
+            }
+            if (mode === 'transient_draft') { const old = x.f.composer.text; x.f.composer.text = 'changed'; x.f.composer.text = old; notify([{ type: 'characterData', target: x.f.composer }]); }
+            if (mode === 'draft') x.f.composer.text += ' foreign';
+            if (mode === 'owner') x.f.world.__computaModelOwner = 'foreign';
+            if (mode === 'composer') {
+              const old = x.f.composer, replacement = new Node(old.tagName, { ...old.values }, x.prompt), parent = old.parentElement;
+              parent.children = parent.children.map((node:any) => node === old ? replacement : node); replacement.parentElement = parent;
+              old.connected = false; old.parentElement = null;
+            }
+            if (mode === 'pending') x.state.pending = { ...x.pending };
+            if (mode === 'prior') x.pending.firstInsertOpening = { ...x.pending.firstInsertOpening };
+            if (mode === 'ready_link') x.pending.readyForSubmitOpening = { ...x.pending.firstInsertOpening };
+            if (mode === 'send_disabled') x.send.disabled = true;
+            if (mode === 'send_replaced') {
+              const parent = x.send.parentElement; parent.children = parent.children.filter((node:any) => node !== x.send);
+              x.send.connected = false; x.send.parentElement = null; x.f.body.append(new Node('BUTTON', { 'aria-label': 'Send prompt' }));
+            }
+            if (mode === 'header') x.picker.trigger.connected = false;
+            await finishFirstInsertWait(x, mode === 'expired' ? 1801 : 901); await finishFirstInsertWait(x, 901);
+            const result = await reading;
+            expect(result.error, mode).toBeDefined(); expect(result.modelEvidence, mode).toBeUndefined(); expect(x.recoveryOpenings(), mode).toBe(1);
+            expect(x.pending.firstReadinessOpening?.recoveryClaimed ?? false).toBe(false);
+            if (mode === 'clock') {
+              const diagnostic = result.modelDiagnostic.readContext.preparedReadinessOpening;
+              expect(diagnostic.clockRejected).toBe(true); expect(JSON.stringify(diagnostic)).not.toContain('PRIVATE_READINESS_CLOCK_CANARY');
+            }
+            noReadinessInputReplay(x);
+          } finally { prototype.observe = observe; }
+        }
+        const late = await preparedReadinessRecovery(), reading = late.f.run('sendReady', late.recoveryRequest);
+        await microtasks(); expect(late.recoveryOpenings()).toBe(1); late.f.advanceTime(850); late.open(); late.f.flush(); await microtasks();
+        await finishFirstInsertWait(late, 51);
+        const result = await reading;
+        expect(result.error).toBeUndefined(); expect(result.sendReady).toBe(true); expect(result.modelEvidence.selected).toEqual(late.expected);
+        expect(late.recoveryOpenings()).toBe(1); expect(late.pending.firstReadinessOpening.recoveryClaimed).toBe(false); noReadinessInputReplay(late);
+      });
+      test('prepared readiness acknowledgement provenance distinguishes transient original signals without granting a model proof', async () => {
+        const sourceNames = ['triggerAriaExpanded', 'triggerDataState', 'menuRoot', 'menuDescendant'];
+        for (const mode of [...sourceNames, 'closed_old_value', 'foreign_trigger']) {
+          const x = await preparedReadinessRecovery('Extra High'); let openings = 0;
+          // All physical opening attempts are ignored: only original mutation
+          // acknowledgements may suppress the existing bounded second attempt.
+          x.picker.trigger.onClick = () => { openings++; };
+          const registrations = new Map<any, any[]>(), prototype = Object.getPrototypeOf(x.f.observers[0]), observe = prototype.observe;
+          prototype.observe = function(target:any, options:any) {
+            registrations.set(this, [...(registrations.get(this) || []), { target, options }]); return observe.call(this, target, options);
+          };
+          try {
+            const notify = (records:any[]) => {
+              for (const [observer, scopes] of registrations) if (scopes.some(({target: root, options}) => records.some(record =>
+                options[record.type] && (root === record.target || options.subtree && (root === x.f.document || root.contains?.(record.target)))
+                && (record.type !== 'attributes' || !options.attributeFilter || options.attributeFilter.includes(record.attributeName))))) observer.callback(records);
+            };
+            const reading = x.f.run('sendReady', x.recoveryRequest); await microtasks(); expect(openings).toBe(1);
+            expect(x.pending.firstReadinessOpening.insertProof).toBe(x.pending.firstInsertOpening);
+            if (mode === 'triggerAriaExpanded' || mode === 'triggerDataState' || mode === 'closed_old_value') {
+              const isState = mode === 'triggerDataState';
+              notify([{ type: 'attributes', target: x.picker.trigger, attributeName: isState ? 'data-state' : 'aria-expanded',
+                oldValue: mode === 'closed_old_value' ? 'false' : isState ? 'open' : 'true' }]);
+            } else if (mode === 'foreign_trigger') {
+              const foreign = new Node('BUTTON', { 'aria-label': 'PRIVATE_ACK_CANARY' }); x.f.body.append(foreign);
+              notify([{ type: 'attributes', target: foreign, attributeName: 'aria-expanded', oldValue: 'true' }]);
+            } else {
+              const menu = new Node('DIV', { role: 'menu', 'aria-label': 'PRIVATE_ACK_CANARY' });
+              // This menu has no association with the picker. A transient root
+              // or descendant remains only an ACK signal, never accepted proof.
+              const removed = mode === 'menuRoot' ? menu : new Node('SECTION', { 'aria-label': 'PRIVATE_ACK_WRAPPER' });
+              if (mode === 'menuDescendant') removed.append(menu);
+              x.f.body.append(removed); x.f.body.children = x.f.body.children.filter((node:any) => node !== removed);
+              removed.parentElement = null; removed.connected = false;
+              notify([{ type: 'childList', target: x.f.body, addedNodes: [], removedNodes: [removed] }]);
+            }
+            await finishFirstInsertWait(x, 901); await finishFirstInsertWait(x, 901);
+            const result = await reading, acknowledged = sourceNames.includes(mode);
+            expect(result.error, mode).toBeDefined(); expect(result.modelEvidence, mode).toBeUndefined();
+            expect(openings, mode).toBe(acknowledged ? 1 : 2);
+            const diagnostic = result.modelDiagnostic.readContext.preparedReadinessOpening;
+            expect(diagnostic.nativeGrant).toBe(true); expect(diagnostic.slot).toBe('established');
+            expect(diagnostic.observedAcknowledgement).toBe(acknowledged);
+            expect(diagnostic.recoveryClaimed).toBe(!acknowledged);
+            expect(diagnostic.acknowledgementSources).toEqual(Object.fromEntries(sourceNames.map(name => [name, name === mode])));
+            expect(x.picker.trigger.values['aria-expanded']).toBe('false');
+            for (const secret of [x.prompt, firstMarker, x.grant.fingerprint, 'PRIVATE_ACK_CANARY', 'PRIVATE_ACK_WRAPPER'])
+              expect(JSON.stringify(diagnostic)).not.toContain(secret);
+            noReadinessInputReplay(x);
+          } finally { prototype.observe = observe; }
+        }
+      });
+      for (const action of ['sendReady', 'submit'] as const) test(`prepared ${action} reopens a reciprocally linked picker detached before proof`, async () => {
+        const submitting = action === 'submit';
+        const modes = ['stable_controls', 'transient_controls', 'menu_only', 'aria_only', 'wrong_id', 'wrong_label',
+          'id_drift', 'disjoint_intervals', 'duplicate_menu', 'dropped_menu_role', 'message_wrapped',
+          'hidden_duplicate_menu_id', 'hidden_duplicate_trigger_id',
+          'detached_repaint', 'foreign_portal', 'remounted_trigger', 'still_connected', 'send_toggled'];
+        if (submitting) modes.unshift('send_replaced_after_proof', 'send_duplicated_after_proof');
+        for (const mode of modes) {
+          const x = submitting ? await preparedSubmit('Medium') : await preparedReadinessRecovery('Pro');
+          const { trigger } = x.picker;
+          const openings = submitting ? x.openings : x.recoveryOpenings;
+          const readRequest = submitting ? x.request : x.recoveryRequest;
+          const controls = trigger.getAttribute('aria-controls'), triggerID = trigger.getAttribute('id');
+          const stable = mode === 'stable_controls' || mode === 'menu_only';
+          const popup = new Node('DIV', { role: 'menu', id: ['wrong_id', 'detached_repaint'].includes(mode) ? 'foreign-picker' : controls,
+            'aria-labelledby': mode === 'wrong_label' ? 'foreign-trigger' : triggerID });
+          const wrapPopup = ['stable_controls', 'duplicate_menu', 'dropped_menu_role', 'message_wrapped', 'detached_repaint'].includes(mode);
+          const root = wrapPopup ? new Node('SECTION', mode === 'message_wrapped' ? { 'data-turn': 'assistant' } : {}) : popup;
+          const body = x.f.body, portal = mode === 'foreign_portal' ? new Node('SECTION') : body;
+          Object.assign(x.f.document, { body, querySelector: (selector: string) => x.f.document.querySelectorAll(selector)[0] ?? null });
+          if (portal !== body) body.append(portal);
+          if (root !== popup) root.append(popup);
+          const otherMenu = ['duplicate_menu', 'dropped_menu_role'].includes(mode) ? new Node('DIV', { ...popup.values }) : null;
+          if (otherMenu) root.append(otherMenu);
+          const replacement = x.picker.menu;
+          body.children = body.children.filter((node:any) => node !== replacement);
+          replacement.parentElement = null;
+          replacement.connected = false;
+          if (mode === 'hidden_duplicate_menu_id') body.append(new Node('DIV', { ...popup.values, hidden: '' }));
+          if (mode === 'hidden_duplicate_trigger_id') body.append(new Node('BUTTON', { ...trigger.values, hidden: '' }));
+          if (!stable) delete trigger.values['aria-controls'];
+          const click = trigger.onClick, dispatch = replacement.onDispatch;
+          trigger.onClick = () => {
+            if (openings() >= 1) {
+              trigger.values['aria-controls'] = controls;
+              if (!body.children.includes(replacement)) body.append(replacement);
+            }
+            click();
+          };
+          replacement.onDispatch = (event:any) => {
+            dispatch?.(event);
+            if (!stable && trigger.getAttribute('aria-expanded') === 'false') delete trigger.values['aria-controls'];
+          };
+          const registrations = new Map<any, { target:any, options:any }[]>();
+          const prototype = Object.getPrototypeOf(x.f.observers[0]), observe = prototype.observe;
+          prototype.observe = function(target:any, options:any) {
+            registrations.set(this, [...(registrations.get(this) || []), { target, options }]);
+            return observe.call(this, target, options);
+          };
+          const changeAfterProof = mode === 'send_replaced_after_proof' || mode === 'send_duplicated_after_proof';
+          const query = x.f.document.querySelectorAll;
+          let lateSend: any = null;
+          if (changeAfterProof) x.f.document.querySelectorAll = function(selector: string) {
+            // This single-selector lookup belongs to providerPageAction, after
+            // its awaited recovered precheck. The picker proof uses a union.
+            if (!lateSend && selector === 'button[aria-label="Send prompt"]' && openings() === 2
+              && x.pending.firstSubmitOpening?.recoveryClaimed === true
+              && trigger.getAttribute('aria-expanded') === 'false') {
+              expect(x.pending.phase, mode).toBe('prepared');
+              expect(x.f.world.__computaModelFirstSubmitted, mode).toBeUndefined();
+              lateSend = new Node('BUTTON', { ...x.send.values });
+              if (mode === 'send_replaced_after_proof') {
+                body.children = body.children.filter((node:any) => node !== x.send);
+                x.send.parentElement = null; x.send.connected = false;
+              }
+              body.append(lateSend);
+            }
+            return query.call(this, selector);
+          };
+          try {
+            const reading = x.f.run(action, readRequest);
+            await microtasks(); expect(openings(), mode).toBe(1);
+            const slotName = submitting ? 'firstSubmitOpening' : 'firstReadinessOpening';
+            const slot = x.pending[slotName];
+            expect(slot.insertProof).toBe(x.pending.firstInsertOpening);
+            expect(slot.recoveryClaimed).toBe(false);
+            const records: any[] = [];
+            const attribute = (name: string, value: string | null, target = trigger) => {
+              records.push({ type: 'attributes', target, attributeName: name, oldValue: target.getAttribute(name) });
+              if (value === null) delete target.values[name]; else target.values[name] = value;
+            };
+            const childList = (addedNodes: any[], removedNodes: any[], target = portal) =>
+              records.push({ type: 'childList', target, addedNodes, removedNodes });
+            const mount = () => { portal.append(root); childList([root], []); };
+            if (mode !== 'menu_only') attribute('aria-expanded', 'true');
+            if (!stable) attribute('aria-controls', controls);
+            if (mode !== 'aria_only' && mode !== 'disjoint_intervals') mount();
+            if (mode === 'id_drift') attribute('aria-controls', 'foreign-picker');
+            if (mode === 'dropped_menu_role') attribute('role', null, otherMenu);
+            if (mode === 'send_toggled') { attribute('disabled', '', x.send); attribute('disabled', null, x.send); }
+            if (mode !== 'menu_only') attribute('aria-expanded', 'false');
+            if (!stable) attribute('aria-controls', null);
+            if (mode === 'disjoint_intervals') mount();
+            if (mode !== 'aria_only') {
+              portal.children = portal.children.filter((node:any) => node !== root);
+              root.parentElement = null; root.connected = false; childList([], [root]);
+            }
+            if (mode === 'still_connected') {
+              root.connected = true; root.values.hidden = ''; mount();
+            }
+            if (mode === 'remounted_trigger') {
+              const original = x.picker.replaceTrigger();
+              childList([x.picker.trigger], [original], body);
+            }
+            for (const [observer, scopes] of registrations) {
+              const relevant = records.filter((record, index) => scopes.some(({ target, options }) => options[record.type]
+                && (target === record.target || options.subtree && (target === x.f.document || target.contains?.(record.target)
+                  // Subtree mutations from before removal remain in the delivery batch.
+                  || records.slice(index + 1).some(later => later.type === 'childList' && target.contains?.(later.target)
+                    && later.removedNodes.some((node:any) => node.contains?.(record.target)))))
+                && (record.type !== 'attributes' || !options.attributeFilter || options.attributeFilter.includes(record.attributeName))));
+              if (relevant.length) observer.callback(relevant);
+            }
+            if (mode === 'detached_repaint') {
+              // After observer delivery the detached wrapper can change without another document record.
+              popup.parentElement = null; popup.connected = false; root.children = [];
+              root.append(new Node('DIV', { ...popup.values, id: controls }));
+            }
+            expect(x.send.clicks, mode).toBe(0);
+            await finishFirstInsertWait(x, 901); await finishFirstInsertWait(x, 901);
+            const result = await reading, accepted = mode === 'stable_controls' || mode === 'transient_controls';
+            if (changeAfterProof) {
+              expect(lateSend, mode).not.toBeNull();
+              expect(lateSend.clicks + x.send.clicks, mode).toBe(0);
+              expect(x.pending.phase, mode).toBe('prepared');
+              expect(x.f.world.__computaModelFirstSubmitted, mode).toBeUndefined();
+              expect(result.error, mode).toBe('send_unavailable');
+            }
+            expect(openings(), mode).toBe(accepted ? (submitting ? 3 : 2) : changeAfterProof ? 2 : 1);
+            expect(slot.recoveryClaimed, mode).toBe(accepted || changeAfterProof);
+            expect(x.pending[slotName]).toBe(slot);
+            if (accepted) {
+              expect(popup.isConnected, mode).toBe(false); expect(popup.events).toHaveLength(0);
+              expect(result.error, mode).toBeUndefined();
+              if (submitting) expect(result.submitted, mode).toBe(true);
+              else expect(result.sendReady, mode).toBe(true);
+              if (!submitting) {
+                expect(result.modelEvidence.selected, mode).toEqual(x.expected);
+                expect(result.modelEvidence.chatSelection.family).toEqual({ key: 'GPT-6', label: 'GPT-6' });
+                expect(result.modelEvidence.chatSelection.automaticFamily.policy).toBe('highest_offered_plain_gpt');
+                expect(result.modelEvidence.chatSelection.power.key).toBe('pro');
+                expect(result.productModeEvidence).toMatchObject({ product: 'chatgpt', mode: 'chat', temporaryTransition: 'acknowledged' });
+              }
+              expect(x.picker.trigger).toBe(trigger); expect(trigger.getAttribute('aria-expanded')).toBe('false');
+              expect(trigger.getAttribute('aria-controls')).toBe(stable ? controls : null);
+            } else {
+              expect(result.error, mode).toBeDefined(); expect(result.modelEvidence, mode).toBeUndefined();
+              expect(result.sendReady, mode).toBeUndefined();
+            }
+            if (submitting) {
+              expect(x.send.clicks, mode).toBe(accepted ? 1 : 0);
+              if (!accepted) expect(x.f.composer.textContent, mode).toBe(x.prompt);
+              expect(x.counts().insertions, mode).toBe(1);
+              expect(x.picker.familyOptions.map((node:any) => node.clicks), mode).toEqual(x.familyBefore);
+              expect(arrows(x.picker), mode).toHaveLength(x.powerBefore);
+            } else {
+              expect(x.f.composer.textContent).toBe(x.prompt); noReadinessInputReplay(x);
+            }
+          } finally { prototype.observe = observe; }
+        }
+      });
+      test('a layout LF never substitutes for the full literal submit draft', () => {
+        const source = readFileSync(new URL('../Sources/Computa/Resources/BrowserModels/chatgpt.js', import.meta.url), 'utf8');
+        const definition = source.slice(source.indexOf('function chatGPTExactSubmitDraft('), source.indexOf('function chatGPTSubmissionPins('));
+        const compare = new Function(definition + '\nreturn chatGPTExactSubmitDraft;')();
+        const text = (data: string) => ({nodeType:3, data});
+        const element = (tagName: string, childNodes: any[], attributes: string[] = []) =>
+          ({nodeType:1, tagName, childNodes, firstChild:childNodes[0], attributes, getAttributeNames:()=>attributes});
+        const br = element('BR', []);
+        const second = text('  two 🐢 ');
+        const span = element('SPAN', [second], ['data-line']);
+        const first = text(' one');
+        const prompt = first.data + '\n' + second.data;
+        const editor = (nodes: any[], cls = 'ProseMirror') => {
+          const p = element('P', nodes);
+          return {isConnected:true, getAttribute:()=> 'true', classList:{contains:(name:string)=>name===cls},
+            childNodes:[p], firstChild:p};
+        };
+        expect(compare(editor([first,br,second]), prompt+'\n', prompt)).toBe(true);
+        expect(compare(editor([first,br,span]), prompt+'\n', prompt)).toBe(true);
+        for (const nodes of [[first,br,span,br], [first,br,span,text('\n')], [first,br,text(second.data.trim())],
+          [first,br,element('BUTTON',[second])], [first,br,element('SPAN',[second],['hidden'])],
+          [first,br,element('SPAN',[span])], [first,br,element('BR',[],['class']),span],
+          Array(4097).fill(text(''))]) {
+          expect(compare(editor(nodes), prompt+'\n', prompt)).toBe(false);
+        }
+        expect(compare(editor([first,br,span], 'other'), prompt+'\n', prompt)).toBe(false);
+        expect(compare(editor([first,br,span]), prompt+'\n\n', prompt)).toBe(false);
+      });
+      test('fresh submit precheck recovers one unacknowledged opening for each exact Chat power before a single Send', async () => {
+        for (const label of ['Instant','Medium','High','Extra High','Pro']) {
+          const x = await preparedSubmit(label);
+          const request = x.f.run('submit', x.request);
+          await microtasks(); expect(x.openings(),label).toBe(1); expect(x.send.clicks).toBe(0);
+          await finishFirstInsertWait(x); await finishFirstInsertWait(x,100);
+          const result=await request; expect(result.submitted,label).toBe(true);
+          expect(x.send.clicks).toBe(1); expect(x.counts().insertions).toBe(1);
+          expect(x.picker.familyOptions.map((node:any) => node.clicks)).toEqual(x.familyBefore);
+          expect(arrows(x.picker)).toHaveLength(x.powerBefore);
+        }
+      });
+      test('fresh submit precheck cannot reopen after ambiguity, changed draft, selected power or prior dispatch', async () => {
+        for (const change of ['unready','native_hash','attempted','claimed','picked','foreign_owner','replaced_header','draft','transient_menu','transient_trigger','transient_draft','marker','prior','revoked','route','deadline','wrong_fresh_choice','never_opens']) {
+          const x = await preparedSubmit('Medium', change === 'unready');
+          if (change==='native_hash') x.request.expectedSubmissionProofs[0].fingerprint='0'.repeat(64);
+          const request = x.f.run('submit', x.request); await microtasks();
+          expect(x.openings(),change).toBe(1);
+          let second=0;
+          if (change==='wrong_fresh_choice' || change==='never_opens') x.picker.trigger.onClick=()=>{
+            second++; if (change==='wrong_fresh_choice') { x.picker.selected('High'); x.open(); }
+          };
+          if (change==='attempted') x.f.world.__computaModelFirstSubmitted=true;
+          if (change==='claimed') x.pending.phase='sent';
+          if (change==='picked') x.f.world.__computaChatPresetPin.invalidated=true;
+          if (change==='marker') x.pending.marker='foreign-marker';
+          if (change==='prior') x.pending.firstInsertOpening={...x.pending.firstInsertOpening};
+          if (change==='revoked') x.state.revoked=true;
+          if (change==='route') x.f.document.URL+='&foreign=1';
+          if (change==='transient_trigger') x.f.observers.forEach((o:any)=>o.callback([{type:'attributes',target:x.picker.trigger,attributeName:'aria-expanded',oldValue:'true'}]));
+          if (change==='foreign_owner') x.f.world.__computaModelOwner='not-the-owner';
+          if (change==='replaced_header') x.picker.trigger.connected=false;
+          if (change==='draft') x.f.composer.text+=' ';
+          if (change==='transient_menu' || change==='transient_draft') {
+            const records=change==='transient_menu' ? [{type:'childList',target:x.f.body,addedNodes:[],removedNodes:[new Node('DIV',{role:'menu'})]}]
+              : [{type:'characterData',target:x.f.composer}];
+            x.f.observers.forEach((o:any)=>o.callback(records));
+          }
+          await finishFirstInsertWait(x, change==='deadline' ? 1801 : 901); await finishFirstInsertWait(x,1100);
+          const result=await request;expect(result.error,change).toBeDefined();expect(x.send.clicks,change).toBe(0);
+          expect(x.openings(),change).toBe(1);expect(second,change).toBe(['wrong_fresh_choice','never_opens'].includes(change)?1:0);
+          expect(x.counts().insertions).toBe(1);
+        }
+      });
+      test('fresh submit precheck spends the only recovery and preserves a late first acknowledgement', async () => {
+        const late = await preparedSubmit();
+        const answer = late.f.run('submit',late.request); await microtasks();
+        late.f.advanceTime(700); late.open(); late.f.flush(); await microtasks(); late.f.flush();
+        expect((await answer).submitted).toBe(true); expect(late.send.clicks).toBe(1); expect(late.pending.firstSubmitOpening.recoveryClaimed).toBe(false);
+        const blocked = await preparedSubmit(); let clicks=0; blocked.picker.trigger.onClick=()=>{clicks++;};
+        const first=blocked.f.run('submit',blocked.request); await microtasks();
+        await finishFirstInsertWait(blocked); await finishFirstInsertWait(blocked,1000);
+        expect((await first).error).toBeDefined(); expect(clicks).toBe(2); expect(blocked.send.clicks).toBe(0);
+        const next=blocked.f.run('submit',blocked.request); await microtasks();
+        await finishFirstInsertWait(blocked); await finishFirstInsertWait(blocked,1000);
+        expect((await next).error).toBeDefined(); expect(clicks).toBe(3); expect(blocked.send.clicks).toBe(0);
+      });
+      test('post-insert Instant verification reopens an unacknowledged header once and reads a fresh selection',async()=>{
+        const x=await preparedVerification();
+        const request=x.verify(); await microtasks();
+        expect(x.calls()).toBe(1); await finishFirstInsertWait(x);
+        const result=await request;
+        expect(result.error).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(x.expected);
+        expect(x.calls()).toBe(2); noFirstInsertReplay(x);
+        const repeat=x.verify(); await microtasks(); await finishFirstInsertWait(x,1801);
+        expect((await repeat).error).toBeDefined(); expect(x.calls()).toBe(3); noFirstInsertReplay(x);
+      });
+      test('post-insert Instant verification refuses changed draft, missing grant, transient open-close and expired budget',async()=>{
+        for(const change of ['raw_draft','pending','sent','hash','marker','no_grant','record','picker','late','transient','removed_menu','restored_text','fresh_selection','no_prior','sequence']) {
+          const x=await preparedVerification();
+          const grant={...x.grant}; if(change==='hash')grant.fingerprint='0'.repeat(64); if(change==='marker')grant.marker='bad'; if(change==='sequence')grant.sequence=2;
+          if(change==='no_prior')x.pending.firstInsertOpening=null;
+          let changedSelectionOpenings=0;
+          const read=x.verify({preparedInstantVerificationOpening:change==='no_grant'?null:grant});
+          await microtasks(); expect(x.calls()).toBe(1);
+          if(change==='raw_draft')x.f.composer.text+='\n';
+          if(change==='pending')x.state.pending={...x.pending};
+          if(change==='sent')x.pending.phase='send_claimed';
+          if(change==='record')x.pending.firstInsertOpening={...x.pending.firstInsertOpening};
+          if(change==='picker')x.f.world.__computaChatPresetPin.invalidated=true;
+          if(change==='removed_menu'||change==='restored_text'){
+            const records=change==='removed_menu' ? [{type:'childList',target:x.f.body,addedNodes:[],removedNodes:[new Node('DIV',{role:'menu'})]}]
+              : [{type:'characterData',target:x.f.composer}];
+            x.f.observers.forEach((o:any)=>o.callback(records));
+          }
+          if(change==='fresh_selection') {
+            x.picker.trigger.onClick=()=>{changedSelectionOpenings++; x.picker.selected('High'); x.open();};
+          }
+          if(change==='transient'){
+            const records=[{type:'attributes',target:x.picker.trigger,attributeName:'aria-expanded',oldValue:'true'}];
+            x.f.observers.forEach((o:any)=>o.callback(records));
+          }
+          await finishFirstInsertWait(x,change==='late'?1801:901);
+          await finishFirstInsertWait(x,901);
+          const result=await read; expect(result.error,change).toBeDefined(); expect(x.calls(),change).toBe(1); expect(changedSelectionOpenings).toBe(change==='fresh_selection'?1:0); noFirstInsertReplay(x);
+        }
+      });
       test('first insert final guard recovers one ignored opening after exactly one literal insertion', async () => {
         const x = await firstInsertOpening();
         await finishFirstInsertWait(x);
@@ -3489,31 +4841,267 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           noSelection(f, picker);
         }
       });
-      const pendingDisabledHeader = async (composite = true, attribute = 'disabled', requested = 'Instant') => {
+      const pendingDisabledHeader = async (composite = true, attribute = 'disabled', requested = 'Instant', nativeBudget?: number, beforeSelection?: (f: any, picker: any, form: any) => void) => {
         const { f, picker } = setup(false, { closedCompositeHeader: composite, resetToPowerOnClose: true });
         picker.selected('Instant'); await f.run('inspect');
         const form = new Node('FORM'); form.append(f.composer, picker.trigger); f.body.append(form);
         if (attribute === 'property') picker.trigger.disabled = true;
         else picker.trigger.values[attribute] = attribute === 'aria-disabled' ? 'true' : '';
         picker.trigger.values['data-state'] = 'closed';
+        beforeSelection?.(f, picker, form);
         const clocks: { milliseconds: number; expire: () => void }[] = [];
+        const phases: string[] = [];
+        f.window.webkit.messageHandlers.computaModelDiagnostic = { postMessage: (body: { phase: string }) => phases.push(body.phase) };
         let registered!: () => void;
         const registration = new Promise<void>(resolve => { registered = resolve; });
         f.window.webkit.messageHandlers.computaModelClock = { postMessage: (body: any) => new Promise(resolve => {
           clocks.push({ milliseconds: body.milliseconds, expire: () => resolve(true) }); registered();
         }) };
         const pending = f.run('selectModel', { modelChoice: choice(requested),
-          operationID: '95e24632-2eb6-4cd6-b30f-17ab208c2fbd' });
+          operationID: '95e24632-2eb6-4cd6-b30f-17ab208c2fbd',
+          ...(nativeBudget === undefined ? {} : { initialModelReadinessDeadlineEpochMilliseconds: Date.now() + nativeBudget }) });
         await Promise.race([registration, pending.then((result: any) => {
           throw new Error('Disabled initial picker returned before readiness wait: ' + result.error);
         })]);
         expect(picker.trigger.clicks).toBe(0); noSelection(f, picker);
-        expect(clocks).toHaveLength(1); expect(clocks[0].milliseconds).toBeLessThanOrEqual(1_800);
+        expect(clocks).toHaveLength(1); expect(clocks[0].milliseconds).toBeLessThanOrEqual(nativeBudget ?? 1_800);
         const wake = (records?: any[]) => { for (const observer of [...f.observers]) observer.callback(records || [
           { type: 'attributes', target: picker.trigger, attributeName: 'disabled', oldValue: '' }]); };
         const enable = () => { picker.trigger.disabled = false; delete picker.trigger.values.disabled; delete picker.trigger.values['aria-disabled']; wake(); };
-        return { f, picker, form, clocks, pending, wake, enable };
+        return { f, picker, form, clocks, phases, pending, wake, enable };
       };
+      test('425 finite disabled composite header already enters the pinned readiness wait', async () => {
+        for (const requested of ['Extra High', 'Instant']) {
+          const x = await pendingDisabledHeader(true, 'aria-disabled', requested, 8_000, (_f, picker) => {
+            picker.primary.text = 'Thinking effortInstant'; picker.primary.zeroRects = true;
+            const svg = new Node('SVG'); svg.zeroRects = true; picker.trigger.append(svg);
+            Object.defineProperty(picker.trigger, 'innerText', { configurable: true, get: () =>
+              picker.trigger.getAttribute('aria-disabled') === 'true' ? 'Thinking effort\n\nInstant' : picker.primary.text });
+          });
+          expect(x.picker.trigger.innerText.length).toBe(24);
+          expect(x.picker.trigger.textContent.length).toBe(22);
+          expect(x.picker.primary.getClientRects()).toHaveLength(0);
+          expect(x.picker.trigger.clicks).toBe(0);
+          x.picker.selected(requested); x.enable(); const result = await x.pending;
+          expect(result.selected).toBe(true); expect(result.modelEvidence.chatSelection.power.label).toBe(requested);
+          expect(result.modelDiagnostic.chatHeader.readiness).toEqual({ startedDisabled: true, outcome: 'recognized', reason: null });
+          noSelection(x.f, x.picker);
+        }
+      });
+      test('initial disabled readiness diagnoses the original early guards without a clock or action', async () => {
+        for (const condition of ['invalid_deadline', 'expired_deadline', 'over_budget', 'disabled_editor', 'hidden_editor',
+          'multiple_editors', 'empty_paragraph', 'bare_br', 'draft', 'busy', 'submission', 'ancestor_limit', 'temporary_lost']) {
+          const { f, picker } = setup(false, { closedCompositeHeader: true }); picker.selected('Instant'); await f.run('inspect');
+          const form = new Node('FORM'); form.append(f.composer, picker.trigger); f.body.append(form);
+          picker.trigger.values['aria-disabled'] = 'true'; picker.trigger.values['data-state'] = 'closed';
+          let deadline: any = Date.now() + 8_000;
+          if (condition === 'invalid_deadline') deadline = 'PRIVATE_INVALID_DEADLINE';
+          if (condition === 'expired_deadline') deadline = Date.now() - 1;
+          if (condition === 'over_budget') deadline = Date.now() + 20_000;
+          if (condition === 'disabled_editor') f.composer.values['aria-disabled'] = 'true';
+          if (condition === 'hidden_editor') f.composer.values.hidden = '';
+          if (condition === 'multiple_editors') for (let i = 0; i < 4; i++) form.append(new Node('DIV', { id: 'prompt-textarea', contenteditable: 'true' }));
+          if (condition === 'empty_paragraph') { f.composer.append(new Node('P', { dir: 'auto' })); Object.defineProperty(f.composer, 'innerText', { get: () => '\n' }); }
+          if (condition === 'bare_br') { const p = new Node('P'); p.append(new Node('BR')); f.composer.append(p); Object.defineProperty(f.composer, 'innerText', { get: () => '\n' }); }
+          if (condition === 'draft') f.composer.text = 'PRIVATE_UNSENT_DRAFT';
+          if (condition === 'busy') f.body.append(new Node('BUTTON', { 'data-testid': 'stop-button' }, 'PRIVATE_STOP_TEXT'));
+          if (condition === 'submission') f.world.__computaChatSubmissionState = {};
+          if (condition === 'ancestor_limit') { let parent = f.body; for (let i = 0; i < 258; i++) { const next = new Node('DIV'); parent.append(next); parent = next; } parent.append(form); }
+          if (condition === 'temporary_lost') f.temporary.connected = false;
+          let clocks = 0; f.window.webkit.messageHandlers.computaModelClock = { postMessage: () => { clocks++; return Promise.resolve(true); } };
+          const result = await f.run('selectModel', { modelChoice: choice('Extra High'),
+            initialModelReadinessDeadlineEpochMilliseconds: deadline, operationID: '95e24632-2eb6-4cd6-b30f-17ab208c2fbd' });
+          expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+          expect(result.modelDiagnostic.readStage).toBe('initial_trigger_disabled_rejected');
+          const h = result.modelDiagnostic.chatHeader;
+          const reason = condition.includes('deadline') || condition === 'over_budget' ? 'native_deadline'
+            : ['disabled_editor', 'hidden_editor', 'multiple_editors'].includes(condition) ? 'composer_unavailable'
+            : ['empty_paragraph', 'bare_br', 'draft'].includes(condition) ? 'composer_not_empty'
+            : ['busy', 'submission'].includes(condition) ? 'passive_editor_changed'
+            : condition === 'temporary_lost' ? 'fresh_context' : 'ancestor_limit';
+          expect(h.readiness).toEqual({ startedDisabled: true, outcome: 'rejected', reason });
+          if (reason === 'native_deadline') expect(h.initialReadiness.nativeDeadline).toBe(condition === 'invalid_deadline' ? 'invalid' : condition === 'expired_deadline' ? 'expired' : 'over_budget');
+          if (condition === 'disabled_editor') expect(h.initialReadiness).toEqual({ nativeDeadline: 'within_budget', candidateCount: 1, physicalCount: 1, visibleCount: 1, enabledCount: 0 });
+          if (condition === 'hidden_editor') expect(h.initialReadiness).toEqual({ nativeDeadline: 'within_budget', candidateCount: 1, physicalCount: 0, visibleCount: 0, enabledCount: 0 });
+          if (condition === 'multiple_editors') expect(h.initialReadiness).toEqual({ nativeDeadline: 'within_budget', candidateCount: 3, physicalCount: 3, visibleCount: 3, enabledCount: 3 });
+          if (condition === 'empty_paragraph') expect(h.initialReadiness.composer).toMatchObject({ rendered: 'line_feed', literalEmpty: true, childCount: 1, childTags: ['p'], soleParagraph: true, paragraphChildCount: 0, paragraphDir: 'auto', soleBR: false });
+          if (condition === 'bare_br') expect(h.initialReadiness.composer).toMatchObject({ rendered: 'line_feed', literalEmpty: true, soleParagraph: true, paragraphChildCount: 1, soleBR: true, trailingBreak: false });
+          if (condition === 'draft') expect(h.initialReadiness.composer).toMatchObject({ rendered: 'other', literalEmpty: false, childTags: ['text'] });
+          expect(clocks).toBe(0); expect(picker.trigger.clicks).toBe(0); noSelection(f, picker, condition === 'draft' ? 'PRIVATE_UNSENT_DRAFT' : '');
+          expect(JSON.stringify(result)).not.toContain('PRIVATE');
+        }
+      });
+      test('rejected initial composer diagnostic visits only its first three child entries', async () => {
+        const { f, picker } = setup(false, { closedCompositeHeader: true }); picker.selected('Instant'); await f.run('inspect');
+        const form = new Node('FORM'); form.append(f.composer, picker.trigger); f.body.append(form);
+        picker.trigger.values['aria-disabled'] = 'true'; f.composer.text = 'PRIVATE_DRAFT';
+        const reads: number[] = [];
+        const children = new Proxy({ length: 16_384 }, { get(target, key) {
+          if (key === 'length') return target.length;
+          if (typeof key !== 'string' || !/^[0-9]+$/.test(key)) throw new Error('No full collection traversal');
+          const index = Number(key); reads.push(index);
+          if (index > 2) throw new Error('Beyond bounded diagnostic children');
+          return { nodeType: 3 };
+        } });
+        Object.defineProperty(f.composer, 'childNodes', { get: () => children });
+        const result = await f.run('selectModel', { modelChoice: choice('Extra High'),
+          initialModelReadinessDeadlineEpochMilliseconds: Date.now() + 8_000 });
+        expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+        expect(result.modelDiagnostic.chatHeader.initialReadiness.composer).toMatchObject({ childCount: 3, childTags: ['text', 'text', 'text'] });
+        expect(reads).toEqual([0, 1, 2]); expect(picker.trigger.clicks).toBe(0); noSelection(f, picker, 'PRIVATE_DRAFT');
+        expect(JSON.stringify(result)).not.toContain('PRIVATE');
+      });
+      const deepReadinessAncestors = (f: any, picker: any, form: any, count: number) => {
+        const union = () => {
+          const nodes = new Set<any>();
+          for (const held of [picker.trigger, f.composer]) for (let n = held; n; n = n.parentElement) nodes.add(n);
+          return nodes;
+        };
+        const p = new Node('P'); p.append(new Node('BR', { class: 'ProseMirror-trailingBreak' }));
+        f.composer.values.class = 'ProseMirror'; f.composer.append(p);
+        Object.defineProperty(f.composer, 'innerText', { get: () => '\n' });
+        const old = new Node('DIV', { id: 'prompt-textarea', contenteditable: 'true', hidden: '' }); form.append(old);
+        let index = 0;
+        while (union().size < count) {
+          const held = index++ % 2 ? picker.trigger : f.composer;
+          const parent = held.parentElement, wrapper = new Node('DIV'); parent.append(wrapper); wrapper.append(held);
+        }
+        expect(union().size).toBe(count);
+        return union();
+      };
+      test('disabled readiness retains the complete shared ancestor union at65 and129 before full proof', async () => {
+        for (const count of [65, 129]) for (const requested of ['Instant', 'Extra High']) {
+          let nodes!: Set<any>;
+          const x = await pendingDisabledHeader(true, 'aria-disabled', requested, 8_000, (f, picker, form) => {
+            nodes = deepReadinessAncestors(f, picker, form, count);
+          });
+          const ancestorObserver = x.f.observers.find((o: any) => o.options?.childList === true && Object.keys(o.options).length === 1);
+          expect(ancestorObserver).toBeDefined(); expect(nodes.size).toBe(count);
+          expect(x.picker.trigger.clicks).toBe(0); x.picker.selected(requested); x.enable();
+          const result = await x.pending;
+          expect(result.selected).toBe(true); expect(result.modelEvidence.chatSelection.power.label).toBe(requested);
+          expect(result.modelDiagnostic.chatHeader.readiness.outcome).toBe('recognized');
+          expect(x.clocks[0].milliseconds).toBeLessThanOrEqual(8_000); noSelection(x.f, x.picker);
+        }
+      });
+      test('disabled readiness retains256 ancestors only as a bounded passive wait without model authority', async () => {
+        const x = await pendingDisabledHeader(true, 'aria-disabled', 'Extra High', 8_000,
+          (f, picker, form) => deepReadinessAncestors(f, picker, form, 256));
+        expect(x.picker.trigger.clicks).toBe(0); expect(x.f.world.__computaChatPresetPin).toBeUndefined();
+        x.f.advanceTime(8_001); x.clocks[0].expire(); const result = await x.pending;
+        expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+        expect(result.modelDiagnostic.chatHeader.readiness.reason).toBe('deadline');
+        expect(x.clocks).toHaveLength(1); expect(x.picker.trigger.clicks).toBe(0); noSelection(x.f, x.picker);
+      });
+      test('disabled readiness rejects the257th union ancestor rather than observing a truncated path', async () => {
+        const { f, picker } = setup(false, { closedCompositeHeader: true }); picker.selected('Instant'); await f.run('inspect');
+        const form = new Node('FORM'); form.append(f.composer, picker.trigger); f.body.append(form);
+        deepReadinessAncestors(f, picker, form, 257); picker.trigger.values['aria-disabled'] = 'true';
+        let clocks = 0; f.window.webkit.messageHandlers.computaModelClock = { postMessage: () => { clocks++; return Promise.resolve(true); } };
+        const result = await f.run('selectModel', { modelChoice: choice('Instant'),
+          initialModelReadinessDeadlineEpochMilliseconds: Date.now() + 8_000, operationID: '95e24632-2eb6-4cd6-b30f-17ab208c2fbd' });
+        expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+        expect(result.modelDiagnostic.chatHeader.readiness.reason).toBe('ancestor_limit');
+        expect(clocks).toBe(0); expect(picker.trigger.clicks).toBe(0); noSelection(f, picker);
+      });
+      test('disabled readiness invalidates deep shared and document-root remove-and-restore history', async () => {
+        for (const target of ['composer_parent', 'header_parent', 'shared_form', 'html']) {
+          const x = await pendingDisabledHeader(true, 'aria-disabled', 'Extra High', 8_000,
+            (f, picker, form) => deepReadinessAncestors(f, picker, form, 256));
+          const node = target === 'composer_parent' ? x.f.composer.parentElement : target === 'header_parent'
+            ? x.picker.trigger.parentElement : target === 'shared_form' ? x.form : x.f.document.documentElement;
+          const parent = target === 'html' ? x.f.document : node.parentElement;
+          const record = { type: 'childList', target: parent, removedNodes: [node], addedNodes: [node] };
+          x.wake([record]); x.enable(); const result = await x.pending;
+          expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+          expect(x.picker.trigger.clicks).toBe(0); noSelection(x.f, x.picker);
+        }
+      });
+      test('native initial readiness budget observes late enabled Extra High before an independent complete picker proof', async () => {
+        for (const requested of ['Extra High', 'Instant', 'Medium', 'High', 'Pro']) {
+          const x = await pendingDisabledHeader(true, 'aria-disabled', requested, 8_000);
+          expect(x.clocks[0].milliseconds).toBeGreaterThan(1_800);
+          x.f.advanceTime(2_100); x.picker.selected(requested);
+          expect(x.picker.trigger.clicks).toBe(0); noSelection(x.f, x.picker);
+          x.enable(); const result = await x.pending;
+          expect(result.selected).toBe(true); expect(result.modelEvidence.selected.key).toBe(choice(requested).key);
+          expect(result.modelEvidence.chatSelection.family.key).toBe('GPT-6');
+          expect(result.modelDiagnostic.chatHeader.readiness.outcome).toBe('recognized');
+          expect(x.picker.trigger.clicks).toBe(1); noSelection(x.f, x.picker);
+        }
+      });
+      test('native initial readiness ignores unrelated hydration while keeping relevant mutation limits', async () => {
+        for (const relevant of [false, true]) {
+          const x = await pendingDisabledHeader(true, 'aria-disabled', 'Instant', 8_000);
+          const sidebar = new Node('DIV'); x.f.body.append(sidebar);
+          const target = relevant ? x.f.composer : sidebar;
+          // Deliver this batch to the new scoped readiness watchers. The
+          // fixture's generic wake broadcasts to unrelated existing policies.
+          const records = Array.from({ length: 65 }, () => ({ type: 'characterData', target }));
+          for (const observer of x.f.observers) if (observer.options?.childList === true
+            && (Object.keys(observer.options).length === 1 || observer.options.subtree === true
+              && observer.options.characterData === true && observer.options.attributes === undefined
+              && observer.options.characterDataOldValue === undefined)) observer.callback(records);
+          x.f.advanceTime(2_100); x.enable(); const result = await x.pending;
+          if (relevant) { expect(result.error).toBeDefined(); expect(x.picker.trigger.clicks).toBe(0); }
+          else { expect(result.selected).toBe(true); expect(result.modelEvidence.selected).toEqual(choice('Instant')); }
+          noSelection(x.f, x.picker);
+        }
+      });
+      test('native initial readiness rejects malformed or renewed bounds without input or a clock', async () => {
+        for (const value of ['late', NaN, Infinity, Date.now() - 1, Date.now() + 20_000, Date.now() + 5_000.5]) {
+          const { f, picker } = setup(false, { closedCompositeHeader: true }); picker.selected('Instant');
+          picker.trigger.values['aria-disabled'] = 'true'; let clocks = 0;
+          f.window.webkit.messageHandlers.computaModelClock = { postMessage: () => { clocks++; return Promise.resolve(true); } };
+          const result = await f.run('selectModel', { modelChoice: choice('Extra High'),
+            initialModelReadinessDeadlineEpochMilliseconds: value, operationID: '95e24632-2eb6-4cd6-b30f-17ab208c2fbd' });
+          expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+          expect(clocks).toBe(0); expect(picker.trigger.clicks).toBe(0); noSelection(f, picker);
+        }
+      });
+      test('native initial readiness budget expires without actions and cannot renew a selection attempt', async () => {
+        const x = await pendingDisabledHeader(true, 'aria-disabled', 'Extra High', 3_000);
+        expect(x.phases).toContain('model_wait_initial_disabled');
+        expect(x.clocks[0].milliseconds).toBeLessThanOrEqual(2_850);
+        x.f.advanceTime(x.clocks[0].milliseconds); x.clocks[0].expire(); const result = await x.pending;
+        expect(x.phases).toContain('model_wait_done');
+        expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+        expect(result.modelDiagnostic.chatHeader.readiness.reason).toBe('deadline');
+        x.enable(); expect((await x.f.run('selectModel', { modelChoice: choice('Extra High'),
+          initialModelReadinessDeadlineEpochMilliseconds: Date.now() + 10_000 })).error).toBe('model_unverified');
+        expect(x.clocks).toHaveLength(1); expect(x.picker.trigger.clicks).toBe(0); noSelection(x.f, x.picker);
+      });
+      test('native initial readiness budget cannot add a fresh full picker clock beyond its original deadline', async () => {
+        const x = await pendingDisabledHeader(true, 'aria-disabled', 'Instant', 3_000);
+        x.f.advanceTime(2_800); x.picker.trigger.onClick = () => {}; x.enable(); await microtasks();
+        expect(x.clocks).toHaveLength(2); expect(x.clocks[1].milliseconds).toBeLessThanOrEqual(200);
+        x.f.advanceTime(201); x.clocks[1].expire(); const result = await x.pending;
+        expect(result.error).toBe('model_unverified'); expect(result.modelEvidence).toBeUndefined();
+        expect(x.picker.trigger.clicks).toBe(1); noSelection(x.f, x.picker);
+      });
+      test('native initial readiness budget rejects changed composer and detached or ambiguous header before input', async () => {
+        for (const mutation of ['draft', 'draft_then_restore', 'composer_replace', 'header_detach_restore', 'duplicate', 'parent', 'busy', 'owner', 'route']) {
+          const x = await pendingDisabledHeader(true, 'aria-disabled', 'Extra High', 8_000);
+          x.f.advanceTime(2_100);
+          let records: any[] = [];
+          if (mutation === 'draft') x.f.composer.text = 'PRIVATE_UNSENT_DRAFT';
+          if (mutation === 'draft_then_restore') records = [{ type: 'characterData', target: x.f.composer }];
+          if (mutation === 'composer_replace') {
+            const replacement = new Node('DIV', { id: 'prompt-textarea', contenteditable: 'true' });
+            x.f.composer.connected = false; x.form.append(replacement);
+          }
+          if (mutation === 'header_detach_restore') records = [{ type: 'childList', target: x.form,
+            addedNodes: [x.picker.trigger], removedNodes: [x.picker.trigger] }];
+          if (mutation === 'duplicate') x.f.body.append(new Node('BUTTON', { 'aria-label': 'Select ChatGPT model', 'aria-haspopup': 'menu' }, 'Thinking effort Instant'));
+          if (mutation === 'parent') { const parent = new Node('DIV'); x.form.append(parent); parent.append(x.picker.trigger); }
+          if (mutation === 'busy') x.f.body.append(new Node('BUTTON', { 'data-testid': 'stop-button' }, 'Stop'));
+          if (mutation === 'owner') x.f.world.__computaModelOwner = 'PRIVATE_OTHER_OWNER';
+          if (mutation === 'route') x.f.document.URL += '&changed=1';
+          x.wake(records); x.enable(); const result = await x.pending;
+          expect(result.error).toBeDefined(); expect(result.modelEvidence).toBeUndefined();
+          expect(x.picker.trigger.clicks).toBe(0); noSelection(x.f, x.picker, mutation === 'draft' ? 'PRIVATE_UNSENT_DRAFT' : '');
+        }
+      });
       test('disabled initial picker waits without input then proves Instant from the complete current picker', async () => {
         for (const composite of [false, true]) for (const attribute of ['disabled', 'aria-disabled', 'property']) {
           const x = await pendingDisabledHeader(composite, attribute); x.enable();
@@ -4762,6 +6350,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       const serialized = JSON.stringify(result.modelDiagnostic);
       expect(serialized).not.toContain('PRIVATE'); expect(serialized).not.toContain('Computa session marker');
       expect(serialized.length).toBeLessThanOrEqual(8192);
+      if (provider !== 'claude') expect(result.modelDiagnostic.lastModelTrigger).toBeUndefined();
     });
   });
 }

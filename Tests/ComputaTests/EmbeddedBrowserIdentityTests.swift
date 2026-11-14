@@ -186,7 +186,7 @@ final class EmbeddedBrowserIdentityTests: XCTestCase {
             let suite = "Computa.IdentityTests.\(UUID())", profile = ownedPersistentProfile(), probe = CacheRemovalProbe()
             let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
             defer { defaults.removePersistentDomain(forName: suite) }
-            let session = EmbeddedBrowserSession(profileID: profile, defaults: defaults)
+            let session = try makePersistentBrowserTestSession(profileID: profile, defaults: defaults)
             session.cacheIdentityRemovalForTesting = probe.remove
             defer { session.shutdown() }
             let tab = try session.createTab(), url = try XCTUnwrap(URL(string: "https://example.invalid/owned"))
@@ -211,7 +211,7 @@ final class EmbeddedBrowserIdentityTests: XCTestCase {
         let suite = "Computa.IdentityTests.\(UUID())", probe = CacheRemovalProbe()
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
-        let session = EmbeddedBrowserSession(profileID: ownedPersistentProfile(), defaults: defaults)
+        let session = try makePersistentBrowserTestSession(profileID: ownedPersistentProfile(), defaults: defaults)
         session.cacheIdentityRemovalForTesting = probe.remove
         defer { session.shutdown() }
         let tab = try session.createTab(), view = try XCTUnwrap(session.webView(for: tab))
@@ -265,7 +265,7 @@ final class EmbeddedBrowserIdentityTests: XCTestCase {
         XCTAssertEqual(sameIdentity["count"] as? Int, 1)
         XCTAssertEqual(server.count(path: "/one"), 1)
 
-        let session = EmbeddedBrowserSession(profileID: profile, defaults: defaults)
+        let session = try makePersistentBrowserTestSession(profileID: profile, defaults: defaults)
         defer { session.shutdown(); views.forEach { $0.stopLoading() } }
         let firstTab = try session.createTab(url: firstURL)
         let first = try XCTUnwrap(session.webView(for: firstTab))
@@ -303,7 +303,7 @@ final class EmbeddedBrowserIdentityTests: XCTestCase {
             let suite = "Computa.IdentityTests.\(UUID())", probe = CacheRemovalProbe()
             let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
             defer { defaults.removePersistentDomain(forName: suite) }
-            let session = EmbeddedBrowserSession(profileID: ownedPersistentProfile(), defaults: defaults)
+            let session = try makePersistentBrowserTestSession(profileID: ownedPersistentProfile(), defaults: defaults)
             session.cacheIdentityRemovalForTesting = probe.remove
             defer { session.shutdown() }
             let blockedURL = origin.appendingPathComponent(mutation + "-blocked")

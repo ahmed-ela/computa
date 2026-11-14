@@ -1,10 +1,51 @@
 import Foundation
+import CryptoKit
 import CoreFoundation
 
 /// The browser is a model transport. It never owns a tool or executes
 /// an action: validated function calls return to the existing App Server loop.
 enum WebModelResponseCodec {
     static let maximumPromptBytes = 160 * 1_024
+    // Local body admission against the observed 8,000-token website ceiling.
+    // The reserve covers unmeasured website framing/output; this is neither a
+    // provider quota guarantee nor a reason to truncate history or retry Send.
+    static let groqMaximumBodyTokens = 6_000
+    static let groqReservedTokens = 2_000
+
+    static func groqPromptBudgetUsesExactTokenizer(model: String) -> Bool {
+        guard let choice = WebsiteModelCatalog.choice(for: model), choice.provider == "groq" else { return false }
+        return ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"].contains(choice.key)
+    }
+
+    @discardableResult
+    static func validateGroqPromptBudget(model: String, prompt: String) throws -> Int? {
+        guard LocalModelCatalog.webProvider(for: model) == "groq" else { return nil }
+        guard groqPromptBudgetUsesExactTokenizer(model: model) else {
+            // Unknown choices and an unpinned website default retain the
+            // conservative byte allowance; they cannot borrow another tokenizer.
+            let bytes = prompt.utf8.count
+            guard bytes <= groqMaximumBodyTokens else {
+                throw Failure.groqPromptByteBudgetExceeded(actualBytes: bytes, maximumBytes: groqMaximumBodyTokens,
+                                                          reservedTokens: groqReservedTokens)
+            }
+            return bytes
+        }
+        let count: Int
+        do {
+            if WebsiteModelCatalog.choice(for: model)?.key == "qwen/qwen3.8-27b" {
+                count = try QwenBodyTokenCounter.tokenCount(prompt)
+            } else {
+                count = try GroqBodyTokenCounter.tokenCount(prompt)
+            }
+        }
+        catch is CancellationError { throw CancellationError() }
+        catch { throw Failure.groqTokenCounterUnavailable }
+        guard count <= groqMaximumBodyTokens else {
+            throw Failure.groqPromptBudgetExceeded(actualTokens: count, maximumTokens: groqMaximumBodyTokens,
+                                                  reservedTokens: groqReservedTokens)
+        }
+        return count
+    }
 
     struct Request: Sendable {
         let model: String
@@ -19,8 +60,30 @@ enum WebModelResponseCodec {
         /// Derived from validated original definitions; native admission supplies state.
         let requiresBrowserToolAvailability: Bool
         let toolCatalogDiagnostic: ToolCatalogDiagnostic
+        let geminiFlashLiteRepairDiagnostic: GeminiFlashLiteRepairDiagnostic?
+        /// Content-free facts for the final validated Groq loader projection only.
+        let groqToolDiscoveryDiagnostic: GroqToolDiscoveryDiagnostic?
         let offeredToolNames: Set<String>
         let customToolNames: Set<String>
+        /// Admitted current native custom definitions, never reply-authored aliases.
+        fileprivate let declaredCustomFunctionSchemas: [String: String]
+        fileprivate let limitsWebsiteCallsToOne: Bool
+        /// Available only for an exact registered native Groq schema loader.
+        /// The server owns selection state; page/model data cannot create it.
+        let groqToolCatalogSeed: GroqToolCatalog.Seed?
+        /// Exact registered reader, offered and allowed for THIS response only.
+        /// Native scope/issued-call/publication checks remain server-owned.
+        let groqHistoryReaderName: String?
+        /// Only a chosen, fully budget-admitted request may publish this plan.
+        /// Count-only previews carry no plan, even when they render references.
+        let groqHistoryPlan: GroqContextManifestProjector.Plan?
+        let groqHistoryPreviewOnly: Bool
+        /// Native registered-history choice AND the exact currently allowed
+        /// reader are required. This is never decoded from HTTP/model JSON.
+        fileprivate let compactGroqCallIDs: Bool
+        /// The same immutable native-profile predicate drives compact call IDs
+        /// and known permission presentation. It grants no action/permission.
+        var usesNativeGroqHistoryPresentation: Bool { compactGroqCallIDs }
         fileprivate let tools: [String: OfferedTool]
         fileprivate let toolPolicy: ToolPolicy
         fileprivate let parallelToolCalls: Bool
@@ -45,6 +108,38 @@ enum WebModelResponseCodec {
         let allowedNames: Set<String>
         let requiresCall: Bool
         let mode: ToolCatalogDiagnostic.Choice
+    }
+
+    /// Fixed facts about the patch capability and trusted instructions. No
+    /// request values, tool arguments or history are retained by the diagnostic.
+    struct GeminiFlashLiteRepairDiagnostic: Equatable, Sendable {
+        let patchDeclared: Bool
+        let patchOffered: Bool
+        let patchAllowed: Bool
+        let patchInFrame: Bool
+        let repairInstructions: Bool
+
+        var logFields: String {
+            "patchDeclared=\(patchDeclared) patchOffered=\(patchOffered) patchAllowed=\(patchAllowed) patchInFrame=\(patchInFrame) repairInstructions=\(repairInstructions)"
+        }
+
+        fileprivate static func patchNames(in tools: [String: OfferedTool]) -> Set<String> {
+            Set(["apply_patch", "functions.apply_patch"].filter { tools[$0]?.isCustom == true })
+        }
+
+        fileprivate static func hasPatchSchema(in renderedJSON: String) -> Bool {
+            guard let object = try? JSONSerialization.jsonObject(with: Data(renderedJSON.utf8)) as? [String: Any],
+                  let tools = object["tools"] as? [[String: Any]] else { return false }
+            func isPatch(_ tool: [String: Any]) -> Bool {
+                tool["type"] as? String == "custom" && tool["name"] as? String == "apply_patch"
+            }
+            return tools.contains { tool in
+                if isPatch(tool) { return true }
+                guard tool["type"] as? String == "namespace", tool["name"] as? String == "functions",
+                      let children = tool["tools"] as? [[String: Any]] else { return false }
+                return children.contains(where: isPatch)
+            }
+        }
     }
 
     /// Finite request facts only. These fields never alter model instructions,
@@ -86,6 +181,46 @@ enum WebModelResponseCodec {
 
         var logFields: String {
             "binding=\(binding.rawValue) choice=\(choice.rawValue) offeredCount=\(offeredCount) allowedCount=\(allowedCount) offeredBrowserMask=\(offeredBrowserMask) allowedBrowserMask=\(allowedBrowserMask) requiresCall=\(requiresCall) parallel=\(parallel) maxToolCalls=\(maxToolCalls.map(String.init) ?? "unset")"
+        }
+    }
+
+    /// Separate finite diagnostic; never serialized into the website prompt or
+    /// used by tool admission. Entry bits retain v1 positions: open=2, bind=4.
+    struct GroqToolDiscoveryDiagnostic: Codable, Equatable, Sendable {
+        let binding: ToolCatalogDiagnostic.Binding
+        let revisionSHA256: String
+        let loadedCount: Int
+        let unloadedDiscoverableCount: Int
+        let loaderOffered: Bool
+        let discoverableEntryMask: UInt16
+        let offeredEntryMask: UInt16
+        /// Hash of the admitted Request.prompt, not a later correction reminder.
+        let requestPromptSHA256: String
+
+        fileprivate init(projection: GroqToolCatalog.Projection, tools: [String: OfferedTool],
+                         policy: ToolPolicy, entryTools: [String: OfferedTool],
+                         availability: EmbeddedBrowserToolAvailability?, prompt: String) {
+            binding = availability.map { $0 == .bound ? .bound : .unbound } ?? .unknown
+            revisionSHA256 = projection.revision
+            loadedCount = projection.selectedNames.count
+            let discoverable = Set(projection.discoverable.map(\.name))
+            unloadedDiscoverableCount = discoverable.subtracting(projection.selectedNames).count
+            let callable = Set(tools.keys).intersection(policy.allowedNames)
+            loaderOffered = callable.contains { name in
+                (name == GroqToolCatalog.name || name == "functions." + GroqToolCatalog.name)
+                    && tools[name]?.isCustom == false
+            }
+            discoverableEntryMask = entryTools.reduce(0) { mask, entry in
+                mask | (discoverable.contains(entry.key) ? entry.value.nativeBrowserBit : 0)
+            }
+            offeredEntryMask = entryTools.reduce(0) { mask, entry in
+                mask | (callable.contains(entry.key) ? entry.value.nativeBrowserBit : 0)
+            }
+            requestPromptSHA256 = SHA256.hash(data: Data(prompt.utf8)).map { String(format: "%02x", $0) }.joined()
+        }
+
+        var logFields: String {
+            "binding=\(binding.rawValue) revisionSHA256=\(revisionSHA256) loadedCount=\(loadedCount) unloadedDiscoverableCount=\(unloadedDiscoverableCount) loaderOffered=\(loaderOffered) discoverableEntryMask=\(discoverableEntryMask) offeredEntryMask=\(offeredEntryMask) requestPromptSHA256=\(requestPromptSHA256)"
         }
     }
 
@@ -147,10 +282,14 @@ enum WebModelResponseCodec {
         case unsupportedToolType
         case unsupportedModality(Modality)
         case promptTooLarge(actualBytes: Int, maximumBytes: Int)
+        case groqPromptBudgetExceeded(actualTokens: Int, maximumTokens: Int, reservedTokens: Int)
+        case groqPromptByteBudgetExceeded(actualBytes: Int, maximumBytes: Int, reservedTokens: Int)
+        case groqTokenCounterUnavailable
         case emptyReply
         case malformedEnvelope
         case unsupportedWebsiteResponse
         case unknownTool(String)
+        case unsupportedCallFields
         case argumentsMustBeObject
         case customInputMustBeString
         case invalidParameter(String)
@@ -158,6 +297,8 @@ enum WebModelResponseCodec {
         case invalidToolChoice
         case rejectedToolChoice
         case parallelToolCallsUnsupported
+        case websiteCallLimitExceeded
+        case customFunctionArgumentsInvalid
         case toolCallLimitExceeded
 
         var errorDescription: String? {
@@ -179,10 +320,17 @@ enum WebModelResponseCodec {
                 "Browser models support text input only. Read the attachment through the local tools first. No prompt was submitted."
             case let .promptTooLarge(actual, maximum):
                 "The complete web model prompt is \(actual) bytes, exceeding the \(maximum)-byte limit. No context was truncated or submitted."
+            case let .groqPromptBudgetExceeded(actual, maximum, reserved):
+                "The complete Groq website prompt uses \(actual) body tokens, exceeding the local \(maximum)-token budget with \(reserved) tokens reserved for website framing and output. No user content, history or action evidence was truncated, and no prompt was submitted. Use a model with a larger request allowance or a new shorter task."
+            case let .groqPromptByteBudgetExceeded(actual, maximum, reserved):
+                "This Groq model has no verified local tokenizer. Its complete prompt is \(actual) UTF-8 bytes, exceeding the conservative \(maximum)-byte allowance with \(reserved) tokens reserved for website framing and output. No content was truncated or submitted. Choose a supported model or a shorter task."
+            case .groqTokenCounterUnavailable:
+                "The Groq website prompt budget could not be verified. No context was truncated or submitted."
             case .emptyReply: "The website returned an empty model reply."
             case .malformedEnvelope: "The website returned a malformed model response envelope. No tool calls from this reply were dispatched."
             case .unsupportedWebsiteResponse: "ChatGPT returned website content outside the required response envelope. Computa cannot verify a native website card or action. This reply was not accepted or retried, and no local tool calls from it were dispatched."
             case .unknownTool: "The website requested an unoffered tool. No tool calls from this reply were dispatched."
+            case .unsupportedCallFields: "A website tool call included an unsupported field. Function entries allow only name and arguments. Custom entries allow only name and input. Computa supplies call IDs and metadata. No tool calls from this reply were dispatched."
             case .argumentsMustBeObject: "Web model tool arguments must be a JSON object. No tool calls from this reply were dispatched."
             case .customInputMustBeString: "A custom tool needs literal string input and no function arguments. No tool calls from this reply were dispatched."
             case let .invalidParameter(parameter): "The web model request contains an invalid \(parameter) parameter. No prompt was submitted."
@@ -190,13 +338,148 @@ enum WebModelResponseCodec {
             case .invalidToolChoice: "The requested tool_choice must identify currently offered tools and a supported selection mode. No prompt was submitted."
             case .rejectedToolChoice: "The website reply violated tool_choice. No tool calls from this reply were dispatched."
             case .parallelToolCallsUnsupported: "The website returned multiple calls when parallel_tool_calls was false. No tool calls from this reply were dispatched."
+            case .websiteCallLimitExceeded: "This website response permits one tool call. The entire batch was rejected; no call was dispatched."
+            case .customFunctionArgumentsInvalid: "The declared custom-tool function requires exactly one string argument named input. No call was dispatched."
             case .toolCallLimitExceeded: "The website returned more calls than max_tool_calls allows. No tool calls from this reply were dispatched."
             }
         }
     }
 
+    enum GroqDirectToolSet {
+        case standard, essential, loadedOnly
+
+        fileprivate func includes(_ tool: OfferedTool, availability: EmbeddedBrowserToolAvailability?) -> Bool {
+            guard self != .loadedOnly, tool.namespace == nil || tool.namespace == "functions" else { return false }
+            if tool.nativeBrowserBit != 0 {
+                switch (availability, tool.name) {
+                case (.unbound, "browser_open"), (.bound, "browser_read"), (.bound, "browser_click"): return true
+                case (.bound, "browser_fill"), (.bound, "browser_close"): return self == .standard
+                default: return false
+                }
+            }
+            guard availability != .bound else { return false }
+            if tool.isCustom { return self == .standard && tool.name == "apply_patch" }
+            return tool.name == "exec_command"
+        }
+    }
+
+    /// Native-only presentation hook over one already validated candidate.
+    /// Root authenticates the actual frame and resolves ledger fields before
+    /// constructing its closure. A preview returns data, never a snapshot.
+    enum GroqHistoryRendering: Sendable {
+        case planned(GroqContextManifestProjector.Plan)
+        case preview(Data)
+    }
+    typealias GroqHistoryProjection = @Sendable (GroqContextJSONLayout) throws -> GroqHistoryRendering
+
+    /// Model state and the read-only loader retain their selected schemas.
+    /// Direct tools are an inference-local presentation over that selection.
+    /// The optional rejection observer receives only the ultimately thrown typed
+    /// failure and its own returned candidate; pre-render failures have none.
+    static func prepareBudgetedGroqRequest(_ data: Data, availability: EmbeddedBrowserToolAvailability?,
+                                           projection: GroqToolCatalog.Projection, model: String,
+                                           loadedOnly: Bool = false,
+                                           compactHistoryInventory: Bool = false,
+                                           historyProjection: GroqHistoryProjection? = nil,
+                                           rejectionObserver: ((Request?, Failure) -> Void)? = nil) throws -> (request: Request, units: Int) {
+        try prepareBudgetedGroqRequest(data, availability: availability, projection: projection, model: model,
+                                      loadedOnly: loadedOnly, compactHistoryInventory: compactHistoryInventory,
+                                      historyProjection: historyProjection, candidateObserver: nil,
+                                      rejectionObserver: rejectionObserver)
+    }
+
+    #if DEBUG
+    /// A synchronous fixture observer sees the actual candidate BEFORE its own
+    /// validator. It cannot substitute bytes, change admission or replace errors.
+    static func prepareBudgetedGroqRequest(_ data: Data, availability: EmbeddedBrowserToolAvailability?,
+        projection: GroqToolCatalog.Projection, model: String,
+        loadedOnly: Bool = false,
+        compactHistoryInventory: Bool = false,
+        historyProjection: GroqHistoryProjection? = nil,
+        observingCandidate: @escaping (Request, String, Bool) -> Void,
+        rejectionObserver: ((Request?, Failure) -> Void)? = nil) throws -> (request: Request, units: Int) {
+        try prepareBudgetedGroqRequest(data, availability: availability, projection: projection, model: model,
+                                      loadedOnly: loadedOnly, compactHistoryInventory: compactHistoryInventory,
+                                      historyProjection: historyProjection, candidateObserver: observingCandidate,
+                                      rejectionObserver: rejectionObserver)
+    }
+    #endif
+
+    private static func prepareBudgetedGroqRequest(_ data: Data, availability: EmbeddedBrowserToolAvailability?,
+        projection: GroqToolCatalog.Projection, model: String,
+        loadedOnly: Bool,
+        compactHistoryInventory: Bool,
+        historyProjection: GroqHistoryProjection?,
+        candidateObserver: ((Request, String, Bool) -> Void)?,
+        rejectionObserver: ((Request?, Failure) -> Void)?) throws -> (request: Request, units: Int) {
+        guard historyProjection == nil || loadedOnly else {
+            rejectionObserver?(nil, .invalidTools)
+            throw Failure.invalidTools
+        }
+        let exact = groqPromptBudgetUsesExactTokenizer(model: model)
+        let choices: [GroqDirectToolSet] = exact && !loadedOnly
+            ? [.standard, .essential, .loadedOnly] : [.loadedOnly]
+        // Legacy candidates/fallbacks are unchanged. Typed history projection
+        // must see the actual raw payload tokens, never legacy loader rewrites.
+        let attempts = choices.map { ($0, false) }
+            + (exact && historyProjection == nil ? [(.loadedOnly, true)] : [])
+        var fullHistoryFailure: Failure?
+        var fullHistoryFailureRequest: Request?
+        for (index, attempt) in attempts.enumerated() {
+            let (choice, compactHistory) = attempt
+            var candidateRequest: Request?
+            do {
+                let request = try prepareRequest(data, browserToolAvailability: availability,
+                    groqToolCatalogProjection: projection, groqDirectTools: choice, compactGroqLoaderHistory: compactHistory,
+                    groqHistoryProjection: historyProjection, compactHistoryInventory: compactHistoryInventory)
+                candidateRequest = rejectionObserver == nil ? nil : request
+                if let candidateObserver {
+                    let direct: String = switch choice {
+                    case .standard: "standard"
+                    case .essential: "essential"
+                    case .loadedOnly: "loadedOnly"
+                    }
+                    candidateObserver(request, direct, compactHistory)
+                }
+                guard request.model == model,
+                      let units = try validateGroqPromptBudget(model: model, prompt: request.prompt) else {
+                    throw Failure.invalidTools
+                }
+                return (request, units)
+            } catch let failure as Failure {
+                switch failure {
+                case .promptTooLarge, .groqPromptBudgetExceeded:
+                    if compactHistory {
+                        let selectedFailure = fullHistoryFailure ?? failure
+                        rejectionObserver?(fullHistoryFailure == nil ? candidateRequest : fullHistoryFailureRequest,
+                            selectedFailure)
+                        throw selectedFailure
+                    }
+                    if choice == .loadedOnly {
+                        fullHistoryFailure = failure
+                        fullHistoryFailureRequest = candidateRequest
+                    }
+                    if index == attempts.count - 1 {
+                        rejectionObserver?(candidateRequest, failure)
+                        throw failure
+                    }
+                default:
+                    rejectionObserver?(candidateRequest, failure)
+                    throw failure
+                }
+            }
+        }
+        rejectionObserver?(nil, .invalidTools)
+        throw Failure.invalidTools
+    }
+
     static func prepareRequest(_ data: Data,
-                               browserToolAvailability: EmbeddedBrowserToolAvailability? = nil) throws -> Request {
+                               browserToolAvailability: EmbeddedBrowserToolAvailability? = nil,
+                               groqToolCatalogProjection: GroqToolCatalog.Projection? = nil,
+                               groqDirectTools: GroqDirectToolSet = .loadedOnly,
+                               compactGroqLoaderHistory: Bool = false,
+                               groqHistoryProjection: GroqHistoryProjection? = nil,
+                               compactHistoryInventory: Bool = false) throws -> Request {
         // Reject before expanding a large JSON body into prompt storage.
         guard data.count <= maximumPromptBytes else {
             throw Failure.promptTooLarge(actualBytes: data.count, maximumBytes: maximumPromptBytes)
@@ -208,6 +491,23 @@ enum WebModelResponseCodec {
         guard let model = object["model"] as? String,
               !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw Failure.missingModel
+        }
+        let provider = LocalModelCatalog.webProvider(for: model)
+        let isChatGPT = provider == "chatgpt", isClaude = provider == "claude", isGroq = provider == "groq"
+        let claudeChoice = isClaude ? WebsiteModelCatalog.choice(for: model) : nil
+        let isGeminiFlashLite = provider == "gemini" && WebsiteModelCatalog.choice(for: model) ==
+            WebsiteModelChoice(provider: "gemini", key: "3.5 Flash-Lite", label: "3.5 Flash-Lite")
+        if groqHistoryProjection != nil {
+            guard isGroq, groqToolCatalogProjection != nil, groqDirectTools == .loadedOnly,
+                  !compactGroqLoaderHistory else { throw Failure.invalidTools }
+        }
+        // DeepSeek's JSON code block preserves the literal PRE text, including
+        // backslashes in patch inputs. Its ordinary paragraph renders Markdown.
+        // Kimi also requires all authored content to be inside its single JSON block.
+        let responseFormat: ComputaAgentInstructions.WebResponseFormat = switch provider {
+        case "qwen": .codePayloadJSON
+        case "claude", "deepseek", "kimi", "groq": .literalFencedJSON
+        default: .fencedJSON
         }
         guard object["input"] is String || object["input"] is [Any] else {
             throw Failure.missingInput
@@ -222,12 +522,16 @@ enum WebModelResponseCodec {
         if let instructions = object["instructions"], !(instructions is String), !(instructions is NSNull) {
             throw Failure.invalidRequest
         }
-        let schemas: [[String: Any]]
+        var schemas: [[String: Any]]
+        var registeredDefinitions: [[String: Any]] = []
+        var registeredBrowserAllowedNames: Set<String>?
         let requiresBrowserToolAvailability: Bool
         let deferredBrowserInstructions: String?
         var toolDefinitionsChanged = false
+        var nativePatchDeclared = false
         if let raw = object["tools"], !(raw is NSNull) {
             guard let values = raw as? [[String: Any]] else { throw Failure.invalidTools }
+            registeredDefinitions = values
             var historical: [String: OfferedTool] = [:]
             for value in values {
                 if value["type"] as? String == "namespace" {
@@ -236,11 +540,20 @@ enum WebModelResponseCodec {
                     for child in children { try insertTool(child, namespace: namespace, into: &historical) }
                 } else { try insertTool(value, namespace: nil, into: &historical) }
             }
+            if isGeminiFlashLite {
+                nativePatchDeclared = !GeminiFlashLiteRepairDiagnostic.patchNames(in: historical).isEmpty
+            }
+            if isGroq { registeredBrowserAllowedNames = (try? toolPolicy(object["tool_choice"], tools: historical))?.allowedNames }
             requiresBrowserToolAvailability = ComputaModelToolCatalog.requiresBrowserToolAvailability(values)
-            deferredBrowserInstructions = ComputaModelToolCatalog.deferredBrowserToolInstructions(values,
-                availability: browserToolAvailability)
+            let stableGroqBrowserSchemas = isGroq && browserToolAvailability != nil
+                && GroqToolCatalog.isRegisteredLoader(values)
+                && [GroqToolCatalog.name, "functions." + GroqToolCatalog.name].contains {
+                    registeredBrowserAllowedNames?.contains($0) == true
+                }
+            deferredBrowserInstructions = stableGroqBrowserSchemas ? nil
+                : ComputaModelToolCatalog.deferredBrowserToolInstructions(values, availability: browserToolAvailability)
             schemas = ComputaModelToolCatalog.visibleToolDefinitions(values, modelID: model,
-                browserToolAvailability: browserToolAvailability)
+                browserToolAvailability: browserToolAvailability, stableGroqBrowserSchemas: stableGroqBrowserSchemas)
             toolDefinitionsChanged = !NSArray(array: values).isEqual(to: schemas)
             object["tools"] = schemas
         } else {
@@ -260,43 +573,220 @@ enum WebModelResponseCodec {
         }
         let stream = try booleanParameter("stream", in: object, defaultValue: false, nullable: false)
         let parallel = try booleanParameter("parallel_tool_calls", in: object, defaultValue: true)
-        let policy = try toolPolicy(object["tool_choice"], tools: offered)
+        var policy = try toolPolicy(object["tool_choice"], tools: offered)
+        // Native availability and the complete callable catalog establish the
+        // entry route even when its exact schema has not been loaded yet.
+        let groqEntryTools = isGroq ? offered.filter {
+            policy.allowedNames.contains($0.key) && $0.value.nativeBrowserBit != 0
+                && ["browser_open", "browser_bind"].contains($0.value.name)
+        } : [:]
+        let groqToolCatalogSeed: GroqToolCatalog.Seed?
+        if isGroq, GroqToolCatalog.isRegisteredLoader(registeredDefinitions) {
+            let loaderAllowed = [GroqToolCatalog.name, "functions." + GroqToolCatalog.name].contains {
+                policy.allowedNames.contains($0)
+            }
+            let reader = GroqHistoryTool.registeredName(in: registeredDefinitions).flatMap { name in
+                offered[name] != nil && policy.allowedNames.contains(name) ? name : nil
+            }
+            groqToolCatalogSeed = .init(
+                registeredDefinitionsJSON: try JSONSerialization.data(withJSONObject: registeredDefinitions,
+                    options: [.sortedKeys, .withoutEscapingSlashes]),
+                callableNames: Set(offered.keys), allowedNames: policy.allowedNames,
+                preloadNames: loaderAllowed ? Set(reader.map { [$0] } ?? []) : policy.allowedNames,
+                toolChoiceJSON: try JSONSerialization.data(withJSONObject: object["tool_choice"] ?? "auto",
+                    options: [.fragmentsAllowed, .sortedKeys, .withoutEscapingSlashes]))
+        } else { groqToolCatalogSeed = nil }
+        // Preserve native current eligibility before optional schema selection.
+        let browserEligibleNames = Set(offered.keys).intersection(policy.allowedNames)
+        let displayProjection: GroqToolCatalog.Projection?
+        if let loaded = groqToolCatalogProjection {
+            guard let seed = groqToolCatalogSeed else { throw Failure.invalidTools }
+            try GroqToolCatalog.validate(loaded, for: seed)
+            var direct = Set<String>()
+            if groqDirectTools != .loadedOnly, !loaded.selectedNames.isDisjoint(with: [GroqToolCatalog.name, "functions." + GroqToolCatalog.name]) {
+                direct = Set(offered.filter { name, tool in
+                    policy.allowedNames.contains(name) && groqDirectTools.includes(tool, availability: browserToolAvailability)
+                }.keys)
+            }
+            let selection = GroqToolCatalog.Projection(revision: loaded.revision, inventory: loaded.inventory,
+                                                       selectedNames: loaded.selectedNames.union(direct))
+            displayProjection = selection
+            schemas = schemas.compactMap { definition in
+                if definition["type"] as? String == "namespace", let namespace = definition["name"] as? String,
+                   let children = definition["tools"] as? [[String: Any]] {
+                    let selected = children.filter { child in
+                        (child["name"] as? String).map { selection.selectedNames.contains(namespace + "." + $0) } ?? false
+                    }.map {
+                        GroqToolCatalog.restoringRegisteredLoaderBounds($0, namespace: namespace)
+                    }
+                    guard !selected.isEmpty else { return nil }
+                    var result = definition; result["tools"] = selected; return result
+                }
+                guard let name = definition["name"] as? String, selection.selectedNames.contains(name) else { return nil }
+                return GroqToolCatalog.restoringRegisteredLoaderBounds(definition)
+            }
+            object["tools"] = schemas
+            toolDefinitionsChanged = true
+            offered = offered.filter { selection.selectedNames.contains($0.key) }
+            policy = .init(allowedNames: policy.allowedNames.intersection(offered.keys),
+                           requiresCall: policy.requiresCall, mode: policy.mode)
+            guard !policy.requiresCall || !policy.allowedNames.isEmpty else { throw Failure.invalidToolChoice }
+        } else { displayProjection = nil }
+        let groqHistoryReaderName = isGroq ? GroqHistoryTool.registeredName(in: registeredDefinitions).flatMap { name in
+            offered[name] != nil && policy.allowedNames.contains(name) ? name : nil
+        } : nil
+        let nativeGroqHistoryPresentation = compactHistoryInventory && groqHistoryReaderName != nil
         let configuration = try responseConfiguration(object, schemas: schemas, parallel: parallel)
         let customNames = Set(offered.filter { $0.value.isCustom }.keys)
+        // Native policy/configuration above remain exact. Only this existing
+        // trusted native history presentation declares a different wire shape.
+        let declaredFunctionProfile = nativeGroqHistoryPresentation && displayProjection != nil
+        let declared = try declaredCustomFunctionPresentation(schemas, allowedNames: policy.allowedNames,
+            enabled: declaredFunctionProfile)
+        let wireCustomNames = customNames.subtracting(declared.identities.keys)
         let includedInstructionText = trustedInstructionText(in: object)
-        let provider = LocalModelCatalog.webProvider(for: model)
-        let isChatGPT = provider == "chatgpt"
-        let isClaude = provider == "claude"
-        let runtimeInstructions = [ComputaAgentInstructions.webInferenceContract(offeredFunctions: offered.mapValues(\.name),
+        let compactGroq = isGroq && displayProjection != nil
+        let browserCapabilities = compactGroq ? registeredBrowserAllowedNames.flatMap {
+            ComputaModelToolCatalog.browserCapabilityDescriptor(registeredDefinitions,
+                availability: browserToolAvailability, allowedNames: $0, eligibleNames: browserEligibleNames,
+                loadedNames: Set(offered.keys).intersection(policy.allowedNames),
+                loaderAvailable: [GroqToolCatalog.name, "functions." + GroqToolCatalog.name].contains {
+                    offered[$0] != nil && policy.allowedNames.contains($0)
+                })
+        } : nil
+        var groqDomains = Set<ComputaAgentInstructions.GroqInstructionDomain>()
+        for tool in offered.values where tool.namespace == nil || tool.namespace == "functions" {
+            if tool.nativeBrowserBit != 0 {
+                groqDomains.insert(.browser)
+                switch tool.name {
+                case "browser_fill", "browser_click": groqDomains.insert(.browserInput)
+                case "browser_close": groqDomains.insert(.browserClose)
+                default: groqDomains.insert(.browserRead)
+                }
+            }
+            if !tool.isCustom, ["exec_command", "write_stdin"].contains(tool.name) { groqDomains.insert(.terminal) }
+            if tool.isCustom, tool.name == "apply_patch" { groqDomains.insert(.files) }
+            if !tool.isCustom, tool.name.hasPrefix("computer_v2_") { groqDomains.insert(.computer) }
+        }
+        let runtimeInstructions = compactGroq
+            ? [ComputaAgentInstructions.groqRuntimeContractForPresentation(includedInstructionText: includedInstructionText,
+                    compactHistoryInventory: compactHistoryInventory),
+               ComputaAgentInstructions.groqNativeSupplement(includedInstructionText: includedInstructionText,
+                                                            needsBrowser: requiresBrowserToolAvailability, domains: groqDomains),
+               try displayProjection.map { try groqCatalogNotice($0, compactHistoryInventory: compactHistoryInventory,
+                   declaredCustomFunctions: !declared.identities.isEmpty) }].compactMap { $0 }.joined(separator: "\n\n")
+            : [ComputaAgentInstructions.webInferenceContract(offeredFunctions: offered.mapValues(\.name),
             customToolNames: customNames, includedInstructionText: includedInstructionText, compactNativeContext: isChatGPT,
-            deduplicateNativeContext: isClaude),
+            deduplicateNativeContext: isClaude || isGroq,
+            externalClientContext: claudeChoice ==
+                WebsiteModelChoice(provider: "claude", key: "Opus 4.7", label: "Opus 4.7")),
             deferredBrowserInstructions].compactMap { $0 }.joined(separator: "\n\n")
         let latestUserItemIndex = (object["input"] as? [Any])?.lastIndex { item in
             guard let message = item as? [String: Any], message["role"] as? String == "user" else { return false }
             return message["type"] == nil || message["type"] as? String == "message"
         }
-        let currentUserInstructions = ComputaAgentInstructions.webCurrentUserContract(
-            latestUserItemIndex: latestUserItemIndex, inputIsString: object["input"] is String)
-        let displaySource = toolDefinitionsChanged
+        let baseCurrentUserInstructions = compactGroq
+            ? ComputaAgentInstructions.groqCurrentUserContract(latestUserItemIndex: latestUserItemIndex, inputIsString: object["input"] is String)
+            : ComputaAgentInstructions.webCurrentUserContract(latestUserItemIndex: latestUserItemIndex, inputIsString: object["input"] is String)
+        let fullDisplaySource = toolDefinitionsChanged
             ? String(decoding: try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
             : originalJSON
+        var usesLoaderReferences = false
+        let taskDisplaySource = try displayProjection.map {
+            try groqTrustedNativeProjection(originalJSON, object: object, schemas: $0.displaySchemas(declared.schemas, compactHistoryInventory: compactHistoryInventory), domains: groqDomains, nativePermissionCompaction: nativeGroqHistoryPresentation, compactLoaderHistory: compactGroqLoaderHistory,
+                declaredCustomFunctionNames: Set(declared.identities.keys), usesLoaderReferences: &usesLoaderReferences)
+        } ?? fullDisplaySource
+        // API response/transport controls are validated above and retained in
+        // the canonical request. They must not become website instructions to
+        // supply unsupported reasoning output or transport metadata.
+        let nativeDisplaySource = WebsitePromptProjection.omittingAPIOnlyTopLevelFields(taskDisplaySource)
+        var displaySource = nativeDisplaySource
+        var groqHistoryPlan: GroqContextManifestProjector.Plan?
+        var groqHistoryPreviewOnly = false
+        var usesHistoryReferences = false
+        if let groqHistoryProjection {
+            // Parse BEFORE whitespace compaction. The existing native policy and
+            // schema splices leave all payload lexemes and user items untouched.
+            let candidate = try GroqContextJSONLayout.parse(Data(nativeDisplaySource.utf8))
+            let rendered: Data
+            switch try groqHistoryProjection(candidate) {
+            case let .planned(plan):
+                guard plan.isCurrent() else { throw GroqContextManifestProjector.Failure.publication }
+                rendered = plan.renderedJSON
+                usesHistoryReferences = plan.requiresManifestContract
+                groqHistoryPlan = plan
+            case let .preview(bytes):
+                rendered = bytes
+                usesHistoryReferences = bytes != candidate.sourceUTF8
+                groqHistoryPreviewOnly = true
+            }
+            guard rendered.count <= maximumPromptBytes,
+                  let text = String(data: rendered, encoding: .utf8),
+                  (try? JSONSerialization.jsonObject(with: rendered)) is [String: Any] else {
+                throw Failure.invalidRequest
+            }
+            guard !usesHistoryReferences || groqHistoryReaderName != nil else { throw Failure.invalidToolChoice }
+            displaySource = text
+        }
+        let requestLabel = usesHistoryReferences ? GroqContextManifestProjector.label : "COMPLETE_RESPONSES_REQUEST_JSON"
+        let currentUserInstructions = usesHistoryReferences
+            ? baseCurrentUserInstructions.replacingOccurrences(of: "COMPLETE_RESPONSES_REQUEST_JSON", with: requestLabel)
+            : baseCurrentUserInstructions
         let projection = WebsitePromptProjection.compactValidatedJSON(displaySource)
-        let displayJSON = displayStableJSON(isChatGPT ? projection.json : displaySource, shieldURLPunctuation: isChatGPT)
-        // Keep ChatGPT and Claude's complete request in one literal, unlabelled
-        // code block. This changes no JSON values or tool/dispatch policy; the
-        // eight fence bytes count toward admission and ownership fingerprints.
-        let framedRequestJSON = (isChatGPT || isClaude) ? "```\n" + displayJSON + "\n```" : displayJSON
-        let responseContract = ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames,
-            includedInstructionText: includedInstructionText, responseFormat: .fencedJSON, singleActionRelay: isChatGPT,
-            currentBrowserHandoff: currentBrowserHandoff(tools: offered, policy: policy, availability: browserToolAvailability),
+        // Groq receives one compact JSON line inside a literal code block.
+        // Valid JSON strings cannot contain raw CR/LF, so quoted backticks cannot
+        // become a closing-fence line. Preserve JSON lexemes rather than expand
+        // punctuation into Unicode escapes; the other providers keep their
+        // existing rendering policy. This grants no relay/dispatch privileges.
+        let displayJSON = isGroq ? projection.json
+            : displayStableJSON(isChatGPT ? projection.json : displaySource, shieldURLPunctuation: isChatGPT)
+        // The eight fence bytes count toward admission and ownership fingerprints.
+        let framedRequestJSON = (isChatGPT || isClaude || isGroq) ? "```\n" + displayJSON + "\n```" : displayJSON
+        let baseRequestContext = compactGroq ? ComputaAgentInstructions.groqRequestContext
+            + (usesLoaderReferences ? "\nIn loader arguments and outputs, a $ref object repeats the exact earlier input field at its JSON pointer." : "")
+            : ComputaAgentInstructions.requestContext(compactLiteralJSON: isGroq)
+        let requestContext = usesHistoryReferences
+            ? baseRequestContext + "\n" + groqHistoryManifestContract(readerName: groqHistoryReaderName!)
+            : baseRequestContext
+        let browserHandoff = compactGroq
+            ? currentGroqBrowserHandoff(tools: offered, policy: policy, entryTools: groqEntryTools,
+                                       availability: browserToolAvailability,
+                                       capabilities: browserCapabilities)
+            : currentBrowserHandoff(tools: offered, policy: policy, availability: browserToolAvailability)
+        let latestItem = (object["input"] as? [Any])?.last as? [String: Any]
+        let latestItemType = latestItem?["type"] as? String
+        // Refresh the function-call example after Instant receives a tool result.
+        // The example uses the same current policy as the other provider handoffs.
+        let instantToolContinuation = isChatGPT && WebsiteModelCatalog.choice(for: model)?.key == "chat/latest/instant"
+            && (latestItemType == "function_call_output" || latestItemType == "custom_tool_call_output")
+        let baseResponseContract = compactGroq ? ComputaAgentInstructions.groqResponseContract(currentBrowserHandoff: browserHandoff,
+            hasFunctions: offered.values.contains { !$0.isCustom } || !declared.identities.isEmpty,
+            hasCustomTools: !wireCustomNames.isEmpty, singleCallProfile: declaredFunctionProfile,
+            currentToolHandoff: try currentGroqToolHandoff(projection: displayProjection,
+                offeredNames: Set(offered.keys), allowedNames: policy.allowedNames,
+                validatedReaderName: groqHistoryReaderName, nativeBrowserEntryNames: Set(groqEntryTools.keys),
+                browserAvailability: browserToolAvailability))
+            : ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(offered.keys), customToolNames: customNames,
+            includedInstructionText: includedInstructionText, responseFormat: responseFormat,
+            compactLiteralBoundary: provider == "groq",
+            singleActionRelay: isChatGPT,
+            illustrateFunctionArguments: provider == "qwen" || instantToolContinuation
+                || isGeminiFlashLite
+                || (provider == "kimi" && WebsiteModelCatalog.choice(for: model) ==
+                    WebsiteModelChoice(provider: "kimi", key: "k28-instant", label: "Instant"))
+                || claudeChoice == .claudeHaiku55
+                || claudeChoice == .claudeOpus3,
+            currentBrowserHandoff: browserHandoff,
             allowedToolNames: policy.allowedNames)
+        let responseContract = baseResponseContract + (claudeChoice == .claudeOpus3
+            ? ComputaAgentInstructions.claudeOpus3OutputBoundary : "")
         let prompt = """
         \(runtimeInstructions)
 
-        \(ComputaAgentInstructions.webRequestContext)
-        COMPLETE_RESPONSES_REQUEST_JSON:
+        \(requestContext)
+        \(requestLabel):
         \(framedRequestJSON)
-        END_COMPLETE_RESPONSES_REQUEST_JSON.
+        END_\(requestLabel).
 
         \(currentUserInstructions)
 
@@ -307,18 +797,211 @@ enum WebModelResponseCodec {
             throw Failure.promptTooLarge(actualBytes: bytes, maximumBytes: maximumPromptBytes)
         }
         let statistics = projection.statistics(originalRequestBytes: data.count, presentedRequestBytes: displayJSON.utf8.count,
-            runtimeBytes: runtimeInstructions.utf8.count, requestContextBytes: ComputaAgentInstructions.webRequestContext.utf8.count,
+            runtimeBytes: runtimeInstructions.utf8.count, requestContextBytes: requestContext.utf8.count,
             currentUserBytes: currentUserInstructions.utf8.count, responseContractBytes: responseContract.utf8.count,
             finalPromptBytes: bytes)
+        let geminiRepairDiagnostic: GeminiFlashLiteRepairDiagnostic?
+        if isGeminiFlashLite {
+            let patchNames = GeminiFlashLiteRepairDiagnostic.patchNames(in: offered)
+            geminiRepairDiagnostic = .init(patchDeclared: nativePatchDeclared, patchOffered: !patchNames.isEmpty,
+                patchAllowed: !patchNames.isDisjoint(with: policy.allowedNames),
+                patchInFrame: GeminiFlashLiteRepairDiagnostic.hasPatchSchema(in: displayJSON),
+                repairInstructions: responseContract.contains(ComputaAgentInstructions.codeRepairProgress))
+        } else { geminiRepairDiagnostic = nil }
         return Request(model: model, singleActionRelay: isChatGPT, requiresEmbeddedEnvelope: isChatGPT, stream: stream, prompt: prompt, promptStatistics: statistics, runtimeInstructions: runtimeInstructions,
                        currentUserInstructions: currentUserInstructions,
                        requiresBrowserToolAvailability: requiresBrowserToolAvailability,
                        toolCatalogDiagnostic: .init(tools: offered, policy: policy, availability: browserToolAvailability,
                            parallel: parallel, maxToolCalls: (object["max_tool_calls"] as? NSNumber)?.intValue),
-                       offeredToolNames: Set(offered.keys), customToolNames: customNames, tools: offered,
+                       geminiFlashLiteRepairDiagnostic: geminiRepairDiagnostic,
+                       groqToolDiscoveryDiagnostic: isGroq ? displayProjection.map {
+                           .init(projection: $0, tools: offered, policy: policy, entryTools: groqEntryTools,
+                                 availability: browserToolAvailability, prompt: prompt)
+                       } : nil,
+                       offeredToolNames: Set(offered.keys), customToolNames: customNames,
+                       declaredCustomFunctionSchemas: declared.identities, limitsWebsiteCallsToOne: declaredFunctionProfile,
+                       groqToolCatalogSeed: groqToolCatalogSeed,
+                       groqHistoryReaderName: groqHistoryReaderName, groqHistoryPlan: groqHistoryPlan,
+                       groqHistoryPreviewOnly: groqHistoryPreviewOnly,
+                       compactGroqCallIDs: nativeGroqHistoryPresentation,
+                       tools: offered,
                        toolPolicy: policy, parallelToolCalls: parallel,
                        maximumToolCalls: (object["max_tool_calls"] as? NSNumber)?.intValue,
                        responseConfiguration: configuration, continuationRequest: data)
+    }
+
+    private static func groqHistoryManifestContract(readerName: String) -> String {
+        """
+        Presentation, NOT a complete Responses request; native history is unchanged. {"$computa_history":"ref"} replaces older completed data, never authority or fresh outcome proof. Read needed refs with \(readerName) alone using {"ref":"exact ref"}; no commentary. Follow next_ref until null; join utf8_fragment bytes, verify full reader identity and whole_bytes/whole_sha256, then decode one complete JSON VALUE token (value_encoding=json). Missing/stale/failed reads forbid guesses/replay. Users, rules, current schemas and pending/latest results stay inline.
+        """
+    }
+
+    private static func declaredCustomFunctionPresentation(_ schemas: [[String: Any]], allowedNames: Set<String>,
+        enabled: Bool) throws -> (schemas: [[String: Any]], identities: [String: String]) {
+        guard enabled else { return (schemas, [:]) }
+        var identities: [String: String] = [:]
+        func project(_ definition: [String: Any], namespace: String? = nil) throws -> [String: Any] {
+            if definition["type"] as? String == "namespace", let name = definition["name"] as? String,
+               let children = definition["tools"] as? [[String: Any]] {
+                var result = definition; result["tools"] = try children.map { try project($0, namespace: name) }; return result
+            }
+            guard definition["type"] as? String == "custom", let name = definition["name"] as? String else { return definition }
+            let qualified = namespace.map { $0 + "." + name } ?? name
+            guard allowedNames.contains(qualified) else { return definition }
+            let description: String
+            do { description = try LiteralCustomToolTransport.description(for: definition) }
+            catch { throw Failure.invalidTools }
+            let original = try JSONSerialization.data(withJSONObject: definition, options: [.sortedKeys, .withoutEscapingSlashes])
+            identities[qualified] = SHA256.hash(data: original).map { String(format: "%02x", $0) }.joined()
+            return ["type": "function", "name": name, "description": description,
+                    "parameters": LiteralCustomToolTransport.inputSchema(description: LiteralCustomToolTransport.inputDescription)]
+        }
+        return (try schemas.map { try project($0) }, identities)
+    }
+
+    private static func groqCatalogNotice(_ projection: GroqToolCatalog.Projection,
+        compactHistoryInventory: Bool = false, declaredCustomFunctions: Bool = false) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        // Presentation only: loaded names and complete current callable schemas
+        // remain below. Native inventory/revision/eligibility are unchanged.
+        let discovery = compactHistoryInventory
+            ? projection.discoverable.filter { !projection.selectedNames.contains($0.name) }
+            : projection.discoverable
+        let rowKind = compactHistoryInventory ? "unloaded discovery" : "discovery"
+        let rowFields = compactHistoryInventory ? "name,kind?" : "name,purpose,kind"
+        let kindRule = (compactHistoryInventory ? " Omitted kind uses kind_default." : "")
+            + (declaredCustomFunctions ? " Kinds are native; current schemas declare transport." : "")
+        let kindDefault = compactHistoryInventory ? "\"kind_default\":\"function\"," : ""
+        let entries = String(decoding: try encoder.encode(discovery.map { entry in
+            let kind = entry.isCustom ? "custom" : "function"
+            if compactHistoryInventory { return entry.isCustom ? [entry.name, kind] : [entry.name] }
+            return [entry.name, String(entry.summary.prefix(40)), kind]
+        }), as: UTF8.self)
+        let revision = String(decoding: try encoder.encode(projection.revision), as: UTF8.self)
+        let loaded = String(decoding: try encoder.encode(projection.selectedNames.sorted()), as: UTF8.self)
+        let loader = projection.inventory.first { $0.name == GroqToolCatalog.name || $0.name == "functions." + GroqToolCatalog.name }?.name
+            ?? GroqToolCatalog.name
+        return """
+        GROQ_NATIVE_TOOL_INVENTORY:
+        Rows [\(rowFields)] are \(rowKind); only loaded tools have callable schemas.\(kindRule) Load other exact names with \(loader), current catalog_revision and at most four names. Loading REPLACES optional selections, executes nothing; wait for the next request's schema before calling them.
+        ```
+        {"catalog_revision":\(revision),"loaded":\(loaded),\(kindDefault)"inventory":\(entries)}
+        ```
+        END_GROQ_NATIVE_TOOL_INVENTORY.
+        """
+    }
+
+    /// Repeat the validated current selection at the final response boundary.
+    /// Inventory summaries are discovery data, not callable schemas. An exact
+    /// loader example avoids requiring the model to invent its first arguments.
+    private static func currentGroqToolHandoff(projection: GroqToolCatalog.Projection?,
+                                               offeredNames: Set<String>, allowedNames: Set<String>,
+                                               validatedReaderName: String?, nativeBrowserEntryNames: Set<String>,
+                                               browserAvailability: EmbeddedBrowserToolAvailability?) throws -> String {
+        guard let projection else { return "" }
+        func json(_ value: Any) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: value,
+                options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
+        }
+        let callable = offeredNames.intersection(allowedNames)
+        let heading = "Callable names for THIS response: \(try json(callable.sorted()))."
+        guard let loader = callable.sorted().first(where: {
+            $0 == GroqToolCatalog.name || $0 == "functions." + GroqToolCatalog.name
+        }) else { return heading + " Other inventory names are not loaded schemas." }
+        var result = heading + " Eligible unloaded inventory names are loadable with \(loader); load needed schemas yourself, not user enablement."
+        let unloaded = projection.loaderChoices.filter { !projection.selectedNames.contains($0) }
+        let needsBrowserCue = nativeBrowserEntryNames.isDisjoint(with: callable)
+            && !nativeBrowserEntryNames.isDisjoint(with: unloaded)
+        func compactLoaderRecipe(example: String, lead: String, callLoadedTools: Bool,
+                                 loaderAlone: Bool, browserCue: Bool) throws -> String {
+            let call: [String: Any] = ["type": "tool_calls", "calls": [["name": loader,
+                "arguments": ["catalog_revision": projection.revision, "names": [example]]]]]
+            let wait = loaderAlone ? " alone; await matching output and next-request schema."
+                : "; await next-request schema."
+            return "Callable: \(try json(callable.sorted()))." + (callLoadedTools ? " Call loaded tools." : "")
+                + lead + (try json(call)) + wait + " Load eligible names yourself; no user enablement."
+                + (browserCue ? " Webpages use browser_*; computer_v2_* is native-app UI." : "")
+        }
+        if needsBrowserCue {
+            result += " Webpages use browser_*; computer_v2_* is native-app UI."
+        }
+        // A preloaded historical reader is not an execution route. Only the
+        // exact registered, currently offered/allowed reader is excluded here;
+        // a foreign tool with the same spelling keeps legacy behavior.
+        var ordinaryCallable = callable.subtracting([loader])
+        if let validatedReaderName { ordinaryCallable.remove(validatedReaderName) }
+        if !ordinaryCallable.isEmpty {
+            result += " Call listed tools directly. Do not reload them."
+            // Replacing optional schemas can leave an execution tool loaded
+            // while the native unbound entry route is eligible but unloaded.
+            // Existing callable entries need no extra load. Never infer need
+            // from task text or borrow a same-named, unregistered tool.
+            guard browserAvailability == .unbound, nativeBrowserEntryNames.isDisjoint(with: callable),
+                  let entry = unloaded.first(where: { nativeBrowserEntryNames.contains($0)
+                    && ($0 == "browser_open" || $0 == "functions.browser_open") })
+                    ?? unloaded.first(where: { nativeBrowserEntryNames.contains($0) }) else { return result }
+            return try compactLoaderRecipe(example: entry, lead: " Entry if needed: ",
+                callLoadedTools: true, loaderAlone: false, browserCue: true)
+        }
+        guard let example = unloaded.first(where: { $0 == "exec_command" || $0 == "functions.exec_command" })
+            ?? unloaded.first else { return result }
+        // The inventory and exact loader schema already retain eligibility,
+        // replacement/max-four, and no-execution rules. Keep this final cue
+        // concise without changing the example choice or any callable schema.
+        return try compactLoaderRecipe(example: example, lead: " Example only if needed: ",
+            callLoadedTools: false, loaderAlone: true, browserCue: needsBrowserCue)
+    }
+
+    private static func currentGroqBrowserHandoff(tools: [String: OfferedTool], policy: ToolPolicy,
+                                                  entryTools: [String: OfferedTool],
+                                                  availability: EmbeddedBrowserToolAvailability?,
+                                                  capabilities: ComputaModelToolCatalog.BrowserCapabilityDescriptor?) -> String {
+        if let capabilities {
+            let separation = entryTools.keys.contains { tools[$0] != nil && policy.allowedNames.contains($0) }
+                ? " Webpages use browser_*; computer_v2_* is native-app UI." : ""
+            if capabilities.state == .unbound {
+                let open = capabilities.entry.first { $0 == "browser_open" || $0 == "functions.browser_open" }.map {
+                    " When browser work is next, supplied URL: " + (capabilities.loaded.contains($0) ? "call " : "first load ") + $0 + "."
+                } ?? ""
+                let bind = capabilities.entry.first { $0 == "browser_bind" || $0 == "functions.browser_bind" }.map {
+                    " Observed tab_id only: " + (capabilities.loaded.contains($0) ? "call " : "first load ") + $0 + "."
+                } ?? ""
+                return "Current browser state: unbound. Schemas do not bind pages. Page tools require this task's browser binding; click/fill also need current refs." + open + bind
+                    + " Shell HTTP cannot verify browser state; empty tabs do not prove denial." + separation
+            }
+            let read = capabilities.eligible.first { $0 == "browser_read" || $0 == "functions.browser_read" }.map {
+                " Fresh " + $0 + " needs no cursor."
+            } ?? ""
+            let continuation = capabilities.eligible.first { $0 == "browser_continue" || $0 == "functions.browser_continue" }.map {
+                " " + $0 + " requires an observed next_cursor."
+            } ?? ""
+            return "Native page bound." + read + continuation + " Use current refs." + separation
+        }
+        // Preserve the existing narrow route when no descriptor is proved;
+        // never advertise registered-deferred capability from a name alone.
+        if availability == .unbound, !entryTools.isEmpty {
+            let routes = entryTools.sorted { ($0.value.name, $0.key) > ($1.value.name, $1.key) }.map { name, tool in
+                let use = tools[name] != nil && policy.allowedNames.contains(name) ? "call" : "first load"
+                return tool.name == "browser_open"
+                    ? "Supplied URL: \(use) \(name)."
+                    : "Existing human tab with an observed tab_id: \(use) \(name)."
+            }
+            var result = "Current browser state: unbound. " + routes.joined(separator: " ")
+                + " Loading schemas executes no task tools. Shell HTTP cannot verify browser state. Empty tabs do not prove denial."
+                + " After entry check catalog_revision for reads/actions."
+            if entryTools.keys.contains(where: { tools[$0] != nil && policy.allowedNames.contains($0) }) {
+                result += " Webpages use browser_*; computer_v2_* is native-app UI."
+            }
+            return result
+        }
+        let allowed = tools.filter { policy.allowedNames.contains($0.key) && $0.value.nativeBrowserBit != 0 }
+        guard !allowed.isEmpty else { return "" }
+        switch availability {
+        case .bound:
+            return "Current browser state: native page bound. Fresh browser_read needs no cursor; browser_continue requires an observed next_cursor. Use loaded exact schemas and current refs."
+        default: return ""
+        }
     }
 
     /// Native state and the final validated catalog establish this handoff,
@@ -332,7 +1015,7 @@ enum WebModelResponseCodec {
             var lines = [
                 "COMPUTA_CURRENT_BROWSER_ENTRY:",
                 "Computa offers these permitted browser entry operations: \(entry.keys.sorted().joined(separator: ", ")). This turn has not bound a page yet.",
-                "Return a tool_calls JSON request for the next needed operation. Computa executes it outside this website; the website itself needs no connection to the browser or target URL.",
+                "If the task needs a webpage, request the relevant browser operation. Computa executes it outside this website. A text-only reply needs no tab inventory.",
             ]
             if let open = entry.filter({ $0.value.name == "browser_open" }).keys.sorted().first {
                 lines.append("For a supplied URL, request \(open) with its exact URL in the url argument, including localhost URLs. This creates and binds a task page, subject to native permissions.")
@@ -347,7 +1030,12 @@ enum WebModelResponseCodec {
             return lines.joined(separator: "\n")
         }
         guard availability == .bound else { return "" }
-        guard let read = allowed.filter({ $0.value.browserReadMode == .fresh }).keys.sorted().first else { return "" }
+        let closeHandoff = allowed.filter { $0.value.name == "browser_close" }.keys.sorted().first.map { close in
+            "If this turn opened the current tab (matching native open output: ownership=task_created) and the task calls for closing it, request \(close) with {} before the final answer. Verify released=true and existing_user_tab_preserved=true in its matching output. A website receipt does not close a tab. Preserve existing user tabs and report an unverified close."
+        }
+        guard let read = allowed.filter({ $0.value.browserReadMode == .fresh }).keys.sorted().first else {
+            return closeHandoff ?? ""
+        }
         var lines = [
             "COMPUTA_CURRENT_BROWSER_CAPABILITIES:",
             "This request has a native browser binding. Tool_choice permits these native browser tools: \(allowed.keys.sorted().joined(separator: ", ")).",
@@ -360,6 +1048,7 @@ enum WebModelResponseCodec {
         if let continuation = allowed.filter({ $0.value.name == "browser_continue" }).keys.sorted().first {
             lines.append("\(continuation) is only for a next_cursor from a current read, not a prerequisite for \(read).")
         }
+        if let closeHandoff { lines.append(closeHandoff) }
         return lines.joined(separator: "\n")
     }
 
@@ -382,6 +1071,257 @@ enum WebModelResponseCodec {
             }
         }
         return texts
+    }
+
+    private enum GroqJSONPath: Hashable {
+        case key(String), index(Int)
+    }
+
+    /// Replace only known native policy within independently trusted string
+    /// values. Lexical edits preserve every other byte, including number/escape
+    /// spellings and foreign prefixes/suffixes. Tool schema filtering is the
+    /// separately authorized native catalog projection. Ambiguous duplicate
+    /// keys fail closed rather than choosing which contract to present.
+    private static func groqTrustedNativeProjection(_ source: String, object: [String: Any],
+                                                     schemas: [[String: Any]],
+                                                     domains: Set<ComputaAgentInstructions.GroqInstructionDomain>,
+                                                     nativePermissionCompaction: Bool,
+                                                     compactLoaderHistory: Bool, declaredCustomFunctionNames: Set<String> = [],
+                                                     usesLoaderReferences: inout Bool) throws -> String {
+        let permission = GroqNativePermissionPresentation.replacement(in: trustedInstructionText(in: object),
+            enabled: nativePermissionCompaction)
+        var replacements: [[GroqJSONPath]: (original: String, permission: GroqNativePermissionPresentation.Replacement?)] = [:]
+        var trustedIndex = 0
+        func consider(_ value: Any?, at path: [GroqJSONPath]) {
+            guard let text = value as? String else { return }
+            let matchedPermission = permission?.partIndex == trustedIndex ? permission : nil
+            trustedIndex += 1
+            let compact = ComputaAgentInstructions.groqCompactTrustedNativeText(text, domains: domains)
+            if Data(text.utf8) != Data(compact.utf8) || matchedPermission != nil {
+                replacements[path] = (text, matchedPermission)
+            }
+        }
+        consider(object["instructions"], at: [.key("instructions")])
+        for (index, item) in (object["input"] as? [[String: Any]] ?? []).enumerated() {
+            guard item["type"] == nil || item["type"] as? String == "message",
+                  let role = item["role"] as? String, ["system", "developer"].contains(role) else { continue }
+            let path: [GroqJSONPath] = [.key("input"), .index(index), .key("content")]
+            consider(item["content"], at: path)
+            for (partIndex, part) in (item["content"] as? [[String: Any]] ?? []).enumerated() {
+                guard let type = part["type"] as? String, ["input_text", "text"].contains(type) else { continue }
+                consider(part["text"], at: path + [.index(partIndex), .key("text")])
+            }
+        }
+        // References exist only in the website display. Preserve the call, its
+        // ID, position, and complete native payload; refer only to an identical
+        // preceding loader field of the same kind. Skip ambiguous history.
+        let input = compactLoaderHistory ? (object["input"] as? [[String: Any]] ?? []) : []
+        var loaderIDs = Set<String>(), callIDs = Set<String>(), outputIDs = Set<String>()
+        var referenceFields = [Int: String]()
+        var unambiguous = true
+        for (index, item) in input.prefix(2048).enumerated() {
+            guard let id = item["call_id"] as? String, id.hasPrefix("call_"), (6...256).contains(id.utf8.count),
+                  id.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0)
+                      || (48...57).contains($0) || $0 == 45 || $0 == 95 }) else { continue }
+            switch item["type"] as? String {
+            case "function_call", "custom_tool_call":
+                guard callIDs.insert(id).inserted, !outputIDs.contains(id) else { unambiguous = false; continue }
+                let name = item["name"] as? String, namespace = item["namespace"] as? String
+                let isLoader = item["namespace"] == nil && (name == GroqToolCatalog.name || name == "functions." + GroqToolCatalog.name)
+                    || namespace == "functions" && name == GroqToolCatalog.name
+                if item["type"] as? String == "function_call" && isLoader {
+                    loaderIDs.insert(id)
+                    referenceFields[index] = "arguments"
+                }
+            case "function_call_output", "custom_tool_call_output":
+                guard outputIDs.insert(id).inserted else { unambiguous = false; continue }
+                if loaderIDs.contains(id) {
+                    if item["type"] as? String == "function_call_output" { referenceFields[index] = "output" }
+                    else { unambiguous = false }
+                }
+            default: continue
+            }
+        }
+        if input.count > 2048 || !unambiguous || !loaderIDs.isSubset(of: outputIDs) || referenceFields.contains(where: { input[$0.key][$0.value] as? String == nil }) {
+            referenceFields.removeAll()
+        }
+        var earlier = [String: [Data: Int]]()
+        var functionChoicePaths = Set<[GroqJSONPath]>()
+        if let choice = object["tool_choice"] as? [String: Any] {
+            if choice["type"] as? String == "custom", let name = choice["name"] as? String,
+               declaredCustomFunctionNames.contains(name) { functionChoicePaths.insert([.key("tool_choice"), .key("type")]) }
+            if choice["type"] as? String == "allowed_tools", let choices = choice["tools"] as? [[String: Any]] {
+                for (index, value) in choices.enumerated() where value["type"] as? String == "custom" {
+                    if let name = value["name"] as? String, declaredCustomFunctionNames.contains(name) {
+                        functionChoicePaths.insert([.key("tool_choice"), .key("tools"), .index(index), .key("type")])
+                    }
+                }
+            }
+        }
+        let projectedTools = try JSONSerialization.data(withJSONObject: schemas, options: [.sortedKeys, .withoutEscapingSlashes])
+        let bytes = Array(source.utf8)
+        var position = 0, edits: [(Range<Int>, Data)] = []
+        enum ScanFailure: Error { case ambiguous }
+        func whitespace() { while position < bytes.count, [9, 10, 13, 32].contains(bytes[position]) { position += 1 } }
+        func stringRange() throws -> Range<Int> {
+            guard position < bytes.count, bytes[position] == 34 else { throw ScanFailure.ambiguous }
+            let start = position
+            position += 1
+            while position < bytes.count {
+                if bytes[position] == 92 { position += 2 }
+                else if bytes[position] == 34 { position += 1; return start..<position }
+                else { position += 1 }
+            }
+            throw ScanFailure.ambiguous
+        }
+        func decoded(_ range: Range<Int>) throws -> String {
+            guard let value = try JSONSerialization.jsonObject(with: Data(bytes[range]), options: .fragmentsAllowed) as? String
+            else { throw ScanFailure.ambiguous }
+            return value
+        }
+        func value(_ path: [GroqJSONPath], depth: Int) throws {
+            whitespace()
+            let start = position
+            try body(path, depth: depth)
+            if path == [.key("tools")] { edits.append((start..<position, projectedTools)) }
+            if functionChoicePaths.contains(path) { edits.append((start..<position, Data("\"function\"".utf8))) }
+        }
+        func body(_ path: [GroqJSONPath], depth: Int) throws {
+            guard depth <= 256 else { throw ScanFailure.ambiguous }
+            whitespace()
+            guard position < bytes.count else { throw ScanFailure.ambiguous }
+            switch bytes[position] {
+            case 34:
+                let range = try stringRange()
+                if let replacement = replacements[path] {
+                    guard Data(try decoded(range).utf8) == Data(replacement.original.utf8) else { throw ScanFailure.ambiguous }
+                    let encoded = try groqCompactEncodedNativeString(Data(bytes[range]), decoded: replacement.original,
+                        domains: domains, permissionReplacement: replacement.permission)
+                    edits.append((range, encoded))
+                } else if path.count == 3, path[0] == .key("input"), case let .index(index) = path[1],
+                          case let .key(field) = path[2], referenceFields[index] == field,
+                          (100...4098).contains(range.count) {
+                    let literal = Data(bytes[range])
+                    if let source = earlier[field]?[literal] {
+                        // field is either "arguments" or "output" and source is a native index.
+                        let pointer = Data("{\"$ref\":\"#/input/\(source)/\(field)\"}".utf8)
+                        edits.append((range, pointer))
+                        usesLoaderReferences = true
+                    } else if (earlier[field]?.count ?? 0) < 64 {
+                        earlier[field, default: [:]][literal] = index
+                    }
+                }
+            case 123:
+                position += 1; whitespace()
+                if position < bytes.count, bytes[position] == 125 { position += 1; return }
+                var keys = Set<String>()
+                while true {
+                    whitespace()
+                    let key = try decoded(stringRange())
+                    guard keys.insert(key).inserted else { throw ScanFailure.ambiguous }
+                    whitespace()
+                    guard position < bytes.count, bytes[position] == 58 else { throw ScanFailure.ambiguous }
+                    position += 1
+                    try value(path + [.key(key)], depth: depth + 1)
+                    whitespace()
+                    guard position < bytes.count else { throw ScanFailure.ambiguous }
+                    if bytes[position] == 125 { position += 1; return }
+                    guard bytes[position] == 44 else { throw ScanFailure.ambiguous }
+                    position += 1
+                }
+            case 91:
+                position += 1; whitespace()
+                if position < bytes.count, bytes[position] == 93 { position += 1; return }
+                var index = 0
+                while true {
+                    try value(path + [.index(index)], depth: depth + 1); index += 1
+                    whitespace()
+                    guard position < bytes.count else { throw ScanFailure.ambiguous }
+                    if bytes[position] == 93 { position += 1; return }
+                    guard bytes[position] == 44 else { throw ScanFailure.ambiguous }
+                    position += 1
+                }
+            default:
+                let start = position
+                while position < bytes.count, ![9, 10, 13, 32, 44, 93, 125].contains(bytes[position]) { position += 1 }
+                guard position > start else { throw ScanFailure.ambiguous }
+            }
+        }
+        do {
+            try value([], depth: 0); whitespace()
+            guard position == bytes.count else { throw Failure.invalidRequest }
+        } catch { throw Failure.invalidRequest }
+        var result = Data(), start = 0
+        for (range, replacement) in edits.sorted(by: { $0.0.lowerBound < $1.0.lowerBound }) {
+            result.append(contentsOf: bytes[start..<range.lowerBound]); result.append(replacement)
+            start = range.upperBound
+        }
+        result.append(contentsOf: bytes[start...])
+        return String(decoding: result, as: UTF8.self)
+    }
+
+    /// Map decoded UTF-8 boundaries back to the original JSON string lexeme.
+    /// This preserves even foreign \u escapes around the replaced native block.
+    private static func groqCompactEncodedNativeString(_ encoded: Data, decoded: String,
+        domains: Set<ComputaAgentInstructions.GroqInstructionDomain>,
+        permissionReplacement: GroqNativePermissionPresentation.Replacement?) throws -> Data {
+        let raw = Array(encoded), text = Data(decoded.utf8)
+        if let permissionReplacement {
+            guard permissionReplacement.sourceUTF8 == text,
+                  permissionReplacement.range.lowerBound >= 0, permissionReplacement.range.upperBound <= text.count,
+                  text.subdata(in: permissionReplacement.range) == Data(GroqNativePermissionPresentation.fullSource.utf8) else {
+                throw Failure.invalidRequest
+            }
+        }
+        guard raw.count >= 2, raw.first == 34, raw.last == 34 else { throw Failure.invalidRequest }
+        var offsets = [Int: Int](), cursor = 1, decodedOffset = 0
+        offsets[0] = cursor
+        while cursor < raw.count - 1 {
+            let start = cursor
+            if raw[cursor] == 92 {
+                guard cursor + 2 <= raw.count - 1 else { throw Failure.invalidRequest }
+                cursor += 2
+                if raw[start + 1] == 117 {
+                    guard start + 6 <= raw.count - 1 else { throw Failure.invalidRequest }
+                    cursor = start + 6
+                    guard let first = Int(String(decoding: raw[(start + 2)..<(start + 6)], as: UTF8.self), radix: 16) else { throw Failure.invalidRequest }
+                    if (0xD800...0xDBFF).contains(first) {
+                        guard cursor + 6 <= raw.count - 1, raw[cursor] == 92, raw[cursor + 1] == 117,
+                              let second = Int(String(decoding: raw[(cursor + 2)..<(cursor + 6)], as: UTF8.self), radix: 16),
+                              (0xDC00...0xDFFF).contains(second) else { throw Failure.invalidRequest }
+                        cursor += 6
+                    } else if (0xDC00...0xDFFF).contains(first) { throw Failure.invalidRequest }
+                }
+                let fragment = Data([34] + Array(raw[start..<cursor]) + [34])
+                guard let value = try JSONSerialization.jsonObject(with: fragment, options: .fragmentsAllowed) as? String
+                else { throw Failure.invalidRequest }
+                decodedOffset += value.utf8.count
+            } else {
+                cursor += 1; decodedOffset += 1
+            }
+            offsets[decodedOffset] = cursor
+        }
+        guard decodedOffset == text.count else { throw Failure.invalidRequest }
+        var result = Data([34]), offset = 0, rawOffset = 1
+        while offset < text.count {
+            var matches = ComputaAgentInstructions.groqNativeInstructionReplacements(domains: domains).compactMap { before, after -> (Range<Int>, Data)? in
+                text.range(of: before, in: offset..<text.count).map { ($0, after) }
+            }
+            if let permissionReplacement, permissionReplacement.range.lowerBound >= offset {
+                matches.append((permissionReplacement.range, permissionReplacement.replacementUTF8))
+            }
+            guard let next = matches.min(by: { lhs, rhs in
+                lhs.0.lowerBound == rhs.0.lowerBound ? lhs.0.count > rhs.0.count : lhs.0.lowerBound < rhs.0.lowerBound
+            }) else { break }
+            guard let start = offsets[next.0.lowerBound], let end = offsets[next.0.upperBound] else { throw Failure.invalidRequest }
+            result.append(contentsOf: raw[rawOffset..<start])
+            let replacement = try JSONSerialization.data(withJSONObject: String(decoding: next.1, as: UTF8.self),
+                options: [.fragmentsAllowed, .withoutEscapingSlashes])
+            result.append(replacement.dropFirst().dropLast())
+            offset = next.0.upperBound; rawOffset = end
+        }
+        result.append(contentsOf: raw[rawOffset...])
+        return result
     }
 
     /// Protect rendering-sensitive punctuation in JSON strings. ChatGPT's
@@ -454,22 +1394,52 @@ enum WebModelResponseCodec {
         return String(decoding: result, as: UTF8.self)
     }
 
+    /// Observes a rejection at its original validation guard; contains no page values.
+    enum RejectedCallShape: String {
+        case functionUsedInput = "function_used_input", customUsedArguments = "custom_used_arguments"
+        case functionMissingArguments = "function_missing_arguments", customMissingInput = "custom_missing_input"
+        case functionExtraKeys = "function_extra_keys", customExtraKeys = "custom_extra_keys"
+        case argumentsString = "arguments_string", argumentsArray = "arguments_array"
+        case argumentsNull = "arguments_null", argumentsScalar = "arguments_scalar"
+        case customInputNotString = "custom_input_not_string"
+
+        static func classify(_ call: [String: Any], custom: Bool) -> Self {
+            let field = custom ? "input" : "arguments"
+            let keys = Set(call.keys)
+            if keys == ["name", custom ? "arguments" : "input"] { return custom ? .customUsedArguments : .functionUsedInput }
+            if keys == ["name"] { return custom ? .customMissingInput : .functionMissingArguments }
+            if keys != ["name", field] { return custom ? .customExtraKeys : .functionExtraKeys }
+            if custom { return .customInputNotString }
+            switch call[field] {
+            case is String: return .argumentsString
+            case is [Any]: return .argumentsArray
+            case is NSNull: return .argumentsNull
+            default: return .argumentsScalar
+            }
+        }
+    }
+
     /// ChatGPT must use the complete envelope: native website cards can mix
     /// controls and suggestions into rendered prose. Other providers retain
     /// ordinary-text compatibility; prose never grants an action. Never extract
     /// or repair a call hidden inside surrounding text.
-    static func parseEmbeddedReply(_ text: String, request: Request) throws -> Reply {
+    static func parseEmbeddedReply(_ text: String, request: Request,
+                                   onRejectedCall: ((RejectedCallShape, Bool) -> Void)? = nil) throws -> Reply {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw Failure.emptyReply }
-        if trimmed.rangeOfCharacter(from: CharacterSet(charactersIn: "{}")) == nil,
-           !trimmed.contains("```"), !trimmed.hasPrefix("["), !trimmed.hasPrefix("\"") {
+        if isPlainEmbeddedReply(trimmed) {
             // This previously accepted prose is not a JSON format correction:
             // a website-native action may have happened outside host history.
             // Do not resend its request automatically.
             guard !request.requiresEmbeddedEnvelope else { throw Failure.unsupportedWebsiteResponse }
             return try validated(.message(text), request: request)
         }
-        return try parseReply(text, request: request, requireEnvelope: true)
+        return try parseReply(text, request: request, requireEnvelope: true, onRejectedCall: onRejectedCall)
+    }
+
+    private static func isPlainEmbeddedReply(_ trimmed: String) -> Bool {
+        !trimmed.isEmpty && trimmed.rangeOfCharacter(from: CharacterSet(charactersIn: "{}")) == nil
+            && !trimmed.contains("```") && !trimmed.hasPrefix("[") && !trimmed.hasPrefix("\"")
     }
 
     static func malformedEmbeddedReplyDiagnostic(_ text: String, request: Request) -> MalformedEnvelopeDiagnostic? {
@@ -480,9 +1450,57 @@ enum WebModelResponseCodec {
         }
     }
 
+    static func closedGroqRenderedMessage(_ text: String) -> String? {
+        closedGroqMessage(text, messageKeys: ["text"], requiresMessageType: true)
+    }
+
+    /// Only an exact message envelope or ordinary text can be released from a
+    /// verified rendered paragraph. Structured replies require literal proof.
+    static func groqRenderedMessageText(_ text: String) -> String? {
+        guard text.utf8.count <= 220_000 else { return nil }
+        if let message = closedGroqRenderedMessage(text) { return message }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return isPlainEmbeddedReply(trimmed) && !trimmed.hasPrefix("]") ? text : nil
+    }
+
+    /// Groq has returned both sole-string fields as final answers. The server
+    /// releases them only with native literal proof and saved cleanup.
+    static func closedGroqLiteralOutputMessage(_ text: String) -> String? {
+        closedGroqMessage(text, messageKeys: ["output", "value"], requiresMessageType: false)
+    }
+
+    private static func closedGroqMessage(_ text: String, messageKeys: Set<String>, requiresMessageType: Bool) -> String? {
+        let bytes = Data(text.utf8)
+        guard bytes.count <= 220_000,
+              let envelope = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { return nil }
+        var keys = Set(envelope.keys)
+        if requiresMessageType {
+            guard envelope["type"] as? String == "message" else { return nil }
+            keys.remove("type")
+        }
+        guard keys.count == 1, let key = keys.first, messageKeys.contains(key),
+              let message = envelope[key] as? String,
+              !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              APIModelCorrectionJSON.isUnambiguous(bytes) else { return nil }
+        return message
+    }
+
+    static func parseGroqRenderedMessage(_ text: String, request: Request) throws -> Reply {
+        guard LocalModelCatalog.webProvider(for: request.model) == "groq",
+              let message = groqRenderedMessageText(text) else { throw Failure.unsupportedWebsiteResponse }
+        return try validated(.message(message), request: request)
+    }
+
+    static func parseGroqLiteralOutputMessage(_ text: String, request: Request) throws -> Reply {
+        guard LocalModelCatalog.webProvider(for: request.model) == "groq",
+              let message = closedGroqLiteralOutputMessage(text) else { throw Failure.unsupportedWebsiteResponse }
+        return try validated(.message(message), request: request)
+    }
+
     /// Generic callers keep ordinary-text compatibility. Strict envelope
     /// callers never repair or extract JSON.
-    static func parseReply(_ text: String, request: Request, requireEnvelope: Bool = false) throws -> Reply {
+    static func parseReply(_ text: String, request: Request, requireEnvelope: Bool = false,
+                           onRejectedCall: ((RejectedCallShape, Bool) -> Void)? = nil) throws -> Reply {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw Failure.emptyReply }
         let candidate = removingJSONFence(trimmed)
@@ -493,6 +1511,7 @@ enum WebModelResponseCodec {
             if requireEnvelope || looksLikeToolEnvelope(candidate) { throw Failure.malformedEnvelope }
             return try validated(.message(text), request: request)
         }
+        if request.limitsWebsiteCallsToOne, !APIModelCorrectionJSON.isUnambiguous(data) { throw Failure.malformedEnvelope }
         switch envelope["type"] as? String {
         case "message":
             guard Set(envelope.keys).isSubset(of: ["type", "text", "phase"]),
@@ -512,19 +1531,35 @@ enum WebModelResponseCodec {
             if let commentary = envelope["commentary"], !(commentary is String) {
                 throw Failure.malformedEnvelope
             }
+            if request.limitsWebsiteCallsToOne, calls.count != 1 { throw Failure.websiteCallLimitExceeded }
+            let singleUncommentedCall = calls.count == 1 && envelope["commentary"] == nil
             let validated = try calls.map { call -> ToolCall in
                 guard let offeredName = call["name"] as? String, !offeredName.isEmpty else {
                     throw Failure.malformedEnvelope
                 }
                 guard let tool = request.tools[offeredName] else { throw Failure.unknownTool(offeredName) }
                 guard request.toolPolicy.allowedNames.contains(offeredName) else { throw Failure.rejectedToolChoice }
+                if request.declaredCustomFunctionSchemas[offeredName] != nil {
+                    guard tool.isCustom, Set(call.keys) == ["name", "arguments"],
+                          let arguments = call["arguments"] as? [String: Any],
+                          let input = LiteralCustomToolTransport.literalInput(in: arguments) else {
+                        throw Failure.customFunctionArgumentsInvalid
+                    }
+                    return ToolCall(name: tool.name, argumentsJSON: "", namespace: tool.namespace, customInput: input)
+                }
+                guard Set(call.keys).isSubset(of: ["name", tool.isCustom ? "input" : "arguments"]) else {
+                    onRejectedCall?(.classify(call, custom: tool.isCustom), singleUncommentedCall)
+                    throw Failure.unsupportedCallFields
+                }
                 if tool.isCustom {
-                    guard Set(call.keys) == ["name", "input"], let input = call["input"] as? String else {
+                    guard let input = call["input"] as? String else {
+                        onRejectedCall?(.classify(call, custom: true), singleUncommentedCall)
                         throw Failure.customInputMustBeString
                     }
                     return ToolCall(name: tool.name, argumentsJSON: "", namespace: tool.namespace, customInput: input)
                 }
-                guard Set(call.keys) == ["name", "arguments"], let arguments = call["arguments"] as? [String: Any] else {
+                guard let arguments = call["arguments"] as? [String: Any] else {
+                    onRejectedCall?(.classify(call, custom: false), singleUncommentedCall)
                     throw Failure.argumentsMustBeObject
                 }
                 let encoded = try JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys, .withoutEscapingSlashes])
@@ -540,6 +1575,61 @@ enum WebModelResponseCodec {
             if requireEnvelope { throw Failure.malformedEnvelope }
             return try validated(.message(text), request: request)
         }
+    }
+
+    /// A rejected call can request one correction only when the current native
+    /// catalog permits loading its exact name. This never validates its arguments
+    /// against an absent schema or accepts/loads/dispatches the rejected call.
+    static func isGroqUnloadedToolCorrectionCandidate(_ text: String, requestedName: String,
+                                                       request: Request) -> Bool {
+        guard LocalModelCatalog.webProvider(for: request.model) == "groq",
+              let seed = request.groqToolCatalogSeed,
+              let catalog = try? GroqToolCatalog.baseline(for: seed),
+              request.tools[requestedName] == nil,
+              let entry = catalog.inventory.first(where: { $0.name == requestedName }),
+              entry.callable, entry.allowed,
+              seed.callableNames.contains(requestedName), seed.allowedNames.contains(requestedName),
+              [GroqToolCatalog.name, "functions." + GroqToolCatalog.name].contains(where: {
+                  request.tools[$0] != nil && request.toolPolicy.allowedNames.contains($0)
+                      && catalog.selectedNames.contains($0)
+              }),
+              request.maximumToolCalls == nil || request.maximumToolCalls! >= 1 else { return false }
+        let candidate = removingJSONFence(text.trimmingCharacters(in: .whitespacesAndNewlines))
+        let data = Data(candidate.utf8)
+        guard !data.isEmpty, data.count <= maximumPromptBytes,
+              APIModelCorrectionJSON.isUnambiguous(data),
+              let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(envelope.keys) == ["type", "calls"], envelope["type"] as? String == "tool_calls",
+              let calls = envelope["calls"] as? [[String: Any]], calls.count == 1,
+              let call = calls.first, call["name"] as? String == requestedName else { return false }
+        if entry.isCustom {
+            return Set(call.keys) == ["name", "input"] && call["input"] is String
+        }
+        return Set(call.keys) == ["name", "arguments"] && call["arguments"] is [String: Any]
+    }
+
+    /// Narrow one rejected alternate envelope to a correction request only.
+    /// The original reply remains malformed; no call or repaired reply escapes.
+    static func isGroqEnvelopeFormatCorrectionCandidate(_ text: String, request: Request) -> Bool {
+        guard LocalModelCatalog.webProvider(for: request.model) == "groq",
+              request.limitsWebsiteCallsToOne else { return false }
+        let candidate = removingJSONFence(text.trimmingCharacters(in: .whitespacesAndNewlines))
+        let data = Data(candidate.utf8)
+        guard !data.isEmpty, data.count <= maximumPromptBytes,
+              APIModelCorrectionJSON.isUnambiguous(data),
+              let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(envelope.keys) == ["tool_calls"],
+              let calls = envelope["tool_calls"] as? [[String: Any]], calls.count == 1,
+              let call = calls.first, Set(call.keys) == ["name", "arguments"],
+              let name = call["name"] as? String,
+              request.tools[name] != nil, request.toolPolicy.allowedNames.contains(name),
+              call["arguments"] is [String: Any],
+              let canonical = try? JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": calls],
+                  options: [.sortedKeys, .withoutEscapingSlashes]),
+              let validated = try? parseReply(String(decoding: canonical, as: UTF8.self),
+                  request: request, requireEnvelope: true),
+              case let .toolCalls(validatedCalls) = validated, validatedCalls.count == 1 else { return false }
+        return true
     }
 
     /// Diagnose exactly the existing malformed-envelope failure without
@@ -597,11 +1687,14 @@ enum WebModelResponseCodec {
         responseID: String = "resp_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
         createdAt: Int = Int(Date().timeIntervalSince1970),
         websiteModelEvidence: WebsiteModelEvidence? = nil,
+        websiteSelectionEvidence: WebsiteSelectionEvidence? = nil,
         websiteToolSelection: String? = nil
     ) throws -> Data {
+        guard websiteModelEvidence == nil || websiteSelectionEvidence == nil else { throw Failure.invalidRequest }
+        let selectionEvidence = websiteSelectionEvidence ?? websiteModelEvidence.map(WebsiteSelectionEvidence.model)
         _ = try validated(reply, request: request)
-        let output = outputItems(for: reply, responseID: responseID)
-        let initial = response(request: request, reply: reply, responseID: responseID, createdAt: createdAt, output: [], completed: false, websiteModelEvidence: websiteModelEvidence, websiteToolSelection: websiteToolSelection)
+        let output = outputItems(for: reply, request: request, responseID: responseID)
+        let initial = response(request: request, reply: reply, responseID: responseID, createdAt: createdAt, output: [], completed: false, websiteSelectionEvidence: selectionEvidence, websiteToolSelection: websiteToolSelection)
         var events: [[String: Any]] = [
             ["type": "response.created", "response": initial],
             ["type": "response.in_progress", "response": initial],
@@ -636,7 +1729,7 @@ enum WebModelResponseCodec {
             }
             events.append(["type": "response.output_item.done", "output_index": index, "item": item])
         }
-        let completed = response(request: request, reply: reply, responseID: responseID, createdAt: createdAt, output: output, completed: true, websiteModelEvidence: websiteModelEvidence, websiteToolSelection: websiteToolSelection)
+        let completed = response(request: request, reply: reply, responseID: responseID, createdAt: createdAt, output: output, completed: true, websiteSelectionEvidence: selectionEvidence, websiteToolSelection: websiteToolSelection)
         events.append(["type": "response.completed", "response": completed])
         var result = Data()
         for (sequence, var event) in events.enumerated() {
@@ -656,12 +1749,15 @@ enum WebModelResponseCodec {
         responseID: String = "resp_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
         createdAt: Int = Int(Date().timeIntervalSince1970),
         websiteModelEvidence: WebsiteModelEvidence? = nil,
+        websiteSelectionEvidence: WebsiteSelectionEvidence? = nil,
         websiteToolSelection: String? = nil
     ) throws -> Data {
+        guard websiteModelEvidence == nil || websiteSelectionEvidence == nil else { throw Failure.invalidRequest }
+        let selectionEvidence = websiteSelectionEvidence ?? websiteModelEvidence.map(WebsiteSelectionEvidence.model)
         _ = try validated(reply, request: request)
         return try JSONSerialization.data(withJSONObject: response(
             request: request, reply: reply, responseID: responseID, createdAt: createdAt,
-            output: outputItems(for: reply, responseID: responseID), completed: true, websiteModelEvidence: websiteModelEvidence, websiteToolSelection: websiteToolSelection
+            output: outputItems(for: reply, request: request, responseID: responseID), completed: true, websiteSelectionEvidence: selectionEvidence, websiteToolSelection: websiteToolSelection
         ), options: [.sortedKeys, .withoutEscapingSlashes])
     }
 
@@ -671,6 +1767,7 @@ enum WebModelResponseCodec {
             guard !request.toolPolicy.requiresCall else { throw Failure.rejectedToolChoice }
         case let .toolCalls(calls), let .toolCallsWithCommentary(calls, _):
             guard !calls.isEmpty else { throw Failure.malformedEnvelope }
+            if request.limitsWebsiteCallsToOne, calls.count != 1 { throw Failure.websiteCallLimitExceeded }
             guard request.parallelToolCalls || calls.count == 1 else { throw Failure.parallelToolCallsUnsupported }
             if let maximum = request.maximumToolCalls, calls.count > maximum { throw Failure.toolCallLimitExceeded }
             for call in calls {
@@ -929,7 +2026,13 @@ enum WebModelResponseCodec {
         return text.range(of: #"["']type["']\s*:\s*["']tool_calls["']"#, options: .regularExpression) != nil
     }
 
-    private static func outputItems(for reply: Reply, responseID: String) -> [[String: Any]] {
+    /// Native staging uses the same IDs/namespace/payload items as both actual
+    /// encoders. This is not HTTP-write acknowledgement or completion evidence.
+    static func nativeOutputItems(for reply: Reply, request: Request, responseID: String) -> [[String: Any]] {
+        outputItems(for: reply, request: request, responseID: responseID)
+    }
+
+    private static func outputItems(for reply: Reply, request: Request, responseID: String) -> [[String: Any]] {
         let identity = responseID.hasPrefix("resp_") ? String(responseID.dropFirst(5)) : responseID
         switch reply {
         case let .message(text):
@@ -939,12 +2042,14 @@ enum WebModelResponseCodec {
             return [["id": "msg_\(identity)", "type": "message", "role": "assistant", "status": "completed", "phase": phase.rawValue,
                      "content": [["type": "output_text", "text": text, "annotations": [] as [String]]]]]
         case let .toolCallsWithCommentary(calls, commentary):
-            return outputItems(for: .assistantMessage(commentary, phase: .commentary), responseID: responseID)
-                + outputItems(for: .toolCalls(calls), responseID: responseID)
+            return outputItems(for: .assistantMessage(commentary, phase: .commentary), request: request, responseID: responseID)
+                + outputItems(for: .toolCalls(calls), request: request, responseID: responseID)
         case let .toolCalls(calls):
             return calls.enumerated().map { index, call in
+                let callID = request.compactGroqCallIDs ? compactNativeCallID(responseID: responseID, index: index)
+                    : "call_\(identity)_\(index)"
                 var item: [String: Any] = ["id": "fc_\(identity)_\(index)", "type": "function_call", "status": "completed",
-                                          "call_id": "call_\(identity)_\(index)", "name": call.name, "arguments": call.argumentsJSON]
+                                          "call_id": callID, "name": call.name, "arguments": call.argumentsJSON]
                 if let input = call.customInput {
                     item["type"] = "custom_tool_call"
                     item["id"] = "ctc_\(identity)_\(index)"
@@ -957,7 +2062,18 @@ enum WebModelResponseCodec {
         }
     }
 
-    private static func response(request: Request, reply: Reply, responseID: String, createdAt: Int, output: [[String: Any]], completed: Bool, websiteModelEvidence: WebsiteModelEvidence? = nil, websiteToolSelection: String? = nil) -> [String: Any] {
+    private static func compactNativeCallID(responseID: String, index: Int) -> String {
+        var source = Data()
+        for part in [Data(responseID.utf8), Data(String(index).utf8)] {
+            source.append(Data("\(part.count):".utf8)); source.append(part)
+        }
+        let raw = Data(SHA256.hash(data: source).prefix(16))
+        let value = raw.base64EncodedString().replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        return "call_" + value
+    }
+
+    private static func response(request: Request, reply: Reply, responseID: String, createdAt: Int, output: [[String: Any]], completed: Bool, websiteSelectionEvidence: WebsiteSelectionEvidence? = nil, websiteToolSelection: String? = nil) -> [String: Any] {
         let finalText: String
         let endTurn: Bool
         switch reply {
@@ -977,8 +2093,8 @@ enum WebModelResponseCodec {
         // metadata value cannot impersonate the host's finite diagnostic.
         var metadata = value["metadata"] as? [String: Any] ?? [:]
         var metadataChanged = metadata.removeValue(forKey: "computa_website_tool_selection") != nil
-        if let websiteModelEvidence {
-            metadata["computa_website_model"] = websiteModelEvidence.dictionary
+        if let websiteSelectionEvidence {
+            metadata = websiteSelectionEvidence.responseMetadata(preserving: metadata)
             metadataChanged = true
         }
         if let websiteToolSelection {

@@ -3993,3 +3993,336 @@ All 16 inferences verified normal Chat/Instant selection, full submission/owners
 The task-created fixture tab closed automatically; the three restored Gmail tabs and normal ChatGPT tab remained. All task-scoped diagnostic arms were archived and removed under the shared lock. Only the recorded fixture process was stopped; its final ledger remained byte-identical to the capture and port62412 had no listener. Final UI and fixture cleanup evidence are in `live301/root-final-ui.json` and `live301/draft-control/fixture-cleanup/result.json`. This qualifies the controlled cases and does not promise universal website-model reliability. Local fixture success does not prove external email delivery. All prior failed captures and uncertain cleanup records remain preserved.
 
 Evidence: `baseline298/marker/capture/summary.json`; `baseline298b/marker/capture/independent-format-failure-review.json`; `live299b/*/capture`; `native-framing-codec-qualification.json`; `native-ordinary-model-qualification.json`; `native-initial-recovery-before-pin-baseline300.json`; `native-initial-recovery-before-pin-candidate-metadata.json`; `native-initial-recovery-qualification.json`; `native-initial-recovery-final-ownership-green.log`; `ownership301-adapter-final.log`, `ownership300-unicode-causal-analysis.json`, `live301/aggregate.json` and per-case independent reviews. The failed build300 case remains in `live300/unicode/capture`. The qualification JSON files bind their source, binary and log hashes. No final live result is inferred from native or adapter tests.
+
+
+### 2026-11-11 — DeepSeek DeepThink cleanup failure on build 495
+
+A fresh signed-in DeepThink invoice workflow edited only the permitted helper,
+passed all six tests, printed the correct reference, submitted it once through
+the built-in browser, observed its unique receipt and explicitly closed its
+task-created browser tab. Independent audit passed 18 of 19 checks. Eleven native
+tool calls ran across nine website inferences in 76.320 seconds.
+
+The first eight website conversations were deleted with saved receipts. The ninth
+response reached `complete`, but its conversation deletion could not be verified;
+two cleanup observations refer to this same session. Computa withheld the final
+answer and kept the task failed. No prompt or cleanup action was manually replayed.
+The exact failed deletion predicate is unknown: bounded system-log queries returned
+no matching diagnostic, and existing receipts retain only `cleanup_unverified`.
+Structure and rejected-reply captures were armed after initial successful tool
+calls; neither applies to this cleanup failure, and both unused arms were retired.
+This is a partial workflow result, not a clean DeepThink qualification.
+
+### 2026-11-11 — Durable cleanup failure diagnostics in 497
+
+Cleanup receipts can retain a versioned, closed diagnostic: stage, failure category, exact native OwnershipReason for ownership failures, and optional finite adapter code/detail. Free-form errors, page contents and credentials are excluded. Unknown or inconsistent fields fail validation.
+
+The metadata survives restoration to explain an unconfirmed cleanup. It grants neither closure proof nor retry authority and does not repair or establish the cause of the earlier DeepThink deletion failure. Existing cleanup verification and terminal failure behavior remain intact.
+
+Validation: all 670 combined Swift methods passed with zero failures or skips in 286.548 seconds. The cleanup subset covers old receipt compatibility, closed-field validation, exact original native error retention and unchanged action counts. This is test-fixture evidence; live diagnosis and qualification remain pending.
+
+### 2026-11-11 — Controlled live qualification on installed 497
+
+These are single controlled invoice runs on signed Computa 0.8.0 (497), built from `7759a8286108b7c7b630d505d345f00576f472fa`, not reliability estimates or attestations of provider backend models. The complete installed bundle (67 files and modes) and Developer ID signature matched the sealed package for each run.
+
+| ChatGPT selection | Result | Duration | Native tool calls | Website inferences | Cleanup |
+| --- | --- | ---: | ---: | ---: | --- |
+| Instant | PASS, 19/19 checks | 72.526 s | 8 | 9 | 9 temporary sessions closed |
+| Medium | PASS, 19/19 checks | 93.960 s | 8 | 9 | 9 sessions closed |
+| High | PASS, 19/19 checks | 135.221 s | 9 | 10 | 10 sessions closed |
+| Extra High | PASS, 19/19 checks | 153.589 s | 9 | 10 | 10 sessions closed |
+| GPT-6 Pro | PASS, 19/19 checks | 505.200 s | 9 | 10 | 10 sessions closed |
+
+DeepSeek DeepThink failed after 220 ms at the pre-creation sign-in gate, with no tools or owned session. Normal navigation independently confirmed the login page; the cause of lost authentication remains unknown.
+
+Groq/120B failed after 70.618 seconds on its second inference, following one schema-only loader call. The owned page showed the generic “Something went wrong” notice and restored draft. No command, edit, browser action or POST followed. Its HTTP cause remains unknown. Inspector approval is pending, and the separate approximately 19 KB normal-page probe remains unsent. Neither blocked run qualifies, and no uncertain submission was replayed.
+All five ChatGPT selections passed the same 19-check independent audit: only the permitted function changed, all six tests passed, the printed reference matched the oracle, exactly one browser POST issued a unique receipt observed in the tool output, the model explicitly closed its task-created tab, and its final answer reported the reference and receipt. The website journals independently verified GPT-6 family, the selected power, Chat product and temporary-session policy throughout. All 48 website exchanges completed with saved closed-session receipts and no recorded website errors. No uncertain action was replayed.
+
+Evidence is retained under `all-models-20261102/current-workflow-preparation/fixtures/cases/invoice-497-chat-*`, including native traces, provider and cleanup journals, code diffs, independent test output and audit results. The broader all-model qualification remains incomplete.
+
+### 2026-11-11 — Additional provider checks on installed 497
+
+| Selection | Controlled workflow outcome |
+| --- | --- |
+| Claude Sonnet 5.5 | Passed all 19 checks in 58.487 s. Eight native tool calls, six passing tests, one observed browser receipt, an explicit model-issued close, and nine verified website releases with saved cleanup receipts. |
+| Claude Opus 5.5 | Passed all 19 checks in 103.217 s. Eleven native tool calls, six passing tests, one observed browser receipt, an explicit model-issued close, and nine verified website releases with saved cleanup receipts. |
+| Claude Opus 5 | The website blocked the first verified submission with a reasoning-extraction warning after 3.946 s. No tool ran or reply was accepted. The temporary session closed; the prompt was not replayed. |
+| Qwen3.7-Plus website | The first verified submission hit the five-minute response deadline (303.081 s overall). No tool ran. A later receipt confirmed deletion. Separate short direct Temporary Chat and native saved-session marker controls passed; the native control took 16.862 s and saved its deletion receipt. The controls do not establish why the full workflow timed out. |
+| Kimi Instant | The initial editor check rejected supported nonwhitespace content before Send (1.552 s). Its origin is unknown. No tool ran. The durable cleanup diagnostic recorded `saved_deletion / ownership / unbound_cleanup`; cleanup remains unconfirmed and was not retried. |
+| Alibaba Qwen3.7 Flash API | Three successful read commands preceded `invalid_arguments` after 28.248 s. A bounded second attempt still rejected one `apply_patch` literal-input argument. No rejected-response call executed, and no edit, browser submission, or final answer was recorded. |
+
+The Qwen timeout journal's last admitted observation was 64.820 s old at the deadline. It contained an empty extraction and no completion candidate. That is an observation gap, not proof that the provider was still generating or that a finished reply was missed. The later marker pass does not qualify the longer workflow.
+
+The Alibaba failure log does not retain the rejected input. New finite metadata distinguishes a mismatch against the exact admitted literal patch pattern from other wrapper or schema failures. It preserves strict validation, corrective feedback, request bytes, retry limits, and the rejection of all calls in a malformed response. It saves no patch text. All 13 focused Codec, correction-store, and server tests passed; the diagnostic change was not installed for the live 497 run and cannot retrospectively identify its missing argument bytes.
+
+#### Kimi Instant after clearing a stale test draft
+
+The normal Kimi tab restored an older synthetic invoice relay draft. Its parsed request contained only the earlier fixture input and generated environment/policy messages, with Computa's standard footer and session marker. Clearing that test draft and reloading the same normal page left the editor empty. The previously failed owned session was not retried or modified. This does not identify the website's draft-storage mechanism or reproduce the exact contents of the earlier failed owned editor.
+
+A separate fresh 497 task verified four submissions, completed two reads and one valid patch, and saved four website deletion receipts. The fourth reply proposed one `exec_command` with its argument object encoded as a string. The unchanged decoder rejected the reply atomically. The independent audit passed 10 of 19 checks, including the scoped edit, six independent tests, and expected reference. The model never ran the requested tests or browser steps and did not produce a final answer.
+
+Kimi Instant now receives the existing inert argument-object example when functions are offered and allowed. Historical serialized arguments remain byte-identical. String arguments, mixed malformed batches, and tool-choice denials are still rejected. All 141 website Codec tests passed after updating the two exact prompt expectations. The example's live effect remains unverified.
+
+#### Gemini checkpoint recovery on a healthy normal page
+
+The normal build 497 Gemini tab was signed in and displayed the four expected model choices without a challenge. A 3.1 Pro task nevertheless returned `website_verification_required` after 253 ms, before an owned page or website prompt existed. Its saved receipt confirms no owned session was created. This is distinct from a fresh CAPTCHA on an owned model page.
+
+The saved verification checkpoint remained after prompt-free discovery failed. One supported reload of the normal page started a separate discovery attempt; the installed process logged another 30-second preparation timeout within that attempt's recorded probing interval. The same checkpoint remained, and no website prompt was sent. The 497 log does not distinguish readiness from model-menu polling.
+
+The next diagnostic appends the existing checkpoint identity, the active discovery stage, and finite last-observed readiness/menu flags to that timeout record. Missing or non-Boolean values are unknown. It performs no additional page read, wait, prompt, or retry, and leaves every checkpoint-clearance, ownership and cleanup check in place. This is evidence for the next failure, not a recovery or CAPTCHA-prevention fix.
+
+Ten existing native WebKit and app-state recovery checks passed with zero failures or skips. They exercise successful verified recovery, blocked or revoked probes, checkpoint retention across recreation, and the temporary-mode readiness boundary. Live timeout classification with the new fields remains pending.
+
+### 2026-11-11 — Controlled live qualification on installed 499
+
+Signed Computa 0.8.0 (499) ran from `530b896faa1feae43d215b9eb0edf7e3a63d7b91`.
+All 67 installed files and modes matched the signed package. This was a local
+test installation.
+
+- Alibaba Qwen3.7 Flash passed all 19 independent checks in 48.795 s. Twelve
+  tools completed: seven terminal commands, one scoped patch and four browser
+  actions. The model ran all six tests, submitted the correct reference once,
+  reported the observed receipt and explicitly closed its task tab. The trace
+  proves the configured API model; it does not identify the provider's backend
+  or establish what caused the 497 argument failure.
+- Kimi Instant failed on the second verified submission in 31.754 s, after one
+  successful read. The page adapter rejected `authored_source_json_count`: the
+  recognized Markdown container did not have exactly one `code.language-json`
+  node. The record cannot distinguish zero from multiple matches. The argument
+  decoder was not reached for that reply. No edit or browser action ran, the
+  audit passed 7 of 19 checks, and both deletion receipts were eventually saved.
+- DeepSeek's normal landing still redirected to sign-in. No new DeepSeek
+  inference was attempted.
+
+#### Gemini Temporary Chat entry label
+
+On build 499, one ordinary Gemini landing triggered prompt-free recovery for the
+existing verification checkpoint. It timed out at readiness: composer present,
+temporary mode unverified, no available entry action, no click claimed. The
+checkpoint remained. The normal tab's accessible button name was `Turn on
+temporary chat`, while the adapter accepted only `Temporary chat`. A separate
+normal-tab check used the new control once, observed the temporary title and
+exit control, then returned the tab to normal without sending anything. An
+accessible name does not by itself identify the attribute or prove that the
+owned view has the same markup.
+
+The adapter now recognizes both exact native button labels. It rejects disabled,
+ambiguous, or authored controls. It still requires the independent active-mode
+evidence and retains the one-click, ownership, and checkpoint clearance guards.
+Thirteen focused native WebKit and recovery checks and 182 Gemini adapter tests
+passed. Live owned recovery must still verify the change; it does not prevent
+or clear a provider CAPTCHA.
+
+### 2026-11-11 — Gemini recovery and first-message markup on installed 500
+
+The prior Gemini checkpoint survived restart to signed build 500 (`84b8029`).
+One normal landing started a new prompt-free owned probe. It verified temporary
+mode and model discovery, closed the probe with `not_created`, and cleared the
+same checkpoint. This establishes recovery on one healthy landing; it does not
+establish CAPTCHA prevention or a model response.
+
+The separate 3.1 Pro invoice task stopped in 2.869 s on
+`website_ownership_unverified / first_user_message`. The website submission was
+claimed but not verified, no tool ran, and cleanup remains unconfirmed. The
+bounded first-user diagnostic showed one rendered message root. Its status
+container had a sole `div.query-bubble-anchor` wrapping the background span.
+The previous lookup required the span directly under the status container and
+found no message body. The retained projection did not contain the body bytes.
+
+The adapter now admits that exact additional layout. The anchor and background
+span must each be the sole direct element at their respective level. Mixed or
+deeper layouts do not qualify. The same exact body, literal payload, marker,
+fingerprint, selected model, and conversation ownership checks still apply.
+No failed prompt or uncertain cleanup action was replayed.
+
+The new positive regression failed against build 500's unchanged adapter and
+passed with the additional wrapper path. All 184 Gemini adapter tests and 12
+focused native WebKit tests passed, including rejection of altered payloads,
+ambiguous wrappers, and replay attempts. Live inference remains to be verified.
+
+Kimi Instant's separate 500 fixture verified three submissions and ran two read
+commands. The third conversation regressed to the fresh-chat route and the
+ownership guard stopped the task in 34.200 s before any edit or browser action.
+The first two deletions were confirmed; the third cleanup remains unconfirmed.
+The scoped structure arm published no packet because this was a route failure.
+
+### 2026-11-11 — Gemini live check on installed 501
+
+The cleared Gemini checkpoint stayed clear when signed build 501 (`abe618e`)
+restarted. A new 3.1 Pro invoice run passed all 19 outcome checks in 129.145 s.
+It verified 11 submissions in one owned session, ran ten tools, passed six
+tests, obtained one accepted browser receipt, and explicitly closed its task
+tab. The saved website receipt confirms the temporary session closed.
+
+The outcome involved recovery: the first patch proposed the instruction's
+sample path and was rejected before mutation. The model corrected the patch
+using the fixture path. A read-only browser wait timed out before a later read
+found the receipt. This is a completed workflow with recovered tool errors,
+not an error-free reliability run.
+
+The separate 3.5 Flash-Lite run hit `website_verification_required` in 1.089 s.
+The owned main-frame response was Google's HTTP 429 verification route. It
+created a new checkpoint, distinct from the one cleared on build 500. There
+was no verified submission, tool call, or fixture POST; the owned page closed
+with a saved `not_created` receipt. 3.8 Flash and 4 Argon were left unsent. The
+two adapter fixes address recovery and message lookup; the provider
+verification block can still recur. The request evidence does not establish
+why Google issued it.
+
+DeepSeek's normal build 501 tab still redirected to sign-in. It was left on
+that screen and no DeepSeek inference was sent.
+
+### 2026-11-11 — Qwen completion and interrupted catalog refresh
+
+The earlier Qwen Plus timeout retained an empty response observation from
+64.820 s before the deadline. A local WebKit test rendered the same complete
+owned reply in two runs. The original transport released the reply when it
+received the page notification. It reached the deadline when the test consumed
+that notification. The fixture establishes a missed-notification failure mode.
+The cause of the earlier live timeout remains unknown.
+
+For an already bound Qwen reply without a completion candidate or pending
+response choice or code read, the transport can wake once before the original
+deadline for its regular guarded inspection. The fixture now releases both
+replies within the original deadline and verifies one Send and one saved
+deletion receipt per run.
+
+The Groq website offered Qwen3.8-27B and GPT OSS 120B, while Computa also
+displayed cached GPT OSS 20B. An automatic catalog probe could lose its result
+if native work started during discovery, spending its launch attempt. The
+selected provider can now retry discovery once when idle. Local tests verify
+both a late result and a validator cancellation, with the stale 20B choice
+removed only after fresh discovery. Forty focused Swift tests passed.
+
+A separate build 501 Groq Qwen3.8-27B workflow completed its schema lookup.
+Both requests passed local admission at 2,360 and 4,330 body tokens against
+the 6,000-token cap. The website removed the second message and restored its
+draft. No edit, terminal command, browser action, or fixture POST followed.
+The first transcript cleared and the second cleanup remains unconfirmed. The
+website HTTP status and cause of the rollback remain unknown.
+
+### 2026-11-11 — Qwen Plus response comparison on installed 502
+
+Signed build 502 (`662c054`) verified nine website submissions in a fresh
+Qwen Plus invoice task. Eight inferences completed and their deletions were
+confirmed. The fixture change passed all six tests. One POST produced an
+accepted receipt, which the model read in the browser. The final inference
+stopped at `website_ownership_unverified / first_user_message`, leaving the
+answer, explicit tab close, and ninth website deletion unverified. The audit
+passed 16 of 19 checks in 226.656 s.
+
+The failure occurred while Qwen rendered a two-card comparison. The first
+changed DOM reference was the assistant root pinned during the optimistic
+long-message preview. The live diagnostic records the changed root. Whether
+the original pending response node survived the replacement is unknown.
+
+The adapter accepts a replacement at this stage only when the previous root
+is detached and the original pending response node appears in the first
+validated comparison card. The assistant turn, user-body and control pins
+must still match. The adapter requires exact full-prompt verification before
+choosing a response or releasing output. A real WebKit fixture verifies the
+handoff, one Send, one expansion, one preference selection, and confirmed
+deletion. A cloned response still fails ownership with zero new actions.
+
+GPT OSS 20B remained in Computa's cached catalog after restart to 502. A
+successful live discovery that removes it remains to be observed. DeepSeek
+still redirects to sign-in in the normal browser on build 502.
+
+### 2026-11-11 — Qwen Plus final payload on installed 503
+
+The signed build 503 (`7bccc44`) workflow passed 18 of 19 checks in 215.223 s.
+It fixed the fixture, passed all six tests, read the single accepted receipt,
+and explicitly closed its browser tab. The eighth inference stopped at
+`unsupported_website_response` before returning a final answer. Its deletion
+receipt arrived after the terminal capture; all eight deletions are confirmed.
+
+The final inference recorded 37 bytes of in-progress text. A later inspection
+reported a pending literal payload on the same owned response. The native
+failure snapshot shows full first-message ownership and no sampling grant.
+The WebKit regression reproduces the pre-grant refusal when the earlier bytes
+are still buffered.
+
+The first fully verified literal candidate can now replace buffered text from
+an in-progress Qwen reply. An earlier ordinary completion candidate still
+blocks the switch. The original quiet period, one-sample limit, body and
+selection checks, and deletion before release remain in place.
+
+### 2026-11-11 — Qwen comparison continuity and Groq catalog on 504
+
+The build 504 Qwen Plus workflow stopped at the third website inference.
+The model ran a failing baseline test and applied the patch. The independent
+audit passed all six tests after the fixture stopped. The model never reached
+post-patch tests, browser submission, or the final payload. Two website
+deletions were confirmed and the third remains unconfirmed.
+
+The first changed reference was the assistant root during a two-card
+comparison, as in build 502. The failure diagnostic now records whether the
+old root detached, where the old response appeared, and whether the current
+turn and comparison root matched. It records no response content or identity
+values and leaves the ownership rejection in place.
+
+In build 504, idle Groq discovery republished the same three Groq choices.
+The normal menu's exact display-name search for GPT OSS 20B yielded no row.
+The direct model route selected GPT OSS 20B, and searching the menu by
+`gpt-oss-20b` found it. Both checks were prompt-free.
+
+### 2026-11-11 — Qwen Max comparison on installed 505
+
+Signed build 505 (`ef3cae2`) completed a clean Qwen Plus workflow with all
+19 checks, one accepted receipt and explicit browser close. All nine owned
+website deletions were saved. A separate Qwen Max marker verified the named
+selection, exact reply and one saved deletion.
+
+The Max coding and browser workflow stopped on its third inference before
+post-patch tests or browser actions. The adapter diagnostic shows a detached
+old assistant root and response node, the same assistant turn, and a matching
+current comparison root. The old empty-ID presentation carried no reply
+identity. The first two deletions were saved and the third remains unconfirmed.
+
+When both old nodes detach, the adapter can now observe the new comparison
+under the original assistant turn and user pins. Before granting one
+preference click, it still verifies the whole submitted prompt and marker,
+the model, and both current response cards. A changed suffix after expansion
+stops before a preference, reply or deletion can be accepted.
+
+### 2026-11-11 — Claude Haiku 5.5 tool-call fields on installed 507
+
+Claude and Computa displayed the same 13 Claude choices. Haiku 5.5 completed
+two dependent terminal reads in 20.226 s, returned the exact second value,
+and saved three Incognito closure receipts.
+
+The separate invoice workflow stopped before dispatching a tool. Its first
+verified response proposed a tool call with an unsupported field. Computa
+rejected the entire response and saved the Incognito closure. The exact field
+was unavailable in the capture.
+
+The Haiku handoff now includes the existing inert example of a function entry
+with only `name` and `arguments`. When an offered call fails the entry shape
+check, the native log records a finite category for that inference. The codec
+continues to reject the entire proposal when any call contains extra fields.
+
+### 2026-11-12 — Qwen Plus workflow and Max verification diagnostics
+
+Signed build 543 (`19b0dd6`) rejected a 1,243-byte Qwen Plus response as
+invalid JSON after three read-only commands. Both owned website sessions
+were deleted. The failure record did not retain the reply bytes, so the source
+of the formatting error remains unknown.
+
+A fresh Qwen Plus case on the same signed build passed all 19 checks in
+224.258 seconds. It used one native patch, passed all six tests, submitted one
+reference in the built-in browser, observed the matching receipt, and closed
+its browser tab. All nine website selections and deletions were verified.
+The task's private rejected-reply capture was unused and retired.
+
+Signed build 544 (`ef10b23`) adds an attributable record for Qwen model
+verification errors after Send. The record identifies the rejecting check on
+the current owned page without reading the reply or granting authority to
+release it. A native WebKit test covered six cases, including stale views and
+cleanup, and all 20 Qwen adapter tests passed.
+
+Qwen Max on build 544 verified three submissions and made a correct file edit.
+The third inference rejected the picker binding before post-edit tests or
+browser actions. The new record identified the adapter's first-body inspection,
+and the matching adapter record named `selection_binding`. The two earlier
+deletions were confirmed. The third cleanup was unconfirmed. The audit passed
+10 of 19 checks in 63.226 seconds.

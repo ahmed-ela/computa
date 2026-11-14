@@ -11,7 +11,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
     func testNativeEmailCardIsTerminalWithoutCorrectionOrReleasedContent() async throws {
         let card = "Hello\n\nReconnect email\ncourse-staff@example.invalid\nHi course staff,\nJust wanted to say hi!\n\nAdd a clear reason for writing"
         let root = try canonicalFormatCorrectionFixtureRoot()
-        let base = FormatCorrectionFixtureTransport(replies: [card, valid])
+        let base = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: [card, valid])
         let server = try await makeServer(storageDirectory: root)
         await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
         let bytes = try JSONSerialization.data(withJSONObject: ["model": syntheticChatGPTModelID, "stream": false,
@@ -47,7 +47,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
     func testNativeCardAfterLocalActionDoesNotCorrectOrReplayEitherAction() async throws {
         let card = "Reconnect email\nHi course staff\nMake the greeting more professional"
         let root = try canonicalFormatCorrectionFixtureRoot()
-        let base = FormatCorrectionFixtureTransport(replies: [valid, card, valid])
+        let base = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: [valid, card, valid])
         let server = try await makeServer(storageDirectory: root)
         await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
         var input: [[String: Any]] = [["role": "user", "content": "Use the offered fixture command once, then summarize."]]
@@ -67,6 +67,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
         }
         let prompts = await base.prompts()
         XCTAssertEqual(prompts.count, 2, "Only the first action and one rejected inference; no correction")
+        XCTAssertFalse(prompts[1].contains(WebModelServer.claudeMatchedOutputNote))
         let canonical = try XCTUnwrap(JSONSerialization.jsonObject(with: canonicalRequestBytes(in: prompts[1])) as? [String: Any])
         let retained = try XCTUnwrap(canonical["input"] as? [[String: Any]])
         XCTAssertEqual(retained.count, 3)
@@ -80,9 +81,35 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
         XCTAssertEqual(ledger.filter { $0.operation == "webProviderSend" }.count, 2)
     }
 
+    func testGeminiFunctionArgumentRejectionIsTerminalAndCannotReleaseOrResend() async throws {
+        let root = try canonicalFormatCorrectionFixtureRoot()
+        let choice = WebsiteModelChoice(provider: "gemini", key: "3.5 Flash-Lite", label: "3.5 Flash-Lite")
+        let malformed = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":"{}"}]}"#
+        let transport = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: [malformed, valid], geminiChoice: choice)
+        let server = try await makeServer(storageDirectory: root)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        var payload = try XCTUnwrap(JSONSerialization.jsonObject(with: request()) as? [String: Any])
+        payload["model"] = choice.modelID
+        let bytes = try JSONSerialization.data(withJSONObject: payload)
+        let task = "gemini-shape-terminal"
+        do {
+            _ = try await server.fixtureInfer(bytes, taskID: task)
+            XCTFail("An invalid function call cannot be returned")
+        } catch {
+            XCTAssertEqual(error as? WebModelResponseCodec.Failure, .argumentsMustBeObject)
+        }
+        let finish = await server.fixtureFinish(taskID: task)
+        XCTAssertTrue(finish.isEmpty)
+        let ledger = await transport.ledger()
+        XCTAssertEqual(ledger.map(\.operation), ["webProviderStart", "webProviderSend", "webProviderPoll", "webProviderFinish"])
+        let journal = try transactionJournal(root: root, task: task)
+        XCTAssertFalse(journal.contains { ["complete", "yield_verified", "release_verified"].contains($0["phase"] as? String ?? "") })
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("evidence/format-corrections-v1").path))
+    }
+
     func testChatInvalidJSONClosesOriginalBeforeOneFreshFormatCorrection() async throws {
         let root = try canonicalFormatCorrectionFixtureRoot()
-        let base = FormatCorrectionFixtureTransport(replies: [malformed, valid])
+        let base = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: [malformed, valid])
         let server = try await makeServer(storageDirectory: root)
         await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
         let output = try await server.fixtureInfer(request(), taskID: "format-positive")
@@ -122,7 +149,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
 
     func testChatSecondInvalidJSONAndRemappedTaskCannotRenewCorrection() async throws {
         let root = try canonicalFormatCorrectionFixtureRoot()
-        let base = FormatCorrectionFixtureTransport(replies: [malformed, malformed, malformed, valid])
+        let base = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: [malformed, malformed, malformed, valid])
         let server = try await makeServer(storageDirectory: root)
         await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
         await assertRejected(server, task: "format-once", thread: "stable-thread", turn: "stable-turn")
@@ -139,12 +166,12 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
 
     func testChatCorrectionClaimSurvivesServerRestart() async throws {
         let root = try canonicalFormatCorrectionFixtureRoot()
-        let first = FormatCorrectionFixtureTransport(replies: [malformed, valid])
+        let first = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: [malformed, valid])
         let server = try await makeServer(storageDirectory: root)
         await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(first, defaultChatChoice: syntheticChatGPTChoice))
         _ = try await server.fixtureInfer(request(), taskID: "before-restart", threadID: "persisted-thread", turnID: "persisted-turn")
         _ = await server.shutdown()
-        let second = FormatCorrectionFixtureTransport(replies: [malformed, valid])
+        let second = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: [malformed, valid])
         let restarted = try await makeServer(storageDirectory: root)
         await restarted.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(second, defaultChatChoice: syntheticChatGPTChoice))
         await assertRejected(restarted, task: "after-restart", thread: "persisted-thread", turn: "persisted-turn")
@@ -157,7 +184,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
             #"{"type":"tool_calls","calls":"invalid"}"#,
             #"{"type":"message","text":"forbidden by required tool choice"}"#]
         for (index, reply) in replies.enumerated() {
-            let base = FormatCorrectionFixtureTransport(replies: [reply, valid])
+            let base = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: [reply, valid])
             let server = try await makeServer()
             await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
             var object = try XCTUnwrap(JSONSerialization.jsonObject(with: request()) as? [String: Any])
@@ -174,7 +201,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
     func testChatCorrectionRequiresDurableOriginalClosure() async throws {
         for persistFailure in [false, true] {
             let root = try canonicalFormatCorrectionFixtureRoot()
-            let base = FormatCorrectionFixtureTransport(replies: [malformed, valid], cleanupFails: !persistFailure)
+            let base = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: [malformed, valid], cleanupFails: !persistFailure)
             let server = try await makeServer(storageDirectory: root)
             if persistFailure {
                 await base.setFirstFinishHook {
@@ -192,7 +219,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
     }
 
     func testChatCorrectionDeadlineIncludesOriginalCleanupAndDoesNotRenew() async throws {
-        let base = FormatCorrectionFixtureTransport(replies: [malformed, valid], cleanupDelay: .milliseconds(100))
+        let base = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: [malformed, valid], cleanupDelay: .milliseconds(100))
         let server = try await makeServer()
         await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
         await server.setTimeoutsForTesting(readiness: .seconds(1), response: .milliseconds(50))
@@ -205,7 +232,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
 
     func testChatCorrectionDeadlineBeginsBeforeOriginalSendAndBoundsCorrectiveStart() async throws {
         for delayFirstSend in [true, false] {
-            let base = FormatCorrectionFixtureTransport(replies: [malformed, valid],
+            let base = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: [malformed, valid],
                 firstSendDelay: delayFirstSend ? .milliseconds(100) : .zero,
                 secondStartDelay: delayFirstSend ? .zero : .milliseconds(100))
             let server = try await makeServer()
@@ -221,7 +248,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
 
     func testChatCorrectionExcludesMaintenanceAndRetainedLeases() async throws {
         for maintenance in [true, false] {
-            let base = FormatCorrectionFixtureTransport(replies: [malformed, valid])
+            let base = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: [malformed, valid])
             let server = try await makeServer()
             await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
             if maintenance {
@@ -238,7 +265,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
 
     func testCorrectedResponseCannotRenewAmbiguousHTTPHandoff() async throws {
         let root = try canonicalFormatCorrectionFixtureRoot()
-        let base = FormatCorrectionFixtureTransport(replies: [malformed, valid, valid])
+        let base = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: [malformed, valid, valid])
         let server = try await makeServer(storageDirectory: root)
         await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
         let data = try await server.fixtureInfer(request(), taskID: "format-ambiguous")
@@ -259,7 +286,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
     }
 
     func testChatCorrectionRefusesChangedTransportAfterOriginalClosure() async throws {
-        let base = FormatCorrectionFixtureTransport(replies: [malformed, valid])
+        let base = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: [malformed, valid])
         let server = try await makeServer()
         await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
         await base.setFirstFinishHook {
@@ -273,7 +300,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
     }
 
     func testChatCorrectionKeepsResolvedFamilyPinnedBeforeSecondSend() async throws {
-        let base = FormatCorrectionFixtureTransport(replies: [malformed, valid], mismatchesSecondModel: true)
+        let base = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: [malformed, valid], mismatchesSecondModel: true)
         let server = try await makeServer()
         await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
         await assertRejected(server, task: "format-model-drift")
@@ -284,7 +311,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
 
     func testChatCorrectiveResponseStillRequiresModelProductAndOwnershipProof() async throws {
         for mutation in ["model", "work", "proof", "context"] {
-            let base = FormatCorrectionFixtureTransport(replies: [malformed, valid], secondResponseMutation: mutation)
+            let base = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: [malformed, valid], secondResponseMutation: mutation)
             let server = try await makeServer()
             await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
             if mutation == "context" {
@@ -304,7 +331,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
 
     func testChatCorrectionCancellationWaitsForOriginalClosureAndForbidsSecondStart() async throws {
         let gate = FormatCorrectionGate()
-        let base = FormatCorrectionFixtureTransport(replies: [malformed, valid])
+        let base = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: [malformed, valid])
         let server = try await makeServer()
         await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
         await base.setFirstFinishHook { await gate.pause() }
@@ -340,7 +367,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
     }
 
     func testChatCorrectionConsumesTheExistingNativeTurnInferenceBudget() async throws {
-        let base = FormatCorrectionFixtureTransport(replies: [malformed] + Array(repeating: valid, count: 16))
+        let base = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: [malformed] + Array(repeating: valid, count: 16))
         let server = try await makeServer()
         await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
         var input: [[String: Any]] = [["role": "user", "content": "Use the offered fixture command"]]
@@ -360,7 +387,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
     func testUnavailableCorrectionStoreDoesNotAffectOrdinaryFirstInference() async throws {
         for reply in [valid, malformed] {
             let root = try canonicalFormatCorrectionFixtureRoot()
-            let base = FormatCorrectionFixtureTransport(replies: [reply, valid])
+            let base = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: [reply, valid])
             let server = try await makeServer(storageDirectory: root)
             try FileManager.default.createDirectory(at: root.appendingPathComponent("evidence"), withIntermediateDirectories: true)
             try Data("blocked".utf8).write(to: root.appendingPathComponent("evidence/format-corrections-v1"))
@@ -374,7 +401,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
 
     func testRendererFailureClosesExactSessionBeforeOneFreshInference() async throws {
         let root = try canonicalFormatCorrectionFixtureRoot()
-        let base = FormatCorrectionFixtureTransport(replies: ["UNACCEPTED_RENDERER_CONTENT", valid],
+        let base = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: ["UNACCEPTED_RENDERER_CONTENT", valid],
             pollFailures: [1: .responseRenderingFailed])
         let server = try await makeServer(storageDirectory: root)
         await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
@@ -415,7 +442,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
                 ? [1: .responseRenderingFailed, 2: .responseRenderingFailed]
                 : order == "renderer-json" ? [1: .responseRenderingFailed] : [2: .responseRenderingFailed]
             let root = try canonicalFormatCorrectionFixtureRoot()
-            let base = FormatCorrectionFixtureTransport(replies: [malformed, malformed, valid], pollFailures: errors)
+            let base = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: [malformed, malformed, valid], pollFailures: errors)
             let server = try await makeServer(storageDirectory: root)
             await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
             await assertRejected(server, task: order)
@@ -433,7 +460,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
         let fill = #"{"type":"tool_calls","calls":[{"name":"browser_fill","arguments":{"ref":"field-fixture","text":"fixture@example.test"}}]}"#
         let click = #"{"type":"tool_calls","calls":[{"name":"browser_click","arguments":{"ref":"submit-fixture"}}]}"#
         let root = try canonicalFormatCorrectionFixtureRoot()
-        let base = FormatCorrectionFixtureTransport(replies: [fill, "UNACCEPTED_RENDERER_CONTENT", click,
+        let base = FormatCorrectionFixtureTransport(literalReplies: [Data(fill.utf8), Data(click.utf8)], replies: [fill, "UNACCEPTED_RENDERER_CONTENT", click,
             #"{"type":"message","text":"Observed fixture receipt."}"#], pollFailures: [2: .responseRenderingFailed])
         let server = try await makeServer(storageDirectory: root)
         await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
@@ -487,12 +514,12 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
 
     func testRendererClaimSurvivesRestartAndTaskRemapWithoutRenewingAllowance() async throws {
         let root = try canonicalFormatCorrectionFixtureRoot()
-        let first = FormatCorrectionFixtureTransport(replies: ["ignored", valid], pollFailures: [1: .responseRenderingFailed])
+        let first = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: ["ignored", valid], pollFailures: [1: .responseRenderingFailed])
         let server = try await makeServer(storageDirectory: root)
         await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(first, defaultChatChoice: syntheticChatGPTChoice))
         _ = try await server.fixtureInfer(request(), taskID: "renderer-before-restart", threadID: "stable-renderer-thread", turnID: "stable-renderer-turn")
         _ = await server.shutdown()
-        let second = FormatCorrectionFixtureTransport(replies: [malformed, valid])
+        let second = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: [malformed, valid])
         let restarted = try await makeServer(storageDirectory: root)
         await restarted.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(second, defaultChatChoice: syntheticChatGPTChoice))
         await assertRejected(restarted, task: "renderer-remapped", thread: "stable-renderer-thread", turn: "stable-renderer-turn")
@@ -503,7 +530,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
     func testRendererRecoveryRequiresCleanupPersistenceDeadlineAndCurrentContext() async throws {
         for scenario in ["cleanup-failed", "receipt-missing", "deadline", "transport", "maintenance", "retained", "missing-proof", "model"] {
             let root = try canonicalFormatCorrectionFixtureRoot()
-            let base = FormatCorrectionFixtureTransport(replies: ["ignored", valid], cleanupFails: scenario == "cleanup-failed",
+            let base = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: ["ignored", valid], cleanupFails: scenario == "cleanup-failed",
                 cleanupDelay: scenario == "deadline" ? .milliseconds(100) : .zero,
                 mismatchesSecondModel: scenario == "model", pollFailures: [1: .responseRenderingFailed],
                 firstSendMutation: scenario == "missing-proof" ? "proof" : nil)
@@ -538,7 +565,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
 
     func testRendererRecoveryCancellationFinishesCleanupWithoutStartingAgain() async throws {
         let gate = FormatCorrectionGate()
-        let base = FormatCorrectionFixtureTransport(replies: ["ignored", valid], pollFailures: [1: .responseRenderingFailed])
+        let base = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: ["ignored", valid], pollFailures: [1: .responseRenderingFailed])
         let server = try await makeServer()
         await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
         await base.setFirstFinishHook { await gate.pause() }
@@ -568,7 +595,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
 
     func testRendererRecoveryConsumesUnchangedInferenceAndCumulativePromptBudgets() async throws {
         for largePrompts in [false, true] {
-            let base = FormatCorrectionFixtureTransport(replies: Array(repeating: valid, count: 20),
+            let base = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: Array(repeating: valid, count: 20),
                 pollFailures: [1: .responseRenderingFailed])
             let server = try await makeServer()
             await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
@@ -609,7 +636,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
     func testOnlyExactRendererFailureFromResponsePollCanRecover() async throws {
         for (index, failure) in [EmbeddedWebModelTransport.Failure.responseFailed(.chatgpt),
             .ownershipFailure(.javaScriptSubmission), .modelUnavailable, .signInRequired, .humanVerificationRequired(.chatgpt), .deadline].enumerated() {
-            let base = FormatCorrectionFixtureTransport(replies: ["ignored", valid], pollFailures: [1: failure])
+            let base = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: ["ignored", valid], pollFailures: [1: failure])
             let server = try await makeServer()
             await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
             await assertRejected(server, task: "generic-failure-\(index)")
@@ -617,7 +644,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
             XCTAssertEqual(ledger.filter { $0.operation == "webProviderSend" }.count, 1)
         }
         for operation in ["webProviderStart", "webProviderSend"] {
-            let base = FormatCorrectionFixtureTransport(replies: [valid], earlyRendererFailureOperation: operation)
+            let base = FormatCorrectionFixtureTransport(literalReplies: [Data(valid.utf8)], replies: [valid], earlyRendererFailureOperation: operation)
             let server = try await makeServer()
             await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
             await assertRejected(server, task: "early-renderer-" + operation)
@@ -663,7 +690,9 @@ actor FormatCorrectionFixtureTransport: WebModelTransport {
     private var entries: [Entry] = []
     private var sentPrompts: [String] = []
     private var replies: [String]
+    private let literalReplies: Set<Data>
     private var active: [String: String] = [:]
+    private let geminiChoice: WebsiteModelChoice?
     private let cleanupFails: Bool
     private let cleanupDelay: Duration
     private let mismatchesSecondModel: Bool
@@ -677,10 +706,12 @@ actor FormatCorrectionFixtureTransport: WebModelTransport {
     private var finishes = 0
     private var firstFinishHook: (@Sendable () async -> Void)?
     private var secondPollHook: (@Sendable () async -> Void)?
-    init(replies: [String], cleanupFails: Bool = false, cleanupDelay: Duration = .zero, mismatchesSecondModel: Bool = false,
+    init(literalReplies: Set<Data> = [], replies: [String], cleanupFails: Bool = false, cleanupDelay: Duration = .zero, mismatchesSecondModel: Bool = false,
          secondResponseMutation: String? = nil, firstSendDelay: Duration = .zero, secondStartDelay: Duration = .zero,
          pollFailures: [Int: EmbeddedWebModelTransport.Failure] = [:], firstSendMutation: String? = nil,
-         earlyRendererFailureOperation: String? = nil) {
+         earlyRendererFailureOperation: String? = nil, geminiChoice: WebsiteModelChoice? = nil) {
+        self.geminiChoice = geminiChoice
+        self.literalReplies = literalReplies
         self.replies = replies; self.cleanupFails = cleanupFails; self.cleanupDelay = cleanupDelay
         self.mismatchesSecondModel = mismatchesSecondModel
         self.secondResponseMutation = secondResponseMutation
@@ -725,6 +756,12 @@ actor FormatCorrectionFixtureTransport: WebModelTransport {
                 if starts == 2 { await secondPollHook?() }
                 if let failure = pollFailures[sentPrompts.count] { throw failure }
                 snapshot = ["state": "complete", "text": active[token]!]
+                // Explicit local fixture observation only; card/prose and
+                // malformed replies are never inferred to be literal code.
+                if geminiChoice == nil, literalReplies.contains(Data(active[token]!.utf8)) {
+                    snapshot["completionEvidence"] = ["codeStructure": [
+                        "selectedExtraction": "raw_code", "extractionReason": "accepted_literal_code"]]
+                }
             case "webProviderFinish", "webProviderCancel":
                 finishes += 1
                 if finishes == 1 { await firstFinishHook?() }
@@ -735,6 +772,10 @@ actor FormatCorrectionFixtureTransport: WebModelTransport {
             }
         }
         var prepared = syntheticPreparedWebsiteSnapshot(snapshot)
+        if let choice = geminiChoice, ["ready","running","complete"].contains(prepared["state"] as? String ?? "") {
+            prepared.removeValue(forKey: "productModeEvidence")
+            prepared["modelEvidence"] = ["selected":["key":choice.key,"label":choice.label],"source":"selected_model_indicator","verification":"website_selection"]
+        }
         if operation == "webProviderSend", sentPrompts.count == 1, firstSendMutation == "proof" {
             prepared["modelProofContext"] = ["submittedPromptFingerprint": String(repeating: "0", count: 64)]
         }

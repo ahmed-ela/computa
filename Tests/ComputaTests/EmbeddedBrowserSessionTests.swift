@@ -5,6 +5,220 @@ import XCTest
 
 @MainActor
 final class EmbeddedBrowserSessionTests: XCTestCase {
+    func testKimiModelProfileIsolatesRealWebKitStorageAndPreservesNormalDraftAcrossSwitches() async throws {
+        let normalProfile = UUID()
+        registerKimiFixtureProfileForCleanup(normalProfile)
+        let preferences = isolatedTestPreferences()
+        let session = try makePersistentBrowserTestSession(profileID: normalProfile, defaults: preferences)
+        defer { session.shutdown() }
+        XCTAssertNil(session.kimiModelProfileID, "The regular profile is the default")
+
+        let normal = try session.createTab()
+        let normalView = try XCTUnwrap(session.webView(for: normal))
+        let normalStore = normalView.configuration.websiteDataStore
+        XCTAssertEqual(normalStore.identifier, normalProfile)
+        let defaultModel = try session.createUnloadedModelTabForTesting()
+        XCTAssertTrue(try XCTUnwrap(session.webView(for: defaultModel)).configuration.websiteDataStore === normalStore)
+        session.closeTab(defaultModel)
+        try await loadKimiProfileFixture(normalView)
+        let normalGeneration = session.documentGeneration(for: normal)
+        let normalDraft = Data("  Normal draft\nCafe\u{0301}\t🙂  ".utf8)
+        try await writeKimiProfileFixtureDraft(normalDraft, in: normalView)
+        let normalBefore = try await kimiProfileFixtureDraft(in: normalView)
+        XCTAssertEqual(normalBefore, KimiProfileFixtureDraft(editor: normalDraft, stored: normalDraft))
+
+        let signIn = try session.openKimiModelSignInForTesting()
+        let profile = try XCTUnwrap(session.kimiModelProfileID)
+        registerKimiFixtureProfileForCleanup(profile)
+        XCTAssertNotEqual(profile, normalProfile)
+        XCTAssertEqual(session.selectedTabID, signIn)
+        let signInView = try XCTUnwrap(session.webView(for: signIn))
+        let isolatedStore = signInView.configuration.websiteDataStore
+        XCTAssertTrue(isolatedStore.isPersistent)
+        XCTAssertEqual(isolatedStore.identifier, profile)
+        XCTAssertFalse(isolatedStore === normalStore)
+        let initialPrivateModel = try session.createUnloadedKimiModelTabForTesting(profileID: profile)
+        let initialPrivateView = try XCTUnwrap(session.webView(for: initialPrivateModel))
+        XCTAssertTrue(initialPrivateView.configuration.websiteDataStore === isolatedStore)
+        XCTAssertEqual(session.selectedTabID, signIn)
+        try await loadKimiProfileFixture(signInView)
+        try await loadKimiProfileFixture(initialPrivateView)
+        let initialSignIn = try await kimiProfileFixtureDraft(in: signInView)
+        let initialPrivate = try await kimiProfileFixtureDraft(in: initialPrivateView)
+        XCTAssertNil(initialSignIn.stored)
+        XCTAssertNil(initialPrivate.stored)
+        session.closeTab(initialPrivateModel)
+
+        let dedicatedDraft = Data("Dedicated profile fixture\nOnly here".utf8)
+        try await writeKimiProfileFixtureDraft(dedicatedDraft, in: signInView)
+        let committedSignInDraft = try await kimiProfileFixtureDraft(in: signInView)
+        XCTAssertEqual(committedSignInDraft.stored, dedicatedDraft)
+        let laterNormal = try session.createTab(select: false)
+        let laterNormalView = try XCTUnwrap(session.webView(for: laterNormal))
+        XCTAssertTrue(laterNormalView.configuration.websiteDataStore === normalStore)
+        try await loadKimiProfileFixture(laterNormalView)
+        let laterNormalDraft = try await kimiProfileFixtureDraft(in: laterNormalView)
+        XCTAssertEqual(laterNormalDraft.stored, normalDraft)
+        let privateModel = try session.createUnloadedKimiModelTabForTesting(profileID: profile)
+        let privateView = try XCTUnwrap(session.webView(for: privateModel))
+        XCTAssertTrue(privateView.configuration.websiteDataStore === isolatedStore)
+        let storageDeadline = ContinuousClock.now + .seconds(10)
+        try await loadKimiProfileFixture(privateView, until: storageDeadline)
+        var privateAfterSignIn = try await kimiProfileFixtureDraft(in: privateView)
+        while privateAfterSignIn.stored == nil, ContinuousClock.now < storageDeadline {
+            // A fresh document can precede cross-WebView storage propagation.
+            try await loadKimiProfileFixture(privateView, until: storageDeadline)
+            privateAfterSignIn = try await kimiProfileFixtureDraft(in: privateView)
+        }
+        XCTAssertEqual(privateAfterSignIn.stored, dedicatedDraft, "A fresh private document reads the dedicated WebKit store")
+        let restoredEnabled = try makePersistentBrowserTestSession(profileID: normalProfile, defaults: preferences)
+        XCTAssertEqual(restoredEnabled.kimiModelProfileID, profile)
+        XCTAssertTrue(restoredEnabled.tabs.isEmpty)
+        restoredEnabled.shutdown()
+
+        session.useSharedKimiModelProfile()
+        XCTAssertNil(session.kimiModelProfileID)
+        let restoredShared = try makePersistentBrowserTestSession(profileID: normalProfile, defaults: preferences)
+        XCTAssertNil(restoredShared.kimiModelProfileID)
+        XCTAssertTrue(restoredShared.tabs.isEmpty)
+        restoredShared.shutdown()
+        XCTAssertThrowsError(try session.createUnloadedKimiModelTabForTesting(profileID: profile))
+        XCTAssertTrue(session.isKimiProfileTab(signIn))
+        XCTAssertTrue(session.webView(for: privateModel) === privateView)
+        let sharedModel = try session.createUnloadedModelTabForTesting()
+        XCTAssertTrue(try XCTUnwrap(session.webView(for: sharedModel)).configuration.websiteDataStore === normalStore)
+        session.closeTab(sharedModel)
+        session.closeTab(privateModel)
+        session.closeTab(signIn)
+
+        let reopened = try session.openKimiModelSignInForTesting()
+        XCTAssertNotEqual(reopened, signIn)
+        XCTAssertEqual(session.kimiModelProfileID, profile)
+        let reopenedView = try XCTUnwrap(session.webView(for: reopened))
+        XCTAssertTrue(reopenedView.configuration.websiteDataStore === isolatedStore)
+        try await loadKimiProfileFixture(reopenedView)
+        let reopenedDraft = try await kimiProfileFixtureDraft(in: reopenedView)
+        XCTAssertEqual(reopenedDraft.stored, dedicatedDraft)
+        let normalAfter = try await kimiProfileFixtureDraft(in: normalView)
+        XCTAssertEqual(normalAfter, normalBefore)
+        XCTAssertTrue(session.webView(for: normal) === normalView)
+        XCTAssertEqual(session.documentGeneration(for: normal), normalGeneration)
+    }
+
+    func testKimiProfileSignInIsHumanVisibleButBothDedicatedViewsRejectBrowserToolAuthority() async throws {
+        let session = EmbeddedBrowserSession(persistent: false, defaults: isolatedTestPreferences())
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+                              styleMask: [], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        window.contentView = host
+        defer { session.shutdown(); window.close() }
+        let normal = try session.createTab()
+        let signIn = try session.openKimiModelSignInForTesting()
+        let profile = try XCTUnwrap(session.kimiModelProfileID)
+        let privateModel = try session.createUnloadedKimiModelTabForTesting(profileID: profile)
+        XCTAssertEqual(session.humanTabs.map(\.id), [normal, signIn])
+        XCTAssertEqual(session.selectedTabID, signIn)
+        XCTAssertFalse(session.isKimiProfileTab(normal))
+        XCTAssertTrue(session.isKimiProfileTab(signIn))
+        XCTAssertTrue(session.isKimiProfileTab(privateModel))
+        let opener = try XCTUnwrap(session.webView(for: signIn))
+        try session.presentTab(signIn, in: host)
+        for id in [normal, signIn, privateModel] {
+            try await loadKimiProfileFixture(XCTUnwrap(session.webView(for: id)))
+        }
+        _ = try await script(opener, """
+            setTimeout(() => { window.fixtureChild = window.open('', 'kimi-profile-fixture'); }, 30);
+            return true;
+            """)
+        try await waitForPopupCount(4, session: session)
+        let popup = try XCTUnwrap(session.humanTabs.first(where: \.isPopup))
+        let popupView = try XCTUnwrap(session.webView(for: popup.id))
+        XCTAssertTrue(popupView.configuration.websiteDataStore === opener.configuration.websiteDataStore)
+        XCTAssertTrue(session.isKimiProfileTab(popup.id))
+        XCTAssertEqual(session.humanTabs.map(\.id), [normal, signIn, popup.id])
+
+        let transport = EmbeddedBrowserTabTransport(session: session)
+        let targets = try await transport.humanTargets()
+        XCTAssertEqual(targets.map(\.targetID), [normal.uuidString])
+        let normalTarget = try await transport.target(id: normal.uuidString)
+        XCTAssertNotNil(normalTarget)
+        for protected in [signIn, privateModel, popup.id] {
+            let target = try await transport.target(id: protected.uuidString)
+            XCTAssertNil(target)
+            let view = try XCTUnwrap(session.webView(for: protected))
+            let forged = BrowserTarget(targetID: protected.uuidString, instanceToken: protected.uuidString,
+                                       title: "Kimi profile fixture", url: try XCTUnwrap(view.url ?? URL(string: "about:blank")))
+            do {
+                _ = try await transport.observe(target: forged)
+                XCTFail("A known profile tab ID must not grant read authority")
+            } catch {
+                XCTAssertEqual(error as? BrowserTabBrokerError, .targetClosed)
+            }
+            let generation = try XCTUnwrap(session.documentGeneration(for: protected))
+            XCTAssertThrowsError(try session.prepareToolMutation(tabID: protected, generation: generation)) {
+                XCTAssertEqual($0 as? BrowserTabBrokerError, .staleDocument)
+            }
+        }
+        session.useSharedKimiModelProfile()
+        XCTAssertTrue(session.isKimiProfileTab(signIn))
+        XCTAssertTrue(session.isKimiProfileTab(popup.id))
+        let afterOptOut = try await transport.humanTargets()
+        XCTAssertEqual(afterOptOut.map(\.targetID), [normal.uuidString])
+    }
+
+    private struct KimiProfileFixtureDraft: Equatable {
+        let editor: Data
+        let stored: Data?
+    }
+
+    private func loadKimiProfileFixture(_ view: WKWebView, until deadline: ContinuousClock.Instant = .now + .seconds(10)) async throws {
+        let url = try XCTUnwrap(URL(string: "https://kimi-profile.example.test/"))
+        let document = UUID().uuidString
+        view.loadHTMLString("<!doctype html><textarea id='draft' data-document='\(document)'></textarea>", baseURL: url)
+        while ContinuousClock.now < deadline {
+            if !view.isLoading, view.url == url,
+               (try? await script(view, "return document.getElementById('draft')?.dataset.document === '\(document)';")) == Data("true".utf8) {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTFail("The local Kimi profile fixture did not load")
+        throw URLError(.timedOut)
+    }
+
+    private func writeKimiProfileFixtureDraft(_ draft: Data, in view: WKWebView) async throws {
+        let value = String(decoding: draft, as: UTF8.self)
+        let encoded = try JSONSerialization.data(withJSONObject: value, options: .fragmentsAllowed)
+        let literal = String(decoding: encoded, as: UTF8.self)
+        _ = try await script(view, """
+            const draft = \(literal);
+            document.getElementById('draft').value = draft;
+            localStorage.setItem('kimi-fixture-draft', draft);
+            return true;
+            """)
+    }
+
+    private func kimiProfileFixtureDraft(in view: WKWebView) async throws -> KimiProfileFixtureDraft {
+        let raw = try await script(view, """
+            return {editor: document.getElementById('draft').value, stored: localStorage.getItem('kimi-fixture-draft')};
+            """)
+        let snapshot = try XCTUnwrap(JSONSerialization.jsonObject(with: raw) as? [String: Any])
+        let editor = try XCTUnwrap(snapshot["editor"] as? String)
+        let stored = (snapshot["stored"] as? String).map { Data($0.utf8) }
+        return KimiProfileFixtureDraft(editor: Data(editor.utf8), stored: stored)
+    }
+
+    private func registerKimiFixtureProfileForCleanup(_ id: UUID) {
+        addTeardownBlock { @MainActor in
+            do {
+                try await WKWebsiteDataStore.remove(forIdentifier: id)
+            } catch {
+                print("KIMI_PROFILE_FIXTURE_CLEANUP_PENDING \(id.uuidString)")
+            }
+        }
+    }
+
     func testBorrowedHumanRenderingRestoresUsableViewportWithoutNavigationSelectionOrFocus() async throws {
         try await verifyBorrowedHumanRendering(presented: false)
     }
@@ -1134,6 +1348,153 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertTrue(window.firstResponder === input)
     }
 
+    /// Diagnostic experiment, not a provider qualification: use the production
+    /// host, model-owned configuration and one unchanged view/document. Only an
+    /// opaque sibling's exposure changes. No provider request or user tab exists.
+    func testModelOwnedRAFRemountCoveredVersusUncoveredUsesSameNativeDeadline() async throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_MODEL_RAF_DIAGNOSTIC"] == "1",
+            "Set COMPUTA_MODEL_RAF_DIAGNOSTIC=1 for the offline on-screen rendering diagnostic.")
+        guard let screen = NSScreen.main, screen.visibleFrame.width >= 1_024, screen.visibleFrame.height >= 768 else {
+            throw XCTSkip("RAF diagnostic is unperformed: an on-screen 1024x768 fixture viewport is unavailable")
+        }
+        let session = EmbeddedBrowserSession(persistent: false)
+        let frame = NSRect(x: screen.visibleFrame.minX, y: screen.visibleFrame.minY, width: 1_024, height: 768)
+        let window = ModelRAFProbePanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel],
+                                        backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.hidesOnDeactivate = false
+        window.ignoresMouseEvents = true
+        window.isFloatingPanel = false
+        let root = NSView(frame: NSRect(origin: .zero, size: frame.size))
+        window.contentView = root
+        let host = EmbeddedModelRenderContainer(session: session)
+        host.frame = root.bounds
+        root.addSubview(host)
+        session.installModelRenderHost(host)
+        let cover = ModelRAFProbeCover(frame: root.bounds)
+        root.addSubview(cover, positioned: .above, relativeTo: host)
+        let keyWindow = NSApplication.shared.keyWindow
+        let firstResponder = keyWindow?.firstResponder
+        let foregroundPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        defer { session.shutdown(); window.orderOut(nil); window.close() }
+        let id = try session.createUnloadedModelTabForTesting()
+        let view = try XCTUnwrap(session.webView(for: id))
+        XCTAssertEqual(view.configuration.preferences.inactiveSchedulingPolicy, .none)
+        XCTAssertFalse(view.configuration.websiteDataStore.isPersistent)
+        XCTAssertFalse(view.acceptsFirstResponder)
+        XCTAssertFalse(view.isInspectable)
+        XCTAssertTrue(session.humanTabs.isEmpty)
+        view.loadHTMLString("""
+            <!doctype html><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+            <style>html,body{margin:0;background:white;color:black}button{display:block}</style>
+            <main id="fixture-root"><button id="fixture-model">Synthetic model</button></main>
+            """, baseURL: URL(string: "https://raf-fixture.invalid/"))
+        window.orderFrontRegardless() // Non-key, mouse-ignoring fixture; never activate the application.
+        let loadDeadline = ContinuousClock.now + .seconds(10)
+        var loaded = false
+        while ContinuousClock.now < loadDeadline {
+            if !view.isLoading,
+               (try? await script(view, "return !!document.getElementById('fixture-model');")) == Data("true".utf8) {
+                loaded = true; break
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        guard loaded else { return XCTFail("Offline RAF fixture did not load") }
+        let generation = session.documentGeneration(for: id)
+        var observations: [[String: Any]] = []
+        // A final covered control exposes ordering/warmup effects without a new
+        // document, configuration, owner, native focus acquisition or provider call.
+        for covered in [true, false, true] {
+            cover.isHidden = !covered
+            window.displayIfNeeded()
+            await Task.yield()
+            let nativeBefore = session.modelDiagnosticSnapshot(tabID: id)
+            let nativeStart = ContinuousClock.now
+            let start = try await script(view, """
+                const root=document.getElementById('fixture-root');
+                const old=document.getElementById('fixture-model');
+                if(!root||!old||window.fixtureRAFProbe?.active)throw new Error('invalid fixture phase');
+                const p={active:true,start:performance.now(),frames:0,framesWithinDeadline:0,
+                  timers:0,timersWithinDeadline:0,mutations:0,remountElapsed:null,frame:null,timer:null,
+                  visibilityAtStart:document.visibilityState,hiddenAtStart:document.hidden};
+                window.fixtureRAFProbe=p;
+                p.observer=new MutationObserver(rs=>{p.mutations=Math.min(32,p.mutations+rs.length)});
+                p.observer.observe(root,{childList:true}); old.remove();
+                const step=()=>{if(!p.active)return; const elapsed=performance.now()-p.start;
+                  p.frames++;if(elapsed<=1800)p.framesWithinDeadline++;
+                  if(p.frames===2){const replacement=document.createElement('button');replacement.id='fixture-model';
+                    replacement.textContent='Synthetic model';root.append(replacement);p.remountElapsed=elapsed;}
+                  if(p.frames<8)p.frame=requestAnimationFrame(step);};
+                p.frame=requestAnimationFrame(step);
+                const tick=()=>{if(!p.active)return;p.timers++;if(performance.now()-p.start<=1800)p.timersWithinDeadline++;
+                  if(p.timers<18)p.timer=setTimeout(tick,100);};p.timer=setTimeout(tick,100);
+                return {width:innerWidth,height:innerHeight,oldConnected:old.isConnected};
+                """)
+            let initialParts = (ContinuousClock.now - nativeStart).components
+            let initialEvaluationUpperBoundMs = Int(ceil(Double(initialParts.seconds) * 1_000 + Double(initialParts.attoseconds) / 1e15))
+            let startState = try XCTUnwrap(JSONSerialization.jsonObject(with: start) as? [String: Any])
+            XCTAssertEqual(startState["width"] as? Int, 1_024)
+            XCTAssertEqual(startState["height"] as? Int, 768)
+            XCTAssertEqual(startState["oldConnected"] as? Bool, false)
+            // Native time is authoritative; webpage timer/rAF starvation cannot
+            // extend the 1.8s measurement or hang the observation interval.
+            try await Task.sleep(until: nativeStart + .milliseconds(1_800), clock: .continuous)
+            let nativeElapsed = ContinuousClock.now - nativeStart
+            let result = try await script(view, """
+                const p=window.fixtureRAFProbe;p.active=false;
+                cancelAnimationFrame(p.frame);clearTimeout(p.timer);p.observer.disconnect();
+                const r={frames:p.frames,framesWithinDeadline:p.framesWithinDeadline,timers:p.timers,
+                  timersWithinDeadline:p.timersWithinDeadline,mutations:p.mutations,
+                  remountElapsedMs:p.remountElapsed===null?null:Math.min(10000,Math.ceil(p.remountElapsed)),
+                  remountedWithinDeadline:p.remountElapsed!==null&&p.remountElapsed<=1800,
+                  visibilityAtStart:p.visibilityAtStart,visibilityAtEnd:document.visibilityState,
+                  hiddenAtStart:p.hiddenAtStart,hiddenAtEnd:document.hidden,width:innerWidth,height:innerHeight,
+                  networkResourceCount:performance.getEntriesByType('resource').length};
+                if(!document.getElementById('fixture-model')){const b=document.createElement('button');
+                  b.id='fixture-model';b.textContent='Synthetic model';document.getElementById('fixture-root').append(b);}
+                return r;
+                """)
+            let page = try XCTUnwrap(JSONSerialization.jsonObject(with: result) as? [String: Any])
+            let parts = nativeElapsed.components
+            let nativeMs = Int(Double(parts.seconds) * 1_000 + Double(parts.attoseconds) / 1e15)
+            let stable = view.superview === host && view.window === window && host.superview === root
+                && view.frame.size == NSSize(width: 1_024, height: 768)
+                && session.documentGeneration(for: id) == generation
+            let focusUnchanged = NSApplication.shared.keyWindow === keyWindow
+                && keyWindow?.firstResponder === firstResponder
+                && NSWorkspace.shared.frontmostApplication?.processIdentifier == foregroundPID
+            let exposedWindow = window.isVisible && window.occlusionState.contains(.visible)
+            // JS starts after native dispatch. Adding the full acknowledgement
+            // latency is a conservative upper bound, never a later deadline.
+            let remountedWithinNativeDeadline = (page["remountElapsedMs"] as? Int)
+                .map { $0 + initialEvaluationUpperBoundMs <= 1_800 } ?? false
+            let record: [String: Any] = ["covered": covered, "deadlineMs": 1_800,
+                "initialEvaluationUpperBoundMs": initialEvaluationUpperBoundMs,
+                "remountedWithinNativeDeadline": remountedWithinNativeDeadline,
+                "nativeElapsedMs": nativeMs, "nativeBefore": nativeBefore,
+                "nativeAfter": session.modelDiagnosticSnapshot(tabID: id), "page": page,
+                "sameViewHostDocument": stable, "focusUnchanged": focusUnchanged,
+                "windowExposed": exposedWindow, "coverOpaque": cover.isOpaque]
+            observations.append(record)
+            let encoded = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys])
+            print("OFFLINE_MODEL_RAF_PROBE " + String(decoding: encoded, as: UTF8.self))
+            XCTAssertTrue(stable)
+            XCTAssertTrue(focusUnchanged)
+            XCTAssertTrue(exposedWindow, "An occluded fixture window cannot distinguish opaque sibling coverage")
+            XCTAssertFalse(view.isHiddenOrHasHiddenAncestor)
+            XCTAssertEqual(page["networkResourceCount"] as? Int, 0)
+            XCTAssertEqual(page["width"] as? Int, 1_024)
+            XCTAssertEqual(page["height"] as? Int, 768)
+            XCTAssertLessThan(initialEvaluationUpperBoundMs, 1_800)
+            XCTAssertGreaterThanOrEqual(nativeMs, 1_800)
+            XCTAssertLessThan(nativeMs, 5_000)
+        }
+        XCTAssertEqual(observations.count, 3)
+        XCTAssertTrue(session.humanTabs.isEmpty)
+        // Frame/remount outcomes are measurements, not predetermined pass
+        // assertions. They do not establish Claude's implementation or cause.
+    }
+
     func testModelPresentationIsRejectedAndKeepsExactViewInPrivateBackingHost() throws {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }
@@ -1570,6 +1931,83 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         channel.signalDOMChange()
         channel.signal()
         XCTAssertThrowsError(try channel.currentRevision())
+    }
+
+    func testModelSignalProgressRequiresExactOwnedViewOwnerGenerationAndOpenChannel() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createModelTab(url: XCTUnwrap(URL(string: "about:blank")))
+        let view = try XCTUnwrap(session.webView(for: id))
+        let owner = UUID().uuidString
+        let generation = try XCTUnwrap(session.documentGeneration(for: id))
+        XCTAssertNil(session.modelSignalProgress(tabID: id, view: view, ownerToken: owner, generation: generation))
+        try session.installModelChangeSignal(tabID: id, ownerToken: owner,
+            world: WKContentWorld.world(name: "model-progress-exact"), originHost: "chat.qwen.ai")
+        XCTAssertNotNil(session.modelSignalProgress(tabID: id, view: view, ownerToken: owner, generation: generation))
+        XCTAssertNil(session.modelSignalProgress(tabID: UUID(), view: view, ownerToken: owner, generation: generation))
+        XCTAssertNil(session.modelSignalProgress(tabID: id, view: WKWebView(), ownerToken: owner, generation: generation))
+        XCTAssertNil(session.modelSignalProgress(tabID: id, view: view, ownerToken: UUID().uuidString, generation: generation))
+        XCTAssertNil(session.modelSignalProgress(tabID: id, view: view, ownerToken: owner, generation: UUID()))
+        let human = try session.createTab(select: false)
+        let humanView = try XCTUnwrap(session.webView(for: human))
+        try session.installModelChangeSignal(tabID: human, ownerToken: owner,
+            world: WKContentWorld.world(name: "model-progress-human"), originHost: "chat.qwen.ai")
+        XCTAssertNil(session.modelSignalProgress(tabID: human, view: humanView, ownerToken: owner,
+            generation: try XCTUnwrap(session.documentGeneration(for: human))))
+        session.closeTab(id)
+        XCTAssertNil(session.modelSignalProgress(tabID: id, view: view, ownerToken: owner, generation: generation))
+    }
+
+    func testModelSignalProgressIsReadOnlyNativeMetadataWithClosedPrivacyShape() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createModelTab(url: XCTUnwrap(URL(string: "about:blank")))
+        let view = try XCTUnwrap(session.webView(for: id))
+        let owner = UUID().uuidString
+        try session.installModelChangeSignal(tabID: id, ownerToken: owner,
+            world: WKContentWorld.world(name: "model-progress-readonly"), originHost: "chat.qwen.ai")
+        let generation = try XCTUnwrap(session.documentGeneration(for: id))
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 40, height: 40))
+        host.addSubview(view)
+        view.isHidden = true
+        let revision = try session.modelChangeRevision(for: id)
+        let first = try XCTUnwrap(session.modelSignalProgress(tabID: id, view: view, ownerToken: owner, generation: generation))
+        let second = try XCTUnwrap(session.modelSignalProgress(tabID: id, view: view, ownerToken: owner, generation: generation))
+        XCTAssertEqual(second.received, first.received)
+        XCTAssertEqual(second.accepted, first.accepted)
+        XCTAssertEqual(second.revision, first.revision)
+        XCTAssertEqual(try session.modelChangeRevision(for: id), revision)
+        XCTAssertEqual(session.documentGeneration(for: id), generation)
+        XCTAssertTrue(second.attached)
+        XCTAssertTrue(second.hidden)
+        XCTAssertFalse(second.windowPresent)
+        XCTAssertFalse(second.visible)
+        XCTAssertFalse(second.occluded)
+        XCTAssertEqual(Set(Mirror(reflecting: second).children.compactMap(\.label)),
+            Set(["received", "accepted", "revision", "saturated", "attached", "hidden", "windowPresent", "visible", "occluded"]))
+        XCTAssertTrue(Mirror(reflecting: second).children.allSatisfy { $0.value is Int || $0.value is Bool },
+            "No URL, owner, document/body text, provider data or timing enters this snapshot")
+        view.removeFromSuperview()
+    }
+
+    func testModelSignalProgressClampsRevisionAndMarksSaturationWithoutAdvancingOnRead() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createModelTab(url: XCTUnwrap(URL(string: "about:blank")))
+        let view = try XCTUnwrap(session.webView(for: id))
+        let owner = UUID().uuidString
+        try session.installModelChangeSignal(tabID: id, ownerToken: owner,
+            world: WKContentWorld.world(name: "model-progress-cap"), originHost: "chat.qwen.ai")
+        let generation = try XCTUnwrap(session.documentGeneration(for: id))
+        for _ in 0...UInt16.max { session.notifyModelSessionChange(tabID: id) }
+        let nativeRevision = try session.modelChangeRevision(for: id)
+        XCTAssertGreaterThan(nativeRevision, UInt64(UInt16.max))
+        let progress = try XCTUnwrap(session.modelSignalProgress(tabID: id, view: view, ownerToken: owner, generation: generation))
+        XCTAssertEqual(progress.revision, Int(UInt16.max))
+        XCTAssertTrue(progress.saturated)
+        XCTAssertEqual(progress.received, 0)
+        XCTAssertEqual(progress.accepted, 0)
+        XCTAssertEqual(try session.modelChangeRevision(for: id), nativeRevision)
     }
 
     func testModelNotificationHandlerIsPrivateAndAcceptsOnlyItsExactReceipt() async throws {
@@ -2063,5 +2501,20 @@ private final class DiagnosticChildFrameFixture: NSObject, WKScriptMessageHandle
     var frame: WKFrameInfo?
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         if !message.frameInfo.isMainFrame, message.body as? String == "ready" { frame = message.frameInfo }
+    }
+}
+
+@MainActor
+private final class ModelRAFProbePanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+}
+
+@MainActor
+private final class ModelRAFProbeCover: NSView {
+    override var isOpaque: Bool { true }
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.windowBackgroundColor.setFill()
+        dirtyRect.fill()
     }
 }

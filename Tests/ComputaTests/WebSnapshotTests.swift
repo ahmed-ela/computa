@@ -203,8 +203,15 @@ final class WebSnapshotTests: XCTestCase {
         XCTAssertTrue(snapshot.tasks.first?.isBusy == true)
         XCTAssertFalse(snapshot.tasks.first?.canSteer ?? true)
         XCTAssertTrue(snapshot.tasks.last?.queuedPrompts.isEmpty == true)
-        XCTAssertEqual(snapshot.modelOptions.map(\.id), LocalModelCatalog.options
-            .filter { $0.id != LocalModelCatalog.chatGPTBrowserModelID }.map(\.id))
+        // A fresh profile retains its concrete Instant intent before discovery;
+        // it stays unavailable and the legacy website default remains absent.
+        let expectedModelIDs = LocalModelCatalog.options
+            .filter { $0.id != LocalModelCatalog.chatGPTBrowserModelID }.map(\.id)
+            + [WebsiteModelCatalog.freshProfileDefaultModelID]
+        XCTAssertEqual(snapshot.modelOptions.map(\.id), expectedModelIDs)
+        XCTAssertEqual(snapshot.modelOptions.first {
+            $0.id == WebsiteModelCatalog.freshProfileDefaultModelID
+        }?.available, false)
         XCTAssertFalse(snapshot.modelOptions.contains { $0.id == LocalModelCatalog.chatGPTBrowserModelID })
 
         let encoded = try JSONEncoder().encode(snapshot)

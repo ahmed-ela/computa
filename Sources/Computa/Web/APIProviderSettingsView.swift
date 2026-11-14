@@ -4,9 +4,9 @@ import SwiftUI
 struct APIProviderSettingsView: View {
     @Bindable var settings: APIProviderSettings
     @Environment(\.dismiss) private var dismiss
-    @State private var providerID = "cerebras"
-    @State private var name = "Cerebras"
-    @State private var baseURL = "https://api.cerebras.ai/v1"
+    @State private var providerID = ""
+    @State private var name = ""
+    @State private var baseURL = ""
     @State private var wireAPI = APIProviderDefinition.WireAPI.chatCompletions
     @State private var key = ""
     @State private var inputError: String?
@@ -38,12 +38,9 @@ struct APIProviderSettingsView: View {
                 }.disabled(!settings.canEditProviders)
                 Divider()
             }
-            HStack {
-                Button("Cerebras") { load(.cerebras) }
-                Button("Custom provider") {
-                    providerID = "custom-" + UUID().uuidString.prefix(8).lowercased()
-                    name = ""; baseURL = "https://"; wireAPI = .chatCompletions; key = ""; inputError = nil; settings.clearError()
-                }
+            Button("Custom provider") {
+                providerID = "custom-" + UUID().uuidString.prefix(8).lowercased()
+                name = ""; baseURL = "https://"; wireAPI = .chatCompletions; key = ""; inputError = nil; settings.clearError()
             }.disabled(!settings.canEditProviders)
             Form {
                 TextField("Provider ID", text: $providerID)

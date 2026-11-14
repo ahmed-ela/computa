@@ -1,5 +1,5 @@
 export type Tone = 'neutral' | 'blue' | 'green' | 'orange' | 'red' | 'purple';
-export type WebsiteModelProvider = 'chatgpt' | 'gemini' | 'claude' | 'groq';
+export type WebsiteModelProvider = 'chatgpt' | 'gemini' | 'claude' | 'groq' | 'kimi' | 'qwen' | 'deepseek';
 
 export interface ConnectionSnapshot {
   state: 'disconnected' | 'connecting' | 'connected' | 'failed';
@@ -124,6 +124,8 @@ export interface TaskSnapshot {
   queuePaused: boolean;
   canSteer: boolean;
   isBusy: boolean;
+  hasUnreadCompletion: boolean;
+  unreadCompletionID?: string;
   websiteSessionCleanupAvailable?: boolean;
   websiteSessionCleanupInProgress?: boolean;
   websiteSessionCleanupOutcome?: 'closed' | 'no_owned_session' | 'unconfirmed';
@@ -136,6 +138,7 @@ export interface ModelOption {
   detail: string;
   highMemory: boolean;
   available?: boolean;
+  selectable?: boolean;
 }
 
 export interface AppSnapshot {
@@ -165,6 +168,7 @@ export interface AppSnapshot {
 export type NativeAction =
   | { action: 'ready' }
   | { action: 'selectTask'; id: string }
+  | { action: 'acknowledgeTaskCompletion'; taskID: string; completionID: string }
   | { action: 'selectEntry'; id: string }
   | { action: 'createTask' }
   | { action: 'chooseTaskWorkspace'; taskID: string }

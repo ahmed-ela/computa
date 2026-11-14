@@ -2,6 +2,7 @@ import AutomationCore
 import CryptoKit
 import Foundation
 import Observation
+import OSLog
 
 private struct ActiveTurnTiming {
     let userEntryID: TimelineEntry.ID
@@ -13,22 +14,42 @@ private struct ActiveTurnTiming {
 final class AppState {
     @ObservationIgnored private let runtime: (any AgentRuntimeClient)?
     @ObservationIgnored private var runtimeShutdown: Task<RuntimeShutdownReport, Never>?
+    @ObservationIgnored private var runtimeEventConsumer: Task<Void, Never>?
     @ObservationIgnored private var isShuttingDown = false
     @ObservationIgnored private var taskSnapshotRevision: UInt64 = 0
     @ObservationIgnored private var taskSelectionRevision: UInt64 = 0
     @ObservationIgnored private let permissionClient: any AutomationPermissionClient
     @ObservationIgnored private let preferences: UserDefaults
+    @ObservationIgnored private let unreadCompletionStore: ChatUnreadCompletionStore?
+    @ObservationIgnored private var unreadCompletionStoreLoaded = true
+    private var unreadCompletions: [String: ChatUnreadCompletionStore.Record] = [:]
+    private(set) var unreadCompletionPersistenceFailed = false
+    private static let unreadLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "ChatReadState")
     @ObservationIgnored private let cookieMaintenanceOnlyLaunch: Bool
     @ObservationIgnored private let cookieMaintenanceRunner: @MainActor (EmbeddedBrowserSession) async -> Void
     @ObservationIgnored private var embeddedModelTransport: EmbeddedWebModelTransport?
     @ObservationIgnored private let websiteModelDiscovery: (@MainActor (String) async throws -> [WebsiteModelChoice])?
+    @ObservationIgnored private let websiteModeDiscovery: (@MainActor (String) async throws -> [WebsiteModeChoice])?
     @ObservationIgnored private var websiteModelRefreshTask: Task<Void, Never>?
     @ObservationIgnored private var websiteModelRefreshGeneration: UUID?
+    private struct ProviderSignInRecovery {
+        let candidate: EmbeddedBrowserSession.ProviderSignInRecoveryCandidate
+        let gate: EmbeddedWebModelTransport.SignInRecoveryGate
+    }
     private struct WebsiteModelRefreshIntent {
         let provider: String
         let retryBlocked: Bool
         let candidate: EmbeddedBrowserSession.HumanVerificationRecoveryCandidate?
+        let signInRecovery: ProviderSignInRecovery?
+        init(provider: String, retryBlocked: Bool,
+             candidate: EmbeddedBrowserSession.HumanVerificationRecoveryCandidate?,
+             signInRecovery: ProviderSignInRecovery? = nil) {
+            self.provider = provider; self.retryBlocked = retryBlocked
+            self.candidate = candidate; self.signInRecovery = signInRecovery
+        }
     }
+    @ObservationIgnored private var pendingProviderSignInRecovery: ProviderSignInRecovery?
+    @ObservationIgnored private var providerSignInRecoveryIdleObservation: UUID?
     @ObservationIgnored private var websiteModelRefreshIntents: [WebsiteModelRefreshIntent] = []
     @ObservationIgnored private var websiteModelRefreshCurrentIntent: WebsiteModelRefreshIntent?
     #if DEBUG
@@ -43,10 +64,13 @@ final class AppState {
     var websiteModelRefreshIntentsForTesting: [(provider: String, retryBlocked: Bool)] {
         websiteModelRefreshIntents.map { ($0.provider, $0.retryBlocked) }
     }
+    var websiteTransportForTesting: EmbeddedWebModelTransport { websiteTransport() }
+    var providerSignInRecoveryPendingForTesting: Bool { pendingProviderSignInRecovery != nil }
     #endif
     @ObservationIgnored private var didStartWebsiteModelDiscovery = false
     @ObservationIgnored private var startupWebsiteModelProviders: [String] = []
     @ObservationIgnored private var startupWebsiteModelAttemptedProviders: Set<String> = []
+    @ObservationIgnored private var startupWebsiteModelInterruptedProviders: Set<String> = []
     @ObservationIgnored private var startupWebsiteModelRefreshTask: Task<Void, Never>?
     @ObservationIgnored private var startupWebsiteModelIdleObservation: UUID?
     @ObservationIgnored private var lastWebsitePrewarmDemand: (taskID: AgentTask.ID, time: ContinuousClock.Instant)?
@@ -81,11 +105,13 @@ final class AppState {
     var appearance: AppAppearance = .system
     var defaultModel: String
     private(set) var websiteModelChoices: [WebsiteModelChoice]
+    private(set) var websiteModeChoices: [WebsiteModeChoice]
     private(set) var apiProviders: [APIProviderDefinition] = []
     @ObservationIgnored private(set) var apiProviderSettings: APIProviderSettings!
     var isAPIProvidersPresented = false
     private(set) var websiteModelsRefreshing = false
     private(set) var websiteModelsError: String?
+    private(set) var kimiModelSignInMessage: String?
     var showToolPayloads = false
     var connectionState: RuntimeConnectionState = .disconnected
     var automationPermissions: AutomationPermissionSnapshot
@@ -135,8 +161,10 @@ final class AppState {
         runtime: (any AgentRuntimeClient)? = nil,
         permissionClient: any AutomationPermissionClient = PermissionInspector(),
         preferences: UserDefaults = .standard,
+        unreadCompletionStore: ChatUnreadCompletionStore? = nil,
         browserSession: EmbeddedBrowserSession? = nil,
         websiteModelDiscovery: (@MainActor (String) async throws -> [WebsiteModelChoice])? = nil,
+        websiteModeDiscovery: (@MainActor (String) async throws -> [WebsiteModeChoice])? = nil,
         cookieMaintenanceOnlyLaunch: Bool? = nil,
         cookieMaintenanceRunner: @escaping @MainActor (EmbeddedBrowserSession) async -> Void = { browser in
             _ = await ChatGPTCookieMaintenanceDiagnostic.runAtStartupIfArmed(in: browser)
@@ -145,22 +173,33 @@ final class AppState {
         self.runtime = runtime
         self.permissionClient = permissionClient
         self.preferences = preferences
+        self.unreadCompletionStore = unreadCompletionStore
+        do { unreadCompletions = try unreadCompletionStore?.load() ?? [:] }
+        catch {
+            unreadCompletionStoreLoaded = false
+            unreadCompletionPersistenceFailed = true
+            Self.unreadLog.error("chatReadState operation=load result=failed")
+        }
         let maintenanceHome = URL(fileURLWithPath: CodexAppServerRuntime.Configuration.localQwen.codexHomePath, isDirectory: true)
         self.cookieMaintenanceOnlyLaunch = cookieMaintenanceOnlyLaunch
             ?? ChatGPTCookieMaintenanceDiagnostic.hasArm(codexHome: maintenanceHome)
         self.cookieMaintenanceRunner = cookieMaintenanceRunner
         self.websiteModelDiscovery = websiteModelDiscovery
+        self.websiteModeDiscovery = websiteModeDiscovery
         self.browserSession = browserSession ?? EmbeddedBrowserSession(defaults: preferences)
         let storedAccessMode = preferences.object(forKey: Self.accessModePreferenceKey) as? String
         accessMode = storedAccessMode.flatMap(AccessMode.init(rawValue:)) ?? .askEveryTime
+        let storedAPIProviders = APIProviderCatalog.load(from: preferences)
+        apiProviders = storedAPIProviders
         let storedModel = preferences.string(forKey: Self.defaultModelPreferenceKey)
         defaultModel = storedModel.flatMap { id in
+            guard !Self.isModelHiddenFromPicker(id, apiProviders: storedAPIProviders) else { return nil }
             // Saved website choices remain selected if an account/menu changes.
             // Invalid ones are visible and rejected, never replaced with Qwen.
-            id.hasPrefix("browser/") || id.hasPrefix("api/") ? id : LocalModelCatalog.option(for: id)?.id
+            return id.hasPrefix("browser/") || id.hasPrefix("api/") ? id : LocalModelCatalog.option(for: id)?.id
         } ?? WebsiteModelCatalog.freshProfileDefaultModelID
         websiteModelChoices = WebsiteModelCatalog.load(from: preferences)
-        apiProviders = APIProviderCatalog.load(from: preferences)
+        websiteModeChoices = WebsiteModeCatalog.load(from: preferences)
         automationPermissions = permissionClient.current()
         self.tasks = tasks
         selectedTaskID = tasks.first?.id
@@ -178,9 +217,15 @@ final class AppState {
                     try credentialMutation()
                 }
                 self.apiProviders = providers
+                if Self.isModelHiddenFromPicker(self.defaultModel, apiProviders: providers) {
+                    self.defaultModel = WebsiteModelCatalog.freshProfileDefaultModelID
+                }
             })
         self.browserSession.onHumanVerificationRecoveryCandidate = { [weak self] candidate in
             Task { @MainActor [weak self] in await self?.recoverWebsiteModels(candidate) }
+        }
+        self.browserSession.onProviderSignInRecoveryCandidate = { [weak self] candidate in
+            self?.requestProviderSignInRecovery(candidate)
         }
     }
 
@@ -195,6 +240,7 @@ final class AppState {
             let observed = websiteModelChoices.filter { $0.provider == provider && $0.isObservedChoice }.map { WebsiteModelCatalog.option(for: $0) }
             return provider == "chatgpt" ? observed : [option] + observed
         }
+        options += websiteModeChoices.map { WebsiteModelCatalog.option(for: $0, available: true) }
         options += APIProviderCatalog.options(for: apiProviders)
         for id in [defaultModel, selectedTask?.model].compactMap({ $0 })
             where id.hasPrefix("api/") && !options.contains(where: { $0.id == id }) {
@@ -208,6 +254,8 @@ final class AppState {
                 options.append(LocalModelOption(id: id, label: "ChatGPT / Choose a Chat preset",
                     detail: "Refresh website models after signing in, then choose a Chat power preset. The saved website default cannot send a prompt.",
                     highMemory: false, available: false))
+            } else if let mode = WebsiteModeChoice.parse(requestID: id) {
+                options.append(WebsiteModelCatalog.option(for: mode, available: false))
             } else if let choice = WebsiteModelCatalog.choice(for: id) {
                 guard !choice.isRetired else { continue }
                 options.append(WebsiteModelCatalog.option(for: choice, available: false))
@@ -217,7 +265,24 @@ final class AppState {
                     highMemory: false, available: false))
             }
         }
-        return options
+        return options.map { option in
+            guard Self.isModelHiddenFromPicker(option.id, apiProviders: apiProviders) else { return option }
+            var hidden = option
+            hidden.selectable = false
+            return hidden
+        }
+    }
+
+    /// Pause new Groq and Cerebras selections while saved tasks retain their model identity.
+    private static func isModelHiddenFromPicker(_ id: String, apiProviders: [APIProviderDefinition]) -> Bool {
+        if id == LocalModelCatalog.groqBrowserModelID || id.hasPrefix(LocalModelCatalog.groqBrowserModelID + "/") {
+            return true
+        }
+        guard let identity = APIProviderCatalog.identity(for: id) else { return false }
+        if let provider = apiProviders.first(where: { $0.id == identity.providerID }) {
+            return provider.isCerebrasInference
+        }
+        return identity.providerID == APIProviderDefinition.cerebras.id
     }
 
     private var canEditAPIProviders: Bool {
@@ -266,7 +331,7 @@ final class AppState {
 
     private var websitePrewarmingIsReady: Bool {
         didStartWebsiteModelDiscovery && !cookieMaintenanceOnlyLaunch && !isShuttingDown
-            && !websiteModelsRefreshing && runtime != nil && websiteModelDiscovery == nil
+            && !websiteModelsRefreshing && runtime != nil && websiteModelDiscovery == nil && websiteModeDiscovery == nil
     }
 
     /// A content-free composition hint can refresh an expired unused page.
@@ -295,16 +360,19 @@ final class AppState {
         else { embeddedModelTransport?.setChatGPTPrewarmingEnabled(false, preserveUnusedRoot: preserveUnusedRoot) }
     }
 
-    /// Keep missing-provider discovery, then revalidate only the selected
-    /// provider's cached menu. Other cached providers wait for selection demand.
-    /// Each provider has at most one automatic attempt per launch, while idle.
+    /// Keep missing-provider discovery, then revalidate the selected provider's
+    /// cached menu except Gemini. Cached Gemini choices wait for explicit
+    /// discovery or verified human recovery; inference still verifies its model.
+    /// Each provider gets one automatic attempt per launch, with one idle
+    /// retry if native work interrupts discovery that is still needed.
     func refreshWebsiteModelsIfNeeded() {
         guard !cookieMaintenanceOnlyLaunch, !didStartWebsiteModelDiscovery,
-              runtime != nil || websiteModelDiscovery != nil else { return }
+              runtime != nil || websiteModelDiscovery != nil || websiteModeDiscovery != nil else { return }
         didStartWebsiteModelDiscovery = true
         updateWebsitePrewarming()
-        let missing = WebsiteModelCatalog.providers.filter { provider in
+        let missing = WebsiteModelCatalog.discoveryProviders.filter { provider in
             !websiteModelChoices.contains { $0.provider == provider }
+                && !websiteModeChoices.contains { $0.provider == provider }
         }
         startupWebsiteModelProviders = missing.filter { !startupWebsiteModelAttemptedProviders.contains($0) }
         requestAutomaticWebsiteModelRefresh(for: selectedTask?.model ?? defaultModel)
@@ -314,10 +382,28 @@ final class AppState {
     private func requestAutomaticWebsiteModelRefresh(for modelID: String) {
         guard didStartWebsiteModelDiscovery, !cookieMaintenanceOnlyLaunch, !isShuttingDown,
               let provider = WebsiteModelCatalog.selection(for: modelID)?.provider,
+              WebsiteModelCatalog.discoveryProviders.contains(provider),
               !startupWebsiteModelAttemptedProviders.contains(provider),
               !startupWebsiteModelProviders.contains(provider) else { return }
+        // A cached Gemini menu needs no extra page just because the app starts,
+        // restores a chat, or changes selection. Keep those displayed choices
+        // until explicit discovery or human recovery refreshes them. Every
+        // inference still selects and verifies its model on its live owned page.
+        if provider == "gemini", websiteModelChoices.contains(where: { $0.provider == provider }) { return }
         startupWebsiteModelProviders.append(provider)
         scheduleStartupWebsiteModelRefresh()
+    }
+
+    private func requeueInterruptedWebsiteModelDiscovery(_ intent: WebsiteModelRefreshIntent) {
+        guard !intent.retryBlocked, intent.candidate == nil, intent.signInRecovery == nil, !isShuttingDown else { return }
+        let provider = intent.provider
+        let demanded = WebsiteModelCatalog.selection(for: selectedTask?.model ?? defaultModel)?.provider
+        let cached = websiteModelChoices.contains { $0.provider == provider }
+            || websiteModeChoices.contains { $0.provider == provider }
+        guard demanded == provider || !cached,
+              startupWebsiteModelInterruptedProviders.insert(provider).inserted else { return }
+        startupWebsiteModelAttemptedProviders.remove(provider)
+        if !startupWebsiteModelProviders.contains(provider) { startupWebsiteModelProviders.append(provider) }
     }
 
     private func scheduleStartupWebsiteModelRefresh() {
@@ -364,13 +450,47 @@ final class AppState {
     /// dropped, not queued for automatic retry after the native turn ends.
     var canRefreshWebsiteModels: Bool { !cookieMaintenanceOnlyLaunch && humanWebsiteRecoveryIsIdle }
 
+    var canConfigureKimiProfile: Bool { canRefreshWebsiteModels && !websiteModelsRefreshing }
+
+    private static let kimiModelSignInInstructions =
+        "Sign in on the Kimi sign-in tab, then choose Verify Kimi sign-in from Model sign-ins."
+
+    func openKimiModelSignIn() {
+        guard canConfigureKimiProfile else { return }
+        let previous = browserSession.kimiModelProfileID
+        do {
+            _ = try browserSession.openKimiModelSignIn()
+            if previous != browserSession.kimiModelProfileID || kimiModelSignInMessage == nil {
+                kimiModelSignInMessage = Self.kimiModelSignInInstructions
+            }
+        } catch {
+            kimiModelSignInMessage = error.localizedDescription
+        }
+    }
+
+    func useSharedKimiModelProfile() {
+        guard canConfigureKimiProfile else { return }
+        browserSession.useSharedKimiModelProfile()
+        kimiModelSignInMessage = nil
+    }
+
+    func verifyKimiModelSignIn() async {
+        guard canConfigureKimiProfile, let profile = browserSession.kimiModelProfileID else { return }
+        let checking = "Checking Kimi sign-in…"
+        kimiModelSignInMessage = checking
+        await refreshWebsiteModels(provider: "kimi")
+        if browserSession.kimiModelProfileID == profile, kimiModelSignInMessage == checking {
+            kimiModelSignInMessage = "Kimi sign-in verification was interrupted. Try again when Computa is idle."
+        }
+    }
+
     func refreshWebsiteModels() async {
         guard canRefreshWebsiteModels else { return }
-        await refreshWebsiteModels(providers: WebsiteModelCatalog.providers, retryBlocked: true)
+        await refreshWebsiteModels(providers: WebsiteModelCatalog.discoveryProviders, retryBlocked: true)
     }
 
     func refreshWebsiteModels(provider: String) async {
-        guard WebsiteModelCatalog.providers.contains(provider), canRefreshWebsiteModels else { return }
+        guard WebsiteModelCatalog.discoveryProviders.contains(provider), canRefreshWebsiteModels else { return }
         await refreshWebsiteModels(providers: [provider], retryBlocked: true)
     }
 
@@ -386,7 +506,7 @@ final class AppState {
     }
 
     private func recoverWebsiteModels(_ candidate: EmbeddedBrowserSession.HumanVerificationRecoveryCandidate) async {
-        guard didStartWebsiteModelDiscovery, runtime != nil || websiteModelDiscovery != nil,
+        guard didStartWebsiteModelDiscovery, runtime != nil || websiteModelDiscovery != nil || websiteModeDiscovery != nil,
               recoveryCandidateIsCurrent(candidate) else {
             browserSession.recordHumanVerificationRecovery(candidate, phase: .superseded,
                 reason: humanWebsiteRecoveryIsIdle ? .candidateRevoked : .taskActive)
@@ -395,11 +515,82 @@ final class AppState {
         await refreshWebsiteModels(intents: [.init(provider: candidate.provider, retryBlocked: true, candidate: candidate)])
     }
 
+    private func providerSignInRecoveryIsCurrent(_ recovery: ProviderSignInRecovery,
+                                                 afterDiscovery: Bool = false) -> Bool {
+        guard humanWebsiteRecoveryIsIdle,
+              browserSession.isProviderSignInRecoveryCandidateCurrent(recovery.candidate),
+              let transport = embeddedModelTransport else { return false }
+        return afterDiscovery ? transport.didClearSignInRecoveryGate(recovery.gate)
+            : transport.canRecoverSignInGate(recovery.gate)
+    }
+
+    private func requestProviderSignInRecovery(_ candidate: EmbeddedBrowserSession.ProviderSignInRecoveryCandidate) {
+        guard didStartWebsiteModelDiscovery, !cookieMaintenanceOnlyLaunch, !isShuttingDown,
+              runtime != nil || websiteModelDiscovery != nil || websiteModeDiscovery != nil,
+              browserSession.isProviderSignInRecoveryCandidateCurrent(candidate),
+              let gate = embeddedModelTransport?.signInRecoveryGate(provider: candidate.provider) else { return }
+        // One coalesced source survives a busy AppState. No timer or failed
+        // discovery can regenerate this navigation event.
+        pendingProviderSignInRecovery = ProviderSignInRecovery(candidate: candidate, gate: gate)
+        scheduleProviderSignInRecovery()
+    }
+
+    private func scheduleProviderSignInRecovery() {
+        guard let recovery = pendingProviderSignInRecovery else { return }
+        guard !isShuttingDown, browserSession.isProviderSignInRecoveryCandidateCurrent(recovery.candidate),
+              embeddedModelTransport?.isSignInRecoveryGateCurrent(recovery.gate) == true else {
+            pendingProviderSignInRecovery = nil
+            providerSignInRecoveryIdleObservation = nil
+            return
+        }
+        guard providerSignInRecoveryIdleObservation == nil else { return }
+        if !humanWebsiteRecoveryIsIdle || websiteModelsRefreshing {
+            let observation = UUID()
+            providerSignInRecoveryIdleObservation = observation
+            _ = withObservationTracking {
+                humanWebsiteRecoveryIsIdle && !websiteModelsRefreshing
+            } onChange: { [weak self] in
+                Task { @MainActor [weak self] in
+                    guard let self, self.providerSignInRecoveryIdleObservation == observation else { return }
+                    self.providerSignInRecoveryIdleObservation = nil
+                    self.scheduleProviderSignInRecovery()
+                }
+            }
+            return
+        }
+        pendingProviderSignInRecovery = nil
+        // Retained or uncertain owned sessions are not recovery authority.
+        guard providerSignInRecoveryIsCurrent(recovery) else { return }
+        Task { @MainActor [weak self] in
+            guard let self,
+                  self.browserSession.isProviderSignInRecoveryCandidateCurrent(recovery.candidate),
+                  self.embeddedModelTransport?.isSignInRecoveryGateCurrent(recovery.gate) == true else { return }
+            // No discovery has begun. Preserve an untouched event if activity
+            // starts at this actor hop; a failed discovery never requeues it.
+            if !self.humanWebsiteRecoveryIsIdle || self.websiteModelsRefreshing {
+                if self.pendingProviderSignInRecovery == nil { self.pendingProviderSignInRecovery = recovery }
+                self.scheduleProviderSignInRecovery()
+                return
+            }
+            guard self.providerSignInRecoveryIsCurrent(recovery) else { return }
+            await self.refreshWebsiteModels(intents: [.init(provider: recovery.candidate.provider,
+                retryBlocked: true, candidate: nil, signInRecovery: recovery)])
+        }
+    }
+
     private func refreshWebsiteModels(providers: [String], retryBlocked: Bool) async {
         await refreshWebsiteModels(intents: providers.map { .init(provider: $0, retryBlocked: retryBlocked, candidate: nil) })
     }
 
     private func enqueueWebsiteModelRefresh(_ intent: WebsiteModelRefreshIntent) {
+        if intent.signInRecovery != nil {
+            let alreadyRecovering = websiteModelRefreshCurrentIntent.map {
+                $0.provider == intent.provider && $0.retryBlocked
+            } == true || websiteModelRefreshIntents.contains {
+                $0.provider == intent.provider && $0.retryBlocked
+            }
+            if alreadyRecovering { return }
+        }
         // Only this provider's intent can bypass its saved gate. A manual
         // request remains queued behind an automatic probe that may be revoked.
         if let current = websiteModelRefreshCurrentIntent, current.provider == intent.provider, current.retryBlocked {
@@ -408,7 +599,7 @@ final class AppState {
                     reason: current.candidate == nil ? .manualRefresh : .recoveryInProgress)
                 return
             }
-            if !intent.retryBlocked || current.candidate == nil { return }
+            if !intent.retryBlocked || current.candidate == nil && current.signInRecovery == nil { return }
         }
         if let index = websiteModelRefreshIntents.firstIndex(where: { $0.provider == intent.provider }) {
             let previous = websiteModelRefreshIntents[index]
@@ -418,7 +609,7 @@ final class AppState {
                         reason: previous.candidate == nil ? .manualRefresh : .recoveryInProgress)
                     return
                 }
-                if !intent.retryBlocked || previous.candidate == nil { return }
+                if !intent.retryBlocked || previous.candidate == nil && previous.signInRecovery == nil { return }
             }
             guard intent.retryBlocked else { return }
             if let candidate = previous.candidate {
@@ -464,7 +655,17 @@ final class AppState {
                 defer { self.websiteModelRefreshCurrentIntent = nil }
                 let provider = intent.provider
                 let requiresIdle = intent.candidate == nil
-                guard !requiresIdle || self.canRefreshWebsiteModels else { continue }
+                if requiresIdle && !self.canRefreshWebsiteModels {
+                    if let recovery = intent.signInRecovery, self.pendingProviderSignInRecovery == nil,
+                       self.browserSession.isProviderSignInRecoveryCandidateCurrent(recovery.candidate),
+                       self.embeddedModelTransport?.isSignInRecoveryGateCurrent(recovery.gate) == true {
+                        self.pendingProviderSignInRecovery = recovery
+                        self.scheduleProviderSignInRecovery()
+                    }
+                    continue
+                }
+                if let recovery = intent.signInRecovery,
+                   !self.providerSignInRecoveryIsCurrent(recovery) { continue }
                 if let candidate = intent.candidate {
                     guard self.recoveryCandidateIsCurrent(candidate) else {
                         self.browserSession.recordHumanVerificationRecovery(candidate, phase: .superseded,
@@ -473,6 +674,7 @@ final class AppState {
                     }
                     self.browserSession.recordHumanVerificationRecovery(candidate, phase: .probing, reason: .healthyHumanDocument)
                 }
+                var interruptedByNativeWork = false
                 do {
                     // A real manual/recovery attempt also satisfies the launch
                     // budget, so a pending automatic probe cannot duplicate it.
@@ -481,23 +683,53 @@ final class AppState {
                     #if DEBUG
                     self.websiteModelRefreshObserverForTesting?(provider, intent.retryBlocked)
                     #endif
-                    let choices: [WebsiteModelChoice]
-                    if let discovery = self.websiteModelDiscovery { choices = try await discovery(provider) }
-                    else {
-                        var validator: (@MainActor () -> Bool)?
-                        if let candidate = intent.candidate {
-                            validator = { [weak self] in self?.recoveryCandidateIsCurrent(candidate) == true }
-                        } else if requiresIdle {
-                            // This existing validator runs before page creation
-                            // and immediately before any saved gate is cleared.
-                            validator = { [weak self] in self?.canRefreshWebsiteModels == true }
+                    var validator: (@MainActor () -> Bool)?
+                    if let recovery = intent.signInRecovery {
+                        validator = { [weak self] in self?.providerSignInRecoveryIsCurrent(recovery) == true }
+                    } else if let candidate = intent.candidate {
+                        validator = { [weak self] in self?.recoveryCandidateIsCurrent(candidate) == true }
+                    } else if requiresIdle {
+                        // The shared idle/identity check runs before creation
+                        // and immediately before a saved provider gate clears.
+                        validator = { [weak self] in
+                            guard self?.canRefreshWebsiteModels == true else {
+                                interruptedByNativeWork = true
+                                return false
+                            }
+                            return true
                         }
-                        choices = try await self.websiteTransport().discoverModels(provider: provider,
-                            retryBlocked: intent.retryBlocked, recoveryCandidateIsCurrent: validator)
+                    }
+                    let choices: [WebsiteModelChoice]
+                    let modes: [WebsiteModeChoice]
+                    if provider == "deepseek" {
+                        choices = []
+                        if let discovery = self.websiteModeDiscovery { modes = try await discovery(provider) }
+                        else if self.websiteModelDiscovery != nil {
+                            // A synthetic named-model injection cannot authorize
+                            // an unrelated live website-mode discovery.
+                            throw WebsiteModelCatalog.Failure.invalidChoices
+                        } else {
+                            modes = try await self.websiteTransport().discoverModes(provider: provider,
+                                retryBlocked: intent.retryBlocked, recoveryCandidateIsCurrent: validator)
+                        }
+                    } else {
+                        modes = []
+                        if let discovery = self.websiteModelDiscovery { choices = try await discovery(provider) }
+                        else if self.websiteModeDiscovery != nil {
+                            throw WebsiteModelCatalog.Failure.invalidChoices
+                        } else {
+                            choices = try await self.websiteTransport().discoverModels(provider: provider,
+                                retryBlocked: intent.retryBlocked, recoveryCandidateIsCurrent: validator)
+                        }
                     }
                     guard !Task.isCancelled, !self.isShuttingDown,
                           self.websiteModelRefreshGeneration == generation else { break }
-                    guard !requiresIdle || self.canRefreshWebsiteModels else { continue }
+                    guard !requiresIdle || self.canRefreshWebsiteModels else {
+                        self.requeueInterruptedWebsiteModelDiscovery(intent)
+                        continue
+                    }
+                    if let recovery = intent.signInRecovery,
+                       !self.providerSignInRecoveryIsCurrent(recovery, afterDiscovery: true) { continue }
                     // Injection is not checkpoint-clearance authority. Production
                     // discovery clears only behind its cleanup/identity validator.
                     if let candidate = intent.candidate,
@@ -505,12 +737,26 @@ final class AppState {
                         self.browserSession.recordHumanVerificationRecovery(candidate, phase: .superseded, reason: .candidateRevoked)
                         continue
                     }
-                    try WebsiteModelCatalog.validateObserved(choices, provider: provider)
+                    if provider == "deepseek" {
+                        try WebsiteModeCatalog.validateObserved(modes, provider: provider)
+                        self.websiteModeChoices = modes
+                        WebsiteModeCatalog.save(modes, to: self.preferences)
+                    } else {
+                        try WebsiteModelCatalog.validateObserved(choices, provider: provider)
+                        self.websiteModelChoices.removeAll { $0.provider == provider }
+                        self.websiteModelChoices.append(contentsOf: choices)
+                        WebsiteModelCatalog.save(self.websiteModelChoices, to: self.preferences)
+                    }
+                    if provider == "kimi", self.browserSession.kimiModelProfileID != nil {
+                        self.kimiModelSignInMessage = "Kimi sign-in verified for this profile."
+                    }
                     errors.removeAll { $0.hasPrefix(WebsiteModelCatalog.providerLabel(provider) + ": ") }
-                    self.websiteModelChoices.removeAll { $0.provider == provider }
-                    self.websiteModelChoices.append(contentsOf: choices)
-                    WebsiteModelCatalog.save(self.websiteModelChoices, to: self.preferences)
                     self.retireWebsiteModelSelections()
+                    if intent.signInRecovery != nil, self.canRefreshWebsiteModels {
+                        self.websiteModelRefreshIntents.removeAll {
+                            $0.provider == provider && $0.retryBlocked && $0.candidate == nil && $0.signInRecovery == nil
+                        }
+                    }
                     if let candidate = intent.candidate {
                         self.browserSession.recordHumanVerificationRecovery(candidate, phase: .verified, reason: .healthyHumanDocument)
                         // A verified recovery can satisfy an overlapping manual
@@ -524,6 +770,9 @@ final class AppState {
                         }
                     }
                 } catch is CancellationError {
+                    if !Task.isCancelled, requiresIdle, interruptedByNativeWork || !self.canRefreshWebsiteModels {
+                        self.requeueInterruptedWebsiteModelDiscovery(intent)
+                    }
                     if let candidate = intent.candidate {
                         self.browserSession.recordHumanVerificationRecovery(candidate,
                             phase: Task.isCancelled ? .cancelled : .superseded,
@@ -532,11 +781,18 @@ final class AppState {
                     if Task.isCancelled { break }
                 } catch {
                     guard !self.isShuttingDown, self.websiteModelRefreshGeneration == generation else { break }
+                    var message = error.localizedDescription
+                    if provider == "kimi", self.browserSession.kimiModelProfileID != nil {
+                        if (error as? EmbeddedWebModelTransport.Failure) == .signInRequired {
+                            message = Self.kimiModelSignInInstructions
+                        }
+                        self.kimiModelSignInMessage = message
+                    }
                     if let candidate = intent.candidate {
                         self.browserSession.recordHumanVerificationRecovery(candidate, phase: .blocked,
                             reason: self.humanVerificationRecoveryFailureReason(error))
                     }
-                    errors.append("\(WebsiteModelCatalog.providerLabel(provider)): \(error.localizedDescription)")
+                    errors.append("\(WebsiteModelCatalog.providerLabel(provider)): \(message)")
                 }
             }
             guard self.websiteModelRefreshGeneration == generation else { return }
@@ -578,6 +834,7 @@ final class AppState {
     func selectTask(_ id: AgentTask.ID?) {
         taskSelectionRevision &+= 1
         selectedTaskID = id
+        if let id { markTaskCompletionRead(taskID: id) }
         requestAutomaticWebsiteModelRefresh(for: selectedTask?.model ?? defaultModel)
         updateWebsitePrewarming()
         selectedEntryID = selectedTask?.entries.last?.id
@@ -585,6 +842,62 @@ final class AppState {
         reviewRefresh?.cancel()
         review = nil
         if isReviewPresented, let id { requestReviewRefresh(taskID: id) }
+    }
+
+    func unreadCompletionID(for taskID: AgentTask.ID) -> String? {
+        guard let task = tasks.first(where: { $0.id == taskID }),
+              let threadID = ChatUnreadCompletionStore.identity(task.runtimeThreadID),
+              let record = unreadCompletions[threadID], record.hasUnreadCompletion else { return nil }
+        return record.completionID
+    }
+
+    func hasUnreadCompletion(for taskID: AgentTask.ID) -> Bool {
+        unreadCompletionID(for: taskID) != nil
+    }
+
+    /// The bridge additionally proves native window visibility/focus. Exact
+    /// completion identity prevents an old rendered snapshot reading a new turn.
+    @discardableResult
+    func acknowledgeTaskCompletion(taskID: AgentTask.ID, completionID: String) -> Bool {
+        guard selectedTaskID == taskID, !isBusy(taskID: taskID),
+              tasks.first(where: { $0.id == taskID })?.status == .completed,
+              unreadCompletionID(for: taskID) == completionID else { return false }
+        return markTaskCompletionRead(taskID: taskID)
+    }
+
+    @discardableResult
+    private func markTaskCompletionRead(taskID: AgentTask.ID) -> Bool {
+        guard let task = tasks.first(where: { $0.id == taskID }),
+              let threadID = ChatUnreadCompletionStore.identity(task.runtimeThreadID),
+              var record = unreadCompletions[threadID], record.hasUnreadCompletion else { return false }
+        record.hasUnreadCompletion = false
+        var next = unreadCompletions; next[threadID] = record
+        // A failed write cannot pretend that a durable unread marker was read.
+        guard persistUnreadCompletions(next) else { return false }
+        unreadCompletions = next
+        return true
+    }
+
+    private func persistUnreadCompletions(_ records: [String: ChatUnreadCompletionStore.Record]) -> Bool {
+        do {
+            guard unreadCompletionStoreLoaded else { throw ChatUnreadCompletionStore.Failure.invalid }
+            try unreadCompletionStore?.save(records)
+            unreadCompletionPersistenceFailed = false
+            return true
+        } catch {
+            unreadCompletionPersistenceFailed = true
+            Self.unreadLog.error("chatReadState operation=save result=failed")
+            return false
+        }
+    }
+
+    private func bindTaskThread(taskID: AgentTask.ID, threadID: String) -> Bool {
+        guard let stable = ChatUnreadCompletionStore.identity(threadID),
+              let index = tasks.firstIndex(where: { $0.id == taskID }),
+              tasks[index].runtimeThreadID == nil
+                || ChatUnreadCompletionStore.identity(tasks[index].runtimeThreadID) == stable else { return false }
+        tasks[index].runtimeThreadID = stable
+        return true
     }
 
     /// Remember the native user's choice across launches. Missing or invalid
@@ -781,7 +1094,8 @@ final class AppState {
 
     @discardableResult
     func setDefaultModel(_ modelID: String) -> Bool {
-        guard let option = modelOptions.first(where: { $0.id == modelID }), option.available != false else { return false }
+        guard let option = modelOptions.first(where: { $0.id == modelID }),
+              option.available != false, option.selectable != false else { return false }
         defaultModel = modelID
         preferences.set(modelID, forKey: Self.defaultModelPreferenceKey)
         requestAutomaticWebsiteModelRefresh(for: modelID)
@@ -792,6 +1106,7 @@ final class AppState {
     @discardableResult
     func setTaskModel(_ modelID: String, taskID: AgentTask.ID) -> Bool {
         guard let option = modelOptions.first(where: { $0.id == modelID }), option.available != false,
+              option.selectable != false,
               let index = tasks.firstIndex(where: { $0.id == taskID }),
               canChangeModel(for: taskID)
         else { return false }
@@ -1248,9 +1563,31 @@ final class AppState {
         }
     }
 
-    /// Starts listening to the injected runtime. With no runtime installed the
-    /// sample store remains fully local and this method is a no-op.
+    /// Window appearance starts one AppState-owned consumer. Its lifetime is
+    /// independent of any SwiftUI view task and ends only at runtime shutdown.
+    func startRuntimeIfNeeded() {
+        _ = ensureRuntimeEventConsumer()
+    }
+
+    /// Awaiting this handle preserves deterministic finite-stream test/startup
+    /// callers. Cancelling a caller never cancels the owned runtime consumer.
     func startRuntime() async {
+        guard let consumer = ensureRuntimeEventConsumer() else { return }
+        await consumer.value
+    }
+
+    private func ensureRuntimeEventConsumer() -> Task<Void, Never>? {
+        guard !isShuttingDown, runtime != nil else { return nil }
+        if let runtimeEventConsumer { return runtimeEventConsumer }
+        let consumer = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.consumeRuntimeEvents()
+        }
+        runtimeEventConsumer = consumer
+        return consumer
+    }
+
+    private func consumeRuntimeEvents() async {
         guard !isShuttingDown, let runtime else { return }
         let tasksBeforeLoading = tasks
         let selectionRevisionBeforeLoading = taskSelectionRevision
@@ -1282,17 +1619,29 @@ final class AppState {
                 apply(event)
             }
         } catch is CancellationError {
+            // A backend can reject startup with cancellation independently of
+            // our owner. Only a later explicit appearance/start may retry it.
+            if !Task.isCancelled, !isShuttingDown { runtimeEventConsumer = nil }
             return
         } catch {
             guard !isShuttingDown else { return }
+            // Configuration/history failed before subscribing. Release this
+            // attempt so a later explicit start can retry the still-open stream.
+            runtimeEventConsumer = nil
             apply(.connectionChanged(.failed(message: error.localizedDescription)))
         }
+        // An exhausted event stream cannot be recreated by iterating it again.
+        // Retain that completed owner; production finishes it only at shutdown.
     }
 
     func shutdownRuntime() async -> RuntimeShutdownReport {
         if let runtimeShutdown { return await runtimeShutdown.value }
         isShuttingDown = true
+        let eventConsumer = runtimeEventConsumer
+        eventConsumer?.cancel()
         startupWebsiteModelIdleObservation = nil
+        pendingProviderSignInRecovery = nil
+        providerSignInRecoveryIdleObservation = nil
         startupWebsiteModelProviders.removeAll()
         startupWebsiteModelRefreshTask?.cancel()
         browserSession.observeGeminiCookieShutdownRequested()
@@ -1318,11 +1667,13 @@ final class AppState {
         let task = Task {
             await websiteRefresh?.value
             let report = await runtime?.shutdown() ?? RuntimeShutdownReport(issues: [])
+            await eventConsumer?.value
             browserSession.shutdown()
             return report
         }
         runtimeShutdown = task
         let report = await task.value
+        runtimeEventConsumer = nil
         websiteModelRefreshTask = nil
         websiteModelRefreshIntents = []
         websiteModelRefreshCurrentIntent = nil
@@ -1377,7 +1728,14 @@ final class AppState {
             $0.timestamp == $1.timestamp ? $0.attemptID < $1.attemptID : $0.timestamp < $1.timestamp
         }
         discardAllMessageDrafts(except: retainedTaskIDs)
-        tasks = newTasks
+        let priorThreads = Dictionary(uniqueKeysWithValues: tasks.compactMap { task in
+            task.runtimeThreadID.map { (task.id, $0) }
+        })
+        tasks = newTasks.map { task in
+            var restored = task
+            if restored.runtimeThreadID == nil { restored.runtimeThreadID = priorThreads[task.id] }
+            return restored
+        }
         selectedTaskID = preserveEmptySelection || newTasks.contains(where: { $0.id == priorSelection })
             ? priorSelection
             : newTasks.first?.id
@@ -1420,11 +1778,28 @@ final class AppState {
         case .tasksSnapshot(let snapshot):
             replaceTasks(with: snapshot)
 
+        case .taskThreadBound(let taskID, let threadID):
+            _ = bindTaskThread(taskID: taskID, threadID: threadID)
+
+        case .taskCompletionObserved(let taskID, let threadID, let turnID):
+            guard let stable = ChatUnreadCompletionStore.identity(threadID),
+                  let completionID = ChatUnreadCompletionStore.identity(turnID),
+                  bindTaskThread(taskID: taskID, threadID: stable),
+                  unreadCompletions[stable]?.completionID != completionID else { return }
+            var next = unreadCompletions
+            next[stable] = .init(completionID: completionID, hasUnreadCompletion: true)
+            // Completion must still be visible if local persistence fails. Do
+            // not change task status, discard the old file, or block completion.
+            _ = persistUnreadCompletions(next)
+            unreadCompletions = next
+
         case .taskUpserted(let task):
             discardAssistantDrafts(taskID: task.id)
             discardReasoningDrafts(taskID: task.id)
             if let index = tasks.firstIndex(where: { $0.id == task.id }) {
-                tasks[index] = task
+                var replacement = task
+                if replacement.runtimeThreadID == nil { replacement.runtimeThreadID = tasks[index].runtimeThreadID }
+                tasks[index] = replacement
             } else {
                 tasks.insert(task, at: 0)
             }
@@ -1582,6 +1957,7 @@ final class AppState {
             discardReasoningDrafts(taskID: taskID)
 
         case .taskStatusChanged(let taskID, let status):
+            if status == .running { markTaskCompletionRead(taskID: taskID) }
             if status == .running,
                case .failed? = compactionStateByTask[taskID] {
                 compactionStateByTask.removeValue(forKey: taskID)
@@ -1822,7 +2198,9 @@ final class AppState {
                 let cancelled = error is CancellationError
                 tasks[currentIndex].status = cancelled ? .waiting : .failed
                 let rejectedBeforeDispatch: Bool
-                if case .embeddedRequired? = error as? WebModelServer.Failure {
+                if error is CodexAppServerRuntime.PromptNotDispatched {
+                    rejectedBeforeDispatch = true
+                } else if case .embeddedRequired? = error as? WebModelServer.Failure {
                     rejectedBeforeDispatch = true
                 } else if case .invalidModelID? = error as? WebsiteModelCatalog.Failure {
                     rejectedBeforeDispatch = true

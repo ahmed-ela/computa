@@ -12,7 +12,7 @@ const tool = (id: string, status = 'Succeeded', changes: Partial<EntrySnapshot> 
 const task = (entries: EntrySnapshot[], changes: Partial<TaskSnapshot> = {}): TaskSnapshot => ({
   id: 'task-one', title: 'Test task', summary: '', status: 'Running', statusTone: 'blue', updatedAt: 100,
   workspace: '', model: 'test-model', modelSelectable: true, entries,
-  queuedPrompts: [], queuePaused: false, canSteer: true, isBusy: true, ...changes,
+  queuedPrompts: [], queuePaused: false, canSteer: true, isBusy: true, hasUnreadCompletion: false, ...changes,
 });
 const activity = (rows: ActivityRow[]): ActivityGroup[] => rows.flatMap((row) => row.kind === 'activity' ? [row.group] : []);
 const outside = (rows: ActivityRow[]) => rows.filter((row): row is Extract<ActivityRow, { kind: 'entry' }> => row.kind === 'entry');

@@ -1,0 +1,2996 @@
+{
+  "schemaVersion": 1,
+  "reference": "tokenizers 0.22.1; Qwen3.8-27B pinned tokenizer; ordinary text",
+  "rows": [
+    {
+      "text": "",
+      "count": 0,
+      "nfc": ""
+    },
+    {
+      "text": "hi",
+      "count": 1,
+      "nfc": "hi"
+    },
+    {
+      "text": "Hello world!",
+      "count": 3,
+      "nfc": "Hello world!"
+    },
+    {
+      "text": "1–4 unique inventory names",
+      "count": 6,
+      "nfc": "1–4 unique inventory names"
+    },
+    {
+      "text": "é é Å Å",
+      "count": 4,
+      "nfc": "é é Å Å"
+    },
+    {
+      "text": "العربية 中文 日本語 हिन्दी",
+      "count": 9,
+      "nfc": "العربية 中文 日本語 हिन्दी"
+    },
+    {
+      "text": "👩🏽‍💻 🧭 🇺🇸",
+      "count": 19,
+      "nfc": "👩🏽‍💻 🧭 🇺🇸"
+    },
+    {
+      "text": "<|im_start|>user\nhi<|im_end|>",
+      "count": 15,
+      "nfc": "<|im_start|>user\nhi<|im_end|>"
+    },
+    {
+      "text": "\r\n\n\t  ",
+      "count": 2,
+      "nfc": "\r\n\n\t  "
+    },
+    {
+      "text": "'s 'S 'ſ 't 'RE 've 'll 'd",
+      "count": 16,
+      "nfc": "'s 'S 'ſ 't 'RE 've 'll 'd"
+    },
+    {
+      "text": "ä́bཱི",
+      "count": 6,
+      "nfc": "ä́bཱི"
+    },
+    {
+      "text": "\u0000\u0001",
+      "count": 5,
+      "nfc": "\u0000\u0001"
+    },
+    {
+      "text": "123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890",
+      "count": 1500,
+      "nfc": "123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890"
+    },
+    {
+      "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "count": 512,
+      "nfc": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    {
+      "text": "                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                ",
+      "count": 64,
+      "nfc": "                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                "
+    },
+    {
+      "text": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n",
+      "count": 128,
+      "nfc": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+    },
+    {
+      "text": "́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́",
+      "count": 500,
+      "nfc": "́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́"
+    },
+    {
+      "text": "c",
+      "count": 1,
+      "nfc": "c"
+    },
+    {
+      "text": "\tb[1\tZXc",
+      "count": 6,
+      "nfc": "\tb[1\tZXc"
+    },
+    {
+      "text": "]ا中ſXſ\nة中b{1😀ع́",
+      "count": 17,
+      "nfc": "]ا中ſXſ\nة中b{1😀ع́"
+    },
+    {
+      "text": "ب2]é:ŹZZbYيب中ر😀]ب\n ي́",
+      "count": 19,
+      "nfc": "ب2]é:ŹZZbYيب中ر😀]ب\n ي́"
+    },
+    {
+      "text": "bبيبb\"Y\\😀اb]\taاX中ر文ب ſلé\nببة文",
+      "count": 25,
+      "nfc": "bبيبb\"Y\\😀اb]\taاX中ر文ب ſلé\nببة文"
+    },
+    {
+      "text": "\n1\"اXةa 😀ة\"éة[😀Yع😀\t1😀\\]\\́\nبةX3XX Xلع",
+      "count": 30,
+      "nfc": "\n1\"اXةa 😀ة\"éة[😀Yع😀\t1😀\\]\\́\nبةX3XX Xلع"
+    },
+    {
+      "text": "[عر1[\t\\Y}\néſاXيباéZ }عاا33中1文{Y\\Xع1é[ع文\t\"ي ",
+      "count": 40,
+      "nfc": "[عر1[\t\\Y}\néſاXيباéZ }عاا33中1文{Y\\Xع1é[ع文\t\"ي "
+    },
+    {
+      "text": "[bZcſ2ر2ةY中b文Z]ſZ :中\tſ1文 رé中ة[}😀 \"ſYZćXع[Xbب}\nY2ر",
+      "count": 47,
+      "nfc": "[bZcſ2ر2ةY中b文Z]ſZ :中\tſ1文 رé中ة[}😀 \"ſYZćXع[Xbب}\nY2ر"
+    },
+    {
+      "text": "文 يععبةb\tبي😀Z文中ي文1b}[3}b😀1éل[ب{]Zي:éY}ب\\3 é1\"ر3ي}يÝ中]\\\\3",
+      "count": 46,
+      "nfc": "文 يععبةb\tبي😀Z文中ي文1b}[3}b😀1éل[ب{]Zي:éY}ب\\3 é1\"ر3ي}يÝ中]\\\\3"
+    },
+    {
+      "text": "😀ي]éاé2cX中文a]3لر\tYZſ́ }ي文文Z ́1ع\"1}ة{2لةYX́}{ع2́ſا3اſ1é{中cب\nرر😀2\"",
+      "count": 62,
+      "nfc": "😀ي]éاé2cX中文a]3لر\tYZſ́ }ي文文Z ́1ع\"1}ة{2لةYX́}{ع2́ſا3اſ1é{中cب\nرر😀2\""
+    },
+    {
+      "text": "ع}\n:{Yéſ}b\\]Zé}X[[c]文]ا}\"3{文ſbير:XةZc😀文XcYة文ca:́文ب\"\n{{1\\[}3é}ل 文ſé\ncé\"文",
+      "count": 65,
+      "nfc": "ع}\n:{Yéſ}b\\]Zé}X[[c]文]ا}\"3{文ſbير:XةZc😀文XcYة文ca:́文ب\"\n{{1\\[}3é}ل 文ſé\ncé\"文"
+    },
+    {
+      "text": "a ل\n2:中ةي 文{Y{[X[c😀::2́b }}😀3c{\t{ZZ😀:cc{́cةي\t[]bc:3中😀ſ\tX]3́:رcبcb:للZب\"32} ر[:",
+      "count": 65,
+      "nfc": "a ل\n2:中ةي 文{Y{[X[c😀::2́b }}😀3c{\t{ZZ😀:cc{́cةي\t[]bc:3中😀ſ\tX]3́:رcبcb:للZب\"32} ر[:"
+    },
+    {
+      "text": "ييb2ي[ةر}ſXaة\n文c]Ya1中Y]2:文:ب\"1ععل3́X\nعbر́2ſ文2́323ſ\t\"\"[ا1cb}ي中را中\" 😀1\t]{{]ررةſc\"}1:3\"ي",
+      "count": 79,
+      "nfc": "ييb2ي[ةر}ſXaة\n文c]Ya1中Y]2:文:ب\"1ععل3́X\nعbر́2ſ文2́323ſ\t\"\"[ا1cb}ي中را中\" 😀1\t]{{]ررةſc\"}1:3\"ي"
+    },
+    {
+      "text": "cbلſ{ſY]bا\\😀ر}}bبé ::Ycة\ń]ة3اع\nل\ńاéZY\\ſb:ة[\tة́cعيYſ:3:\nة́中Z1اbcé\\عةcا文:]a😀Z2中]1ةي\\[ب😀X}Z}\n",
+      "count": 85,
+      "nfc": "cbلſ{ſY]bا\\😀ر}}bبé ::Ycة\ń]ة3اع\nل\ńاéZY\\ſb:ة[\tة́cعيYſ:3:\nة́中Z1اbcé\\عةcا文:]a😀Z2中]1ةي\\[ب😀X}Z}\n"
+    },
+    {
+      "text": "{يع1بع \n\"文文ا文\"a{Z中ab\\c文́文ا😀3]cſ}́[3ارر\"\nXY 3ع] [\\{ل́رYſ中文😀 ب1\\ع\tc\n{\t1中́عيب{:ſ]X😀b😀ſ中\\X2 \\ſ1ZYéيل[31",
+      "count": 87,
+      "nfc": "{يع1بع \n\"文文ا文\"a{Z中ab\\c文́文ا😀3]cſ}́[3ارر\"\nXY 3ع] [\\{ل́رYſ中文😀 ب1\\ع\tc\n{\t1中́عيب{:ſ]X😀b😀ſ中\\X2 \\ſ1ZYéيل[31"
+    },
+    {
+      "text": "\nbب1رب文ة文بةب\\ةل}c文a{3{b\\:3عبéع\nc中\tر[ر\n中中ر\t:\"ل3Z\"b中3Z\nbcعcÝa文]]{文é\n\ńſر2\"中\téيرع文ا[béة ب文ع中\t\n文X1ية 😀ب3}ي\nbY",
+      "count": 92,
+      "nfc": "\nbب1رب文ة文بةب\\ةل}c文a{3{b\\:3عبéع\nc中\tر[ر\n中中ر\t:\"ل3Z\"b中3Z\nbcعcÝa文]]{文é\n\ńſر2\"中\téيرع文ا[béة ب文ع中\t\n文X1ية 😀ب3}ي\nbY"
+    },
+    {
+      "text": "a]ة\t]]] \\Yر[عة] }{ةX2\n:é3Y😀ć中\n\nةيZcعل😀[1ccب{́ي]يcع\n{Xرر\"b{ا}\tبعبي文文cي[ ا\tééſة3{{😀中ع}ية}aة]éعرſéé][ة1ع}ةéc ة[}رZع",
+      "count": 99,
+      "nfc": "a]ة\t]]] \\Yر[عة] }{ةX2\n:é3Y😀ć中\n\nةيZcعل😀[1ccب{́ي]يcع\n{Xرر\"b{ا}\tبعبي文文cي[ ا\tééſة3{{😀中ع}ية}aة]éعرſéé][ة1ع}ةéc ة[}رZع"
+    },
+    {
+      "text": "\"1عرةbbع3😀\"😀{ يب1}\"32é\"\nعé\nbaa3يY1中\"Xc😀]اſ\nلل}[\tYع 文لا\\\tا\nع😀2😀يZع文éب:é]\t:😀\"😀:ر{3 \nY\\3c3\n😀X\nة😀éةعbXſZY😀ع:ي[ ́لac2[ر}́́́c ",
+      "count": 109,
+      "nfc": "\"1عرةbbع3😀\"😀{ يب1}\"32é\"\nعé\nbaa3يY1中\"Xc😀]اſ\nلل}[\tYع 文لا\\\tا\nع😀2😀يZع文éب:é]\t:😀\"😀:ر{3 \nY\\3c3\n😀X\nة😀éةعbXſZY😀ع:ي[ ́لac2[ر}́́́c "
+    },
+    {
+      "text": "{\\اb1ZZع{ةبلc[aa文éYaſ\t\\ ر1بي中X2Y]رY][Z ب213{ا\nXc\nſاا:\\{\t{baX32é31b{\\]Z中3ل::aſ\té\taل]}Z😀X]ب文]\tع}3\n\tc[}cع\tاb中Z中:😀a:3Xيaا\\é[c:بZ\nſY",
+      "count": 114,
+      "nfc": "{\\اb1ZZع{ةبلc[aa文éYaſ\t\\ ر1بي中X2Y]رY][Z ب213{ا\nXc\nſاا:\\{\t{baX32é31b{\\]Z中3ل::aſ\té\taل]}Z😀X]ب文]\tع}3\n\tc[}cع\tاb中Z中:😀a:3Xيaا\\é[c:بZ\nſY"
+    },
+    {
+      "text": "2Z3文bبي文éا\"ع}{😀Yة1ع\\ſعb́YYX{3Y\t3{aZcبعبر3}:Yc中 1{3b3\"ب}ل1文文يYŹſZb\n文1ع}文عل\\اة{\":لXباbY[b2}aةbةX\tZ\n3ي[اſ文]ſb😀é}Y]😀يع]2لXX1:b中\nاع\"{c\nع1c",
+      "count": 121,
+      "nfc": "2Z3文bبي文éا\"ع}{😀Yة1ع\\ſعb́YYX{3Y\t3{aZcبعبر3}:Yc中 1{3b3\"ب}ل1文文يYŹſZb\n文1ع}文عل\\اة{\":لXباbY[b2}aةbةX\tZ\n3ي[اſ文]ſb😀é}Y]😀يع]2لXX1:b中\nاع\"{c\nع1c"
+    },
+    {
+      "text": ":X]1\n\tب\n\\2{2中ي 2Z3ةc]😀\t中[بaب́}2X文YZaZ:Y\tب{\"b\nعع{ب2ل{Yſ😀[2\"\"c中ةZXبZ]ا{文ةرbة}}}:ا\t}ة\\عYاا文文\nي\n]́\"😀\nر😀😀}}32ba文Yſ\"Xبةي é3}aاع́中文中X\\文\nb文中ا́]Yéع1{{",
+      "count": 128,
+      "nfc": ":X]1\n\tب\n\\2{2中ي 2Z3ةc]😀\t中[بaب́}2X文YZaZ:Y\tب{\"b\nعع{ب2ل{Yſ😀[2\"\"c中ةZXبZ]ا{文ةرbة}}}:ا\t}ة\\عYاا文文\nي\n]́\"😀\nر😀😀}}32ba文Yſ\"Xبةي é3}aاع́中文中X\\文\nb文中ا́]Yéع1{{"
+    },
+    {
+      "text": "1]中3ب]文[文\tل\\ب文文 b😀ة3\t2بر{\nbcX́ſ\tcé3:Yاbرa\n😀YZة]́ةX{aZc3 ب2{1ة\t́3\t a:\\يبيb́ع中\nXſa\"ZعX1Xلاع]\"Zل\n:ل文:1Z3\ńل:[\"ZرلYſبZ😀ة3ي1لا́[}{رب[́ي3 عي\t\\[]ſY2\n😀1ر[[中",
+      "count": 132,
+      "nfc": "1]中3ب]文[文\tل\\ب文文 b😀ة3\t2بر{\nbcX́ſ\tcé3:Yاbرa\n😀YZة]́ةX{aZc3 ب2{1ة\t́3\t a:\\يبيb́ع中\nXſa\"ZعX1Xلاع]\"Zل\n:ل文:1Z3\ńل:[\"ZرلYſبZ😀ة3ي1لا́[}{رب[́ي3 عي\t\\[]ſY2\n😀1ر[[中"
+    },
+    {
+      "text": "2é:ي😀ſ1Xلل\\ \\文}3يſaéXZ:عع[文ع:\n\\YاZſcſ1 [لc[]a:\n[1XXل\\\nXé] \\33عرaر:3a2يb{][\t1ةبaXةé😀ſر}[😀:ر ب文{cع}ر中رaX́a3́\tة3 ſ[ſ\t\nc文]2]́中 c[ {Xb3\"é文ل:cبا\"لa]ا\\ربbا中Y]aع中 ",
+      "count": 145,
+      "nfc": "2é:ي😀ſ1Xلل\\ \\文}3يſaéXZ:عع[文ع:\n\\YاZſcſ1 [لc[]a:\n[1XXل\\\nXé] \\33عرaر:3a2يb{][\t1ةبaXةé😀ſر}[😀:ر ب文{cع}ر中رaX́a3́\tة3 ſ[ſ\t\nc文]2]́中 c[ {Xb3\"é文ل:cبا\"لa]ا\\ربbا中Y]aع中 "
+    },
+    {
+      "text": "3aſ中bſéةرa{}12ſ:\n😀文3文ة1中:c}]:c文ي:文1\\Y2́اX:2ا ةbYaةaي}2é[Z\tYا}😀a  }Y\n\"😀Z{2\t{ عéZZ:ة 2中]ع中{́cة[ل2}́ a1文\\\"é1éب}ل\n\n😀ا\\\n\"́1Xةا\"\nيلbc2aaيعa\nي\t́}}Z23{\"X\"{\"]ل{b\\اعا中عé😀ي\n",
+      "count": 144,
+      "nfc": "3aſ中bſéةرa{}12ſ:\n😀文3文ة1中:c}]:c文ي:文1\\Y2́اX:2ا ةbYaةaي}2é[Z\tYا}😀a  }Y\n\"😀Z{2\t{ عéZZ:ة 2中]ع中{́cة[ل2}́ a1文\\\"é1éب}ل\n\n😀ا\\\n\"́1Xةا\"\nيلbc2aaيعa\nي\t́}}Z23{\"X\"{\"]ل{b\\اعا中عé😀ي\n"
+    },
+    {
+      "text": "\\:1ة\"ع]Xaا\\رÝ\"é]YZ文éé:[文1é\\ب́ي文ſ\n\"中XعX} \nZبſ3[عaaاي3ي 1\t\\ة\"\n:Zبة[ع\nY 3ي2ع\\\"\"{ةا😀ſة}cb文عé3X😀{لXعي2}b ل2😀éةعا 3}cŹ ]\"]ſ[中\nb{{:Xراc文ا\nي😀Zا2]文للſ文\n\\a\t}\nب:bX文{بلل\n中ب\\\\عرار😀",
+      "count": 149,
+      "nfc": "\\:1ة\"ع]Xaا\\رÝ\"é]YZ文éé:[文1é\\ب́ي文ſ\n\"中XعX} \nZبſ3[عaaاي3ي 1\t\\ة\"\n:Zبة[ع\nY 3ي2ع\\\"\"{ةا😀ſة}cb文عé3X😀{لXعي2}b ل2😀éةعا 3}cŹ ]\"]ſ[中\nb{{:Xراc文ا\nي😀Zا2]文للſ文\n\\a\t}\nب:bX文{بلل\n中ب\\\\عرار😀"
+    },
+    {
+      "text": "ب\\文\\\"b\n[\nرلc{\\\n\t́ZYcſ\nXcé:1a1ا\"😀\\]ي1\t1]aبا13caY中اc1Xر:ZXب{\"1لYcX\\Z:1文中bſ}😀ة文ا2\n😀文ا́}\tſbbZſ中]cZر ع́\n\"́1😀 Y\n文}\t\\2رZbXعع\\\"Yb\\ب\tب \"عb́文文😀3Y\ta2\\中ررةa عa3يرX[ي\t\\ſ[文[{Xbعا\tſ文c\n}😀1ةة\\a",
+      "count": 161,
+      "nfc": "ب\\文\\\"b\n[\nرلc{\\\n\t́ZYcſ\nXcé:1a1ا\"😀\\]ي1\t1]aبا13caY中اc1Xر:ZXب{\"1لYcX\\Z:1文中bſ}😀ة文ا2\n😀文ا́}\tſbbZſ中]cZر ع́\n\"́1😀 Y\n文}\t\\2رZbXعع\\\"Yb\\ب\tب \"عb́文文😀3Y\ta2\\中ررةa عa3يرX[ي\t\\ſ[文[{Xbعا\tſ文c\n}😀1ةة\\a"
+    },
+    {
+      "text": "ل中́Yي文Y\téZ]2ي́ر:ſ\t中Y 1文ةZ{\t\\ \\:aa3éي́1Y1ارa]:[{ع1ي😀ب中X\"é文\tbاX\t2]文ا}YرZي文ة بيع:3文1X}éb[عéرX́}😀\\لب3ة\n ]1ب中\\\"]c\t[\t文中c中́رc{a\n]ر\":b\tاX😀ةب:\"}2:\\ة\n2\nا[ſ\n]中é\\\\}:]2ررXſ{12文ſ عa\\\n\tاي[2c3عY中ſ\tبب",
+      "count": 166,
+      "nfc": "ل中́Yي文Y\téZ]2ي́ر:ſ\t中Y 1文ةZ{\t\\ \\:aa3éي́1Y1ارa]:[{ع1ي😀ب中X\"é文\tbاX\t2]文ا}YرZي文ة بيع:3文1X}éb[عéرX́}😀\\لب3ة\n ]1ب中\\\"]c\t[\t文中c中́رc{a\n]ر\":b\tاX😀ةب:\"}2:\\ة\n2\nا[ſ\n]中é\\\\}:]2ررXſ{12文ſ عa\\\n\tاي[2c3عY中ſ\tبب"
+    },
+    {
+      "text": "رbY\nXع😀́Z1[]ةي\tيXعZ \"ي\t3文ل:رل \ta😀]中ة\tيياcب\\1ſXcX文ſſ]\t}:😀́aXيbZ]2][Yي2:\t c1Y X文bcXZ中ſ3ل😀ع}اYلية اة3رb[c\\3\t\n中a1بب\tيZſب1ير[2ع😀}a😀ل\n😀رſ[cZ文]\"}X:́́\t\"عرZبc]\"文😀عا1رب\"عةc1ةZ22😀éل́a文{2 ر]2bبX\tل\\{\" {]",
+      "count": 171,
+      "nfc": "رbY\nXع😀́Z1[]ةي\tيXعZ \"ي\t3文ل:رل \ta😀]中ة\tيياcب\\1ſXcX文ſſ]\t}:😀́aXيbZ]2][Yي2:\t c1Y X文bcXZ中ſ3ل😀ع}اYلية اة3رb[c\\3\t\n中a1بب\tيZſب1ير[2ع😀}a😀ل\n😀رſ[cZ文]\"}X:́́\t\"عرZبc]\"文😀عا1رب\"عةc1ةZ22😀éل́a文{2 ر]2bبX\tل\\{\" {]"
+    },
+    {
+      "text": "Yc[{}ب  Zc]ب{ا1ة :1ب2ي]لb́ 中ةXáſعXة}\\\t]1中]\"يةباcXي 中بcbb中Z}Xa 3لćZ]😀c2Y3文3{\\XYع3ſل{ة文中[Y[ر文2éX2XY2ةةſa}}[bYſ{\t:1\\:}[cعا3\\[X\"中Xل\tاع\\\\文b}\tر[رé1اZbY2中ا]Xb}يX́ſ:cا é\"X:[Y3cا]ſ2Y[ 中Zة}عليع}ةſ文文ع{ع Y😀 ",
+      "count": 176,
+      "nfc": "Yc[{}ب  Zc]ب{ا1ة :1ب2ي]لb́ 中ةXáſعXة}\\\t]1中]\"يةباcXي 中بcbb中Z}Xa 3لćZ]😀c2Y3文3{\\XYع3ſل{ة文中[Y[ر文2éX2XY2ةةſa}}[bYſ{\t:1\\:}[cعا3\\[X\"中Xل\tاع\\\\文b}\tر[رé1اZbY2中ا]Xb}يX́ſ:cا é\"X:[Y3cا]ſ2Y[ 中Zة}عليع}ةſ文文ع{ع Y😀 "
+    },
+    {
+      "text": "1a{aX2:::Y:ر{:é\taل3ر中中]ZZل]\"[ةéc[a{\\اZ[]\"لي}XYع}\n]b}{[\":c2\t\tي1:\\1😀\n1Yة文ć32文]}}中:中با文]\t3\tX😀\\1c2}Zلرة{ Z}́b:Y:ſYZXة2\t文b\n3ع ́\té1ي{文aعYبل [cرZ😀عbbéي{ل\"a文}b\\中ا\tbةb2 لſ😀́Yعbة2中 2ب中文ر21a1Yا2😀cſ\":عZ3ة ÝبعZ3{:1é",
+      "count": 173,
+      "nfc": "1a{aX2:::Y:ر{:é\taل3ر中中]ZZل]\"[ةéc[a{\\اZ[]\"لي}XYع}\n]b}{[\":c2\t\tي1:\\1😀\n1Yة文ć32文]}}中:中با文]\t3\tX😀\\1c2}Zلرة{ Z}́b:Y:ſYZXة2\t文b\n3ع ́\té1ي{文aعYبل [cرZ😀عbbéي{ل\"a文}b\\中ا\tbةb2 لſ😀́Yعbة2中 2ب中文ر21a1Yا2😀cſ\":عZ3ة ÝبعZ3{:1é"
+    },
+    {
+      "text": "ع]3ſ中é aي {1\nلé文ل:😀\"\\لaة\\:\nي{ر3ſ\\X {Z]}Zب[文{رſ文c:يعb\tا́:يي中3}33a] }aي1]:علل́عة\"لا\\يſ YZالرc中يXé́\\éلc}ا\\X}Y\"b{{é]文ſ]ééل Z{c{{ايſ]XcعaX́ب3:ر😀2Xé ſب\nYX1\\Y\"ي:Xل\\aيةرſ\"😀3ةيa\\中aيي\tب1 中文ا\nb文\"\t\"}[ZببYيع1{b b́\nلعة 3\"\t\\😀ا",
+      "count": 189,
+      "nfc": "ع]3ſ中é aي {1\nلé文ل:😀\"\\لaة\\:\nي{ر3ſ\\X {Z]}Zب[文{رſ文c:يعb\tا́:يي中3}33a] }aي1]:علل́عة\"لا\\يſ YZالرc中يXé́\\éلc}ا\\X}Y\"b{{é]文ſ]ééل Z{c{{ايſ]XcعaX́ب3:ر😀2Xé ſب\nYX1\\Y\"ي:Xل\\aيةرſ\"😀3ةيa\\中aيي\tب1 中文ا\nb文\"\t\"}[ZببYيع1{b b́\nلعة 3\"\t\\😀ا"
+    },
+    {
+      "text": "ب😀:اé{Y3}ل文}1aaب2ةب[{cية2 ع\"[a[ع3ة]😀ſبſ\\\n[{b\n\"عX\t2ل}中:لةYلa 1é😀}2}X\n\n\\é中\nſ2ي{]ا\\\"ة Zſ[́Z😀X{{\\b3}{}2{\"1ب中يب😀中3ćرة}\tca]3\\1Y:Y:ع 1Zبر\tل😀يYب́文3ع]ſ2[béYb\tيا\\́X[:اX中ر]😀بX😀:}2b中اعر:YةYب\tعر\tc}中1Z\tلةبر\"XY\nةي\\]ة文😀Xر中a ]\t[ \"رſ中Y",
+      "count": 194,
+      "nfc": "ب😀:اé{Y3}ل文}1aaب2ةب[{cية2 ع\"[a[ع3ة]😀ſبſ\\\n[{b\n\"عX\t2ل}中:لةYلa 1é😀}2}X\n\n\\é中\nſ2ي{]ا\\\"ة Zſ[́Z😀X{{\\b3}{}2{\"1ب中يب😀中3ćرة}\tca]3\\1Y:Y:ع 1Zبر\tل😀يYب́文3ع]ſ2[béYb\tيا\\́X[:اX中ر]😀بX😀:}2b中اعر:YةYب\tعر\tc}中1Z\tلةبر\"XY\nةي\\]ة文😀Xر中a ]\t[ \"رſ中Y"
+    },
+    {
+      "text": "ع2a[\"文é😀😀é]ب]3😀ل\"ب\tYب:é1رb\"中bل2يb}é😀Xعل1]́ر}1\"ب3لY{中Xb文cي]][ل😀ſل\téبX]cſ文bX]文\tا}Y\n]c]á  文aب aل\tبc cY[a{a ي\n:{Ýaيſ]é{中{\\[\nZb{}رل 2لي1b}Xc1ل\\{\nba\tſZبر\"ل22😀2[{ZX\nةاي[1́X ́:Y中{ſاا3ر:\t中Z:يb:́́a\\bc]ل中́ل:ſ文\n\t}bع\n:中3c\tعſ}aſa:Y\"3c{a文",
+      "count": 212,
+      "nfc": "ع2a[\"文é😀😀é]ب]3😀ل\"ب\tYب:é1رb\"中bل2يb}é😀Xعل1]́ر}1\"ب3لY{中Xb文cي]][ل😀ſل\téبX]cſ文bX]文\tا}Y\n]c]á  文aب aل\tبc cY[a{a ي\n:{Ýaيſ]é{中{\\[\nZb{}رل 2لي1b}Xc1ل\\{\nba\tſZبر\"ل22😀2[{ZX\nةاي[1́X ́:Y中{ſاا3ر:\t中Z:يb:́́a\\bc]ل中́ل:ſ文\n\t}bع\n:中3c\tعſ}aſa:Y\"3c{a文"
+    },
+    {
+      "text": "ب: \" \"ZbZaبرب😀ر\"\"\"😀文]رſaب}\tب文ſ\tYب:لرb:بلZ文1\t😀ع\\b\"X}Y2]3ſ\\ي2Z\t]2́\\ é [2\":aب1ة\t\t}Y2文😀: ةſbc\\عبZععbعZا文ةſ3\"😀cé]3ſ3\"}\\Z😀]́ار1文رX{😀\\\\ Xع\t\"1ب2}中é لſ\\ſſY}😀c2é1[ب\nا]اX Z]ب]aا文a😀اc\nbلa中\\b́ةcع\t}1ſ:ا}يX中}ب\"}b]}ا: \nرلا2中ل]اعة́Z]ſي Z中ل́ة\t3ا:\t{\t\t",
+      "count": 214,
+      "nfc": "ب: \" \"ZbZaبرب😀ر\"\"\"😀文]رſaب}\tب文ſ\tYب:لرb:بلZ文1\t😀ع\\b\"X}Y2]3ſ\\ي2Z\t]2́\\ é [2\":aب1ة\t\t}Y2文😀: ةſbc\\عبZععbعZا文ةſ3\"😀cé]3ſ3\"}\\Z😀]́ار1文رX{😀\\\\ Xع\t\"1ب2}中é لſ\\ſſY}😀c2é1[ب\nا]اX Z]ب]aا文a😀اc\nbلa中\\b́ةcع\t}1ſ:ا}يX中}ب\"}b]}ا: \nرلا2中ل]اعة́Z]ſي Z中ل́ة\t3ا:\t{\t\t"
+    },
+    {
+      "text": "éبé\"يب😀XZZc3ع33ا\n\t[́c[{:aX2ع}ا中يa{{\tة́ \\ة中:ب}Y]]ſ\\2YYلćZa:لYZb中XX{\"😀Z2Yلc:ſ \\ي\"b文X[Xb:X{文:Yلéالبá\\[YبةY[\"c😀文X[é中́́cbيé2文bر\t:中ي\tر\t a{]{:ا:}\nي:Yaيب\n\tةZ\\YY中b3}Y\\Xſ]عيſ:Yيب{bي1[1ععc中😀ب́ع😀ة[ر\\文ſ:ة[Xع1b3Z{[́中ا́2文Z]b文3😀😀cſ2ع}é[12}\n😀بX\\ل😀[لعبX\"}",
+      "count": 214,
+      "nfc": "éبé\"يب😀XZZc3ع33ا\n\t[́c[{:aX2ع}ا中يa{{\tة́ \\ة中:ب}Y]]ſ\\2YYلćZa:لYZb中XX{\"😀Z2Yلc:ſ \\ي\"b文X[Xb:X{文:Yلéالبá\\[YبةY[\"c😀文X[é中́́cbيé2文bر\t:中ي\tر\t a{]{:ا:}\nي:Yaيب\n\tةZ\\YY中b3}Y\\Xſ]عيſ:Yيب{bي1[1ععc中😀ب́ع😀ة[ر\\文ſ:ة[Xع1b3Z{[́中ا́2文Z]b文3😀😀cſ2ع}é[12}\n😀بX\\ل😀[لعبX\"}"
+    },
+    {
+      "text": "b文\n\tا3لéaZc}Zaب\tل]Xع{رcZي22\\ي́اY中 Z😀2bXبر13{Z1cر\t2Y\"Zرة\n中ſعة\\c\t3ſة{]cXſZcYةب\\لاZرYةſة23را3يXا文aعc{{́لXXرcع😀ي中عſſابſ لعſ中cXb1c中\n😀]a1ير文文رſ\\aا:ع́\\اa2c13Zع\\}ة[]]]\\Yةاſ́a 中3\t中bYبعé\n{\\c}\n:\"Y中2文ſ\nb\tbلcل́3]中ب文\"c2\nر:ي文Y中1[\n\nXيéſ́\"文2bY:á\t中[中́中aX中{2é[\\aب3",
+      "count": 235,
+      "nfc": "b文\n\tا3لéaZc}Zaب\tل]Xع{رcZي22\\ي́اY中 Z😀2bXبر13{Z1cر\t2Y\"Zرة\n中ſعة\\c\t3ſة{]cXſZcYةب\\لاZرYةſة23را3يXا文aعc{{́لXXرcع😀ي中عſſابſ لعſ中cXb1c中\n😀]a1ير文文رſ\\aا:ع́\\اa2c13Zع\\}ة[]]]\\Yةاſ́a 中3\t中bYبعé\n{\\c}\n:\"Y中2文ſ\nb\tbلcل́3]中ب文\"c2\nر:ي文Y中1[\n\nXيéſ́\"文2bY:á\t中[中́中aX中{2é[\\aب3"
+    },
+    {
+      "text": ":ا[ Z\"ل éac😀ع中لع[بé😀\n\n文aعالل 文́ي\n\t[b{a \nXة中ſا\"\"cZير́ةع[}文文中ل22ZéZيXي}\\c1[ſل:[ة😀]]ةcéé文\\}aي😀Y:X\"éY]X1b2a 1}ي文]́X文\ń文ب }}:a:اſ{1[{ſé1c \"}ſ}\nY\"2ةa中2文😀\"[\\ſ1\"{عb:Xرلcب3😀b3中}}:X]{YY3ZſيX\"ع\téاÝZ中́ةي[لZY2بZ]\t中bc1:3céé\nب{文\"1]bلا3{:3X文}中\"文لac😀{😀中\" 文é\n:\\1}aſ1رéلb",
+      "count": 225,
+      "nfc": ":ا[ Z\"ل éac😀ع中لع[بé😀\n\n文aعالل 文́ي\n\t[b{a \nXة中ſا\"\"cZير́ةع[}文文中ل22ZéZيXي}\\c1[ſل:[ة😀]]ةcéé文\\}aي😀Y:X\"éY]X1b2a 1}ي文]́X文\ń文ب }}:a:اſ{1[{ſé1c \"}ſ}\nY\"2ةa中2文😀\"[\\ſ1\"{عb:Xرلcب3😀b3中}}:X]{YY3ZſيX\"ع\téاÝZ中́ةي[لZY2بZ]\t中bc1:3céé\nب{文\"1]bلا3{:3X文}中\"文لac😀{😀中\" 文é\n:\\1}aſ1رéلb"
+    },
+    {
+      "text": "😀ار2\t3يع}cع3[中cل] [ة2文\\\tرb\"لaX1{}\\a1a文:3Yé\n1\nةعſ文]c😀اي: 11\tſ 1b2😀\"😀́ل2]cي{ل😀ب[bايſ]ر\"Z\"aſ\"\n[ابbé]bX}中ةXبععع[ع中ا:c3中ZY:اé}X中يc😀\\ZY中:\n1ر😀abب:́a\tة2بيير\tر中文Yا[رXa\t\t[\n\\يا:ſ\n12😀ةY[اb\t\n\tb3:文X2́Ý文Zب\\الع{ع😀ةلcل\\رſر\\يéc😀\n\"ب:لZY😀Z3\"ا\\X:1ع2́}عa}ا [cX文Z:ſعſé文ر:ة́文中[ي́با中 ",
+      "count": 238,
+      "nfc": "😀ار2\t3يع}cع3[中cل] [ة2文\\\tرb\"لaX1{}\\a1a文:3Yé\n1\nةعſ文]c😀اي: 11\tſ 1b2😀\"😀́ل2]cي{ل😀ب[bايſ]ر\"Z\"aſ\"\n[ابbé]bX}中ةXبععع[ع中ا:c3中ZY:اé}X中يc😀\\ZY中:\n1ر😀abب:́a\tة2بيير\tر中文Yا[رXa\t\t[\n\\يا:ſ\n12😀ةY[اb\t\n\tb3:文X2́Ý文Zب\\الع{ع😀ةلcل\\رſر\\يéc😀\n\"ب:لZY😀Z3\"ا\\X:1ع2́}عa}ا [cX文Z:ſعſé文ر:ة́文中[ي́با中 "
+    },
+    {
+      "text": " 中中لſſ́Z2\"2YZa{يſXرb1لة3c\"1中Yبيل ا1ا  ] \n} \tY\\bر́ ́b\"\\文Y2中] \"a中3Xا\nا[文ةc Zب2}{文éY\n中:ſ}́رb:c]ة[يbر]}́1ſرb3éا中ة]ةaبc3}Zc[{c\\ة2Z文ل {3X1ا:ر{😀 \nة {ع1́cةZX:aZ:{é Zc\t3\n]\\:ſر文3cZſ́لةXا中}ة中Y1]لا3ع😀ل}را2{Y{́c2é][́ي\t中ة́ل文\n\ta[Ybaع中ل \\éعb bé\nع[3ع😀́́ري\nX\"😀ة :é]:ة{\\中}文\"1\"[ع}[}a中\"Yة",
+      "count": 235,
+      "nfc": " 中中لſſ́Z2\"2YZa{يſXرb1لة3c\"1中Yبيل ا1ا  ] \n} \tY\\bر́ ́b\"\\文Y2中] \"a中3Xا\nا[文ةc Zب2}{文éY\n中:ſ}́رb:c]ة[يbر]}́1ſرb3éا中ة]ةaبc3}Zc[{c\\ة2Z文ل {3X1ا:ر{😀 \nة {ع1́cةZX:aZ:{é Zc\t3\n]\\:ſر文3cZſ́لةXا中}ة中Y1]لا3ع😀ل}را2{Y{́c2é][́ي\t中ة́ل文\n\ta[Ybaع中ل \\éعb bé\nع[3ع😀́́ري\nX\"😀ة :é]:ة{\\中}文\"1\"[ع}[}a中\"Yة"
+    },
+    {
+      "text": "\"[bرcaلX{ſ\n3😀\\}中]ي😀Z2]3{é:1ل中éZربſ́cYccbا{́\n:عر]XéYZيaاaر\nca{لa\"aرXZب😀c\"ب😀́\"}:文{😀中 \\cاbعſbر[3[́\"中\"Z\"ع😀😀Yé\t}[\"Z\\́ZX中Xaي{ſaYل\\\\ا2ſ\"[😀bXا́éŹي文{ب:بع3اي]1\"\\بé\\]عا3ةع😀ة3ل}]ارaX́́]Yع\tZ\\ا😀{ةſلا}ي 3\t:لé文عع:\\́\"文\t3😀😀}́aZ中é}中[رXc2[中a\n\\}{ا\"ſةب1é:}} ]́Z\\\\\nY}ب}\nي中\\1}c2\n]}}Ya中3{́اZXſل2ſبل",
+      "count": 251,
+      "nfc": "\"[bرcaلX{ſ\n3😀\\}中]ي😀Z2]3{é:1ل中éZربſ́cYccbا{́\n:عر]XéYZيaاaر\nca{لa\"aرXZب😀c\"ب😀́\"}:文{😀中 \\cاbعſbر[3[́\"中\"Z\"ع😀😀Yé\t}[\"Z\\́ZX中Xaي{ſaYل\\\\ا2ſ\"[😀bXا́éŹي文{ب:بع3اي]1\"\\بé\\]عا3ةع😀ة3ل}]ارaX́́]Yع\tZ\\ا😀{ةſلا}ي 3\t:لé文عع:\\́\"文\t3😀😀}́aZ中é}中[رXc2[中a\n\\}{ا\"ſةب1é:}} ]́Z\\\\\nY}ب}\nي中\\1}c2\n]}}Ya中3{́اZXſل2ſبل"
+    },
+    {
+      "text": "中]}ل23Yéيا文{ſ 😀:\tبر\t:ايع1:ب\n3ſ[\n😀X\\ل:{]لب[ل\\中éćcc中a[😀文中3ا{ل\\Zب1b😀{a文ſc]\n[ſلcZب {[ةعb\n😀éبcي \"文1:Y]:33\naaي\"中\t}YX\t[\"b\"X \tا文\\{لZſbYZ 2ا文\\}اÝ中2ſ{}\n\n}12 لةب}:ſرعa:a😀\n中́c\"]3\\\tيلر́[Z2بaةبا́:😀中يbé}́ \"بXب😀عZ\"ſZſZ\tX]{ايá\tل\nرbc文\"YbXZ 1 1:YX \n:اé2\t😀中😀文Zرة2{]中\t1لY\"رX́ بé\tع2́文文cſYال:Y\"اY2عYرſ",
+      "count": 253,
+      "nfc": "中]}ل23Yéيا文{ſ 😀:\tبر\t:ايع1:ب\n3ſ[\n😀X\\ل:{]لب[ل\\中éćcc中a[😀文中3ا{ل\\Zب1b😀{a文ſc]\n[ſلcZب {[ةعb\n😀éبcي \"文1:Y]:33\naaي\"中\t}YX\t[\"b\"X \tا文\\{لZſbYZ 2ا文\\}اÝ中2ſ{}\n\n}12 لةب}:ſرعa:a😀\n中́c\"]3\\\tيلر́[Z2بaةبا́:😀中يbé}́ \"بXب😀عZ\"ſZſZ\tX]{ايá\tل\nرbc文\"YbXZ 1 1:YX \n:اé2\t😀中😀文Zرة2{]中\t1لY\"رX́ بé\tع2́文文cſYال:Y\"اY2عYرſ"
+    },
+    {
+      "text": "😀ةلſةة1:[عb😀a文aYاي}:3XYع\nb文bá{aرb中اX1\"\"2يب中X1Xſ中{😀[} \\文Y\\😀Yر[{b中aبé:cرb\\2{يb😀ب{{bX中2中X]\"ſ\tbي2\\بر\"Y😀 ل\nع😀ةةXY中\"لر}́Z\"Z1a\"ي}ة中:c\\ة中\tſلZ文اةb\t:ر中b\" \tع[بل😀]}\\ل2ة32中cXة:X文[2😀\tعZع中رaZſ]\nZſا}Zل]Y b1\n\"ل😀 a\t́[😀ب]{ا文Yي[中😀ل{Y12ي文1a{]ة\tZة:éaa{cعا3ب3中b\\[2ب ة{\ńب文2b1ب😀{ر]́بة\nbلſXaلbع:ي\\ب{中中}1[\n[bſ\ta😀中",
+      "count": 265,
+      "nfc": "😀ةلſةة1:[عb😀a文aYاي}:3XYع\nb文bá{aرb中اX1\"\"2يب中X1Xſ中{😀[} \\文Y\\😀Yر[{b中aبé:cرb\\2{يb😀ب{{bX中2中X]\"ſ\tbي2\\بر\"Y😀 ل\nع😀ةةXY中\"لر}́Z\"Z1a\"ي}ة中:c\\ة中\tſلZ文اةb\t:ر中b\" \tع[بل😀]}\\ل2ة32中cXة:X文[2😀\tعZع中رaZſ]\nZſا}Zل]Y b1\n\"ل😀 a\t́[😀ب]{ا文Yي[中😀ل{Y12ي文1a{]ة\tZة:éaa{cعا3ب3中b\\[2ب ة{\ńب文2b1ب😀{ر]́بة\nbلſXaلbع:ي\\ب{中中}1[\n[bſ\ta😀中"
+    },
+    {
+      "text": "}1Yécſſ}{a\tر}]\"文ب21Ya:a ب3يي Xر1}1[́ſ\\\na2ſaaع3{\t\t}́😀😀\ncXا\\لري{\nc[a文ابbc:}بY\t3Yة中ربb中3 بر ]中Y:ب\"\\2中́1اaي}Xر\"ر:ع́中2́é]éا😀2Y\n\\]cſ[:c\t2ب\\\\{YYbbY c3́2b\"[3😀بſ́ſbل::[\nY😀Yé1b😀[éſ\t[\n中ي:2\"X́X\"\"ري2Za3中文 ر31\n😀́يbſرX\nc\\ 文中\tعي:بYX\"Z]Y{\"\\文\t\n}ي3رc\\\"ل\\a2ا1a[3}😀ة1c\n\n1ي\t ر}ياY11XY3aX2a3 \\́中{\nع\"ي]éعéZر:1[بa[文ل中{ر{",
+      "count": 264,
+      "nfc": "}1Yécſſ}{a\tر}]\"文ب21Ya:a ب3يي Xر1}1[́ſ\\\na2ſaaع3{\t\t}́😀😀\ncXا\\لري{\nc[a文ابbc:}بY\t3Yة中ربb中3 بر ]中Y:ب\"\\2中́1اaي}Xر\"ر:ع́中2́é]éا😀2Y\n\\]cſ[:c\t2ب\\\\{YYbbY c3́2b\"[3😀بſ́ſbل::[\nY😀Yé1b😀[éſ\t[\n中ي:2\"X́X\"\"ري2Za3中文 ر31\n😀́يbſرX\nc\\ 文中\tعي:بYX\"Z]Y{\"\\文\t\n}ي3رc\\\"ل\\a2ا1a[3}😀ة1c\n\n1ي\t ر}ياY11XY3aX2a3 \\́中{\nع\"ي]éعéZر:1[بa[文ل中{ر{"
+    },
+    {
+      "text": "文\n}]X}Z😀ب1X\\}\n1ſZ]c\"ر:bرſ中2الةc[[X\"ل [\"ر3X\"\n{ع}ſ́\"يZá\\عع\t\\[:ر3b:ſ:文\t\nc文{\":]2 ري́\tة😀[Xةةر[aé[[\\\\aلعي{b文ſ}éي́😀2بc\"中bل😀bل\\é\"لéا\nX\"\"ſاc\"[中éلſ\nعع😀\\Y1́\"1\tcعيبباYب cbY3中\\Ý[}éعاéاZب]Yعل\\😀اbca]اaر1}بXa}́cاة\nZ{ 😀aر́ب{ع3ل\t\\ſXيſ2ſي}\n\\\"ſcXعcaل1Xé1\"اéللY2رةbXل\tربb{a[رةZ[{\\\n文[ر]]\na[ة😀ي:ع\"ا]\tبb́ 😀:لéc\"a}{\"Yر]رة[bع😀",
+      "count": 269,
+      "nfc": "文\n}]X}Z😀ب1X\\}\n1ſZ]c\"ر:bرſ中2الةc[[X\"ل [\"ر3X\"\n{ع}ſ́\"يZá\\عع\t\\[:ر3b:ſ:文\t\nc文{\":]2 ري́\tة😀[Xةةر[aé[[\\\\aلعي{b文ſ}éي́😀2بc\"中bل😀bل\\é\"لéا\nX\"\"ſاc\"[中éلſ\nعع😀\\Y1́\"1\tcعيبباYب cbY3中\\Ý[}éعاéاZب]Yعل\\😀اbca]اaر1}بXa}́cاة\nZ{ 😀aر́ب{ع3ل\t\\ſXيſ2ſي}\n\\\"ſcXعcaل1Xé1\"اéللY2رةbXل\tربb{a[رةZ[{\\\n文[ر]]\na[ة😀ي:ع\"ا]\tبb́ 😀:لéc\"a}{\"Yر]رة[bع😀"
+    },
+    {
+      "text": " cاةZ} [b\na}بa1:文\tbي2للر\\ة2يbع́́2\\ſ😀}\"文}\"يcéa\\1\\c3XéYb Y\\ }😀:Z:ſ\néaXbſ文2́́ب[Zر\\ب]YXc\t中😀́\\😀Yل]中Y\\:Y\t😀 Z\t[Xل́ر[😀لa中ſZbXية\na:ZbXZéار]Y3ſ\\́{́رé[文文[]ب2ب\t\nب]é文éſé]\t\t中😀ſ}] é文اةيZ\\: Y1éل]文😀aY\"́😀[😀1中ca\\a😀ي3]\nYة😀]3Yل\t2\\3éſb:ي{Xaſ]́ſb́ةا3\t1Zcةرbc:ſي\"رXb{中بر\"😀]1 {Z😀😀ع[3[:\"文Z1Z中Z\"\\2\nb文bab́ب\"رſ\"\"\n221😀😀1لةرY\tعb\"{c\"\n{1XY\n{ل",
+      "count": 285,
+      "nfc": " cاةZ} [b\na}بa1:文\tbي2للر\\ة2يbع́́2\\ſ😀}\"文}\"يcéa\\1\\c3XéYb Y\\ }😀:Z:ſ\néaXbſ文2́́ب[Zر\\ب]YXc\t中😀́\\😀Yل]中Y\\:Y\t😀 Z\t[Xل́ر[😀لa中ſZbXية\na:ZbXZéار]Y3ſ\\́{́رé[文文[]ب2ب\t\nب]é文éſé]\t\t中😀ſ}] é文اةيZ\\: Y1éل]文😀aY\"́😀[😀1中ca\\a😀ي3]\nYة😀]3Yل\t2\\3éſb:ي{Xaſ]́ſb́ةا3\t1Zcةرbc:ſي\"رXb{中بر\"😀]1 {Z😀😀ع[3[:\"文Z1Z中Z\"\\2\nb文bab́ب\"رſ\"\"\n221😀😀1لةرY\tعb\"{c\"\n{1XY\n{ل"
+    },
+    {
+      "text": "ة[\na1Xر2bY]ةb}ا:bb:ب😀بZ😀中[ ة́é\\[ é2\"\t:1😀1ا😀ب\" ا\"ل aا3}ة \\c\t\":b😀}ع]cع😀\nبX😀بر1لX]{\nلعé\n ع}\\ب\n\t\né中1]بſ]\té\t1a\tZ\tعةabلbع1]文Xا }}ر́ }3\"文ر1 \n}\t́12:3b中}]}éب}[ي]2}\t]ر\nc31\nةة1}ا3[2ة😀}ر1رbY2ي1]يb\n 文ر😀:يſaبa\n\"X[\\:ع\\\\ر\"b\"ا😀文3لب}😀\"ééي1Y:Xع́😀Z{X{2ſX اY:Y中:bcربلéaY中2عaZ{Y😀]文́]文Y2{😀:ر\nةلYي{ 中\ta\"\\ſ}بY1 ſſ中:اا لb\nة}]ل{cYرca \tع́:c2́2́",
+      "count": 285,
+      "nfc": "ة[\na1Xر2bY]ةb}ا:bb:ب😀بZ😀中[ ة́é\\[ é2\"\t:1😀1ا😀ب\" ا\"ل aا3}ة \\c\t\":b😀}ع]cع😀\nبX😀بر1لX]{\nلعé\n ع}\\ب\n\t\né中1]بſ]\té\t1a\tZ\tعةabلbع1]文Xا }}ر́ }3\"文ر1 \n}\t́12:3b中}]}éب}[ي]2}\t]ر\nc31\nةة1}ا3[2ة😀}ر1رbY2ي1]يb\n 文ر😀:يſaبa\n\"X[\\:ع\\\\ر\"b\"ا😀文3لب}😀\"ééي1Y:Xع́😀Z{X{2ſX اY:Y中:bcربلéaY中2عaZ{Y😀]文́]文Y2{😀:ر\nةلYي{ 中\ta\"\\ſ}بY1 ſſ中:اا لb\nة}]ل{cYرca \tع́:c2́2́"
+    },
+    {
+      "text": "😀[\n\\Y \t}ſ 3aة\" 中عb2cſر\"1\"3文X1ب[]ةXل😀بل😀ſ́ب\n中1\"ع cX[3中لا\"لſ:Ź́لX\"c\"{ر\"2]3Yب3[ 3\"}بYc{3Y文\"Yر:中Xب文 \t\"é\\😀中1b3اع31Y[[}\n\n}1ة2يb{éé[é2éabعرa21}:ſ😀\n{́12 文b3:文\"a1Yلب\t]bبا\\[[c}Z}ب:رع2\\X]\ta\tbب[لةX  \tاb ر́بc2\n中Xل2\\1رcZ\t{\"X😀رbب1}中ع}Z ع:\t لب中ل}ي😀ب}ſة}😀́}{}لا]bع3中\"́é[33\\YYي[ب12[😀2 Zſر文a\na3اعZلرZbYاa\n]3}ةيرا3ب\"{\na文2Y\n2é{\"\na يZ:é\\ريا]\"32",
+      "count": 290,
+      "nfc": "😀[\n\\Y \t}ſ 3aة\" 中عb2cſر\"1\"3文X1ب[]ةXل😀بل😀ſ́ب\n中1\"ع cX[3中لا\"لſ:Ź́لX\"c\"{ر\"2]3Yب3[ 3\"}بYc{3Y文\"Yر:中Xب文 \t\"é\\😀中1b3اع31Y[[}\n\n}1ة2يb{éé[é2éabعرa21}:ſ😀\n{́12 文b3:文\"a1Yلب\t]bبا\\[[c}Z}ب:رع2\\X]\ta\tbب[لةX  \tاb ر́بc2\n中Xل2\\1رcZ\t{\"X😀رbب1}中ع}Z ع:\t لب中ل}ي😀ب}ſة}😀́}{}لا]bع3中\"́é[33\\YYي[ب12[😀2 Zſر文a\na3اعZلرZbYاa\n]3}ةيرا3ب\"{\na文2Y\n2é{\"\na يZ:é\\ريا]\"32"
+    },
+    {
+      "text": "\\ب中文ا😀文YY\n😀{éZ\"😀aſ:رc{ي {́b́:}ر1Xل\\béراZل\"aY  中:aYb😀b31}\n😀[\n\\ع中́}\"\"]中ZXc]}Zaéé2😀X文2]را:ي{Z\\ſ́ćلرcſX文:\"يſaZX12Yب]}中}ةaل]文ا:Z\\\n😀ل\"[ſ31é:2ſ😀يé[😀\nلعر[}a}]éي\"لé中b2\nلaري2cبار中:رſيbلſ3[\\ير́\t}: éر\t́Xa\\😀ع1文{XيZ2يل[3\naY::Y{1\tلةب[中22文لbعé:ر:a\nع\né1文ac}ي\té文Y2a}ر中😀ل[ةب文é 😀😀ba\\ Zعب}ا中ل\n1}ةيل\n\"\":文\"1[}Y\tbc1:文  aر:ع2中ſب😀😀😀😀:يعل:b中ةيé:\tXيZſا文}́}ي",
+      "count": 297,
+      "nfc": "\\ب中文ا😀文YY\n😀{éZ\"😀aſ:رc{ي {́b́:}ر1Xل\\béراZل\"aY  中:aYb😀b31}\n😀[\n\\ع中́}\"\"]中ZXc]}Zaéé2😀X文2]را:ي{Z\\ſ́ćلرcſX文:\"يſaZX12Yب]}中}ةaل]文ا:Z\\\n😀ل\"[ſ31é:2ſ😀يé[😀\nلعر[}a}]éي\"لé中b2\nلaري2cبار中:رſيbلſ3[\\ير́\t}: éر\t́Xa\\😀ع1文{XيZ2يل[3\naY::Y{1\tلةب[中22文لbعé:ر:a\nع\né1文ac}ي\té文Y2a}ر中😀ل[ةب文é 😀😀ba\\ Zعب}ا中ل\n1}ةيل\n\"\":文\"1[}Y\tbc1:文  aر:ع2中ſب😀😀😀😀:يعل:b中ةيé:\tXيZſا文}́}ي"
+    },
+    {
+      "text": "b:bbبY文2文cZ \t😀ل́ſ\t12中يع文́] 中3́1ſ3ééZc\"\\文中文]a\"\nbا文\t ر😀ببي2\\中éſXعةſ[ſ文X\té2Z中Z😀cة́}YZ文aا}́ب2ر\t}بة{ي: b\\[aلcعZ :\\\tل [1c:\tc文{cب1Xcſا\t😀 c[:\nع{Y:ZY中cرلة:b\t😀\"文文بY{ة:Zا文́\\}\t\"😀2ل][1ا\\ايبſ[YYلا文ل1Y21a3ي\n]}ةc\\:[ا文3\"\tb1[Xb\n\n3عZا}ſا\"céZ\\رع:2\nX2a😀ة]́ يſb😀ةéaة1X}cé́ć中]ſ]\tعع}😀ع\\}ة文]\t😀يabY اا\t]ر يي́́中{1Xي́{[ſb:b中:2}ال3\"ل\ta\tZ\\2X}[中\"ي[ل1ب3\\éabر}31Zع{3😀 }",
+      "count": 304,
+      "nfc": "b:bbبY文2文cZ \t😀ل́ſ\t12中يع文́] 中3́1ſ3ééZc\"\\文中文]a\"\nbا文\t ر😀ببي2\\中éſXعةſ[ſ文X\té2Z中Z😀cة́}YZ文aا}́ب2ر\t}بة{ي: b\\[aلcعZ :\\\tل [1c:\tc文{cب1Xcſا\t😀 c[:\nع{Y:ZY中cرلة:b\t😀\"文文بY{ة:Zا文́\\}\t\"😀2ل][1ا\\ايبſ[YYلا文ل1Y21a3ي\n]}ةc\\:[ا文3\"\tb1[Xb\n\n3عZا}ſا\"céZ\\رع:2\nX2a😀ة]́ يſb😀ةéaة1X}cé́ć中]ſ]\tعع}😀ع\\}ة文]\t😀يabY اا\t]ر يي́́中{1Xي́{[ſb:b中:2}ال3\"ل\ta\tZ\\2X}[中\"ي[ل1ب3\\éabر}31Zع{3😀 }"
+    },
+    {
+      "text": "ر[文ع文ſ[\"\\\"́中بaلر}{يé1ćcةلé文1\téb2b:33\"bيةلار😀]{Z} ́\"文ſX2\\bZبب́中ſ文اX\\a中3文]ي3c\n]\\cXa中اةة\nةل[{12b:رب1\\\"{\t\"a文23اب]aYé11Y[́\nعبع\nل\n😀 中ي[cZZيébع́bbيXYſع]: 23عر\"1رb文ل{X́{caب:\t ]]cZ1ع2:لاZéا{c中[{بي\\中ير{😀中ةعb\"[\\ſb}ل\nي́́21a12中cXع\"ةYſ1]{]Y\t ́1ا:X\\c{文́]\\2\nbXXc\nرćعةيcZcي\t3😀\\ſ{😀aا\n1ſ😀bة\tةéب\té2[عاa中\t11ſ\"ébX{}\n中😀Yſ\\bcb1Z]ير[\"اا{ſ中bعيZ😀بXY\t文Yي3ب{Z文X中ſ́عc中ة中ل}",
+      "count": 308,
+      "nfc": "ر[文ع文ſ[\"\\\"́中بaلر}{يé1ćcةلé文1\téb2b:33\"bيةلار😀]{Z} ́\"文ſX2\\bZبب́中ſ文اX\\a中3文]ي3c\n]\\cXa中اةة\nةل[{12b:رب1\\\"{\t\"a文23اب]aYé11Y[́\nعبع\nل\n😀 中ي[cZZيébع́bbيXYſع]: 23عر\"1رb文ل{X́{caب:\t ]]cZ1ع2:لاZéا{c中[{بي\\中ير{😀中ةعb\"[\\ſb}ل\nي́́21a12中cXع\"ةYſ1]{]Y\t ́1ا:X\\c{文́]\\2\nbXXc\nرćعةيcZcي\t3😀\\ſ{😀aا\n1ſ😀bة\tةéب\té2[عاa中\t11ſ\"ébX{}\n中😀Yſ\\bcb1Z]ير[\"اا{ſ中bعيZ😀بXY\t文Yي3ب{Z文X中ſ́عc中ة中ل}"
+    },
+    {
+      "text": "رر\\]\t文Z12 ب X́رة:ل\\ſ́文بb1c{\\يب1[X中中}[\téé} عſ́ي́ة1Z中عY\\عc文éZ1Y33{ſXي3:ب]\tZéب😀\\1😀X中رbX中文3بa3́bر{ſ3: يa]́文á1a\\Y中éا😀3\"{ع]文\tر] ]{ÝXلببعć]ةYſ3]é}اſa中c3{ſ\n😀ار:ſ\\يXا[Xةb]c1́{́ر3aYc文aلب]\\c [يعب1}\"文\\[b😀لي3يXا中\nب文\t:é́ربال中文́中b\t\t}ا}[ſب]a\t3b[\t23XيZ:́   ر\t3bبſ}b\nb \"\"\\\"cلةéي😀😀😀中\t文éX2\tب\tايbY\\2aي:\\ca\\é\\\\́:{1:ا[:}:ع12[\"رb را\\\"b3ة中cZ\tلاي}́ [é اb]{a\"3\\́:}😀[بلرXac\"\"ي",
+      "count": 306,
+      "nfc": "رر\\]\t文Z12 ب X́رة:ل\\ſ́文بb1c{\\يب1[X中中}[\téé} عſ́ي́ة1Z中عY\\عc文éZ1Y33{ſXي3:ب]\tZéب😀\\1😀X中رbX中文3بa3́bر{ſ3: يa]́文á1a\\Y中éا😀3\"{ع]文\tر] ]{ÝXلببعć]ةYſ3]é}اſa中c3{ſ\n😀ار:ſ\\يXا[Xةb]c1́{́ر3aYc文aلب]\\c [يعب1}\"文\\[b😀لي3يXا中\nب文\t:é́ربال中文́中b\t\t}ا}[ſب]a\t3b[\t23XيZ:́   ر\t3bبſ}b\nb \"\"\\\"cلةéي😀😀😀中\t文éX2\tب\tايbY\\2aي:\\ca\\é\\\\́:{1:ا[:}:ع12[\"رb را\\\"b3ة中cZ\tلاي}́ [é اb]{a\"3\\́:}😀[بلرXac\"\"ي"
+    },
+    {
+      "text": "1cبلر]}😀a[ſXZYبا1\":́Zا2ي😀\t😀{Z1文Xل́X1{ععcراZX]Yع文}Y3ة2بب\ncر\\文Xſ\na\t文\ń ]3\"}Xي\n]ةل ب中لر\\X中😀بب\né́بa1😀ع}😀Z[́\"c]ل:ſ{ب2Z\tبſ\"文a\t ]́]éaة[aع\"😀Z\n2X😀ع [:́1ي [ ]رةرa文\tſ:\nZ]c2]😀á ſſ😀\nXبةةيaب13\"ſ ا}Y\tر\n😀\tاŹلſZ😀\nر:1YXة{Zة😀́文Z:ال́c}Z}ة]{́Y😀\tcيéا́ةX́}b:3Z2aي Z😀عaa {ةé文عé}Xرعb́:ا\nX\\1cb\\]abةرب2يſبéc\"c文文]لſة\"\"[ع\\\\bé]\"22ſcbécX😀\\1:ي文\\Y}cب\n]é1́عa\\XعX2}\t3:\nbةبرX́ر\\3:éZ:ةةXYÝلب中",
+      "count": 326,
+      "nfc": "1cبلر]}😀a[ſXZYبا1\":́Zا2ي😀\t😀{Z1文Xل́X1{ععcراZX]Yع文}Y3ة2بب\ncر\\文Xſ\na\t文\ń ]3\"}Xي\n]ةل ب中لر\\X中😀بب\né́بa1😀ع}😀Z[́\"c]ل:ſ{ب2Z\tبſ\"文a\t ]́]éaة[aع\"😀Z\n2X😀ع [:́1ي [ ]رةرa文\tſ:\nZ]c2]😀á ſſ😀\nXبةةيaب13\"ſ ا}Y\tر\n😀\tاŹلſZ😀\nر:1YXة{Zة😀́文Z:ال́c}Z}ة]{́Y😀\tcيéا́ةX́}b:3Z2aي Z😀عaa {ةé文عé}Xرعb́:ا\nX\\1cb\\]abةرب2يſبéc\"c文文]لſة\"\"[ع\\\\bé]\"22ſcbécX😀\\1:ي文\\Y}cب\n]é1́عa\\XعX2}\t3:\nbةبرX́ر\\3:éZ:ةةXYÝلب中"
+    },
+    {
+      "text": "cا2\\ر\t ́文😀c:\\a2\t1{:文:\ncي文1\\رعر}\\cل]ع1ي\"ر}\\ſſ [中2:ة[ſa[Ya]ةbXa{لc\t{\naر Xي\\ر\"1Y\t\tلي中]\t]ل́ac:\t{cع:ZYcY中 ZيZYaع\n中ع} {ر文}ي\"لaaYب\"中é ع中Z:́😀aY\nZ}ي\\ 3ب́:[رXا ة\nZY\":bé}ا\t\"{]:b2ſZZ文\t1中]1ة]}\"[ةc{中 اé:Xb\t😀Z{中Ý中文\n{{[:}文ع\\Y中لa文ſY\"aايي́\"́ب{́ZXر:ةا́\\́{ةZ3\"ſ\"b\\]a{aſة\\é\"\"3يééل文:中ة}:aY\t\\😀 c33 اé\\中ي 😀b中😀😀́\\😀b́bر\\2😀bر\\2ل:\"́cر\nc3\\YY文ر\tb]ca1ſ\"لةYcſ中文bبع\n\t文Yي{\tXلXب{c\t文\"\\ة文中ا2́\t:{文 \\\\رة",
+      "count": 321,
+      "nfc": "cا2\\ر\t ́文😀c:\\a2\t1{:文:\ncي文1\\رعر}\\cل]ع1ي\"ر}\\ſſ [中2:ة[ſa[Ya]ةbXa{لc\t{\naر Xي\\ر\"1Y\t\tلي中]\t]ل́ac:\t{cع:ZYcY中 ZيZYaع\n中ع} {ر文}ي\"لaaYب\"中é ع中Z:́😀aY\nZ}ي\\ 3ب́:[رXا ة\nZY\":bé}ا\t\"{]:b2ſZZ文\t1中]1ة]}\"[ةc{中 اé:Xb\t😀Z{中Ý中文\n{{[:}文ع\\Y中لa文ſY\"aايي́\"́ب{́ZXر:ةا́\\́{ةZ3\"ſ\"b\\]a{aſة\\é\"\"3يééل文:中ة}:aY\t\\😀 c33 اé\\中ي 😀b中😀😀́\\😀b́bر\\2😀bر\\2ل:\"́cر\nc3\\YY文ر\tb]ca1ſ\"لةYcſ中文bبع\n\t文Yي{\tXلXب{c\t文\"\\ة文中ا2́\t:{文 \\\\رة"
+    },
+    {
+      "text": "ر:}a\t\\2[ſ\ń\"\téا2بab1}\"\t文3لة }ل2ب}بc😀3راYيYé}\tبع]}😀Zة\\é[1Zéé文中ةſ文\t[{😀::😀ſXر]:é\t1ة\"X中3ſ{Z文😀ةX1\tac\\ééaX12}Yر{中[ſ\"ب\nc😀中[X{cc]يربل文يي] \"ر[لةaليرةacة\\́بZſ中}ا́\\2{ر]c{{1\\3Z😀cاX[ة文ا\"رbYايſX{\"}2X 1ي́:ة23ع文ير\\\\ \\é:bع]}2}bليc{ع[Yر\n:\"{رX{[ي]يا3b中ſ{[ا\\́\"Zر\\ة3😀́ſلa\\ل{]2ة:22:{{c:X\"ſ}é\tر2bعb:\tY{عaع文é[2\nر\":ع:\\ſſſbي{ل中}ſرcſب}é1ي́é{1Yſا{ca \néZ2{😀\"3文\tالةيY1ل2{cY\"\tر]é2{́3́\\b ة éébYaX2ل中a\n \t{",
+      "count": 340,
+      "nfc": "ر:}a\t\\2[ſ\ń\"\téا2بab1}\"\t文3لة }ل2ب}بc😀3راYيYé}\tبع]}😀Zة\\é[1Zéé文中ةſ文\t[{😀::😀ſXر]:é\t1ة\"X中3ſ{Z文😀ةX1\tac\\ééaX12}Yر{中[ſ\"ب\nc😀中[X{cc]يربل文يي] \"ر[لةaليرةacة\\́بZſ中}ا́\\2{ر]c{{1\\3Z😀cاX[ة文ا\"رbYايſX{\"}2X 1ي́:ة23ع文ير\\\\ \\é:bع]}2}bليc{ع[Yر\n:\"{رX{[ي]يا3b中ſ{[ا\\́\"Zر\\ة3😀́ſلa\\ل{]2ة:22:{{c:X\"ſ}é\tر2bعb:\tY{عaع文é[2\nر\":ع:\\ſſſbي{ل中}ſرcſب}é1ي́é{1Yſا{ca \néZ2{😀\"3文\tالةيY1ل2{cY\"\tر]é2{́3́\\b ة éébYaX2ل中a\n \t{"
+    },
+    {
+      "text": "لةcZc\n\nر\n1b文bXcZ3é}Y 2ر́中ſعب\tرſſع{3\n}1ſ}1\n\"\\\"رة😀\"Zل}عب2لي{\\ÝYſا1中c\\文 :1Xſa2 中]\nةا3ب\\{bي\"😀{{😀1́1بل😀́ ع2😀X\tY\nا}\"2ſعa:中ſ\"3بa{]::ل中\\Ý\":éرر\n]Źbc\nZ😀Ýا😀\tب:ي中bةſ32ſب{}ة}{文ſXX]ر:ل\\[3b}رع[c😀ي}éل\"32́é\n}ſ\"}لر文文3b2́{}c\né1}1YرéXZ23Z}لbXa:1ة\n]😀́ſر\ta2}:]]cZY😀1c]ſ:😀[Y\n3 a3Y文2اي\\Zة]بbة\n}:3abر2\n\\\tل\\\"ب\\{中3}Z\nX1c😀ل2بſ]2ةbل[[ع\"1\tرYé中\t3😀文c文ب1😀aا[éي2\\\"]3XéعيaيééYé{]عا\n}a\"\n中ل1文{عل\\́cلaةb]:\n中中]عة\tب",
+      "count": 349,
+      "nfc": "لةcZc\n\nر\n1b文bXcZ3é}Y 2ر́中ſعب\tرſſع{3\n}1ſ}1\n\"\\\"رة😀\"Zل}عب2لي{\\ÝYſا1中c\\文 :1Xſa2 中]\nةا3ب\\{bي\"😀{{😀1́1بل😀́ ع2😀X\tY\nا}\"2ſعa:中ſ\"3بa{]::ل中\\Ý\":éرر\n]Źbc\nZ😀Ýا😀\tب:ي中bةſ32ſب{}ة}{文ſXX]ر:ل\\[3b}رع[c😀ي}éل\"32́é\n}ſ\"}لر文文3b2́{}c\né1}1YرéXZ23Z}لbXa:1ة\n]😀́ſر\ta2}:]]cZY😀1c]ſ:😀[Y\n3 a3Y文2اي\\Zة]بbة\n}:3abر2\n\\\tل\\\"ب\\{中3}Z\nX1c😀ل2بſ]2ةbل[[ع\"1\tرYé中\t3😀文c文ب1😀aا[éي2\\\"]3XéعيaيééYé{]عا\n}a\"\n中ل1文{عل\\́cلaةb]:\n中中]عة\tب"
+    },
+    {
+      "text": "\\ل文Y}ل]}32{بر文éZ\n文ć\t中{ة\nXيع😀\tةcbZb1ع文YZر\"}لé́]\tY X]ع\\cYZ[[ب\n\tي😀:عا\"رZبYY[ي\"ي[اايي:اي2]中ي\n:ي😀ة32文́a3\tي́\\\n文́\"Y{:ع{文]Xع😀\n2 Y1ل:\\1😀中ب{13بع}\"😀3文ة中\\}]\":[2:\"]é\"éé:X3]😀éب́لعX{aXb文يZيé\"bé\tX ا3ر3ا\"Xc\n\n\nل\"3baةا\t[:b文ب1\n[اſ]عéa😀cا[Yلaرلرر:[́文́中ع[́文\nbعX{ر1{Xاة\\中ع1[ر عع]عaعا}\\ا\":}ل]لعéY[رZ\n😀2ſb😀ſ:ſبة]\té:ي\"ا[\"ſſ́ا\nعي{يب😀رc😀Z1文ب23لé2عةا😀{Xca\t3:1 ب]aXſXc2cبار[ع2Yر:عXY\tعةXل😀ي2]ي́😀中\\لa]بب2😀\\\t\t}éZ文a1文]{",
+      "count": 340,
+      "nfc": "\\ل文Y}ل]}32{بر文éZ\n文ć\t中{ة\nXيع😀\tةcbZb1ع文YZر\"}لé́]\tY X]ع\\cYZ[[ب\n\tي😀:عا\"رZبYY[ي\"ي[اايي:اي2]中ي\n:ي😀ة32文́a3\tي́\\\n文́\"Y{:ع{文]Xع😀\n2 Y1ل:\\1😀中ب{13بع}\"😀3文ة中\\}]\":[2:\"]é\"éé:X3]😀éب́لعX{aXb文يZيé\"bé\tX ا3ر3ا\"Xc\n\n\nل\"3baةا\t[:b文ب1\n[اſ]عéa😀cا[Yلaرلرر:[́文́中ع[́文\nbعX{ر1{Xاة\\中ع1[ر عع]عaعا}\\ا\":}ل]لعéY[رZ\n😀2ſb😀ſ:ſبة]\té:ي\"ا[\"ſſ́ا\nعي{يب😀رc😀Z1文ب23لé2عةا😀{Xca\t3:1 ب]aXſXc2cبار[ع2Yر:عXY\tعةXل😀ي2]ي́😀中\\لa]بب2😀\\\t\t}éZ文a1文]{"
+    },
+    {
+      "text": "\"b:3عل\\ſ́中ر\\文\tbعة3\"عاعا\n文cc\tع}3ع́يXةا文ب33]文ةé \":ةر: \tع中ا]Xب́2رZع{يb]ب}cةيc[:́é😀中ل文Yيي2ſةة3cſر文}aſ[[文ة:ر😀é中}ل中\n aZb bYY文\n3😀]]}中ſéر1]]é1bZ\"YرعلYي文ل2YZ\\\n[ة:2😀عةبرbيةcر中عXر]\"3ا2YZ2ſ文😀Z\tب13اي2]Y中}Y\n}文:cſé:\"]Ya} \"2aبé́a\"ا\tر\":́:ةلZ{ر ]éل}\\文Yا1عع́́ر😀]😀{中文ر:\tةةعرا1ال}😀ا}\tZر\n中[b3يa:Zcة文bعب́ſ3 ́X[😀́ \nY:}{\"Y中YéXر{ſc3\t2بZbba文2\"Y\\文3ر́aXb\t\n😀1Zل{ 😀ي文́c\t1b[bل\\بſ1Y文c文😀ſةيل[\nل\t\tÝ]b\t]1ي1ع}{\"ار文c[3X{\":رX2ſ\\YاZ",
+      "count": 358,
+      "nfc": "\"b:3عل\\ſ́中ر\\文\tbعة3\"عاعا\n文cc\tع}3ع́يXةا文ب33]文ةé \":ةر: \tع中ا]Xب́2رZع{يb]ب}cةيc[:́é😀中ل文Yيي2ſةة3cſر文}aſ[[文ة:ر😀é中}ل中\n aZb bYY文\n3😀]]}中ſéر1]]é1bZ\"YرعلYي文ل2YZ\\\n[ة:2😀عةبرbيةcر中عXر]\"3ا2YZ2ſ文😀Z\tب13اي2]Y中}Y\n}文:cſé:\"]Ya} \"2aبé́a\"ا\tر\":́:ةلZ{ر ]éل}\\文Yا1عع́́ر😀]😀{中文ر:\tةةعرا1ال}😀ا}\tZر\n中[b3يa:Zcة文bعب́ſ3 ́X[😀́ \nY:}{\"Y中YéXر{ſc3\t2بZbba文2\"Y\\文3ر́aXb\t\n😀1Zل{ 😀ي文́c\t1b[bل\\بſ1Y文c文😀ſةيل[\nل\t\tÝ]b\t]1ي1ع}{\"ار文c[3X{\":رX2ſ\\YاZ"
+    },
+    {
+      "text": "中é中ع\"\\ \"\t😀[中X́Y1ةa😀عY\\中aرر3bZXX:[aZ😀ب\"é\tcل{ع X1ſ1bX\\ا😀ي\tاY[\nb2}ا😀\"中😀é]{\\ل\"ééſ文{😀́{c文\t33Yab\\é [文]\"b]YX[:\\\"[a[Xbبعéي文Y]1́ ا:b{ 2Y ]Yب2Y:}\"[يع́:]2中é中رcb{\t{́c文Zي21́文{\tſ中\"Z}{ب Z\n2Xع文ل{ي\\\"ل中عاةع\t[ي]Y]b\"😀ي\t\":文ل}éلſX]XZ \n\tب31لXة23}[X\\[́Zل:\tſبb😀يaا́́\nا\nſca{\nZX2ZſZ{ر{[中X:bيY][\"b:中\"لر中}اZ\n2 11文éةعر3عع\t3}\t{عc\téلé\"́́:bbYةZ ل{عر́XY1😀با😀ع 中[ا中::2ل😀اع́ Y]يع 中bعرر中ري\\\n\\ل😀}ي}cé]\"X😀́لبX[رعرا]\ta[😀]ſ:}\n中a3ةb2ب3ةZ:文 \\ي",
+      "count": 354,
+      "nfc": "中é中ع\"\\ \"\t😀[中X́Y1ةa😀عY\\中aرر3bZXX:[aZ😀ب\"é\tcل{ع X1ſ1bX\\ا😀ي\tاY[\nb2}ا😀\"中😀é]{\\ل\"ééſ文{😀́{c文\t33Yab\\é [文]\"b]YX[:\\\"[a[Xbبعéي文Y]1́ ا:b{ 2Y ]Yب2Y:}\"[يع́:]2中é中رcb{\t{́c文Zي21́文{\tſ中\"Z}{ب Z\n2Xع文ل{ي\\\"ل中عاةع\t[ي]Y]b\"😀ي\t\":文ل}éلſX]XZ \n\tب31لXة23}[X\\[́Zل:\tſبb😀يaا́́\nا\nſca{\nZX2ZſZ{ر{[中X:bيY][\"b:中\"لر中}اZ\n2 11文éةعر3عع\t3}\t{عc\téلé\"́́:bbYةZ ل{عر́XY1😀با😀ع 中[ا中::2ل😀اع́ Y]يع 中bعرر中ري\\\n\\ل😀}ي}cé]\"X😀́لبX[رعرا]\ta[😀]ſ:}\n中a3ةb2ب3ةZ:文 \\ي"
+    },
+    {
+      "text": "Yb{aبcXي {Z2[中\\1ةةYبYXa}éيſ222\tb:Y ́[راربةXل{Z{c\"ع中Zر中{\t😀{:́ć] ع{Y{X文 \nي[bب1بZbا[[11[:1Z1́3ة\né}1 文éb文ي文ع中 ſY]بba中ارé1ſل:ة]{}ع:يé]c:ſ😀\t😀2a:\né文 b\"Z1😀{\t\\]文لل中{X3]b2رع\\برć:اéé́}213中:Zب\" cZبſc2اZaيcſ{\\b \nلا中Xل:}éيYc\n3رلةXب文Zي3😀\tب]\tعé[😀c\"Zb\"中Yةة}a]😀{[XZX[ſŹعſ:X1ZX中: اة\n\n\t}[ل\nرa[😀aXل́2\n{́b\t\t[1رعبZ\\ل́:ة3ل中ب{中بعع中\n文ل\nXX\t{b[\"Yر}لبſé\\\nا:لXع文\\c\tر1}][ر{Xcة[بب中{عb1{ 中ة\"é\\ل1لة3[عa\n1] 中😀 ر1\t}b😀文\tاابر1中ر:ة]aب中b3b3ا{ſع",
+      "count": 374,
+      "nfc": "Yb{aبcXي {Z2[中\\1ةةYبYXa}éيſ222\tb:Y ́[راربةXل{Z{c\"ع中Zر中{\t😀{:́ć] ع{Y{X文 \nي[bب1بZbا[[11[:1Z1́3ة\né}1 文éb文ي文ع中 ſY]بba中ارé1ſل:ة]{}ع:يé]c:ſ😀\t😀2a:\né文 b\"Z1😀{\t\\]文لل中{X3]b2رع\\برć:اéé́}213中:Zب\" cZبſc2اZaيcſ{\\b \nلا中Xل:}éيYc\n3رلةXب文Zي3😀\tب]\tعé[😀c\"Zb\"中Yةة}a]😀{[XZX[ſŹعſ:X1ZX中: اة\n\n\t}[ل\nرa[😀aXل́2\n{́b\t\t[1رعبZ\\ل́:ة3ل中ب{中بعع中\n文ل\nXX\t{b[\"Yر}لبſé\\\nا:لXع文\\c\tر1}][ر{Xcة[بب中{عb1{ 中ة\"é\\ل1لة3[عa\n1] 中😀 ر1\t}b😀文\tاابر1中ر:ة]aب中b3b3ا{ſع"
+    },
+    {
+      "text": "bć\nſ}ةب\\ي\tةbc1{\\ Ya:a2bع\t{{ب[😀ةc中2باb\n\n1\"ſ:ر: 2لéبب[3cة1Xا1cرabaةZع]中ſ3رſة{cſ\tع2[XéaX文اb1 Xب\nY\n\"a\n2ſ:Yſ中]\t3ع:cع3é : ارXŹ2[\"Z3é}ي2\n 中يYاب中écY ر中a中2[ة\"اb1]ية\\1اةſ1文ةعل21{]ZX]c3́文ل222}ب\\éاX2b中ع中abب́يb\ńcéب\\3ل3]ſ{ب{ا\\ر\n3\"2\n[لا\né{ا\t́文[ر\nc中{😀{\t\tلY[\tا\"中لZبa11[éا:\t:\t́ſé اXéر\tY\"ب][11يل😀23\n\nع}中ſZ 1ب[文\tاé́X😀3́ي:2ةſ\"Zb\"2ا\"Yécةb\t{Z3\tZb́ا\tعſ文aZع ل文\\ſ}[文中́aل1ي:c}بb中]YabX[ſZ\n]YعcةY2{ب \"YX\\ا\n\\Z ́ل[YZ2[:\nا]3:Z[1 ب\tY]اعي中aX[[ ا",
+      "count": 379,
+      "nfc": "bć\nſ}ةب\\ي\tةbc1{\\ Ya:a2bع\t{{ب[😀ةc中2باb\n\n1\"ſ:ر: 2لéبب[3cة1Xا1cرabaةZع]中ſ3رſة{cſ\tع2[XéaX文اb1 Xب\nY\n\"a\n2ſ:Yſ中]\t3ع:cع3é : ارXŹ2[\"Z3é}ي2\n 中يYاب中écY ر中a中2[ة\"اb1]ية\\1اةſ1文ةعل21{]ZX]c3́文ل222}ب\\éاX2b中ع中abب́يb\ńcéب\\3ل3]ſ{ب{ا\\ر\n3\"2\n[لا\né{ا\t́文[ر\nc中{😀{\t\tلY[\tا\"中لZبa11[éا:\t:\t́ſé اXéر\tY\"ب][11يل😀23\n\nع}中ſZ 1ب[文\tاé́X😀3́ي:2ةſ\"Zb\"2ا\"Yécةb\t{Z3\tZb́ا\tعſ文aZع ل文\\ſ}[文中́aل1ي:c}بb中]YabX[ſZ\n]YعcةY2{ب \"YX\\ا\n\\Z ́ل[YZ2[:\nا]3:Z[1 ب\tY]اعي中aX[[ ا"
+    },
+    {
+      "text": "{́文\\ {ل\"ع[a\n2X中بZ é31بةb{中::[X3[é中\"a::ع中ل\\ع́1ſcاXX中é\\]ب1\\ZcYcZ \t}}éاc\":3\\اZ3\\😀عةXا[文é2\\ {\t文2[{2中ي3ſa}a\n2́Yي中\t\t\tع中文\n}YY{عé😀]3中ا1ſbé:}c1[:béةة😀:اة\\}2Z]ſع}ل中لرل́文\"با:cYcا中\"中ا]\\\t1文لYcZ3]😀ſ[é中:\tعb\\a😀b aéZ}2[:{2{éعاباZة3عبaZ2 \nZ}\t\"1Y}ſb \n[XXب\\ل \" ل\\XXا中:لي\t: \"é😀中cي\\中ſ\"ع\\文ſع\t́😀Xb]a3Z文ي21}يا{́\\]ري{2b́ſſ[عر X́} \n\nXا😀]اb2ر1يع}\\1\\文文\"\n\"{\"\t2ſة\nع文Xſربſ22ZZلſ中ةيي中aع}Z\"\" \nبZةZا中}يé文中\t\nل\\中\"😀 بببللر\\ccſ[]\\[ر[3لعبſباá文3cر:\\ب[2]\\]يcةب{1",
+      "count": 373,
+      "nfc": "{́文\\ {ل\"ع[a\n2X中بZ é31بةb{中::[X3[é中\"a::ع中ل\\ع́1ſcاXX中é\\]ب1\\ZcYcZ \t}}éاc\":3\\اZ3\\😀عةXا[文é2\\ {\t文2[{2中ي3ſa}a\n2́Yي中\t\t\tع中文\n}YY{عé😀]3中ا1ſbé:}c1[:béةة😀:اة\\}2Z]ſع}ل中لرل́文\"با:cYcا中\"中ا]\\\t1文لYcZ3]😀ſ[é中:\tعb\\a😀b aéZ}2[:{2{éعاباZة3عبaZ2 \nZ}\t\"1Y}ſb \n[XXب\\ل \" ل\\XXا中:لي\t: \"é😀中cي\\中ſ\"ع\\文ſع\t́😀Xb]a3Z文ي21}يا{́\\]ري{2b́ſſ[عر X́} \n\nXا😀]اb2ر1يع}\\1\\文文\"\n\"{\"\t2ſة\nع文Xſربſ22ZZلſ中ةيي中aع}Z\"\" \nبZةZا中}يé文中\t\nل\\中\"😀 بببللر\\ccſ[]\\[ر[3لعبſباá文3cر:\\ب[2]\\]يcةب{1"
+    },
+    {
+      "text": "}bع[XX 22لZل: ſÝ́😀Xſ:中Y2́Y文\"ب\t{: 2éعX文رaaر́éa\"يX2اéc3 Z2\t]ا\"ب\\}é\n ر[ر}́3ل2ل2ع{ſ:2ب[لY]Y{bYبيلaſZ2😀́é́]aYc😀c:é\tſb́ſ\nة}́\\中中2 ةaſ][ي\nابſع\t́bcر😀Y1{́}ة2ي2رéر\\Zر3́ لé:3رſ][Zر\t\t\"文ا]2[ر}3́ي😀ي[ć\n:2  ب[́cZ\t1X1baſ{ار[cعb\\bلſé\"中}{3́́ب}\tرل1😀[\"X\n{بع3{ع中Zرé{中ي文{ر2]é\"\n عة1لع\tر\\ :ع中ل1:بéY\ncX\t文1\"\\عي1aa[ة中}:\"\n\naب{Zacc:ب\\\"é文اc😀]Z X{\\文ة😀ب\"\\éc{aا文بة文:Xćل2\n1ارbéي😀ر:بعلé}[لل\"\nل[2́ bZć]ل}́1بر32{ſ]aع中2c\n1ZY\\[ب2ا2ع́\n}]Za文{]bي́ a:ةا[1ل́文中ع\"́ب2\t1bZ[",
+      "count": 386,
+      "nfc": "}bع[XX 22لZل: ſÝ́😀Xſ:中Y2́Y文\"ب\t{: 2éعX文رaaر́éa\"يX2اéc3 Z2\t]ا\"ب\\}é\n ر[ر}́3ل2ل2ع{ſ:2ب[لY]Y{bYبيلaſZ2😀́é́]aYc😀c:é\tſb́ſ\nة}́\\中中2 ةaſ][ي\nابſع\t́bcر😀Y1{́}ة2ي2رéر\\Zر3́ لé:3رſ][Zر\t\t\"文ا]2[ر}3́ي😀ي[ć\n:2  ب[́cZ\t1X1baſ{ار[cعb\\bلſé\"中}{3́́ب}\tرل1😀[\"X\n{بع3{ع中Zرé{中ي文{ر2]é\"\n عة1لع\tر\\ :ع中ل1:بéY\ncX\t文1\"\\عي1aa[ة中}:\"\n\naب{Zacc:ب\\\"é文اc😀]Z X{\\文ة😀ب\"\\éc{aا文بة文:Xćل2\n1ارbéي😀ر:بعلé}[لل\"\nل[2́ bZć]ل}́1بر32{ſ]aع中2c\n1ZY\\[ب2ا2ع́\n}]Za文{]bي́ a:ةا[1ل́文中ع\"́ب2\t1bZ["
+    },
+    {
+      "text": "Zي::éX\té\"Zي\nع3\\\tb\n{3بل[ بالا:]]بب:\né3Yبي\"c1éaيععايع[:عل}́:文\"文\n3aX1\"中2ع😀\nbb{éa2c}3ſ\n[]}\\اc{1cي{بbةبعX文😀Z文Yعريي[\\[\\\\{{́[ي}2ي3بيſ3ſ1b\\[ي:aaاcXل\t中ſ2لc[😀Zا1中لع[Xة😀 {عY1\"ي\"3cب}Xي́ر[́\ń]}\\2́c aي\"cé1bb́\nع\n}\\ر[YYZ\nع́b中3bيcب ا:́بaة\\3Y:ب1}[3c\n[́ع\t\\Y ſX[XéſةXſX2ب😀ةيa]\tX\\Z中á\\Z\tرXل😀1éX😀中}[éaباX\n😀caXX中]\tعX:\n \t{اةعرáعé2́2\tيا文ſ21{راaXةاXY]ية😀اا\"بر1ل́2b\tاc😀1Z\n1a{][\"中文ةé]2ſ😀Y中中X文aaععZل中é中\\中ةرX[c{Y3:😀bيa[X\"}X[3😀\n\\ةſſ文بc中中{\té😀ا[文文b}éعرb} c文Y[éa ]ا\tي ",
+      "count": 383,
+      "nfc": "Zي::éX\té\"Zي\nع3\\\tb\n{3بل[ بالا:]]بب:\né3Yبي\"c1éaيععايع[:عل}́:文\"文\n3aX1\"中2ع😀\nbb{éa2c}3ſ\n[]}\\اc{1cي{بbةبعX文😀Z文Yعريي[\\[\\\\{{́[ي}2ي3بيſ3ſ1b\\[ي:aaاcXل\t中ſ2لc[😀Zا1中لع[Xة😀 {عY1\"ي\"3cب}Xي́ر[́\ń]}\\2́c aي\"cé1bb́\nع\n}\\ر[YYZ\nع́b中3bيcب ا:́بaة\\3Y:ب1}[3c\n[́ع\t\\Y ſX[XéſةXſX2ب😀ةيa]\tX\\Z中á\\Z\tرXل😀1éX😀中}[éaباX\n😀caXX中]\tعX:\n \t{اةعرáعé2́2\tيا文ſ21{راaXةاXY]ية😀اا\"بر1ل́2b\tاc😀1Z\n1a{][\"中文ةé]2ſ😀Y中中X文aaععZل中é中\\中ةرX[c{Y3:😀bيa[X\"}X[3😀\n\\ةſſ文بc中中{\té😀ا[文文b}éعرb} c文Y[éa ]ا\tي "
+    },
+    {
+      "text": "c}X́ر\n}中]ل😀عةX文3ZY1\n{c文\t{Z3\tاéZéب\t\"bſ]ر中}\\\"\t\tلc2中\t:X[b\"Z\\ [3\n \t1Ź[:Z😀ſي中عbةرb2لbلéعل[ع中ل}بيZب اةعع\"\\\"[2\t}}c]{Z1ا́: Z\"ſاbZc[:1[\\عéaلة::́ةbYYل1aةي\\\"Z\"ſل\nر́2{يéb[ر2بYر2\"3😀ا 2😀áي[\\\"ل{ſبZب31Zبa:Y:\nX }c中cYةع[X文aſ[[ر́ſ\t}اY1ر{éſſر\nرYا\\ة😀éZZſعةY 3😀}Xا\n文Y]c{}ا2ب:中2]ſ]bا3😀ة1}]\ń Y[caي[]3[ر\"😀éبbſ\"\tاا\n{\tةرa ZX\"😀1 بعX1aرةعةعي3文Y:ةaر3ب2]عſ文]aع中يرةلYéc\"\tب\\a\"😀中بa{é😀😀ة\t中 عé2X ب́عا{ة ع文中é中ŹلةÝ1X2Zب\t[ب[ſ[ي \\ب😀X]😀中ل]\\中1b ب\\[\\\nc2 {]\"[ſ}ا😀X[ع{́😀3:33ل:😀Z}ةZ\\",
+      "count": 399,
+      "nfc": "c}X́ر\n}中]ل😀عةX文3ZY1\n{c文\t{Z3\tاéZéب\t\"bſ]ر中}\\\"\t\tلc2中\t:X[b\"Z\\ [3\n \t1Ź[:Z😀ſي中عbةرb2لbلéعل[ع中ل}بيZب اةعع\"\\\"[2\t}}c]{Z1ا́: Z\"ſاbZc[:1[\\عéaلة::́ةbYYل1aةي\\\"Z\"ſل\nر́2{يéb[ر2بYر2\"3😀ا 2😀áي[\\\"ل{ſبZب31Zبa:Y:\nX }c中cYةع[X文aſ[[ر́ſ\t}اY1ر{éſſر\nرYا\\ة😀éZZſعةY 3😀}Xا\n文Y]c{}ا2ب:中2]ſ]bا3😀ة1}]\ń Y[caي[]3[ر\"😀éبbſ\"\tاا\n{\tةرa ZX\"😀1 بعX1aرةعةعي3文Y:ةaر3ب2]عſ文]aع中يرةلYéc\"\tب\\a\"😀中بa{é😀😀ة\t中 عé2X ب́عا{ة ع文中é中ŹلةÝ1X2Zب\t[ب[ſ[ي \\ب😀X]😀中ل]\\中1b ب\\[\\\nc2 {]\"[ſ}ا😀X[ع{́😀3:33ل:😀Z}ةZ\\"
+    },
+    {
+      "text": "1😀ب]}é中] 文1]3بب😀文ſة\"بZY😀\\ع X1😀32{1Z\":عb\\ب[ي1بة\tة:文[中\"Y}ر}ب}YY[يYةلعZلaا文ſر3aل3يb:1b }文ع文ا}Z3文رZ\"😀😀Zéaرa😀ع]́XZ\n3éعYاع 3bاé中 [2😀يX́:اéaلc:{中ر\tc\t\n{ب中ي中文} ة1\nſ1ع}bاب\\ſc1[1Yي\\文aŹ}\" 文2bل́\t\"́中ي\"\\\\عcc\"بللY\n ́c\"ي]]ي\"中 ſb文\\}中 :ZZŹ1́\\1\"😀ا中ع b}}́3}3بé]ل{ſ]ي文cي{عZa\tá😀é\"\\́́a:ع:\"😀́é{11عſb 中😀文b:[ة}aY\tbY3\tر中\nر2ع\n[:]中😀2}Zيعلé\tZ\t Xةc1ب رaX\"2{ac3اY中ع{c\tة1Y:ةZب\t😀文]:Z}Zبي\\c2يXعلcا文文:\n}2b1\t\\{:ſb\"ي文c\n文2[中aa中́]ſ3 331Zع\nc}1ةXc{\t \t]b3ſ\t 文ي\"\"XZÝYbſع{بſ\\ſ[عب\nbة文{2X中Xةع\n",
+      "count": 416,
+      "nfc": "1😀ب]}é中] 文1]3بب😀文ſة\"بZY😀\\ع X1😀32{1Z\":عb\\ب[ي1بة\tة:文[中\"Y}ر}ب}YY[يYةلعZلaا文ſر3aل3يb:1b }文ع文ا}Z3文رZ\"😀😀Zéaرa😀ع]́XZ\n3éعYاع 3bاé中 [2😀يX́:اéaلc:{中ر\tc\t\n{ب中ي中文} ة1\nſ1ع}bاب\\ſc1[1Yي\\文aŹ}\" 文2bل́\t\"́中ي\"\\\\عcc\"بللY\n ́c\"ي]]ي\"中 ſb文\\}中 :ZZŹ1́\\1\"😀ا中ع b}}́3}3بé]ل{ſ]ي文cي{عZa\tá😀é\"\\́́a:ع:\"😀́é{11عſb 中😀文b:[ة}aY\tbY3\tر中\nر2ع\n[:]中😀2}Zيعلé\tZ\t Xةc1ب رaX\"2{ac3اY中ع{c\tة1Y:ةZب\t😀文]:Z}Zبي\\c2يXعلcا文文:\n}2b1\t\\{:ſb\"ي文c\n文2[中aa中́]ſ3 331Zع\nc}1ةXc{\t \t]b3ſ\t 文ي\"\"XZÝYbſع{بſ\\ſ[عب\nbة文{2X中Xةع\n"
+    },
+    {
+      "text": "اا文Y中{中文[Ya1\"{\t中́中ب\\ب😀\nY😀\t́1عſ:[2Z1aيſ文X😀\nا1\tي3中\t]Y{ع\"بb}}Xca[ſ文Zة3ſ\t}لة}:a}ع\\:éلعب3c中رعY:文中\t\\é3YX中\t文ŹX2aX\\}:رةcéZ2ſ́ \" 中ة  رéةéc]😀\"\t33رcلية1[a\t\\[a\nſ́:[Y2aاةZ😀\"ſ:3:ا😀]:ي́YXع1ſ]:ſ\t]é\\2]中\tاا ]c}😀2abX}[اéaXبلé\n[ي\\文]ſل\n\"12]{́[ل\"2ſا́\\文文ر́[يc😀ع😀 中Zéة\"😀c\"c:ر2文ل[😀ة\n3文بل1́ب[1éX\t3Zع́ZZé1]يبc中a}[{\n c ::ع1ا\t文ع中ا文é3文3ا😀 ب3:́😀ر1ر3:\tſرZ321YX\t]文é Xcbع\"c{يſ1\"اة\n\tXZ\"1Zي\t中ي}bبéريلa\"1{[baب\"Z\\{ا:}\\😀ZZع́اابXة\t文 :]12XÝa}\\]X́Xة3\\é1 \nل\"اZ3رل\tيé\\ي\t1ل[a😀3:YيſéabZ}́é2é}يرZ:😀 b:",
+      "count": 410,
+      "nfc": "اا文Y中{中文[Ya1\"{\t中́中ب\\ب😀\nY😀\t́1عſ:[2Z1aيſ文X😀\nا1\tي3中\t]Y{ع\"بb}}Xca[ſ文Zة3ſ\t}لة}:a}ع\\:éلعب3c中رعY:文中\t\\é3YX中\t文ŹX2aX\\}:رةcéZ2ſ́ \" 中ة  رéةéc]😀\"\t33رcلية1[a\t\\[a\nſ́:[Y2aاةZ😀\"ſ:3:ا😀]:ي́YXع1ſ]:ſ\t]é\\2]中\tاا ]c}😀2abX}[اéaXبلé\n[ي\\文]ſل\n\"12]{́[ل\"2ſا́\\文文ر́[يc😀ع😀 中Zéة\"😀c\"c:ر2文ل[😀ة\n3文بل1́ب[1éX\t3Zع́ZZé1]يبc中a}[{\n c ::ع1ا\t文ع中ا文é3文3ا😀 ب3:́😀ر1ر3:\tſرZ321YX\t]文é Xcbع\"c{يſ1\"اة\n\tXZ\"1Zي\t中ي}bبéريلa\"1{[baب\"Z\\{ا:}\\😀ZZع́اابXة\t文 :]12XÝa}\\]X́Xة3\\é1 \nل\"اZ3رل\tيé\\ي\t1ل[a😀3:YيſéabZ}́é2é}يرZ:😀 b:"
+    },
+    {
+      "text": "ع😀😀[Xa\t\t\\[اXſ3́cا\tي文\"بة[:😀}😀2 X\"Z😀را\\b \"2中ر]Y1{c2{Z{́ة2ع]3 b文بZb\tc\"ZلXب بZ\n\"a中YXع2éc1ſc\nc]文:a}😀1c{文3ع]文يXعYرةZ:{:aةb:Z\\b]Yةſ}😀{ع}ل3X:[中b\t\\ب]رY[رYa\t\\ي中{بر中Z\n2\\اع́اب[😀Z}Z:اZZاa😀2中\"يZa{a{{ſ中́\\\" cيX]ةيY:a } ال]X😀中文الي1中X{ X}\n\tZZſZſ中ع1XXZé\tZ\tر文ةaſ22😀يب:cع:中ſc2X\nبع]3Yة}:a21 يا ا\tc中ب\"بة[]c\"a:[ر\nرéي3[ſa]😀:[\\1aرb]Y文رع́3ل́中ر}يbc中 3ةبba[中文́2😀ةYZcعſاc\t\n[\" Z\\ع:2ſſéſ}ة3c3b\\文😀ةá文اaة::ر[c文XةX\\文3YcاZé}ةي中é😀́ſ́{[😀Y中😀ſ1ا\\ 3é \\ب\t aZX\tيعb]1:[ccZ\\]ſةé\\Xaةſبة1ZY3b\\ب ſ2é中é😀{Zاcا中ſ2",
+      "count": 413,
+      "nfc": "ع😀😀[Xa\t\t\\[اXſ3́cا\tي文\"بة[:😀}😀2 X\"Z😀را\\b \"2中ر]Y1{c2{Z{́ة2ع]3 b文بZb\tc\"ZلXب بZ\n\"a中YXع2éc1ſc\nc]文:a}😀1c{文3ع]文يXعYرةZ:{:aةb:Z\\b]Yةſ}😀{ع}ل3X:[中b\t\\ب]رY[رYa\t\\ي中{بر中Z\n2\\اع́اب[😀Z}Z:اZZاa😀2中\"يZa{a{{ſ中́\\\" cيX]ةيY:a } ال]X😀中文الي1中X{ X}\n\tZZſZſ中ع1XXZé\tZ\tر文ةaſ22😀يب:cع:中ſc2X\nبع]3Yة}:a21 يا ا\tc中ب\"بة[]c\"a:[ر\nرéي3[ſa]😀:[\\1aرb]Y文رع́3ل́中ر}يbc中 3ةبba[中文́2😀ةYZcعſاc\t\n[\" Z\\ع:2ſſéſ}ة3c3b\\文😀ةá文اaة::ر[c文XةX\\文3YcاZé}ةي中é😀́ſ́{[😀Y中😀ſ1ا\\ 3é \\ب\t aZX\tيعb]1:[ccZ\\]ſةé\\Xaةſبة1ZY3b\\ب ſ2é中é😀{Zاcا中ſ2"
+    },
+    {
+      "text": "ل:لXل\n\nZ😀文Y3X́ع31{Yca\t3ر😀béZXbلbéZ😀]{\nر😀Z2́}\\}中2ر2ل\\ \\Y3 ل😀\tا́ ر中ZYر}c2}bعZ\n\"]\"\"́]\\\"1ſa3\tZ中Zbيb}2{bcYaſZ11ل́éلa1ſا́1}ي\" ا::X:2c文́لbل ا3😀3c X2]文Zر́\n\\文اé中Ý113ة1ة:́中]]{ي😀\"\nا\"{ا12b[:[3cاب2[اللéا2文{中aſbX:文éY]c1b]{ل中Y文ة\\ſر:} ]لſ\nة}1\t3́ا{: ر\t}3́2\n\"يY😀 13bيſ文]3 Yب\\Y2\"\tc[aيي😀يé中a:Xéة ةY\\1\nب\n文文2{{c1\\中[\tع}\t中c2ة ب\"2é:رc[1Y{Zل[لا😀2́ 1ب😀ي😀Zيé\"]\t\ń\"ا\"éبر\\cſ\\ſ[é文cرب3}3لYلéب\\ب1ي文ſ文Z中ع\t2ب😀2{bب\t]\"3\tYaع\nيc\\😀éécé\n3ع:\" ſ\\ر}\t:بZcة{ſا́2]ل中3ةلſXعb]بcاZſſي]ا\\😀:中中a\"]文文éل1文[\nر}中X\"2Y]3文XXXر2Yع",
+      "count": 433,
+      "nfc": "ل:لXل\n\nZ😀文Y3X́ع31{Yca\t3ر😀béZXbلbéZ😀]{\nر😀Z2́}\\}中2ر2ل\\ \\Y3 ل😀\tا́ ر中ZYر}c2}bعZ\n\"]\"\"́]\\\"1ſa3\tZ中Zbيb}2{bcYaſZ11ل́éلa1ſا́1}ي\" ا::X:2c文́لbل ا3😀3c X2]文Zر́\n\\文اé中Ý113ة1ة:́中]]{ي😀\"\nا\"{ا12b[:[3cاب2[اللéا2文{中aſbX:文éY]c1b]{ل中Y文ة\\ſر:} ]لſ\nة}1\t3́ا{: ر\t}3́2\n\"يY😀 13bيſ文]3 Yب\\Y2\"\tc[aيي😀يé中a:Xéة ةY\\1\nب\n文文2{{c1\\中[\tع}\t中c2ة ب\"2é:رc[1Y{Zل[لا😀2́ 1ب😀ي😀Zيé\"]\t\ń\"ا\"éبر\\cſ\\ſ[é文cرب3}3لYلéب\\ب1ي文ſ文Z中ع\t2ب😀2{bب\t]\"3\tYaع\nيc\\😀éécé\n3ع:\" ſ\\ر}\t:بZcة{ſا́2]ل中3ةلſXعb]بcاZſſي]ا\\😀:中中a\"]文文éل1文[\nر}中X\"2Y]3文XXXر2Yع"
+    },
+    {
+      "text": "]bا2Zيa]رXة文ة3يX3 2\n\tX\nÝ\n{لéاb́رYſY😀]Z\t}اع中文ſع]\"ع[2cع}é[{Y\"中:]\nعécbYعارع\n:]ſ}1:\\ſ:1ل2😀ع2عاX}اة} \\\"3:ل \\X3中\\لرل ]ر2😀bيZ2bل3يſ\"\t\nرb\t2😀ſع3X\tY\"cب😀Xر3ا}رةب]́ب bر{\\中中😀ع2ب中بaعcé:رعي \\ا1ع ́Z2ſ X[b文 😀Z1\n:ل\n😀\n\t文[\\:́ſع1ب😀\"3ل\"ر\tZſ文Zلب\t́ſé文\ta:ر\"文😀\nب}Yر́:ſ{X}Y{{文3لر2:[ſ]عſ}2ر\"ربب:中1\nي3X́ſY2لZع2عY2ZX3😀ةللX\\á\tcا]éرé1[ca\tX😀 😀Y3c\n 😀}]2بة😀éc{ 3ب{á\nلc😀ر\"2ب😀😀]é3\n\t文:Zc::ع文a]Zبa[ل文ةيبa{{{aبc]Zااع\"\n{ا\nرع😀عXة文中́\"ل2\": ير́😀:{32}\nةſZ]]ا[́ي 😀é2[1Z\néſعي{ل 文😀}Zل]ébZ😀]ل:1中́رةر:1Y\"ة😀ع\tل1 2:\"2]\\aل\\XبXb2",
+      "count": 426,
+      "nfc": "]bا2Zيa]رXة文ة3يX3 2\n\tX\nÝ\n{لéاb́رYſY😀]Z\t}اع中文ſع]\"ع[2cع}é[{Y\"中:]\nعécbYعارع\n:]ſ}1:\\ſ:1ل2😀ع2عاX}اة} \\\"3:ل \\X3中\\لرل ]ر2😀bيZ2bل3يſ\"\t\nرb\t2😀ſع3X\tY\"cب😀Xر3ا}رةب]́ب bر{\\中中😀ع2ب中بaعcé:رعي \\ا1ع ́Z2ſ X[b文 😀Z1\n:ل\n😀\n\t文[\\:́ſع1ب😀\"3ل\"ر\tZſ文Zلب\t́ſé文\ta:ر\"文😀\nب}Yر́:ſ{X}Y{{文3لر2:[ſ]عſ}2ر\"ربب:中1\nي3X́ſY2لZع2عY2ZX3😀ةللX\\á\tcا]éرé1[ca\tX😀 😀Y3c\n 😀}]2بة😀éc{ 3ب{á\nلc😀ر\"2ب😀😀]é3\n\t文:Zc::ع文a]Zبa[ل文ةيبa{{{aبc]Zااع\"\n{ا\nرع😀عXة文中́\"ل2\": ير́😀:{32}\nةſZ]]ا[́ي 😀é2[1Z\néſعي{ل 文😀}Zل]ébZ😀]ل:1中́رةر:1Y\"ة😀ع\tل1 2:\"2]\\aل\\XبXb2"
+    },
+    {
+      "text": "́ا́\\Y[]2́ةب}aaab1́文b😀1\tbſةaccc[ا文\"中1 é́Yſ中 2:cل]ا2عZ\\ليي2́3{́2}:{ة1Z ba2 {a3\\:cbبa中中عZYل\"́文3ي\"aي[\"يc]{ا}\n1́\\é\"ةا::😀文b\"\n\n{c中ر\\中:ل:\nccéةY]文3\" {3中1a1ر}\"ſ\"é1{文 عبſa ]ب3é22ر3ZcYةا}😀ةا}\ncع:ſ中ة\n{\\[3 ةb́中aباbبZ文{ا1abرةع\téſ{Xر Y]عa[a[ب}\néب3عaéZ2\"}[\\\\中X:YيcZةéé[a中3Ybſ2:\\b:} ſ]ع\n1]اſaع:é}ي😀]][لY:X}😀\"\\[لياياaيا\\c[]́ ة}中文{́Z2aZá\"Y:{:رع3é\"[中{ل:ر: 😀1[Xc]中ي]ا\t aſX[2]{ا}Y:{[Z\t中ع[:3اééبا中ſ́中́ار]ة ر\n\n اc\\́عاX[:11[bلر\\ةب😀ل\\]ةل2}Xc{رر[[ة{bاب中中 يY3[c中文لX中:رbZ1中:文{2عYريار1]😀\\2文😀\n] ſل1😀{ع😀\t中ſY\n \\رYX{3[",
+      "count": 421,
+      "nfc": "́ا́\\Y[]2́ةب}aaab1́文b😀1\tbſةaccc[ا文\"中1 é́Yſ中 2:cل]ا2عZ\\ليي2́3{́2}:{ة1Z ba2 {a3\\:cbبa中中عZYل\"́文3ي\"aي[\"يc]{ا}\n1́\\é\"ةا::😀文b\"\n\n{c中ر\\中:ل:\nccéةY]文3\" {3中1a1ر}\"ſ\"é1{文 عبſa ]ب3é22ر3ZcYةا}😀ةا}\ncع:ſ中ة\n{\\[3 ةb́中aباbبZ文{ا1abرةع\téſ{Xر Y]عa[a[ب}\néب3عaéZ2\"}[\\\\中X:YيcZةéé[a中3Ybſ2:\\b:} ſ]ع\n1]اſaع:é}ي😀]][لY:X}😀\"\\[لياياaيا\\c[]́ ة}中文{́Z2aZá\"Y:{:رع3é\"[中{ل:ر: 😀1[Xc]中ي]ا\t aſX[2]{ا}Y:{[Z\t中ع[:3اééبا中ſ́中́ار]ة ر\n\n اc\\́عاX[:11[bلر\\ةب😀ل\\]ةل2}Xc{رر[[ة{bاب中中 يY3[c中文لX中:رbZ1中:文{2عYريار1]😀\\2文😀\n] ſل1😀{ع😀\t中ſY\n \\رYX{3["
+    },
+    {
+      "text": "\\\nلب{}{\n1b ]́يبرر\tſر{\\3\"\\😀لZ😀\tا́باéي b}ع 😀文1ا]3\nري:c😀ر中\tل}b}Yيري2中Za\"cY}文éب中لéYة\"cل文3文]]文:ا:a1c\"éعلY]aيع1cſيا\t3بb中رſY\"ةرY:ةي]\nبcب\\ة3文\t\\\t:中aل}ſ2Xلé\"ع21[éي\\3اX😀رb́ſب1: b́ſY中ي}\"2abل文[[ عي\"文éſ\"́文Yé\\文ſري\"文 2\\b1😀:Y中😀}رſ: Z\t😀2}بc]}😀 ر23ſ33\néb\\ة[c}\naéة\\\tZ]a中😀中a\nc\nا}}{中YY\"😀لé]]中\\3ي}:bلXaY cX2aربةY22c3b\n\n\"بيcر{ا:\"😀\nي\nſ中ſ:文2]1ة3Xل{1\"ا]ع{́3Y}ع3\\[X\n}Z:😀[\n:Yة}}😀ſر ع[]\n\\caa3a1}文{عa\n[لab 中3cXيل}ع\t\"\"ريXع }ل文ل文ب}bé中3b[ع}}}é\"a3رſcéb3:\"3文بةc]éل\" يل́\t3́ſريب́يXر😀́}ſZb\\中́ل\\́} b\\\tب [ة́ةZ[1ل中:é\"ة3}éZلaéةYلaY\" Z",
+      "count": 439,
+      "nfc": "\\\nلب{}{\n1b ]́يبرر\tſر{\\3\"\\😀لZ😀\tا́باéي b}ع 😀文1ا]3\nري:c😀ر中\tل}b}Yيري2中Za\"cY}文éب中لéYة\"cل文3文]]文:ا:a1c\"éعلY]aيع1cſيا\t3بb中رſY\"ةرY:ةي]\nبcب\\ة3文\t\\\t:中aل}ſ2Xلé\"ع21[éي\\3اX😀رb́ſب1: b́ſY中ي}\"2abل文[[ عي\"文éſ\"́文Yé\\文ſري\"文 2\\b1😀:Y中😀}رſ: Z\t😀2}بc]}😀 ر23ſ33\néb\\ة[c}\naéة\\\tZ]a中😀中a\nc\nا}}{中YY\"😀لé]]中\\3ي}:bلXaY cX2aربةY22c3b\n\n\"بيcر{ا:\"😀\nي\nſ中ſ:文2]1ة3Xل{1\"ا]ع{́3Y}ع3\\[X\n}Z:😀[\n:Yة}}😀ſر ع[]\n\\caa3a1}文{عa\n[لab 中3cXيل}ع\t\"\"ريXع }ل文ل文ب}bé中3b[ع}}}é\"a3رſcéb3:\"3文بةc]éل\" يل́\t3́ſريب́يXر😀́}ſZb\\中́ل\\́} b\\\tب [ة́ةZ[1ل中:é\"ة3}éZلaéةYلaY\" Z"
+    },
+    {
+      "text": "é{b中aايa\\1文\nبي\nع\t32é\nة{Yي] \\ſ1XY \t́Z}中ر😀عاaة1\tYé\"{اي文a\néرب文3ſ12\nYcب\\3ZXييع中bXراب]}Zر文Z文Zلع:ب文ب]{]\\Yb\\😀اbبaل]{ ا文\"é}23a😀X\"文é́[\"ب́1aب😀}中\t\\]2\\\nX😀]\\2\nYc中b{ا:中cة1\nا{ Xc\t\n}ا\nb]中́ſ رYſZ{اéYبZabX{\nر{}éćل文بſſ\"Y[ {Xa::ة\tرع2ب]2ب\"}cŹ文لY21ſ\"ſرb\"ةة3اé中3́1عب}3ر {ي\tc[b\t́]:بXX1éé2] \"1{ل中́X😀ر2\\a bYيةعة2]X \\ل31{2[3 😀ي1  لل\tYa\"3للX中3ة\"😀\"\\{ 1{3Xا3中[3\\ſلععY{😀ſſبةة}a22ل\"\n{Y33\\لا\"ſع13😀:بſبb]ا[يc😀ا3]عب{c\"]b{ل中éX\\]Y[c\t:Y😀{文c\nا cbرcر\"ييا́a1:3}}}é]رX3\\ي3Xا ب}1́c]اب]لعا😀ي\tة]\"a22\t\t]3\\3ا😀22Y:中\t22\nZſ文1cZZ3Y2Y😀بعاY\"ب😀عX😀é}{",
+      "count": 445,
+      "nfc": "é{b中aايa\\1文\nبي\nع\t32é\nة{Yي] \\ſ1XY \t́Z}中ر😀عاaة1\tYé\"{اي文a\néرب文3ſ12\nYcب\\3ZXييع中bXراب]}Zر文Z文Zلع:ب文ب]{]\\Yb\\😀اbبaل]{ ا文\"é}23a😀X\"文é́[\"ب́1aب😀}中\t\\]2\\\nX😀]\\2\nYc中b{ا:中cة1\nا{ Xc\t\n}ا\nb]中́ſ رYſZ{اéYبZabX{\nر{}éćل文بſſ\"Y[ {Xa::ة\tرع2ب]2ب\"}cŹ文لY21ſ\"ſرb\"ةة3اé中3́1عب}3ر {ي\tc[b\t́]:بXX1éé2] \"1{ل中́X😀ر2\\a bYيةعة2]X \\ل31{2[3 😀ي1  لل\tYa\"3للX中3ة\"😀\"\\{ 1{3Xا3中[3\\ſلععY{😀ſſبةة}a22ل\"\n{Y33\\لا\"ſع13😀:بſبb]ا[يc😀ا3]عب{c\"]b{ل中éX\\]Y[c\t:Y😀{文c\nا cbرcر\"ييا́a1:3}}}é]رX3\\ي3Xا ب}1́c]اب]لعا😀ي\tة]\"a22\t\t]3\\3ا😀22Y:中\t22\nZſ文1cZZ3Y2Y😀بعاY\"ب😀عX😀é}{"
+    },
+    {
+      "text": ":\t中\nb3YXX中Zةc文اbاببb3ب\tY\t:]X\"ب3中لX文:文[ba:ةaع́ل中\"Z{\"ع中中béعſ\"ſ2\n\tſا33\taي́ربX中Y\"abا\n3́ ب文\t文a[ſ1}Źيſé́بYي\tX2ة\t}bر]]{ عاYc}ſعي中]\nي́b\\{\tÝ中😀لé\\\t}Y]:ſZ文Z😀[\n\nX[Yé\tرة\n\t1لر:][文文ة1]\\文2bZcةعc Z\t😀a}}ر\n\"ة1ةرلſ中لةل\"YZ232ſ[😀ZY\"ابc😀ي\\ل\\aلبةZرع21Z\\]لY中\nſ3{\\ةب{X\nية\"́\\\nةبY}\t文 برébb]يYbaةcſ1é\\\nZلéرé\"\nاcر\"اZa[]]ل́Ź32YلاcY]]ا😀2ب中ي́\"}Ybéل{cé😀:ſ1中 ع3اXbة2\\中ſ中ر عةa:}b文\\X文\t\taبرa\n}ة\t[😀a{]بb😀ل{Yſ\\文\t\"́\"ةير]ي{{😀ſ́Y[bYب3中عſX́عaX中中لX1c😀رلb文ة1رب中ي文ſ2:\\b 2Y2يc\"1YYb\"Zل [ر{aa3ſZ😀\na[Z中 😀\"}3ييYة :ب[[ةXع\\Xa中ا\"عةل\n:1[1  {́}a😀يلſ3\n😀ة 😀éſa[",
+      "count": 459,
+      "nfc": ":\t中\nb3YXX中Zةc文اbاببb3ب\tY\t:]X\"ب3中لX文:文[ba:ةaع́ل中\"Z{\"ع中中béعſ\"ſ2\n\tſا33\taي́ربX中Y\"abا\n3́ ب文\t文a[ſ1}Źيſé́بYي\tX2ة\t}bر]]{ عاYc}ſعي中]\nي́b\\{\tÝ中😀لé\\\t}Y]:ſZ文Z😀[\n\nX[Yé\tرة\n\t1لر:][文文ة1]\\文2bZcةعc Z\t😀a}}ر\n\"ة1ةرلſ中لةل\"YZ232ſ[😀ZY\"ابc😀ي\\ل\\aلبةZرع21Z\\]لY中\nſ3{\\ةب{X\nية\"́\\\nةبY}\t文 برébb]يYbaةcſ1é\\\nZلéرé\"\nاcر\"اZa[]]ل́Ź32YلاcY]]ا😀2ب中ي́\"}Ybéل{cé😀:ſ1中 ع3اXbة2\\中ſ中ر عةa:}b文\\X文\t\taبرa\n}ة\t[😀a{]بb😀ل{Yſ\\文\t\"́\"ةير]ي{{😀ſ́Y[bYب3中عſX́عaX中中لX1c😀رلb文ة1رب中ي文ſ2:\\b 2Y2يc\"1YYb\"Zل [ر{aa3ſZ😀\na[Z中 😀\"}3ييYة :ب[[ةXع\\Xa中ا\"عةل\n:1[1  {́}a😀يلſ3\n😀ة 😀éſa["
+    },
+    {
+      "text": "[😀1[{1{文\\́ Y[\"[a\"1\"\"\n😀]}bي文:ا́[\"}2ا文ع:ةXة[{ a{b\n:Xb[\"]́3اااZ\t2文[3ا}\t{}cYc:2\\ب}}}[ſ\tة\t2b😀Y bابcة\"é\\{é:😀b1ة\"中عبي2اc😀 ſ]caéب2ع́😀}\\ي ب ſ́ا😀Xé1ب{32中\"3́Xcععb}\"[لZY文}:ر{رع}[]ةſbة\\c\t😀ب\t:😀\tZي😀{cc1😀cc3\t\naي\n😀رة{é3{ب X:ة213́ب{[\\]3ر\"[2a2 Z\tا\nب\tY}b😀ا中223c}cع]\t:[اعل{\tZ😀\"éلر文\\[ب]ر\"{ة}ca文b ][3中ع{😀\\ب \nc2X文2ة[ي😀c\"́文ب ة1bرYſZ中} éيbX[\t2:1Zc:中\\  \\a}\":\n{]لX\\\\3 ſعل:Z😀b́3c[2c2ب32{\"ا😀\t😀X ]يcéةZيXſير]Yſſع{2ةZ]ع\"2aé:اb2ccc{b:\nلب\t文b😀}2}ي\t😀ي1ع2ا]́بcي3ر\"بYلع{ة\"ع Z\nيa]éé}Y[]يY😀1X\néل中اي\"Yع\"cbbب}\\YcY}😀ر3\\Zb中c😀bc \nةbل[ب\tعſعYc\\Y ع\\\"يعا\néبي ر\"",
+      "count": 450,
+      "nfc": "[😀1[{1{文\\́ Y[\"[a\"1\"\"\n😀]}bي文:ا́[\"}2ا文ع:ةXة[{ a{b\n:Xb[\"]́3اااZ\t2文[3ا}\t{}cYc:2\\ب}}}[ſ\tة\t2b😀Y bابcة\"é\\{é:😀b1ة\"中عبي2اc😀 ſ]caéب2ع́😀}\\ي ب ſ́ا😀Xé1ب{32中\"3́Xcععb}\"[لZY文}:ر{رع}[]ةſbة\\c\t😀ب\t:😀\tZي😀{cc1😀cc3\t\naي\n😀رة{é3{ب X:ة213́ب{[\\]3ر\"[2a2 Z\tا\nب\tY}b😀ا中223c}cع]\t:[اعل{\tZ😀\"éلر文\\[ب]ر\"{ة}ca文b ][3中ع{😀\\ب \nc2X文2ة[ي😀c\"́文ب ة1bرYſZ中} éيbX[\t2:1Zc:中\\  \\a}\":\n{]لX\\\\3 ſعل:Z😀b́3c[2c2ب32{\"ا😀\t😀X ]يcéةZيXſير]Yſſع{2ةZ]ع\"2aé:اb2ccc{b:\nلب\t文b😀}2}ي\t😀ي1ع2ا]́بcي3ر\"بYلع{ة\"ع Z\nيa]éé}Y[]يY😀1X\néل中اي\"Yع\"cbbب}\\YcY}😀ر3\\Zb中c😀bc \nةbل[ب\tعſعYc\\Y ع\\\"يعا\néبي ر\""
+    },
+    {
+      "text": "ا1 a\tſY3]:é\t\tcXZ文ي😀ا {ةع1X文́[\"\"ي\\}中اſ2يي عb2Z ́😀é]ة\t:بل中بع 文ل́ X😀رل\\ي́}́Xc]ةbé\ta[2cةbé\\رbر]]ا\"😀[لéع😀Z\t}بé😀😀a😀}رb]:Zي:1يل [cع]😀Z[\t1ةب ac😀Z {عbcي{\t中Y\tbX\t21́:عYع3b:لé}X]b[ة😀[1{لع}ba[رba3b2ل\néaع\n]b2:[X:2Z {1ل中Z\tبaب文cل😀中1اYZاaا}ſa中بa{文ع]ب1رب2\\ب]Yاع XſſZc1 }éſX]a3\tي]X\\́文😀b😀\t中ار{ا]]:ي中ZX\"́Z:]{}é:é}للZ{Z}文ſاé😀3يc{]é}\nbb́{Zا́😀́2Y\\1ي]\":1{\"\"{ب2bا1ل́cX\t́1́Z[]Yبا{aةاſ]c中يſي:éر{文́éع{}X:رſſر:رة2́[عل}[X\"acaXر3ل]بY\\文́caر\n3ا3😀文}يc😀13ſ\n1]\\ل文[cX\n\nŹاZ2 文a Y1文\t\n\nالر1]ب3é2中b😀Yc\t😀[3{\nع文[ر😀中ا}\nZ中بة\\ſ\n33中\taبc\"á文c\"ير\tل\\ع\n中Yع XaبZZابé{\n[́Y",
+      "count": 467,
+      "nfc": "ا1 a\tſY3]:é\t\tcXZ文ي😀ا {ةع1X文́[\"\"ي\\}中اſ2يي عb2Z ́😀é]ة\t:بل中بع 文ل́ X😀رل\\ي́}́Xc]ةbé\ta[2cةbé\\رbر]]ا\"😀[لéع😀Z\t}بé😀😀a😀}رb]:Zي:1يل [cع]😀Z[\t1ةب ac😀Z {عbcي{\t中Y\tbX\t21́:عYع3b:لé}X]b[ة😀[1{لع}ba[رba3b2ل\néaع\n]b2:[X:2Z {1ل中Z\tبaب文cل😀中1اYZاaا}ſa中بa{文ع]ب1رب2\\ب]Yاع XſſZc1 }éſX]a3\tي]X\\́文😀b😀\t中ار{ا]]:ي中ZX\"́Z:]{}é:é}للZ{Z}文ſاé😀3يc{]é}\nbb́{Zا́😀́2Y\\1ي]\":1{\"\"{ب2bا1ل́cX\t́1́Z[]Yبا{aةاſ]c中يſي:éر{文́éع{}X:رſſر:رة2́[عل}[X\"acaXر3ل]بY\\文́caر\n3ا3😀文}يc😀13ſ\n1]\\ل文[cX\n\nŹاZ2 文a Y1文\t\n\nالر1]ب3é2中b😀Yc\t😀[3{\nع文[ر😀中ا}\nZ中بة\\ſ\n33中\taبc\"á文c\"ير\tل\\ع\n中Yع XaبZZابé{\n[́Y"
+    },
+    {
+      "text": "\néلل12{ééX\"رYا:Z{ي\\\n😀😀يع2c😀ſ]ي😀ر\n1ة1XةZي\\\"[}رb \"ةا[😀}a😀{\\😀cſ[\"ع\n3رbةر😀[{́1\\2 }[baيa[a{中عX]عة\\1ة1اب]XاéZ:ع文éa2{ةبc\tbY{Yb1éب😀:3ر[é[\"a文\tX\n X:😀:文ſ aة\"\t:رع[2\nZcZعY\n2文}YZع\tة文ة́文[2Y2ſ ]ſXé ]\taa2c} aXé\nررZa\"a\\aب}يY2ل[c{] ́:][aZ文文😀بſ\"bXYب}Z]b\"2\t 2c:éعع\\{中Z}با{é}ر文ري ́́a}[[ع中]😀[2بر}😀Yة\\\n😀bا}ſ2\\Z1]}\n\n文😀́b 文 Yć[\t3Y{{中13}}ل]中 [1]{X1]\\[aſ1Xيéر32راXc{cbb}\tcXacع2文中\t😀ة{Y3}Y]عbZc2😀é]2😀[3Z[Y\"文\"ع\"رbل Y2Y:يY:ZbYاb}́cع \\2\\a1ſ1:a\\😀3́لر2بة 2[عbلل中aرZلع文}\tX] 中\tا2c中 ة1\\ل中رXYZ2}Xſſ3:يية2中بXبZةſY3YZ\\ل{ة\n1رر\"文2Y ة[XةX2Yيي{😀\t\\中😀ب\n]ا\t\n3:é \\\"}c {}]éيZ",
+      "count": 472,
+      "nfc": "\néلل12{ééX\"رYا:Z{ي\\\n😀😀يع2c😀ſ]ي😀ر\n1ة1XةZي\\\"[}رb \"ةا[😀}a😀{\\😀cſ[\"ع\n3رbةر😀[{́1\\2 }[baيa[a{中عX]عة\\1ة1اب]XاéZ:ع文éa2{ةبc\tbY{Yb1éب😀:3ر[é[\"a文\tX\n X:😀:文ſ aة\"\t:رع[2\nZcZعY\n2文}YZع\tة文ة́文[2Y2ſ ]ſXé ]\taa2c} aXé\nررZa\"a\\aب}يY2ل[c{] ́:][aZ文文😀بſ\"bXYب}Z]b\"2\t 2c:éعع\\{中Z}با{é}ر文ري ́́a}[[ع中]😀[2بر}😀Yة\\\n😀bا}ſ2\\Z1]}\n\n文😀́b 文 Yć[\t3Y{{中13}}ل]中 [1]{X1]\\[aſ1Xيéر32راXc{cbb}\tcXacع2文中\t😀ة{Y3}Y]عbZc2😀é]2😀[3Z[Y\"文\"ع\"رbل Y2Y:يY:ZbYاb}́cع \\2\\a1ſ1:a\\😀3́لر2بة 2[عbلل中aرZلع文}\tX] 中\tا2c中 ة1\\ل中رXYZ2}Xſſ3:يية2中بXبZةſY3YZ\\ل{ة\n1رر\"文2Y ة[XةX2Yيي{😀\t\\中😀ب\n]ا\t\n3:é \\\"}c {}]éيZ"
+    },
+    {
+      "text": "Yſb{cبZر{\\Xa 2cاعſé文2\n[بŹé\n2Xé ب1ل😀1Ya中a:́́ل3😀}\"ا2é中}\"\n\tب{[{اa3文[[ا[3́b[Z[中]Z2اa2:2\\́X3Xع]ة\"Z}}Z\"中]\"\"X\\ة[X\té{béب2\\\nX1a[}\\[Zع\\ا[لرع\"[2ZcاX\tſ[Zة bY1\\:\nع{文ي́Y:文😀😀]ع{X文ل\\ع\"\tاYب\"بل2文baي[ر́YX[ſ: 😀😀\nb\"文ر\" \\ةZ3\"́a:文ſ3]ة中é [ſſYXſY:\nbر a{b]XcZYا3Y中中文اcب\":{[\nc😀cي😀بéلب1}ة2aſ中\\X}ارé :a中}13c\naZ1ةX́ا😀\\bZاaZ\\2ا́b: {😀[éſر文ſع\tbé]31Xعſ[]ب2 bb[Z[عZة{cbبZ[́b[\t😀بY\"\\b[::cل2é\\:Y1cب\tع文ا2a中😀\\\t1لZايcXé😀\\ا{ةaY:aة2]ر]cعي c12{]3ري\\b}ل\\[3\n\"ſرéاaعX\\XX:ب\t\t231ب\t{2́😀文2{\tل\"́\t3ع\t1a2[ي1a]中عſبcaZعيب\"中ر:[Z\\ة\nbيXي中éيcي😀2ſXX2中X \tZع}cيſéةé\n中ة3ا\nيb]بةXſY3́文ي文عſ:{3́}ر}1ر",
+      "count": 495,
+      "nfc": "Yſb{cبZر{\\Xa 2cاعſé文2\n[بŹé\n2Xé ب1ل😀1Ya中a:́́ل3😀}\"ا2é中}\"\n\tب{[{اa3文[[ا[3́b[Z[中]Z2اa2:2\\́X3Xع]ة\"Z}}Z\"中]\"\"X\\ة[X\té{béب2\\\nX1a[}\\[Zع\\ا[لرع\"[2ZcاX\tſ[Zة bY1\\:\nع{文ي́Y:文😀😀]ع{X文ل\\ع\"\tاYب\"بل2文baي[ر́YX[ſ: 😀😀\nb\"文ر\" \\ةZ3\"́a:文ſ3]ة中é [ſſYXſY:\nbر a{b]XcZYا3Y中中文اcب\":{[\nc😀cي😀بéلب1}ة2aſ中\\X}ارé :a中}13c\naZ1ةX́ا😀\\bZاaZ\\2ا́b: {😀[éſر文ſع\tbé]31Xعſ[]ب2 bb[Z[عZة{cbبZ[́b[\t😀بY\"\\b[::cل2é\\:Y1cب\tع文ا2a中😀\\\t1لZايcXé😀\\ا{ةaY:aة2]ر]cعي c12{]3ري\\b}ل\\[3\n\"ſرéاaعX\\XX:ب\t\t231ب\t{2́😀文2{\tل\"́\t3ع\t1a2[ي1a]中عſبcaZعيب\"中ر:[Z\\ة\nbيXي中éيcي😀2ſXX2中X \tZع}cيſéةé\n中ة3ا\nيb]بةXſY3́文ي文عſ:{3́}ر}1ر"
+    },
+    {
+      "text": "\"aا[XZري[[]ي ]بZ{ب}b中é文رZ中a\t\nZل\nXة́]́文: 3{ Z}بيéſة: 文{\nل\tbc2é}3]ي{éYcZ\"اcŹ}لب\"a\"ي]}1ي[اع́ſ\\céع}bب\téſار\t😀{YZ文aXabſ\\\"c\\]ا中ة{بY文ي文éc中\\]2ب\"\tZſ\nب{c\" []Z}ſع[ſ文😀\\éZر2ةćعي]3中\"中a[Xéر\\3文b文 \\اب:Zب\"::😀 😀文é文Zع2aZa[中يZبي😀\\Zá1]ع:يبYاſ😀X😀]اZ1:́}ſY ccéي\t文ab\\:[]文aY3ſXي́عا\\{Zc]ب\t1ر文:\"ſ:😀Z[[Zر\t]2文2ſ32{ر2:ة\"b\"c\"中{2ة133\ńc[中文́中ع{عل{😀a\nX\tY文文😀中文ة 中aعaرا\"中2[Y3\"1\"文را[XYY\n中ة2\nيعſة3رعع\n中بY}中b}\\:}[\nſ́Xéر3a😀بZZاc\"ي[3\n\"لcY{3}{\tba\t b\tc😀3:[X1{éX{]بY😀ا中\"b [😀 😀́ر\\Y\t\ta[3\"[文文2中:}]يſ\t\\😀ب aر\"中́1Y:cة́ا中يبةا 文Z ا中中\t\nſ3ا中\n}中1\"b中Z:\nb\né:X\"ſé\\ي:Z😀Y\tي1يY}ي{21文😀1中ة\t:😀bbع1b ééYX",
+      "count": 483,
+      "nfc": "\"aا[XZري[[]ي ]بZ{ب}b中é文رZ中a\t\nZل\nXة́]́文: 3{ Z}بيéſة: 文{\nل\tbc2é}3]ي{éYcZ\"اcŹ}لب\"a\"ي]}1ي[اع́ſ\\céع}bب\téſار\t😀{YZ文aXabſ\\\"c\\]ا中ة{بY文ي文éc中\\]2ب\"\tZſ\nب{c\" []Z}ſع[ſ文😀\\éZر2ةćعي]3中\"中a[Xéر\\3文b文 \\اب:Zب\"::😀 😀文é文Zع2aZa[中يZبي😀\\Zá1]ع:يبYاſ😀X😀]اZ1:́}ſY ccéي\t文ab\\:[]文aY3ſXي́عا\\{Zc]ب\t1ر文:\"ſ:😀Z[[Zر\t]2文2ſ32{ر2:ة\"b\"c\"中{2ة133\ńc[中文́中ع{عل{😀a\nX\tY文文😀中文ة 中aعaرا\"中2[Y3\"1\"文را[XYY\n中ة2\nيعſة3رعع\n中بY}中b}\\:}[\nſ́Xéر3a😀بZZاc\"ي[3\n\"لcY{3}{\tba\t b\tc😀3:[X1{éX{]بY😀ا中\"b [😀 😀́ر\\Y\t\ta[3\"[文文2中:}]يſ\t\\😀ب aر\"中́1Y:cة́ا中يبةا 文Z ا中中\t\nſ3ا中\n}中1\"b中Z:\nb\né:X\"ſé\\ي:Z😀Y\tي1يY}ي{21文😀1中ة\t:😀bbع1b ééYX"
+    },
+    {
+      "text": "X\nعc[ bbةY{عي2é😀X12a:لé\"1\\b[́ةX\tة😀\t😀{[ة́[[\tb中中aYة\t1文}ي\t\"رر中\"1]中c3ة\"رZ:\n}::文3\n{ة文ا中ر\\Za{😀\nع:ب{ſعر\n1́\n}ل}ر中中{Z😀اY}{ل1عſ中عاZي文\n3\n😀ſ[ةي\nbرع}中}Yſ1[]1a\t中é\"ر文Yة文11😀c 3c\tbcY]X😀ر\t ل]1\n\tع\"عYZ中a]文ع文ſ}ب:X\\ا中ZعلbZعſ1 ſ{c\"X]}\":\"1Zلaة\tي}c\t3\\́cل😀\\3Z2}😀ة́c{2لa232ع\n{] \" 2é\\1X\t]لcb[ر\"bb}ب😀ا1]عbZ[ر\nب\t\n2[]:X́b\"ي}中ي[\t1ب[{́cXcſcرلاé\tيا\"ZZلب}]ſ:a2\\:{{اXةع}éر2:a ćي\n Xاا́cZلرcلX1ب}ſ\\لZر[ةba文\nع[:\téYةي3يةZ\tZ ي3ةا:رل2文😀Zع]Zا文b[Y}\téa中\né文ةع]́Y文\"لc1رc\"\"Y[]文رcX aيZة\\\"ة:\nZé\t中文1cſb文 中[a\t:cع😀ا}b3\"Y文\t\"Z\"Y1:\\ا\n}ل}  b Zي\"\"ل2ي{中}ابc😀Z\nر{😀Z\t\nب\"c😀[رة ſ3:\n[文 {بةbY\nX}\tYلZZع́ć\"\"1ي😀éع",
+      "count": 492,
+      "nfc": "X\nعc[ bbةY{عي2é😀X12a:لé\"1\\b[́ةX\tة😀\t😀{[ة́[[\tb中中aYة\t1文}ي\t\"رر中\"1]中c3ة\"رZ:\n}::文3\n{ة文ا中ر\\Za{😀\nع:ب{ſعر\n1́\n}ل}ر中中{Z😀اY}{ل1عſ中عاZي文\n3\n😀ſ[ةي\nbرع}中}Yſ1[]1a\t中é\"ر文Yة文11😀c 3c\tbcY]X😀ر\t ل]1\n\tع\"عYZ中a]文ع文ſ}ب:X\\ا中ZعلbZعſ1 ſ{c\"X]}\":\"1Zلaة\tي}c\t3\\́cل😀\\3Z2}😀ة́c{2لa232ع\n{] \" 2é\\1X\t]لcb[ر\"bb}ب😀ا1]عbZ[ر\nب\t\n2[]:X́b\"ي}中ي[\t1ب[{́cXcſcرلاé\tيا\"ZZلب}]ſ:a2\\:{{اXةع}éر2:a ćي\n Xاا́cZلرcلX1ب}ſ\\لZر[ةba文\nع[:\téYةي3يةZ\tZ ي3ةا:رل2文😀Zع]Zا文b[Y}\téa中\né文ةع]́Y文\"لc1رc\"\"Y[]文رcX aيZة\\\"ة:\nZé\t中文1cſb文 中[a\t:cع😀ا}b3\"Y文\t\"Z\"Y1:\\ا\n}ل}  b Zي\"\"ل2ي{中}ابc😀Z\nر{😀Z\t\nب\"c😀[رة ſ3:\n[文 {بةbY\nX}\tYلZZع́ć\"\"1ي😀éع"
+    },
+    {
+      "text": "\nX2لبYſa\n{\t]bا😀ر[بر́Yc\\́لY Z\"ب中ي1]3\n2文bYéرر́éة1中ع中ع{رéبacſ}}ſ}中]\ta1文é\\لرXbaبaa2Zb23é中ب1ع\\文ةé}c]ل中b😀\"ر2Y2\nر文3Z\n:}文}ل中\nſ́́]:́文a中1ع文3ببYſ\t\"\\3}ب213يaéſaع{\t 中 ة1YZé\t中[:ا13Yé\t́Y文{}\n23ſ1ة1]\"[béb\"́}[ربb\\3X́2:{ا3\n[中😀\n ع[\"رſلاa[Xſ😀}文اZ\\cيل[X{]ل\"文ZéZل]éY\\ب{ل\"b\"文ſةſé{aة]aةZل[é]3b\\2ا\néZل[}[Y1{ي\nX́X\"ي: 文{::\"ل\nعc\n\"\"́\"عبلةa} 😀Z{بXا1ل😀\"ب2é文ي:رſ[2aل中يé\\\nر1́ ب\\éX中1لć:بةſ3:\\}[😀]́]بر中]2X文é\"\t[a中ل\"بيé3ب́Y2{} 2\nX2Ý{\":]ر b}[رلة\tب3ع[é\tb}b1cbſ中[]ةſ]:2لb\nبſY\\\n{3́33: ſ2ل 1ع{文2\tر:ا2́a]ŹعZZي\n[a:32\\éي{\n中文é{لب文]\nXYſ:[\"ZZb文\tل3cة\"}文[را[2Y中aſ 文́]ſ😀{c\\ل:لر :😀Yaة😀ع\"Z1😀ع\\}\"Zي😀ا中[1Z3Z",
+      "count": 512,
+      "nfc": "\nX2لبYſa\n{\t]bا😀ر[بر́Yc\\́لY Z\"ب中ي1]3\n2文bYéرر́éة1中ع中ع{رéبacſ}}ſ}中]\ta1文é\\لرXbaبaa2Zb23é中ب1ع\\文ةé}c]ل中b😀\"ر2Y2\nر文3Z\n:}文}ل中\nſ́́]:́文a中1ع文3ببYſ\t\"\\3}ب213يaéſaع{\t 中 ة1YZé\t中[:ا13Yé\t́Y文{}\n23ſ1ة1]\"[béb\"́}[ربb\\3X́2:{ا3\n[中😀\n ع[\"رſلاa[Xſ😀}文اZ\\cيل[X{]ل\"文ZéZل]éY\\ب{ل\"b\"文ſةſé{aة]aةZل[é]3b\\2ا\néZل[}[Y1{ي\nX́X\"ي: 文{::\"ل\nعc\n\"\"́\"عبلةa} 😀Z{بXا1ل😀\"ب2é文ي:رſ[2aل中يé\\\nر1́ ب\\éX中1لć:بةſ3:\\}[😀]́]بر中]2X文é\"\t[a中ل\"بيé3ب́Y2{} 2\nX2Ý{\":]ر b}[رلة\tب3ع[é\tb}b1cbſ中[]ةſ]:2لb\nبſY\\\n{3́33: ſ2ل 1ع{文2\tر:ا2́a]ŹعZZي\n[a:32\\éي{\n中文é{لب文]\nXYſ:[\"ZZb文\tل3cة\"}文[را[2Y中aſ 文́]ſ😀{c\\ل:لر :😀Yaة😀ع\"Z1😀ع\\}\"Zي😀ا中[1Z3Z"
+    },
+    {
+      "text": "́é:\nXb{2😀ةXا\"\"لXZ:́文c{a Y3ca]3]]}:\tc\"لéر1😀中1cZſaéa文3́中{ي[1́😀:}ةbZبc]للب{\nع{\"😀中\\ة\tY ſcلſ́:a\tععلYc}ſب1ة3b文\\\"\"Yا31\n\n}1Y😀\nة\\ر:{文b Yي} ي́́ي 😀]1\"é1\"ةZX \t1ر2يé3اbaX}[1\naب文ة\\3\t1ſZة文😀3{2]\t{[عéaا\tرلY1Zي中:b}文ر\"3éb́\tر中ب \" Yccلſ1عبZ{X[Z2文\\Yة3[ZلبلY文中中YZ1\nX[中عر[}中}]ا中\t11[ſ]\tةعZلſ 文يZ]لر\"اة2{中[文ة: 2Y}文\n2X文يZ}́ي:文́\"2cي[éa中ſa2\"😀aب\n{中X😀Zb}Z\t \\ا😀2b:ر}😀éa:Z3́عي文3ل \" ب中[\"ل{ر😀ر文 \t1عc]XYY\n\"😀\\لرa}aa\\لÝبب\t]́لc ل\"中ع́[X文文[بZ\"c\\\\😀́[ſZ\"́\\ل中ي\t c\t\t\t\\:c:ſ\t bيaي1\\cbZ中ة\":\\}\nع\taéſ1ل3ةي]ع中ة\\b文3文c2Ya2中éعب中23عb }]aYZعéYل3Yéالſbc{بé😀é\"\n\\3اX]\tſYc:文中ر ́االXر\"ع:اc2\\ſ\"文\n\\中中1Yc\t1يb文رZ3́a\t}3\ta中ب{a]",
+      "count": 510,
+      "nfc": "́é:\nXb{2😀ةXا\"\"لXZ:́文c{a Y3ca]3]]}:\tc\"لéر1😀中1cZſaéa文3́中{ي[1́😀:}ةbZبc]للب{\nع{\"😀中\\ة\tY ſcلſ́:a\tععلYc}ſب1ة3b文\\\"\"Yا31\n\n}1Y😀\nة\\ر:{文b Yي} ي́́ي 😀]1\"é1\"ةZX \t1ر2يé3اbaX}[1\naب文ة\\3\t1ſZة文😀3{2]\t{[عéaا\tرلY1Zي中:b}文ر\"3éb́\tر中ب \" Yccلſ1عبZ{X[Z2文\\Yة3[ZلبلY文中中YZ1\nX[中عر[}中}]ا中\t11[ſ]\tةعZلſ 文يZ]لر\"اة2{中[文ة: 2Y}文\n2X文يZ}́ي:文́\"2cي[éa中ſa2\"😀aب\n{中X😀Zb}Z\t \\ا😀2b:ر}😀éa:Z3́عي文3ل \" ب中[\"ل{ر😀ر文 \t1عc]XYY\n\"😀\\لرa}aa\\لÝبب\t]́لc ل\"中ع́[X文文[بZ\"c\\\\😀́[ſZ\"́\\ل中ي\t c\t\t\t\\:c:ſ\t bيaي1\\cbZ中ة\":\\}\nع\taéſ1ل3ةي]ع中ة\\b文3文c2Ya2中éعب中23عb }]aYZعéYل3Yéالſbc{بé😀é\"\n\\3اX]\tſYc:文中ر ́االXر\"ع:اc2\\ſ\"文\n\\中中1Yc\t1يb文رZ3́a\t}3\ta中ب{a]"
+    },
+    {
+      "text": "ل中ااcZſ\n]\\X́bccaة\"中1́YYZaعةل2中\\́aa\"}\\\\aé 2ا中中يYXbYي2ا1 ]\"Z\"Z\\文X::b\\بةééي文عY中\\中\nر1XYيé文Zع\"\":ſZc}\\ب}́X}文ة]]رXb23 [}با}را\tZ3لaة\nةc\t\\a:ل2 😀中中ſXي1ة{́لرة2\tللب{بX ب:ير3ع}]ةcZ2中文\n\tيX1\n\n中{é\tةa\\ب2]{1文ſ}Y\tا1bb{لةبY \t2a }Zرſ}عع a\nعY2ل\\2ع[\ń[ة\nرل[😀X}]2X}文c{}لcéل\\a\t\t3ة\tع文Y13[文3لbZ\nc:文ي\t}[:\t33😀Y3ب}ع文 Xل Z\n2ب\n{يرŹ ́ع]\"\n[\ná2ا1:\t:{a:1\"\tرع}بX22中\t\\لa\"Z2عYل😀بYſ[ 3:b\\ſ]]2]́́中😀يéé́ةي{2]\"XcX}ſ}}{3b́ bا2éب2中ر}]Xſ1\"\néab😀Xécب\nي中\\ ́́́YلبY}中اca中 ب\n}:ب[:ي[ل{😀ل文😀[{\\中YةلcY\n \n\t [ ببſX́عبX} ا1Xا😀\"3\tرcر[}\t\tb😀ب1́Yا[:1b文cb中😀bZ2é]عةX3Yéb\"لا😀ر}}{中ſa[{\n}Y\"ب:ſ3X1\\é:ا中中ا\tا}{ب\n3́عا́aſ\t{ر́é\"بY2中}بب\"\n文ا中",
+      "count": 504,
+      "nfc": "ل中ااcZſ\n]\\X́bccaة\"中1́YYZaعةل2中\\́aa\"}\\\\aé 2ا中中يYXbYي2ا1 ]\"Z\"Z\\文X::b\\بةééي文عY中\\中\nر1XYيé文Zع\"\":ſZc}\\ب}́X}文ة]]رXb23 [}با}را\tZ3لaة\nةc\t\\a:ل2 😀中中ſXي1ة{́لرة2\tللب{بX ب:ير3ع}]ةcZ2中文\n\tيX1\n\n中{é\tةa\\ب2]{1文ſ}Y\tا1bb{لةبY \t2a }Zرſ}عع a\nعY2ل\\2ع[\ń[ة\nرل[😀X}]2X}文c{}لcéل\\a\t\t3ة\tع文Y13[文3لbZ\nc:文ي\t}[:\t33😀Y3ب}ع文 Xل Z\n2ب\n{يرŹ ́ع]\"\n[\ná2ا1:\t:{a:1\"\tرع}بX22中\t\\لa\"Z2عYل😀بYſ[ 3:b\\ſ]]2]́́中😀يéé́ةي{2]\"XcX}ſ}}{3b́ bا2éب2中ر}]Xſ1\"\néab😀Xécب\nي中\\ ́́́YلبY}中اca中 ب\n}:ب[:ي[ل{😀ل文😀[{\\中YةلcY\n \n\t [ ببſX́عبX} ا1Xا😀\"3\tرcر[}\t\tb😀ب1́Yا[:1b文cb中😀bZ2é]عةX3Yéb\"لا😀ر}}{中ſa[{\n}Y\"ب:ſ3X1\\é:ا中中ا\tا}{ب\n3́عا́aſ\t{ر́é\"بY2中}بب\"\n文ا中"
+    },
+    {
+      "text": "a2Y😀بé عc中عZ文a\"]́2文ب2{لع文caةX{{中Zةل\n\\ا لZY]éا́1\\3ر12中\\X:é\\ſ́ي1لة1[́Xا[Y13ل\n中]ي]ع\\ع\ta]ر文c\\ةياX{aZZ中中يبل]😀}文ſ[ة\"ééXZلر\"{ ́2]ةX[ي2\tر}́aعة]\\عا😀Z文ل\nbcرب ́ةé́ي́文[ي1Zيa:ةb中1]ةر́a{écYل\\{aب中́Xc文\"\"ب}\"بé3:اب\"é\\{يZةعا1[ع\"3}ةY\\ل😀é3\\ſZ中c[[中́ 😀 \t\tب]中b2ب]3}ع ر{c1bي\\Zا\"ب2ſ}{\nر:cé文3{bZلر\\cac2中ا1ل\"لر\"X中\"文2ل13اX\néا中Ya]X2文]éا3ا]لب]2ZعYZ1ة\tل\"1عا[\\}中b[لé]Z ]ة中ع1\tة\\ي\nلر中X[2ي😀{{ر}ſa3} éة́ ةſع\":ا}Xرcc[}ſé中ba\nYéZ\"\"2[中bX:ع😀1{][ZY\nſX文1ſر3c😀[:\tſيرة]32\"\n\\\t3{:cſſيلbاةY中a中:ب ſYſX́\t3éع2éb{ſي}1ياé\n3ſر}\\]\\2 ر1ſbc1ب\"}\tييbbلcbل́́ ́2b\\ا́23\t{文Z2ب}a}😀بZ:a2Y\tة\\بب\n\\Yé[😀\t::]{\nſb\"文aZ\tſ文ةZة\n:ي😀éل{[文c3ر[XſيXſéſل33\"",
+      "count": 530,
+      "nfc": "a2Y😀بé عc中عZ文a\"]́2文ب2{لع文caةX{{中Zةل\n\\ا لZY]éا́1\\3ر12中\\X:é\\ſ́ي1لة1[́Xا[Y13ل\n中]ي]ع\\ع\ta]ر文c\\ةياX{aZZ中中يبل]😀}文ſ[ة\"ééXZلر\"{ ́2]ةX[ي2\tر}́aعة]\\عا😀Z文ل\nbcرب ́ةé́ي́文[ي1Zيa:ةb中1]ةر́a{écYل\\{aب中́Xc文\"\"ب}\"بé3:اب\"é\\{يZةعا1[ع\"3}ةY\\ل😀é3\\ſZ中c[[中́ 😀 \t\tب]中b2ب]3}ع ر{c1bي\\Zا\"ب2ſ}{\nر:cé文3{bZلر\\cac2中ا1ل\"لر\"X中\"文2ل13اX\néا中Ya]X2文]éا3ا]لب]2ZعYZ1ة\tل\"1عا[\\}中b[لé]Z ]ة中ع1\tة\\ي\nلر中X[2ي😀{{ر}ſa3} éة́ ةſع\":ا}Xرcc[}ſé中ba\nYéZ\"\"2[中bX:ع😀1{][ZY\nſX文1ſر3c😀[:\tſيرة]32\"\n\\\t3{:cſſيلbاةY中a中:ب ſYſX́\t3éع2éb{ſي}1ياé\n3ſر}\\]\\2 ر1ſbc1ب\"}\tييbbلcbل́́ ́2b\\ا́23\t{文Z2ب}a}😀بZ:a2Y\tة\\بب\n\\Yé[😀\t::]{\nſb\"文aZ\tſ文ةZة\n:ي😀éل{[文c3ر[XſيXſéſل33\""
+    },
+    {
+      "text": "3文\n3ي2ة{中b[Yرſي😀Yبب{2 يXYا béبſي́́:cا:عc1:{😀 ب13é\\]Y[XYé]中́ب1中\\ر ل}\\عع}\tي2́رaZY中cZ文يb文Y文\"رYX中ل\n\"XرX\tY\tر:文aيا\n😀😀1}[\naرYſc1:2ي:ل中ةc[ر3عع[aا}ſXةa\"\"31ة{中\\中Z2ع́  رbةة{X\t\"Z}X\":ſ文}c3é2223文1文ر́😀ر\nر3́[bXل}\"\n\"\t:\"يaر\\\\[ع]😀لX́}{رſ\"X\t1aa[:Zة}بي́}bé\"ع́}😀بعل\"[ة2X😀{ا{ل文Xébc文لب}لXاب2}:ال{😀ل}رر]{文]a3[中é {لaةb2\t\"\"\t{ć]اير\"́ييع文bbſ文\\Z\t中}}[́\tبيا́ةc}ل[ ة[é]\n中عZY2\"3ل\\اé\\ 文}a2XXaXل]:عة 3é[[3Z\"\t中bب文b中ع]́{\\\"cة2ا中ب\t{\\2}ب}يYX́́ćب[{\" \t\"اé3中aa}\":́ب]1{中]Z文عa中\t3ا2bل2😀cX😀ا😀ة]中bي:ةZXب1\\ر22ب文a\"ا\\]b\n\\:\"ل{:c:بbلXſſ Zſب😀ر}عر中\nعاةعc[ةbé3Z文Z 中中\nYſا{éb文bé文1][3b文ſſ{bياaé{Y文2Zéب\tةي2\"éر文\nb]{{{[}😀[{ر😀}ب\néة😀2\"ا中b2}\na中{]",
+      "count": 523,
+      "nfc": "3文\n3ي2ة{中b[Yرſي😀Yبب{2 يXYا béبſي́́:cا:عc1:{😀 ب13é\\]Y[XYé]中́ب1中\\ر ل}\\عع}\tي2́رaZY中cZ文يb文Y文\"رYX中ل\n\"XرX\tY\tر:文aيا\n😀😀1}[\naرYſc1:2ي:ل中ةc[ر3عع[aا}ſXةa\"\"31ة{中\\中Z2ع́  رbةة{X\t\"Z}X\":ſ文}c3é2223文1文ر́😀ر\nر3́[bXل}\"\n\"\t:\"يaر\\\\[ع]😀لX́}{رſ\"X\t1aa[:Zة}بي́}bé\"ع́}😀بعل\"[ة2X😀{ا{ل文Xébc文لب}لXاب2}:ال{😀ل}رر]{文]a3[中é {لaةb2\t\"\"\t{ć]اير\"́ييع文bbſ文\\Z\t中}}[́\tبيا́ةc}ل[ ة[é]\n中عZY2\"3ل\\اé\\ 文}a2XXaXل]:عة 3é[[3Z\"\t中bب文b中ع]́{\\\"cة2ا中ب\t{\\2}ب}يYX́́ćب[{\" \t\"اé3中aa}\":́ب]1{中]Z文عa中\t3ا2bل2😀cX😀ا😀ة]中bي:ةZXب1\\ر22ب文a\"ا\\]b\n\\:\"ل{:c:بbلXſſ Zſب😀ر}عر中\nعاةعc[ةbé3Z文Z 中中\nYſا{éb文bé文1][3b文ſſ{bياaé{Y文2Zéب\tةي2\"éر文\nb]{{{[}😀[{ر😀}ب\néة😀2\"ا中b2}\na中{]"
+    },
+    {
+      "text": "3با́رر[يعZلZYةر]]ſاé:😀bيéY1\\ة中ل ́Yé[😀b3لX中Xéc\"]ا中}Y2XY2لةZ\\Y2a\"ل3\"Z文ةYاbري{ع[Z\n中Z中X😀\tع3{c{\n3 bر文éXل]\tل😀11[بY{\t]😀{😀3ة3ſل\nةب文a\\[:b2é1عاX\"ع13中中[يbر[}Xعر[b\"a\\ةa]b文لي😀{اa\t\t文ة1ع文ر中X]1cةb:X2Xع ب\n\"bا1中[Xة]\nي32}b\"عa[aب1Y]Xé\néع{ع文\"يX\"[́aX]12😀2́Z\nعb:\tر😀عé{é}c}1c中ع́\\文ſ2:\\ عé:2X文́ب211بلa\n中ر\"ر\t2Y\\ي\\\"\"bY{c😀cربل{]عc😀:عZ\"\\اbة1文中ع2اب中😀[ć́ب中中212لbZYcſ\"Z[ſ]\\2Z\nل\\:中يXبا\\ة\\é \t́ي:3{اXعي:]\n[文文é22bcc\n中ر]éة́ع中éل{}ÝYbé1b\tY\\😀3éYb bاZبرé😀\n{😀ا:ب2Y}ا YX}Xb1ع3baل{1:\"中عي X\n\"\nbYر\tع}\\ل\\c[中عةبYY]عſ\n:بcي13\\中b32 ةلſ{عZ1́c\"😀}ع\nرé\tبر{]\\文ſ:ا[中1ا3{ة\\é:éة文ا{رةb́Zſ\tي́😀\\ \\ي\t😀Xابb1́ ]ي2ab}:31😀éرſاYر1Xة\\3Z中YZ:céſ[ſ文{2Ýا\nا\né\n:",
+      "count": 536,
+      "nfc": "3با́رر[يعZلZYةر]]ſاé:😀bيéY1\\ة中ل ́Yé[😀b3لX中Xéc\"]ا中}Y2XY2لةZ\\Y2a\"ل3\"Z文ةYاbري{ع[Z\n中Z中X😀\tع3{c{\n3 bر文éXل]\tل😀11[بY{\t]😀{😀3ة3ſل\nةب文a\\[:b2é1عاX\"ع13中中[يbر[}Xعر[b\"a\\ةa]b文لي😀{اa\t\t文ة1ع文ر中X]1cةb:X2Xع ب\n\"bا1中[Xة]\nي32}b\"عa[aب1Y]Xé\néع{ع文\"يX\"[́aX]12😀2́Z\nعb:\tر😀عé{é}c}1c中ع́\\文ſ2:\\ عé:2X文́ب211بلa\n中ر\"ر\t2Y\\ي\\\"\"bY{c😀cربل{]عc😀:عZ\"\\اbة1文中ع2اب中😀[ć́ب中中212لbZYcſ\"Z[ſ]\\2Z\nل\\:中يXبا\\ة\\é \t́ي:3{اXعي:]\n[文文é22bcc\n中ر]éة́ع中éل{}ÝYbé1b\tY\\😀3éYb bاZبرé😀\n{😀ا:ب2Y}ا YX}Xb1ع3baل{1:\"中عي X\n\"\nbYر\tع}\\ل\\c[中عةبYY]عſ\n:بcي13\\中b32 ةلſ{عZ1́c\"😀}ع\nرé\tبر{]\\文ſ:ا[中1ا3{ة\\é:éة文ا{رةb́Zſ\tي́😀\\ \\ي\t😀Xابb1́ ]ي2ab}:31😀éرſاYر1Xة\\3Z中YZ:céſ[ſ文{2Ýا\nا\né\n:"
+    },
+    {
+      "text": "22\ń2ر́ة {XYX\\\":ا]اY:Y\\}عZé\tXععZا\\{😀ر3中بZ[X:]é\t\nſ[2بر ة\"́ ́عccع文é́Yر\\1\"{ſZار[文::1:文中\nل{ \t[b}{\nZعXſ\"1]ſ\ńل 2رéلcيع\tع{\t中لZ{ة中\\😀bا3}\\{áXا XلرY}éYا}لac\né\\中:a2中é}bſX\"عab中é3ر́😀\nZcة{ة{]c\"ر ة[3:3:رYaYa}1文中 😀 }\nZé[c3\\ب\\3\t😀́Zي}\"]ع文{Z:2́bX:ب\\😀cيل ة:cب́😀لب😀ب}cل\\Zل1عXعاع}1ي\\́ ا}{\t1Y1cاع1Xعع中\"2]中 للY\"\nع\" ſعيbY{3{{́ſé1\\3X\\X\"́Z3ل\ná2X文😀بc2aZſſé́1}ر😀2c[يé文中文ي]اب{2\\{23ſ😀\\\n[é\t2ر{ر3ة{لcYſ\\عZي\\:c😀ري\tYةلbZéaſ1😀}cاé́}ة\n[بc\"́文\"Y文ſſ\\ي\"ب\nbعſ\\}]\n ]}\té\tZY:ةX:}:اية }ر3文éé}文bبة{X2اZبa[\nY😀Z😀Yé\t{中\":中لا\taع:bſcة文Xćبرéa \\\"\néع中يYي\"Zéةي\ń\\X[3ر😀{]X́بة2b}ي[ب\tſ[ي1\t\t\"]3: aر:ربbé\"ع\nلY3́c2ب文Z[1اع\\́ 😀بXé \t中]😀اé \n{:}ل́ة́ر́ة3عcaX\"ر1",
+      "count": 539,
+      "nfc": "22\ń2ر́ة {XYX\\\":ا]اY:Y\\}عZé\tXععZا\\{😀ر3中بZ[X:]é\t\nſ[2بر ة\"́ ́عccع文é́Yر\\1\"{ſZار[文::1:文中\nل{ \t[b}{\nZعXſ\"1]ſ\ńل 2رéلcيع\tع{\t中لZ{ة中\\😀bا3}\\{áXا XلرY}éYا}لac\né\\中:a2中é}bſX\"عab中é3ر́😀\nZcة{ة{]c\"ر ة[3:3:رYaYa}1文中 😀 }\nZé[c3\\ب\\3\t😀́Zي}\"]ع文{Z:2́bX:ب\\😀cيل ة:cب́😀لب😀ب}cل\\Zل1عXعاع}1ي\\́ ا}{\t1Y1cاع1Xعع中\"2]中 للY\"\nع\" ſعيbY{3{{́ſé1\\3X\\X\"́Z3ل\ná2X文😀بc2aZſſé́1}ر😀2c[يé文中文ي]اب{2\\{23ſ😀\\\n[é\t2ر{ر3ة{لcYſ\\عZي\\:c😀ري\tYةلbZéaſ1😀}cاé́}ة\n[بc\"́文\"Y文ſſ\\ي\"ب\nbعſ\\}]\n ]}\té\tZY:ةX:}:اية }ر3文éé}文bبة{X2اZبa[\nY😀Z😀Yé\t{中\":中لا\taع:bſcة文Xćبرéa \\\"\néع中يYي\"Zéةي\ń\\X[3ر😀{]X́بة2b}ي[ب\tſ[ي1\t\t\"]3: aر:ربbé\"ع\nلY3́c2ب文Z[1اع\\́ 😀بXé \t中]😀اé \n{:}ل́ة́ر́ة3عcaX\"ر1"
+    },
+    {
+      "text": "  ",
+      "count": 1,
+      "nfc": "  "
+    },
+    {
+      "text": "abel",
+      "count": 1,
+      "nfc": "abel"
+    },
+    {
+      "text": " rem",
+      "count": 1,
+      "nfc": " rem"
+    },
+    {
+      "text": "ision",
+      "count": 1,
+      "nfc": "ision"
+    },
+    {
+      "text": "ero",
+      "count": 1,
+      "nfc": "ero"
+    },
+    {
+      "text": "ands",
+      "count": 1,
+      "nfc": "ands"
+    },
+    {
+      "text": " attack",
+      "count": 1,
+      "nfc": " attack"
+    },
+    {
+      "text": " needs",
+      "count": 1,
+      "nfc": " needs"
+    },
+    {
+      "text": " Mr",
+      "count": 1,
+      "nfc": " Mr"
+    },
+    {
+      "text": "_start",
+      "count": 1,
+      "nfc": "_start"
+    },
+    {
+      "text": "_ERROR",
+      "count": 1,
+      "nfc": "_ERROR"
+    },
+    {
+      "text": "itions",
+      "count": 1,
+      "nfc": "itions"
+    },
+    {
+      "text": "Offset",
+      "count": 1,
+      "nfc": "Offset"
+    },
+    {
+      "text": " Option",
+      "count": 1,
+      "nfc": " Option"
+    },
+    {
+      "text": "apse",
+      "count": 1,
+      "nfc": "apse"
+    },
+    {
+      "text": " Congress",
+      "count": 1,
+      "nfc": " Congress"
+    },
+    {
+      "text": " sequence",
+      "count": 1,
+      "nfc": " sequence"
+    },
+    {
+      "text": "ye",
+      "count": 1,
+      "nfc": "ye"
+    },
+    {
+      "text": " mixed",
+      "count": 1,
+      "nfc": " mixed"
+    },
+    {
+      "text": "TEST",
+      "count": 1,
+      "nfc": "TEST"
+    },
+    {
+      "text": " prepare",
+      "count": 1,
+      "nfc": " prepare"
+    },
+    {
+      "text": "aje",
+      "count": 1,
+      "nfc": "aje"
+    },
+    {
+      "text": "lie",
+      "count": 1,
+      "nfc": "lie"
+    },
+    {
+      "text": ".exists",
+      "count": 1,
+      "nfc": ".exists"
+    },
+    {
+      "text": "Theme",
+      "count": 1,
+      "nfc": "Theme"
+    },
+    {
+      "text": "aler",
+      "count": 1,
+      "nfc": "aler"
+    },
+    {
+      "text": " excess",
+      "count": 1,
+      "nfc": " excess"
+    },
+    {
+      "text": "eden",
+      "count": 1,
+      "nfc": "eden"
+    },
+    {
+      "text": "mal",
+      "count": 1,
+      "nfc": "mal"
+    },
+    {
+      "text": " expr",
+      "count": 1,
+      "nfc": " expr"
+    },
+    {
+      "text": " Du",
+      "count": 1,
+      "nfc": " Du"
+    },
+    {
+      "text": " horizontal",
+      "count": 1,
+      "nfc": " horizontal"
+    },
+    {
+      "text": " electron",
+      "count": 1,
+      "nfc": " electron"
+    },
+    {
+      "text": "onde",
+      "count": 1,
+      "nfc": "onde"
+    },
+    {
+      "text": " datos",
+      "count": 1,
+      "nfc": " datos"
+    },
+    {
+      "text": ".internal",
+      "count": 1,
+      "nfc": ".internal"
+    },
+    {
+      "text": "dney",
+      "count": 1,
+      "nfc": "dney"
+    },
+    {
+      "text": "\tval",
+      "count": 1,
+      "nfc": "\tval"
+    },
+    {
+      "text": ".Split",
+      "count": 1,
+      "nfc": ".Split"
+    },
+    {
+      "text": " blend",
+      "count": 1,
+      "nfc": " blend"
+    },
+    {
+      "text": ".COM",
+      "count": 1,
+      "nfc": ".COM"
+    },
+    {
+      "text": "umn",
+      "count": 1,
+      "nfc": "umn"
+    },
+    {
+      "text": "gp",
+      "count": 1,
+      "nfc": "gp"
+    },
+    {
+      "text": ".Display",
+      "count": 1,
+      "nfc": ".Display"
+    },
+    {
+      "text": "ande",
+      "count": 1,
+      "nfc": "ande"
+    },
+    {
+      "text": "(ip",
+      "count": 1,
+      "nfc": "(ip"
+    },
+    {
+      "text": "ilot",
+      "count": 1,
+      "nfc": "ilot"
+    },
+    {
+      "text": " cycles",
+      "count": 1,
+      "nfc": " cycles"
+    },
+    {
+      "text": " IDC",
+      "count": 1,
+      "nfc": " IDC"
+    },
+    {
+      "text": "specialchars",
+      "count": 1,
+      "nfc": "specialchars"
+    },
+    {
+      "text": " difficulties",
+      "count": 1,
+      "nfc": " difficulties"
+    },
+    {
+      "text": " satisfy",
+      "count": 1,
+      "nfc": " satisfy"
+    },
+    {
+      "text": " INDIRECT",
+      "count": 1,
+      "nfc": " INDIRECT"
+    },
+    {
+      "text": " DNS",
+      "count": 1,
+      "nfc": " DNS"
+    },
+    {
+      "text": "(menu",
+      "count": 1,
+      "nfc": "(menu"
+    },
+    {
+      "text": " likelihood",
+      "count": 1,
+      "nfc": " likelihood"
+    },
+    {
+      "text": ".shift",
+      "count": 1,
+      "nfc": ".shift"
+    },
+    {
+      "text": " VI",
+      "count": 1,
+      "nfc": " VI"
+    },
+    {
+      "text": "igDecimal",
+      "count": 1,
+      "nfc": "igDecimal"
+    },
+    {
+      "text": " linking",
+      "count": 1,
+      "nfc": " linking"
+    },
+    {
+      "text": ".STRING",
+      "count": 1,
+      "nfc": ".STRING"
+    },
+    {
+      "text": "nf",
+      "count": 1,
+      "nfc": "nf"
+    },
+    {
+      "text": "\tArrayList",
+      "count": 1,
+      "nfc": "\tArrayList"
+    },
+    {
+      "text": "usk",
+      "count": 1,
+      "nfc": "usk"
+    },
+    {
+      "text": "rique",
+      "count": 1,
+      "nfc": "rique"
+    },
+    {
+      "text": "(^",
+      "count": 1,
+      "nfc": "(^"
+    },
+    {
+      "text": " sept",
+      "count": 1,
+      "nfc": " sept"
+    },
+    {
+      "text": " physicians",
+      "count": 1,
+      "nfc": " physicians"
+    },
+    {
+      "text": ".metrics",
+      "count": 1,
+      "nfc": ".metrics"
+    },
+    {
+      "text": " accountable",
+      "count": 1,
+      "nfc": " accountable"
+    },
+    {
+      "text": "ardi",
+      "count": 1,
+      "nfc": "ardi"
+    },
+    {
+      "text": "elda",
+      "count": 1,
+      "nfc": "elda"
+    },
+    {
+      "text": " Receive",
+      "count": 1,
+      "nfc": " Receive"
+    },
+    {
+      "text": "deb",
+      "count": 1,
+      "nfc": "deb"
+    },
+    {
+      "text": "\")))",
+      "count": 1,
+      "nfc": "\")))"
+    },
+    {
+      "text": " Ignore",
+      "count": 1,
+      "nfc": " Ignore"
+    },
+    {
+      "text": "\tsort",
+      "count": 1,
+      "nfc": "\tsort"
+    },
+    {
+      "text": " Burg",
+      "count": 1,
+      "nfc": " Burg"
+    },
+    {
+      "text": "NSDate",
+      "count": 1,
+      "nfc": "NSDate"
+    },
+    {
+      "text": " troubled",
+      "count": 1,
+      "nfc": " troubled"
+    },
+    {
+      "text": "ToFile",
+      "count": 1,
+      "nfc": "ToFile"
+    },
+    {
+      "text": " maid",
+      "count": 1,
+      "nfc": " maid"
+    },
+    {
+      "text": "dados",
+      "count": 1,
+      "nfc": "dados"
+    },
+    {
+      "text": "-Ta",
+      "count": 1,
+      "nfc": "-Ta"
+    },
+    {
+      "text": "Lista",
+      "count": 1,
+      "nfc": "Lista"
+    },
+    {
+      "text": ".isSelected",
+      "count": 1,
+      "nfc": ".isSelected"
+    },
+    {
+      "text": " liberals",
+      "count": 1,
+      "nfc": " liberals"
+    },
+    {
+      "text": " entertain",
+      "count": 1,
+      "nfc": " entertain"
+    },
+    {
+      "text": " scream",
+      "count": 1,
+      "nfc": " scream"
+    },
+    {
+      "text": "Mah",
+      "count": 1,
+      "nfc": "Mah"
+    },
+    {
+      "text": "zahl",
+      "count": 1,
+      "nfc": "zahl"
+    },
+    {
+      "text": "Ken",
+      "count": 1,
+      "nfc": "Ken"
+    },
+    {
+      "text": " Championships",
+      "count": 1,
+      "nfc": " Championships"
+    },
+    {
+      "text": " dumped",
+      "count": 1,
+      "nfc": " dumped"
+    },
+    {
+      "text": " Rena",
+      "count": 1,
+      "nfc": " Rena"
+    },
+    {
+      "text": " discrimin",
+      "count": 1,
+      "nfc": " discrimin"
+    },
+    {
+      "text": "_SENSOR",
+      "count": 1,
+      "nfc": "_SENSOR"
+    },
+    {
+      "text": " stale",
+      "count": 1,
+      "nfc": " stale"
+    },
+    {
+      "text": ")&&(",
+      "count": 1,
+      "nfc": ")&&("
+    },
+    {
+      "text": "(cap",
+      "count": 1,
+      "nfc": "(cap"
+    },
+    {
+      "text": "(\"#{",
+      "count": 1,
+      "nfc": "(\"#{"
+    },
+    {
+      "text": " zich",
+      "count": 1,
+      "nfc": " zich"
+    },
+    {
+      "text": " Serve",
+      "count": 1,
+      "nfc": " Serve"
+    },
+    {
+      "text": "_hover",
+      "count": 1,
+      "nfc": "_hover"
+    },
+    {
+      "text": " prefers",
+      "count": 1,
+      "nfc": " prefers"
+    },
+    {
+      "text": " intervene",
+      "count": 1,
+      "nfc": " intervene"
+    },
+    {
+      "text": "ulg",
+      "count": 1,
+      "nfc": "ulg"
+    },
+    {
+      "text": ",start",
+      "count": 1,
+      "nfc": ",start"
+    },
+    {
+      "text": "Defs",
+      "count": 1,
+      "nfc": "Defs"
+    },
+    {
+      "text": "ıs",
+      "count": 1,
+      "nfc": "ıs"
+    },
+    {
+      "text": "acid",
+      "count": 1,
+      "nfc": "acid"
+    },
+    {
+      "text": " screened",
+      "count": 1,
+      "nfc": " screened"
+    },
+    {
+      "text": "svc",
+      "count": 1,
+      "nfc": "svc"
+    },
+    {
+      "text": "upon",
+      "count": 1,
+      "nfc": "upon"
+    },
+    {
+      "text": "celain",
+      "count": 1,
+      "nfc": "celain"
+    },
+    {
+      "text": " superClass",
+      "count": 1,
+      "nfc": " superClass"
+    },
+    {
+      "text": "integration",
+      "count": 1,
+      "nfc": "integration"
+    },
+    {
+      "text": " stamina",
+      "count": 1,
+      "nfc": " stamina"
+    },
+    {
+      "text": "_vertical",
+      "count": 1,
+      "nfc": "_vertical"
+    },
+    {
+      "text": ".squeeze",
+      "count": 1,
+      "nfc": ".squeeze"
+    },
+    {
+      "text": "ipated",
+      "count": 1,
+      "nfc": "ipated"
+    },
+    {
+      "text": " Spiritual",
+      "count": 1,
+      "nfc": " Spiritual"
+    },
+    {
+      "text": "-fashioned",
+      "count": 1,
+      "nfc": "-fashioned"
+    },
+    {
+      "text": " operative",
+      "count": 1,
+      "nfc": " operative"
+    },
+    {
+      "text": " Sporting",
+      "count": 1,
+      "nfc": " Sporting"
+    },
+    {
+      "text": " Inspired",
+      "count": 1,
+      "nfc": " Inspired"
+    },
+    {
+      "text": "_GENERAL",
+      "count": 1,
+      "nfc": "_GENERAL"
+    },
+    {
+      "text": "abh",
+      "count": 1,
+      "nfc": "abh"
+    },
+    {
+      "text": "adors",
+      "count": 1,
+      "nfc": "adors"
+    },
+    {
+      "text": " COD",
+      "count": 1,
+      "nfc": " COD"
+    },
+    {
+      "text": "Intern",
+      "count": 1,
+      "nfc": "Intern"
+    },
+    {
+      "text": " cocks",
+      "count": 1,
+      "nfc": " cocks"
+    },
+    {
+      "text": "KeyPress",
+      "count": 1,
+      "nfc": "KeyPress"
+    },
+    {
+      "text": " endPoint",
+      "count": 1,
+      "nfc": " endPoint"
+    },
+    {
+      "text": ".endDate",
+      "count": 1,
+      "nfc": ".endDate"
+    },
+    {
+      "text": " procur",
+      "count": 1,
+      "nfc": " procur"
+    },
+    {
+      "text": " Secondly",
+      "count": 1,
+      "nfc": " Secondly"
+    },
+    {
+      "text": " velit",
+      "count": 1,
+      "nfc": " velit"
+    },
+    {
+      "text": " BIO",
+      "count": 1,
+      "nfc": " BIO"
+    },
+    {
+      "text": "*g",
+      "count": 1,
+      "nfc": "*g"
+    },
+    {
+      "text": "tabl",
+      "count": 1,
+      "nfc": "tabl"
+    },
+    {
+      "text": ".setToolTip",
+      "count": 1,
+      "nfc": ".setToolTip"
+    },
+    {
+      "text": "ά",
+      "count": 1,
+      "nfc": "ά"
+    },
+    {
+      "text": " fors",
+      "count": 1,
+      "nfc": " fors"
+    },
+    {
+      "text": ".softmax",
+      "count": 1,
+      "nfc": ".softmax"
+    },
+    {
+      "text": ">ID",
+      "count": 1,
+      "nfc": ">ID"
+    },
+    {
+      "text": " toughness",
+      "count": 1,
+      "nfc": " toughness"
+    },
+    {
+      "text": ".addColumn",
+      "count": 1,
+      "nfc": ".addColumn"
+    },
+    {
+      "text": "ェ",
+      "count": 1,
+      "nfc": "ェ"
+    },
+    {
+      "text": " signifies",
+      "count": 1,
+      "nfc": " signifies"
+    },
+    {
+      "text": "apses",
+      "count": 1,
+      "nfc": "apses"
+    },
+    {
+      "text": " \"%\"",
+      "count": 1,
+      "nfc": " \"%\""
+    },
+    {
+      "text": ".imageUrl",
+      "count": 1,
+      "nfc": ".imageUrl"
+    },
+    {
+      "text": " Incredible",
+      "count": 1,
+      "nfc": " Incredible"
+    },
+    {
+      "text": " stimulated",
+      "count": 1,
+      "nfc": " stimulated"
+    },
+    {
+      "text": "'à",
+      "count": 1,
+      "nfc": "'à"
+    },
+    {
+      "text": " SKIP",
+      "count": 1,
+      "nfc": " SKIP"
+    },
+    {
+      "text": "_PLACE",
+      "count": 1,
+      "nfc": "_PLACE"
+    },
+    {
+      "text": "Circular",
+      "count": 1,
+      "nfc": "Circular"
+    },
+    {
+      "text": "Parsed",
+      "count": 1,
+      "nfc": "Parsed"
+    },
+    {
+      "text": "_genes",
+      "count": 1,
+      "nfc": "_genes"
+    },
+    {
+      "text": " Cd",
+      "count": 1,
+      "nfc": " Cd"
+    },
+    {
+      "text": " Departments",
+      "count": 1,
+      "nfc": " Departments"
+    },
+    {
+      "text": " scripted",
+      "count": 1,
+      "nfc": " scripted"
+    },
+    {
+      "text": ".Operator",
+      "count": 1,
+      "nfc": ".Operator"
+    },
+    {
+      "text": "hear",
+      "count": 1,
+      "nfc": "hear"
+    },
+    {
+      "text": "urma",
+      "count": 1,
+      "nfc": "urma"
+    },
+    {
+      "text": " Blackjack",
+      "count": 1,
+      "nfc": " Blackjack"
+    },
+    {
+      "text": " Barang",
+      "count": 1,
+      "nfc": " Barang"
+    },
+    {
+      "text": "addError",
+      "count": 1,
+      "nfc": "addError"
+    },
+    {
+      "text": "subnet",
+      "count": 1,
+      "nfc": "subnet"
+    },
+    {
+      "text": " ==========",
+      "count": 1,
+      "nfc": " =========="
+    },
+    {
+      "text": " hver",
+      "count": 1,
+      "nfc": " hver"
+    },
+    {
+      "text": ".Small",
+      "count": 1,
+      "nfc": ".Small"
+    },
+    {
+      "text": "_ELEM",
+      "count": 1,
+      "nfc": "_ELEM"
+    },
+    {
+      "text": " ilma",
+      "count": 1,
+      "nfc": " ilma"
+    },
+    {
+      "text": "ansible",
+      "count": 1,
+      "nfc": "ansible"
+    },
+    {
+      "text": "sbin",
+      "count": 1,
+      "nfc": "sbin"
+    },
+    {
+      "text": " likeness",
+      "count": 1,
+      "nfc": " likeness"
+    },
+    {
+      "text": "ICAST",
+      "count": 1,
+      "nfc": "ICAST"
+    },
+    {
+      "text": "Beauty",
+      "count": 1,
+      "nfc": "Beauty"
+    },
+    {
+      "text": ".xx",
+      "count": 1,
+      "nfc": ".xx"
+    },
+    {
+      "text": ".Te",
+      "count": 1,
+      "nfc": ".Te"
+    },
+    {
+      "text": "ChartData",
+      "count": 1,
+      "nfc": "ChartData"
+    },
+    {
+      "text": " Tahoe",
+      "count": 1,
+      "nfc": " Tahoe"
+    },
+    {
+      "text": "-thumbnails",
+      "count": 1,
+      "nfc": "-thumbnails"
+    },
+    {
+      "text": "_locs",
+      "count": 1,
+      "nfc": "_locs"
+    },
+    {
+      "text": "ppt",
+      "count": 1,
+      "nfc": "ppt"
+    },
+    {
+      "text": " sidelined",
+      "count": 1,
+      "nfc": " sidelined"
+    },
+    {
+      "text": "emachine",
+      "count": 1,
+      "nfc": "emachine"
+    },
+    {
+      "text": "_PREVIEW",
+      "count": 1,
+      "nfc": "_PREVIEW"
+    },
+    {
+      "text": "相关",
+      "count": 1,
+      "nfc": "相关"
+    },
+    {
+      "text": "露",
+      "count": 1,
+      "nfc": "露"
+    },
+    {
+      "text": "简单",
+      "count": 1,
+      "nfc": "简单"
+    },
+    {
+      "text": "署",
+      "count": 1,
+      "nfc": "署"
+    },
+    {
+      "text": "吊",
+      "count": 1,
+      "nfc": "吊"
+    },
+    {
+      "text": "簡",
+      "count": 1,
+      "nfc": "簡"
+    },
+    {
+      "text": "党委",
+      "count": 1,
+      "nfc": "党委"
+    },
+    {
+      "text": "疫情防控",
+      "count": 1,
+      "nfc": "疫情防控"
+    },
+    {
+      "text": "教授",
+      "count": 1,
+      "nfc": "教授"
+    },
+    {
+      "text": "踏实",
+      "count": 1,
+      "nfc": "踏实"
+    },
+    {
+      "text": "疣",
+      "count": 1,
+      "nfc": "疣"
+    },
+    {
+      "text": "法人",
+      "count": 1,
+      "nfc": "法人"
+    },
+    {
+      "text": "前三",
+      "count": 1,
+      "nfc": "前三"
+    },
+    {
+      "text": "蒲",
+      "count": 1,
+      "nfc": "蒲"
+    },
+    {
+      "text": "碩",
+      "count": 1,
+      "nfc": "碩"
+    },
+    {
+      "text": "专注",
+      "count": 1,
+      "nfc": "专注"
+    },
+    {
+      "text": "相当于",
+      "count": 1,
+      "nfc": "相当于"
+    },
+    {
+      "text": "预案",
+      "count": 1,
+      "nfc": "预案"
+    },
+    {
+      "text": "股东大会",
+      "count": 1,
+      "nfc": "股东大会"
+    },
+    {
+      "text": "一想",
+      "count": 1,
+      "nfc": "一想"
+    },
+    {
+      "text": "关心的",
+      "count": 1,
+      "nfc": "关心的"
+    },
+    {
+      "text": "克斯坦",
+      "count": 1,
+      "nfc": "克斯坦"
+    },
+    {
+      "text": "喜怒哀",
+      "count": 1,
+      "nfc": "喜怒哀"
+    },
+    {
+      "text": "鳴",
+      "count": 1,
+      "nfc": "鳴"
+    },
+    {
+      "text": "人物",
+      "count": 1,
+      "nfc": "人物"
+    },
+    {
+      "text": "询问",
+      "count": 1,
+      "nfc": "询问"
+    },
+    {
+      "text": "只好",
+      "count": 1,
+      "nfc": "只好"
+    },
+    {
+      "text": "题材",
+      "count": 1,
+      "nfc": "题材"
+    },
+    {
+      "text": "就医",
+      "count": 1,
+      "nfc": "就医"
+    },
+    {
+      "text": "政府采购",
+      "count": 1,
+      "nfc": "政府采购"
+    },
+    {
+      "text": "与人",
+      "count": 1,
+      "nfc": "与人"
+    },
+    {
+      "text": "改装",
+      "count": 1,
+      "nfc": "改装"
+    },
+    {
+      "text": "左手",
+      "count": 1,
+      "nfc": "左手"
+    },
+    {
+      "text": "蘋果",
+      "count": 1,
+      "nfc": "蘋果"
+    },
+    {
+      "text": "大火",
+      "count": 1,
+      "nfc": "大火"
+    },
+    {
+      "text": "方向盘",
+      "count": 1,
+      "nfc": "方向盘"
+    },
+    {
+      "text": "减弱",
+      "count": 1,
+      "nfc": "减弱"
+    },
+    {
+      "text": "风筝",
+      "count": 1,
+      "nfc": "风筝"
+    },
+    {
+      "text": "投资项目",
+      "count": 1,
+      "nfc": "投资项目"
+    },
+    {
+      "text": "必须是",
+      "count": 1,
+      "nfc": "必须是"
+    },
+    {
+      "text": "不错的选择",
+      "count": 1,
+      "nfc": "不错的选择"
+    },
+    {
+      "text": "焚烧",
+      "count": 1,
+      "nfc": "焚烧"
+    },
+    {
+      "text": "四海",
+      "count": 1,
+      "nfc": "四海"
+    },
+    {
+      "text": "老祖",
+      "count": 1,
+      "nfc": "老祖"
+    },
+    {
+      "text": "试听",
+      "count": 1,
+      "nfc": "试听"
+    },
+    {
+      "text": "年金",
+      "count": 1,
+      "nfc": "年金"
+    },
+    {
+      "text": "做好准备",
+      "count": 1,
+      "nfc": "做好准备"
+    },
+    {
+      "text": "插画",
+      "count": 1,
+      "nfc": "插画"
+    },
+    {
+      "text": "仓位",
+      "count": 1,
+      "nfc": "仓位"
+    },
+    {
+      "text": "头盔",
+      "count": 1,
+      "nfc": "头盔"
+    },
+    {
+      "text": "追随",
+      "count": 1,
+      "nfc": "追随"
+    },
+    {
+      "text": "来判断",
+      "count": 1,
+      "nfc": "来判断"
+    },
+    {
+      "text": "交汇处",
+      "count": 1,
+      "nfc": "交汇处"
+    },
+    {
+      "text": "紧密结合",
+      "count": 1,
+      "nfc": "紧密结合"
+    },
+    {
+      "text": "利润率",
+      "count": 1,
+      "nfc": "利润率"
+    },
+    {
+      "text": "艾灸",
+      "count": 1,
+      "nfc": "艾灸"
+    },
+    {
+      "text": "山坡",
+      "count": 1,
+      "nfc": "山坡"
+    },
+    {
+      "text": "点个",
+      "count": 1,
+      "nfc": "点个"
+    },
+    {
+      "text": "继续保持",
+      "count": 1,
+      "nfc": "继续保持"
+    },
+    {
+      "text": "覆盖率",
+      "count": 1,
+      "nfc": "覆盖率"
+    },
+    {
+      "text": "处理方法",
+      "count": 1,
+      "nfc": "处理方法"
+    },
+    {
+      "text": "党纪",
+      "count": 1,
+      "nfc": "党纪"
+    },
+    {
+      "text": "施工方案",
+      "count": 1,
+      "nfc": "施工方案"
+    },
+    {
+      "text": "这是在",
+      "count": 1,
+      "nfc": "这是在"
+    },
+    {
+      "text": "班里",
+      "count": 1,
+      "nfc": "班里"
+    },
+    {
+      "text": "线缆",
+      "count": 1,
+      "nfc": "线缆"
+    },
+    {
+      "text": "制作方法",
+      "count": 1,
+      "nfc": "制作方法"
+    },
+    {
+      "text": "一体的",
+      "count": 1,
+      "nfc": "一体的"
+    },
+    {
+      "text": "百余",
+      "count": 1,
+      "nfc": "百余"
+    },
+    {
+      "text": "什么人",
+      "count": 1,
+      "nfc": "什么人"
+    },
+    {
+      "text": "迪亚",
+      "count": 1,
+      "nfc": "迪亚"
+    },
+    {
+      "text": "年时间",
+      "count": 1,
+      "nfc": "年时间"
+    },
+    {
+      "text": "收藏夹",
+      "count": 1,
+      "nfc": "收藏夹"
+    },
+    {
+      "text": "正大",
+      "count": 1,
+      "nfc": "正大"
+    },
+    {
+      "text": "神灵",
+      "count": 1,
+      "nfc": "神灵"
+    },
+    {
+      "text": "放下了",
+      "count": 1,
+      "nfc": "放下了"
+    },
+    {
+      "text": "也并不",
+      "count": 1,
+      "nfc": "也并不"
+    },
+    {
+      "text": "干粉",
+      "count": 1,
+      "nfc": "干粉"
+    },
+    {
+      "text": "扎实的",
+      "count": 1,
+      "nfc": "扎实的"
+    },
+    {
+      "text": "注销备案",
+      "count": 1,
+      "nfc": "注销备案"
+    },
+    {
+      "text": "消毒液",
+      "count": 1,
+      "nfc": "消毒液"
+    },
+    {
+      "text": "风险和",
+      "count": 1,
+      "nfc": "风险和"
+    },
+    {
+      "text": "门头",
+      "count": 1,
+      "nfc": "门头"
+    },
+    {
+      "text": "五角",
+      "count": 1,
+      "nfc": "五角"
+    },
+    {
+      "text": "管理团队",
+      "count": 1,
+      "nfc": "管理团队"
+    },
+    {
+      "text": "发出一",
+      "count": 1,
+      "nfc": "发出一"
+    },
+    {
+      "text": "骑手",
+      "count": 1,
+      "nfc": "骑手"
+    },
+    {
+      "text": "有的在",
+      "count": 1,
+      "nfc": "有的在"
+    },
+    {
+      "text": "经信",
+      "count": 1,
+      "nfc": "经信"
+    },
+    {
+      "text": "维修服务",
+      "count": 1,
+      "nfc": "维修服务"
+    },
+    {
+      "text": "有一點",
+      "count": 1,
+      "nfc": "有一點"
+    },
+    {
+      "text": "依恋",
+      "count": 1,
+      "nfc": "依恋"
+    },
+    {
+      "text": "你放心",
+      "count": 1,
+      "nfc": "你放心"
+    },
+    {
+      "text": "已经结束",
+      "count": 1,
+      "nfc": "已经结束"
+    },
+    {
+      "text": "分别与",
+      "count": 1,
+      "nfc": "分别与"
+    },
+    {
+      "text": "注册成立",
+      "count": 1,
+      "nfc": "注册成立"
+    },
+    {
+      "text": "水是",
+      "count": 1,
+      "nfc": "水是"
+    },
+    {
+      "text": "每季度",
+      "count": 1,
+      "nfc": "每季度"
+    },
+    {
+      "text": "大麻",
+      "count": 1,
+      "nfc": "大麻"
+    },
+    {
+      "text": "基地建设",
+      "count": 1,
+      "nfc": "基地建设"
+    },
+    {
+      "text": "风尘",
+      "count": 1,
+      "nfc": "风尘"
+    },
+    {
+      "text": "都是比较",
+      "count": 1,
+      "nfc": "都是比较"
+    },
+    {
+      "text": "投资价值",
+      "count": 1,
+      "nfc": "投资价值"
+    },
+    {
+      "text": "該怎麼",
+      "count": 1,
+      "nfc": "該怎麼"
+    },
+    {
+      "text": "ุด",
+      "count": 1,
+      "nfc": "ุด"
+    },
+    {
+      "text": "ường",
+      "count": 1,
+      "nfc": "ường"
+    },
+    {
+      "text": "про",
+      "count": 1,
+      "nfc": "про"
+    },
+    {
+      "text": "ひ",
+      "count": 1,
+      "nfc": "ひ"
+    },
+    {
+      "text": "별",
+      "count": 1,
+      "nfc": "별"
+    },
+    {
+      "text": " 직",
+      "count": 1,
+      "nfc": " 직"
+    },
+    {
+      "text": "дра",
+      "count": 1,
+      "nfc": "дра"
+    },
+    {
+      "text": " син",
+      "count": 1,
+      "nfc": " син"
+    },
+    {
+      "text": "たく",
+      "count": 1,
+      "nfc": "たく"
+    },
+    {
+      "text": "ляют",
+      "count": 1,
+      "nfc": "ляют"
+    },
+    {
+      "text": "น้อย",
+      "count": 1,
+      "nfc": "น้อย"
+    },
+    {
+      "text": "icur",
+      "count": 1,
+      "nfc": "icur"
+    },
+    {
+      "text": " сча",
+      "count": 1,
+      "nfc": " сча"
+    },
+    {
+      "text": "ｗ",
+      "count": 1,
+      "nfc": "ｗ"
+    },
+    {
+      "text": "เดินทาง",
+      "count": 1,
+      "nfc": "เดินทาง"
+    },
+    {
+      "text": "々な",
+      "count": 1,
+      "nfc": "々な"
+    },
+    {
+      "text": " Trabal",
+      "count": 1,
+      "nfc": " Trabal"
+    },
+    {
+      "text": "قامة",
+      "count": 1,
+      "nfc": "قامة"
+    },
+    {
+      "text": "heb",
+      "count": 1,
+      "nfc": "heb"
+    },
+    {
+      "text": " الفي",
+      "count": 1,
+      "nfc": " الفي"
+    },
+    {
+      "text": "्यों",
+      "count": 1,
+      "nfc": "्यों"
+    },
+    {
+      "text": "ੂ",
+      "count": 1,
+      "nfc": "ੂ"
+    },
+    {
+      "text": "っていた",
+      "count": 1,
+      "nfc": "っていた"
+    },
+    {
+      "text": "реза",
+      "count": 1,
+      "nfc": "реза"
+    },
+    {
+      "text": "ậc",
+      "count": 1,
+      "nfc": "ậc"
+    },
+    {
+      "text": " 터",
+      "count": 1,
+      "nfc": " 터"
+    },
+    {
+      "text": "ยอม",
+      "count": 1,
+      "nfc": "ยอม"
+    },
+    {
+      "text": "onsel",
+      "count": 1,
+      "nfc": "onsel"
+    },
+    {
+      "text": "prochen",
+      "count": 1,
+      "nfc": "prochen"
+    },
+    {
+      "text": " ouvert",
+      "count": 1,
+      "nfc": " ouvert"
+    },
+    {
+      "text": " สิง",
+      "count": 1,
+      "nfc": " สิง"
+    },
+    {
+      "text": "共に",
+      "count": 1,
+      "nfc": "共に"
+    },
+    {
+      "text": " ที่ดี",
+      "count": 1,
+      "nfc": " ที่ดี"
+    },
+    {
+      "text": "вершенно",
+      "count": 1,
+      "nfc": "вершенно"
+    },
+    {
+      "text": " прожив",
+      "count": 1,
+      "nfc": " прожив"
+    },
+    {
+      "text": "เครื่องบิน",
+      "count": 1,
+      "nfc": "เครื่องบิน"
+    },
+    {
+      "text": " nij",
+      "count": 1,
+      "nfc": " nij"
+    },
+    {
+      "text": "중한",
+      "count": 1,
+      "nfc": "중한"
+    },
+    {
+      "text": "ioter",
+      "count": 1,
+      "nfc": "ioter"
+    },
+    {
+      "text": "カロ",
+      "count": 1,
+      "nfc": "カロ"
+    },
+    {
+      "text": "σκεται",
+      "count": 1,
+      "nfc": "σκεται"
+    },
+    {
+      "text": "걸",
+      "count": 1,
+      "nfc": "걸"
+    },
+    {
+      "text": "덤",
+      "count": 1,
+      "nfc": "덤"
+    },
+    {
+      "text": " lớ",
+      "count": 1,
+      "nfc": " lớ"
+    },
+    {
+      "text": " chuẩn",
+      "count": 1,
+      "nfc": " chuẩn"
+    },
+    {
+      "text": " ситуа",
+      "count": 1,
+      "nfc": " ситуа"
+    },
+    {
+      "text": " возможность",
+      "count": 1,
+      "nfc": " возможность"
+    },
+    {
+      "text": "hav",
+      "count": 1,
+      "nfc": "hav"
+    },
+    {
+      "text": "inggal",
+      "count": 1,
+      "nfc": "inggal"
+    },
+    {
+      "text": " أمام",
+      "count": 1,
+      "nfc": " أمام"
+    },
+    {
+      "text": " 최신",
+      "count": 1,
+      "nfc": " 최신"
+    },
+    {
+      "text": " convoc",
+      "count": 1,
+      "nfc": " convoc"
+    },
+    {
+      "text": "ケース",
+      "count": 1,
+      "nfc": "ケース"
+    },
+    {
+      "text": "гами",
+      "count": 1,
+      "nfc": "гами"
+    },
+    {
+      "text": " процессе",
+      "count": 1,
+      "nfc": " процессе"
+    },
+    {
+      "text": "toff",
+      "count": 1,
+      "nfc": "toff"
+    },
+    {
+      "text": "λι",
+      "count": 1,
+      "nfc": "λι"
+    },
+    {
+      "text": " réaliser",
+      "count": 1,
+      "nfc": " réaliser"
+    },
+    {
+      "text": " Phụ",
+      "count": 1,
+      "nfc": " Phụ"
+    },
+    {
+      "text": "трі",
+      "count": 1,
+      "nfc": "трі"
+    },
+    {
+      "text": " depor",
+      "count": 1,
+      "nfc": " depor"
+    },
+    {
+      "text": "動き",
+      "count": 1,
+      "nfc": "動き"
+    },
+    {
+      "text": " chùa",
+      "count": 1,
+      "nfc": " chùa"
+    },
+    {
+      "text": " vorh",
+      "count": 1,
+      "nfc": " vorh"
+    },
+    {
+      "text": " رسول",
+      "count": 1,
+      "nfc": " رسول"
+    },
+    {
+      "text": " tecnic",
+      "count": 1,
+      "nfc": " tecnic"
+    },
+    {
+      "text": "твори",
+      "count": 1,
+      "nfc": "твори"
+    },
+    {
+      "text": "берна",
+      "count": 1,
+      "nfc": "берна"
+    },
+    {
+      "text": " sechs",
+      "count": 1,
+      "nfc": " sechs"
+    },
+    {
+      "text": " domande",
+      "count": 1,
+      "nfc": " domande"
+    },
+    {
+      "text": " วัด",
+      "count": 1,
+      "nfc": " วัด"
+    },
+    {
+      "text": " الدوري",
+      "count": 1,
+      "nfc": " الدوري"
+    },
+    {
+      "text": " Thích",
+      "count": 1,
+      "nfc": " Thích"
+    },
+    {
+      "text": " apparten",
+      "count": 1,
+      "nfc": " apparten"
+    },
+    {
+      "text": " Enviar",
+      "count": 1,
+      "nfc": " Enviar"
+    },
+    {
+      "text": " الكريم",
+      "count": 1,
+      "nfc": " الكريم"
+    },
+    {
+      "text": " viajar",
+      "count": 1,
+      "nfc": " viajar"
+    },
+    {
+      "text": " Pereira",
+      "count": 1,
+      "nfc": " Pereira"
+    },
+    {
+      "text": " dapatkan",
+      "count": 1,
+      "nfc": " dapatkan"
+    },
+    {
+      "text": " 나누",
+      "count": 1,
+      "nfc": " 나누"
+    },
+    {
+      "text": " deinen",
+      "count": 1,
+      "nfc": " deinen"
+    },
+    {
+      "text": "Ни",
+      "count": 1,
+      "nfc": "Ни"
+    },
+    {
+      "text": " tā",
+      "count": 1,
+      "nfc": " tā"
+    },
+    {
+      "text": " veículos",
+      "count": 1,
+      "nfc": " veículos"
+    },
+    {
+      "text": "امت",
+      "count": 1,
+      "nfc": "امت"
+    },
+    {
+      "text": " функций",
+      "count": 1,
+      "nfc": " функций"
+    },
+    {
+      "text": " Hingga",
+      "count": 1,
+      "nfc": " Hingga"
+    },
+    {
+      "text": " daca",
+      "count": 1,
+      "nfc": " daca"
+    },
+    {
+      "text": "支払い",
+      "count": 1,
+      "nfc": "支払い"
+    },
+    {
+      "text": "ของเธอ",
+      "count": 1,
+      "nfc": "ของเธอ"
+    },
+    {
+      "text": " przeprow",
+      "count": 1,
+      "nfc": " przeprow"
+    },
+    {
+      "text": " spricht",
+      "count": 1,
+      "nfc": " spricht"
+    },
+    {
+      "text": " desf",
+      "count": 1,
+      "nfc": " desf"
+    },
+    {
+      "text": " sohbet",
+      "count": 1,
+      "nfc": " sohbet"
+    },
+    {
+      "text": "ļu",
+      "count": 1,
+      "nfc": "ļu"
+    },
+    {
+      "text": " remont",
+      "count": 1,
+      "nfc": " remont"
+    },
+    {
+      "text": " Landschaft",
+      "count": 1,
+      "nfc": " Landschaft"
+    },
+    {
+      "text": " zil",
+      "count": 1,
+      "nfc": " zil"
+    },
+    {
+      "text": " vissza",
+      "count": 1,
+      "nfc": " vissza"
+    },
+    {
+      "text": " JAKARTA",
+      "count": 1,
+      "nfc": " JAKARTA"
+    },
+    {
+      "text": "زمات",
+      "count": 1,
+      "nfc": "زمات"
+    },
+    {
+      "text": " 연출",
+      "count": 1,
+      "nfc": " 연출"
+    },
+    {
+      "text": " jaj",
+      "count": 1,
+      "nfc": " jaj"
+    },
+    {
+      "text": " dieron",
+      "count": 1,
+      "nfc": " dieron"
+    },
+    {
+      "text": "해진",
+      "count": 1,
+      "nfc": "해진"
+    },
+    {
+      "text": " torre",
+      "count": 1,
+      "nfc": " torre"
+    },
+    {
+      "text": "тивными",
+      "count": 1,
+      "nfc": "тивными"
+    },
+    {
+      "text": "ânea",
+      "count": 1,
+      "nfc": "ânea"
+    },
+    {
+      "text": " 변호",
+      "count": 1,
+      "nfc": " 변호"
+    },
+    {
+      "text": "staat",
+      "count": 1,
+      "nfc": "staat"
+    },
+    {
+      "text": " eléctrico",
+      "count": 1,
+      "nfc": " eléctrico"
+    },
+    {
+      "text": "になってしまう",
+      "count": 1,
+      "nfc": "になってしまう"
+    },
+    {
+      "text": " хто",
+      "count": 1,
+      "nfc": " хто"
+    },
+    {
+      "text": "onstruk",
+      "count": 1,
+      "nfc": "onstruk"
+    },
+    {
+      "text": "ంలో",
+      "count": 1,
+      "nfc": "ంలో"
+    },
+    {
+      "text": " şart",
+      "count": 1,
+      "nfc": " şart"
+    },
+    {
+      "text": " цей",
+      "count": 1,
+      "nfc": " цей"
+    },
+    {
+      "text": " 획득",
+      "count": 1,
+      "nfc": " 획득"
+    },
+    {
+      "text": " Zá",
+      "count": 1,
+      "nfc": " Zá"
+    },
+    {
+      "text": "보자",
+      "count": 1,
+      "nfc": "보자"
+    },
+    {
+      "text": " спре",
+      "count": 1,
+      "nfc": " спре"
+    },
+    {
+      "text": " 모두가",
+      "count": 1,
+      "nfc": " 모두가"
+    },
+    {
+      "text": " gelöscht",
+      "count": 1,
+      "nfc": " gelöscht"
+    },
+    {
+      "text": " protet",
+      "count": 1,
+      "nfc": " protet"
+    },
+    {
+      "text": " Aussi",
+      "count": 1,
+      "nfc": " Aussi"
+    },
+    {
+      "text": " orale",
+      "count": 1,
+      "nfc": " orale"
+    },
+    {
+      "text": "かけた",
+      "count": 1,
+      "nfc": "かけた"
+    },
+    {
+      "text": " Ваша",
+      "count": 1,
+      "nfc": " Ваша"
+    },
+    {
+      "text": "이에요",
+      "count": 1,
+      "nfc": "이에요"
+    },
+    {
+      "text": " wład",
+      "count": 1,
+      "nfc": " wład"
+    },
+    {
+      "text": " подключа",
+      "count": 1,
+      "nfc": " подключа"
+    },
+    {
+      "text": " 것이라는",
+      "count": 1,
+      "nfc": " 것이라는"
+    },
+    {
+      "text": "子は",
+      "count": 1,
+      "nfc": "子は"
+    },
+    {
+      "text": "くれました",
+      "count": 1,
+      "nfc": "くれました"
+    },
+    {
+      "text": "มากยิ่งขึ้น",
+      "count": 1,
+      "nfc": "มากยิ่งขึ้น"
+    },
+    {
+      "text": " 어떠한",
+      "count": 1,
+      "nfc": " 어떠한"
+    },
+    {
+      "text": "ządu",
+      "count": 1,
+      "nfc": "ządu"
+    },
+    {
+      "text": "urier",
+      "count": 1,
+      "nfc": "urier"
+    },
+    {
+      "text": " Алтай",
+      "count": 1,
+      "nfc": " Алтай"
+    },
+    {
+      "text": " thoảng",
+      "count": 1,
+      "nfc": " thoảng"
+    },
+    {
+      "text": "ง่ายขึ้น",
+      "count": 1,
+      "nfc": "ง่ายขึ้น"
+    },
+    {
+      "text": " errore",
+      "count": 1,
+      "nfc": " errore"
+    },
+    {
+      "text": "ราก",
+      "count": 1,
+      "nfc": "ราก"
+    },
+    {
+      "text": " родился",
+      "count": 1,
+      "nfc": " родился"
+    },
+    {
+      "text": " đục",
+      "count": 1,
+      "nfc": " đục"
+    },
+    {
+      "text": "vila",
+      "count": 1,
+      "nfc": "vila"
+    },
+    {
+      "text": " وبح",
+      "count": 1,
+      "nfc": " وبح"
+    },
+    {
+      "text": " хокке",
+      "count": 1,
+      "nfc": " хокке"
+    },
+    {
+      "text": " абон",
+      "count": 1,
+      "nfc": " абон"
+    },
+    {
+      "text": " тұ",
+      "count": 1,
+      "nfc": " тұ"
+    },
+    {
+      "text": " anmelden",
+      "count": 1,
+      "nfc": " anmelden"
+    },
+    {
+      "text": "halie",
+      "count": 1,
+      "nfc": "halie"
+    },
+    {
+      "text": "niec",
+      "count": 1,
+      "nfc": "niec"
+    },
+    {
+      "text": " جوجل",
+      "count": 1,
+      "nfc": " جوجل"
+    },
+    {
+      "text": " 実際に",
+      "count": 1,
+      "nfc": " 実際に"
+    },
+    {
+      "text": " сложные",
+      "count": 1,
+      "nfc": " сложные"
+    },
+    {
+      "text": "impatto",
+      "count": 1,
+      "nfc": "impatto"
+    },
+    {
+      "text": " pev",
+      "count": 1,
+      "nfc": " pev"
+    },
+    {
+      "text": " 여론",
+      "count": 1,
+      "nfc": " 여론"
+    },
+    {
+      "text": "ūra",
+      "count": 1,
+      "nfc": "ūra"
+    },
+    {
+      "text": " présentent",
+      "count": 1,
+      "nfc": " présentent"
+    },
+    {
+      "text": " kuota",
+      "count": 1,
+      "nfc": " kuota"
+    },
+    {
+      "text": " английского",
+      "count": 1,
+      "nfc": " английского"
+    },
+    {
+      "text": " 신설",
+      "count": 1,
+      "nfc": " 신설"
+    },
+    {
+      "text": " Vorm",
+      "count": 1,
+      "nfc": " Vorm"
+    },
+    {
+      "text": " bezüglich",
+      "count": 1,
+      "nfc": " bezüglich"
+    },
+    {
+      "text": " Dokumente",
+      "count": 1,
+      "nfc": " Dokumente"
+    },
+    {
+      "text": "ươm",
+      "count": 1,
+      "nfc": "ươm"
+    },
+    {
+      "text": " удовлетвори",
+      "count": 1,
+      "nfc": " удовлетвори"
+    },
+    {
+      "text": " enormes",
+      "count": 1,
+      "nfc": " enormes"
+    },
+    {
+      "text": "icino",
+      "count": 1,
+      "nfc": "icino"
+    },
+    {
+      "text": " SED",
+      "count": 1,
+      "nfc": " SED"
+    },
+    {
+      "text": " 이들이",
+      "count": 1,
+      "nfc": " 이들이"
+    },
+    {
+      "text": "ในตอน",
+      "count": 1,
+      "nfc": "ในตอน"
+    },
+    {
+      "text": " Kuh",
+      "count": 1,
+      "nfc": " Kuh"
+    },
+    {
+      "text": "affiche",
+      "count": 1,
+      "nfc": "affiche"
+    },
+    {
+      "text": " مفاج",
+      "count": 1,
+      "nfc": " مفاج"
+    },
+    {
+      "text": " dramat",
+      "count": 1,
+      "nfc": " dramat"
+    },
+    {
+      "text": " 영원",
+      "count": 1,
+      "nfc": " 영원"
+    },
+    {
+      "text": " Ambas",
+      "count": 1,
+      "nfc": " Ambas"
+    },
+    {
+      "text": " платформы",
+      "count": 1,
+      "nfc": " платформы"
+    },
+    {
+      "text": "ージェント",
+      "count": 1,
+      "nfc": "ージェント"
+    },
+    {
+      "text": "hamn",
+      "count": 1,
+      "nfc": "hamn"
+    },
+    {
+      "text": " смены",
+      "count": 1,
+      "nfc": " смены"
+    },
+    {
+      "text": " encontrou",
+      "count": 1,
+      "nfc": " encontrou"
+    },
+    {
+      "text": "болез",
+      "count": 1,
+      "nfc": "болез"
+    },
+    {
+      "text": " ستت",
+      "count": 1,
+      "nfc": " ستت"
+    },
+    {
+      "text": " строения",
+      "count": 1,
+      "nfc": " строения"
+    },
+    {
+      "text": " Дат",
+      "count": 1,
+      "nfc": " Дат"
+    },
+    {
+      "text": " aeron",
+      "count": 1,
+      "nfc": " aeron"
+    },
+    {
+      "text": " dibujo",
+      "count": 1,
+      "nfc": " dibujo"
+    },
+    {
+      "text": " صفقة",
+      "count": 1,
+      "nfc": " صفقة"
+    },
+    {
+      "text": "lieb",
+      "count": 1,
+      "nfc": "lieb"
+    },
+    {
+      "text": " بازد",
+      "count": 1,
+      "nfc": " بازد"
+    },
+    {
+      "text": " ngần",
+      "count": 1,
+      "nfc": " ngần"
+    },
+    {
+      "text": " méda",
+      "count": 1,
+      "nfc": " méda"
+    },
+    {
+      "text": " kararı",
+      "count": 1,
+      "nfc": " kararı"
+    },
+    {
+      "text": "氷",
+      "count": 1,
+      "nfc": "氷"
+    },
+    {
+      "text": "会計",
+      "count": 1,
+      "nfc": "会計"
+    },
+    {
+      "text": "著作権",
+      "count": 1,
+      "nfc": "著作権"
+    }
+  ]
+}

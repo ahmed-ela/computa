@@ -368,7 +368,7 @@ class Element {
   hasAttribute(name: string) { return this.getAttribute(name) !== null; }
   get childNodes(): any[] { return [...(this.text ? [{ nodeType: 3, textContent: this.text, parentElement: this }] : []), ...this.children]; }
   get attributes() { return Object.entries(this.values).map(([name, value]) => ({ name, value })); }
-  get classList() { const names = (this.values.class || "").split(/\s+/).filter(Boolean); return { contains: (name: string) => names.includes(name), [Symbol.iterator]: () => names[Symbol.iterator]() }; }
+  get classList() { const names = (this.values.class || "").split(/\s+/).filter(Boolean); return { length: names.length, contains: (name: string) => names.includes(name), [Symbol.iterator]: () => names[Symbol.iterator]() }; }
   get textContent(): string { return this.text + this.children.map(child => child.textContent).join(""); }
   get innerText() { return this.textContent; }
   getAttribute(name: string) { return this.values[name] ?? null; }
@@ -389,6 +389,7 @@ class Element {
     return (order.indexOf(this) < order.indexOf(other) ? 4 : 2)
       | (this.contains(other) ? 16 : 0) | (other.contains(this) ? 8 : 0);
   }
+  matches(selector: string) { return selector.split(",").some(part => matches(this, part.trim())); }
   closest(selector: string): Element | null {
     for (let node: Element | null = this; node; node = node.parentElement)
       if (selector.split(",").some(part => matches(node!, part.trim()))) return node;
@@ -520,10 +521,15 @@ function fixture(options: { articleOnly?: boolean; userPrompt?: string; rendered
     expectedFirstUserMarker: firstMarker, expectedFirstUserFingerprint: nativeFingerprint,
     allowFirstUserBinding: nativeFingerprint === undefined, ...request },
     document, window, location, (node: Element, pseudo?: string) => ({ visibility: node.cssVisibility,
-      display: node.values['data-fixture-display'] ?? (node.getAttribute('hidden') !== null ? 'none' : 'block'),
+      display: (node as any).literalDisplay ?? node.values['data-fixture-display'] ?? (node.getAttribute('hidden') !== null ? 'none' : 'block'),
       opacity: node.values['data-fixture-opacity'] ?? '1',
       stroke: node.values.stroke ?? 'none', strokeOpacity: node.values['stroke-opacity'] ?? '0', strokeWidth: node.values['stroke-width'] ?? '0',
-      content: pseudo === '::before' ? node.beforeContent : node.afterContent }), Observer, (callback: () => void, delay: number) => {
+      content: pseudo === '::before' ? node.beforeContent : node.afterContent,
+      textTransform: (node as any).literalTransform || 'none', webkitTextSecurity: (node as any).literalSecurity || 'none',
+      contentVisibility: (node as any).literalContentVisibility || 'visible', filter: (node as any).literalFilter || 'none', clipPath: (node as any).literalClip || 'none',
+      borderTopLeftRadius:'0px',borderTopRightRadius:'0px',borderBottomLeftRadius:'0px',borderBottomRightRadius:'0px',
+      transform:'none',translate:'none',rotate:'none',scale:'none',perspective:'none',offsetPath:'none',zoom:'1',
+      ...(node as any).clipStyles }), Observer, (callback: () => void, delay: number) => {
       timers.push(callback); scheduledDelays.push(delay);
     }, world, { subtle: { digest: async (algorithm: string, data: Uint8Array) => {
       digestInputs.push(new TextDecoder().decode(data));
@@ -593,6 +599,30 @@ function markedChatComposerFixture() {
 }
 
 describe('ChatGPT explicit Chat composer provenance', () => {
+  test('initial missing Chat proof reports only the form and exact control predicates that decided it', async () => {
+    type F = ReturnType<typeof markedChatComposerFixture>;
+    const cases: [Partial<Record<'form' | 'editor' | 'picker', string>>, (f: F) => void][] = [
+      [{ form: 'chat_marker' }, f => { delete f.form.values['data-chatgpt-composer']; }],
+      [{ form: 'thread_marker' }, f => { delete f.form.values['data-thread-find-composer']; }],
+      [{ form: 'placement' }, f => { f.form.values['data-composer-placement']='PRIVATE_CANARY'; }],
+      [{ editor: 'no_exact_match' }, f => { f.composer.values['aria-label']='PRIVATE_CANARY'; }],
+      [{ picker: 'no_exact_match' }, f => { f.picker.trigger.values['aria-label']='PRIVATE_CANARY'; }],
+      [{ picker: 'outside_form' }, f => { f.body.append(f.picker.trigger); }],
+      [{ picker: 'multiple' }, f => { f.form.append(new Element('BUTTON',{...f.picker.trigger.values})); }],
+      [{ form: 'chat_marker', picker: 'no_exact_match' }, f => {
+        delete f.form.values['data-chatgpt-composer']; f.picker.trigger.values['aria-label']='PRIVATE_CANARY'; }],
+    ];
+    for (const [changed,mutate] of cases) {
+      const f=markedChatComposerFixture(); mutate(f); const r=await f.inspect();
+      expect(r.error).toBe('product_mode_unverified');
+      expect(r.productModeDiagnostic.markerInputs).toEqual({ form:'matches', editor:'owned', picker:'owned', ...changed });
+      expect(JSON.stringify(r.productModeDiagnostic)).not.toContain('PRIVATE_CANARY');
+      expect(f.chatMode.clicks).toBe(0); expect(f.picker.trigger.clicks).toBe(0); expect(f.composer.events).toEqual([]);
+      expect(f.world.__computaChatProductMode).toBeUndefined();
+    }
+    expect((await markedChatComposerFixture().inspect()).chatModeReady).toBe(true);
+  });
+
   const successor = (f: ReturnType<typeof markedChatComposerFixture>, keepHidden = true) => {
     const old = f.form, form = new Element('FORM', { ...old.values });
     const editor = new Element('DIV', { ...f.composer.values });
@@ -1489,15 +1519,17 @@ describe('ChatGPT literal terminal source equivalence', () => {
   const end = source.indexOf('function chatGPTTerminalCompletionMatches(observed) {', start);
   const extractionStart = source.indexOf('function modelResponseExtraction(answer) {');
   const extractionEnd = source.indexOf('function modelResponseText(', extractionStart);
-  const read = new Function('rawSource', 'answer', 'messageID', 'getComputedStyle',
+  const read = new Function('rawSource', 'answer', 'messageID', 'getComputedStyle', 'document', 'window',
     source.slice(start, end) + source.slice(extractionStart, extractionEnd)
       + 'const extraction=modelResponseExtraction(answer);return {relation:chatGPTTerminalResponseTextRelation(rawSource,answer,extraction,messageID),text:extraction.text,flags:extraction.flags};');
   const style = (node: any, pseudo?: string) => ({ visibility: node.cssVisibility || 'visible',
     display: node.literalDisplay || (node.getAttribute('hidden') !== null ? 'none' : 'block'),
-    opacity: node.literalOpacity || '1', content: pseudo === '::before' ? node.beforeContent : node.afterContent });
+    opacity: node.literalOpacity || '1', content: pseudo === '::before' ? node.beforeContent : node.afterContent,
+    textTransform: node.literalTransform || 'none', webkitTextSecurity: node.literalSecurity || 'none',
+    contentVisibility: node.literalContentVisibility || 'visible', filter: node.literalFilter || 'none', clipPath: node.literalClip || 'none' });
   const wrap = (body: string) => '```json\n' + body + '\n```';
   function literal(body: string) {
-    const answer = new Element('DIV', { 'data-markdown-text-style': 'assistant-message' });
+    const answer = new Element('DIV', { 'data-markdown-text-style': 'assistant-message', 'data-chatgpt-selection-message-id': messageID });
     const copy = new Element('DIV', { class: 'my-4', 'data-dil-source-message-id': messageID,
       'data-chatgpt-copy-reference': '0', 'data-markdown-copy': 'contents' });
     const layout = new Element('DIV', { class: 'layout' }), hidden = new Element('DIV', { hidden: '' });
@@ -1513,6 +1545,431 @@ describe('ChatGPT literal terminal source equivalence', () => {
     return { answer, copy, layout, hidden, portal, dil, p, span, raw,
       read: (value = '<escape>' + raw() + '</escape>') => read(value, answer, messageID, style) };
   }
+  function streamRun(body: string) {
+    const x = literal(body);
+    x.copy.values.class = 'my-4 first:mt-0 last:mb-0 empty:hidden';
+    x.layout.values.class = '[--entity-prose-inset:0px]';
+    delete x.dil.values['data-d-inline-reveal']; x.dil.values['data-dil-response'] = '';
+    const run = new Element('SPAN', { 'data-d-stream-run': '', 'data-d-text-flow': 'run',
+      style: '--d-stream-ink: rgb(13, 13, 13);' }, body);
+    x.p.children = []; x.p.append(run);
+    const tail = new Element('DIV', { class: 'contents' }); tail.literalDisplay = 'contents'; tail.zeroRects = true;
+    x.copy.append(tail);
+    Object.defineProperty(x.answer, 'innerText', { configurable: true, get: () => x.raw().replace(/[ \t]+/g, ' ') + '\n' });
+    return { ...x, run, tail, read: (value = x.raw()) => read(value, x.answer, messageID, style) };
+  }
+  const readDirectLiteral = new Function('answer', 'messageID', 'getComputedStyle', 'document',
+    source.slice(start, end) + 'return chatGPTLiteralDILText(answer,messageID);');
+  function directText(body: string, fragments = [body]) {
+    const x = streamRun(body), document = {};
+    x.p.children = []; x.p.text = ''; (x.p as any).ownerDocument = document;
+    const nodes: any[] = fragments.map(data => ({ nodeType: 3, isConnected: true, parentNode: x.p,
+      parentElement: x.p, ownerDocument: document, data }));
+    Object.defineProperty(x.p, 'childNodes', { configurable: true, get: () => nodes });
+    Object.defineProperty(x.p, 'textContent', { configurable: true,
+      get: () => nodes.map(node => typeof node.data === 'string' ? node.data : node.textContent || '').join('') });
+    return { ...x, document, nodes,
+      literal: () => readDirectLiteral(x.answer, messageID, style, document),
+      read: (value = body) => read(value, x.answer, messageID, style, document) };
+  }
+  const noDirectActions = (x: any) => {
+    for (const node of [x.answer, x.copy, x.layout, x.hidden, x.portal, x.dil, x.p, x.tail]) expect(node.clicks).toBe(0);
+  };
+  test('direct Text DIL preserves original JSON fence whitespace patch indentation escapes and split Unicode', () => {
+    const patch = '*** Begin Patch\n*** Add File: /synthetic/direct.py\n+def demo():\n+    return "a  b \\ c e\u0301 🌍 `one` ``two``"\n*** End Patch';
+    const body = JSON.stringify({ type: 'tool_calls', calls: [{ name: 'apply_patch', input: patch }] });
+    const cases = [body, ...['\n', '\r\n'].flatMap(ending => [
+      '```json' + ending + body + ending + '```', '```json' + ending + body + ending + '```' + ending,
+    ]), JSON.stringify({ type: 'message', text: 'raw ``` triple backticks, a  b, "quoted", \\path and 🌍' })];
+    for (const raw of cases) for (const fragmented of [false, true]) {
+      const split = raw.indexOf('🌍') + 1;
+      const chunks = fragmented ? [raw.slice(0, split), raw.slice(split)] : [raw];
+      const x = directText(raw, chunks), result = x.read();
+      expect(x.literal()).toEqual({ text: raw, displayed: null, directText: true });
+      expect(result.text).toBe(raw);
+      expect(new TextEncoder().encode(result.text)).toEqual(new TextEncoder().encode(raw));
+      expect(result.flags.selectedExtraction).toBe('literal_dil');
+      expect(result.flags.literalDILDecline).toBeUndefined();
+      expect(result.relation).toBe(raw.startsWith('```') ? 'dil_literal_json_fence' : 'exact');
+      expect(x.read(raw + ' ').relation).toBeNull();
+      if (raw.startsWith('```')) {
+        expect(x.read('<escape>' + raw + '</escape>').relation).toBe('dil_escaped_literal_json_fence');
+      }
+      if (raw === body) {
+        expect(JSON.parse(result.text).calls[0].input).toBe(patch);
+        expect(x.answer.innerText).not.toBe(raw); // Rendered collapsing is not used as the literal source.
+      }
+      expect(x.nodes.map(node => node.data).join('')).toBe(raw); noDirectActions(x);
+    }
+    const short = JSON.stringify({ type: 'message', text: 'exact' });
+    const boundary = directText(short, [short, ...Array(127).fill('')]);
+    expect(boundary.read().text).toBe(short); expect(boundary.read().flags.selectedExtraction).toBe('literal_dil');
+    noDirectActions(boundary);
+  });
+  test('direct Text DIL refuses foreign mixed masked oversized malformed or changing physical sources without actions', () => {
+    const raw = JSON.stringify({ type: 'message', text: 'PRIVATE direct  bytes 🌍' });
+    const variants: [string, (x: any) => void][] = [
+      ['element', x => x.nodes.push({ nodeType: 1, tagName: 'B', parentElement: x.p })],
+      ['comment', x => x.nodes.push({ nodeType: 8, textContent: '', parentElement: x.p })],
+      ['foreign_document', x => x.nodes[0].ownerDocument = {}],
+      ['foreign_paragraph', x => x.p.ownerDocument = {}],
+      ['detached', x => x.nodes[0].isConnected = false],
+      ['parent_node', x => x.nodes[0].parentNode = {}],
+      ['parent_element', x => x.nodes[0].parentElement = {}],
+      ['non_string', x => x.nodes[0].data = 17],
+      ['source_id', x => x.copy.values['data-dil-source-message-id'] = firstMarker],
+      ['answer_id', x => x.answer.values['data-chatgpt-selection-message-id'] = firstMarker],
+      ['mask', x => x.p.literalSecurity = 'disc'],
+      ['transform', x => x.p.literalTransform = 'uppercase'],
+      ['hidden', x => x.p.values.hidden = ''],
+      ['source_mismatch', x => Object.defineProperty(x.copy, 'textContent', { get: () => raw + ' ' })],
+      ['answer_mismatch', x => Object.defineProperty(x.answer, 'textContent', { get: () => raw + ' ' })],
+      ['count129', x => x.nodes.push(...Array.from({ length: 128 }, () => ({ ...x.nodes[0], data: '' })))],
+      ['node_replacement', x => { let reads = 0; Object.defineProperty(x.p, 'childNodes', {
+        get: () => ++reads < 3 ? x.nodes : x.nodes.map((node: any) => ({ ...node })) }); }],
+      ['data_mutation', x => { let reads = 0; Object.defineProperty(x.nodes[0], 'data', {
+        get: () => ++reads === 1 ? raw : raw + ' changed' }); }],
+    ];
+    for (const [name, mutate] of variants) {
+      const x = directText(raw); mutate(x); const result = x.read();
+      expect(result.flags.selectedExtraction, name).not.toBe('literal_dil');
+      expect(['dil_literal_json_fence', 'dil_escaped_literal_json_fence'], name).not.toContain(result.relation);
+      noDirectActions(x);
+    }
+    // Generic equal rendered text is not a literal/tool-release grant.
+    const malformed = ['prose', '{broken}', '[]', '{"type":"unknown"}',
+      '```json ' + raw + ' ```', '```JSON\n' + raw + '\n```', '```json\n' + raw + '\n```\nextra',
+      '```json\n' + JSON.stringify({ type: 'message', text: 'triple ``` remains excluded inside a fence' }) + '\n```',
+      JSON.stringify({ type: 'message', text: 'x'.repeat(220_000) }),
+      JSON.stringify({ type: 'message', text: '🌍'.repeat(60_000) }),
+      '{"type":"message","text":"' + String.fromCharCode(0xD800) + '"}',
+      '{"type":"message","text":"' + String.fromCharCode(0xDC00) + '"}'];
+    for (const text of malformed) {
+      const x = directText(text), result = x.read();
+      expect(result.flags.selectedExtraction, text.slice(0, 32)).not.toBe('literal_dil');
+      expect(['dil_literal_json_fence', 'dil_escaped_literal_json_fence']).not.toContain(result.relation);
+      noDirectActions(x);
+    }
+  });
+  test('observed literal DIL stream run preserves the complete raw JSON patch and exact terminal relation', () => {
+    const patch = '*** Begin Patch\n*** Add File: /synthetic/indent-probe.py\n+def demo():\n+    return 7\n*** End Patch';
+    const raw = JSON.stringify({type:'tool_calls',calls:[{name:'apply_patch',input:patch}]}), x=streamRun(raw);
+    expect(raw.length).toBe(166); expect(JSON.parse(x.answer.innerText).calls[0].input).not.toBe(patch);
+    const result=x.read();
+    expect(result.flags).toMatchObject({selectedExtraction:'literal_dil',extractionReason:'accepted_literal_dil'});
+    expect(result.text).toBe(raw); expect(JSON.parse(result.text).calls[0].input).toBe(patch);
+    expect(result.relation).toBe('exact'); expect(result.flags.literalDILDecline).toBeUndefined();
+    expect(x.read('<escape>'+raw+'</escape>').relation).toBeNull();
+    expect(x.read(raw+' ').relation).toBeNull();
+    for (const body of [JSON.stringify({type:'message',text:'a  b \\ c "quoted" 🌍'}), JSON.stringify({type:'tool_calls',calls:[]})]) {
+      const f=streamRun(body); expect(f.read().text).toBe(body); expect(f.read().relation).toBe('exact');
+    }
+    x.run.text=x.run.text.replace('+    return 7','+ return 7');
+    expect(x.read(raw).relation).toBeNull(); expect(x.read().text).not.toBe(raw);
+  });
+  test('observed literal DIL stream run preserves the supported strict JSON fence without repairing its bytes', () => {
+    const patch = '*** Begin Patch\n*** Add File: /synthetic/indent-probe.py\n+def demo():\n+    return "a  b \\ c 🌍"\n*** End Patch';
+    const body = JSON.stringify({type:'tool_calls',calls:[{name:'apply_patch',input:patch}]});
+    for (const ending of ['\n', '\r\n']) for (const trailing of ['', ending]) {
+      const raw='```json'+ending+body+ending+'```'+trailing, x=streamRun(raw), result=x.read();
+      expect(result.flags).toMatchObject({selectedExtraction:'literal_dil',extractionReason:'accepted_literal_dil'});
+      expect(result.flags.literalDILDecline).toBeUndefined(); expect(result.text).toBe(raw);
+      expect(result.relation).toBe('dil_literal_json_fence');
+      expect(x.read('<escape>'+raw+'</escape>').relation).toBe('dil_escaped_literal_json_fence');
+      for(const changed of ['<escape><escape>'+raw+'</escape></escape>', '<escape>'+raw+'</escape> ',
+        '<escape> '+raw+'</escape>', '<escape>'+raw+' </escape>', '<escape>'+raw.replace('```json','```JSON')+'</escape>',
+        '<escape>'+raw.replace('+    return','+ return')+'</escape>']) expect(x.read(changed).relation).toBeNull();
+      expect(JSON.parse(result.text.slice(7+ending.length,-(ending.length+3+trailing.length))).calls[0].input).toBe(patch);
+      expect(x.answer.innerText).not.toContain('+    return');
+      expect(x.read(raw+' ').relation).toBeNull();
+      x.run.text=x.run.text.replace('+    return','+        return');
+      expect(x.read(raw).relation).toBeNull();
+    }
+  });
+  test('observed literal DIL stream run refuses prose multiple fences and malformed fence envelopes', () => {
+    const body=JSON.stringify({type:'tool_calls',calls:[{name:'apply_patch',input:'  exact  input'}]}), fenced=wrap(body);
+    for(const raw of ['before\n'+fenced,fenced+'\nafter',fenced+'\n'+fenced,
+      '```JSON\n'+body+'\n```','```json '+body+'```','```\n'+body+'\n```',
+      '```json\r'+body+'\r```',' '+fenced,fenced+'\n\n','```json\n{broken}\n```',
+      wrap('[]'),wrap('{"type":"unknown"}'),wrap('{"type":"message"}{"type":"message"}'),
+      wrap(JSON.stringify({type:'message',text:'literal ``` or <escape> is excluded'})),
+      wrap(JSON.stringify({type:'message',text:'x'.repeat(220000)}))]) {
+      const result=streamRun(raw).read();
+      expect(result.flags.selectedExtraction,raw.slice(0,30)).not.toBe('literal_dil');
+      expect(result.flags.literalDILDecline,raw.slice(0,30)).toMatch(/^(response_fence|text_size|text_context)$/);
+      expect(['dil_literal_json_fence','dil_escaped_literal_json_fence']).not.toContain(result.relation);
+    }
+  });
+  test('observed literal DIL stream run refuses extra content mixed leaves and unaccounted style or identity', () => {
+    const raw=JSON.stringify({type:'message',text:'PRIVATE  exact  bytes'});
+    const variants: [string,(x:any)=>void][] = [
+      ['tail_text',x=>x.tail.text='PRIVATE hidden text'], ['tail_whitespace',x=>x.tail.text=' '], ['tail_child',x=>x.tail.append(new Element('SPAN'))],
+      ['tail_comment',x=>Object.defineProperty(x.tail,'childNodes',{get:()=>[{nodeType:8,textContent:''}]})],
+      ['tail_hidden',x=>x.tail.values.hidden=''], ['tail_aria',x=>x.tail.values['aria-hidden']='true'],
+      ['tail_inert',x=>x.tail.values.inert=''], ['tail_opacity',x=>x.tail.literalOpacity='0'],
+      ['tail_display',x=>x.tail.literalDisplay='none'], ['tail_visibility',x=>x.tail.cssVisibility='hidden'],
+      ['tail_before',x=>x.tail.beforeContent='"PRIVATE"'], ['tail_after',x=>x.tail.afterContent='"PRIVATE"'],
+      ['tail_attr',x=>x.tail.values.title='PRIVATE'], ['tail_class',x=>x.tail.values.class='contents extra'],
+      ['tail_namespace',x=>x.tail.namespaceURI='http://www.w3.org/2000/svg'],
+      ['layout_class',x=>x.layout.values.class='other'], ['source_class',x=>x.copy.values.class+=' other'],
+      ['extra_source_text',x=>x.copy.text=' '], ['extra_source_child',x=>x.copy.append(new Element('DIV'))],
+      ['portal_style',x=>x.portal.values.style+='display:none'], ['portal_class',x=>x.portal.values.class+=' interactive'],
+      ['dil_mixed',x=>x.dil.values['data-d-inline-reveal']=''], ['dil_id',x=>x.dil.values['data-dil-message-id']=firstMarker],
+      ['source_id',x=>x.copy.values['data-dil-source-message-id']=firstMarker], ['selection_id',x=>x.answer.values['data-chatgpt-selection-message-id']=firstMarker],
+      ['dil_unknown_attr',x=>x.dil.values.onclick='PRIVATE'], ['paragraph_class',x=>x.p.values.class+=' unknown'],
+      ['word_sibling',x=>x.p.append(x.span('other'))], ['run_sibling',x=>x.p.append(new Element('SPAN',x.run.values,raw))],
+      ['run_element',x=>x.run.append(new Element('B',{},'PRIVATE'))], ['run_comment',x=>Object.defineProperty(x.run,'childNodes',{get:()=>[{nodeType:3,textContent:raw},{nodeType:8,textContent:''}]})],
+      ['run_word_attr',x=>x.run.values['data-d-stream-word']=''], ['run_style_extra',x=>x.run.values.style+='color:transparent'],
+      ['run_style_unknown',x=>x.run.values.style='--d-stream-ink: url(PRIVATE)'], ['run_style_bound',x=>x.run.values.style=' '.repeat(129)+x.run.values.style], ['run_hidden',x=>x.run.values.hidden=''],
+      ['run_interactive',x=>x.run.values.role='button'], ['run_before',x=>x.run.beforeContent='"PRIVATE"'],
+      ['run_transform',x=>x.run.literalTransform='uppercase'], ['run_filter',x=>x.run.literalFilter='opacity(0)'],
+      ['run_clip',x=>x.run.literalClip='inset(100%)'], ['run_namespace',x=>x.run.namespaceURI='http://www.w3.org/2000/svg'],
+    ];
+    for(const [name,mutate] of variants) {
+      const x=streamRun(raw);mutate(x);const result=x.read();
+      expect(result.flags.selectedExtraction,name).not.toBe('literal_dil'); expect(result.relation,name).toBeNull();
+      expect(JSON.stringify(result.flags),name).not.toContain('PRIVATE');
+    }
+  });
+  test('observed literal DIL stream run admits only one whole bounded envelope and keeps legacy words fenced', () => {
+    for(const raw of ['{}','[]','null','{"type":"unknown"}','{"type":"message"} explanation',
+      '{"type":"message"}{"type":"message"}', '```text\n{"type":"message","text":"hi"}\n```',
+      '{"type":"message","text":"unterminated}', JSON.stringify({type:'message',text:'x'.repeat(220000)}),
+      JSON.stringify({type:'message',text:'🌍'.repeat(55000)})]) {
+      const x=streamRun(raw);expect(x.read().flags.selectedExtraction,raw.slice(0,30)).not.toBe('literal_dil');
+    }
+    const prefix='{"type":"message","text":"', suffix='"}';
+    const raw=prefix+'x'.repeat(220000-prefix.length-suffix.length)+suffix;
+    expect(streamRun(raw).read().text).toBe(raw);
+    expect(streamRun(raw).read().flags.selectedExtraction).toBe('literal_dil');
+    const old=literal('{"type":"message","text":"old"}');
+    expect(old.read().relation).toBe('dil_escaped_literal_json_fence');
+    old.p.children=[old.span('{"type":"message","text":"raw words"}')];
+    expect(old.read().flags.selectedExtraction).not.toBe('literal_dil');
+    const changed=streamRun('{"type":"message","text":"hi"}');
+    changed.portal.values.class='relative PortalBoundary-Other Renderer-Other';
+    changed.dil.values.class='DilRenderer-Other DilResponseRoot-Other Reveal-Other';
+    changed.p.values.class='TextBase-Other Text-Other';
+    expect(changed.read().flags.selectedExtraction).toBe('literal_dil');
+  });
+
+  test('literal DIL declines report the first finite guard without changing fallback bytes or accepting unknown shape', () => {
+    const parent = (x:any, count:number) => { let child=x.answer;for(let i=0;i<count;i++){const p=new Element('DIV');p.append(child);child=p;}return child; };
+    const cases: [string,(x:any)=>void][] = [
+      ['response_source_count', x=>delete x.copy.values['data-dil-source-message-id']],
+      ['response_source_id', x=>x.copy.values['data-dil-source-message-id']='PRIVATE_ID'],
+      ['response_selection_scope', x=>delete x.answer.values['data-chatgpt-selection-message-id']],
+      ['response_assistant_limit', x=>{for(let i=0;i<65;i++)x.answer.append(new Element('DIV',{'data-message-author-role':'assistant'}));}],
+      ['response_assistant_scope', x=>x.answer.append(new Element('DIV',{'data-message-author-role':'user'},'PRIVATE_BODY'))],
+      ['text_ancestor_limit', x=>parent(x,65)],
+      ['text_ancestor_visibility', x=>parent(x,1).literalOpacity='0'],
+      ['text_source_shape', x=>x.copy.values.title='PRIVATE_ATTRIBUTE'],
+      ['text_layout_shape', x=>x.layout.values.title='PRIVATE_ATTRIBUTE'],
+      ['text_hidden_placeholder', x=>x.hidden.text='PRIVATE_BODY'],
+      ['text_portal_shape', x=>x.portal.values.title='PRIVATE_ATTRIBUTE'],
+      ['text_dil_dir', x=>x.dil.values.dir='rtl'],
+      ['text_paragraph_shape', x=>x.p.values.title='PRIVATE_ATTRIBUTE'],
+      ['text_renderer_classes', x=>x.portal.values.class='PRIVATE_CLASS'],
+      ['text_span_count', x=>{x.p.children=[];}],
+      ['text_physical', x=>x.p.literalOpacity='0'],
+      ['text_span_shape', x=>x.p.children[0].values.title='PRIVATE_ATTRIBUTE'],
+      ['text_size', x=>x.p.children[1].text='x'.repeat(220001)],
+      ['text_mismatch', x=>Object.defineProperty(x.answer,'textContent',{get:()=> 'PRIVATE_BODY'})],
+      ['response_fence', x=>x.p.children[0].text='```other\n'],
+      ['response_masking', x=>x.p.literalTransform='uppercase'],
+      ['response_ancestor_limit', x=>parent(x,64)],
+      ['response_ancestor_masking', x=>parent(x,1).literalFilter='opacity(0)'],
+      ['response_selection_id', x=>parent(x,1).values['data-chatgpt-selection-message-id']=firstMarker],
+    ];
+    for (const [reason, mutate] of cases) {
+      const x=literal('{"type":"message","text":"PRIVATE_REPLY"}');mutate(x);
+      const expected=(x.answer.innerText||x.answer.textContent||'').trim();
+      const result=x.read('unrelated candidate');
+      expect(result.flags,reason).toMatchObject({selectedExtraction:'rendered_fallback',extractionReason:'missing_code',literalDILDecline:reason});
+      expect(result.text,reason).toBe(expected);
+      expect(result.relation,reason).toBeNull();
+      expect(JSON.stringify(result.flags),reason).not.toContain('PRIVATE');
+    }
+    const x=literal('{"type":"message","text":"unchanged"}');
+    x.copy.values.title='PRIVATE';x.p.literalTransform='uppercase';
+    expect(x.read().flags.literalDILDecline).toBe('text_source_shape');
+    delete x.copy.values.title;delete x.p.literalTransform;
+    expect(x.read().flags).not.toHaveProperty('literalDILDecline');
+    expect(x.read().flags.selectedExtraction).toBe('literal_dil');
+  });
+  function outerClipFixture() {
+    const raw=JSON.stringify({type:'tool_calls',calls:[{name:'apply_patch',input:'+    exact\n+        λ😀'}]});
+    const x=streamRun(raw), main:any=new Element('MAIN'), body:any=new Element('BODY'), html:any=new Element('HTML');
+    main.append(x.answer);body.append(main);html.append(body);
+    const rect={left:340,top:0,right:1024,bottom:768,width:684,height:768};
+    main.getClientRects=()=>[rect];main.getBoundingClientRect=()=>rect;
+    x.answer.getBoundingClientRect=()=>({left:362.5,top:12889,right:1002.5,bottom:13097,width:640,height:208});
+    const document={documentElement:html}, window={innerWidth:1024,innerHeight:768,
+      visualViewport:{width:1024,height:768,scale:1,offsetLeft:0,offsetTop:0}};
+    const inspect=()=>read(raw,x.answer,messageID,style,document,window);
+    return {...x,raw,main,body,html,rect,document,window,inspect};
+  }
+  test('literal DIL exact source survives outer desktop partition and offscreen clipping without geometry authority',()=>{
+    const x=outerClipFixture();
+    // These are authored source bytes, not a claim that all response pixels are
+    // currently visible. No particular outer CSS shape is an admission token.
+    for(const clip of ['none','border-box','inset(0px round 12px)','circle(0px)','url(#site-clip)']) {
+      x.main.literalClip=clip;const result=x.inspect();
+      expect(result.flags).toMatchObject({selectedExtraction:'literal_dil',extractionReason:'accepted_literal_dil'});
+      expect(result.text).toBe(x.raw);expect(result.relation).toBe('exact');
+      expect(JSON.parse(result.text).calls[0].input).toBe('+    exact\n+        λ😀');
+      expect(result.flags).not.toHaveProperty('viewportClipDiagnostic');
+      expect(result.flags).not.toHaveProperty('literalDILDecline');
+    }
+    x.main.getBoundingClientRect=()=>{throw Error('geometry is not source authority');};
+    expect(x.inspect().text).toBe(x.raw);expect(x.inspect().relation).toBe('exact');
+    x.run.text=x.run.text.replace('+    exact','+        exact');
+    expect(x.inspect().relation).toBeNull();expect(x.inspect().text).not.toBe(x.raw);
+  });
+  test('outer clipping never excuses local masking hidden content or identity drift',()=>{
+    const variants:[string,(x:any)=>void][]=[
+      ...['answer','copy','layout','portal','dil','p','run'].map(key=>[key+' clip',(x:any)=>x[key].literalClip='inset(100%)'] as [string,(x:any)=>void]),
+      ['hidden source',x=>x.copy.values.hidden=''],['hidden ancestor',x=>x.main.values.hidden=''],
+      ['inert ancestor',x=>x.main.values.inert=''],['aria hidden ancestor',x=>x.main.values['aria-hidden']='true'],
+      ['ancestor opacity',x=>x.main.literalOpacity='0'],['ancestor filter',x=>x.main.literalFilter='opacity(0)'],
+      ['ancestor transform',x=>x.main.literalTransform='uppercase'],['ancestor text security',x=>x.main.literalSecurity='disc'],
+      ['ancestor content visibility',x=>x.main.literalContentVisibility='hidden'],['ancestor namespace',x=>x.main.namespaceURI='urn:foreign'],
+      ['source ID',x=>x.copy.values['data-dil-source-message-id']=firstMarker],
+      ['DIL ID',x=>x.dil.values['data-dil-message-id']=firstMarker],['selection ID',x=>x.answer.values['data-chatgpt-selection-message-id']=firstMarker],
+      ['outer selection ID',x=>x.main.values['data-chatgpt-selection-message-id']=firstMarker],
+      ['extra leaf',x=>x.p.append(new Element('SPAN',{},'EXTRA'))],['detached ancestor',x=>x.body.connected=false],
+    ];
+    for(const [label,mutate] of variants){const x=outerClipFixture();x.main.literalClip='circle(0px)';mutate(x);const result=x.inspect();
+      expect(result.flags.selectedExtraction,label).toBe('rendered_fallback');expect(result.relation,label).toBeNull();
+    }
+  });
+  test('literal DIL ancestor masking reports only the first closed predicate depth and tag without changing rejection', () => {
+    const raw=JSON.stringify({type:'tool_calls',calls:[{name:'apply_patch',input:'+    PRIVATE_REPLY'}]});
+    const variants: [string,string,string][] = [['namespace','namespaceURI','urn:PRIVATE_NAMESPACE'],
+      ['text_transform','literalTransform','uppercase'],['text_security','literalSecurity','disc'],
+      ['content_visibility','literalContentVisibility','hidden'],['filter','literalFilter','opacity(0)']];
+    for(const run of [false,true]) for(const [property,key,value] of variants) for(const count of [1,3,63]) {
+      const x=run?streamRun(raw):literal(raw);let parent:any=x.answer;
+      for(let i=0;i<count;i++){const next=new Element(i===count-1?'SECTION':'DIV');next.append(parent);parent=next;}
+      parent[key]=value;const result=x.read('unrelated');
+      expect(result.flags).toMatchObject({selectedExtraction:'rendered_fallback',extractionReason:'missing_code',
+        literalDILDecline:'response_ancestor_masking',literalDILAncestorMasking:{depth:count+1,tag:'section',property}});
+      expect(result.text).toBe(x.answer.innerText.trim());expect(result.relation).toBeNull();
+      expect(JSON.stringify(result.flags)).not.toContain('PRIVATE');
+    }
+    const x=streamRun(raw), near:any=new Element('DIV'), far:any=new Element('PRIVATE_TAG');near.append(x.answer);far.append(near);
+    near.literalTransform='uppercase';near.literalFilter='opacity(0)';far.literalSecurity='disc';
+    expect(x.read().flags.literalDILAncestorMasking).toEqual({depth:2,tag:'div',property:'text_transform'});
+    delete near.literalTransform;expect(x.read().flags.literalDILAncestorMasking).toEqual({depth:2,tag:'div',property:'filter'});
+    delete near.literalFilter;expect(x.read().flags.literalDILAncestorMasking).toEqual({depth:3,tag:'other',property:'text_security'});
+    delete far.literalSecurity;expect(x.read().flags).not.toHaveProperty('literalDILAncestorMasking');
+    expect(x.read().flags.selectedExtraction).toBe('literal_dil');
+    x.p.literalFilter='opacity(0)';expect(x.read().flags.literalDILDecline).toBe('response_masking');
+    expect(x.read().flags).not.toHaveProperty('literalDILAncestorMasking');
+    const limited=streamRun(raw);let parent:any=limited.answer;
+    for(let i=0;i<64;i++){const next=new Element('DIV');next.append(parent);parent=next;}
+    parent.literalFilter='opacity(0)';expect(limited.read().flags.literalDILDecline).toBe('response_ancestor_limit');
+    expect(limited.read().flags).not.toHaveProperty('literalDILAncestorMasking');
+  });
+  test('literal DIL container decline identifies the same first failed predicate with unchanged fallback bytes', () => {
+    const variants: [string,(x:any)=>void][] = [
+      ['text_dil_missing', x=>{x.portal.children=[];}],
+      ['text_dil_tag', x=>{x.dil.tagName='SECTION';}],
+      ['text_dil_children', x=>{x.portal.append(new Element('DIV'));}],
+      ['text_dil_children', x=>{x.portal.text=' ';}],
+      ['text_dil_children', x=>Object.defineProperty(x.portal,'childNodes',{get:()=>[x.dil,{nodeType:8,textContent:''}]})],
+      ['text_dil_message_id', x=>x.dil.values['data-dil-message-id']='PRIVATE_WRONG_ID'],
+      ['text_dil_marker', x=>{delete x.dil.values['data-dil-response'];delete x.dil.values['data-d-inline-reveal'];}],
+      ['text_dil_marker', x=>{const name=x.dil.hasAttribute('data-dil-response')?'data-dil-response':'data-d-inline-reveal';x.dil.values[name]='PRIVATE_NONEMPTY';}],
+      ['text_dil_direction', x=>x.dil.values['data-d-direction']='row'],
+      ['text_dil_dir', x=>x.dil.values.dir='rtl'],
+      ['text_dil_attributes', x=>x.dil.values['data-private-attribute']='PRIVATE_VALUE'],
+      ['text_dil_opposite_marker_empty', x=>{const other=x.dil.hasAttribute('data-dil-response')?'data-d-inline-reveal':'data-dil-response';x.dil.values[other]='';}],
+    ];
+    for(const run of [false,true]) for(const [reason,mutate] of variants) {
+      const raw='{"type":"message","text":"PRIVATE_BODY"}', x=run?streamRun(raw):literal(raw);
+      mutate(x); const expected=(x.answer.innerText||x.answer.textContent||'').trim(), result=x.read('unrelated');
+      expect(result.flags).toMatchObject({selectedExtraction:'rendered_fallback',extractionReason:'missing_code',literalDILDecline:reason});
+      expect(result.text).toBe(expected);expect(result.relation).toBeNull();
+      expect(JSON.stringify(result.flags)).not.toContain('PRIVATE');
+    }
+    const x=streamRun('{"type":"message","text":"unchanged"}');
+    x.dil.values['data-dil-message-id']='PRIVATE'; x.dil.values.dir='rtl';x.dil.values.title='PRIVATE';
+    expect(x.read().flags.literalDILDecline).toBe('text_dil_message_id');
+    x.dil.values['data-dil-message-id']=messageID;expect(x.read().flags.literalDILDecline).toBe('text_dil_dir');
+    x.dil.values.dir='auto';expect(x.read().flags.literalDILDecline).toBe('text_dil_attributes');
+    delete x.dil.values.title;expect(x.read().flags.selectedExtraction).toBe('literal_dil');
+    expect(x.read().flags).not.toHaveProperty('literalDILDecline');
+  });
+  test('literal DIL opposite empty marker diagnosis never accepts either profile or reveals extra attributes', () => {
+    for (const run of [false, true]) {
+      const raw = '{"type":"message","text":"PRIVATE_BODY"}';
+      const make = () => run ? streamRun(raw) : literal(raw);
+      const expectedMarker = run ? 'data-dil-response' : 'data-d-inline-reveal';
+      const oppositeMarker = run ? 'data-d-inline-reveal' : 'data-dil-response';
+      const cases: [string, (x: any) => void][] = [
+        ['text_dil_opposite_marker_empty', x => { x.dil.values[oppositeMarker] = ''; }],
+        ['text_dil_attributes', x => { x.dil.values[oppositeMarker] = 'PRIVATE_VALUE'; }],
+        ['text_dil_attributes', x => { x.dil.values[oppositeMarker] = ' '; }],
+        ['text_dil_attributes', x => { x.dil.values['data-private-extra'] = ''; }],
+        ['text_dil_attributes', x => { x.dil.values[oppositeMarker] = ''; x.dil.values['data-private-extra'] = 'PRIVATE_VALUE'; }],
+        ['text_dil_attributes', x => { x.dil.values[oppositeMarker] = ''; x.dil.values.title = ''; }],
+        ['text_dil_marker', x => { delete x.dil.values[expectedMarker]; x.dil.values[oppositeMarker] = ''; }],
+        ['text_dil_marker', x => { x.dil.values[expectedMarker] = 'PRIVATE_VALUE'; x.dil.values[oppositeMarker] = ''; }],
+        ['text_dil_dir', x => { x.dil.values.dir = 'rtl'; x.dil.values[oppositeMarker] = ''; }],
+      ];
+      for (const [reason, mutate] of cases) {
+        const x = make(); mutate(x);
+        const fallback = (x.answer.innerText || x.answer.textContent || '').trim();
+        const result = x.read('unrelated');
+        expect(result.flags).toMatchObject({ selectedExtraction: 'rendered_fallback', extractionReason: 'missing_code', literalDILDecline: reason });
+        expect(result.text).toBe(fallback); expect(result.relation).toBeNull();
+        expect(JSON.stringify(result.flags)).not.toContain('PRIVATE');
+        expect(JSON.stringify(result.flags)).not.toContain('data-');
+      }
+      const clean = make(), before = clean.read();
+      expect(before.flags.selectedExtraction).toBe('literal_dil');
+      clean.dil.values[oppositeMarker] = '';
+      expect(clean.read().flags.literalDILDecline).toBe('text_dil_opposite_marker_empty');
+      delete clean.dil.values[oppositeMarker];
+      expect(clean.read()).toEqual(before);
+    }
+  });
+  test('literal DIL reason schema covers every emitted guard and remains absent on an accepted code block', () => {
+    const native=readFileSync(new URL('../Sources/Computa/Browser/EmbeddedWebModelTransport.swift',import.meta.url),'utf8');
+    const emitted=new Set([...source.slice(start,end).matchAll(/chatGPTLiteralDILDecline\(report, '([^']+)'/g)].map(m=>m[1]));
+    const branch=native.slice(native.indexOf('if let decline = source["literalDILDecline"]'),native.indexOf('if let raw = source["literalDILAncestorMasking"]'));
+    const accepted=new Set([...branch.matchAll(/"((?:text|response)_[a-z_]+)"/g)].map(m=>m[1]));
+    expect(emitted.size).toBe(34);expect(accepted).toEqual(new Set([...emitted,'text_dil_shape']));
+    const x=fixture();observedChatGPTCodeBlock(x,'{"type":"message","text":"HI"}');
+    expect(read('unrelated',x.answer,messageID,style).flags).not.toHaveProperty('literalDILDecline');
+  });
+
+  test('literal DIL action input preserves indentation and escapes while normal rendering collapses them', () => {
+    const patch = '*** Begin Patch\n*** Add File: /synthetic/résumé.py\n+    def f():\n+        return "🌍 \\ path"\n*** End Patch';
+    const f = literal(JSON.stringify({type:'tool_calls',calls:[{name:'apply_patch',input:patch}]}));
+    Object.defineProperty(f.answer,'innerText',{configurable:true,get:()=>f.raw().replace(/\n/g,' ').replace(/[ \t]+/g,' ')});
+    expect(JSON.parse(f.answer.innerText.slice(8,-4)).calls[0].input).not.toBe(patch);
+    expect(f.read().flags).toMatchObject({selectedExtraction:'literal_dil',extractionReason:'accepted_literal_dil'});
+    expect(JSON.parse(f.read().text.slice(8,-4)).calls[0].input).toBe(patch);
+    for (const mutate of [
+      (x:any)=>delete x.answer.values['data-chatgpt-selection-message-id'],
+      (x:any)=>x.answer.values['data-chatgpt-selection-message-id']=firstMarker,
+      (x:any)=>x.answer.values['data-markdown-text-style']='user-message',
+      (x:any)=>x.p.literalTransform='uppercase', (x:any)=>x.p.literalSecurity='disc',
+      (x:any)=>x.p.literalContentVisibility='hidden', (x:any)=>x.p.literalFilter='opacity(0)',
+      (x:any)=>x.p.literalClip='inset(100%)', (x:any)=>x.p.namespaceURI='http://www.w3.org/2000/svg',
+      (x:any)=>x.hidden.text='hidden', (x:any)=>x.p.children[0].append(new Element('BUTTON',{},'extra')),
+      (x:any)=>x.p.children[0].beforeContent='"extra"', (x:any)=>x.p.values.onclick='extra',
+    ]) {
+      const bad=literal(JSON.stringify({type:'tool_calls',calls:[{name:'apply_patch',input:patch}]}));
+      mutate(bad);expect(bad.read().flags.selectedExtraction,String(mutate)).not.toBe('literal_dil');
+    }
+    const stale=f.read(), other=firstMarker;
+    f.copy.values['data-dil-source-message-id']=other; f.dil.values['data-dil-message-id']=other;
+    expect(f.read(stale.text).relation).toBeNull();
+  });
+
   test('the actual three-span source preserves LF, JSON escapes and a single exact escape wrapper', () => {
     expect(start).toBeGreaterThan(0); expect(extractionStart).toBeGreaterThan(end);
     for (const envelope of [
@@ -1522,8 +1979,8 @@ describe('ChatGPT literal terminal source equivalence', () => {
       const raw = JSON.stringify(envelope), f = literal(raw), before = f.raw();
       expect(f.read().relation).toBe('dil_escaped_literal_json_fence');
       expect(f.read(f.raw()).relation).toBe('dil_literal_json_fence');
-      expect(f.read().text).toBe('```json ' + raw + ' ```');
-      expect(f.read().flags.selectedExtraction).toBe('rendered_fallback');
+      expect(f.read().text).toBe(wrap(raw));
+      expect(f.read().flags.selectedExtraction).toBe('literal_dil');
       expect(f.raw()).toBe(before); expect(f.raw()).toBe(wrap(raw));
     }
   });
@@ -1573,19 +2030,91 @@ describe('ChatGPT literal terminal source equivalence', () => {
     const f = literal('{"type":"message","text":"HI"}'), raw = '<escape>' + f.raw() + '</escape>';
     expect(f.read(raw).relation).toBe('dil_escaped_literal_json_fence');
     Object.defineProperty(f.answer, 'innerText', { configurable: true, get: () => '```json  {"type":"message","text":"HI"} ```\n' });
-    expect(f.read(raw).relation).toBeNull();
+    expect(f.read(raw).relation).toBe('dil_escaped_literal_json_fence');
     Object.defineProperty(f.answer, 'innerText', { configurable: true, get: () => f.p.children.map(child => child.textContent.replace(/\r?\n$/, ' ')).join('') + '\n' });
     f.p.children[1].text = '{"type":"message","text":"CHANGED"}\n';
     expect(f.read(raw).relation).toBeNull();
   });
+  test('observed raw or fenced DIL stream run requires fresh native context and exact bytes after the final picker await', async () => {
+    for (const fenced of [false,true]) for (const mutation of ['none','whitespace','identity','source_identity','selection_identity','contents','model','owner']) {
+      const choice={key:'chat/latest/medium',label:'Medium'}, conversationID='6ad86c7a-2284-8331-b846-a59490db0c46';
+      const x=await chatTurnFixture(choice), click=x.send.onClick!;
+      x.send.onClick=()=>{click();x.f.location.pathname='/c/'+conversationID;
+        x.f.document.URL='https://chatgpt.com'+x.f.location.pathname+'?temporary-chat=true';};
+      const record=await x.dispatch('Exact owned raw DIL terminal source',{deferModelVerification:true});
+      const patch='*** Begin Patch\n*** Add File: /synthetic/indent.py\n+def f():\n+    return 7\n*** End Patch';
+      const envelope=JSON.stringify({type:'tool_calls',calls:[{name:'apply_patch',input:patch}]});
+      const raw=fenced?wrap(envelope):envelope, body=streamRun(raw), root=x.answer('placeholder');
+      root.children[0].connected=false;root.children[0]=body.answer;body.answer.parentElement=root;
+      root.values['data-chatgpt-selection-message-id']=messageID;
+      const candidate={correlationID:'245e3c88-8dac-4239-947b-1aff997b9f61',sequence:1,
+        inputSHA256:createHash('sha256').update(record.outbound).digest('hex'),
+        inputMessageID:'ae2e44b2-714e-43cd-ba07-d5c3f09c9463',conversationID,messageID,text:raw};
+      const picker:any=x.picker, open=picker.trigger.onClick;let opens=0;
+      picker.trigger.onClick=()=>{open();if(++opens!==2)return;
+        if(mutation==='whitespace')body.run.text=body.run.text.replace('+    return 7','+        return 7');
+        if(mutation==='identity')body.dil.values['data-dil-message-id']=firstMarker;
+        if(mutation==='source_identity')body.copy.values['data-dil-source-message-id']=firstMarker;
+        if(mutation==='selection_identity')root.values['data-chatgpt-selection-message-id']=firstMarker;
+        if(mutation==='contents')body.tail.text='unexpected';
+        if(mutation==='model')picker.selected('High');
+        if(mutation==='owner')x.f.world.__computaModelOwner='foreign-owner';};
+      const observed=await x.observe(record,{deferModelVerification:false,terminalCompletionCandidate:candidate});
+      expect(opens).toBe(2);expect(x.send.clicks).toBe(1);expect(candidate.text).toBe(raw);
+      if(mutation==='none') {
+        expect(observed.error).toBeUndefined();expect(observed.terminalCompletionMatched).toBe(true);
+        expect(observed.terminalCompletionRepresentation).toBe(fenced?'dil_literal_json_fence':'exact');expect(observed.text).toBe(raw);
+        expect(JSON.parse(fenced?observed.text.slice(8,-4):observed.text).calls[0].input).toBe(patch);
+        expect(observed.modelEvidence.selected).toEqual(choice);expect(observed.submissionProof.fingerprint).toBe(record.fingerprint);
+      } else {
+        expect(observed.terminalCompletionMatched,mutation).toBeUndefined();
+        expect(observed.terminalCompletionRepresentation,mutation).toBeUndefined();
+      }
+    }
+  });
+  test('literal DIL reread accepts outer clip changes but refuses local masking after the final picker await',async()=>{
+    for(const mutation of ['none','outer_clip','local_clip','local_hidden','local_transform']) {
+      const choice={key:'chat/latest/medium',label:'Medium'},conversationID='6ad86c7a-2284-8331-b846-a59490db0c46';
+      const x=await chatTurnFixture(choice),click=x.send.onClick!;
+      x.send.onClick=()=>{click();x.f.location.pathname='/c/'+conversationID;x.f.document.URL='https://chatgpt.com'+x.f.location.pathname+'?temporary-chat=true';};
+      const record=await x.dispatch('Owned literal source under outer clipping',{deferModelVerification:true});
+      const raw=JSON.stringify({type:'tool_calls',calls:[{name:'exec_command',arguments:{cmd:'pwd'}}]});
+      const body=streamRun(raw),root=x.answer('placeholder');root.children[0].connected=false;
+      root.children[0]=body.answer;body.answer.parentElement=root;root.values['data-chatgpt-selection-message-id']=messageID;
+      const main:any=x.f.body.querySelector('main')!,rect={left:0,top:0,right:360,bottom:527,width:360,height:527};
+      main.literalClip='border-box';main.getClientRects=()=>[rect];
+      Object.assign(x.f.window,{innerWidth:360,innerHeight:527,visualViewport:{width:360,height:527,offsetLeft:0,offsetTop:0,scale:1}});
+      const candidate={correlationID:'245e3c88-8dac-4239-947b-1aff997b9f61',sequence:1,
+        inputSHA256:createHash('sha256').update(record.outbound).digest('hex'),
+        inputMessageID:'ae2e44b2-714e-43cd-ba07-d5c3f09c9463',conversationID,messageID,text:raw};
+      const picker:any=x.picker,open=picker.trigger.onClick;let opens=0;
+      picker.trigger.onClick=()=>{open();if(++opens!==2)return;
+        if(mutation==='outer_clip'){main.literalClip='circle(0px)';rect.left=340;rect.right=1024;}
+        if(mutation==='local_clip')body.p.literalClip='inset(100%)';
+        if(mutation==='local_hidden')body.p.values.hidden='';
+        if(mutation==='local_transform')body.p.literalTransform='uppercase';
+        expect(body.answer.innerText.trim()).toBe(raw);
+      };
+      const observed=await x.observe(record,{deferModelVerification:false,terminalCompletionCandidate:candidate});
+      expect(opens).toBe(2);expect(x.send.clicks).toBe(1);expect(body.raw()).toBe(raw);
+      if(mutation==='none'||mutation==='outer_clip'){
+        expect(observed.error).toBeUndefined();expect(observed.text).toBe(raw);expect(observed.terminalCompletionMatched).toBe(true);
+        expect(observed.completionEvidence.codeStructure.selectedExtraction).toBe('literal_dil');
+        expect(observed.modelEvidence.selected).toEqual(choice);
+      }else{
+        expect(observed).toMatchObject({error:'conversation_changed',detail:'response_changed'});
+        expect(observed.text).toBeUndefined();expect(observed.terminalCompletionMatched).toBeUndefined();
+      }
+    }
+  });
   test('a fenced DIL source still obtains full fresh proof and is rechecked after the last picker await', async () => {
-    for (const mutation of ['none', 'raw_line_ending', 'dil_identity', 'extra_attribute']) {
+    for (const mutation of ['none', 'raw_line_ending', 'dil_identity', 'extra_attribute', 'raw_whitespace']) {
       const choice = { key: 'chat/latest/medium', label: 'Medium' }, conversationID = '6ad86c7a-2284-8331-b846-a59490db0c46';
       const x = await chatTurnFixture(choice), click = x.send.onClick!;
       x.send.onClick = () => { click(); x.f.location.pathname = '/c/' + conversationID;
         x.f.document.URL = 'https://chatgpt.com' + x.f.location.pathname + '?temporary-chat=true'; };
       const record = await x.dispatch('Exact owned DIL terminal source', { deferModelVerification: true });
-      const body = literal('{"type":"message","text":"HI"}'), root = x.answer('placeholder');
+      const body = literal('{"type":"message","text":"HI    THERE"}'), root = x.answer('placeholder');
       root.children[0].connected = false; root.children[0] = body.answer; body.answer.parentElement = root;
       root.values['data-chatgpt-selection-message-id'] = messageID;
       const candidate = { correlationID: '245e3c88-8dac-4239-947b-1aff997b9f61', sequence: 1,
@@ -1596,7 +2125,8 @@ describe('ChatGPT literal terminal source equivalence', () => {
       picker.trigger.onClick = () => { open(); if (++opens !== 2) return;
         if (mutation === 'raw_line_ending') body.p.children[0].text = '```json\r\n';
         if (mutation === 'dil_identity') body.dil.values['data-dil-message-id'] = firstMarker;
-        if (mutation === 'extra_attribute') body.p.values.onclick = 'not invoked'; };
+        if (mutation === 'extra_attribute') body.p.values.onclick = 'not invoked';
+        if (mutation === 'raw_whitespace') body.p.children[1].text = body.p.children[1].text.replace('HI    THERE','HI        THERE'); };
       const observed = await x.observe(record, { deferModelVerification: false, terminalCompletionCandidate: candidate });
       expect(opens).toBe(2); expect(x.send.clicks).toBe(1);
       if (mutation === 'none') {
@@ -1607,7 +2137,7 @@ describe('ChatGPT literal terminal source equivalence', () => {
         expect(observed.terminalCompletionMatched, mutation).toBeUndefined();
         expect(observed.terminalCompletionRepresentation, mutation).toBeUndefined();
       }
-      expect(candidate.text).toBe('<escape>```json\n{"type":"message","text":"HI"}\n```</escape>');
+      expect(candidate.text).toBe('<escape>```json\n{"type":"message","text":"HI    THERE"}\n```</escape>');
     }
   });
 });
@@ -2337,6 +2867,143 @@ describe('ChatGPT per-round canonical submission ownership', () => {
         verified: false, finalizationStage: 'not_reached', finalizationError: 'not_returned' });
       expect(x.send.clicks).toBe(1);
     });
+    const initialNoPinHeaderPromotion = async (remount = true, timing = 'body_hash', mutation = 'none') => {
+      const staged = await initialRouteStage(remount), { x, first, body, record, initial, continuation } = staged;
+      const state: any = x.f.world.__computaChatSubmissionState;
+      const pin: any = x.f.world.__computaChatPresetPin;
+      const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/public-initial-header?temporary-chat=true';
+      let crossed = false, oldHeader: any;
+      const promote = () => {
+        if (timing === 'finalization_hash' && !x.f.world.__computaModelFirstProof) {
+          x.f.onDigest(promote, first.outbound); return;
+        }
+        const candidate: any = x.f.world.__computaModelBoundFirstExpansion;
+        expect(candidate).toMatchObject({ initialRoute: true, bound: true, outcome: 'expanded', remount });
+        expect(candidate.pendingPrivate).not.toBe(true); expect(candidate.provisional).not.toBe(true);
+        expect(candidate.predecessor).toBe(initial); expect(candidate.expandedText).toBe(first.outbound);
+        expect(candidate.deadline).toBe(initial.deadline); expect(body.text).toBe(first.outbound);
+        expect(record.phase).toBe('send_claimed'); expect(record.root).toBeNull(); expect(record.body).toBeNull();
+        expect(record.nativeFirstPinned).not.toBe(true); expect(state.pending).toBe(record); expect(state.lastVerified).toBeNull();
+        if (timing === 'finalization_hash') expect(x.f.world.__computaModelFirstProof).toEqual({ marker: first.marker, fingerprint: first.fingerprint });
+        else expect(x.f.world.__computaModelFirstProof).toBeUndefined();
+        crossed = true; x.f.document.URL = toURL; x.f.location.pathname = '/c/public-initial-header';
+        if (timing === 'model_read') x.picker!.close();
+        oldHeader = x.picker!.replaceTrigger(mutation !== 'connected_old');
+        if (mutation === 'disabled') x.picker!.trigger.disabled = true;
+        if (mutation === 'wrong_power') x.picker!.selected('High');
+        if (mutation === 'body') body.text += '!';
+        if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign';
+        if (mutation === 'document') candidate.document = {};
+        if (mutation === 'private_pin') x.f.world.__computaModelFirstProof = { marker: first.marker, fingerprint: first.fingerprint };
+        if (mutation === 'native_adopted') record.nativeFirstPinned = true;
+        if (mutation === 'record_phase') record.phase = 'verified';
+        if (mutation === 'pending_identity') state.pending = { ...record };
+        if (mutation === 'native_hash') (continuation as any).expectedSubmissionProofs = [{ sequence: 1, fingerprint: '0'.repeat(64) }];
+        if (mutation === 'first_edge') continuation.firstUserExpansionRouteContinuation[0].fromURL += 'wrong';
+        if (mutation === 'extra_edge') continuation.firstUserExpansionRouteContinuation.push({ fromURL, toURL });
+        if (mutation === 'expired') x.f.advanceTime(2_000);
+      };
+      if (timing === 'model_read') {
+        let hashed = false; x.f.onDigest(() => { hashed = true; }, first.outbound);
+        const open = x.picker!.trigger.onClick!;
+        x.picker!.trigger.onClick = () => { open(); if (hashed && !crossed) promote(); };
+      } else x.f.onDigest(promote, first.outbound);
+      const discarded = await x.observe(first, continuation);
+      expect(crossed).toBe(true);
+      const candidate: any = x.f.world.__computaModelBoundFirstExpansion;
+      return { ...staged, state, pin, oldHeader, discarded, candidate, next: { ...continuation,
+        firstUserExpansionRouteContinuation: [...continuation.firstUserExpansionRouteContinuation, { fromURL, toURL }] } };
+    };
+
+    test('initial no-pin header remount retains only a witness until fresh full model and body proof', async () => {
+      for (const remount of [false, true]) for (const timing of ['body_hash', 'model_read']) {
+        const { x, first, body, state, record, pin, oldHeader, candidate, discarded, next, initial, initialControl, expand } =
+          await initialNoPinHeaderPromotion(remount, timing);
+        expect(discarded).toMatchObject({ error: 'document_changed', detail: 'model_read_context' }); denied(discarded);
+        expect(candidate.routeDiscard.stage).toBe(timing); expect(candidate.routeModelPin).toBe(pin);
+        const pending = pin.provisionalHeader;
+        expect(candidate.routeModelRemount).toBe(pending); expect(pending.completed).toBe(false);
+        expect(candidate.verified).not.toBe(true); expect(pin.headerTrigger).toBe(oldHeader);
+        expect(oldHeader.isConnected).toBe(false); expect(x.f.world.__computaModelFirstProof).toBeUndefined();
+        expect(state.pending).toBe(record); expect(state.lastVerified).toBeNull(); expect(record.root).toBeNull(); expect(record.body).toBeNull();
+        const before = x.f.digestInputs.length; let fullReads = 0; const open = x.picker!.trigger.onClick!;
+        x.picker!.trigger.onClick = () => { fullReads++; expect(candidate.verified).not.toBe(true); expect(state.pending).toBe(record); open(); };
+        const fresh = await x.observe(first, { ...next, deferModelVerification: true });
+        expect(fresh.error).toBeUndefined(); expect(fresh.modelEvidence?.selected).toEqual(choice); expect(fresh.modelVerificationPending).toBeUndefined();
+        expect(fresh.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint }); expect(fullReads).toBeGreaterThan(0);
+        expect(x.f.digestInputs.slice(before).filter(text => text === first.outbound).length).toBeGreaterThanOrEqual(2);
+        expect(record.phase).toBe('verified'); expect(record.body).toBe(body); expect(state.pending).toBeNull(); expect(state.lastVerified).toBe(record);
+        expect(candidate.verified).toBe(true); expect(candidate.deadline).toBe(initial.deadline); expect(candidate.routeContinuationEdges).toHaveLength(2);
+        expect(pin.headerTrigger).toBe(x.picker!.trigger); expect(pending.completed).toBe(true);
+        expect(x.f.world.__computaModelFirstProof).toEqual({ marker: first.marker, fingerprint: first.fingerprint });
+        expect(initialControl.clicks).toBe(remount ? 1 : 2); expect(expand.clicks).toBe(remount ? 1 : 2); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    test('initial no-pin header invalid ownership or route cannot create model or body authority', async () => {
+      for (const mutation of ['connected_old', 'disabled', 'wrong_power', 'body', 'owner', 'document', 'private_pin',
+        'native_adopted', 'record_phase', 'pending_identity', 'first_edge', 'extra_edge', 'expired']) {
+        const { x, first, record, candidate, pin, oldHeader, discarded, next, initialControl, expand } =
+          await initialNoPinHeaderPromotion(true, 'body_hash', mutation);
+        denied(discarded); expect(candidate.routeDiscard, mutation).toBeUndefined(); expect(candidate.routeModelRemount, mutation).toBeUndefined();
+        expect(pin.provisionalHeader, mutation).toBeUndefined(); expect(pin.headerTrigger).toBe(oldHeader); expect(candidate.verified).not.toBe(true);
+        expect(record.root).toBeNull(); expect(record.body).toBeNull();
+        denied(await x.observe(first, { ...next, deferModelVerification: true }));
+        expect(record.root).toBeNull(); expect(record.body).toBeNull(); expect(x.send.clicks).toBe(1);
+        expect(initialControl.clicks).toBe(1); expect(expand.clicks).toBe(1);
+      }
+    });
+
+    test('initial no-pin header witness rejects later mutation and cannot renew its original deadline', async () => {
+      for (const mutation of ['replacement', 'old_connected', 'disabled', 'wrong_family', 'switch_restore', 'body', 'owner', 'document',
+        'private_pin', 'record_hash', 'pending_identity', 'missing_edge', 'reversed_edge', 'extra_edge', 'expired', 'expires_during_read']) {
+        const { x, first, record, body, candidate, discarded, next, pin, oldHeader, initialControl, expand } = await initialNoPinHeaderPromotion();
+        expect(discarded).toMatchObject({ error: 'document_changed', detail: 'model_read_context' });
+        const deadline = candidate.deadline, pending = pin.provisionalHeader, goodEdges = next.firstUserExpansionRouteContinuation.map(edge => ({ ...edge }));
+        if (mutation === 'replacement') x.picker!.replaceTrigger();
+        if (mutation === 'old_connected') oldHeader.connected = true;
+        if (mutation === 'disabled') x.picker!.trigger.disabled = true;
+        if (mutation === 'wrong_family') x.picker!.selected('GPT-5.5');
+        if (mutation === 'switch_restore') { let once = true; pending.observer.takeRecords = () => { if (!once) return []; once = false;
+          return [{ type: 'characterData', target: { nodeType: 3, parentElement: x.picker!.trigger, textContent: 'Medium' }, oldValue: 'High' }]; }; }
+        if (mutation === 'body') body.text += '!';
+        if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign';
+        if (mutation === 'document') candidate.document = {};
+        if (mutation === 'private_pin') x.f.world.__computaModelFirstProof = { marker: first.marker, fingerprint: first.fingerprint };
+        if (mutation === 'record_hash') record.fingerprint = '0'.repeat(64);
+        if (mutation === 'pending_identity') pin.provisionalHeader = { ...pending };
+        if (mutation === 'missing_edge') next.firstUserExpansionRouteContinuation.pop();
+        if (mutation === 'reversed_edge') next.firstUserExpansionRouteContinuation.reverse();
+        if (mutation === 'extra_edge') next.firstUserExpansionRouteContinuation.push({ fromURL: x.f.document.URL, toURL: x.f.document.URL + '/extra' });
+        if (mutation === 'expired') x.f.advanceTime(2_000);
+        if (mutation === 'expires_during_read') { const open = x.picker!.trigger.onClick!; x.picker!.trigger.onClick = () => { open(); x.f.advanceTime(2_000); }; }
+        const fresh = await x.observe(first, { ...next, deferModelVerification: true }); denied(fresh); expect(fresh.modelEvidence, mutation).toBeUndefined();
+        expect(candidate.verified, mutation).not.toBe(true); expect(candidate.deadline).toBe(deadline); expect(record.root).toBeNull(); expect(record.body).toBeNull();
+        if (mutation === 'expired' || mutation === 'expires_during_read') x.f.advanceTime(-2_000);
+        if (mutation.endsWith('_edge')) next.firstUserExpansionRouteContinuation = goodEdges;
+        denied(await x.observe(first, { ...next, deferModelVerification: true })); expect(candidate.verified, mutation).not.toBe(true);
+        expect(initialControl.clicks).toBe(1); expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    test('initial no-pin header finalization is a separate completed-display control requiring current model proof', async () => {
+      for (const remount of [false, true]) {
+        const { x, first, state, record, body, pin, oldHeader, candidate, discarded, next, initialControl, expand } =
+          await initialNoPinHeaderPromotion(remount, 'finalization_hash');
+        expect(discarded).toMatchObject({ error: 'document_changed', detail: 'model_read_context' });
+        expect(candidate.verified).toBe(true); expect(record.phase).toBe('send_claimed'); expect(state.pending).toBe(record);
+        expect(candidate.routeModelRemount).toBeUndefined(); expect(record.root).toBeNull(); expect(record.body).toBeNull();
+        expect(pin.headerTrigger).toBe(oldHeader); expect(x.f.world.__computaModelFirstProof).toEqual({ marker: first.marker, fingerprint: first.fingerprint });
+        const before = x.f.digestInputs.length;
+        const fresh = await x.observe(first, { ...next, deferModelVerification: false });
+        expect(fresh.error).toBeUndefined(); expect(fresh.modelEvidence.selected).toEqual(choice);
+        expect(fresh.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+        expect(x.f.digestInputs.slice(before).filter(text => text === first.outbound).length).toBeGreaterThanOrEqual(2);
+        expect(record.phase).toBe('verified'); expect(record.body).toBe(body); expect(state.pending).toBeNull(); expect(pin.headerTrigger).toBe(x.picker!.trigger);
+        expect(initialControl.clicks).toBe(remount ? 1 : 2); expect(expand.clicks).toBe(remount ? 1 : 2); expect(x.send.clicks).toBe(1);
+      }
+    });
+
     const pendingPrivateStage = async () => {
       const x = await chatTurnFixture(choice), first = await x.dispatch('PRIVATE PENDING FIRST\n' + 'x'.repeat(40_000));
       const oldRoot = x.f.document.querySelectorAll('article[data-turn="user"]')[0], oldBody = oldRoot.children[0];
@@ -2440,6 +3107,87 @@ describe('ChatGPT per-round canonical submission ownership', () => {
       return { ...staged, candidate, discarded, next: { ...continuation,
         firstUserExpansionRouteContinuation: [...continuation.firstUserExpansionRouteContinuation, { fromURL, toURL }] } };
     };
+
+    const pendingPrivateHeaderPromotion = async (mutation = 'none') => {
+      let oldHeader: any;
+      const staged=await pendingPrivateHashPromotion(staged=>{
+        const {x,first,body,record,state,oldRoot,oldBody,continuation}=staged;
+        oldHeader=x.picker!.replaceTrigger(mutation!=='connected_old');
+        if(mutation==='disabled')x.picker!.trigger.disabled=true;
+        if(mutation==='wrong_power')x.picker!.selected('High');
+        if(mutation==='body')body.text+='!';
+        if(mutation==='owner')x.f.world.__computaModelOwner='foreign';
+        if(mutation==='document')(x.f.world.__computaModelBoundFirstExpansion as any).document={};
+        if(mutation==='private_pin')(x.f.world.__computaModelFirstProof as any).fingerprint='0'.repeat(64);
+        if(mutation==='native_adopted')record.nativeFirstPinned=true;
+        if(mutation==='record_phase')record.phase='verified';
+        if(mutation==='pending_identity')state.pending={...record};
+        if(mutation==='old_root'){oldRoot.connected=true;oldRoot.values['data-turn']='retired';}
+        if(mutation==='old_body')x.f.body.append(oldBody);
+        if(mutation==='first_edge')continuation.firstUserExpansionRouteContinuation[0].fromURL+='wrong';
+        if(mutation==='extra_edge')continuation.firstUserExpansionRouteContinuation.push({fromURL:'https://chatgpt.com/c/foreign',toURL:x.f.document.URL});
+        if(mutation==='expired')x.f.advanceTime(2_000);
+      });
+      return {...staged,oldHeader,pin:staged.x.f.world.__computaChatPresetPin as any};
+    };
+    test('pending private body-hash header remount keeps only a route witness until fresh full proof',async()=>{
+      const {x,first,state,record,body,candidate,discarded,next,oldHeader,pin,initial,initialControl,expand}=await pendingPrivateHeaderPromotion();
+      expect(discarded,JSON.stringify(discarded.boundCertificateDiagnostic)).toMatchObject({error:'document_changed',detail:'model_read_context'});
+      denied(discarded);expect(candidate).toMatchObject({pendingPrivate:true,provisional:true});expect(candidate.verified).not.toBe(true);
+      expect(candidate.routeDiscard.stage).toBe('body_hash');expect(state.pending).toBe(record);expect(state.lastVerified).toBeNull();
+      expect(record.phase).toBe('send_claimed');expect(record.root).toBeNull();expect(record.body).toBeNull();
+      const pending=pin.provisionalHeader;expect(pending.completed).toBe(false);expect(pin.headerTrigger).toBe(oldHeader);
+      expect(candidate.routeModelRemount).toBe(pending);expect(candidate.routeModelPin).toBe(pin);
+      const before=x.f.digestInputs.length;let fullReads=0;const open=x.picker!.trigger.onClick!;
+      x.picker!.trigger.onClick=()=>{fullReads++;expect(candidate.verified).not.toBe(true);expect(state.pending).toBe(record);open();};
+      const fresh=await x.observe(first,{...next,deferModelVerification:true});
+      expect(fresh.error).toBeUndefined();expect(fresh.modelEvidence?.selected).toEqual(choice);expect(fresh.modelVerificationPending).toBeUndefined();
+      expect(fresh.submissionProof).toEqual({sequence:1,fingerprint:first.fingerprint});expect(fullReads).toBeGreaterThan(0);
+      expect(x.f.digestInputs.slice(before).filter(text=>text===first.outbound).length).toBeGreaterThanOrEqual(2);
+      expect(state.lastVerified).toBe(record);expect(state.pending).toBeNull();expect(record.body).toBe(body);expect(record.phase).toBe('verified');
+      expect(candidate.verified).toBe(true);expect(candidate.deadline).toBe(initial.deadline);expect(candidate.routeContinuationEdges).toHaveLength(2);
+      expect(pin.headerTrigger).toBe(x.picker!.trigger);expect(pending.completed).toBe(true);
+      expect(initialControl.clicks).toBe(1);expect(expand.clicks).toBe(1);expect(x.send.clicks).toBe(1);
+    });
+    test('pending private route refuses header and ownership failures before installing a model witness',async()=>{
+      for(const mutation of ['connected_old','disabled','wrong_power','body','owner','document','private_pin','native_adopted','record_phase','pending_identity','old_root','old_body','first_edge','extra_edge','expired']){
+        const {x,first,candidate,discarded,pin,oldHeader,record,next,initialControl,expand}=await pendingPrivateHeaderPromotion(mutation);
+        denied(discarded);expect(candidate.routeDiscard,mutation).toBeUndefined();expect(candidate.routeModelRemount,mutation).toBeUndefined();
+        expect(pin.provisionalHeader,mutation).toBeUndefined();expect(pin.headerTrigger).toBe(oldHeader);expect(candidate.verified).not.toBe(true);
+        denied(await x.observe(first,{...next,deferModelVerification:true}));expect(record.root).toBeNull();expect(record.body).toBeNull();
+        expect(initialControl.clicks).toBe(1);expect(expand.clicks).toBe(1);expect(x.send.clicks).toBe(1);
+      }
+    });
+    test('pending private route header witness cannot survive changed body model lineage or original deadline',async()=>{
+      for(const mutation of ['replacement','old_connected','disabled','wrong_family','switch_restore','body','owner','document','private_pin','record_hash','pending_identity','missing_edge','reversed_edge','extra_edge','expired','expires_during_read']){
+        const {x,first,record,body,candidate,discarded,next,pin,oldHeader,initialControl,expand}=await pendingPrivateHeaderPromotion();
+        expect(discarded).toMatchObject({error:'document_changed',detail:'model_read_context'});
+        const deadline=candidate.deadline,pending=pin.provisionalHeader,goodEdges=next.firstUserExpansionRouteContinuation.map(edge=>({...edge}));
+        if(mutation==='replacement')x.picker!.replaceTrigger();
+        if(mutation==='old_connected')oldHeader.connected=true;
+        if(mutation==='disabled')x.picker!.trigger.disabled=true;
+        if(mutation==='wrong_family')x.picker!.selected('GPT-5.5');
+        if(mutation==='switch_restore'){let once=true;pending.observer.takeRecords=()=>{if(!once)return [];once=false;return [{type:'characterData',target:{nodeType:3,parentElement:x.picker!.trigger,textContent:'Medium'},oldValue:'High'}];};}
+        if(mutation==='body')body.text+='!';
+        if(mutation==='owner')x.f.world.__computaModelOwner='foreign';
+        if(mutation==='document')candidate.document={};
+        if(mutation==='private_pin')(x.f.world.__computaModelFirstProof as any).fingerprint='0'.repeat(64);
+        if(mutation==='record_hash')record.fingerprint='0'.repeat(64);
+        if(mutation==='pending_identity')pin.provisionalHeader={...pending};
+        if(mutation==='missing_edge')next.firstUserExpansionRouteContinuation.pop();
+        if(mutation==='reversed_edge')next.firstUserExpansionRouteContinuation.reverse();
+        if(mutation==='extra_edge')next.firstUserExpansionRouteContinuation.push({fromURL:x.f.document.URL,toURL:x.f.document.URL+'/extra'});
+        if(mutation==='expired')x.f.advanceTime(2_000);
+        if(mutation==='expires_during_read'){const open=x.picker!.trigger.onClick!;x.picker!.trigger.onClick=()=>{open();x.f.advanceTime(2_000);};}
+        const fresh=await x.observe(first,{...next,deferModelVerification:true});expect(fresh.error,mutation).toBeDefined();denied(fresh);expect(fresh.modelEvidence,mutation).toBeUndefined();
+        expect(candidate.verified,mutation).not.toBe(true);expect(candidate.deadline).toBe(deadline);expect(record.root).toBeNull();expect(record.body).toBeNull();
+        if(mutation==='expired'||mutation==='expires_during_read')x.f.advanceTime(-2_000);
+        if(mutation.endsWith('_edge'))next.firstUserExpansionRouteContinuation=goodEdges;
+        denied(await x.observe(first,{...next,deferModelVerification:true}));
+        expect(candidate.verified,mutation).not.toBe(true);
+        expect(initialControl.clicks).toBe(1);expect(expand.clicks).toBe(1);expect(x.send.clicks).toBe(1);
+      }
+    });
 
     test('pending-private public-promotion witness rejects altered ownership content model pins and first edge', async () => {
       for (const mutation of ['body', 'owner', 'private_pin', 'native_pin', 'record_hash', 'model', 'work',
@@ -2588,6 +3336,204 @@ describe('ChatGPT per-round canonical submission ownership', () => {
       x.f.location.pathname = '/c/local-chatgpt%3Aprovisional';
       return { x, first, record, oldRoot, oldBody, ...next, expand, initialControl };
     };
+
+    const provisionalBodyRouteStage = async (mutate?: (value: any) => void, history?: (edges: any[]) => any, timing = 'body_hash') => {
+      const value = await provisionalStage(true), { x, first, record } = value;
+      const state: any = x.f.world.__computaChatSubmissionState;
+      const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/public-provisional-body?temporary-chat=true';
+      const firstEdge = { fromURL: (x.f.world.__computaModelFirstExpansion as any).routeURL, toURL: fromURL };
+      const secondEdge = { fromURL, toURL };
+      let promoted = false;
+      const promote = () => {
+        const candidate: any = x.f.world.__computaModelBoundFirstExpansion;
+        if (timing === 'finalization_hash' && candidate?.finalizationDiagnostic?.finalizationStage !== 'entered') {
+          x.f.onDigest(promote, first.outbound); return;
+        }
+        expect(candidate).toMatchObject({ provisional: true, pendingPrivate: false, remount: true, outcome: 'expanded' });
+        if (timing === 'body_hash') expect(candidate.finalizationDiagnostic).toBeUndefined();
+        else expect(candidate.finalizationDiagnostic).toMatchObject({ finalizationStage: 'entered' });
+        expect(state.pending).toBeNull(); expect(state.lastVerified).toBe(record); expect(record.phase).toBe('verified');
+        expect(record.nativeFirstPinned).not.toBe(true);
+        promoted = true; x.f.document.URL = toURL; x.f.location.pathname = '/c/public-provisional-body';
+        mutate?.({ ...value, state, candidate, firstEdge, secondEdge });
+      };
+      x.f.onDigest(promote, first.outbound);
+      const crossed = await x.observe(first, { ...provisionalAllowance,
+        firstUserExpansionRouteContinuation: history ? history([firstEdge]) : [firstEdge] });
+      expect(promoted).toBe(true);
+      return { ...value, state, fromURL, toURL, firstEdge, secondEdge, crossed,
+        candidate: x.f.world.__computaModelBoundFirstExpansion as any };
+    };
+
+    const provisionalHeaderRouteStage = async (timing: string, mutation = 'none', replace = true) => {
+      let oldHeader: any;
+      const staged = await provisionalBodyRouteStage(({ x }: any) => {
+        if (!replace) return;
+        oldHeader = x.picker.replaceTrigger(mutation !== 'connected_old');
+        if (mutation === 'disabled') x.picker.trigger.disabled = true;
+        if (mutation === 'wrong_power') x.picker.selected('High');
+      }, undefined, timing);
+      return { ...staged, oldHeader, pin: staged.x.f.world.__computaChatPresetPin as any };
+    };
+
+    test('provisional route header remount requires fresh complete choice proof at body and final hashes', async () => {
+      for (const timing of ['body_hash', 'finalization_hash']) for (const replace of [false, true]) {
+        const { x, first, record, oldRoot, oldBody, root, body, expand, initialControl, firstEdge, secondEdge,
+          crossed, candidate, oldHeader, pin } = await provisionalHeaderRouteStage(timing, 'none', replace);
+        expect(crossed).toMatchObject({ error: 'document_changed', detail: 'model_read_context' });
+        expect(crossed).not.toHaveProperty('submissionProof'); expect(crossed).not.toHaveProperty('firstUserVerified', true);
+        expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody); expect(record.nativeFirstPinned).not.toBe(true);
+        const deadline = candidate.deadline, before = x.f.digestInputs.length, pending = pin.provisionalHeader;
+        expect(candidate.verified === true).toBe(!replace && timing === 'finalization_hash');
+        let fullReads = 0;
+        const click = x.picker!.trigger.onClick!;
+        x.picker!.trigger.onClick = () => {
+          fullReads++;
+          if (replace && fullReads === 1) expect(pin.headerTrigger).toBe(oldHeader);
+          if (replace) expect(candidate.verified).toBe(false);
+          expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody); click();
+        };
+        if (replace) {
+          expect(pin.headerTrigger).toBe(oldHeader); expect(oldHeader.isConnected).toBe(false);
+          expect(pending.completed).toBe(false); expect(candidate.routeModelRemount).toBe(pending);
+          expect(candidate.routeModelPin).toBe(pin);
+        }
+        const fresh = await x.observe(first, { ...provisionalAllowance,
+          firstUserExpansionRouteContinuation: [firstEdge, secondEdge], deferModelVerification: replace });
+        expect(fresh.error).toBeUndefined(); expect(fresh.modelEvidence?.selected).toEqual(choice);
+        expect(fresh).not.toHaveProperty('modelVerificationPending'); expect(fullReads).toBeGreaterThan(0);
+        expect(fresh.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+        expect(x.f.digestInputs.slice(before).filter(text => text === first.outbound).length).toBeGreaterThanOrEqual(2);
+        expect(candidate.deadline).toBe(deadline); expect(candidate.verified).toBe(true);
+        if (replace) { expect(pin.headerTrigger).toBe(x.picker!.trigger); expect(pending.completed).toBe(true); }
+        expect(record.root).toBe(root); expect(record.body).toBe(body); expect(record.replacement).toBeNull();
+        expect(initialControl.clicks).toBe(1); expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+    });
+
+    test('provisional route header remount refuses wrong disabled and connected predecessors before fresh proof', async () => {
+      for (const timing of ['body_hash', 'finalization_hash']) for (const mutation of ['connected_old', 'disabled', 'wrong_power']) {
+        const { x, first, crossed, candidate, pin, oldHeader, expand, firstEdge, secondEdge }
+          = await provisionalHeaderRouteStage(timing, mutation);
+        denied(crossed); expect(pin.headerTrigger).toBe(oldHeader); expect(pin.provisionalHeader).toBeUndefined();
+        expect(candidate.routeModelRemount).toBeUndefined();
+        const result = await x.observe(first, { ...provisionalAllowance, firstUserExpansionRouteContinuation: [firstEdge, secondEdge],
+          deferModelVerification: true });
+        denied(result); expect(result).not.toHaveProperty('modelEvidence');
+        expect(x.send.clicks).toBe(1); expect(expand.clicks).toBe(1);
+      }
+    });
+
+    test('provisional route header witness cannot survive drift replacement or its original deadline', async () => {
+      for (const timing of ['body_hash', 'finalization_hash']) for (const mutation of ['second_replacement', 'old_reconnected',
+        'wrong_family', 'switch_restore', 'disabled', 'body', 'owner', 'pending_identity', 'expired', 'expires_during_read']) {
+        const { x, first, crossed, candidate, pin, oldHeader, record, oldRoot, oldBody, body, expand, firstEdge, secondEdge }
+          = await provisionalHeaderRouteStage(timing);
+        expect(crossed).toMatchObject({ error: 'document_changed', detail: 'model_read_context' });
+        const pending = pin.provisionalHeader, trigger = x.picker!.trigger, deadline = candidate.deadline;
+        expect(pending.completed).toBe(false); expect(pin.headerTrigger).toBe(oldHeader);
+        if (mutation === 'second_replacement') x.picker!.replaceTrigger();
+        if (mutation === 'old_reconnected') oldHeader.connected = true;
+        if (mutation === 'wrong_family') x.picker!.selected('GPT-5.5');
+        if (mutation === 'switch_restore') {
+          let once = true;
+          pending.observer.takeRecords = () => { if (!once) return []; once = false;
+            return [{ type: 'characterData', target: { nodeType: 3, parentElement: trigger, textContent: 'Medium' }, oldValue: 'High' }]; };
+        }
+        if (mutation === 'disabled') trigger.disabled = true;
+        if (mutation === 'body') body.text += '!';
+        if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign';
+        if (mutation === 'pending_identity') pin.provisionalHeader = { ...pending };
+        if (mutation === 'expired') x.f.advanceTime(3_000);
+        if (mutation === 'expires_during_read') {
+          const click = trigger.onClick!; let once = true;
+          trigger.onClick = () => { if (once) { once = false; x.f.advanceTime(3_000); } click(); };
+        }
+        const result = await x.observe(first, { ...provisionalAllowance, firstUserExpansionRouteContinuation: [firstEdge, secondEdge],
+          deferModelVerification: true });
+        denied(result); expect(result).not.toHaveProperty('modelEvidence'); expect(result).not.toHaveProperty('submissionProof');
+        expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody); expect(record.nativeFirstPinned).not.toBe(true);
+        expect(candidate.deadline).toBe(deadline); expect(pending.completed).toBe(false);
+        if (mutation === 'expired' || mutation === 'expires_during_read') {
+          x.f.advanceTime(-3_000);
+          denied(await x.observe(first, { ...provisionalAllowance, firstUserExpansionRouteContinuation: [firstEdge, secondEdge],
+            deferModelVerification: true }));
+          expect(pending.completed).toBe(false);
+        }
+        expect(x.send.clicks).toBe(1); expect(expand.clicks).toBe(1);
+      }
+    });
+
+    test('provisional body hash carries only the second certified route before native adoption', async () => {
+      const { x, first, record, oldRoot, oldBody, root, body, expand, initialControl, firstEdge, secondEdge, crossed, candidate }
+        = await provisionalBodyRouteStage();
+      expect(crossed).toMatchObject({ error: 'document_changed', detail: 'model_read_context' });
+      expect(crossed).not.toHaveProperty('submissionProof'); expect(crossed).not.toHaveProperty('firstUserVerified', true);
+      expect(candidate.verified).not.toBe(true); expect(candidate.routeDiscard).toMatchObject({ ...secondEdge, stage: 'body_hash' });
+      expect(candidate.routeContinuationEdges).toEqual([firstEdge]);
+      expect(record.root).toBe(oldRoot); expect(record.body).toBe(oldBody); expect(record.nativeFirstPinned).not.toBe(true);
+      const deadline = candidate.deadline, before = x.f.digestInputs.length;
+      const fresh = await x.observe(first, { ...provisionalAllowance, firstUserExpansionRouteContinuation: [firstEdge, secondEdge] });
+      expect(fresh.error).toBeUndefined(); expect(fresh.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+      expect(x.f.digestInputs.slice(before).filter(text => text === first.outbound).length).toBeGreaterThanOrEqual(2);
+      expect(candidate.deadline).toBe(deadline); expect(candidate.verified).toBe(true);
+      expect(candidate.routeContinuationEdges).toEqual([firstEdge, secondEdge]);
+      expect(record.root).toBe(root); expect(record.body).toBe(body); expect(record.replacement).toBeNull();
+      expect(initialControl.clicks).toBe(1); expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      expect((await x.observe(first)).error).toBeUndefined(); expect(record.nativeFirstPinned).toBe(true);
+    });
+
+    test('provisional body hash refuses changed bytes ownership model and private record transitions', async () => {
+      for (const mutation of ['body', 'owner', 'document', 'model', 'old_root', 'old_body', 'record', 'private_pin',
+        'pending', 'phase', 'native_pinned', 'receipt', 'deadline', 'lease']) {
+        const { x, first, expand, candidate, crossed, firstEdge, secondEdge } = await provisionalBodyRouteStage(value => {
+          const { x, body, oldRoot, oldBody, state, record, candidate } = value;
+          if (mutation === 'body') body.text += '!';
+          if (mutation === 'owner') x.f.world.__computaModelOwner = 'other';
+          if (mutation === 'document') candidate.document = {};
+          if (mutation === 'model') state.modelChoice = { key: 'chat/latest/pro', label: 'Pro' };
+          if (mutation === 'old_root') x.f.messages.append(oldRoot);
+          if (mutation === 'old_body') body.append(oldBody);
+          if (mutation === 'record') state.lastVerified = { ...record };
+          if (mutation === 'private_pin') (x.f.world.__computaModelFirstProof as any).fingerprint = '0'.repeat(64);
+          if (mutation === 'pending') state.pending = record;
+          if (mutation === 'phase') record.phase = 'send_claimed';
+          if (mutation === 'native_pinned') record.nativeFirstPinned = true;
+          if (mutation === 'receipt') record.replacement = {};
+          if (mutation === 'deadline') x.f.advanceTime(3_000);
+          if (mutation === 'lease') x.f.world.__computaChatActiveInvocation = {};
+        });
+        denied(crossed); expect(candidate.routeDiscard, mutation).toBeUndefined(); expect(candidate.verified, mutation).not.toBe(true);
+        denied(await x.observe(first, { ...provisionalAllowance, firstUserExpansionRouteContinuation: [firstEdge, secondEdge] }));
+        expect(expand.clicks, mutation).toBe(1); expect(x.send.clicks, mutation).toBe(1);
+      }
+    });
+
+    test('provisional body hash refuses unsolicited stale reversed and extra route histories', async () => {
+      for (const history of [() => undefined, () => [], (e: any[]) => [e[0], e[0]],
+        (e: any[]) => [{ fromURL: e[0].toURL, toURL: e[0].fromURL }],
+        (e: any[]) => [{ ...e[0], toURL: 'https://chatgpt.com/c/stale' }],
+        (e: any[]) => [{ ...e[0], extra: true }]]) {
+        const { x, expand, candidate, crossed } = await provisionalBodyRouteStage(undefined, history);
+        denied(crossed); expect(candidate.routeDiscard).toBeUndefined(); expect(candidate.verified).not.toBe(true);
+        expect(expand.clicks).toBe(1); expect(x.send.clicks).toBe(1);
+      }
+      for (const change of ['missing_prefix', 'stale_prefix', 'reversed', 'extra', 'wrong_end', 'body', 'private_pin', 'deadline']) {
+        const { x, first, body, expand, candidate, firstEdge, secondEdge, crossed } = await provisionalBodyRouteStage();
+        expect(crossed).toMatchObject({ error: 'document_changed', detail: 'model_read_context' });
+        let edges: any[] = [firstEdge, secondEdge];
+        if (change === 'missing_prefix') edges = [secondEdge];
+        if (change === 'stale_prefix') edges[0] = { ...firstEdge, fromURL: 'https://chatgpt.com/c/stale' };
+        if (change === 'reversed') edges.reverse();
+        if (change === 'extra') edges.push({ fromURL: secondEdge.toURL, toURL: 'https://chatgpt.com/c/extra' });
+        if (change === 'wrong_end') edges[1] = { ...secondEdge, toURL: 'https://chatgpt.com/c/wrong' };
+        if (change === 'body') body.text += '!';
+        if (change === 'private_pin') (x.f.world.__computaModelFirstProof as any).fingerprint = '0'.repeat(64);
+        if (change === 'deadline') x.f.advanceTime(3_000);
+        denied(await x.observe(first, { ...provisionalAllowance, firstUserExpansionRouteContinuation: edges }));
+        expect(candidate.verified, change).not.toBe(true); expect(expand.clicks, change).toBe(1); expect(x.send.clicks, change).toBe(1);
+      }
+    });
 
     test('provisional remount rehashes complete bytes under pending native outbound proof before first adoption', async () => {
       for (const initialExpansion of [false, true]) {
@@ -4481,6 +5427,182 @@ describe('ChatGPT first-message expansion after a failed center hit', () => {
       else { expect(result.error).toBeUndefined(); expect(result.firstUserVerified).toBe(true); }
       expect(scrolls).toBe(1); expect(x.expand.clicks).toBe(1); expect(x.send.clicks).toBe(0);
       expect([...x.listeners.values()].every(callbacks => callbacks.size === 0)).toBe(true);
+    }
+  });
+
+  test('a certified pre-click remount spends only the original exposure claim', async () => {
+    for (const mutation of ['none', 'utf8', 'settles', 'prefix', 'old_prefix', 'old_connected', 'owner', 'work', 'model',
+      'fingerprint', 'no_certificate', 'wrong_edge', 'expired', 'stale_lease', 'replacement_root', 'replacement_body',
+      'replacement_control', 'duplicate_control', 'disabled', 'result', 'late_pending', 'second_after_click']) {
+      const x = await chatTurnFixture(choice), first = await x.dispatch(
+        (mutation === 'utf8' ? 'Owned café — 東京 😀 remount.\n' : 'Owned pre-click remount.\n').repeat(1_200));
+      const oldRoot = x.f.document.querySelectorAll('article[data-turn="user"]')[0], oldBody = oldRoot.children[0];
+      oldBody.text = first.outbound.slice(0, 10_240);
+      const oldControl = new Element('BUTTON', { 'aria-label': 'Show more' }); oldRoot.append(oldControl);
+      const overlay = new Element('DIV'); x.f.body.append(overlay); x.f.setHit(overlay);
+      let scrolls = 0;
+      oldControl.getBoundingClientRect = () => ({ left: 20, top: 80, width: 100, height: 30 });
+      (oldControl as any).scrollIntoView = () => { scrolls++; };
+      x.f.window.innerWidth = 1_000; x.f.window.innerHeight = 800; x.f.window.requestAnimationFrame = () => 1;
+      const listeners = new Map<string, Set<Function>>();
+      for (const target of [x.f.document, x.f.window] as any[]) {
+        target.addEventListener = (name: string, callback: Function) => {
+          if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name)!.add(callback);
+        };
+        target.removeEventListener = (name: string, callback: Function) => listeners.get(name)?.delete(callback);
+      }
+      const allowance = { allowFirstUserExpansion: true, firstUserExpansionModelChoice: choice };
+      const fromURL = x.f.document.URL, toURL = 'https://chatgpt.com/c/local-chatgpt%3Apreclick-remount?temporary-chat=true';
+      const pending = x.observe(first, allowance);
+      for (let i = 0; i < 100 && !(x.f.world.__computaModelFirstExpansion as any)?.exposureDiagnostic?.waited; i++) await Bun.sleep(1);
+      const candidate = x.f.world.__computaModelFirstExpansion as any;
+      expect(candidate.exposureDiagnostic.waited).toBe(true);
+      const deadline = candidate.exposureDeadline;
+      const root = new Element('ARTICLE', { 'data-turn': 'user' });
+      const body = new Element('DIV', { class: 'whitespace-pre-wrap' }, oldBody.text);
+      const control = new Element('BUTTON', { 'aria-label': 'Show more' }); root.append(body, control);
+      (control as any).scrollIntoView = () => { scrolls++; };
+      control.getBoundingClientRect = oldControl.getBoundingClientRect;
+      control.onClick = () => {
+        body.text = first.outbound + (mutation === 'result' ? '!' : '');
+        if (mutation === 'second_after_click') {
+          const secondRoot = new Element('ARTICLE', { 'data-turn': 'user' });
+          secondRoot.append(new Element('DIV', { class: 'whitespace-pre-wrap' }, first.outbound));
+          secondRoot.parentElement = x.f.messages;
+          x.f.messages.children = x.f.messages.children.map(node => node === root ? secondRoot : node); root.connected = false;
+        }
+      };
+      root.parentElement = x.f.messages;
+      x.f.messages.children = x.f.messages.children.map(node => node === oldRoot ? root : node); oldRoot.connected = false;
+      x.f.document.URL = toURL; x.f.location.pathname = '/c/local-chatgpt%3Apreclick-remount'; x.f.setHit(control);
+      if (mutation === 'old_prefix') oldBody.text += '!';
+      if (mutation === 'old_connected') oldRoot.connected = true;
+      for (const callback of listeners.get('scroll') || []) callback();
+      const crossed = await pending;
+      expect(crossed.error).toBeDefined(); expect(crossed).not.toHaveProperty('submissionProof');
+      expect(oldControl.clicks + control.clicks).toBe(0); expect(x.send.clicks).toBe(1);
+      const record = (x.f.world.__computaChatSubmissionState as any).pending;
+      let replacement: Element | undefined;
+      if (mutation === 'prefix') body.text += '!';
+      if (mutation === 'owner') x.f.world.__computaModelOwner = 'foreign-owner';
+      if (mutation === 'work') { x.f.chatMode.values['aria-pressed'] = 'false'; x.f.workMode.values['aria-pressed'] = 'true'; }
+      if (mutation === 'model') (x.f.world.__computaChatPresetPin as any).invalidated = true;
+      if (mutation === 'fingerprint') record.fingerprint = '0'.repeat(64);
+      if (mutation === 'expired') x.f.advanceTime(1_801);
+      if (mutation === 'replacement_root') {
+        replacement = new Element('ARTICLE', { 'data-turn': 'user' });
+        replacement.append(new Element('DIV', { class: 'whitespace-pre-wrap' }, body.text), new Element('BUTTON', { 'aria-label': 'Show more' }));
+        replacement.parentElement = x.f.messages;
+        x.f.messages.children = x.f.messages.children.map(node => node === root ? replacement! : node); root.connected = false;
+      }
+      if (mutation === 'replacement_body') {
+        replacement = new Element('DIV', { class: 'whitespace-pre-wrap' }, body.text); replacement.parentElement = root;
+        root.children = root.children.map(node => node === body ? replacement! : node); body.connected = false;
+      }
+      if (mutation === 'replacement_control') {
+        replacement = new Element('BUTTON', { 'aria-label': 'Show more' }); replacement.parentElement = root;
+        root.children = root.children.map(node => node === control ? replacement! : node); control.connected = false;
+      }
+      if (mutation === 'duplicate_control') root.append(new Element('BUTTON', { 'aria-label': 'Show more' }));
+      if (mutation === 'disabled') control.disabled = true;
+      if (mutation === 'settles') x.f.setHit(overlay);
+      if (mutation === 'stale_lease' || mutation === 'late_pending') {
+        const hit = x.f.document.elementFromPoint;
+        x.f.document.elementFromPoint = (left, top) => {
+          const target = hit(left, top);
+          if (left === 70 && top === 95) {
+            if (mutation === 'stale_lease') x.f.world.__computaChatActiveInvocation = { document: x.f.document };
+            else record.phase = 'verified';
+          }
+          return target;
+        };
+      }
+      const certificate = mutation === 'no_certificate' ? {} : {
+        firstUserExpansionRouteContinuation: [{ fromURL: mutation === 'wrong_edge' ? toURL : fromURL, toURL }] };
+      const resumedRead = x.observe(first, { ...allowance, ...certificate });
+      if (mutation === 'settles') {
+        for (let i = 0; i < 100 && !listeners.get('scroll')?.size; i++) await Bun.sleep(1);
+        expect(listeners.get('scroll')?.size).toBe(1); expect(control.clicks).toBe(0);
+        x.f.setHit(control); for (const callback of listeners.get('scroll') || []) callback();
+      }
+      const resumed = await resumedRead;
+      const succeeds = ['none', 'utf8', 'settles'].includes(mutation);
+      if (succeeds) {
+        expect(resumed.error, mutation).toBeUndefined(); expect(resumed.firstUserVerified).toBe(true);
+        expect(resumed.submissionProof).toEqual({ sequence: 1, fingerprint: first.fingerprint });
+        expect(candidate.root).toBe(root); expect(candidate.body).toBe(body); expect(candidate.deadline).toBe(deadline);
+        expect(record.root).toBe(root); expect(record.body).toBe(body); expect(record.phase).toBe('verified');
+        expect((await x.observe(first)).error).toBeUndefined();
+      } else {
+        expect(resumed.error, mutation).toBeDefined(); expect(resumed).not.toHaveProperty('firstUserVerified', true);
+        expect(resumed).not.toHaveProperty('submissionProof'); expect(resumed).not.toHaveProperty('answerComplete', true);
+        expect((await x.observe(first, { ...allowance, ...certificate })).error, mutation).toBeDefined();
+      }
+      expect(x.f.world.__computaModelFirstExpansion).toBe(candidate); expect(candidate.exposureDeadline).toBe(deadline);
+      expect(scrolls, mutation).toBe(1); expect(oldControl.clicks, mutation).toBe(0);
+      expect(control.clicks, mutation).toBe(succeeds || ['result', 'second_after_click'].includes(mutation) ? 1 : 0);
+      expect(replacement?.clicks ?? 0).toBe(0); expect(x.send.clicks, mutation).toBe(1);
+    }
+  });
+
+  test('a certified first route resumes the same exposure wait before its only display click', async () => {
+    for (const mutation of ['none', 'settles', 'control', 'body', 'work', 'stale_lease', 'late', 'uncertified', 'output']) {
+      const x = await staged(); let scrolls = 0;
+      x.f.window.requestAnimationFrame = () => 1;
+      (x.expand as any).scrollIntoView = () => { scrolls++; };
+      const fromURL = x.f.document.URL;
+      const toURL = 'https://chatgpt.com/c/local-chatgpt%3Aexposure?temporary-chat=true';
+      const pending = x.inspect(); await waiting(x);
+      const candidate = x.f.world.__computaModelFirstExpansion as any;
+      const deadline = candidate.exposureDeadline;
+      x.f.document.URL = toURL; x.f.location.pathname = '/c/local-chatgpt%3Aexposure';
+      x.emit('scroll');
+      const crossed = await pending;
+      expect(crossed.error, mutation).toBeDefined(); expect(crossed).not.toHaveProperty('firstUserVerified', true);
+      expect(candidate).toMatchObject({ contextFailure: 'url', clicked: false });
+      expect(x.expand.clicks, mutation).toBe(0);
+      if (mutation !== 'settles') x.f.setHit(x.expand);
+      const certificate = mutation === 'uncertified' ? {} : { firstUserExpansionRouteContinuation: [{ fromURL, toURL }] };
+      let replacement: Element | undefined;
+      if (mutation === 'control') {
+        const parent = x.expand.parentElement!;
+        replacement = new Element('BUTTON', { 'aria-label': 'Show more' });
+        replacement.parentElement = parent; parent.children[parent.children.indexOf(x.expand)] = replacement;
+        x.expand.connected = false; x.f.setHit(replacement);
+      }
+      if (mutation === 'body') x.f.userBody!.text += '!';
+      if (mutation === 'work') { x.f.chatMode.values['aria-pressed'] = 'false'; x.f.workMode.values['aria-pressed'] = 'true'; }
+      if (mutation === 'stale_lease') {
+        const hit = x.f.document.elementFromPoint;
+        x.f.document.elementFromPoint = (left, top) => {
+          const target = hit(left, top);
+          if (left === 70 && top === 95) x.f.world.__computaChatActiveInvocation = { document: x.f.document };
+          return target;
+        };
+      }
+      if (mutation === 'late') x.f.advanceTime(1_801);
+      if (mutation === 'output') x.expand.onClick = () => { x.f.userBody!.text = x.outbound + '!'; };
+      const resumedRead = x.inspect(certificate);
+      if (mutation === 'settles') {
+        for (let i = 0; i < 100 && !x.listeners.get('scroll')?.size; i++) await Bun.sleep(1);
+        expect(x.listeners.get('scroll')?.size).toBe(1); expect(x.expand.clicks).toBe(0);
+        x.f.setHit(x.expand); x.emit('scroll');
+      }
+      const resumed = await resumedRead;
+      if (mutation === 'none' || mutation === 'settles') {
+        expect(resumed.error).toBeUndefined(); expect(resumed.firstUserVerified).toBe(true);
+        expect(resumed.firstUserMarkerVerified).toBe(true);
+        expect((await x.inspect()).error).toBeUndefined();
+      } else {
+        expect(resumed.error, mutation).toBeDefined();
+        expect(resumed, mutation).not.toHaveProperty('firstUserVerified', true);
+      }
+      expect(x.f.world.__computaModelFirstExpansion).toBe(candidate);
+      expect(candidate.exposureDeadline).toBe(deadline);
+      expect(scrolls, mutation).toBe(1);
+      expect(x.expand.clicks, mutation).toBe(['none', 'settles', 'output'].includes(mutation) ? 1 : 0);
+      expect(replacement?.clicks ?? 0).toBe(0);
+      expect(x.send.clicks, mutation).toBe(0); expect(x.f.composer.events, mutation).toHaveLength(0);
     }
   });
 

@@ -5,7 +5,222 @@ shared Responses interface and browser, terminal and file tools, retaining
 one owned temporary website conversation across tool rounds. Claude and the
 broader browser-engine expansion in issue #9 remain outside this work.
 
-Current checkpoint (October 31, 2026, 10:41:17.909 UTC / 06:41:17.909 EDT):
+Current checkpoint (November 14, 2026, build 547): the approved fresh CAPTCHA
+cleared and an unexpired exemption candidate was present after the next restart. The app no longer
+opens an extra Gemini catalog page for cached startup/restoration/selection
+demand; the bounded startup capture recorded zero Gemini navigation-response
+events before the first Send. All four fresh model pages returned HTTP 200 without
+another CAPTCHA. Pro, Argon and Hydrogen passed the complete workflow; Flash-Lite
+failed response-format validation before tools, then passed a separate diagnostic
+run without a protocol change. This removes a measured
+unnecessary request, not a proven cause of Google's recurring challenge.
+
+### November 14: stale clearance and redundant startup discovery
+
+The approved challenge left open from November 13 cleared at 17:58 UTC on
+November 14. Its return URL carried an exemption expiry of November 13 at
+16:11:36 UTC, already past. Subsequent native samples contained zero exemption
+candidates, although the ordinary page and verified recovery discovery returned
+HTTP 200. Query metadata is not proof of the cookie that WebKit installed.
+This repeats the historical stale-challenge observation; it cannot explain
+earlier recurrences while an unexpired exemption was present.
+
+After restarting unchanged build 546, Flash-Lite completed ten verified website
+inferences and passed its code/terminal checks, but failed the browser workflow
+(12/19 independent checks). It filled an invented reference before fixing the
+code and paired the fill with a click using the consumed observation. The click
+correctly rejected without dispatch. Later reads supplied usable fresh controls,
+but the model did not refill with the actual printed reference or submit. No
+POST occurred. App cleanup closed the fixture tab; durable website cleanup was
+confirmed. The next fresh Hydrogen session received Google HTTP 429 before Send,
+and its unused session closed. Pro and Argon remained unstarted in this round.
+
+The user then approved the new challenge visible at 18:07:57 UTC. Completion at
+18:10:57 UTC returned the ordinary Gemini composer, followed by successful
+verified recovery discovery. Both ordinary and model samples now contained one
+unexpired exemption with more than one hour remaining. No cookie value, expiry,
+profile or checkpoint was manually manipulated. The saved checkpoint cleared
+only through normal verified recovery. Cookie-store metadata does not prove
+that an exemption was transmitted on any particular request.
+
+The startup trace exposed a separate avoidable request. Web UI readiness and
+asynchronous restoration automatically revalidated the selected provider's
+catalog even when validated choices were already cached. On build 546 this
+created and closed a Gemini discovery page before the actual task's separate
+navigation. Build 547, source `3aac96d65eb8473aad0bddd8706fd867a04b4f76`, skips
+that automatic demand only for cached Gemini choices. Missing-catalog discovery,
+explicit discovery, verified human recovery, and every live inference's model
+selection/ownership checks remain unchanged. Other providers retain their policy.
+
+The UI freshness tradeoff is explicit: cached Gemini choices remain until
+existing explicit discovery or verified human recovery refreshes them. Refresh
+buttons remain hidden by request; this change adds no new user refresh control.
+A removed or mismatched live model still fails verification. Publishing the
+catalog from an already-open owned model picker is a possible follow-up that
+could avoid an additional discovery page.
+
+Three new native regressions failed on unchanged source; the missing-catalog
+control passed. The candidate passed all 60 model-state/recovery tests and nine
+version tests. Its signed 67-file package changed only the main executable and
+Info.plist from build 546. After installation and a fresh launch, restoration and
+Pro selection produced zero Gemini navigation-response events before Send, while
+the startup cookie sample retained the future exemption. The source/test proof
+and bounded runtime observation support removal of the extra request; they do
+not establish Google's risk decision or permanent CAPTCHA prevention.
+
+All four requested choices were then tested independently in that same freshly
+started build 547 process. Native response metadata records four Gemini document
+loads with HTTP 200 and current response dates. No CAPTCHA was observed in these
+four attempts. This bounded result does not establish that the exemption was
+sent in a request or distinguish fresh clearance from the effect of removing the
+extra startup request.
+
+| Model | Duration | Website inferences | Independent fixture result |
+| --- | ---: | ---: | --- |
+| 3.1 Pro | 80.371 s | 8 | Pass, 19/19 checks |
+| 4 Argon | 114.802 s | 7 | Pass, 19/19 checks |
+| 4 Hydrogen | 64.800 s | 8 | Pass, 19/19 checks |
+| 3.5 Flash-Lite | 7.173 s | 1 attempted | Failed: `malformed_website_reply / invalid_json`, no tools |
+
+Each passing model made only the intended `summarize` edit, passed the six
+protected tests on independent rerun, returned the independent reference,
+submitted exactly once through the built-in browser, read its unique receipt,
+and explicitly closed its task-created browser tab. All 23 completed inferences
+retained exact selected-model, ownership, response and yield/release proofs.
+There were no failed native tool calls in these three runs. Durable closed
+website-session receipts were verified separately from fixture-tab cleanup.
+
+Flash-Lite's first submission proved the selected model and owned document, but
+the extracted 309-byte response failed JSON parsing. No tool was dispatched, no
+code was changed, and no fixture POST occurred. Its seven passing audit checks
+were protection/nonexecution checks; the workflow did not pass. The initial
+capture preceded the durable cleanup record by 131 ms. A separate later capture
+joins the exact task, thread, turn, inference, session, runtime and model to an
+automatic saved `closed` receipt; the original failure capture is unchanged.
+No successful completion or release proof is inferred from that cleanup. The actual
+rejected reply was not retained in this capture, so generation versus extraction
+is not established. This protocol failure is separate from Google verification.
+The existing bounded format-correction policy does not admit Gemini; no automatic
+format correction was attempted or added.
+
+One separately prepared Flash-Lite diagnostic fixture then armed the existing
+private rejected-reply capture for its exact new task, with the same signed build
+and process. It completed in 67.816 seconds with ten verified website inferences
+and passed all 19 independent checks. Its only nonzero tool result was the
+pre-edit test run exposing the seeded bug; the post-edit six-test rerun passed.
+The format error did not recur, so no
+rejected reply was captured; the unused one-shot arm was retired. This is a
+separate pass, not a repair of the first failure. No parsing, correction or
+verification rule changed between these two attempts.
+
+All five fixture servers were stopped and their listeners checked. The original
+ChatGPT homepage was restored without sending a message. Inspector remained
+disabled throughout these runs. Each of the four requested models now has a
+completed workflow in this post-restart process, but Flash-Lite's failed first
+attempt remains unresolved. These results do not establish repeat reliability
+or permanent CAPTCHA prevention.
+
+Local evidence is retained under `qualification546-restart-20261114` and
+`qualification547-next`, with separate fresh fixture cases, signed package and
+launch bindings, `four-model-native-metadata.json`, `provider-review.json`,
+`flash-lite-late-cleanup.json`, the separate `qualification547-flash-diagnostic`
+case and capture-retirement records, and the unchanged independent 19-check auditor.
+
+### November 13: Inspector capture and message layout change
+
+With explicit Inspector approval, one new ordinary Gemini tab loaded on the
+unchanged signed build 544. One normal reload captured `GET /app` returning
+HTTP 200 from Network in 251 ms, zero redirects, response Date
+`Fri, 13 Nov 2026 12:41:55 GMT`, and
+`Cache-Control: no-cache, no-store, max-age=0, must-revalidate`. The Cookie header
+was present, but Safari's accessibility text stopped at 512 characters; complete
+cookie-name membership cannot be inferred from that truncated view. No raw
+cookie values or HAR were retained. The existing UA/profile/network and cache
+settings were unchanged. Safari developer features and the tab's Inspector
+permission were restored off. The local saved Gemini gate was clear before
+restart, through normal application recovery; it was not edited manually.
+
+Build 545, source `7a1346bcb863f5abd4cabd6ee62d6493169e5be1`, was installed from
+its verified 67-file signed package and started as a new process. The normal
+Gemini page loaded. Its live picker presented 3.5 Flash-Lite, 4 Hydrogen,
+3.1 Pro, 4 Argon, and the additional 4 Carbon. The test binder was updated to
+allow additional well-formed catalog choices while still requiring every
+requested target exactly once and retaining saved-gate/profile checks; the
+requested four-model qualification scope did not expand.
+
+The independent Flash-Lite fixture started at 12:50:08.506 UTC and stopped in
+2.743 seconds with `website_ownership_unverified / first_user_message`, no
+native tools and no accepted local fixture POST. Its initial Gemini document
+returned HTTP 200. The bounded structural diagnostic showed one
+`div.query-content > div.query-bubble-anchor >
+span.user-query-bubble-with-background > span.ng-star-inserted` message path.
+The adapter required an intervening `div.query-bubble-with-status`, so it
+returned `body_empty` despite the observed direct anchor. One cleanup-only
+recheck a minute later retained the same structure and failure; no prompt was
+replayed. The code/terminal/browser fixture therefore did not pass, and cleanup
+is recorded separately as unconfirmed.
+
+The follow-up accepts only the observed direct, unique anchor path. It rejects
+competing status/anchor branches and extra anchor/content children, retaining
+the existing body, exact-text, marker, fingerprint, owner, route, model and
+cleanup checks. This repair addresses the evidenced layout rejection; it does
+not claim to prevent Google's intermittent challenge. The focused
+baseline reproduced the layout rejection; the candidate passed all 189 Gemini
+adapter tests, including exact first/continuation proofs and post-binding
+replacement rejection. Nine version tests passed. No native ownership, model,
+cleanup or CAPTCHA-admission policy was relaxed.
+
+Signed build 546, source `aaf60676b574437eb27bf509a223550e2abe3e30`, was
+installed from its verified 67-file package and launched as a new process.
+The first fresh 3.5 Flash-Lite workflow passed all 19 independent fixture checks:
+only the intended aggregation function changed, all six tests passed, the
+reference matched the independent oracle, one browser form submission produced
+the matching receipt, and the model explicitly closed its task-created browser
+tab. All ten website inferences retained exact model and ownership proofs; the
+final release joined a saved closed website-session receipt. The model recovered
+from an initial terminal call with an incorrectly prefixed working directory;
+this was a completed workflow pass, not a run with zero failed tool calls.
+
+At 13:08:02.454 UTC, the next fresh Hydrogen view recorded its initial Gemini GET.
+The native view/generation callback sequence recorded a redirect to Google's
+`/sorry` and HTTP 429 by 13:08:02.924, before model selection, prompt submission
+or tools; exact navigation identity remains unknown in this diagnostic. The native task
+ended after 1.090 seconds with `website_verification_required`. Its unused session
+closed with a saved receipt. The local Responses endpoint's HTTP 403 translates
+this failure; it is not Google's status. Both fixture servers were stopped and
+their listeners verified absent. Pro and Argon were held before dispatch.
+
+The new challenge appeared in the same app process, about 111 seconds after
+the successful Flash-Lite website session closed. The retained cookie samples
+already had zero verification-exemption candidates during the successful run
+and after its close. Scoped counts remained 28 Gemini-eligible and 18
+Google-challenge-eligible cookies. These metadata samples do not prove cookie
+contents or actual outgoing headers. Source review found no per-session store
+reset or Google-cookie deletion: both views share the same cached store;
+Gemini cleanup closes its verified view, and the separate ChatGPT cookie
+retirement filter cannot match Google cookies.
+
+One approved ordinary navigation was inspected at 13:11:37 UTC, after completing
+an inert `about:blank` document before attachment. Inspector showed a 302 from
+`GET /app`, followed by a 429 from Google's challenge, with Source **Network**,
+current response Dates and `no-store, no-cache, must-revalidate` on both responses.
+The UA was unchanged from the earlier successful reload. The Cookies pane listed
+18 request-cookie names for the final challenge request, with no verification
+exemption and no response cookies. The initial redirected Gemini request's
+complete cookie headers remain unavailable. This is consistent with WebKit's
+[tracked redirect-metrics limitation](https://bugs.webkit.org/show_bug.cgi?id=190214),
+not evidence that the initial request omitted its cookies. No raw cookie values,
+HAR, or challenge query were retained in the diagnostic artifact. Cache behavior
+was unchanged; Safari developer features and per-tab Inspector access were
+restored off. The displayed CAPTCHA was left pending explicit completion approval.
+
+Local evidence: `qualification546-next/inspector546-failing-navigation-20261113.json`,
+`qualification546-next/hydrogen-captcha-incident.json`, and the separately sealed
+`invoice-546-gemini-*` cases retain package/process bindings, native traces,
+model/cleanup journals and independent audits. The preserved build 545 failure
+remains separate from the passing build 546 layout repair.
+
+Historical checkpoint (October 31, 2026, 10:41:17.909 UTC / 06:41:17.909 EDT):
 Computa 0.7.0 build 333, executable source
 `f58c5c7d92324d5a24fcc28d1ea175452acad170`, is installed and audited. One fresh
 Gemini 3.5 Flash-Lite request returned its exact expected marker in 8.035 seconds,
@@ -44,6 +259,126 @@ The retained future-cookie metadata was unchanged. This extends the observed
 recovery period; intervening native follow-ups prevent isolating verification age.
 Earlier staged/installed statements below describe historical evidence, not the
 current installation.
+
+## November 12: restart comparison and renewed verification
+
+On build 540, one normal Gemini navigation received a fresh Google verification
+HTTP 429 at 11:56 EST. Later that same process loaded the signed-in composer;
+the first normal Gemini navigation after a controlled restart also returned
+HTTP 200. The persisted WebKit profile identifier and all seven scoped cookie
+category counts matched across the restart. Those counts do not establish
+cookie contents or what the request sent. No Gemini model response was logged
+before the successful post-restart human load.
+
+Build 541 refuses automatic recovery when the current ordinary Gemini landing
+actually rendered an HTTP error. A fresh healthy landing must still be followed
+by verified discovery and cleanup before a saved checkpoint can be cleared.
+The change covers an unnecessary extra request after a same-origin HTTP error;
+it does not prevent a Google `/sorry` redirect.
+
+After a fresh build 541 launch, the normal Gemini tab, provider model discovery,
+and a Flash-Lite session each reached Gemini with HTTP 200. Computa discovered
+3.5 Flash-Lite, 4 Hydrogen, 3.1 Pro and 4 Argon. The ordinary website picker
+also showed 4 Carbon, which this discovery did not offer. The Flash-Lite
+session completed and closed, but the workflow failed because the model passed
+a nonexistent working directory to two terminal calls. During the next model's
+startup, Hydrogen received a Google verification HTTP 429 before submission.
+Its unused website session closed with a saved receipt. One subsequent normal
+Gemini reload received the same verification HTTP 429. No blocked prompt was
+replayed. These observations show that restart alone is insufficient to explain
+the challenge; Google's triggering condition remains unverified.
+
+Local WebKit tests reproduced a separate recovery bug. A title change on an
+already-open Gemini page could offer a new discovery probe after Computa saved
+a checkpoint. A navigation already in progress could also offer a probe if
+the checkpoint was replaced before the page committed. Automatic recovery now
+requires the same checkpoint at ordinary navigation start and when the probe
+is offered. The existing verified discovery and cleanup still control when
+Computa clears the checkpoint. The retained live records did not show either
+local bug preceding Google's HTTP 429.
+
+The first ordinary Gemini load after installing signed build 543 returned
+HTTP 200 at 16:36 EST. A separate model discovery also returned HTTP 200 and
+cleared the saved checkpoint after verification and cleanup. Flash-Lite,
+Hydrogen, 3.1 Pro and Argon each returned their exact test reply with verified
+model selection and a saved temporary-session closure. These four checks sent
+one prompt each and used zero tools.
+
+About 84 seconds after the Argon session was released, a fresh Flash-Lite
+workflow received Google's verification HTTP 429 on its initial navigation.
+The bounded native capture recorded the Gemini request and Google redirect
+before model selection, prompt submission, or tool execution. Computa saved
+closure of the unused session. The provider's reason for challenging that
+request remains unknown.
+
+A second graceful restart of the same signed build reproduced verification at
+17:06 EST, this time on the first ordinary Gemini load. The native incident
+record shows one initial `GET` to Gemini, the redirect to Google `/sorry`, and
+HTTP 429 with a recent `Date` and `no-store`, `no-cache`, and `must-revalidate`.
+The challenge was left open for manual verification; no Gemini task was sent.
+All seven scoped cookie metadata vectors matched at the earlier healthy launch,
+the in-process model challenge, shutdown, the second launch, and its ordinary
+challenge. These samples do not identify the cookies sent on either request.
+
+A separate loopback WebKit test used two disposable persistent profiles and
+distinct writer/reader processes. After graceful exit and restart, the local
+server observed the synthetic persistent cookie on both the initial request
+and redirected landing for ordinary-first and model-first view creation. This
+exercises the profile API and first-request persistence with synthetic data.
+It does not model Google's cross-site cookie rules or verification decision.
+Taken together, the live and local checks do not establish a restart-induced
+profile reset, stale cached redirect, or a Computa change that prevents the
+challenge. Verification and cleanup requirements are unchanged. All four
+models still need a full workflow pass after verified recovery.
+
+Signed build 544 opened the normal Gemini composer after a restart at 17:30
+EST. The normal page and model discovery both returned HTTP 200. Discovery
+cleared the saved verification checkpoint, and all four choices passed the
+readiness check. The four workflow results are distinct:
+
+- **3.5 Flash-Lite** returned a reply after verified Send. The native codec
+  rejected one offered function call with extra entry fields before any tool
+  ran. All patch admission flags were present. The temporary session closed.
+- **4 Hydrogen** passed all 19 checks in 55.888 seconds, including one file
+  edit, six tests, one browser submission, the matching receipt, explicit
+  browser-tab closure, and a saved temporary-session closure.
+- **4 Argon** received a fresh Google verification HTTP 429 at 17:36 EST,
+  before model selection or Send. The unused session closed.
+- **3.1 Pro** was held before dispatch because the new verification checkpoint
+  remained in place.
+
+Access was available after restart for the successful Hydrogen workflow.
+Google issued another challenge in the same app process. Its triggering
+condition remains unknown. In the retained build 544 challenge report, all
+seven cookie scopes had zero future, session-only or expired verification
+exemption candidates. Earlier healthy requests also had zero. The historical
+October 31 finding of an unexpired exemption cookie does not describe this
+recurrence, and absence alone does not identify its cause. The report still
+cannot determine which cookies were transmitted on the failing request.
+
+### November 12: follow-up prepared for build 545
+
+The exact Flash-Lite choice now receives the existing inert function-call
+example when an allowed function is offered. The entry contains only `name`
+and nested `arguments`. Parsing still rejects unsupported fields, disallowed
+tools and the inert example itself. Two focused native tests failed on the
+expected missing-example assertions against the prior prompt and passed with
+the change. The live workflow retest remains pending.
+
+Persistent-profile tests also used the production default directory for
+CAPTCHA reports. Synthetic reports could consume its 16-report retention
+budget and evict real diagnostic evidence. Those test sessions now inject
+temporary CAPTCHA and cookie-retirement directories. Four focused native
+tests passed, including retention of 18 synthetic incidents in only the test
+store, preservation of a sibling store, scoped cookie retirement and saved
+checkpoint recreation. The run compiled the current browser-session source
+and used pinned cached dependency objects. No Google requests were made.
+
+Neither change establishes prevention of Google's verification challenge.
+The current bounded request-capture plan awaits Inspector approval for one
+normal reload of the existing Gemini tab. No prompt replay, CAPTCHA completion
+or protection change is authorized by that capture plan. Build 544 remains
+installed until the prepared candidate is installed and checked separately.
 
 ## Ownership failure and repair
 

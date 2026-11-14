@@ -41,6 +41,9 @@ import OSLog
         let eligibleCookieCount: Int
         let excludedConversationCookieCount: Int
         let ignoredOutOfScopeDuplicateCount: Int
+        let ignoredExcludedConversationDuplicateCount: Int
+        let ignoredExpiredDuplicateCount: Int
+        let selectedPartitionedCookieCount: Int
     }
     enum Failure: Error, LocalizedError, Equatable {
         case unavailable, bounds, invalidSource, destinationNotEmpty, verificationFailed, deadline
@@ -57,12 +60,14 @@ import OSLog
             case unavailable, deadline, cancelled, unknown
             case sourceCount = "source_count_bound", clock = "nonfinite_clock", fieldBytes = "field_byte_bound", totalBytes = "total_byte_bound"
             case invalidFields = "invalid_fields", duplicateIdentity = "duplicate_identity", nonfiniteExpiry = "nonfinite_expiry"
+            case invalidPartition = "invalid_partition_field"
             case invalidScopeFields = "invalid_scope_fields", selectedCount = "selected_count_bound"
             case destinationNotEmpty = "destination_not_empty", verificationCount = "verification_count_mismatch", verificationAttributes = "verification_attributes_mismatch"
         }
         enum Comparison: String, Sendable { case uniqueIdentity = "unique_identity", singleRemaining = "single_remaining" }
+        enum PartitionPresence: String, Sendable { case absent, present }
         // Bit positions: domain, path, name, value, secure, HTTPOnly, session,
-        // expiry, version, ports, SameSite. The mask carries no attribute value.
+        // expiry, version, ports, SameSite, storage partition. The mask carries no attribute value.
         let phase: Phase
         let code: Code
         let reason: Reason
@@ -74,10 +79,11 @@ import OSLog
         let measuredFieldBytes: Int?
         let attributeMismatchMask: Int?
         let comparison: Comparison?
+        let duplicatePartition: PartitionPresence?
 
         init(phase: Phase, code: Code, reason: Reason, sourceCount: Int? = nil, eligibleCount: Int? = nil,
              selectedCount: Int? = nil, destinationCount: Int? = nil, completedWrites: Int = 0, measuredFieldBytes: Int? = nil,
-             attributeMismatchMask: Int? = nil, comparison: Comparison? = nil) {
+             attributeMismatchMask: Int? = nil, comparison: Comparison? = nil, duplicatePartition: PartitionPresence? = nil) {
             self.phase = phase; self.code = code; self.reason = reason
             self.sourceCount = sourceCount.map { min(max($0, 0), 4_097) }
             self.eligibleCount = eligibleCount.map { min(max($0, 0), 4_097) }
@@ -85,12 +91,13 @@ import OSLog
             self.destinationCount = destinationCount.map { min(max($0, 0), 4_097) }
             self.completedWrites = min(max(completedWrites, 0), 512)
             self.measuredFieldBytes = measuredFieldBytes.map { min(max($0, 0), 1_048_577) }
-            self.attributeMismatchMask = attributeMismatchMask.map { $0 & 2_047 }
+            self.attributeMismatchMask = attributeMismatchMask.map { $0 & 4_095 }
             self.comparison = comparison
+            self.duplicatePartition = duplicatePartition
         }
 
         var record: String {
-            "cookieSeedFailure version=1 phase=\(phase.rawValue) code=\(code.rawValue) reason=\(reason.rawValue) sourceCount=\(sourceCount ?? -1) eligibleCount=\(eligibleCount ?? -1) selectedCount=\(selectedCount ?? -1) destinationCount=\(destinationCount ?? -1) completedWrites=\(completedWrites) measuredFieldBytes=\(measuredFieldBytes ?? -1) attributeMismatchMask=\(attributeMismatchMask ?? -1) comparison=\(comparison?.rawValue ?? "unavailable")"
+            "cookieSeedFailure version=1 phase=\(phase.rawValue) code=\(code.rawValue) reason=\(reason.rawValue) sourceCount=\(sourceCount ?? -1) eligibleCount=\(eligibleCount ?? -1) selectedCount=\(selectedCount ?? -1) destinationCount=\(destinationCount ?? -1) completedWrites=\(completedWrites) measuredFieldBytes=\(measuredFieldBytes ?? -1) attributeMismatchMask=\(attributeMismatchMask ?? -1) comparison=\(comparison?.rawValue ?? "unavailable") duplicatePartition=\(duplicatePartition?.rawValue ?? "unavailable")"
         }
         static func code(for error: any Error) -> Code {
             if error is CancellationError { return .cancelled }
@@ -213,7 +220,7 @@ import OSLog
             receive(ticket) {
                 diagnosticPhase = .sourceSelection; sourceCount = cookies.count
                 let selection = try Self.select(cookies, now: Date(), onFailure: { self.selectionFailure = $0 })
-                Self.failureLog.notice("cookieSeedSelection version=1 sourceCount=\(cookies.count) eligibleCount=\(selection.eligibleCookieCount) selectedCount=\(selection.cookies.count) ignoredOutOfScopeDuplicateCount=\(selection.ignoredOutOfScopeDuplicateCount)")
+                Self.failureLog.notice("cookieSeedSelection version=1 sourceCount=\(cookies.count) eligibleCount=\(selection.eligibleCookieCount) selectedCount=\(selection.cookies.count) ignoredOutOfScopeDuplicateCount=\(selection.ignoredOutOfScopeDuplicateCount) ignoredExcludedConversationDuplicateCount=\(selection.ignoredExcludedConversationDuplicateCount) selectedPartitionedCookieCount=\(selection.selectedPartitionedCookieCount) ignoredExpiredDuplicateCount=\(selection.ignoredExpiredDuplicateCount)")
                 selected = selection.cookies
                 selectionCounts = Summary(sourceCookieCount: cookies.count, eligibleCookieCount: selection.eligibleCookieCount,
                     excludedConversationCookieCount: selection.excludedConversationCookieCount, seededCookieCount: selected.count,
@@ -271,20 +278,47 @@ import OSLog
         }
     }
 
+    // WebKit exports this key but the SDK has no typed property constant:
+    // https://github.com/WebKit/WebKit/blob/main/Source/WebCore/platform/network/cocoa/CookieCocoa.mm
+    // Public cookie.properties carries the original partition; no private API is used.
+    // Absence and present exact bytes are distinct; do not infer, normalize or
+    // reconstruct a partition, or call the private _storagePartition selector.
+    private enum StoragePartition: Hashable {
+        case absent, present(Data)
+        var byteCount: Int { if case .present(let bytes) = self { bytes.count } else { 0 } }
+        var presence: FailureDiagnostic.PartitionPresence { if case .present = self { .present } else { .absent } }
+    }
+    private enum PartitionFailure: Error { case invalid, bounds }
+    private struct Identity: Hashable {
+        let domain, path, name: Data
+        let partition: StoragePartition
+    }
+    private static func storagePartition(_ cookie: HTTPCookie) throws -> StoragePartition {
+        guard let properties = cookie.properties else { throw PartitionFailure.invalid }
+        guard let raw = properties[HTTPCookiePropertyKey(rawValue: "StoragePartition")] else { return .absent }
+        guard let string = raw as? String, !string.contains("\0") else { throw PartitionFailure.invalid }
+        guard string.utf8.prefix(65_537).count <= 65_536 else { throw PartitionFailure.bounds }
+        return .present(Data(string.utf8))
+    }
+
     /// Creation metadata may legitimately change when WebKit stores a cookie.
     /// Authentication/policy attributes and all string bytes must survive;
     /// Unicode-equivalent but byte-different values do not establish equality.
     fileprivate static func sameCookie(_ left: HTTPCookie, _ right: HTTPCookie) -> Bool {
         func equal(_ a: String, _ b: String) -> Bool { Data(a.utf8) == Data(b.utf8) }
-        return equal(left.domain, right.domain) && equal(left.path, right.path) && equal(left.name, right.name)
+        guard equal(left.domain, right.domain) && equal(left.path, right.path) && equal(left.name, right.name)
             && equal(left.value, right.value) && left.isSecure == right.isSecure && left.isHTTPOnly == right.isHTTPOnly
             && left.isSessionOnly == right.isSessionOnly && left.expiresDate == right.expiresDate
-            && left.version == right.version && left.portList == right.portList && left.sameSitePolicy == right.sameSitePolicy
+            && left.version == right.version && left.portList == right.portList && left.sameSitePolicy == right.sameSitePolicy else { return false }
+        guard let leftPartition = try? storagePartition(left), let rightPartition = try? storagePartition(right) else { return false }
+        return leftPartition == rightPartition
     }
 
     private static func attributeMismatch(_ expected: HTTPCookie, remaining: [HTTPCookie]) -> (mask: Int, comparison: FailureDiagnostic.Comparison)? {
         func equal(_ a: String, _ b: String) -> Bool { Data(a.utf8) == Data(b.utf8) }
-        let matches = remaining.filter { equal(expected.domain, $0.domain) && equal(expected.path, $0.path) && equal(expected.name, $0.name) }
+        let expectedPartition = try? storagePartition(expected)
+        let matches = remaining.filter { equal(expected.domain, $0.domain) && equal(expected.path, $0.path) && equal(expected.name, $0.name)
+            && expectedPartition != nil && expectedPartition == (try? storagePartition($0)) }
         let actual: HTTPCookie, comparison: FailureDiagnostic.Comparison
         if matches.count == 1 { actual = matches[0]; comparison = .uniqueIdentity }
         else if remaining.count == 1 { actual = remaining[0]; comparison = .singleRemaining }
@@ -293,7 +327,8 @@ import OSLog
             !equal(expected.name, actual.name), !equal(expected.value, actual.value), expected.isSecure != actual.isSecure,
             expected.isHTTPOnly != actual.isHTTPOnly, expected.isSessionOnly != actual.isSessionOnly,
             expected.expiresDate != actual.expiresDate, expected.version != actual.version,
-            expected.portList != actual.portList, expected.sameSitePolicy != actual.sameSitePolicy]
+            expected.portList != actual.portList, expected.sameSitePolicy != actual.sameSitePolicy,
+            expectedPartition == nil || expectedPartition != (try? storagePartition(actual))]
         let mask = differences.enumerated().reduce(0) { $0 | ($1.element ? 1 << $1.offset : 0) }
         return (mask, comparison)
     }
@@ -302,11 +337,16 @@ import OSLog
     /// are not classified as conversation cookies. No auth-name allowlist is
     /// guessed: all other eligible ChatGPT cookies retain their exact objects.
     static func select(_ cookies: [HTTPCookie], now: Date, onFailure: ((FailureDiagnostic) -> Void)? = nil) throws -> Selection {
-        var bytes = 0, identities = Set<Data>(), selected: [HTTPCookie] = []
-        var eligible = 0, excluded = 0, ignoredOutOfScopeDuplicates = 0
-        func reject(_ failure: Failure, _ reason: FailureDiagnostic.Reason) -> Failure {
+        var bytes = 0, identities: [Identity: (cookie: HTTPCookie, expired: Bool)] = [:], selected: [HTTPCookie] = []
+        var selectedPartitioned = 0
+        var eligible = 0, excluded = 0, ignoredOutOfScopeDuplicates = 0, ignoredExcludedConversationDuplicates = 0
+        var ignoredExpiredDuplicates = 0
+        func reject(_ failure: Failure, _ reason: FailureDiagnostic.Reason,
+                    mismatch: (mask: Int, comparison: FailureDiagnostic.Comparison)? = nil,
+                    duplicatePartition: FailureDiagnostic.PartitionPresence? = nil) -> Failure {
             onFailure?(FailureDiagnostic(phase: .sourceSelection, code: FailureDiagnostic.code(for: failure), reason: reason,
-                sourceCount: cookies.count, eligibleCount: eligible, selectedCount: selected.count, measuredFieldBytes: bytes))
+                sourceCount: cookies.count, eligibleCount: eligible, selectedCount: selected.count, measuredFieldBytes: bytes,
+                attributeMismatchMask: mismatch?.mask, comparison: mismatch?.comparison, duplicatePartition: duplicatePartition))
             return failure
         }
         guard cookies.count <= 4_096 else { throw reject(.bounds, .sourceCount) }
@@ -320,39 +360,61 @@ import OSLog
             }
             guard !cookie.domain.contains("\0"), !cookie.path.contains("\0"), !cookie.name.contains("\0"),
                   cookie.properties != nil else { throw reject(.invalidSource, .invalidFields) }
+            let partition: StoragePartition
+            do { partition = try storagePartition(cookie) }
+            catch PartitionFailure.bounds { throw reject(.bounds, .fieldBytes) }
+            catch { throw reject(.invalidSource, .invalidPartition) }
+            guard bytes <= 1_048_576 - partition.byteCount else { throw reject(.bounds, .totalBytes) }
+            bytes += partition.byteCount
             var host = cookie.domain.lowercased()
             if host.hasPrefix(".") { host.removeFirst() }
             let inScope = host == "chatgpt.com" || host.hasSuffix(".chatgpt.com")
-            let identity = Data((cookie.domain + "\0" + cookie.path + "\0" + cookie.name).utf8)
-            if !identities.insert(identity).inserted {
-                // The shared source contains unrelated websites. Their identity
-                // ambiguity cannot affect this fresh ChatGPT-only destination.
-                // Keep in-scope rejection before expiry, as in the original policy.
-                guard !inScope else { throw reject(.invalidSource, .duplicateIdentity) }
-                ignoredOutOfScopeDuplicates += 1
+            let conversation = ChatGPTTemporaryConversationCookies.canonicalID(name: cookie.name, prefix: "conv_key_") != nil
+                || ChatGPTTemporaryConversationCookies.canonicalID(name: cookie.name, prefix: "history_off_") != nil
+            let excludedConversation = host == "chatgpt.com" && cookie.path == "/" && conversation
+            let expiry = cookie.expiresDate
+            if let expiry, !expiry.timeIntervalSince1970.isFinite { throw reject(.invalidSource, .nonfiniteExpiry) }
+            let expired = expiry.map { $0 <= now } ?? false
+            let identity = Identity(domain: Data(cookie.domain.utf8), path: Data(cookie.path.utf8), name: Data(cookie.name.utf8), partition: partition)
+            if let first = identities[identity] {
+                // Foreign, excluded, and expired rows cannot enter the
+                // destination. A live row replaces an expired witness only in
+                // this local index, so two live rows still reject in any order.
+                if excludedConversation {
+                    ignoredExcludedConversationDuplicates += 1
+                } else if !inScope {
+                    ignoredOutOfScopeDuplicates += 1
+                } else if expired || first.expired {
+                    ignoredExpiredDuplicates += 1
+                    if !expired { identities[identity] = (cookie, false) }
+                } else {
+                    let mismatch = onFailure == nil ? nil : attributeMismatch(first.cookie, remaining: [cookie])
+                    throw reject(.invalidSource, .duplicateIdentity,
+                        mismatch: mismatch?.comparison == .uniqueIdentity ? mismatch : nil, duplicatePartition: partition.presence)
+                }
+            } else {
+                identities[identity] = (cookie, expired)
             }
-            if let expiry = cookie.expiresDate {
-                guard expiry.timeIntervalSince1970.isFinite else { throw reject(.invalidSource, .nonfiniteExpiry) }
-                if expiry <= now { continue }
-            }
-            guard inScope else { continue }
+            guard inScope, !expired else { continue }
             let labels = host.split(separator: ".", omittingEmptySubsequences: false)
             guard host.utf8.count <= 253, labels.allSatisfy({ label in
                 !label.isEmpty && label.utf8.count <= 63 && label.first != "-" && label.last != "-"
                     && label.utf8.allSatisfy { (97...122).contains($0) || (48...57).contains($0) || $0 == 45 }
             }), cookie.path.hasPrefix("/") else { throw reject(.invalidSource, .invalidScopeFields) }
             eligible += 1
-            let conversation = ChatGPTTemporaryConversationCookies.canonicalID(name: cookie.name, prefix: "conv_key_") != nil
-                || ChatGPTTemporaryConversationCookies.canonicalID(name: cookie.name, prefix: "history_off_") != nil
-            if host == "chatgpt.com", cookie.path == "/", conversation {
+            if excludedConversation {
                 excluded += 1
                 continue
             }
             guard selected.count < 512 else { throw reject(.bounds, .selectedCount) }
             selected.append(cookie)
+            if case .present = partition { selectedPartitioned += 1 }
         }
         return Selection(cookies: selected, eligibleCookieCount: eligible, excludedConversationCookieCount: excluded,
-            ignoredOutOfScopeDuplicateCount: ignoredOutOfScopeDuplicates)
+            ignoredOutOfScopeDuplicateCount: ignoredOutOfScopeDuplicates,
+            ignoredExcludedConversationDuplicateCount: ignoredExcludedConversationDuplicates,
+            ignoredExpiredDuplicateCount: ignoredExpiredDuplicates,
+            selectedPartitionedCookieCount: selectedPartitioned)
     }
 }
 

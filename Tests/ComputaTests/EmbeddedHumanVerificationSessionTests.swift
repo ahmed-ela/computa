@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import WebKit
 import XCTest
 @testable import Computa
@@ -10,7 +11,7 @@ final class EmbeddedHumanVerificationSessionTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let profile = UUID()
-        let original = EmbeddedBrowserSession(profileID: profile, defaults: defaults)
+        let original = try makePersistentBrowserTestSession(profileID: profile, defaults: defaults)
         original.recordHumanVerificationRequired(provider: "gemini")
         original.recordHumanVerificationRequired(provider: "chatgpt")
         let saved = original.savedHumanVerificationCheckpointIDs
@@ -21,8 +22,8 @@ final class EmbeddedHumanVerificationSessionTests: XCTestCase {
         XCTAssertTrue(original.tabs.isEmpty)
         original.shutdown()
 
-        let recreated = EmbeddedBrowserSession(profileID: profile, defaults: defaults)
-        let otherProfile = EmbeddedBrowserSession(profileID: UUID(), defaults: defaults)
+        let recreated = try makePersistentBrowserTestSession(profileID: profile, defaults: defaults)
+        let otherProfile = try makePersistentBrowserTestSession(profileID: UUID(), defaults: defaults)
         defer { recreated.shutdown(); otherProfile.shutdown() }
         XCTAssertEqual(recreated.savedHumanVerificationCheckpointIDs, saved)
         XCTAssertEqual(recreated.savedHumanVerificationProviders, ["gemini", "chatgpt"])
@@ -41,10 +42,11 @@ final class EmbeddedHumanVerificationSessionTests: XCTestCase {
         let suite = "Computa.HumanVerification.SessionTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
-        let session = EmbeddedBrowserSession(defaults: defaults)
+        let session = try makePersistentBrowserTestSession(defaults: defaults)
         defer { session.shutdown() }
         session.recordHumanVerificationRequired(provider: "gemini")
         let resolved = try XCTUnwrap(defaults.string(forKey: EmbeddedBrowserSession.profileDefaultsKey).flatMap(UUID.init(uuidString:)))
+        addTeardownBlock { @MainActor in try await WKWebsiteDataStore.remove(forIdentifier: resolved) }
         let replacement = UUID()
         defaults.set(replacement.uuidString, forKey: EmbeddedBrowserSession.profileDefaultsKey)
         let tab = try session.createTab()
@@ -356,6 +358,242 @@ final class EmbeddedHumanVerificationSessionTests: XCTestCase {
         XCTAssertNotNil(session.savedHumanVerificationCheckpointIDs["gemini"])
     }
 
+    func testNewCheckpointDoesNotBorrowAnAlreadySettledGeminiPage() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        var candidates: [EmbeddedBrowserSession.HumanVerificationRecoveryCandidate] = []
+        session.onHumanVerificationRecoveryCandidate = { candidates.append($0) }
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        let landing = try XCTUnwrap(URL(string: "https://gemini.google.com/app"))
+        try await loadLocalFixture(view, at: landing)
+        let generation = try XCTUnwrap(session.documentGeneration(for: id))
+        XCTAssertTrue(candidates.isEmpty)
+
+        session.recordHumanVerificationRequired(provider: "gemini")
+        let checkpoint = try XCTUnwrap(session.savedHumanVerificationCheckpointIDs["gemini"])
+        _ = try await view.evaluateJavaScript("document.title = 'Existing page after new checkpoint'")
+        try await waitForRecovery { session.tabs.first?.title == "Existing page after new checkpoint" }
+        XCTAssertEqual(session.documentGeneration(for: id), generation)
+        guard candidates.isEmpty else { return XCTFail("Same-document title KVO cannot spend a new recovery probe") }
+
+        try await loadLocalFixture(view, at: landing)
+        try await waitForRecovery { candidates.count == 1 }
+        let fresh = try XCTUnwrap(candidates.first)
+        XCTAssertNotEqual(fresh.documentGeneration, generation)
+        XCTAssertEqual(fresh.checkpointID, checkpoint)
+        XCTAssertTrue(session.isHumanVerificationRecoveryCandidateCurrent(fresh))
+        XCTAssertEqual(session.savedHumanVerificationCheckpointIDs["gemini"], checkpoint)
+    }
+
+    func testGeminiRecoveryRejectsCheckpointRenewedDuringSameNavigation() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        session.recordHumanVerificationRequired(provider: "gemini")
+        let original = try XCTUnwrap(session.savedHumanVerificationCheckpointIDs["gemini"])
+        var candidates: [EmbeddedBrowserSession.HumanVerificationRecoveryCandidate] = []
+        session.onHumanVerificationRecoveryCandidate = { candidates.append($0) }
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        let delegate = RecoveryFixtureDelegate(forwardingTo: try XCTUnwrap(view.navigationDelegate))
+        view.navigationDelegate = delegate
+        let landing = try XCTUnwrap(URL(string: "https://gemini.google.com/app"))
+        delegate.beforeCommit = { _ in
+            session.clearHumanVerificationRequired(provider: "gemini")
+            session.recordHumanVerificationRequired(provider: "gemini")
+        }
+        try await loadLocalFixture(view, at: landing)
+        try await waitForRecovery { delegate.finishes == 1 }
+        let renewed = try XCTUnwrap(session.savedHumanVerificationCheckpointIDs["gemini"])
+        XCTAssertNotEqual(renewed, original)
+        guard candidates.isEmpty else { return XCTFail("A checkpoint renewed after native navigation start needs a new ordinary load") }
+
+        delegate.beforeCommit = nil
+        try await loadLocalFixture(view, at: landing)
+        try await waitForRecovery { delegate.finishes == 2 && candidates.count == 1 }
+        let fresh = try XCTUnwrap(candidates.first)
+        XCTAssertEqual(fresh.checkpointID, renewed)
+        XCTAssertTrue(session.isHumanVerificationRecoveryCandidateCurrent(fresh))
+        XCTAssertEqual(session.savedHumanVerificationCheckpointIDs["gemini"], renewed)
+    }
+
+    func testRestartedGeminiProfileCanOfferRecoveryForSavedCheckpoint() async throws {
+        let suite = "Computa.HumanVerification.Freshness.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let profile = UUID()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        addTeardownBlock { @MainActor in try await WKWebsiteDataStore.remove(forIdentifier: profile) }
+        let original = try makePersistentBrowserTestSession(profileID: profile, defaults: defaults)
+        original.recordHumanVerificationRequired(provider: "gemini")
+        let checkpoint = try XCTUnwrap(original.savedHumanVerificationCheckpointIDs["gemini"])
+        original.shutdown()
+
+        let reopened = try makePersistentBrowserTestSession(profileID: profile, defaults: defaults)
+        defer { reopened.shutdown() }
+        var candidates: [EmbeddedBrowserSession.HumanVerificationRecoveryCandidate] = []
+        reopened.onHumanVerificationRecoveryCandidate = { candidates.append($0) }
+        XCTAssertEqual(reopened.savedHumanVerificationCheckpointIDs["gemini"], checkpoint)
+        XCTAssertTrue(reopened.tabs.isEmpty)
+        let id = try reopened.createTab(), view = try XCTUnwrap(reopened.webView(for: id))
+        XCTAssertEqual(view.configuration.websiteDataStore.identifier, profile)
+        let challenge = try XCTUnwrap(URL(string: "https://www.google.com/sorry/index"))
+        try await loadLocalFixture(view, at: challenge)
+        try await waitForRecovery { reopened.savedHumanVerificationCheckpointIDs["gemini"] != checkpoint }
+        let updated = try XCTUnwrap(reopened.savedHumanVerificationCheckpointIDs["gemini"])
+        XCTAssertNotEqual(updated, checkpoint)
+        XCTAssertTrue(candidates.isEmpty, "The checkpoint page cannot offer recovery")
+
+        let landing = try XCTUnwrap(URL(string: "https://gemini.google.com/app"))
+        try await loadLocalFixture(view, at: landing)
+        try await waitForRecovery { candidates.count == 1 }
+        let candidate = try XCTUnwrap(candidates.first)
+        XCTAssertEqual(candidate.checkpointID, updated)
+        XCTAssertTrue(reopened.isHumanVerificationRecoveryCandidateCurrent(candidate))
+        XCTAssertEqual(reopened.savedHumanVerificationCheckpointIDs["gemini"], updated)
+        XCTAssertEqual(reopened.tabs.map(\.id), [id], "A recovery intent does not open a probe or clear the checkpoint")
+    }
+
+    func testGeminiHTTPErrorDocumentsDoNotOfferAutomaticRecovery() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        session.recordHumanVerificationRequired(provider: "gemini")
+        let checkpoint = try XCTUnwrap(session.savedHumanVerificationCheckpointIDs["gemini"])
+        var candidates: [EmbeddedBrowserSession.HumanVerificationRecoveryCandidate] = []
+        session.onHumanVerificationRecoveryCandidate = { candidates.append($0) }
+        let id = try session.createTab(), view = try XCTUnwrap(session.webView(for: id))
+        let delegate = RecoveryFixtureDelegate(forwardingTo: try XCTUnwrap(view.navigationDelegate))
+        view.navigationDelegate = delegate
+        let landing = try XCTUnwrap(URL(string: "https://gemini.google.com/app"))
+        let otherLanding = try XCTUnwrap(URL(string: "https://gemini.google.com/u/1/app"))
+        let rateLimited = try XCTUnwrap(HTTPURLResponse(url: landing, statusCode: 429, httpVersion: nil, headerFields: nil))
+        let timedOut = try XCTUnwrap(HTTPURLResponse(url: landing, statusCode: 504, httpVersion: nil, headerFields: nil))
+        let successful = try XCTUnwrap(HTTPURLResponse(url: landing, statusCode: 200, httpVersion: nil, headerFields: nil))
+        let stale = try XCTUnwrap(HTTPURLResponse(url: otherLanding, statusCode: 504, httpVersion: nil, headerFields: nil))
+        let unavailable = URLResponse(url: landing, mimeType: "text/html", expectedContentLength: 0, textEncodingName: nil)
+
+        for (index, response) in [rateLimited, timedOut].enumerated() {
+            delegate.beforeCommit = { view in
+                session.recordGeminiRecoveryHTTPFailureForTesting(response, isMainFrame: true, view: view, tabID: id)
+            }
+            try await loadLocalFixture(view, at: landing)
+            try await waitForRecovery { delegate.finishes == index + 1 }
+            XCTAssertTrue(candidates.isEmpty, "Rendered HTTP \(response.statusCode) is not a recovery source")
+            XCTAssertEqual(session.savedHumanVerificationCheckpointIDs["gemini"], checkpoint)
+        }
+
+        delegate.beforeCommit = { view in
+            session.recordGeminiRecoveryHTTPFailureForTesting(stale, isMainFrame: true, view: view, tabID: id)
+            session.recordGeminiRecoveryHTTPFailureForTesting(unavailable, isMainFrame: true, view: view, tabID: id)
+            session.recordGeminiRecoveryHTTPFailureForTesting(successful, isMainFrame: true, view: view, tabID: id)
+            session.recordGeminiRecoveryHTTPFailureForTesting(timedOut, isMainFrame: false, view: view, tabID: id)
+        }
+        try await loadLocalFixture(view, at: landing)
+        try await waitForRecovery { delegate.finishes == 3 && candidates.count == 1 }
+        let candidate = try XCTUnwrap(candidates.first)
+        XCTAssertTrue(session.isHumanVerificationRecoveryCandidateCurrent(candidate))
+        session.recordGeminiRecoveryHTTPFailureForTesting(timedOut, isMainFrame: true, view: view, tabID: id)
+        XCTAssertTrue(session.isHumanVerificationRecoveryCandidateCurrent(candidate), "A response outside a provisional navigation has no authority")
+        XCTAssertEqual(session.savedHumanVerificationCheckpointIDs["gemini"], checkpoint)
+        XCTAssertEqual(session.tabs.map(\.id), [id], "Recovery intent alone never opens a provider probe")
+    }
+
+    func testPersistentFixtureCAPTCHARetentionCannotEvictAnotherStore() throws {
+        let retained = try PersistentBrowserTestStorage(testCase: self)
+        let synthetic = try PersistentBrowserTestStorage(testCase: self)
+        let retainedStore = try GeminiCAPTCHADiagnosticStore(directory: retained.diagnostics)
+        var originals: [URL: Data] = [:]
+        for index in 0..<16 {
+            let report = GeminiCAPTCHADiagnostic.Journal().report(tabID: UUID(), generation: UUID(),
+                role: .human, trigger: .response, now: Date(timeIntervalSince1970: Double(index + 1)), cookieEvents: [])
+            let file = try retainedStore.save(report)
+            originals[file] = try Data(contentsOf: file)
+        }
+        let suite = "Computa.FixtureStorage.Retention.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let profile = UUID()
+        addTeardownBlock { @MainActor in try await WKWebsiteDataStore.remove(forIdentifier: profile) }
+        let challenge = try XCTUnwrap(HTTPURLResponse(url: URL(string: "https://www.google.com/sorry/index")!,
+            statusCode: 429, httpVersion: nil, headerFields: ["Cache-Control": "no-store"]))
+
+        // Each fixture lifetime stays below the native eight-save budget. These
+        // are injected response callbacks on unloaded views, never Google loads.
+        for _ in 0..<3 {
+            let session = synthetic.session(profileID: profile, defaults: defaults)
+            defer { session.shutdown() }
+            for _ in 0..<6 {
+                let id = try session.createUnloadedModelTabForTesting()
+                let view = try XCTUnwrap(session.webView(for: id))
+                XCTAssertNil(view.url)
+                session.observeGeminiNavigationResponseForTesting(response: challenge, isMainFrame: true, view: view, tabID: id)
+                session.closeTab(id)
+            }
+            session.shutdown()
+        }
+        let files = try FileManager.default.contentsOfDirectory(at: synthetic.diagnostics, includingPropertiesForKeys: nil)
+        XCTAssertEqual(files.count, 16, "The 18 synthetic incidents exercise retention only inside this fixture")
+        XCTAssertTrue(files.allSatisfy { $0.path.hasPrefix(synthetic.root.path + "/") && $0.pathExtension == "json" })
+        XCTAssertEqual(Set(try FileManager.default.contentsOfDirectory(at: retained.diagnostics,
+            includingPropertiesForKeys: nil)), Set(originals.keys))
+        for (file, bytes) in originals { XCTAssertEqual(try Data(contentsOf: file), bytes) }
+    }
+
+    func testPersistentFixtureUsesOnlyItsInjectedCookieRetirementRegistry() async throws {
+        let retained = try PersistentBrowserTestStorage(testCase: self)
+        let synthetic = try PersistentBrowserTestStorage(testCase: self)
+        let profile = UUID(), retired = UUID(), unrelated = UUID()
+        addTeardownBlock { @MainActor in try await WKWebsiteDataStore.remove(forIdentifier: profile) }
+        let now = Date().addingTimeInterval(-1)
+        let retainedRegistry = ChatGPTTemporaryCookieRegistry(directory: retained.cookieRetirement, profileID: profile)
+        let syntheticRegistry = ChatGPTTemporaryCookieRegistry(directory: synthetic.cookieRetirement, profileID: profile)
+        XCTAssertTrue(retainedRegistry.save([unrelated: now]))
+        XCTAssertTrue(syntheticRegistry.save([retired: now]))
+        let retainedFile = retained.cookieRetirement.appendingPathComponent("owned.json")
+        let before = try Data(contentsOf: retainedFile)
+        let suite = "Computa.FixtureStorage.Retirement.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let session = synthetic.session(profileID: profile, defaults: defaults)
+        defer { session.shutdown() }
+        let tab = try session.createTab(), view = try XCTUnwrap(session.webView(for: tab))
+        XCTAssertNil(view.url)
+        let store = view.configuration.websiteDataStore.httpCookieStore
+        for id in [retired, unrelated] {
+            let cookie = try XCTUnwrap(HTTPCookie(properties: [.domain: "chatgpt.com", .path: "/",
+                .name: "conv_key_" + id.uuidString.lowercased(), .value: "local-fixture",
+                .secure: "TRUE", .expires: Date().addingTimeInterval(60)]))
+            await store.setCookie(cookie)
+        }
+        let settled = await session.settleChatGPTTemporaryCookieRetirement(until: .now + .seconds(5))
+        XCTAssertTrue(settled)
+        let cookies = await store.allCookies()
+        XCTAssertFalse(cookies.contains { $0.name == "conv_key_" + retired.uuidString.lowercased() })
+        XCTAssertTrue(cookies.contains { $0.name == "conv_key_" + unrelated.uuidString.lowercased() },
+                      "The other directory's registry must not authorize a deletion")
+        XCTAssertEqual(try Data(contentsOf: retainedFile), before)
+        XCTAssertEqual(syntheticRegistry.load(now: Date())?.keys.sorted { $0.uuidString < $1.uuidString }, [retired])
+    }
+
+    @MainActor private final class RecoveryFixtureDelegate: NSObject, WKNavigationDelegate {
+        let delegate: any WKNavigationDelegate
+        var beforeCommit: ((WKWebView) -> Void)?
+        private(set) var finishes = 0
+
+        init(forwardingTo delegate: any WKNavigationDelegate) { self.delegate = delegate }
+
+        func webView(_ view: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            delegate.webView?(view, didStartProvisionalNavigation: navigation)
+        }
+
+        func webView(_ view: WKWebView, didCommit navigation: WKNavigation!) {
+            beforeCommit?(view)
+            delegate.webView?(view, didCommit: navigation)
+        }
+
+        func webView(_ view: WKWebView, didFinish navigation: WKNavigation!) {
+            delegate.webView?(view, didFinish: navigation)
+            finishes += 1
+        }
+    }
+
     private func waitForRecovery(_ condition: @MainActor () -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(5)
         while !condition(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
@@ -376,5 +614,37 @@ final class EmbeddedHumanVerificationSessionTests: XCTestCase {
         await Task.yield()
         XCTAssertEqual(view.url, url)
         XCTAssertFalse(view.isLoading)
+    }
+}
+
+/// Persistent-profile fixtures must isolate every disk-backed side store as well
+/// as WebKit and preferences. A random profile does not scope CAPTCHA retention.
+@MainActor
+struct PersistentBrowserTestStorage {
+    let root: URL
+    var diagnostics: URL { root.appendingPathComponent("captcha", isDirectory: true) }
+    var cookieRetirement: URL { root.appendingPathComponent("cookie-retirement", isDirectory: true) }
+
+    init(testCase: XCTestCase) throws {
+        let physical = try XCTUnwrap(realpath(FileManager.default.temporaryDirectory.path, nil))
+        defer { free(physical) }
+        root = URL(fileURLWithPath: String(cString: physical), isDirectory: true)
+            .appendingPathComponent("ComputaPersistentBrowserTest-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false,
+                                               attributes: [.posixPermissions: 0o700])
+        let ownedRoot = root
+        testCase.addTeardownBlock { try FileManager.default.removeItem(at: ownedRoot) }
+    }
+
+    func session(profileID: UUID? = nil, defaults: UserDefaults) -> EmbeddedBrowserSession {
+        EmbeddedBrowserSession(profileID: profileID, defaults: defaults,
+            cookieRetirementDirectory: cookieRetirement, geminiDiagnosticDirectory: diagnostics)
+    }
+}
+
+extension XCTestCase {
+    @MainActor
+    func makePersistentBrowserTestSession(profileID: UUID? = nil, defaults: UserDefaults) throws -> EmbeddedBrowserSession {
+        try PersistentBrowserTestStorage(testCase: self).session(profileID: profileID, defaults: defaults)
     }
 }

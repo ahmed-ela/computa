@@ -3,6 +3,57 @@ import XCTest
 @testable import Computa
 
 final class RuntimeContextContractTests: XCTestCase {
+    func testKnownNonzeroNativeCommandResultStaysFailedAndStrictlyClassified() throws {
+        typealias L = GroqNativePublicationLedger
+        for state in ["failed"] {
+            for exit in [1, 255, Int(Int32.max)] {
+                let item: [String: Any] = ["type": "commandExecution", "id": "native-command",
+                    "command": "python3 -m unittest -v", "cwd": "/fixture", "status": state,
+                    "exitCode": exit, "aggregatedOutput": "FAILED (failures=26)\nexact native output"]
+                let terminal = AppServerCompletedToolItemContract.groqHistoryCommandTerminal(item)
+                XCTAssertEqual(terminal, .knownNonzeroCommandResult(status: state == "completed" ? .completed : .failed, exitCode: exit))
+                XCTAssertNotEqual(terminal, .command(status: .completed, exitCode: 0))
+                var transcript = AppServerCommandTranscript()
+                let entry = try XCTUnwrap(transcript.receive(item: item, completed: true))
+                XCTAssertEqual(entry.toolEvent?.status, .failed)
+                XCTAssertEqual(entry.toolEvent?.output, "FAILED (failures=26)\nexact native output\nExit code: \(exit)")
+                XCTAssertNil(transcript.receive(item: item, completed: true), "A duplicate native terminal remains a duplicate")
+            }
+        }
+        let invalid: [(String?, Any?)] = [
+            ("completed", 1), ("completed", nil), ("failed", nil), ("failed", NSNull()),
+            ("failed", true), ("failed", false), ("failed", "1"),
+            ("failed", 1.5), ("failed", Double.infinity),
+            ("completed", -1), ("failed", -1), ("failed", Int64(Int32.max) + 1),
+            ("failed", 0), ("declined", 1), ("inProgress", 1),
+            ("cancelled", 1), ("unknown", 1), (nil, 1)
+        ]
+        for (state, exit) in invalid {
+            var item: [String: Any] = ["type": "commandExecution", "id": "native-command", "command": "fixture", "cwd": "/fixture"]
+            if let state { item["status"] = state }
+            if let exit { item["exitCode"] = exit }
+            let terminal = AppServerCompletedToolItemContract.groqHistoryCommandTerminal(item)
+            if case .knownNonzeroCommandResult = terminal { XCTFail("Uncertain, cancelled or malformed results cannot publish history") }
+            XCTAssertNotEqual(terminal, .command(status: .completed, exitCode: 0), "A rejected result cannot become success")
+        }
+        XCTAssertEqual(AppServerCompletedToolItemContract.groqHistoryCommandTerminal([
+            "type": "commandExecution", "status": "completed", "exitCode": 0
+        ]), .command(status: .completed, exitCode: 0))
+        let inconsistentCompleted: [String: Any] = ["type": "commandExecution", "id": "completed-nonzero",
+            "command": "fixture", "cwd": "/fixture", "status": "completed", "exitCode": 1]
+        XCTAssertEqual(AppServerCompletedToolItemContract.groqHistoryCommandTerminal(inconsistentCompleted),
+            .command(status: .completed, exitCode: 1), "An inconsistent native status stays the old ineligible generic fact")
+        var inconsistentTranscript = AppServerCommandTranscript()
+        XCTAssertEqual(inconsistentTranscript.receive(item: inconsistentCompleted, completed: true)?.toolEvent?.status, .failed)
+        for kind in ["fileChange", "mcpToolCall", "unknown"] {
+            let terminal = AppServerCompletedToolItemContract.groqHistoryCommandTerminal([
+                "type": kind, "status": "failed", "exitCode": 1
+            ])
+            if case .knownNonzeroCommandResult = terminal { XCTFail("Only a native command item carries this typed result") }
+            XCTAssertNotEqual(terminal, .command(status: .completed, exitCode: 0), "Foreign items cannot invent command success")
+        }
+    }
+
     func testContextUsesLastRequestNotCumulativeLifetimeUsage() throws {
         let date = Date(timeIntervalSince1970: 100)
         let usage = try XCTUnwrap(AppServerContextUsageContract.parse(payload(), expectedTurnID: "turn", now: date))

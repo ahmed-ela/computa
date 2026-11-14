@@ -26,7 +26,7 @@ function computaProviderCore(request, provider, origin, actions) {
     if (values.length !== 1) fail(error, detail);
     return values[0];
   };
-  const hitFailure = node => {
+  const hitFailure = (node, testIntersection) => {
     if (!enabled(node)) return 'disabled';
     if (typeof node.getBoundingClientRect !== 'function' || typeof document.elementFromPoint !== 'function') return 'invalid_geometry';
     const r = node.getBoundingClientRect(), width = window.innerWidth, height = window.innerHeight;
@@ -38,6 +38,7 @@ function computaProviderCore(request, provider, origin, actions) {
     const left = Math.max(0, r.left), top = Math.max(0, r.top);
     const clippedRight = Math.min(width, right), clippedBottom = Math.min(height, bottom);
     if (clippedRight <= left || clippedBottom <= top) return 'outside_viewport';
+    if (testIntersection) return testIntersection(left, top, clippedRight, clippedBottom) ? null : 'occluded';
     const x = left + (clippedRight - left) / 2, y = top + (clippedBottom - top) / 2;
     return node.contains(document.elementFromPoint(x, y)) ? null : 'occluded';
   };
@@ -71,7 +72,10 @@ function computaProviderCore(request, provider, origin, actions) {
     });
     record.observer.observe(document.documentElement || document, { subtree: true, childList: true,
       characterData: true, attributes: true, attributeFilter: ['disabled', 'aria-disabled', 'aria-hidden', 'aria-busy',
-        'aria-label', 'aria-expanded', 'aria-controls', 'aria-selected', 'data-state', 'class', 'style', 'hidden', 'inert'] });
+        'aria-label', 'aria-expanded', 'aria-controls', 'aria-selected', 'data-state', 'class', 'style', 'hidden', 'inert',
+        ...(provider === 'kimi' ? ['role', 'contenteditable', 'data-lexical-editor', 'data-testid', 'aria-haspopup', 'id', 'href']
+          : provider === 'qwen' ? ['role', 'aria-haspopup', 'id']
+          : provider === 'deepseek' ? ['role', 'placeholder', 'aria-pressed'] : [])] });
     globalThis[signalKey] = record;
   }
   return { uuid, fail, normalize, bodyText, choiceValid, equalChoice, physical, visible, enabled, nodes, unique, hit, hitFailure, context, assertContext, hash };
@@ -79,6 +83,9 @@ function computaProviderCore(request, provider, origin, actions) {
 
 // Groq chat is a fresh explicit-clear session, never a temporary conversation.
 // The native transport owns lifecycle receipts, document generations and URLs.
+const stateKey = '__computaGroqFreshSessionV1';
+let groqUserCountDiagnostic = null;
+let groqSession = globalThis[stateKey];
 try {
   const actions = ['inspect', 'discoverModels', 'selectModel', 'modelDiagnostic', 'verifyModel',
     'prepare', 'insert', 'sendReady', 'submit', 'stop', 'clearTranscript', 'observeClearTranscript'];
@@ -90,11 +97,12 @@ try {
   const validKey = key => typeof key === 'string' && key.length > 0 && key.length <= 160
     && /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(key) && !key.includes('..') && !key.includes('//');
   if (modelKey !== null && !validKey(modelKey)) c.fail('model_unverified');
-  const stateKey = '__computaGroqFreshSessionV1';
   if (globalThis[stateKey] === undefined) globalThis[stateKey] = { owner: input.ownerToken,
     document, generation: input.documentGeneration, url: null, mapping: null, picker: null,
-    prepared: null, inserted: null, submitted: false, first: null, clear: null, sendReveal: null };
+    prepared: null, inserted: null, submitted: false, first: null, clear: null, sendReveal: null,
+    renderedMessage: null, renderedMessageRevision: 0 };
   const state = globalThis[stateKey];
+  groqSession = state;
   const owned = () => c.context() && globalThis[stateKey] === state && state.owner === input.ownerToken
     && state.document === document && state.generation === input.documentGeneration
     && (state.url === null && !state.picker && !state.prepared && !state.inserted && !state.submitted && !state.clear
@@ -109,16 +117,99 @@ try {
     && !['meta-llama/llama-prompt-guard-2-22m', 'meta-llama/llama-prompt-guard-2-86m',
       'openai/gpt-oss-safeguard-20b'].includes(choice.key)
     && !/(?:^|\/)(?:whisper|distil-whisper|playai-tts|canopylabs\/orpheus)(?:[-/]|$)/i.test(choice.key);
+  // The site's notification region was empty before the observed submission,
+  // then displayed this exact generic failure. Its copy supplies no HTTP status.
+  function notificationRegion(expected, failed = false) {
+    try {
+      const matches = document.querySelectorAll('[aria-label="Notifications alt+T"]');
+      if (matches.length !== 1) return null;
+      const region = matches[0];
+      if (!region.isConnected || !document.documentElement.contains(region) || expected && region !== expected
+        || region.closest('form, textarea, [contenteditable], [hidden], [inert], [aria-hidden="true"]')
+        || authored(region) || region.contains(state.prepared)) return null;
+      const stack = [region]; let visited = 0, messages = 0;
+      while (stack.length) {
+        const node = stack.pop();
+        if (++visited > 48) return null;
+        if (node.nodeType === 3) {
+          if (node.length > 96) return null;
+          const text = node.textContent.trim();
+          if (!text) continue;
+          if (!failed || text !== 'Something went wrong. Please, try again.' || ++messages > 1
+            || !c.visible(node.parentElement) || authored(node.parentElement)) return null;
+        } else if (node.nodeType === 1) {
+          if (node.childNodes.length + stack.length + visited > 48) return null;
+          for (const child of node.childNodes) stack.push(child);
+        } else return null;
+      }
+      return messages === (failed ? 1 : 0) ? region : null;
+    } catch { return null; }
+  }
+  function failUserCount(branch, users, answers) {
+    // Snapshot the arrays from this rejected evaluation; no transcript reread.
+    // Visibility is diagnostic only and unknown if its getters cannot be read.
+    try {
+      const visibleCount = nodes => { try { return nodes.filter(c.visible).length; } catch { return null; } };
+      const expected = input.expectedUserCounts;
+      const validExpected = Array.isArray(expected) && (expected.length === 1 && [0, 1].includes(expected[0])
+        || expected.length === 2 && expected[0] === 0 && expected[1] === 1);
+      const expectedUserCounts = validExpected ? [...expected] : null;
+      const submitted = state.submitted === true, first = state.first, editor = state.prepared;
+      const adapterFirstBound = !!first;
+      const flag = read => { try { const value = read(); return typeof value === 'boolean' ? value : null; } catch { return null; } };
+      const held = read => first ? flag(read) : null;
+      const preparedEditorConnected = editor ? flag(() => editor.isConnected) : null;
+      // Only compare the already-held editor and exact inserted string. A detached
+      // editor is unknown, not evidence that the current page restored its draft.
+      const preparedEditorDraftRestored = submitted && preparedEditorConnected === true
+        && typeof state.inserted === 'string' ? flag(() => { const value = editor.value; return typeof value === 'string' ? value === state.inserted : null; }) : null;
+      const boundNodes = {
+        rootConnected: held(() => first.root.isConnected), bodyConnected: held(() => first.body.isConnected),
+        parentConnected: held(() => first.parent.isConnected),
+        rootClassMatches: held(() => first.root.classList.contains('group/input')),
+        bodyClassMatches: held(() => first.body.classList.contains('line-clamp-5')),
+        rootParentMatches: held(() => first.root.parentElement === first.parent),
+        bodyWithinRoot: held(() => first.root.contains(first.body)),
+        rootInDocument: held(() => document.documentElement.contains(first.root)),
+        preparedEditorConnected, preparedEditorDraftRestored };
+      groqUserCountDiagnostic = { kind: 'groq_user_count_v2', action: input.action, branch,
+        userCount: users.length, answerCount: answers.length,
+        visibleUserCount: visibleCount(users), visibleAnswerCount: visibleCount(answers),
+        expectedUserCounts, submitted, adapterFirstBound, boundNodes };
+      if (input.action === 'inspect' && branch === 'expected_count' && expectedUserCounts?.length === 1
+        && expectedUserCounts[0] === 1 && users.length === 0 && answers.length === 0 && adapterFirstBound && submitted
+        && preparedEditorDraftRestored === true && boundNodes.rootConnected === false && boundNodes.bodyConnected === false
+        && boundNodes.parentConnected === false && boundNodes.rootInDocument === false && boundNodes.rootClassMatches === true
+        && boundNodes.bodyClassMatches === true && boundNodes.rootParentMatches === true && boundNodes.bodyWithinRoot === true
+        && state.emptyNotice && notificationRegion(state.emptyNotice, true))
+        groqUserCountDiagnostic.freshNotice = 'generic_error';
+    } catch { groqUserCountDiagnostic = null; }
+    c.fail('conversation_changed', 'user_count');
+  }
   function transcript() {
     const users = c.nodes(document, '[class*="group/input"]', 64).filter(node => token(node, 'group/input'));
     const answers = c.nodes(document, '.font-inter', 64).filter(node =>
       node.parentElement && token(node.parentElement, 'font-normal') && token(node.parentElement, 'text-base'));
-    if (users.length > 1 || answers.length > 1) c.fail('conversation_changed', 'user_count');
+    if (users.length > 1 || answers.length > 1)
+      failUserCount(users.length > 1 ? 'multiple_users' : 'multiple_answers', users, answers);
     let first = null, answer = null, block = null;
     if (users.length) {
       const root = users[0], wrappers = [...root.children].filter(node => node.tagName === 'DIV'
-        && node.children.length === 1 && token(node.children[0], 'line-clamp-5'));
+        && token(node.children[0], 'line-clamp-5'));
       const wrapper = c.unique(wrappers, 'conversation_changed', 'first_user_message'), body = wrapper.children[0];
+      // Long messages retain their complete leaf text and add this observed
+      // presentation control. Never expand it or hash the wrapper's chrome.
+      if (wrapper.children.length !== 1) {
+        const more = wrapper.children[1];
+        if (wrapper.children.length !== 2 || body.tagName !== 'DIV' || more.tagName !== 'SPAN'
+          || more.children.length !== 0 || more.textContent !== 'Show more'
+          || [...more.classList].length !== 2 || !token(more, 'text-primaryaccent') || !token(more, 'cursor-pointer')
+          || more.getAttribute('role') !== null || more.getAttribute('aria-label') !== null || !c.visible(more)
+          || c.nodes(root, '.line-clamp-5', 64).length !== 1
+          || ![...wrapper.childNodes].every(node => node === body || node === more
+            || node.nodeType === 3 && /^\s*$/.test(node.textContent || '')))
+          c.fail('conversation_changed', 'first_user_message');
+      }
       if (!c.visible(root) || !c.visible(body) || body.children.length > 0) c.fail('conversation_changed', 'first_user_message');
       const parent = root.parentElement;
       if (!token(parent, 'flex-col') || !token(parent, '[word-break:break-word]')) c.fail('conversation_changed', 'first_user_message');
@@ -128,7 +219,7 @@ try {
         if (block.parentElement !== parent || [...parent.children].indexOf(block) <= [...parent.children].indexOf(root)
           || !c.visible(answer) || !c.visible(block)) c.fail('conversation_changed', 'response_scope');
       }
-    } else if (answers.length) c.fail('conversation_changed', 'user_count');
+    } else if (answers.length) failUserCount('answer_without_user', users, answers);
     return { users, answers, first, answer, block };
   }
   function composer() {
@@ -190,23 +281,94 @@ try {
     return c.nodes(document, 'button', 128).filter(node => c.visible(node) && !authored(node)
       && c.normalize(node.innerText || node.textContent) === 'Clear chat');
   }
+  function renderedMessageShape(answer, text, captureRejectedAttributeName) {
+    const declined = reason => ({ witness: null, reason });
+    if (answer.childNodes.length !== 1) return declined('answer_child_count');
+    const paragraph = answer.childNodes[0];
+    const kind = paragraph.nodeType;
+    if (kind !== 1) return declined(kind === 3 ? 'answer_text_child' : 'answer_child_kind');
+    if (paragraph.namespaceURI !== 'http://www.w3.org/1999/xhtml') return declined('paragraph_namespace');
+    if (paragraph.tagName !== 'P') return declined('paragraph_tag');
+    if (paragraph.childNodes.length !== 1) return declined('paragraph_child_count');
+    if (paragraph.isContentEditable) return declined('paragraph_editable');
+    if (!c.visible(paragraph)) return declined('paragraph_hidden');
+    // Language and direction metadata do not add authored nodes or controls.
+    // Only allow the known layout classes and closed passive HTML attributes.
+    const attrs = paragraph.attributes;
+    if (attrs.length > 8) return declined('attribute_count');
+    for (const { namespaceURI, name, value } of attrs) {
+      if (namespaceURI !== null) return declined('attribute_namespace');
+      switch (name) {
+        case 'class': {
+          if (value.length > 64) return declined('attribute_value');
+          const tokens = value.split(/[\t\n\f\r ]+/).filter(Boolean);
+          if (tokens.length !== 2 || !tokens.includes('text-left') || !tokens.includes('mb-4'))
+            return declined('attribute_value');
+          break;
+        }
+        case 'dir':
+          if (!['auto', 'ltr', 'rtl'].includes(value)) return declined('attribute_value');
+          break;
+        case 'lang':
+          if (!/^[a-z]{2,8}(?:-[a-z0-9]{1,8}){0,5}$/i.test(value)) return declined('attribute_value');
+          break;
+        case 'id': return declined('attribute_id');
+        case 'title': return declined('attribute_title');
+        case 'role': return declined('attribute_role');
+        case 'tabindex': return declined('attribute_tabindex');
+        case 'contenteditable': return declined('attribute_contenteditable');
+        case 'draggable': return declined('attribute_draggable');
+        case 'align': return declined('attribute_align');
+        case 'translate': return declined('attribute_translate');
+        case 'spellcheck': return declined('attribute_spellcheck');
+        case 'popover': return declined('attribute_popover');
+        case 'onclick': case 'ondblclick': case 'oncontextmenu':
+        case 'onkeydown': case 'onkeyup': case 'onfocus': case 'onblur':
+        case 'oninput': case 'onchange': case 'onmousedown': case 'onmouseup':
+        case 'onpointerdown': case 'onpointerup': case 'ontouchstart': case 'ontouchend':
+          return declined('attribute_event_handler');
+        default:
+          // An inert, exact object-string sentinel on the otherwise passive paragraph.
+          if (name === 'node' && value === '[object Object]') break;
+          if (name === 'style') return declined('attribute_style');
+          if (name.startsWith('data-')) return declined('attribute_data');
+          if (name.startsWith('aria-')) return declined('attribute_aria');
+          if (captureRejectedAttributeName && name.match(/^[a-z][a-z0-9-]{0,31}$/)?.[0] === name)
+            return { ...declined('attribute_name'), rejectedAttributeName: name };
+          return declined('attribute_name');
+      }
+    }
+    const body = paragraph.childNodes[0];
+    // Native checks message grammar. The paragraph profile never normalizes,
+    // truncates or joins text to obtain a matching byte sequence.
+    if (body.nodeType !== 3) return declined('leaf_not_text');
+    if (body.textContent !== text) return declined('text_mismatch');
+    return { witness: { answer, paragraph, body }, reason: 'matched' };
+  }
   function responseText(answer) {
-    if (!answer) return '';
-    // Groq wraps a fenced block as PRE > DIV > PRE > CODE, alongside an
-    // icon-only copy DIV. Read literal code bytes only for this exact shape.
-    // JSON validity belongs to the native codec, including malformed replies.
-    const fallback = () => (answer.textContent || '').trim().slice(0, 220_001);
+    const structure = { kind: 'groq_literal_profile_v1', reason: 'absent_answer', preCount: 0, codeCount: 0, scanCount: 0 };
+    const result = (text, literal, reason) => { structure.reason = reason; return { text, literal, structure }; };
+    if (!answer) return result('', false, 'absent_answer');
+    // These closed facts report the first original predicate only. They never
+    // read extra DOM/text or participate in literal/completion acceptance.
+    const fallback = reason => result((answer.textContent || '').trim().slice(0, 220_001), false, reason);
+    const decline = (value, reason) => { if (value) structure.reason = reason; return value; };
     const pres = c.nodes(answer, 'pre', 64), codes = c.nodes(answer, 'code', 64);
-    if (pres.length !== 2 || codes.length !== 1) return fallback();
+    structure.preCount = pres.length; structure.codeCount = codes.length;
+    if (decline(pres.length !== 2, 'pre_count') || decline(codes.length !== 1, 'code_count')) return fallback(structure.reason);
     const outer = pres[0], inner = pres[1], code = codes[0], wrapper = inner.parentElement;
-    if (outer.parentElement !== answer || wrapper?.tagName !== 'DIV' || wrapper.parentElement !== outer
-      || code.parentElement !== inner || !token(code, 'language-json') || !c.visible(code)
-      || outer.children.length !== 1 || wrapper.children.length !== 2 || inner.children.length !== 1) return fallback();
+    if (decline(outer.parentElement !== answer, 'outer_parent') || decline(wrapper?.tagName !== 'DIV', 'wrapper_tag')
+      || decline(wrapper.parentElement !== outer, 'wrapper_parent') || decline(code.parentElement !== inner, 'code_parent')
+      || decline(!token(code, 'language-json'), 'language_json') || decline(!c.visible(code), 'code_hidden')
+      || decline(outer.children.length !== 1, 'outer_children') || decline(wrapper.children.length !== 2, 'wrapper_children')
+      || decline(inner.children.length !== 1, 'inner_children')) return fallback(structure.reason);
     const chrome = [...wrapper.children].find(node => node !== inner);
-    if (chrome?.tagName !== 'DIV' || !['w-min', 'ml-2', 'cursor-pointer', 'absolute', 'top-2', 'right-2', 'text-sm', 'px-2']
-      .every(value => token(chrome, value)) || !c.visible(chrome) || chrome.children.length !== 1
-      || chrome.children[0].tagName.toLowerCase() !== 'svg' || chrome.children[0].getAttribute('aria-label') !== 'copy'
-      || (chrome.textContent || '').trim() !== '') return fallback();
+    if (decline(chrome?.tagName !== 'DIV', 'chrome_tag') || decline(!['w-min', 'ml-2', 'cursor-pointer', 'absolute', 'top-2', 'right-2', 'text-sm', 'px-2']
+      .every(value => token(chrome, value)), 'chrome_classes') || decline(!c.visible(chrome), 'chrome_hidden')
+      || decline(chrome.children.length !== 1, 'chrome_children')
+      || decline(chrome.children[0].tagName.toLowerCase() !== 'svg', 'chrome_icon_tag')
+      || decline(chrome.children[0].getAttribute('aria-label') !== 'copy', 'chrome_icon_label')
+      || decline((chrome.textContent || '').trim() !== '', 'chrome_text')) return fallback(structure.reason);
     let visited = 0;
     const onlyLiteralAndChrome = node => {
       if (++visited > 10_000) return false;
@@ -215,30 +377,58 @@ try {
       if (node.nodeType !== 1) return true;
       return [...node.childNodes].every(onlyLiteralAndChrome);
     };
-    // Hidden or visible authored prose is never discarded to salvage a call.
-    if (!onlyLiteralAndChrome(answer)) return fallback();
-    return (code.textContent || '').slice(0, 220_001);
+    // Preserve hidden/visible authored content and the original scan bound.
+    const isolated = onlyLiteralAndChrome(answer); structure.scanCount = visited;
+    if (!isolated) return fallback(visited > 10_000 ? 'outside_scan_limit' : 'outside_content');
+    return result((code.textContent || '').slice(0, 220_001), true, 'accepted_literal_code');
   }
-  function responseComplete(t, form, text) {
-    if (!state.submitted || state.clear || !t.first || !t.answer || !text.trim()
-      || !c.enabled(form.editor) || form.editor.value !== '' || !c.enabled(form.send)) return false;
+  function responseComplete(t, form, text, progress) {
+    // Record only the first failed operand, at its original evaluation point.
+    // This optional report never participates in completion or ownership.
+    const no = reason => { if (progress) progress.reason = reason; return false; };
+    if (!state.submitted) return no('not_submitted');
+    if (state.clear) return no('cleared');
+    if (!t.first) return no('user_absent');
+    if (!t.answer) return no('answer_absent');
+    if (!text.trim()) return no('text_empty');
+    if (!c.enabled(form.editor)) return no('editor_disabled');
+    if (form.editor.value !== '') return no('editor_not_empty');
+    if (!c.enabled(form.send)) return no('send_disabled');
     const siblings = [...t.block.children], footer = siblings[siblings.indexOf(t.answer) + 1];
-    if (footer?.tagName !== 'DIV' || !['flex', 'flex-row', 'align-center', 'items-center', 'gap-1', 'pt-2']
-      .every(value => token(footer, value)) || !c.visible(footer)) return false;
+    if (footer?.tagName !== 'DIV') return no('footer_missing');
+    if (!['flex', 'flex-row', 'align-center', 'items-center', 'gap-1', 'pt-2']
+      .every(value => token(footer, value))) return no('footer_shape');
+    if (!c.visible(footer)) return no('footer_hidden');
     const copies = c.nodes(t.block, 'button', 32).filter(node =>
       c.nodes(node, 'svg[aria-label="copy"]', 4).length > 0 && !t.answer.contains(node));
-    return copies.length === 1 && copies[0].parentElement === footer && c.enabled(copies[0])
-      && c.nodes(copies[0], 'svg[aria-label="copy"]', 4).length === 1;
+    if (copies.length !== 1) return no('copy_count');
+    if (copies[0].parentElement !== footer) return no('copy_parent');
+    if (!c.enabled(copies[0])) return no('copy_disabled');
+    if (c.nodes(copies[0], 'svg[aria-label="copy"]', 4).length !== 1) return no('copy_icon_count');
+    if (progress) progress.reason = 'complete';
+    return true;
   }
-  function read() {
+  function read(captureRejectedAttributeName = false) {
     const t = transcript(), form = composer(), modelEvidence = evidence(false);
-    const text = responseText(t.answer), answerComplete = responseComplete(t, form, text);
+    const progress = input.action === 'inspect'
+      && Object.getOwnPropertyDescriptor(input, 'groqFailureProgress')?.value === true ? { reason: null } : null;
+    const extracted = responseText(t.answer), text = extracted.text, answerComplete = responseComplete(t, form, text, progress);
+    const rendered = answerComplete && !extracted.literal && (input.action === 'inspect' || state.renderedMessage)
+      ? renderedMessageShape(t.answer, text, captureRejectedAttributeName) : null;
+    const renderedMessage = rendered?.witness ?? null;
+    const prior = state.renderedMessage;
+    if (prior && (!renderedMessage || prior.answer !== renderedMessage.answer || prior.paragraph !== renderedMessage.paragraph
+      || prior.body !== renderedMessage.body)) state.renderedMessage = null;
     // The terminal conjunction is answer-scoped footer Copy plus an empty,
     // enabled composer and enabled Send. Global speed/code-copy grant nothing.
-    return { t, form, output: { url: document.URL, sessionLifecycle: 'explicit_clear', temporary: false,
+    return { t, form, renderedMessage, renderedMessageReason: rendered?.reason,
+      rejectedAttributeName: rendered?.rejectedAttributeName,
+      output: { url: document.URL, sessionLifecycle: 'explicit_clear', temporary: false,
       modelEvidence, composer: c.enabled(form.editor), userCount: t.users.length, responseCount: t.answers.length,
       conversationIdentity: null, busy: !answerComplete && (t.users.length > 0 || state.submitted && !state.clear),
-      interrupted: false, answerComplete, text,
+      interrupted: false, answerComplete, text, groqLiteralResponse: extracted.literal,
+      completionEvidence: { codeStructure: extracted.structure },
+      ...(progress ? { groqFailureProgress: { kind: 'groq_completion_gate_v1', reason: progress.reason } } : {}),
       firstUserIdentity: null, firstUserVerified: false, firstUserMarkerVerified: false, firstUserFingerprint: null } };
   }
   // React can mount the composer before the picker and canonical model query.
@@ -309,7 +499,8 @@ try {
   if (!Array.isArray(input.expectedUserCounts) || input.expectedUserCounts.length < 1 || input.expectedUserCounts.length > 2
     || input.expectedUserCounts.some(value => !Number.isInteger(value) || value < 0 || value > 1)
     || input.expectedUserCounts.length === 2 && (input.expectedUserCounts[0] !== 0 || input.expectedUserCounts[1] !== 1)
-    || !input.expectedUserCounts.includes(initial.t.users.length)) c.fail('conversation_changed', 'user_count');
+    || !input.expectedUserCounts.includes(initial.t.users.length))
+    failUserCount('expected_count', initial.t.users, initial.t.answers);
   if (state.submitted && !initial.output.modelEvidence) c.fail('model_unverified');
   if (initial.t.first) {
     const first = initial.t.first, marker = input.expectedFirstUserMarker, markerLine = `Computa session marker: ${marker}`;
@@ -329,11 +520,27 @@ try {
     }
     // Hashing yields to the page. Use a fresh terminal observation afterward;
     // a pre-yield enabled footer/composer must not survive resumed streaming.
-    const current = read();
+    const current = read(input.action === 'inspect'
+      && Object.getOwnPropertyDescriptor(input, 'groqRejectedAttributeNameDiagnostic')?.value === true);
     if (!sameFirst(first) || !c.equalChoice(current.output.modelEvidence?.selected, initial.output.modelEvidence?.selected))
       c.fail('conversation_changed', 'first_user_message');
     Object.assign(initial.output, current.output,
       { firstUserVerified: true, firstUserMarkerVerified: true, firstUserFingerprint: fingerprint });
+    // Issue the witness only from the post-hash owned inspection. Losing the
+    // shape even on the pre-hash read invalidates its old revision.
+    if (input.action === 'inspect' && current.renderedMessage) {
+      if (!state.renderedMessage && state.renderedMessageRevision < 1024) {
+        state.renderedMessage = current.renderedMessage;
+        state.renderedMessageRevision++;
+      }
+      if (state.renderedMessage) initial.output.groqRenderedMessageRevision = state.renderedMessageRevision;
+    }
+    if (input.action === 'inspect' && current.renderedMessageReason) {
+      initial.output.groqRenderedMessageShape = current.renderedMessage && !state.renderedMessage
+        ? 'revision_exhausted' : current.renderedMessageReason;
+      if (current.renderedMessageReason === 'attribute_name' && current.rejectedAttributeName)
+        initial.output.groqRejectedAttributeName = current.rejectedAttributeName;
+    }
   } else if (state.first || input.expectedFirstUserFingerprint != null) c.fail('conversation_changed', 'first_user_message');
   if (['discoverModels', 'selectModel'].includes(input.action)) {
     if (!fresh()) c.fail('not_fresh');
@@ -437,12 +644,16 @@ try {
   if (input.action === 'sendReady') return { ...initial.output, sendReady: ready, sendReadinessFailure,
     ...(state.sendReveal?.diagnostic ? { sendRevealDiagnostic: state.sendReveal.diagnostic } : {}) };
   if (!ready) c.fail('send_unavailable', sendReadinessFailure);
+  state.emptyNotice = notificationRegion(null);
   state.submitted = true;
   form.send.click();
   // This is the pre-click empty observation plus dispatch acknowledgment. It
   // cannot bind the newly appended user body or prove response completion.
   return { ...initial.output, submitted: true };
 } catch (error) {
-  if (error?.computaAdapterFailure === true) return { error: error.error, ...(error.detail ? { detail: error.detail } : {}) };
+  if (groqSession) groqSession.renderedMessage = null;
+  if (error?.computaAdapterFailure === true) return { error: error.error, ...(error.detail ? { detail: error.detail } : {}),
+    ...(error.error === 'conversation_changed' && error.detail === 'user_count' && groqUserCountDiagnostic
+      ? { groqUserCountDiagnostic } : {}) };
   throw error;
 }

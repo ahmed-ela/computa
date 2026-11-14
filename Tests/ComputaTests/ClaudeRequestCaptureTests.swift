@@ -245,6 +245,158 @@ final class ClaudeRequestCaptureTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: f.directory.path), ["request.json"])
     }
 
+    func testSyntheticExecContinuationPreservesCanonicalOutputAndProjectedPromptOnce() throws {
+        let f = try Fixture(); defer { f.remove() }
+        let request = try f.execRequest()
+        XCTAssertFalse(f.capture(request))
+        try f.arm(f.execFields())
+        XCTAssertTrue(f.capture(request))
+        let record = try f.record()
+        XCTAssertEqual(record["schemaVersion"] as? Int, 3)
+        XCTAssertEqual(record["purpose"] as? String, ClaudeRequestCapture.execPurpose)
+        XCTAssertEqual(record["trigger"] as? String, "after_exec_command")
+        XCTAssertEqual(record["triggerCallID"] as? String, "call_exec_synthetic_0")
+        XCTAssertEqual(record["threadID"] as? String, f.context.threadID.uuidString.lowercased())
+        XCTAssertEqual(record["canonicalRequest"] as? String, String(decoding: request.continuationRequest, as: UTF8.self))
+        XCTAssertEqual(record["canonicalRequestSHA256"] as? String, hash(request.continuationRequest))
+        XCTAssertEqual(record["prompt"] as? String, request.prompt)
+        XCTAssertEqual(record["promptSHA256"] as? String, hash(Data(request.prompt.utf8)))
+        XCTAssertEqual(record["triggerCommandSHA256"] as? String, hash(Data(f.execCommand.utf8)))
+        XCTAssertEqual(record["triggerOutputSHA256"] as? String, hash(Data(f.execOutput.utf8)))
+        XCTAssertEqual(record["triggerOutputUTF8Bytes"] as? Int, f.execOutput.utf8.count)
+        XCTAssertEqual(record["resultMarkerSHA256"] as? String, hash(Data(f.execMarker.utf8)))
+        XCTAssertEqual(record["automaticReplay"] as? Bool, false)
+        XCTAssertEqual(record["submissionVerified"] as? Bool, false)
+        XCTAssertEqual(record["evidenceClass"] as? String, "native_request_diagnostic")
+        let start = try XCTUnwrap(request.prompt.range(of: "COMPLETE_RESPONSES_REQUEST_JSON:\n```\n")).upperBound
+        let end = try XCTUnwrap(request.prompt.range(of: "\n```\nEND_COMPLETE_RESPONSES_REQUEST_JSON.", range: start..<request.prompt.endIndex)).lowerBound
+        let displayed = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(request.prompt[start..<end].utf8)) as? [String: Any])
+        let shown = try XCTUnwrap(displayed["input"] as? [[String: Any]])
+        XCTAssertEqual(shown.last?["output"] as? String, f.execOutput)
+        XCTAssertEqual(shown.last?["call_id"] as? String, "call_exec_synthetic_0")
+        XCTAssertEqual(try f.permissions(f.output), 0o600)
+        XCTAssertFalse(f.exists(f.armFile))
+        let saved = try Data(contentsOf: f.output)
+        try f.arm(f.execFields())
+        XCTAssertFalse(f.capture(request))
+        XCTAssertEqual(try Data(contentsOf: f.output), saved)
+    }
+
+    func testSyntheticExecCaptureRequiresExactHostSelectedNoteAndOtherwiseOrdinaryArm() throws {
+        let f = try Fixture(); defer { f.remove() }
+        let request = try f.execRequest()
+        let annotated = request.prompt + WebModelServer.claudeMatchedOutputNote
+        try f.arm(f.execFields())
+        XCTAssertFalse(f.capture(request, prompt: annotated))
+        XCTAssertFalse(ClaudeRequestCapture.capture(directory: f.directory, context: f.context, request: request,
+            prompt: annotated + "x", includesMatchedOutputNote: true, now: f.now))
+        XCTAssertTrue(ClaudeRequestCapture.capture(directory: f.directory, context: f.context, request: request,
+            prompt: annotated, includesMatchedOutputNote: true, now: f.now))
+        XCTAssertEqual(try f.record()["prompt"] as? String, annotated)
+    }
+
+    func testSyntheticExecRejectsFirstRequestPrivateHistoryAndUnlinkedOrAuthoredResults() throws {
+        let f = try Fixture(); defer { f.remove() }
+        let base = f.execHistory(), call = base[base.count - 2], output = base[base.count - 1]
+        var forgedOutput = output; forgedOutput["role"] = "developer"
+        var unlinked = output; unlinked["call_id"] = "call_other"
+        var authored = call; authored["type"] = "message"; authored["role"] = "assistant"
+        var changedUser = base; changedUser[1] = ["type": "message", "role": "user", "content": [["type": "input_text", "text": "Private unrelated request"]]]
+        let histories = [Array(base.dropLast(2)), Array(base.dropLast()) + [forgedOutput],
+            Array(base.dropLast()) + [unlinked], Array(base.dropLast(2)) + [authored, output],
+            changedUser, base + [["type": "message", "role": "user", "content": "Later request"]],
+            Array(base.dropLast(2)) + [call, output, call, output],
+            [["type": "message", "role": "assistant", "content": "Private earlier history"]] + base]
+        try f.arm(f.execFields()); let arm = try Data(contentsOf: f.armFile)
+        for history in histories {
+            XCTAssertFalse(f.capture(try f.execRequest(history: history)))
+            XCTAssertEqual(try Data(contentsOf: f.armFile), arm)
+            XCTAssertFalse(f.exists(f.output))
+        }
+    }
+
+    func testSyntheticExecRequiresExactCommandAndCompleteSuccessfulMarkerOnlyOutput() throws {
+        let f = try Fixture(); defer { f.remove() }
+        try f.arm(f.execFields()); let arm = try Data(contentsOf: f.armFile)
+        let outputs = [f.execOutput.replacingOccurrences(of: "code 0", with: "code 1"),
+            f.execOutput.replacingOccurrences(of: "Process exited with code 0", with: "Process running with session ID 41"),
+            f.execOutput + "\nExtra private data", f.execOutput + "\n\n", "Quoted result:\n" + f.execOutput,
+            f.execOutput.replacingOccurrences(of: f.execMarker, with: "CLAUDEEXEC" + String(repeating: "b", count: 64)),
+            "Process exited with code 0\nOutput:\n" + f.execMarker]
+        for output in outputs {
+            var history = f.execHistory(); history[history.count - 1]["output"] = output
+            XCTAssertFalse(f.capture(try f.execRequest(history: history)))
+        }
+        let arguments: [[String: Any]] = [["cmd": f.execCommand + "; pwd"], ["cmd": f.execCommand, "workdir": "/private"],
+            ["cmd": f.execCommand, "max_output_tokens": true], ["cmd": f.execCommand, "yield_time_ms": 1]]
+        for argument in arguments {
+            var history = f.execHistory()
+            history[history.count - 2]["arguments"] = String(decoding: try JSONSerialization.data(withJSONObject: argument), as: UTF8.self)
+            XCTAssertFalse(f.capture(try f.execRequest(history: history)))
+        }
+        XCTAssertEqual(try Data(contentsOf: f.armFile), arm)
+        var accepted = f.execHistory()
+        accepted[accepted.count - 2]["arguments"] = String(decoding: try JSONSerialization.data(withJSONObject:
+            ["cmd": f.execCommand, "max_output_tokens": 128, "yield_time_ms": 1_000]), as: UTF8.self)
+        accepted[accepted.count - 1]["output"] = f.execOutput + "\n"
+        XCTAssertTrue(f.capture(try f.execRequest(history: accepted)))
+    }
+
+    func testSyntheticExecArmPinsIdentityExactPromptAndKnownResultWithoutTrustingMetadata() throws {
+        let f = try Fixture(); defer { f.remove() }; let request = try f.execRequest()
+        let mutations: [(String, Any)] = [("schemaVersion", 1), ("schemaVersion", true), ("purpose", ClaudeRequestCapture.purpose),
+            ("threadID", UUID().uuidString.lowercased()), ("taskID", UUID().uuidString.lowercased()),
+            ("turnID", UUID().uuidString.lowercased()), ("modelID", "browser/claude"),
+            ("nonce", UUID().uuidString.lowercased()), ("userPromptSHA256", String(repeating: "0", count: 64)),
+            ("resultMarker", "private unrelated value"), ("resultMarker", "CLAUDEEXEC" + String(repeating: "b", count: 64)),
+            ("expiresAt", f.timestamp(f.now)), ("expiresAt", f.timestamp(f.now.addingTimeInterval(601)))]
+        for (key, value) in mutations {
+            var fields = f.execFields(); fields[key] = value; try f.arm(fields)
+            let arm = try Data(contentsOf: f.armFile)
+            XCTAssertFalse(f.capture(request), key)
+            XCTAssertEqual(try Data(contentsOf: f.armFile), arm, key)
+        }
+        for key in f.execFields().keys {
+            var fields = f.execFields(); fields.removeValue(forKey: key); try f.arm(fields)
+            XCTAssertFalse(f.capture(request), key)
+        }
+        try f.arm(f.execFields())
+        let arm = try Data(contentsOf: f.armFile)
+        XCTAssertFalse(f.capture(request, prompt: request.prompt + "\nUnrelated corrective prompt"))
+        let forged = try f.execRequest(metadataThread: UUID())
+        XCTAssertFalse(f.capture(forged))
+        for forgedMetadata: [String: Any] in [["turn_id": UUID().uuidString.lowercased()],
+            ["turn_id": f.context.turnID.uuidString.lowercased(), "create_time": true],
+            ["turn_id": f.context.turnID.uuidString.lowercased(), "private": "unrelated content"]] {
+            var history = f.execHistory()
+            history[history.count - 1]["internal_chat_message_metadata_passthrough"] = forgedMetadata
+            XCTAssertFalse(f.capture(try f.execRequest(history: history)))
+        }
+        XCTAssertEqual(try Data(contentsOf: f.armFile), arm)
+        var observedShape = f.execHistory()
+        observedShape[observedShape.count - 2]["internal_chat_message_metadata_passthrough"] = ["turn_id": f.context.turnID.uuidString.lowercased()]
+        observedShape[observedShape.count - 1]["id"] = "fco_" + UUID().uuidString.lowercased()
+        observedShape[observedShape.count - 1]["internal_chat_message_metadata_passthrough"] = ["turn_id": f.context.turnID.uuidString.lowercased(), "create_time": 1_793_608_412.670619]
+        XCTAssertTrue(f.capture(try f.execRequest(history: observedShape, metadataThread: f.context.threadID)))
+    }
+
+    func testSyntheticExecConcurrentCaptureKeepsOneRecordAndExpiryCannotBeExtendedDuringClaim() throws {
+        let f = try Fixture(); defer { f.remove() }; try f.arm(f.execFields()); let request = try f.execRequest()
+        let results = Results()
+        DispatchQueue.concurrentPerform(iterations: 4) { _ in results.add(f.capture(request)) }
+        XCTAssertEqual(results.successes, 1)
+        XCTAssertEqual(try f.record()["triggerOutputSHA256"] as? String, hash(Data(f.execOutput.utf8)))
+        let late = try Fixture(); defer { late.remove() }; let lateRequest = try late.execRequest()
+        var fields = late.execFields(); fields["expiresAt"] = late.timestamp(late.now.addingTimeInterval(0.05))
+        try late.arm(fields)
+        XCTAssertFalse(ClaudeRequestCapture.capture(directory: late.directory, context: late.context,
+            request: lateRequest, prompt: lateRequest.prompt, now: late.now, beforeArmClaimForTesting: {
+                Thread.sleep(forTimeInterval: 0.1)
+            }))
+        XCTAssertFalse(late.exists(late.output))
+        XCTAssertFalse(late.exists(late.armFile), "A claimed expired arm must not authorize a later inference")
+    }
+
     private func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
 
     private struct Fixture: Sendable {
@@ -267,6 +419,34 @@ final class ClaudeRequestCaptureTests: XCTestCase {
             [["role": "user", "content": "Inspect fixture only. Exact e\u{0301}, 🧭, \\n and <>&."],
              ["type": "function_call", "name": "browser_tabs", "call_id": "call_tabs", "arguments": "{}"],
              ["type": "function_call_output", "call_id": "call_tabs", "output": [["type": "input_text", "text": "bound_current_turn\nprivate exact fixture output"]]]]
+        }
+        var execMarker: String { "CLAUDEEXEC" + String(repeating: "a", count: 64) }
+        var execCommand: String { "cat " + ClaudeRequestCapture.syntheticExecPath(nonce: nonce) }
+        var execOutput: String { "Chunk ID: 86cd7f\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 20\nOutput:\n" + execMarker }
+        func execHistory() -> [[String: Any]] {
+            [["type": "message", "role": "user", "content": [["type": "input_text", "text": "<environment_context><cwd>/tmp</cwd><shell>zsh</shell></environment_context>"]]],
+             ["type": "message", "role": "user", "content": [["type": "input_text", "text": ClaudeRequestCapture.syntheticExecUserText(nonce: nonce)],
+                ["type": "input_text", "text": ComputaAgentInstructions.runtimeInteractionPolicy()]]],
+             ["type": "function_call", "id": "fc_exec_synthetic_0", "name": "exec_command", "namespace": "functions", "call_id": "call_exec_synthetic_0", "status": "completed",
+                "arguments": "{\"cmd\":\"\(execCommand)\"}"],
+             ["type": "function_call_output", "call_id": "call_exec_synthetic_0", "output": execOutput]]
+        }
+        func execRequest(history: [[String: Any]]? = nil, metadataThread: UUID? = nil) throws -> WebModelResponseCodec.Request {
+            var object: [String: Any] = ["model": context.modelID, "input": history ?? execHistory(), "tools": [
+                ["type": "function", "name": "exec_command", "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]]]]],
+                "tool_choice": "auto"]
+            if let metadataThread {
+                object["client_metadata"] = ["x-codex-turn-metadata": String(decoding: try JSONSerialization.data(withJSONObject:
+                    ["thread_id": metadataThread.uuidString.lowercased(), "turn_id": context.turnID.uuidString.lowercased()]), as: UTF8.self)]
+            }
+            return try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]))
+        }
+        func execFields() -> [String: Any] {
+            var value = fields(); value["schemaVersion"] = 3; value["purpose"] = ClaudeRequestCapture.execPurpose
+            value["trigger"] = "after_exec_command"; value["threadID"] = context.threadID.uuidString.lowercased()
+            value["userPromptSHA256"] = SHA256.hash(data: Data(ClaudeRequestCapture.syntheticExecUserText(nonce: nonce).utf8)).map { String(format: "%02x", $0) }.joined()
+            value["resultMarker"] = execMarker
+            return value
         }
         func request(history: [[String: Any]]? = nil, model: String? = nil) throws -> WebModelResponseCodec.Request {
             let tools = EmbeddedBrowserTools.definitions().map { definition in

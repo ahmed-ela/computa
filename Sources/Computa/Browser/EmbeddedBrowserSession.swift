@@ -8,6 +8,7 @@ import WebKit
 final class EmbeddedBrowserTab: Identifiable {
     let id: UUID
     let isPopup: Bool
+    fileprivate let kimiProfileID: UUID?
     fileprivate(set) var title = "New tab"
     fileprivate(set) var url: URL?
     fileprivate(set) var isLoading = false
@@ -20,7 +21,9 @@ final class EmbeddedBrowserTab: Identifiable {
     fileprivate(set) var isWebInspectorEnabled = false
     fileprivate(set) var isWebInspectorAvailable = false
 
-    fileprivate init(id: UUID = UUID(), isPopup: Bool = false) { self.id = id; self.isPopup = isPopup }
+    fileprivate init(id: UUID = UUID(), isPopup: Bool = false, kimiProfileID: UUID? = nil) {
+        self.id = id; self.isPopup = isPopup; self.kimiProfileID = kimiProfileID
+    }
 }
 
 /// Browser views are independent of the privileged Octane UI WebView.
@@ -37,6 +40,7 @@ final class EmbeddedBrowserSession {
         case modelPopupUnsupported
         case toolPopupUnsupported
         case popupProfileMismatch
+        case kimiProfileUnavailable
         case inspectionUnavailable, cookieMaintenancePending
 
         var errorDescription: String? {
@@ -48,6 +52,7 @@ final class EmbeddedBrowserSession {
             case .modelPopupUnsupported: "Pop-up windows are not enabled for model inference pages."
             case .toolPopupUnsupported: "This task tab cannot open an unowned pop-up. Open the observed destination with the browser tools."
             case .popupProfileMismatch: "The requested pop-up did not preserve this browser's sign-in profile."
+            case .kimiProfileUnavailable: "The dedicated Kimi sign-in profile could not be verified."
             case .inspectionUnavailable: "Web Inspector is unavailable for this tab while a task owns or uses it."
             case .cookieMaintenancePending: "The browser profile is completing a local maintenance operation."
             }
@@ -59,6 +64,7 @@ final class EmbeddedBrowserSession {
     /// session whose website cleanup could not be confirmed.
     var humanTabs: [EmbeddedBrowserTab] { tabs.filter { entries[$0.id]?.isModelOwned == false } }
     private(set) var selectedTabID: UUID?
+    private(set) var kimiModelProfileID: UUID?
     private(set) var errorMessage: String?
     #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
     enum ModelNativeFocusDiagnosticDisposition: String {
@@ -109,6 +115,8 @@ final class EmbeddedBrowserSession {
     }
 
     @ObservationIgnored private var websiteDataStore: WKWebsiteDataStore?
+    @ObservationIgnored private var kimiDedicatedProfileID: UUID?
+    @ObservationIgnored private var kimiDedicatedStore: WKWebsiteDataStore?
     @ObservationIgnored private var geminiCookieObservationRequests = 0
     @ObservationIgnored private var geminiCookieTimeline: GeminiVerificationCookieTimeline?
     @ObservationIgnored private var geminiDiagnosticCookieEvents: [GeminiCAPTCHADiagnostic.CookieEvent] = []
@@ -144,12 +152,22 @@ final class EmbeddedBrowserSession {
     @ObservationIgnored private var transientHumanVerificationCheckpoints: [String: UUID] = [:]
     @ObservationIgnored private var transientRecoveryReports: [String: EmbeddedHumanVerificationStore.RecoveryReport] = [:]
     @ObservationIgnored var onHumanVerificationRecoveryCandidate: (@MainActor (HumanVerificationRecoveryCandidate) -> Void)?
+    @ObservationIgnored var onProviderSignInRecoveryCandidate: (@MainActor (ProviderSignInRecoveryCandidate) -> Void)?
     @ObservationIgnored private var entries: [UUID: Entry] = [:]
     @ObservationIgnored private weak var modelRenderHost: NSView?
     @ObservationIgnored private var modelRenderHosts: [ModelRenderHostReference] = []
     @ObservationIgnored private var isShutdown = false
     @ObservationIgnored private var geminiPostBlockDiagnosticConsumed = false
     static let profileDefaultsKey = "Computa.EmbeddedBrowser.ProfileIdentifier.v1"
+
+    private struct KimiProfile {
+        let id: UUID
+        let store: WKWebsiteDataStore
+    }
+
+    private static func kimiProfileKey(sharedProfileID: UUID) -> String {
+        "Computa.EmbeddedBrowser.KimiModelProfile.v1." + sharedProfileID.uuidString
+    }
 
     private final class ModelRenderHostReference {
         weak var view: NSView?
@@ -198,6 +216,7 @@ final class EmbeddedBrowserSession {
         let usesIsolatedChatGPTProfile: Bool
         let navigationChanges = EmbeddedModelChangeChannel(ownerToken: UUID().uuidString)
         let popupOpenerTabID: UUID?
+        var isAvailableToBrowserTools: Bool { !isModelOwned && tab.kimiProfileID == nil }
         weak var presentationHost: NSView?
         var toolRenderLeases: Set<UUID> = []
         var frameBeforeToolRendering: (frame: NSRect, autoresizing: NSView.AutoresizingMask)?
@@ -213,6 +232,10 @@ final class EmbeddedBrowserSession {
         var preparedDocumentNavigation = false
         // Native lifecycle facts can defer an untouched initial inspection,
         // but never grant adapter, document, or recovery authority.
+        // Binds a future, page-initiated root navigation to its previous native generation.
+        var hadChatRootDiagnostic = false
+        var authorizedChatRootRequest: UUID?
+        var initialChatRootTransition: (from: UUID, to: UUID)?
         var modelCommittedGeneration: UUID?
         var modelFinishedGeneration: UUID?
         var modelFailedGeneration: UUID?
@@ -222,11 +245,18 @@ final class EmbeddedBrowserSession {
         var geminiDocumentCommitObserved = false
         var serverRedirectObservedInCurrentNavigation = false
         var inspectorDiagnostic: (id: UUID, binding: ChatGPTInspectorLease.Binding, expiry: Task<Void, Never>)?
+        var groqFixtureInspectorDiagnostic: (id: UUID, binding: GroqOwnedStatusLease.InspectorBinding, expiry: Task<Void, Never>)?
         #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
         var syntheticNativeFocusDiagnostic: (id: UUID, binding: WebsiteBenchmarkCaptureLease.NativeFocusBinding,
                                             expiry: Task<Void, Never>)?
         #endif
         var requestMetadataDiagnostic: RequestMetadataDiagnostic?
+        var groqStatus: GroqStatusProbe?
+        var qwenMarkerProbe: QwenMarkerProbe?
+        var claudeResponseStreamDiagnostic: ClaudeResponseStreamDiagnosticState?
+        // Stop removes the page observer, but close must still revoke this exact
+        // lease after transport's pre-cleanup persistence attempt.
+        var claudeResponseStreamLease: ClaudeResponseStreamLease?
         var responseCompletionObserver: ResponseCompletionObserver?
         var responseCompletion: ChatGPTResponseCompletion?
         var responseCompletionDiagnosticLogged = false
@@ -237,6 +267,7 @@ final class EmbeddedBrowserSession {
         var pendingConversationAdmission: (id: UUID, generation: UUID)?
         var pendingCacheAdmission: (id: UUID, generation: UUID)?
         var modelChanges: EmbeddedModelChangeChannel?
+        var qwenCodePayloadChannel: [String: String]?
         var modelSignalWorld: WKContentWorld?
         var modelSignalOriginHost: String?
         var modelDiagnosticOperation: UUID?
@@ -257,10 +288,14 @@ final class EmbeddedBrowserSession {
         var humanCommittedNavigation: WKNavigation?
         var recoveryCommittedGeneration: UUID?
         var recoverySettledGeneration: UUID?
+        var geminiRecoveryNavigationStart: (checkpointID: UUID, generation: UUID)?
+        var pendingGeminiRecoveryHTTPFailure: (navigation: WKNavigation, generation: UUID, url: URL)?
+        var geminiRecoveryHTTPFailureGeneration: UUID?
         var recoveryToolUsed = false
         var geminiCookieObservationGeneration: UUID?
         var recoveryAttemptedCheckpointID: UUID?
         var recoveryAttemptedDocumentID: UUID?
+        var providerSignInRecoveryAttemptedDocumentID: UUID?
         // The callback that requests a popup carries no public tool-origin
         // token. Retain the guard until a replacement document commits so
         // delayed page callbacks cannot become human-owned after tool cleanup.
@@ -294,6 +329,13 @@ final class EmbeddedBrowserSession {
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support", isDirectory: true)
         self.geminiDiagnosticDirectory = geminiDiagnosticDirectory ?? (persistent ? support.appendingPathComponent(
             "LocalCodex/CodexHome/GeminiCAPTCHADiagnostics-v1", isDirectory: true) : nil)
+        if persistent, let sharedID = profileID ?? defaults.string(forKey: Self.profileDefaultsKey).flatMap(UUID.init(uuidString:)),
+           let saved = defaults.dictionary(forKey: Self.kimiProfileKey(sharedProfileID: sharedID)),
+           let id = (saved["identifier"] as? String).flatMap(UUID.init(uuidString:)), id != sharedID {
+            resolvedProfileID = sharedID
+            kimiDedicatedProfileID = id
+            if saved["enabled"] as? Bool == true { kimiModelProfileID = id }
+        }
     }
 
     /// Resolve once for both WebKit and saved checkpoints, even if preferences
@@ -314,6 +356,54 @@ final class EmbeddedBrowserSession {
         return identifier
     }
 
+    func isKimiProfileTab(_ id: UUID) -> Bool { entries[id]?.tab.kimiProfileID != nil }
+
+    func openKimiModelSignIn() throws -> UUID { try openKimiModelSignIn(loadHome: true) }
+
+    func useSharedKimiModelProfile() {
+        guard !isShutdown, kimiModelProfileID != nil else { return }
+        kimiModelProfileID = nil
+        saveKimiModelProfile()
+    }
+
+    private func openKimiModelSignIn(loadHome: Bool) throws -> UUID {
+        let profile = try kimiProfile(id: kimiDedicatedProfileID ?? UUID())
+        let tabID: UUID
+        if let tab = humanTabs.first(where: { !$0.isPopup && $0.kimiProfileID == profile.id }) {
+            guard entries[tab.id]?.view.configuration.websiteDataStore === profile.store else { throw Failure.kimiProfileUnavailable }
+            selectTab(tab.id)
+            tabID = tab.id
+        } else {
+            tabID = try createTab(select: true, modelOwned: false, kimiProfile: profile)
+            do {
+                if loadHome { try navigate(tabID: tabID, to: EmbeddedWebModelTransport.Provider.kimi.startURL) }
+            } catch {
+                closeTab(tabID)
+                throw error
+            }
+        }
+        kimiDedicatedProfileID = profile.id
+        kimiDedicatedStore = profile.store
+        kimiModelProfileID = profile.id
+        saveKimiModelProfile()
+        return tabID
+    }
+
+    private func kimiProfile(id: UUID) throws -> KimiProfile {
+        guard !isShutdown else { throw Failure.sessionClosed }
+        guard kimiDedicatedProfileID == nil || kimiDedicatedProfileID == id,
+              !persistent || id != persistentProfileIdentifier() else { throw Failure.kimiProfileUnavailable }
+        let store = kimiDedicatedStore ?? (persistent ? WKWebsiteDataStore(forIdentifier: id) : .nonPersistent())
+        guard store !== websiteDataStore else { throw Failure.kimiProfileUnavailable }
+        return KimiProfile(id: id, store: store)
+    }
+
+    private func saveKimiModelProfile() {
+        guard persistent, let id = kimiDedicatedProfileID else { return }
+        let saved: [String: Any] = ["identifier": id.uuidString, "enabled": kimiModelProfileID == id]
+        defaults.set(saved, forKey: Self.kimiProfileKey(sharedProfileID: persistentProfileIdentifier()))
+    }
+
     var savedHumanVerificationCheckpointIDs: [String: UUID] {
         guard persistent else { return transientHumanVerificationCheckpoints }
         return EmbeddedHumanVerificationStore(defaults: defaults, profileID: persistentProfileIdentifier()).load()
@@ -329,6 +419,42 @@ final class EmbeddedBrowserSession {
         let committedDocumentID: UUID
         let documentID: UUID
         let documentGeneration: UUID
+    }
+
+    /// A settled normal human landing is recovery intent, never authentication
+    /// proof. The transport separately requires its exact cached sign-in gate.
+    struct ProviderSignInRecoveryCandidate: Equatable, Sendable {
+        let id = UUID()
+        let provider: String
+        let tabID: UUID
+        let committedDocumentID: UUID
+        let documentID: UUID
+        let documentGeneration: UUID
+    }
+
+    func isProviderSignInRecoveryCandidateCurrent(_ candidate: ProviderSignInRecoveryCandidate) -> Bool {
+        guard candidate.provider == "deepseek", !isShutdown,
+              let entry = entries[candidate.tabID], entry.isAvailableToBrowserTools, !entry.isToolOwned,
+              !entry.recoveryToolUsed, entry.toolPopupContext == nil,
+              entry.humanCommittedDocumentID == candidate.committedDocumentID,
+              entry.tab.documentID == candidate.documentID, entry.tab.documentGeneration == candidate.documentGeneration,
+              entry.recoveryCommittedGeneration == candidate.documentGeneration,
+              entry.recoverySettledGeneration == candidate.documentGeneration,
+              entry.navigation == nil, !entry.view.isLoading, !entry.tab.isLoading, entry.tab.error == nil,
+              entry.view.url == EmbeddedWebModelTransport.Provider.deepseek.startURL else { return false }
+        return true
+    }
+
+    private func observeProviderSignInRecovery(_ entry: Entry) {
+        guard let callback = onProviderSignInRecoveryCandidate,
+              entry.view.url == EmbeddedWebModelTransport.Provider.deepseek.startURL else { return }
+        let candidate = ProviderSignInRecoveryCandidate(provider: "deepseek", tabID: entry.tab.id,
+            committedDocumentID: entry.humanCommittedDocumentID, documentID: entry.tab.documentID,
+            documentGeneration: entry.tab.documentGeneration)
+        guard isProviderSignInRecoveryCandidateCurrent(candidate),
+              entry.providerSignInRecoveryAttemptedDocumentID != entry.tab.documentID else { return }
+        entry.providerSignInRecoveryAttemptedDocumentID = entry.tab.documentID
+        callback(candidate)
     }
 
     var humanVerificationRecoveryReports: [String: EmbeddedHumanVerificationStore.RecoveryReport] {
@@ -361,12 +487,15 @@ final class EmbeddedBrowserSession {
     }
 
     private func isHumanVerificationRecoverySourceCurrent(_ candidate: HumanVerificationRecoveryCandidate) -> Bool {
-        guard !isShutdown, let entry = entries[candidate.tabID], !entry.isModelOwned, !entry.isToolOwned,
+        guard !isShutdown, let entry = entries[candidate.tabID], entry.isAvailableToBrowserTools, !entry.isToolOwned,
               !entry.recoveryToolUsed, entry.toolPopupContext == nil,
               entry.humanCommittedDocumentID == candidate.committedDocumentID,
               entry.tab.documentID == candidate.documentID, entry.tab.documentGeneration == candidate.documentGeneration,
               entry.recoveryCommittedGeneration == candidate.documentGeneration,
               entry.recoverySettledGeneration == candidate.documentGeneration,
+              entry.geminiRecoveryNavigationStart?.generation == candidate.documentGeneration,
+              entry.geminiRecoveryNavigationStart?.checkpointID == candidate.checkpointID,
+              entry.geminiRecoveryHTTPFailureGeneration != candidate.documentGeneration,
               entry.navigation == nil, !entry.view.isLoading, !entry.tab.isLoading, entry.tab.error == nil,
               EmbeddedHumanVerificationStore.recoveryProvider(forTrustedHumanURL: entry.view.url) == candidate.provider else { return false }
         return true
@@ -375,7 +504,7 @@ final class EmbeddedBrowserSession {
     private func observeHumanVerificationRecovery(_ entry: Entry) {
         guard let callback = onHumanVerificationRecoveryCandidate,
               let provider = EmbeddedHumanVerificationStore.recoveryProvider(forTrustedHumanURL: entry.view.url),
-              let checkpointID = savedHumanVerificationCheckpointIDs[provider] else { return }
+              let checkpointID = entry.geminiRecoveryNavigationStart?.checkpointID else { return }
         let candidate = HumanVerificationRecoveryCandidate(provider: provider, checkpointID: checkpointID,
             tabID: entry.tab.id, committedDocumentID: entry.humanCommittedDocumentID,
             documentID: entry.tab.documentID, documentGeneration: entry.tab.documentGeneration)
@@ -579,13 +708,13 @@ final class EmbeddedBrowserSession {
     }
 
     private func createTab(url: URL? = nil, select: Bool, modelOwned: Bool, toolOwned: Bool = false,
-                           isolatedChatGPTStore: WKWebsiteDataStore? = nil) throws -> UUID {
+                           isolatedChatGPTStore: WKWebsiteDataStore? = nil, kimiProfile: KimiProfile? = nil) throws -> UUID {
         do {
             guard !isShutdown else { throw Failure.sessionClosed }
             guard tabs.count + pendingChatGPTInferenceCookiePreparationCount < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
             if let url { try EmbeddedBrowserURLPolicy.validate(url) }
             let configuration = WKWebViewConfiguration()
-            configuration.websiteDataStore = isolatedChatGPTStore ?? dataStore()
+            configuration.websiteDataStore = kimiProfile?.store ?? isolatedChatGPTStore ?? dataStore()
             // This fresh controller has no native script handlers, scripts, or UI resource scheme.
             configuration.userContentController = WKUserContentController()
             // OAuth can open a window after an asynchronous response, beyond
@@ -609,7 +738,7 @@ final class EmbeddedBrowserSession {
             }
             configuration.defaultWebpagePreferences.allowsContentJavaScript = true
             let entry = try registerTab(configuration: configuration, select: select, modelOwned: modelOwned, toolOwned: toolOwned,
-                                        usesIsolatedChatGPTProfile: isolatedChatGPTStore != nil)
+                                        usesIsolatedChatGPTProfile: isolatedChatGPTStore != nil, kimiProfileID: kimiProfile?.id)
             if toolOwned { mountModelView(entry) }
             // Empty tabs intentionally do not load a homepage or trigger any network request.
             if let url { try navigate(tabID: entry.tab.id, to: url) }
@@ -621,14 +750,15 @@ final class EmbeddedBrowserSession {
     }
 
     private func registerTab(configuration: WKWebViewConfiguration, select: Bool, modelOwned: Bool, toolOwned: Bool = false,
-                             popupOpenerTabID: UUID? = nil, usesIsolatedChatGPTProfile: Bool = false) throws -> Entry {
+                             popupOpenerTabID: UUID? = nil, usesIsolatedChatGPTProfile: Bool = false,
+                             kimiProfileID: UUID? = nil) throws -> Entry {
         guard !isShutdown else { throw Failure.sessionClosed }
         guard exclusiveCookieMaintenance == nil else { throw Failure.cookieMaintenancePending }
         guard tabs.count + pendingChatGPTInferenceCookiePreparationCount < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
         // Apply before construction/initial navigation for human, tool, model
         // and popup tabs. Keep WebKit's own platform/engine user-agent prefix.
         configuration.applicationNameForUserAgent = EmbeddedBrowserIdentity.currentApplicationName
-        let tab = EmbeddedBrowserTab(isPopup: popupOpenerTabID != nil)
+        let tab = EmbeddedBrowserTab(isPopup: popupOpenerTabID != nil, kimiProfileID: kimiProfileID)
         let view: WKWebView
         #if DEBUG
         if modelOwned, let factory = modelViewFactoryForTesting { view = factory(configuration) }
@@ -640,11 +770,14 @@ final class EmbeddedBrowserSession {
         view = EmbeddedModelWebView(frame: modelOwned || toolOwned ? NSRect(x: 0, y: 0, width: 1_024, height: 768) : .zero,
                                     configuration: configuration)
         #endif
+        if kimiProfileID != nil, view.configuration.websiteDataStore !== configuration.websiteDataStore {
+            throw Failure.kimiProfileUnavailable
+        }
         (view as? EmbeddedModelWebView)?.protectsNativeFocus = modelOwned || toolOwned
         // Inspection is an explicit, ephemeral choice for each human tab.
         // An inspectable opener must not grant it to a new popup.
         view.isInspectable = false
-        tab.isWebInspectorAvailable = !modelOwned && !toolOwned
+        tab.isWebInspectorAvailable = !modelOwned && !toolOwned && kimiProfileID == nil
         let delegate = EmbeddedBrowserDelegate(session: self, tabID: tab.id)
         view.navigationDelegate = delegate
         view.uiDelegate = delegate
@@ -681,7 +814,7 @@ final class EmbeddedBrowserSession {
             // Preserve WebKit's configuration, opener and initial navigation.
             // Registration adds the same browser identity; never load again.
             return try registerTab(configuration: configuration, select: true, modelOwned: false,
-                                   popupOpenerTabID: tabID).view
+                                   popupOpenerTabID: tabID, kimiProfileID: opener.tab.kimiProfileID).view
         } catch {
             report(error.localizedDescription, tabID: tabID)
             return nil
@@ -714,9 +847,13 @@ final class EmbeddedBrowserSession {
         entry.frameBeforeToolRendering = nil
         removeResponseCompletionObserver(entry)
         revokeRequestMetadata(entry)
+        revokeClaudeResponseStream(entry)
+        removeGroqStatus(entry)
+        removeQwenMarker(entry)
         let postBlockObservation = entry.geminiPostBlockObservation
         entry.geminiPostBlockObservation = nil
         revokeModelInspector(entry, reason: isShutdown ? .shutdown : .closed)
+        revokeGroqFixtureInspector(entry, reason: isShutdown ? .shutdown : .closed)
         let humanIndex = tabs.prefix(index).filter { entries[$0.id]?.isModelOwned == false }.count
         entry.view.isInspectable = false
         entry.tab.isWebInspectorEnabled = false
@@ -803,8 +940,14 @@ final class EmbeddedBrowserSession {
         entry.pendingCacheAdmission = nil
         entry.delegate.cancelCacheAdmission()
         revokeResponseCompletion(entry)
+        removeGroqStatus(entry)
+        removeQwenMarker(entry)
+        revokeClaudeResponseStream(entry)
         revokeModelInspector(entry, reason: .navigation)
+        revokeGroqFixtureInspector(entry, reason: .navigation)
         resetModelNavigationDiagnostic(entry)
+        entry.geminiRecoveryNavigationStart = nil
+        entry.pendingGeminiRecoveryHTTPFailure = nil
         entry.navigation = nil
         entry.preparedDocumentNavigation = false
         entry.tab.documentID = UUID()
@@ -818,7 +961,7 @@ final class EmbeddedBrowserSession {
 
     func canInspect(tabID: UUID) -> Bool {
         guard !isShutdown, let entry = entries[tabID] else { return false }
-        return entry.tab.isWebInspectorAvailable && !entry.isModelOwned && !entry.isToolOwned
+        return entry.tab.isWebInspectorAvailable && entry.isAvailableToBrowserTools && !entry.isToolOwned
             && entry.toolPopupContext?.documentID != entry.humanCommittedDocumentID
     }
 
@@ -834,6 +977,614 @@ final class EmbeddedBrowserSession {
         case navigation, origin, closed, shutdown, expired, nativeContext = "native_context", finished
     }
     private static let inspectorDiagnosticLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "ModelInspectorDiagnostic")
+
+    /// Captures one explicitly armed synthetic inference. A separately admitted
+    /// experiment may set tool_choice:none; it never supplies response text,
+    /// ownership, provider completion or tool-dispatch authority.
+    @MainActor private final class GroqStatusProbe {
+        let lease: GroqOwnedStatusLease
+        let key = UUID().uuidString.replacingOccurrences(of:"-",with:"").lowercased()
+        let secret = UUID().uuidString.replacingOccurrences(of:"-",with:"").lowercased()
+        let url: URL
+        let source: String
+        var initialStart = false
+        var initialPreparation = false
+        var generation: UUID?
+        var owner: String?
+        var fingerprint: String?
+        var armed = false
+        var earlyScript: WKUserScript?
+        var expiry: Task<Void, Never>?
+        init?(lease:GroqOwnedStatusLease, url:URL) {
+            self.lease=lease; self.url=url
+            guard EmbeddedWebModelTransport.Provider.groq.acceptsGroqModelQuery(url,expectedKey:lease.modelChoice.key),
+                  let source=EmbeddedBrowserSession.rendererDiagnosticSource(named:"groq-owned-status"),
+                  source.components(separatedBy:"__GROQ_OWNED_SYNTHETIC_CONFIG__").count==2 else{return nil}
+            let remaining=(lease.deadline - ContinuousClock.now).components
+            let milliseconds=Int(min(390_000,max(0,Double(remaining.seconds)*1000+Double(remaining.attoseconds)/1e15)))
+            guard milliseconds>0 else{return nil}
+            self.source = source
+        }
+        // Late mode captures the current page fetch in the verified arm call.
+        // Explicit early mode captures it once before initial navigation only.
+        func installationSource() -> String? {
+            guard lease.isCurrent else { return nil }
+            let remaining=(lease.deadline - ContinuousClock.now).components
+            let milliseconds=Int(min(390_000,max(0,Double(remaining.seconds)*1000+Double(remaining.attoseconds)/1e15)))
+            var config:[String:Any]=["key":key,"secret":secret,"durationMs":milliseconds,"profile":lease.profile.rawValue]
+            if lease.isFixture { config["setupDiagnostics"] = true }
+            if lease.installationMode == .earlyPassive { config["earlyPassive"] = true }
+            var installedSource = source
+            if lease.capturesResponseStreamMetadata {
+                let marker = "null /*__GROQ_RESPONSE_STREAM_FACTORY__*/"
+                guard installedSource.components(separatedBy: marker).count == 2,
+                      let factory = EmbeddedBrowserSession.rendererDiagnosticSource(named: "groq-response-stream-metadata"),
+                      factory.utf8.count <= 32_768 else { return nil }
+                installedSource = installedSource.replacingOccurrences(of: marker, with: "(" + factory + ")")
+                guard let purpose = lease.responseStreamMetadataPurpose else { return nil }
+                config["streamMetadata"] = true
+                config["streamMetadataPurpose"] = purpose
+            }
+            if lease.permitsRequestTransformForTesting {
+                guard lease.capturesResponseStreamMetadata, lease.responseStreamMetadataVersion == 2,
+                      lease.installationMode == .earlyPassive else { return nil }
+                config["toolChoiceNoneForTesting"] = true
+            }
+            guard milliseconds>0,let bytes=try? JSONSerialization.data(withJSONObject:config) else{return nil}
+            return installedSource.replacingOccurrences(of:"__GROQ_OWNED_SYNTHETIC_CONFIG__",with:String(decoding:bytes,as:UTF8.self))
+        }
+    }
+    func createGroqStatusTab(url:URL,lease:GroqOwnedStatusLease) throws -> UUID {
+        let id=try createModelTab(initialURL:nil)
+        do {
+            if let entry=entries[id],entry.isModelOwned,!entry.isToolOwned,entry.view.url==nil,entry.modelChanges==nil,
+               let probe=GroqStatusProbe(lease:lease,url:url),lease.isCurrent {
+                entry.groqStatus=probe
+                if lease.installationMode == .earlyPassive, !installEarlyGroqStatus(entry, probe:probe) {
+                    removeGroqStatus(entry)
+                }
+            } else {lease.revoke()}
+            try navigate(tabID:id,to:url);return id
+        } catch {closeTab(id);lease.revoke();throw error}
+    }
+    private func installEarlyGroqStatus(_ entry: Entry, probe: GroqStatusProbe) -> Bool {
+        guard entry.groqStatus === probe, entry.isModelOwned, !entry.isToolOwned, entry.view.url == nil,
+              probe.lease.installationMode == .earlyPassive, probe.lease.isCurrent, probe.earlyScript == nil,
+              let source = probe.installationSource() else { return false }
+        let id = entry.tab.id
+        guard probe.lease.onEarlyObserverRevocation({ [weak self, weak probe] in
+            Task { @MainActor [weak self, weak probe] in
+                guard let self, let probe, let current = self.entries[id], current.groqStatus === probe else { return }
+                self.removeGroqStatus(current)
+            }
+        }) else { return false }
+        let script = WKUserScript(source:source,injectionTime:.atDocumentStart,forMainFrameOnly:true,in:.page)
+        probe.earlyScript = script
+        entry.view.configuration.userContentController.addUserScript(script)
+        let deadline = min(probe.lease.deadline, ContinuousClock.now + .seconds(390))
+        probe.expiry = Task { @MainActor [weak self, weak probe] in
+            do { try await Task.sleep(until:deadline) } catch { return }
+            guard let self, let probe, let current = self.entries[id], current.groqStatus === probe else { return }
+            self.removeGroqStatus(current)
+        }
+        guard probe.lease.isCurrent else { removeGroqStatus(entry); return false }
+        return true
+    }
+
+    private func removeGroqStatus(_ entry:Entry, preserveFixtureFailureScope:Bool=false) {
+        guard let probe=entry.groqStatus else{return}
+        entry.groqStatus=nil
+        probe.expiry?.cancel(); probe.expiry=nil
+        if let script = probe.earlyScript {
+            let controller = entry.view.configuration.userContentController
+            // Public WebKit removes all scripts; preserve every unrelated object/order.
+            let surviving = controller.userScripts.filter { $0 !== script }
+            controller.removeAllUserScripts(); surviving.forEach(controller.addUserScript)
+            probe.earlyScript=nil
+        }
+        if entry.view.url==probe.url && (probe.generation==nil || entry.tab.documentGeneration==probe.generation) {
+            entry.view.callAsyncJavaScript("if(document.URL===url)window[key]?.(secret,'dispose'); return null",
+                arguments:["url":probe.url.absoluteString,"key":"__computaGroqStatus_"+probe.key,"secret":probe.secret],in:nil,in:.page,completionHandler:nil)
+        }
+        // Failed observer setup grants nothing. A fixture-only native scope can
+        // still report not-armed at the original failure, under native joins.
+        if !preserveFixtureFailureScope || !probe.lease.isFixture { probe.lease.revoke() }
+    }
+    private func groqStatusCurrent(_ entry:Entry,_ probe:GroqStatusProbe,view:WKWebView,owner:String,generation:UUID)->Bool {
+        !isShutdown && !Task.isCancelled && entries[entry.tab.id]===entry && entry.groqStatus===probe && probe.initialStart
+        && entry.view===view && entry.isModelOwned && !entry.isToolOwned && view.url==probe.url && entry.tab.documentGeneration==generation
+        && entry.modelChanges?.ownerToken==owner && entry.modelSignalOriginHost=="chat.groq.com"
+    }
+    func prepareGroqStatus(_ id:UUID, view:WKWebView, owner:String, generation:UUID, outbound:String, fingerprint:String,
+                           lease: GroqOwnedStatusLease) async {
+        guard let e=entries[id],let p=e.groqStatus,p.lease.isCurrent,p.owner==nil,
+              groqStatusCurrent(e,p,view:view,owner:owner,generation:generation) else {
+            var reason: GroqOwnedStatusLease.SetupReason = .nativePrepareGuardSkipped
+            // Failed-guard diagnostics read only this exact current owned view;
+            // probe flags additionally require the same native fixture lease.
+            if lease.isFixture, !isShutdown, !Task.isCancelled, lease.isCurrent, let entry=entries[id],
+               entry.view===view, entry.isModelOwned, !entry.isToolOwned, entry.tab.documentGeneration==generation {
+                if let probe=entry.groqStatus, probe.lease===lease {
+                    if !probe.initialStart { reason = .nativeInitialStartMissing }
+                    else if probe.owner != nil { reason = .nativeOwnerAlreadySet }
+                    else if entry.modelChanges?.ownerToken != owner { reason = .nativeSignalOwnerMismatch }
+                    else if entry.modelSignalOriginHost != "chat.groq.com" { reason = .nativeSignalOriginMismatch }
+                } else if entry.groqStatus == nil { reason = .nativeProbeAbsent }
+            }
+            lease.recordSetupReason(reason); return
+        }
+        p.owner=owner;p.generation=generation;p.fingerprint=fingerprint
+        let result=await callGroqStatus(p,view:view,command:"arm",args:["model":p.lease.modelChoice.key,"label":p.lease.modelChoice.label,"prompt":outbound])
+        guard p.lease.isCurrent,groqStatusCurrent(e,p,view:view,owner:owner,generation:generation) else {
+            lease.recordSetupReason(.postAwaitContextRetired)
+            removeGroqStatus(e,preserveFixtureFailureScope:true); return
+        }
+        guard case .returned("ready") = result else {
+            let reason: GroqOwnedStatusLease.SetupReason
+            switch result {
+            case .returned(let value): reason = .javaScriptArmReason(value) ?? .armFalse
+            case .javascriptException: reason = .armException
+            case .timedOut: reason = .armTimeout
+            case .unavailable: reason = .armFalse
+            }
+            lease.recordSetupReason(reason)
+            removeGroqStatus(e,preserveFixtureFailureScope:true); return
+        }
+        p.armed=true;p.lease.recordObserverArmed()
+    }
+    func groqStatusResult(_ id:UUID,view:WKWebView,owner:String,generation:UUID,fingerprint:String) async -> String? {
+        guard let e=entries[id],let p=e.groqStatus,p.lease.isCurrent,p.armed,p.owner==owner,p.generation==generation,p.fingerprint==fingerprint,
+              groqStatusCurrent(e,p,view:view,owner:owner,generation:generation) else{return nil}
+        p.armed=false
+        let result=await callGroqStatus(p,view:view,command:"finish",args:[:])
+        guard p.lease.isCurrent,groqStatusCurrent(e,p,view:view,owner:owner,generation:generation) else{return nil}
+        guard case .returned(let value) = result, GroqOwnedStatusLease.stages.contains(value) else { return nil }
+        return value
+    }
+    struct GroqResponseStreamStatus {
+        let stage: String
+        let metadata: GroqOwnedStatusLease.ResponseStreamMetadata?
+
+        static func parse(_ text: String, expectedVersion: Int = 1) -> Self? {
+            guard [1, 2].contains(expectedVersion), text.utf8.count <= 2_048 else { return nil }
+            let data = Data(text.utf8)
+            guard APIModelCorrectionJSON.isUnambiguous(data),
+                  let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  Set(value.keys) == ["stage", "responseStream"],
+                  let stage = value["stage"] as? String, GroqOwnedStatusLease.stages.contains(stage) else { return nil }
+            let metadata: GroqOwnedStatusLease.ResponseStreamMetadata?
+            if value["responseStream"] is NSNull { metadata = nil }
+            else {
+                guard stage == "http_2xx_opened",
+                      let parsed = GroqOwnedStatusLease.ResponseStreamMetadata.parse(value["responseStream"]),
+                      parsed.version == expectedVersion else { return nil }
+                metadata = parsed
+            }
+            return .init(stage: stage, metadata: metadata)
+        }
+    }
+
+    func groqResponseStreamStatusResult(_ id: UUID, view: WKWebView, owner: String, generation: UUID,
+                                       fingerprint: String) async -> GroqResponseStreamStatus? {
+        guard let e = entries[id], let p = e.groqStatus, p.lease.capturesResponseStreamMetadata,
+              let expectedVersion = p.lease.responseStreamMetadataVersion,
+              p.armed, p.owner == owner, p.generation == generation, p.fingerprint == fingerprint,
+              groqStatusCurrent(e, p, view: view, owner: owner, generation: generation) else { return nil }
+        p.armed = false
+        let result = await callGroqStatus(p, view: view, command: "finish_metadata", args: [:])
+        guard p.lease.capturesResponseStreamMetadata,
+              groqStatusCurrent(e, p, view: view, owner: owner, generation: generation),
+              case .returned(let text) = result else { return nil }
+        return GroqResponseStreamStatus.parse(text, expectedVersion: expectedVersion)
+    }
+
+    private enum GroqStatusCallOutcome {
+        case returned(String), javascriptException, timedOut, unavailable
+    }
+    private enum GroqStatusCallFailure: Error { case javascriptException, timedOut, invalidReturn }
+    private func callGroqStatus(_ probe:GroqStatusProbe,view:WKWebView,command:String,args:[String:Any]) async -> GroqStatusCallOutcome {
+        let maximumBytes: Int
+        if command == "finish_metadata" {
+            guard probe.lease.capturesResponseStreamMetadata else { return .unavailable }
+            maximumBytes = 2_048
+        } else { maximumBytes = 42 }
+        let installation: String
+        if command == "arm", probe.lease.installationMode == .late {
+            guard let source = probe.installationSource() else { return .unavailable }
+            installation = source + ";\n"
+        } else { installation = "" }
+        let result=EmbeddedScriptResult(),deadline=min(probe.lease.deadline,ContinuousClock.now + .milliseconds(500))
+        do {
+            let bytes: Data = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    result.install(continuation)
+                    result.setTimeout(Task { do { try await Task.sleep(until:deadline) } catch{return};result.complete(.failure(GroqStatusCallFailure.timedOut)) })
+                    guard !Task.isCancelled,ContinuousClock.now<deadline else{result.complete(.failure(CancellationError()));return}
+                    view.callAsyncJavaScript("""
+                        if(document.URL!==url)return command==='arm'?'js_route_unavailable':null;
+                        \(installation)
+                        if(typeof window[key]!=='function')return command==='arm'?'controller_absent':null;
+                        const r=window[key](secret,command,args);
+                        return r===true?'ready':typeof r==='string'&&r.length<=\(maximumBytes)?r:command==='arm'?'arm_false':null;
+                        """,arguments:["url":probe.url.absoluteString,"key":"__computaGroqStatus_"+probe.key,"secret":probe.secret,"command":command,"args":args],
+                        in:nil,in:.page){ reply in
+                            switch reply {
+                            case .success(let value):
+                                if let string=value as? String,string.utf8.count<=maximumBytes {result.complete(.success(Data(string.utf8)))}
+                                else {result.complete(.failure(GroqStatusCallFailure.invalidReturn))}
+                            case .failure: result.complete(.failure(GroqStatusCallFailure.javascriptException))
+                            }
+                        }
+                }
+            } onCancel: { result.complete(.failure(CancellationError())) }
+            guard ContinuousClock.now<deadline else { return .timedOut }
+            return .returned(String(decoding:bytes,as:UTF8.self))
+        } catch GroqStatusCallFailure.timedOut { return .timedOut }
+        catch GroqStatusCallFailure.javascriptException { return .javascriptException }
+        catch { return .unavailable }
+    }
+
+    @MainActor private final class QwenMarkerProbe {
+        let lease: QwenMarkerWireLease
+        let key = "__computaQwenMarker_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        let secret = UUID().uuidString
+        let script: WKUserScript
+        var initialStart = false
+        var initialPreparation = false
+        var canonical: String?
+        var reachedProvisional = false
+        var generation: UUID?
+        var prepareResult: String?
+        var expiry: Task<Void, Never>?
+
+        init?(lease: QwenMarkerWireLease, label: String) {
+            self.lease = lease
+            let duration = min(60_000, lease.remainingMilliseconds)
+            let config: [String: Any] = ["origin":"https://chat.qwen.ai", "key":key, "secret":secret, "visibleModel":label,
+                "expiresAt":Date().timeIntervalSince1970 * 1_000 + Double(duration)]
+            guard duration > 0, let source = EmbeddedBrowserSession.rendererDiagnosticSource(named: "qwen-marker-wire"),
+                  source.components(separatedBy: "__COMPUTA_QWEN_MARKER_CONFIG__").count == 2,
+                  let json = try? JSONSerialization.data(withJSONObject: config) else { return nil }
+            script = .init(source: source.replacingOccurrences(of: "__COMPUTA_QWEN_MARKER_CONFIG__", with: String(decoding: json, as: UTF8.self)),
+                           injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page)
+        }
+        func allows(_ url: URL) -> Bool {
+            let raw = url.absoluteString
+            if let canonical { return raw == canonical }
+            if raw == "https://chat.qwen.ai/" { return !reachedProvisional }
+            guard generation != nil else { return false }
+            if raw == "https://chat.qwen.ai/c/new-chat" { reachedProvisional = true; return true }
+            guard let id = UUID(uuidString: url.lastPathComponent), raw == "https://chat.qwen.ai/c/" + id.uuidString.lowercased() else { return false }
+            canonical = raw
+            return true
+        }
+    }
+
+    private func installQwenCodePayload(tabID: UUID) throws {
+        guard let entry = entries[tabID], entry.isModelOwned, !entry.isToolOwned,
+              entry.view.url == nil, entry.qwenCodePayloadChannel == nil,
+              let source = Self.rendererDiagnosticSource(named:"qwen-code-payload"),
+              let rawSource = Self.rendererDiagnosticSource(named:"qwen-authored-source"),
+              [source,rawSource].allSatisfy({ $0.components(separatedBy: "__COMPUTA_QWEN_CODE_PAYLOAD_CONFIG__").count == 2 }) else { throw Failure.tabClosed }
+        let channel = ["dispatch": UUID().uuidString.lowercased(), "result": UUID().uuidString.lowercased(),
+                       "secret": UUID().uuidString.lowercased()]
+        let bytes = try JSONSerialization.data(withJSONObject: channel)
+        for template in [source,rawSource] {
+            let script = WKUserScript(source: template.replacingOccurrences(of: "__COMPUTA_QWEN_CODE_PAYLOAD_CONFIG__",
+                with: String(decoding: bytes, as: UTF8.self)), injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page)
+            entry.view.configuration.userContentController.addUserScript(script)
+        }
+        entry.qwenCodePayloadChannel = channel
+    }
+
+    func qwenCodePayloadChannel(tabID: UUID, view: WKWebView, owner: String, generation: UUID) -> [String: String]? {
+        guard let entry = entries[tabID], entry.isModelOwned, !entry.isToolOwned, entry.view === view,
+              entry.modelChanges?.ownerToken == owner, entry.modelSignalOriginHost == "chat.qwen.ai",
+              entry.tab.documentGeneration == generation, view.url?.host == "chat.qwen.ai" else { return nil }
+        return entry.qwenCodePayloadChannel
+    }
+
+    func createQwenMarkerTab(url: URL, label: String, lease: QwenMarkerWireLease) throws -> UUID {
+        let id = try createModelTab(initialURL: nil)
+        do { try installQwenCodePayload(tabID:id) } catch { closeTab(id); lease.revoke(); throw error }
+        do {
+            if url.absoluteString == "https://chat.qwen.ai/", let entry = entries[id], entry.isModelOwned, !entry.isToolOwned,
+               entry.view.url == nil, !entry.view.isLoading, entry.modelChanges == nil,
+               let probe = QwenMarkerProbe(lease: lease, label: label), lease.claim(view: ObjectIdentifier(entry.view)) {
+                entry.qwenMarkerProbe = probe
+                entry.view.configuration.userContentController.addUserScript(probe.script)
+                probe.expiry = Task { @MainActor [weak self, weak probe] in
+                    guard let probe else { return }
+                    do { try await Task.sleep(for: .milliseconds(min(60_000, lease.remainingMilliseconds))) } catch { return }
+                    if let self, let current = self.entries[id], current.qwenMarkerProbe === probe { self.removeQwenMarker(current) }
+                }
+            } else { lease.revoke() }
+            try navigate(tabID: id, to: url)
+            return id
+        } catch { closeTab(id); lease.revoke(); throw error }
+    }
+
+    private func removeQwenMarker(_ entry: Entry, preserveStagedLease: Bool = false) {
+        guard let probe = entry.qwenMarkerProbe else { return }
+        entry.qwenMarkerProbe = nil
+        probe.expiry?.cancel()
+        let controller = entry.view.configuration.userContentController
+        if controller.userScripts.contains(where: { $0 === probe.script }) {
+            let surviving = controller.userScripts.filter { $0 !== probe.script }
+            controller.removeAllUserScripts(); surviving.forEach(controller.addUserScript)
+        }
+        if let url = entry.view.url, url.scheme == "https", url.host == "chat.qwen.ai", url.port == nil,
+           url.user == nil, url.password == nil, probe.generation == nil || probe.generation == entry.tab.documentGeneration {
+            entry.view.callAsyncJavaScript("if (location.origin===origin && document.URL===url) { try { window[key]?.(secret,'retire',null) } catch {} } return null",
+                arguments: ["origin":"https://chat.qwen.ai","url":url.absoluteString,"key":probe.key,"secret":probe.secret],
+                in:nil, in:.page, completionHandler:nil)
+        }
+        if !preserveStagedLease { probe.lease.revoke() }
+    }
+
+    private func qwenMarkerCurrent(_ entry: Entry, _ probe: QwenMarkerProbe, view: WKWebView, owner: String, generation: UUID) -> Bool {
+        !isShutdown && !Task.isCancelled && entries[entry.tab.id] === entry && entry.qwenMarkerProbe === probe
+            && entry.isModelOwned && !entry.isToolOwned && entry.view === view && entry.modelChanges?.ownerToken == owner
+            && entry.modelSignalOriginHost == "chat.qwen.ai" && entry.tab.documentGeneration == generation
+            && probe.generation == generation && probe.initialStart && view.url.map(probe.allows) == true
+            && probe.lease.matches(view: ObjectIdentifier(view), ownerToken: owner, generation: generation)
+    }
+
+    func prepareQwenMarker(tabID: UUID, view: WKWebView, owner: String, turn: String, label: String,
+                           generation: UUID, outbound: String, fingerprint: String) async {
+        guard let entry = entries[tabID], let probe = entry.qwenMarkerProbe,
+              entry.isModelOwned, !entry.isToolOwned, entry.view === view, entry.modelChanges?.ownerToken == owner,
+              entry.modelSignalOriginHost == "chat.qwen.ai", entry.tab.documentGeneration == generation,
+              view.url?.absoluteString == "https://chat.qwen.ai/", probe.initialStart, probe.generation == nil,
+              probe.lease.bind(view: ObjectIdentifier(view), ownerToken: owner, generation: generation, outboundFingerprint: fingerprint)
+        else { return }
+        probe.generation = generation
+        guard qwenMarkerCurrent(entry, probe, view:view, owner:owner, generation:generation) else { removeQwenMarker(entry); return }
+        let tag = await callQwenMarker(probe, view:view, command:"prepare", packet:["turn":turn,"generation":generation.uuidString.lowercased(),
+            "visibleModel":label,"pickerVerified":true,"prompt":outbound])
+        guard qwenMarkerCurrent(entry, probe, view:view, owner:owner, generation:generation),
+              view.url?.absoluteString == "https://chat.qwen.ai/" else { return }
+        if let tag, ["ready","catalog_not_seen","catalog_pending","catalog_path_unverified","catalog_missing","catalog_ambiguous",
+            "catalog_binding","catalog_binding_scope","catalog_open_changed","catalog_send_changed","catalog_held_changed",
+            "catalog_send_unobserved","catalog_not_done","catalog_final_url","catalog_non_200","catalog_response_type",
+            "catalog_size","catalog_request","catalog_response","catalog_reused","catalog_accessor","catalog_mime","catalog_shape","stream_unavailable"].contains(tag) {
+            probe.prepareResult = tag
+        }
+    }
+
+    func finishQwenMarker(tabID: UUID, view: WKWebView, owner: String, generation: UUID, packet: [String: Any]) async -> String? {
+        guard let entry = entries[tabID], let probe = entry.qwenMarkerProbe,
+              qwenMarkerCurrent(entry, probe, view:view, owner:owner, generation:generation),
+              let canonical = probe.canonical, canonical == view.url?.absoluteString, let prepared = probe.prepareResult else { return nil }
+        let tag: String?
+        if prepared == "ready" { tag = await callQwenMarker(probe, view:view, command:"finish", packet:packet) }
+        else { tag = prepared }
+        guard qwenMarkerCurrent(entry, probe, view:view, owner:owner, generation:generation),
+              view.url?.absoluteString == canonical else { return nil }
+        removeQwenMarker(entry, preserveStagedLease:true)
+        return tag
+    }
+
+    private func callQwenMarker(_ probe: QwenMarkerProbe, view: WKWebView, command: String, packet: [String: Any]) async -> String? {
+        guard let url = view.url?.absoluteString, probe.lease.isCurrent else { return nil }
+        let deadline = ContinuousClock.now + .milliseconds(min(750, probe.lease.remainingMilliseconds))
+        let result = EmbeddedScriptResult()
+        let bytes: Data? = try? await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                result.install(continuation)
+                result.setTimeout(Task {
+                    do { try await Task.sleep(until: deadline) } catch { return }
+                    result.complete(.failure(Failure.tabClosed))
+                })
+                guard result.isPending, !Task.isCancelled, ContinuousClock.now < deadline else {
+                    result.complete(.failure(CancellationError())); return
+                }
+                view.callAsyncJavaScript("""
+                    if(document.URL!==url || typeof window[key]!=='function')return null;
+                    const r=window[key](secret,command,packet);
+                    return r && Object.keys(r).length===1 && typeof r.stage==='string' && r.stage.length<=48 ? r.stage : null;
+                    """, arguments:["url":url,"key":probe.key,"secret":probe.secret,"command":command,"packet":packet], in:nil, in:.page) { reply in
+                    if case .success(let value) = reply, let tag = value as? String, tag.utf8.count <= 48 {
+                        result.complete(.success(Data(tag.utf8)))
+                    } else { result.complete(.failure(Failure.tabClosed)) }
+                }
+            }
+        } onCancel: { result.complete(.failure(CancellationError())) }
+        return ContinuousClock.now < deadline ? bytes.map { String(decoding:$0,as:UTF8.self) } : nil
+    }
+
+    private final class ClaudeResponseStreamDiagnosticState {
+        let authorization: ClaudeResponseStreamLease
+        let key: String
+        let script: WKUserScript
+        var initialNavigationPrepared = false
+        var initialNavigationStarted = false
+        var generation: UUID?
+        var conversationURL: String?
+        var expiry: Task<Void, Never>?
+        init(authorization: ClaudeResponseStreamLease, key: String, script: WKUserScript) {
+            self.authorization = authorization; self.key = key; self.script = script
+        }
+    }
+
+    func createModelTab(url: URL, claudeResponseStream authorization: ClaudeResponseStreamLease) throws -> UUID {
+        let id = try createModelTab(initialURL: nil)
+        do {
+            if Self.claudeResponseStreamFreshURL(url) { _ = installClaudeResponseStream(authorization, tabID: id) }
+            else { authorization.revoke() }
+            // A failed diagnostic cannot fail or replay the ordinary navigation.
+            try navigate(tabID: id, to: url)
+            return id
+        } catch { closeTab(id); authorization.revoke(); throw error }
+    }
+
+    @discardableResult
+    func installClaudeResponseStream(_ authorization: ClaudeResponseStreamLease, tabID: UUID) -> Bool {
+        guard !isShutdown, !Task.isCancelled, let entry = entries[tabID], entry.isModelOwned, !entry.isToolOwned,
+              entry.claudeResponseStreamDiagnostic == nil, entry.claudeResponseStreamLease == nil,
+              entry.view.url == nil, !entry.view.isLoading,
+              entry.modelChanges == nil, authorization.isCurrent,
+              authorization.claim(view: ObjectIdentifier(entry.view)) else { authorization.revoke(); return false }
+        let duration = min(60_000, authorization.remainingMilliseconds)
+        let key = "__computaClaudeResponseStream_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
+        guard duration > 0, let source = Self.claudeResponseStreamSource(),
+              let config = try? JSONSerialization.data(withJSONObject: ["key": key, "durationMs": duration]),
+              let text = String(data: config, encoding: .utf8) else { authorization.revoke(); return false }
+        let script = WKUserScript(source: source.replacingOccurrences(of: "__COMPUTA_CLAUDE_RESPONSE_STREAM_CONFIG__", with: text),
+                                  injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page)
+        let diagnostic = ClaudeResponseStreamDiagnosticState(authorization: authorization, key: key, script: script)
+        entry.claudeResponseStreamDiagnostic = diagnostic
+        entry.claudeResponseStreamLease = authorization
+        entry.view.configuration.userContentController.addUserScript(script)
+        diagnostic.expiry = Task { @MainActor [weak self, weak diagnostic] in
+            do { try await Task.sleep(for: .milliseconds(duration)) } catch { return }
+            guard let self, let diagnostic, let current = self.entries[tabID],
+                  current.claudeResponseStreamDiagnostic === diagnostic else { return }
+            self.revokeClaudeResponseStream(current)
+        }
+        return true
+    }
+
+    func armClaudeResponseStream(tabID: UUID, view: WKWebView, ownerToken: String, expectedPrompt: String) async -> Bool {
+        guard !Task.isCancelled, !isShutdown, let entry = entries[tabID], entry.view === view,
+              entry.isModelOwned, !entry.isToolOwned, entry.modelChanges?.ownerToken == ownerToken,
+              entry.modelSignalOriginHost == "claude.ai", Self.claudeResponseStreamFreshURL(view.url),
+              let diagnostic = entry.claudeResponseStreamDiagnostic, diagnostic.generation == nil,
+              diagnostic.initialNavigationStarted, diagnostic.authorization.isCurrent,
+              !expectedPrompt.isEmpty, expectedPrompt.utf16.count <= 131_072 else { return false }
+        let generation = entry.tab.documentGeneration
+        guard diagnostic.authorization.bind(view: ObjectIdentifier(view), ownerToken: ownerToken, generation: generation) else { return false }
+        diagnostic.generation = generation
+        let bytes = await callClaudeResponseStream(command: "arm", entry: entry, diagnostic: diagnostic,
+                                                  arguments: ["expectedPrompt": expectedPrompt,
+                                                              "expectedMarker": diagnostic.authorization.expectedMarker])
+        guard claudeResponseStreamCurrent(entry, diagnostic: diagnostic, view: view, ownerToken: ownerToken, generation: generation),
+              bytes == Data("true".utf8) else {
+            if entries[tabID] === entry, entry.claudeResponseStreamDiagnostic === diagnostic { revokeClaudeResponseStream(entry) }
+            return false
+        }
+        return true
+    }
+
+    func stopClaudeResponseStream(tabID: UUID, view: WKWebView, ownerToken: String) async -> ClaudeResponseStreamSnapshot? {
+        guard !isShutdown, let entry = entries[tabID], entry.view === view,
+              entry.isModelOwned, !entry.isToolOwned, entry.modelChanges?.ownerToken == ownerToken,
+              entry.modelSignalOriginHost == "claude.ai", let diagnostic = entry.claudeResponseStreamDiagnostic else { return nil }
+        // Removal is unconditional for this exact caller, even if no arm or
+        // snapshot succeeded. Persistence belongs to transport before revoke.
+        defer { removeClaudeResponseStream(entry, diagnostic: diagnostic) }
+        guard let generation = diagnostic.generation,
+              claudeResponseStreamCurrent(entry, diagnostic: diagnostic, view: view, ownerToken: ownerToken, generation: generation) else { return nil }
+        let bytes = await callClaudeResponseStream(command: "stop", entry: entry, diagnostic: diagnostic)
+        guard claudeResponseStreamCurrent(entry, diagnostic: diagnostic, view: view, ownerToken: ownerToken, generation: generation),
+              let bytes else { return nil }
+        return try? ClaudeResponseStreamSnapshot.parse(bytes)
+    }
+
+    func revokeClaudeResponseStream(tabID: UUID, ownerToken: String) {
+        guard let entry = entries[tabID], entry.modelChanges?.ownerToken == ownerToken else { return }
+        revokeClaudeResponseStream(entry)
+    }
+
+    private func claudeResponseStreamCurrent(_ entry: Entry, diagnostic: ClaudeResponseStreamDiagnosticState,
+                                            view: WKWebView, ownerToken: String, generation: UUID) -> Bool {
+        !Task.isCancelled && !isShutdown && entries[entry.tab.id] === entry && entry.view === view
+            && entry.claudeResponseStreamDiagnostic === diagnostic && diagnostic.generation == generation
+            && entry.tab.documentGeneration == generation && entry.modelChanges?.ownerToken == ownerToken
+            && entry.modelSignalOriginHost == "claude.ai"
+            && diagnostic.authorization.matches(view: ObjectIdentifier(view), ownerToken: ownerToken, generation: generation)
+            && claudeResponseStreamRouteCurrent(entry, diagnostic: diagnostic)
+    }
+
+    private static func claudeResponseStreamFreshURL(_ url: URL?) -> Bool {
+        ["https://claude.ai/new", "https://claude.ai/new?incognito"].contains(url?.absoluteString ?? "")
+    }
+
+    private func claudeResponseStreamRouteCurrent(_ entry: Entry, diagnostic: ClaudeResponseStreamDiagnosticState) -> Bool {
+        guard let url = entry.view.url, url.scheme == "https", url.host == "claude.ai",
+              url.port == nil, url.user == nil, url.password == nil, url.fragment == nil else { return false }
+        if let pinned = diagnostic.conversationURL { return url.absoluteString == pinned }
+        if Self.claudeResponseStreamFreshURL(url) { return true }
+        guard diagnostic.generation != nil, url.query == nil, url.path.hasPrefix("/chat/"),
+              let id = UUID(uuidString: String(url.path.dropFirst(6))),
+              url.absoluteString == "https://claude.ai/chat/" + id.uuidString.lowercased() else { return false }
+        diagnostic.conversationURL = url.absoluteString
+        return true
+    }
+
+    private func callClaudeResponseStream(command: String, entry: Entry, diagnostic: ClaudeResponseStreamDiagnosticState,
+                                          arguments: [String: Any] = [:]) async -> Data? {
+        guard let expectedURL = entry.view.url?.absoluteString, diagnostic.authorization.isCurrent else { return nil }
+        let deadline = ContinuousClock.now + .milliseconds(min(1_000, diagnostic.authorization.remainingMilliseconds))
+        let result = EmbeddedScriptResult()
+        let bytes: Data? = try? await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                result.install(continuation)
+                let timeout = Task {
+                    do { try await Task.sleep(until: deadline) } catch { return }
+                    result.complete(.failure(Failure.tabClosed))
+                }
+                result.setTimeout(timeout)
+                guard result.isPending, !Task.isCancelled, ContinuousClock.now < deadline else {
+                    result.complete(.failure(CancellationError())); return
+                }
+                var values = arguments
+                values["key"] = diagnostic.key; values["command"] = command; values["expectedURL"] = expectedURL
+                values["expectedPrompt"] = values["expectedPrompt"] ?? NSNull()
+                values["expectedMarker"] = values["expectedMarker"] ?? NSNull()
+                entry.view.callAsyncJavaScript("""
+                    if (document.URL !== expectedURL || typeof window[key] !== 'function') return null;
+                    try {
+                      const value = await window[key](command, expectedPrompt, expectedMarker);
+                      const text = JSON.stringify(value);
+                      return typeof text === 'string' && text.length <= 81920 ? text : null;
+                    } catch { return null; }
+                    """, arguments: values, in: nil, in: .page) { reply in
+                    switch reply {
+                    case .success(let value):
+                        if let text = value as? String, text.utf8.count <= ClaudeResponseStreamSnapshot.maximumEncodedBytes {
+                            result.complete(.success(Data(text.utf8)))
+                        } else { result.complete(.failure(Failure.tabClosed)) }
+                    case .failure: result.complete(.failure(Failure.tabClosed))
+                    }
+                }
+            }
+        } onCancel: { result.complete(.failure(CancellationError())) }
+        return ContinuousClock.now < deadline ? bytes : nil
+    }
+
+    private func removeClaudeResponseStream(_ entry: Entry, diagnostic: ClaudeResponseStreamDiagnosticState) {
+        guard entry.claudeResponseStreamDiagnostic === diagnostic else { return }
+        entry.claudeResponseStreamDiagnostic = nil; diagnostic.expiry?.cancel()
+        let controller = entry.view.configuration.userContentController
+        let surviving = controller.userScripts.filter { $0 !== diagnostic.script }
+        controller.removeAllUserScripts(); surviving.forEach(controller.addUserScript)
+        // No snapshot or authority is retained by this best-effort disposal.
+        entry.view.callAsyncJavaScript("""
+            if (typeof window[key] === 'function') { try { window[key]('stop'); } catch {} }
+            try { delete window[key]; } catch {} return null;
+            """, arguments: ["key": diagnostic.key], in: nil, in: .page, completionHandler: nil)
+    }
+
+    private func revokeClaudeResponseStream(_ entry: Entry) {
+        if let diagnostic = entry.claudeResponseStreamDiagnostic { removeClaudeResponseStream(entry, diagnostic: diagnostic) }
+        entry.claudeResponseStreamLease?.revoke()
+        entry.claudeResponseStreamLease = nil
+    }
+
+    private static func claudeResponseStreamSource() -> String? {
+        #if SWIFT_PACKAGE
+        let bundles = [Bundle.module, Bundle.main]
+        #else
+        let bundles = [Bundle.main]
+        #endif
+        for bundle in bundles {
+            if let url = bundle.url(forResource: "claude-response-stream-diagnostic", withExtension: "js", subdirectory: "BrowserModels"),
+               let source = try? String(contentsOf: url, encoding: .utf8),
+               source.components(separatedBy: "__COMPUTA_CLAUDE_RESPONSE_STREAM_CONFIG__").count == 2 { return source }
+        }
+        return nil
+    }
 
     private final class RequestMetadataDiagnostic {
         let authorization: ChatGPTRequestMetadataLease
@@ -884,6 +1635,7 @@ final class EmbeddedBrowserSession {
         let script = WKUserScript(source: source.replacingOccurrences(of: "__COMPUTA_REQUEST_METADATA_CONFIG__", with: configText),
             injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page)
         let diagnostic = RequestMetadataDiagnostic(authorization: authorization, key: key, script: script)
+        entry.hadChatRootDiagnostic = true
         entry.requestMetadataDiagnostic = diagnostic
         entry.view.configuration.userContentController.addUserScript(script)
         diagnostic.expiry = Task { @MainActor [weak self, weak diagnostic] in
@@ -1378,9 +2130,58 @@ final class EmbeddedBrowserSession {
             guard let self, let current = self.entries[tabID], current.inspectorDiagnostic?.id == id else { return }
             self.revokeModelInspector(current, reason: .expired)
         }
+        entry.hadChatRootDiagnostic = true
         entry.inspectorDiagnostic = (id, binding, expiry)
         Self.inspectorDiagnosticLog.notice("inspectorDiagnostic disposition=granted")
         return true
+    }
+
+    /// A separate, explicitly manual fixture purpose. Existing human policy and
+    /// ChatGPT inspection guards are independent and unchanged.
+    func grantGroqFixtureInspectorDiagnostic(_ binding: GroqOwnedStatusLease.InspectorBinding, tabID: UUID,
+                                            view: WKWebView, ownerToken: String, generation: UUID) -> Bool {
+        guard !isShutdown, !Task.isCancelled, let entry = entries[tabID], entry.view === view,
+              entry.isModelOwned, !entry.isToolOwned, entry.inspectorDiagnostic == nil,
+              entry.groqFixtureInspectorDiagnostic == nil,
+              entry.modelChanges?.ownerToken == ownerToken, entry.modelSignalOriginHost == "chat.groq.com",
+              entry.tab.documentGeneration == generation, Self.groqFixtureInspectorURLAllowed(view.url) else { return false }
+        let id = UUID()
+        let activated = binding.activate(view: ObjectIdentifier(view), ownerToken: ownerToken, generation: generation,
+            onRevocation: { [weak self] in
+                Task { @MainActor [weak self] in
+                    guard let self, let current = self.entries[tabID], current.groqFixtureInspectorDiagnostic?.id == id else { return }
+                    self.revokeGroqFixtureInspector(current, reason: .nativeContext)
+                }
+            }, action: { view.isInspectable = true })
+        guard activated else { return false }
+        let expiry = Task { @MainActor [weak self] in
+            do { try await Task.sleep(until: binding.deadline, clock: .continuous) }
+            catch { return }
+            guard let self, let current = self.entries[tabID], current.groqFixtureInspectorDiagnostic?.id == id else { return }
+            self.revokeGroqFixtureInspector(current, reason: .expired)
+        }
+        entry.groqFixtureInspectorDiagnostic = (id, binding, expiry)
+        Self.inspectorDiagnosticLog.notice("groqFixtureInspectorDiagnostic disposition=granted")
+        return true
+    }
+
+    func revokeGroqFixtureInspectorDiagnostic(tabID: UUID, ownerToken: String) {
+        guard let entry = entries[tabID], entry.modelChanges?.ownerToken == ownerToken else { return }
+        revokeGroqFixtureInspector(entry, reason: .finished)
+    }
+
+    private static func groqFixtureInspectorURLAllowed(_ url: URL?) -> Bool {
+        guard let url else { return false }
+        return url == EmbeddedWebModelTransport.Provider.groq.startURL(choice: GroqOwnedStatusLease.Profile.gptoss120b.choice)
+    }
+
+    private func revokeGroqFixtureInspector(_ entry: Entry, reason: ModelInspectorRevocation) {
+        guard let diagnostic = entry.groqFixtureInspectorDiagnostic else { return }
+        entry.groqFixtureInspectorDiagnostic = nil
+        diagnostic.expiry.cancel()
+        entry.view.isInspectable = false
+        diagnostic.binding.revoke()
+        Self.inspectorDiagnosticLog.notice("groqFixtureInspectorDiagnostic disposition=revoked reason=\(reason.rawValue, privacy: .public)")
     }
 
     #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
@@ -1427,6 +2228,7 @@ final class EmbeddedBrowserSession {
                   current.syntheticNativeFocusDiagnostic?.id == id else { return }
             self.endModelNativeFocusDiagnostic(current)
         }
+        entry.hadChatRootDiagnostic = true
         entry.syntheticNativeFocusDiagnostic = (id, binding, expiry)
         Self.inspectorDiagnosticLog.notice("syntheticNativeFocusDiagnostic version=1 nonce=\(binding.nonce.uuidString.lowercased(), privacy: .public) sessionID=\(binding.ownerToken.lowercased(), privacy: .public) generation=\(binding.generation.uuidString.lowercased(), privacy: .public) disposition=acquired")
         return true
@@ -1461,7 +2263,7 @@ final class EmbeddedBrowserSession {
     /// release; a new committed human document can offer a new recovery intent.
     func markHumanDocumentUsedByTool(tabID: UUID, generation: UUID) throws {
         let entry = try entry(tabID)
-        guard !entry.isModelOwned, entry.tab.documentGeneration == generation else { throw BrowserTabBrokerError.staleDocument }
+        guard entry.isAvailableToBrowserTools, entry.tab.documentGeneration == generation else { throw BrowserTabBrokerError.staleDocument }
         entry.recoveryToolUsed = true
     }
 
@@ -1469,7 +2271,7 @@ final class EmbeddedBrowserSession {
     /// A provisional/failed load or Stop does not replace the retained document.
     func prepareToolMutation(tabID: UUID, generation: UUID) throws -> UUID {
         let entry = try entry(tabID)
-        guard !entry.isModelOwned, entry.tab.documentGeneration == generation else {
+        guard entry.isAvailableToBrowserTools, entry.tab.documentGeneration == generation else {
             throw BrowserTabBrokerError.staleDocument
         }
         entry.view.isInspectable = false
@@ -1562,7 +2364,7 @@ final class EmbeddedBrowserSession {
     /// human pane cannot shrink the task viewport; final release restores it.
     func acquireToolRendering(tabID: UUID) throws -> UUID {
         let entry = try entry(tabID)
-        guard !entry.isModelOwned else { throw Failure.modelTabPrivate }
+        guard entry.isAvailableToBrowserTools else { throw Failure.modelTabPrivate }
         guard modelRenderHost?.window != nil else {
             throw BrowserTabBrokerError.browserUnavailable("The background browser render host is unavailable. No page action was dispatched.")
         }
@@ -1593,6 +2395,7 @@ final class EmbeddedBrowserSession {
     /// Check immediately before tool dispatch, without moving or replaying it.
     func requireToolRendering(tabID: UUID) throws {
         let entry = try entry(tabID)
+        guard entry.isAvailableToBrowserTools else { throw Failure.modelTabPrivate }
         guard !entry.toolRenderLeases.isEmpty else { return }
         guard let host = modelRenderHost, let window = host.window,
               entry.view.superview === host, entry.view.window === window,
@@ -1629,7 +2432,7 @@ final class EmbeddedBrowserSession {
     /// A provisional load may invalidate capabilities without replacing the
     /// rendered document. Retry accounting uses only an observed native commit.
     func committedHumanDocumentID(for id: UUID, generation: UUID) -> UUID? {
-        guard let entry = entries[id], !entry.isModelOwned,
+        guard let entry = entries[id], entry.isAvailableToBrowserTools,
               entry.tab.documentGeneration == generation,
               entry.humanCommittedNavigation != nil else { return nil }
         return entry.humanCommittedDocumentID
@@ -1751,6 +2554,41 @@ final class EmbeddedBrowserSession {
             && !facts.generationCommitted && !facts.generationFinished && !facts.navigationError
     }
 
+    fileprivate func invalidateChatRootRequest(_ view: WKWebView, tabID: UUID) {
+        guard let entry = entries[tabID], entry.view === view, entry.usesIsolatedChatGPTProfile else { return }
+        entry.authorizedChatRootRequest = nil
+        entry.initialChatRootTransition = nil
+    }
+
+    fileprivate func noteAllowedChatRootRequest(_ action: WKNavigationAction, view: WKWebView, tabID: UUID) {
+        guard let entry = entries[tabID], entry.view === view, entry.usesIsolatedChatGPTProfile, entry.isModelOwned,
+              action.targetFrame?.isMainFrame == true else { return }
+        entry.authorizedChatRootRequest = nil
+        entry.initialChatRootTransition = nil
+        if action.sourceFrame.isMainFrame, action.request.httpMethod == "GET",
+           action.navigationType == .other || action.navigationType == .reload,
+           action.request.url?.absoluteString == "https://chatgpt.com/", view.url?.absoluteString == "https://chatgpt.com/" {
+            entry.authorizedChatRootRequest = entry.tab.documentGeneration
+        }
+    }
+
+    enum InitialChatRootTransition { case provisional, settled }
+
+    func initialChatRootTransition(tabID: UUID, view: WKWebView, owner: String,
+                                   from: UUID, to: UUID) -> InitialChatRootTransition? {
+        guard !isShutdown, let entry = entries[tabID], entry.isModelOwned, !entry.isToolOwned,
+              entry.usesIsolatedChatGPTProfile, !entry.hadChatRootDiagnostic, !entry.view.isInspectable, entry.view === view, entry.modelChanges?.ownerToken == owner,
+              entry.modelSignalOriginHost == "chatgpt.com", entry.tab.documentGeneration == to, from != to,
+              let edge = entry.initialChatRootTransition, edge.from == from, edge.to == to,
+              let facts = modelNavigationDiagnostic(tabID: tabID, view: view), !facts.navigationError,
+              !facts.serverRedirectObservedInCurrentNavigation else { return nil }
+        if facts.settled {
+            return view.url?.absoluteString == "https://chatgpt.com/" ? .settled : nil
+        }
+        guard entry.pendingConversationURL?.absoluteString == "https://chatgpt.com/", facts.navigationPending else { return nil }
+        return .provisional
+    }
+
     static let modelSignalName = "computaChatGPTSignal"
     static let modelDiagnosticName = "computaModelDiagnostic"
     static let modelClockName = "computaModelClock"
@@ -1765,6 +2603,7 @@ final class EmbeddedBrowserSession {
         case adapterEntry = "adapter_entry"
         case modelProof = "model_proof"
         case modelWait = "model_wait"
+        case modelWaitInitialDisabled = "model_wait_initial_disabled"
         case modelWaitDone = "model_wait_done"
         case firstUserHash = "first_user_hash"
         case firstUserExpand = "first_user_expand"
@@ -1785,7 +2624,7 @@ final class EmbeddedBrowserSession {
                                   originHost: String = "chatgpt.com") throws {
         let entry = try entry(tabID)
         guard UUID(uuidString: ownerToken) != nil, entry.modelChanges == nil,
-              ["chatgpt.com", "claude.ai", "gemini.google.com", "chat.groq.com"].contains(originHost) else { throw Failure.tabClosed }
+              ["chatgpt.com", "claude.ai", "gemini.google.com", "chat.groq.com", "www.kimi.ai", "chat.qwen.ai", "chat.deepseek.com"].contains(originHost) else { throw Failure.tabClosed }
         entry.modelChanges = EmbeddedModelChangeChannel(ownerToken: ownerToken)
         entry.modelSignalWorld = world
         entry.modelSignalOriginHost = originHost
@@ -1919,6 +2758,38 @@ final class EmbeddedBrowserSession {
         for wait in waits { wait.task.cancel(); wait.reply(nil, "model_clock_cancelled") }
     }
 
+    /// A native-memory observation only. This does not inspect the provider,
+    /// signal/rearm its observer, advance a revision, or grant page authority.
+    struct ModelSignalProgress: Sendable {
+        let received: Int
+        let accepted: Int
+        let revision: Int
+        let saturated: Bool
+        let attached: Bool
+        let hidden: Bool
+        let windowPresent: Bool
+        let visible: Bool
+        let occluded: Bool
+    }
+
+    func modelSignalProgress(tabID: UUID, view: WKWebView, ownerToken: String,
+                             generation: UUID) -> ModelSignalProgress? {
+        guard let entry = entries[tabID], entry.isModelOwned, !entry.isToolOwned,
+              entry.view === view, let channel = entry.modelChanges,
+              channel.ownerToken == ownerToken, entry.tab.documentGeneration == generation,
+              let revision = try? channel.currentRevision() else { return nil }
+        let cap = UInt64(UInt16.max)
+        let received = Int(entry.modelDOMSignalsReceived)
+        let accepted = Int(entry.modelDOMSignalsAccepted)
+        let window = view.window
+        return ModelSignalProgress(received: received, accepted: accepted,
+            revision: Int(min(revision, cap)),
+            saturated: UInt64(received) >= cap || UInt64(accepted) >= cap || revision >= cap,
+            attached: view.superview != nil, hidden: view.isHiddenOrHasHiddenAncestor,
+            windowPresent: window != nil, visible: window?.isVisible == true,
+            occluded: window != nil && window?.occlusionState.contains(.visible) != true)
+    }
+
     func modelChangeRevision(for id: UUID) throws -> UInt64 {
         guard let channel = try entry(id).modelChanges else { throw Failure.tabClosed }
         return try channel.currentRevision()
@@ -1960,9 +2831,14 @@ final class EmbeddedBrowserSession {
         try createTab(url: url, select: false, modelOwned: false, toolOwned: true)
     }
 
-    /// No model page or privileged app WebView can enter the general browser driver.
     func humanTab(id: UUID) -> EmbeddedBrowserTab? {
         guard let entry = entries[id], !entry.isModelOwned else { return nil }
+        return entry.tab
+    }
+
+    /// Dedicated sign-in and OAuth pages remain visible to the person only.
+    func browserToolTab(id: UUID) -> EmbeddedBrowserTab? {
+        guard let entry = entries[id], entry.isAvailableToBrowserTools else { return nil }
         return entry.tab
     }
 
@@ -1970,7 +2846,7 @@ final class EmbeddedBrowserSession {
         while true {
             try Task.checkCancellation()
             let entry = try entry(id)
-            guard !entry.isModelOwned else { throw Failure.modelTabPrivate }
+            guard entry.isAvailableToBrowserTools else { throw Failure.modelTabPrivate }
             let revision = try entry.navigationChanges.currentRevision()
             if let error = entry.tab.error { throw BrowserTabBrokerError.browserUnavailable(error) }
             if !entry.tab.isLoading, !entry.view.isLoading, entry.view.url != nil { return }
@@ -1991,13 +2867,13 @@ final class EmbeddedBrowserSession {
                                       until deadline: ContinuousClock.Instant,
                                       authorization: () throws -> Void) async throws -> BrowserDocumentChangeResult {
         let original = try entry(id)
-        guard !original.isModelOwned else { throw Failure.modelTabPrivate }
+        guard original.isAvailableToBrowserTools else { throw Failure.modelTabPrivate }
         let view = original.view
         var changed = false
         while true {
             try Task.checkCancellation()
             let current = try entry(id)
-            guard !current.isModelOwned else { throw Failure.modelTabPrivate }
+            guard current.isAvailableToBrowserTools else { throw Failure.modelTabPrivate }
             guard current.view === view else { throw BrowserTabBrokerError.targetReplaced }
             try authorization()
             // Register against the revision obtained before examining state;
@@ -2021,6 +2897,21 @@ final class EmbeddedBrowserSession {
     /// Model pages share the sign-in profile, but never reuse a human's tab.
     func createModelTab(url: URL) throws -> UUID {
         try createModelTab(initialURL: url)
+    }
+
+    func createKimiModelTab(url: URL, profileID: UUID) throws -> UUID {
+        guard url.absoluteString == EmbeddedWebModelTransport.Provider.kimi.startURL.absoluteString else {
+            throw Failure.kimiProfileUnavailable
+        }
+        return try createKimiModelTab(initialURL: url, profileID: profileID)
+    }
+
+    private func createKimiModelTab(initialURL: URL?, profileID: UUID) throws -> UUID {
+        guard kimiModelProfileID == profileID else { throw Failure.kimiProfileUnavailable }
+        let profile = try kimiProfile(id: profileID)
+        let tabID = try createModelTab(initialURL: initialURL, kimiProfile: profile)
+        kimiDedicatedStore = profile.store
+        return tabID
     }
 
     private static let inferencePrewarmLog = Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "EmbeddedWebModel")
@@ -2066,7 +2957,8 @@ final class EmbeddedBrowserSession {
     /// Observation only, after a successful committed navigation. Never awaits
     /// WebKit, retains cookies, clears a checkpoint, or grants model authority.
     private func observeGeminiVerificationCookies(_ entry: Entry) {
-        guard !isShutdown, entries[entry.tab.id] === entry, !entry.isToolOwned, !entry.recoveryToolUsed, entry.toolPopupContext == nil,
+        guard !isShutdown, entries[entry.tab.id] === entry, entry.tab.kimiProfileID == nil,
+              !entry.isToolOwned, !entry.recoveryToolUsed, entry.toolPopupContext == nil,
               entry.toolRenderLeases.isEmpty, entry.navigation == nil, !entry.view.isLoading, !entry.tab.isLoading,
               entry.tab.error == nil, let destination = Self.geminiCookieDestination(entry.view.url),
               entry.geminiCookieObservationGeneration != entry.tab.documentGeneration,
@@ -2571,22 +3463,33 @@ final class EmbeddedBrowserSession {
 
     /// Fixtures load one local document themselves. Starting about:blank first
     /// would leave two competing provisional navigations in the same WebView.
-    func createUnloadedModelTabForTesting(isolatedChatGPTProfile: Bool = false,
+    func createUnloadedModelTabForTesting(isolatedChatGPTProfile: Bool = false, qwenCodePayload: Bool = false,
                                          viewFactory: (@MainActor (WKWebViewConfiguration) -> WKWebView)? = nil) throws -> UUID {
         modelViewFactoryForTesting = viewFactory
         defer { modelViewFactoryForTesting = nil }
-        return try createModelTab(initialURL: nil, isolatedChatGPTStore: isolatedChatGPTProfile ? .nonPersistent() : nil)
+        let id = try createModelTab(initialURL: nil, isolatedChatGPTStore: isolatedChatGPTProfile ? .nonPersistent() : nil)
+        if qwenCodePayload { try installQwenCodePayload(tabID:id) }
+        return id
+    }
+
+    func openKimiModelSignInForTesting() throws -> UUID { try openKimiModelSignIn(loadHome: false) }
+
+    func createUnloadedKimiModelTabForTesting(profileID: UUID) throws -> UUID {
+        try createKimiModelTab(initialURL: nil, profileID: profileID)
     }
     #endif
 
-    private func createModelTab(initialURL: URL?, isolatedChatGPTStore: WKWebsiteDataStore? = nil) throws -> UUID {
-        let id = try createTab(select: false, modelOwned: true, isolatedChatGPTStore: isolatedChatGPTStore)
+    private func createModelTab(initialURL: URL?, isolatedChatGPTStore: WKWebsiteDataStore? = nil, kimiProfile: KimiProfile? = nil) throws -> UUID {
+        let id = try createTab(select: false, modelOwned: true, isolatedChatGPTStore: isolatedChatGPTStore, kimiProfile: kimiProfile)
         do {
             guard let view = webView(for: id) else { throw Failure.tabClosed }
             if let entry = entries[id] { installResponseCompletionObserver(entry) }
             view.frame = NSRect(x: 0, y: 0, width: 1_024, height: 768)
             if let entry = entries[id] { mountModelView(entry) }
-            if let initialURL { try navigate(tabID: id, to: initialURL) }
+            if let initialURL {
+                if initialURL.absoluteString == "https://chat.qwen.ai/" { try installQwenCodePayload(tabID:id) }
+                try navigate(tabID: id, to: initialURL)
+            }
             return id
         } catch {
             closeTab(id)
@@ -2609,6 +3512,7 @@ final class EmbeddedBrowserSession {
         for seed in Array(inferenceCookieSeeds.values) { seed.cancel() }
         for validation in Array(inferenceCookieValidations.values) { validation.cancel() }
         onHumanVerificationRecoveryCandidate = nil
+        onProviderSignInRecoveryCandidate = nil
         for id in tabs.map(\.id) { closeTab(id) }
         temporaryCookieRetirement?.stop()
         modelRenderHost = nil
@@ -2623,14 +3527,38 @@ final class EmbeddedBrowserSession {
         return entry
     }
 
-    private func prepareNavigation(_ entry: Entry, replacesDocument: Bool = false) {
+    private func prepareNavigation(_ entry: Entry, replacesDocument: Bool = false, claudeInitialStart: Bool = false) {
         entry.pendingCacheAdmission = nil
         entry.delegate.cancelCacheAdmission()
         entry.pendingConversationAdmission = nil
         revokeResponseCompletion(entry)
         if entry.requestMetadataDiagnostic?.generation != nil { revokeRequestMetadata(entry) }
+        if let probe = entry.groqStatus {
+            if claudeInitialStart && !probe.initialStart {probe.initialStart=true}
+            else if !probe.initialPreparation && !probe.initialStart && entry.view.url==nil && entry.navigation==nil {probe.initialPreparation=true}
+            else {removeGroqStatus(entry)}
+        }
+        if let probe = entry.qwenMarkerProbe {
+            if claudeInitialStart && !probe.initialStart { probe.initialStart = true }
+            else if !probe.initialPreparation && !probe.initialStart && entry.view.url == nil && entry.navigation == nil { probe.initialPreparation = true }
+            else { removeQwenMarker(entry) }
+        }
+        if let diagnostic = entry.claudeResponseStreamDiagnostic {
+            if claudeInitialStart, !diagnostic.initialNavigationStarted {
+                // The one initial owned navigation injects the dormant script.
+                diagnostic.initialNavigationStarted = true
+            } else if !diagnostic.initialNavigationPrepared, !diagnostic.initialNavigationStarted,
+                      entry.view.url == nil, entry.navigation == nil {
+                diagnostic.initialNavigationPrepared = true
+            } else { revokeClaudeResponseStream(entry) }
+        } else if entry.claudeResponseStreamLease != nil {
+            revokeClaudeResponseStream(entry)
+        }
         revokeModelInspector(entry, reason: .navigation)
+        revokeGroqFixtureInspector(entry, reason: .navigation)
         resetModelNavigationDiagnostic(entry)
+        entry.geminiRecoveryNavigationStart = nil
+        entry.pendingGeminiRecoveryHTTPFailure = nil
         entry.recoverySettledGeneration = nil
         entry.tab.documentID = UUID()
         entry.preparedDocumentNavigation = replacesDocument
@@ -2668,8 +3596,13 @@ final class EmbeddedBrowserSession {
 
     private func refresh(_ id: UUID, view: WKWebView, committedNavigation: Bool = false) {
         guard let entry = entries[id], entry.view === view else { return }
+        if let probe=entry.groqStatus,let url=view.url,url != probe.url {removeGroqStatus(entry)}
+        if let probe = entry.qwenMarkerProbe, let url = view.url, !probe.allows(url) { removeQwenMarker(entry) }
+        if let diagnostic = entry.claudeResponseStreamDiagnostic, view.url != nil,
+           !claudeResponseStreamRouteCurrent(entry, diagnostic: diagnostic) { revokeClaudeResponseStream(entry) }
         if entry.responseCompletion != nil, !Self.responseCompletionURLAllowed(view.url) { revokeResponseCompletion(entry) }
         if entry.inspectorDiagnostic != nil, !Self.inspectorOriginAllowed(view.url) { revokeModelInspector(entry, reason: .origin) }
+        if entry.groqFixtureInspectorDiagnostic != nil, !Self.groqFixtureInspectorURLAllowed(view.url) { revokeGroqFixtureInspector(entry, reason: .origin) }
         let title = view.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         entry.tab.title = title.isEmpty ? (view.url?.host ?? "New tab") : String(title.prefix(512))
         // Includes history.pushState/fragment navigation. This is intentionally conservative;
@@ -2681,9 +3614,12 @@ final class EmbeddedBrowserSession {
         entry.tab.canGoForward = view.canGoForward
         // A provisional load can still expose the old page URL. Observe the
         // committed document or settled native URL without inspecting its DOM.
-        if !entry.isModelOwned, committedNavigation || !view.isLoading {
+        if entry.isAvailableToBrowserTools, committedNavigation || !view.isLoading {
             observeHumanVerificationCheckpoint(entry)
-            if entry.recoverySettledGeneration == entry.tab.documentGeneration { observeHumanVerificationRecovery(entry) }
+            if entry.recoverySettledGeneration == entry.tab.documentGeneration {
+                observeHumanVerificationRecovery(entry)
+                observeProviderSignInRecovery(entry)
+            }
         }
         signalModelChange(entry)
         emitGeminiPostBlockNativeEvent(entry, .changed)
@@ -2804,7 +3740,7 @@ final class EmbeddedBrowserSession {
 
     fileprivate func observeGeminiNavigationRequest(_ request: URLRequest, isMainFrame: Bool,
                                                     view: WKWebView, tabID: UUID) {
-        guard !isShutdown, isMainFrame, let entry = entries[tabID], entry.view === view else { return }
+        guard !isShutdown, isMainFrame, let entry = entries[tabID], entry.tab.kimiProfileID == nil, entry.view === view else { return }
         entry.geminiDiagnosticJournal.recordRequest(request, generation: entry.tab.documentGeneration, now: Date())
     }
 
@@ -2813,7 +3749,7 @@ final class EmbeddedBrowserSession {
     /// Synchronous persistence makes the save acknowledgment precede teardown,
     /// including cancellation and shutdown; no page evaluation or retry occurs.
     func captureGeminiCAPTCHA(tabID: UUID, view: WKWebView, trigger: GeminiCAPTCHADiagnostic.Trigger) {
-        guard let entry = entries[tabID], entry.view === view else { return }
+        guard let entry = entries[tabID], entry.tab.kimiProfileID == nil, entry.view === view else { return }
         #if DEBUG
         guard geminiDiagnosticDirectory != nil || geminiDiagnosticWriterForTesting != nil else { return }
         #else
@@ -2885,12 +3821,24 @@ final class EmbeddedBrowserSession {
     }
     #endif
 
+    fileprivate func recordGeminiRecoveryHTTPFailure(_ response: URLResponse, isMainFrame: Bool,
+                                                     view: WKWebView, tabID: UUID) {
+        guard !isShutdown, isMainFrame, let entry = entries[tabID], entry.view === view,
+              entry.isAvailableToBrowserTools, !entry.isToolOwned, let navigation = entry.navigation,
+              entry.recoveryCommittedGeneration != entry.tab.documentGeneration,
+              let response = response as? HTTPURLResponse, (400..<600).contains(response.statusCode),
+              let url = response.url, EmbeddedHumanVerificationStore.recoveryProvider(forTrustedHumanURL: url) == "gemini" else { return }
+        // WebKit's response callback has no navigation token. Treat this only
+        // as a veto, and only if the current navigation commits this resource.
+        entry.pendingGeminiRecoveryHTTPFailure = (navigation, entry.tab.documentGeneration, url)
+    }
+
     /// A small callback-time sample, not a complete redirect trace. WebKit's
     /// response-policy callback supplies neither a navigation token nor cache
     /// provenance or the outgoing Cookie header. No observation affects policy.
     fileprivate func observeGeminiNavigationResponse(_ response: URLResponse, isMainFrame: Bool,
                                                      view: WKWebView, tabID: UUID) {
-        guard !isShutdown, isMainFrame, let entry = entries[tabID], entry.view === view else { return }
+        guard !isShutdown, isMainFrame, let entry = entries[tabID], entry.tab.kimiProfileID == nil, entry.view === view else { return }
         let generation = entry.tab.documentGeneration
         // The bounded durable journal is independent of the OSLog rate limit.
         // A busy log window must not hide the response that actually failed.
@@ -2929,6 +3877,11 @@ final class EmbeddedBrowserSession {
         geminiResponseObservationClock = clock
     }
 
+    func recordGeminiRecoveryHTTPFailureForTesting(_ response: URLResponse, isMainFrame: Bool,
+                                                   view: WKWebView, tabID: UUID) {
+        recordGeminiRecoveryHTTPFailure(response, isMainFrame: isMainFrame, view: view, tabID: tabID)
+    }
+
     func observeGeminiNavigationResponseForTesting(response: URLResponse, isMainFrame: Bool,
                                                   view: WKWebView, tabID: UUID) {
         observeGeminiNavigationResponse(response, isMainFrame: isMainFrame, view: view, tabID: tabID)
@@ -2940,11 +3893,25 @@ final class EmbeddedBrowserSession {
         // A native load/reload invalidates synchronously, before WebKit starts it.
         // Page-initiated full navigations advance here; pushState does not arrive here.
         let prepared = entry.preparedDocumentNavigation && entry.navigation === navigation
-        prepareNavigation(entry)
+        let prior = entry.tab.documentGeneration
+        let exactRoot = !prepared && navigation != nil && entry.isModelOwned && entry.usesIsolatedChatGPTProfile
+            && !entry.hadChatRootDiagnostic && !entry.view.isInspectable && entry.authorizedChatRootRequest == prior
+            && entry.pendingConversationURL?.absoluteString == "https://chatgpt.com/"
+            && entry.view.url?.absoluteString == "https://chatgpt.com/"
+        prepareNavigation(entry, claudeInitialStart: true)
         if !prepared { entry.tab.documentGeneration = UUID() }
+        entry.authorizedChatRootRequest = nil
+        entry.initialChatRootTransition = exactRoot ? (prior, entry.tab.documentGeneration) : nil
         entry.navigation = navigation
-        if entry.isModelOwned, navigation != nil {
-            entry.modelNavigationGeneration = entry.tab.documentGeneration
+        if navigation != nil {
+            if entry.isModelOwned {
+                entry.modelNavigationGeneration = entry.tab.documentGeneration
+            } else if entry.isAvailableToBrowserTools, !entry.isToolOwned,
+                      let checkpointID = savedHumanVerificationCheckpointIDs["gemini"] {
+                // Title and same-document URL changes cannot pair an older
+                // landing page with a checkpoint seen after navigation started.
+                entry.geminiRecoveryNavigationStart = (checkpointID, entry.tab.documentGeneration)
+            }
         }
         refresh(tabID, view: view)
         emitGeminiPostBlockNativeEvent(entry, .started)
@@ -2961,6 +3928,9 @@ final class EmbeddedBrowserSession {
               entry.modelCommittedGeneration != entry.tab.documentGeneration,
               entry.modelFinishedGeneration != entry.tab.documentGeneration,
               entry.modelFailedGeneration != entry.tab.documentGeneration else { return }
+        removeGroqStatus(entry)
+        removeQwenMarker(entry)
+        entry.initialChatRootTransition = nil
         entry.serverRedirectObservedInCurrentNavigation = true
         emitGeminiPostBlockNativeEvent(entry, .redirected)
     }
@@ -2975,6 +3945,8 @@ final class EmbeddedBrowserSession {
             }
         }
         entry.navigation = nil
+        if error != nil { entry.geminiRecoveryNavigationStart = nil }
+        entry.pendingGeminiRecoveryHTTPFailure = nil
         entry.pendingConversationURL = nil
         entry.preparedDocumentNavigation = false
         refresh(tabID, view: view)
@@ -2986,6 +3958,7 @@ final class EmbeddedBrowserSession {
            entry.recoveryCommittedGeneration == entry.tab.documentGeneration {
             entry.recoverySettledGeneration = entry.tab.documentGeneration
             observeHumanVerificationRecovery(entry)
+            observeProviderSignInRecovery(entry)
         }
         emitGeminiPostBlockNativeEvent(entry, error == nil ? .finished : .failed)
         if error == nil, navigation != nil,
@@ -3006,12 +3979,20 @@ final class EmbeddedBrowserSession {
             }
         }
         if !entry.isModelOwned, let navigation, entry.humanCommittedNavigation !== navigation {
+            let generation = entry.tab.documentGeneration
+            if let failure = entry.pendingGeminiRecoveryHTTPFailure,
+               failure.navigation === navigation, failure.generation == generation,
+               let url = view.url, var resource = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+                resource.fragment = nil
+                if resource.url == failure.url { entry.geminiRecoveryHTTPFailureGeneration = generation }
+            }
+            entry.pendingGeminiRecoveryHTTPFailure = nil
             entry.humanCommittedNavigation = navigation
             entry.humanCommittedDocumentID = UUID()
             entry.recoveryCommittedGeneration = entry.tab.documentGeneration
             entry.recoveryToolUsed = entry.toolPopupContext != nil
             entry.toolPopupContext = nil
-            entry.tab.isWebInspectorAvailable = !entry.isToolOwned
+            entry.tab.isWebInspectorAvailable = entry.isAvailableToBrowserTools && !entry.isToolOwned
         }
         refresh(tabID, view: view, committedNavigation: true)
         emitGeminiPostBlockNativeEvent(entry, .committed)
@@ -3020,8 +4001,14 @@ final class EmbeddedBrowserSession {
     fileprivate func terminated(_ view: WKWebView, tabID: UUID) {
         guard let entry = entries[tabID], entry.view === view else { return }
         revokeResponseCompletion(entry)
+        removeGroqStatus(entry)
+        removeQwenMarker(entry)
+        revokeClaudeResponseStream(entry)
         revokeModelInspector(entry, reason: .navigation)
+        revokeGroqFixtureInspector(entry, reason: .navigation)
         resetModelNavigationDiagnostic(entry)
+        entry.geminiRecoveryNavigationStart = nil
+        entry.pendingGeminiRecoveryHTTPFailure = nil
         entry.navigation = nil
         entry.preparedDocumentNavigation = false
         entry.tab.documentID = UUID()
@@ -3438,7 +4425,10 @@ private final class EmbeddedBrowserDelegate: NSObject, WKNavigationDelegate, WKU
         guard session?.owns(webView, tabID: tabID) == true else { decisionHandler(.cancel); return }
         session?.observeGeminiNavigationRequest(navigationAction.request,
             isMainFrame: navigationAction.targetFrame?.isMainFrame == true, view: webView, tabID: tabID)
-        if navigationAction.targetFrame?.isMainFrame ?? true { cancelCacheAdmission() }
+        if navigationAction.targetFrame?.isMainFrame ?? true {
+            cancelCacheAdmission()
+            session?.invalidateChatRootRequest(webView, tabID: tabID)
+        }
         if navigationAction.shouldPerformDownload {
             deny("Downloads are not enabled. No file was saved.", view: webView)
             decisionHandler(.cancel)
@@ -3454,7 +4444,10 @@ private final class EmbeddedBrowserDelegate: NSObject, WKNavigationDelegate, WKU
             if navigationAction.targetFrame?.isMainFrame ?? true {
                 admitCacheIdentity(url, view: webView) { [weak self, weak webView] permitted in
                     guard permitted, let self, let webView else { decisionHandler(.cancel); return }
-                    self.admitChatGPT(url, view: webView) { decisionHandler($0 ? .allow : .cancel) }
+                    self.admitChatGPT(url, view: webView) { allowed in
+                        if allowed { self.session?.noteAllowedChatRootRequest(navigationAction, view: webView, tabID: self.tabID) }
+                        decisionHandler(allowed ? .allow : .cancel)
+                    }
                 }
             } else { decisionHandler(.allow) }
         } catch {
@@ -3490,6 +4483,8 @@ private final class EmbeddedBrowserDelegate: NSObject, WKNavigationDelegate, WKU
             return
         }
         if navigationResponse.isForMainFrame, let url = navigationResponse.response.url {
+            session?.recordGeminiRecoveryHTTPFailure(navigationResponse.response, isMainFrame: true,
+                                                     view: webView, tabID: tabID)
             admitChatGPT(url, view: webView) { decisionHandler($0 ? .allow : .cancel) }
         } else { decisionHandler(.allow) }
     }

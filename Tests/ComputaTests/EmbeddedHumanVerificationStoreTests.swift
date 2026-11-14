@@ -9,7 +9,9 @@ final class EmbeddedHumanVerificationStoreTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let profile = UUID()
         let store = EmbeddedHumanVerificationStore(defaults: defaults, profileID: profile)
-        let expected = Dictionary(uniqueKeysWithValues: ["chatgpt", "claude", "gemini", "groq"].map { ($0, UUID()) })
+        let expected = Dictionary(uniqueKeysWithValues: ["chatgpt", "claude", "gemini", "groq", "kimi"].map { ($0, UUID()) })
+        XCTAssertTrue(Set(WebsiteModelCatalog.providers).isSubset(of: Set(expected.keys)),
+                      "Every public provider must retain its checkpoint across restart")
         var supplied = expected
         supplied["https://www.google.com/sorry/?private=query"] = UUID()
         store.save(supplied)
@@ -18,7 +20,7 @@ final class EmbeddedHumanVerificationStoreTests: XCTestCase {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(Set(object.keys), ["version", "checkpoints"])
         let checkpoints = try XCTUnwrap(object["checkpoints"] as? [String: String])
-        XCTAssertEqual(Set(checkpoints.keys), ["chatgpt", "claude", "gemini", "groq"])
+        XCTAssertEqual(Set(checkpoints.keys), ["chatgpt", "claude", "gemini", "groq", "kimi"])
         XCTAssertTrue(checkpoints.values.allSatisfy { UUID(uuidString: $0) != nil })
         XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("private"))
         XCTAssertTrue(EmbeddedHumanVerificationStore(defaults: defaults, profileID: UUID()).load().isEmpty)

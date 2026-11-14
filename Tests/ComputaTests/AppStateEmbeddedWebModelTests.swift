@@ -1,15 +1,51 @@
+import AppKit
 import WebKit
 import XCTest
 @testable import Computa
 
 @MainActor
 final class AppStateEmbeddedWebModelTests: XCTestCase {
+    func testKimiProfileVerificationReportsItsActualOutcomeAndSwitchesOnlyWhenIdle() async throws {
+        let browser = EmbeddedBrowserSession(persistent: false)
+        defer { browser.shutdown() }
+        _ = try browser.openKimiModelSignInForTesting()
+        let profile = try XCTUnwrap(browser.kimiModelProfileID)
+        var signedIn = false
+        var discoveries: [String] = []
+        let state = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: browser,
+            websiteModelDiscovery: { provider in
+                discoveries.append(provider)
+                guard signedIn else { throw EmbeddedWebModelTransport.Failure.signInRequired }
+                return Self.choices(provider)
+            })
+
+        await state.verifyKimiModelSignIn()
+        let instructions = "Sign in on the Kimi sign-in tab, then choose Verify Kimi sign-in from Model sign-ins."
+        XCTAssertEqual(state.kimiModelSignInMessage, instructions)
+        XCTAssertEqual(state.websiteModelsError, "Kimi: " + instructions)
+        signedIn = true
+        await state.verifyKimiModelSignIn()
+        XCTAssertEqual(discoveries, ["kimi", "kimi"])
+        XCTAssertEqual(state.kimiModelSignInMessage, "Kimi sign-in verified for this profile.")
+        XCTAssertNil(state.websiteModelsError)
+
+        state.activeTurnTaskIDs.insert("fixture-running")
+        XCTAssertFalse(state.canConfigureKimiProfile)
+        state.useSharedKimiModelProfile()
+        XCTAssertEqual(browser.kimiModelProfileID, profile)
+        state.activeTurnTaskIDs.remove("fixture-running")
+        state.useSharedKimiModelProfile()
+        XCTAssertNil(browser.kimiModelProfileID)
+        XCTAssertNil(state.kimiModelSignInMessage)
+    }
+
     func testWebsitePrewarmingFollowsSelectedProviderOnlyAfterRenderHostReadiness() async {
         let browser = EmbeddedBrowserSession(persistent: false)
         defer { browser.shutdown() }
         let preferences = isolatedTestPreferences()
         preferences.set(LocalModelCatalog.defaultModelID, forKey: "LocalCodex.defaultModelID")
-        WebsiteModelCatalog.save(WebsiteModelCatalog.providers.flatMap(Self.choices), to: preferences)
+        WebsiteModelCatalog.save(namedWebsiteModelProviders.flatMap(Self.choices), to: preferences)
+        WebsiteModeCatalog.save(Self.modes, to: preferences)
         let instant = Self.choices("chatgpt")[0].modelID
         let task = AgentTask(title: "Prewarm fixture", summary: "", status: .draft,
             workspace: "No workspace selected", model: instant)
@@ -52,7 +88,8 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         defer { browser.shutdown() }
         let preferences = isolatedTestPreferences()
         preferences.set(LocalModelCatalog.defaultModelID, forKey: "LocalCodex.defaultModelID")
-        WebsiteModelCatalog.save(WebsiteModelCatalog.providers.flatMap(Self.choices), to: preferences)
+        WebsiteModelCatalog.save(namedWebsiteModelProviders.flatMap(Self.choices), to: preferences)
+        WebsiteModeCatalog.save(Self.modes, to: preferences)
         let instant = Self.choices("chatgpt")[0].modelID
         let websiteTask = AgentTask(title: "Website fixture", summary: "", status: .draft,
             workspace: "No workspace selected", model: instant)
@@ -94,7 +131,8 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         defer { browser.shutdown() }
         let preferences = isolatedTestPreferences()
         preferences.set(LocalModelCatalog.defaultModelID, forKey: "LocalCodex.defaultModelID")
-        WebsiteModelCatalog.save(WebsiteModelCatalog.providers.flatMap(Self.choices), to: preferences)
+        WebsiteModelCatalog.save(namedWebsiteModelProviders.flatMap(Self.choices), to: preferences)
+        WebsiteModeCatalog.save(Self.modes, to: preferences)
         let runtime = EmbeddedConfigurationRuntime(browser: browser)
         let state = AppState(tasks: [], runtime: runtime, preferences: preferences, browserSession: browser)
         XCTAssertNil(WebsiteModelCatalog.inferenceSelection(for: state.defaultModel))
@@ -121,7 +159,11 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         var discovered: [String] = []
         var maintenanceRuns = 0
         let state = AppState(tasks: [], runtime: runtime, preferences: isolatedTestPreferences(), browserSession: browser,
-            websiteModelDiscovery: { provider in discovered.append(provider); return Self.choices(provider) },
+            websiteModelDiscovery: { provider in discovered.append(provider); return Self.choices(provider) }, websiteModeDiscovery: { provider in
+                XCTAssertEqual(provider, "deepseek")
+                discovered.append(provider)
+                return Self.modes
+            },
             cookieMaintenanceOnlyLaunch: true,
             cookieMaintenanceRunner: { _ in maintenanceRuns += 1 })
         state.refreshWebsiteModelsIfNeeded()
@@ -142,7 +184,11 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         var discovered: [String] = []
         var maintenanceRuns = 0
         let state = AppState(tasks: [], runtime: nil, preferences: isolatedTestPreferences(), browserSession: browser,
-            websiteModelDiscovery: { provider in discovered.append(provider); return Self.choices(provider) },
+            websiteModelDiscovery: { provider in discovered.append(provider); return Self.choices(provider) }, websiteModeDiscovery: { provider in
+                XCTAssertEqual(provider, "deepseek")
+                discovered.append(provider)
+                return Self.modes
+            },
             cookieMaintenanceOnlyLaunch: true,
             cookieMaintenanceRunner: { _ in maintenanceRuns += 1 })
         state.refreshWebsiteModelsIfNeeded()
@@ -180,6 +226,234 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         XCTAssertEqual(runtime.operations.filter { $0 == "shutdown" }.count, 1)
     }
 
+    func testNormalDeepSeekHumanLandingAutomaticallyClearsOnlyItsActualSignInGateWithoutSending() async throws {
+        let fixture = DeepSeekSignInRecoveryFixture(); defer { fixture.shutdown() }
+        let runtime = EmbeddedConfigurationRuntime(browser: fixture.browser)
+        let state = AppState(tasks: [], runtime: runtime, preferences: deepSeekRecoveryPreferences(), browserSession: fixture.browser)
+        state.refreshWebsiteModelsIfNeeded()
+        let gate = try await seedDeepSeekSignInGate(state, fixture: fixture)
+        fixture.signIn = false
+        var refreshes: [(String, Bool)] = []
+        state.setWebsiteModelRefreshObserverForTesting { refreshes.append(($0, $1)) }
+        let (humanID, _) = try await deepSeekHumanPage(fixture.browser, url: "https://chat.deepseek.com/")
+        try await waitUntil {
+            state.websiteTransportForTesting.didClearSignInRecoveryGate(gate) && !state.websiteModelsRefreshing
+        }
+        XCTAssertEqual(refreshes.map { $0.0 }, ["deepseek"])
+        XCTAssertEqual(refreshes.map { $0.1 }, [true])
+        XCTAssertEqual(state.websiteModeChoices, Self.modes)
+        XCTAssertEqual(fixture.modelLoads, 2, "One auth observation and one read-only recovery discovery")
+        XCTAssertEqual(fixture.browser.tabs.map(\.id), [humanID], "Both private discovery views have physically closed")
+        XCTAssertNotNil(fixture.browser.webView(for: humanID))
+        XCTAssertNil(state.websiteTransportForTesting.signInRecoveryGate(provider: "deepseek"))
+        XCTAssertEqual(runtime.submissions, 0)
+        _ = await state.shutdownRuntime()
+    }
+
+    func testDeepSeekHumanLandingWithoutSignInGateOrOnForeignRouteCannotScheduleDiscovery() async throws {
+        let fixture = DeepSeekSignInRecoveryFixture(); defer { fixture.shutdown() }
+        let runtime = EmbeddedConfigurationRuntime(browser: fixture.browser)
+        var probes: [String] = []
+        let state = AppState(tasks: [], runtime: runtime, preferences: deepSeekRecoveryPreferences(), browserSession: fixture.browser,
+            websiteModeDiscovery: { provider in probes.append(provider); return Self.modes })
+        state.refreshWebsiteModelsIfNeeded()
+        let forwarding = fixture.browser.onProviderSignInRecoveryCandidate
+        var candidates: [EmbeddedBrowserSession.ProviderSignInRecoveryCandidate] = []
+        fixture.browser.onProviderSignInRecoveryCandidate = { candidate in candidates.append(candidate); forwarding?(candidate) }
+        let (id, view) = try await deepSeekHumanPage(fixture.browser, url: "https://chat.deepseek.com/")
+        try await waitUntil { candidates.count == 1 }
+        XCTAssertTrue(probes.isEmpty)
+        XCTAssertNil(state.websiteTransportForTesting.signInRecoveryGate(provider: "deepseek"))
+        let oldCandidate = try XCTUnwrap(candidates.last)
+        try await loadDeepSeekHumanFixture(view, url: "https://chat.deepseek.com/sign_in")
+        XCTAssertFalse(fixture.browser.isProviderSignInRecoveryCandidateCurrent(oldCandidate))
+        try await loadDeepSeekHumanFixture(view, url: "https://chat.deepseek.com/a/chat/s/foreign")
+        try await loadDeepSeekHumanFixture(view, url: "https://example.test/")
+        try await loadDeepSeekHumanFixture(view, url: "https://chat.deepseek.com/")
+        try await waitUntil { candidates.count == 2 }
+        XCTAssertEqual(candidates.map(\.provider), ["deepseek", "deepseek"])
+        XCTAssertTrue(probes.isEmpty, "A committed normal page is not a saved sign-in gate")
+        let gate = try await seedDeepSeekSignInGate(state, fixture: fixture)
+        fixture.signIn = false
+        let modes = try await state.websiteTransportForTesting.discoverModes(provider: "deepseek", retryBlocked: true)
+        XCTAssertEqual(Set(modes.map(\.key)), Set(Self.modes.map(\.key)))
+        XCTAssertTrue(state.websiteTransportForTesting.didClearSignInRecoveryGate(gate))
+        XCTAssertEqual(candidates.count, 2, "A healthy model-owned root discovery cannot mint a normal-human event")
+        XCTAssertTrue(probes.isEmpty)
+        XCTAssertNotNil(fixture.browser.webView(for: id))
+        XCTAssertEqual(runtime.submissions, 0)
+        _ = await state.shutdownRuntime()
+    }
+
+    func testDeepSeekSignInRecoveryCoalescesBusyHumanEventAndDispatchesOnceWhenIdle() async throws {
+        let fixture = DeepSeekSignInRecoveryFixture(); defer { fixture.shutdown() }
+        let runtime = EmbeddedConfigurationRuntime(browser: fixture.browser)
+        var probes: [String] = []
+        var held: CheckedContinuation<[WebsiteModeChoice], Error>?
+        let state = AppState(tasks: [], runtime: runtime, preferences: deepSeekRecoveryPreferences(), browserSession: fixture.browser,
+            websiteModeDiscovery: { provider in
+                probes.append(provider)
+                return try await withCheckedThrowingContinuation { held = $0 }
+            })
+        state.refreshWebsiteModelsIfNeeded()
+        let gate = try await seedDeepSeekSignInGate(state, fixture: fixture)
+        state.activeTurnTaskIDs.insert("busy-native-turn")
+        let forwarding = fixture.browser.onProviderSignInRecoveryCandidate
+        var observed: [EmbeddedBrowserSession.ProviderSignInRecoveryCandidate] = []
+        fixture.browser.onProviderSignInRecoveryCandidate = { candidate in observed.append(candidate); forwarding?(candidate) }
+        var refreshes: [(String, Bool)] = []
+        state.setWebsiteModelRefreshObserverForTesting { refreshes.append(($0, $1)) }
+        let (_, view) = try await deepSeekHumanPage(fixture.browser, url: "https://chat.deepseek.com/")
+        try await waitUntil { observed.count == 1 }
+        let candidate = try XCTUnwrap(observed.first)
+        XCTAssertTrue(state.providerSignInRecoveryPendingForTesting)
+        forwarding?(candidate); forwarding?(candidate)
+        view.navigationDelegate?.webView?(view, didFinish: nil)
+        XCTAssertTrue(probes.isEmpty)
+        XCTAssertTrue(state.websiteTransportForTesting.isSignInRecoveryGateCurrent(gate))
+        state.activeTurnTaskIDs.removeAll()
+        try await waitUntil { held != nil }
+        XCTAssertEqual(probes, ["deepseek"])
+        XCTAssertEqual(refreshes.map { $0.0 }, ["deepseek"])
+        XCTAssertEqual(refreshes.map { $0.1 }, [true])
+        held?.resume(throwing: EmbeddedWebModelTransport.Failure.modelUnverified); held = nil
+        try await waitUntil { !state.websiteModelsRefreshing }
+        view.navigationDelegate?.webView?(view, didFinish: nil)
+        await Task.yield()
+        XCTAssertEqual(probes, ["deepseek"], "The spent document cannot auto-retry a failed recovery")
+        XCTAssertTrue(state.websiteTransportForTesting.isSignInRecoveryGateCurrent(gate))
+        XCTAssertEqual(runtime.submissions, 0)
+        _ = await state.shutdownRuntime()
+    }
+
+    func testDeepSeekPendingSignInRecoveryDropsChangedDocumentOrNewerGateBeforeIdle() async throws {
+        for replaceGate in [false, true] {
+            let fixture = DeepSeekSignInRecoveryFixture(); defer { fixture.shutdown() }
+            let runtime = EmbeddedConfigurationRuntime(browser: fixture.browser)
+            var probes: [String] = []
+            let state = AppState(tasks: [], runtime: runtime, preferences: deepSeekRecoveryPreferences(), browserSession: fixture.browser,
+                websiteModeDiscovery: { provider in probes.append(provider); throw EmbeddedWebModelTransport.Failure.modelUnverified })
+            state.refreshWebsiteModelsIfNeeded()
+            let oldGate = try await seedDeepSeekSignInGate(state, fixture: fixture)
+            state.activeTurnTaskIDs.insert("busy-native-turn")
+            let forwarding = fixture.browser.onProviderSignInRecoveryCandidate
+            var candidate: EmbeddedBrowserSession.ProviderSignInRecoveryCandidate?
+            fixture.browser.onProviderSignInRecoveryCandidate = { candidate = $0; forwarding?($0) }
+            let (_, view) = try await deepSeekHumanPage(fixture.browser, url: "https://chat.deepseek.com/")
+            try await waitUntil { candidate != nil }
+            XCTAssertTrue(state.providerSignInRecoveryPendingForTesting)
+            if replaceGate {
+                fixture.signIn = false
+                let modes = try await state.websiteTransportForTesting.discoverModes(provider: "deepseek", retryBlocked: true)
+                XCTAssertEqual(modes, Self.modes)
+                XCTAssertTrue(state.websiteTransportForTesting.didClearSignInRecoveryGate(oldGate))
+                fixture.signIn = true
+                _ = try await seedDeepSeekSignInGate(state, fixture: fixture)
+                XCTAssertFalse(state.websiteTransportForTesting.isSignInRecoveryGateCurrent(oldGate))
+                XCTAssertNotNil(state.websiteTransportForTesting.signInRecoveryGate(provider: "deepseek"))
+            } else {
+                try await loadDeepSeekHumanFixture(view, url: "https://example.test/")
+                XCTAssertFalse(fixture.browser.isProviderSignInRecoveryCandidateCurrent(try XCTUnwrap(candidate)))
+            }
+            state.activeTurnTaskIDs.removeAll()
+            try await waitUntil { !state.providerSignInRecoveryPendingForTesting }
+            XCTAssertTrue(probes.isEmpty, "An old event cannot borrow a newer gate or document")
+            XCTAssertEqual(runtime.submissions, 0)
+            _ = await state.shutdownRuntime()
+        }
+    }
+
+    func testInjectedDeepSeekRecoverySuccessOrFailureCannotClearSavedGateOrPublishCatalog() async throws {
+        for fail in [false, true] {
+            let fixture = DeepSeekSignInRecoveryFixture(); defer { fixture.shutdown() }
+            let runtime = EmbeddedConfigurationRuntime(browser: fixture.browser)
+            var probes = 0
+            var held: CheckedContinuation<[WebsiteModeChoice], Error>?
+            let state = AppState(tasks: [], runtime: runtime, preferences: deepSeekRecoveryPreferences(), browserSession: fixture.browser,
+                websiteModeDiscovery: { provider in
+                    XCTAssertEqual(provider, "deepseek"); probes += 1
+                    return try await withCheckedThrowingContinuation { held = $0 }
+                })
+            state.refreshWebsiteModelsIfNeeded()
+            let oldModes = state.websiteModeChoices
+            let gate = try await seedDeepSeekSignInGate(state, fixture: fixture)
+            let (_, view) = try await deepSeekHumanPage(fixture.browser, url: "https://chat.deepseek.com/")
+            try await waitUntil { held != nil }
+            view.navigationDelegate?.webView?(view, didFinish: nil)
+            if fail { held?.resume(throwing: EmbeddedWebModelTransport.Failure.modelUnverified) }
+            else { held?.resume(returning: Self.modes) }
+            held = nil
+            try await waitUntil { !state.websiteModelsRefreshing }
+            XCTAssertEqual(probes, 1)
+            XCTAssertEqual(state.websiteModeChoices, oldModes)
+            XCTAssertTrue(state.websiteTransportForTesting.isSignInRecoveryGateCurrent(gate),
+                "Injected catalog values are not authenticated cleanup/gate-clearance proof")
+            XCTAssertEqual(runtime.submissions, 0)
+            _ = await state.shutdownRuntime()
+        }
+    }
+
+    private func deepSeekRecoveryPreferences() -> UserDefaults {
+        let preferences = isolatedTestPreferences()
+        preferences.set(LocalModelCatalog.defaultModelID, forKey: "LocalCodex.defaultModelID")
+        WebsiteModelCatalog.save(namedWebsiteModelProviders.flatMap(Self.choices), to: preferences)
+        WebsiteModeCatalog.save(Self.modes, to: preferences)
+        return preferences
+    }
+
+    private func seedDeepSeekSignInGate(_ state: AppState, fixture: DeepSeekSignInRecoveryFixture) async throws -> EmbeddedWebModelTransport.SignInRecoveryGate {
+        let loads = fixture.modelLoads
+        do {
+            _ = try await state.websiteTransportForTesting.discoverModes(provider: "deepseek")
+            XCTFail("The actual local sign-in document must reject discovery")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .signInRequired) }
+        let gate = try XCTUnwrap(state.websiteTransportForTesting.signInRecoveryGate(provider: "deepseek"))
+        XCTAssertTrue(state.websiteTransportForTesting.isSignInRecoveryGateCurrent(gate))
+        XCTAssertTrue(state.websiteTransportForTesting.canRecoverSignInGate(gate))
+        XCTAssertEqual(fixture.modelLoads, loads + 1, "The gate came from one actual intercepted local discovery")
+        return gate
+    }
+
+    private func deepSeekHumanPage(_ browser: EmbeddedBrowserSession, url: String) async throws -> (UUID, WKWebView) {
+        let id = try browser.createTab(), view = try XCTUnwrap(browser.webView(for: id))
+        try await loadDeepSeekHumanFixture(view, url: url)
+        return (id, view)
+    }
+
+    private func loadDeepSeekHumanFixture(_ view: WKWebView, url raw: String) async throws {
+        let url = try XCTUnwrap(URL(string: raw))
+        view.loadHTMLString("<!doctype html><p>Local normal human DeepSeek fixture</p>", baseURL: url)
+        try await waitUntil { !view.isLoading && view.url == url }
+        await Task.yield()
+    }
+
+    func testCachedGeminiStillOffersHumanRecoveryWithoutStartupDiscovery() async throws {
+        let browser = EmbeddedBrowserSession(persistent: false)
+        defer { browser.shutdown() }
+        browser.recordHumanVerificationRequired(provider: "gemini")
+        let checkpoint = browser.savedHumanVerificationCheckpointIDs["gemini"]
+        let preferences = isolatedTestPreferences()
+        WebsiteModelCatalog.save(namedWebsiteModelProviders.flatMap(Self.choices), to: preferences)
+        WebsiteModeCatalog.save(Self.modes, to: preferences)
+        preferences.set(Self.choices("gemini")[0].modelID, forKey: "LocalCodex.defaultModelID")
+        let runtime = EmbeddedConfigurationRuntime(browser: browser)
+        var observed: [(String, Bool)] = []
+        let state = AppState(tasks: [], runtime: runtime, preferences: preferences, browserSession: browser,
+            websiteModelDiscovery: { Self.choices($0) }, websiteModeDiscovery: { _ in Self.modes })
+        state.setWebsiteModelRefreshObserverForTesting { observed.append(($0, $1)) }
+        state.refreshWebsiteModelsIfNeeded()
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertTrue(observed.isEmpty)
+        _ = try await healthyHumanPage(browser)
+        try await waitUntil { observed.contains { $0.0 == "gemini" && $0.1 } && !state.websiteModelsRefreshing }
+        XCTAssertEqual(observed.map { $0.0 }, ["gemini"])
+        XCTAssertEqual(observed.map { $0.1 }, [true], "The human recovery path retains its explicit blocked-provider probe")
+        XCTAssertEqual(browser.savedHumanVerificationCheckpointIDs["gemini"], checkpoint,
+                       "A synthetic menu cannot replace verified recovery and cleanup authority")
+        XCTAssertEqual(runtime.submissions, 0)
+        XCTAssertEqual(browser.tabs.count, 1)
+    }
+
     func testHumanRecoveryMergedIntoStartupCanRetryOnlyGeminiAndNeverSubmit() async throws {
         let browser = EmbeddedBrowserSession(persistent: false)
         defer { browser.shutdown() }
@@ -191,6 +465,9 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
             websiteModelDiscovery: { provider in
                 if provider == "chatgpt" { return try await withCheckedThrowingContinuation { held = $0 } }
                 return Self.choices(provider)
+            }, websiteModeDiscovery: { provider in
+                XCTAssertEqual(provider, "deepseek")
+                return Self.modes
             })
         var observed: [(String, Bool)] = []
         state.setWebsiteModelRefreshObserverForTesting { observed.append(($0, $1)) }
@@ -200,8 +477,8 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         try await waitUntil { state.websiteModelRefreshIntentsForTesting.contains { $0.provider == "gemini" && $0.retryBlocked } }
         held?.resume(returning: Self.choices("chatgpt")); held = nil
         try await waitUntil { !state.websiteModelsRefreshing }
-        XCTAssertEqual(observed.map { $0.0 }, WebsiteModelCatalog.providers)
-        XCTAssertEqual(observed.map { $0.1 }, WebsiteModelCatalog.providers.map { $0 == "gemini" },
+        XCTAssertEqual(observed.map { $0.0 }, WebsiteModelCatalog.discoveryProviders)
+        XCTAssertEqual(observed.map { $0.1 }, WebsiteModelCatalog.discoveryProviders.map { $0 == "gemini" },
                        "A Gemini intent cannot widen another provider's startup gate")
         XCTAssertEqual(browser.savedHumanVerificationCheckpointIDs["gemini"], checkpoint, "Injected catalog results cannot clear a checkpoint")
         XCTAssertEqual(runtime.submissions, 0)
@@ -215,7 +492,12 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
             browser.recordHumanVerificationRequired(provider: "gemini")
             let checkpoint = browser.savedHumanVerificationCheckpointIDs["gemini"]
             let preferences = isolatedTestPreferences()
-            if !beforeProbe { WebsiteModelCatalog.save(WebsiteModelCatalog.providers.flatMap(Self.choices), to: preferences) }
+            // Isolate revocation from unrelated missing-provider demand. The
+            // before-probe case deliberately holds selected ChatGPT's refresh;
+            // the during-probe case has only the human Gemini recovery intent.
+            WebsiteModelCatalog.save(namedWebsiteModelProviders.flatMap(Self.choices), to: preferences)
+            WebsiteModeCatalog.save(Self.modes, to: preferences)
+            if !beforeProbe { preferences.set(LocalModelCatalog.defaultModelID, forKey: "LocalCodex.defaultModelID") }
             let runtime = EmbeddedConfigurationRuntime(browser: browser)
             var held: CheckedContinuation<[WebsiteModelChoice], Error>?
             let state = AppState(tasks: [], runtime: runtime, preferences: preferences, browserSession: browser,
@@ -224,9 +506,15 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
                         return try await withCheckedThrowingContinuation { held = $0 }
                     }
                     return Self.choices(provider)
+                }, websiteModeDiscovery: { provider in
+                    XCTAssertEqual(provider, "deepseek")
+                    return Self.modes
                 })
             var observed: [String] = []
             state.setWebsiteModelRefreshObserverForTesting { provider, _ in observed.append(provider) }
+            XCTAssertEqual(state.websiteModelChoices.count, namedWebsiteModelProviders.count)
+            XCTAssertEqual(state.websiteModeChoices, Self.modes)
+            XCTAssertEqual(WebsiteModelCatalog.selection(for: state.defaultModel)?.provider, beforeProbe ? "chatgpt" : nil)
             state.refreshWebsiteModelsIfNeeded()
             if beforeProbe { try await waitUntil { held != nil } }
             let (id, _) = try await healthyHumanPage(browser)
@@ -249,11 +537,17 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         defer { browser.shutdown() }
         browser.recordHumanVerificationRequired(provider: "gemini")
         let preferences = isolatedTestPreferences()
-        WebsiteModelCatalog.save(WebsiteModelCatalog.providers.flatMap(Self.choices), to: preferences)
+        // This fixture exercises human recovery, not selected-provider startup.
+        preferences.set(LocalModelCatalog.defaultModelID, forKey: "LocalCodex.defaultModelID")
+        WebsiteModelCatalog.save(namedWebsiteModelProviders.flatMap(Self.choices), to: preferences)
+        WebsiteModeCatalog.save(Self.modes, to: preferences)
         let runtime = EmbeddedConfigurationRuntime(browser: browser)
         var probes = 0
         let state = AppState(tasks: [], runtime: runtime, preferences: preferences, browserSession: browser,
-            websiteModelDiscovery: { _ in probes += 1; throw EmbeddedWebModelTransport.Failure.modelUnverified })
+            websiteModelDiscovery: { _ in probes += 1; throw EmbeddedWebModelTransport.Failure.modelUnverified }, websiteModeDiscovery: { provider in
+                XCTAssertEqual(provider, "deepseek")
+                return Self.modes
+            })
         state.refreshWebsiteModelsIfNeeded()
         state.activeTurnTaskIDs.insert("recovery-active-task")
         let (_, view) = try await healthyHumanPage(browser)
@@ -284,17 +578,20 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
                     if chatReads == 1 { return try await withCheckedThrowingContinuation { held = $0 } }
                 }
                 return Self.choices(provider)
+            }, websiteModeDiscovery: { provider in
+                XCTAssertEqual(provider, "deepseek")
+                return Self.modes
             })
         var observed: [(String, Bool)] = []
         state.setWebsiteModelRefreshObserverForTesting { observed.append(($0, $1)) }
         state.refreshWebsiteModelsIfNeeded()
         try await waitUntil { held != nil }
         let explicit = Task { await state.refreshWebsiteModels() }
-        try await waitUntil { state.websiteModelRefreshIntentsForTesting.count == 3 }
+        try await waitUntil { state.websiteModelRefreshIntentsForTesting.count == WebsiteModelCatalog.discoveryProviders.count }
         held?.resume(returning: Self.choices("chatgpt")); held = nil
         await explicit.value
         XCTAssertEqual(observed.first?.0, "chatgpt"); XCTAssertEqual(observed.first?.1, false)
-        for provider in WebsiteModelCatalog.providers {
+        for provider in WebsiteModelCatalog.discoveryProviders {
             XCTAssertEqual(observed.filter { $0.0 == provider && $0.1 }.count, 1)
         }
         XCTAssertTrue(browser.tabs.isEmpty)
@@ -314,7 +611,9 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         defer { browser.shutdown() }
         browser.recordHumanVerificationRequired(provider: "gemini")
         let preferences = isolatedTestPreferences()
-        WebsiteModelCatalog.save(WebsiteModelCatalog.providers.flatMap(Self.choices), to: preferences)
+        preferences.set(LocalModelCatalog.defaultModelID, forKey: "LocalCodex.defaultModelID")
+        WebsiteModelCatalog.save(namedWebsiteModelProviders.flatMap(Self.choices), to: preferences)
+        WebsiteModeCatalog.save(Self.modes, to: preferences)
         let runtime = EmbeddedConfigurationRuntime(browser: browser)
         var held: CheckedContinuation<[WebsiteModelChoice], Error>?
         var reads: [String] = []
@@ -330,6 +629,10 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
                     return [manualChoice]
                 }
                 return Self.choices(provider)
+            }, websiteModeDiscovery: { provider in
+                XCTAssertEqual(provider, "deepseek")
+                reads.append(provider)
+                return Self.modes
             })
         state.refreshWebsiteModelsIfNeeded()
         let (humanID, _) = try await healthyHumanPage(browser)
@@ -338,13 +641,13 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
             if allProviders { await state.refreshWebsiteModels() }
             else { await state.refreshWebsiteModels(provider: "gemini") }
         }
-        try await waitUntil { state.websiteModelRefreshIntentsForTesting.count == (allProviders ? WebsiteModelCatalog.providers.count : 1) }
+        try await waitUntil { state.websiteModelRefreshIntentsForTesting.count == (allProviders ? WebsiteModelCatalog.discoveryProviders.count : 1) }
         // Model production discovery's successful cleanup/checkpoint clearance.
         // This fixture does not grant that authority to injected catalog data.
         browser.clearHumanVerificationRequired(provider: "gemini")
         held?.resume(returning: [automaticChoice]); held = nil
         await manual.value
-        XCTAssertEqual(reads, allProviders ? ["gemini"] + WebsiteModelCatalog.providers.filter { $0 != "gemini" } : ["gemini"],
+        XCTAssertEqual(reads, allProviders ? ["gemini"] + WebsiteModelCatalog.discoveryProviders.filter { $0 != "gemini" } : ["gemini"],
                        "An equivalent completed recovery must satisfy the pending same-provider refresh")
         XCTAssertEqual(state.websiteModelChoices.filter { $0.provider == "gemini" }, [automaticChoice])
         XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), state.websiteModelChoices)
@@ -367,7 +670,9 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
             defer { browser.shutdown() }
             browser.recordHumanVerificationRequired(provider: "gemini")
             let preferences = isolatedTestPreferences()
-            WebsiteModelCatalog.save(WebsiteModelCatalog.providers.flatMap(Self.choices), to: preferences)
+            preferences.set(LocalModelCatalog.defaultModelID, forKey: "LocalCodex.defaultModelID")
+            WebsiteModelCatalog.save(namedWebsiteModelProviders.flatMap(Self.choices), to: preferences)
+            WebsiteModeCatalog.save(Self.modes, to: preferences)
             let runtime = EmbeddedConfigurationRuntime(browser: browser)
             var held: CheckedContinuation<[WebsiteModelChoice], Error>?
             var reads = 0
@@ -378,6 +683,9 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
                     reads += 1
                     if reads == 1 { return try await withCheckedThrowingContinuation { held = $0 } }
                     return [manualChoice]
+                }, websiteModeDiscovery: { provider in
+                    XCTAssertEqual(provider, "deepseek")
+                    return Self.modes
                 })
             state.refreshWebsiteModelsIfNeeded()
             let (humanID, _) = try await healthyHumanPage(browser)
@@ -416,7 +724,9 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         browser.recordHumanVerificationRequired(provider: "gemini")
         let checkpoint = browser.savedHumanVerificationCheckpointIDs["gemini"]
         let preferences = isolatedTestPreferences()
-        WebsiteModelCatalog.save(WebsiteModelCatalog.providers.flatMap(Self.choices), to: preferences)
+        preferences.set(LocalModelCatalog.defaultModelID, forKey: "LocalCodex.defaultModelID")
+        WebsiteModelCatalog.save(namedWebsiteModelProviders.flatMap(Self.choices), to: preferences)
+        WebsiteModeCatalog.save(Self.modes, to: preferences)
         let runtime = EmbeddedConfigurationRuntime(browser: browser)
         var held: CheckedContinuation<[WebsiteModelChoice], Error>?
         var geminiReads = 0
@@ -429,6 +739,9 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
                     return [manualChoice]
                 }
                 return Self.choices(provider)
+            }, websiteModeDiscovery: { provider in
+                XCTAssertEqual(provider, "deepseek")
+                return Self.modes
             })
         var observed: [(String, Bool)] = []
         state.setWebsiteModelRefreshObserverForTesting { observed.append(($0, $1)) }
@@ -436,11 +749,11 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         let (id, _) = try await healthyHumanPage(browser)
         try await waitUntil { held != nil }
         let manual = Task { await state.refreshWebsiteModels() }
-        try await waitUntil { state.websiteModelRefreshIntentsForTesting.count == WebsiteModelCatalog.providers.count }
+        try await waitUntil { state.websiteModelRefreshIntentsForTesting.count == WebsiteModelCatalog.discoveryProviders.count }
         _ = try browser.prepareToolMutation(tabID: id, generation: XCTUnwrap(browser.documentGeneration(for: id)))
         held?.resume(returning: Self.choices("gemini")); held = nil
         await manual.value
-        XCTAssertEqual(observed.map { $0.0 }, ["gemini"] + WebsiteModelCatalog.providers)
+        XCTAssertEqual(observed.map { $0.0 }, ["gemini"] + WebsiteModelCatalog.discoveryProviders)
         XCTAssertTrue(observed.allSatisfy { $0.1 }, "The explicit all-provider refresh retains its own per-provider recovery flags")
         XCTAssertEqual(geminiReads, 2, "Revoking automatic recovery cannot drop the queued manual Gemini request")
         XCTAssertTrue(state.websiteModelChoices.contains(manualChoice))
@@ -454,7 +767,9 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
             defer { browser.shutdown() }
             browser.recordHumanVerificationRequired(provider: "gemini")
             let preferences = isolatedTestPreferences()
-            if !pending { WebsiteModelCatalog.save(WebsiteModelCatalog.providers.flatMap(Self.choices), to: preferences) }
+            WebsiteModelCatalog.save(namedWebsiteModelProviders.flatMap(Self.choices), to: preferences)
+            WebsiteModeCatalog.save(Self.modes, to: preferences)
+            if !pending { preferences.set(LocalModelCatalog.defaultModelID, forKey: "LocalCodex.defaultModelID") }
             var held: CheckedContinuation<[WebsiteModelChoice], Error>?
             var geminiReads = 0
             let state = AppState(tasks: [], preferences: preferences, browserSession: browser,
@@ -464,7 +779,13 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
                         return try await withCheckedThrowingContinuation { held = $0 }
                     }
                     return Self.choices(provider)
+                }, websiteModeDiscovery: { provider in
+                    XCTAssertEqual(provider, "deepseek")
+                    return Self.modes
                 })
+            XCTAssertEqual(state.websiteModelChoices.count, namedWebsiteModelProviders.count)
+            XCTAssertEqual(state.websiteModeChoices, Self.modes)
+            XCTAssertEqual(WebsiteModelCatalog.selection(for: state.defaultModel)?.provider, pending ? "chatgpt" : nil)
             state.refreshWebsiteModelsIfNeeded()
             if pending { try await waitUntil { held != nil } }
             let (_, view) = try await healthyHumanPage(browser)
@@ -501,12 +822,17 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
             browser.recordHumanVerificationRequired(provider: "gemini")
             let checkpoint = browser.savedHumanVerificationCheckpointIDs["gemini"]
             let preferences = isolatedTestPreferences()
-            let cached = WebsiteModelCatalog.providers.flatMap(Self.choices)
+            let cached = namedWebsiteModelProviders.flatMap(Self.choices)
             WebsiteModelCatalog.save(cached, to: preferences)
+            WebsiteModeCatalog.save(Self.modes, to: preferences)
             var probes: [String] = []
             let runtime = EmbeddedConfigurationRuntime(browser: browser)
             let state = AppState(tasks: [], runtime: runtime, preferences: preferences, browserSession: browser,
-                websiteModelDiscovery: { provider in probes.append(provider); return Self.choices(provider) })
+                websiteModelDiscovery: { provider in probes.append(provider); return Self.choices(provider) }, websiteModeDiscovery: { provider in
+                    XCTAssertEqual(provider, "deepseek")
+                    probes.append(provider)
+                    return Self.modes
+                })
             makeBusy(state)
             XCTAssertFalse(WebUISnapshot(state: state).canRefreshWebsiteModels)
             await state.refreshWebsiteModels()
@@ -526,7 +852,7 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
             XCTAssertTrue(probes.isEmpty, "Returning to idle must not replay a rejected refresh")
             XCTAssertTrue(WebUISnapshot(state: state).canRefreshWebsiteModels)
             await state.refreshWebsiteModels()
-            XCTAssertEqual(probes, WebsiteModelCatalog.providers)
+            XCTAssertEqual(probes, WebsiteModelCatalog.discoveryProviders)
             XCTAssertEqual(browser.savedHumanVerificationCheckpointIDs["gemini"], checkpoint,
                            "Injected catalog results never clear a saved checkpoint")
             XCTAssertEqual(runtime.submissions, 0)
@@ -539,8 +865,9 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         browser.recordHumanVerificationRequired(provider: "gemini")
         let checkpoint = browser.savedHumanVerificationCheckpointIDs["gemini"]
         let preferences = isolatedTestPreferences()
-        let cached = WebsiteModelCatalog.providers.flatMap(Self.choices)
+        let cached = namedWebsiteModelProviders.flatMap(Self.choices)
         WebsiteModelCatalog.save(cached, to: preferences)
+        WebsiteModeCatalog.save(Self.modes, to: preferences)
         var probes: [String] = []
         var held: CheckedContinuation<[WebsiteModelChoice], Error>?
         let replacement = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/high", label: "High")
@@ -549,6 +876,10 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
                 probes.append(provider)
                 if probes.count == 1 { return try await withCheckedThrowingContinuation { held = $0 } }
                 return Self.choices(provider)
+            }, websiteModeDiscovery: { provider in
+                XCTAssertEqual(provider, "deepseek")
+                probes.append(provider)
+                return Self.modes
             })
         let refresh = Task { await state.refreshWebsiteModels() }
         try await waitUntil { held != nil }
@@ -567,11 +898,15 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         await Task.yield()
         XCTAssertEqual(probes, ["chatgpt"], "Idle transition must not requeue the skipped probes")
         await state.refreshWebsiteModels()
-        XCTAssertEqual(probes, ["chatgpt"] + WebsiteModelCatalog.providers)
+        XCTAssertEqual(probes, ["chatgpt"] + WebsiteModelCatalog.discoveryProviders)
     }
+
+    private static var modes: [WebsiteModeChoice] { WebsiteModeChoice.DeepSeekMode.allCases.map { .init(deepSeekMode: $0) } }
 
     private static func choices(_ provider: String) -> [WebsiteModelChoice] {
         provider == "chatgpt" ? [.init(provider: provider, key: "chat/latest/instant", label: "Instant")]
+            : provider == "kimi" ? [syntheticKimiChoice]
+            : provider == "qwen" ? [syntheticWebsiteChoice(provider: provider, key: "fixture", label: "Fixture")]
             : [.init(provider: provider, key: "fixture-choice", label: "Fixture choice")]
     }
 
@@ -623,5 +958,48 @@ private final class EmbeddedConfigurationRuntime: AgentRuntimeClient {
         operations.append("shutdown")
         browserWasLiveDuringShutdown = !browser.tabs.isEmpty
         return RuntimeShutdownReport(issues: [])
+    }
+}
+
+@MainActor
+private final class DeepSeekSignInRecoveryFixture {
+    let browser = EmbeddedBrowserSession(persistent: false)
+    private let window: Window
+    private let host: EmbeddedModelRenderContainer
+    var signIn = true
+    private(set) var modelLoads = 0
+
+    init() {
+        window = Window(contentRect: NSRect(x: 20, y: 20, width: 1024, height: 768), styleMask: [], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.ignoresMouseEvents = true
+        host = EmbeddedModelRenderContainer(session: browser)
+        host.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
+        window.contentView = host; browser.installModelRenderHost(host); window.orderBack(nil)
+        browser.setModelViewFactoryForTesting { [unowned self] configuration in
+            let view = LocalView(frame: NSRect(x: 0, y: 0, width: 1024, height: 768), configuration: configuration)
+            view.fixtureURL = URL(string: self.signIn ? "https://chat.deepseek.com/sign_in" : "https://chat.deepseek.com/")!
+            view.fixtureHTML = self.signIn ? "<!doctype html><p>Local sign-in gate</p>" : DeepSeekFixturePage.html
+            view.onLoad = { [unowned self] in self.modelLoads += 1 }
+            return view
+        }
+    }
+
+    func shutdown() {
+        browser.shutdown(); host.detach(); window.orderOut(nil); window.close()
+    }
+
+    private final class Window: NSWindow {
+        override var canBecomeKey: Bool { false }
+        override var canBecomeMain: Bool { false }
+    }
+
+    private final class LocalView: WKWebView {
+        var fixtureURL: URL!
+        var fixtureHTML = ""
+        var onLoad: (() -> Void)?
+        override func load(_ request: URLRequest) -> WKNavigation? {
+            onLoad?()
+            return super.loadHTMLString(fixtureHTML, baseURL: fixtureURL)
+        }
     }
 }

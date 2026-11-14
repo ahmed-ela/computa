@@ -736,6 +736,147 @@ describe('Gemini per-submission ownership', () => {
     return { f, styles, shapes, textNode };
   }
 
+  function anchorQueryBubble(body: Element, tag = 'DIV') {
+    const bubble = body.parentElement!, status = bubble.parentElement!;
+    const anchor = new Element(tag, { class: 'query-bubble-anchor ng-star-inserted' });
+    status.children = [];
+    anchor.append(bubble); status.append(anchor);
+    return { status, anchor, bubble };
+  }
+
+  test('direct and anchored query bubbles prove the entire body after one Send', async () => {
+    for (const anchored of [false, true]) {
+      const { f } = queryFixture(), send = f.send.onClick!;
+      f.send.onClick = () => { send(); if (anchored) anchorQueryBubble(f.userBody!); };
+      const text = await stage(f, 1, outbound);
+      const result = await submitThenInspect(f, 1, text), digest = await fingerprint(text);
+      expect(result.firstUserFingerprint).toBe(digest);
+      expect(result.submissionProof).toEqual({ sequence: 1, fingerprint: digest });
+      const verified = f.world.__computaGeminiSubmissionState.lastVerified;
+      expect(verified.body).toBe(f.userBody);
+      expect(verified.canonical).toBe(normalized(text));
+      expect(f.send.clicks).toBe(1);
+    }
+  });
+
+  test('anchored query bubbles reject forged bodies and ambiguous topology without replay', async () => {
+    for (const fault of ['body', 'wrongTag', 'mixed', 'duplicateAnchor', 'extraStatusChild', 'extraAnchorChild']) {
+      // Structural alternatives carry equally valid literal bodies, so either
+      // branch would bind if a permissive selector picked it.
+      const rich = fault === 'body' ? queryFixture() : null;
+      const f = rich?.f ?? fixture(provider, { response: false });
+      const text = await stage(f, 1, outbound), send = f.send.onClick!;
+      f.send.onClick = () => {
+        send();
+        const body = f.userBody!;
+        const { status, anchor, bubble } = anchorQueryBubble(body, fault === 'wrongTag' ? 'SPAN' : 'DIV');
+        if (rich) {
+          rich.shapes[0].rows[0].replaceChildren(rich.textNode('Different authored first row'));
+          Object.defineProperty(body, 'innerText', { configurable: true, get: () => text });
+        } else if (fault === 'mixed') status.append(bubble.cloneNode(true));
+        else if (fault === 'duplicateAnchor') status.append(anchor.cloneNode(true));
+        else if (fault === 'extraStatusChild') status.append(new Element('DIV'));
+        else if (fault === 'extraAnchorChild') anchor.append(new Element('DIV'));
+      };
+      const rejected = await submitThenInspect(f, 1, text);
+      expect(rejected).toMatchObject({ error: 'conversation_changed' });
+      expect(rejected.firstUserVerified).not.toBe(true);
+      expect(rejected.submissionProof).toBeUndefined();
+      expect(f.world.__computaGeminiSubmissionState.lastVerified?.sequence).toBeUndefined();
+      expect(f.send.clicks).toBe(1);
+      expect(await f.run('submit', { ...fields(1), expectedUserCounts: [0], prompt: text })).toHaveProperty('error');
+      expect(f.send.clicks).toBe(1);
+    }
+  });
+
+  function directAnchorQueryBubble(body: Element, tag = 'DIV') {
+    const { status, anchor, bubble } = anchorQueryBubble(body, tag);
+    const content = status.parentElement!;
+    status.children = []; status.connected = false;
+    content.children = []; content.append(anchor);
+    return { content, status, anchor, bubble };
+  }
+
+  test('direct content anchors bind exact first and continuation payloads without a status wrapper', async () => {
+    for (const rich of [false, true]) {
+      const f = rich ? queryFixture(true).f : fixture(provider, { response: false });
+      const send = f.send.onClick!;
+      f.send.onClick = () => { send(); directAnchorQueryBubble(f.userBody!); };
+      const first = await finishRound(f, 1, outbound);
+      const current = await finishRound(f, 2);
+      expect(current.firstUserFingerprint).toBe(first.firstUserFingerprint);
+      expect(current.submissionProof).toEqual({ sequence: 2, fingerprint: await fingerprint(roundPrompt(2)) });
+      expect(f.world.__computaGeminiSubmissionState.lastVerified.body).toBe(f.userBody);
+      expect(f.send.clicks).toBe(2);
+      const cleanupRead = await f.run('inspect', { ...fields(2), expectedUserCounts: [2], allowFirstUserBinding: false });
+      expect(cleanupRead.firstUserVerified).toBe(true);
+      expect(cleanupRead.submissionProof).toEqual(current.submissionProof);
+    }
+  });
+
+  test('direct content anchors reject mixed topology, forged payloads and changed ownership without replay', async () => {
+    for (const fault of ['wrongTag', 'duplicateAnchor', 'extraContentChild', 'extraAnchorChild',
+      'mixedStatus', 'dualClass', 'nestedAnchor', 'hiddenAnchor', 'hiddenContent', 'hiddenBody', 'editableBody',
+      'controlledBody', 'duplicateBody', 'foreignRoot', 'changedPayload', 'duplicateMarker', 'changedOwner', 'changedRoute']) {
+      const f = fixture(provider, { response: false }), text = await stage(f, 1, outbound), send = f.send.onClick!;
+      f.send.onClick = () => {
+        send(); const body = f.userBody!;
+        const { content, status, anchor, bubble } = directAnchorQueryBubble(body, fault === 'wrongTag' ? 'SPAN' : 'DIV');
+        if (fault === 'duplicateAnchor') content.append(anchor.cloneNode(true));
+        else if (fault === 'extraContentChild') content.append(new Element('DIV'));
+        else if (fault === 'extraAnchorChild') anchor.append(new Element('DIV'));
+        else if (fault === 'mixedStatus') { status.connected = true; status.append(bubble.cloneNode(true)); content.append(status); }
+        else if (fault === 'dualClass') anchor.values.class += ' query-bubble-with-status';
+        else if (fault === 'nestedAnchor') { const wrapper = new Element('DIV'); content.children = []; wrapper.append(anchor); content.append(wrapper); }
+        else if (fault === 'hiddenAnchor') anchor.values.hidden = '';
+        else if (fault === 'hiddenContent') content.values.hidden = '';
+        else if (fault === 'hiddenBody') body.values.hidden = '';
+        else if (fault === 'editableBody') body.values.contenteditable = 'true';
+        else if (fault === 'controlledBody') body.append(new Element('BUTTON'));
+        else if (fault === 'duplicateBody') bubble.append(body.cloneNode(true));
+        else if (fault === 'foreignRoot') { content.children = []; const foreign = new Element('USER-QUERY'); foreign.append(anchor); content.append(foreign); }
+        else if (fault === 'changedPayload') body.text = text.replace('C++', 'changed');
+        else if (fault === 'duplicateMarker') body.text += '\n' + markerLine;
+      };
+      await submitPending(f, 1, text);
+      if (fault === 'changedOwner') f.world.__computaModelOwner = 'foreign';
+      if (fault === 'changedRoute') f.document.URL += '/foreign';
+      const rejected = await f.run('inspect', { ...fields(1), expectedUserCounts: [1],
+        ...(fault === 'changedRoute' ? { expectedURL: f.origin + '/app' } : {}) });
+      expect(rejected.error, fault).toBeDefined();
+      expect(rejected.firstUserVerified, fault).not.toBe(true);
+      expect(rejected.submissionProof, fault).toBeUndefined();
+      expect(f.world.__computaGeminiSubmissionState.lastVerified?.sequence, fault).toBeUndefined();
+      expect(f.send.clicks, fault).toBe(1);
+      expect(await f.run('submit', { ...fields(1), expectedUserCounts: [0], prompt: text }), fault).toHaveProperty('error');
+      expect(f.send.clicks, fault).toBe(1);
+    }
+  });
+
+  test('bound direct anchors reject physical replacement and payload changes during later verification', async () => {
+    for (const fault of ['bodyReplacement', 'rootReplacement', 'payloadDuringDigest']) {
+      const f = fixture(provider, { response: false }), send = f.send.onClick!;
+      f.send.onClick = () => { send(); directAnchorQueryBubble(f.userBody!); };
+      await finishRound(f, 1, outbound);
+      if (fault === 'bodyReplacement') {
+        const body = f.userBody!, bubble = body.parentElement!, replacement = body.cloneNode(true);
+        bubble.children[bubble.children.indexOf(body)] = replacement;
+        replacement.parentElement = bubble; body.connected = false;
+      } else if (fault === 'rootReplacement') {
+        const root = f.userRoot!, parent = root.parentElement!, replacement = root.cloneNode(true);
+        parent.children[parent.children.indexOf(root)] = replacement;
+        replacement.parentElement = parent; root.connected = false;
+      } else f.onDigest(() => { f.userBody!.text += ' changed after digest'; });
+      const rejected = await f.run('inspect', { ...fields(1), expectedUserCounts: [1], allowFirstUserBinding: false });
+      expect(rejected.error, fault).toBeDefined();
+      expect(rejected.firstUserVerified, fault).not.toBe(true);
+      expect(rejected.submissionProof, fault).toBeUndefined();
+      expect(f.send.clicks, fault).toBe(1);
+      expect(await f.run('submit', { ...fields(1), expectedUserCounts: [0], prompt: outbound }), fault).toHaveProperty('error');
+      expect(f.send.clicks, fault).toBe(1);
+    }
+  });
+
   test('measured query paragraphs preserve all 169 lines and seven independent full-body round proofs', async () => {
     const { f, shapes } = queryFixture();
     const lines = Array.from({ length: 167 }, (_, i) => i === 5 ? '' : `PRIVATE line ${i}: \t  [literal] e\u0301\u00a0\u200b tail `);
@@ -1620,6 +1761,61 @@ describe("observed Gemini Argon family identity", () => {
       expect(await f.run("verifyModel", { expectedModelChoice: { key: "4 Argon", label: "4 Argon" } })).toMatchObject({ error: "model_unverified" });
       expect(picker.options.every(option => option.clicks === 0)).toBe(true); expect(f.send.clicks).toBe(0);
     }
+  });
+});
+
+describe("observed Gemini Hydrogen and Carbon families", () => {
+  const labels = ["3.5 Flash-Lite", "4 Hydrogen", "3.1 Pro", "4 Argon", "4 Carbon"];
+  const choice = (label: string) => ({ key: label, label });
+  function observedCatalog() {
+    const { f, picker } = observedGeminiArgonPicker();
+    const oldFlash = picker.options.find(option => option.children[0].text === "3.8 Flash")!;
+    const hydrogen = picker.add(picker.menu, "4 Hydrogen", "Everyday help");
+    const carbon = picker.add(picker.menu, "4 Carbon", "Most complex work");
+    picker.menu.children.splice(picker.menu.children.indexOf(hydrogen), 1);
+    picker.menu.children.splice(picker.menu.children.indexOf(oldFlash), 1, hydrogen);
+    picker.options.splice(picker.options.indexOf(oldFlash), 1);
+    oldFlash.connected = false;
+    for (const option of [hydrogen, carbon]) {
+      const select = option.onClick!;
+      option.onClick = () => {
+        select();
+        picker.trigger.values["aria-label"] = "Open mode picker, currently Gemini " + option.children[0].text.slice(2);
+      };
+    }
+    return { f, picker, hydrogen, carbon };
+  }
+
+  test("discovery reports all five observed choices and does not return the removed Flash row", async () => {
+    const { f, picker } = observedCatalog();
+    expect(await advanceGeminiPicker(f, "discoverModels")).toMatchObject({
+      modelChoices: labels.map(choice), modelEvidence: { selected: choice("4 Argon") },
+    });
+    expect(picker.options.every(option => option.clicks === 0)).toBe(true);
+    expect(f.send.clicks).toBe(0);
+  });
+
+  test("Hydrogen and Carbon each require their own exact selection and do not substitute for removed Flash", async () => {
+    for (const label of ["4 Hydrogen", "4 Carbon"]) {
+      const { f, picker, hydrogen, carbon } = observedCatalog();
+      const expected = choice(label);
+      expect(await advanceGeminiPicker(f, "selectModel", { modelChoice: expected })).toMatchObject({
+        selected: true, modelEvidence: { selected: expected },
+      });
+      expect(await f.run("verifyModel", { expectedModelChoice: expected })).toMatchObject({
+        modelEvidence: { selected: expected },
+      });
+      expect(await f.run("verifyModel", { expectedModelChoice: choice("4 Argon") })).toMatchObject({ error: "model_mismatch" });
+      expect(hydrogen.clicks).toBe(label === "4 Hydrogen" ? 1 : 0);
+      expect(carbon.clicks).toBe(label === "4 Carbon" ? 1 : 0);
+      picker.trigger.values["aria-label"] = "Open mode picker, currently Gemini " + label.slice(2) + " Work";
+      expect(await f.run("verifyModel", { expectedModelChoice: expected })).toMatchObject({ error: "model_unverified" });
+      expect(f.send.clicks).toBe(0);
+    }
+    const { f, hydrogen, carbon } = observedCatalog();
+    expect(await advanceGeminiPicker(f, "selectModel", { modelChoice: choice("3.8 Flash") })).toMatchObject({ error: "model_unavailable" });
+    expect(hydrogen.clicks).toBe(0); expect(carbon.clicks).toBe(0);
+    expect(f.send.clicks).toBe(0);
   });
 });
 
