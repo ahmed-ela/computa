@@ -5,7 +5,7 @@ shared Responses interface and browser, terminal and file tools, retaining
 one owned temporary website conversation across tool rounds. Claude and the
 broader browser-engine expansion in issue #9 remain outside this work.
 
-Current checkpoint (November 14, 2026, installed build 550, source
+Current checkpoint (November 14 local / November 15 UTC, 2026, installed build 550, source
 `1a1f8d563960d2aa6ef0b07714d4ba03833f11b4`) fixes a separate restart-persistence defect: application
 termination now retains already-created persistent WebKit data stores until
 process exit, while normal shutdown still closes every page. The local
@@ -21,8 +21,13 @@ challenge was completed, a third normal launch passed four fresh model response 
 at 22:51–22:54 UTC. This demonstrates recovery across that restart, not a fix for
 the recurring challenge. Subsequent controlled comparisons reproduced original
 profile HTTP 429, fresh unsigned profile HTTP 200, then restored original
-profile HTTP 429 on the identical build. Profile/authentication state is now the
-main isolated difference; the specific cause and signed-in remedy remain unproven.
+profile HTTP 429 on the identical build. After normal sign-in to the fresh
+profile, the authenticated fresh/original/fresh comparison returned HTTP 200 in
+all three arms: the original profile recovered too. A fresh-profile Flash-Lite
+response passed in 6.923 seconds. After another normal restart with the preserved
+original profile restored, all four new response checks passed at November 15,
+00:21–00:23 UTC. The specific cause and permanent prevention remain unproven;
+no profile replacement is established as a causal remedy.
 
 Prior checkpoint (November 14, 2026, installed build 549): source
 `9549bef227b1532faf9def2b14a191ed01b5348d` removes one redundant Gemini model-only
@@ -81,12 +86,71 @@ under these conditions; neither the engine version nor application identity
 alone is sufficient to force it. It does not identify one corrupt cookie, prove
 an account-wide restriction, or establish a fresh profile as a signed-in remedy.
 
-The next control reopens the preserved fresh profile and signs into the same
-Google account normally. Its unsigned page again returned HTTP 200 after restart.
-Google then required the user's password, so authenticated comparison is pending
-user input in the visible browser. No credential was read or transferred. The
-original profile remains preserved and has already passed the exact restoration
-check; the temporary reference is active only for this pending experiment.
+The user subsequently completed normal Google sign-in to the preserved fresh
+profile in the browser; no credential was read or transferred by the investigator.
+Its authenticated return page responded HTTP 200 at November 14, 23:55:35.375 UTC.
+The following bounded queryless `/app` comparison used no prompt or CAPTCHA
+completion between its arms:
+
+| Authenticated arm | Human navigation result (UTC) | Process |
+| --- | --- | ---: |
+| Fresh profile, after normal sign-in | November 14, 23:58:11.585: HTTP 200 | 71687 |
+| Preserved original profile, after normal restart | November 15, 00:03:52.344: HTTP 200 | 84342 |
+| Fresh profile again, after normal restart | November 15, 00:06:23.230: HTTP 200 | 85342 |
+
+Both restarted arms recorded zero Gemini navigation callbacks before their
+intended load. Settled scoped cookie counts were 22/15 in the fresh profile and
+27/18 in the original, with zero exemption categories throughout. Account state
+was checked through the normal UI; the original address remained visually
+truncated. The `200 → 200 → 200` result does not confirm a fresh-profile remedy or
+one corrupt cookie. Elapsed time, normal sign-in and provider/account/session
+state remain confounded; the original profile recovered without its data being
+reset or copied.
+
+The original-profile human load was followed by a separate model-role HTTP 200
+at 00:03:53.689 UTC. This matches the existing recovery path: a settled healthy
+human page with a saved checkpoint triggers a prompt-free model-catalog probe.
+The probe verifies the observed menu and closes its page before clearing the
+same checkpoint. It is additional navigation, not a submitted model prompt, and
+it followed rather than caused the observed human-page recovery. The cached
+Gemini startup-discovery suppression does not suppress this verified recovery
+path.
+
+After the final fresh-profile restart, one new Flash-Lite marker passed in
+6.923 seconds (November 15, 00:14:39.817–00:14:46.740 UTC). Independent review
+matched the exact prompt, model and final marker to three hash-pinned native,
+provider and cleanup sources: one inference, zero tools, verified ownership and
+a joined durable closed receipt. This is one authenticated response check, not
+a causal CAPTCHA fix.
+
+The app then quit normally from process 85342. The exact original profile
+reference was restored and verified before launching the unchanged signed build
+as process 89053 at 00:16:52.658 UTC. Both stores remain preserved; the original
+profile is active again. Its first ordinary navigation returned HTTP 200 at
+00:17:41.119 UTC. All four newly bound original-profile response checks passed:
+
+| Model | Native duration | Task completed, November 15 UTC |
+| --- | ---: | --- |
+| 3.5 Flash-Lite | 6.586 s | 00:21:18.615 |
+| 4 Hydrogen | 7.325 s | 00:22:05.479 |
+| 3.1 Pro | 9.244 s | 00:22:58.967 |
+| 4 Argon | 10.684 s | 00:23:48.539 |
+
+Independent review re-read the three hash-pinned sources for each task and
+matched its canonical prompt, exact final marker, native model and turn,
+selected-model and ownership proofs, and durable closed cleanup receipt. Each
+completed one inference with zero tools and no recorded task/provider error.
+The bounded native capture contains 37 records: five Gemini HTTP 200 navigation
+callbacks (one human and four model), eleven available cookie samples, and zero
+adapter timeouts. All exemption categories remained zero; the last scoped counts
+were 27/18. These are current response-recovery results, not renewed tool-workflow
+qualification or permanent prevention evidence.
+
+The final restoration receipt confirms the original profile remains selected in
+process 89053 and the fresh profile is preserved. The experiment did not copy,
+delete or directly edit original website data; ordinary browser activity may
+update cookies and other storage. No additional provider tests were run after
+this cohort.
 
 Six checks in one local WebKit probe passed in 18.3 seconds using isolated,
 nonpersistent stores and seven loopback requests. A URL-token-only redirect
@@ -108,6 +172,21 @@ independent profile audit SHA-256 is
 `7bfcb5b940e46e825d94b9fb98b988c307a66923419f30698e784c12a6b21ff7`;
 the local cookie-control report is
 `bd61e9039756600d86b09f9b74c83d06a9299873cc4d8ce08f945b4a1301dd97`.
+The authenticated bracket review is
+`0c4315bf0ac18edde35c2881da9237c02772517f3ca39fbec85d0028fb5c1917`;
+the independent fresh-profile response audit is
+`051b962d95accf3829486d2c3c995c986ec47aba2a5805c7c4e19b0459fe73ab`.
+Their evidence is in `profile-control/authenticated-bracket-review.json`,
+`profile-control/authenticated-response`, and the separate original-restoration
+and response folders. The independent original-profile four-model audit is
+`5945b18a6bbeaf9e2c182a4495145d994703179a12195cb33d5c743d1e3f1798`,
+stored in `profile-control/original-restored-response/independent-audit.json`.
+The final native metadata SHA-256 is
+`9bb0c0e1f142cb4e6db268b2feff6246bf51fa4fb48697c79c77a5fda099b44f`;
+the restoration receipt is
+`a4caff4e2f654ce29e12cb7994fdb6d57ae23b7fe7ace8a3c81ba8721fdb7b21`.
+All follow-up UTC times after midnight are November 15;
+the local date remained November 14.
 No product-source change or permanent prevention claim follows from these tests.
 
 ### November 14: bounded clearance and third-launch response check

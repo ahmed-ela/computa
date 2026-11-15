@@ -27,10 +27,25 @@ Later November 14 comparisons reproduced a narrower difference on unchanged
 build 550: the original browser profile returned HTTP 429, a fresh unsigned
 profile returned HTTP 200, and restoring the original profile returned HTTP 429
 again. Safari loaded Gemini during the same episode, including after existing
-Google SSO. This localizes the investigation toward profile/authentication state;
-normal same-account sign-in to the fresh Computa profile is pending user input.
-The original profile data remains preserved. These are access controls, not new
-model/tool qualification or proof of permanent CAPTCHA prevention.
+Google SSO. After the user completed normal sign-in to the preserved fresh
+profile, the authenticated fresh/original/fresh bracket returned HTTP 200 in all
+three arms (November 14, 23:58 UTC through November 15, 00:06 UTC; November 14
+local). The original profile recovered too, so elapsed time, sign-in and provider
+state remain confounded; a fresh-profile causal remedy is not established.
+A separate fresh-profile Flash-Lite response passed in 6.923 seconds with exact
+model/ownership proofs and closed cleanup. The original profile reference was
+then restored and verified in process 89053 on the same signed build. Four new
+original-profile response checks passed at November 15, 00:21–00:23 UTC:
+Flash-Lite 6.586 s, Hydrogen 7.325 s, Pro 9.244 s and Argon 10.684 s. Independent
+review verified each exact prompt/answer, selected model, ownership and closed
+cleanup against its three hash-pinned native sources; each used one inference
+and zero tools. The capture records five Gemini HTTP 200 navigations and no
+adapter timeouts. The original profile remains selected and both stores are
+preserved without copying, deletion or direct data editing; normal browser
+activity may update website storage. These checks do not newly qualify tool
+workflows or establish permanent CAPTCHA prevention. The Gemini record retains
+the audit hashes and separately explains the prompt-free catalog probe that
+followed healthy human recovery.
 
 ## Candidate261: verified ChatGPT renderer failure recovery
 
