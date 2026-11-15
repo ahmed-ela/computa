@@ -5,7 +5,7 @@ shared Responses interface and browser, terminal and file tools, retaining
 one owned temporary website conversation across tool rounds. Claude and the
 broader browser-engine expansion in issue #9 remain outside this work.
 
-Current checkpoint (November 14 local / November 15 UTC, 2026, installed build 550, source
+Current checkpoint (November 15, 2026, installed build 550, source
 `1a1f8d563960d2aa6ef0b07714d4ba03833f11b4`) fixes a separate restart-persistence defect: application
 termination now retains already-created persistent WebKit data stores until
 process exit, while normal shutdown still closes every page. The local
@@ -28,6 +28,9 @@ response passed in 6.923 seconds. After another normal restart with the preserve
 original profile restored, all four new response checks passed at November 15,
 00:21–00:23 UTC. The specific cause and permanent prevention remain unproven;
 no profile replacement is established as a causal remedy.
+The same original-profile process later passed one Flash-Lite response after
+7 hours 51 minutes idle and an ordinary load 11 minutes 12 seconds afterward.
+This bounded nonreproduction made no product changes and does not establish prevention.
 
 Prior checkpoint (November 14, 2026, installed build 549): source
 `9549bef227b1532faf9def2b14a191ed01b5348d` removes one redundant Gemini model-only
@@ -53,6 +56,41 @@ another CAPTCHA. Pro, Argon and Hydrogen passed the complete workflow; Flash-Lit
 failed response-format validation before tools, then passed a separate diagnostic
 run without a protocol change. This removes a measured
 unnecessary request, not a proven cause of Google's recurring challenge.
+
+### November 15: idle and delayed-load nonreproduction
+
+The unchanged signed build 550, original profile and process 89053 remained in
+place. At 08:14:57.365 UTC, one ordinary queryless `/app` load returned HTTP 200,
+7 hours 51 minutes 8.826 seconds after the previous Argon task completed. The
+prior 37 native metadata records were unchanged through that interval. A new
+Flash-Lite exact-marker task then passed in 6.881 seconds, completing at
+08:17:34.492 UTC with one inference, zero tools, exact model/ownership proofs and
+joined durable closed cleanup. Independent review matched all three source hashes.
+
+One further ordinary load returned HTTP 200 at 08:28:46.449 UTC, 11 minutes
+11.957 seconds after completion; its dispatch also respected the planned
+11-minute minimum. No intervening main-frame navigation callback was recorded.
+The three new callbacks were all HTTP 200, with no new timeout/error rows;
+scoped cookie counts remained 27/18 and all exemption categories remained zero.
+These callbacks do not measure background traffic or transmitted cookies. This
+single-response workload is not the prior four-model cohort or a restart
+control, and does not identify the recurring trigger or prove permanent prevention.
+
+A separate isolated WebKit service-worker control passed seven behavioral
+checks: a synthetic same-origin 429 survived the production HTTP disk/memory
+cache removal, while a fresh profile reached the server's HTTP 200. Its separate
+cleanup check initially failed; the exact remaining isolated store was removed
+after the probe exited. No Google request or installed-app change occurred.
+The historical Gemini failure instead recorded an `/app` → Google `/sorry`
+cross-origin callback sequence, which the synthetic 429 did not reproduce.
+There is no actual Gemini worker/controller evidence, so this control does not
+justify a product cache-clearing change.
+
+Private evidence is under `work/gemini-captcha-20261115`. The independent delayed
+audit SHA-256 is `2d7df7b08233ae77b22fe60ab19e5e9e2451bd30fec8358ae1058e4763e22538`;
+the response audit is `50370e3a43c294f4403661fa32b2ee9a7f38d7d3fe2b846ba0e41de7dd7510ea`.
+The local worker-control report and separate cleanup receipt remain under
+`work/gemini-captcha-20261114/systematic550/local-service-worker-control`.
 
 ### November 14: systematic browser, network and profile comparisons
 
@@ -149,8 +187,8 @@ qualification or permanent prevention evidence.
 The final restoration receipt confirms the original profile remains selected in
 process 89053 and the fresh profile is preserved. The experiment did not copy,
 delete or directly edit original website data; ordinary browser activity may
-update cookies and other storage. No additional provider tests were run after
-this cohort.
+update cookies and other storage. The later idle/delayed-load check is recorded
+separately above.
 
 Six checks in one local WebKit probe passed in 18.3 seconds using isolated,
 nonpersistent stores and seven loopback requests. A URL-token-only redirect

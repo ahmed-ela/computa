@@ -47,6 +47,18 @@ workflows or establish permanent CAPTCHA prevention. The Gemini record retains
 the audit hashes and separately explains the prompt-free catalog probe that
 followed healthy human recovery.
 
+On November 15, the unchanged original-profile build 550 process 89053 loaded
+Gemini successfully after 7 hours 51 minutes idle, passed one new Flash-Lite
+exact-marker response in 6.881 seconds with verified model/ownership and closed
+cleanup, then loaded the ordinary page successfully 11 minutes 12 seconds later.
+All three new navigation callbacks were HTTP 200 with no recorded errors. This
+is a bounded nonreproduction, not the prior four-model workload, a restart
+control or permanent prevention. Seven separate local service-worker behavioral
+checks passed; a cleanup failure was subsequently resolved. That synthetic
+same-origin 429 did not reproduce the historical cross-origin Google challenge
+sequence and supplies no actual Gemini worker evidence, so no product change
+followed. The Gemini record contains the independent audit hashes and limits.
+
 ## Candidate261: verified ChatGPT renderer failure recovery
 
 The October 25 local / October 26 UTC reproduction ran the unchanged installed
