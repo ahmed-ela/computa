@@ -59,3 +59,24 @@ change only the intended function, run six tests and the program, submit the
 computed reference once through Computa's built-in browser, read the matching
 receipt, and close only that fixture tab. A pass requires all 19 independent
 checks plus exact provider/model, ownership and durable website-cleanup evidence.
+
+## Installed build 551 discovery
+
+Grok discovery stopped before any prompt. Inspector identified a second textarea
+used only for sizing: a direct body child, `aria-hidden=true`, `tabindex=-1`,
+hidden visibility, absolute positioning, zero height and `z-index=-1000`, without
+message-editor identity. The initial candidate scan incorrectly treated it as a
+second composer. The build 552 candidate excludes only that observed inert shape;
+visible, accessible, altered or message-labelled controls still fail closed.
+The updated fixture passes 29 JavaScript and 13 native Grok tests.
+
+A multiline draft probe initially appeared to lose whitespace. Comparing the
+page's actual input with the intended payload identified Inspector text entry as
+the confound. A UTF-8 base64 payload, independently compared byte for byte,
+preserved repeated spaces, newlines, quotes and Unicode through `insertText`.
+No insertion relaxation or fallback was added. The exact synthetic draft was
+cleared and its private test tab closed without Send.
+
+Kimi's startup discovery reported a nonempty composer. Its draft has not yet been
+cleared or replayed; the old third-inference receipt does not retain an outbound
+fingerprint that could establish an exact match after restart.

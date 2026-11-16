@@ -54,6 +54,33 @@ describe('Grok private inference adapter', () => {
     }
   });
 
+  test('the observed inaccessible measurement textarea is excluded without granting readiness', async () => {
+    const f = grokFixture();
+    expect(await f.run('inspect', { allowGrokInitialHydration: true })).toMatchObject({ composer: true, userCount: 0 });
+    const absent = grokFixture();
+    [...absent.body.children].filter(node => node !== absent.f.measurement).forEach(node => node.remove());
+    expect(await absent.run('inspect', { allowGrokInitialHydration: true }))
+      .toEqual({ grokInitialHydrationPending: true, pending: true, composer: false });
+    expect(absent.f.privateCount + absent.f.sendCount + absent.f.pickerOpens).toBe(0);
+  });
+
+  test('visible, accessible, named or differently placed textareas remain competing editor failures', async () => {
+    for (const alter of [
+      (f: ReturnType<typeof grokFixture>) => { f.f.measurement.setAttribute('aria-label', 'Message Grok'); },
+      (f: ReturnType<typeof grokFixture>) => { f.f.measurement.setAttribute('role', 'textbox'); },
+      (f: ReturnType<typeof grokFixture>) => { f.f.measurement.setAttribute('tabindex', '0'); },
+      (f: ReturnType<typeof grokFixture>) => { f.f.measurement.setAttribute('aria-hidden', 'false'); },
+      (f: ReturnType<typeof grokFixture>) => { f.f.measurement.values.visibility = 'visible'; },
+      (f: ReturnType<typeof grokFixture>) => { f.f.measurement.setAttribute('style', 'visibility:hidden;position:absolute;height:1px;z-index:-1000'); },
+      (f: ReturnType<typeof grokFixture>) => { f.f.measurement.setAttribute('name', 'unrelated-visible-field'); },
+      (f: ReturnType<typeof grokFixture>) => { f.f.form.append(f.f.measurement); },
+    ]) {
+      const f = grokFixture(); alter(f);
+      expect(await f.run('inspect', { allowGrokInitialHydration: true })).toMatchObject({ error: 'composer_unavailable' });
+      expect(f.f.privateCount + f.f.sendCount + f.f.pickerOpens).toBe(0);
+    }
+  });
+
   test('hydration grants cannot cover a different route or a prior model action', async () => {
     const foreign = grokFixture(); [...foreign.body.children].forEach(node => node.remove()); foreign.document.URL += '?unowned=1';
     expect(await foreign.run('inspect', { allowGrokInitialHydration: true })).toMatchObject({ error: 'document_changed' });

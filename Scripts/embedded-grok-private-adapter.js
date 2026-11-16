@@ -79,7 +79,18 @@ try {
       || state.privateEntered || state.toggleClaimed || state.prepared || state.prompt !== null || state.submitted || state.first
       || state.grokModelOperation || state.grokModelChoices || state.grokExpectedModel) return false;
     if (c.nodes(document, '[data-testid="user-message"], [data-testid="assistant-message"]', 8).length) c.fail('not_fresh');
-    const editors = c.nodes(document, '[contenteditable], [role="textbox"], textarea', 8);
+    // Grok also mounts one inaccessible BODY-level textarea for measurement.
+    // Its observed noninteractive shape is not a composer or readiness proof.
+    // Matching message editors, accessible fields and changed shapes still
+    // participate in ambiguity/malformed-control rejection below.
+    const measurementTextarea = node => {
+      if (node.tagName !== 'TEXTAREA' || node.parentElement !== document.body || document.activeElement === node
+        || node.getAttribute('tabindex') !== '-1' || node.getAttribute('aria-hidden') !== 'true'
+        || ['role', 'aria-label', 'aria-labelledby', 'contenteditable', 'id', 'name'].some(name => node.getAttribute(name) !== null)) return false;
+      const style = getComputedStyle(node);
+      return style.visibility === 'hidden' && style.position === 'absolute' && style.height === '0px' && style.zIndex === '-1000';
+    };
+    const editors = c.nodes(document, '[contenteditable], [role="textbox"], textarea', 8).filter(node => !measurementTextarea(node));
     if (editors.length > 1) c.fail('composer_unavailable');
     if (editors.length && (!c.enabled(editors[0]) || editors[0].tagName !== 'DIV'
       || editors[0].getAttribute('contenteditable') !== 'true' || editors[0].getAttribute('role') !== 'textbox'

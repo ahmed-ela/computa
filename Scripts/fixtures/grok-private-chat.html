@@ -52,6 +52,10 @@
   f.form.append(f.editor, f.send); document.body.append(f.form);
   f.status = make('span', { role: 'status', 'aria-live': 'polite' }); f.status.append(make('span'));
   document.body.append(f.status);
+  // Observed ancillary measurement control; it cannot prove editor readiness.
+  f.measurement = make('textarea', { tabindex: '-1', 'aria-hidden': 'true',
+    style: 'visibility:hidden!important;position:absolute!important;height:0px!important;z-index:-1000!important' });
+  document.body.append(f.measurement);
   f.appendUser = text => {
     const id = 'turn-heading-0b4a13de-efe1-42b7-8eb6-cc4d6fc2680c';
     f.user = make('div', { role: 'article', 'data-testid': 'user-message', 'aria-labelledby': id });

@@ -60,7 +60,15 @@ export function grokFixture() {
       expectedUserCounts: submitted ? fingerprint ? [1] : [0, 1] : [0], expectedFirstUserMarker: grokMarker,
       expectedFirstUserFingerprint: fingerprint, allowFirstUserBinding: submitted && !fingerprint,
       ...overrides }, document, window, location,
-      (node: Node) => ({ visibility: node.values.visibility || 'visible', display: node.closest('[hidden]') ? 'none' : 'block' }),
+      (node: Node) => {
+        const inline = Object.fromEntries((node.values.style || '').split(';').filter(Boolean).map(declaration => {
+          const separator = declaration.indexOf(':');
+          return [declaration.slice(0, separator).trim(), declaration.slice(separator + 1).replace(/!important\s*$/, '').trim()];
+        }));
+        return { visibility: node.values.visibility || inline.visibility || 'visible',
+          display: node.closest('[hidden]') ? 'none' : inline.display || 'block',
+          position: inline.position || 'static', height: inline.height || '30px', zIndex: inline['z-index'] || 'auto' };
+      },
       class {
         records: any[] = [];
         constructor(public callback: any) { observers.push(this); }
