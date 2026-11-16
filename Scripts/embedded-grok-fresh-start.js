@@ -51,26 +51,9 @@ if (typeof input.action === 'string' && input.action.startsWith('grokFreshStart'
     guard();
     const packet = (stage, readiness = null) => ({ grokFreshStart: { version: 1, stage, ...(readiness ? { readiness } : {}) } });
     function awaitLayout(node) {
-      const ancestors = [];
-      for (let current = node; current; current = current.parentElement) ancestors.push(current);
-      const types = ['transitionend', 'transitioncancel', 'animationend', 'animationcancel'];
-      const wait = { remove: () => {
-        for (const type of types) document.removeEventListener(type, wake, true);
-        if (preparation.layoutWait === wait) preparation.layoutWait = null;
-      } };
-      const wake = event => {
-        const current = globalThis.__computaGrokFreshStartV1 === preparation && preparation.layoutWait === wait
-          && preparation.document === document && preparation.owner === input.ownerToken && preparation.generation === input.documentGeneration
-          && !preparation.terminal && !preparation.verified && !preparation.newChat && c.context()
-          && node.isConnected && ancestors.every(ancestor => ancestor.contains(node));
-        if (!current) { wait.remove(); return; }
-        if (!ancestors.includes(event.target)) return;
-        wait.remove(); // One wakeup per pending read; this grants no action authority.
-        try { window.webkit?.messageHandlers?.computaChatGPTSignal?.postMessage({ ownerToken: preparation.owner, kind: 'dom_changed' }); }
-        catch { /* A missing wake channel cannot grant readiness. */ }
-      };
-      preparation.layoutWait = wait;
-      for (const type of types) document.addEventListener(type, wake, true);
+      computaGrokAwaitLayout(c, preparation, node, () => globalThis.__computaGrokFreshStartV1 === preparation
+        && preparation.owner === input.ownerToken && preparation.generation === input.documentGeneration
+        && !preparation.terminal && !preparation.verified && !preparation.newChat);
     }
     const unavailableHit = (target, node) => {
       const reason = c.hitFailure(node);

@@ -23,9 +23,60 @@ describe('Grok private inference adapter', () => {
       expect(f.f.privateCount).toBe(0); expect(f.f.sendCount).toBe(0);
     }
     const f = grokFixture(); f.blockHit(true);
-    expect(await f.run('inspect')).toMatchObject({ temporary: false, temporaryActionAvailable: true });
+    expect(await f.run('inspect')).toMatchObject({ temporary: false, temporaryActionAvailable: false });
     expect(await f.run('enableTemporary')).toEqual({ error: 'temporary_mode_unavailable', detail: 'private_control_hit_occluded' });
     expect(f.f.privateCount).toBe(0); expect(f.f.sendCount).toBe(0);
+  });
+
+  test('Private readiness waits for a scoped layout wake and rereads before one activation', async () => {
+    const f = grokFixture(); f.blockHit(true);
+    expect(await f.run('inspect')).toMatchObject({ temporary: false, temporaryActionAvailable: false });
+    expect(f.document.layoutListenerCount()).toBe(4);
+    f.document.emitLayout('transitionend', f.f.trigger);
+    expect(f.posted).toHaveLength(0); expect(f.document.layoutListenerCount()).toBe(4);
+    f.document.emitLayout('transitionend', f.f.privateToggle);
+    expect(f.posted).toHaveLength(1); expect(f.document.layoutListenerCount()).toBe(0);
+    expect(await f.run('inspect')).toMatchObject({ temporaryActionAvailable: false });
+    expect(f.f.privateCount).toBe(0);
+    f.blockHit(false); f.document.emitLayout('animationend', f.body);
+    expect(f.posted).toHaveLength(2); expect(f.document.layoutListenerCount()).toBe(0);
+    expect(await f.run('inspect')).toMatchObject({ temporaryActionAvailable: true });
+    expect(await f.run('enableTemporary')).toMatchObject({ enabled: false });
+    expect(await f.run('inspect')).toMatchObject({ temporary: true, temporaryActionAvailable: false });
+    expect(f.f.privateCount).toBe(1); expect(f.f.sendCount).toBe(0);
+  });
+
+  test('Private layout wakes reject stale owner, generation, document, route and action claims', async () => {
+    const changes: ((f: ReturnType<typeof grokFixture>) => void)[] = [
+      f => { f.world.__computaModelOwner = grokGeneration; },
+      f => { f.world.__computaGrokPrivateSessionV1.generation = grokOwner; },
+      f => { f.world.__computaGrokPrivateSessionV1.document = {}; },
+      f => { f.document.URL = 'https://grok.com/c/unowned'; },
+      f => { f.world.__computaGrokPrivateSessionV1.toggleClaimed = true; },
+      f => { f.world.__computaGrokPrivateSessionV1.privateEntered = true; },
+      f => { f.world.__computaGrokPrivateSessionV1.submitted = true; },
+      f => { f.f.privateToggle.remove(); },
+    ];
+    for (const change of changes) {
+      const f = grokFixture(); f.blockHit(true); await f.run('inspect'); change(f);
+      f.document.emitLayout('transitioncancel', f.body);
+      expect(f.posted).toHaveLength(0); expect(f.document.layoutListenerCount()).toBe(0);
+      expect(f.f.privateCount).toBe(0); expect(f.f.sendCount).toBe(0);
+    }
+  });
+
+  test('Private pending reads replace listeners, and an occlusion after readiness still rejects the action', async () => {
+    const f = grokFixture(); f.blockHit(true);
+    for (let read = 0; read < 3; read++) {
+      expect(await f.run('inspect')).toMatchObject({ temporaryActionAvailable: false });
+      expect(f.document.layoutListenerCount()).toBe(4); expect(f.f.privateCount).toBe(0);
+    }
+    f.blockHit(false);
+    expect(await f.run('inspect')).toMatchObject({ temporaryActionAvailable: true });
+    expect(f.document.layoutListenerCount()).toBe(0);
+    f.blockHit(true);
+    expect(await f.run('enableTemporary')).toEqual({ error: 'temporary_mode_unavailable', detail: 'private_control_hit_occluded' });
+    expect(f.document.layoutListenerCount()).toBe(0); expect(f.f.privateCount).toBe(0);
   });
 
   test('only a native-granted initial absent shape yields negative hydration readiness', async () => {

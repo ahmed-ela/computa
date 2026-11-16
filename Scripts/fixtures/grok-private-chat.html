@@ -10,7 +10,8 @@
     return node;
   };
   const f = window.grokFixture = { selected: 'Fast', choices: ['Fast', 'Build', 'Auto', 'Expert', 'Heavy'],
-    sendCount: 0, privateCount: 0, stopCount: 0, pickerOpens: 0, privateEntered: false,
+    sendCount: 0, privateCount: 0, stopCount: 0, pickerOpens: 0, modelOptionClicks: 0, privateEntered: false,
+    delayModelClose: false,
     delayUser: false, delayResponse: false, ignorePrivate: false, ignoreSend: false,
     reply: '{"type":"message","text":"GROK_NATIVE_FIXTURE_OK"}', user: null, userBody: null, answer: null,
     code: null, footer: null, copy: null, responseParent: null, menu: null };
@@ -22,6 +23,7 @@
     f.privateToggle.setAttribute('aria-label', 'Exit Private Chat'); f.privateToggle.setAttribute('aria-pressed', 'true');
   };
   f.trigger = make('button', { type: 'button', id: 'model-select-trigger', 'aria-label': 'Model: Fast', 'aria-haspopup': 'menu', 'aria-expanded': 'false' }, 'Fast');
+  f.finishModelClose = () => { f.menu?.remove(); f.menu = null; };
   f.trigger.onclick = () => {
     f.pickerOpens++;
     if (f.menu) return;
@@ -31,8 +33,12 @@
         ...(label === 'Build' ? { 'aria-disabled': 'true', 'data-disabled': '' } : {}) }, label);
       row.onclick = () => {
         if (label === 'Build') return;
+        f.modelOptionClicks++;
         f.selected = label; f.trigger.setAttribute('aria-label', 'Model: ' + label); f.trigger.textContent = label;
-        menu.remove(); f.menu = null; f.trigger.setAttribute('aria-expanded', 'false');
+        f.trigger.setAttribute('aria-expanded', 'false');
+        if (f.delayModelClose) {
+          menu.setAttribute('data-closed', ''); menu.setAttribute('data-ending-style', ''); menu.removeAttribute('data-open');
+        } else f.finishModelClose();
       };
       menu.append(row);
     }

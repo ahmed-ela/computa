@@ -1055,6 +1055,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var loggedGroqComposerFailure = false
         var loggedGrokComposerFailure = false
         var loggedGrokPrivateFailure = false
+        var loggedGrokModelFailure = false
         var loggedGrokUnexpectedRoute = false
         var loggedGroqSendFailure = false
         var loggedGroqSendReveal = false
@@ -5257,6 +5258,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if session.state == "loading" {
             if session.provider == .grok, observed["grokInitialHydrationPending"] != nil {
                 guard Self.isGrokInitialHydrationObservation(observed), canObserveGrokInitialHydration(session) else {
+                    logGrokNativeModelFailure(observed, session: session, action: "inspect", stage: "initial_hydration", failure: .modelUnverified)
                     throw Failure.modelUnverified
                 }
                 return try snapshot(session)
@@ -5306,7 +5308,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // controls or composer aria-hidden. Advance this claimed phase
                 // so its adapter can close the popup. Only fresh checked model
                 // proof and restored temporary mode can finish preparation.
-                guard session.lifecycleVerified, session.selectionIntent != nil else { throw Failure.modelUnverified }
+                guard session.lifecycleVerified, session.selectionIntent != nil else {
+                    logGrokNativeModelFailure(observed, session: session, action: "selectModel", stage: "loading_selection_state", failure: .modelUnverified)
+                    throw Failure.modelUnverified
+                }
                 let selected = try await page(session, action: "selectModel", maximumWait: min(.seconds(10), deadline - .now))
                 if selected["pending"] as? Bool != true {
                     session.selectionEvidence = try validatedSelectionEvidence(selected, session: session, action: "selectModel")
@@ -5382,7 +5387,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                count(observed, "userCount") == session.sequence,
                (session.baseline...session.baseline + 1).contains(count(observed, "responseCount")),
                (observed["text"] as? String)?.isEmpty == true,
-               (try? validatedSelectionEvidence(observed, session: session, action: "inspect")) != nil {
+               (try? validatedSelectionEvidence(observed, session: session, action: "inspect", logGrokRejection: false)) != nil {
                 throw Failure.responseStreamFailed(failureCandidate.reason)
             }
             if session.provider == .chatgpt, observed["responseLoadFailed"] as? Bool == true {
@@ -5422,7 +5427,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     if completedRendererFailure(proven), proven["modelVerificationPending"] == nil,
                        let original = observed["text"] as? String, let current = proven["text"] as? String,
                        original.utf8.elementsEqual(current.utf8),
-                       (try? validatedSelectionEvidence(proven, session: session, action: "inspect")) != nil {
+                       (try? validatedSelectionEvidence(proven, session: session, action: "inspect", logGrokRejection: false)) != nil {
                         await captureArmedRendererFailureDiagnostic(session, deadline: deadline)
                         throw Failure.responseRenderingFailed
                     }
@@ -7630,6 +7635,61 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return "action=\(action) error=\(error) detail=\(detail)"
     }
 
+    /// Fixed adapter branches only. This projection cannot supply selection
+    /// evidence, preserve page content, or change a model rejection.
+    static func grokModelFailureDiagnostic(_ observed: [String: Any], provider: Provider, action: String) -> String? {
+        let actions: Set<String> = ["inspect", "discoverModels", "selectModel", "verifyModel", "enableTemporary",
+            "prepare", "insert", "sendReady", "submit", "stop"]
+        let errors: Set<String> = ["model_unverified", "model_mismatch", "model_unavailable", "unknown_action"]
+        let details: Set<String> = ["model_trigger_missing", "model_trigger_hidden", "model_trigger_ambiguous",
+            "model_trigger_shape", "model_trigger_label", "model_trigger_choice", "model_menu_ambiguous",
+            "model_menu_authored", "model_expansion_invalid", "model_collapsed_menu_present", "model_rows_unavailable",
+            "model_rows_empty", "model_row_choice", "model_row_checked", "model_row_authored", "model_rows_duplicate",
+            "model_checked_count", "model_checked_disabled", "model_checked_label", "model_enabled_count",
+            "model_pinned_changed", "model_action_unknown", "model_intent_invalid", "model_operation_changed",
+            "model_open_not_closed", "model_trigger_replaced", "model_target_count", "model_selection_changed",
+            "model_guard_contradiction", "model_observed_changed", "model_pilot_unavailable", "model_choices_empty",
+            "model_verify_missing", "model_required_missing", "model_initial_trigger_ambiguous",
+            "model_initial_trigger_invalid", "model_initial_menu_present", "model_closing_trigger_replaced",
+            "model_closing_menu_replaced", "model_closing_selection_changed", "model_closing_shape",
+            "model_open_hit_disabled", "model_open_hit_invalid_geometry", "model_open_hit_outside_viewport", "model_open_hit_occluded",
+            "model_option_hit_disabled", "model_option_hit_invalid_geometry", "model_option_hit_outside_viewport", "model_option_hit_occluded"]
+        guard provider == .grok, actions.contains(action), let error = observed["error"] as? String,
+              errors.contains(error) else { return nil }
+        let detail = observed["detail"].map { ($0 as? String).flatMap { details.contains($0) ? $0 : nil } ?? "unknown" } ?? "absent"
+        return "action=\(action) error=\(error) detail=\(detail)"
+    }
+
+    /// Native failed-proof location and JSON shape only; no raw model names,
+    /// proof strings, page text or URL enter the diagnostic.
+    static func grokNativeModelFailureDiagnostic(_ observed: [String: Any], provider: Provider, action: String,
+                                                stage: String, failure: Failure) -> String? {
+        let actions: Set<String> = ["inspect", "discoverModels", "selectModel", "verifyModel", "enableTemporary",
+            "prepare", "insert", "sendReady", "submit", "stop", "cleanup", "other"]
+        let stages: Set<String> = ["initial_hydration", "loading_selection_state", "invalid_pending",
+            "selection_parse", "evidence_mismatch", "pinned_selection", "after_await"]
+        guard provider == .grok, actions.contains(action), stages.contains(stage),
+              failure == .modelUnverified || failure == .modelMismatch else { return nil }
+        func shape(_ value: Any?) -> String {
+            guard let value else { return "absent" }
+            if value is NSNull { return "null" }
+            return value is [String: Any] ? "object" : "other"
+        }
+        let evidence = observed["modelEvidence"] as? [String: Any]
+        let error = failure == .modelUnverified ? "model_unverified" : "model_mismatch"
+        return "action=\(action) error=\(error) stage=\(stage) evidence=\(shape(observed["modelEvidence"]))"
+            + " selected=\(shape(evidence?["selected"])) modePresent=\(observed["modeEvidence"] != nil) responsePresent=\(evidence?["response"] != nil)"
+    }
+
+    private func logGrokNativeModelFailure(_ observed: [String: Any], session: Session, action: String,
+                                           stage: String, failure: Failure) {
+        guard !session.loggedGrokModelFailure,
+              let diagnostic = Self.grokNativeModelFailureDiagnostic(observed, provider: session.provider,
+                action: action, stage: stage, failure: failure) else { return }
+        session.loggedGrokModelFailure = true
+        Self.inspectionLog.notice("modelFailure provider=grok origin=native \(diagnostic, privacy: .public) sequence=\(session.sequence) temporary=\(session.temporary) modelSelectionRequested=\(session.modelSelectionRequested) modelSelectionVerified=\(session.modelSelectionVerified)")
+    }
+
     /// Captures overlapping initial-render defects in a single failed attempt.
     /// Exact keys, fixed tag classes and real JSON booleans exclude DOM content.
     static func grokInitialEditorFailureDiagnostic(_ raw: Any?, action: String, detail: Any?) -> String? {
@@ -9175,6 +9235,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             Self.inspectionLog.error("productModeDiagnostic provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence) structure=\(safe, privacy: .public)")
         }
         if let error = observed["error"] as? String {
+            if !session.loggedGrokModelFailure,
+               let diagnostic = Self.grokModelFailureDiagnostic(observed, provider: provider, action: action) {
+                session.loggedGrokModelFailure = true
+                Self.inspectionLog.notice("modelFailure provider=grok origin=adapter \(diagnostic, privacy: .public) sequence=\(session.sequence) temporary=\(session.temporary) modelSelectionRequested=\(session.modelSelectionRequested) modelSelectionVerified=\(session.modelSelectionVerified)")
+            }
             if !session.loggedGrokPrivateFailure,
                let diagnostic = Self.grokPrivateFailureDiagnostic(observed, provider: provider, action: action) {
                 session.loggedGrokPrivateFailure = true
@@ -10254,7 +10319,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                   allowPendingChatGPTModelVerification, session.provider == .chatgpt,
                   session.state == "running", session.submitted, session.modelVerificationPending,
                   ["inspect", "submit", "verifyModel", "verifyProductMode"].contains(action),
-                  observed["modelEvidence"] == nil else { throw Failure.modelUnverified }
+                  observed["modelEvidence"] == nil else {
+                logGrokNativeModelFailure(observed, session: session, action: action, stage: "invalid_pending", failure: .modelUnverified)
+                throw Failure.modelUnverified
+            }
             // These are negative continuity checks, not fresh selection evidence.
             if action == "inspect", !session.loggedPendingModelVerification {
                 session.loggedPendingModelVerification = true
@@ -10289,6 +10357,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 let currentEvidence = try validatedSelectionEvidence(fresh, session: session, action: freshAction, rejectionStage: .selectionRecheck)
                 guard evidence.isSameResolvedSelection(as: currentEvidence) else {
                     logModelMismatch(fresh, session: session, action: freshAction, stage: "after_await")
+                    logGrokNativeModelFailure(fresh, session: session, action: freshAction, stage: "after_await", failure: .modelMismatch)
                     throw Failure.modelMismatch
                 }
             }
@@ -10297,21 +10366,25 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     }
 
     private func validatedSelectionEvidence(_ observation: [String: Any], session: Session, action: String = "other",
-                                            rejectionStage: QwenModelRejection.Stage? = nil) throws -> WebsiteSelectionEvidence {
+                                            rejectionStage: QwenModelRejection.Stage? = nil,
+                                            logGrokRejection: Bool = true) throws -> WebsiteSelectionEvidence {
         let current: WebsiteSelectionEvidence
         do { current = try WebsiteSelectionEvidence.parse(snapshot: observation, provider: session.provider.rawValue,
             expectedModel: session.modelChoice, expectedMode: session.modeChoice) }
         catch WebsiteSelectionEvidence.Failure.mismatch {
             logModelMismatch(observation, session: session, action: action, stage: "evidence_validation")
+            if logGrokRejection { logGrokNativeModelFailure(observation, session: session, action: action, stage: "evidence_mismatch", failure: .modelMismatch) }
             throw Failure.modelMismatch
         }
         catch {
             logDeepSeekModeObservation(observation, session: session, action: action)
+            if logGrokRejection { logGrokNativeModelFailure(observation, session: session, action: action, stage: "selection_parse", failure: .modelUnverified) }
             if let rejectionStage { throw qwenModelUnverified(session, stage: rejectionStage, action: action) }
             throw Failure.modelUnverified
         }
         guard session.selectionEvidence.map({ $0.isSameResolvedSelection(as: current) }) ?? true else {
             logModelMismatch(observation, session: session, action: action, stage: "pinned_selection")
+            if logGrokRejection { logGrokNativeModelFailure(observation, session: session, action: action, stage: "pinned_selection", failure: .modelMismatch) }
             throw Failure.modelMismatch
         }
         return current
@@ -10992,7 +11065,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               observation["firstUserFingerprint"] as? String == first,
               let text = observation["text"] as? String, !text.isEmpty,
               text.utf8.elementsEqual(session.response.utf8),
-              let model = try? validatedSelectionEvidence(observation, session: session, action: "inspect"),
+              let model = try? validatedSelectionEvidence(observation, session: session, action: "inspect", logGrokRejection: false),
               case .model(let proof) = model,
               proof.selected.key == choice.key, proof.selected.label == choice.label,
               session.selectionEvidence?.isSameResolvedSelection(as: model) == true else { return nil }
@@ -11035,7 +11108,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
               observation["firstUserFingerprint"] as? String == first,
               let text = observation["text"] as? String, !text.isEmpty,
               text.utf8.elementsEqual(session.response.utf8),
-              let model = try? validatedSelectionEvidence(observation, session: session, action: "inspect") else { return nil }
+              let model = try? validatedSelectionEvidence(observation, session: session, action: "inspect", logGrokRejection: false) else { return nil }
         return .init(binding: binding, url: url, responseFingerprint: Self.promptFingerprint(text), selectionEvidence: model)
     }
 

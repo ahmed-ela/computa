@@ -230,6 +230,93 @@ final class GrokPrivateModeEvidenceTests: XCTestCase {
     }
 
     @MainActor
+    func testModelAdapterDiagnosticOnlyRetainsClosedProviderActionErrorAndDetail() {
+        let actions = ["inspect", "discoverModels", "selectModel", "verifyModel", "enableTemporary",
+            "prepare", "insert", "sendReady", "submit", "stop"]
+        let errors = ["model_unverified", "model_mismatch", "model_unavailable", "unknown_action"]
+        let details = ["model_trigger_missing", "model_trigger_hidden", "model_trigger_ambiguous",
+            "model_trigger_shape", "model_trigger_label", "model_trigger_choice", "model_menu_ambiguous",
+            "model_menu_authored", "model_expansion_invalid", "model_collapsed_menu_present", "model_rows_unavailable",
+            "model_rows_empty", "model_row_choice", "model_row_checked", "model_row_authored", "model_rows_duplicate",
+            "model_checked_count", "model_checked_disabled", "model_checked_label", "model_enabled_count",
+            "model_pinned_changed", "model_action_unknown", "model_intent_invalid", "model_operation_changed",
+            "model_open_not_closed", "model_trigger_replaced", "model_target_count", "model_selection_changed",
+            "model_guard_contradiction", "model_observed_changed", "model_pilot_unavailable", "model_choices_empty",
+            "model_verify_missing", "model_required_missing", "model_initial_trigger_ambiguous",
+            "model_initial_trigger_invalid", "model_initial_menu_present", "model_closing_trigger_replaced",
+            "model_closing_menu_replaced", "model_closing_selection_changed", "model_closing_shape"]
+            + ["model_open_hit_", "model_option_hit_"].flatMap { prefix in
+                ["disabled", "invalid_geometry", "outside_viewport", "occluded"].map { prefix + $0 }
+            }
+        for action in actions {
+            for error in errors {
+                for detail in details {
+                    XCTAssertEqual(EmbeddedWebModelTransport.grokModelFailureDiagnostic(["error": error, "detail": detail], provider: .grok, action: action),
+                        "action=\(action) error=\(error) detail=\(detail)")
+                }
+                XCTAssertEqual(EmbeddedWebModelTransport.grokModelFailureDiagnostic(["error": error], provider: .grok, action: action),
+                    "action=\(action) error=\(error) detail=absent")
+                for detail: Any in ["PRIVATE_PAGE_TEXT", "https://grok.com/c/private", 42, true, NSNull(), ["model_trigger_missing"], String(repeating: "x", count: 10_000)] {
+                    XCTAssertEqual(EmbeddedWebModelTransport.grokModelFailureDiagnostic(["error": error, "detail": detail,
+                        "url": "PRIVATE_URL", "modelEvidence": ["selected": "PRIVATE_MODEL"]], provider: .grok, action: action),
+                        "action=\(action) error=\(error) detail=unknown")
+                }
+            }
+        }
+        let valid: [String: Any] = ["error": "model_unverified", "detail": "model_trigger_missing"]
+        for provider in EmbeddedWebModelTransport.Provider.allCases where provider != .grok {
+            XCTAssertNil(EmbeddedWebModelTransport.grokModelFailureDiagnostic(valid, provider: provider, action: "selectModel"))
+        }
+        XCTAssertNil(EmbeddedWebModelTransport.grokModelFailureDiagnostic(valid, provider: .grok, action: "PRIVATE_ACTION"))
+        for error: Any in ["PRIVATE_ERROR", "composer_unavailable", 1, true, NSNull()] {
+            XCTAssertNil(EmbeddedWebModelTransport.grokModelFailureDiagnostic(["error": error], provider: .grok, action: "selectModel"))
+        }
+    }
+
+    @MainActor
+    func testNativeModelDiagnosticOnlyRetainsClosedFailureStagesAndProofShapes() {
+        let actions = ["inspect", "discoverModels", "selectModel", "verifyModel", "enableTemporary",
+            "prepare", "insert", "sendReady", "submit", "stop", "cleanup", "other"]
+        let stages = ["initial_hydration", "loading_selection_state", "invalid_pending", "selection_parse",
+            "evidence_mismatch", "pinned_selection", "after_await"]
+        let observations: [([String: Any], String)] = [
+            ([:], "evidence=absent selected=absent modePresent=false responsePresent=false"),
+            (["modelEvidence": NSNull()], "evidence=null selected=absent modePresent=false responsePresent=false"),
+            (["modelEvidence": "PRIVATE_PROOF"], "evidence=other selected=absent modePresent=false responsePresent=false"),
+            (["modelEvidence": ["selected": ["key": "PRIVATE_MODEL", "label": "PRIVATE_LABEL"], "response": "PRIVATE_REPLY"],
+              "modeEvidence": "PRIVATE_MODE", "text": "PRIVATE_TEXT", "url": "PRIVATE_URL"],
+             "evidence=object selected=object modePresent=true responsePresent=true"),
+            (["modelEvidence": ["selected": NSNull()]], "evidence=object selected=null modePresent=false responsePresent=false"),
+            (["modelEvidence": ["selected": ["PRIVATE_MODEL"]]], "evidence=object selected=other modePresent=false responsePresent=false")]
+        for action in actions {
+            for stage in stages {
+                for failure in [EmbeddedWebModelTransport.Failure.modelUnverified, .modelMismatch] {
+                    for (observation, shape) in observations {
+                        let error = failure == .modelUnverified ? "model_unverified" : "model_mismatch"
+                        let result = EmbeddedWebModelTransport.grokNativeModelFailureDiagnostic(observation, provider: .grok,
+                            action: action, stage: stage, failure: failure)
+                        XCTAssertEqual(result, "action=\(action) error=\(error) stage=\(stage) " + shape)
+                        XCTAssertFalse(result?.contains("PRIVATE") == true)
+                        XCTAssertLessThanOrEqual(result?.utf8.count ?? 0, 256)
+                    }
+                }
+            }
+        }
+        for provider in EmbeddedWebModelTransport.Provider.allCases where provider != .grok {
+            XCTAssertNil(EmbeddedWebModelTransport.grokNativeModelFailureDiagnostic([:], provider: provider,
+                action: "selectModel", stage: "selection_parse", failure: .modelUnverified))
+        }
+        XCTAssertNil(EmbeddedWebModelTransport.grokNativeModelFailureDiagnostic([:], provider: .grok,
+            action: "PRIVATE_ACTION", stage: "selection_parse", failure: .modelUnverified))
+        XCTAssertNil(EmbeddedWebModelTransport.grokNativeModelFailureDiagnostic([:], provider: .grok,
+            action: "selectModel", stage: "PRIVATE_STAGE", failure: .modelUnverified))
+        for failure in [EmbeddedWebModelTransport.Failure.temporaryUnverified, .modelUnavailable, .editorFailure("PRIVATE_ERROR")] {
+            XCTAssertNil(EmbeddedWebModelTransport.grokNativeModelFailureDiagnostic([:], provider: .grok,
+                action: "selectModel", stage: "selection_parse", failure: failure))
+        }
+    }
+
+    @MainActor
     func testInitialEditorDiagnosticRejectsOpenFieldsAndKeepsOverlappingFailures() {
         let valid: [String: Any] = ["version": 1, "tag": "div", "editable": true, "role": true, "label": true,
             "connected": true, "rects": false, "displayNone": true, "visibilityHidden": false,

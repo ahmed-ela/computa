@@ -249,3 +249,41 @@ Kimi remains quota-blocked; no new Kimi prompt has been sent.
 The diagnostic candidate passes 55 Grok JavaScript tests (653 assertions) and
 the native projection test, including rejection of arbitrary page metadata.
 These are source checks; the Private activation cause still needs a live capture.
+
+Installed build 561's single marker entered Private successfully, then failed
+model verification before provider submission. The exact model error was saved
+and cleanup again closed the unsubmitted page. This does not resolve the earlier
+intermittent Private-click failure. The marker is not a tool qualification.
+
+A bounded Inspector experiment on an empty ordinary Grok Private chat reproduced
+a model-picker state rejected by the adapter: 50 ms after clicking the already
+selected Fast row, the trigger had `aria-expanded=false`, while its associated
+menu still had geometry and `visibility=visible` with `data-closed` and
+`data-ending-style` (opacity zero). The menu was removed by the next captured
+frame at 79 ms. The adapter treated the closing transition as contradictory
+markup before consulting its owned closing operation. The open menu did not
+hide Private or model controls in this experiment, and every captured opening
+frame with a Fast row passed its hit test. No provider message was sent by this
+inspection; the disposable tab was closed and developer settings restored.
+
+Build 562 handles only that existing owned menu's closing transition as pending.
+It still requires the same trigger, menu and intended selection, and grants no
+model evidence or further action until the menu disappears. Fixed adapter and
+native-proof diagnostics identify any subsequent failed branch without recording
+page content. The recorded closing state proves an unsupported website
+transition; the exact branch of the earlier 561 inference failure was not logged.
+
+The same candidate tightens Private readiness: enabled state alone no longer
+advertises a clickable toggle. A scoped layout completion signal requests a new
+read when the known control is temporarily unhittable. The original preparation
+deadline, immediate pre-click hit check and one-use click claim remain intact.
+This is a bounded readiness correction, not proof of the earlier failure's cause.
+
+The final candidate passes 64 JavaScript tests (881 assertions) and six focused
+native methods covering diagnostic projection, held and invalid closing menus,
+Private readiness/deadline/pre-action rejection, and the shared WebKit event
+wake. The first native run's closing tests incorrectly expected generation
+metadata to be absent while loading; correcting that test expectation preserved
+the absent model evidence, loading state and single-click assertions. Both
+affected methods passed on rerun without a production change. Live qualification
+of this candidate remains pending.

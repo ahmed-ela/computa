@@ -13,6 +13,8 @@ try {
     document, toggleClaimed: false, privateEntered: false, contradictoryModeObserved: false,
     prepared: null, prompt: null, submitted: false, first: null, stopped: false, observer: null, initialHydrationClosed: false };
   const state = globalThis[key];
+  if (state.owner === input.ownerToken && state.generation === input.documentGeneration && state.document === document)
+    state.layoutWait?.remove();
   const authored = node => node?.closest?.('[data-testid="user-message"], [data-testid="assistant-message"], [contenteditable], pre, code');
   const rootGuard = () => {
     c.assertContext();
@@ -49,7 +51,7 @@ try {
   const guard = () => {
     rootGuard(); recordContradictions(state.observer?.takeRecords?.() || []);
     if (state.contradictoryModeObserved) c.fail('temporary_mode_unverified');
-    if (state.modelContradiction) c.fail('model_mismatch');
+    if (state.modelContradiction) c.fail('model_mismatch', 'model_guard_contradiction');
   };
   function privateControl() {
     const controls = c.nodes(document, 'button[aria-label="Exit Private Chat"], button[aria-label="Switch to Private Chat"]', 8)
@@ -73,6 +75,31 @@ try {
       ownerToken: state.owner, documentGeneration: state.generation, url: 'https://grok.com/',
       sequence: state.submitted ? 1 : 0, enteredBeforeSend: true, sendClaimed: state.submitted,
       contradictoryModeObserved: false };
+  }
+  function privateActionAvailable(mode, transcript) {
+    const node = privateControl().node;
+    if (state.submitted || state.toggleClaimed || mode || !c.enabled(node)) return false;
+    const reason = c.hitFailure(node);
+    if (reason === null) return true;
+    if (input.action === 'inspect' && !state.privateEntered && !state.prepared && state.prompt === null
+      && !transcript.users.length && !transcript.answers.length && !state.grokModelOperation
+      && node.getAttribute('aria-label') === 'Switch to Private Chat' && node.getAttribute('aria-pressed') === 'false') {
+      // Only the actual hit element may add a sibling overlay's CSS completion
+      // to this wake scope. No identity, geometry or page content is logged.
+      let occluder = null;
+      if (reason === 'occluded') {
+        const rect = node.getBoundingClientRect(), left = Math.max(0, rect.left), top = Math.max(0, rect.top);
+        const right = Math.min(window.innerWidth, rect.left + rect.width), bottom = Math.min(window.innerHeight, rect.top + rect.height);
+        if ([left, top, right, bottom].every(Number.isFinite) && right > left && bottom > top) {
+          const hit = document.elementFromPoint(left + (right - left) / 2, top + (bottom - top) / 2);
+          if (hit?.nodeType === 1 && !node.contains(hit)) occluder = hit;
+        }
+      }
+      computaGrokAwaitLayout(c, state, node, () => globalThis[key] === state
+        && !state.toggleClaimed && !state.privateEntered && !state.submitted && !state.prepared && state.prompt === null
+        && !state.contradictoryModeObserved && !state.grokModelOperation, occluder);
+    }
+    return false;
   }
   guard();
   // Native grants this only for its still-unbound initial root inspection. It
@@ -130,15 +157,15 @@ try {
     const buttons = c.nodes(document, 'button', 256);
     const triggers = [...new Set([...c.nodes(document, '#model-select-trigger', 8),
       ...buttons.filter(node => node.getAttribute('aria-label')?.startsWith('Model: '))])];
-    if (triggers.length > 1) c.fail('model_unverified');
+    if (triggers.length > 1) c.fail('model_unverified', 'model_initial_trigger_ambiguous');
     if (triggers.length) {
       const trigger = triggers[0], label = trigger.getAttribute('aria-label');
       if (!c.enabled(trigger) || trigger.tagName !== 'BUTTON' || trigger.getAttribute('id') !== 'model-select-trigger'
         || trigger.getAttribute('aria-haspopup') !== 'menu' || trigger.getAttribute('aria-expanded') !== 'false'
         || typeof label !== 'string' || !label.startsWith('Model: ') || !c.choiceValid({ key: label.slice(7), label: label.slice(7) }))
-        c.fail('model_unverified');
+        c.fail('model_unverified', 'model_initial_trigger_invalid');
     }
-    if (c.nodes(document, '[role="menu"][aria-labelledby="model-select-trigger"]', 8).some(c.visible)) c.fail('model_unverified');
+    if (c.nodes(document, '[role="menu"][aria-labelledby="model-select-trigger"]', 8).some(c.visible)) c.fail('model_unverified', 'model_initial_menu_present');
     const modes = buttons.filter(node => node.getAttribute('aria-label')?.includes('Private Chat') || c.normalize(node.innerText) === 'Private');
     if (modes.length > 1) c.fail('temporary_mode_unverified');
     if (modes.length && (!c.enabled(modes[0])
@@ -268,7 +295,7 @@ try {
       || !input.expectedUserCounts.includes(t.users.length)) c.fail('conversation_changed', 'user_count');
     if (state.submitted && !mode) c.fail('temporary_mode_unverified');
     if (state.grokExpectedModel && !['discoverModels', 'selectModel'].includes(input.action)
-      && input.expectedModelChoice && (!model || !c.equalChoice(model.selected, input.expectedModelChoice))) c.fail('model_mismatch');
+      && input.expectedModelChoice && (!model || !c.equalChoice(model.selected, input.expectedModelChoice))) c.fail('model_mismatch', 'model_observed_changed');
     let fingerprint = null;
     if (t.first) {
       const marker = input.expectedFirstUserMarker, line = `Computa session marker: ${marker}`;
@@ -288,7 +315,7 @@ try {
     if (fingerprint && !sameFirst(state.first) || model && !c.equalChoice(currentModel?.selected, model.selected)) c.fail('conversation_changed', 'first_user_message');
     const result = current.first ? response(current, currentForm) : { text: '', answerComplete: false, busy: state.submitted, interrupted: false };
     return { url: document.URL, temporary: currentMode !== null, ...(currentMode ? { grokPrivateEvidence: currentMode } : {}),
-      temporaryActionAvailable: !state.submitted && !currentMode && c.enabled(privateControl().node), conversationIdentity: null,
+      temporaryActionAvailable: privateActionAvailable(currentMode, current), conversationIdentity: null,
       modelEvidence: currentModel, composer: c.enabled(currentForm.editor), userCount: current.users.length, responseCount: current.answers.length,
       firstUserIdentity: null, firstUserVerified: fingerprint !== null, firstUserMarkerVerified: fingerprint !== null,
       firstUserFingerprint: fingerprint, ...result };
@@ -299,15 +326,15 @@ try {
     if (state.submitted || initial.userCount || initial.responseCount) c.fail('not_fresh');
     // Public pilot qualification is intentionally narrower than website
     // discovery. Never fabricate Fast if its enabled row was not observed.
-    if (input.action === 'selectModel' && (input.modelChoice?.key !== 'Fast' || input.modelChoice?.label !== 'Fast')) c.fail('model_unavailable');
+    if (input.action === 'selectModel' && (input.modelChoice?.key !== 'Fast' || input.modelChoice?.label !== 'Fast')) c.fail('model_unavailable', 'model_pilot_unavailable');
     const observed = models.step(input.action, input.modelChoice);
     if (observed.modelChoices) observed.modelChoices = observed.modelChoices.filter(choice => choice.key === 'Fast' && choice.label === 'Fast');
-    if (!observed.pending && !observed.modelChoices?.length) c.fail('model_unavailable');
+    if (!observed.pending && !observed.modelChoices?.length) c.fail('model_unavailable', 'model_choices_empty');
     return { ...initial, ...observed };
   }
   if (input.action === 'inspect') return initial;
   if (input.action === 'verifyModel') {
-    if (!initial.modelEvidence) c.fail('model_unverified');
+    if (!initial.modelEvidence) c.fail('model_unverified', 'model_verify_missing');
     return initial;
   }
   if (input.action === 'enableTemporary') {
@@ -323,7 +350,7 @@ try {
     return { ...initial, enabled: false };
   }
   if (!initial.temporary) c.fail('temporary_mode_unverified');
-  if (!initial.modelEvidence) c.fail('model_unverified');
+  if (!initial.modelEvidence) c.fail('model_unverified', 'model_required_missing');
   const form = composer();
   if (input.action === 'stop') {
     if (state.stopped) return { ...initial, stopped: true };
@@ -368,6 +395,9 @@ try {
   form.send.click(); rootGuard();
   return { ...initial, submitted: true };
 } catch (error) {
+  const state = globalThis.__computaGrokPrivateSessionV1;
+  if (state?.owner === input.ownerToken && state.generation === input.documentGeneration && state.document === document)
+    state.layoutWait?.remove();
   if (error?.computaAdapterFailure === true) return { error: error.error, ...(error.detail ? { detail: error.detail } : {}),
     ...(error.grokInitialEditorDiagnostic ? { grokInitialEditorDiagnostic: error.grokInitialEditorDiagnostic } : {}) };
   throw error;

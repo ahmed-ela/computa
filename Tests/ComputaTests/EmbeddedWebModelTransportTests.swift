@@ -15173,6 +15173,136 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         return (token, view)
     }
 
+    func testGrokPrivateReadinessWaitsForHitAndPreservesDeadlineAndImmediateActionGuard() async throws {
+        for arm in ["transient", "permanent", "pre_action"] {
+            let setup = arm == "pre_action" ? "" : Self.grokReadinessOverlay
+            let page = try Self.grokFixturePage().replacingOccurrences(of: "</body>", with: "<script>" + setup + "</script></body>")
+            let fixture = try Fixture(page: page)
+            defer { fixture.transport.setBeforePageResultValidationForTesting(nil); fixture.shutdown() }
+            if arm == "permanent" { fixture.transport.setTimeoutsForTesting(preparation: .seconds(2), response: .seconds(30)) }
+            let started = try await startChoice(syntheticGrokChoice, in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            try await waitForFixture(view)
+            var inspected = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                guard action == "inspect", !inspected else { return }
+                inspected = true
+                if arm == "pre_action" { _ = try? await self.evaluate(view, Self.grokReadinessOverlay + "return true;") }
+            }
+            if arm == "pre_action" {
+                do { _ = try await waitForState("ready", fixture.transport, token: token); XCTFail("A stale hit cannot dispatch Private") }
+                catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .temporaryUnverified) }
+                XCTAssertTrue(inspected)
+            } else {
+                let limit = ContinuousClock.now + .seconds(5)
+                while !inspected, ContinuousClock.now < limit {
+                    let observed = try await fixture.transport.changeRevision(sessionToken: token)
+                    let revision = try XCTUnwrap(observed)
+                    let pending = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                    XCTAssertEqual(pending["state"] as? String, "loading")
+                    if !inspected { _ = try await fixture.transport.waitForChange(sessionToken: token, after: revision, until: limit) }
+                }
+                XCTAssertTrue(inspected)
+                fixture.transport.setBeforePageResultValidationForTesting(nil)
+                let before = try await evaluate(view, "return [grokFixture.privateCount,grokFixture.pickerOpens,grokFixture.modelOptionClicks,grokFixture.sendCount];") as? [Int]
+                XCTAssertEqual(before, [0, 0, 0, 0])
+                if arm == "permanent" {
+                    do { _ = try await waitForState("ready", fixture.transport, token: token); XCTFail("Blocked Private must keep the original deadline") }
+                    catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .preparationDeadline) }
+                } else {
+                    _ = try await evaluate(view, "grokFixture.readinessCover.remove(); return true;")
+                    let ready = try await waitForState("ready", fixture.transport, token: token)
+                    try assertChoiceEvidence(ready, choice: syntheticGrokChoice)
+                }
+            }
+            let after = try await evaluate(view, "return [grokFixture.privateCount,grokFixture.pickerOpens,grokFixture.modelOptionClicks,grokFixture.sendCount];") as? [Int]
+            XCTAssertEqual(after, arm == "transient" ? [1, 1, 1, 0] : [0, 0, 0, 0], arm)
+        }
+    }
+
+    private func startGrokClosingModelFixture(_ fixture: Fixture) async throws -> (String, WKWebView) {
+        let started = try await startChoice(syntheticGrokChoice, in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        try await waitForFixture(view)
+        let deadline = ContinuousClock.now + .seconds(7)
+        while ContinuousClock.now < deadline {
+            let observed = try await fixture.transport.changeRevision(sessionToken: token)
+            let revision = try XCTUnwrap(observed)
+            let pending = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTAssertEqual(pending["state"] as? String, "loading")
+            XCTAssertNil(pending["modelEvidence"])
+            if let context = pending["modelProofContext"] as? [String: Any] {
+                // Native generation metadata is emitted before model proof;
+                // its zero submission fields confer no selected-model evidence.
+                XCTAssertEqual(Set(context.keys), ["documentGeneration", "sequence", "firstUserFingerprint", "responseCount", "baselineResponseCount"])
+                XCTAssertNotNil((context["documentGeneration"] as? String).flatMap(UUID.init(uuidString:)))
+                XCTAssertEqual(context["sequence"] as? Int, 0); XCTAssertEqual(context["firstUserFingerprint"] as? String, "")
+                XCTAssertEqual(context["responseCount"] as? Int, 0); XCTAssertEqual(context["baselineResponseCount"] as? Int, 0)
+            }
+            let clicked = try await evaluate(view, "return grokFixture.modelOptionClicks;") as? Int
+            if clicked == 1 { return (token, view) }
+            _ = try await fixture.transport.waitForChange(sessionToken: token, after: revision, until: deadline)
+        }
+        XCTFail("The synthetic model row was not clicked once within the preparation deadline")
+        throw FixtureFailure.timeout
+    }
+
+    func testGrokOwnedClosingModelMenuWaitsWithoutEvidenceOrRepeatedClickUntilGone() async throws {
+        let page = try Self.grokFixturePage().replacingOccurrences(of: "</body>", with: "<script>grokFixture.delayModelClose = true;</script></body>")
+        let fixture = try Fixture(page: page)
+        defer { fixture.shutdown() }
+        let (token, view) = try await startGrokClosingModelFixture(fixture)
+        for _ in 0..<2 {
+            let pending = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTAssertEqual(pending["state"] as? String, "loading")
+            XCTAssertNil(pending["modelEvidence"])
+            let context = try XCTUnwrap(pending["modelProofContext"] as? [String: Any])
+            XCTAssertEqual(Set(context.keys), ["documentGeneration", "sequence", "firstUserFingerprint", "responseCount", "baselineResponseCount"])
+            XCTAssertNotNil((context["documentGeneration"] as? String).flatMap(UUID.init(uuidString:)))
+            XCTAssertEqual(context["sequence"] as? Int, 0); XCTAssertEqual(context["firstUserFingerprint"] as? String, "")
+            XCTAssertEqual(context["responseCount"] as? Int, 0); XCTAssertEqual(context["baselineResponseCount"] as? Int, 0)
+            let state = try await evaluate(view, "return [grokFixture.menu.isConnected,grokFixture.trigger.getAttribute('aria-expanded'),grokFixture.pickerOpens,grokFixture.modelOptionClicks,grokFixture.sendCount];") as? [Any]
+            XCTAssertEqual(state?[0] as? Bool, true); XCTAssertEqual(state?[1] as? String, "false")
+            XCTAssertEqual(state?[2] as? Int, 1); XCTAssertEqual(state?[3] as? Int, 1); XCTAssertEqual(state?[4] as? Int, 0)
+        }
+        _ = try await evaluate(view, "grokFixture.finishModelClose(); return true;")
+        let ready = try await waitForState("ready", fixture.transport, token: token)
+        try assertChoiceEvidence(ready, choice: syntheticGrokChoice)
+        let counts = try await evaluate(view, "return [grokFixture.pickerOpens,grokFixture.modelOptionClicks,grokFixture.privateCount,grokFixture.sendCount];") as? [Int]
+        XCTAssertEqual(counts, [1, 1, 1, 0])
+    }
+
+    func testGrokClosingModelMenuRejectsReplacementInvalidMarkersAndUnownedMenusWithoutReplay() async throws {
+        for arm in ["replaced_menu", "invalid_marker", "unowned"] {
+            let setup = arm == "unowned" ? """
+                grokFixture.trigger.click(); grokFixture.menu.querySelector('[role=menuitemcheckbox]').click();
+                grokFixture.pickerOpens = 0; grokFixture.modelOptionClicks = 0;
+                """ : ""
+            let page = try Self.grokFixturePage().replacingOccurrences(of: "</body>", with: "<script>grokFixture.delayModelClose = true;" + setup + "</script></body>")
+            let fixture = try Fixture(page: page)
+            defer { fixture.shutdown() }
+            let token: String, view: WKWebView
+            if arm == "unowned" {
+                let started = try await startChoice(syntheticGrokChoice, in: fixture)
+                token = try XCTUnwrap(started["sessionToken"] as? String)
+                view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+                try await waitForFixture(view)
+            } else {
+                let started = try await startGrokClosingModelFixture(fixture)
+                token = started.0; view = started.1
+                _ = try await evaluate(view, arm == "replaced_menu"
+                    ? "const replacement=grokFixture.menu.cloneNode(true);grokFixture.menu.replaceWith(replacement);grokFixture.menu=replacement;return true;"
+                    : "grokFixture.menu.setAttribute('data-ending-style','invalid');return true;")
+            }
+            do { _ = try await waitForState("ready", fixture.transport, token: token); XCTFail("Invalid closing state cannot supply model proof: " + arm) }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelUnverified, arm) }
+            let counts = try await evaluate(view, "return [grokFixture.pickerOpens,grokFixture.modelOptionClicks,grokFixture.privateCount,grokFixture.sendCount];") as? [Int]
+            XCTAssertEqual(counts, arm == "unowned" ? [0, 0, 0, 0] : [1, 1, 1, 0], arm)
+        }
+    }
+
     private static let grokSavedFixtureURL = "https://grok.com/c/11111111-abcd-4333-8444-555555555555"
 
     private static func grokFreshStartPage(_ setup: String = "") throws -> String {
