@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 
 export const grokResource = new URL('../Sources/Computa/Resources/BrowserModels/grok.js', import.meta.url);
 export function composeGrokResource(): string {
-  const source = ['embedded-provider-core.js', 'embedded-grok-layout-wake.js', 'embedded-grok-fresh-start.js', 'embedded-grok-model-controls.js', 'embedded-grok-editor-geometry.js', 'embedded-grok-transcript-rendering.js', 'embedded-grok-private-adapter.js']
+  const source = ['embedded-provider-core.js', 'embedded-grok-layout-wake.js', 'embedded-grok-fresh-start.js', 'embedded-grok-model-controls.js', 'embedded-grok-editor-geometry.js', 'embedded-grok-transcript-rendering.js', 'embedded-grok-first-user-diagnostic.js', 'embedded-grok-private-adapter.js']
     .map(name => readFileSync(new URL(name, import.meta.url), 'utf8')).join('\n');
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
   new AsyncFunction('input', source);

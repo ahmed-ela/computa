@@ -525,6 +525,72 @@ describe('Grok private inference adapter', () => {
     expect(sent.f.sendCount).toBe(1);
   });
 
+  test('first-body diagnostics distinguish literal mismatch from rendered blank-line changes', async () => {
+    for (const arm of ['content', 'blank_lines', 'whitespace', 'rendered_only']) {
+      const f = grokFixture(); expect(await f.submit()).toMatchObject({ submitted: true });
+      const expected = f.f.lastPrompt;
+      if (arm === 'rendered_only') Object.defineProperty(f.f.userBody, 'innerText', { get: () => expected.replace('\n\n', '\n\n\n') });
+      else f.f.userBody.textContent = arm === 'content' ? expected.replace('Return', 'Foreign')
+        : arm === 'whitespace' ? expected.replace('a synthetic', 'a  synthetic') : expected.replace('\n\n', '\n\n\n');
+      const failed = await f.run('inspect');
+      expect(failed).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
+      const d = failed.grokFirstUserFailureDiagnostic;
+      expect(d).toMatchObject({ version: 1, stage: 'before_hash', reason: 'payload_text', users: 1, answers: 1,
+        bodies: 1, bodyVisible: true, expectedUTF16: expected.length, innerTextMatches: false,
+        textContentMatches: arm === 'rendered_only', textDifference: arm === 'content' ? 'other' : arm === 'whitespace' ? 'whitespace' : 'blank_lines', identity: 'not_checked' });
+      expect(Object.keys(d).sort()).toEqual(['version','stage','reason','users','answers','bodies','bodyVisible',
+        'observedUTF16','expectedUTF16','observedLines','expectedLines','textContentMatches','innerTextMatches','textDifference','identity'].sort());
+      expect(JSON.stringify(d)).not.toContain(expected); expect(JSON.stringify(d)).not.toContain('Computa session marker');
+      expect(f.world.__computaGrokPrivateSessionV1.first).toBeNull(); expect(f.f.sendCount).toBe(1);
+    }
+  });
+
+  test('first-body shape and hash-yield identity diagnostics keep the original rejection', async () => {
+    for (const arm of ['missing', 'duplicate', 'hidden', 'root', 'body', 'parent']) {
+      const f = grokFixture(); expect(await f.submit()).toMatchObject({ submitted: true });
+      if (arm === 'missing') f.f.userBody.remove();
+      if (arm === 'duplicate') f.f.user.append(new f.Node('SPAN', { 'data-bubble-text': '' }, f.f.lastPrompt));
+      if (arm === 'hidden') f.f.userBody.setAttribute('style', 'visibility:hidden');
+      if (['root', 'body', 'parent'].includes(arm)) f.onDigest(() => {
+        if (arm === 'root') { f.f.user.remove(); f.f.appendUser(f.f.lastPrompt); }
+        if (arm === 'body') { f.f.userBody.remove(); f.f.userBody = new f.Node('SPAN', { 'data-bubble-text': '' }, f.f.lastPrompt); f.f.user.append(f.f.userBody); }
+        if (arm === 'parent') {
+          f.f.user.remove(); f.f.user.connected = true;
+          const parent = new f.Node('DIV'); parent.append(f.f.user); f.f.messages.append(parent);
+        }
+      });
+      const failed = await f.run('inspect');
+      expect(failed).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message' });
+      const d = failed.grokFirstUserFailureDiagnostic;
+      expect(d.stage).toBe(['root','body','parent'].includes(arm) ? 'after_hash' : 'entry');
+      expect(d.reason).toBe(['root','body','parent'].includes(arm) ? 'node_identity' : arm === 'hidden' ? 'body_visibility' : 'body_count');
+      expect(d.identity).toBe(['root','body','parent'].includes(arm) ? arm + '_changed' : 'not_checked');
+      expect(f.world.__computaGrokPrivateSessionV1.first).toBeNull(); expect(f.f.sendCount).toBe(1);
+    }
+  });
+
+  test('fingerprint diagnostic does not reveal either expected or observed hash', async () => {
+    const f = grokFixture(); expect(await f.submit()).toMatchObject({ submitted: true });
+    const failed = await f.run('inspect', { expectedFirstUserFingerprint: '0'.repeat(64) });
+    expect(failed).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message',
+      grokFirstUserFailureDiagnostic: { stage: 'after_hash', reason: 'fingerprint', identity: 'stable',
+        textDifference: 'none', textContentMatches: true, innerTextMatches: true } });
+    expect(JSON.stringify(failed.grokFirstUserFailureDiagnostic)).not.toContain('0'.repeat(64));
+    expect(f.world.__computaGrokPrivateSessionV1.first).toBeNull(); expect(f.f.sendCount).toBe(1);
+  });
+
+  test('diagnostic metadata is bounded and unreadable metadata cannot replace its original failure', () => {
+    const source = readFileSync(new URL('./embedded-grok-first-user-diagnostic.js', import.meta.url), 'utf8');
+    const fail = new Function('c','state','transcript', source + '\nreturn computaGrokFirstUserFailure(c,state,"before_hash","payload_text",transcript);');
+    const core = { bodyText: (text: string) => text.trim(), visible: () => true };
+    let error: any;
+    try { fail(core, { prompt: 'owned' }, { users: [], answers: [], bodies: [], text: 'x'.repeat(230000) }); } catch (e) { error = e; }
+    expect(error).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message',
+      grokFirstUserFailureDiagnostic: { observedUTF16: 220001, observedLines: null, innerTextMatches: null, textDifference: 'unavailable' } });
+    try { fail(core, { prompt: 'owned' }, { body: { get innerText() { throw Error('PRIVATE_DIAGNOSTIC_FAILURE'); } } }); } catch (e) { error = e; }
+    expect(error).toEqual({ computaAdapterFailure: true, error: 'conversation_changed', detail: 'first_user_message' });
+  });
+
   test('same marker in a changed prompt, replaced body, changed URL or changed generation cannot bind', async () => {
     for (const change of [
       (f: ReturnType<typeof grokFixture>) => { f.f.userBody.textContent = 'changed ' + grokPrompt; },

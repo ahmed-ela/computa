@@ -199,6 +199,110 @@ final class GrokPrivateModeEvidenceTests: XCTestCase {
         XCTAssertNil(EmbeddedWebModelTransport.grokComposerFailureDiagnostic(action: "unknown private action", detail: "editor_missing"))
     }
 
+    private func firstUserFailurePacket() -> [String: Any] {
+        ["version": 1, "stage": "before_hash", "reason": "payload_text", "users": 1, "answers": 0, "bodies": 1,
+         "bodyVisible": true, "observedUTF16": 32768, "expectedUTF16": 32770, "observedLines": 410,
+         "expectedLines": 412, "textContentMatches": true, "innerTextMatches": false,
+         "textDifference": "blank_lines", "identity": "not_checked"]
+    }
+
+    private func firstUserFailureRecord(_ packet: [String: Any]) -> [String: Any] {
+        ["error": "conversation_changed", "detail": "first_user_message", "grokFirstUserFailureDiagnostic": packet]
+    }
+
+    func testFirstUserFailureDiagnosticProjectsOnlyFiniteFailureMetadata() throws {
+        let packet = firstUserFailurePacket()
+        var record = firstUserFailureRecord(packet)
+        record["text"] = "PRIVATE_BODY_SHOULD_NOT_BE_LOGGED"
+        record["url"] = "https://example.test/private-token"
+        record["firstUserFingerprint"] = fingerprint
+        let result = try XCTUnwrap(EmbeddedWebModelTransport.grokFirstUserFailureDiagnostic(record, provider: .grok, action: "inspect"))
+        XCTAssertLessThanOrEqual(result.utf8.count, 960)
+        let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.utf8)) as? [String: Any])
+        var expected = packet; expected["action"] = "inspect"
+        XCTAssertTrue(NSDictionary(dictionary: decoded).isEqual(to: expected))
+        XCTAssertFalse(result.contains("PRIVATE_BODY")); XCTAssertFalse(result.contains("https://"))
+        XCTAssertFalse(result.contains(fingerprint))
+        let choices = [
+            "stage": ["entry", "before_hash", "after_hash", "recheck"],
+            "reason": ["body_count", "body_visibility", "body_owner", "submission_state", "marker_state", "payload_text",
+                "marker_suffix", "marker_count", "node_identity", "bound_identity", "fingerprint", "bound_missing", "model_after_hash"],
+            "textDifference": ["unavailable", "none", "blank_lines", "whitespace", "other"],
+            "identity": ["not_checked", "stable", "root_changed", "body_changed", "parent_changed", "text_changed"],
+        ]
+        for (key, values) in choices {
+            for value in values {
+                var changed = packet; changed[key] = value
+                XCTAssertNotNil(EmbeddedWebModelTransport.grokFirstUserFailureDiagnostic(firstUserFailureRecord(changed), provider: .grok, action: "inspect"), key)
+            }
+        }
+        for key in ["users", "answers", "bodies"] {
+            for value in [0, 4] {
+                var changed = packet; changed[key] = value
+                XCTAssertNotNil(EmbeddedWebModelTransport.grokFirstUserFailureDiagnostic(firstUserFailureRecord(changed), provider: .grok, action: "inspect"), key)
+            }
+        }
+        for key in ["observedUTF16", "expectedUTF16", "observedLines", "expectedLines"] {
+            for value: Any in [0, 220_001, NSNull()] {
+                var changed = packet; changed[key] = value
+                XCTAssertNotNil(EmbeddedWebModelTransport.grokFirstUserFailureDiagnostic(firstUserFailureRecord(changed), provider: .grok, action: "inspect"), key)
+            }
+        }
+        for key in ["bodyVisible", "textContentMatches", "innerTextMatches"] {
+            for value: Any in [true, false, NSNull()] {
+                var changed = packet; changed[key] = value
+                // Exercise the actual JSON boundary, where bool and numeric NSNumber must remain distinct.
+                let data = try JSONSerialization.data(withJSONObject: firstUserFailureRecord(changed))
+                let bridged = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+                XCTAssertNotNil(EmbeddedWebModelTransport.grokFirstUserFailureDiagnostic(bridged, provider: .grok, action: "inspect"), key)
+            }
+        }
+    }
+
+    func testFirstUserFailureDiagnosticRejectsMalformedOrEnrichedPackets() {
+        let packet = firstUserFailurePacket()
+        func reject(_ changed: [String: Any], _ label: String) {
+            XCTAssertNil(EmbeddedWebModelTransport.grokFirstUserFailureDiagnostic(firstUserFailureRecord(changed), provider: .grok, action: "inspect"), label)
+        }
+        for key in packet.keys {
+            var changed = packet; changed.removeValue(forKey: key); reject(changed, key)
+        }
+        for key in ["text", "url", "cookie", "marker", "firstUserFingerprint", "modelEvidence", "grokPrivateEvidence", "submitted", "cleanup"] {
+            var changed = packet; changed[key] = NSNull(); reject(changed, key)
+        }
+        for key in ["stage", "reason", "textDifference", "identity"] {
+            for value: Any in ["PRIVATE_UNRECOGNIZED_VALUE", true, 1, NSNull(), ["entry"], ["value": "entry"]] {
+                var changed = packet; changed[key] = value; reject(changed, key)
+            }
+        }
+        for key in ["version", "users", "answers", "bodies", "observedUTF16", "expectedUTF16", "observedLines", "expectedLines"] {
+            for value: Any in [true, false, "1", 1.5, -1, Double.infinity, [1], ["value": 1]] {
+                var changed = packet; changed[key] = value; reject(changed, key)
+            }
+            let invalid: Any = key == "version" ? 2 : (["users", "answers", "bodies"].contains(key) ? 5 : 220_002)
+            var changed = packet; changed[key] = invalid; reject(changed, key)
+        }
+        for key in ["version", "users", "answers", "bodies"] {
+            var changed = packet; changed[key] = NSNull(); reject(changed, key)
+        }
+        for key in ["bodyVisible", "textContentMatches", "innerTextMatches"] {
+            for value: Any in [0, 1, "true", [], ["value": true]] {
+                var changed = packet; changed[key] = value; reject(changed, key)
+            }
+        }
+        let record = firstUserFailureRecord(packet)
+        for provider in EmbeddedWebModelTransport.Provider.allCases where provider != .grok {
+            XCTAssertNil(EmbeddedWebModelTransport.grokFirstUserFailureDiagnostic(record, provider: provider, action: "inspect"))
+        }
+        for action in ["", "PRIVATE_ACTION", "grokFreshStartInspect"] {
+            XCTAssertNil(EmbeddedWebModelTransport.grokFirstUserFailureDiagnostic(record, provider: .grok, action: action))
+        }
+        for (key, value) in [("error", "model_unverified"), ("detail", "user_count"), ("detail", "PRIVATE_DETAIL")] {
+            var changed = record; changed[key] = value
+            XCTAssertNil(EmbeddedWebModelTransport.grokFirstUserFailureDiagnostic(changed, provider: .grok, action: "inspect"))
+        }
+    }
+
     @MainActor
     func testPrivateFailureDiagnosticOnlyRetainsClosedProviderActionErrorAndDetail() {
         let details = ["private_control_missing", "private_control_shape", "private_control_hit_disabled",

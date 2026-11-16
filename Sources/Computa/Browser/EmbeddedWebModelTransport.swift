@@ -1056,6 +1056,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var loggedGrokComposerFailure = false
         var loggedGrokPrivateFailure = false
         var loggedGrokModelFailure = false
+        var loggedGrokFirstUserFailure = false
         var loggedGrokUnexpectedRoute = false
         var loggedGroqSendFailure = false
         var loggedGroqSendReveal = false
@@ -7726,6 +7727,50 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         Self.inspectionLog.notice("modelFailure provider=grok origin=native \(diagnostic, privacy: .public) sequence=\(session.sequence) temporary=\(session.temporary) modelSelectionRequested=\(session.modelSelectionRequested) modelSelectionVerified=\(session.modelSelectionVerified)")
     }
 
+    /// Failure-only branch and shape metadata. The exact finite packet excludes
+    /// page strings and cannot grant first-message binding, output or cleanup.
+    nonisolated static func grokFirstUserFailureDiagnostic(_ observed: [String: Any], provider: Provider, action: String) -> String? {
+        let actions: Set<String> = ["inspect", "discoverModels", "selectModel", "verifyModel", "enableTemporary",
+            "prepare", "insert", "sendReady", "submit", "stop"]
+        let countKeys = ["users", "answers", "bodies"]
+        let sizeKeys = ["observedUTF16", "expectedUTF16", "observedLines", "expectedLines"]
+        let flagKeys = ["bodyVisible", "textContentMatches", "innerTextMatches"]
+        let categories: [String: Set<String>] = [
+            "stage": ["entry", "before_hash", "after_hash", "recheck"],
+            "reason": ["body_count", "body_visibility", "body_owner", "submission_state", "marker_state", "payload_text",
+                "marker_suffix", "marker_count", "node_identity", "bound_identity", "fingerprint", "bound_missing", "model_after_hash"],
+            "textDifference": ["unavailable", "none", "blank_lines", "whitespace", "other"],
+            "identity": ["not_checked", "stable", "root_changed", "body_changed", "parent_changed", "text_changed"],
+        ]
+        guard provider == .grok, actions.contains(action),
+              observed["error"] as? String == "conversation_changed", observed["detail"] as? String == "first_user_message",
+              let value = observed["grokFirstUserFailureDiagnostic"] as? [String: Any],
+              Set(value.keys) == Set(["version"] + countKeys + sizeKeys + flagKeys + Array(categories.keys)),
+              ComputerToolArgumentContract.exactInt64(value["version"]) == 1 else { return nil }
+        var safe: [String: Any] = ["version": 1, "action": action]
+        for (key, choices) in categories {
+            guard let label = value[key] as? String, choices.contains(label) else { return nil }
+            safe[key] = label
+        }
+        for key in countKeys {
+            guard let count = ComputerToolArgumentContract.exactInt64(value[key]), (0...4).contains(count) else { return nil }
+            safe[key] = count
+        }
+        for key in sizeKeys {
+            if value[key] is NSNull { safe[key] = NSNull(); continue }
+            // 220001 is the adapter's bounded overflow sentinel, not exact size.
+            guard let count = ComputerToolArgumentContract.exactInt64(value[key]), (0...220_001).contains(count) else { return nil }
+            safe[key] = count
+        }
+        for key in flagKeys {
+            if value[key] is NSNull { safe[key] = NSNull(); continue }
+            guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
+            safe[key] = flag
+        }
+        guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), bytes.count <= 960 else { return nil }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
     /// Captures overlapping initial-render defects in a single failed attempt.
     /// Exact keys, fixed tag classes and real JSON booleans exclude DOM content.
     static func grokInitialEditorFailureDiagnostic(_ raw: Any?, action: String, detail: Any?) -> String? {
@@ -9277,6 +9322,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             Self.inspectionLog.error("productModeDiagnostic provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence) structure=\(safe, privacy: .public)")
         }
         if let error = observed["error"] as? String {
+            if !session.loggedGrokFirstUserFailure,
+               let diagnostic = Self.grokFirstUserFailureDiagnostic(observed, provider: provider, action: action) {
+                session.loggedGrokFirstUserFailure = true
+                Self.inspectionLog.error("grokFirstUserFailure provider=grok origin=adapter structure=\(diagnostic, privacy: .public) sequence=\(session.sequence) pendingSubmission=\(session.pendingSubmission) fingerprintPresent=\(session.firstUserFingerprint != nil)")
+            }
             if !session.loggedGrokModelFailure,
                let diagnostic = Self.grokModelFailureDiagnostic(observed, provider: provider, action: action) {
                 session.loggedGrokModelFailure = true

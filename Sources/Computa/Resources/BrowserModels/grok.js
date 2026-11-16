@@ -482,6 +482,44 @@ function computaGrokTranscriptRenderingPending(c, state, input, guard, privateEv
   return true;
 }
 
+// Failure-only, closed metadata. Never return prompt/page text, markers, hashes
+// or DOM identifiers. A diagnostic read must not replace the original failure.
+function computaGrokFirstUserFailure(c, state, stage, reason, transcript, identity = 'not_checked') {
+  const failure = { computaAdapterFailure: true, error: 'conversation_changed', detail: 'first_user_message' };
+  try {
+    const cap = 220001, bounded = text => typeof text === 'string' && text.length < cap ? text : null;
+    const body = transcript?.body || null;
+    const rawObserved = typeof transcript?.text === 'string' ? transcript.text : body ? body.innerText : null;
+    const rawExpected = typeof state.prompt === 'string' ? state.prompt : null;
+    const observed = bounded(rawObserved) === null ? null : c.bodyText(rawObserved);
+    const expected = bounded(rawExpected) === null ? null : c.bodyText(rawExpected);
+    const rawContent = body ? body.textContent : null;
+    const content = bounded(rawContent) === null ? null : c.bodyText(rawContent);
+    const length = text => typeof text === 'string' ? Math.min(cap, text.length) : null;
+    const lines = text => {
+      if (typeof text !== 'string' || text.length >= cap) return null;
+      let count = 1;
+      for (let index = 0; index < text.length && count < cap; index++) if (text[index] === '\n') count++;
+      return count;
+    };
+    const comparable = observed !== null && expected !== null;
+    const difference = !comparable ? 'unavailable' : observed === expected ? 'none'
+      : observed.replace(/\n+/g, '\n') === expected.replace(/\n+/g, '\n') ? 'blank_lines'
+      : observed.replace(/\s/g, '') === expected.replace(/\s/g, '') ? 'whitespace' : 'other';
+    failure.grokFirstUserFailureDiagnostic = {
+      version: 1, stage, reason, users: Math.min(4, transcript?.users?.length || 0),
+      answers: Math.min(4, transcript?.answers?.length || 0), bodies: Math.min(4, transcript?.bodies?.length || 0),
+      bodyVisible: body ? c.visible(body) : null,
+      // 220001 is a saturation sentinel, not an exact oversized length.
+      observedUTF16: length(observed ?? rawObserved), expectedUTF16: length(expected ?? rawExpected),
+      observedLines: lines(observed ?? rawObserved), expectedLines: lines(expected ?? rawExpected),
+      textContentMatches: content !== null && expected !== null ? content === expected : null,
+      innerTextMatches: comparable ? observed === expected : null, textDifference: difference, identity,
+    };
+  } catch { /* Preserve the original failure even if metadata cannot be read. */ }
+  throw failure;
+}
+
 // One observed Private Chat per inference. Private is a proved transition,
 // not an invented persistent indicator: Grok removes its toggle after Send.
 try {
@@ -688,7 +726,8 @@ try {
     if (!send && !stop && !voice) c.fail('composer_unavailable', 'action_invalid');
     return { editor, send, stop };
   }
-  function transcript() {
+  const firstFailure = (stage, reason, value, identity) => computaGrokFirstUserFailure(c, state, stage, reason, value, identity);
+  function transcript(stage) {
     const users = c.nodes(document, '[data-testid="user-message"]', 4);
     const answers = c.nodes(document, '[data-testid="assistant-message"]', 4);
     if (users.length > 1 || answers.length > 1 || answers.length > users.length
@@ -696,14 +735,17 @@ try {
         || node.closest('[contenteditable], pre, code'))) c.fail('conversation_changed', 'user_count');
     const first = users[0] || null;
     const bodies = first ? c.nodes(first, 'span[data-bubble-text]', 4) : [];
-    if (first && (bodies.length !== 1 || !c.visible(bodies[0]) || bodies[0].closest('[data-testid="user-message"]') !== first))
-      c.fail('conversation_changed', 'first_user_message');
-    return { users, answers, first, body: bodies[0] || null, text: bodies[0] ? c.bodyText(bodies[0].innerText) : '' };
+    const shape = { users, answers, first, bodies, body: bodies.length === 1 ? bodies[0] : null };
+    if (first && bodies.length !== 1) firstFailure(stage, 'body_count', shape);
+    if (first && !c.visible(bodies[0])) firstFailure(stage, 'body_visibility', shape);
+    if (first && bodies[0].closest('[data-testid="user-message"]') !== first) firstFailure(stage, 'body_owner', shape);
+    return { ...shape, text: bodies[0] ? c.bodyText(bodies[0].innerText) : '' };
   }
-  function sameFirst(first) {
-    const current = transcript();
-    return first.root === current.first && first.body === current.body && first.parent === current.first?.parentElement
-      && first.text === current.text;
+  function observeFirst(first, stage) {
+    const current = transcript(stage);
+    const identity = first.root !== current.first ? 'root_changed' : first.body !== current.body ? 'body_changed'
+      : first.parent !== current.first?.parentElement ? 'parent_changed' : first.text !== current.text ? 'text_changed' : 'stable';
+    return { current, identity, matches: identity === 'stable' };
   }
   function response(t, form) {
     const answer = t.answers[0] || null, parent = answer?.parentElement;
@@ -776,7 +818,7 @@ try {
     guard();
     if (computaGrokTranscriptRenderingPending(c, state, input, guard, privateEvidence, () => models.evidence()))
       return { grokTranscriptRenderingPending: true };
-    const t = transcript(), form = composer(), mode = privateEvidence(), model = models.evidence();
+    const t = transcript('entry'), form = composer(), mode = privateEvidence(), model = models.evidence();
     if (!Array.isArray(input.expectedUserCounts) || input.expectedUserCounts.length < 1 || input.expectedUserCounts.length > 2
       || input.expectedUserCounts.some(value => value !== 0 && value !== 1)
       || !input.expectedUserCounts.includes(t.users.length)) c.fail('conversation_changed', 'user_count');
@@ -786,20 +828,33 @@ try {
     let fingerprint = null;
     if (t.first) {
       const marker = input.expectedFirstUserMarker, line = `Computa session marker: ${marker}`;
-      if (!state.submitted || !c.uuid(marker) || state.marker !== marker || t.text !== c.bodyText(state.prompt)
-        || !t.text.endsWith('\n\n' + line) || t.text.split('\n').filter(value => value === line).length !== 1)
-        c.fail('conversation_changed', 'first_user_message');
+      if (!state.submitted) firstFailure('before_hash', 'submission_state', t);
+      if (!c.uuid(marker) || state.marker !== marker) firstFailure('before_hash', 'marker_state', t);
+      if (t.text !== c.bodyText(state.prompt)) firstFailure('before_hash', 'payload_text', t);
+      if (!t.text.endsWith('\n\n' + line)) firstFailure('before_hash', 'marker_suffix', t);
+      if (t.text.split('\n').filter(value => value === line).length !== 1) firstFailure('before_hash', 'marker_count', t);
       const first = { root: t.first, body: t.body, parent: t.first.parentElement, text: t.text };
       fingerprint = await c.hash(t.text); guard();
-      if (!sameFirst(first) || state.first && (!sameFirst(state.first) || state.first.fingerprint !== fingerprint)
-        || input.expectedFirstUserFingerprint !== fingerprint && !(input.action === 'inspect'
-          && input.allowFirstUserBinding === true && input.expectedFirstUserFingerprint == null)) c.fail('conversation_changed', 'first_user_message');
+      const afterHash = observeFirst(first, 'after_hash');
+      if (!afterHash.matches) firstFailure('after_hash', 'node_identity', afterHash.current, afterHash.identity);
+      if (state.first) {
+        const bound = observeFirst(state.first, 'after_hash');
+        if (!bound.matches) firstFailure('after_hash', 'bound_identity', bound.current, bound.identity);
+        if (state.first.fingerprint !== fingerprint) firstFailure('after_hash', 'fingerprint', bound.current, bound.identity);
+      }
+      if (input.expectedFirstUserFingerprint !== fingerprint && !(input.action === 'inspect'
+        && input.allowFirstUserBinding === true && input.expectedFirstUserFingerprint == null))
+        firstFailure('after_hash', 'fingerprint', afterHash.current, afterHash.identity);
       if (!state.first) state.first = { ...first, fingerprint };
-    } else if (state.first || input.expectedFirstUserFingerprint != null) c.fail('conversation_changed', 'first_user_message');
+    } else if (state.first || input.expectedFirstUserFingerprint != null) firstFailure('before_hash', 'bound_missing', t);
     // Re-read completion after hashing yields; stale footer/idle observations
     // cannot authorize a response after streaming or the page resumes.
-    const current = transcript(), currentForm = composer(), currentMode = privateEvidence(), currentModel = models.evidence();
-    if (fingerprint && !sameFirst(state.first) || model && !c.equalChoice(currentModel?.selected, model.selected)) c.fail('conversation_changed', 'first_user_message');
+    const current = transcript('recheck'), currentForm = composer(), currentMode = privateEvidence(), currentModel = models.evidence();
+    if (fingerprint) {
+      const bound = observeFirst(state.first, 'recheck');
+      if (!bound.matches) firstFailure('recheck', 'bound_identity', bound.current, bound.identity);
+    }
+    if (model && !c.equalChoice(currentModel?.selected, model.selected)) firstFailure('recheck', 'model_after_hash', current);
     const result = current.first ? response(current, currentForm) : { text: '', answerComplete: false, busy: state.submitted, interrupted: false };
     return { url: document.URL, temporary: currentMode !== null, ...(currentMode ? { grokPrivateEvidence: currentMode } : {}),
       temporaryActionAvailable: privateActionAvailable(currentMode, current), conversationIdentity: null,
@@ -896,6 +951,7 @@ try {
   if (state?.owner === input.ownerToken && state.generation === input.documentGeneration && state.document === document)
     state.layoutWait?.remove();
   if (error?.computaAdapterFailure === true) return { error: error.error, ...(error.detail ? { detail: error.detail } : {}),
-    ...(error.grokInitialEditorDiagnostic ? { grokInitialEditorDiagnostic: error.grokInitialEditorDiagnostic } : {}) };
+    ...(error.grokInitialEditorDiagnostic ? { grokInitialEditorDiagnostic: error.grokInitialEditorDiagnostic } : {}),
+    ...(error.grokFirstUserFailureDiagnostic ? { grokFirstUserFailureDiagnostic: error.grokFirstUserFailureDiagnostic } : {}) };
   throw error;
 }

@@ -430,4 +430,30 @@ model/route changes, deadline/cancellation, and one-Send behavior. Seven methods
 passed in the initial run. The eighth initially polled an already-completed
 cached result; its setup was corrected to keep a verified-body task running,
 and that method passed separately. No production change was needed for that
-test correction. Installed build 565 qualification remains the next gate.
+test correction.
+
+Installed build 565 (`b0dae18`) passed package, signature and fresh-process
+checks, but its one new marker failed in 6.040 seconds with
+`website_ownership_unverified / first_user_message`. This advances beyond the
+previous `user_count` failure without establishing a working harness. The
+bounded native log identifies an adapter rejection during the nested post-Send
+inspection, before a first-body fingerprint was returned; it does not identify
+whether body structure, exact text or post-hash identity caused the rejection.
+There was no verified answer or tool execution. Cleanup remains unconfirmed,
+and the prompt was not replayed. The new full-workflow cases remain unused.
+Build 566 adds failure-only diagnostics to distinguish those branches; it must
+not accept a mismatching message or claim a fix from this failed attempt.
+
+One later cleanup-only UI attempt on that exact retained session, at
+10:13:10 UTC, again rejected `first_user_message` and saved an unconfirmed
+receipt. It sent no prompt and did not restart the model. This establishes
+that the failure persisted after settling; it does not distinguish an altered
+body from an invalidated earlier node binding. The original marker capture is
+unchanged, with the manual attempt recorded separately in build 565 artifacts.
+
+The build 566 diagnostic patch passes 76 JavaScript tests (1,210 assertions)
+and two native projection tests. It logs at most one closed, bounded failure
+record per session. Prompt/page text, markers, hashes and DOM identifiers are
+excluded; numeric/string values cannot impersonate Boolean comparison flags.
+Oversized metadata reads skip newline scanning, and a diagnostic exception
+preserves the original rejection. No acceptance, timeout or cleanup rule changes.
