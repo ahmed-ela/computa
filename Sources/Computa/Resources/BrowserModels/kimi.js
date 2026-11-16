@@ -890,7 +890,9 @@ try {
       if (!scope || !c.visible(scope) || c.nodes(scope, '.chat-input-editor[contenteditable="true"]').length !== 1)
         reject('composer_unavailable');
       const counts = {}, serialized = composerText(editor, counts);
-      if (serialized !== '') {
+      // Restored drafts may render before the account chrome. Keep checking
+      // every control, but defer this rejection until the account is known.
+      if (serialized !== '' && accountAvailable) {
         // Reuse the held string and counters from that same serializer pass.
         // No text, length, hash, HTML, attribute, URL or DOM identifier leaves it.
         kimiComposerGuardDiagnostic = { version: 1, provider: 'kimi', trigger: 'composer_not_empty',

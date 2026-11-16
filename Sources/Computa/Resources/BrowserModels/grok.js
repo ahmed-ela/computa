@@ -258,7 +258,16 @@ try {
     };
     const editors = c.nodes(document, '[contenteditable], [role="textbox"], textarea', 8).filter(node => !measurementTextarea(node));
     if (editors.length > 1) c.fail('composer_unavailable', 'initial_editor_ambiguous');
-    if (editors.length && (!c.enabled(editors[0]) || editors[0].tagName !== 'DIV'
+    // Initial Grok HTML can render one ordinary textarea before mounting the
+    // observed Message Grok editor. It is never an editor candidate we may use:
+    // only this unclaimed initial inspection may wait for its replacement.
+    // An occupied textarea (whose innerText can be empty despite its value),
+    // any expected-editor identity, ambiguity or disabled shape still fails.
+    const initialTextareaPending = editors.length === 1 && editors[0].tagName === 'TEXTAREA' && c.enabled(editors[0])
+      && editors[0].getAttribute('contenteditable') !== 'true' && editors[0].getAttribute('role') !== 'textbox'
+      && c.normalize(editors[0].getAttribute('aria-label')) !== 'Message Grok';
+    if (initialTextareaPending && (c.bodyText(editors[0].value) || c.bodyText(editors[0].textContent))) c.fail('composer_not_empty');
+    if (!initialTextareaPending && editors.length && (!c.enabled(editors[0]) || editors[0].tagName !== 'DIV'
       || editors[0].getAttribute('contenteditable') !== 'true' || editors[0].getAttribute('role') !== 'textbox'
       || editors[0].getAttribute('aria-label') !== 'Message Grok')) {
       const node = editors[0], style = getComputedStyle(node);
@@ -307,7 +316,7 @@ try {
         || label === 'Send' && action === 'send' && control.getAttribute('type') === 'submit'
           && control.getAttribute('data-testid') === 'chat-submit')) c.fail('composer_unavailable', 'initial_action_invalid');
     }
-    if (![editors, triggers, modes, controls].every(nodes => nodes.length === 1)) return true;
+    if (initialTextareaPending || ![editors, triggers, modes, controls].every(nodes => nodes.length === 1)) return true;
     state.initialHydrationClosed = true;
     return false;
   }

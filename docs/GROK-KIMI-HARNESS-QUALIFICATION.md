@@ -106,3 +106,20 @@ installed startup still returned `composer_not_empty`, so the quota classifier
 is not yet a demonstrated live fix. Its existing guard diagnostic now includes
 a finite quota-read stage, separating absent account chrome from a missing or
 mismatched banner without changing failure timing.
+
+## Captured startup causes and candidate fixes
+
+Build 554 captured Grok's actual initial control as a visible, enabled ordinary
+textarea, before the Message Grok DIV mounts. It was not the separate CSS-hidden
+editor hypothesis, whose candidate was left unapplied. Build 555 waits only for
+that single empty initial textarea to be replaced, using the existing negative
+readiness packet and original preparation deadline. It never inserts into the
+placeholder. Occupied, disabled, ambiguous or message-identified controls still
+fail, and the final DIV must pass normal model, Private and ownership checks.
+
+The same startup recorded Kimi's `quotaReadReason=account_unknown`: its restored
+draft rendered before authenticated account controls. Build 555 defers only the
+nonempty-draft rejection until account status is known, retaining every other
+control check and the original deadline. Known guests still require sign-in; an
+authenticated quota card still blocks responses; an authenticated draft without
+a quota card still fails. Live qualification of these fixes remains pending.

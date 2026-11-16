@@ -55,24 +55,39 @@ final class KimiWebModelTransportTests: XCTestCase {
         XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
     }
 
-    func testInitialQuotaWithUnmountedAccountChromeStillRejectsRestoredDraftBeforeAccountHydrates() async throws {
+    func testInitialUnknownAccountWithRestoredDraftWaitsThenReportsObservedQuotaWithoutAuthority() async throws {
         let fixture = try Fixture(initialFreeQuotaBanner: true, initialAccountLinkPending: true); defer { fixture.shutdown() }
+        var inspected = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "inspect" { inspected = true }
+        }
         let parameters = ["provider": "kimi", "modelChoice": try XCTUnwrap(choice.canonicalJSONString)]
         let data = try await fixture.transport.request(operation: "webProviderStart", params: JSONSerialization.data(withJSONObject: parameters))
         let started = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         let token = try XCTUnwrap(started["sessionToken"] as? String)
-        do {
-            _ = try await wait(fixture, token, state: "ready")
-            XCTFail("Characterize the existing early draft rejection; diagnostics must not add a wait")
-        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .editorFailure("composer_not_empty")) }
+        // Native loading alone can precede HTML parsing. Require the adapter's
+        // first real read before asserting this fixture's quota/account shape.
+        let firstReadDeadline = ContinuousClock.now + .seconds(5)
+        var pending: [String: Any] = [:]
+        repeat {
+            let currentRevision = try await fixture.transport.changeRevision(sessionToken: token)
+            let revision = try XCTUnwrap(currentRevision)
+            pending = try await call(fixture, "webProviderPoll", token)
+            if inspected { break }
+            _ = try await fixture.transport.waitForChange(sessionToken: token, after: revision, until: firstReadDeadline)
+        } while ContinuousClock.now < firstReadDeadline
+        XCTAssertTrue(inspected, "The negative account-hydration receipt must come from an actual adapter read")
+        XCTAssertEqual(pending["state"] as? String, "loading")
+        XCTAssertEqual(pending["text"] as? String, "")
+        XCTAssertNil(pending["modelEvidence"]); XCTAssertNil(pending["modelProofContext"])
         let before = try await evaluate(fixture.view,
             "return [document.querySelectorAll('.chat-input-bar').length,document.querySelectorAll('a[href=\"/chat/history\"]').length];")
         XCTAssertEqual(before as? [Int], [1, 0])
         _ = try await evaluate(fixture.view, "fixtureAccountHydration.restore(); return true;")
         do {
-            _ = try await call(fixture, "webProviderPoll", token)
-            XCTFail("A later account link cannot undo the terminal draft rejection or authorize a retry")
-        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptConversation)) }
+            _ = try await wait(fixture, token, state: "ready")
+            XCTFail("Once the account is known, its observed quota must stop readiness without changing the draft")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.kimi)) }
         let finished = try await call(fixture, "webProviderCancel", token)
         XCTAssertEqual(finished["cleanup"] as? String, "failed")
         let draft = try await evaluate(fixture.view, "return document.querySelector('.chat-input-editor').textContent;")
@@ -82,6 +97,26 @@ final class KimiWebModelTransportTests: XCTestCase {
         XCTAssertEqual(actions as? [Int], [0, 0, 0, 0, 0])
         XCTAssertNotNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
         XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
+    func testInitialUnknownAccountRestoredDraftWaitKeepsOriginalPreparationDeadline() async throws {
+        let fixture = try Fixture(initialFreeQuotaBanner: true, initialAccountLinkPending: true); defer { fixture.shutdown() }
+        fixture.transport.setTimeoutsForTesting(preparation: .seconds(2), response: .seconds(30))
+        let parameters = ["provider": "kimi", "modelChoice": try XCTUnwrap(choice.canonicalJSONString)]
+        let data = try await fixture.transport.request(operation: "webProviderStart", params: JSONSerialization.data(withJSONObject: parameters))
+        let started = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let pending = try await call(fixture, "webProviderPoll", token)
+        XCTAssertEqual(pending["state"] as? String, "loading")
+        do {
+            _ = try await wait(fixture, token, state: "ready")
+            XCTFail("An unknown account cannot reset the original preparation deadline")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .preparationDeadline) }
+        let draft = try await evaluate(fixture.view, "return document.querySelector('.chat-input-editor').textContent;")
+        XCTAssertEqual(draft as? String, "Unsent synthetic restored draft")
+        let actions = try await evaluate(fixture.view,
+            "return [kimiFixture.counters.modelOpens,kimiFixture.counters.beforeInput,kimiFixture.counters.sends,kimiFixture.counters.confirmations,window.fixtureQuotaClicks];")
+        XCTAssertEqual(actions as? [Int], [0, 0, 0, 0, 0])
     }
 
     func testFreshGuestInferenceClosesOnlyItsUntouchedOwnedTab() async throws {

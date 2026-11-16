@@ -128,18 +128,71 @@ describe('Kimi initial provider-owned free-quota banner', () => {
     }
   });
 
-  test('unknown account chrome fails on the restored draft before reading a present quota card', async () => {
+  test('unknown account chrome with a restored draft waits without authority then reports the actual quota', async () => {
     const f = adapterFixture(), q = installQuota(f); f.setDraft('Unsent synthetic draft');
     f.remove(f.accountHistory);
-    const first = await f.run('inspect', initial);
-    expect(first.error).toBe('composer_not_empty');
-    expect(first.composerGuardDiagnostic.quotaReadReason).toBe('account_unknown');
-    expect(first.pending).toBeUndefined(); expect(first.freshQuotaAbort).toBeUndefined();
+    const pending = { pending: true, sessionLifecycle: 'saved_conversation_delete', temporary: false, composer: false };
+    for (let read = 0; read < 3; read++) expect(await f.run('inspect', initial)).toEqual(pending);
+    expect(f.draftText()).toBe('Unsent synthetic draft');
+    expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 }); expect(f.trigger.clicks).toBe(0);
     f.accountHistory.connected = true; f.body.append(f.accountHistory);
-    expect(await f.run('inspect', initial)).toEqual({ error: 'conversation_changed', detail: 'terminal_operation' });
+    expect(await f.run('inspect', initial)).toEqual(quotaError);
     expect(f.draftText()).toBe('Unsent synthetic draft');
     expect(q.close.clicks).toBe(0); expect(q.upgrade.clicks).toBe(0);
     expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
+  });
+
+  test('account hydration preserves authenticated draft rejection and guest sign-in rejection', async () => {
+    for (const account of ['authenticated', 'guest']) {
+      const f = adapterFixture(); f.setDraft('Unsent synthetic draft'); f.remove(f.accountHistory);
+      expect(await f.run('inspect', initial)).toEqual({ pending: true, sessionLifecycle: 'saved_conversation_delete', temporary: false, composer: false });
+      if (account === 'authenticated') { f.accountHistory.connected = true; f.body.append(f.accountHistory); }
+      else f.body.append(new f.Node('BUTTON', {}, 'Log in to sync chat history'));
+      const result = await f.run('inspect', initial);
+      expect(result.error).toBe(account === 'authenticated' ? 'composer_not_empty' : 'sign_in_required');
+      expect(result.pending).toBeUndefined(); expect(result.freshQuotaAbort).toBeUndefined(); expect(result.freshKimiSignInAbort).toBeUndefined();
+      expect(f.draftText()).toBe('Unsent synthetic draft');
+      expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 }); expect(f.trigger.clicks).toBe(0);
+    }
+  });
+
+  test('unknown account and a draft cannot hide an ownership, transcript or control contradiction', async () => {
+    for (const mutation of ['owner', 'generation', 'route', 'transcript', 'editor-duplicate', 'editor-hidden',
+      'scope', 'trigger-duplicate', 'trigger-hidden', 'trigger-malformed', 'open-menu', 'editor-replaced']) {
+      const f = adapterFixture(); f.setDraft('Unsent synthetic draft'); f.remove(f.accountHistory);
+      const overrides: Record<string, any> = { ...initial };
+      switch (mutation) {
+        case 'owner': f.world.__computaModelOwner = 'other-owner'; break;
+        case 'generation': overrides.documentGeneration = 'other-generation'; break;
+        case 'route': f.document.URL = canonical; break;
+        case 'transcript': f.installTranscript(); break;
+        case 'editor-duplicate': f.scope.append(f.editor.cloneNode(true)); break;
+        case 'editor-hidden': f.editor.setAttribute('hidden', ''); break;
+        case 'scope': f.scope.setAttribute('class', 'other'); break;
+        case 'trigger-duplicate': f.body.append(f.trigger.cloneNode(true)); break;
+        case 'trigger-hidden': f.trigger.setAttribute('hidden', ''); break;
+        case 'trigger-malformed': f.trigger.removeAttribute('aria-controls'); break;
+        case 'open-menu': f.menu.removeAttribute('hidden'); break;
+        case 'editor-replaced': {
+          expect((await f.run('inspect', initial)).pending).toBe(true);
+          const replacement = f.editor.cloneNode(true); f.remove(f.editor); f.scope.append(replacement); break;
+        }
+      }
+      const result = await f.run('inspect', overrides);
+      expect(result.error, mutation).toBeDefined(); expect(result.pending, mutation).toBeUndefined();
+      expect(f.counts(), mutation).toEqual({ insertions: 0, sends: 0, confirms: 0 }); expect(f.trigger.clicks, mutation).toBe(0);
+    }
+  });
+
+  test('unknown account wait cannot authorize model, editor, submission or cleanup operations', async () => {
+    for (const action of ['discoverModels', 'selectModel', 'verifyModel', 'prepare', 'insert', 'sendReady', 'submit', 'deleteConversation']) {
+      const f = adapterFixture(); f.setDraft('Unsent synthetic draft'); f.remove(f.accountHistory);
+      expect((await f.run('inspect', initial)).pending).toBe(true);
+      const result = await f.run(action, initial);
+      expect(result.error, action).toBeDefined(); expect(result.pending, action).toBeUndefined();
+      expect(f.draftText()).toBe('Unsent synthetic draft');
+      expect(f.counts(), action).toEqual({ insertions: 0, sends: 0, confirms: 0 }); expect(f.trigger.clicks, action).toBe(0);
+    }
   });
 
   test('composer rejection records only the first finite quota-read guard without changing it', async () => {

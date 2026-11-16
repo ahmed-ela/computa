@@ -15207,6 +15207,109 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    private static func grokInitialTextareaFixturePage(_ mutation: String = "") throws -> String {
+        try grokFixturePage().replacingOccurrences(of: "</body>", with: """
+            <script>
+            window.grokInitialTextarea = document.createElement('textarea');
+            grokFixture.editor.replaceWith(window.grokInitialTextarea);
+            \(mutation)
+            </script></body>
+            """)
+    }
+
+    func testGrokInitialPlainTextareaWaitsWithoutAuthorityUntilObservedEditorMounts() async throws {
+        let fixture = try Fixture(page: Self.grokInitialTextareaFixturePage())
+        defer { fixture.shutdown() }
+        let started = try await startChoice(WebsiteModelChoice(provider: "grok", key: "Fast", label: "Fast"), in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        try await waitForFixture(view)
+        for _ in 0..<2 {
+            let pending = try await grokFixtureCall(fixture, "webProviderPoll", ["sessionToken": token])
+            XCTAssertEqual(pending["state"] as? String, "loading")
+            XCTAssertEqual(pending["text"] as? String, "")
+            XCTAssertNil(pending["modelEvidence"]); XCTAssertNil(pending["modelProofContext"])
+            let counts = try await evaluate(view, "return [grokFixture.privateCount, grokFixture.pickerOpens, grokFixture.sendCount];")
+            XCTAssertEqual(counts as? [Int], [0, 0, 0])
+        }
+        _ = try await evaluate(view, "window.grokInitialTextarea.replaceWith(grokFixture.editor); return true;")
+        let ready = try await waitForState("ready", fixture.transport, token: token)
+        try assertChoiceEvidence(ready, choice: WebsiteModelChoice(provider: "grok", key: "Fast", label: "Fast"))
+        let after = try await evaluate(view, "return [grokFixture.privateCount, grokFixture.pickerOpens, grokFixture.sendCount];")
+        XCTAssertEqual(after as? [Int], [1, 1, 0])
+        let closed = try await grokFixtureCall(fixture, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(closed["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testGrokInitialTextareaCannotHideDraftIdentityOrAmbiguity() async throws {
+        let mutations = ["grokInitialTextarea.value = 'Existing typed draft';",
+            "grokInitialTextarea.textContent = 'Existing default draft';",
+            "grokInitialTextarea.setAttribute('aria-label', 'Message Grok');",
+            "grokInitialTextarea.setAttribute('role', 'textbox');",
+            "grokInitialTextarea.setAttribute('contenteditable', 'true');",
+            "grokInitialTextarea.disabled = true;",
+            "grokFixture.form.append(grokFixture.editor);"]
+        for mutation in mutations {
+            let fixture = try Fixture(page: Self.grokInitialTextareaFixturePage(mutation))
+            defer { fixture.shutdown() }
+            let started = try await startChoice(WebsiteModelChoice(provider: "grok", key: "Fast", label: "Fast"), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            try await waitForFixture(view)
+            let before = try await evaluate(view, "return [grokInitialTextarea.value, grokInitialTextarea.textContent];") as? [String]
+            do {
+                _ = try await grokFixtureCall(fixture, "webProviderPoll", ["sessionToken": token])
+                XCTFail("An occupied or identified editor cannot be treated as an empty initial placeholder")
+            } catch { XCTAssertNotNil(error as? EmbeddedWebModelTransport.Failure) }
+            let after = try await evaluate(view, "return [grokInitialTextarea.value, grokInitialTextarea.textContent];") as? [String]
+            XCTAssertEqual(after, before)
+            let counts = try await evaluate(view, "return [grokFixture.privateCount, grokFixture.pickerOpens, grokFixture.sendCount];")
+            XCTAssertEqual(counts as? [Int], [0, 0, 0])
+        }
+    }
+
+    func testGrokPlainTextareaAfterPrivateAndModelClaimsCannotRestartHydration() async throws {
+        let fixture = try Fixture(page: Self.grokFixturePage())
+        defer { fixture.shutdown() }
+        let (token, view) = try await startGrokFixture(fixture)
+        _ = try await evaluate(view, "grokFixture.editor.replaceWith(document.createElement('textarea')); return true;")
+        do {
+            _ = try await grokFixtureCall(fixture, "webProviderSend", ["sessionToken": token, "prompt": "Must not send"])
+            XCTFail("A placeholder appearing after ownership claims cannot reenter initial hydration")
+        } catch { XCTAssertNotNil(error as? EmbeddedWebModelTransport.Failure) }
+        let sends = try await evaluate(view, "return grokFixture.sendCount;")
+        XCTAssertEqual(sends as? Int, 0)
+    }
+
+    func testGrokInitialTextareaKeepsOriginalPreparationDeadline() async throws {
+        let fixture = try Fixture(page: Self.grokInitialTextareaFixturePage())
+        defer { fixture.shutdown() }
+        fixture.transport.setTimeoutsForTesting(preparation: .seconds(2), response: .seconds(30))
+        let started = try await startChoice(WebsiteModelChoice(provider: "grok", key: "Fast", label: "Fast"), in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        try await waitForFixture(view)
+        let revision = try await fixture.transport.changeRevision(sessionToken: token)
+        let pending = try await grokFixtureCall(fixture, "webProviderPoll", ["sessionToken": token])
+        XCTAssertEqual(pending["state"] as? String, "loading")
+        let deadline = ContinuousClock.now + .seconds(4)
+        var expired = false, current = try XCTUnwrap(revision)
+        while ContinuousClock.now < deadline {
+            _ = try await fixture.transport.waitForChange(sessionToken: token, after: current, until: deadline)
+            do { _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]) }
+            catch {
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .preparationDeadline)
+                expired = true; break
+            }
+            let next = try await fixture.transport.changeRevision(sessionToken: token)
+            current = try XCTUnwrap(next)
+        }
+        XCTAssertTrue(expired)
+        let counts = try await evaluate(view, "return [grokFixture.privateCount, grokFixture.pickerOpens, grokFixture.sendCount];")
+        XCTAssertEqual(counts as? [Int], [0, 0, 0])
+    }
+
     // Characterizes the startup race independently of the live site: this is
     // not evidence that CSS visibility caused the installed app's failure.
     func testGrokInitialExactEditorCSSMountCurrentlyRejectsBeforeBecomingVisible() async throws {

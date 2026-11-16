@@ -36,6 +36,58 @@ describe('Grok private inference adapter', () => {
     }
   });
 
+  test('an initial plain empty textarea carries only negative readiness until the observed DIV mounts', async () => {
+    const f = grokFixture(), editor = f.f.editor;
+    editor.remove(); const placeholder = new f.Node('TEXTAREA', { 'aria-label': 'Initial input' });
+    (placeholder as any).value = ''; f.f.form.append(placeholder);
+    for (let read = 0; read < 2; read++) {
+      expect(await f.run('inspect', { allowGrokInitialHydration: true }))
+        .toEqual({ grokInitialHydrationPending: true, pending: true, composer: false });
+      expect(f.f.sendCount + f.f.privateCount + f.f.pickerOpens).toBe(0);
+    }
+    placeholder.remove(); editor.connected = true; f.f.form.append(editor);
+    expect(await f.run('inspect', { allowGrokInitialHydration: true })).toMatchObject({ composer: true, userCount: 0, temporary: false });
+    expect(await f.submit()).toMatchObject({ submitted: true });
+    expect(await f.run('inspect')).toMatchObject({ answerComplete: true });
+  });
+
+  test('textarea hydration never hides a draft, expected-editor identity, disabled or competing control', async () => {
+    for (const mutate of [
+      (node: any) => { node.value = 'existing typed draft'; },
+      (node: any) => { node.textContent = 'existing default draft'; },
+      (node: any) => { node.setAttribute('aria-label', 'Message Grok'); },
+      (node: any) => { node.setAttribute('role', 'textbox'); },
+      (node: any) => { node.setAttribute('contenteditable', 'true'); },
+      (node: any) => { node.disabled = true; },
+      (node: any) => { node.setAttribute('aria-disabled', 'true'); },
+      (node: any) => { node.setAttribute('hidden', ''); },
+    ]) {
+      const f = grokFixture(); f.f.editor.remove();
+      const placeholder = new f.Node('TEXTAREA'); f.f.form.append(placeholder); mutate(placeholder);
+      const before = [placeholder.textContent, (placeholder as any).value];
+      const result = await f.run('inspect', { allowGrokInitialHydration: true });
+      expect(result.error).toBeDefined(); expect(result.grokInitialHydrationPending).toBeUndefined();
+      expect([placeholder.textContent, (placeholder as any).value]).toEqual(before);
+      expect(f.f.sendCount + f.f.privateCount + f.f.pickerOpens).toBe(0);
+    }
+    const competing = grokFixture(); competing.f.form.append(new competing.Node('TEXTAREA'));
+    expect(await competing.run('inspect', { allowGrokInitialHydration: true }))
+      .toMatchObject({ error: 'composer_unavailable', detail: 'initial_editor_ambiguous' });
+  });
+
+  test('a textarea cannot restart hydration without the initial grant or after model or Private claims', async () => {
+    for (const stage of ['ungranted', 'ready', 'model', 'private']) {
+      const f = grokFixture();
+      if (stage === 'ready') await f.run('inspect', { allowGrokInitialHydration: true });
+      if (stage === 'model') await f.select();
+      if (stage === 'private') await f.run('enableTemporary');
+      f.f.editor.remove(); f.f.form.append(new f.Node('TEXTAREA'));
+      const result = await f.run('inspect', { allowGrokInitialHydration: stage !== 'ungranted' });
+      expect(result).toMatchObject({ error: 'composer_unavailable' });
+      expect(result.grokInitialHydrationPending).toBeUndefined(); expect(f.f.sendCount).toBe(0);
+    }
+  });
+
   test('hidden, malformed, duplicate or nonempty initial controls are never hydration', async () => {
     const scenarios = [
       (f: ReturnType<typeof grokFixture>) => { f.f.editor.setAttribute('hidden', ''); },
@@ -112,7 +164,7 @@ describe('Grok private inference adapter', () => {
 
   test('initial editor failure separates exact predicates and retains only closed shape metadata', async () => {
     const scenarios: [string, (f: ReturnType<typeof grokFixture>) => void][] = [
-      ['tag_textarea', f => { f.f.editor.remove(); f.f.form.append(new f.Node('TEXTAREA', { 'aria-label': 'Private draft text' })); }],
+      ['tag_textarea', f => { f.f.editor.remove(); f.f.form.append(new f.Node('TEXTAREA', { 'aria-label': 'Message Grok' })); }],
       ['tag_other', f => { f.f.editor.remove(); f.f.form.append(new f.Node('SPAN', { role: 'textbox' })); }],
       ['contenteditable', f => { f.f.editor.setAttribute('contenteditable', 'false'); }],
       ['role', f => { f.f.editor.setAttribute('role', 'other'); }],
