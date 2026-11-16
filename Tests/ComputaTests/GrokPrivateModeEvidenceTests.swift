@@ -61,6 +61,74 @@ final class GrokPrivateModeEvidenceTests: XCTestCase {
         XCTAssertFalse(proof.accepts(foreign, sequence: 1))
     }
 
+    private func freshPacket(_ stage: String) -> [String: Any] {
+        ["grokFreshStart": ["version": 1, "stage": stage]]
+    }
+
+    func testFreshStartFailureDiagnosticKeepsOnlyClosedCategories() {
+        XCTAssertEqual(GrokFreshStartPreparation.failureDiagnostic(error: "document_changed", detail: "fresh_start_action_unverified"),
+            "error=document_changed detail=fresh_start_action_unverified")
+        XCTAssertEqual(GrokFreshStartPreparation.failureDiagnostic(error: "composer_not_empty", detail: nil),
+            "error=composer_not_empty detail=absent")
+        for raw: Any in ["private page text", "https://grok.com/c/private?rid=secret", 123, true, ["document_changed"], NSNull()] {
+            XCTAssertEqual(GrokFreshStartPreparation.failureDiagnostic(error: raw, detail: raw), "error=unknown detail=unknown")
+        }
+    }
+
+    func testFreshStartRouteAllowsOnlyPinnedMonotonicResponseID() throws {
+        let path = "https://grok.com/c/11111111-abcd-4333-8444-555555555555"
+        let rid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        for raw in [path, path + "?rid=" + rid] { XCTAssertNotNil(GrokFreshStartPreparation.Route(raw)) }
+        for raw in [path + "/", path + "?", path + "#", path + "?rid=x", path + "?rid=" + rid + "&x=1",
+            path + "?rid=" + rid + "&rid=" + rid, path + "\n", path.uppercased(), "https://grok.com:443" + URL(string: path)!.path] {
+            XCTAssertNil(GrokFreshStartPreparation.Route(raw), raw)
+        }
+        for invalid in [path, path + "?rid=ffffffff-bbbb-4ccc-8ddd-eeeeeeeeeeee", "https://grok.com/", path + "#x"] {
+            var lease = try XCTUnwrap(GrokFreshStartPreparation(url: path, owner: owner, generation: generation))
+            XCTAssertTrue(lease.observe(path + "?rid=" + rid))
+            XCTAssertFalse(lease.observe(invalid))
+            XCTAssertFalse(lease.observe(path + "?rid=" + rid), "An invalid excursion stays failed")
+        }
+    }
+
+    func testFreshStartClaimsAreSingleAndRootReceiptHasNoInferenceAuthority() throws {
+        let path = "https://grok.com/c/11111111-abcd-4333-8444-555555555555"
+        var lease = try XCTUnwrap(GrokFreshStartPreparation(url: path, owner: owner, generation: generation))
+        XCTAssertEqual(lease.nextAction(), .inspect)
+        XCTAssertTrue(lease.accept(freshPacket("sidebar_closed"), action: .inspect))
+        XCTAssertEqual(lease.nextAction(), .expand)
+        XCTAssertTrue(lease.expanded)
+        XCTAssertNil(lease.nextAction(), "Lost expansion acknowledgement cannot replay the action")
+        XCTAssertTrue(lease.failed)
+        lease = try XCTUnwrap(GrokFreshStartPreparation(url: path, owner: owner, generation: generation))
+        XCTAssertTrue(lease.accept(freshPacket("new_chat_ready"), action: .inspect))
+        XCTAssertEqual(lease.nextAction(), .newChat)
+        XCTAssertEqual(lease.nextAction(), .verify, "Even without acknowledgement, the next action is read-only")
+        XCTAssertTrue(lease.accept(freshPacket("new_chat_requested"), action: .newChat))
+        XCTAssertTrue(lease.observe(GrokPrivateModeEvidence.root))
+        XCTAssertTrue(lease.accept(freshPacket("root_observed"), action: .verify))
+        XCTAssertTrue(lease.verified)
+        XCTAssertNil(lease.nextAction())
+        XCTAssertFalse(lease.observe(path))
+        XCTAssertFalse(lease.observe(GrokPrivateModeEvidence.root))
+    }
+
+    func testFreshStartReceiptRejectsForgedStageOpenFieldsAndEarlyRoot() throws {
+        let path = "https://grok.com/c/11111111-abcd-4333-8444-555555555555"
+        let invalid: [[String: Any]] = [[:], ["grokFreshStart": ["version": true, "stage": "pending"]],
+            ["grokFreshStart": ["version": 1.5, "stage": "pending"]],
+            ["grokFreshStart": ["version": 1, "stage": "pending", "text": "invented"]],
+            ["grokFreshStart": ["version": 1, "stage": "unknown"]],
+            freshPacket("pending").merging(["temporary": true]) { _, new in new }, freshPacket("root_observed")]
+        for value in invalid {
+            var lease = try XCTUnwrap(GrokFreshStartPreparation(url: path, owner: owner, generation: generation))
+            XCTAssertFalse(lease.accept(value, action: .inspect))
+            XCTAssertTrue(lease.failed)
+        }
+        var lease = try XCTUnwrap(GrokFreshStartPreparation(url: path, owner: owner, generation: generation))
+        XCTAssertFalse(lease.observe(GrokPrivateModeEvidence.root), "Unclaimed route transition cannot prove navigation")
+    }
+
     @MainActor
     func testInitialHydrationReceiptCarriesNoPositiveAuthority() {
         let value: [String: Any] = ["grokInitialHydrationPending": true, "pending": true, "composer": false]

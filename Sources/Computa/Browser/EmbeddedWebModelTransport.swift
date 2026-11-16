@@ -910,6 +910,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var temporary = false
         var temporaryRequested = false
         var grokPrivateSubmission: GrokPrivateSubmission?
+        var grokFreshStart: OSAllocatedUnfairLock<GrokFreshStartPreparation>?
+        var grokFreshStartRouteObservation: NSKeyValueObservation?
         // Retain only the sticky scalar in the observer callback, never this
         // Session or its view (a pending WebKit callback must not keep it alive).
         let grokPrivateRouteChanged = OSAllocatedUnfairLock(initialState: false)
@@ -3258,7 +3260,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
     }
 
-    private func canObserveGrokInitialHydration(_ session: Session) -> Bool {
+    private func isUnboundGrokPreparation(_ session: Session) -> Bool {
         session.provider == .grok && session.state == "loading" && session.terminalFailure == nil && !Task.isCancelled
             && sessions[session.token] === session && session.documentGeneration == nil && session.routeContext == nil
             && !session.modelSelectionRequested && !session.modelSelectionVerified && session.selectionEvidence == nil
@@ -3268,7 +3270,137 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && session.sequence == 0 && session.acknowledgedSendSequence == 0
             && session.firstUserFingerprint == nil && session.conversation == nil && session.conversationIdentity == nil
             && browser.webView(for: session.tabID) === session.view
-            && session.view.url?.absoluteString == GrokPrivateModeEvidence.root
+    }
+
+    private func canObserveGrokInitialHydration(_ session: Session) -> Bool {
+        isUnboundGrokPreparation(session) && session.view.url?.absoluteString == GrokPrivateModeEvidence.root
+            && (session.grokFreshStart == nil || session.grokFreshStart?.withLock { $0.verified && !$0.failed } == true)
+    }
+
+    private struct GrokFreshStartReadDiscarded: Error {}
+
+    private func shouldPrepareGrokFreshStart(_ session: Session) -> Bool {
+        isUnboundGrokPreparation(session) && session.grokFreshStart == nil
+            && session.view.url.flatMap { GrokFreshStartPreparation.Route($0.absoluteString) } != nil
+    }
+
+    /// A separate navigation-only evaluator keeps saved routes outside page(),
+    /// whose exact-root inference and cleanup policy remains unchanged.
+    private func prepareGrokFreshStart(_ session: Session) async throws -> Bool {
+        guard session.provider == .grok else { return false }
+        if session.grokFreshStart?.withLock({ $0.verified && !$0.failed }) == true { return false }
+        guard session.grokFreshStart != nil || shouldPrepareGrokFreshStart(session) else { return false }
+        let deadline = session.created + preparationTimeout
+        guard ContinuousClock.now < deadline else { throw preparationFailure(session) }
+        guard isUnboundGrokPreparation(session), let generation = browser.documentGeneration(for: session.tabID) else {
+            throw Failure.ownershipFailure(.documentGenerationBefore)
+        }
+        // Match ordinary initial inspection: a provisional document cannot
+        // establish a lease. Once established, any generation change still fails.
+        if session.grokFreshStart == nil, session.view.isLoading { return true }
+        if session.grokFreshStart == nil {
+            guard let url = session.view.url?.absoluteString,
+                  let preparation = GrokFreshStartPreparation(url: url, owner: session.token, generation: generation) else {
+                throw Failure.ownershipFailure(.routeBefore)
+            }
+            let lease = OSAllocatedUnfairLock(initialState: preparation)
+            session.grokFreshStart = lease
+            Self.inspectionLog.notice("grokFreshStart provider=grok phase=started expanded=false newChatClaimed=false")
+            // Retain only scalar route state; never retain the Session or view.
+            session.grokFreshStartRouteObservation = session.view.observe(\.url, options: [.new]) { _, change in
+                let url = (change.newValue ?? nil)?.absoluteString
+                _ = lease.withLock { $0.observe(url) }
+            }
+        }
+        guard let lease = session.grokFreshStart else { throw Failure.staleSession }
+        var failureDiagnostic = "error=native_failure detail=absent"
+        var lastAction = "none"
+        do {
+            try checkProviderGate(session)
+            let owner = session.token, initialURL = session.view.url?.absoluteString
+            guard lease.withLock({ $0.owner == owner && $0.generation == generation && $0.observe(initialURL) }) else {
+                throw Failure.ownershipFailure(.routeBefore)
+            }
+            if session.view.isLoading { return true }
+            // At most inspect/expand/inspect/new-chat/verify in one poll. A
+            // pending read yields to the existing DOM signal and original deadline.
+            for _ in 0..<5 {
+                try Task.checkCancellation()
+                guard ContinuousClock.now < deadline else { throw preparationFailure(session) }
+                let currentURL = session.view.url?.absoluteString
+                guard isUnboundGrokPreparation(session), browser.documentGeneration(for: session.tabID) == generation,
+                      lease.withLock({ $0.observe(currentURL) }),
+                      let action = lease.withLock({ $0.nextAction() }),
+                      let url = session.view.url?.absoluteString, let source = script(for: .grok) else {
+                    throw Failure.ownershipFailure(.routeBefore)
+                }
+                lastAction = action.rawValue
+                let token = lease.withLock { $0.token }
+                let input: [String: Any] = ["provider": "grok", "action": action.rawValue,
+                    "ownerToken": session.token, "documentGeneration": generation.uuidString, "bindOwner": true,
+                    "expectedURL": url, "allowGrokFreshStart": true, "grokFreshStartToken": token]
+                let evaluationDeadline = min(deadline, ContinuousClock.now + inspectionTimeout)
+                let result = EmbeddedScriptResult()
+                session.providerAdapterEverDispatched = true
+                let bytes = try await withTaskCancellationHandler {
+                    try await withCheckedThrowingContinuation { continuation in
+                        result.install(continuation)
+                        result.setTimeout(Task {
+                            do {
+                                try await Task.sleep(until: evaluationDeadline, clock: .continuous)
+                                result.complete(.failure(Failure.pageUnavailable))
+                            } catch { }
+                        })
+                        guard result.isPending else { return }
+                        session.view.callAsyncJavaScript(source, arguments: ["input": input], in: nil, in: world) { reply in
+                            switch reply {
+                            case .success(let value):
+                                do { result.complete(.success(try JSONSerialization.data(withJSONObject: value))) }
+                                catch { result.complete(.failure(Failure.pageUnavailable)) }
+                            case .failure: result.complete(.failure(Failure.pageUnavailable))
+                            }
+                        }
+                    }
+                } onCancel: { result.complete(.failure(CancellationError())) }
+                #if DEBUG
+                await beforePageResultValidationForTesting?(action.rawValue)
+                #endif
+                try Task.checkCancellation()
+                try checkProviderGate(session)
+                guard ContinuousClock.now < evaluationDeadline else { throw Failure.pageUnavailable }
+                let returnedURL = session.view.url?.absoluteString
+                guard isUnboundGrokPreparation(session), browser.documentGeneration(for: session.tabID) == generation,
+                      lease.withLock({ $0.observe(returnedURL) }) else {
+                    throw Failure.ownershipFailure(.routeAfter)
+                }
+                guard let observed = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw Failure.pageUnavailable }
+                if let error = observed["error"] as? String {
+                    failureDiagnostic = GrokFreshStartPreparation.failureDiagnostic(error: error, detail: observed["detail"])
+                    switch error {
+                    case "composer_not_empty", "composer_unavailable": throw Failure.editorFailure(error)
+                    case "not_fresh": throw Failure.notFresh
+                    case "model_unverified": throw Failure.modelUnverified
+                    case "temporary_mode_unverified": throw Failure.temporaryUnverified
+                    default: throw Failure.ownershipFailure(.javaScriptConversation)
+                    }
+                }
+                guard let stage = GrokFreshStartPreparation.parse(observed), lease.withLock({ $0.accept(stage, action: action) }) else { throw Failure.ownershipFailure(.javaScriptConversation) }
+                if lease.withLock({ $0.verified }) {
+                    let expanded = lease.withLock { $0.expanded }
+                    let claimed = lease.withLock { $0.newChatClaimed }
+                    Self.inspectionLog.notice("grokFreshStart provider=grok phase=verified expanded=\(expanded) newChatClaimed=\(claimed)")
+                    return false
+                }
+                if lease.withLock({ $0.stage == .pending }) { return true }
+            }
+            return true
+        } catch {
+            let stage = lease.withLock { $0.stage?.rawValue ?? "initial" }
+            let category = error is CancellationError ? "cancelled" : (error as? Failure)?.diagnosticCode ?? "unavailable"
+            Self.inspectionLog.error("grokFreshStart provider=grok phase=rejected action=\(lastAction, privacy: .public) stage=\(stage, privacy: .public) category=\(category, privacy: .public) \(failureDiagnostic, privacy: .public)")
+            lease.withLock { $0.reject() }
+            throw error
+        }
     }
 
     private func canObserveKimiInitialHydration(_ session: Session) -> Bool {
@@ -4989,6 +5121,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             session.initialReadRetry = nil
             return try snapshot(session)
         }
+        if try await prepareGrokFreshStart(session) { return try snapshot(session) }
         try rejectWebsiteBlocker(session, action: "inspect", phase: "before")
         if session.state == "loading", session.view.isLoading {
             session.initialReadRetry = nil
@@ -5039,6 +5172,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
         }
         catch {
+            if error is GrokFreshStartReadDiscarded { return try snapshot(session) }
             if let failure = error as? Failure, failure.diagnosticCode != nil { throw failure }
             if !Task.isCancelled, ContinuousClock.now >= deadline { throw session.state == "loading" ? preparationFailure(session) : timeoutFailure }
             if (error as? Failure) == .submissionObservationPending {
@@ -8221,6 +8355,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             try checkProviderGate(session, allowGroqFormatCleanupModelRead: action == "verifyModel")
         }
         guard browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }
+        if action == "inspect", shouldPrepareGrokFreshStart(session) { throw GrokFreshStartReadDiscarded() }
+        let freshStartURLBefore = session.view.url?.absoluteString
+        if let lease = session.grokFreshStart,
+           !lease.withLock({ $0.verified && !$0.failed && $0.observe(freshStartURLBefore) }) {
+            throw Failure.ownershipFailure(.routeBefore)
+        }
         try rejectWebsiteBlocker(session, action: action, phase: "before")
         func mayInspectReplacement(_ generation: UUID) -> Bool {
             guard let from = replacingInitialRootFrom, session.documentGeneration == from, action == "inspect",
@@ -8727,6 +8867,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 }
             } onCancel: { result.complete(.failure(CancellationError())) }
         } catch {
+            if action == "inspect", shouldPrepareGrokFreshStart(session) { throw GrokFreshStartReadDiscarded() }
             if !Task.isCancelled, browser.webView(for: session.tabID) === session.view {
                 // A challenge redirect can destroy the JavaScript context. Use
                 // only its native URL classification; never execute on it.
@@ -8754,6 +8895,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             try checkProviderGate(session, allowGroqFormatCleanupModelRead: action == "verifyModel")
         }
         guard browser.webView(for: session.tabID) === session.view else { throw Failure.staleSession }
+        if action == "inspect", shouldPrepareGrokFreshStart(session) { throw GrokFreshStartReadDiscarded() }
+        let freshStartURLAfter = session.view.url?.absoluteString
+        if let lease = session.grokFreshStart,
+           !lease.withLock({ $0.verified && !$0.failed && $0.observe(freshStartURLAfter) }) {
+            throw Failure.ownershipFailure(.routeAfter)
+        }
         try rejectWebsiteBlocker(session, action: action, phase: "after")
         guard browser.documentGeneration(for: session.tabID) == generation else {
             if action == "inspect", !allowBlockedProvider, onlyInitialChatReads(session),

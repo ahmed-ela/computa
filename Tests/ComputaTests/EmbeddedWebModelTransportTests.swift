@@ -15173,6 +15173,220 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         return (token, view)
     }
 
+    private static let grokSavedFixtureURL = "https://grok.com/c/11111111-abcd-4333-8444-555555555555"
+
+    private static func grokFreshStartPage(_ setup: String = "") throws -> String {
+        try grokFixturePage().replacingOccurrences(of: "</body>", with: """
+            <script>
+            grokFixture.installFreshStart();
+            grokFixture.appendUser('Preserved old fixture conversation');
+            \(setup)
+            </script></body>
+            """)
+    }
+
+    func testGrokFreshStartLeavesSavedChatThenProvesPrivateModelSendAndCleanup() async throws {
+        for expanded in [false, true] {
+            let setup = expanded ? "grokFixture.sidebarToggle.click(); grokFixture.sidebarCount = 0;" : ""
+            let fixture = try Fixture(page: Self.grokFreshStartPage(setup), initialURL: URL(string: Self.grokSavedFixtureURL))
+            defer { fixture.shutdown() }
+            let (token, view) = try await startGrokFixture(fixture)
+            let before = try await evaluate(view, "return [grokFixture.sidebarCount, grokFixture.newChatCount, grokFixture.privateCount, grokFixture.sendCount];")
+            XCTAssertEqual(before as? [Int], [expanded ? 0 : 1, 1, 1, 0])
+            let preserved = try await evaluate(view, "return grokFixture.savedMessages.textContent.includes('Preserved old fixture conversation');")
+            XCTAssertEqual(preserved as? Bool, true)
+            _ = try await grokFixtureCall(fixture, "webProviderSend", ["sessionToken": token, "prompt": "Harmless fresh Grok fixture"])
+            let complete = try await waitForState("complete", fixture.transport, token: token)
+            XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"GROK_NATIVE_FIXTURE_OK"}"#)
+            try assertChoiceEvidence(complete, choice: WebsiteModelChoice(provider: "grok", key: "Fast", label: "Fast"))
+            let counts = try await evaluate(view, "return [grokFixture.newChatCount, grokFixture.sendCount, grokFixture.savedMessages.querySelectorAll('[data-testid=user-message]').length];")
+            XCTAssertEqual(counts as? [Int], [1, 1, 1])
+            let closed = try await grokFixtureCall(fixture, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(closed["cleanup"] as? String, "not_created")
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
+    func testGrokFreshStartUnsupportedParagraphSpacingRejectsChangedPromptBeforeSend() async throws {
+        // The observed site resets paragraph margins. An unobserved default-P
+        // layout changes innerText line breaks and must not weaken exact matching.
+        let fixture = try Fixture(page: Self.grokFreshStartPage("grokFixture.editor.innerHTML = '<p><br></p>';"),
+            initialURL: URL(string: Self.grokSavedFixtureURL))
+        defer { fixture.transport.setBeforePageResultValidationForTesting(nil); fixture.shutdown() }
+        let (token, view) = try await startGrokFixture(fixture)
+        var insertions = 0
+        fixture.transport.setBeforePageResultValidationForTesting { if $0 == "insert" { insertions += 1 } }
+        let modelWorld = WKContentWorld.world(name: "computa-chatgpt-model-v1")
+        _ = try await evaluate(view, """
+            globalThis.grokTestInsertCommands = 0;
+            const original = document.execCommand;
+            document.execCommand = function(command, ...args) {
+                if (command === 'insertText') globalThis.grokTestInsertCommands++;
+                return original.call(this, command, ...args);
+            };
+            return true;
+            """, world: modelWorld)
+        do {
+            _ = try await grokFixtureCall(fixture, "webProviderSend", ["sessionToken": token, "prompt": "Harmless fresh Grok fixture"])
+            XCTFail("Unexpected paragraph layout must not submit a changed prompt")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .editorFailure("prompt_not_inserted")) }
+        let counts = try await evaluate(view, "return [grokFixture.newChatCount, grokFixture.privateCount, grokFixture.sendCount];")
+        let commands = try await evaluate(view, "return globalThis.grokTestInsertCommands;", world: modelWorld)
+        XCTAssertEqual(commands as? Int, 1, "One editing command can emit several DOM input events")
+        XCTAssertEqual(insertions, 1)
+        XCTAssertEqual(counts as? [Int], [1, 1, 0])
+    }
+
+    func testGrokFreshStartPreservesDraftsAndCannotGrantSavedChatCleanup() async throws {
+        for draft in ["Existing draft", "   ", "\n"] {
+            let literal = String(data: try JSONSerialization.data(withJSONObject: draft, options: [.fragmentsAllowed]), encoding: .utf8)!
+            let fixture = try Fixture(page: Self.grokFreshStartPage("grokFixture.editor.textContent = " + literal + ";"),
+                initialURL: URL(string: Self.grokSavedFixtureURL))
+            defer { fixture.shutdown() }
+            let started = try await startChoice(WebsiteModelChoice(provider: "grok", key: "Fast", label: "Fast"), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let id = try XCTUnwrap(fixture.createdTabs.last), view = try XCTUnwrap(fixture.browser.webView(for: id))
+            try await waitForFixture(view)
+            do { _ = try await waitForState("ready", fixture.transport, token: token); XCTFail("Draft must be preserved") }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .editorFailure("composer_not_empty")) }
+            let unchanged = try await evaluate(view, "return grokFixture.editor.textContent;")
+            XCTAssertEqual(unchanged as? String, draft)
+            let counts = try await evaluate(view, "return [grokFixture.sidebarCount, grokFixture.newChatCount, grokFixture.privateCount, grokFixture.sendCount];")
+            XCTAssertEqual(counts as? [Int], [0, 0, 0, 0])
+            let closed = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(closed["cleanup"] as? String, "failed", "Navigation does not authorize cleanup of an old saved conversation")
+            try await assertHumanTabIntact(fixture, retaining: id)
+        }
+    }
+
+    func testGrokFreshStartIgnoredNavigationUsesOriginalDeadlineWithoutReplay() async throws {
+        for ignored in ["ignoreSidebar", "ignoreNewChat"] {
+            let fixture = try Fixture(page: Self.grokFreshStartPage("grokFixture." + ignored + " = true;"),
+                initialURL: URL(string: Self.grokSavedFixtureURL))
+            defer { fixture.shutdown() }
+            fixture.transport.setTimeoutsForTesting(preparation: .seconds(2), response: .seconds(30))
+            let started = try await startChoice(WebsiteModelChoice(provider: "grok", key: "Fast", label: "Fast"), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            try await waitForFixture(view)
+            do { _ = try await waitForState("ready", fixture.transport, token: token); XCTFail("Ignored navigation must expire") }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .preparationDeadline) }
+            let counts = try await evaluate(view, "return [grokFixture.sidebarCount, grokFixture.newChatCount, grokFixture.privateCount, grokFixture.sendCount];")
+            XCTAssertEqual(counts as? [Int], [1, ignored == "ignoreNewChat" ? 1 : 0, 0, 0])
+            await assertRejected(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            let repeated = try await evaluate(view, "return [grokFixture.sidebarCount, grokFixture.newChatCount];")
+            XCTAssertEqual(repeated as? [Int], [1, ignored == "ignoreNewChat" ? 1 : 0])
+        }
+    }
+
+    func testGrokFreshStartRejectsRootRoundTripAndGenerationChangeAfterClick() async throws {
+        for replacement in [false, true] {
+            let fixture = try Fixture(page: Self.grokFreshStartPage(), initialURL: URL(string: Self.grokSavedFixtureURL))
+            defer { fixture.transport.setBeforePageResultValidationForTesting(nil); fixture.shutdown() }
+            let started = try await startChoice(WebsiteModelChoice(provider: "grok", key: "Fast", label: "Fast"), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let id = try XCTUnwrap(fixture.createdTabs.last), view = try XCTUnwrap(fixture.browser.webView(for: id))
+            try await waitForFixture(view)
+            var mutations = 0, replacementReady = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                if action == "grokFreshStartNewChat" {
+                    mutations += 1
+                    if replacement {
+                        if let page = try? Self.grokFixturePage().replacingOccurrences(of: "window.fixtureGeneration = 'initial';", with: "window.fixtureGeneration = 'replacement';") {
+                            view.loadHTMLString(page, baseURL: URL(string: "https://grok.com/"))
+                            do { try await self.waitForFixture(view, generation: "replacement"); replacementReady = true }
+                            catch { XCTFail("Replacement fixture failed to load: \(error)") }
+                        }
+                    }
+                    else { _ = try? await self.evaluate(view, "history.pushState({}, '', '\(Self.grokSavedFixtureURL)'); history.pushState({}, '', '/'); return true;") }
+                }
+            }
+            do { _ = try await waitForState("ready", fixture.transport, token: token); XCTFail("Changed route or generation must fail") }
+            catch { XCTAssertNotNil(error as? EmbeddedWebModelTransport.Failure) }
+            XCTAssertEqual(mutations, 1, "Exercise the claimed NewChat transition, not the initial navigation wait")
+            if replacement { XCTAssertTrue(replacementReady) }
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            await assertRejected(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            if !replacement {
+                let counts = try await evaluate(view, "return [grokFixture.newChatCount, grokFixture.privateCount, grokFixture.sendCount];")
+                XCTAssertEqual(counts as? [Int], [1, 0, 0])
+            }
+        }
+    }
+
+    func testGrokFreshStartDiscardedInitialReadCanPrepareWithoutAdoptingSavedBody() async throws {
+        for positive in [false, true] {
+            let fixture = try Fixture(page: Self.grokFixturePage())
+            defer { fixture.transport.setBeforePageResultValidationForTesting(nil); fixture.shutdown() }
+            let started = try await startChoice(WebsiteModelChoice(provider: "grok", key: "Fast", label: "Fast"), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            try await waitForFixture(view)
+            if !positive { _ = try await evaluate(view, "grokFixture.form.remove(); return true;") }
+            var changed = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                if action == "inspect", !changed {
+                    changed = true
+                    _ = try? await self.evaluate(view, "document.body.append(grokFixture.form); grokFixture.installFreshStart(); grokFixture.appendUser('Old body'); history.pushState({}, '', '\(Self.grokSavedFixtureURL)'); return true;")
+                }
+            }
+            // A navigation-loading poll is not an adapter result. Keep the
+            // callback installed until this test really crosses the read.
+            let limit = ContinuousClock.now + .seconds(5)
+            var pending: [String: Any] = [:]
+            while !changed, ContinuousClock.now < limit {
+                let observedRevision = try await fixture.transport.changeRevision(sessionToken: token)
+                let revision = try XCTUnwrap(observedRevision)
+                pending = try await grokFixtureCall(fixture, "webProviderPoll", ["sessionToken": token])
+                if !changed { _ = try await fixture.transport.waitForChange(sessionToken: token, after: revision, until: limit) }
+            }
+            XCTAssertTrue(changed)
+            XCTAssertEqual(pending["state"] as? String, "loading")
+            XCTAssertNil(pending["modelEvidence"])
+            XCTAssertNil(pending["modelProofContext"])
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            do { _ = try await waitForState("ready", fixture.transport, token: token) }
+            catch {
+                XCTFail("Discarded initial read positive=\(positive) failed before any claim: \(error)")
+                continue
+            }
+            let counts = try await evaluate(view, "return [grokFixture.newChatCount, grokFixture.privateCount, grokFixture.sendCount];")
+            XCTAssertEqual(counts as? [Int], [1, 1, 0])
+        }
+    }
+
+    func testGrokFreshStartDiscoveryFailureClosesOnlyOwnedViewAndReleasesObserver() async throws {
+        for cancel in [false, true] {
+            let fixture = try Fixture(page: Self.grokFreshStartPage("grokFixture.ignoreNewChat = true;"),
+                initialURL: URL(string: Self.grokSavedFixtureURL))
+            defer { fixture.transport.setBeforePageResultValidationForTesting(nil); fixture.shutdown() }
+            fixture.transport.setTimeoutsForTesting(preparation: .seconds(2), response: .seconds(30))
+            weak var owned: WKWebView?
+            var clicked = 0
+            var operation: Task<[WebsiteModelChoice], Error>?
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                if action == "grokFreshStartNewChat", let id = fixture.createdTabs.last, let view = fixture.browser.webView(for: id) {
+                    owned = view
+                    clicked = (try? await self.evaluate(view, "return grokFixture.newChatCount;")) as? Int ?? -1
+                    if cancel { operation?.cancel() }
+                }
+            }
+            operation = Task { try await fixture.transport.discoverModels(provider: "grok") }
+            do { _ = try await operation!.value; XCTFail("Ignored navigation must expire or cancel") }
+            catch {
+                if cancel { XCTAssertTrue(error is CancellationError) }
+                else { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .preparationDeadline) }
+            }
+            operation = nil
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            XCTAssertEqual(clicked, 1)
+            try await assertHumanTabIntact(fixture)
+            let releaseDeadline = ContinuousClock.now + .seconds(2)
+            while owned != nil, ContinuousClock.now < releaseDeadline { await Task.yield() }
+            XCTAssertNil(owned, "URL observer must not retain the closed Session or WKWebView")
+        }
+    }
+
     func testGrokInitialMissingControlsWaitWithoutModeOrEditorAuthority() async throws {
         for missing in ["composer", "model"] {
             let removal = missing == "composer" ? "grokFixture.form" : "grokFixture.trigger"

@@ -4,6 +4,10 @@ try {
   const actions = ['inspect', 'discoverModels', 'selectModel', 'verifyModel', 'enableTemporary', 'prepare', 'insert', 'sendReady', 'submit', 'stop'];
   const c = computaProviderCore(input, 'grok', 'https://grok.com', actions);
   if (document.URL !== 'https://grok.com/') c.fail('document_changed', 'document_url');
+  const preparation = globalThis.__computaGrokFreshStartV1;
+  if (preparation && (!preparation.verified || preparation.terminal || preparation.document !== document
+    || preparation.owner !== input.ownerToken || preparation.generation !== input.documentGeneration))
+    c.fail('document_changed', 'fresh_start_unverified');
   const key = '__computaGrokPrivateSessionV1';
   if (globalThis[key] === undefined) globalThis[key] = { owner: input.ownerToken, generation: input.documentGeneration,
     document, toggleClaimed: false, privateEntered: false, contradictoryModeObserved: false,

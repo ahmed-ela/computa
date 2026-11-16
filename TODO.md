@@ -38,6 +38,10 @@ Existing Chrome and native desktop tooling retain their separate behavior.
 
 ## Kimi, Qwen and DeepSeek website integrations
 
+Current Grok/Kimi results and remaining access/qualification blockers are tracked
+in the [dated Grok/Kimi qualification record](docs/GROK-KIMI-HARNESS-QUALIFICATION.md).
+The installed-394 entry below is historical evidence.
+
 - [ ] Add and qualify the three signed-in websites, separately from Alibaba's
   existing Qwen API integration. Kimi Instant, Qwen3.7-Plus/Qwen3.8-Max and
   DeepSeek Chat/DeepThink are enabled for controlled pilots. Installed394 still

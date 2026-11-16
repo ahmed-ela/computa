@@ -132,3 +132,49 @@ exact root after keyboard navigation and Private activation, so onboarding or
 Private navigation is not an established cause. Build 556 adds bounded route
 shape and preparation-stage diagnostics without recording URLs or changing
 route admission. Eight focused route/proof tests pass; live diagnosis continues.
+
+Build 556 captured a settled, same-host `/c/UUID` route with no query or fragment,
+before Private or model-selection requests. No Send occurred. A genuinely new
+ordinary tab loaded the exact root with no messages. Profile, user agent and
+JavaScript permission match. Build 557 changed only the owned Grok viewport
+width from 1024 to the observed ordinary pane's 360, retaining height 768 and all
+verification rules. All 24 focused native tests passed, but the installed build
+reproduced the same pre-action saved-route redirect. The width hypothesis was
+falsified and the viewport change reverted; it is not a fix.
+
+## November 16 fresh-start preparation candidate
+
+The observed primary New Chat control is inside the site-owned App navigation
+sidebar, with its own label and keyboard-shortcut structure. A separate generic
+New-chat icon is not the same target. One controlled DOM click returned the saved
+page to the exact root in the same document, with zero user/assistant messages,
+an empty editor and an available unselected Private toggle. The website can add
+one `rid` UUID while hydrating the same saved-conversation path. A subsequent
+Inspector-attached reload paused in a worker context; that interrupted run is
+not clean evidence of the transition's reliability.
+
+Build 558 separates a one-use navigation preparation grant from the inference
+adapter. It preserves drafts, pins the original conversation/document while
+leaving it, and never grants Send or saved-conversation deletion. The normal
+adapter still accepts only the exact root and must independently verify Private,
+model selection and prompt ownership. Live qualification remains pending.
+
+The preparation uses the original deadline and spends each navigation claim
+before dispatch. Native route observation rejects a return to the saved route
+after reaching the root, including an excursion between JavaScript callbacks.
+A discarded initial read can enter preparation only while every inference
+claim remains unbound. Discovery timeout/cancellation closes only its owned
+view; inference cleanup authority is not broadened.
+
+A synthetic paragraph-spacing regression was isolated to default paragraph
+margins that did not match the observed empty editor. The attempted insertion
+change did not fix it and was reverted. Production insertion remains one
+`insertText` command with unchanged canonical prompt comparison. An unsupported
+paragraph structure still fails before Send. The fresh-start JavaScript suite
+passes 47 tests (483 assertions).
+
+All 19 focused native methods pass: 18 in the combined run and the paragraph
+mismatch regression on its corrected test-only command counter. These cover
+both sidebar states, discarded initial reads, deadlines, draft preservation,
+route/generation changes, cancellation and observer release. They are local
+WebKit/proof tests, not evidence that the installed provider completed a task.

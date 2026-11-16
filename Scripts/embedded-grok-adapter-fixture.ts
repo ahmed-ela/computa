@@ -21,7 +21,8 @@ export function grokFixture() {
     setAttribute(name: string, value: string) { this.values[name] = value; }
     removeAttribute(name: string) { delete this.values[name]; }
     hasAttribute(name: string) { return Object.hasOwn(this.values, name); }
-    get textContent() { return super.textContent; }
+    get textContent() { return this.text + this.children.map(child => child.textContent).join(''); }
+    get innerText() { return this.text + this.children.map(child => child.tagName === 'BR' ? '\n' : child.innerText).join(''); }
     set textContent(value: string) { this.replaceChildren(); this.text = value; }
     remove() {
       if (this.parentElement) this.parentElement.children = this.parentElement.children.filter(child => child !== this);

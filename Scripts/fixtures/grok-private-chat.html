@@ -94,6 +94,31 @@
     if (!f.delayResponse && !f.delayUser) f.finishResponse();
   };
   f.form.onsubmit = event => event.preventDefault();
+  // Observed saved-chat navigation controls. Installed only by preparation
+  // tests; existing inference fixtures keep their original empty-root shape.
+  f.installFreshStart = (expanded = false) => {
+    f.sidebarCount = 0; f.newChatCount = 0;
+    f.sidebarToggle = make('button', { type: 'button', 'aria-label': 'Toggle sidebar', 'aria-expanded': String(expanded),
+      'aria-keyshortcuts': 'Meta+B', 'aria-disabled': 'false' }, 'Toggle sidebar');
+    f.sidebar = make('aside', { id: 'app-sidebar', 'aria-label': 'App navigation', ...(expanded ? {} : { hidden: '' }) });
+    f.newChat = make('button', { type: 'button', 'aria-keyshortcuts': 'Meta+J' });
+    const labelRow = make('span');
+    labelRow.append(make('span', { 'data-sidebar-item-label': '' }, 'New chat'),
+      make('span', { 'data-slot': 'sidebar-item-shortcut' }, '⌘J'));
+    f.newChat.append(labelRow); f.sidebar.append(f.newChat);
+    f.otherNewChat = make('button', { type: 'button', 'aria-label': 'New chat' }); f.sidebar.append(f.otherNewChat);
+    f.sidebarToggle.onclick = () => {
+      f.sidebarCount++; if (f.ignoreSidebar) return;
+      f.sidebarToggle.setAttribute('aria-expanded', 'true'); f.sidebar.removeAttribute('hidden');
+    };
+    f.newChat.onclick = () => {
+      f.newChatCount++; if (f.ignoreNewChat) return;
+      f.savedMessages = f.messages; f.messages.remove(); f.messages = make('main'); document.body.append(f.messages);
+      f.sidebarToggle.setAttribute('aria-expanded', 'false'); f.sidebar.setAttribute('hidden', '');
+      if (window.history) window.history.pushState({}, '', '/'); else document.URL = 'https://grok.com/';
+    };
+    document.body.append(f.sidebarToggle, f.sidebar);
+  };
   window.grokFixtureReady = true; window.fixtureReady = true; window.fixtureGeneration = 'initial';
 })();
 </script></body>
