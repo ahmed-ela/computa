@@ -1052,6 +1052,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var loggedFirstUserStructure = false
         var loggedGroqComposerFailure = false
         var loggedGrokComposerFailure = false
+        var loggedGrokUnexpectedRoute = false
         var loggedGroqSendFailure = false
         var loggedGroqSendReveal = false
         var loggedSavedAdapterFailure = false
@@ -7600,6 +7601,39 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return "scheme=\(scheme) host=\(host) port=\(port) userInfo=\(userInfo) path=\(pathShape) pathEncoded=\(pathEncoded) trailingSlash=\(trailingSlash) uuid=\(uuidShape) segments=\(segmentCount) tokenBytes=\(tokenBytes) tokenChars=\(tokenChars) tokenPrefix=\(tokenPrefix) query=\(queryShape) queryKey=\(queryKey) fragment=\(fragment)"
     }
 
+    /// Classifies a rejected native URL without recording its text. These
+    /// finite shapes are diagnostic only and never admit an additional route.
+    static func unexpectedGrokRouteDiagnostic(_ url: URL?) -> String {
+        let components = url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) }
+        let scheme = url?.scheme.map { ["https", "http"].contains($0) ? $0 : "other" } ?? "absent"
+        let host = url?.host.map { $0 == Provider.grok.host ? "expected" : "other" } ?? "absent"
+        let port = url?.port.map { $0 == 443 ? "https_default" : "other" } ?? "absent"
+        let literal: String
+        switch url?.absoluteString {
+        case "https://grok.com/": literal = "root_with_slash"
+        case "https://grok.com": literal = "implicit_slash"
+        case nil: literal = "absent"
+        default: literal = "other"
+        }
+        let path = components?.percentEncodedPath
+        let saved = path?.hasPrefix("/c/") == true || path == "/c"
+        let pathShape = path.map { $0.isEmpty || $0 == "/" ? "root" : saved ? "saved_c" : "other" } ?? "absent"
+        let segments = path?.split(separator: "/", maxSplits: 3).count ?? 0
+        let segmentCount = segments > 2 ? "3plus" : String(segments)
+        let rawToken = path.flatMap { $0.hasPrefix("/c/")
+            ? $0.dropFirst(3).split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false).first : nil }
+        let uuidShape: String
+        if rawToken == nil || rawToken?.isEmpty == true { uuidShape = "absent" }
+        else if rawToken!.utf8.count > 128 { uuidShape = "oversized" }
+        else if let token = String(rawToken!).removingPercentEncoding, let uuid = UUID(uuidString: token) {
+            uuidShape = token == uuid.uuidString.lowercased() ? "lower" : token == uuid.uuidString ? "upper" : "mixed"
+        } else { uuidShape = "other" }
+        let query = components?.percentEncodedQuery.map { $0.isEmpty ? "empty" : "present" } ?? "absent"
+        let fragment = components?.percentEncodedFragment != nil
+        let userInfo = url?.user != nil || url?.password != nil
+        return "scheme=\(scheme) host=\(host) port=\(port) literal=\(literal) userInfo=\(userInfo) path=\(pathShape) segments=\(segmentCount) tokenUUID=\(uuidShape) query=\(query) fragment=\(fragment)"
+    }
+
     private func rejectWebsiteBlocker(_ session: Session, action: String, phase: String) throws {
         let url = session.view.url
         let initialBlank = session.documentGeneration == nil && url?.absoluteString == "about:blank"
@@ -7630,6 +7664,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if failure == .unexpectedPage(.qwen) {
             let route = Self.unexpectedQwenRouteDiagnostic(url)
             Self.inspectionLog.error("unexpectedRouteDiagnostic version=2 provider=qwen action=\(action, privacy: .public) phase=\(phase, privacy: .public) sequence=\(session.sequence) \(route, privacy: .public)")
+        }
+        if failure == .unexpectedPage(.grok), !session.loggedGrokUnexpectedRoute {
+            session.loggedGrokUnexpectedRoute = true
+            let route = Self.unexpectedGrokRouteDiagnostic(url)
+            Self.inspectionLog.error("unexpectedRouteDiagnostic version=1 provider=grok action=\(action, privacy: .public) phase=\(phase, privacy: .public) sequence=\(session.sequence) temporaryRequested=\(session.temporaryRequested) modelSelectionRequested=\(session.modelSelectionRequested) \(route, privacy: .public)")
         }
         let firstFailure = session.terminalFailure == nil
         let recorded = recordedWebsiteBlocker(failure, session: session)

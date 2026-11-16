@@ -122,4 +122,13 @@ draft rendered before authenticated account controls. Build 555 defers only the
 nonempty-draft rejection until account status is known, retaining every other
 control check and the original deadline. Known guests still require sign-in; an
 authenticated quota card still blocks responses; an authenticated draft without
-a quota card still fails. Live qualification of these fixes remains pending.
+a quota card still fails.
+
+Installed build 555 now reports Kimi's actual website usage limit; its restored
+draft remains untouched. This verifies startup error classification, not tool
+qualification. Grok passed the initial editor check but then stopped at native
+route verification before any prompt. An ordinary empty Grok tab stayed at the
+exact root after keyboard navigation and Private activation, so onboarding or
+Private navigation is not an established cause. Build 556 adds bounded route
+shape and preparation-stage diagnostics without recording URLs or changing
+route admission. Eight focused route/proof tests pass; live diagnosis continues.

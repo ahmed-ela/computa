@@ -125,6 +125,68 @@ final class GrokPrivateModeEvidenceTests: XCTestCase {
     }
 
     @MainActor
+    func testUnexpectedGrokRouteDiagnosticDistinguishesLiteralRootAndClosedRouteShapes() throws {
+        let uuid = "11111111-abcd-4333-8444-555555555555"
+        let cases: [(String, [String])] = [
+            ("https://grok.com/", ["literal=root_with_slash", "path=root", "segments=0", "query=absent"]),
+            ("https://grok.com", ["literal=implicit_slash", "path=root", "segments=0"]),
+            ("https://grok.com/?", ["literal=other", "query=empty"]),
+            ("https://grok.com/?PRIVATE_KEY=PRIVATE_VALUE", ["literal=other", "query=present"]),
+            ("https://grok.com/#PRIVATE_FRAGMENT", ["literal=other", "fragment=true"]),
+            ("https://grok.com/c/" + uuid, ["path=saved_c", "segments=2", "tokenUUID=lower"]),
+            ("https://grok.com/c/" + uuid.uppercased(), ["tokenUUID=upper"]),
+            ("https://grok.com/c/" + uuid.replacingOccurrences(of: "abcd", with: "AbCd"), ["tokenUUID=mixed"]),
+            ("https://grok.com/c/PRIVATE_TOKEN/PRIVATE_SUFFIX", ["path=saved_c", "segments=3plus", "tokenUUID=other"]),
+            ("https://grok.com/c/", ["path=saved_c", "segments=1", "tokenUUID=absent"]),
+            ("https://grok.com/PRIVATE_PATH", ["path=other", "segments=1", "tokenUUID=absent"]),
+            ("http://grok.com/", ["scheme=http", "host=expected", "literal=other"]),
+            ("private+scheme://grok.com/", ["scheme=other", "host=expected"]),
+            ("https://PRIVATE_HOST.invalid/", ["host=other"]),
+            ("https://grok.com:443/", ["port=https_default", "literal=other"]),
+            ("https://grok.com:444/", ["port=other"]),
+            ("https://PRIVATE_USER:PRIVATE_PASSWORD@grok.com/", ["userInfo=true"]),
+        ]
+        for (raw, expected) in cases {
+            let url = try XCTUnwrap(URL(string: raw))
+            let before = EmbeddedWebModelTransport.Provider.grok.accepts(raw)
+            let result = EmbeddedWebModelTransport.unexpectedGrokRouteDiagnostic(url)
+            for field in expected { XCTAssertTrue(result.split(separator: " ").contains(Substring(field)), field) }
+            XCTAssertEqual(EmbeddedWebModelTransport.Provider.grok.accepts(raw), before)
+            XCTAssertEqual(before, raw == "https://grok.com/", "Diagnostics never change exact-root admission")
+            XCTAssertLessThanOrEqual(result.utf8.count, 256)
+            for forbidden in ["PRIVATE", uuid, "grok.com", "https://", "http://", "abcd", "555555"] {
+                XCTAssertFalse(result.contains(forbidden), forbidden)
+            }
+        }
+    }
+
+    @MainActor
+    func testUnexpectedGrokRouteDiagnosticNeverRetainsPathQueryOrTokenData() throws {
+        let schemas: [String: Set<String>] = ["scheme": ["absent", "https", "http", "other"],
+            "host": ["absent", "expected", "other"], "port": ["absent", "https_default", "other"],
+            "literal": ["absent", "root_with_slash", "implicit_slash", "other"], "userInfo": ["true", "false"],
+            "path": ["absent", "root", "saved_c", "other"], "segments": ["0", "1", "2", "3plus"],
+            "tokenUUID": ["absent", "lower", "upper", "mixed", "other", "oversized"],
+            "query": ["absent", "empty", "present"], "fragment": ["true", "false"]]
+        let inputs: [URL?] = [nil, URL(string: "https://grok.com/c/" + String(repeating: "X", count: 4096)),
+            URL(string: "https://grok.com/c/%31%31%31%31%31%31%31%31-abcd-4333-8444-555555555555?SECRET_KEY=SECRET_VALUE#SECRET_FRAGMENT"),
+            URL(string: "https://grok.com/SECRET_PATH/SECRET_SUBPATH?" + String(repeating: "SECRET", count: 1000))]
+        for url in inputs {
+            let result = EmbeddedWebModelTransport.unexpectedGrokRouteDiagnostic(url)
+            let fields = Dictionary(uniqueKeysWithValues: result.split(separator: " ").map { field in
+                let pair = field.split(separator: "=", maxSplits: 1); return (String(pair[0]), String(pair[1]))
+            })
+            XCTAssertEqual(Set(fields.keys), Set(schemas.keys))
+            for (key, value) in fields { XCTAssertTrue(schemas[key]?.contains(value) == true) }
+            XCTAssertLessThanOrEqual(result.utf8.count, 256)
+            for forbidden in ["SECRET", String(repeating: "X", count: 32), "11111111", "%31", "grok.com"] {
+                XCTAssertFalse(result.contains(forbidden))
+            }
+        }
+        XCTAssertTrue(EmbeddedWebModelTransport.unexpectedGrokRouteDiagnostic(nil).contains("literal=absent"))
+    }
+
+    @MainActor
     func testOnlyExactPrivateRootIsAdmitted() {
         let provider = EmbeddedWebModelTransport.Provider.grok
         XCTAssertTrue(provider.lifecycle == .temporary)
