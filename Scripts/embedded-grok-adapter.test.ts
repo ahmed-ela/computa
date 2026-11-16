@@ -91,7 +91,7 @@ describe('Grok private inference adapter', () => {
   test('composer failures report only the evaluated fixed branch without granting readiness', async () => {
     const scenarios: [string, boolean, (f: ReturnType<typeof grokFixture>) => void][] = [
       ['initial_editor_ambiguous', true, f => { f.body.append(f.f.editor.cloneNode(true)); }],
-      ['initial_editor_invalid', true, f => { f.f.editor.setAttribute('hidden', ''); }],
+      ['initial_editor_no_rects', true, f => { f.f.editor.setAttribute('hidden', ''); }],
       ['initial_action_ambiguous', true, f => { f.body.append(new f.Node('BUTTON', { ...f.f.send.values })); }],
       ['initial_action_invalid', true, f => { f.f.send.setAttribute('aria-label', 'Unrecognized private text'); }],
       ['editor_missing', false, f => { f.f.editor.remove(); }],
@@ -102,7 +102,39 @@ describe('Grok private inference adapter', () => {
     ];
     for (const [detail, allowGrokInitialHydration, change] of scenarios) {
       const f = grokFixture(); change(f);
-      expect(await f.run('inspect', { allowGrokInitialHydration })).toEqual({ error: 'composer_unavailable', detail });
+      const result = await f.run('inspect', { allowGrokInitialHydration });
+      expect(result).toMatchObject({ error: 'composer_unavailable', detail });
+      expect(Object.keys(result).sort()).toEqual((detail === 'initial_editor_no_rects'
+        ? ['error', 'detail', 'grokInitialEditorDiagnostic'] : ['error', 'detail']).sort());
+      expect(f.f.sendCount + f.f.privateCount + f.f.pickerOpens).toBe(0);
+    }
+  });
+
+  test('initial editor failure separates exact predicates and retains only closed shape metadata', async () => {
+    const scenarios: [string, (f: ReturnType<typeof grokFixture>) => void][] = [
+      ['tag_textarea', f => { f.f.editor.remove(); f.f.form.append(new f.Node('TEXTAREA', { 'aria-label': 'Private draft text' })); }],
+      ['tag_other', f => { f.f.editor.remove(); f.f.form.append(new f.Node('SPAN', { role: 'textbox' })); }],
+      ['contenteditable', f => { f.f.editor.setAttribute('contenteditable', 'false'); }],
+      ['role', f => { f.f.editor.setAttribute('role', 'other'); }],
+      ['label', f => { f.f.editor.setAttribute('aria-label', 'Private draft text'); }],
+      ['no_rects', f => { f.f.editor.setAttribute('hidden', ''); }],
+      ['display_none', f => { f.f.editor.setAttribute('style', 'display:none'); }],
+      ['visibility_hidden', f => { f.f.editor.values.visibility = 'hidden'; }],
+      ['inert_ancestor', f => { f.f.form.setAttribute('inert', ''); }],
+      ['aria_hidden_ancestor', f => { f.f.form.setAttribute('aria-hidden', 'true'); }],
+      ['disabled', f => { f.f.editor.disabled = true; }],
+      ['aria_disabled', f => { f.f.editor.setAttribute('aria-disabled', 'true'); }],
+    ];
+    for (const [reason, change] of scenarios) {
+      const f = grokFixture(); change(f);
+      const result = await f.run('inspect', { allowGrokInitialHydration: true });
+      expect(result).toMatchObject({ error: 'composer_unavailable', detail: 'initial_editor_' + reason });
+      const { version, tag, ...flags } = result.grokInitialEditorDiagnostic;
+      expect(version).toBe(1); expect(['div', 'textarea', 'other']).toContain(tag);
+      expect(Object.keys(flags).sort()).toEqual(['editable', 'role', 'label', 'connected', 'rects', 'displayNone',
+        'visibilityHidden', 'hiddenAncestor', 'inertAncestor', 'ariaHiddenAncestor', 'disabled', 'ariaDisabled'].sort());
+      expect(Object.values(flags).every(value => typeof value === 'boolean')).toBe(true);
+      expect(JSON.stringify(result)).not.toContain('Private draft text');
       expect(f.f.sendCount + f.f.privateCount + f.f.pickerOpens).toBe(0);
     }
   });

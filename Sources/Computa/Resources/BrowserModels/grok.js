@@ -260,7 +260,25 @@ try {
     if (editors.length > 1) c.fail('composer_unavailable', 'initial_editor_ambiguous');
     if (editors.length && (!c.enabled(editors[0]) || editors[0].tagName !== 'DIV'
       || editors[0].getAttribute('contenteditable') !== 'true' || editors[0].getAttribute('role') !== 'textbox'
-      || editors[0].getAttribute('aria-label') !== 'Message Grok')) c.fail('composer_unavailable', 'initial_editor_invalid');
+      || editors[0].getAttribute('aria-label') !== 'Message Grok')) {
+      const node = editors[0], style = getComputedStyle(node);
+      // Failure-only closed predicates preserve the actual early render shape;
+      // they contain no page strings and cannot grant readiness or recovery.
+      const shape = { version: 1, tag: node.tagName === 'DIV' ? 'div' : node.tagName === 'TEXTAREA' ? 'textarea' : 'other',
+        editable: node.getAttribute('contenteditable') === 'true', role: node.getAttribute('role') === 'textbox',
+        label: node.getAttribute('aria-label') === 'Message Grok', connected: node.isConnected === true,
+        rects: node.getClientRects().length > 0, displayNone: style.display === 'none', visibilityHidden: style.visibility === 'hidden',
+        hiddenAncestor: !!node.closest('[hidden]'), inertAncestor: !!node.closest('[inert]'),
+        ariaHiddenAncestor: !!node.closest('[aria-hidden="true"]'), disabled: !!node.disabled,
+        ariaDisabled: node.getAttribute('aria-disabled') === 'true' };
+      const failure = shape.tag !== 'div' ? 'tag_' + shape.tag : !shape.editable ? 'contenteditable'
+        : !shape.role ? 'role' : !shape.label ? 'label' : !shape.connected ? 'disconnected' : !shape.rects ? 'no_rects'
+        : shape.displayNone ? 'display_none' : shape.visibilityHidden ? 'visibility_hidden' : shape.hiddenAncestor ? 'hidden_ancestor'
+        : shape.inertAncestor ? 'inert_ancestor' : shape.ariaHiddenAncestor ? 'aria_hidden_ancestor'
+        : shape.disabled ? 'disabled' : shape.ariaDisabled ? 'aria_disabled' : 'invalid';
+      throw { computaAdapterFailure: true, error: 'composer_unavailable', detail: 'initial_editor_' + failure,
+        grokInitialEditorDiagnostic: shape };
+    }
     if (editors.length && c.bodyText(editors[0].innerText)) c.fail('composer_not_empty');
     const buttons = c.nodes(document, 'button', 256);
     const triggers = [...new Set([...c.nodes(document, '#model-select-trigger', 8),
@@ -500,6 +518,7 @@ try {
   form.send.click(); rootGuard();
   return { ...initial, submitted: true };
 } catch (error) {
-  if (error?.computaAdapterFailure === true) return { error: error.error, ...(error.detail ? { detail: error.detail } : {}) };
+  if (error?.computaAdapterFailure === true) return { error: error.error, ...(error.detail ? { detail: error.detail } : {}),
+    ...(error.grokInitialEditorDiagnostic ? { grokInitialEditorDiagnostic: error.grokInitialEditorDiagnostic } : {}) };
   throw error;
 }

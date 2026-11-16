@@ -37,6 +37,29 @@ final class KimiComposerGuardDiagnosticTests: XCTestCase {
             XCTAssertEqual(observed as NSDictionary, primary as NSDictionary)
         }
     }
+    func testQuotaReadReasonIsClosedMetadataAndCannotChangeThePrimaryFailure() throws {
+        let reasons = ["not_evaluated", "account_unknown", "request_binding", "expected_counts", "expected_lineage",
+            "prior_state", "route_state", "authored_present", "card_missing", "card_ambiguous", "box_missing", "box_ambiguous",
+            "card_or_parent_shape", "associated_editor", "card_child_count", "content_actions_shape", "content_or_control_count",
+            "icon_shape", "label_shape", "label_text", "upgrade_shape", "upgrade_label", "close_shape", "matched"]
+        for reason in reasons {
+            var metadata = value; metadata["quotaReadReason"] = reason
+            var observed: [String: Any] = ["error": "composer_not_empty", "composerGuardDiagnostic": metadata]
+            let packet = try XCTUnwrap(D.removeComposerGuard(from: &observed, provider: "kimi", action: "inspect"))
+            XCTAssertEqual(observed as NSDictionary, ["error": "composer_not_empty"] as NSDictionary)
+            let log = try XCTUnwrap(D.composerGuardLog(packet, context: nil, sessionToken: UUID(), documentGeneration: UUID(), sequence: 0))
+            let record = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(log.utf8)) as? [String: Any])
+            XCTAssertEqual((record["metadata"] as? [String: Any])?["quotaReadReason"] as? String, reason)
+            XCTAssertLessThanOrEqual(packet.data.count, 512)
+        }
+        for invalid in ["PRIVATE_QUOTA_TEXT", true, 0, NSNull(), ["reason": "card_missing"]] as [Any] {
+            var metadata = value; metadata["quotaReadReason"] = invalid
+            var observed: [String: Any] = ["error": "composer_not_empty", "composerGuardDiagnostic": metadata]
+            XCTAssertNil(D.removeComposerGuard(from: &observed, provider: "kimi", action: "inspect"))
+            XCTAssertEqual(observed as NSDictionary, ["error": "composer_not_empty"] as NSDictionary)
+        }
+    }
+
     func testMissingNativeAttributionIsExplicitNullAndCannotBePIDOnlyCause() throws {
         let packet = try XCTUnwrap(D.sanitizeComposerGuard(value)), token = UUID(), generation = UUID()
         let text = try XCTUnwrap(D.composerGuardLog(packet, context: nil, sessionToken: token, documentGeneration: generation, sequence: 0))

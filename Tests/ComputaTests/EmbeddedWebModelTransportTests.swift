@@ -15207,6 +15207,45 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    // Characterizes the startup race independently of the live site: this is
+    // not evidence that CSS visibility caused the installed app's failure.
+    func testGrokInitialExactEditorCSSMountCurrentlyRejectsBeforeBecomingVisible() async throws {
+        for (style, detail) in [("display:none", "initial_editor_no_rects"),
+                                ("visibility:hidden", "initial_editor_visibility_hidden")] {
+            let html = try Self.grokFixturePage().replacingOccurrences(of: "</body>", with: """
+                <script>grokFixture.editor.setAttribute('style', '\(style)');</script></body>
+                """)
+            let fixture = try Fixture(page: html)
+            defer { fixture.shutdown() }
+            let started = try await startChoice(WebsiteModelChoice(provider: "grok", key: "Fast", label: "Fast"), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            try await waitForFixture(view)
+            let expected = EmbeddedWebModelTransport.Failure.editorFailure("composer_unavailable; action=inspect; detail=\(detail)")
+            do {
+                _ = try await grokFixtureCall(fixture, "webProviderPoll", ["sessionToken": token])
+                XCTFail("This characterization requires observing the original early rejection")
+            } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, expected) }
+            let before = try await evaluate(view, "return [grokFixture.privateCount, grokFixture.pickerOpens, grokFixture.sendCount];")
+            XCTAssertEqual(before as? [Int], [0, 0, 0])
+            let visible = try await evaluate(view, """
+                grokFixture.editor.removeAttribute('style');
+                return grokFixture.editor.getClientRects().length > 0
+                  && getComputedStyle(grokFixture.editor).visibility !== 'hidden'
+                  && getComputedStyle(grokFixture.editor).display !== 'none';
+                """)
+            XCTAssertEqual(visible as? Bool, true)
+            // A low-level caller can explicitly poll again after the thrown
+            // read. Discovery instead exits/cleans up on that first exception.
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            let counts = try await evaluate(view, "return [grokFixture.privateCount, grokFixture.pickerOpens, grokFixture.sendCount];")
+            XCTAssertEqual(counts as? [Int], [1, 1, 0])
+            let closed = try await grokFixtureCall(fixture, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(closed["cleanup"] as? String, "not_created")
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
     func testGrokInitialHydrationDoesNotHideAmbiguousHiddenOrOccupiedControls() async throws {
         let mutations = [
             "grokFixture.trigger.remove(); grokFixture.form.append(grokFixture.editor.cloneNode(true));",

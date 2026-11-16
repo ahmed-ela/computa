@@ -55,6 +55,35 @@ final class KimiWebModelTransportTests: XCTestCase {
         XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
     }
 
+    func testInitialQuotaWithUnmountedAccountChromeStillRejectsRestoredDraftBeforeAccountHydrates() async throws {
+        let fixture = try Fixture(initialFreeQuotaBanner: true, initialAccountLinkPending: true); defer { fixture.shutdown() }
+        let parameters = ["provider": "kimi", "modelChoice": try XCTUnwrap(choice.canonicalJSONString)]
+        let data = try await fixture.transport.request(operation: "webProviderStart", params: JSONSerialization.data(withJSONObject: parameters))
+        let started = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        do {
+            _ = try await wait(fixture, token, state: "ready")
+            XCTFail("Characterize the existing early draft rejection; diagnostics must not add a wait")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .editorFailure("composer_not_empty")) }
+        let before = try await evaluate(fixture.view,
+            "return [document.querySelectorAll('.chat-input-bar').length,document.querySelectorAll('a[href=\"/chat/history\"]').length];")
+        XCTAssertEqual(before as? [Int], [1, 0])
+        _ = try await evaluate(fixture.view, "fixtureAccountHydration.restore(); return true;")
+        do {
+            _ = try await call(fixture, "webProviderPoll", token)
+            XCTFail("A later account link cannot undo the terminal draft rejection or authorize a retry")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptConversation)) }
+        let finished = try await call(fixture, "webProviderCancel", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "failed")
+        let draft = try await evaluate(fixture.view, "return document.querySelector('.chat-input-editor').textContent;")
+        XCTAssertEqual(draft as? String, "Unsent synthetic restored draft")
+        let actions = try await evaluate(fixture.view,
+            "return [kimiFixture.counters.modelOpens,kimiFixture.counters.beforeInput,kimiFixture.counters.sends,kimiFixture.counters.confirmations,window.fixtureQuotaClicks];")
+        XCTAssertEqual(actions as? [Int], [0, 0, 0, 0, 0])
+        XCTAssertNotNil(fixture.browser.webView(for: try XCTUnwrap(fixture.createdID)))
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
     func testFreshGuestInferenceClosesOnlyItsUntouchedOwnedTab() async throws {
         let fixture = try Fixture(); defer { fixture.shutdown() }
         fixture.guestAtHome = true
@@ -2079,7 +2108,7 @@ final class KimiWebModelTransportTests: XCTestCase {
         private static let signedInChrome = #"<a href="/chat/history">All chats</a>"#
         private var retainedView: WKWebView?
         var view: WKWebView { retainedView! }
-        init(initialControlsPending: Bool = false, initialEditorAttributePending: Bool = false, initialNestedModel: Bool = false, initialFreeQuotaBanner: Bool = false) throws {
+        init(initialControlsPending: Bool = false, initialEditorAttributePending: Bool = false, initialNestedModel: Bool = false, initialFreeQuotaBanner: Bool = false, initialAccountLinkPending: Bool = false) throws {
             window = Window(contentRect: NSRect(x: 20, y: 20, width: 1024, height: 768), styleMask: [], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false; window.ignoresMouseEvents = true
             host = EmbeddedModelRenderContainer(session: browser); host.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
@@ -2126,7 +2155,13 @@ final class KimiWebModelTransportTests: XCTestCase {
                   wrap.querySelector('.chat-input-bar').addEventListener('click', () => window.fixtureQuotaClicks++);
                 })();</script>
                 """# : ""
-            let setup = nestedSetup + quotaSetup + (initialControlsPending ? hydrationSetup : initialEditorAttributePending ? attributeSetup : "")
+            let accountSetup = initialAccountLinkPending ? #"""
+                <script>(() => {
+                  const history = document.querySelector('a[href="/chat/history"]'); history.remove();
+                  window.fixtureAccountHydration = {restore() { document.body.append(history); }};
+                })();</script>
+                """# : ""
+            let setup = nestedSetup + quotaSetup + accountSetup + (initialControlsPending ? hydrationSetup : initialEditorAttributePending ? attributeSetup : "")
             let html = KimiFixturePage.html
                 .replacingOccurrences(of: "<body>", with: "<body>" + Self.signedInChrome)
                 .replacingOccurrences(of: "</body>", with: setup + "</body>")

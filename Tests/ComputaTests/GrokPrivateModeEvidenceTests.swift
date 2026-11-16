@@ -100,6 +100,31 @@ final class GrokPrivateModeEvidenceTests: XCTestCase {
     }
 
     @MainActor
+    func testInitialEditorDiagnosticRejectsOpenFieldsAndKeepsOverlappingFailures() {
+        let valid: [String: Any] = ["version": 1, "tag": "div", "editable": true, "role": true, "label": true,
+            "connected": true, "rects": false, "displayNone": true, "visibilityHidden": false,
+            "hiddenAncestor": true, "inertAncestor": false, "ariaHiddenAncestor": false, "disabled": false, "ariaDisabled": false]
+        let reason = "initial_editor_no_rects"
+        let rendered = EmbeddedWebModelTransport.grokInitialEditorFailureDiagnostic(valid, action: "inspect", detail: reason)
+        XCTAssertNotNil(rendered)
+        XCTAssertTrue(rendered?.contains("rects=false displayNone=true") == true)
+        XCTAssertTrue(rendered?.contains("hiddenAncestor=true") == true)
+        for key in valid.keys {
+            var missing = valid; missing.removeValue(forKey: key)
+            XCTAssertNil(EmbeddedWebModelTransport.grokInitialEditorFailureDiagnostic(missing, action: "inspect", detail: reason), key)
+        }
+        for (key, value): (String, Any) in [("extra", "private text"), ("tag", "private DOM tag"), ("rects", 0),
+            ("editable", "true"), ("version", true), ("version", 1.5)] {
+            var invalid = valid; invalid[key] = value
+            XCTAssertNil(EmbeddedWebModelTransport.grokInitialEditorFailureDiagnostic(invalid, action: "inspect", detail: reason), key)
+        }
+        XCTAssertNil(EmbeddedWebModelTransport.grokInitialEditorFailureDiagnostic(valid, action: "submit", detail: reason))
+        XCTAssertNil(EmbeddedWebModelTransport.grokInitialEditorFailureDiagnostic(valid, action: "inspect", detail: "initial_editor_disabled"))
+        var textarea = valid; textarea["tag"] = "textarea"
+        XCTAssertNotNil(EmbeddedWebModelTransport.grokInitialEditorFailureDiagnostic(textarea, action: "inspect", detail: "initial_editor_tag_textarea"))
+    }
+
+    @MainActor
     func testOnlyExactPrivateRootIsAdmitted() {
         let provider = EmbeddedWebModelTransport.Provider.grok
         XCTAssertTrue(provider.lifecycle == .temporary)

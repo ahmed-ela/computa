@@ -85,6 +85,7 @@ function computaProviderCore(request, provider, origin, actions) {
 // Saved conversations require an explicit confirmed deletion, never temp mode.
 let kimiDraftState = null;
 let kimiComposerGuardDiagnostic = null;
+let kimiInitialQuotaReadReason = 'not_evaluated';
 let kimiDiscoveryProgress = null;
 let kimiFirstRootIDDiagnostic = null;
 try {
@@ -818,46 +819,49 @@ try {
   }
 
   function initialFreeQuotaExceeded() {
+    const reject = reason => { kimiInitialQuotaReadReason = reason; return false; };
     // Observed 2026-11-15: Kimi restores drafts beneath this site-owned bar.
     // Classify the limit before the empty-editor guard; this negative receipt
     // grants no message, model, response, Send, or conversation-cleanup proof.
-    if (input.action !== 'inspect' || cleanupInspection || input.bindOwner !== true
-      || input.expectedUserCounts?.length !== 1 || input.expectedUserCounts[0] !== 0
-      || input.expectedConversation != null || input.expectedFirstUserFingerprint != null
-      || state.initialReadComplete || state.submissionAcknowledged
-      || state.model || state.selection || state.prepared || state.inserted || state.submitted
-      || state.first || state.provisional || state.canonical || state.deletion || route.kind !== 'fresh'
-      || c.nodes(document, '.chat-content-item', 64).length) return false;
+    if (input.action !== 'inspect' || cleanupInspection || input.bindOwner !== true) return reject('request_binding');
+    if (input.expectedUserCounts?.length !== 1 || input.expectedUserCounts[0] !== 0) return reject('expected_counts');
+    if (input.expectedConversation != null || input.expectedFirstUserFingerprint != null) return reject('expected_lineage');
+    if (state.initialReadComplete || state.submissionAcknowledged || state.model || state.selection || state.prepared
+      || state.inserted || state.submitted || state.first || state.provisional || state.canonical || state.deletion) return reject('prior_state');
+    if (route.kind !== 'fresh') return reject('route_state');
+    if (c.nodes(document, '.chat-content-item', 64).length) return reject('authored_present');
     const outside = '.chat-content-item, .chat-input-editor, [contenteditable], [role="textbox"], pre, code, aside, nav, header';
     const chrome = node => !!node && c.visible(node) && !node.closest(outside);
     const shape = (node, tag, name) => chrome(node) && node.tagName === tag && (!name || node.classList.contains(name));
     const cards = c.nodes(document, 'div.chat-input-bar', 16).filter(node => !node.closest(outside));
     const boxes = c.nodes(document, '[id="chat-box"]', 4);
-    if (cards.length !== 1 || boxes.length !== 1) return false;
+    if (cards.length !== 1) return reject(cards.length === 0 ? 'card_missing' : 'card_ambiguous');
+    if (boxes.length !== 1) return reject(boxes.length === 0 ? 'box_missing' : 'box_ambiguous');
     const card = cards[0], wrap = card.parentElement, box = boxes[0];
     if (!shape(card, 'DIV', 'chat-input-bar') || !shape(wrap, 'DIV', 'chat-editor-wrap')
-      || !shape(box, 'DIV', 'chat-box') || wrap.parentElement !== box) return false;
+      || !shape(box, 'DIV', 'chat-box') || wrap.parentElement !== box) return reject('card_or_parent_shape');
     const editors = c.nodes(wrap, '.chat-input-editor', 4), editor = editors[0];
     const scope = editor?.closest('.chat-editor-input-wrap');
     if (editors.length !== 1 || !c.visible(editor) || editor.getAttribute('contenteditable') !== 'true'
       || editor.getAttribute('role') !== 'textbox' || editor.getAttribute('data-lexical-editor') !== 'true'
       || authored(editor) || !scope || !c.visible(scope) || scope.closest('.chat-editor-wrap') !== wrap
-      || card.contains(editor)) return false;
+      || card.contains(editor)) return reject('associated_editor');
     const children = [...card.children];
-    if (children.length !== 2) return false;
+    if (children.length !== 2) return reject('card_child_count');
     const [content, actions] = children;
-    if (!shape(content, 'DIV', 'chat-input-bar-content') || !shape(actions, 'DIV', 'chat-input-bar-actions')) return false;
+    if (!shape(content, 'DIV', 'chat-input-bar-content') || !shape(actions, 'DIV', 'chat-input-bar-actions')) return reject('content_actions_shape');
     const parts = [...content.children], controls = [...actions.children];
-    if (parts.length !== 3 || controls.length !== 1) return false;
+    if (parts.length !== 3 || controls.length !== 1) return reject('content_or_control_count');
     const [icon, label, upgrade] = parts, close = controls[0];
-    if (!shape(icon, 'svg', 'iconify') || icon.getAttribute('role') !== 'img' || icon.getAttribute('name') !== 'music'
-      || !shape(label, 'SPAN') || label.children.length !== 0
-      || !/^Your free quota is used up\. Refreshes at (?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])\.$/.test(c.normalize(label.textContent))
-      || !shape(upgrade, 'SPAN', 'chat-input-bar-upgrade') || upgrade.children.length !== 0
-      || c.normalize(upgrade.textContent) !== 'Upgrade'
-      || !shape(close, 'DIV', 'chat-input-bar-close') || !close.classList.contains('icon-button')
+    if (!shape(icon, 'svg', 'iconify') || icon.getAttribute('role') !== 'img' || icon.getAttribute('name') !== 'music') return reject('icon_shape');
+    if (!shape(label, 'SPAN') || label.children.length !== 0) return reject('label_shape');
+    if (!/^Your free quota is used up\. Refreshes at (?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])\.$/.test(c.normalize(label.textContent))) return reject('label_text');
+    if (!shape(upgrade, 'SPAN', 'chat-input-bar-upgrade') || upgrade.children.length !== 0) return reject('upgrade_shape');
+    if (c.normalize(upgrade.textContent) !== 'Upgrade') return reject('upgrade_label');
+    if (!shape(close, 'DIV', 'chat-input-bar-close') || !close.classList.contains('icon-button')
       || !close.classList.contains('no-background') || close.getAttribute('role') !== 'button'
-      || close.getAttribute('tabindex') !== '0' || close.getAttribute('aria-label') !== 'Close') return false;
+      || close.getAttribute('tabindex') !== '0' || close.getAttribute('aria-label') !== 'Close') return reject('close_shape');
+    kimiInitialQuotaReadReason = 'matched';
     return true;
   }
 
@@ -890,7 +894,7 @@ try {
         // Reuse the held string and counters from that same serializer pass.
         // No text, length, hash, HTML, attribute, URL or DOM identifier leaves it.
         kimiComposerGuardDiagnostic = { version: 1, provider: 'kimi', trigger: 'composer_not_empty',
-          stage: 'initial_inspect', serializedClass: serialized === '' ? 'empty'
+          stage: 'initial_inspect', quotaReadReason: kimiInitialQuotaReadReason, serializedClass: serialized === '' ? 'empty'
             : /^\s+$/.test(serialized) ? 'whitespace_only' : 'nonwhitespace', ...counts };
         reject('composer_not_empty');
       }
@@ -911,7 +915,9 @@ try {
       url: document.URL, userCount: 0, responseCount: 0 };
     c.fail('sign_in_required');
   }
-  if (account === 'authenticated' && initialFreeQuotaExceeded()) return { error: 'website_usage_limit' };
+  if (account === 'authenticated') {
+    if (initialFreeQuotaExceeded()) return { error: 'website_usage_limit' };
+  } else kimiInitialQuotaReadReason = 'account_unknown';
   if (initialHydrationPending(account === 'authenticated'))
     return { pending: true, sessionLifecycle: 'saved_conversation_delete', temporary: false, composer: false };
   if (account !== 'authenticated') c.fail('document_changed', 'account_controls');

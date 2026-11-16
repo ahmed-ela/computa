@@ -128,6 +128,53 @@ describe('Kimi initial provider-owned free-quota banner', () => {
     }
   });
 
+  test('unknown account chrome fails on the restored draft before reading a present quota card', async () => {
+    const f = adapterFixture(), q = installQuota(f); f.setDraft('Unsent synthetic draft');
+    f.remove(f.accountHistory);
+    const first = await f.run('inspect', initial);
+    expect(first.error).toBe('composer_not_empty');
+    expect(first.composerGuardDiagnostic.quotaReadReason).toBe('account_unknown');
+    expect(first.pending).toBeUndefined(); expect(first.freshQuotaAbort).toBeUndefined();
+    f.accountHistory.connected = true; f.body.append(f.accountHistory);
+    expect(await f.run('inspect', initial)).toEqual({ error: 'conversation_changed', detail: 'terminal_operation' });
+    expect(f.draftText()).toBe('Unsent synthetic draft');
+    expect(q.close.clicks).toBe(0); expect(q.upgrade.clicks).toBe(0);
+    expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
+  });
+
+  test('composer rejection records only the first finite quota-read guard without changing it', async () => {
+    const mutations: Record<string, (f: ReturnType<typeof adapterFixture>, q: ReturnType<typeof installQuota>) => void> = {
+      card_missing: (f, q) => f.remove(q.card),
+      card_ambiguous: (f, q) => q.wrap.append(q.card.cloneNode(true)),
+      box_missing: (f, q) => q.box.setAttribute('id', 'other'),
+      box_ambiguous: (f, q) => f.body.append(new f.Node('DIV', { id: 'chat-box' })),
+      card_or_parent_shape: (f, q) => q.card.setAttribute('visibility', 'hidden'),
+      associated_editor: (f, q) => move(f, f.scope, q.box),
+      card_child_count: (f, q) => q.card.append(new f.Node('P', {}, 'Private text must not escape')),
+      content_actions_shape: (f, q) => q.content.setAttribute('class', 'other'),
+      content_or_control_count: (f, q) => f.remove(q.close),
+      icon_shape: (f, q) => q.icon.setAttribute('name', 'PRIVATE_ICON'),
+      label_shape: (f, q) => q.label.append(new f.Node('SPAN', {}, 'Private label')),
+      label_text: (f, q) => { q.label.text = 'PRIVATE_LABEL'; },
+      upgrade_shape: (f, q) => q.upgrade.setAttribute('hidden', ''),
+      upgrade_label: (f, q) => { q.upgrade.text = 'PRIVATE_UPGRADE'; },
+      close_shape: (f, q) => q.close.setAttribute('aria-label', 'PRIVATE_CLOSE'),
+    };
+    for (const [reason, mutate] of Object.entries(mutations)) {
+      const f = adapterFixture(), q = installQuota(f); f.setDraft('PRIVATE_RESTORED_DRAFT'); mutate(f, q);
+      const result = await f.run('inspect', initial);
+      expect(result.error, reason).toBe('composer_not_empty');
+      expect(result.composerGuardDiagnostic.quotaReadReason, reason).toBe(reason);
+      expect(Object.keys(result).sort()).toEqual(['composerGuardDiagnostic', 'error']);
+      expect(JSON.stringify(result)).not.toContain('PRIVATE_');
+      expect(f.counts()).toEqual({ insertions: 0, sends: 0, confirms: 0 });
+    }
+    const f = adapterFixture(); installQuota(f); f.setDraft('PRIVATE_RESTORED_DRAFT');
+    const result = await f.run('inspect', { expectedUserCounts: [0, 1] });
+    expect(result.error).toBe('composer_not_empty');
+    expect(result.composerGuardDiagnostic.quotaReadReason).toBe('expected_counts');
+  });
+
   test('does not create cleanup authority or replace a post-readiness verification', async () => {
     for (const change of ['cleanup', 'ready', 'selection', 'claimed-send', 'transcript']) {
       const f = adapterFixture();

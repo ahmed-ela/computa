@@ -7466,10 +7466,38 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             "prepare", "insert", "sendReady", "submit", "stop"]
         let reasons: Set<String> = ["initial_editor_ambiguous", "initial_editor_invalid", "initial_action_ambiguous",
             "initial_action_invalid", "editor_missing", "editor_ambiguous", "editor_authored", "action_missing",
-            "action_ambiguous", "action_authored", "action_invalid", "editor_not_fresh", "editor_hit_test"]
+            "action_ambiguous", "action_authored", "action_invalid", "editor_not_fresh", "editor_hit_test",
+            "initial_editor_tag_textarea", "initial_editor_tag_other", "initial_editor_contenteditable", "initial_editor_role",
+            "initial_editor_label", "initial_editor_disconnected", "initial_editor_no_rects", "initial_editor_display_none",
+            "initial_editor_visibility_hidden", "initial_editor_hidden_ancestor", "initial_editor_inert_ancestor",
+            "initial_editor_aria_hidden_ancestor", "initial_editor_disabled", "initial_editor_aria_disabled"]
         guard actions.contains(action) else { return nil }
         let reason = (detail as? String).flatMap { reasons.contains($0) ? $0 : nil } ?? "unknown"
         return "composer_unavailable; action=\(action); detail=\(reason)"
+    }
+
+    /// Captures overlapping initial-render defects in a single failed attempt.
+    /// Exact keys, fixed tag classes and real JSON booleans exclude DOM content.
+    static func grokInitialEditorFailureDiagnostic(_ raw: Any?, action: String, detail: Any?) -> String? {
+        let flags = ["editable", "role", "label", "connected", "rects", "displayNone", "visibilityHidden",
+            "hiddenAncestor", "inertAncestor", "ariaHiddenAncestor", "disabled", "ariaDisabled"]
+        guard action == "inspect", let value = raw as? [String: Any],
+              Set(value.keys) == Set(flags + ["version", "tag"]),
+              ComputerToolArgumentContract.exactInt64(value["version"]) == 1,
+              let tag = value["tag"] as? String, ["div", "textarea", "other"].contains(tag) else { return nil }
+        var observed: [String: Bool] = [:]
+        for key in flags {
+            guard let flag = value[key] as? NSNumber, CFGetTypeID(flag) == CFBooleanGetTypeID() else { return nil }
+            observed[key] = flag.boolValue
+        }
+        let reasons: [(String, Bool, String)] = [("editable", false, "contenteditable"), ("role", false, "role"),
+            ("label", false, "label"), ("connected", false, "disconnected"), ("rects", false, "no_rects"),
+            ("displayNone", true, "display_none"), ("visibilityHidden", true, "visibility_hidden"),
+            ("hiddenAncestor", true, "hidden_ancestor"), ("inertAncestor", true, "inert_ancestor"),
+            ("ariaHiddenAncestor", true, "aria_hidden_ancestor"), ("disabled", true, "disabled"), ("ariaDisabled", true, "aria_disabled")]
+        let reason = tag != "div" ? "tag_" + tag : reasons.first { observed[$0.0] == $0.1 }?.2
+        guard let reason, detail as? String == "initial_editor_" + reason else { return nil }
+        return "version=1 tag=\(tag) " + flags.map { "\($0)=\(observed[$0] == true)" }.joined(separator: " ")
     }
 
     /// Only fixed adapter categories may survive page cleanup. This describes
@@ -9244,6 +9272,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     if !session.loggedGrokComposerFailure {
                         session.loggedGrokComposerFailure = true
                         Self.inspectionLog.notice("composerFailure provider=grok \(diagnostic, privacy: .public)")
+                        if let shape = Self.grokInitialEditorFailureDiagnostic(observed["grokInitialEditorDiagnostic"],
+                            action: action, detail: observed["detail"]) {
+                            Self.inspectionLog.notice("grokInitialEditorFailure \(shape, privacy: .public)")
+                        }
                     }
                     throw Failure.editorFailure(diagnostic)
                 }

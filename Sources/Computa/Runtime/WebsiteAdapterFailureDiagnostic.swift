@@ -71,9 +71,18 @@ enum WebsiteAdapterFailureDiagnostic {
         return sanitizeComposerGuard(raw)
     }
 
+    private static let kimiQuotaReadReasons: Set<String> = ["not_evaluated", "account_unknown", "request_binding",
+        "expected_counts", "expected_lineage", "prior_state", "route_state", "authored_present",
+        "card_missing", "card_ambiguous", "box_missing", "box_ambiguous", "card_or_parent_shape", "associated_editor",
+        "card_child_count", "content_actions_shape", "content_or_control_count", "icon_shape", "label_shape",
+        "label_text", "upgrade_shape", "upgrade_label", "close_shape", "matched"]
+
     static func sanitizeComposerGuard(_ raw: Any?) -> Packet? {
         let counts = ["childCountCapped32", "paragraphCountCapped32", "brCountCapped32", "unsupportedShapeCountCapped32"]
-        guard let value = raw as? [String: Any], Set(value.keys) == Set(counts + ["version", "provider", "trigger", "stage", "serializedClass"]),
+        let baseKeys = Set(counts + ["version", "provider", "trigger", "stage", "serializedClass"])
+        guard let value = raw as? [String: Any],
+              Set(value.keys) == baseKeys || Set(value.keys) == baseKeys.union(["quotaReadReason"]),
+              !value.keys.contains("quotaReadReason") || (value["quotaReadReason"] as? String).map(kimiQuotaReadReasons.contains) == true,
               integer(value["version"], 1...1) == 1, value["provider"] as? String == "kimi",
               value["trigger"] as? String == "composer_not_empty", value["stage"] as? String == "initial_inspect",
               let kind = value["serializedClass"] as? String, ["empty", "whitespace_only", "nonwhitespace"].contains(kind),

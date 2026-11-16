@@ -98,3 +98,11 @@ and grants no ownership or cleanup authority. The six new JavaScript regressions
 and a native WebKit case cover this distinction; live responses remain blocked
 until provider access is restored. This does not prove the cause of build 550's
 third-inference route failure.
+
+Build 553 reproduced Grok's failure during initial inspection, before model
+selection (`initial_editor_invalid`). The follow-up records only a closed set of
+editor shape and visibility flags; no page text enters that diagnostic. Kimi's
+installed startup still returned `composer_not_empty`, so the quota classifier
+is not yet a demonstrated live fix. Its existing guard diagnostic now includes
+a finite quota-read stage, separating absent account chrome from a missing or
+mismatched banner without changing failure timing.
