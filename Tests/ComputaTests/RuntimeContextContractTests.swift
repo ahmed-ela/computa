@@ -3,6 +3,14 @@ import XCTest
 @testable import Computa
 
 final class RuntimeContextContractTests: XCTestCase {
+    func testIntermediateContextFullSentinelDoesNotInterruptSuccessfulCompaction() {
+        var guardrail = AppServerCompactionProgressGuard()
+        guardrail.observeTurnStart(taskID: "task", turnID: "turn")
+        XCTAssertNil(guardrail.started(taskID: "task", turnID: "turn"))
+        XCTAssertNil(guardrail.estimated(taskID: "task", turnID: "turn", estimate: .init(tokens: 62_259, window: 62_259)))
+        XCTAssertNil(guardrail.estimated(taskID: "task", turnID: "turn", estimate: .init(tokens: 8_219, window: 62_259)))
+        XCTAssertNil(guardrail.completed(taskID: "task", turnID: "turn", compactLimit: 49_152))
+    }
     func testKnownNonzeroNativeCommandResultStaysFailedAndStrictlyClassified() throws {
         typealias L = GroqNativePublicationLedger
         for state in ["failed"] {
@@ -228,11 +236,12 @@ final class RuntimeContextContractTests: XCTestCase {
         XCTAssertNil(AppServerContextUsageContract.compactedEstimate(payload(), expectedTurnID: "turn"))
     }
 
-    func testRetainedContextOverEffectiveWindowFailsOnFirstEstimate() {
+    func testRetainedContextOverEffectiveWindowFailsAtCompletedCheckpoint() {
         var guardrail = AppServerCompactionProgressGuard()
         guardrail.observeTurnStart(taskID: "task", turnID: "turn")
         XCTAssertNil(guardrail.started(taskID: "task", turnID: "turn"))
-        XCTAssertNotNil(guardrail.estimated(taskID: "task", turnID: "turn", estimate: .init(tokens: 11_762, window: 7_782)))
+        XCTAssertNil(guardrail.estimated(taskID: "task", turnID: "turn", estimate: .init(tokens: 11_762, window: 7_782)))
+        XCTAssertNotNil(guardrail.completed(taskID: "task", turnID: "turn", compactLimit: 6_144))
     }
 
     func testSecondNonShrinkingCompactionAboveLimitFails() {

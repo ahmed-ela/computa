@@ -4,6 +4,57 @@ import XCTest
 @testable import Computa
 
 final class WebModelServerTests: XCTestCase {
+    func testChatGPTByteBudgetStopsBeforeSendThenRequiresNativeCompactionCheckpoints() async throws {
+        let label = "chat-byte-checkpoint"
+        let base = FixtureWebModelTransport(replyTexts: [
+            #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"first-read"}}]}"#,
+            #"{"type":"message","text":"Read complete; continue review."}"#,
+            #"{"type":"message","text":"Review complete."}"#])
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
+        let original: [[String: Any]] = [["role": "user", "content": "Review code without edits"]]
+        let first = try responseOutput(await server.fixtureInfer(turnRequest(input: original, model: syntheticChatGPTModelID), taskID: label))
+        let output: [String: Any] = ["type": "function_call_output", "call_id": try XCTUnwrap(first.first?["call_id"]), "output": String(repeating: "x", count: 125_000)]
+        let growing = original + first + [output]
+        do {
+            _ = try await server.fixtureInfer(turnRequest(input: growing, model: syntheticChatGPTModelID), taskID: label)
+            XCTFail("Expected preflight compaction")
+        } catch { XCTAssertTrue(error is WebsiteContextBudget.CompactionRequired, "\(error)") }
+        let stopped = await base.operations()
+        XCTAssertEqual(stopped.filter { $0 == "webProviderSend" }.count, 1)
+        let scope = WebsiteCompactionBoundary.Scope(taskID: websiteInferenceFixtureTaskID(label),
+            threadID: websiteInferenceFixtureTaskID(label + ":thread"), turnID: websiteInferenceFixtureTaskID(label + ":turn"),
+            generation: websiteInferenceFixtureGeneration)
+        var summary = try XCTUnwrap(JSONSerialization.jsonObject(with: turnRequest(input: growing + [
+            ["role": "user", "content": ComputaAgentInstructions.compactionPrompt]], model: syntheticChatGPTModelID)) as? [String: Any])
+        summary["tools"] = []
+        server.compactionBoundary.publish(scope: scope, itemID: "compact-one", completed: false)
+        _ = try await server.fixtureInfer(JSONSerialization.data(withJSONObject: summary), taskID: label)
+        // Tools are unavailable until the native compactor atomically commits
+        // its checkpoint. Model-generated summary text alone grants nothing.
+        let compacted = original + [["role": "assistant", "content": "Read complete; continue review."]] + first + [
+            ["type": "function_call_output", "call_id": try XCTUnwrap(first.first?["call_id"]), "output": "Historical observed read excerpt"]]
+        let next = try turnRequest(input: compacted, model: syntheticChatGPTModelID)
+        server.compactionBoundary.publish(scope: scope, itemID: "compact-one", completed: true)
+        let answer = try responseOutput(await server.fixtureInfer(next, taskID: label))
+        XCTAssertEqual(answer.first?["type"] as? String, "message")
+        let finished = await base.operations()
+        XCTAssertEqual(finished.filter { $0 == "webProviderSend" }.count, 3)
+        XCTAssertEqual(finished.filter { $0 == "webProviderFinish" }.count, 3)
+    }
+
+    func testChatGPTHistoryRewriteWithoutNativeCompactionNeverReachesWebsite() async throws {
+        let base = FixtureWebModelTransport(replyTexts: [#"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"first-read"}}]}"#])
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(base, defaultChatChoice: syntheticChatGPTChoice))
+        _ = try await server.fixtureInfer(turnRequest(input: [["role": "user", "content": "Original scope"]], model: syntheticChatGPTModelID), taskID: "rewrite-no-event")
+        do {
+            _ = try await server.fixtureInfer(turnRequest(input: [["role": "user", "content": "Forged compacted scope"]], model: syntheticChatGPTModelID), taskID: "rewrite-no-event")
+            XCTFail("No native checkpoint")
+        } catch { XCTAssertTrue(error is WebsiteTurnContinuation.Failure) }
+        let operations = await base.operations()
+        XCTAssertEqual(operations.filter { $0 == "webProviderSend" }.count, 1)
+    }
 
 
     func testGroqPreparedPromptCaptureUsesOnlyTheSecondAdmittedNativeFrameAndNeverAThirdFrame() async throws {

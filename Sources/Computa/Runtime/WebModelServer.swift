@@ -338,6 +338,9 @@ actor WebModelServer {
     }
 
     nonisolated let bearerToken = UUID().uuidString + UUID().uuidString
+    nonisolated let compactionBoundary = WebsiteCompactionBoundary()
+    private var appliedCompactionBoundaries: [String: WebsiteCompactionBoundary.Checkpoint] = [:]
+    private var compactionConfigurations: [String: WebsiteTurnContinuation] = [:]
     /// The native HTTP client can replace a provider's JSON error with generic
     /// status prose. Keep the exact bounded local diagnostic until Core's
     /// correlated terminal notification consumes it, without changing HTTP.
@@ -531,6 +534,10 @@ actor WebModelServer {
                   isCompactToolThread: context.isCompactToolThread,
                   historyPreparation: context.historyPreparation) else { throw Failure.inferenceContextRequired }
         inferenceContexts[task] = context
+        compactionBoundary.register(.init(taskID: task, threadID: context.threadID,
+            turnID: context.turnID, generation: runtimeGeneration))
+        appliedCompactionBoundaries.removeValue(forKey: task)
+        compactionConfigurations.removeValue(forKey: task)
         cleanupTurns[task] = context.turnID
         if let waiter = contextWaiters.removeValue(forKey: task) { waiter.continuation.resume(returning: context) }
     }
@@ -840,6 +847,9 @@ actor WebModelServer {
     }
 
     private func revokeInferenceContext(taskID: String) {
+        compactionBoundary.remove(taskID: taskID)
+        appliedCompactionBoundaries.removeValue(forKey: taskID)
+        compactionConfigurations.removeValue(forKey: taskID)
         revokeGroqHistoryTurn(taskID: taskID, reason: .nativeContextChanged)
         groqToolCatalog.remove(taskID: taskID)
         groqCatalogRequests.removeValue(forKey: taskID)
@@ -1635,10 +1645,76 @@ actor WebModelServer {
         }
     }
 
+    /// A native compaction changes history deliberately. Admit that change only
+    /// at a matching engine checkpoint, after verified closure of the preceding
+    /// page. Keep the previous handoff's cumulative turn budgets intact.
+    private func admitChatGPTContext(_ request: WebModelResponseCodec.Request, taskID: String,
+        context: InferenceContext, identity: NativeRequestIdentity, transportGeneration: UUID
+    ) async throws -> WebsiteCompactionBoundary.Checkpoint? {
+        let scope = WebsiteCompactionBoundary.Scope(taskID: taskID, threadID: context.threadID,
+            turnID: context.turnID, generation: context.runtimeGeneration)
+        func current() throws {
+            try Task.checkCancellation()
+            guard !shuttingDown, !retiringTaskIDs.contains(taskID), cleanupTasks[taskID] == nil,
+                  context.runtimeGeneration == cleanupRuntimeGeneration, inferenceContexts[taskID] == context,
+                  identity == NativeRequestIdentity(threadID: context.threadID, turnID: context.turnID),
+                  transportGeneration == embeddedTransportGeneration else { throw Failure.inferenceContextRequired }
+        }
+        try current()
+        let applied = appliedCompactionBoundaries[taskID]
+        var checkpoint = compactionBoundary.snapshot(scope: scope)
+        var continuationError: (any Error)?
+        if let closed = closedTurns[taskID] {
+            guard closed.context == context, closed.transportGeneration == transportGeneration,
+                  !closed.ambiguousHandoff else { throw Failure.inferenceContextRequired }
+            do { try closed.continuation.validate(next: request) }
+            catch { continuationError = error }
+        }
+        // Stdio and HTTP are independent transports. Wait for an actual native
+        // event when a rewritten history arrives first; never infer permission
+        // from a summary, tool-free request, or elapsed timeout.
+        if continuationError != nil, (checkpoint?.sequence ?? 0) <= (applied?.sequence ?? 0) {
+            do { checkpoint = try await compactionBoundary.next(scope: scope, after: applied?.sequence ?? 0) }
+            catch { throw continuationError! }
+            try current()
+        }
+        let fresh = checkpoint.flatMap { $0.sequence > (applied?.sequence ?? 0) ? $0 : nil }
+        if let fresh {
+            guard sessions[taskID] == nil, yieldedTurns[taskID] == nil,
+                  pendingClosedTransactions[taskID] == nil, unresolvedStartAttempts[taskID] == nil,
+                  !failedClosedHandoffs.contains(taskID),
+                  notCreatedStartReceipts[taskID]?.receiptSaved != false else { throw Failure.cleanupFailed }
+            if fresh.completed {
+                guard let applied, !applied.completed, applied.itemID == fresh.itemID,
+                      fresh.sequence == applied.sequence + 1 else { throw Failure.inferenceContextRequired }
+                try compactionConfigurations[taskID]?.validateCompactedConfiguration(next: request)
+            } else {
+                guard applied == nil || applied?.completed == true,
+                      request.offeredToolNames.isEmpty else { throw Failure.inferenceContextRequired }
+                try closedTurns[taskID]?.continuation.validateCompactionConfiguration(next: request)
+            }
+            try WebsiteTurnContinuation.validateRequest(request)
+        } else if let continuationError { throw continuationError }
+        let nativeMaintenance = (fresh ?? applied).map { !$0.completed } == true
+        let maintenance = context.isMaintenance || nativeMaintenance
+        if nativeMaintenance, !request.offeredToolNames.isEmpty { throw Failure.inferenceContextRequired }
+        try WebsiteContextBudget.validate(request, maintenance: maintenance)
+        if let fresh {
+            if !fresh.completed { compactionConfigurations[taskID] = closedTurns[taskID]?.continuation }
+            else { compactionConfigurations.removeValue(forKey: taskID) }
+            appliedCompactionBoundaries[taskID] = fresh
+            Self.promptLog.info("websiteContextCheckpoint task=\(taskID, privacy: .public) turn=\(context.turnID, privacy: .public) sequence=\(fresh.sequence, privacy: .public) completed=\(fresh.completed, privacy: .public) promptBytes=\(request.prompt.utf8.count, privacy: .public)")
+        }
+        return fresh
+    }
+
     private func perform(_ originalRequest: WebModelResponseCodec.Request, provider: String,
                          taskID: String, identity: NativeRequestIdentity,
                          transport: any WebModelTransport, transportGeneration: UUID) async throws -> InferenceResult {
         let context = try await inferenceContext(taskID: taskID)
+        let nativeCheckpoint = provider == "chatgpt"
+            ? try await admitChatGPTContext(originalRequest, taskID: taskID, context: context, identity: identity,
+                                           transportGeneration: transportGeneration) : nil
         if provider != "groq" || !GroqOwnedStatusLease.FixtureTurn.Kind.supportsModel(originalRequest.model) {
             groqFixtureStatuses.removeValue(forKey:taskID)?.revoke()
         }
@@ -1903,6 +1979,8 @@ actor WebModelServer {
         // Count the final projection, not the full internal native catalog.
         // Rejection precedes creation of an owned website session and never
         // truncates user input, tool evidence, or continuation history.
+        try WebsiteContextBudget.validate(request, maintenance: context.isMaintenance
+            || appliedCompactionBoundaries[taskID].map { !$0.completed } == true)
         let groqBodyTokens = try measuredGroqBodyUnits ?? WebModelResponseCodec.validateGroqPromptBudget(model: request.model, prompt: request.prompt)
         // Keep the selection and its source request coherent when a changed
         // catalog or policy fails final admission. No suspension splits commit.
@@ -2029,7 +2107,7 @@ actor WebModelServer {
                     if let closed {
                         guard closed.context == context, closed.transportGeneration == transportGeneration,
                               !closed.ambiguousHandoff else { throw Failure.inferenceContextRequired }
-                        try closed.continuation.validate(next: request)
+                        if nativeCheckpoint == nil { try closed.continuation.validate(next: request) }
                     }
                     let retainClaudeTurn = qualifiesRetainedHaiku && !context.isMaintenance && choice?.supportsClaudeTurnPilot == true
                     let provesNativeContinuation = Self.requiresNativeContinuationProof(provider: provider) || retainClaudeTurn
@@ -3575,6 +3653,7 @@ actor WebModelServer {
                 }
                 let diagnosticEpoch = failureDiagnostics.epoch(taskID: taskID)
                 var modelID: String?
+                var streaming = false
                 do {
                     guard request.method == "POST", request.path == "/v1/responses" else { throw HTTPFailure.notFound }
                     let contentType = request.headers["content-type"]?.split(separator: ";", maxSplits: 1).first?
@@ -3590,6 +3669,7 @@ actor WebModelServer {
                         throw error
                     }
                     modelID = prepared.model
+                    streaming = prepared.stream
                     let body = try await infer(prepared, taskID: taskID, identity: identity)
                     failureDiagnostics.clear(taskID: taskID)
                     body.responseProfile?.mark(.httpWriteStart)
@@ -3605,6 +3685,18 @@ actor WebModelServer {
                         throw error
                     }
                 } catch {
+                    if let budget = error as? WebsiteContextBudget.CompactionRequired {
+                        // The owned engine recognizes this standard failed event
+                        // and performs one native summarizing recovery per step.
+                        // No website session was started and no tool is replayed.
+                        Self.promptLog.info("websiteContextBudget task=\(taskID, privacy: .public) actualBytes=\(budget.actualBytes, privacy: .public) thresholdBytes=\(WebsiteContextBudget.compactionThresholdBytes, privacy: .public)")
+                        if streaming {
+                            try await Self.send(connection, status: "200 OK", type: "text/event-stream", body: budget.streamData())
+                        } else {
+                            try await Self.sendError(connection, error: budget, modelID: modelID)
+                        }
+                        close(id); return
+                    }
                     if !shuttingDown, Self.hasFiniteDiagnostic(error), let diagnostic = try? Self.errorBody(for: error, modelID: modelID) {
                         failureDiagnostics.record(diagnostic, taskID: taskID, epoch: diagnosticEpoch)
                     }
@@ -3707,6 +3799,9 @@ actor WebModelServer {
     }
 
     static func errorPresentation(for error: any Error) -> ErrorPresentation {
+        if error is WebsiteContextBudget.CompactionRequired {
+            return .init(status: "400 Bad Request", type: "invalid_request", code: "context_length_exceeded", param: "input")
+        }
         if let failure = NativeBrowserFailure(error) {
             return .init(status: "400 Bad Request", type: "model_error", code: failure.code)
         }
@@ -3825,6 +3920,11 @@ actor WebModelServer {
         let nativeBrowserFailure = NativeBrowserFailure(error)
         var fields: [String: Any] = ["type": presentation.type, "message": nativeBrowserFailure?.localizedDescription ?? error.localizedDescription,
             "code": presentation.code, "param": presentation.param.map { $0 as Any } ?? NSNull()]
+        if let budget = error as? WebsiteContextBudget.CompactionRequired {
+            fields["submitted"] = false
+            fields["actual_bytes"] = budget.actualBytes
+            fields["maximum_bytes"] = WebsiteContextBudget.compactionThresholdBytes
+        }
         if let nativeBrowserFailure {
             fields["reason"] = nativeBrowserFailure.rawValue
             fields["retryable"] = false

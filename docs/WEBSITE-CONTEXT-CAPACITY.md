@@ -7,7 +7,7 @@ byte counts and `submitted:false` across reload. The failure store accepts only
 the complete regenerated envelope, with strict numeric/Boolean types and no
 arbitrary page or provider prose. The limit and HTTP classification are unchanged.
 
-## Remaining compaction gap
+## Accounting gap
 
 The native browser-model configuration advertises a 65,536-token context window
 and a 49,152-token automatic-compaction threshold. Those token limits do not
@@ -32,6 +32,40 @@ maintenance transition for the summary and resumed inference. It must preserve
 completed tool outcomes, verify fresh website ownership and avoid replaying
 uncertain input. A second overflow or an unreduced request must remain terminal.
 
-Capacity-aware automatic recovery remains unfinished. Keep this distinct from
-diagnostic retention, successful short tasks and Groq's reversible history
-presentation.
+## ChatGPT byte-aware maintenance (2026-11-16, build 570)
+
+The failed Pro review reached 179,057 request bytes after ten tool calls, above
+the 163,840-byte hard cap. Its token-based maintenance had not run. The rejected
+request was never sent to ChatGPT.
+
+ChatGPT now requests native compaction when either the canonical request or its
+complete rendered website prompt exceeds 131,072 bytes. This leaves 32 KiB before
+the hard ceiling. The preflight sends the engine a standard `response.failed`
+event with `context_length_exceeded`, before creating a website session. It does
+not invent provider usage, trim tool results, or replay the previous tool call.
+The pinned engine already permits one summarizing recovery per model step.
+
+Only native App Server compaction start/completion events can authorize the
+rewritten history. Checkpoints bind the task, thread, turn, runtime generation
+and item ID. They require confirmed closure of the preceding website session;
+the summary is tool-free, and resumed model, instructions and tool definitions
+must match. Engine window metadata may rotate. Ordinary continuations retain
+their exact history/configuration checks and cumulative turn budgets.
+
+The engine also emits a context-full estimate while producing its summary. The
+progress guard now evaluates the final retained estimate at the completed
+checkpoint instead of interrupting on that intermediate sentinel. Oversized or
+non-progressing completed checkpoints still stop.
+
+Validation before live qualification: 116 focused Swift tests passed, including
+the real bundled engine over HTTP. That fixture executed seven commands,
+compacted once, retained matching call/result receipts, edited a file, and
+returned its exact completion marker. A separate execution ledger verified that
+no command ran twice. Boundary tests retain the hard cap and reject unauthorized
+history, model, instruction or tool changes. Wider-suite failures in Groq/Grok
+fixtures are tracked separately; this is not an all-provider qualification.
+
+The soft boundary is qualified for ChatGPT only. A single oversized input or tool
+result that jumps over the hard cap can still fail before this maintenance path;
+the cap has not been raised. Live Instant review results are recorded separately
+below once the installed build completes the original task.

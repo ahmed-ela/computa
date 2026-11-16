@@ -54,8 +54,9 @@ enum AppServerContextUsageContract {
             inputTokens: input, outputTokens: output, turnID: turnID, measuredAt: now)
     }
 
-    /// Codex's zero-breakdown post-compaction estimate is useful as a stop
-    /// signal, but must never be presented as measured occupancy in the ring.
+    /// Zero-breakdown estimates also include the engine's context-full sentinel.
+    /// At a completed checkpoint they can stop oversized retained history; they
+    /// must never be presented as measured occupancy in the ring.
     static func compactedEstimate(_ params: [String: Any], expectedTurnID: String?) -> CompactedEstimate? {
         guard matchesTurn(params, expectedTurnID: expectedTurnID),
               let usage = params["tokenUsage"] as? [String: Any],
@@ -88,6 +89,7 @@ struct AppServerCompactionProgressGuard: Sendable {
         let turnID: String
         var startsWithoutProgress = 0
         var estimate: Int?
+        var estimatedWindow: Int?
         var previousEstimate: Int?
     }
     private var records: [AgentTask.ID: Record] = [:]
@@ -100,6 +102,7 @@ struct AppServerCompactionProgressGuard: Sendable {
         guard records[taskID]?.turnID == turnID else { return nil }
         records[taskID]?.startsWithoutProgress += 1
         records[taskID]?.estimate = nil
+        records[taskID]?.estimatedWindow = nil
         guard records[taskID, default: Record(turnID: turnID)].startsWithoutProgress >= 3 else { return nil }
         return "Context compaction made no forward progress after two attempts. Start a new task or shorten retained input."
     }
@@ -108,12 +111,18 @@ struct AppServerCompactionProgressGuard: Sendable {
                             estimate: AppServerContextUsageContract.CompactedEstimate) -> String? {
         guard records[taskID]?.turnID == turnID else { return nil }
         records[taskID]?.estimate = estimate.tokens
-        guard estimate.tokens >= estimate.window else { return nil }
-        return "Retained context still exceeds the model's effective window after compaction. Start a new task or shorten the input."
+        records[taskID]?.estimatedWindow = estimate.window
+        // The engine can repeat its context-full sentinel while sampling the
+        // summary. Only the final estimate at the committed checkpoint measures
+        // retained history. Do not interrupt before that estimate can arrive.
+        return nil
     }
 
     mutating func completed(taskID: AgentTask.ID, turnID: String, compactLimit: Int) -> String? {
         guard let record = records[taskID], record.turnID == turnID, let estimate = record.estimate else { return nil }
+        if let window = record.estimatedWindow, estimate >= window {
+            return "Retained context still exceeds the model's effective window after compaction. Start a new task or shorten the input."
+        }
         records[taskID]?.previousEstimate = estimate
         if let previous = record.previousEstimate, estimate >= previous, estimate >= compactLimit {
             return "Repeated context compaction did not reduce retained input below the safe limit. Start a new task or shorten the input."

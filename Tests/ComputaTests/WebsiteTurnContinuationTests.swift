@@ -3,6 +3,32 @@ import XCTest
 @testable import Computa
 
 final class WebsiteTurnContinuationTests: XCTestCase {
+    func testNativeCompactionConfigurationAllowsWindowMetadataButPinsModelInstructionsAndTools() throws {
+        let object: [String: Any] = ["model": syntheticChatGPTModelID, "input": "Review code",
+            "instructions": "Preserve the scope", "tools": [["type": "function", "name": "exec_command",
+                "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]]]]],
+            "client_metadata": ["x-codex-window-id": "before"]]
+        func prepared(_ value: [String: Any]) throws -> WebModelResponseCodec.Request {
+            try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: value))
+        }
+        let first = try prepared(object)
+        let state = try WebsiteTurnContinuation(request: first,
+            encodedResponse: WebModelResponseCodec.completedResponse(for: .message("Historical answer"), request: first))
+        var resumed = object
+        resumed["client_metadata"] = ["x-codex-window-id": "after"]
+        resumed["input"] = "Native compacted history"
+        XCTAssertNoThrow(try state.validateCompactedConfiguration(next: prepared(resumed)))
+        XCTAssertThrowsError(try state.validate(next: prepared(resumed)), "Ordinary continuation remains strict")
+        for (key, changed) in [("model", "browser/gemini" as Any), ("instructions", "Different scope"),
+                               ("tools", [] as [Any])] {
+            var altered = resumed; altered[key] = changed
+            XCTAssertThrowsError(try state.validateCompactedConfiguration(next: prepared(altered)), key)
+        }
+        var summary = resumed; summary["tools"] = []
+        XCTAssertNoThrow(try state.validateCompactionConfiguration(next: prepared(summary)))
+        summary["instructions"] = "Changed instructions"
+        XCTAssertThrowsError(try state.validateCompactionConfiguration(next: prepared(summary)))
+    }
     private let model = "browser/gemini"
     private let initialInput: [[String: Any]] = [
         ["type": "message", "role": "user", "content": [["type": "input_text", "text": "Inspect, patch, and run the tests. Preserve café and cafe\u{301}."]]],

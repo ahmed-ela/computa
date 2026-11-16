@@ -3920,6 +3920,13 @@ private extension CodexAppServerRuntime {
                 }
                 events.yield(.contextCompactionChanged(taskID: taskID, state: .running))
 
+                if LocalModelCatalog.webProvider(for: modelForTask[taskID] ?? "") == "chatgpt",
+                   let turnID = params["turnId"] as? String, let itemID = item["id"] as? String {
+                    webModelServer.compactionBoundary.publish(scope: .init(taskID: taskID.lowercased(),
+                        threadID: threadID.lowercased(), turnID: turnID.lowercased(),
+                        generation: websiteSessionRuntimeGeneration), itemID: itemID, completed: false)
+                }
+
             case "item/completed":
                 guard let item = params["item"] as? [String: Any],
                       let type = item["type"] as? String
@@ -3999,6 +4006,12 @@ private extension CodexAppServerRuntime {
                     }
                     events.yield(.contextUsageUpdated(taskID: taskID, usage: nil))
                     measuredContext.removeValue(forKey: taskID)
+                    if LocalModelCatalog.webProvider(for: modelForTask[taskID] ?? "") == "chatgpt",
+                       let turnID = params["turnId"] as? String, let itemID = item["id"] as? String {
+                        webModelServer.compactionBoundary.publish(scope: .init(taskID: taskID.lowercased(),
+                            threadID: threadID.lowercased(), turnID: turnID.lowercased(),
+                            generation: websiteSessionRuntimeGeneration), itemID: itemID, completed: true)
+                    }
                     if let operation = managedCompactions[taskID], let turnID = params["turnId"] as? String {
                         managedCompactions[taskID]?.barrier.itemCompleted(turnID: turnID,
                             operationID: operation.barrier.id, generation: serverGeneration)
