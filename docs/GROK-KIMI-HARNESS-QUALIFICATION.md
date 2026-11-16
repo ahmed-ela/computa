@@ -208,3 +208,17 @@ with no DOM mutation. A spontaneous CSS-animation test is explicitly skipped
 when `document.hidden` is true: the standalone test window's animation stayed
 pending at time zero. This is a test-environment limitation, not a live pass or
 evidence that the actual Computa window stalls animations.
+
+Installed build 559 completed fresh-start preparation and discovered Fast. Its
+trace records one claimed New Chat action, with no sidebar expansion and no
+pending hit diagnostic in this run. This verifies the navigation preparer, but
+does not establish the earlier hit failure's cause. The actual model menu then
+exposed a separate integration omission: `AppState.modelOptions` expands choices
+from the base catalog, which lacked a Grok entry. The persisted Fast choice was
+therefore absent from the picker. Build 560 adds that base entry and a model-list
+regression. No full task was sent on 559; its isolated workflow cases remain
+pristine.
+
+Three focused native catalog tests pass: fresh and persisted Fast reach the real
+UI snapshot and can be selected, while the bare provider ID remains unavailable,
+nonselectable and rejected for inference. No model choice is seeded by this fix.

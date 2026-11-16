@@ -49,6 +49,12 @@ enum LocalModelCatalog {
             highMemory: false
         ),
         LocalModelOption(
+            id: grokBrowserModelID,
+            label: "Grok / Choose a model · Built-in browser",
+            detail: "Sign in to discover Grok models. Each website inference uses a new Private Chat in Computa's built-in browser; local history remains in Computa.",
+            highMemory: false, available: false, selectable: false
+        ),
+        LocalModelOption(
             id: "mlx-community/Qwen3.8-27B-4bit",
             label: "Qwen3.8-27B · MLX 4-bit",
             detail: "16.1 GB model file. Requires an explicitly configured external local server; not supported by the built-in MLX backend.",

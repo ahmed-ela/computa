@@ -5,6 +5,63 @@ import XCTest
 
 @MainActor
 final class AppStateEmbeddedWebModelTests: XCTestCase {
+    func testGrokFreshDiscoveryPublishesFastToTheSelectorWithoutEnablingTheBaseID() async throws {
+        let browser = EmbeddedBrowserSession(persistent: false)
+        defer { browser.shutdown() }
+        let preferences = isolatedTestPreferences()
+        preferences.set(LocalModelCatalog.defaultModelID, forKey: "LocalCodex.defaultModelID")
+        let task = AgentTask(title: "Grok selector fixture", summary: "", status: .draft,
+            workspace: "No workspace selected", model: LocalModelCatalog.defaultModelID)
+        var discoveries: [String] = []
+        let state = AppState(tasks: [task], preferences: preferences, browserSession: browser,
+            websiteModelDiscovery: { provider in discoveries.append(provider); return Self.choices(provider) })
+        XCTAssertFalse(state.modelOptions.contains { $0.id == syntheticGrokChoice.modelID })
+        XCTAssertFalse(state.setDefaultModel(LocalModelCatalog.grokBrowserModelID))
+        XCTAssertFalse(state.setTaskModel(LocalModelCatalog.grokBrowserModelID, taskID: task.id))
+
+        await state.refreshWebsiteModels(provider: "grok")
+        XCTAssertEqual(discoveries, ["grok"])
+        let options = WebUISnapshot(state: state).modelOptions
+        let fast = try XCTUnwrap(options.first { $0.id == syntheticGrokChoice.modelID })
+        XCTAssertEqual(fast.label, "Grok / Fast · Built-in browser")
+        XCTAssertEqual(fast.available, true)
+        XCTAssertNotEqual(fast.selectable, false)
+        let base = try XCTUnwrap(options.first { $0.id == LocalModelCatalog.grokBrowserModelID })
+        XCTAssertEqual(base.available, false)
+        XCTAssertEqual(base.selectable, false)
+        XCTAssertTrue(base.detail.contains("Private Chat"))
+        XCTAssertNil(WebsiteModelCatalog.inferenceSelection(for: base.id))
+        XCTAssertTrue(state.setDefaultModel(fast.id))
+        XCTAssertTrue(state.setTaskModel(fast.id, taskID: task.id))
+        XCTAssertEqual(state.defaultModel, fast.id)
+        XCTAssertEqual(state.tasks.first?.model, fast.id)
+        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), [syntheticGrokChoice])
+        XCTAssertTrue(browser.tabs.isEmpty, "Catalog publication does not create a website inference")
+    }
+
+    func testGrokCachedFastIsPublishedAndSelectableWithoutRediscoveryOrDefaultFallback() throws {
+        let browser = EmbeddedBrowserSession(persistent: false)
+        defer { browser.shutdown() }
+        let preferences = isolatedTestPreferences()
+        preferences.set(LocalModelCatalog.defaultModelID, forKey: "LocalCodex.defaultModelID")
+        WebsiteModelCatalog.save([syntheticGrokChoice], to: preferences)
+        var discoveries = 0
+        let state = AppState(tasks: [], preferences: preferences, browserSession: browser,
+            websiteModelDiscovery: { provider in discoveries += 1; return Self.choices(provider) })
+        let options = WebUISnapshot(state: state).modelOptions
+        let fast = try XCTUnwrap(options.first { $0.id == syntheticGrokChoice.modelID })
+        XCTAssertEqual(fast.available, true)
+        XCTAssertNotEqual(fast.selectable, false)
+        XCTAssertTrue(state.setDefaultModel(fast.id))
+        XCTAssertFalse(state.setDefaultModel(LocalModelCatalog.grokBrowserModelID))
+        XCTAssertEqual(state.defaultModel, fast.id)
+        let base = try XCTUnwrap(options.first { $0.id == LocalModelCatalog.grokBrowserModelID })
+        XCTAssertEqual(base.available, false)
+        XCTAssertEqual(base.selectable, false)
+        XCTAssertEqual(discoveries, 0)
+        XCTAssertTrue(browser.tabs.isEmpty)
+    }
+
     func testKimiProfileVerificationReportsItsActualOutcomeAndSwitchesOnlyWhenIdle() async throws {
         let browser = EmbeddedBrowserSession(persistent: false)
         defer { browser.shutdown() }

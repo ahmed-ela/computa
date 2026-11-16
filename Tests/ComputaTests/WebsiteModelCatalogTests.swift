@@ -18,7 +18,10 @@ final class WebsiteModelCatalogTests: XCTestCase {
         XCTAssertEqual(WebsiteModelCatalog.inferenceSelection(for: grok.modelID)?.choice, grok)
         XCTAssertNil(WebsiteModelCatalog.inferenceSelection(for: "browser/grok"))
         XCTAssertEqual(WebsiteModelCatalog.option(for: grok).available, true)
-        XCTAssertFalse(LocalModelCatalog.options.contains { $0.id.hasPrefix("browser/grok") })
+        let grokRows = LocalModelCatalog.options.filter { $0.id.hasPrefix("browser/grok") }
+        XCTAssertEqual(grokRows.map(\.id), [LocalModelCatalog.grokBrowserModelID], "Only the discovery anchor is static; Fast must be observed")
+        XCTAssertEqual(grokRows.first?.available, false)
+        XCTAssertEqual(grokRows.first?.selectable, false)
         let preferences = isolatedTestPreferences()
         WebsiteModelCatalog.save([grok, groq], to: preferences)
         XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), [grok, groq])
