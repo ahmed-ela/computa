@@ -705,10 +705,12 @@ final class WebsiteFailureHistoryTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let task = UUID().uuidString, thread = UUID().uuidString
         var expectedRecords: [WebsiteTurnFailureStore.Record] = []
-        for provider in [EmbeddedWebModelTransport.Provider.chatgpt, .claude, .gemini] {
+        for provider in [EmbeddedWebModelTransport.Provider.chatgpt, .claude, .gemini, .grok] {
+            let model = provider == .grok ? syntheticGrokChoice.modelID : "browser/" + provider.rawValue
             let failure = EmbeddedWebModelTransport.Failure.usageLimited(provider)
             XCTAssertTrue(failure.blocksProviderUntilRefresh, "Copy changes cannot grant automatic retries")
             XCTAssertEqual(failure.requiredAction, "wait_for_quota_reset")
+            XCTAssertEqual(WebModelServer.errorPresentation(for: failure).status, "429 Too Many Requests")
             let body = try WebModelServer.errorBody(for: failure)
             let current = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
             let fields = try XCTUnwrap(current["error"] as? [String: Any])
@@ -724,10 +726,19 @@ final class WebsiteFailureHistoryTests: XCTestCase {
                 let text = String(decoding: try JSONSerialization.data(withJSONObject: envelope,
                     options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
                 let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
-                    turnID: UUID().uuidString, modelID: "browser/" + provider.rawValue, diagnosticText: text))
+                    turnID: UUID().uuidString, modelID: model, diagnosticText: text))
                 XCTAssertEqual(record.diagnosticText, text, "Old history retains its exact original finite message")
                 XCTAssertTrue(WebsiteTurnFailureStore(directory: root).append(record))
                 expectedRecords.append(record)
+                if provider == .grok {
+                    var altered = envelope, alteredFields = try XCTUnwrap(envelope["error"] as? [String: Any])
+                    alteredFields["message"] = "PRIVATE_QUOTA_CANARY"
+                    altered["error"] = alteredFields
+                    let bytes = try JSONSerialization.data(withJSONObject: altered, options: [.sortedKeys, .withoutEscapingSlashes])
+                    XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+                        turnID: UUID().uuidString, modelID: model, diagnosticText: String(decoding: bytes, as: UTF8.self)),
+                        "A Grok limit must preserve the exact native envelope, never arbitrary provider prose")
+                }
             }
         }
         XCTAssertEqual(try WebsiteTurnFailureStore(directory: root).load(threadID: thread), expectedRecords)

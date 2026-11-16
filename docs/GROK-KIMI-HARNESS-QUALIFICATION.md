@@ -506,3 +506,40 @@ The build 568 source passes 79 Grok JavaScript tests (1,294 assertions) and
 five native diagnostic tests. A new hash-yield replacement regression confirms
 that the original identity error remains, mismatch coordinates are retained,
 the first body stays unbound and Send is not replayed.
+
+While build 568 compiled, a separate ordinary Private/Fast tab received one
+303-character synthetic lifecycle probe. Its initial user root had a local
+React heading reference. A replacement acquired a UUID heading and response
+wrapper, then that UUID changed again on the same root after it became visible.
+Those attributes alone therefore do not prove a committed message. The answer
+row disappeared and the site displayed **Free tier limit reached**. No additional
+provider prompt was sent after that observation. This quota-ended experiment
+does not establish successful response or tool-workflow qualification.
+
+A read-only inspection found one visible
+`div[data-testid="usage-limit-notice"][role="status"][aria-live="polite"][data-slot="alert"]`,
+under its response wrapper, with the observed alert-title/content and Upgrade
+button. Grok's adapter did not previously recognize this inline status; the
+native transport already supports `website_usage_limit` for Grok. A prospective
+detector matched the real card without interaction and rejected 19 quoted,
+hidden, duplicate or malformed local cases. Build 569 adds that narrow negative
+classification ahead of transcript checks, after document/owner/route checks.
+It grants no model, ownership, response or cleanup proof.
+
+The disposable tab and Inspector were closed and Safari developer features
+restored off. Build 568 was signed, installed and verified from `744b111`, but
+its planned marker and both complete workflow cases were not sent because of
+the observed quota. Grok access restoration is pending; Kimi remains separately
+quota-blocked. The real 14-character mismatch is still unidentified. Evidence
+for this probe and its read-only quota check is under
+`work/grok-kimi-20261115/build568/message-lifecycle-probe/`.
+
+Build 569 source validation passes 83 Grok JavaScript tests (1,368 assertions)
+and the focused native quota-history test, now including Grok Fast. That test
+checks exact current/legacy errors, durable store recreation, HTTP 429 with no
+automatic retry, and rejection of altered error text. The prior five native
+diagnostic tests still match unchanged production and diagnostic source bytes.
+The new adapter tests cover the observed quota card, 19 invalid/quoted/hidden
+variants, owner/generation/route precedence, and a quota appearing during SHA
+verification without binding the body or replaying Send. This validates quota
+classification and persistence, not the still-blocked task qualification.

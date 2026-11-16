@@ -571,6 +571,24 @@ function computaGrokFirstUserFailure(c, state, stage, reason, transcript, identi
   throw failure;
 }
 
+// Negative website status only. No response, ownership or cleanup authority.
+function computaGrokUsageLimited(c) {
+  const authored = node => node.closest('[data-testid="user-message"], [data-testid="assistant-message"], [contenteditable], pre, code');
+  const cards = c.nodes(document, 'div[data-testid="usage-limit-notice"][role="status"][aria-live="polite"][data-slot="alert"]', 4)
+    .filter(node => c.visible(node) && !authored(node));
+  if (cards.length !== 1) return false;
+  const card = cards[0], parent = card.parentElement;
+  if (parent?.tagName !== 'DIV' || !/^response-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(parent.getAttribute('id') || '')) return false;
+  const contents = c.nodes(card, 'div[data-slot="alert-content"]', 4), titles = c.nodes(card, 'p[data-slot="alert-title"]', 4);
+  const buttons = c.nodes(card, 'button', 4);
+  if (contents.length !== 1 || contents[0].parentElement !== card || titles.length !== 1
+    || titles[0].parentElement !== contents[0] || buttons.length !== 1
+    || ![contents[0], titles[0], buttons[0]].every(c.visible)) return false;
+  return c.normalize(titles[0].textContent) === 'Free tier limit reached'
+    && c.normalize(contents[0].textContent) === 'Free tier limit reachedTry again later or upgrade for much higher limits and premium features.'
+    && c.normalize(buttons[0].textContent) === 'Upgrade';
+}
+
 // One observed Private Chat per inference. Private is a proved transition,
 // not an invented persistent indicator: Grok removes its toggle after Send.
 try {
@@ -622,7 +640,11 @@ try {
     }
   }
   const guard = () => {
-    rootGuard(); recordContradictions(state.observer?.takeRecords?.() || []);
+    rootGuard();
+    // The observed site-owned quota card is a negative status, never ownership,
+    // model or cleanup proof. Check it before transient transcript failures.
+    if (computaGrokUsageLimited(c)) c.fail('website_usage_limit');
+    recordContradictions(state.observer?.takeRecords?.() || []);
     if (state.contradictoryModeObserved) c.fail('temporary_mode_unverified');
     if (state.modelContradiction) c.fail('model_mismatch', 'model_guard_contradiction');
   };

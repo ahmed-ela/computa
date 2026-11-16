@@ -3,9 +3,84 @@ import { readFileSync } from 'node:fs';
 import { composeGrokResource, grokResource } from './embedded-grok-resource';
 import { grokFixture, grokGeneration, grokOwner, grokPrompt } from './embedded-grok-adapter-fixture';
 
+function addGrokQuotaNotice(f: ReturnType<typeof grokFixture>) {
+  const parent = new f.Node('DIV', { id:'response-92ebc280-2299-4fdc-a226-74a365735505' });
+  const card = new f.Node('DIV', { 'data-testid':'usage-limit-notice', role:'status', 'aria-live':'polite', 'data-slot':'alert' });
+  const content = new f.Node('DIV', { 'data-slot':'alert-content' });
+  const title = new f.Node('P', { 'data-slot':'alert-title' }, 'Free tier limit reached');
+  const message = new f.Node('P', {}, 'Try again later or upgrade for much higher limits and premium features.');
+  const upgrade = new f.Node('BUTTON', {}, 'Upgrade');
+  content.append(title, message); card.append(content, upgrade); parent.append(card); f.body.append(parent);
+  return { parent, card, content, title, message, upgrade };
+}
+
 describe('Grok private inference adapter', () => {
   test('standalone resource equals its canonical shared core, controls and driver', () => {
     expect(readFileSync(grokResource, 'utf8')).toBe(composeGrokResource());
+  });
+
+  test('the observed site quota card returns only negative status before editor or transcript reads', async () => {
+    const f = grokFixture(), card = addGrokQuotaNotice(f);
+    f.f.editor.remove();
+    const result = await f.run('inspect');
+    expect(result).toEqual({ error:'website_usage_limit' });
+    expect(f.f.privateCount).toBe(0); expect(f.f.sendCount).toBe(0);
+    expect(card.upgrade.clicks).toBe(0); expect(f.document.insertCommandCount).toBe(0);
+    expect(f.world.__computaGrokPrivateSessionV1.first).toBeNull();
+  });
+
+  test('authored, hidden, duplicate or changed quota notices do not claim a website limit', async () => {
+    for (const arm of ['user','assistant','editable','pre','code','hidden','inert','aria_hidden','display','visibility',
+      'title','message','parent','role','test_id','duplicate_card','duplicate_title','duplicate_button','content_owner']) {
+      const f = grokFixture(), q = addGrokQuotaNotice(f);
+      if (['user','assistant','editable','pre','code'].includes(arm)) {
+        const attributes = arm === 'user' || arm === 'assistant' ? { 'data-testid':arm + '-message' }
+          : arm === 'editable' ? { contenteditable:'true' } : {};
+        const wrapper = new f.Node(arm === 'pre' ? 'PRE' : arm === 'code' ? 'CODE' : 'DIV', attributes);
+        q.parent.remove(); q.parent.connected = true; wrapper.append(q.parent); f.body.append(wrapper);
+      }
+      if (arm === 'hidden') q.parent.setAttribute('hidden','');
+      if (arm === 'inert') q.parent.setAttribute('inert','');
+      if (arm === 'aria_hidden') q.parent.setAttribute('aria-hidden','true');
+      if (arm === 'display') q.card.setAttribute('style','display:none');
+      if (arm === 'visibility') q.parent.setAttribute('style','visibility:hidden');
+      if (arm === 'title') q.title.textContent = 'Different title';
+      if (arm === 'message') q.message.textContent = 'Different message';
+      if (arm === 'parent') q.parent.setAttribute('id','response-foreign');
+      if (arm === 'role') q.card.setAttribute('role','alert');
+      if (arm === 'test_id') q.card.setAttribute('data-testid','foreign');
+      if (arm === 'duplicate_card') addGrokQuotaNotice(f);
+      if (arm === 'duplicate_title') q.content.append(new f.Node('P', { 'data-slot':'alert-title' }, 'Free tier limit reached'));
+      if (arm === 'duplicate_button') q.card.append(new f.Node('BUTTON', {}, 'Upgrade'));
+      if (arm === 'content_owner') {
+        q.content.remove(); q.content.connected = true;
+        const wrapper = new f.Node('DIV'); wrapper.append(q.content); q.card.append(wrapper);
+      }
+      expect((await f.run('inspect')).error, arm).not.toBe('website_usage_limit');
+      expect(f.f.sendCount).toBe(0); expect(q.upgrade.clicks).toBe(0);
+    }
+  });
+
+  test('quota status cannot override exact owner, document generation or route failures', async () => {
+    for (const arm of ['owner','generation','route']) {
+      const f = grokFixture(); await f.run('inspect'); addGrokQuotaNotice(f);
+      if (arm === 'owner') f.world.__computaGrokPrivateSessionV1.owner = 'foreign';
+      if (arm === 'generation') f.world.__computaGrokPrivateSessionV1.generation = 'foreign';
+      if (arm === 'route') f.document.URL = 'https://grok.com/c/foreign';
+      expect(await f.run('inspect')).toMatchObject({ error:'document_changed' });
+      expect(f.f.sendCount).toBe(0);
+    }
+  });
+
+  test('a quota card appearing during hashing takes precedence without binding, output or replay', async () => {
+    const f = grokFixture(); expect(await f.submit()).toMatchObject({ submitted:true });
+    f.onDigest(() => {
+      addGrokQuotaNotice(f); f.f.user.remove(); f.f.appendUser(f.f.lastPrompt.slice(14));
+    });
+    expect(await f.run('inspect')).toEqual({ error:'website_usage_limit' });
+    expect(f.world.__computaGrokPrivateSessionV1.first).toBeNull();
+    expect(await f.run('submit', { prompt:grokPrompt })).toEqual({ error:'website_usage_limit' });
+    expect(f.f.sendCount).toBe(1);
   });
 
   test('Private activation reports fixed unavailable and hit reasons without clicking', async () => {

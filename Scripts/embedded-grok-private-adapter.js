@@ -49,7 +49,11 @@ try {
     }
   }
   const guard = () => {
-    rootGuard(); recordContradictions(state.observer?.takeRecords?.() || []);
+    rootGuard();
+    // The observed site-owned quota card is a negative status, never ownership,
+    // model or cleanup proof. Check it before transient transcript failures.
+    if (computaGrokUsageLimited(c)) c.fail('website_usage_limit');
+    recordContradictions(state.observer?.takeRecords?.() || []);
     if (state.contradictoryModeObserved) c.fail('temporary_mode_unverified');
     if (state.modelContradiction) c.fail('model_mismatch', 'model_guard_contradiction');
   };
