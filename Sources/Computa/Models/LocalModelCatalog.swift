@@ -15,6 +15,7 @@ enum LocalModelCatalog {
     static let geminiBrowserModelID = "browser/gemini"
     static let claudeBrowserModelID = "browser/claude"
     static let groqBrowserModelID = "browser/groq"
+    static let grokBrowserModelID = "browser/grok"
     static let kimiBrowserModelID = "browser/kimi"
     static let qwenBrowserModelID = "browser/qwen"
     private static let visualGroundingModelIDs: Set<String> = [

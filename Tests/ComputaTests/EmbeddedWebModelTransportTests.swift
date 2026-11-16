@@ -15129,6 +15129,259 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    private func grokFixtureCall(_ fixture: Fixture, _ operation: String,
+                                  _ values: [String: String]) async throws -> [String: Any] {
+        do {
+            return try await fixturePhaseProbe("grok_" + operation, trace: true) {
+                try await call(fixture.transport, operation, values)
+            }
+        } catch {
+            if let id = fixture.createdTabs.last, let view = fixture.browser.webView(for: id),
+               let value = try? await evaluate(view, """
+                const f = window.grokFixture;
+                return {ready: !!f, sends: f?.sendCount, privateClicks: f?.privateCount,
+                  users: document.querySelectorAll('[data-testid="user-message"]').length,
+                  answers: document.querySelectorAll('[data-testid="assistant-message"]').length,
+                  editorChars: f?.editor?.innerText?.length, activeEditor: document.activeElement === f?.editor,
+                  action: f?.send?.getAttribute('aria-label'), model: f?.trigger?.getAttribute('aria-label')};
+                """), let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]) {
+                print("GrokFixtureFailureShape " + String(decoding: data, as: UTF8.self))
+            }
+            throw error
+        }
+    }
+
+    private static func grokFixturePage() throws -> String {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        return try String(contentsOf: root.appendingPathComponent("Scripts/fixtures/grok-private-chat.html"), encoding: .utf8)
+    }
+
+    private func startGrokFixture(_ fixture: Fixture, label: String = "Fast") async throws -> (String, WKWebView) {
+        let choice = WebsiteModelChoice(provider: "grok", key: label, label: label)
+        let started = try await fixturePhaseProbe("grok_start", trace: true) { try await startChoice(choice, in: fixture) }
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        try await waitForFixture(view)
+        let ready = try await fixturePhaseProbe("grok_ready", trace: true) { try await waitForState("ready", fixture.transport, token: token) }
+        XCTAssertNil(ready["sessionLifecycle"], "Temporary providers use the default lifecycle")
+        let privateEntered = try await evaluate(view, "return grokFixture.privateEntered;")
+        XCTAssertEqual(privateEntered as? Bool, true)
+        XCTAssertNil(ready["turnContinuationCapability"])
+        XCTAssertNil(ready["freshSessionSubmissionCapability"])
+        try assertChoiceEvidence(ready, choice: choice)
+        return (token, view)
+    }
+
+    func testGrokInitialMissingControlsWaitWithoutModeOrEditorAuthority() async throws {
+        for missing in ["composer", "model"] {
+            let removal = missing == "composer" ? "grokFixture.form" : "grokFixture.trigger"
+            let html = try Self.grokFixturePage().replacingOccurrences(of: "</body>", with: """
+                <script>
+                window.grokHydrationHeld = \(removal);
+                window.grokHydrationHeld.remove();
+                </script></body>
+                """)
+            let fixture = try Fixture(page: html)
+            defer { fixture.shutdown() }
+            let started = try await startChoice(WebsiteModelChoice(provider: "grok", key: "Fast", label: "Fast"), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            try await waitForFixture(view)
+            let pending = try await grokFixtureCall(fixture, "webProviderPoll", ["sessionToken": token])
+            XCTAssertEqual(pending["state"] as? String, "loading", missing)
+            XCTAssertEqual(pending["text"] as? String, "")
+            XCTAssertNil(pending["modelEvidence"])
+            XCTAssertNil(pending["modelProofContext"])
+            let before = try await evaluate(view, "return [grokFixture.privateCount, grokFixture.sendCount, grokFixture.editor.innerText.length];")
+            XCTAssertEqual(before as? [Int], [0, 0, 0])
+            _ = try await evaluate(view, "document.body.append(window.grokHydrationHeld); return true;")
+            _ = try await fixturePhaseProbe("grok_hydration_ready", trace: true) {
+                try await waitForState("ready", fixture.transport, token: token)
+            }
+            let after = try await evaluate(view, "return [grokFixture.privateCount, grokFixture.sendCount, grokFixture.editor.innerText.length];")
+            XCTAssertEqual(after as? [Int], [1, 0, 0])
+            let closed = try await grokFixtureCall(fixture, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(closed["cleanup"] as? String, "not_created")
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
+    func testGrokInitialHydrationDoesNotHideAmbiguousHiddenOrOccupiedControls() async throws {
+        let mutations = [
+            "grokFixture.trigger.remove(); grokFixture.form.append(grokFixture.editor.cloneNode(true));",
+            "grokFixture.trigger.remove(); grokFixture.editor.hidden = true;",
+            "grokFixture.trigger.remove(); grokFixture.editor.textContent = 'Existing draft';",
+            "grokFixture.form.remove(); document.body.append(grokFixture.trigger.cloneNode(true));",
+            "grokFixture.form.remove(); grokFixture.trigger.setAttribute('aria-label', 'Unknown control');"]
+        for mutation in mutations {
+            let fixture = try Fixture(page: Self.grokFixturePage())
+            defer { fixture.shutdown() }
+            let started = try await startChoice(WebsiteModelChoice(provider: "grok", key: "Fast", label: "Fast"), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            try await waitForFixture(view)
+            _ = try await evaluate(view, mutation + " return true;")
+            do {
+                _ = try await grokFixtureCall(fixture, "webProviderPoll", ["sessionToken": token])
+                XCTFail("A missing control cannot conceal an ambiguous, hidden or occupied control")
+            } catch { XCTAssertNotNil(error as? EmbeddedWebModelTransport.Failure) }
+            let counts = try await evaluate(view, "return [grokFixture.privateCount, grokFixture.sendCount];")
+            XCTAssertEqual(counts as? [Int], [0, 0])
+        }
+    }
+
+    func testGrokMissingControlsAfterReadinessCannotReenterInitialHydration() async throws {
+        for missing in ["composer", "model"] {
+            let fixture = try Fixture(page: Self.grokFixturePage())
+            defer { fixture.shutdown() }
+            let (token, view) = try await startGrokFixture(fixture)
+            let owned = try XCTUnwrap(fixture.createdTabs.last)
+            _ = try await evaluate(view, missing == "composer" ? "grokFixture.form.remove(); return true;" : "grokFixture.trigger.remove(); return true;")
+            do {
+                _ = try await grokFixtureCall(fixture, "webProviderSend", ["sessionToken": token, "prompt": "Must not send"])
+                XCTFail("Lost ready controls must fail, not return a hydration receipt")
+            } catch { XCTAssertNotNil(error as? EmbeddedWebModelTransport.Failure) }
+            let sends = try await evaluate(view, "return grokFixture.sendCount;")
+            XCTAssertEqual(sends as? Int, 0)
+            let finish = try await grokFixtureCall(fixture, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(finish["cleanup"] as? String, "failed")
+            try await assertHumanTabIntact(fixture, retaining: owned)
+        }
+    }
+
+    func testGrokInitialHydrationKeepsOriginalPreparationDeadline() async throws {
+        let fixture = try Fixture(page: Self.grokFixturePage())
+        defer { fixture.shutdown() }
+        fixture.transport.setTimeoutsForTesting(preparation: .seconds(2), response: .seconds(30))
+        let started = try await startChoice(WebsiteModelChoice(provider: "grok", key: "Fast", label: "Fast"), in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        try await waitForFixture(view)
+        _ = try await evaluate(view, "grokFixture.form.remove(); return true;")
+        let revision = try await fixture.transport.changeRevision(sessionToken: token)
+        let pending = try await grokFixtureCall(fixture, "webProviderPoll", ["sessionToken": token])
+        XCTAssertEqual(pending["state"] as? String, "loading")
+        let deadline = ContinuousClock.now + .seconds(4)
+        var expired = false, current = try XCTUnwrap(revision)
+        while ContinuousClock.now < deadline {
+            _ = try await fixture.transport.waitForChange(sessionToken: token, after: current, until: deadline)
+            do { _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token]) }
+            catch {
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .preparationDeadline)
+                expired = true; break
+            }
+            let next = try await fixture.transport.changeRevision(sessionToken: token)
+            current = try XCTUnwrap(next)
+        }
+        XCTAssertTrue(expired)
+        let counts = try await evaluate(view, "return [grokFixture.privateCount, grokFixture.sendCount];")
+        XCTAssertEqual(counts as? [Int], [0, 0])
+    }
+
+    func testGrokPrivateSessionProvesModelBodyCompletionAndExactClose() async throws {
+        for label in ["Fast"] {
+            let fixture = try Fixture(page: Self.grokFixturePage())
+            defer { fixture.shutdown() }
+            let (token, view) = try await startGrokFixture(fixture, label: label)
+            let sent = try await grokFixtureCall(fixture, "webProviderSend", ["sessionToken": token,
+                "prompt": "Synthetic Grok fixture\n\nPreserve  spaces, e\u{301}, 🌍, and \\n literally."])
+            XCTAssertEqual(sent["state"] as? String, "running")
+            let complete = try await fixturePhaseProbe("grok_complete", trace: true) { try await waitForState("complete", fixture.transport, token: token) }
+            XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"GROK_NATIVE_FIXTURE_OK"}"#)
+            try assertChoiceEvidence(complete, choice: WebsiteModelChoice(provider: "grok", key: label, label: label))
+            let context = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+            let outbound = try await evaluate(view, "return grokFixture.lastPrompt;")
+            XCTAssertEqual(context["firstUserFingerprint"] as? String,
+                EmbeddedWebModelTransport.outboundFingerprint(try XCTUnwrap(outbound as? String)))
+            XCTAssertEqual(context["sequence"] as? Int, 1)
+            XCTAssertEqual(context["responseCount"] as? Int, 1)
+            XCTAssertEqual(view.url?.absoluteString, "https://grok.com/")
+            let controls = try await evaluate(view, "return [grokFixture.sendCount, grokFixture.privateCount, document.querySelectorAll('button[aria-label=\"Exit Private Chat\"]').length];")
+            XCTAssertEqual(controls as? [Int], [1, 1, 0], "Completion must survive disappearance of the real Private toggle")
+            let closed = try await grokFixtureCall(fixture, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(closed["cleanup"] as? String, "not_created")
+            XCTAssertEqual(closed["state"] as? String, "finished")
+            try await assertHumanTabIntact(fixture)
+        }
+    }
+
+    func testGrokPendingSubmissionWithholdsOutputUntilExactFirstBodyAppears() async throws {
+        let fixture = try Fixture(page: Self.grokFixturePage())
+        defer { fixture.shutdown() }
+        let (token, view) = try await startGrokFixture(fixture)
+        _ = try await evaluate(view, "grokFixture.delayUser = true; return true;")
+        _ = try await grokFixtureCall(fixture, "webProviderSend", ["sessionToken": token, "prompt": "Synthetic delayed first body"])
+        let pending = try await grokFixtureCall(fixture, "webProviderPoll", ["sessionToken": token])
+        XCTAssertEqual(pending["state"] as? String, "running")
+        XCTAssertEqual(pending["text"] as? String, "")
+        XCTAssertEqual((pending["modelProofContext"] as? [String: Any])?["firstUserFingerprint"] as? String, "")
+        XCTAssertNil(pending["completionEvidence"])
+        _ = try await evaluate(view, "grokFixture.appendUser(grokFixture.lastPrompt); grokFixture.finishResponse(); return true;")
+        let complete = try await fixturePhaseProbe("grok_complete", trace: true) { try await waitForState("complete", fixture.transport, token: token) }
+        XCTAssertEqual(complete["state"] as? String, "complete")
+        XCTAssertNotNil(complete["modelProofContext"])
+        let sends = try await evaluate(view, "return grokFixture.sendCount;")
+        XCTAssertEqual(sends as? Int, 1)
+        let closed = try await grokFixtureCall(fixture, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(closed["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testGrokUnobservedSubmissionCannotAuthorizeCleanupOrReplay() async throws {
+        let fixture = try Fixture(page: Self.grokFixturePage())
+        defer { fixture.shutdown() }
+        let (token, view) = try await startGrokFixture(fixture)
+        let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+        _ = try await evaluate(view, "grokFixture.delayUser = true; return true;")
+        _ = try await grokFixtureCall(fixture, "webProviderSend", ["sessionToken": token, "prompt": "Synthetic pending cleanup"])
+        let closed = try await grokFixtureCall(fixture, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(closed["cleanup"] as? String, "failed")
+        await assertRejected(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Never replay"])
+        let sends = try await evaluate(view, "return grokFixture.sendCount;")
+        XCTAssertEqual(sends as? Int, 1)
+        try await assertHumanTabIntact(fixture, retaining: ownedID)
+    }
+
+    func testGrokPrivateCleanupRejectsChangedBodyModelModeAndGeneration() async throws {
+        for mutation in ["body", "model", "mode", "generation"] {
+            let fixture = try Fixture(page: Self.grokFixturePage())
+            defer { fixture.shutdown() }
+            let (token, view) = try await startGrokFixture(fixture)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            _ = try await grokFixtureCall(fixture, "webProviderSend", ["sessionToken": token, "prompt": "Synthetic ownership guard"])
+            _ = try await fixturePhaseProbe("grok_complete", trace: true) { try await waitForState("complete", fixture.transport, token: token) }
+            switch mutation {
+            case "body": _ = try await evaluate(view, "grokFixture.userBody.textContent += ' changed'; return true;")
+            case "model": _ = try await evaluate(view, "grokFixture.trigger.setAttribute('aria-label', 'Model: Heavy'); return true;")
+            case "mode": _ = try await evaluate(view, "grokFixture.privateToggle.setAttribute('aria-label', 'Switch to Private Chat'); grokFixture.privateToggle.setAttribute('aria-pressed', 'false'); document.body.append(grokFixture.privateToggle); return true;")
+            default:
+                view.loadHTMLString(try Self.grokFixturePage(), baseURL: URL(string: "https://grok.com/"))
+                try await waitForFixture(view)
+            }
+            let closed = try await grokFixtureCall(fixture, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(closed["cleanup"] as? String, "failed", mutation)
+            try await assertHumanTabIntact(fixture, retaining: ownedID)
+        }
+    }
+
+    func testGrokPrivateRouteRoundTripCannotRecoverSendAuthority() async throws {
+        let fixture = try Fixture(page: Self.grokFixturePage())
+        defer { fixture.shutdown() }
+        let (token, view) = try await startGrokFixture(fixture)
+        let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+        _ = try await evaluate(view, "history.pushState({}, '', '/c/foreign'); return true;")
+        XCTAssertEqual(view.url?.path, "/c/foreign")
+        _ = try await evaluate(view, "history.replaceState({}, '', '/'); return true;")
+        XCTAssertEqual(view.url?.absoluteString, "https://grok.com/")
+        await assertRejected(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Must not send"])
+        let sends = try await evaluate(view, "return grokFixture.sendCount;")
+        XCTAssertEqual(sends as? Int, 0)
+        let closed = try await grokFixtureCall(fixture, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(closed["cleanup"] as? String, "failed")
+        try await assertHumanTabIntact(fixture, retaining: ownedID)
+    }
+
     private static func groqFixturePage() throws -> String {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
@@ -22880,7 +23133,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         case .chatgpt: ["GPT-6", "GPT-5.6 Sol", "GPT-5.5"]
         case .gemini: ["3.5 Flash-Lite", "3.8 Flash", "3.1 Pro"]
         case .claude: ["Sonnet 5.5", "Haiku 4.5", "Sonnet 5", "Sonnet 4.6"]
-        case .groq, .kimi, .qwen, .deepseek: [] // These providers use their dedicated picker/mode/lifecycle fixtures.
+        case .groq, .grok, .kimi, .qwen, .deepseek: [] // These providers use their dedicated picker/mode/lifecycle fixtures.
         }
     }
 

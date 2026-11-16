@@ -906,6 +906,7 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
     private static func choices(_ provider: String) -> [WebsiteModelChoice] {
         provider == "chatgpt" ? [.init(provider: provider, key: "chat/latest/instant", label: "Instant")]
             : provider == "kimi" ? [syntheticKimiChoice]
+            : provider == "grok" ? [syntheticGrokChoice]
             : provider == "qwen" ? [syntheticWebsiteChoice(provider: provider, key: "fixture", label: "Fixture")]
             : [.init(provider: provider, key: "fixture-choice", label: "Fixture choice")]
     }

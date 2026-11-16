@@ -42,6 +42,9 @@ struct WebsiteModelChoice: Codable, Equatable, Sendable {
 
     var isRetired: Bool {
         if provider == "kimi" { return key != "k28-instant" || label != "Instant" }
+        // Initial Grok pilot: only the observed Fast row is admitted. Other
+        // discovered modes stay hidden until their live qualification passes.
+        if provider == "grok" { return key != "Fast" || label != "Fast" }
         // Observed Plus/Max are staged for a native pilot. Omni remains
         // unavailable; this policy does not alias Alibaba's API model IDs.
         if provider == "qwen" { return key != label || !["Qwen3.7-Plus", "Qwen3.8-Max"].contains(key) }
@@ -124,11 +127,13 @@ enum WebsiteModelCatalog {
     // Kimi Instant has passed offline adapter/native gates and is admitted for
     // the installed pilot. Live tool qualification remains pending; agent modes
     // stay excluded by the exact key/label policy in WebsiteModelChoice.
-    static let providers = ["chatgpt", "gemini", "claude", "groq", "kimi", "qwen", "deepseek"]
+    static let providers = ["chatgpt", "gemini", "claude", "groq", "grok", "kimi", "qwen", "deepseek"]
     // Groq is temporarily paused in the picker and in catalog discovery.
     static let discoveryProviders = providers.filter { $0 != "groq" }
     // The pilot exposes only observed Plus/Max names and typed Chat/DeepThink modes.
-    static let knownProviders = ["chatgpt", "gemini", "claude", "groq", "kimi", "qwen", "deepseek"]
+    // Grok's observed Private lifecycle is admitted for its Fast-only pilot;
+    // broader website model availability is never inferred from this registry.
+    static let knownProviders = ["chatgpt", "gemini", "claude", "groq", "grok", "kimi", "qwen", "deepseek"]
     static let maximumChoicesPerProvider = 32
     static let preferenceKey = "Computa.websiteModelChoices.v4-claude-selectable-rows"
     static let priorSelectableRowsPreferenceKey = "Computa.websiteModelChoices.v3-chat-latest-power"
@@ -160,6 +165,7 @@ enum WebsiteModelCatalog {
         case "gemini": "Gemini"
         case "claude": "Claude"
         case "groq": "Groq"
+        case "grok": "Grok"
         case "kimi": "Kimi"
         case "qwen": "Qwen"
         case "deepseek": "DeepSeek"
@@ -201,7 +207,7 @@ enum WebsiteModelCatalog {
             guard selected.choice == nil, let mode = selected.modeChoice, mode.requestID == modelID else { return nil }
         } else if selected.provider == "chatgpt" {
             guard let choice = selected.choice, choice.isSelectable, choice.modelID == modelID else { return nil }
-        } else if ["kimi", "qwen"].contains(selected.provider) {
+        } else if ["kimi", "qwen", "grok"].contains(selected.provider) {
             guard let choice = selected.choice, choice.isSelectable else { return nil }
         } else if let choice = selected.choice, !choice.isSelectable { return nil }
         return selected

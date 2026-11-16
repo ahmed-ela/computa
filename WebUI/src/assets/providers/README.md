@@ -1,6 +1,6 @@
 Provider marks are bundled locally; selectors make no external image requests.
 
-OpenAI, Claude, Groq, Kimi, Qwen, DeepSeek and Cerebras SVGs are vendored from
+OpenAI, Claude, Groq, Grok, Kimi, Qwen, DeepSeek and Cerebras SVGs are vendored from
 `@lobehub/icons-static-svg` 1.101.0 (MIT):
 - Source: https://github.com/lobehub/lobe-icons
 - Package: https://registry.npmjs.org/@lobehub/icons-static-svg/-/icons-static-svg-1.101.0.tgz

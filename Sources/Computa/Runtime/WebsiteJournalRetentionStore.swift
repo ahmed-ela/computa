@@ -433,6 +433,7 @@ struct WebsiteJournalRetentionStore: Sendable {
         case .gemini: return both(perTurn, 2)
         case .claude: return both(perInference, 1) || both(perTurn, 2)
         case .groq: return both("explicit_clear_per_inference", 1)
+        case .grok: return both(perInference, 1)
         case .kimi, .qwen, .deepseek: return both("saved_conversation_delete_per_inference", 1)
         }
     }

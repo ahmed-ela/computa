@@ -1074,7 +1074,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             let boundary = codePayload
                 ? ComputaAgentInstructions.codePayloadResponseBoundary + "\n"
                     + #"In JSON use \u0060 for Markdown backticks and \u002a for asterisks. Example path value (use yours): "report-\u0060x\u0060-\u002a\u002ay\u002a\u002a.txt""# + "\n"
-                : ["claude", "deepseek", "kimi"].contains(LocalModelCatalog.webProvider(for: model) ?? "")
+                : ["claude", "deepseek", "kimi", "grok"].contains(LocalModelCatalog.webProvider(for: model) ?? "")
                     ? ComputaAgentInstructions.literalFencedResponseBoundary + "\n" : ""
             XCTAssertTrue(suffix.hasSuffix("{\"type\":\"message\",\"text\":\"OK\"}\n" + boundary + "END_COMPUTA_LOCAL_RESPONSE_HANDOFF."), model)
         }
@@ -2589,7 +2589,7 @@ final class WebModelResponseCodecTests: XCTestCase {
                        ComputaAgentInstructions.webResponseContract(offeredToolNames: Array(request.offeredToolNames), customToolNames: request.customToolNames,
                            includedInstructionText: includedInstructionText,
                            responseFormat: LocalModelCatalog.webProvider(for: request.model) == "qwen" ? .codePayloadJSON
-                               : ["claude", "deepseek", "kimi", "groq"].contains(LocalModelCatalog.webProvider(for: request.model) ?? "") ? .literalFencedJSON : .fencedJSON,
+                               : ["claude", "deepseek", "kimi", "groq", "grok"].contains(LocalModelCatalog.webProvider(for: request.model) ?? "") ? .literalFencedJSON : .fencedJSON,
                            compactLiteralBoundary: LocalModelCatalog.webProvider(for: request.model) == "groq",
                            singleActionRelay: request.singleActionRelay,
                            illustrateFunctionArguments: expectsFunctionLayout || LocalModelCatalog.webProvider(for: request.model) == "qwen",
@@ -3875,7 +3875,7 @@ final class WebModelResponseCodecTests: XCTestCase {
             XCTAssertFalse(first.currentUserInstructions.contains(latestRequest), "The locator must not duplicate user content")
             try assertUserPayloadAppearsOnce(latestRequest, in: first)
             XCTAssertTrue(first.prompt.hasSuffix(ComputaAgentInstructions.webResponseContract(offeredToolNames: ["computer_v2_snapshot"],
-                responseFormat: provider == "qwen" ? .codePayloadJSON : ["claude", "deepseek", "kimi", "groq"].contains(provider) ? .literalFencedJSON : .fencedJSON,
+                responseFormat: provider == "qwen" ? .codePayloadJSON : ["claude", "deepseek", "kimi", "groq", "grok"].contains(provider) ? .literalFencedJSON : .fencedJSON,
                 compactLiteralBoundary: provider == "groq",
                 singleActionRelay: first.singleActionRelay, illustrateFunctionArguments: provider == "qwen")))
             let nextInput = input + [

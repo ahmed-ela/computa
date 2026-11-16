@@ -35,7 +35,7 @@ export function ModelLabel({ model, option }: { model: string; option?: ModelOpt
 }
 
 const websiteProviderNames: Record<WebsiteModelProvider, string> = {
-  chatgpt: 'ChatGPT', gemini: 'Gemini', claude: 'Claude', groq: 'Groq',
+  chatgpt: 'ChatGPT', gemini: 'Gemini', claude: 'Claude', groq: 'Groq', grok: 'Grok',
   kimi: 'Kimi', qwen: 'Qwen', deepseek: 'DeepSeek',
 };
 const websiteDefaultModels = new Set(Object.keys(websiteProviderNames).map((provider) => `browser/${provider}`));

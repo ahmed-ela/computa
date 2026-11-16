@@ -3,6 +3,34 @@ import XCTest
 @testable import Computa
 
 final class WebsiteModelCatalogTests: XCTestCase {
+    func testGrokPilotRequiresObservedFastWithoutDefaultsSeededModelsOrGroqAliases() throws {
+        let grok = WebsiteModelChoice(provider: "grok", key: "Fast", label: "Fast")
+        let groq = WebsiteModelChoice(provider: "groq", key: grok.key, label: grok.label)
+        XCTAssertNoThrow(try WebsiteModelCatalog.validateObserved([grok], provider: "grok"))
+        XCTAssertEqual(WebsiteModelCatalog.choice(for: grok.modelID), grok)
+        XCTAssertEqual(WebsiteModelChoice.parse(try XCTUnwrap(grok.canonicalJSONString)), grok)
+        XCTAssertNotEqual(grok.modelID, groq.modelID)
+        XCTAssertThrowsError(try WebsiteModelCatalog.validateObserved([groq], provider: "grok"))
+        XCTAssertThrowsError(try WebsiteModelCatalog.validateObserved([grok], provider: "groq"))
+        XCTAssertEqual(WebsiteModelCatalog.providerLabel("grok"), "Grok")
+        XCTAssertTrue(WebsiteModelCatalog.providers.contains("grok"))
+        XCTAssertTrue(WebsiteModelCatalog.discoveryProviders.contains("grok"))
+        XCTAssertEqual(WebsiteModelCatalog.inferenceSelection(for: grok.modelID)?.choice, grok)
+        XCTAssertNil(WebsiteModelCatalog.inferenceSelection(for: "browser/grok"))
+        XCTAssertEqual(WebsiteModelCatalog.option(for: grok).available, true)
+        XCTAssertFalse(LocalModelCatalog.options.contains { $0.id.hasPrefix("browser/grok") })
+        let preferences = isolatedTestPreferences()
+        WebsiteModelCatalog.save([grok, groq], to: preferences)
+        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), [grok, groq])
+        for label in ["Auto", "Expert", "Heavy", "Build", "Fixture Future Model"] {
+            let unqualified = WebsiteModelChoice(provider: "grok", key: label, label: label)
+            XCTAssertTrue(unqualified.isValid, "History retains structurally valid website identities")
+            XCTAssertNil(WebsiteModelCatalog.inferenceSelection(for: unqualified.modelID))
+            XCTAssertThrowsError(try WebsiteModelCatalog.validateObserved([unqualified], provider: "grok"))
+            XCTAssertEqual(WebsiteModelCatalog.option(for: unqualified).available, false)
+        }
+    }
+
     func testSharedInferenceFixturesUseSelectableChoicesForEveryNamedProvider() {
         for provider in namedWebsiteModelProviders {
             XCTAssertNotNil(WebsiteModelCatalog.inferenceSelection(for: syntheticWebsiteModelID(provider)), provider)
@@ -100,6 +128,7 @@ final class WebsiteModelCatalogTests: XCTestCase {
             let choice = provider == "chatgpt"
                 ? WebsiteModelChoice(provider: provider, key: "chat/latest/medium", label: "Medium")
                 : provider == "kimi" ? WebsiteModelChoice(provider: provider, key: "k28-instant", label: "Instant")
+                : provider == "grok" ? syntheticGrokChoice
                 : provider == "qwen" ? syntheticWebsiteChoice(provider: provider, key: "fixture", label: "Fixture")
                 : WebsiteModelChoice(provider: provider, key: "fixture-key/with-symbols", label: "Fixture Model 東京 👋")
             XCTAssertTrue(choice.isValid)
@@ -122,6 +151,11 @@ final class WebsiteModelCatalogTests: XCTestCase {
             let id = "browser/\(provider)"
             XCTAssertEqual(WebsiteModelCatalog.selection(for: id)?.provider, provider)
             XCTAssertNil(WebsiteModelCatalog.choice(for: id))
+            if provider == "grok" {
+                XCTAssertNil(LocalModelCatalog.option(for: id), "Grok has no legacy selectable website default")
+                XCTAssertNil(WebsiteModelCatalog.inferenceSelection(for: id))
+                continue
+            }
             XCTAssertEqual(LocalModelCatalog.option(for: id)?.id, id)
             XCTAssertTrue(LocalModelCatalog.option(for: id)?.label.contains("Website default") == true)
         }
@@ -195,6 +229,7 @@ final class WebsiteModelCatalogTests: XCTestCase {
         let preferences = isolatedTestPreferences()
         let choices = namedWebsiteModelProviders.map {  $0 == "chatgpt" ? WebsiteModelChoice(provider: $0, key: "chat/latest/medium", label: "Medium")
                 : $0 == "kimi" ? WebsiteModelChoice(provider: $0, key: "k28-instant", label: "Instant")
+                : $0 == "grok" ? syntheticGrokChoice
                 : $0 == "qwen" ? syntheticWebsiteChoice(provider: $0, key: "fixture", label: "Fixture")
                 : WebsiteModelChoice(provider: $0, key: "fixture-key", label: "Fixture Label") }
         WebsiteModelCatalog.save(choices, to: preferences)

@@ -1354,6 +1354,7 @@ final class KimiWebModelTransportTests: XCTestCase {
         var outcomes: [String] = [], inspectedRoutes: [URL?] = []
         var restoration: Task<Bool, Error>?
         fixture.transport.setKimiProvisionalRouteWaitObserverForTesting { record in
+            let record = self.kimiRouteWaitRecordWithoutElapsed(record)
             outcomes.append(record)
             if record.hasSuffix(" outcome=waiting") {
                 restoration = Task {
@@ -1393,6 +1394,121 @@ final class KimiWebModelTransportTests: XCTestCase {
         XCTAssertEqual(outcomes, kimiRouteWaitRecords(token, generation, "returned"))
     }
 
+    func testDelayedExactProvisionalReturnBeyondOneSecondStillRequiresFullOwnership() async throws {
+        let fixture = try Fixture(); defer { fixture.shutdown() }
+        let (token, previous, generation) = try await startProvisionalFreshHop(fixture)
+        var records: [String] = [], inspectedRoutes: [URL?] = []
+        var restoration: Task<Bool, Error>?
+        fixture.transport.setKimiProvisionalRouteWaitObserverForTesting { record in
+            records.append(record)
+            if record.hasSuffix(" outcome=waiting") {
+                restoration = Task {
+                    try await Task.sleep(for: .milliseconds(1_500))
+                    return try await self.evaluate(fixture.view,
+                        "history.replaceState({}, '', fixturePriorProvisionalURL); return true;") as? Bool == true
+                }
+            }
+        }
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "inspect" { inspectedRoutes.append(fixture.view.url) }
+        }
+        defer {
+            restoration?.cancel()
+            fixture.transport.setKimiProvisionalRouteWaitObserverForTesting(nil)
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+        }
+        let pending = try await call(fixture, "webProviderPoll", token)
+        let restoring = try XCTUnwrap(restoration)
+        let restored = try await restoring.value
+        XCTAssertTrue(restored)
+        XCTAssertEqual(records.map(kimiRouteWaitRecordWithoutElapsed), kimiRouteWaitRecords(token, generation, "returned"))
+        XCTAssertGreaterThan(kimiRouteWaitElapsedMilliseconds(try XCTUnwrap(records.last)), 1_000)
+        XCTAssertEqual(inspectedRoutes, [previous])
+        XCTAssertEqual(pending["state"] as? String, "running")
+        XCTAssertEqual(pending["text"] as? String, "")
+        let context = try XCTUnwrap(pending["modelProofContext"] as? [String: Any])
+        XCTAssertEqual(context["firstUserFingerprint"] as? String, "")
+        XCTAssertEqual(context["responseCount"] as? Int, 0)
+        try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+
+        _ = try await evaluate(fixture.view, "kimiFixture.canonicalize(); return true;")
+        let complete = try await wait(fixture, token, state: "complete")
+        XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"Offline Kimi fixture reply"}"#)
+        let finished = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "deleted")
+        try await assertCounts(fixture, sends: 1, headers: 1, selections: 1, confirmations: 1)
+    }
+
+    func testDelayedChangedProvisionalQueryCannotInspectDeleteOrReplay() async throws {
+        let fixture = try Fixture(); defer { fixture.shutdown() }
+        let (token, _, generation) = try await startProvisionalFreshHop(fixture)
+        var records: [String] = [], inspections = 0
+        var restoration: Task<Bool, Error>?
+        fixture.transport.setKimiProvisionalRouteWaitObserverForTesting { record in
+            records.append(record)
+            if record.hasSuffix(" outcome=waiting") {
+                restoration = Task {
+                    try await Task.sleep(for: .milliseconds(1_500))
+                    return try await self.evaluate(fixture.view, """
+                        const url = new URL(fixturePriorProvisionalURL);
+                        url.search = url.search ? '' : '?chat_enter_method=home';
+                        history.replaceState({}, '', url); return true;
+                        """) as? Bool == true
+                }
+            }
+        }
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "inspect" { inspections += 1 }
+        }
+        defer {
+            restoration?.cancel()
+            fixture.transport.setKimiProvisionalRouteWaitObserverForTesting(nil)
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+        }
+        do {
+            _ = try await call(fixture, "webProviderPoll", token)
+            XCTFail("More observation time cannot authorize a different provisional URL")
+        } catch let failure as EmbeddedWebModelTransport.Failure {
+            XCTAssertEqual(failure, .ownershipFailure(.routeBefore))
+        }
+        let restoring = try XCTUnwrap(restoration)
+        let restored = try await restoring.value
+        XCTAssertTrue(restored)
+        XCTAssertEqual(records.map(kimiRouteWaitRecordWithoutElapsed), kimiRouteWaitRecords(token, generation, "route_changed"))
+        XCTAssertGreaterThan(kimiRouteWaitElapsedMilliseconds(try XCTUnwrap(records.last)), 1_000)
+        XCTAssertEqual(inspections, 0)
+        let finished = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "failed")
+        try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+    }
+
+    func testProvisionalRouteWaitCannotExtendOriginalInspectionDeadline() async throws {
+        let fixture = try Fixture(); defer { fixture.shutdown() }
+        let (token, _, generation) = try await startProvisionalFreshHop(fixture)
+        fixture.transport.setInspectionTimeoutForTesting(.milliseconds(250))
+        var records: [String] = [], inspections = 0
+        fixture.transport.setKimiProvisionalRouteWaitObserverForTesting { records.append($0) }
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            if action == "inspect" { inspections += 1 }
+        }
+        defer {
+            fixture.transport.setKimiProvisionalRouteWaitObserverForTesting(nil)
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+        }
+        do {
+            _ = try await call(fixture, "webProviderPoll", token)
+            XCTFail("The wait must stop at the original inspection deadline")
+        } catch let failure as EmbeddedWebModelTransport.Failure {
+            XCTAssertEqual(failure, .ownershipFailure(.routeBefore))
+        }
+        XCTAssertEqual(records.map(kimiRouteWaitRecordWithoutElapsed), kimiRouteWaitRecords(token, generation, "expired"))
+        XCTAssertLessThan(kimiRouteWaitElapsedMilliseconds(try XCTUnwrap(records.last)), 1_500)
+        XCTAssertEqual(inspections, 0)
+        let finished = try await call(fixture, "webProviderFinish", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "failed")
+        try await assertCounts(fixture, sends: 1, headers: 0, selections: 0, confirmations: 0)
+    }
+
     func testFinishRevokesResumedProvisionalCallbackWithoutPublishingOrDeleting() async throws {
         let fixture = try Fixture(); defer { fixture.shutdown() }
         let (token, previous, generation) = try await startProvisionalFreshHop(fixture)
@@ -1402,6 +1518,7 @@ final class KimiWebModelTransportTests: XCTestCase {
         var restoration: Task<Bool, Error>?
         var resumeInspection: CheckedContinuation<Void, Never>?
         fixture.transport.setKimiProvisionalRouteWaitObserverForTesting { record in
+            let record = self.kimiRouteWaitRecordWithoutElapsed(record)
             outcomes.append(record)
             if record == expected[0] {
                 restoration = Task {
@@ -1458,6 +1575,7 @@ final class KimiWebModelTransportTests: XCTestCase {
             var outcomes: [String] = [], inspectedRoutes: [URL?] = []
             var restoration: Task<Bool, Error>?
             fixture.transport.setKimiProvisionalRouteWaitObserverForTesting { record in
+                let record = self.kimiRouteWaitRecordWithoutElapsed(record)
                 outcomes.append(record)
                 if record.hasSuffix(" outcome=waiting"), restoration == nil {
                     let change = returnExactly ? "" : #"url.search = url.search ? '' : '?chat_enter_method=home';"#
@@ -1507,6 +1625,7 @@ final class KimiWebModelTransportTests: XCTestCase {
         var outcomes: [String] = [], inspections = 0
         var polling: Task<String?, Error>?
         fixture.transport.setKimiProvisionalRouteWaitObserverForTesting { record in
+            let record = self.kimiRouteWaitRecordWithoutElapsed(record)
             outcomes.append(record)
             if record.hasSuffix(" outcome=waiting") { polling?.cancel() }
         }
@@ -1550,8 +1669,21 @@ final class KimiWebModelTransportTests: XCTestCase {
         return (token, previous, generation)
     }
 
+    private func kimiRouteWaitElapsedMilliseconds(_ record: String) -> Int {
+        let values = record.split(separator: " ").filter { $0.hasPrefix("elapsedMs=") }
+        XCTAssertEqual(values.count, 1, "Every wait observation must carry one bounded elapsed value")
+        let elapsed = values.first.flatMap { Int($0.dropFirst("elapsedMs=".count)) } ?? -1
+        XCTAssertTrue((0...30_000).contains(elapsed))
+        return elapsed
+    }
+
+    private func kimiRouteWaitRecordWithoutElapsed(_ record: String) -> String {
+        _ = kimiRouteWaitElapsedMilliseconds(record)
+        return record.split(separator: " ").filter { !$0.hasPrefix("elapsedMs=") }.joined(separator: " ")
+    }
+
     private func kimiRouteWaitRecords(_ token: String, _ generation: UUID, _ outcome: String) -> [String] {
-        let prefix = "kimiProvisionalRouteWait version=1 provider=kimi session=\(token.lowercased())"
+        let prefix = "kimiProvisionalRouteWait version=2 provider=kimi session=\(token.lowercased())"
             + " generation=\(generation.uuidString.lowercased()) sequence=1 outcome="
         return [prefix + "waiting", prefix + outcome]
     }
@@ -1576,7 +1708,9 @@ final class KimiWebModelTransportTests: XCTestCase {
         let generation = try XCTUnwrap(fixture.browser.documentGeneration(for: tab))
         let freshRoute = "history.replaceState({}, '', '/'); return true;"
         var diagnostics: [String] = [], outcomes: [String] = [], completedInspects = 0, changedInCallback = false
-        fixture.transport.setKimiProvisionalRouteWaitObserverForTesting { outcomes.append($0) }
+        fixture.transport.setKimiProvisionalRouteWaitObserverForTesting {
+            outcomes.append(self.kimiRouteWaitRecordWithoutElapsed($0))
+        }
         fixture.transport.setKimiSavedRouteRejectionObserverForTesting { diagnostics.append($0) }
         fixture.transport.setBeforePageResultValidationForTesting { action in
             guard action == "inspect" else { return }

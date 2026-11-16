@@ -15,9 +15,11 @@ let syntheticQwenChoice = WebsiteModelChoice(provider: "qwen", key: "Qwen3.7-Plu
 // Kimi's current plain-chat pilot admits one observed choice. Fixtures must not
 // invent a second choice or use its intentionally unsupported website default.
 let syntheticKimiChoice = WebsiteModelChoice(provider: "kimi", key: "k28-instant", label: "Instant")
+let syntheticGrokChoice = WebsiteModelChoice(provider: "grok", key: "Fast", label: "Fast")
 
 func syntheticWebsiteModelID(_ provider: String) -> String {
     if provider == "kimi" { return syntheticKimiChoice.modelID }
+    if provider == "grok" { return syntheticGrokChoice.modelID }
     if provider == "qwen" { return syntheticQwenChoice.modelID }
     if provider == "deepseek" { return WebsiteModeChoice(deepSeekMode: .chat).requestID }
     if provider == "groq" {
@@ -28,6 +30,7 @@ func syntheticWebsiteModelID(_ provider: String) -> String {
 
 func syntheticWebsiteChoice(provider: String, key: String, label: String) -> WebsiteModelChoice {
     if provider == "kimi" { return syntheticKimiChoice }
+    if provider == "grok" { return syntheticGrokChoice }
     if provider == "qwen" {
         let name = key.contains("new") ? "Qwen3.8-Max" : "Qwen3.7-Plus"
         return WebsiteModelChoice(provider: provider, key: name, label: name)

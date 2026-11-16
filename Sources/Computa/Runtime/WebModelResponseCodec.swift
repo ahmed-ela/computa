@@ -506,7 +506,7 @@ enum WebModelResponseCodec {
         // Kimi also requires all authored content to be inside its single JSON block.
         let responseFormat: ComputaAgentInstructions.WebResponseFormat = switch provider {
         case "qwen": .codePayloadJSON
-        case "claude", "deepseek", "kimi", "groq": .literalFencedJSON
+        case "claude", "deepseek", "kimi", "groq", "grok": .literalFencedJSON
         default: .fencedJSON
         }
         guard object["input"] is String || object["input"] is [Any] else {

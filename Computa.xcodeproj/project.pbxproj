@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B1811B96FB99409FA430F529 /* GrokPrivateModeEvidenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6CEB94780FBB4A2988C331AB /* GrokPrivateModeEvidenceTests.swift */; };
+		12C976F866AC49568A44410B /* GrokPrivateModeEvidence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BCB59C170904E658B9E04EF /* GrokPrivateModeEvidence.swift */; };
 		6346526664BB4CAA96EC969D /* BrowserTerminationLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C967BB6825CF47E5A75F2A87 /* BrowserTerminationLifecycleTests.swift */; };
 		0018954F5EE183994F43E971 /* NativeApprovalGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87CC204021B3BD470EF28344 /* NativeApprovalGate.swift */; };
 		00F794BFB3573529D912C8EC /* EmbeddedHumanVerificationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEBD18662D62FB7B8D89AFFB /* EmbeddedHumanVerificationStore.swift */; };
@@ -437,6 +439,8 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		6CEB94780FBB4A2988C331AB /* GrokPrivateModeEvidenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GrokPrivateModeEvidenceTests.swift; sourceTree = "<group>"; };
+		6BCB59C170904E658B9E04EF /* GrokPrivateModeEvidence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GrokPrivateModeEvidence.swift; sourceTree = "<group>"; };
 		C967BB6825CF47E5A75F2A87 /* BrowserTerminationLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserTerminationLifecycleTests.swift; sourceTree = "<group>"; };
 		01B0E0DC5BB8E34E0499B5B9 /* KimiFixturePage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KimiFixturePage.swift; sourceTree = "<group>"; };
 		01C90147F65413698351E946 /* PermissionGuardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionGuardTests.swift; sourceTree = "<group>"; };
@@ -947,6 +951,7 @@
 				EA64B22EA9A3443F4EEC3CB7 /* EmbeddedBrowserURLPolicy.swift */,
 				EEBD18662D62FB7B8D89AFFB /* EmbeddedHumanVerificationStore.swift */,
 				FC29668EF1A1DD81F7339742 /* EmbeddedWebModelTransport.swift */,
+				6BCB59C170904E658B9E04EF /* GrokPrivateModeEvidence.swift */,
 				1756EF9C50B448D29DB15BE8 /* GeminiCAPTCHADiagnostic.swift */,
 				0B619DF600E230BA73BBC6FB /* GeminiCAPTCHADiagnosticStore.swift */,
 				BB1DBF75E9F8EFBDA96CE9AD /* GeminiNavigationResponseDiagnostic.swift */,
@@ -1069,6 +1074,7 @@
 				15B94D5847A04AB820739C0B /* EmbeddedModelNavigationObservationTests.swift */,
 				AEFC3CE6478C4B19D8C57252 /* EmbeddedSubmissionOwnershipTests.swift */,
 				5ACD3C5630A1409F0ACC992B /* EmbeddedWebModelTransportTests.swift */,
+				6CEB94780FBB4A2988C331AB /* GrokPrivateModeEvidenceTests.swift */,
 				FDEC391C1ED23BF3D36E9CD8 /* FileEditingHarnessTests.swift */,
 				7CBD355FCCEA070C8807969A /* FixtureBunExecutableTests.swift */,
 				50DCBF553E4EC774FA84AC7A /* FreshProfileModelTests.swift */,
@@ -1670,6 +1676,7 @@
 				C9042762BB351BD62ABAF49D /* EmbeddedBrowserURLPolicy.swift in Sources */,
 				00F794BFB3573529D912C8EC /* EmbeddedHumanVerificationStore.swift in Sources */,
 				8717DD783168F76FC12C41FA /* EmbeddedWebModelTransport.swift in Sources */,
+				12C976F866AC49568A44410B /* GrokPrivateModeEvidence.swift in Sources */,
 				9750D9AE96E16673989B3850 /* FileReviewModels.swift in Sources */,
 				3CDD01FEF3A3C1948CF65997 /* FixtureBunExecutable.swift in Sources */,
 				50E76EE569EC212DCAADDFC4 /* GeminiCAPTCHADiagnostic.swift in Sources */,
@@ -1845,6 +1852,7 @@
 				28E78C6AC3A46495F428510E /* EmbeddedModelNavigationObservationTests.swift in Sources */,
 				F3C03114CCB0CFBADD21C379 /* EmbeddedSubmissionOwnershipTests.swift in Sources */,
 				275492C97A6F336E77CC8872 /* EmbeddedWebModelTransportTests.swift in Sources */,
+				B1811B96FB99409FA430F529 /* GrokPrivateModeEvidenceTests.swift in Sources */,
 				D9083954D2673B2074E3BA8A /* FileEditingHarnessTests.swift in Sources */,
 				9C1C08FF47F7F14A02BF23E8 /* FixtureBunExecutableTests.swift in Sources */,
 				4F6C0E69F6ED2CB891280401 /* FreshProfileModelTests.swift in Sources */,

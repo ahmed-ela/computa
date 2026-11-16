@@ -59,6 +59,18 @@ const selector = (model = options[1].id, label = 'Task model', disabled = false)
 })).html;
 
 describe('website model selectors', () => {
+  test('Grok is distinct from Groq and only supplied specific choices enter its submenu', () => {
+    const grokDefault = { ...options[0], id: 'browser/grok', label: 'Grok / Website default' };
+    const grokChoice = { ...options[1], id: 'browser/grok/choice/fixture', label: 'Grok / Fixture Observed Model' };
+    expect(groupModelOptions([grokDefault, options[8]], grokDefault.id).map(({ id }) => id)).toEqual(['groq']);
+    const groups = groupModelOptions([grokDefault, grokChoice, options[8]], grokChoice.id);
+    expect(groups.map(({ id, name, options: models }) => ({ id, name, ids: models.map(({ id }) => id) }))).toEqual([
+      { id: 'grok', name: 'Grok', ids: [grokChoice.id] },
+      { id: 'groq', name: 'Groq', ids: [options[8].id] },
+    ]);
+    expect(websiteModelsRefreshAction(grokChoice.id)).toEqual({ action: 'refreshWebsiteModels', provider: 'grok' });
+  });
+
   test('groups use canonical provider identities and preserve provider and model order', () => {
     const claudeAPI = { ...options[1], id: 'api/claude/model/shared', label: 'Other label / Fixture Fast · API' };
     const input = [options[1], options[3], options[2], options[4], claudeAPI, options[8]];
@@ -374,6 +386,7 @@ describe('website model selectors', () => {
       ['api/openai/model/fixture', 'openai', 'openai'],
       ['browser/claude/choice/fast', 'claude', 'claude'],
       ['browser/groq/choice/observed', 'groq', 'groq'],
+      ['browser/grok/choice/observed', 'grok', 'grok'],
       ['browser/kimi/choice/observed', 'kimi', 'kimi'],
       ['browser/qwen/choice/observed', 'qwen', 'qwen'],
       ['browser/deepseek/choice/observed', 'deepseek', 'deepseek'],

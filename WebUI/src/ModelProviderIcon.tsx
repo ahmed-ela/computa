@@ -3,6 +3,7 @@ import gemini from './assets/providers/gemini.png';
 import alibabaCloud from './assets/providers/alibaba-cloud.png';
 import claude from './assets/providers/claude.svg';
 import groq from './assets/providers/groq.svg';
+import grok from './assets/providers/grok.svg';
 import kimi from './assets/providers/kimi.svg';
 import qwen from './assets/providers/qwen.svg';
 import deepseek from './assets/providers/deepseek.svg';
@@ -11,7 +12,7 @@ import { Icon } from './Icon';
 
 // Local brand marks; asset provenance and notices live beside the images.
 // Preserve the official colors of Gemini and Alibaba Cloud; never fetch them at runtime.
-const marks: Record<string, string> = { chatgpt: openai, openai, claude, groq, kimi, qwen, deepseek, cerebras };
+const marks: Record<string, string> = { chatgpt: openai, openai, claude, groq, grok, kimi, qwen, deepseek, cerebras };
 
 export function ModelProviderIcon({ model }: { model: string }) {
   const [transport, provider] = model.split('/');

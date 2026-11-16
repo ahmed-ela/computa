@@ -1,0 +1,95 @@
+<!doctype html><meta charset="utf-8">
+<style>body{font:16px sans-serif;margin:24px}button{padding:8px;margin:4px}[contenteditable]{white-space:pre-wrap;border:1px solid #aaa;width:600px;min-height:80px;max-height:120px;overflow:auto;padding:8px}[data-bubble-text]{white-space:pre-wrap}[hidden]{display:none!important}</style>
+<body><script>
+// Synthetic observed Grok controls, shared by inert JS and real WKWebView tests.
+(() => {
+  const make = (tag, attributes = {}, text = '') => {
+    const node = document.createElement(tag);
+    for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, value);
+    if (text) node.textContent = text;
+    return node;
+  };
+  const f = window.grokFixture = { selected: 'Fast', choices: ['Fast', 'Build', 'Auto', 'Expert', 'Heavy'],
+    sendCount: 0, privateCount: 0, stopCount: 0, pickerOpens: 0, privateEntered: false,
+    delayUser: false, delayResponse: false, ignorePrivate: false, ignoreSend: false,
+    reply: '{"type":"message","text":"GROK_NATIVE_FIXTURE_OK"}', user: null, userBody: null, answer: null,
+    code: null, footer: null, copy: null, responseParent: null, menu: null };
+  f.privateToggle = make('button', { type: 'button', 'aria-label': 'Switch to Private Chat', 'aria-pressed': 'false' }, 'Private');
+  f.privateToggle.onclick = () => {
+    f.privateCount++;
+    if (f.ignorePrivate) return;
+    f.privateEntered = true;
+    f.privateToggle.setAttribute('aria-label', 'Exit Private Chat'); f.privateToggle.setAttribute('aria-pressed', 'true');
+  };
+  f.trigger = make('button', { type: 'button', id: 'model-select-trigger', 'aria-label': 'Model: Fast', 'aria-haspopup': 'menu', 'aria-expanded': 'false' }, 'Fast');
+  f.trigger.onclick = () => {
+    f.pickerOpens++;
+    if (f.menu) return;
+    const menu = make('div', { role: 'menu', 'aria-labelledby': 'model-select-trigger' });
+    for (const label of f.choices) {
+      const row = make('div', { role: 'menuitemcheckbox', 'aria-checked': label === f.selected ? 'true' : 'false',
+        ...(label === 'Build' ? { 'aria-disabled': 'true', 'data-disabled': '' } : {}) }, label);
+      row.onclick = () => {
+        if (label === 'Build') return;
+        f.selected = label; f.trigger.setAttribute('aria-label', 'Model: ' + label); f.trigger.textContent = label;
+        menu.remove(); f.menu = null; f.trigger.setAttribute('aria-expanded', 'false');
+      };
+      menu.append(row);
+    }
+    menu.append(make('div', { role: 'menuitem' }, 'Get 50% off Premium Unlock extended capabilities Claim offer'));
+    f.menu = menu; document.body.append(menu); f.trigger.setAttribute('aria-expanded', 'true');
+  };
+  document.body.append(f.privateToggle, f.trigger);
+  f.messages = make('main'); document.body.append(f.messages);
+  f.form = make('form');
+  f.editor = make('div', { contenteditable: 'true', role: 'textbox', 'aria-label': 'Message Grok', class: 'tiptap ProseMirror' });
+  f.send = make('button', { type: 'button', 'aria-label': 'Voice mode', 'data-composer-action': 'voice' }, 'Voice');
+  f.editor.oninput = () => {
+    if (!f.editor.innerText.trim()) return;
+    f.send.setAttribute('type', 'submit'); f.send.setAttribute('aria-label', 'Send');
+    f.send.setAttribute('data-testid', 'chat-submit'); f.send.setAttribute('data-composer-action', 'send'); f.send.textContent = 'Send';
+  };
+  f.form.append(f.editor, f.send); document.body.append(f.form);
+  f.status = make('span', { role: 'status', 'aria-live': 'polite' }); f.status.append(make('span'));
+  document.body.append(f.status);
+  f.appendUser = text => {
+    const id = 'turn-heading-0b4a13de-efe1-42b7-8eb6-cc4d6fc2680c';
+    f.user = make('div', { role: 'article', 'data-testid': 'user-message', 'aria-labelledby': id });
+    f.user.append(make('h2', { id, 'data-no-copy': 'true' }, 'You'));
+    f.userBody = make('span', { 'data-bubble-text': '' }, text); f.user.append(f.userBody); f.messages.append(f.user);
+  };
+  f.finishResponse = () => {
+    const id = '5906e63a-97ca-4519-ac58-206f540601c7';
+    f.responseParent = make('div', { id: 'response-' + id });
+    f.answer = make('div', { role: 'article', 'data-testid': 'assistant-message', 'aria-labelledby': 'turn-heading-' + id });
+    f.answer.append(make('h2', { id: 'turn-heading-' + id, 'data-no-copy': 'true' }, 'Grok'));
+    f.trace = make('div', { 'data-testid': 'conversation-trace-slot', 'data-trace-slot': '' }); f.answer.append(f.trace);
+    f.card = make('div', { 'data-markdown-code': '', 'data-code-card': '', dir: 'ltr' });
+    const header = make('div'); header.append(make('bdi', {}, 'JSON'), make('button', { 'aria-label': 'Copy code', type: 'button' }));
+    const pre = make('pre'); f.code = make('code'); f.code.append(make('span', { class: 'synthetic-highlight' }, f.reply));
+    pre.append(f.code); f.card.append(header, pre);
+    const row = make('div', { 'data-markdown-row': '' }); row.append(f.card); f.answer.append(row, make('section'));
+    f.footer = make('div', { 'data-testid': 'response-footer-actions' });
+    const toolbar = make('div', { role: 'toolbar', 'aria-label': 'Response actions' });
+    f.copy = make('button', { type: 'button', 'aria-disabled': 'false', 'aria-label': 'Copy response' });
+    toolbar.append(f.copy); f.footer.append(toolbar); f.responseParent.append(f.answer, f.footer); f.messages.append(f.responseParent);
+    f.send.setAttribute('aria-label', 'Send'); f.send.setAttribute('data-composer-action', 'send'); f.send.textContent = 'Send';
+    f.status.children[0].textContent = 'Grok finished responding';
+  };
+  f.send.onclick = event => {
+    event?.preventDefault();
+    if (f.send.getAttribute('aria-label') === 'Stop') {
+      f.stopCount++; f.send.setAttribute('aria-label', 'Send'); f.send.setAttribute('data-composer-action', 'send'); return;
+    }
+    f.sendCount++; f.beforeSend?.();
+    if (f.ignoreSend) return;
+    const text = f.editor.innerText; f.lastPrompt = text;
+    f.privateToggle.remove(); f.editor.textContent = '';
+    f.send.setAttribute('aria-label', 'Stop'); f.send.setAttribute('data-composer-action', 'stop');
+    if (!f.delayUser) f.appendUser(text);
+    if (!f.delayResponse && !f.delayUser) f.finishResponse();
+  };
+  f.form.onsubmit = event => event.preventDefault();
+  window.grokFixtureReady = true; window.fixtureReady = true; window.fixtureGeneration = 'initial';
+})();
+</script></body>

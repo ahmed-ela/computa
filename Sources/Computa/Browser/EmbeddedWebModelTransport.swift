@@ -294,7 +294,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     /// Every session pins one provider. A valid route on another provider can
     /// never satisfy its ownership checks, including before its first submit.
     enum Provider: String, CaseIterable {
-        case chatgpt, claude, gemini, groq, kimi, qwen, deepseek
+        case chatgpt, claude, gemini, groq, grok, kimi, qwen, deepseek
 
         /// Each provider must explicitly declare the lifecycle its adapter
         /// proves. A new provider never inherits temporary mode by exclusion.
@@ -302,7 +302,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
         var lifecycle: Lifecycle {
             switch self {
-            case .chatgpt, .claude, .gemini: .temporary
+            case .chatgpt, .claude, .gemini, .grok: .temporary
             case .groq: .visibleTranscriptClear
             case .kimi, .qwen, .deepseek: .savedConversationDelete
             }
@@ -314,6 +314,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .claude: "claude.ai"
             case .gemini: "gemini.google.com"
             case .groq: "chat.groq.com"
+            case .grok: "grok.com"
             case .kimi: "www.kimi.ai"
             case .qwen: "chat.qwen.ai"
             case .deepseek: "chat.deepseek.com"
@@ -326,6 +327,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .claude: "Claude"
             case .gemini: "Gemini"
             case .groq: "Groq"
+            case .grok: "Grok"
             case .kimi: "Kimi"
             case .qwen: "Qwen"
             case .deepseek: "DeepSeek"
@@ -338,6 +340,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .claude: URL(string: "https://claude.ai/new?incognito")!
             case .gemini: URL(string: "https://gemini.google.com/app")!
             case .groq: URL(string: "https://chat.groq.com/")!
+            case .grok: URL(string: GrokPrivateModeEvidence.root)!
             case .kimi: URL(string: "https://www.kimi.ai/")!
             case .qwen: URL(string: "https://chat.qwen.ai/")!
             case .deepseek: URL(string: "https://chat.deepseek.com/")!
@@ -378,6 +381,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
 
         func accepts(_ raw: String) -> Bool {
+            // Private Grok chats remain at this exact root. Saved routes and
+            // query/fragment variants have no private-session authority.
+            if self == .grok { return raw == GrokPrivateModeEvidence.root }
             guard let url = originURL(raw) else { return false }
             if savedConversationPolicy != nil { return savedConversationRoute(url) != nil }
             return isFreshPath(url.path) || conversationURL(raw) != nil
@@ -392,7 +398,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .gemini: pattern = #"^/(?:u/[0-9]{1,3}/)?app/[A-Za-z0-9_-]+/?$"#
             // Only the root and its model query have been observed. Neither
             // a saved-conversation route nor temporary mode is established.
-            case .groq: return nil
+            case .groq, .grok: return nil
             case .kimi, .qwen, .deepseek: return savedConversationRoute(url)?.conversation
             }
             guard url.path.range(of: pattern, options: .regularExpression) != nil else { return nil }
@@ -410,7 +416,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             switch self {
             case .chatgpt: return "https://\(host)/"
             case .claude: return "https://\(host)/new"
-            case .groq, .kimi, .qwen, .deepseek: return "https://\(host)/"
+            case .groq, .grok, .kimi, .qwen, .deepseek: return "https://\(host)/"
             case .gemini:
                 guard let range = url.path.range(of: #"^/(?:u/[0-9]{1,3}/)?app(?=/|$)"#, options: .regularExpression) else { return nil }
                 return "https://\(host)" + String(url.path[range])
@@ -423,7 +429,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             switch self {
             case .chatgpt: return query.contains(URLQueryItem(name: "temporary-chat", value: "true"))
             case .claude: return query.contains { $0.name == "incognito" }
-            case .gemini: return false // Gemini changes its mode without changing the route.
+            case .gemini, .grok: return false // The mode changes without changing the route.
             case .groq: return false // A model query is not temporary-session proof.
             case .kimi, .qwen, .deepseek: return false // Saved-chat deletion is not temporary mode.
             }
@@ -431,7 +437,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
         func acceptsUnboundStart(_ url: URL) -> Bool {
             guard accepts(url.absoluteString), conversationURL(url.absoluteString) == nil else { return false }
-            if savedConversationPolicy != nil { return url == startURL }
+            if savedConversationPolicy != nil || self == .grok { return url == startURL }
             return self == .gemini || self == .chatgpt ? true : acceptsTemporaryToggle(url)
         }
 
@@ -477,7 +483,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .chatgpt: path == "/"
             case .claude: path == "/new" || path == "/new/"
             case .gemini: path.range(of: #"^/(?:u/[0-9]{1,3}/)?app/?$"#, options: .regularExpression) != nil
-            case .groq, .kimi, .qwen, .deepseek: path == "/"
+            case .groq, .grok, .kimi, .qwen, .deepseek: path == "/"
             }
         }
     }
@@ -903,6 +909,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var claudeFirstUserSettlementSpent = false
         var temporary = false
         var temporaryRequested = false
+        var grokPrivateSubmission: GrokPrivateSubmission?
+        // Retain only the sticky scalar in the observer callback, never this
+        // Session or its view (a pending WebKit callback must not keep it alive).
+        let grokPrivateRouteChanged = OSAllocatedUnfairLock(initialState: false)
+        var grokPrivateRouteObservation: NSKeyValueObservation?
         // Explicit clearing is a separate lifecycle, never temporary mode or
         // a promise about the provider's server-side retention.
         var requiresExplicitClear: Bool { provider.lifecycle == .visibleTranscriptClear && !isDiscovery }
@@ -2370,6 +2381,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         } else { modeChoice = nil }
         guard provider.usesWebsiteModes ? choice == nil && modeChoice != nil : modeChoice == nil else { throw Failure.invalidRequest }
         guard provider != .chatgpt || choice?.chatGPTPower != nil else { throw Failure.invalidRequest }
+        guard provider != .grok || choice != nil else { throw Failure.invalidRequest }
         guard provider.lifecycle == .temporary || choice != nil || modeChoice != nil else { throw Failure.invalidRequest }
         let groqLease = provider == .groq && choice==groqCandidate?.modelChoice && admission != nil && groqCandidate?.admission==admission ? groqCandidate : nil
         let qwenLease = provider == .qwen && choice != nil && admission.map({ qwenCandidate?.matches(admission:$0) == true }) == true ? qwenCandidate : nil
@@ -2746,6 +2758,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     session.outboundUTF8Count = outboundBytes
                 }
                 // Claim submission before clicking: even a lost reply must not replay Send.
+                if session.provider == .grok {
+                    guard let generation = session.documentGeneration,
+                          browser.documentGeneration(for: session.tabID) == generation,
+                          let url = session.view.url?.absoluteString,
+                          !session.grokPrivateRouteChanged.withLock({ $0 }),
+                          session.grokPrivateSubmission?.claim(ownerToken: session.token, generation: generation,
+                            url: url, outboundFingerprint: Self.outboundFingerprint(outbound)) == true else {
+                        throw Failure.temporaryUnverified
+                    }
+                }
                 session.submitted = true
                 session.sequence += 1
                 if session.usesSubmissionOwnership { session.submittedUTF8Count += outboundBytes }
@@ -3226,6 +3248,27 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
     }
 
+    static func isGrokInitialHydrationObservation(_ observed: [String: Any]) -> Bool {
+        guard Set(observed.keys) == ["grokInitialHydrationPending", "pending", "composer"] else { return false }
+        return [("grokInitialHydrationPending", true), ("pending", true), ("composer", false)].allSatisfy { key, expected in
+            guard let value = observed[key] as? NSNumber, CFGetTypeID(value) == CFBooleanGetTypeID() else { return false }
+            return value.boolValue == expected
+        }
+    }
+
+    private func canObserveGrokInitialHydration(_ session: Session) -> Bool {
+        session.provider == .grok && session.state == "loading" && session.terminalFailure == nil && !Task.isCancelled
+            && sessions[session.token] === session && session.documentGeneration == nil && session.routeContext == nil
+            && !session.modelSelectionRequested && !session.modelSelectionVerified && session.selectionEvidence == nil
+            && !session.temporaryRequested && !session.temporary && !session.submitted && !session.pendingSubmission
+            && session.grokPrivateSubmission == nil && session.grokPrivateRouteObservation == nil
+            && !session.grokPrivateRouteChanged.withLock({ $0 })
+            && session.sequence == 0 && session.acknowledgedSendSequence == 0
+            && session.firstUserFingerprint == nil && session.conversation == nil && session.conversationIdentity == nil
+            && browser.webView(for: session.tabID) === session.view
+            && session.view.url?.absoluteString == GrokPrivateModeEvidence.root
+    }
+
     private func canObserveKimiInitialHydration(_ session: Session) -> Bool {
         session.state == "loading" && session.terminalFailure == nil && !Task.isCancelled && isUnboundKimiPage(session)
     }
@@ -3333,9 +3376,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         case fresh, returned, changed
     }
 
-    private func logKimiProvisionalRouteWait(_ session: Session, generation: UUID, outcome: KimiProvisionalRouteWaitOutcome) {
-        let record = "kimiProvisionalRouteWait version=1 provider=kimi session=\(session.token.lowercased())"
-            + " generation=\(generation.uuidString.lowercased()) sequence=1 outcome=\(outcome.rawValue)"
+    private func logKimiProvisionalRouteWait(_ session: Session, generation: UUID,
+        outcome: KimiProvisionalRouteWaitOutcome, elapsed: Duration = .zero) {
+        let components = elapsed.components
+        let elapsedMs = Int(max(0, min(30_000,
+            Double(components.seconds) * 1_000 + Double(components.attoseconds) / 1e15)))
+        let record = "kimiProvisionalRouteWait version=2 provider=kimi session=\(session.token.lowercased())"
+            + " generation=\(generation.uuidString.lowercased()) sequence=1 elapsedMs=\(elapsedMs) outcome=\(outcome.rawValue)"
         Self.inspectionLog.notice("\(record, privacy: .public)")
         #if DEBUG
         kimiProvisionalRouteWaitObserverForTesting?(record)
@@ -3377,7 +3424,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     ownerToken: session.token, generation: generation) != nil
         }
         try Task.checkCancellation()
-        let limit = min(deadline, session.turnStarted + responseTimeout, ContinuousClock.now + .seconds(1))
+        // A slow return is observation only: retain the exact route and every
+        // ownership guard, within the original inspection/response deadlines.
+        let waitStarted = ContinuousClock.now
+        let limit = min(deadline, session.turnStarted + responseTimeout, waitStarted + .seconds(10))
         guard ContinuousClock.now < limit, session.view.url == fresh, isCurrent() else { return false }
         session.kimiProvisionalRouteWaitSpent = true
 
@@ -3396,7 +3446,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var outcome = KimiProvisionalRouteWaitOutcome.expired
         defer {
             observation.invalidate()
-            logKimiProvisionalRouteWait(session, generation: generation, outcome: outcome)
+            logKimiProvisionalRouteWait(session, generation: generation, outcome: outcome,
+                elapsed: ContinuousClock.now - waitStarted)
         }
         logKimiProvisionalRouteWait(session, generation: generation, outcome: .waiting)
         do {
@@ -3927,6 +3978,44 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
     }
 
+    /// The adapter's post-Send provenance is insufficient on its own. Match it
+    /// against the native one-shot claim from the immediately preceding ready
+    /// observation, then bind the full outbound body in the ordinary ownership gate.
+    private func validateGrokPrivateEvidence(_ observed: [String: Any], session: Session,
+                                             generation: UUID, action: String) throws {
+        guard session.provider == .grok else { return }
+        guard !session.grokPrivateRouteChanged.withLock({ $0 }),
+              session.view.url?.absoluteString == GrokPrivateModeEvidence.root,
+              observed["url"] as? String == GrokPrivateModeEvidence.root else { throw Failure.ownershipFailure(.routeAfter) }
+        guard observed["temporary"] as? Bool == true else {
+            guard !session.temporary, !session.submitted, observed["grokPrivateEvidence"] == nil else {
+                throw Failure.temporaryUnverified
+            }
+            return
+        }
+        guard let evidence = GrokPrivateModeEvidence.parse(observed["grokPrivateEvidence"],
+            ownerToken: session.token, generation: generation) else { throw Failure.temporaryUnverified }
+        if session.submitted {
+            guard let submission = session.grokPrivateSubmission, submission.claimed,
+                  submission.generation == generation, submission.ownerToken == session.token,
+                  session.sequence == 1 else { throw Failure.temporaryUnverified }
+            if action == "submit" {
+                // This callback acknowledges the dispatch using its pre-click
+                // observation. It cannot authorize a response or cleanup.
+                guard evidence.source == .current, count(observed, "userCount") == 0,
+                      count(observed, "responseCount") == 0 else { throw Failure.temporaryUnverified }
+            } else if !submission.accepts(evidence, sequence: session.sequence) { throw Failure.temporaryUnverified }
+        } else if evidence.source != .current { throw Failure.temporaryUnverified }
+        if session.grokPrivateRouteObservation == nil {
+            let changed = session.grokPrivateRouteChanged
+            session.grokPrivateRouteObservation = session.view.observe(\.url, options: [.initial, .new]) { _, change in
+                let url = change.newValue ?? nil
+                if url?.absoluteString != GrokPrivateModeEvidence.root { changed.withLock { $0 = true } }
+            }
+        }
+        guard !session.grokPrivateRouteChanged.withLock({ $0 }) else { throw Failure.ownershipFailure(.routeAfter) }
+    }
+
     private func waitForSendReady(_ session: Session, prompt: String) async throws {
         let deadline = ContinuousClock.now + .seconds(3)
         // Diagnostic only, local to this one bounded readiness wait. A previous
@@ -3964,7 +4053,22 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
             guard ContinuousClock.now < deadline else { break }
             try requireLifecycle(observed, session: session)
-            if observed["sendReady"] as? Bool == true { return }
+            if observed["sendReady"] as? Bool == true {
+                if session.provider == .grok {
+                    guard !session.submitted, session.sequence == 0,
+                          count(observed, "userCount") == 0, count(observed, "responseCount") == 0,
+                          let generation = session.documentGeneration,
+                          browser.documentGeneration(for: session.tabID) == generation,
+                          session.view.url?.absoluteString == GrokPrivateModeEvidence.root,
+                          !session.grokPrivateRouteChanged.withLock({ $0 }),
+                          let evidence = GrokPrivateModeEvidence.parse(observed["grokPrivateEvidence"],
+                            ownerToken: session.token, generation: generation),
+                          let submission = GrokPrivateSubmission(ready: evidence,
+                            outboundFingerprint: Self.outboundFingerprint(prompt)) else { throw Failure.temporaryUnverified }
+                    session.grokPrivateSubmission = submission
+                }
+                return
+            }
             _ = try await browser.waitForModelChange(tabID: session.tabID, after: revision, until: deadline)
         }
         throw timeoutFailure()
@@ -5010,6 +5114,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         session.initialReadRetry = nil
         logInspection(observed, session: session)
         if session.state == "loading" {
+            if session.provider == .grok, observed["grokInitialHydrationPending"] != nil {
+                guard Self.isGrokInitialHydrationObservation(observed), canObserveGrokInitialHydration(session) else {
+                    throw Failure.modelUnverified
+                }
+                return try snapshot(session)
+            }
             if session.provider.savedConversationPolicy != nil, observed["pending"] as? Bool == true, observed["url"] == nil {
                 // This negative pre-binding observation carries no model,
                 // response, document or conversation authority. Existing DOM
@@ -7958,6 +8068,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       groqRejectedAttributeNameSink: ((String) -> Void)? = nil,
                       claudeFirstUserObservation: ClaudeFirstUserObservation? = nil,
                       maximumWait: Duration = .seconds(10)) async throws -> [String: Any] {
+        if session.provider == .grok, session.grokPrivateRouteChanged.withLock({ $0 }) {
+            throw Failure.ownershipFailure(.routeBefore)
+        }
         if allowSavedCleanupInspection, session.savedResponseChoice != nil, !session.savedResponseChoiceAcknowledged {
             // No independent pre-preference deletion capability is granted by
             // this optional action. Even JS-local acknowledgement is insufficient
@@ -8156,6 +8269,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             "allowSubmissionExpansion": provider == .chatgpt && ["inspect", "verifyModel"].contains(action)
                 && session.pendingSubmission && session.sequence > 1,
         ]
+        let allowGrokInitialHydration = action == "inspect" && !allowBlockedProvider && canObserveGrokInitialHydration(session)
+        if allowGrokInitialHydration { input["allowGrokInitialHydration"] = true }
         if capturesQwenReplyUI { input["qwenProgressUI"] = true }
         let groqProgress = action == "inspect" && enforceModel && !allowBlockedProvider
             && savedDeleteOperation == nil && !allowSavedCleanupInspection ? groqFailureProgressLease(session, allowingPending: true) : nil
@@ -8201,7 +8316,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             guard let policy = provider.savedConversationPolicy else { throw Failure.invalidRequest }
             input[policy.cleanupInspectionKey] = true
         }
-        if provider == .groq || provider.savedConversationPolicy != nil { input["documentGeneration"] = generation.uuidString }
+        if provider == .groq || provider == .grok || provider.savedConversationPolicy != nil { input["documentGeneration"] = generation.uuidString }
         if provider.savedConversationPolicy != nil,
            action == "submit" || provider == .kimi && action == "insert" {
             let phaseMatches = action == "insert"
@@ -9263,6 +9378,16 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         if session.provider.lifecycle == .visibleTranscriptClear, !observesLifecycle(observed, session: session) {
             throw Failure.explicitClearUnverified
         }
+        if provider == .grok, observed["grokInitialHydrationPending"] != nil {
+            // Absence before the first bound read is not readiness. Preserve
+            // the original preparation deadline and wake only on ordinary DOM
+            // changes; this receipt carries no private/model/body authority.
+            guard allowGrokInitialHydration, canObserveGrokInitialHydration(session),
+                  Self.isGrokInitialHydrationObservation(observed), url == currentURL,
+                  currentURL.absoluteString == GrokPrivateModeEvidence.root,
+                  ContinuousClock.now < evaluationDeadline else { throw Failure.modelUnverified }
+            return observed
+        }
         if provider == .groq, observed["pending"] as? Bool == true, observed["url"] == nil {
             guard Self.isGroqHydrationObservation(observed), action == "inspect", session.state == "loading",
                   session.documentGeneration == nil, !session.modelSelectionRequested, !session.explicitClearReady,
@@ -9381,6 +9506,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
             _ = try validatedSelectionEvidence(observed, session: session, action: action, rejectionStage: .responseChoiceAcknowledgement)
         }
+        try validateGrokPrivateEvidence(observed, session: session, generation: generation, action: action)
         let betweenChecksStarted = ContinuousClock.now
         // Submit returns only its acknowledgment; observations carry ownership state.
         if let observedURL = observed["url"] as? String {
@@ -9396,6 +9522,12 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     recordFirstUserFailure(observed["firstUserVerified"] as? Bool != true || observed["firstUserMarkerVerified"] as? Bool != true
                         ? .proofFlagsMissing : .fingerprintInvalid, observed: observed)
                     throw Failure.ownershipFailure(.javaScriptFirstUser)
+                }
+                if provider == .grok {
+                    guard session.sequence == 1, count(observed, "userCount") == 1,
+                          fingerprint == session.grokPrivateSubmission?.outboundFingerprint else {
+                        throw Failure.ownershipFailure(.javaScriptFirstUser)
+                    }
                 }
                 if let pinned = session.firstUserFingerprint {
                     guard fingerprint == pinned else {
