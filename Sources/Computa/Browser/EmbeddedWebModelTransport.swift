@@ -7742,10 +7742,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             "textDifference": ["unavailable", "none", "blank_lines", "whitespace", "other"],
             "identity": ["not_checked", "stable", "root_changed", "body_changed", "parent_changed", "text_changed"],
         ]
+        let keys = Set(["version"] + countKeys + sizeKeys + flagKeys + Array(categories.keys))
         guard provider == .grok, actions.contains(action),
               observed["error"] as? String == "conversation_changed", observed["detail"] as? String == "first_user_message",
               let value = observed["grokFirstUserFailureDiagnostic"] as? [String: Any],
-              Set(value.keys) == Set(["version"] + countKeys + sizeKeys + flagKeys + Array(categories.keys)),
+              Set(value.keys) == (value["mismatch"] == nil ? keys : keys.union(["mismatch"])),
               ComputerToolArgumentContract.exactInt64(value["version"]) == 1 else { return nil }
         var safe: [String: Any] = ["version": 1, "action": action]
         for (key, choices) in categories {
@@ -7766,6 +7767,43 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             if value[key] is NSNull { safe[key] = NSNull(); continue }
             guard let flag = firstUserDiagnosticBool(value[key]) else { return nil }
             safe[key] = flag
+        }
+        if let rawMismatch = value["mismatch"] {
+            let integers = ["offset", "line", "column", "lastExpectedLine", "lastObservedLine",
+                "expectedFirstLineLength", "observedFirstLineLength", "expectedLastLineLength", "observedLastLineLength"]
+            let nearCounts = ["nearBackticksExpected", "nearBackticksObserved", "nearBackslashesExpected", "nearBackslashesObserved"]
+            let kinds = ["expectedFirstKind", "observedFirstKind", "expectedLastKind", "observedLastKind"]
+            guard value["reason"] as? String == "payload_text",
+                  firstUserDiagnosticBool(value["innerTextMatches"]) == false,
+                  let difference = value["textDifference"] as? String, ["blank_lines", "whitespace", "other"].contains(difference),
+                  let mismatch = rawMismatch as? [String: Any], Set(mismatch.keys) == Set(integers + nearCounts + kinds + ["component"]),
+                  let component = mismatch["component"] as? String,
+                  ["runtime", "request", "current_user", "response", "marker", "unknown"].contains(component),
+                  let expectedLength = ComputerToolArgumentContract.exactInt64(value["expectedUTF16"]), expectedLength < 220_001,
+                  let observedLength = ComputerToolArgumentContract.exactInt64(value["observedUTF16"]), observedLength < 220_001,
+                  let expectedLines = ComputerToolArgumentContract.exactInt64(value["expectedLines"]), expectedLines >= 1,
+                  let observedLines = ComputerToolArgumentContract.exactInt64(value["observedLines"]), observedLines >= 1 else { return nil }
+            var numbers: [String: Int64] = [:]
+            var location: [String: Any] = ["component": component]
+            for key in integers + nearCounts {
+                let maximum: Int64 = nearCounts.contains(key) ? 64 : 220_001
+                guard let number = ComputerToolArgumentContract.exactInt64(mismatch[key]), (0...maximum).contains(number) else { return nil }
+                numbers[key] = number; location[key] = number
+            }
+            // Coordinates describe only a bounded rejected comparison. They
+            // cannot identify or replace an owned DOM node or body fingerprint.
+            guard numbers["offset"]! <= min(expectedLength, observedLength),
+                  (1...min(expectedLines, observedLines)).contains(numbers["line"]!),
+                  (1...(min(numbers["expectedFirstLineLength"]!, numbers["observedFirstLineLength"]!) + 1)).contains(numbers["column"]!),
+                  (numbers["line"]!...expectedLines).contains(numbers["lastExpectedLine"]!),
+                  (numbers["line"]!...observedLines).contains(numbers["lastObservedLine"]!),
+                  numbers["expectedFirstLineLength"]! <= expectedLength, numbers["expectedLastLineLength"]! <= expectedLength,
+                  numbers["observedFirstLineLength"]! <= observedLength, numbers["observedLastLineLength"]! <= observedLength else { return nil }
+            for key in kinds {
+                guard let kind = mismatch[key] as? String, ["blank", "prose", "json_like", "fence", "marker", "other"].contains(kind) else { return nil }
+                location[key] = kind
+            }
+            safe["mismatch"] = location
         }
         guard let bytes = try? JSONSerialization.data(withJSONObject: safe, options: .sortedKeys), bytes.count <= 960 else { return nil }
         return String(decoding: bytes, as: UTF8.self)

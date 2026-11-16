@@ -539,7 +539,7 @@ describe('Grok private inference adapter', () => {
         bodies: 1, bodyVisible: true, expectedUTF16: expected.length, innerTextMatches: false,
         textContentMatches: arm === 'rendered_only', textDifference: arm === 'content' ? 'other' : arm === 'whitespace' ? 'whitespace' : 'blank_lines', identity: 'not_checked' });
       expect(Object.keys(d).sort()).toEqual(['version','stage','reason','users','answers','bodies','bodyVisible',
-        'observedUTF16','expectedUTF16','observedLines','expectedLines','textContentMatches','innerTextMatches','textDifference','identity'].sort());
+        'observedUTF16','expectedUTF16','observedLines','expectedLines','textContentMatches','innerTextMatches','textDifference','identity','mismatch'].sort());
       expect(JSON.stringify(d)).not.toContain(expected); expect(JSON.stringify(d)).not.toContain('Computa session marker');
       expect(f.world.__computaGrokPrivateSessionV1.first).toBeNull(); expect(f.f.sendCount).toBe(1);
     }
@@ -587,8 +587,65 @@ describe('Grok private inference adapter', () => {
     try { fail(core, { prompt: 'owned' }, { users: [], answers: [], bodies: [], text: 'x'.repeat(230000) }); } catch (e) { error = e; }
     expect(error).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message',
       grokFirstUserFailureDiagnostic: { observedUTF16: 220001, observedLines: null, innerTextMatches: null, textDifference: 'unavailable' } });
+    expect(error.grokFirstUserFailureDiagnostic.mismatch).toBeUndefined();
     try { fail(core, { prompt: 'owned' }, { body: { get innerText() { throw Error('PRIVATE_DIAGNOSTIC_FAILURE'); } } }); } catch (e) { error = e; }
     expect(error).toEqual({ computaAdapterFailure: true, error: 'conversation_changed', detail: 'first_user_message' });
+  });
+
+  test('literal mismatch locations identify fixed prompt sections without emitting any text', () => {
+    const source = readFileSync(new URL('./embedded-grok-first-user-diagnostic.js', import.meta.url), 'utf8');
+    const fail = new Function('c','state','transcript','reason', source + '\nreturn computaGrokFirstUserFailure(c,state,"before_hash",reason,transcript);');
+    const core = { bodyText: (text: string) => text.trim(), visible: () => true };
+    const parts = ['COMPUTA_CURRENT_RUNTIME_CONTRACT:', 'runtime sentinel', 'COMPLETE_RESPONSES_REQUEST_JSON:',
+      '{"value":"request sentinel"}', 'COMPUTA_CURRENT_USER_LOCATOR:', 'current sentinel',
+      'COMPUTA_LOCAL_RESPONSE_HANDOFF:', 'Literal `a` `b` `c` `d` `e` `f` `g`.', 'Computa session marker: marker sentinel'];
+    const expected = parts.join('\n');
+    const diagnostic = (prompt: string, observed: string, reason = 'payload_text') => {
+      try { fail(core, { prompt }, { text: observed }, reason); } catch (e: any) {
+        expect(e).toMatchObject({ computaAdapterFailure: true, error: 'conversation_changed', detail: 'first_user_message' });
+        return e.grokFirstUserFailureDiagnostic;
+      }
+    };
+    const changed = expected.replace(/`/g, '');
+    const d = diagnostic(expected, changed), m = d.mismatch;
+    expect(m).toEqual({ offset: expected.indexOf('`'), line: 8, column: 9, component: 'response',
+      lastExpectedLine: 8, lastObservedLine: 8, expectedFirstLineLength: parts[7].length,
+      observedFirstLineLength: parts[7].length - 14, expectedLastLineLength: parts[7].length,
+      observedLastLineLength: parts[7].length - 14, expectedFirstKind: 'prose', observedFirstKind: 'prose',
+      expectedLastKind: 'prose', observedLastKind: 'prose', nearBackticksExpected: 14,
+      nearBackticksObserved: 0, nearBackslashesExpected: 0, nearBackslashesObserved: 0 });
+    expect(d.expectedUTF16 - d.observedUTF16).toBe(14);
+    expect(d.expectedLines).toBe(d.observedLines);
+    expect(JSON.stringify(d)).not.toContain('sentinel');
+    for (const [find, component, line] of [['runtime sentinel','runtime',2], ['request sentinel','request',4],
+      ['current sentinel','current_user',6], ['marker sentinel','marker',9]] as const) {
+      expect(diagnostic(expected, expected.replace(find, 'changed')).mismatch).toMatchObject({ component, line });
+    }
+    expect(diagnostic(expected + '\nCOMPUTA_LOCAL_RESPONSE_HANDOFF:', changed + '\nCOMPUTA_LOCAL_RESPONSE_HANDOFF:').mismatch.component).toBe('unknown');
+    expect(diagnostic(expected, expected).mismatch).toBeUndefined();
+    expect(diagnostic(expected, changed, 'fingerprint').mismatch).toBeUndefined();
+  });
+
+  test('mismatch coordinates stay bounded at first-byte, newline, Unicode and length boundaries', () => {
+    const source = readFileSync(new URL('./embedded-grok-first-user-diagnostic.js', import.meta.url), 'utf8');
+    const fail = new Function('c','state','transcript', source + '\nreturn computaGrokFirstUserFailure(c,state,"before_hash","payload_text",transcript);');
+    const core = { bodyText: (text: string) => text.trim(), visible: () => true };
+    for (const [expected, observed, coordinates] of [
+      ['abc','xbc',{ offset:0,line:1,column:1 }], ['abc\ndef','abcX\ndef',{ offset:3,line:1,column:4 }],
+      ['abc\ndef','abc\nXdef',{ offset:4,line:2,column:1 }], ['abc','abcd',{ offset:3,line:1,column:4 }],
+      ['abcd','abc',{ offset:3,line:1,column:4 }], ['', 'x', { offset:0,line:1,column:1 }],
+      ['x', '', { offset:0,line:1,column:1 }], ['🧪a\nb','🧪x\nb',{ offset:2,line:1,column:3 }],
+    ] as const) {
+      let d: any;
+      try { fail(core, { prompt:expected }, { text:observed }); } catch (e: any) { d = e.grokFirstUserFailureDiagnostic; }
+      expect(d.mismatch).toMatchObject({ ...coordinates, component:'unknown' });
+      expect(d.mismatch.offset).toBeLessThanOrEqual(Math.min(d.expectedUTF16,d.observedUTF16));
+      expect(d.mismatch.column).toBeLessThanOrEqual(Math.min(d.mismatch.expectedFirstLineLength,d.mismatch.observedFirstLineLength)+1);
+      expect(d.mismatch.lastExpectedLine).toBeLessThanOrEqual(d.expectedLines);
+      expect(d.mismatch.lastObservedLine).toBeLessThanOrEqual(d.observedLines);
+      expect(d.mismatch.nearBackticksExpected).toBeLessThanOrEqual(64);
+      expect(d.mismatch.nearBackslashesObserved).toBeLessThanOrEqual(64);
+    }
   });
 
   test('same marker in a changed prompt, replaced body, changed URL or changed generation cannot bind', async () => {

@@ -457,3 +457,37 @@ record per session. Prompt/page text, markers, hashes and DOM identifiers are
 excluded; numeric/string values cannot impersonate Boolean comparison flags.
 Oversized metadata reads skip newline scanning, and a diagnostic exception
 preserves the original rejection. No acceptance, timeout or cleanup rule changes.
+
+Installed build 566 (`affe5ef`) verified its fresh Fast marker submission, then
+rejected the first user body 491.63 ms later. Failure-only diagnostics locate
+the rejection at `payload_text`: the expected body was 63,549 UTF-16 units and
+304 lines; the observed body was 63,535 units with the same line count. Both
+text representations differed, including after whitespace removal. The model
+page was already bound at this point. No tools ran; cleanup remains unconfirmed.
+The capture and independent audit preserve this failed attempt without replay.
+
+An approved ordinary Private/Fast test tab then received one synthetic prompt
+of the same size and line count. Insertion took 420 ms with exact readback and
+hash. Its initial hidden user body matched the complete prompt at 1,242 ms;
+Grok replaced it with formatted content at 1,939 ms and revealed it at 2,095 ms.
+The synthetic Markdown links, inline code and fenced code changed. The normal
+website returned the requested answer marker, but that does not qualify the
+Computa harness. Segment checks found that the suspected triple-backtick
+response-boundary prose and raw JSON escape examples stayed unchanged, so the
+proposed six-plus-eight-character explanation was rejected. This establishes a
+rendering mechanism, not the precise source of the real request's 14-character
+loss. No verification relaxation or speculative presentation fix was applied.
+
+The synthetic test tab and its Inspector were closed, and Safari developer
+features restored off. The original saved Grok conversation was not touched.
+Artifacts are under `work/grok-kimi-20261115/build566/body-transform-probe/`;
+the installed failure remains under
+`work/grok-kimi-qualification-20261115/marker566/`. Build 567 narrows diagnostics
+to locate the changed portion of the actual request before choosing a fix.
+
+Build 567 source validation passes 78 Grok JavaScript tests (1,286 assertions)
+and four native diagnostic tests. The optional mismatch coordinates are emitted
+only for a bounded, already-rejected literal mismatch. First-byte, newline,
+prefix/length, Unicode and oversized cases retain the same error. The native
+projection rejects extra fields, invalid coordinates and nonliteral Boolean
+flags; the largest admitted metadata packet fits its existing 960-byte limit.

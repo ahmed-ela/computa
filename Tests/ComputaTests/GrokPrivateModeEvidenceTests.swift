@@ -210,6 +210,89 @@ final class GrokPrivateModeEvidenceTests: XCTestCase {
         ["error": "conversation_changed", "detail": "first_user_message", "grokFirstUserFailureDiagnostic": packet]
     }
 
+    private func firstUserMismatchPacket() -> [String: Any] {
+        ["offset": 20_000, "line": 300, "column": 42, "component": "response",
+         "lastExpectedLine": 302, "lastObservedLine": 302,
+         "expectedFirstLineLength": 150, "observedFirstLineLength": 148,
+         "expectedLastLineLength": 150, "observedLastLineLength": 148,
+         "expectedFirstKind": "prose", "observedFirstKind": "prose", "expectedLastKind": "json_like", "observedLastKind": "json_like",
+         "nearBackticksExpected": 6, "nearBackticksObserved": 0, "nearBackslashesExpected": 0, "nearBackslashesObserved": 0]
+    }
+
+    func testFirstUserFailureDiagnosticAcceptsBoundedMismatchLocationWithoutBodyContents() throws {
+        var packet = firstUserFailurePacket(); packet["mismatch"] = firstUserMismatchPacket()
+        let result = try XCTUnwrap(EmbeddedWebModelTransport.grokFirstUserFailureDiagnostic(firstUserFailureRecord(packet), provider: .grok, action: "verifyModel"))
+        XCTAssertLessThanOrEqual(result.utf8.count, 960)
+        let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.utf8)) as? [String: Any])
+        var expected = packet; expected["action"] = "verifyModel"
+        XCTAssertTrue(NSDictionary(dictionary: decoded).isEqual(to: expected))
+        for component in ["runtime", "request", "current_user", "response", "marker", "unknown"] {
+            var location = firstUserMismatchPacket(); location["component"] = component; packet["mismatch"] = location
+            XCTAssertNotNil(EmbeddedWebModelTransport.grokFirstUserFailureDiagnostic(firstUserFailureRecord(packet), provider: .grok, action: "verifyModel"))
+        }
+        for key in ["expectedFirstKind", "observedFirstKind", "expectedLastKind", "observedLastKind"] {
+            for kind in ["blank", "prose", "json_like", "fence", "marker", "other"] {
+                var location = firstUserMismatchPacket(); location[key] = kind; packet["mismatch"] = location
+                XCTAssertNotNil(EmbeddedWebModelTransport.grokFirstUserFailureDiagnostic(firstUserFailureRecord(packet), provider: .grok, action: "verifyModel"))
+            }
+        }
+        var boundary = firstUserMismatchPacket()
+        boundary["offset"] = 0; boundary["line"] = 1; boundary["column"] = 1
+        for key in ["nearBackticksExpected", "nearBackticksObserved", "nearBackslashesExpected", "nearBackslashesObserved"] { boundary[key] = 64 }
+        packet["mismatch"] = boundary
+        XCTAssertNotNil(EmbeddedWebModelTransport.grokFirstUserFailureDiagnostic(firstUserFailureRecord(packet), provider: .grok, action: "inspect"))
+        // The largest admitted scalar widths and longest fixed categories must
+        // still fit one log record; valid new metadata cannot silently vanish.
+        var largest = firstUserMismatchPacket()
+        for key in ["offset", "line", "lastExpectedLine", "lastObservedLine", "expectedFirstLineLength",
+            "observedFirstLineLength", "expectedLastLineLength", "observedLastLineLength"] { largest[key] = 220_000 }
+        largest["column"] = 220_001; largest["component"] = "current_user"
+        for key in ["expectedFirstKind", "observedFirstKind", "expectedLastKind", "observedLastKind"] { largest[key] = "json_like" }
+        for key in ["nearBackticksExpected", "nearBackticksObserved", "nearBackslashesExpected", "nearBackslashesObserved"] { largest[key] = 64 }
+        var maximal = firstUserFailurePacket(); maximal["mismatch"] = largest
+        for key in ["expectedUTF16", "observedUTF16", "expectedLines", "observedLines"] { maximal[key] = 220_000 }
+        maximal["identity"] = "parent_changed"; maximal["textDifference"] = "whitespace"
+        let largestRecord = try XCTUnwrap(EmbeddedWebModelTransport.grokFirstUserFailureDiagnostic(firstUserFailureRecord(maximal), provider: .grok, action: "enableTemporary"))
+        XCTAssertLessThanOrEqual(largestRecord.utf8.count, 960)
+        XCTAssertTrue(largestRecord.contains("\"mismatch\":"))
+    }
+
+    func testFirstUserFailureDiagnosticRejectsInvalidMismatchCoordinatesOrAuthority() {
+        let location = firstUserMismatchPacket()
+        func reject(_ raw: Any, _ label: String, outer: [String: Any]? = nil) {
+            var packet = outer ?? firstUserFailurePacket(); packet["mismatch"] = raw
+            XCTAssertNil(EmbeddedWebModelTransport.grokFirstUserFailureDiagnostic(firstUserFailureRecord(packet), provider: .grok, action: "verifyModel"), label)
+        }
+        for key in location.keys {
+            var changed = location; changed.removeValue(forKey: key); reject(changed, key)
+        }
+        for key in ["expectedText", "observedText", "lineText", "url", "hash", "modelEvidence", "submitted", "cleanup"] {
+            var changed = location; changed[key] = NSNull(); reject(changed, key)
+        }
+        let categorical = ["component", "expectedFirstKind", "observedFirstKind", "expectedLastKind", "observedLastKind"]
+        for key in location.keys {
+            for raw: Any in [true, false, NSNull(), [], ["text": "PRIVATE"], -1, 1.5, "PRIVATE_VALUE"] {
+                var changed = location; changed[key] = raw; reject(changed, key)
+            }
+            if !categorical.contains(key) {
+                var changed = location; changed[key] = "1"; reject(changed, key)
+            }
+        }
+        let invalid: [(String, Int)] = [("offset", 32_769), ("line", 0), ("line", 411), ("column", 0), ("column", 150),
+            ("lastExpectedLine", 299), ("lastExpectedLine", 413), ("lastObservedLine", 299), ("lastObservedLine", 411),
+            ("expectedFirstLineLength", 32_771), ("expectedLastLineLength", 32_771),
+            ("observedFirstLineLength", 32_769), ("observedLastLineLength", 32_769),
+            ("nearBackticksExpected", 65), ("nearBackticksObserved", 65), ("nearBackslashesExpected", 65), ("nearBackslashesObserved", 65)]
+        for (key, value) in invalid { var changed = location; changed[key] = value; reject(changed, key) }
+        for raw: Any in [NSNull(), true, 1, "PRIVATE", []] { reject(raw, "mismatch shape") }
+        let invalidOuter: [(String, Any)] = [("reason", "fingerprint"), ("innerTextMatches", true),
+            ("textDifference", "none"), ("textDifference", "unavailable"), ("expectedUTF16", NSNull()),
+            ("observedUTF16", 220_001), ("expectedLines", 0), ("observedLines", NSNull())]
+        for (key, value) in invalidOuter {
+            var packet = firstUserFailurePacket(); packet[key] = value; reject(location, key, outer: packet)
+        }
+    }
+
     func testFirstUserFailureDiagnosticProjectsOnlyFiniteFailureMetadata() throws {
         let packet = firstUserFailurePacket()
         var record = firstUserFailureRecord(packet)
