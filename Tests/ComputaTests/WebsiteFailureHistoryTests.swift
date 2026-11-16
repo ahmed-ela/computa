@@ -1010,6 +1010,106 @@ final class WebsiteFailureHistoryTests: XCTestCase {
         }
     }
 
+    func testGrokComposerFailureSurvivesReloadAndReplacesGenericRuntimeHistory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaGrokComposerHistory-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let reason = try XCTUnwrap(EmbeddedWebModelTransport.grokComposerFailureDiagnostic(action: "sendReady", detail: "editor_hit_test"))
+        let failure = EmbeddedWebModelTransport.Failure.editorFailure(reason)
+        let bytes = try WebModelServer.errorBody(for: failure)
+        let expected = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        XCTAssertEqual(WebModelServer.errorPresentation(for: failure).status, "500 Internal Server Error",
+            "Persistence fixes the durable Computa diagnosis without changing the bundled runtime mapping")
+        let task = UUID().uuidString, thread = UUID().uuidString, turnID = UUID().uuidString.lowercased()
+        let earlier = UUID().uuidString.lowercased()
+        let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,
+            turnID: turnID, modelID: syntheticGrokChoice.modelID, diagnosticText: String(decoding: bytes, as: UTF8.self)))
+        XCTAssertTrue(WebsiteTurnFailureStore(directory: root).append(record))
+        XCTAssertTrue(WebsiteTurnFailureStore(directory: root).append(record))
+        let restored = try WebsiteTurnFailureStore(directory: root).load(threadID: thread)
+        XCTAssertEqual(restored, [record])
+        let generic = "We’re currently experiencing high demand, which may cause temporary errors."
+        let raw = try history([turn(earlier, status: "failed", error: ["message": "Earlier failure"]),
+            turn(turnID, status: "failed", error: ["message": generic, "codexErrorInfo": "internal_server_error"])])
+        let rejected = Set(restored.map(\.turnID))
+        var entries = try AppServerThreadHistoryContract.entries(from: raw, excludingAssistantTurns: rejected)
+        let index = try XCTUnwrap(entries.firstIndex { $0.id == record.entry.id })
+        entries[index] = record.entry
+        let actual = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(entries[index].body.utf8)) as? [String: Any])
+        XCTAssertTrue(NSDictionary(dictionary: actual).isEqual(to: expected))
+        XCTAssertTrue(entries[index].body.contains("composer_unavailable; action=sendReady; detail=editor_hit_test"))
+        XCTAssertFalse(entries[index].body.contains("high demand"))
+        XCTAssertEqual(entries.first { $0.id == "agent-error:" + earlier }?.body, "Earlier failure")
+        XCTAssertFalse(entries.contains { $0.kind == .assistant && $0.turnID == turnID })
+        XCTAssertEqual(try AppServerThreadHistoryContract.latestUserTurnStatus(from: raw,
+            rejectedTurns: rejected, failedTurns: rejected), .failed)
+    }
+
+    func testGrokComposerPersistenceAcceptsOnlyTheExistingFiniteFormatterVocabulary() throws {
+        let actions = ["inspect", "discoverModels", "selectModel", "verifyModel", "enableTemporary",
+            "prepare", "insert", "sendReady", "submit", "stop"]
+        let details = ["initial_editor_ambiguous", "initial_editor_invalid", "initial_action_ambiguous",
+            "initial_action_invalid", "editor_missing", "editor_ambiguous", "editor_authored", "action_missing",
+            "action_ambiguous", "action_authored", "action_invalid", "editor_not_fresh", "editor_hit_test",
+            "initial_editor_tag_textarea", "initial_editor_tag_other", "initial_editor_contenteditable", "initial_editor_role",
+            "initial_editor_label", "initial_editor_disconnected", "initial_editor_no_rects", "initial_editor_display_none",
+            "initial_editor_visibility_hidden", "initial_editor_hidden_ancestor", "initial_editor_inert_ancestor",
+            "initial_editor_aria_hidden_ancestor", "initial_editor_disabled", "initial_editor_aria_disabled", "unknown"]
+        for action in actions {
+            for detail in details {
+                let reason = try XCTUnwrap(EmbeddedWebModelTransport.grokComposerFailureDiagnostic(action: action, detail: detail))
+                XCTAssertEqual(reason, "composer_unavailable; action=\(action); detail=\(detail)")
+                let bytes = try WebModelServer.errorBody(for: EmbeddedWebModelTransport.Failure.editorFailure(reason))
+                let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: UUID().uuidString,
+                    threadID: UUID().uuidString, turnID: UUID().uuidString, modelID: syntheticGrokChoice.modelID,
+                    diagnosticText: String(decoding: bytes, as: UTF8.self)), reason)
+                let original = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+                let persisted = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(record.diagnosticText.utf8)) as? [String: Any])
+                XCTAssertTrue(NSDictionary(dictionary: persisted).isEqual(to: original), reason)
+            }
+        }
+    }
+
+    func testGrokComposerPersistenceRejectsForeignModelsProseAndAlteredEnvelopes() throws {
+        let reason = try XCTUnwrap(EmbeddedWebModelTransport.grokComposerFailureDiagnostic(action: "sendReady", detail: "editor_hit_test"))
+        let bytes = try WebModelServer.errorBody(for: EmbeddedWebModelTransport.Failure.editorFailure(reason))
+        let original = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        let fields = try XCTUnwrap(original["error"] as? [String: Any])
+        func reject(_ object: [String: Any], model: String? = nil) throws {
+            XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: UUID().uuidString, threadID: UUID().uuidString,
+                turnID: UUID().uuidString, modelID: model ?? syntheticGrokChoice.modelID,
+                diagnosticText: String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)))
+        }
+        for foreign in [syntheticChatGPTModelID, "browser/gemini", "browser/claude", "browser/groq",
+            WebsiteModelChoice(provider: "kimi", key: "k28-instant", label: "Instant").modelID,
+            WebsiteModelChoice(provider: "qwen", key: "Qwen3.7-Plus", label: "Qwen3.7-Plus").modelID,
+            "browser/deepseek/mode/chat", "api/groq/model/fixture", "browser/unknown"] {
+            try reject(original, model: foreign)
+        }
+        for mutation in [["message": "PRIVATE_PAGE_TEXT"], ["message": "Changed (\(reason))."],
+            ["message": (fields["message"] as? String ?? "") + " extra"], ["type": "server_error"],
+            ["code": "provider_timeout"], ["param": "input"], ["retryable": true], ["retryable": false],
+            ["required_action": "retry_send"], ["detail": "PRIVATE_PAGE_TEXT"]] as [[String: Any]] {
+            var changed = fields; mutation.forEach { changed[$0.key] = $0.value }; try reject(["error": changed])
+        }
+        for key in fields.keys {
+            var changed = fields; changed.removeValue(forKey: key); try reject(["error": changed])
+        }
+        var extra = original; extra["pageText"] = "PRIVATE_PAGE_TEXT"; try reject(extra)
+        for invalid in ["PRIVATE_BODY", "composer_unavailable", "composer_unavailable; action=unknown; detail=editor_hit_test",
+            "composer_unavailable; action=sendReady; detail=PRIVATE_PAGE_TEXT",
+            "composer_unavailable; action=sendReady; detail=editor_hit_test; extra=PRIVATE_PAGE_TEXT",
+            "composer_unavailable;action=sendReady;detail=editor_hit_test",
+            "composer_unavailable; action=sendReady; detail=editor_hit_test ", "(\(reason))"] {
+            let invalidBytes = try WebModelServer.errorBody(for: EmbeddedWebModelTransport.Failure.editorFailure(invalid))
+            try reject(try XCTUnwrap(JSONSerialization.jsonObject(with: invalidBytes) as? [String: Any]))
+        }
+        let text = String(decoding: bytes, as: UTF8.self), needle = "\"code\":\"browser_model_error\""
+        let duplicated = text.replacingOccurrences(of: needle, with: needle + "," + needle)
+        XCTAssertNotEqual(duplicated, text)
+        XCTAssertNil(WebsiteTurnFailureStore.Record.make(taskID: UUID().uuidString, threadID: UUID().uuidString,
+            turnID: UUID().uuidString, modelID: syntheticGrokChoice.modelID, diagnosticText: duplicated))
+    }
+
     func testFixedBrowserFailurePersistenceRejectsUnknownProseExtraMetadataAndAPIModels() throws {
         let failures: [any Error] = [EmbeddedWebModelTransport.Failure.modelUnverified,
             EmbeddedWebModelTransport.Failure.temporaryUnverified, WebModelServer.Failure.cleanupFailed]

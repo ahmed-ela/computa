@@ -106,12 +106,17 @@ struct WebsiteTurnFailureStore: Sendable {
                     WebModelServer.Failure.modelMismatch,
                     WebModelServer.Failure.cleanupFailed,
                 ]
-                guard let fixed = fixedFailures.first(where: { failure in
+                let fixed = fixedFailures.first(where: { failure in
                     guard let bytes = try? WebModelServer.errorBody(for: failure),
                           let envelope = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { return false }
                     return NSDictionary(dictionary: supplied).isEqual(to: envelope)
-                }) else { return nil }
-                nativeError = fixed
+                })
+                if let fixed {
+                    nativeError = fixed
+                } else if provider == "grok", APIModelCorrectionJSON.isUnambiguous(Data(text.utf8)),
+                          let composer = grokComposerFailure(message: error["message"]) {
+                    nativeError = composer
+                } else { return nil }
             case "invalid_model_output":
                 // The codec emits fixed messages without reply text or tool
                 // names. Preserve only complete native envelopes, including
@@ -215,6 +220,24 @@ struct WebsiteTurnFailureStore: Sendable {
             guard NSDictionary(dictionary: supplied).isEqual(to: expected),
                   let sorted = try? JSONSerialization.data(withJSONObject: expected, options: [.sortedKeys, .withoutEscapingSlashes]) else { return nil }
             return String(decoding: sorted, as: UTF8.self)
+        }
+
+        private static func grokComposerFailure(message: Any?) -> EmbeddedWebModelTransport.Failure? {
+            // Extract only a candidate diagnostic. The native formatter validates
+            // its closed action/detail vocabulary; canonicalDiagnostic still
+            // compares the entire regenerated envelope, including message prose.
+            guard let message = message as? String, let opening = message.firstIndex(of: "("),
+                  let closing = message.lastIndex(of: ")"), opening < closing else { return nil }
+            let diagnostic = String(message[message.index(after: opening)..<closing])
+            let parts = diagnostic.components(separatedBy: "; ")
+            guard parts.count == 3, parts[0] == "composer_unavailable",
+                  parts[1].hasPrefix("action="), parts[2].hasPrefix("detail=") else { return nil }
+            let action = String(parts[1].dropFirst("action=".count))
+            let detail = String(parts[2].dropFirst("detail=".count))
+            guard EmbeddedWebModelTransport.grokComposerFailureDiagnostic(action: action, detail: detail) == diagnostic else {
+                return nil
+            }
+            return .editorFailure(diagnostic)
         }
     }
 

@@ -15995,6 +15995,126 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertEqual(counts as? [Int], [0, 0])
     }
 
+    private func installGrokAncestorClipFixture(_ view: WKWebView) async throws {
+        _ = try await evaluate(view, """
+            const f = grokFixture, scroller = document.createElement('div');
+            f.form.style.cssText = 'position:fixed;left:200px;top:300px;width:620px;height:240px;overflow:clip;border:1px solid black;z-index:10';
+            scroller.style.cssText = 'width:600px;height:176px;overflow:auto';
+            f.editor.style.cssText = 'width:560px;min-height:80px;max-height:none;height:auto;overflow:visible;white-space:pre-wrap';
+            f.editor.replaceWith(scroller); scroller.append(f.editor); f.clipScroller = scroller;
+            f.send.style.cssText = 'position:absolute;right:8px;bottom:8px';
+            f.editor.addEventListener('input', () => { scroller.scrollTop = scroller.scrollHeight; });
+            f.clipGeometry = () => {
+                const e = f.editor, r = e.getBoundingClientRect(), c = scroller.getBoundingClientRect();
+                const left = Math.max(0, r.left), top = Math.max(0, r.top);
+                const right = Math.min(innerWidth, r.right), bottom = Math.min(innerHeight, r.bottom);
+                const oldX = (left + right) / 2, oldY = (top + bottom) / 2;
+                const clipLeft = Math.max(left,c.left + scroller.clientLeft), clipTop = Math.max(top,c.top + scroller.clientTop);
+                const clipRight = Math.min(right,c.left + scroller.clientLeft + scroller.clientWidth);
+                const clipBottom = Math.min(bottom,c.top + scroller.clientTop + scroller.clientHeight);
+                const x = (clipLeft + clipRight)/2, y = (clipTop + clipBottom)/2;
+                return {width:innerWidth,height:innerHeight,tall:r.height > innerHeight,
+                    oldPointOutsideClip:oldY < clipTop || oldY >= clipBottom,
+                    oldHit:e.contains(document.elementFromPoint(oldX,oldY)),
+                    clipHit:clipRight > clipLeft && clipBottom > clipTop && e.contains(document.elementFromPoint(x,y)),
+                    otherHit:clipRight > clipLeft && clipBottom > clipTop && e.contains(document.elementFromPoint(x+40,y)),x,y};
+            };
+            const prior = f.beforeSend;
+            f.beforeSend = () => { prior?.(); f.clipGeometryAtSend = f.clipGeometry(); };
+            return true;
+            """)
+    }
+
+    func testGrokAncestorClippedEditorUsesOneVerifiedVisiblePoint() async throws {
+        let fixture = try Fixture(page: Self.grokFixturePage())
+        defer { fixture.shutdown() }
+        let (token, view) = try await startGrokFixture(fixture)
+        try await installGrokEditingObservation(view)
+        try await installGrokAncestorClipFixture(view)
+        let prompt = String(repeating: "SAFE synthetic scrollport line with literal <>& and  spaces.\n", count: 450)
+        let sent = try await grokFixtureCall(fixture, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+        XCTAssertEqual(sent["state"] as? String, "running")
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        let raw = try await evaluate(view, "return {geometry:grokFixture.clipGeometryAtSend,prompt:grokFixture.lastPrompt,sends:grokFixture.sendCount};")
+        let value = try XCTUnwrap(raw as? [String: Any]), geometry = try XCTUnwrap(value["geometry"] as? [String: Any])
+        XCTAssertEqual(geometry["width"] as? Int, 1_024); XCTAssertEqual(geometry["height"] as? Int, 768)
+        XCTAssertEqual(geometry["tall"] as? Bool, true)
+        XCTAssertEqual(geometry["oldPointOutsideClip"] as? Bool, true)
+        XCTAssertEqual(geometry["oldHit"] as? Bool, false)
+        XCTAssertEqual(geometry["clipHit"] as? Bool, true)
+        XCTAssertEqual(value["sends"] as? Int, 1)
+        let outbound = try XCTUnwrap(value["prompt"] as? String)
+        XCTAssertTrue(outbound.hasPrefix(prompt + "\n\nComputa session marker: "))
+        let proof = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+        XCTAssertEqual(proof["firstUserFingerprint"] as? String, EmbeddedWebModelTransport.outboundFingerprint(outbound))
+        XCTAssertEqual(proof["sequence"] as? Int, 1)
+        try assertChoiceEvidence(complete, choice: WebsiteModelChoice(provider: "grok", key: "Fast", label: "Fast"))
+        let commands = try await evaluate(view, "return globalThis.grokNativeEditingOperation.commands;", world: WKContentWorld.world(name: "computa-chatgpt-model-v1"))
+        XCTAssertEqual(commands as? [String], ["insertHTML"])
+        let closed = try await grokFixtureCall(fixture, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(closed["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testGrokAncestorClipCannotSearchAroundOverlayOrReuseChangedBounds() async throws {
+        for arm in ["overlay", "empty_clip", "transform", "changed_after_ready"] {
+            let fixture = try Fixture(page: Self.grokFixturePage())
+            defer { fixture.transport.setBeforePageResultValidationForTesting(nil); fixture.shutdown() }
+            let (token, view) = try await startGrokFixture(fixture)
+            try await installGrokEditingObservation(view)
+            try await installGrokAncestorClipFixture(view)
+            var changed = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                guard !changed, action == (arm == "changed_after_ready" ? "sendReady" : "insert") else { return }
+                changed = true
+                let mutation: String
+                switch arm {
+                case "overlay": mutation = """
+                    const g = grokFixture.clipGeometry(), cover = document.createElement('div');
+                    cover.style.cssText = `position:fixed;left:${g.x-8}px;top:${g.y-8}px;width:16px;height:16px;z-index:1000`;
+                    document.body.append(cover);
+                    """
+                case "transform": mutation = "grokFixture.clipScroller.style.transform='translateX(1px)';"
+                default: mutation = "grokFixture.clipScroller.style.height='0px';"
+                }
+                let result = try? await self.evaluate(view, mutation + " return true;")
+                XCTAssertEqual(result as? Bool, true)
+            }
+            do {
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                    "prompt": String(repeating: "SAFE clipped edit remains exact.\n", count: 450)])
+                XCTFail("Changed or obscured clip cannot authorize Send: \(arm)")
+            } catch {
+                let action = arm == "changed_after_ready" ? "submit" : "sendReady"
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure,
+                    .editorFailure("composer_unavailable; action=\(action); detail=editor_hit_test"), arm)
+            }
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            XCTAssertTrue(changed)
+            let raw = try await evaluate(view, "return {geometry:grokFixture.clipGeometry(),sends:grokFixture.sendCount};")
+            let value = try XCTUnwrap(raw as? [String: Any])
+            XCTAssertEqual(value["sends"] as? Int, 0, arm)
+            if arm == "overlay" {
+                let geometry = try XCTUnwrap(value["geometry"] as? [String: Any])
+                XCTAssertEqual(geometry["clipHit"] as? Bool, false)
+                XCTAssertEqual(geometry["otherHit"] as? Bool, true, "An alternate point must not become an overlay bypass")
+            }
+            await assertRejected(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "No replay"])
+            let commands = try await evaluate(view, "return globalThis.grokNativeEditingOperation.commands;", world: WKContentWorld.world(name: "computa-chatgpt-model-v1"))
+            XCTAssertEqual(commands as? [String], ["insertHTML"], arm)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            let closed = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            // Native spends its submission claim before invoking submit. If
+            // geometry changes after positive readiness, JS refuses the actual
+            // click, but cleanup cannot assume that claimed submission was
+            // absent. Preserve its existing conservative retained-page result.
+            let retained = arm == "changed_after_ready"
+            XCTAssertEqual(closed["cleanup"] as? String, retained ? "failed" : "not_created", arm)
+            if retained { try await assertHumanTabIntact(fixture, retaining: ownedID) }
+            else { try await assertHumanTabIntact(fixture) }
+        }
+    }
+
     func testGrokMultilineLiteralEditingProvesExactBodyWithoutPaste() async throws {
         let fixture = try Fixture(page: Self.grokFixturePage())
         defer { fixture.shutdown() }

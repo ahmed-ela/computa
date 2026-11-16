@@ -347,6 +347,49 @@ describe('Grok private inference adapter', () => {
     }
   });
 
+  test('Grok editor hit intersects ancestor scrollports before one deterministic point', async () => {
+    const f = grokFixture(); expect(await f.prepare()).toMatchObject({ inserted: true });
+    const clip: any = new f.Node('DIV', { style: 'overflow:auto' });
+    clip.rect = { left: 20, top: 300, width: 620, height: 100 };
+    Object.assign(clip, { clientLeft: 1, clientTop: 1, clientWidth: 618, clientHeight: 98 });
+    f.f.editor.remove(); f.f.editor.connected = true; clip.append(f.f.editor); f.f.form.append(clip);
+    f.f.editor.rect = { left: 24, top: -1600, width: 600, height: 2000 };
+    const points: number[][] = [], original = f.document.elementFromPoint;
+    f.document.elementFromPoint = (x: number, y: number) => {
+      if (x > 300) { points.push([x, y]); return y >= 301 && y <= 399 ? f.f.editor : f.body; }
+      return original(x, y);
+    };
+    expect((await f.run('sendReady', { prompt: grokPrompt })).sendReady).toBe(true);
+    expect(points).toEqual([[324, 350]]);
+    points.length = 0;
+    f.document.elementFromPoint = (x: number, y: number) => { if (x > 300) { points.push([x, y]); return f.body; } return original(x, y); };
+    expect(await f.run('submit', { prompt: grokPrompt })).toMatchObject({ error: 'composer_unavailable', detail: 'editor_hit_test' });
+    expect(points).toEqual([[324, 350]]); expect(f.f.sendCount).toBe(0);
+  });
+
+  test('uncertain or empty ancestor clips never grant editor hit readiness', async () => {
+    for (const mode of ['empty', 'invalid', 'transform', 'clip_path', 'paint', 'changed_after_ready']) {
+      const f = grokFixture(); expect(await f.prepare()).toMatchObject({ inserted: true });
+      const clip: any = new f.Node('DIV', { style: 'overflow:auto' });
+      clip.rect = { left: 0, top: 0, width: 100, height: 30 };
+      Object.assign(clip, { clientLeft: 0, clientTop: 0, clientWidth: 100, clientHeight: 30 });
+      f.f.editor.remove(); f.f.editor.connected = true; clip.append(f.f.editor); f.f.form.append(clip);
+      f.document.elementFromPoint = () => f.f.editor;
+      if (mode === 'changed_after_ready') {
+        // Test geometry helper through the full edit guard; Send is independently
+        // hit-tested and therefore intentionally not advertised by this stub.
+        const ready = await f.run('sendReady', { prompt: grokPrompt }); expect(ready.error).toBeUndefined();
+      }
+      if (mode === 'empty' || mode === 'changed_after_ready') clip.clientHeight = 0;
+      if (mode === 'invalid') clip.clientWidth = Number.NaN;
+      if (mode === 'transform') clip.setAttribute('style', 'overflow:auto;transform:translateX(1px)');
+      if (mode === 'clip_path') clip.setAttribute('style', 'overflow:auto;clip-path:inset(1px)');
+      if (mode === 'paint') clip.setAttribute('style', 'overflow:auto;contain:paint');
+      expect(await f.run('sendReady', { prompt: grokPrompt })).toMatchObject({ error: 'composer_unavailable', detail: 'editor_hit_test' });
+      expect(f.f.sendCount).toBe(0);
+    }
+  });
+
   test('the public pilot returns only observed enabled Fast and never invents a missing row', async () => {
     const f = grokFixture(); let discovered: any;
     for (let step = 0; step < 4; step++) { discovered = await f.run('discoverModels'); if (!discovered.pending) break; }

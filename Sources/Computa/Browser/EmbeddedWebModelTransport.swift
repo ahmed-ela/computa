@@ -7606,7 +7606,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
 
     /// Closed Grok control-branch names only; page text, labels, URLs and other
     /// arbitrary details never enter logs or acquire readiness/retry authority.
-    static func grokComposerFailureDiagnostic(action: String, detail: Any?) -> String? {
+    nonisolated static func grokComposerFailureDiagnostic(action: String, detail: Any?) -> String? {
         let actions: Set<String> = ["inspect", "discoverModels", "selectModel", "verifyModel", "enableTemporary",
             "prepare", "insert", "sendReady", "submit", "stop"]
         let reasons: Set<String> = ["initial_editor_ambiguous", "initial_editor_invalid", "initial_action_ambiguous",

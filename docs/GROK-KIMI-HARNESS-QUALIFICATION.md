@@ -346,3 +346,43 @@ paste events, one Send, exact submitted-body fingerprint and verified cleanup.
 False, unconfirmed, empty, partial, replaced-editor and delayed edits cannot
 Send or replay. These tests preserve the native contract; installed-site tool
 qualification remains a separate gate.
+
+Installed build 563 reached `sendReady` after prompt insertion, so the earlier
+insertion timeout did not recur in this attempt. Its fresh marker then failed
+in 4.009 seconds with `composer_unavailable; action=sendReady;
+detail=editor_hit_test`. There was no verified Send, zero tools, and a saved
+`closed/not_created` cleanup receipt. The runtime trace used generic high-demand
+prose for its HTTP-500 error; Computa's live UI showed the precise native editor
+error. The durable failure allowlist rejected this finite diagnostic, causing
+the separate unavailable-record warning. Build 564 admits only Grok diagnostics
+validated by the existing finite formatter and exact regenerated error envelope.
+
+An approved unsent 32 KiB control inserted in a 514 ms measured edit interval
+and passed canonical/hash checks. Its real editor was 29,496 px tall inside a
+176 px `overflow:auto` scrollport, with a further `overflow:clip` form. The
+viewport-only and clipped midpoints both hit the editor in this 360 by 527
+ordinary browser layout; this alone does not reproduce the native 1024 by 768
+failure. It establishes the clipping structure that the existing viewport-only
+hit test ignored. The native-layout regression and next installed run are
+separate checks. The exact synthetic draft was cleared, its tab closed and
+Safari developer features restored off; no message was sent by the control.
+
+Build 564 intersects the Grok editor's viewport rectangle with its ancestor
+scrollport client boxes before choosing one hit-test point. It still requires
+that point to resolve to the exact owned editor, rejects overlays and unsupported
+transforms/clipping, and repeats the check before actions. Other providers and
+Send/model/Private controls retain their existing hit tests.
+
+The real 1024 by 768 WebKit regression reproduces a viewport-only point outside
+the scrollport and verifies that the clipped point reaches the editor. One
+literal edit, exact body fingerprint, Fast/Private evidence and cleanup pass.
+Negative cases cover overlays, empty bounds, transforms and a change after
+readiness. A post-readiness refusal retains the existing conservative claimed-
+Send cleanup failure; it does not replay or infer that no submission occurred.
+
+Final source validation: 69 JavaScript tests (974 assertions) and eight focused
+native methods pass. The first native compile required marking the pure finite
+formatter nonisolated; it accesses no actor state. Seven native methods passed
+together; the remaining negative method passed after its test expectation was
+corrected to the existing post-claim cleanup contract, with no production
+cleanup change. Installed-site qualification of 564 remains pending.

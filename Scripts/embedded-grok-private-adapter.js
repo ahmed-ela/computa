@@ -358,7 +358,7 @@ try {
     return { ...initial, stopped: false };
   }
   if (state.submitted || initial.userCount || initial.responseCount) c.fail('composer_unavailable', 'editor_not_fresh');
-  if (!c.hit(form.editor)) c.fail('composer_unavailable', 'editor_hit_test');
+  if (!computaGrokEditorHit(c, form.editor)) c.fail('composer_unavailable', 'editor_hit_test');
   if (input.action === 'prepare') {
     if (state.prepared || c.bodyText(form.editor.innerText)) c.fail('composer_not_empty');
     state.prepared = form.editor; form.editor.focus(); guard();

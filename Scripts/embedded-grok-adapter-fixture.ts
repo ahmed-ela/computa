@@ -101,6 +101,11 @@ export function grokFixture() {
         }));
         return { visibility: node.values.visibility || inline.visibility || 'visible',
           display: node.closest('[hidden]') ? 'none' : inline.display || 'block',
+          overflowX: inline['overflow-x'] || inline.overflow || 'visible',
+          overflowY: inline['overflow-y'] || inline.overflow || 'visible',
+          transform: inline.transform || 'none', translate: inline.translate || 'none',
+          rotate: inline.rotate || 'none', scale: inline.scale || 'none', perspective: inline.perspective || 'none',
+          clipPath: inline['clip-path'] || 'none', contain: inline.contain || 'none', zoom: inline.zoom || '1',
           position: inline.position || 'static', height: inline.height || '30px', zIndex: inline['z-index'] || 'auto' };
       },
       class {
