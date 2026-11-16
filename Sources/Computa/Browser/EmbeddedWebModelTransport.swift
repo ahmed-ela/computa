@@ -1051,6 +1051,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var claudeCompletionDiagnosticLog = ClaudeCompletionDiagnosticLogBudget()
         var loggedFirstUserStructure = false
         var loggedGroqComposerFailure = false
+        var loggedGrokComposerFailure = false
         var loggedGroqSendFailure = false
         var loggedGroqSendReveal = false
         var loggedSavedAdapterFailure = false
@@ -7458,6 +7459,19 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return "composer_unavailable; action=\(action); detail=\(reason)"
     }
 
+    /// Closed Grok control-branch names only; page text, labels, URLs and other
+    /// arbitrary details never enter logs or acquire readiness/retry authority.
+    static func grokComposerFailureDiagnostic(action: String, detail: Any?) -> String? {
+        let actions: Set<String> = ["inspect", "discoverModels", "selectModel", "verifyModel", "enableTemporary",
+            "prepare", "insert", "sendReady", "submit", "stop"]
+        let reasons: Set<String> = ["initial_editor_ambiguous", "initial_editor_invalid", "initial_action_ambiguous",
+            "initial_action_invalid", "editor_missing", "editor_ambiguous", "editor_authored", "action_missing",
+            "action_ambiguous", "action_authored", "action_invalid", "editor_not_fresh", "editor_hit_test"]
+        guard actions.contains(action) else { return nil }
+        let reason = (detail as? String).flatMap { reasons.contains($0) ? $0 : nil } ?? "unknown"
+        return "composer_unavailable; action=\(action); detail=\(reason)"
+    }
+
     /// Only fixed adapter categories may survive page cleanup. This describes
     /// the evaluated failure, never current geometry or permission to act.
     static func groqSendFailureDiagnostic(action: String, stage: String, detail: Any?) -> String? {
@@ -9226,6 +9240,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case "not_fresh": throw Failure.notFresh
             case "temporary_mode_unavailable", "temporary_mode_unverified": throw Failure.temporaryUnverified
             case "composer_unavailable":
+                if provider == .grok, let diagnostic = Self.grokComposerFailureDiagnostic(action: action, detail: observed["detail"]) {
+                    if !session.loggedGrokComposerFailure {
+                        session.loggedGrokComposerFailure = true
+                        Self.inspectionLog.notice("composerFailure provider=grok \(diagnostic, privacy: .public)")
+                    }
+                    throw Failure.editorFailure(diagnostic)
+                }
                 if provider == .groq, let diagnostic = Self.groqComposerFailureDiagnostic(action: action, detail: observed["detail"]) {
                     if !session.loggedGroqComposerFailure {
                         session.loggedGroqComposerFailure = true

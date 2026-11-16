@@ -88,6 +88,25 @@ describe('Grok private inference adapter', () => {
     expect(await selected.run('inspect', { allowGrokInitialHydration: true })).toMatchObject({ error: 'composer_unavailable' });
   });
 
+  test('composer failures report only the evaluated fixed branch without granting readiness', async () => {
+    const scenarios: [string, boolean, (f: ReturnType<typeof grokFixture>) => void][] = [
+      ['initial_editor_ambiguous', true, f => { f.body.append(f.f.editor.cloneNode(true)); }],
+      ['initial_editor_invalid', true, f => { f.f.editor.setAttribute('hidden', ''); }],
+      ['initial_action_ambiguous', true, f => { f.body.append(new f.Node('BUTTON', { ...f.f.send.values })); }],
+      ['initial_action_invalid', true, f => { f.f.send.setAttribute('aria-label', 'Unrecognized private text'); }],
+      ['editor_missing', false, f => { f.f.editor.remove(); }],
+      ['editor_ambiguous', false, f => { f.body.append(f.f.editor.cloneNode(true)); }],
+      ['editor_authored', false, f => { f.f.form.setAttribute('contenteditable', 'true'); }],
+      ['action_missing', false, f => { f.f.send.remove(); }],
+      ['action_ambiguous', false, f => { f.body.append(new f.Node('BUTTON', { ...f.f.send.values })); }],
+    ];
+    for (const [detail, allowGrokInitialHydration, change] of scenarios) {
+      const f = grokFixture(); change(f);
+      expect(await f.run('inspect', { allowGrokInitialHydration })).toEqual({ error: 'composer_unavailable', detail });
+      expect(f.f.sendCount + f.f.privateCount + f.f.pickerOpens).toBe(0);
+    }
+  });
+
   test('initial native intent is not mistaken for already-observed model proof', async () => {
     const f = grokFixture();
     expect(await f.run('inspect', { expectedModelChoice: { key: 'Fast', label: 'Fast' } }))

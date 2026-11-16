@@ -80,6 +80,26 @@ final class GrokPrivateModeEvidenceTests: XCTestCase {
     }
 
     @MainActor
+    func testComposerDiagnosticOnlyRetainsClosedActionAndBranchNames() {
+        let actions = ["inspect", "discoverModels", "selectModel", "verifyModel", "enableTemporary",
+            "prepare", "insert", "sendReady", "submit", "stop"]
+        let details = ["initial_editor_ambiguous", "initial_editor_invalid", "initial_action_ambiguous",
+            "initial_action_invalid", "editor_missing", "editor_ambiguous", "editor_authored", "action_missing",
+            "action_ambiguous", "action_authored", "action_invalid", "editor_not_fresh", "editor_hit_test"]
+        for action in actions {
+            for detail in details {
+                XCTAssertEqual(EmbeddedWebModelTransport.grokComposerFailureDiagnostic(action: action, detail: detail),
+                    "composer_unavailable; action=\(action); detail=\(detail)")
+            }
+            for detail: Any in ["private page contents", "https://grok.com/c/private", 42, ["editor_missing"], NSNull()] {
+                XCTAssertEqual(EmbeddedWebModelTransport.grokComposerFailureDiagnostic(action: action, detail: detail),
+                    "composer_unavailable; action=\(action); detail=unknown")
+            }
+        }
+        XCTAssertNil(EmbeddedWebModelTransport.grokComposerFailureDiagnostic(action: "unknown private action", detail: "editor_missing"))
+    }
+
+    @MainActor
     func testOnlyExactPrivateRootIsAdmitted() {
         let provider = EmbeddedWebModelTransport.Provider.grok
         XCTAssertTrue(provider.lifecycle == .temporary)

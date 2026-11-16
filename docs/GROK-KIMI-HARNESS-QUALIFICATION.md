@@ -80,3 +80,21 @@ cleared and its private test tab closed without Send.
 Kimi's startup discovery reported a nonempty composer. Its draft has not yet been
 cleared or replayed; the old third-inference receipt does not retain an outbound
 fingerprint that could establish an exact match after restart.
+
+## Installed build 552 and bounded follow-up
+
+Grok discovery still failed before Send. Finite composer-branch diagnostics were
+added without changing control acceptance, timing, ownership or retry behavior.
+A settled ordinary page matches the sizing-field predicate; opening its model
+menu does not hide the composer. Full-resource Inspector transfer attempts did
+not establish execution and are not adapter evidence.
+
+Kimi displays a provider-owned quota banner: “Your free quota is used up.
+Refreshes at 12-02.” Both the dedicated sign-in page and ordinary shared-profile
+page show it. Build 553 recognizes only the observed unique visible composer
+banner during fresh, authenticated, unsubmitted inspection, ahead of the draft
+check. It returns the existing usage-limit error, preserves the restored draft,
+and grants no ownership or cleanup authority. The six new JavaScript regressions
+and a native WebKit case cover this distinction; live responses remain blocked
+until provider access is restored. This does not prove the cause of build 550's
+third-inference route failure.

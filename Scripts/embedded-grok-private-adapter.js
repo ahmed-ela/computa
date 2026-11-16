@@ -91,10 +91,10 @@ try {
       return style.visibility === 'hidden' && style.position === 'absolute' && style.height === '0px' && style.zIndex === '-1000';
     };
     const editors = c.nodes(document, '[contenteditable], [role="textbox"], textarea', 8).filter(node => !measurementTextarea(node));
-    if (editors.length > 1) c.fail('composer_unavailable');
+    if (editors.length > 1) c.fail('composer_unavailable', 'initial_editor_ambiguous');
     if (editors.length && (!c.enabled(editors[0]) || editors[0].tagName !== 'DIV'
       || editors[0].getAttribute('contenteditable') !== 'true' || editors[0].getAttribute('role') !== 'textbox'
-      || editors[0].getAttribute('aria-label') !== 'Message Grok')) c.fail('composer_unavailable');
+      || editors[0].getAttribute('aria-label') !== 'Message Grok')) c.fail('composer_unavailable', 'initial_editor_invalid');
     if (editors.length && c.bodyText(editors[0].innerText)) c.fail('composer_not_empty');
     const buttons = c.nodes(document, 'button', 256);
     const triggers = [...new Set([...c.nodes(document, '#model-select-trigger', 8),
@@ -116,12 +116,12 @@ try {
       c.fail('temporary_mode_unverified');
     const controls = buttons.filter(node => node.hasAttribute('data-composer-action') || node.getAttribute('data-testid') === 'chat-submit'
       || ['Send', 'Stop', 'Voice mode'].includes(node.getAttribute('aria-label')));
-    if (controls.length > 1) c.fail('composer_unavailable');
+    if (controls.length > 1) c.fail('composer_unavailable', 'initial_action_ambiguous');
     if (controls.length) {
       const control = controls[0], label = control.getAttribute('aria-label'), action = control.getAttribute('data-composer-action');
       if (!c.visible(control) || !(label === 'Voice mode' && action === 'voice'
         || label === 'Send' && action === 'send' && control.getAttribute('type') === 'submit'
-          && control.getAttribute('data-testid') === 'chat-submit')) c.fail('composer_unavailable');
+          && control.getAttribute('data-testid') === 'chat-submit')) c.fail('composer_unavailable', 'initial_action_invalid');
     }
     if (![editors, triggers, modes, controls].every(nodes => nodes.length === 1)) return true;
     state.initialHydrationClosed = true;
@@ -132,17 +132,18 @@ try {
   const models = computaGrokModelControls(c, state, guard);
   function composer() {
     const editors = c.nodes(document, 'div[contenteditable="true"][role="textbox"][aria-label="Message Grok"]', 8).filter(c.visible);
-    if (editors.length !== 1 || authored(editors[0]?.parentElement)) c.fail('composer_unavailable');
+    if (editors.length !== 1) c.fail('composer_unavailable', editors.length ? 'editor_ambiguous' : 'editor_missing');
+    if (authored(editors[0].parentElement)) c.fail('composer_unavailable', 'editor_authored');
     const editor = editors[0];
     const controls = c.nodes(document, 'button[data-testid="chat-submit"][data-composer-action], button[aria-label="Voice mode"][data-composer-action="voice"], button[aria-label="Stop"]', 8)
       .filter(node => c.visible(node) && !authored(node));
-    const action = c.unique(controls, 'composer_unavailable');
-    if (authored(action)) c.fail('composer_unavailable');
+    const action = c.unique(controls, 'composer_unavailable', controls.length ? 'action_ambiguous' : 'action_missing');
+    if (authored(action)) c.fail('composer_unavailable', 'action_authored');
     const label = action.getAttribute('aria-label'), kind = action.getAttribute('data-composer-action');
     const send = label === 'Send' && kind === 'send' && action.getAttribute('type') === 'submit' ? action : null;
     const stop = label === 'Stop' ? action : null;
     const voice = !state.submitted && label === 'Voice mode' && kind === 'voice';
-    if (!send && !stop && !voice) c.fail('composer_unavailable');
+    if (!send && !stop && !voice) c.fail('composer_unavailable', 'action_invalid');
     return { editor, send, stop };
   }
   function transcript() {
@@ -295,7 +296,8 @@ try {
     if (form.stop && c.hit(form.stop)) { state.stopped = true; form.stop.click(); guard(); return { ...initial, stopped: true }; }
     return { ...initial, stopped: false };
   }
-  if (state.submitted || initial.userCount || initial.responseCount || !c.hit(form.editor)) c.fail('composer_unavailable');
+  if (state.submitted || initial.userCount || initial.responseCount) c.fail('composer_unavailable', 'editor_not_fresh');
+  if (!c.hit(form.editor)) c.fail('composer_unavailable', 'editor_hit_test');
   if (input.action === 'prepare') {
     if (state.prepared || c.bodyText(form.editor.innerText)) c.fail('composer_not_empty');
     state.prepared = form.editor; form.editor.focus(); guard();

@@ -33,6 +33,28 @@ final class KimiWebModelTransportTests: XCTestCase {
         XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
     }
 
+    func testInitialFreeQuotaReportsLimitBeforeRestoredDraftWithoutGrantingCleanup() async throws {
+        let fixture = try Fixture(initialFreeQuotaBanner: true); defer { fixture.shutdown() }
+        let parameters = ["provider": "kimi", "modelChoice": try XCTUnwrap(choice.canonicalJSONString)]
+        let data = try await fixture.transport.request(operation: "webProviderStart", params: JSONSerialization.data(withJSONObject: parameters))
+        let started = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let ownedTab = try XCTUnwrap(fixture.createdID)
+        do {
+            _ = try await wait(fixture, token, state: "ready")
+            XCTFail("The observed quota must stop readiness before inspecting or changing the restored draft")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .usageLimited(.kimi)) }
+        let finished = try await call(fixture, "webProviderCancel", token)
+        XCTAssertEqual(finished["cleanup"] as? String, "failed", "A quota error supplies no conversation cleanup proof")
+        let draft = try await evaluate(fixture.view, "return document.querySelector('.chat-input-editor').textContent;")
+        XCTAssertEqual(draft as? String, "Unsent synthetic restored draft")
+        let actions = try await evaluate(fixture.view,
+            "return [kimiFixture.counters.modelOpens,kimiFixture.counters.beforeInput,kimiFixture.counters.sends,kimiFixture.counters.confirmations,window.fixtureQuotaClicks];")
+        XCTAssertEqual(actions as? [Int], [0, 0, 0, 0, 0])
+        XCTAssertNotNil(fixture.browser.webView(for: ownedTab), "Retain the unowned restored draft for inspection")
+        XCTAssertNotNil(fixture.browser.webView(for: fixture.humanID))
+    }
+
     func testFreshGuestInferenceClosesOnlyItsUntouchedOwnedTab() async throws {
         let fixture = try Fixture(); defer { fixture.shutdown() }
         fixture.guestAtHome = true
@@ -2057,7 +2079,7 @@ final class KimiWebModelTransportTests: XCTestCase {
         private static let signedInChrome = #"<a href="/chat/history">All chats</a>"#
         private var retainedView: WKWebView?
         var view: WKWebView { retainedView! }
-        init(initialControlsPending: Bool = false, initialEditorAttributePending: Bool = false, initialNestedModel: Bool = false) throws {
+        init(initialControlsPending: Bool = false, initialEditorAttributePending: Bool = false, initialNestedModel: Bool = false, initialFreeQuotaBanner: Bool = false) throws {
             window = Window(contentRect: NSRect(x: 20, y: 20, width: 1024, height: 768), styleMask: [], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false; window.ignoresMouseEvents = true
             host = EmbeddedModelRenderContainer(session: browser); host.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
@@ -2087,7 +2109,24 @@ final class KimiWebModelTransportTests: XCTestCase {
                     })();</script>
                     """
             let nestedSetup = initialNestedModel ? "<script>kimiFixture.selectNestedInitially();</script>" : ""
-            let setup = nestedSetup + (initialControlsPending ? hydrationSetup : initialEditorAttributePending ? attributeSetup : "")
+            let quotaSetup = initialFreeQuotaBanner ? #"""
+                <script>(() => {
+                  const box = document.createElement('div'); box.id = 'chat-box'; box.className = 'chat-box';
+                  const wrap = document.createElement('div'); wrap.className = 'chat-editor-wrap';
+                  wrap.innerHTML = `<div class="chat-input-bar"><div class="chat-input-bar-content">
+                    <svg role="img" class="iconify" name="music" width="1em" height="1em" viewBox="0 0 24 24"><path d="M0 0L24 24"></path></svg>
+                    <span>Your free quota is used up. Refreshes at 06-18.</span>
+                    <span class="chat-input-bar-upgrade">Upgrade</span></div>
+                    <div class="chat-input-bar-actions"><div class="icon-button no-background chat-input-bar-close" role="button" tabindex="0" aria-label="Close">
+                    <svg role="img" class="iconify" name="Close" width="18" height="18" viewBox="0 0 24 24"><path d="M0 0L24 24"></path></svg></div></div></div>`;
+                  wrap.append(document.querySelector('.chat-editor-content')); box.append(wrap); document.body.append(box);
+                  const p = document.createElement('p'); p.textContent = 'Unsent synthetic restored draft';
+                  document.querySelector('.chat-input-editor').replaceChildren(p);
+                  window.fixtureQuotaClicks = 0;
+                  wrap.querySelector('.chat-input-bar').addEventListener('click', () => window.fixtureQuotaClicks++);
+                })();</script>
+                """# : ""
+            let setup = nestedSetup + quotaSetup + (initialControlsPending ? hydrationSetup : initialEditorAttributePending ? attributeSetup : "")
             let html = KimiFixturePage.html
                 .replacingOccurrences(of: "<body>", with: "<body>" + Self.signedInChrome)
                 .replacingOccurrences(of: "</body>", with: setup + "</body>")
