@@ -65,6 +65,38 @@ final class GrokPrivateModeEvidenceTests: XCTestCase {
         ["grokFreshStart": ["version": 1, "stage": stage]]
     }
 
+    func testFreshStartReadinessIsClosedNegativeOnlyAndLoggedOncePerPair() throws {
+        let path = "https://grok.com/c/11111111-abcd-4333-8444-555555555555"
+        var lease = try XCTUnwrap(GrokFreshStartPreparation(url: path, owner: owner, generation: generation))
+        var unique = 0
+        for target in ["toggle", "new_chat"] {
+            for reason in ["disabled", "invalid_geometry", "outside_viewport", "occluded"] {
+                let value: [String: Any] = ["grokFreshStart": ["version": 1, "stage": "pending",
+                    "readiness": ["target": target, "reason": reason]]]
+                let observed = try XCTUnwrap(GrokFreshStartPreparation.parse(value))
+                XCTAssertTrue(lease.accept(observed, action: .inspect))
+                if lease.newlyObservedReadiness(observed) != nil { unique += 1 }
+                XCTAssertNil(lease.newlyObservedReadiness(observed))
+                XCTAssertEqual(lease.nextAction(), .inspect)
+                XCTAssertFalse(lease.expanded); XCTAssertFalse(lease.newChatClaimed); XCTAssertFalse(lease.verified)
+                for stage in ["sidebar_closed", "new_chat_ready", "sidebar_requested", "new_chat_requested", "root_observed"] {
+                    XCTAssertNil(GrokFreshStartPreparation.parse(["grokFreshStart": ["version": 1, "stage": stage,
+                        "readiness": ["target": target, "reason": reason]]]))
+                }
+                var later = try XCTUnwrap(GrokFreshStartPreparation(url: path, owner: owner, generation: generation))
+                XCTAssertTrue(later.accept(freshPacket("new_chat_ready"), action: .inspect))
+                XCTAssertEqual(later.nextAction(), .newChat)
+                XCTAssertFalse(later.accept(observed, action: .verify), "Readiness can only delay initial Inspect")
+            }
+        }
+        XCTAssertEqual(unique, 8)
+        for fields: Any in [["target": "unknown", "reason": "occluded"], ["target": "toggle", "reason": "private text"],
+            ["target": "toggle", "reason": "occluded", "url": "https://example.test/private"],
+            ["target": "toggle"], NSNull(), true] {
+            XCTAssertNil(GrokFreshStartPreparation.parse(["grokFreshStart": ["version": 1, "stage": "pending", "readiness": fields]]))
+        }
+    }
+
     func testFreshStartFailureDiagnosticKeepsOnlyClosedCategories() {
         XCTAssertEqual(GrokFreshStartPreparation.failureDiagnostic(error: "document_changed", detail: "fresh_start_action_unverified"),
             "error=document_changed detail=fresh_start_action_unverified")

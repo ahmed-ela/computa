@@ -3384,7 +3384,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     default: throw Failure.ownershipFailure(.javaScriptConversation)
                     }
                 }
-                guard let stage = GrokFreshStartPreparation.parse(observed), lease.withLock({ $0.accept(stage, action: action) }) else { throw Failure.ownershipFailure(.javaScriptConversation) }
+                guard let observation = GrokFreshStartPreparation.parse(observed), lease.withLock({ $0.accept(observation, action: action) }) else { throw Failure.ownershipFailure(.javaScriptConversation) }
+                if let readiness = lease.withLock({ $0.newlyObservedReadiness(observation) }) {
+                    let host = browser.modelDiagnosticSnapshot(tabID: session.tabID)
+                    Self.inspectionLog.notice("grokFreshStart provider=grok phase=waiting target=\(readiness.target.rawValue, privacy: .public) reason=\(readiness.reason.rawValue, privacy: .public) host={\(host, privacy: .public)}")
+                }
                 if lease.withLock({ $0.verified }) {
                     let expanded = lease.withLock { $0.expanded }
                     let claimed = lease.withLock { $0.newChatClaimed }

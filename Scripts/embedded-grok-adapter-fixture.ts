@@ -11,6 +11,7 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
 export function grokFixture() {
   let currentHit: any = null, obstructed = false;
+  const listeners = new Map<string, Set<(event: any) => void>>();
   const document: any = { URL: 'https://grok.com/', activeElement: null, insertCommandCount: 0 };
   const selection: any = { anchorNode: null, focusNode: null, isCollapsed: false,
     removeAllRanges() { this.anchorNode = this.focusNode = null; this.isCollapsed = false; },
@@ -34,6 +35,12 @@ export function grokFixture() {
   }
   const html = new Node('HTML'), body = new Node('BODY'); html.append(body);
   Object.assign(document, { documentElement: html, body,
+    addEventListener: (type: string, listener: (event: any) => void) => {
+      if (!listeners.has(type)) listeners.set(type, new Set()); listeners.get(type)!.add(listener);
+    },
+    removeEventListener: (type: string, listener: (event: any) => void) => { listeners.get(type)?.delete(listener); },
+    emitLayout: (type: string, target: any) => { for (const listener of [...(listeners.get(type) || [])]) listener({ type, target }); },
+    layoutListenerCount: () => [...listeners.values()].reduce((count, values) => count + values.size, 0),
     createElement: (tag: string) => new Node(tag.toUpperCase()),
     querySelectorAll: (selector: string) => html.querySelectorAll(selector),
     elementFromPoint: () => obstructed ? body : currentHit,

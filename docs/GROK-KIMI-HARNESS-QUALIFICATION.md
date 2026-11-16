@@ -178,3 +178,33 @@ mismatch regression on its corrected test-only command counter. These cover
 both sidebar states, discarded initial reads, deadlines, draft preservation,
 route/generation changes, cancellation and observer release. They are local
 WebKit/proof tests, not evidence that the installed provider completed a task.
+
+Installed build 558 reached navigation preparation but rejected its initial
+New Chat hit test 493 ms after preparation started, following a pending read.
+No navigation action or prompt was dispatched. The error combined hidden,
+disabled, invalid-geometry, out-of-viewport and occluded cases; it does not
+establish that an overlay caused the failure. Kimi's startup again encountered
+the preserved draft before a quota card was visible; no Kimi retry was sent.
+
+The build 559 candidate treats a known, unoccupied but not yet hittable sidebar
+control as negative readiness during inspection only. It retains the original
+deadline and the mandatory hit test immediately before any action. Closed
+diagnostic categories will distinguish persistent geometry problems from a
+control that becomes ready. Live causality and workflow qualification remain
+unproven.
+
+The native waiter has no periodic readiness poll. A CSS-only transition can
+therefore finish without waking it. The candidate adds a scoped completion
+signal for the known pending control; the signal only requests another guarded
+read and never grants navigation or Send authority.
+
+The candidate's 54 JavaScript tests pass (631 assertions), including stale and
+unrelated completion events, listener removal and pre-action revalidation.
+The initial 17 native readiness/proof tests pass, as do four relevant repeats
+against the final resource and a synthetic-event WebKit regression. That last
+test proves event delivery to the native waiter, negative readiness after a
+premature signal, and one guarded New Chat action after a CSSOM-only change
+with no DOM mutation. A spontaneous CSS-animation test is explicitly skipped
+when `document.hidden` is true: the standalone test window's animation stayed
+pending at time zero. This is a test-environment limitation, not a live pass or
+evidence that the actual Computa window stalls animations.

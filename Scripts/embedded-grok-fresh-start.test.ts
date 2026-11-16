@@ -89,21 +89,124 @@ describe('Grok navigation-only fresh-start preparation', () => {
     }
   });
 
-  test('duplicate, malformed, occluded and replaced navigation controls fail without clicks', async () => {
+  test('duplicate, malformed and replaced navigation controls fail without clicks', async () => {
     for (const change of [
       (f: ReturnType<typeof setup>) => { f.body.append(f.f.sidebar.cloneNode(true)); },
       (f: ReturnType<typeof setup>) => { f.f.sidebar.append(f.f.newChat.cloneNode(true)); },
       (f: ReturnType<typeof setup>) => { f.f.newChat.setAttribute('type', 'submit'); },
       (f: ReturnType<typeof setup>) => { f.f.newChat.querySelector('[data-sidebar-item-label]').textContent = 'Delete chat'; },
       (f: ReturnType<typeof setup>) => { f.f.sidebarToggle.setAttribute('aria-keyshortcuts', 'Other'); },
-      (f: ReturnType<typeof setup>) => { f.f.newChat.disabled = true; },
-      (f: ReturnType<typeof setup>) => { f.blockHit(true); },
     ]) {
       const f = setup(true); change(f);
       expect((await f.fresh()).error).toBeDefined(); expect(f.f.sidebarCount + f.f.newChatCount).toBe(0);
     }
     const f = setup(true); await f.fresh(); const replacement = f.f.newChat.cloneNode(true); f.f.newChat.remove(); f.f.sidebar.append(replacement);
     expect((await f.fresh('NewChat')).error).toBeDefined(); expect(f.f.newChatCount).toBe(0);
+  });
+
+  test('a known blocked target grants only finite negative readiness until it is hittable', async () => {
+    for (const expanded of [false, true]) {
+      const f = setup(expanded), target = expanded ? 'new_chat' : 'toggle'; f.blockHit(true);
+      for (let read = 0; read < 3; read++) {
+        expect(await f.fresh()).toEqual({ grokFreshStart: { version: 1, stage: 'pending', readiness: { target, reason: 'occluded' } } });
+        expect(f.world.__computaGrokFreshStartV1.readyElement).toBeNull();
+        expect(f.f.sidebarCount + f.f.newChatCount + f.f.sendCount).toBe(0);
+      }
+      f.blockHit(false);
+      expect(await f.fresh()).toEqual(stage(expanded ? 'new_chat_ready' : 'sidebar_closed'));
+      if (!expanded) {
+        expect(await f.fresh('ExpandSidebar')).toEqual(stage('sidebar_requested'));
+        expect(await f.fresh()).toEqual(stage('new_chat_ready'));
+      }
+      expect(await f.fresh('NewChat')).toEqual(stage('new_chat_requested'));
+      expect(await f.fresh('Verify')).toEqual(stage('root_observed'));
+      expect([f.f.sidebarCount, f.f.newChatCount, f.f.otherNewChat.clicks]).toEqual([expanded ? 0 : 1, 1, 0]);
+    }
+  });
+
+  test('disabled and invalid or offscreen geometry remain pending without becoming ready', async () => {
+    for (const [reason, change] of [
+      ['disabled', (node: any) => { node.disabled = true; }],
+      ['invalid_geometry', (node: any) => { node.rect.width = 0; }],
+      ['outside_viewport', (node: any) => { node.rect.left = 2000; }],
+    ] as const) {
+      for (const expanded of [false, true]) {
+        const f = setup(expanded); change(expanded ? f.f.newChat : f.f.sidebarToggle);
+        expect(await f.fresh()).toEqual({ grokFreshStart: { version: 1, stage: 'pending', readiness: { target: expanded ? 'new_chat' : 'toggle', reason } } });
+        expect(f.world.__computaGrokFreshStartV1.readyElement).toBeNull();
+        expect(f.f.newChatCount + f.f.sidebarCount).toBe(0);
+      }
+    }
+  });
+
+  test('only the pending target or its ancestors can cause one CSS-completion wakeup', async () => {
+    for (const type of ['transitionend', 'transitioncancel', 'animationend', 'animationcancel']) {
+      for (const ancestor of [false, true]) {
+        const f = setup(true); f.blockHit(true); await f.fresh();
+        const unrelated = new f.Node('DIV'); f.body.append(unrelated);
+        expect(f.document.layoutListenerCount()).toBe(4);
+        f.document.emitLayout(type, unrelated);
+        expect(f.posted).toEqual([]); expect(f.document.layoutListenerCount()).toBe(4);
+        f.document.emitLayout(type, ancestor ? f.f.sidebar : f.f.newChat);
+        expect(f.posted).toEqual([{ ownerToken: grokOwner, kind: 'dom_changed' }]);
+        expect(f.document.layoutListenerCount()).toBe(0);
+        f.document.emitLayout(type, f.f.newChat);
+        expect(f.posted).toHaveLength(1); expect(f.f.sidebarCount + f.f.newChatCount + f.f.sendCount).toBe(0);
+      }
+    }
+  });
+
+  test('stale layout events cannot wake another document, owner, route or completed preparation', async () => {
+    for (const change of [
+      (f: ReturnType<typeof setup>) => { f.world.__computaModelOwner = token; },
+      (f: ReturnType<typeof setup>) => { f.world.__computaGrokFreshStartV1.generation = token; },
+      (f: ReturnType<typeof setup>) => { f.world.__computaGrokFreshStartV1.document = {}; },
+      (f: ReturnType<typeof setup>) => { f.document.URL += '?rid=' + rid; },
+      (f: ReturnType<typeof setup>) => { f.world.__computaGrokFreshStartV1.terminal = true; },
+      (f: ReturnType<typeof setup>) => { f.world.__computaGrokFreshStartV1.verified = true; },
+      (f: ReturnType<typeof setup>) => { f.world.__computaGrokFreshStartV1.newChat = true; },
+      (f: ReturnType<typeof setup>) => { f.f.newChat.remove(); },
+    ]) {
+      const f = setup(true); f.blockHit(true); await f.fresh(); change(f);
+      f.document.emitLayout('transitionend', f.f.sidebar);
+      expect(f.posted).toEqual([]); expect(f.document.layoutListenerCount()).toBe(0);
+      expect(f.f.sidebarCount + f.f.newChatCount + f.f.sendCount).toBe(0);
+    }
+  });
+
+  test('new reads, action attempts, verification and failures remove prior layout listeners', async () => {
+    const ready = setup(true); ready.blockHit(true); await ready.fresh();
+    await ready.fresh(); expect(ready.document.layoutListenerCount()).toBe(4);
+    ready.blockHit(false); expect(await ready.fresh()).toEqual(stage('new_chat_ready'));
+    expect(ready.document.layoutListenerCount()).toBe(0);
+    for (const action of ['NewChat', 'Verify', 'Invalid']) {
+      const f = setup(true); f.blockHit(true); await f.fresh();
+      expect((await f.fresh(action)).error).toBeDefined(); expect(f.document.layoutListenerCount()).toBe(0);
+    }
+    const invalid = setup(true); invalid.blockHit(true); await invalid.fresh(); invalid.f.newChat.setAttribute('type', 'submit');
+    expect((await invalid.fresh()).error).toBeDefined(); expect(invalid.document.layoutListenerCount()).toBe(0);
+  });
+
+  test('an occlusion appearing after readiness rejects the claimed action without retry', async () => {
+    for (const expanded of [false, true]) {
+      const f = setup(expanded), action = expanded ? 'NewChat' : 'ExpandSidebar'; await f.fresh(); f.blockHit(true);
+      expect(await f.fresh(action)).toMatchObject({ error: 'document_changed', detail: 'fresh_start_action_unverified' });
+      f.blockHit(false);
+      expect((await f.fresh(action)).error).toBeDefined();
+      expect(f.f.sidebarCount + f.f.newChatCount + f.f.sendCount).toBe(0);
+    }
+  });
+
+  test('New Chat still requires the sidebar toggle to remain enabled at action time', async () => {
+    for (const change of [
+      (node: any) => { node.disabled = true; },
+      (node: any) => { node.setAttribute('aria-disabled', 'true'); },
+      (node: any) => { node.setAttribute('hidden', ''); },
+    ]) {
+      const f = setup(true); expect(await f.fresh()).toEqual(stage('new_chat_ready')); change(f.f.sidebarToggle);
+      expect(await f.fresh('NewChat')).toMatchObject({ error: 'document_changed', detail: 'fresh_start_action_unverified' });
+      expect(f.f.sidebarCount + f.f.newChatCount + f.f.sendCount).toBe(0);
+    }
   });
 
   test('failed or ambiguous clicks cannot be replayed or repaired into a second navigation', async () => {

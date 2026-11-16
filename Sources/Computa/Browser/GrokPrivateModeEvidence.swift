@@ -70,6 +70,16 @@ struct GrokPrivateSubmission: Equatable {
 struct GrokFreshStartPreparation: Sendable {
     enum Action: String, Sendable { case inspect = "grokFreshStartInspect", expand = "grokFreshStartExpandSidebar", newChat = "grokFreshStartNewChat", verify = "grokFreshStartVerify" }
     enum Stage: String, Sendable { case pending, sidebarClosed = "sidebar_closed", newChatReady = "new_chat_ready", sidebarRequested = "sidebar_requested", newChatRequested = "new_chat_requested", rootObserved = "root_observed" }
+    struct Readiness: Hashable, Sendable {
+        enum Target: String, Sendable { case toggle, newChat = "new_chat" }
+        enum Reason: String, Sendable { case disabled, invalidGeometry = "invalid_geometry", outsideViewport = "outside_viewport", occluded }
+        let target: Target
+        let reason: Reason
+    }
+    struct Observation: Sendable {
+        let stage: Stage
+        let readiness: Readiness?
+    }
     struct Route: Equatable, Sendable {
         let path: String
         let responseID: String?
@@ -92,6 +102,7 @@ struct GrokFreshStartPreparation: Sendable {
     private(set) var verified = false
     private(set) var failed = false
     private(set) var stage: Stage?
+    private var loggedReadiness = Set<Readiness>()
 
     init?(url: String, owner: String, generation: UUID) {
         guard let route = Route(url), UUID(uuidString: owner) != nil else { return nil }
@@ -137,12 +148,20 @@ struct GrokFreshStartPreparation: Sendable {
         return "error=\(error) detail=\(detail)"
     }
 
-    static func parse(_ value: [String: Any]) -> Stage? {
+    static func parse(_ value: [String: Any]) -> Observation? {
         guard Set(value.keys) == ["grokFreshStart"],
-              let packet = value["grokFreshStart"] as? [String: Any], Set(packet.keys) == ["version", "stage"],
+              let packet = value["grokFreshStart"] as? [String: Any],
+              Set(packet.keys) == (packet["readiness"] == nil ? ["version", "stage"] : ["version", "stage", "readiness"]),
               let version = packet["version"] as? NSNumber, CFGetTypeID(version) != CFBooleanGetTypeID(), version.doubleValue == 1,
               let raw = packet["stage"] as? String, let next = Stage(rawValue: raw) else { return nil }
-        return next
+        var readiness: Readiness?
+        if let raw = packet["readiness"] {
+            guard next == .pending, let fields = raw as? [String: Any], Set(fields.keys) == ["target", "reason"],
+                  let target = (fields["target"] as? String).flatMap(Readiness.Target.init(rawValue:)),
+                  let reason = (fields["reason"] as? String).flatMap(Readiness.Reason.init(rawValue:)) else { return nil }
+            readiness = Readiness(target: target, reason: reason)
+        }
+        return Observation(stage: next, readiness: readiness)
     }
 
     mutating func accept(_ value: [String: Any], action: Action) -> Bool {
@@ -150,8 +169,9 @@ struct GrokFreshStartPreparation: Sendable {
         return accept(stage, action: action)
     }
 
-    mutating func accept(_ next: Stage, action: Action) -> Bool {
-        guard !failed, !verified else { failed = true; return false }
+    mutating func accept(_ observation: Observation, action: Action) -> Bool {
+        guard !failed, !verified, observation.readiness == nil || action == .inspect else { failed = true; return false }
+        let next = observation.stage
         let valid: Bool
         switch action {
         case .inspect: valid = !newChatClaimed && [.pending, .sidebarClosed, .newChatReady].contains(next) && !(expanded && next == .sidebarClosed)
@@ -164,4 +184,11 @@ struct GrokFreshStartPreparation: Sendable {
         if next == .rootObserved { verified = true }
         return true
     }
+    /// At most eight pairs exist; repeated pending reads cannot flood logs.
+    mutating func newlyObservedReadiness(_ observation: Observation) -> Readiness? {
+        guard !failed, !verified, stage == .pending, let readiness = observation.readiness,
+              loggedReadiness.insert(readiness).inserted else { return nil }
+        return readiness
+    }
+
 }

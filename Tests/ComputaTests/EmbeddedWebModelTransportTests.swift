@@ -15185,6 +15185,208 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             """)
     }
 
+    private static let grokReadinessOverlay = """
+        grokFixture.readinessCover = document.createElement('div');
+        grokFixture.readinessCover.style.cssText = 'position:fixed;inset:0;z-index:999999;background:white';
+        document.body.append(grokFixture.readinessCover);
+        """
+
+    func testGrokFreshStartWaitsForObservedControlsToBecomeHittableWithoutClaims() async throws {
+        for expanded in [false, true] {
+            let setup = (expanded ? "grokFixture.sidebarToggle.click(); grokFixture.sidebarCount = 0;" : "") + Self.grokReadinessOverlay
+            let fixture = try Fixture(page: Self.grokFreshStartPage(setup), initialURL: URL(string: Self.grokSavedFixtureURL))
+            defer { fixture.transport.setBeforePageResultValidationForTesting(nil); fixture.shutdown() }
+            let started = try await startChoice(WebsiteModelChoice(provider: "grok", key: "Fast", label: "Fast"), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            try await waitForFixture(view)
+            var inspected = false
+            fixture.transport.setBeforePageResultValidationForTesting { if $0 == "grokFreshStartInspect" { inspected = true } }
+            let limit = ContinuousClock.now + .seconds(5)
+            var pending: [String: Any] = [:]
+            while !inspected, ContinuousClock.now < limit {
+                let observed = try await fixture.transport.changeRevision(sessionToken: token)
+                let revision = try XCTUnwrap(observed)
+                pending = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+                if !inspected { _ = try await fixture.transport.waitForChange(sessionToken: token, after: revision, until: limit) }
+            }
+            XCTAssertTrue(inspected); XCTAssertEqual(pending["state"] as? String, "loading")
+            XCTAssertNil(pending["modelEvidence"]); XCTAssertNil(pending["modelProofContext"])
+            let before = try await evaluate(view, "return [grokFixture.sidebarCount,grokFixture.newChatCount,grokFixture.privateCount,grokFixture.sendCount];")
+            XCTAssertEqual(before as? [Int], [0, 0, 0, 0])
+            _ = try await evaluate(view, "grokFixture.readinessCover.remove(); return true;")
+            _ = try await waitForState("ready", fixture.transport, token: token)
+            let after = try await evaluate(view, "return [grokFixture.sidebarCount,grokFixture.newChatCount,grokFixture.privateCount,grokFixture.sendCount];")
+            XCTAssertEqual(after as? [Int], [expanded ? 0 : 1, 1, 1, 0])
+        }
+    }
+
+    func testGrokFreshStartSyntheticTransitionEventWakesGuardedNativeRereadWithoutDOMMutation() async throws {
+        let setup = """
+            grokFixture.sidebarToggle.click(); grokFixture.sidebarCount = 0;
+            grokFixture.layoutStyle = document.createElement('style');
+            grokFixture.layoutStyle.textContent = '#app-sidebar { transform: translateX(-1500px); }';
+            document.head.append(grokFixture.layoutStyle);
+            """
+        let fixture = try Fixture(page: Self.grokFreshStartPage(setup), initialURL: URL(string: Self.grokSavedFixtureURL))
+        defer { fixture.transport.setBeforePageResultValidationForTesting(nil); fixture.shutdown() }
+        let started = try await startChoice(WebsiteModelChoice(provider: "grok", key: "Fast", label: "Fast"), in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        try await waitForFixture(view)
+        var inspected = false
+        fixture.transport.setBeforePageResultValidationForTesting { if $0 == "grokFreshStartInspect" { inspected = true } }
+        let initialLimit = ContinuousClock.now + .seconds(5)
+        while !inspected, ContinuousClock.now < initialLimit {
+            let observed = try await fixture.transport.changeRevision(sessionToken: token)
+            let revision = try XCTUnwrap(observed)
+            let pending = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTAssertEqual(pending["state"] as? String, "loading")
+            if !inspected { _ = try await fixture.transport.waitForChange(sessionToken: token, after: revision, until: initialLimit) }
+        }
+        XCTAssertTrue(inspected)
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        _ = try await evaluate(view, """
+            grokFixture.layoutMutationCount = 0;
+            grokFixture.layoutObserver = new MutationObserver(records => { grokFixture.layoutMutationCount += records.length; });
+            grokFixture.layoutObserver.observe(document, { subtree:true, childList:true, attributes:true, characterData:true });
+            return true;
+            """)
+        // A synthetic CSS event crosses into the isolated adapter world and
+        // wakes native, but cannot authorize any action while still occluded.
+        let blockedObserved = try await fixture.transport.changeRevision(sessionToken: token)
+        let blockedRevision = try XCTUnwrap(blockedObserved)
+        _ = try await evaluate(view, """
+            grokFixture.sidebar.dispatchEvent(new TransitionEvent('transitionend', { bubbles:true, propertyName:'transform' }));
+            return true;
+            """)
+        let blockedWake = try await fixture.transport.waitForChange(sessionToken: token, after: blockedRevision, until: ContinuousClock.now + .seconds(3))
+        XCTAssertGreaterThan(try XCTUnwrap(blockedWake), blockedRevision)
+        let stillPending = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+        XCTAssertEqual(stillPending["state"] as? String, "loading")
+        let blockedCounts = try await evaluate(view, "return [grokFixture.layoutMutationCount,grokFixture.sidebarCount,grokFixture.newChatCount,grokFixture.privateCount,grokFixture.sendCount];")
+        XCTAssertEqual(blockedCounts as? [Int], [0, 0, 0, 0, 0])
+
+        let observed = try await fixture.transport.changeRevision(sessionToken: token)
+        let revision = try XCTUnwrap(observed)
+        let layout = try await evaluate(view, """
+            // Updating the existing CSSOM rule changes hit-test geometry without
+            // changing a DOM node or producing a MutationObserver wake.
+            grokFixture.layoutStyle.sheet.cssRules[0].style.transform = 'translateX(0px)';
+            const right = grokFixture.newChat.getBoundingClientRect().right;
+            grokFixture.sidebar.dispatchEvent(new TransitionEvent('transitionend', { bubbles:true, propertyName:'transform' }));
+            await Promise.resolve();
+            return [right, grokFixture.layoutMutationCount];
+            """) as? [Double]
+        XCTAssertGreaterThan(layout?.first ?? 0, 0)
+        XCTAssertEqual(layout?.last, 0)
+        let wake = try await fixture.transport.waitForChange(sessionToken: token, after: revision, until: ContinuousClock.now + .seconds(3))
+        XCTAssertGreaterThan(try XCTUnwrap(wake), revision)
+        _ = try await waitForState("ready", fixture.transport, token: token)
+        let counts = try await evaluate(view, "return [grokFixture.sidebarCount,grokFixture.newChatCount,grokFixture.privateCount,grokFixture.sendCount];")
+        XCTAssertEqual(counts as? [Int], [0, 1, 1, 0])
+    }
+
+    func testGrokFreshStartCSSAncestorTransitionWakesWithoutEndingDOMMutation() async throws {
+        let setup = """
+            grokFixture.sidebarToggle.click(); grokFixture.sidebarCount = 0;
+            grokFixture.sidebar.style.cssText = 'transform:translateX(-1500px);transition:transform 650ms linear';
+            """
+        let fixture = try Fixture(page: Self.grokFreshStartPage(setup), initialURL: URL(string: Self.grokSavedFixtureURL))
+        defer { fixture.transport.setBeforePageResultValidationForTesting(nil); fixture.shutdown() }
+        let started = try await startChoice(WebsiteModelChoice(provider: "grok", key: "Fast", label: "Fast"), in: fixture)
+        let token = try XCTUnwrap(started["sessionToken"] as? String)
+        let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+        try await waitForFixture(view)
+        let documentHidden = try await evaluate(view, "return document.hidden;") as? Bool
+        try XCTSkipIf(documentHidden == true, "This test host keeps the WebKit document hidden, so its CSS animation clock does not run; spontaneous CSS completion is not qualified here")
+        var inspected = false
+        fixture.transport.setBeforePageResultValidationForTesting { if $0 == "grokFreshStartInspect" { inspected = true } }
+        let initialLimit = ContinuousClock.now + .seconds(5)
+        while !inspected, ContinuousClock.now < initialLimit {
+            let observed = try await fixture.transport.changeRevision(sessionToken: token)
+            let revision = try XCTUnwrap(observed)
+            let pending = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTAssertEqual(pending["state"] as? String, "loading")
+            if !inspected { _ = try await fixture.transport.waitForChange(sessionToken: token, after: revision, until: initialLimit) }
+        }
+        XCTAssertTrue(inspected)
+        fixture.transport.setBeforePageResultValidationForTesting(nil)
+        let positions = try await evaluate(view, """
+            const f = grokFixture;
+            const before = f.newChat.getBoundingClientRect().right;
+            f.transitionEndCount = 0;
+            f.sidebar.addEventListener('transitionend', event => {
+                if (event.target === f.sidebar && event.propertyName === 'transform') f.transitionEndCount++;
+            }); // Scalar-only evidence; this listener never mutates the DOM.
+            f.sidebar.style.transform = 'translateX(0px)';
+            return [before, f.newChat.getBoundingClientRect().right];
+            """) as? [Double]
+        XCTAssertEqual(positions?.count, 2)
+        XCTAssertLessThan(positions?.first ?? 0, 0)
+        XCTAssertLessThan(positions?.last ?? 0, 0, "Poll during the transition, while the target is still outside the viewport")
+        let limit = ContinuousClock.now + .seconds(3)
+        var ready = false, waited = false
+        while ContinuousClock.now < limit {
+            let observed = try await fixture.transport.changeRevision(sessionToken: token)
+            let revision = try XCTUnwrap(observed)
+            let state = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            if state["state"] as? String == "ready" { ready = true; break }
+            waited = true
+            let wake = try await fixture.transport.waitForChange(sessionToken: token, after: revision, until: limit)
+            // A poll after a timed-out wait would falsely pass once CSS had
+            // already settled. Require an actual native revision wake instead.
+            guard let wake, wake > revision else { XCTFail("CSS completion did not wake the pending preparation"); break }
+        }
+        XCTAssertTrue(waited); XCTAssertTrue(ready)
+        let counts = try await evaluate(view, "return [grokFixture.transitionEndCount,grokFixture.sidebarCount,grokFixture.newChatCount,grokFixture.privateCount,grokFixture.sendCount];")
+        XCTAssertEqual(counts as? [Int], [1, 0, 1, 1, 0])
+    }
+
+    func testGrokFreshStartPermanentHitFailureExpiresWithoutAnyClick() async throws {
+        for expanded in [false, true] {
+            let setup = (expanded ? "grokFixture.sidebarToggle.click(); grokFixture.sidebarCount = 0;" : "") + Self.grokReadinessOverlay
+            let fixture = try Fixture(page: Self.grokFreshStartPage(setup), initialURL: URL(string: Self.grokSavedFixtureURL))
+            defer { fixture.shutdown() }
+            fixture.transport.setTimeoutsForTesting(preparation: .seconds(2), response: .seconds(30))
+            let started = try await startChoice(WebsiteModelChoice(provider: "grok", key: "Fast", label: "Fast"), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            try await waitForFixture(view)
+            do { _ = try await waitForState("ready", fixture.transport, token: token); XCTFail("Covered target must never become ready") }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .preparationDeadline) }
+            let counts = try await evaluate(view, "return [grokFixture.sidebarCount,grokFixture.newChatCount,grokFixture.privateCount,grokFixture.sendCount];")
+            XCTAssertEqual(counts as? [Int], [0, 0, 0, 0])
+        }
+    }
+
+    func testGrokFreshStartReocclusionBeforeActionRejectsWithoutReplay() async throws {
+        for expanded in [false, true] {
+            let setup = expanded ? "grokFixture.sidebarToggle.click(); grokFixture.sidebarCount = 0;" : ""
+            let fixture = try Fixture(page: Self.grokFreshStartPage(setup), initialURL: URL(string: Self.grokSavedFixtureURL))
+            defer { fixture.transport.setBeforePageResultValidationForTesting(nil); fixture.shutdown() }
+            let started = try await startChoice(WebsiteModelChoice(provider: "grok", key: "Fast", label: "Fast"), in: fixture)
+            let token = try XCTUnwrap(started["sessionToken"] as? String)
+            let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
+            try await waitForFixture(view)
+            var covered = false
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                if action == "grokFreshStartInspect", !covered {
+                    covered = true
+                    _ = try? await self.evaluate(view, Self.grokReadinessOverlay + " return true;")
+                }
+            }
+            do { _ = try await waitForState("ready", fixture.transport, token: token); XCTFail("A stale hit cannot authorize a click") }
+            catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptConversation)) }
+            XCTAssertTrue(covered)
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            _ = try await evaluate(view, "grokFixture.readinessCover.remove(); return true;")
+            await assertRejected(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            let counts = try await evaluate(view, "return [grokFixture.sidebarCount,grokFixture.newChatCount,grokFixture.privateCount,grokFixture.sendCount];")
+            XCTAssertEqual(counts as? [Int], [0, 0, 0, 0])
+        }
+    }
+
     func testGrokFreshStartLeavesSavedChatThenProvesPrivateModelSendAndCleanup() async throws {
         for expanded in [false, true] {
             let setup = expanded ? "grokFixture.sidebarToggle.click(); grokFixture.sidebarCount = 0;" : ""

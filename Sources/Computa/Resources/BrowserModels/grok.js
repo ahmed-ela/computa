@@ -87,6 +87,9 @@ function computaProviderCore(request, provider, origin, actions) {
 if (typeof input.action === 'string' && input.action.startsWith('grokFreshStart')) {
   let preparation;
   try {
+    const prior = globalThis.__computaGrokFreshStartV1;
+    if (prior?.owner === input.ownerToken && prior.generation === input.documentGeneration && prior.document === document)
+      prior.layoutWait?.remove();
     const actions = ['grokFreshStartInspect', 'grokFreshStartExpandSidebar', 'grokFreshStartNewChat', 'grokFreshStartVerify'];
     const c = computaProviderCore(input, 'grok', 'https://grok.com', actions);
     if (input.allowGrokFreshStart !== true || !c.uuid(input.grokFreshStartToken)) c.fail('document_changed', 'fresh_start_grant');
@@ -129,7 +132,36 @@ if (typeof input.action === 'string' && input.action.startsWith('grokFreshStart'
       if (route[2]) preparation.responseID = route[2];
     };
     guard();
-    const packet = stage => ({ grokFreshStart: { version: 1, stage } });
+    const packet = (stage, readiness = null) => ({ grokFreshStart: { version: 1, stage, ...(readiness ? { readiness } : {}) } });
+    function awaitLayout(node) {
+      const ancestors = [];
+      for (let current = node; current; current = current.parentElement) ancestors.push(current);
+      const types = ['transitionend', 'transitioncancel', 'animationend', 'animationcancel'];
+      const wait = { remove: () => {
+        for (const type of types) document.removeEventListener(type, wake, true);
+        if (preparation.layoutWait === wait) preparation.layoutWait = null;
+      } };
+      const wake = event => {
+        const current = globalThis.__computaGrokFreshStartV1 === preparation && preparation.layoutWait === wait
+          && preparation.document === document && preparation.owner === input.ownerToken && preparation.generation === input.documentGeneration
+          && !preparation.terminal && !preparation.verified && !preparation.newChat && c.context()
+          && node.isConnected && ancestors.every(ancestor => ancestor.contains(node));
+        if (!current) { wait.remove(); return; }
+        if (!ancestors.includes(event.target)) return;
+        wait.remove(); // One wakeup per pending read; this grants no action authority.
+        try { window.webkit?.messageHandlers?.computaChatGPTSignal?.postMessage({ ownerToken: preparation.owner, kind: 'dom_changed' }); }
+        catch { /* A missing wake channel cannot grant readiness. */ }
+      };
+      preparation.layoutWait = wait;
+      for (const type of types) document.addEventListener(type, wake, true);
+    }
+    const unavailableHit = (target, node) => {
+      const reason = c.hitFailure(node);
+      if (reason === null) return null;
+      if (!['disabled', 'invalid_geometry', 'outside_viewport', 'occluded'].includes(reason)) c.fail('document_changed', 'fresh_start_action_unverified');
+      awaitLayout(node);
+      return packet('pending', { target, reason });
+    };
     const authored = node => !!node.closest('[data-testid="user-message"], [data-testid="assistant-message"], pre, code');
     const measurement = node => {
       if (node.tagName !== 'TEXTAREA' || node.parentElement !== document.body || document.activeElement === node
@@ -177,7 +209,7 @@ if (typeof input.action === 'string' && input.action.startsWith('grokFreshStart'
       if (toggles.length > 1 || sidebars.length > 1) c.fail('document_changed', 'fresh_start_sidebar_ambiguous');
       const toggle = toggles[0] || null, sidebar = sidebars[0] || null;
       if (toggle && (toggle.getAttribute('type') !== 'button' || toggle.getAttribute('aria-keyshortcuts') !== 'Meta+B'
-        || !['true', 'false'].includes(toggle.getAttribute('aria-expanded')) || !c.enabled(toggle)))
+        || !['true', 'false'].includes(toggle.getAttribute('aria-expanded'))))
         c.fail('document_changed', 'fresh_start_toggle_invalid');
       if (sidebar && (sidebar.tagName !== 'ASIDE' || sidebar.getAttribute('aria-label') !== 'App navigation' || authored(sidebar)))
         c.fail('document_changed', 'fresh_start_sidebar_invalid');
@@ -223,19 +255,22 @@ if (typeof input.action === 'string' && input.action.startsWith('grokFreshStart'
       if (!form || !controls.toggle) return packet('pending');
       if (controls.toggle.getAttribute('aria-expanded') === 'false') {
         if (preparation.expanded) return packet('pending');
-        if (!c.hit(controls.toggle)) c.fail('document_changed', 'fresh_start_toggle_occluded');
+        const pending = unavailableHit('toggle', controls.toggle);
+        if (pending) return pending;
         preparation.readyElement = controls.toggle; preparation.readyStage = 'sidebar_closed';
         return packet('sidebar_closed');
       }
       if (!controls.sidebar || !controls.button) return packet('pending');
-      if (!c.hit(controls.button)) c.fail('document_changed', 'fresh_start_new_chat_occluded');
+      const pending = unavailableHit('new_chat', controls.button);
+      if (pending) return pending;
       preparation.readyElement = controls.button; preparation.readyStage = 'new_chat_ready';
       return packet('new_chat_ready');
     }
     const expand = input.action === 'grokFreshStartExpandSidebar';
     const target = expand ? controls.toggle : controls.button;
     if (!form || !target || target !== preparation.readyElement || preparation.readyStage !== (expand ? 'sidebar_closed' : 'new_chat_ready')
-      || !c.hit(target) || !controls.toggle || controls.toggle.getAttribute('aria-expanded') !== (expand ? 'false' : 'true')
+      || !c.hit(target) || !controls.toggle || !c.enabled(controls.toggle)
+      || controls.toggle.getAttribute('aria-expanded') !== (expand ? 'false' : 'true')
       || expand && preparation.expanded) c.fail('document_changed', 'fresh_start_action_unverified');
     guard(); emptyDrafts(); preparation.readyElement = null; preparation.readyStage = null;
     if (expand) preparation.expanded = true;
@@ -244,7 +279,7 @@ if (typeof input.action === 'string' && input.action.startsWith('grokFreshStart'
     guard();
     return packet(expand ? 'sidebar_requested' : 'new_chat_requested');
   } catch (error) {
-    if (preparation) preparation.terminal = true;
+    if (preparation) { preparation.layoutWait?.remove(); preparation.terminal = true; }
     if (error?.computaAdapterFailure === true) return { error: error.error, ...(error.detail ? { detail: error.detail } : {}) };
     throw error;
   }
