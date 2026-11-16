@@ -314,8 +314,11 @@ try {
     if (initial.temporary) return { ...initial, enabled: true };
     if (state.submitted || state.toggleClaimed || initial.userCount || initial.responseCount) c.fail('temporary_mode_unverified');
     const control = privateControl().node;
-    if (!control || control.getAttribute('aria-label') !== 'Switch to Private Chat' || control.getAttribute('aria-pressed') !== 'false' || !c.hit(control))
-      c.fail('temporary_mode_unavailable');
+    if (!control) c.fail('temporary_mode_unavailable', 'private_control_missing');
+    if (control.getAttribute('aria-label') !== 'Switch to Private Chat' || control.getAttribute('aria-pressed') !== 'false')
+      c.fail('temporary_mode_unavailable', 'private_control_shape');
+    const hitFailure = c.hitFailure(control);
+    if (hitFailure) c.fail('temporary_mode_unavailable', 'private_control_hit_' + hitFailure);
     state.toggleClaimed = true; control.click(); guard();
     return { ...initial, enabled: false };
   }

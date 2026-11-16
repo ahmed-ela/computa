@@ -222,3 +222,30 @@ pristine.
 Three focused native catalog tests pass: fresh and persisted Fast reach the real
 UI snapshot and can be selected, while the bare provider ID remains unavailable,
 nonselectable and rejected for inference. No model choice is seeded by this fix.
+
+Installed build 560 exposed Grok / Fast and completed startup preparation after
+one observed `new_chat/occluded` readiness interval. The first full fixture then
+failed before any provider submission or tool call. Its exact error was failure
+to confirm Private Chat; owned-page cleanup completed as `closed/not_created`.
+The fixture audit passed only 7 of 19 checks because no work was performed.
+
+The retained inspection timeline shows an available Private toggle immediately
+before `enableTemporary`, with no successful Private-mode observation. The
+adapter advertised availability using enabled state but rechecked the hit target
+before clicking. Missing controls, changed attributes and failed hit tests shared
+one error, so this evidence does not yet identify which condition occurred. A
+settled ordinary-tab Inspector read found the toggle valid and hittable. The
+inspection sent no prompt; its test tab was closed and developer settings restored.
+
+Build 561 adds fixed diagnostic categories for that pre-click failure. It does
+not change readiness, action admission or verification. It also fixes a separate
+local-history omission: the exact temporary-mode failure was not in the allowed
+persisted errors, producing the misleading unavailable-record warning and leaving
+the generic runtime error in history. Grok's exact literal-format error now uses
+the same strict persistence path as the other literal adapters. Four focused
+history tests pass, including 64 native-error/provider save/reload combinations.
+Kimi remains quota-blocked; no new Kimi prompt has been sent.
+
+The diagnostic candidate passes 55 Grok JavaScript tests (653 assertions) and
+the native projection test, including rejection of arbitrary page metadata.
+These are source checks; the Private activation cause still needs a live capture.

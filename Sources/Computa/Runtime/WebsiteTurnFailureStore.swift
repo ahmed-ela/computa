@@ -39,7 +39,7 @@ struct WebsiteTurnFailureStore: Sendable {
             // Legacy fixed errors and native timeouts have no retry metadata. The fixed
             // literal adapters' unsupported-response envelope does, and must retain a real Bool.
             // Exact generated envelopes still pass canonical equality below.
-            let savedLiteralSource = ["kimi", "qwen", "deepseek", "groq"].contains(provider)
+            let savedLiteralSource = ["kimi", "qwen", "deepseek", "groq", "grok"].contains(provider)
             if code != "browser_model_error" && code != "website_turn_limit" && code != "invalid_model_output"
                 && code != "provider_timeout"
                 && (code != "unsupported_website_response" || savedLiteralSource) {
@@ -100,6 +100,7 @@ struct WebsiteTurnFailureStore: Sendable {
                     EmbeddedWebModelTransport.Failure.pageUnavailable,
                     EmbeddedWebModelTransport.Failure.modelUnverified,
                     EmbeddedWebModelTransport.Failure.modelMismatch,
+                    EmbeddedWebModelTransport.Failure.temporaryUnverified,
                     EmbeddedWebModelTransport.Failure.editorFailure("composer_not_empty"),
                     WebModelServer.Failure.modelUnverified,
                     WebModelServer.Failure.modelMismatch,

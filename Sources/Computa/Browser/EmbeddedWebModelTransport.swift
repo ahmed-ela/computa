@@ -1054,6 +1054,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var loggedFirstUserStructure = false
         var loggedGroqComposerFailure = false
         var loggedGrokComposerFailure = false
+        var loggedGrokPrivateFailure = false
         var loggedGrokUnexpectedRoute = false
         var loggedGroqSendFailure = false
         var loggedGroqSendReveal = false
@@ -7615,6 +7616,20 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         return "composer_unavailable; action=\(action); detail=\(reason)"
     }
 
+    /// This is failure metadata only. It distinguishes a missing/malformed
+    /// Private control from a failed hit test without admitting any action.
+    static func grokPrivateFailureDiagnostic(_ observed: [String: Any], provider: Provider, action: String) -> String? {
+        let actions: Set<String> = ["inspect", "discoverModels", "selectModel", "verifyModel", "enableTemporary",
+            "prepare", "insert", "sendReady", "submit", "stop"]
+        let errors: Set<String> = ["temporary_mode_unavailable", "temporary_mode_unverified"]
+        let details: Set<String> = ["private_control_missing", "private_control_shape", "private_control_hit_disabled",
+            "private_control_hit_invalid_geometry", "private_control_hit_outside_viewport", "private_control_hit_occluded"]
+        guard provider == .grok, actions.contains(action), let error = observed["error"] as? String,
+              errors.contains(error) else { return nil }
+        let detail = observed["detail"].map { ($0 as? String).flatMap { details.contains($0) ? $0 : nil } ?? "unknown" } ?? "absent"
+        return "action=\(action) error=\(error) detail=\(detail)"
+    }
+
     /// Captures overlapping initial-render defects in a single failed attempt.
     /// Exact keys, fixed tag classes and real JSON booleans exclude DOM content.
     static func grokInitialEditorFailureDiagnostic(_ raw: Any?, action: String, detail: Any?) -> String? {
@@ -9160,6 +9175,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             Self.inspectionLog.error("productModeDiagnostic provider=\(provider.rawValue, privacy: .public) action=\(action, privacy: .public) sequence=\(session.sequence) structure=\(safe, privacy: .public)")
         }
         if let error = observed["error"] as? String {
+            if !session.loggedGrokPrivateFailure,
+               let diagnostic = Self.grokPrivateFailureDiagnostic(observed, provider: provider, action: action) {
+                session.loggedGrokPrivateFailure = true
+                Self.inspectionLog.notice("privateModeFailure provider=grok origin=adapter \(diagnostic, privacy: .public) sequence=\(session.sequence) temporaryRequested=\(session.temporaryRequested) modelSelectionRequested=\(session.modelSelectionRequested)")
+            }
             if !allowBlockedProvider, !session.loggedSavedAdapterFailure, let packet = kimiComposerGuard,
                let token = UUID(uuidString: session.token),
                let record = WebsiteAdapterFailureDiagnostic.composerGuardLog(packet, context: session.adapterFailureContext,

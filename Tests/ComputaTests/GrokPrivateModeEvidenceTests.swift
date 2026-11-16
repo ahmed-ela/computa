@@ -200,6 +200,36 @@ final class GrokPrivateModeEvidenceTests: XCTestCase {
     }
 
     @MainActor
+    func testPrivateFailureDiagnosticOnlyRetainsClosedProviderActionErrorAndDetail() {
+        let details = ["private_control_missing", "private_control_shape", "private_control_hit_disabled",
+            "private_control_hit_invalid_geometry", "private_control_hit_outside_viewport", "private_control_hit_occluded"]
+        for error in ["temporary_mode_unavailable", "temporary_mode_unverified"] {
+            for action in ["inspect", "discoverModels", "selectModel", "verifyModel", "enableTemporary",
+                "prepare", "insert", "sendReady", "submit", "stop"] {
+                for detail in details {
+                    XCTAssertEqual(EmbeddedWebModelTransport.grokPrivateFailureDiagnostic(["error": error, "detail": detail], provider: .grok, action: action),
+                        "action=\(action) error=\(error) detail=\(detail)")
+                }
+                XCTAssertEqual(EmbeddedWebModelTransport.grokPrivateFailureDiagnostic(["error": error], provider: .grok, action: action),
+                    "action=\(action) error=\(error) detail=absent")
+                for detail: Any in ["private page text", "https://grok.com/c/private?rid=secret", 1, true, NSNull(), ["private_control_missing"], String(repeating: "x", count: 10_000)] {
+                    XCTAssertEqual(EmbeddedWebModelTransport.grokPrivateFailureDiagnostic(["error": error, "detail": detail,
+                        "url": "https://example.test/private", "text": "PRIVATE"], provider: .grok, action: action),
+                        "action=\(action) error=\(error) detail=unknown")
+                }
+            }
+        }
+        let valid: [String: Any] = ["error": "temporary_mode_unavailable", "detail": "private_control_hit_occluded"]
+        for provider in EmbeddedWebModelTransport.Provider.allCases where provider != .grok {
+            XCTAssertNil(EmbeddedWebModelTransport.grokPrivateFailureDiagnostic(valid, provider: provider, action: "enableTemporary"))
+        }
+        XCTAssertNil(EmbeddedWebModelTransport.grokPrivateFailureDiagnostic(valid, provider: .grok, action: "private action text"))
+        for error: Any in ["private error text", "composer_unavailable", 1, NSNull()] {
+            XCTAssertNil(EmbeddedWebModelTransport.grokPrivateFailureDiagnostic(["error": error], provider: .grok, action: "enableTemporary"))
+        }
+    }
+
+    @MainActor
     func testInitialEditorDiagnosticRejectsOpenFieldsAndKeepsOverlappingFailures() {
         let valid: [String: Any] = ["version": 1, "tag": "div", "editable": true, "role": true, "label": true,
             "connected": true, "rects": false, "displayNone": true, "visibilityHidden": false,

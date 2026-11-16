@@ -8,6 +8,26 @@ describe('Grok private inference adapter', () => {
     expect(readFileSync(grokResource, 'utf8')).toBe(composeGrokResource());
   });
 
+  test('Private activation reports fixed unavailable and hit reasons without clicking', async () => {
+    const scenarios: [string, (f: ReturnType<typeof grokFixture>) => void][] = [
+      ['private_control_missing', f => { f.f.privateToggle.remove(); }],
+      ['private_control_shape', f => { f.f.privateToggle.setAttribute('aria-pressed', 'unknown'); }],
+      ['private_control_hit_disabled', f => { f.f.privateToggle.disabled = true; }],
+      ['private_control_hit_invalid_geometry', f => { f.f.privateToggle.rect.width = 0; }],
+      ['private_control_hit_outside_viewport', f => { f.f.privateToggle.rect.left = -200; }],
+      ['private_control_hit_occluded', f => { f.blockHit(true); }],
+    ];
+    for (const [detail, alter] of scenarios) {
+      const f = grokFixture(); alter(f);
+      expect(await f.run('enableTemporary')).toEqual({ error: 'temporary_mode_unavailable', detail });
+      expect(f.f.privateCount).toBe(0); expect(f.f.sendCount).toBe(0);
+    }
+    const f = grokFixture(); f.blockHit(true);
+    expect(await f.run('inspect')).toMatchObject({ temporary: false, temporaryActionAvailable: true });
+    expect(await f.run('enableTemporary')).toEqual({ error: 'temporary_mode_unavailable', detail: 'private_control_hit_occluded' });
+    expect(f.f.privateCount).toBe(0); expect(f.f.sendCount).toBe(0);
+  });
+
   test('only a native-granted initial absent shape yields negative hydration readiness', async () => {
     const f = grokFixture(), original = [...f.body.children]; original.forEach(node => node.remove());
     expect(await f.run('inspect', { allowGrokInitialHydration: true })).toEqual({ grokInitialHydrationPending: true, pending: true, composer: false });
