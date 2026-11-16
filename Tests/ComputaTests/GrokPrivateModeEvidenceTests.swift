@@ -257,6 +257,25 @@ final class GrokPrivateModeEvidenceTests: XCTestCase {
         XCTAssertTrue(largestRecord.contains("\"mismatch\":"))
     }
 
+    func testFirstUserFailureDiagnosticRetainsLocationWhenHashYieldRejectsChangedRoot() throws {
+        var packet = firstUserFailurePacket()
+        packet["stage"] = "after_hash"; packet["reason"] = "node_identity"; packet["identity"] = "root_changed"
+        packet["expectedUTF16"] = 63_549; packet["observedUTF16"] = 63_535
+        packet["expectedLines"] = 304; packet["observedLines"] = 304
+        packet["textDifference"] = "other"; packet["textContentMatches"] = false
+        packet["mismatch"] = firstUserMismatchPacket()
+        let result = try XCTUnwrap(EmbeddedWebModelTransport.grokFirstUserFailureDiagnostic(firstUserFailureRecord(packet), provider: .grok, action: "inspect"))
+        let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.utf8)) as? [String: Any])
+        var expected = packet; expected["action"] = "inspect"
+        XCTAssertTrue(NSDictionary(dictionary: decoded).isEqual(to: expected))
+        XCTAssertLessThanOrEqual(result.utf8.count, 960)
+        XCTAssertEqual(decoded["reason"] as? String, "node_identity", "Location metadata must not replace the actual rejection reason")
+        XCTAssertEqual(decoded["identity"] as? String, "root_changed")
+        for key in ["firstUserFingerprint", "firstUserVerified", "temporary", "modelEvidence", "submitted", "cleanup"] {
+            XCTAssertNil(decoded[key], key)
+        }
+    }
+
     func testFirstUserFailureDiagnosticRejectsInvalidMismatchCoordinatesOrAuthority() {
         let location = firstUserMismatchPacket()
         func reject(_ raw: Any, _ label: String, outer: [String: Any]? = nil) {
@@ -285,7 +304,7 @@ final class GrokPrivateModeEvidenceTests: XCTestCase {
             ("nearBackticksExpected", 65), ("nearBackticksObserved", 65), ("nearBackslashesExpected", 65), ("nearBackslashesObserved", 65)]
         for (key, value) in invalid { var changed = location; changed[key] = value; reject(changed, key) }
         for raw: Any in [NSNull(), true, 1, "PRIVATE", []] { reject(raw, "mismatch shape") }
-        let invalidOuter: [(String, Any)] = [("reason", "fingerprint"), ("innerTextMatches", true),
+        let invalidOuter: [(String, Any)] = [("reason", "PRIVATE_REASON"), ("innerTextMatches", true),
             ("textDifference", "none"), ("textDifference", "unavailable"), ("expectedUTF16", NSNull()),
             ("observedUTF16", 220_001), ("expectedLines", 0), ("observedLines", NSNull())]
         for (key, value) in invalidOuter {

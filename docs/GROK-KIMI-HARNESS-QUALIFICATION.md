@@ -491,3 +491,18 @@ only for a bounded, already-rejected literal mismatch. First-byte, newline,
 prefix/length, Unicode and oversized cases retain the same error. The native
 projection rejects extra fields, invalid coordinates and nonliteral Boolean
 flags; the largest admitted metadata packet fits its existing 960-byte limit.
+
+Installed build 567 (`48461e2`) failed its one fresh marker in 6.148 seconds.
+The same 14-unit, same-line-count text difference was present, but the first
+rejection occurred after hashing at `node_identity / root_changed`, before a
+first-body fingerprint was returned. The location diagnostic was limited to
+the `payload_text` rejection and therefore omitted coordinates in this timing
+case. This is a diagnostic coverage gap; it does not justify accepting a
+replacement node. No tools ran, cleanup remains unconfirmed and no prompt was
+replayed. Build 568 extends location metadata to bounded text mismatches at
+other existing rejection branches, retaining their original stage and reason.
+
+The build 568 source passes 79 Grok JavaScript tests (1,294 assertions) and
+five native diagnostic tests. A new hash-yield replacement regression confirms
+that the original identity error remains, mismatch coordinates are retained,
+the first body stays unbound and Send is not replayed.

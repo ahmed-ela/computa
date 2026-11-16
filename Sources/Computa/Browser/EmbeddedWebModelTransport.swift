@@ -7773,8 +7773,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 "expectedFirstLineLength", "observedFirstLineLength", "expectedLastLineLength", "observedLastLineLength"]
             let nearCounts = ["nearBackticksExpected", "nearBackticksObserved", "nearBackslashesExpected", "nearBackslashesObserved"]
             let kinds = ["expectedFirstKind", "observedFirstKind", "expectedLastKind", "observedLastKind"]
-            guard value["reason"] as? String == "payload_text",
-                  firstUserDiagnosticBool(value["innerTextMatches"]) == false,
+            guard firstUserDiagnosticBool(value["innerTextMatches"]) == false,
                   let difference = value["textDifference"] as? String, ["blank_lines", "whitespace", "other"].contains(difference),
                   let mismatch = rawMismatch as? [String: Any], Set(mismatch.keys) == Set(integers + nearCounts + kinds + ["component"]),
                   let component = mismatch["component"] as? String,

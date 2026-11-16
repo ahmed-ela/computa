@@ -34,7 +34,7 @@ function computaGrokFirstUserFailure(c, state, stage, reason, transcript, identi
     };
     // Locate only an already-rejected, bounded literal mismatch. All values are
     // offsets, counts or closed categories; no expected/observed text escapes.
-    if (reason === 'payload_text' && comparable && observed !== expected) {
+    if (comparable && observed !== expected) {
       let offset = 0, expectedEnd = expected.length, observedEnd = observed.length;
       while (offset < expectedEnd && offset < observedEnd && expected[offset] === observed[offset]) offset++;
       while (expectedEnd > offset && observedEnd > offset && expected[expectedEnd - 1] === observed[observedEnd - 1]) {

@@ -569,6 +569,24 @@ describe('Grok private inference adapter', () => {
     }
   });
 
+  test('a hash-yield root replacement reports its literal mismatch without binding or replaying', async () => {
+    const f = grokFixture(); expect(await f.submit()).toMatchObject({ submitted: true });
+    const expected = f.f.lastPrompt;
+    f.onDigest(() => { f.f.user.remove(); f.f.appendUser(expected.slice(14)); });
+    const failed = await f.run('inspect');
+    expect(failed).toMatchObject({ error: 'conversation_changed', detail: 'first_user_message',
+      grokFirstUserFailureDiagnostic: { stage:'after_hash', reason:'node_identity', identity:'root_changed',
+        expectedUTF16:expected.length, observedUTF16:expected.length-14, innerTextMatches:false,
+        textContentMatches:false, textDifference:'other', mismatch:{ offset:0, line:1, column:1, component:'unknown' } } });
+    const d = failed.grokFirstUserFailureDiagnostic;
+    expect(d.expectedLines).toBe(d.observedLines);
+    expect(JSON.stringify(d)).not.toContain(expected);
+    expect(f.world.__computaGrokPrivateSessionV1.first).toBeNull();
+    expect(f.f.sendCount).toBe(1);
+    expect(await f.run('submit', { prompt:grokPrompt })).toMatchObject({ error:'conversation_changed' });
+    expect(f.f.sendCount).toBe(1);
+  });
+
   test('fingerprint diagnostic does not reveal either expected or observed hash', async () => {
     const f = grokFixture(); expect(await f.submit()).toMatchObject({ submitted: true });
     const failed = await f.run('inspect', { expectedFirstUserFingerprint: '0'.repeat(64) });
@@ -623,7 +641,7 @@ describe('Grok private inference adapter', () => {
     }
     expect(diagnostic(expected + '\nCOMPUTA_LOCAL_RESPONSE_HANDOFF:', changed + '\nCOMPUTA_LOCAL_RESPONSE_HANDOFF:').mismatch.component).toBe('unknown');
     expect(diagnostic(expected, expected).mismatch).toBeUndefined();
-    expect(diagnostic(expected, changed, 'fingerprint').mismatch).toBeUndefined();
+    expect(diagnostic(expected, changed, 'fingerprint').mismatch).toEqual(m);
   });
 
   test('mismatch coordinates stay bounded at first-byte, newline, Unicode and length boundaries', () => {
