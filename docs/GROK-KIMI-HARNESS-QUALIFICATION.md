@@ -1,5 +1,25 @@
 # Grok and Kimi harness qualification
 
+## Current status — November 16, 2026
+
+Build **569** is signed, installed and running from source `bdd190a`. The
+68-file package inventory, strict Developer ID signature and fresh process were
+verified. It adds bounded Grok mismatch diagnostics and recognition of the
+observed inline free-tier quota card. The original saved Grok tab was restored;
+synthetic probe tabs and Inspector were closed, Safari developer features were
+restored off, and no fixture server was started.
+
+**Grok and Kimi tool qualification remains incomplete.** Grok now displays
+"Free tier limit reached"; Kimi previously reported its free quota exhausted.
+No provider prompt was sent after the Grok quota observation. Restoring account
+access is pending. Grok's real first-message rendering mismatch (14 UTF-16 units
+removed with 304 lines retained) is still unidentified, despite the reproduced
+optimistic-to-formatted replacement. No mismatching body or stale node was
+accepted. The next authorized fresh marker must capture the precise mismatch
+location, then a verified fix must pass the two independent browser/terminal/
+file-editing fixtures. A synthetic response, detector match or unit test does
+not substitute for those live checks. The PR remains draft.
+
 ## Scope — November 15, 2026
 
 Grok initially admits only the observed **Fast** option; Kimi admits **Instant**
