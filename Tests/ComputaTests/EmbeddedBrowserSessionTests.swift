@@ -1293,37 +1293,6 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertNil(session.modelNavigationDiagnostic(tabID: otherID, view: other))
     }
 
-    func testExplicitModelViewportSurvivesAttachmentAndHostReplacement() throws {
-        let session = EmbeddedBrowserSession(persistent: false)
-        defer { session.shutdown() }
-        let human = try session.createTab()
-        let narrow = EmbeddedBrowserSession.ModelViewport(width: 360, height: 768)
-        let narrowID = try session.createUnloadedModelTabForTesting(viewport: narrow)
-        let defaultID = try session.createUnloadedModelTabForTesting()
-        let narrowView = try XCTUnwrap(session.webView(for: narrowID))
-        let defaultView = try XCTUnwrap(session.webView(for: defaultID))
-        XCTAssertEqual(narrowView.frame, narrow.frame)
-        XCTAssertEqual(defaultView.frame, EmbeddedBrowserSession.ModelViewport.standard.frame)
-        let first = EmbeddedModelRenderContainer(session: session), second = EmbeddedModelRenderContainer(session: session)
-        first.frame = NSRect(x: 0, y: 0, width: 1_400, height: 900)
-        second.frame = NSRect(x: 0, y: 0, width: 280, height: 400)
-        session.installModelRenderHost(first)
-        XCTAssertTrue(narrowView.superview === first)
-        XCTAssertEqual(narrowView.frame, narrow.frame)
-        XCTAssertEqual(defaultView.frame, EmbeddedBrowserSession.ModelViewport.standard.frame)
-        session.installModelRenderHost(second); session.removeModelRenderHost(first)
-        XCTAssertTrue(narrowView.superview === second)
-        XCTAssertEqual(narrowView.frame, narrow.frame)
-        XCTAssertEqual(defaultView.frame, EmbeddedBrowserSession.ModelViewport.standard.frame)
-        XCTAssertTrue(narrowView.autoresizingMask.isEmpty)
-        XCTAssertEqual(session.selectedTabID, human)
-        XCTAssertTrue(narrowView.configuration.websiteDataStore === defaultView.configuration.websiteDataStore)
-        XCTAssertEqual(narrowView.configuration.applicationNameForUserAgent, defaultView.configuration.applicationNameForUserAgent)
-        XCTAssertEqual(narrowView.configuration.preferences.inactiveSchedulingPolicy, .none)
-        XCTAssertFalse(narrowView.configuration.preferences.javaScriptCanOpenWindowsAutomatically)
-        XCTAssertFalse(narrowView.acceptsFirstResponder)
-    }
-
     func testModelRenderHostAttachesFixedViewportWithoutChangingHumanSelectionOrFocus() async throws {
         let session = EmbeddedBrowserSession(persistent: false)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1_100, height: 800),

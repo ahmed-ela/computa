@@ -132,11 +132,3 @@ exact root after keyboard navigation and Private activation, so onboarding or
 Private navigation is not an established cause. Build 556 adds bounded route
 shape and preparation-stage diagnostics without recording URLs or changing
 route admission. Eight focused route/proof tests pass; live diagnosis continues.
-
-Build 556 captured a settled, same-host `/c/UUID` route with no query or fragment,
-before Private or model-selection requests. No Send occurred. A genuinely new
-ordinary tab loaded the exact root with no messages; its observed viewport was
-360 by 527, compared with 1024 by 768 for the owned view. Profile, user agent and
-JavaScript permission match. Build 557 compares only the owned Grok width (360),
-retaining height 768 and all route, ownership, focus, popup and action rules.
-The result remains an experiment until checked live; a saved route still fails.

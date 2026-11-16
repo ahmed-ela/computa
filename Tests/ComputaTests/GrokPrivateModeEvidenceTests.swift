@@ -189,10 +189,6 @@ final class GrokPrivateModeEvidenceTests: XCTestCase {
     @MainActor
     func testOnlyExactPrivateRootIsAdmitted() {
         let provider = EmbeddedWebModelTransport.Provider.grok
-        XCTAssertEqual(provider.modelViewport, .init(width: 360, height: 768))
-        for other in [EmbeddedWebModelTransport.Provider.chatgpt, .gemini, .claude, .groq, .kimi, .qwen, .deepseek] {
-            XCTAssertEqual(other.modelViewport, .standard)
-        }
         XCTAssertTrue(provider.lifecycle == .temporary)
         XCTAssertTrue(provider.accepts("https://grok.com/"))
         XCTAssertTrue(provider.acceptsUnboundStart(URL(string: "https://grok.com/")!))

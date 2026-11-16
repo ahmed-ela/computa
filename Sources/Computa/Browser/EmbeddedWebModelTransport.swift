@@ -348,11 +348,6 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
 
         var usesWebsiteModes: Bool { self == .deepseek }
-        var modelViewport: EmbeddedBrowserSession.ModelViewport {
-            // Width-only Grok startup comparison against the observed ordinary
-            // browser pane. This is an experiment, not a route-policy change.
-            self == .grok ? .init(width: 360, height: 768) : .standard
-        }
         /// Internal selection phases keep their existing names; only this closed
         /// native capability selects the adapter's distinct mode API.
         func selectionAdapterAction(_ action: String) -> String {
@@ -1152,7 +1147,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private let browser: EmbeddedBrowserSession
     private let geminiPostBlockDiagnosticEnabled: Bool
     private var geminiPostBlockDiagnosticDuration: Duration = .seconds(5)
-    private let createTab: @MainActor (URL, EmbeddedBrowserSession.ModelViewport) throws -> UUID
+    private let createTab: @MainActor (URL) throws -> UUID
     private let createKimiTab: @MainActor (URL, UUID) throws -> UUID
     private let isolatesChatGPTInference: Bool
     private var pendingInferenceStarts = 0
@@ -1424,7 +1419,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     init(browser: EmbeddedBrowserSession, geminiPostBlockDiagnostic: Bool? = nil) {
         self.geminiPostBlockDiagnosticEnabled = geminiPostBlockDiagnostic ?? Self.compiledPostBlockDiagnostic
         self.browser = browser
-        self.createTab = { try browser.createModelTab(url: $0, viewport: $1) }
+        self.createTab = { try browser.createModelTab(url: $0) }
         self.createKimiTab = { try browser.createKimiModelTab(url: $0, profileID: $1) }
         self.isolatesChatGPTInference = true
     }
@@ -1435,17 +1430,8 @@ final class EmbeddedWebModelTransport: WebModelTransport {
          createTabForTesting: @escaping @MainActor (URL) throws -> UUID) {
         self.geminiPostBlockDiagnosticEnabled = geminiPostBlockDiagnostic ?? Self.compiledPostBlockDiagnostic
         self.browser = browser
-        self.createTab = { url, _ in try createTabForTesting(url) }
+        self.createTab = createTabForTesting
         self.createKimiTab = createKimiTabForTesting ?? { try browser.createKimiModelTab(url: $0, profileID: $1) }
-        self.isolatesChatGPTInference = false
-    }
-
-    init(browser: EmbeddedBrowserSession,
-         createTabWithViewportForTesting: @escaping @MainActor (URL, EmbeddedBrowserSession.ModelViewport) throws -> UUID) {
-        self.geminiPostBlockDiagnosticEnabled = Self.compiledPostBlockDiagnostic
-        self.browser = browser
-        self.createTab = createTabWithViewportForTesting
-        self.createKimiTab = { try browser.createKimiModelTab(url: $0, profileID: $1) }
         self.isolatesChatGPTInference = false
     }
 
@@ -3024,7 +3010,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         else if let requestMetadata, provider == .chatgpt, !isDiscovery, !isRecoveryProbe {
             id = try browser.createModelTab(url: provider.startURL(choice: choice), requestMetadata: requestMetadata)
-        } else { id = try createTab(provider.startURL(choice: choice), provider.modelViewport) }
+        } else { id = try createTab(provider.startURL(choice: choice)) }
         guard let view = browser.webView(for: id), let generation = browser.documentGeneration(for: id) else { throw Failure.staleSession }
         let session = Session(provider: provider, tabID: id, view: view, documentGeneration: generation,
                               modelChoice: choice, modeChoice: modeChoice, isDiscovery: isDiscovery,
