@@ -382,8 +382,17 @@ try {
     guard();
     if (selection.isCollapsed !== true || !form.editor.contains(selection.anchorNode) || !form.editor.contains(selection.focusNode)
       || document.activeElement !== form.editor || composer().editor !== form.editor || c.bodyText(form.editor.innerText)) c.fail('caret_unavailable');
-    if (!document.execCommand('insertText', false, prompt)) c.fail('insert_command_rejected');
+    // A 32 KiB multiline insertText probe took 26 seconds; large plain-text
+    // paste instead became a file attachment. One escaped-text HTML edit with
+    // BR line breaks preserves the literal payload without either behavior.
+    // Only fixed BR markup is generated: prompt markup remains inert text.
+    // Never retry or fall back after this edit. Full literal readback and the
+    // later submitted-body proof remain mandatory before accepting a response.
+    const literalHTML = prompt.replace(/\r\n?/g, '\n').replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
+    const inserted = document.execCommand('insertHTML', false, literalHTML);
     guard();
+    if (inserted !== true) c.fail('insert_command_rejected');
     if (composer().editor !== form.editor || c.bodyText(form.editor.innerText) !== c.bodyText(prompt)) c.fail('prompt_not_inserted');
     return { ...initial, inserted: true };
   }

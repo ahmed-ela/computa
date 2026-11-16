@@ -278,6 +278,57 @@ describe('Grok private inference adapter', () => {
     expect(await f.prepare()).toMatchObject({ inserted: true });
     expect(f.selection.anchorNode).toBe(f.f.editor); expect(f.selection.focusNode).toBe(f.f.editor);
     expect(f.selection.isCollapsed).toBe(true); expect(f.document.insertCommandCount).toBe(1);
+    expect(f.document.pasteDispatchCount).toBe(0);
+  });
+
+  test('one escaped-text HTML edit preserves large multiline literals without executable markup', async () => {
+    const f = grokFixture(), literal = '  repeated  spaces\tTabbed\r\n\r\nUnicode 🌍 e\u0301 中文\r<literal data-value="&<>">text</literal> &amp; &lt;b&gt; \\n \\path\\file\n';
+    const prompt = literal.repeat(700) + grokPrompt;
+    expect(new TextEncoder().encode(prompt).length).toBeGreaterThan(65536);
+    expect(await f.submit(prompt)).toMatchObject({ submitted: true });
+    expect(f.document.pasteDispatchCount).toBe(0); expect(f.document.insertCommandCount).toBe(1);
+    expect(f.f.sendCount).toBe(1);
+    expect(f.f.lastPrompt).toBe(prompt.replace(/\r\n?/g, '\n'));
+    expect(f.document.lastInsertHTML.match(/<[^>]*>/g).every((tag: string) => tag === '<br>')).toBe(true);
+    expect(f.document.lastInsertHTML).toContain('&lt;literal data-value="&amp;&lt;&gt;"&gt;');
+    expect(f.document.lastInsertHTML).toContain('&amp;amp; &amp;lt;b&amp;gt;');
+    expect(f.f.editor.querySelectorAll('literal')).toHaveLength(0);
+    expect(await f.run('inspect')).toMatchObject({ firstUserVerified: true, answerComplete: true });
+  });
+
+  test('rejected, unconfirmed, partial, delayed or replaced edits never fall back or replay', async () => {
+    for (const behavior of ['rejected', 'unconfirmed', 'noop', 'partial', 'delayed', 'replaced']) {
+      const f = grokFixture(); let commit: (() => void) | null = null;
+      const original = f.document.execCommand;
+      f.document.execCommand = (command: string, ui: boolean, html: string) => {
+        if (behavior === 'rejected' || behavior === 'noop' || behavior === 'delayed') {
+          f.document.insertCommandCount++;
+          if (behavior === 'delayed') commit = () => { f.f.editor.textContent = grokPrompt; f.f.editor.oninput?.(); };
+          return behavior !== 'rejected';
+        }
+        const result = original(command, ui, html);
+        if (behavior === 'partial') f.f.editor.textContent = f.f.editor.textContent.slice(0, -1);
+        if (behavior === 'replaced') {
+          const replacement = new f.Node('DIV', { ...f.f.editor.values }); replacement.textContent = grokPrompt;
+          f.f.editor.remove(); f.f.form.append(replacement);
+        }
+        return behavior === 'unconfirmed' ? false : result;
+      };
+      const failed = await f.prepare();
+      expect(failed).toMatchObject({ error: ['rejected', 'unconfirmed'].includes(behavior) ? 'insert_command_rejected' : 'prompt_not_inserted' });
+      expect(f.document.pasteDispatchCount).toBe(0); expect(f.document.insertCommandCount).toBe(1); expect(f.f.sendCount).toBe(0);
+      if (commit) (commit as () => void)();
+      expect((await f.run('insert', { prompt: grokPrompt })).error).toBeDefined();
+      expect(f.document.pasteDispatchCount).toBe(0); expect(f.document.insertCommandCount).toBe(1); expect(f.f.sendCount).toBe(0);
+    }
+  });
+
+  test('an editing exception cannot replay or fall back to another primitive', async () => {
+    const f = grokFixture();
+    f.document.execCommand = () => { f.document.insertCommandCount++; throw new Error('synthetic editing failure'); };
+    await expect(f.prepare()).rejects.toThrow('synthetic editing failure');
+    expect((await f.run('insert', { prompt: grokPrompt })).error).toBeDefined();
+    expect(f.document.pasteDispatchCount).toBe(0); expect(f.document.insertCommandCount).toBe(1); expect(f.f.sendCount).toBe(0);
   });
 
   test('missing, foreign and noncollapsed carets cannot dispatch insertion', async () => {
@@ -291,7 +342,8 @@ describe('Grok private inference adapter', () => {
         f.selection.anchorNode = f.selection.focusNode = f.f.editor; f.selection.isCollapsed = false;
       };
       expect(await f.prepare()).toMatchObject({ error: 'caret_unavailable' });
-      expect(f.document.insertCommandCount).toBe(0); expect(f.f.editor.innerText).toBe(''); expect(f.f.sendCount).toBe(0);
+      expect(f.document.insertCommandCount).toBe(0); expect(f.document.pasteDispatchCount).toBe(0);
+      expect(f.f.editor.innerText).toBe(''); expect(f.f.sendCount).toBe(0);
     }
   });
 

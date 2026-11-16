@@ -15173,6 +15173,42 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         return (token, view)
     }
 
+    private func installGrokEditingObservation(_ view: WKWebView, behavior: String = "literal") async throws {
+        let encoded = String(data: try JSONSerialization.data(withJSONObject: behavior, options: [.fragmentsAllowed]), encoding: .utf8)!
+        // Observe real browser editing events in the page world. No synthetic
+        // paste consumer supplies the insertion or enables the Send control.
+        _ = try await evaluate(view, """
+            const editor = grokFixture.editor;
+            const observation = globalThis.grokNativeEditingEvents = {pastes:0,inputs:0,executableNodes:null};
+            grokFixture.beforeSend = () => {
+                observation.executableNodes = editor.querySelectorAll('script,img,iframe,svg,a,[onerror]').length;
+            };
+            editor.addEventListener('paste', () => observation.pastes++);
+            editor.addEventListener('input', () => observation.inputs++);
+            return true;
+            """)
+        _ = try await evaluate(view, """
+            const behavior = \(encoded);
+            const observation = globalThis.grokNativeEditingOperation = {commands:[],nativeCalls:0,pending:null};
+            const original = document.execCommand;
+            document.execCommand = function(command, showUI, value) {
+                observation.commands.push(command);
+                if (behavior === 'false') return false;
+                if (behavior === 'noop') return true;
+                const editor = document.activeElement;
+                const commit = () => {
+                    observation.nativeCalls++;
+                    const result = original.call(document, command, showUI, behavior === 'partial' ? 'partial' : value);
+                    if (behavior === 'replaced') editor.replaceWith(editor.cloneNode(true));
+                    return behavior === 'unconfirmed' ? false : result;
+                };
+                if (behavior === 'delayed') { observation.pending = commit; return true; }
+                return commit();
+            };
+            return true;
+            """, world: WKContentWorld.world(name: "computa-chatgpt-model-v1"))
+    }
+
     func testGrokPrivateReadinessWaitsForHitAndPreservesDeadlineAndImmediateActionGuard() async throws {
         for arm in ["transient", "permanent", "pre_action"] {
             let setup = arm == "pre_action" ? "" : Self.grokReadinessOverlay
@@ -15539,32 +15575,24 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
-    func testGrokFreshStartUnsupportedParagraphSpacingRejectsChangedPromptBeforeSend() async throws {
-        // The observed site resets paragraph margins. An unobserved default-P
-        // layout changes innerText line breaks and must not weaken exact matching.
+    func testGrokFreshStartCorruptedEditingRejectsChangedPromptBeforeSend() async throws {
+        // A successful editing command cannot authorize changed text.
         let fixture = try Fixture(page: Self.grokFreshStartPage("grokFixture.editor.innerHTML = '<p><br></p>';"),
             initialURL: URL(string: Self.grokSavedFixtureURL))
         defer { fixture.transport.setBeforePageResultValidationForTesting(nil); fixture.shutdown() }
         let (token, view) = try await startGrokFixture(fixture)
         var insertions = 0
         fixture.transport.setBeforePageResultValidationForTesting { if $0 == "insert" { insertions += 1 } }
-        let modelWorld = WKContentWorld.world(name: "computa-chatgpt-model-v1")
-        _ = try await evaluate(view, """
-            globalThis.grokTestInsertCommands = 0;
-            const original = document.execCommand;
-            document.execCommand = function(command, ...args) {
-                if (command === 'insertText') globalThis.grokTestInsertCommands++;
-                return original.call(this, command, ...args);
-            };
-            return true;
-            """, world: modelWorld)
+        try await installGrokEditingObservation(view, behavior: "partial")
         do {
             _ = try await grokFixtureCall(fixture, "webProviderSend", ["sessionToken": token, "prompt": "Harmless fresh Grok fixture"])
-            XCTFail("Unexpected paragraph layout must not submit a changed prompt")
+            XCTFail("A successful editing command must not submit a changed prompt")
         } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .editorFailure("prompt_not_inserted")) }
         let counts = try await evaluate(view, "return [grokFixture.newChatCount, grokFixture.privateCount, grokFixture.sendCount];")
-        let commands = try await evaluate(view, "return globalThis.grokTestInsertCommands;", world: modelWorld)
-        XCTAssertEqual(commands as? Int, 1, "One editing command can emit several DOM input events")
+        let pastes = try await evaluate(view, "return globalThis.grokNativeEditingEvents.pastes;")
+        let commands = try await evaluate(view, "return globalThis.grokNativeEditingOperation.commands;", world: .world(name: "computa-chatgpt-model-v1"))
+        XCTAssertEqual(pastes as? Int, 0)
+        XCTAssertEqual(commands as? [String], ["insertHTML"], "An uncertain insertion must not fall back or replay")
         XCTAssertEqual(insertions, 1)
         XCTAssertEqual(counts as? [Int], [1, 1, 0])
     }
@@ -15965,6 +15993,97 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         XCTAssertTrue(expired)
         let counts = try await evaluate(view, "return [grokFixture.privateCount, grokFixture.sendCount];")
         XCTAssertEqual(counts as? [Int], [0, 0])
+    }
+
+    func testGrokMultilineLiteralEditingProvesExactBodyWithoutPaste() async throws {
+        let fixture = try Fixture(page: Self.grokFixturePage())
+        defer { fixture.shutdown() }
+        let (token, view) = try await startGrokFixture(fixture)
+        try await installGrokEditingObservation(view)
+        var prompt = "Literal <script>globalThis.grokNativeInjection=1</script> <img src=x onerror=alert(1)> &amp; <>&\"'\r\nUnicode e\u{301}, مرحبا, 🌍; literal \\n stays text.\r\n\r\n"
+        let line = "Synthetic fixture line:\t{\"path\":\"fixture.txt\",\"value\":1234};  spaces.\r\n"
+        while prompt.utf8.count + line.utf8.count <= 65_536 { prompt += line }
+        prompt += String(repeating: "x", count: 65_536 - prompt.utf8.count)
+        XCTAssertEqual(prompt.utf8.count, 65_536)
+        XCTAssertGreaterThan(prompt.components(separatedBy: "\r\n").count - 1, 800)
+        let sent = try await grokFixtureCall(fixture, "webProviderSend", ["sessionToken": token, "prompt": prompt])
+        XCTAssertEqual(sent["state"] as? String, "running")
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        let evidence = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+        let rawObservation = try await evaluate(view, """
+            const o = globalThis.grokNativeEditingEvents;
+            return {pastes:o.pastes,inputs:o.inputs,executableNodes:o.executableNodes,
+              lastPrompt:grokFixture.lastPrompt,sends:grokFixture.sendCount,
+              privateClicks:grokFixture.privateCount,injected:globalThis.grokNativeInjection === 1};
+            """)
+        let observation = try XCTUnwrap(rawObservation as? [String: Any])
+        XCTAssertEqual(observation["pastes"] as? Int, 0)
+        XCTAssertGreaterThan(try XCTUnwrap(observation["inputs"] as? Int), 0)
+        XCTAssertEqual(observation["executableNodes"] as? Int, 0)
+        XCTAssertEqual(observation["injected"] as? Bool, false)
+        XCTAssertEqual(observation["sends"] as? Int, 1)
+        XCTAssertEqual(observation["privateClicks"] as? Int, 1)
+        let lastPrompt = try XCTUnwrap(observation["lastPrompt"] as? String)
+        let canonicalPrompt = prompt.replacingOccurrences(of: "\r\n", with: "\n").precomposedStringWithCanonicalMapping
+        XCTAssertTrue(lastPrompt.hasPrefix(canonicalPrompt + "\n\nComputa session marker: "))
+        let parts = lastPrompt.components(separatedBy: "\n\nComputa session marker: ")
+        XCTAssertEqual(parts.count, 2)
+        let marker = try XCTUnwrap(parts.last).trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertNotNil(UUID(uuidString: marker))
+        let expectedFingerprint = EmbeddedWebModelTransport.outboundFingerprint(prompt + "\n\nComputa session marker: " + marker)
+        XCTAssertEqual(EmbeddedWebModelTransport.outboundFingerprint(lastPrompt), expectedFingerprint)
+        XCTAssertEqual(evidence["firstUserFingerprint"] as? String, expectedFingerprint)
+        XCTAssertEqual(evidence["sequence"] as? Int, 1)
+        XCTAssertEqual(evidence["responseCount"] as? Int, 1)
+        try assertChoiceEvidence(complete, choice: WebsiteModelChoice(provider: "grok", key: "Fast", label: "Fast"))
+        let commands = try await evaluate(view, "return globalThis.grokNativeEditingOperation.commands;", world: WKContentWorld.world(name: "computa-chatgpt-model-v1"))
+        XCTAssertEqual(commands as? [String], ["insertHTML"])
+        let nativeCalls = try await evaluate(view, "return globalThis.grokNativeEditingOperation.nativeCalls;", world: WKContentWorld.world(name: "computa-chatgpt-model-v1"))
+        XCTAssertEqual(nativeCalls as? Int, 1)
+        let closed = try await grokFixtureCall(fixture, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(closed["cleanup"] as? String, "not_created")
+        XCTAssertEqual(closed["state"] as? String, "finished")
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testGrokUnconfirmedOrChangedEditingCannotSendOrReplay() async throws {
+        for behavior in ["false", "unconfirmed", "noop", "partial", "replaced"] {
+            let fixture = try Fixture(page: Self.grokFixturePage())
+            defer { fixture.shutdown() }
+            let (token, view) = try await startGrokFixture(fixture)
+            try await installGrokEditingObservation(view, behavior: behavior)
+            do {
+                _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Synthetic exact editing\n\nSecond line"])
+                XCTFail("\(behavior) cannot authorize Send")
+            } catch {
+                XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure,
+                    .editorFailure(["false", "unconfirmed"].contains(behavior) ? "insert_command_rejected" : "prompt_not_inserted"), behavior)
+            }
+            await assertRejected(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "No replay"])
+            let counts = try await evaluate(view, "return [globalThis.grokNativeEditingEvents.pastes,grokFixture.sendCount];")
+            XCTAssertEqual(counts as? [Int], [0, 0], behavior)
+            let commands = try await evaluate(view, "return globalThis.grokNativeEditingOperation.commands;", world: WKContentWorld.world(name: "computa-chatgpt-model-v1"))
+            XCTAssertEqual(commands as? [String], ["insertHTML"], behavior)
+        }
+    }
+
+    func testGrokDelayedEditingCannotReviveFailedInsertionOrSend() async throws {
+        let fixture = try Fixture(page: Self.grokFixturePage())
+        defer { fixture.shutdown() }
+        let (token, view) = try await startGrokFixture(fixture)
+        try await installGrokEditingObservation(view, behavior: "delayed")
+        do {
+            _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Synthetic delayed editing\nSecond line"])
+            XCTFail("An acknowledged but still empty insertion must fail before Send")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .editorFailure("prompt_not_inserted")) }
+        let before = try await evaluate(view, "return [globalThis.grokNativeEditingEvents.pastes,grokFixture.sendCount,grokFixture.editor.textContent.length];")
+        XCTAssertEqual(before as? [Int], [0, 0, 0])
+        _ = try await evaluate(view, "globalThis.grokNativeEditingOperation.pending(); return true;", world: WKContentWorld.world(name: "computa-chatgpt-model-v1"))
+        await assertRejected(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "No replay"])
+        let after = try await evaluate(view, "return [globalThis.grokNativeEditingEvents.pastes,grokFixture.sendCount,grokFixture.editor.textContent.length > 0 ? 1 : 0];")
+        XCTAssertEqual(after as? [Int], [0, 0, 1])
+        let commands = try await evaluate(view, "return globalThis.grokNativeEditingOperation.commands;", world: WKContentWorld.world(name: "computa-chatgpt-model-v1"))
+        XCTAssertEqual(commands as? [String], ["insertHTML"])
     }
 
     func testGrokPrivateSessionProvesModelBodyCompletionAndExactClose() async throws {

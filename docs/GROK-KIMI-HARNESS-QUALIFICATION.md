@@ -287,3 +287,62 @@ metadata to be absent while loading; correcting that test expectation preserved
 the absent model evidence, loading state and single-click assertions. Both
 affected methods passed on rerun without a production change. Live qualification
 of this candidate remains pending.
+
+Installed build 562 reached verified Private/model readiness and completed
+editor preparation, then its `insert` call timed out at 10.408 seconds. The native
+transport remained at sequence zero, before the Send path. The task failed in
+12.850 seconds with zero tools and joined `closed/not_created` cleanup. Its
+server-side failed-row sequence of one does not prove Send: that separate counter
+starts at one. Independent review verified 14 artifact/identity checks and
+retained the failure as a failure. The two full workflow fixtures were not run.
+
+Controlled, unsent probes in an empty Grok Private chat isolated the bottleneck.
+The same 32,768-byte size inserted through `insertText` in 50 ms on one line,
+but took 26,219 ms across 409 lines. Both eventually matched the canonical text
+and SHA-256 and produced zero messages. The measured edit intervals include the phase log and exclude the later
+settling delay and hash. These are representative
+synthetic payloads in Inspector's page world; the failed native outbound text
+was not captured.
+
+One synthetic `text/plain` paste of the identical 409-line payload took 337 ms,
+with the provider consuming the event and exact text/hash equality afterward.
+It reads no system clipboard, inserts no HTML and has no fallback or Send.
+Each verified text draft was cleared only after matching its known text/hash
+and original editor. The first build 563 candidate used that single paste
+operation with unchanged fresh-editor/caret, Private, model and canonical
+readback checks. It passed 67 JavaScript tests (950 assertions) and 31 native
+methods, with one existing hidden-host CSS test skipped. Those results describe
+the adapter contract, not general live prompt compatibility.
+
+The next unsent stress test rejected that candidate: Grok consumed a 65,536-byte,
+1,768-line literal-text paste in 18 ms but converted it into a `pasted-text.txt`
+attachment. The editor stayed empty, so exact readback failed and no Send was
+attempted. A subsequent read of the same owned page confirmed the attachment
+and zero messages. This provider behavior requires a text insertion method
+that does not trigger paste-to-file conversion; accepting the attachment or
+weakening text verification would not solve it.
+
+A single escaped-text `insertHTML` operation with BR line separators preserved
+the same 64 KiB payload, including tabs, repeated spaces, blank lines, Unicode
+and literal markup. Immediate canonical equality and settled canonical/hash checks passed with
+zero messages. The measured edit interval, including the phase log and text
+escaping, was 1,997 ms; the scheduled 250 ms settling check returned at 12,037 ms
+total. That gap is not localized to renderer work
+versus timer scheduling and is not proof of native deadline behavior. The owned
+synthetic attachment was removed once; this later text draft was cleared only
+after verifying its exact text/hash and editor identity.
+
+The paragraph-per-line variant did not return during the bounded observation.
+The native browser closed only this disposable unsent Private tab; the Inspector
+closed with it, and Safari developer features were restored to their original
+off setting. No message was sent by any editor probe. The candidate now uses
+one escaped-text edit with fixed BR separators. It introduces no HTML from the
+prompt, automatic replay, fallback insertion or relaxed ownership checks.
+
+The final BR candidate passes 67 JavaScript tests (949 assertions) and nine
+focused native methods. The real WebKit editing fixture preserves 64 KiB of
+literal markup, Unicode, tabs, CRLF and blank lines with one `insertHTML`, zero
+paste events, one Send, exact submitted-body fingerprint and verified cleanup.
+False, unconfirmed, empty, partial, replaced-editor and delayed edits cannot
+Send or replay. These tests preserve the native contract; installed-site tool
+qualification remains a separate gate.

@@ -12,15 +12,34 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 export function grokFixture() {
   let currentHit: any = null, obstructed = false;
   const listeners = new Map<string, Set<(event: any) => void>>();
-  const document: any = { URL: 'https://grok.com/', activeElement: null, insertCommandCount: 0 };
+  const document: any = { URL: 'https://grok.com/', activeElement: null, insertCommandCount: 0, pasteDispatchCount: 0 };
+  class FixtureEvent {
+    defaultPrevented = false; isTrusted = false; target: any = null;
+    constructor(public type: string, options: any = {}) { Object.assign(this, options); }
+    preventDefault() { if ((this as any).cancelable) this.defaultPrevented = true; }
+  }
   const selection: any = { anchorNode: null, focusNode: null, isCollapsed: false,
     removeAllRanges() { this.anchorNode = this.focusNode = null; this.isCollapsed = false; },
     addRange(range: any) { this.anchorNode = this.focusNode = range.container; this.isCollapsed = range.collapsed; } };
   class Node extends Element {
     onclick: any; oninput: any;
+    eventListeners = new Map<string, Set<(event: any) => void>>();
     rect = { left: 0, top: 0, width: 100, height: 30 };
     setAttribute(name: string, value: string) { this.values[name] = value; }
     removeAttribute(name: string) { delete this.values[name]; }
+    addEventListener(type: string, listener: (event: any) => void) {
+      if (!this.eventListeners.has(type)) this.eventListeners.set(type, new Set());
+      this.eventListeners.get(type)!.add(listener);
+    }
+    dispatchEvent(event: any) {
+      event.target = this;
+      if (event.type === 'paste') document.pasteDispatchCount++;
+      for (const listener of this.eventListeners.get(event.type) || []) listener(event);
+      if (event.type === 'input') this.oninput?.(event);
+      super.dispatchEvent(event);
+      return !event.defaultPrevented;
+    }
+    append(...children: Element[]) { super.append(...children.flatMap(child => child.tagName === '#FRAGMENT' ? child.children : [child])); }
     hasAttribute(name: string) { return Object.hasOwn(this.values, name); }
     get textContent() { return this.text + this.children.map(child => child.textContent).join(''); }
     get innerText() { return this.text + this.children.map(child => child.tagName === 'BR' ? '\n' : child.innerText).join(''); }
@@ -42,21 +61,28 @@ export function grokFixture() {
     emitLayout: (type: string, target: any) => { for (const listener of [...(listeners.get(type) || [])]) listener({ type, target }); },
     layoutListenerCount: () => [...listeners.values()].reduce((count, values) => count + values.size, 0),
     createElement: (tag: string) => new Node(tag.toUpperCase()),
+    createTextNode: (text: string) => new Node('#text', {}, text),
+    createDocumentFragment: () => new Node('#FRAGMENT'),
     querySelectorAll: (selector: string) => html.querySelectorAll(selector),
     elementFromPoint: () => obstructed ? body : currentHit,
     createRange: () => ({ container: null, collapsed: false,
       selectNodeContents(node: any) { this.container = node; }, collapse() { this.collapsed = true; } }),
     execCommand: (command: string, _ui: boolean, text: string) => {
       document.insertCommandCount++;
-      if (command !== 'insertText' || !document.activeElement || selection.isCollapsed !== true
+      if (command !== 'insertHTML' || !document.activeElement || selection.isCollapsed !== true
         || !document.activeElement.contains(selection.anchorNode) || !document.activeElement.contains(selection.focusNode)) return false;
-      document.activeElement.textContent = text; document.activeElement.oninput?.(); return true;
+      // Inert grammar model only; native tests execute the real WebKit command.
+      // Accept fixed BRs and escaped text, never silently emulate arbitrary HTML.
+      document.lastInsertHTML = text;
+      if ((text.match(/<[^>]*>/g) || []).some(tag => tag !== '<br>')) return false;
+      const literal = text.replace(/<br>/g, '\n').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+      document.activeElement.textContent = literal; document.activeElement.oninput?.(); return true;
     } });
   const posted: any[] = [], observers: any[] = [];
   const window: any = { innerWidth: 1024, innerHeight: 768, getSelection: () => selection,
     webkit: { messageHandlers: { computaChatGPTSignal: { postMessage: (value: any) => posted.push(value) } } } };
   window.top = window;
-  new Function('document', 'window', readFileSync(grokFixtureHTMLPath, 'utf8').split('<script>')[1].split('</script>')[0])(document, window);
+  new Function('document', 'window', 'InputEvent', readFileSync(grokFixtureHTMLPath, 'utf8').split('<script>')[1].split('</script>')[0])(document, window, FixtureEvent);
   const world: Record<string, any> = {}, location = { origin: 'https://grok.com' };
   const source = readFileSync(new URL('../Sources/Computa/Resources/BrowserModels/grok.js', import.meta.url), 'utf8');
   const execute = new AsyncFunction('input', 'document', 'window', 'location', 'getComputedStyle', 'MutationObserver', 'globalThis', 'crypto', source);
