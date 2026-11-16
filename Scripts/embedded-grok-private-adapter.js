@@ -289,7 +289,10 @@ try {
       completionEvidence: { codeStructure: { reason: 'literal_code', blocks: 1, preCount: 1, codeCount: 1 } } };
   }
   async function inspect() {
-    guard(); const t = transcript(), form = composer(), mode = privateEvidence(), model = models.evidence();
+    guard();
+    if (computaGrokTranscriptRenderingPending(c, state, input, guard, privateEvidence, () => models.evidence()))
+      return { grokTranscriptRenderingPending: true };
+    const t = transcript(), form = composer(), mode = privateEvidence(), model = models.evidence();
     if (!Array.isArray(input.expectedUserCounts) || input.expectedUserCounts.length < 1 || input.expectedUserCounts.length > 2
       || input.expectedUserCounts.some(value => value !== 0 && value !== 1)
       || !input.expectedUserCounts.includes(t.users.length)) c.fail('conversation_changed', 'user_count');
@@ -321,6 +324,7 @@ try {
       firstUserFingerprint: fingerprint, ...result };
   }
   const initial = await inspect();
+  if (initial.grokTranscriptRenderingPending === true) return initial;
   state.initialHydrationClosed = true;
   if (['discoverModels', 'selectModel'].includes(input.action)) {
     if (state.submitted || initial.userCount || initial.responseCount) c.fail('not_fresh');

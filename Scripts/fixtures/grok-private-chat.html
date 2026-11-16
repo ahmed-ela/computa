@@ -46,7 +46,7 @@
     f.menu = menu; document.body.append(menu); f.trigger.setAttribute('aria-expanded', 'true');
   };
   document.body.append(f.privateToggle, f.trigger);
-  f.messages = make('main'); document.body.append(f.messages);
+  f.messages = make('div', { role: 'log', 'data-testid': 'chat-transcript-scroller' }); document.body.append(f.messages);
   f.form = make('form');
   f.editor = make('div', { contenteditable: 'true', role: 'textbox', 'aria-label': 'Message Grok', class: 'tiptap ProseMirror' });
   f.send = make('button', { type: 'button', 'aria-label': 'Voice mode', 'data-composer-action': 'voice' }, 'Voice');
@@ -119,7 +119,8 @@
     };
     f.newChat.onclick = () => {
       f.newChatCount++; if (f.ignoreNewChat) return;
-      f.savedMessages = f.messages; f.messages.remove(); f.messages = make('main'); document.body.append(f.messages);
+      f.savedMessages = f.messages; f.messages.remove();
+      f.messages = make('div', { role: 'log', 'data-testid': 'chat-transcript-scroller' }); document.body.append(f.messages);
       f.sidebarToggle.setAttribute('aria-expanded', 'false'); f.sidebar.setAttribute('hidden', '');
       if (window.history) window.history.pushState({}, '', '/'); else document.URL = 'https://grok.com/';
     };

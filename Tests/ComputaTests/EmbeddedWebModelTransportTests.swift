@@ -16233,6 +16233,173 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         }
     }
 
+    func testGrokTranscriptRenderingReceiptAcceptsOnlyClosedNegativePacket() throws {
+        let valid = try JSONSerialization.jsonObject(with: Data(#"{"grokTranscriptRenderingPending":true}"#.utf8)) as! [String: Any]
+        XCTAssertTrue(EmbeddedWebModelTransport.isGrokTranscriptRenderingPendingObservation(valid))
+        for value in [false, 1, "true", NSNull(), [], [:]] as [Any] {
+            XCTAssertFalse(EmbeddedWebModelTransport.isGrokTranscriptRenderingPendingObservation(["grokTranscriptRenderingPending": value]))
+        }
+        for key in ["url", "text", "modelEvidence", "temporary", "firstUserFingerprint", "responseCount", "pending", "submitted", "cleanup", "grokPrivateEvidence"] {
+            XCTAssertFalse(EmbeddedWebModelTransport.isGrokTranscriptRenderingPendingObservation(["grokTranscriptRenderingPending": true, key: NSNull()]))
+        }
+        XCTAssertFalse(EmbeddedWebModelTransport.isGrokTranscriptRenderingPendingObservation([:]))
+    }
+
+    func testGrokTranscriptRenderingSubmitRecheckAcceptsVisibleReplacementAfterRacingWake() async throws {
+        let fixture = try Fixture(page: Self.grokFixturePage())
+        defer { fixture.transport.setBeforePageResultValidationForTesting(nil); fixture.shutdown() }
+        let (token, view) = try await startGrokFixture(fixture)
+        _ = try await evaluate(view, "grokFixture.messages.style.visibility='hidden'; return true;")
+        var replaced = false
+        fixture.transport.setBeforePageResultValidationForTesting { action in
+            guard action == "inspect", !replaced else { return }
+            replaced = true
+            do {
+                let unbound = try await self.evaluate(view, "return globalThis.__computaGrokPrivateSessionV1.first == null;",
+                    world: WKContentWorld.world(name: "computa-chatgpt-model-v1"))
+                XCTAssertEqual(unbound as? Bool, true, "A hidden node cannot become a first-body binding")
+                // The reveal and replacement happen after the pending read but
+                // before native can register its wait. Its earlier revision must
+                // still wake the recheck without another Send or a timer.
+                _ = try await self.evaluate(view, """
+                    grokFixture.user.remove(); grokFixture.responseParent.remove();
+                    grokFixture.appendUser(grokFixture.lastPrompt); grokFixture.finishResponse();
+                    grokFixture.messages.style.visibility='visible'; return true;
+                    """)
+            } catch { XCTFail("Synthetic reveal failed: \(error)") }
+        }
+        let sent = try await grokFixtureCall(fixture, "webProviderSend", ["sessionToken": token, "prompt": "Synthetic hidden-to-visible first body"])
+        XCTAssertEqual(sent["state"] as? String, "running")
+        XCTAssertTrue(replaced)
+        let complete = try await waitForState("complete", fixture.transport, token: token)
+        let context = try XCTUnwrap(complete["modelProofContext"] as? [String: Any])
+        let outbound = try await evaluate(view, "return grokFixture.lastPrompt;")
+        XCTAssertEqual(context["firstUserFingerprint"] as? String,
+            EmbeddedWebModelTransport.outboundFingerprint(try XCTUnwrap(outbound as? String)))
+        XCTAssertEqual(context["sequence"] as? Int, 1)
+        try assertChoiceEvidence(complete, choice: syntheticGrokChoice)
+        let current = try await evaluate(view, "return globalThis.__computaGrokPrivateSessionV1.first.root === document.querySelector('[data-testid=user-message]');",
+            world: WKContentWorld.world(name: "computa-chatgpt-model-v1"))
+        XCTAssertEqual(current as? Bool, true)
+        let counts = try await evaluate(view, "return [grokFixture.sendCount,grokFixture.privateCount];")
+        XCTAssertEqual(counts as? [Int], [1, 1])
+        let closed = try await grokFixtureCall(fixture, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(closed["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
+    }
+
+    func testGrokTranscriptRenderingAcknowledgedReadWithholdsBodyOutputAndCleanup() async throws {
+        for arm in ["reveal", "cleanup"] {
+            let fixture = try Fixture(page: Self.grokFixturePage())
+            defer { fixture.shutdown() }
+            let (token, view) = try await startGrokFixture(fixture)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            _ = try await evaluate(view, "grokFixture.delayUser=true; return true;")
+            _ = try await grokFixtureCall(fixture, "webProviderSend", ["sessionToken": token, "prompt": "Synthetic delayed hidden body"])
+            _ = try await evaluate(view, """
+                grokFixture.messages.style.visibility='hidden';
+                grokFixture.appendUser(grokFixture.lastPrompt); grokFixture.finishResponse(); return true;
+                """)
+            for _ in 0..<2 {
+                let pending = try await grokFixtureCall(fixture, "webProviderPoll", ["sessionToken": token])
+                XCTAssertEqual(pending["state"] as? String, "running")
+                XCTAssertEqual(pending["text"] as? String, "")
+                XCTAssertNil(pending["completionEvidence"])
+                let context = try XCTUnwrap(pending["modelProofContext"] as? [String: Any])
+                XCTAssertEqual(context["firstUserFingerprint"] as? String, "")
+                XCTAssertEqual(context["responseCount"] as? Int, 0)
+            }
+            if arm == "cleanup" {
+                let closed = try await grokFixtureCall(fixture, "webProviderFinish", ["sessionToken": token])
+                XCTAssertEqual(closed["cleanup"] as? String, "failed")
+                try await assertHumanTabIntact(fixture, retaining: ownedID)
+            } else {
+                _ = try await evaluate(view, "grokFixture.messages.style.visibility='visible'; return true;")
+                let complete = try await waitForState("complete", fixture.transport, token: token)
+                XCTAssertEqual(complete["text"] as? String, #"{"type":"message","text":"GROK_NATIVE_FIXTURE_OK"}"#)
+                let closed = try await grokFixtureCall(fixture, "webProviderFinish", ["sessionToken": token])
+                XCTAssertEqual(closed["cleanup"] as? String, "not_created")
+                try await assertHumanTabIntact(fixture)
+            }
+        }
+    }
+
+    func testGrokTranscriptRenderingCannotReenterAfterBodyBinding() async throws {
+        let fixture = try Fixture(page: Self.grokFixturePage())
+        defer { fixture.shutdown() }
+        let (token, view) = try await startGrokFixture(fixture)
+        let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+        _ = try await evaluate(view, "grokFixture.delayResponse=true; return true;")
+        let sent = try await grokFixtureCall(fixture, "webProviderSend", ["sessionToken": token, "prompt": "Synthetic bound first body"])
+        XCTAssertEqual(sent["state"] as? String, "running")
+        let bound = try XCTUnwrap(sent["modelProofContext"] as? [String: Any])
+        XCTAssertFalse(try XCTUnwrap(bound["firstUserFingerprint"] as? String).isEmpty)
+        _ = try await evaluate(view, "grokFixture.messages.style.visibility='hidden'; return true;")
+        do {
+            _ = try await call(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            XCTFail("A hidden bound body cannot reenter the initial rendering wait")
+        } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .ownershipFailure(.javaScriptUserCount)) }
+        let closed = try await grokFixtureCall(fixture, "webProviderFinish", ["sessionToken": token])
+        XCTAssertEqual(closed["cleanup"] as? String, "failed")
+        try await assertHumanTabIntact(fixture, retaining: ownedID)
+    }
+
+    func testGrokTranscriptRenderingRejectsModelOrRouteChanges() async throws {
+        for arm in ["model", "route"] {
+            let fixture = try Fixture(page: Self.grokFixturePage())
+            defer { fixture.shutdown() }
+            let (token, view) = try await startGrokFixture(fixture)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            _ = try await evaluate(view, "grokFixture.delayUser=true; return true;")
+            _ = try await grokFixtureCall(fixture, "webProviderSend", ["sessionToken": token, "prompt": "Synthetic hidden guard change"])
+            _ = try await evaluate(view, "grokFixture.messages.style.visibility='hidden'; grokFixture.appendUser(grokFixture.lastPrompt); grokFixture.finishResponse(); return true;")
+            _ = try await evaluate(view, arm == "model"
+                ? "grokFixture.trigger.setAttribute('aria-label','Model: Heavy'); return true;"
+                : "history.pushState({},'', '/c/foreign'); history.replaceState({},'', '/'); return true;")
+            await assertRejected(fixture.transport, "webProviderPoll", ["sessionToken": token])
+            await assertRejected(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Never replay"])
+            let counts = try await evaluate(view, "return grokFixture.sendCount;")
+            XCTAssertEqual(counts as? Int, 1)
+            let closed = try await grokFixtureCall(fixture, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(closed["cleanup"] as? String, "failed")
+            try await assertHumanTabIntact(fixture, retaining: ownedID)
+        }
+    }
+
+    func testGrokTranscriptRenderingSubmitWaitKeepsDeadlineAndCancellationWithoutReplay() async throws {
+        for arm in ["deadline", "cancel"] {
+            let fixture = try Fixture(page: Self.grokFixturePage())
+            defer { fixture.transport.setBeforePageResultValidationForTesting(nil); fixture.shutdown() }
+            let (token, view) = try await startGrokFixture(fixture)
+            let ownedID = try XCTUnwrap(fixture.createdTabs.last)
+            fixture.transport.setTimeoutsForTesting(preparation: .seconds(10), response: .seconds(2))
+            _ = try await evaluate(view, "grokFixture.messages.style.visibility='hidden'; return true;")
+            var pendingRead = false
+            fixture.transport.setBeforePageResultValidationForTesting { if $0 == "inspect" { pendingRead = true } }
+            let began = ContinuousClock.now
+            let request = Task<Bool, Error> {
+                _ = try await self.call(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Synthetic bounded hidden body"])
+                return true
+            }
+            let observationDeadline = ContinuousClock.now + .seconds(1)
+            while !pendingRead, ContinuousClock.now < observationDeadline { await Task.yield() }
+            XCTAssertTrue(pendingRead)
+            if arm == "cancel" { request.cancel() }
+            do { _ = try await request.value; XCTFail("A hidden body cannot acknowledge a positive post-Send model recheck") }
+            catch {
+                if arm == "cancel" { XCTAssertTrue(error is CancellationError) }
+                else { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .deadline) }
+            }
+            XCTAssertLessThan(ContinuousClock.now - began, .seconds(4))
+            await assertRejected(fixture.transport, "webProviderSend", ["sessionToken": token, "prompt": "Never replay"])
+            let counts = try await evaluate(view, "return [grokFixture.sendCount,grokFixture.stopCount];")
+            XCTAssertEqual(counts as? [Int], [1, 0])
+            let closed = try await grokFixtureCall(fixture, "webProviderFinish", ["sessionToken": token])
+            XCTAssertEqual(closed["cleanup"] as? String, "failed")
+            try await assertHumanTabIntact(fixture, retaining: ownedID)
+        }
+    }
+
     func testGrokPendingSubmissionWithholdsOutputUntilExactFirstBodyAppears() async throws {
         let fixture = try Fixture(page: Self.grokFixturePage())
         defer { fixture.shutdown() }

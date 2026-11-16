@@ -94,12 +94,13 @@ export function grokFixture() {
       expectedUserCounts: submitted ? fingerprint ? [1] : [0, 1] : [0], expectedFirstUserMarker: grokMarker,
       expectedFirstUserFingerprint: fingerprint, allowFirstUserBinding: submitted && !fingerprint,
       ...overrides }, document, window, location,
-      (node: Node) => {
+      function computedStyle(node: Node): any {
         const inline = Object.fromEntries((node.values.style || '').split(';').filter(Boolean).map(declaration => {
           const separator = declaration.indexOf(':');
           return [declaration.slice(0, separator).trim(), declaration.slice(separator + 1).replace(/!important\s*$/, '').trim()];
         }));
-        return { visibility: node.values.visibility || inline.visibility || 'visible',
+        return { visibility: node.values.visibility || inline.visibility
+            || (node.parentElement ? computedStyle(node.parentElement as Node).visibility : 'visible'),
           display: node.closest('[hidden]') ? 'none' : inline.display || 'block',
           overflowX: inline['overflow-x'] || inline.overflow || 'visible',
           overflowY: inline['overflow-y'] || inline.overflow || 'visible',

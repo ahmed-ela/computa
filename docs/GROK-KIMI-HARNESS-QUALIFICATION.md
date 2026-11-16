@@ -385,4 +385,49 @@ native methods pass. The first native compile required marking the pure finite
 formatter nonisolated; it accesses no actor state. Seven native methods passed
 together; the remaining negative method passed after its test expectation was
 corrected to the existing post-claim cleanup contract, with no production
-cleanup change. Installed-site qualification of 564 remains pending.
+cleanup change.
+
+Installed build 564 (`eec1401`) failed its single fresh Fast marker in 5.589
+seconds with `website_ownership_unverified` and reason `user_count`. There was
+no verified final answer or tool execution. The provider journal contains no
+submission, completion or release proof; its failure sequence of one alone
+does not establish Send. The local failure store retained the ownership error.
+Automatic cleanup remains `unconfirmed/cleanup_unverified`; this attempt was
+not replayed. Both complete workflow fixtures remain unused.
+
+A separate approved 32 KiB Private/Fast probe captured one exact insertion and
+one Send. Its first user and assistant rows appeared after 1,106 ms with
+`role=article`, layout rectangles and `visibility:hidden`. Grok replaced both
+rows while still hidden at 1,786 ms, then made them visible at 2,256 ms. The
+settled user body matched the complete synthetic request and SHA-256; the
+assistant returned exactly the requested JSON marker. Both rows belong to
+the site's `role=log` / `chat-transcript-scroller` container. The existing
+adapter rejects these hidden initial rows as `user_count`, so this is a
+reproduced rendering failure condition, not evidence of a changed conversation.
+The installed failed session was not inspected directly, and remains unresolved.
+
+The synthetic private tab was closed and Safari developer features restored
+off. This direct probe establishes the transition and response format, not
+installed-harness browser, terminal or file-editing qualification. Its metadata
+and cleanup record are in `work/grok-kimi-20261115/build564/transcript-*.json`;
+the failed harness capture is in
+`work/grok-kimi-qualification-20261115/marker564/capture`.
+
+Build 565 adds a negative-only wait for this initial hidden transcript. It is
+limited to the sole claimed Send before the first user body is bound, the
+observed transcript container, exact owned payload/marker, and unchanged
+Private/model context. It returns no URL, model, body, output or cleanup
+authority. Normal visible-body hashing and identity checks remain mandatory.
+The native post-Send model recheck uses the same absolute deadline and a DOM
+revision captured before inspection; Send is not acknowledged until fresh
+positive evidence returns. Ordinary acknowledged reads retain their existing
+response deadline. Hidden content after binding remains an error.
+
+Source validation passes 72 Grok JavaScript tests (1,129 assertions) and eight
+focused native methods. The native cases exercise a reveal/replacement between
+the read and wait registration, acknowledged pending reads, rejected cleanup,
+model/route changes, deadline/cancellation, and one-Send behavior. Seven methods
+passed in the initial run. The eighth initially polled an already-completed
+cached result; its setup was corrected to keep a verified-body task running,
+and that method passed separately. No production change was needed for that
+test correction. Installed build 565 qualification remains the next gate.

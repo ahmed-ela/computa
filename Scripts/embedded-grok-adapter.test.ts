@@ -390,6 +390,69 @@ describe('Grok private inference adapter', () => {
     }
   });
 
+  test('hidden unbound transcript is only pending and replacement binds only after reveal', async () => {
+    const f = grokFixture(); f.f.messages.setAttribute('style', 'visibility:hidden');
+    expect(await f.submit()).toMatchObject({ submitted: true });
+    let hashed = false; f.onDigest(() => { hashed = true; });
+    const grant = { allowGrokTranscriptRenderingPending: true };
+    expect(await f.run('inspect', grant)).toEqual({ grokTranscriptRenderingPending: true });
+    expect(hashed).toBe(false); expect(f.world.__computaGrokPrivateSessionV1.first).toBeNull();
+    const prior = f.f.user;
+    f.f.user.remove(); f.f.responseParent.remove(); f.f.appendUser(f.f.lastPrompt); f.f.finishResponse();
+    expect(f.f.user).not.toBe(prior);
+    expect(await f.run('inspect', grant)).toEqual({ grokTranscriptRenderingPending: true });
+    expect(hashed).toBe(false); expect(f.world.__computaGrokPrivateSessionV1.first).toBeNull();
+    f.f.messages.setAttribute('style', 'visibility:visible');
+    expect(await f.run('inspect', grant)).toMatchObject({ firstUserVerified: true, answerComplete: true });
+    expect(hashed).toBe(true); expect(f.world.__computaGrokPrivateSessionV1.first.root).toBe(f.f.user);
+    expect(f.f.sendCount).toBe(1); expect(f.document.insertCommandCount).toBe(1);
+    f.f.messages.setAttribute('style', 'visibility:hidden');
+    expect((await f.run('inspect', grant)).error).toBeDefined();
+  });
+
+  test('hidden first user without an answer may wait but can expose no authority', async () => {
+    const f = grokFixture(); f.f.delayResponse = true; f.f.messages.setAttribute('style', 'visibility:hidden');
+    expect(await f.submit()).toMatchObject({ submitted: true });
+    for (let i = 0; i < 3; i++) {
+      expect(await f.run('inspect', { allowGrokTranscriptRenderingPending: true })).toEqual({ grokTranscriptRenderingPending: true });
+      expect(f.world.__computaGrokPrivateSessionV1.first).toBeNull();
+    }
+    expect(f.f.sendCount).toBe(1); expect(f.document.insertCommandCount).toBe(1);
+  });
+
+  test('transcript rendering wait refuses unowned, changed or differently hidden structures', async () => {
+    for (const arm of ['no_grant', 'wrong_action', 'unclaimed', 'wrong_counts', 'fingerprint', 'payload',
+      'duplicate_user', 'duplicate_answer', 'role', 'log', 'duplicate_log', 'display_none', 'hidden', 'inert',
+      'aria_hidden', 'no_layout', 'authored', 'mixed_visibility', 'missing_body', 'duplicate_body', 'model', 'private']) {
+      const f = grokFixture(); f.f.messages.setAttribute('style', 'visibility:hidden');
+      expect(await f.submit()).toMatchObject({ submitted: true });
+      const overrides: any = { allowGrokTranscriptRenderingPending: true };
+      if (arm === 'no_grant') overrides.allowGrokTranscriptRenderingPending = false;
+      if (arm === 'unclaimed') f.world.__computaGrokPrivateSessionV1.submitted = false;
+      if (arm === 'wrong_counts') overrides.expectedUserCounts = [1];
+      if (arm === 'fingerprint') overrides.expectedFirstUserFingerprint = '0'.repeat(64);
+      if (arm === 'payload') f.f.userBody.textContent += ' changed';
+      if (arm === 'duplicate_user') f.f.appendUser(f.f.lastPrompt);
+      if (arm === 'duplicate_answer') f.f.finishResponse();
+      if (arm === 'role') f.f.user.setAttribute('role', 'group');
+      if (arm === 'log') f.f.messages.removeAttribute('data-testid');
+      if (arm === 'duplicate_log') f.body.append(new f.Node('DIV', { role: 'log', 'data-testid': 'chat-transcript-scroller' }));
+      if (arm === 'display_none') f.f.user.setAttribute('style', 'display:none');
+      if (['hidden', 'inert', 'aria_hidden'].includes(arm)) f.f.messages.setAttribute(arm === 'aria_hidden' ? 'aria-hidden' : arm, arm === 'aria_hidden' ? 'true' : '');
+      if (arm === 'no_layout') f.f.user.getClientRects = () => [];
+      if (arm === 'authored') f.f.messages.setAttribute('contenteditable', 'false');
+      if (arm === 'mixed_visibility') f.f.answer.setAttribute('style', 'visibility:visible');
+      if (arm === 'missing_body') f.f.userBody.remove();
+      if (arm === 'duplicate_body') f.f.user.append(new f.Node('SPAN', { 'data-bubble-text': '' }, f.f.lastPrompt));
+      if (arm === 'model') f.f.trigger.setAttribute('aria-label', 'Model: Expert');
+      if (arm === 'private') f.body.append(new f.Node('BUTTON', { 'aria-label': 'Switch to Private Chat', 'aria-pressed': 'false' }));
+      const result = await f.run(arm === 'wrong_action' ? 'verifyModel' : 'inspect', overrides);
+      expect(result.error).toBeDefined(); expect(result.grokTranscriptRenderingPending).toBeUndefined();
+      expect(f.world.__computaGrokPrivateSessionV1.first).toBeNull();
+      expect(f.f.sendCount).toBe(1); expect(f.document.insertCommandCount).toBe(1);
+    }
+  });
+
   test('the public pilot returns only observed enabled Fast and never invents a missing row', async () => {
     const f = grokFixture(); let discovered: any;
     for (let step = 0; step < 4; step++) { discovered = await f.run('discoverModels'); if (!discovered.pending) break; }

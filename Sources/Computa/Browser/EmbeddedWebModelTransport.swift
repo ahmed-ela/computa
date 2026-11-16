@@ -4118,6 +4118,34 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
     }
 
+    private enum GrokRenderingWaitContext: Equatable { case submitRecheck, acknowledgedRead }
+
+    /// A rendered transcript is still required before any body or reply can
+    /// bind. This predicate permits only a negative read after the sole Send.
+    private func canObservePendingGrokTranscript(_ session: Session, context: GrokRenderingWaitContext) -> Bool {
+        guard !Task.isCancelled, session.provider == .grok, !session.isDiscovery, !session.isRecoveryProbe,
+              session.state == "running", session.terminalFailure == nil, session.submitted,
+              session.sequence == 1, session.acknowledgedSendSequence == (context == .submitRecheck ? 0 : 1),
+              session.pendingSubmission, session.confirmedUsers == 0, session.firstUserFingerprint == nil,
+              session.baseline == 0, session.observedResponseCount == 0, session.response.isEmpty,
+              !session.completionCandidate, session.responseCodeStructure == nil,
+              session.conversation == nil, session.conversationIdentity == nil,
+              session.temporary, session.lifecycleVerified, session.modelSelectionVerified,
+              session.modelChoice != nil, session.selectionEvidence != nil,
+              let submission = session.grokPrivateSubmission, submission.claimed,
+              submission.ownerToken == session.token, session.documentGeneration == submission.generation,
+              sessions[session.token] === session, browser.webView(for: session.tabID) === session.view,
+              browser.documentGeneration(for: session.tabID) == submission.generation,
+              session.view.url?.absoluteString == GrokPrivateModeEvidence.root,
+              !session.grokPrivateRouteChanged.withLock({ $0 }) else { return false }
+        return true
+    }
+
+    static func isGrokTranscriptRenderingPendingObservation(_ observed: [String: Any]) -> Bool {
+        Set(observed.keys) == ["grokTranscriptRenderingPending"]
+            && firstUserDiagnosticBool(observed["grokTranscriptRenderingPending"]) == true
+    }
+
     /// The adapter's post-Send provenance is insufficient on its own. Match it
     /// against the native one-shot claim from the immediately preceding ready
     /// observation, then bind the full outbound body in the ordinary ownership gate.
@@ -5169,6 +5197,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 observed = try await inspectClaudeFirstReply(session, deadline: deadline)
             } else {
                 observed = try await page(session, action: "inspect", allowPendingClaudeModelObservation: true,
+                    grokRenderingWaitContext: .acknowledgedRead,
                     allowPendingDeepSeekComposerHandoff: true,
                     allowPendingQwenProvisionalRoute: true,
                     allowPendingQwenInitialResponseIdentity: true, allowQwenFirstBodyExpansion: true,
@@ -5232,6 +5261,13 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
         session.geminiRecoveryPreparation?.observeReadiness(observed)
         guard ContinuousClock.now < deadline else { throw session.state == "loading" ? preparationFailure(session) : timeoutFailure }
+        if observed["grokTranscriptRenderingPending"] != nil {
+            guard Self.isGrokTranscriptRenderingPendingObservation(observed),
+                  canObservePendingGrokTranscript(session, context: .acknowledgedRead) else {
+                throw Failure.ownershipFailure(.javaScriptFirstUser)
+            }
+            return try snapshot(session)
+        }
         if observed["claudeModelObservationPending"] != nil {
             guard session.claudeModelObservationPending else { throw Failure.modelUnverified }
             return try snapshot(session)
@@ -8342,6 +8378,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       allowFreshClaudeQuotaCleanup: Bool = false,
                       allowPendingChatGPTModelVerification: Bool = true,
                       allowPendingClaudeModelObservation: Bool = false,
+                      grokRenderingWaitContext: GrokRenderingWaitContext? = nil,
                       allowPendingDeepSeekComposerHandoff: Bool = false,
                       allowPendingQwenProvisionalRoute: Bool = false,
                       allowPendingQwenInitialResponseIdentity: Bool = false,
@@ -8681,6 +8718,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && action == "inspect" && enforceModel && !allowBlockedProvider
             && canObservePendingClaudeModel(session)
         if allowClaudeModelObservationPending { input["allowClaudeModelObservationPending"] = true }
+        let allowGrokTranscriptRenderingPending = grokRenderingWaitContext.map {
+            action == "inspect" && enforceModel && !allowBlockedProvider && !allowSavedCleanupInspection
+                && canObservePendingGrokTranscript(session, context: $0)
+        } ?? false
+        if allowGrokTranscriptRenderingPending { input["allowGrokTranscriptRenderingPending"] = true }
         let allowDeepSeekComposerHandoff = allowPendingDeepSeekComposerHandoff
             && action == "inspect" && enforceModel && !allowBlockedProvider && !allowSavedCleanupInspection
             && canObservePendingDeepSeekComposerHandoff(session)
@@ -9577,6 +9619,17 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             default: throw Failure.composerUnavailable
             }
         }
+        if observed["grokTranscriptRenderingPending"] != nil {
+            // No URL, count, model, Private or body claim is adopted. Ordinary
+            // proof remains mandatory once the actual rows are visible.
+            guard allowGrokTranscriptRenderingPending, let context = grokRenderingWaitContext,
+                  canObservePendingGrokTranscript(session, context: context),
+                  Self.isGrokTranscriptRenderingPendingObservation(observed),
+                  session.documentGeneration == generation, currentURL == url,
+                  currentURL.absoluteString == GrokPrivateModeEvidence.root,
+                  ContinuousClock.now < evaluationDeadline else { throw Failure.ownershipFailure(.javaScriptFirstUser) }
+            return observed
+        }
         if observed["claudeModelObservationPending"] != nil {
             // No ordinary field is adopted from this empty negative receipt.
             // The invocation's exact view/generation/route fences have passed;
@@ -9818,7 +9871,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                                        allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
                                                        preparedReadinessRequest: action == "insert" ? preparedReadinessRequest : nil,
                                                        preparedReadinessSink: action == "insert" ? preparedReadinessSink : nil,
-                                                       maximumWait: evaluationDeadline - .now)
+                                                       maximumWait: evaluationDeadline - .now, grokRecheckDeadline: evaluationDeadline)
             }
         }
         // Validate preference acknowledgement before ordinary first-user or
@@ -9930,7 +9983,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                                            refreshReadOnlyObservation: refreshReadOnlyObservation,
                                                            combinedContextRecheck: combinedContextRecheck,
                                                            allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
-                                                           maximumWait: evaluationDeadline - .now)
+                                                           maximumWait: evaluationDeadline - .now, grokRecheckDeadline: evaluationDeadline)
                 }
                 if provider.savedConversationPolicy == nil, !promotion, session.conversation == nil, let conversation = provider.conversationURL(observedURL) {
                     // Preserve the initial route pin while waiting for render;
@@ -9999,7 +10052,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                                        refreshReadOnlyObservation: refreshReadOnlyObservation,
                                                        combinedContextRecheck: combinedContextRecheck,
                                                        allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
-                                                       maximumWait: evaluationDeadline - .now)
+                                                       maximumWait: evaluationDeadline - .now, grokRecheckDeadline: evaluationDeadline)
             }
         }
         let finalValidationStarted = ContinuousClock.now
@@ -10308,7 +10361,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                               allowPendingChatGPTModelVerification: Bool,
                                               preparedReadinessRequest: PreparedEditorReadinessRequest? = nil,
                                               preparedReadinessSink: ((PreparedEditorReadinessReceipt) -> Void)? = nil,
-                                              maximumWait: Duration) async throws {
+                                              maximumWait: Duration, grokRecheckDeadline: ContinuousClock.Instant? = nil) async throws {
         #if DEBUG
         modelValidationObserverForTesting?(.init(action: .init(rawValue: action) ?? .other,
             enforceModel: enforceModel, allowPending: allowPendingChatGPTModelVerification, recheck: recheck,
@@ -10346,14 +10399,57 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 // This branch requires fresh positive evidence below; a deferred
                 // continuity read cannot satisfy that contract. The ordinary
                 // pending branch above remains available for running responses.
-                let fresh = try await page(session, action: freshAction, enforceModel: enforceModel,
+                let renderingContext: GrokRenderingWaitContext?
+                if needsUserInspection, action == "submit",
+                   Self.firstUserDiagnosticBool(observed["submitted"]) == true,
+                   canObservePendingGrokTranscript(session, context: .submitRecheck) {
+                    // page(submit) has already validated its pre-click Private
+                    // receipt and this exact selection. Do not acknowledge it
+                    // until the original positive post-await check succeeds.
+                    renderingContext = .submitRecheck
+                } else if needsUserInspection,
+                          canObservePendingGrokTranscript(session, context: .acknowledgedRead) {
+                    renderingContext = .acknowledgedRead
+                } else { renderingContext = nil }
+                let renderingDeadline = grokRecheckDeadline.map { min($0, session.turnStarted + responseTimeout) }
+                var fresh: [String: Any]
+                while true {
+                    try Task.checkCancellation()
+                    let revision: UInt64?
+                    let remaining: Duration
+                    if let context = renderingContext {
+                        guard canObservePendingGrokTranscript(session, context: context) else {
+                            throw Failure.ownershipFailure(.javaScriptFirstUser)
+                        }
+                        guard let deadline = renderingDeadline, ContinuousClock.now < deadline else {
+                            throw ContinuousClock.now >= session.turnStarted + responseTimeout ? Failure.deadline : Failure.pageUnavailable
+                        }
+                        // Take the revision before the read, so a reveal that
+                        // races its callback cannot be lost before the wait.
+                        revision = try browser.modelChangeRevision(for: session.tabID)
+                        remaining = deadline - .now
+                    } else { revision = nil; remaining = maximumWait }
+                    fresh = try await page(session, action: freshAction, enforceModel: enforceModel,
                                            refreshChangedRoute: refreshChangedRoute, recheckModelAfterAwait: false,
                                            recheckProductAfterAwait: !combinedContextRecheck,
                                            refreshReadOnlyObservation: refreshReadOnlyObservation,
                                            allowPendingChatGPTModelVerification: false,
+                                           grokRenderingWaitContext: renderingContext,
                                            preparedReadinessRequest: preparedReadinessRequest,
                                            preparedReadinessSink: preparedReadinessSink,
-                                           maximumWait: maximumWait)
+                                           maximumWait: remaining)
+                    if fresh["grokTranscriptRenderingPending"] == nil { break }
+                    guard let context = renderingContext, let revision, let deadline = renderingDeadline,
+                          Self.isGrokTranscriptRenderingPendingObservation(fresh),
+                          canObservePendingGrokTranscript(session, context: context) else {
+                        throw Failure.ownershipFailure(.javaScriptFirstUser)
+                    }
+                    if context == .acknowledgedRead { throw Failure.submissionObservationPending }
+                    guard ContinuousClock.now < deadline else {
+                        throw ContinuousClock.now >= session.turnStarted + responseTimeout ? Failure.deadline : Failure.pageUnavailable
+                    }
+                    _ = try await browser.waitForModelChange(tabID: session.tabID, after: revision, until: deadline)
+                }
                 let currentEvidence = try validatedSelectionEvidence(fresh, session: session, action: freshAction, rejectionStage: .selectionRecheck)
                 guard evidence.isSameResolvedSelection(as: currentEvidence) else {
                     logModelMismatch(fresh, session: session, action: freshAction, stage: "after_await")
