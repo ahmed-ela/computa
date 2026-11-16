@@ -32,6 +32,15 @@ final class EmbeddedBrowserTab: Identifiable {
 /// Only close/shutdown destroys either session.
 @MainActor @Observable
 final class EmbeddedBrowserSession {
+    /// Native rendering geometry is explicit and retained by the owned view;
+    /// it does not identify a provider or grant browser/action authority.
+    struct ModelViewport: Equatable, Sendable {
+        let width: Int
+        let height: Int
+        static let standard = Self(width: 1_024, height: 768)
+        var frame: NSRect { NSRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)) }
+    }
+
     enum Failure: Error, LocalizedError, Equatable {
         case tabLimit(Int)
         case tabClosed
@@ -213,6 +222,7 @@ final class EmbeddedBrowserSession {
         let delegate: EmbeddedBrowserDelegate
         let isModelOwned: Bool
         let isToolOwned: Bool
+        let modelViewport: ModelViewport
         let usesIsolatedChatGPTProfile: Bool
         let navigationChanges = EmbeddedModelChangeChannel(ownerToken: UUID().uuidString)
         let popupOpenerTabID: UUID?
@@ -305,12 +315,13 @@ final class EmbeddedBrowserSession {
         var humanCheckpointURL: URL?
 
         init(tab: EmbeddedBrowserTab, view: WKWebView, delegate: EmbeddedBrowserDelegate, isModelOwned: Bool, isToolOwned: Bool = false,
-             popupOpenerTabID: UUID? = nil, usesIsolatedChatGPTProfile: Bool = false) {
+             popupOpenerTabID: UUID? = nil, usesIsolatedChatGPTProfile: Bool = false, modelViewport: ModelViewport = .standard) {
             self.tab = tab
             self.view = view
             self.delegate = delegate
             self.isModelOwned = isModelOwned
             self.isToolOwned = isToolOwned
+            self.modelViewport = modelViewport
             self.usesIsolatedChatGPTProfile = usesIsolatedChatGPTProfile
             self.popupOpenerTabID = popupOpenerTabID
         }
@@ -708,7 +719,8 @@ final class EmbeddedBrowserSession {
     }
 
     private func createTab(url: URL? = nil, select: Bool, modelOwned: Bool, toolOwned: Bool = false,
-                           isolatedChatGPTStore: WKWebsiteDataStore? = nil, kimiProfile: KimiProfile? = nil) throws -> UUID {
+                           isolatedChatGPTStore: WKWebsiteDataStore? = nil, kimiProfile: KimiProfile? = nil,
+                           modelViewport: ModelViewport = .standard) throws -> UUID {
         do {
             guard !isShutdown else { throw Failure.sessionClosed }
             guard tabs.count + pendingChatGPTInferenceCookiePreparationCount < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
@@ -738,7 +750,8 @@ final class EmbeddedBrowserSession {
             }
             configuration.defaultWebpagePreferences.allowsContentJavaScript = true
             let entry = try registerTab(configuration: configuration, select: select, modelOwned: modelOwned, toolOwned: toolOwned,
-                                        usesIsolatedChatGPTProfile: isolatedChatGPTStore != nil, kimiProfileID: kimiProfile?.id)
+                                        usesIsolatedChatGPTProfile: isolatedChatGPTStore != nil, kimiProfileID: kimiProfile?.id,
+                                        modelViewport: modelViewport)
             if toolOwned { mountModelView(entry) }
             // Empty tabs intentionally do not load a homepage or trigger any network request.
             if let url { try navigate(tabID: entry.tab.id, to: url) }
@@ -751,7 +764,7 @@ final class EmbeddedBrowserSession {
 
     private func registerTab(configuration: WKWebViewConfiguration, select: Bool, modelOwned: Bool, toolOwned: Bool = false,
                              popupOpenerTabID: UUID? = nil, usesIsolatedChatGPTProfile: Bool = false,
-                             kimiProfileID: UUID? = nil) throws -> Entry {
+                             kimiProfileID: UUID? = nil, modelViewport: ModelViewport = .standard) throws -> Entry {
         guard !isShutdown else { throw Failure.sessionClosed }
         guard exclusiveCookieMaintenance == nil else { throw Failure.cookieMaintenancePending }
         guard tabs.count + pendingChatGPTInferenceCookiePreparationCount < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
@@ -763,11 +776,11 @@ final class EmbeddedBrowserSession {
         #if DEBUG
         if modelOwned, let factory = modelViewFactoryForTesting { view = factory(configuration) }
         else {
-            view = EmbeddedModelWebView(frame: modelOwned || toolOwned ? NSRect(x: 0, y: 0, width: 1_024, height: 768) : .zero,
+            view = EmbeddedModelWebView(frame: modelOwned || toolOwned ? modelViewport.frame : .zero,
                                         configuration: configuration)
         }
         #else
-        view = EmbeddedModelWebView(frame: modelOwned || toolOwned ? NSRect(x: 0, y: 0, width: 1_024, height: 768) : .zero,
+        view = EmbeddedModelWebView(frame: modelOwned || toolOwned ? modelViewport.frame : .zero,
                                     configuration: configuration)
         #endif
         if kimiProfileID != nil, view.configuration.websiteDataStore !== configuration.websiteDataStore {
@@ -783,7 +796,8 @@ final class EmbeddedBrowserSession {
         view.uiDelegate = delegate
         view.allowsBackForwardNavigationGestures = true
         let entry = Entry(tab: tab, view: view, delegate: delegate, isModelOwned: modelOwned, isToolOwned: toolOwned,
-                          popupOpenerTabID: popupOpenerTabID, usesIsolatedChatGPTProfile: usesIsolatedChatGPTProfile)
+                          popupOpenerTabID: popupOpenerTabID, usesIsolatedChatGPTProfile: usesIsolatedChatGPTProfile,
+                          modelViewport: modelViewport)
         entries[tab.id] = entry
         tabs.append(tab)
         // Inactive creation stays inactive, including the first inference tab.
@@ -2422,7 +2436,7 @@ final class EmbeddedBrowserSession {
             entry.view.removeFromSuperview()
         }
         entry.view.autoresizingMask = []
-        entry.view.frame = NSRect(x: 0, y: 0, width: 1_024, height: 768)
+        entry.view.frame = entry.modelViewport.frame
         (entry.view as? EmbeddedModelWebView)?.captureNativeFocus(in: host.window)
         if entry.view.superview !== host { host.addSubview(entry.view) }
     }
@@ -2895,8 +2909,8 @@ final class EmbeddedBrowserSession {
     }
 
     /// Model pages share the sign-in profile, but never reuse a human's tab.
-    func createModelTab(url: URL) throws -> UUID {
-        try createModelTab(initialURL: url)
+    func createModelTab(url: URL, viewport: ModelViewport = .standard) throws -> UUID {
+        try createModelTab(initialURL: url, viewport: viewport)
     }
 
     func createKimiModelTab(url: URL, profileID: UUID) throws -> UUID {
@@ -3464,10 +3478,11 @@ final class EmbeddedBrowserSession {
     /// Fixtures load one local document themselves. Starting about:blank first
     /// would leave two competing provisional navigations in the same WebView.
     func createUnloadedModelTabForTesting(isolatedChatGPTProfile: Bool = false, qwenCodePayload: Bool = false,
+                                         viewport: ModelViewport = .standard,
                                          viewFactory: (@MainActor (WKWebViewConfiguration) -> WKWebView)? = nil) throws -> UUID {
         modelViewFactoryForTesting = viewFactory
         defer { modelViewFactoryForTesting = nil }
-        let id = try createModelTab(initialURL: nil, isolatedChatGPTStore: isolatedChatGPTProfile ? .nonPersistent() : nil)
+        let id = try createModelTab(initialURL: nil, isolatedChatGPTStore: isolatedChatGPTProfile ? .nonPersistent() : nil, viewport: viewport)
         if qwenCodePayload { try installQwenCodePayload(tabID:id) }
         return id
     }
@@ -3479,12 +3494,14 @@ final class EmbeddedBrowserSession {
     }
     #endif
 
-    private func createModelTab(initialURL: URL?, isolatedChatGPTStore: WKWebsiteDataStore? = nil, kimiProfile: KimiProfile? = nil) throws -> UUID {
-        let id = try createTab(select: false, modelOwned: true, isolatedChatGPTStore: isolatedChatGPTStore, kimiProfile: kimiProfile)
+    private func createModelTab(initialURL: URL?, isolatedChatGPTStore: WKWebsiteDataStore? = nil, kimiProfile: KimiProfile? = nil,
+                                viewport: ModelViewport = .standard) throws -> UUID {
+        let id = try createTab(select: false, modelOwned: true, isolatedChatGPTStore: isolatedChatGPTStore, kimiProfile: kimiProfile,
+                               modelViewport: viewport)
         do {
             guard let view = webView(for: id) else { throw Failure.tabClosed }
             if let entry = entries[id] { installResponseCompletionObserver(entry) }
-            view.frame = NSRect(x: 0, y: 0, width: 1_024, height: 768)
+            view.frame = viewport.frame
             if let entry = entries[id] { mountModelView(entry) }
             if let initialURL {
                 if initialURL.absoluteString == "https://chat.qwen.ai/" { try installQwenCodePayload(tabID:id) }

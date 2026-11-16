@@ -15164,6 +15164,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let view = try XCTUnwrap(fixture.browser.webView(for: XCTUnwrap(fixture.createdTabs.last)))
         try await waitForFixture(view)
         let ready = try await fixturePhaseProbe("grok_ready", trace: true) { try await waitForState("ready", fixture.transport, token: token) }
+        XCTAssertEqual(view.frame.size, NSSize(width: 360, height: 768), "The Grok comparison must exercise the actual owned viewport")
         XCTAssertNil(ready["sessionLifecycle"], "Temporary providers use the default lifecycle")
         let privateEntered = try await evaluate(view, "return grokFixture.privateEntered;")
         XCTAssertEqual(privateEntered as? Bool, true)
@@ -24349,12 +24350,11 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 transport = EmbeddedWebModelTransport(browser: browser)
                 return
             }
-            transport = EmbeddedWebModelTransport(browser: browser, createTabForTesting: { [unowned self] url in
+            transport = EmbeddedWebModelTransport(browser: browser, createTabWithViewportForTesting: { [unowned self] url, viewport in
                 // Load only the local fixture, retaining the product's model
                 // ownership, render-host mounting, and inactive-tab behavior.
-                let id = try self.browser.createUnloadedModelTabForTesting()
+                let id = try self.browser.createUnloadedModelTabForTesting(viewport: viewport)
                 let view = try XCTUnwrap(self.browser.webView(for: id))
-                view.frame = NSRect(x: 0, y: 0, width: 1024, height: 768)
                 let html: String
                 if !self.page.contains("fixture-model-trigger"), url.host == "chatgpt.com" {
                     html = EmbeddedWebModelTransportTests.modelChoicePage(.chatgpt, basePage: self.page)
