@@ -3053,6 +3053,54 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect(x.f.world.__computaModelFirstSubmitted).toBeUndefined();
         expect(x.f.world.__computaChatSubmissionState.pending).toMatchObject({ sequence: 1, marker: firstMarker, phase: 'prepared' });
       });
+      test('first Instant pre-input model read recovers one closed opening before any focus or text', async () => {
+        for (const acknowledgement of ['ignored', 'closed']) {
+          const x = await focusedFirstInstantInsert(), open = x.picker.trigger.onClick;
+          let clicks = 0;
+          x.picker.trigger.onClick = () => {
+            if (++clicks > 1) { open(); return; }
+            if (acknowledgement === 'closed') x.f.observers.forEach((o:any) => o.callback([
+              { type:'attributes', target:x.picker.trigger, attributeName:'aria-expanded', oldValue:'true' }]));
+          };
+          const pending = x.start();
+          for (let tick=0; tick<20 && clicks===0; tick++) { await microtasks(); await new Promise(resolve=>setImmediate(resolve)); }
+          x.noInput(); expect(clicks).toBe(1);
+          x.f.advanceTime(901); x.f.flush(); await microtasks(); x.f.flush();
+          const result = await pending;
+          expect({result, acknowledgement, clicks}).toMatchObject({result:{inserted:true}});
+          expect(result.modelEvidence.selected).toEqual(x.expected);
+          expect(x.counts()).toEqual({ insertions:1, focuses:1 }); expect(x.send.clicks).toBe(0);
+          expect(x.f.world.__computaModelSelection.firstInsertPrecheckOpening.recoveryClaimed).toBe(true);
+          expect(clicks).toBe(3); // Two pre-input openings and the ordinary post-insert proof.
+        }
+      });
+      test('first Instant pre-input recovery rejects drift and remains bounded without inserting or sending', async () => {
+        for (const change of ['draft', 'transient_draft', 'owner', 'route', 'work', 'model', 'header',
+          'pending_replaced', 'pending_claimed', 'fingerprint', 'marker', 'expired', 'never']) {
+          const x = await focusedFirstInstantInsert(), open = x.picker.trigger.onClick;
+          let clicks = 0;
+          x.picker.trigger.onClick = () => { if (++clicks > 1 && change !== 'never') open(); };
+          const pending = x.start();
+          for (let tick=0; tick<20 && clicks===0; tick++) { await microtasks(); await new Promise(resolve=>setImmediate(resolve)); }
+          x.noInput(); expect(clicks).toBe(1);
+          if (change === 'draft') x.f.composer.text = 'foreign draft';
+          if (change === 'transient_draft') x.f.observers.forEach((o:any) => o.callback([{type:'characterData',target:x.f.composer}]));
+          if (change === 'owner') x.f.world.__computaModelOwner = 'foreign';
+          if (change === 'route') x.f.document.URL += '&foreign=1';
+          if (change === 'work') { x.f.chatMode.values['aria-pressed']='false'; x.f.workMode.values['aria-pressed']='true'; }
+          if (change === 'model') x.picker.selected('High');
+          if (change === 'header') x.picker.trigger.connected = false;
+          const submission = x.f.world.__computaChatSubmissionState;
+          if (change === 'pending_replaced') submission.pending = { ...submission.pending };
+          if (change === 'pending_claimed') submission.pending.phase = 'submitted';
+          if (change === 'fingerprint') submission.pending.fingerprint = 'f'.repeat(64);
+          if (change === 'marker') submission.pending.marker = 'foreign-marker';
+          x.f.advanceTime(change === 'expired' ? 1801 : 901); x.f.flush(); await microtasks(); x.f.flush();
+          x.f.advanceTime(901); x.f.flush(); await microtasks(); x.f.flush();
+          const result = await pending; expect(result.error, change).toBeDefined(); x.noInput();
+          expect(clicks, change).toBe(change === 'never' ? 2 : 1);
+        }
+      });
       test('scoped first Instant focus rechecks fresh ownership product model and editor before any input', async () => {
         const mutations: [string, (x: any) => void][] = [
           ['user', x => { x.f.appendUser('Foreign focus user'); }],

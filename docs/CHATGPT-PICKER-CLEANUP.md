@@ -59,3 +59,20 @@ receipts. No failed prompt was replayed. The source review remains incomplete.
 Build 572 adds finite rejection diagnostics for this remaining case: draft
 mutation category, acknowledgement sources, popup lifecycle, clock rejection
 and whether the single recovery was claimed. It changes no verification policy.
+
+### Build 572 reproduction and pre-input recovery
+
+The next controlled review completed three tool calls before the first Instant
+insertion's model precheck failed: the picker stayed closed and that phase had
+no recovery allowance. The optimized insertion already creates its private
+prepared submission record before this check, so the existing empty-editor
+recovery (which requires no submission state) did not apply.
+
+Build 573 gives that first Instant precheck its own single empty-editor opening
+slot. It binds the exact private prepared record, prompt, fingerprint and marker
+as well as the original physical editor, selected model, route, owner and mode.
+The existing deadline and fresh full model proof remain mandatory. It cannot
+repeat input or Send. Tests cover ignored and acknowledged-but-closed openings,
+changed/restored drafts, ownership/route/model/header drift, replaced or claimed
+submission records, fingerprint/marker changes, deadline expiry, and a picker
+that never opens. Installed review qualification remains pending.

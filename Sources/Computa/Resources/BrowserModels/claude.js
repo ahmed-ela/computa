@@ -764,25 +764,45 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       && openingCondition('message_roots', chatGPTMessageRoots('user').length === 0 && chatGPTMessageRoots('assistant').length === 0, capture)
       && openingCondition('mode', !!chatGPTProductModeProof() && chatGPTTemporaryVerified(), capture);
   };
+  const emptyOpeningSubmissionIntact = opening => {
+    const state = globalThis.__computaChatSubmissionState;
+    if (!opening?.beforeInsert) return state == null;
+    const record = opening.record;
+    return request.action === 'insert' && request.prepareFirstInstantInInsert === true
+      && state === opening.state && chatGPTSubmissionContext(state) && state.lastVerified == null && state.pending === record
+      && record?.document === originalDocument && record.owner === owner && record.phase === 'prepared'
+      && record.sequence === 1 && request.submissionSequence === 1 && record.marker === request.submissionMarker
+      && record.marker === request.expectedFirstUserMarker && record.root === null && record.body === null
+      && record.expansionAttempted === false && record.canonical === opening.canonical
+      && record.fingerprint === opening.fingerprint && request.prompt === opening.prompt
+      && chatGPTSubmissionCanonical(request.prompt) === record.canonical
+      && Array.isArray(request.expectedSubmissionProofs) && request.expectedSubmissionProofs.length === 0;
+  };
   const prepareOpeningIntact = (current, opening = prepareOpening, allowAcknowledged = false, spent = false, capture = false) => {
+    const beforeInsert = request.action === 'insert' && request.prepareFirstInstantInInsert === true
+      && expected.key === 'chat/latest/instant' && request.submissionSequence === 1
+      && request.submissionMarker === request.expectedFirstUserMarker
+      && Array.isArray(request.expectedSubmissionProofs) && request.expectedSubmissionProofs.length === 0;
     if (!readonlyOpeningSelectionIntact(opening, current, spent, capture)
       || openingCondition('context', context?.action !== request.action, capture, true)
-      || openingCondition('context', context.scope !== 'action_final_guard', capture, true)
-      || openingCondition('context', globalThis.__computaChatSubmissionState, capture, true)) return false;
+      || openingCondition('context', context.scope !== (beforeInsert ? 'action_precheck' : 'action_final_guard'), capture, true)
+      || openingCondition('context', !emptyOpeningSubmissionIntact(opening), capture, true)) return false;
     if (request.action === 'prepare') return globalThis.__computaChatFirstPrepareOpening === opening;
     const composer = opening.composer;
     recordVerifyOpening(verifyObserver?.takeRecords?.() || []);
     recordDraftChanges(draftObserver?.takeRecords?.() || []);
     return openingCondition('editor_changed', !draftChanged, capture)
-      && openingCondition('verification_context', request.action === 'verifyModel' && request.allowFirstChatVerificationOpening === true
-        && opening.attempt.firstVerificationOpening === opening && (allowAcknowledged || !verifyAcknowledged), capture)
+      && openingCondition('verification_context', (beforeInsert
+        ? opening.attempt.firstInsertPrecheckOpening === opening
+        : request.action === 'verifyModel' && request.allowFirstChatVerificationOpening === true
+          && opening.attempt.firstVerificationOpening === opening) && (allowAcknowledged || !verifyAcknowledged), capture)
       && openingCondition('editor_unavailable', composer && composer.isConnected && insertComposer(current) === composer, capture)
       && openingCondition('editor_not_empty', firstVerificationComposerEmpty(composer), capture);
   };
   const passiveEditorIntact = (opening, current) => {
     recordDraftChanges(draftObserver?.takeRecords?.() || []);
     return !draftChanged && opening?.composer?.isConnected === true && firstVerificationComposerEmpty(opening.composer)
-      && globalThis.__computaChatSubmissionState == null && ![...document.querySelectorAll('button[data-testid="stop-button"],'
+      && emptyOpeningSubmissionIntact(opening) && ![...document.querySelectorAll('button[data-testid="stop-button"],'
         + 'button[aria-label="Stop streaming"],button[aria-label="Stop generating"],button[aria-label="Stop"]')].some(current.visible);
   };
   const insertComposer = (current, facts = null) => {
@@ -906,32 +926,42 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     if (recoveryEligible) attempt.postFamilyOpeningClaimed = true;
     const completed = globalThis.__computaModelSelection;
     const firstVerify = request.action === 'verifyModel' && request.allowFirstChatVerificationOpening === true;
+    const beforeInsert = request.action === 'insert' && request.prepareFirstInstantInInsert === true
+      && context?.scope === 'action_precheck';
+    const emptyEditorOpening = firstVerify || beforeInsert;
     // Negative-only facts from this original decision. No guard is reread and
     // these fields never establish an opening slot, model proof or readiness.
-    if (request.action === 'verifyModel' && firstVerificationOpeningDiagnostic === null)
-      firstVerificationOpeningDiagnostic = { nativeGrant: firstVerify, slot: 'not_claimed', reason: null };
+    if ((request.action === 'verifyModel' || beforeInsert) && firstVerificationOpeningDiagnostic === null)
+      firstVerificationOpeningDiagnostic = { nativeGrant: emptyEditorOpening, slot: 'not_claimed', reason: null };
     const captureOpening = firstVerificationOpeningDiagnostic !== null && firstVerificationOpeningDiagnostic.slot === 'not_claimed';
     if (openingCondition('generic_recheck', !genericPowerRecheck, captureOpening)
       && openingCondition('mutable_read', !mutable, captureOpening)
-      && openingCondition('context', context?.action === request.action && context.scope === 'action_final_guard', captureOpening)
+      && openingCondition('context', context?.action === request.action
+        && context.scope === (beforeInsert ? 'action_precheck' : 'action_final_guard'), captureOpening)
       && openingCondition('selection_incomplete', completed?.completed === true, captureOpening)
       && (request.action === 'prepare' && globalThis.__computaChatFirstPrepareOpening == null
-        || openingCondition('native_grant_absent', firstVerify, captureOpening)
-          && openingCondition('slot_existing', completed.firstVerificationOpening == null, captureOpening))) {
+        || openingCondition('native_grant_absent', emptyEditorOpening, captureOpening)
+          && openingCondition('slot_existing', (beforeInsert ? completed.firstInsertPrecheckOpening : completed.firstVerificationOpening) == null, captureOpening))) {
       // Claim only the first opening of this phase, including an acknowledged opening.
       const pin = globalThis.__computaChatPresetPin;
       prepareOpening = { owner, document: originalDocument, attempt: completed, pin, selection: pin?.selection, header: trigger,
         recoveryClaimed: false,
         resolved: { family: { ...pin?.selection?.family }, power: { ...pin?.selection?.power } } };
-      if (firstVerify) {
-        completed.firstVerificationOpening = prepareOpening;
+      if (beforeInsert) {
+        const state = globalThis.__computaChatSubmissionState, record = state?.pending;
+        Object.assign(prepareOpening, { beforeInsert: true, state, record, canonical: record?.canonical,
+          fingerprint: record?.fingerprint, prompt: request.prompt });
+      }
+      if (emptyEditorOpening) {
+        if (beforeInsert) completed.firstInsertPrecheckOpening = prepareOpening;
+        else completed.firstVerificationOpening = prepareOpening;
         prepareOpening.composer = insertComposer(current);
       } else globalThis.__computaChatFirstPrepareOpening = prepareOpening;
       current = drainOpeningEvidence();
-      if (!prepareOpeningIntact(current, prepareOpening, false, false, firstVerify)) {
-        if (firstVerify) firstVerificationOpeningDiagnostic.slot = 'ineligible';
+      if (!prepareOpeningIntact(current, prepareOpening, false, false, emptyEditorOpening)) {
+        if (emptyEditorOpening) firstVerificationOpeningDiagnostic.slot = 'ineligible';
         prepareOpening = null;
-      } else if (firstVerify) {
+      } else if (emptyEditorOpening) {
         firstVerificationOpeningDiagnostic.slot = 'established';
         // Retain the first opening's acknowledgment and editor history. Any bounded
         // recovery below shares this phase's single recovery claim and deadline.
@@ -1041,10 +1071,10 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         if (clockRejected || Date.now() < acknowledgementDeadline) {
           if (firstReadiness) preparedReadinessOpeningDiagnostic.clockUnconfirmed = true;
           if (firstSubmit) preparedSubmitOpeningDiagnostic.clockUnconfirmed = true;
-          if (firstVerify) readStage = 'first_verification_clock_unconfirmed';
+          if (emptyEditorOpening) readStage = 'first_verification_clock_unconfirmed';
           throw failure('model_unverified');
         }
-        if (firstVerify || firstReadiness || firstSubmit) recordVerifyOpening(verifyObserver?.takeRecords?.() || []);
+        if (emptyEditorOpening || firstReadiness || firstSubmit) recordVerifyOpening(verifyObserver?.takeRecords?.() || []);
         let detachedReadinessPopup = false;
         if ((firstReadiness || firstSubmit) && readinessPopupObserver) {
           recordReadinessPopup(readinessPopupObserver.takeRecords?.() || []);
@@ -1056,7 +1086,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
           readinessPopupLifecycle = readinessPopupTrace.overflow ? 'overflow'
             : detachedReadinessPopup ? 'detached_associated' : 'unproved';
         }
-        if (firstVerify && verifyAcknowledged) {
+        if (emptyEditorOpening && verifyAcknowledged) {
           // An acknowledged opening is now positively closed. Only this untouched
           // first-verification slot may spend its existing one recovery on a fresh
           // opening; an open/ambiguous picker or a changed pin/editor still refuses.
@@ -1077,11 +1107,11 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
           if (drifted || Date.now() >= until) throw failure('model_unverified');
         } else {
           if (!(prepareOpening !== null ? prepareOpeningIntact(current) : insertOpeningIntact(current, false, detachedReadinessPopup))) {
-            if (firstVerify) readStage = 'first_verification_recovery_guard_changed';
+            if (emptyEditorOpening) readStage = 'first_verification_recovery_guard_changed';
             throw failure('model_unverified');
           }
           (prepareOpening || insertOpening).recoveryClaimed = true;
-          readStage = firstVerify || insertOpening?.insertProof ? 'primary_open_recovery_requested' : prepareOpening !== null ? 'prepare_open_recovery_requested' : 'insert_open_recovery_requested';
+          readStage = emptyEditorOpening || insertOpening?.insertProof ? 'primary_open_recovery_requested' : prepareOpening !== null ? 'prepare_open_recovery_requested' : 'insert_open_recovery_requested';
           trigger.click();
           current = await wait(powerAcknowledged);
         }
