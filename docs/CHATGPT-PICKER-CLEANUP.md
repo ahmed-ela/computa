@@ -138,10 +138,11 @@ installed inventory match the sealed package. Its SHA-256 receipt is
   continuation completed the source review in another 36.570 seconds. It was
   not an uninterrupted single-turn completion. Missing `rg` in the app shell
   caused the model to fall back to other commands; no tool transport was lost.
-- No picker or cleanup failure occurred in that build-575 review. The fault
-  injection, rather than a live recurrence during this particular run, proves
-  recovery of the exact detached-popup case. This does not qualify other
-  provider/model pairs or promise immunity to future website changes.
+- No picker or cleanup failure occurred in that build-575 review. Fault
+  injection proves recovery of the exact detached-popup case. Successful live
+  telemetry does not independently distinguish that recovery from ordinary
+  picker openings. This does not qualify other provider/model pairs or promise
+  immunity to future website changes.
 
 Live thread: `01a1eb79-ed20-7ff3-8271-dfb6d13679a2`. The response contains
 source-linked findings; their correctness was not independently audited as
