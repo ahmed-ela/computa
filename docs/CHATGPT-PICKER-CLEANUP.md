@@ -44,7 +44,7 @@ never-sent draft, and retains seven altered or ambiguous cases. Existing tests
 retain cancellation, generation, exact-draft, delayed readiness, model drift,
 unbound-message and cleanup-expansion barriers.
 
-Installed-app review qualification is pending. Local evidence: `work/picker-cleanup-20261117/`.
+Installed-app review results are recorded below. Local evidence: `work/picker-cleanup-20261117/`.
 
 ### Installed build 571 reproduction
 
@@ -113,3 +113,42 @@ family and power; the transient popup supplies no model evidence and no Send
 authority. The ordinary post-proof draft/ownership checks and later native
 Submit verification remain mandatory. Unassociated or aria-only signals,
 changed drafts, invalid intervals, duplicate IDs and cancellation still refuse.
+
+
+## Final validation — November 17, build 575
+
+Signed build 575 is installed from `b478092b0212b3236cfb0cba1344f9ab65ddf6db`.
+The later `da8a774` commit corrects two test-only Pro assertions; production
+sources and installed resources are unchanged. The signature and 68-file
+installed inventory match the sealed package. Its SHA-256 receipt is
+`36c6d3826407cf3e62636651d493164ea2aa188b8f2ac197441c64242568dd1b`.
+
+- Adapter validation: 1,120 cases passed in the three-provider full run. Two Pro
+  assertions accidentally referenced the new fixture's local variable; both
+  corrected cases and the three detached-popup phase cases passed on rerun.
+  All 1,122 distinct adapter cases therefore pass across these runs.
+- Four focused native WebKit tests passed: the existing ten-case Instant
+  readiness/cleanup matrix, exact detached-popup recovery before one Instant
+  Send, refusal/cancellation with zero Send, and unchanged Pro readiness.
+  Earlier selection/ownership and cleanup-store regressions also passed.
+- Fresh-restart Instant review: 15 terminal tool calls, three successful
+  compactions, 19 completed inference responses with GPT-6 / Instant and Chat
+  product proof, and 19 matching saved `closed` cleanup receipts. The first
+  turn reached the unchanged 16-inference budget after 166.488 seconds. A bounded
+  continuation completed the source review in another 36.570 seconds. It was
+  not an uninterrupted single-turn completion. Missing `rg` in the app shell
+  caused the model to fall back to other commands; no tool transport was lost.
+- No picker or cleanup failure occurred in that build-575 review. The fault
+  injection, rather than a live recurrence during this particular run, proves
+  recovery of the exact detached-popup case. This does not qualify other
+  provider/model pairs or promise immunity to future website changes.
+
+Live thread: `01a1eb79-ed20-7ff3-8271-dfb6d13679a2`. The response contains
+source-linked findings; their correctness was not independently audited as
+part of transport qualification. Local artifacts are in
+`work/picker-cleanup-20261117/`, including build/package/install receipts,
+`detached-verify-all.log`, `detached-verify-corrected-tests.log`,
+`detached-verify-native.log`, `build575-live-result.json`, and both journals.
+Historical failed receipts remain intact. No prompt or uncertain Send was
+replayed, no verification or per-turn budget was disabled, and no developer
+settings needed changing for this work.

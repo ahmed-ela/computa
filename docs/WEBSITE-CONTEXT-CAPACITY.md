@@ -106,3 +106,15 @@ including `live-review-results.json`, per-turn transaction/cleanup journals,
 `live-app.log`, the 134 passing test receipts, and build/sign/install receipts.
 First thread: `01a1e68a-ba15-78b2-8226-e2cb544f9d04`.
 Second thread: `01a1e690-abbb-78e0-bf91-c6f3fbb08f5c`.
+
+
+### November 17: installed Instant review completion
+
+Build 575 completes the source-review workflow after the model-picker and
+unsent-cleanup fixes described in [ChatGPT picker and cleanup](CHATGPT-PICKER-CLEANUP.md).
+The fresh-restart test made 15 terminal tool calls, compacted three times,
+returned the review, and retained exact model/product evidence plus confirmed
+closure for all 19 inference sessions. It required a bounded second user turn
+after the existing 16-inference cap; that cap and all byte/tool/ownership
+checks remain enabled. This qualifies the tested Instant transport workflow,
+not Pro, other providers, or the correctness of the review's findings.
