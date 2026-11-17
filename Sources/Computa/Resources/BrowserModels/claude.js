@@ -559,6 +559,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   let prepareOpening = null, insertOpening = null, genericPowerRecheck = false;
   let firstVerificationOpeningDiagnostic = null;
   let preparedReadinessOpeningDiagnostic = null;
+  let preparedSubmitOpeningDiagnostic = null;
   let readinessPopupObserver = null, readinessPopupTrace = null, readinessPopupLifecycle = null;
   let detachedSubmitSend = null;
   const recordReadinessPopup = records => {
@@ -580,17 +581,18 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     return value;
   };
   let draftObserver = null, draftChanged = false, firstVerificationEditor = null, initialReadinessObserver = null;
-  const invalidateDraft = () => { draftChanged = true; };
+  let draftChangeReason = null;
+  const invalidateDraft = reason => { draftChanged = true; draftChangeReason ||= typeof reason === 'string' ? reason : 'input_event'; };
   const recordDraftChanges = records => {
     const composer = insertOpening?.composer || firstVerificationEditor;
     if (!composer || !records.length) return;
-    if (records.length > 64) { draftChanged = true; return; }
+    if (records.length > 64) { invalidateDraft('record_overflow'); return; }
     for (const r of records) {
-      if (r.target === composer || composer.contains(r.target)) draftChanged = true;
+      if (r.target === composer || composer.contains(r.target)) invalidateDraft('editor_mutation');
       if (r.type !== 'childList') continue;
-      if (r.addedNodes.length + r.removedNodes.length > 64) { draftChanged = true; return; }
+      if (r.addedNodes.length + r.removedNodes.length > 64) { invalidateDraft('child_overflow'); return; }
       for (const node of [...r.addedNodes, ...r.removedNodes]) {
-        if (node === composer || node.contains?.(composer) || node === trigger || node.contains?.(trigger)) draftChanged = true;
+        if (node === composer || node.contains?.(composer) || node === trigger || node.contains?.(trigger)) invalidateDraft('identity_changed');
         if (insertOpening && (openingAcknowledgement('menuRoot', ['menu','listbox'].includes(node.getAttribute?.('role'))) ||
           openingAcknowledgement('menuDescendant', node.querySelector?.('[role="menu"],[role="listbox"]')))) verifyAcknowledged = true;
       }
@@ -650,6 +652,10 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         selectionSettled: selection?.completed === true, selectionCompleted: selection?.completed === true,
         recoveryEligible: prepareOpening !== null || insertOpening !== null,
         firstVerificationOpening: firstVerificationOpeningDiagnostic,
+        ...(preparedSubmitOpeningDiagnostic ? { preparedSubmitOpening: {
+          ...preparedSubmitOpeningDiagnostic, draftChanged, draftChangeReason,
+          observedAcknowledgement: verifyAcknowledged, acknowledgementSources: { ...acknowledgementSources },
+          recoveryClaimed: insertOpening?.recoveryClaimed === true, readinessPopupLifecycle } } : {}),
         ...(preparedReadinessOpeningDiagnostic ? { preparedReadinessOpening: {
           ...preparedReadinessOpeningDiagnostic, observedAcknowledgement: verifyAcknowledged,
           acknowledgementSources: { ...acknowledgementSources },
@@ -958,6 +964,8 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     }
     const firstSubmit = request.action === 'submit' && context?.action === 'submit' && context.scope === 'action_precheck'
       && prepared?.readyForSubmitOpening === prepared?.firstInsertOpening && prepared?.firstSubmitOpening == null;
+    if (firstSubmit && preparedSubmitOpeningDiagnostic == null)
+      preparedSubmitOpeningDiagnostic = { clockRejected: false, clockUnconfirmed: false };
     const preparedVerify = !firstVerify && request.action === 'verifyModel' && request.preparedInstantVerificationOpening
       && context?.action === 'verifyModel' && context.scope === 'action_final_guard' && prepared?.firstPreparedVerificationOpening == null;
     const readinessScope = request.action === 'sendReady' && request.firstChatReadinessFinalGuardOnly === true
@@ -1025,12 +1033,14 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       const acknowledged = await websiteModelWaitForChange(acknowledgementDeadline,
         () => !owned() || selectionChanged || powerAcknowledged(), 'model_wait', () => {
           clockRejected = true; if (firstReadiness) preparedReadinessOpeningDiagnostic.clockRejected = true;
+          if (firstSubmit) preparedSubmitOpeningDiagnostic.clockRejected = true;
         });
       current = drainOpeningEvidence();
       // A delayed acknowledgement wins; never toggle an already opened menu.
       if (!acknowledged && !powerAcknowledged()) {
         if (clockRejected || Date.now() < acknowledgementDeadline) {
           if (firstReadiness) preparedReadinessOpeningDiagnostic.clockUnconfirmed = true;
+          if (firstSubmit) preparedSubmitOpeningDiagnostic.clockUnconfirmed = true;
           if (firstVerify) readStage = 'first_verification_clock_unconfirmed';
           throw failure('model_unverified');
         }

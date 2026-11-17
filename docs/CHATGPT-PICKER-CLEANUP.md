@@ -45,3 +45,17 @@ retain cancellation, generation, exact-draft, delayed readiness, model drift,
 unbound-message and cleanup-expansion barriers.
 
 Installed-app review qualification is pending. Local evidence: `work/picker-cleanup-20261117/`.
+
+### Installed build 571 reproduction
+
+The same Instant review made ten terminal tool calls and one compaction in
+134.555 seconds. Eleven inference responses completed with verified GPT-6 /
+Instant selection and Chat product evidence. The twelfth stopped at the submit
+picker precheck. Unlike build 570, its diagnostic reports recovery eligible;
+another guard rejects recovery after the acknowledgement wait. All twelve
+sessions, including the unsent failed inference, have saved confirmed closure
+receipts. No failed prompt was replayed. The source review remains incomplete.
+
+Build 572 adds finite rejection diagnostics for this remaining case: draft
+mutation category, acknowledgement sources, popup lifecycle, clock rejection
+and whether the single recovery was claimed. It changes no verification policy.

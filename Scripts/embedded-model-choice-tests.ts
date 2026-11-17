@@ -4389,6 +4389,11 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           }
           await finishFirstInsertWait(x, change==='deadline' ? 1801 : 901); await finishFirstInsertWait(x,1100);
           const result=await request;expect(result.error,change).toBeDefined();expect(x.send.clicks,change).toBe(0);
+          if (change === 'transient_draft') expect(result.modelDiagnostic.readContext.preparedSubmitOpening)
+            .toMatchObject({ draftChanged: true, draftChangeReason: 'editor_mutation', recoveryClaimed: false });
+          if (change === 'transient_trigger') expect(result.modelDiagnostic.readContext.preparedSubmitOpening)
+            .toMatchObject({ draftChanged: false, observedAcknowledgement: true,
+              acknowledgementSources: { triggerAriaExpanded: true }, recoveryClaimed: false });
           expect(x.openings(),change).toBe(1);expect(second,change).toBe(['wrong_fresh_choice','never_opens'].includes(change)?1:0);
           expect(x.counts().insertions).toBe(1);
         }
