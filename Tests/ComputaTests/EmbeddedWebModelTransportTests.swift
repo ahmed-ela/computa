@@ -1793,6 +1793,15 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertPreparedFinalReadinessOpening(.detachedPopup, power: .pro)
     }
 
+    func testPreparedInstantVerificationRecoversExactlyDetachedPopupBeforeOneSend() async throws {
+        try await assertPreparedFinalReadinessOpening(.detachedPopup, power: .instant)
+    }
+
+    func testPreparedInstantVerificationRejectsUnprovedPopupAndCancellation() async throws {
+        try await assertPreparedFinalReadinessOpening(.ariaOnly, power: .instant)
+        try await assertPreparedFinalReadinessOpening(.detachedPopup, cancelDuringOpening: true, power: .instant)
+    }
+
     private enum PreparedReadinessOpening { case ignored, ariaOnly, detachedPopup }
 
     private func assertPreparedFinalReadinessOpening(_ opening: PreparedReadinessOpening,
@@ -1811,7 +1820,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let world = WKContentWorld.world(name: "computa-chatgpt-model-v1")
         var installed = false
         fixture.transport.setBeforePageResultValidationForTesting { action in
-            if action == "sendReady" {
+            if action == (power == .instant ? "verifyModel" : "sendReady") {
                 // Retire this fixture listener before the subsequent native submit proof.
                 _ = try? await self.evaluate(view, """
                     document.getElementById('fixture-model-trigger')?.removeEventListener(
@@ -1843,10 +1852,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
                 globalThis.__fixtureReadinessOpenings = 0;
                 globalThis.__fixtureReadinessPriorProved = false;
                 const interrupt = event => {
-                  // Inspect only the real slot minted by the exact native sendReady
-                  // final invocation. Earlier insertion/model proofs remain untouched.
+                  // Inspect the real slot minted by this native verification phase.
+                  // Earlier insertion/model proofs remain untouched.
                   const pending = globalThis.__computaChatSubmissionState?.pending;
-                  const slot = pending?.firstReadinessOpening;
+                  const slot = pending?.[\(String(reflecting: power == .instant ? "firstPreparedVerificationOpening" : "firstReadinessOpening"))];
                   if (!slot) return;
                   globalThis.__fixtureReadinessPriorProved = slot.insertProof === pending.firstInsertOpening
                     && slot.insertProof?.proved === true && slot.insertProof?.exactSubmitDraft === true;

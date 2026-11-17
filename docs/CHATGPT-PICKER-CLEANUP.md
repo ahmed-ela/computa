@@ -86,3 +86,30 @@ post-insert `verifyModel` check failed before Send; all nine sessions closed
 with saved cleanup receipts. Build 574 adds the existing finite draft and
 acknowledgement diagnostics to that prepared-verification phase, without
 changing its proof policy. The full review is still incomplete.
+
+
+### Prepared model verification: reproduced cause
+
+Build 574 completed the review across two user turns: 17 tool calls, four
+compactions and 22 fully verified GPT-6 / Instant responses, all with saved
+closed-session receipts. The first turn stopped at its unchanged 16-inference
+budget; a bounded continuation produced the review. This establishes transport
+completion, not independent validation of the model's review findings.
+
+An independent repeat reproduced the remaining picker failure after seven tool
+calls and one compaction. Diagnostic `92C68025-9C93-48FF-B559-3A68BF745C30`
+shows the prepared `verifyModel` phase: intact draft and model pin, no clock
+failure, and both a menu-descendant removal and an expanded-to-closed header
+acknowledgement. Recovery was eligible but not claimed. That phase rejected any
+opening acknowledgement; unlike readiness and Submit, it did not collect the
+existing proof that the exact associated popup had opened and detached.
+
+Build 575 shares that existing structural lifecycle proof with prepared Instant
+verification. Recovery still requires reciprocal menu/header IDs, overlapping
+association/expanded/mount intervals, the original body, editor and enabled Send,
+no ambiguous menu or identity mutation, zero messages, exact native grant and
+full draft, and the original deadline. One fresh opening must then prove both
+family and power; the transient popup supplies no model evidence and no Send
+authority. The ordinary post-proof draft/ownership checks and later native
+Submit verification remain mandatory. Unassociated or aria-only signals,
+changed drafts, invalid intervals, duplicate IDs and cancellation still refuse.

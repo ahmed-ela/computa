@@ -3589,7 +3589,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           await tickVerification(x.f,901); await tickVerification(x.f,901);
           const result=await checking;
           expect(result.error).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(choice('Pro'));
-          expect(result.modelEvidence.chatSelection.power.key).toBe('pro'); expect(x.count()).toBe(2);
+          expect(result.modelEvidence.chatSelection.power.key).toBe(verifying ? 'instant' : 'pro'); expect(x.count()).toBe(2);
           expect(x.f.world.__computaModelSelection.firstVerificationOpening.recoveryClaimed).toBe(true);
           noSelection(x.f,x.picker);
         }
@@ -3621,7 +3621,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           if (variant==='same_pro') {
             expect(result.error).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(x.expected);
             expect(result.modelEvidence.chatSelection.family.key).toBe('GPT-6');
-            expect(result.modelEvidence.chatSelection.power.key).toBe('pro');
+            expect(result.modelEvidence.chatSelection.power.key).toBe(verifying ? 'instant' : 'pro');
           } else { expect(result.error,variant).toBeDefined(); expect(result.modelEvidence,variant).toBeUndefined(); }
           expect(x.count(),variant).toBe(2); noSelection(x.f,x.picker,variant==='draft'?'unrelated unsent draft':'');
         }
@@ -4208,18 +4208,19 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           } finally { prototype.observe = observe; }
         }
       });
-      for (const action of ['sendReady', 'submit'] as const) test(`prepared ${action} reopens a reciprocally linked picker detached before proof`, async () => {
-        const submitting = action === 'submit';
+      for (const action of ['sendReady', 'submit', 'verifyModel'] as const) test(`prepared ${action} reopens a reciprocally linked picker detached before proof`, async () => {
+        const submitting = action === 'submit', verifying = action === 'verifyModel';
         const modes = ['stable_controls', 'transient_controls', 'menu_only', 'aria_only', 'wrong_id', 'wrong_label',
           'id_drift', 'disjoint_intervals', 'duplicate_menu', 'dropped_menu_role', 'message_wrapped',
           'hidden_duplicate_menu_id', 'hidden_duplicate_trigger_id',
           'detached_repaint', 'foreign_portal', 'remounted_trigger', 'still_connected', 'send_toggled'];
         if (submitting) modes.unshift('send_replaced_after_proof', 'send_duplicated_after_proof');
         for (const mode of modes) {
-          const x = submitting ? await preparedSubmit('Medium') : await preparedReadinessRecovery('Pro');
+          const x = submitting ? await preparedSubmit('Medium') : verifying ? await preparedVerification() : await preparedReadinessRecovery('Pro');
           const { trigger } = x.picker;
-          const openings = submitting ? x.openings : x.recoveryOpenings;
-          const readRequest = submitting ? x.request : x.recoveryRequest;
+          const openings = submitting ? x.openings : verifying ? x.calls : x.recoveryOpenings;
+          const readRequest = submitting ? x.request : verifying ? { expectedModelChoice:x.expected,
+            expectedSubmissionProofs:[], preparedInstantVerificationOpening:x.grant } : x.recoveryRequest;
           const controls = trigger.getAttribute('aria-controls'), triggerID = trigger.getAttribute('id');
           const stable = mode === 'stable_controls' || mode === 'menu_only';
           const popup = new Node('DIV', { role: 'menu', id: ['wrong_id', 'detached_repaint'].includes(mode) ? 'foreign-picker' : controls,
@@ -4280,7 +4281,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           try {
             const reading = x.f.run(action, readRequest);
             await microtasks(); expect(openings(), mode).toBe(1);
-            const slotName = submitting ? 'firstSubmitOpening' : 'firstReadinessOpening';
+            const slotName = submitting ? 'firstSubmitOpening' : verifying ? 'firstPreparedVerificationOpening' : 'firstReadinessOpening';
             const slot = x.pending[slotName];
             expect(slot.insertProof).toBe(x.pending.firstInsertOpening);
             expect(slot.recoveryClaimed).toBe(false);
@@ -4343,12 +4344,12 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
               expect(popup.isConnected, mode).toBe(false); expect(popup.events).toHaveLength(0);
               expect(result.error, mode).toBeUndefined();
               if (submitting) expect(result.submitted, mode).toBe(true);
-              else expect(result.sendReady, mode).toBe(true);
+              else if (!verifying) expect(result.sendReady, mode).toBe(true);
               if (!submitting) {
                 expect(result.modelEvidence.selected, mode).toEqual(x.expected);
                 expect(result.modelEvidence.chatSelection.family).toEqual({ key: 'GPT-6', label: 'GPT-6' });
                 expect(result.modelEvidence.chatSelection.automaticFamily.policy).toBe('highest_offered_plain_gpt');
-                expect(result.modelEvidence.chatSelection.power.key).toBe('pro');
+                expect(result.modelEvidence.chatSelection.power.key).toBe(verifying ? 'instant' : 'pro');
                 expect(result.productModeEvidence).toMatchObject({ product: 'chatgpt', mode: 'chat', temporaryTransition: 'acknowledged' });
               }
               expect(x.picker.trigger).toBe(trigger); expect(trigger.getAttribute('aria-expanded')).toBe('false');

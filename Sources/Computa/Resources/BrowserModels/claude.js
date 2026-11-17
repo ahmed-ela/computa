@@ -656,7 +656,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         ...(preparedVerificationOpeningDiagnostic ? { preparedVerificationOpening: {
           ...preparedVerificationOpeningDiagnostic, draftChanged, draftChangeReason,
           observedAcknowledgement: verifyAcknowledged, acknowledgementSources: { ...acknowledgementSources },
-          recoveryClaimed: insertOpening?.recoveryClaimed === true } } : {}),
+          recoveryClaimed: insertOpening?.recoveryClaimed === true, readinessPopupLifecycle } } : {}),
         ...(preparedSubmitOpeningDiagnostic ? { preparedSubmitOpening: {
           ...preparedSubmitOpeningDiagnostic, draftChanged, draftChangeReason,
           observedAcknowledgement: verifyAcknowledged, acknowledgementSources: { ...acknowledgementSources },
@@ -1039,7 +1039,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         draftObserver = new MutationObserver(recordDraftChanges);
         draftObserver.observe(document.documentElement || document, {subtree:true,childList:true,characterData:true});
         insertOpening.composer.addEventListener?.('input', invalidateDraft, true);
-        const submitControls = firstSubmit && typeof context?.recordRecoveredSubmitSend === 'function'
+        const submitControls = (preparedVerify || firstSubmit && typeof context?.recordRecoveredSubmitSend === 'function')
           ? websiteChatVisibleSendControls(current.visible) : [];
         const popupSend = firstReadiness ? chatGPTFirstChatReadinessSnapshot.send
           : submitControls.length === 1 && current.enabled(submitControls[0]) ? submitControls[0] : null;
@@ -1083,14 +1083,14 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
           if (emptyEditorOpening) readStage = 'first_verification_clock_unconfirmed';
           throw failure('model_unverified');
         }
-        if (emptyEditorOpening || firstReadiness || firstSubmit) recordVerifyOpening(verifyObserver?.takeRecords?.() || []);
+        if (emptyEditorOpening || firstReadiness || firstSubmit || preparedVerify) recordVerifyOpening(verifyObserver?.takeRecords?.() || []);
         let detachedReadinessPopup = false;
-        if ((firstReadiness || firstSubmit) && readinessPopupObserver) {
+        if ((firstReadiness || firstSubmit || preparedVerify) && readinessPopupObserver) {
           recordReadinessPopup(readinessPopupObserver.takeRecords?.() || []);
           readinessPopupObserver.disconnect?.();
           detachedReadinessPopup = verifyAcknowledged && current.physicalMenus.length === 0
             && websiteChatReadinessPopupDetached(readinessPopupTrace)
-            && (!firstSubmit || exactVisibleSend(current, readinessPopupTrace.send));
+            && (!(firstSubmit || preparedVerify) || exactVisibleSend(current, readinessPopupTrace.send));
           if (firstSubmit && detachedReadinessPopup) detachedSubmitSend = readinessPopupTrace.send;
           readinessPopupLifecycle = readinessPopupTrace.overflow ? 'overflow'
             : detachedReadinessPopup ? 'detached_associated' : 'unproved';
