@@ -3589,7 +3589,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           await tickVerification(x.f,901); await tickVerification(x.f,901);
           const result=await checking;
           expect(result.error).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(choice('Pro'));
-          expect(result.modelEvidence.chatSelection.power.key).toBe(verifying ? 'instant' : 'pro'); expect(x.count()).toBe(2);
+          expect(result.modelEvidence.chatSelection.power.key).toBe('pro'); expect(x.count()).toBe(2);
           expect(x.f.world.__computaModelSelection.firstVerificationOpening.recoveryClaimed).toBe(true);
           noSelection(x.f,x.picker);
         }
@@ -3621,7 +3621,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           if (variant==='same_pro') {
             expect(result.error).toBeUndefined(); expect(result.modelEvidence.selected).toEqual(x.expected);
             expect(result.modelEvidence.chatSelection.family.key).toBe('GPT-6');
-            expect(result.modelEvidence.chatSelection.power.key).toBe(verifying ? 'instant' : 'pro');
+            expect(result.modelEvidence.chatSelection.power.key).toBe('pro');
           } else { expect(result.error,variant).toBeDefined(); expect(result.modelEvidence,variant).toBeUndefined(); }
           expect(x.count(),variant).toBe(2); noSelection(x.f,x.picker,variant==='draft'?'unrelated unsent draft':'');
         }
