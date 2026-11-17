@@ -1464,6 +1464,96 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testFastInstantReadinessPreservesSubmitRecoveryAndProvesUnsentCleanup() async throws {
+        for behavior in ["ignored_once", "missing_readiness", "never_opens", "changed_draft", "send_claimed",
+                         "replaced_editor", "fingerprint", "foreign_user", "route", "temporary"] {
+            let (fixture, view, token, choice) = try await readyInstantPrepareFixture(synchronousReadiness: true)
+            defer { fixture.transport.setBeforePageResultValidationForTesting(nil); fixture.shutdown() }
+            let world = WKContentWorld.world(name: "computa-chatgpt-model-v1")
+            var armed = false, readinessActions = 0
+            fixture.transport.setBeforePageResultValidationForTesting { action in
+                if action == "sendReady" { readinessActions += 1 }
+                if action == "insert" {
+                    // Settle the fixture's independent asynchronous editor normalization
+                    // before testing an ignored picker click against a stable draft.
+                    let settled = try? await self.evaluate(view, """
+                        const until = performance.now() + 1000;
+                        while (window.fixtureNormalizationCount === 0 && performance.now() < until)
+                          await new Promise(resolve => setTimeout(resolve, 5));
+                        return window.fixtureNormalizationCount === 1;
+                        """)
+                    XCTAssertEqual(settled as? Bool, true)
+                    return
+                }
+                guard action == "verifyProductMode", !armed else { return }
+                let result = try? await self.evaluate(view, """
+                    const pending = globalThis.__computaChatSubmissionState?.pending;
+                    if (pending?.phase !== 'prepared' || pending.firstInsertOpening?.proved !== true
+                      || pending.readyForSubmitOpening !== pending.firstInsertOpening) return false;
+                    // Reproduce the former optimized-path omission independently of
+                    // whether the website would acknowledge a second opening.
+                    if (\(String(reflecting: behavior)) === 'missing_readiness') delete pending.readyForSubmitOpening;
+                    const trigger = document.getElementById('fixture-model-trigger');
+                    globalThis.__fixtureSubmitOpenings = 0;
+                    trigger.addEventListener('click', function interrupt(event) {
+                      globalThis.__fixtureSubmitOpenings++;
+                      if (['ignored_once', 'missing_readiness'].includes(\(String(reflecting: behavior))) && globalThis.__fixtureSubmitOpenings === 2) {
+                        trigger.removeEventListener('click', interrupt, true); return;
+                      }
+                      event.stopImmediatePropagation(); event.preventDefault();
+                    }, true);
+                    return true;
+                    """, world: world)
+                armed = result as? Bool == true
+            }
+            if behavior == "ignored_once" {
+                let sent = try await fixturePhaseProbe("instant_submit_recovery") {
+                    try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                        "prompt": "Read the exact synthetic Instant submit fixture"])
+                }
+                try assertRunningOrVerifiedChoice(sent, choice: choice)
+                let complete = try await waitForState("complete", fixture.transport, token: token)
+                try assertChoiceEvidence(complete, choice: choice)
+            } else {
+                do {
+                    _ = try await call(fixture.transport, "webProviderSend", ["sessionToken": token,
+                        "prompt": "Read the exact synthetic Instant submit fixture"])
+                    XCTFail("An unverified picker must never Send")
+                } catch { XCTAssertEqual(error as? EmbeddedWebModelTransport.Failure, .modelUnverified) }
+            }
+            fixture.transport.setBeforePageResultValidationForTesting(nil)
+            XCTAssertTrue(armed, behavior)
+            XCTAssertEqual(readinessActions, 0, "Exercise the optimized native path, not sendReady")
+            let openings = try await evaluate(view, "return globalThis.__fixtureSubmitOpenings;", world: world) as? Int
+            XCTAssertEqual(openings, behavior == "missing_readiness" ? 1 : 2, behavior)
+            try await assertChoiceLedger(view, insertions: 1, sends: behavior == "ignored_once" ? 1 : 0, selections: 0)
+            if behavior == "changed_draft" {
+                _ = try await evaluate(view, "document.getElementById('fixture-editor').textContent += ' foreign'; return true;")
+            } else if behavior == "send_claimed" {
+                _ = try await evaluate(view, "globalThis.__computaChatSubmissionState.pending.phase = 'send_claimed'; return true;", world: world)
+            } else if behavior == "replaced_editor" {
+                _ = try await evaluate(view, "const editor = document.getElementById('fixture-editor'); editor.replaceWith(editor.cloneNode(true)); return true;")
+            } else if behavior == "fingerprint" {
+                _ = try await evaluate(view, "globalThis.__computaChatSubmissionState.pending.fingerprint = '0'.repeat(64); return true;", world: world)
+            } else if behavior == "foreign_user" {
+                _ = try await evaluate(view, "const root = document.createElement('article'); root.setAttribute('data-message-author-role','user'); root.textContent = 'Foreign message'; document.body.append(root); return true;")
+            } else if behavior == "route" {
+                _ = try await evaluate(view, "history.pushState({}, '', '/c/foreign-cleanup?temporary-chat=true'); return true;")
+            } else if behavior == "temporary" {
+                _ = try await evaluate(view, "document.querySelector('[aria-label=\"Turn off temporary chat\"]').setAttribute('aria-label','Temporary chat'); return true;")
+            }
+            let finish = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
+            let closed = ["ignored_once", "missing_readiness", "never_opens"].contains(behavior)
+            XCTAssertEqual(finish["cleanup"] as? String,
+                closed ? "not_created" : "failed", behavior)
+            if !closed {
+                XCTAssertTrue(fixture.browser.webView(for: try XCTUnwrap(fixture.createdTabs.last)) === view,
+                              "Uncertain cleanup must retain the exact owned view")
+            }
+            try await assertHumanTabIntact(fixture, retaining: closed ? nil : fixture.createdTabs.last)
+        }
+    }
+
     func testFirstInstantFoldsFocusIntoInsertButRetainedAppendStillPrepares() async throws {
         let (fixture, view, token, choice) = try await readyInstantPrepareFixture(synchronousReadiness: true)
         defer { fixture.shutdown() }
@@ -1684,10 +1774,10 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertChoiceLedger(view, insertions: 1, sends: refused ? 0 : 1,
                                      selections: XCTUnwrap(initialSelections))
         let finish = try await call(fixture.transport, "webProviderFinish", ["sessionToken": token])
-        // The denied precheck follows the native submission claim. Without a
-        // verified first user, the retained private tab cannot claim cleanup.
-        XCTAssertEqual(finish["cleanup"] as? String, refused ? "failed" : "not_created")
-        try await assertHumanTabIntact(fixture, retaining: refused ? fixture.createdTabs.last : nil)
+        // A denied precheck still never claimed page Send. Fresh cleanup can
+        // prove the same exact unsent draft without inventing a first user.
+        XCTAssertEqual(finish["cleanup"] as? String, "not_created")
+        try await assertHumanTabIntact(fixture)
     }
 
     func testPreparedMediumFinalReadinessRecoversOneIgnoredOpeningBeforeOneSend() async throws {

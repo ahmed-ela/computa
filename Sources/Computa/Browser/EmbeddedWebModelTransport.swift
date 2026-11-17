@@ -8451,11 +8451,33 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             && session.documentGeneration != nil && session.routeContext != nil && session.productModeEvidence != nil
     }
 
+    private func canInspectUnsubmittedChatGPTDraft(_ session: Session) -> Bool {
+        guard session.provider == .chatgpt, !session.isDiscovery, !session.isRecoveryProbe,
+              sessions[session.token] === session, session.usesSubmissionOwnership,
+              session.submitted, session.pendingSubmission, session.sequence == 1,
+              session.acknowledgedSendSequence == 0, session.confirmedUsers == 0,
+              session.baseline == 0, session.observedResponseCount == 0,
+              session.firstUserFingerprint == nil, session.conversation == nil, !session.promoted,
+              session.previousSubmission == nil, !session.currentSubmissionVerified,
+              session.temporary, session.temporaryRequested, session.productModeEvidence != nil,
+              let binding = session.currentSubmission, let prepared = session.preparedSubmission,
+              binding.sequence == 1, binding.marker == session.firstUserMarker,
+              prepared.sequence == binding.sequence, prepared.marker == binding.marker,
+              prepared.promptFingerprint == binding.promptFingerprint, prepared.outboundFingerprint == binding.outboundFingerprint,
+              let generation = session.documentGeneration,
+              browser.documentGeneration(for: session.tabID) == generation,
+              browser.webView(for: session.tabID) === session.view, let url = session.view.url,
+              session.provider.acceptsUnboundStart(url),
+              session.routeContext == session.provider.routeContext(url.absoluteString) else { return false }
+        return true
+    }
+
     private func page(_ session: Session, action: String, prompt: String? = nil, enforceModel: Bool = true,
                       refreshChangedRoute: Bool = true, recheckModelAfterAwait: Bool = true, recheckProductAfterAwait: Bool = true,
                       refreshReadOnlyObservation: Bool = true,
                       allowBoundFirstUserRemountRefresh: Bool = false,
                       allowBlockedProvider: Bool = false, allowPendingModelTemporary: Bool = false,
+                      allowUnsubmittedDraftCleanup: Bool = false,
                       requireClaudeSafeguardPause: Bool = false,
                       allowFreshClaudeQuotaCleanup: Bool = false,
                       allowPendingChatGPTModelVerification: Bool = true,
@@ -8483,6 +8505,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                       maximumWait: Duration = .seconds(10)) async throws -> [String: Any] {
         if session.provider == .grok, session.grokPrivateRouteChanged.withLock({ $0 }) {
             throw Failure.ownershipFailure(.routeBefore)
+        }
+        if allowUnsubmittedDraftCleanup {
+            guard action == "inspect", !enforceModel, allowBlockedProvider,
+                  canInspectUnsubmittedChatGPTDraft(session) else { throw Failure.invalidRequest }
         }
         if allowSavedCleanupInspection, session.savedResponseChoice != nil, !session.savedResponseChoiceAcknowledged {
             // No independent pre-preference deletion capability is granted by
@@ -8903,6 +8929,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 input["submissionSequence"] = binding.sequence
             }
         }
+        if allowUnsubmittedDraftCleanup { input["allowUnsubmittedDraftCleanup"] = true }
         if allowFirstUserExpansion || allowBoundFirstUserExpansion, !routeContinuation.isEmpty {
             // A bounded contiguous chain survives an unconsumed intermediate
             // read. Cleanup and unrelated read refreshes receive no receipts.
@@ -9323,6 +9350,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             binding: provider == .chatgpt ? session.benchmarkObservationBinding : nil)
         logObservationDiagnostic(observationDiagnostic, session: session)
         var preparedReadiness = observed.removeValue(forKey: "firstInstantPreparedEditorReadiness")
+        // Only the native validation below may emit this cleanup-only result.
+        observed.removeValue(forKey: "unsubmittedDraftVerified")
+        let unsubmittedDraftProof = observed.removeValue(forKey: "unsubmittedDraftProof")
         #if DEBUG
         if requestsPreparedReadiness, let transform = preparedEditorReadinessTransformForTesting {
             preparedReadiness = transform(preparedReadiness)
@@ -10071,6 +10101,20 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                                            combinedContextRecheck: combinedContextRecheck,
                                                            allowPendingChatGPTModelVerification: allowPendingChatGPTModelVerification,
                                                            maximumWait: evaluationDeadline - .now, grokRecheckDeadline: evaluationDeadline)
+                }
+                if allowUnsubmittedDraftCleanup, canInspectUnsubmittedChatGPTDraft(session),
+                   !promotion, observedURL == currentURL.absoluteString,
+                   ComputerToolArgumentContract.exactInt64(observed["userCount"]) == 0,
+                   ComputerToolArgumentContract.exactInt64(observed["responseCount"]) == 0,
+                   observed["temporary"] as? Bool == true, observed["busy"] as? Bool == false,
+                   observed["text"] as? String == "", observed["answerComplete"] as? Bool == false,
+                   let binding = session.currentSubmission, let unsubmittedDraftProof,
+                   Self.validSubmissionProof(unsubmittedDraftProof, sequence: binding.sequence,
+                                             fingerprint: binding.outboundFingerprint) {
+                    // The private page proved an intact, never-claimed draft.
+                    // Do not adopt submission ownership or reset Send intent.
+                    return ["temporary": true, "userCount": 0, "responseCount": 0, "text": "",
+                            "busy": false, "answerComplete": false, "unsubmittedDraftVerified": true]
                 }
                 if provider.savedConversationPolicy == nil, !promotion, session.conversation == nil, let conversation = provider.conversationURL(observedURL) {
                     // Preserve the initial route pin while waiting for render;
@@ -11023,6 +11067,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 do {
                     defer { session.responseProfile?.mark(.cleanupOwnershipInspectEnd) }
                     observed = try await page(session, action: "inspect", enforceModel: false, allowBlockedProvider: true,
+                        allowUnsubmittedDraftCleanup: canInspectUnsubmittedChatGPTDraft(session),
                         allowFreshClaudeQuotaCleanup: session.provider == .claude)
                 }
                 catch {
@@ -11052,6 +11097,9 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 }
                 guard observed["ownershipPending"] as? Bool != true else {
                     throw Failure.ownershipFailure(.promotionFirstUser)
+                }
+                if observed["unsubmittedDraftVerified"] as? Bool == true {
+                    guard canInspectUnsubmittedChatGPTDraft(session) else { throw Failure.staleSession }
                 }
                 if session.submitted {
                     guard session.temporary, observed["temporary"] as? Bool == true else { throw Failure.temporaryUnverified }

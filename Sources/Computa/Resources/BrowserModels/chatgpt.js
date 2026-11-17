@@ -6690,18 +6690,13 @@ async function providerPageAction(input, readLineageFingerprint = null) {
       : provider === "claude" ? find(['button[data-testid="chat-input-send"][aria-label="Send message"]'])
       : find(['button[aria-label="Send message"]', 'button[aria-label="Send"]', 'button.send-button']);
     if (action === "sendReady") {
-      const ready = enabled(send), pending = globalThis.__computaChatSubmissionState?.pending, prior = pending?.firstInsertOpening;
+      const ready = enabled(send), pending = globalThis.__computaChatSubmissionState?.pending;
       if (chatReadinessFinalGuardOnly) {
         const state = globalThis.__computaChatSubmissionState;
         chatGPTFirstChatReadinessSnapshot = { document, state, record: pending, composer, value, send, ready,
           canonical: pending.canonical, fingerprint: pending.fingerprint };
       }
-      // Pin the prior verified insertion only when this readiness read sees the identical editor and exact outbound text.
-      if (ready && prior?.proved === true && pending.phase === 'prepared' && pending.sequence === 1
-        && input.submissionSequence === 1 && pending.marker === input.submissionMarker && prior.composer === composer
-        && prior.exactSubmitDraft && prior.prompt === prompt && prior.editorValue === value
-        && chatGPTExactSubmitDraft(composer, value, prompt))
-        pending.readyForSubmitOpening = prior;
+      if (ready) chatGPTRecordSubmitReadiness(pending, composer, value, prompt, input.submissionSequence, input.submissionMarker);
       return { ...state, sendReady: ready };
     }
     if (!enabled(send)) return { error: "send_unavailable" };
@@ -8099,6 +8094,16 @@ async function chatGPTExpandFirstUser(candidate, resumeExposure = false) {
     return await chatGPTObserveFirstUserExpansion(candidate);
   } catch { return reject('failed'); }
 }
+// Both readiness paths retain the same physical insertion proof. This grants
+// only the existing bounded picker-opening recovery, never model proof or Send.
+function chatGPTRecordSubmitReadiness(pending, composer, value, prompt, sequence, marker) {
+  const prior = pending?.firstInsertOpening;
+  if (prior?.proved === true && pending.phase === 'prepared' && pending.sequence === 1
+    && sequence === 1 && pending.marker === marker && prior.composer === composer
+    && prior.exactSubmitDraft && prior.prompt === prompt && prior.editorValue === value
+    && chatGPTExactSubmitDraft(composer, value, prompt))
+    pending.readyForSubmitOpening = prior;
+}
 // An optional scheduling observation for the terminal native product recheck.
 // It neither prepares/claims a message nor replaces submit's ordinary checks.
 function chatGPTPreparedEditorReadinessResult(observed) {
@@ -8150,8 +8155,38 @@ function chatGPTPreparedEditorReadinessResult(observed) {
     const ready = enabled(editor) && enabled(send) && chatGPTControlExposed(send)
       && stops.length === 0 && actual !== null && actual === expected.trim()
       && chatGPTSubmissionCanonical(value) === pending.canonical;
+    if (ready) chatGPTRecordSubmitReadiness(pending, editor, value, expected, request.sequence, request.marker);
     return { ...observed, firstInstantPreparedEditorReadiness: { sequence: pending.sequence,
       marker: pending.marker, fingerprint: pending.fingerprint, ready: !!ready } };
+  } catch { return observed; }
+}
+// Cleanup alone may prove that the native Send intent never reached its page
+// claim. Preserve that intent; this receipt cannot authorize a retry or answer.
+function chatGPTUnsubmittedDraftCleanupResult(observed) {
+  try {
+    if (input.allowUnsubmittedDraftCleanup !== true || input.action !== 'inspect'
+      || observed.error || observed.temporary !== true || observed.userCount !== 0 || observed.responseCount !== 0
+      || observed.busy !== false || observed.answerComplete === true || observed.text !== ''
+      || input.expectedFirstUserFingerprint != null || input.expectedConversation != null
+      || globalThis.__computaModelFirstProof != null || globalThis.__computaModelFirstSubmitted === true
+      || globalThis.__computaModelLastSubmissionCount != null
+      || chatGPTMessageRoots('user').length !== 0 || chatGPTMessageRoots('assistant').length !== 0) return observed;
+    const state = globalThis.__computaChatSubmissionState, pending = state?.pending, expected = globalThis.__computaModelFirstPrompt;
+    const prior = pending?.firstInsertOpening, editor = prior?.composer;
+    if (!chatGPTSubmissionContext(state) || state.lastVerified != null || !pending
+      || pending.document !== document || pending.owner !== input.ownerToken || pending.phase !== 'prepared'
+      || pending.sequence !== 1 || input.submissionSequence !== 1 || pending.marker !== input.submissionMarker
+      || pending.marker !== input.expectedFirstUserMarker || !chatGPTSubmissionPins(pending)
+      || pending.root !== null || pending.body !== null || pending.expansionAttempted !== false
+      || prior?.proved !== true || prior.document !== document || prior.owner !== state.owner
+      || prior.state !== state || prior.record !== pending || prior.fingerprint !== pending.fingerprint
+      || !prior.exactSubmitDraft || !editor?.isConnected
+      || typeof expected !== 'string' || !expected.endsWith(`\n\nComputa session marker: ${pending.marker}`)
+      || prior.prompt !== expected || chatGPTSubmissionCanonical(expected) !== pending.canonical) return observed;
+    const value = editor instanceof HTMLTextAreaElement ? editor.value : editor.innerText;
+    if (typeof value !== 'string' || value !== prior.editorValue
+      || chatGPTSubmissionCanonical(value) !== pending.canonical || !chatGPTExactSubmitDraft(editor, value, expected)) return observed;
+    return { ...observed, unsubmittedDraftProof: { sequence: pending.sequence, fingerprint: pending.fingerprint } };
   } catch { return observed; }
 }
 function chatGPTFirstUserBodyObservation(root, body, rendered, markerLine, roots) {
@@ -8757,4 +8792,4 @@ if (['inspect', 'verifyModel', 'verifyProductMode'].includes(input.action)) {
 const result = { ...observed, firstUserVerified, firstUserFingerprint };
 const finalized = chatGPTFinalizeResponseRead(globalThis.__computaChatSubmissionState != null ? await chatGPTSubmissionResult(input, result) : result);
 chatGPTPreparationRecord('outerFinalizationMs', outerFinalizationStarted);
-return chatGPTPreparationResult(chatGPTPreparedEditorReadinessResult(chatGPTFirstChatReadinessResult(finalized)));
+return chatGPTPreparationResult(chatGPTUnsubmittedDraftCleanupResult(chatGPTPreparedEditorReadinessResult(chatGPTFirstChatReadinessResult(finalized))));
