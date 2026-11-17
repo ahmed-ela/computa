@@ -4497,6 +4497,11 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           await finishFirstInsertWait(x,change==='late'?1801:901);
           await finishFirstInsertWait(x,901);
           const result=await read; expect(result.error,change).toBeDefined(); expect(x.calls(),change).toBe(1); expect(changedSelectionOpenings).toBe(change==='fresh_selection'?1:0); noFirstInsertReplay(x);
+          if (change === 'restored_text') expect(result.modelDiagnostic.readContext.preparedVerificationOpening)
+            .toMatchObject({ draftChanged: true, draftChangeReason: 'editor_mutation', recoveryClaimed: false });
+          if (change === 'transient') expect(result.modelDiagnostic.readContext.preparedVerificationOpening)
+            .toMatchObject({ draftChanged: false, observedAcknowledgement: true,
+              acknowledgementSources: { triggerAriaExpanded: true }, recoveryClaimed: false });
         }
       });
       test('first insert final guard recovers one ignored opening after exactly one literal insertion', async () => {

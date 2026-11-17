@@ -76,3 +76,13 @@ repeat input or Send. Tests cover ignored and acknowledged-but-closed openings,
 changed/restored drafts, ownership/route/model/header drift, replaced or claimed
 submission records, fingerprint/marker changes, deadline expiry, and a picker
 that never opens. Installed review qualification remains pending.
+
+
+### Build 573 live result
+
+The exact review ran seven tool calls and compacted once in 88.047 seconds.
+Eight inference responses verified GPT-6 / Instant in Chat mode. The following
+post-insert `verifyModel` check failed before Send; all nine sessions closed
+with saved cleanup receipts. Build 574 adds the existing finite draft and
+acknowledgement diagnostics to that prepared-verification phase, without
+changing its proof policy. The full review is still incomplete.

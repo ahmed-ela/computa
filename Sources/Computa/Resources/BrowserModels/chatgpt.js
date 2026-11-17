@@ -560,6 +560,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   let firstVerificationOpeningDiagnostic = null;
   let preparedReadinessOpeningDiagnostic = null;
   let preparedSubmitOpeningDiagnostic = null;
+  let preparedVerificationOpeningDiagnostic = null;
   let readinessPopupObserver = null, readinessPopupTrace = null, readinessPopupLifecycle = null;
   let detachedSubmitSend = null;
   const recordReadinessPopup = records => {
@@ -652,6 +653,10 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         selectionSettled: selection?.completed === true, selectionCompleted: selection?.completed === true,
         recoveryEligible: prepareOpening !== null || insertOpening !== null,
         firstVerificationOpening: firstVerificationOpeningDiagnostic,
+        ...(preparedVerificationOpeningDiagnostic ? { preparedVerificationOpening: {
+          ...preparedVerificationOpeningDiagnostic, draftChanged, draftChangeReason,
+          observedAcknowledgement: verifyAcknowledged, acknowledgementSources: { ...acknowledgementSources },
+          recoveryClaimed: insertOpening?.recoveryClaimed === true } } : {}),
         ...(preparedSubmitOpeningDiagnostic ? { preparedSubmitOpening: {
           ...preparedSubmitOpeningDiagnostic, draftChanged, draftChangeReason,
           observedAcknowledgement: verifyAcknowledged, acknowledgementSources: { ...acknowledgementSources },
@@ -998,6 +1003,8 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       preparedSubmitOpeningDiagnostic = { clockRejected: false, clockUnconfirmed: false };
     const preparedVerify = !firstVerify && request.action === 'verifyModel' && request.preparedInstantVerificationOpening
       && context?.action === 'verifyModel' && context.scope === 'action_final_guard' && prepared?.firstPreparedVerificationOpening == null;
+    if (preparedVerify && preparedVerificationOpeningDiagnostic == null)
+      preparedVerificationOpeningDiagnostic = { clockRejected: false, clockUnconfirmed: false };
     const readinessScope = request.action === 'sendReady' && request.firstChatReadinessFinalGuardOnly === true
       && context?.action === 'sendReady' && context.scope === 'action_final_guard';
     const readinessGrant = request.preparedChatReadinessOpening;
@@ -1064,6 +1071,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         () => !owned() || selectionChanged || powerAcknowledged(), 'model_wait', () => {
           clockRejected = true; if (firstReadiness) preparedReadinessOpeningDiagnostic.clockRejected = true;
           if (firstSubmit) preparedSubmitOpeningDiagnostic.clockRejected = true;
+          if (preparedVerify) preparedVerificationOpeningDiagnostic.clockRejected = true;
         });
       current = drainOpeningEvidence();
       // A delayed acknowledgement wins; never toggle an already opened menu.
@@ -1071,6 +1079,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         if (clockRejected || Date.now() < acknowledgementDeadline) {
           if (firstReadiness) preparedReadinessOpeningDiagnostic.clockUnconfirmed = true;
           if (firstSubmit) preparedSubmitOpeningDiagnostic.clockUnconfirmed = true;
+          if (preparedVerify) preparedVerificationOpeningDiagnostic.clockUnconfirmed = true;
           if (emptyEditorOpening) readStage = 'first_verification_clock_unconfirmed';
           throw failure('model_unverified');
         }
