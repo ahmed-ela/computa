@@ -3786,8 +3786,14 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           expect(arrows(x.picker)).toHaveLength(0); expect(x.picker.familyOptions.every((node:any)=>node.clicks===0)).toBe(true);
         }
       });
-      const firstInsertOpening = async (behavior: 'ignore_once' | 'late' | 'never' = 'ignore_once', editorSuffix = '', label = 'Instant') => {
+      const firstInsertOpening = async (behavior: 'ignore_once' | 'late' | 'never' = 'ignore_once', editorSuffix = '', label = 'Instant', nested = false) => {
         const { f, picker } = setup(); picker.selected(label);
+        if (nested) {
+          f.document.body = f.body;
+          f.body.children = f.body.children.filter((node:any) => node !== picker.menu);
+          const host = new Node('SECTION');
+          f.body.append(host); host.append(picker.menu);
+        }
         const expected = choice(label);
         expect((await f.run('selectModel', { modelChoice: expected })).selected).toBe(true);
         expect((await f.run('prepare', { expectedModelChoice: expected })).prepared).toBe(true);
@@ -3830,8 +3836,8 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         expect(x.picker.familyOptions.map((node: any) => node.clicks)).toEqual(x.familyBefore);
         expect(x.f.world.__computaModelFirstSubmitted).toBeUndefined();
       };
-      const preparedVerification = async () => {
-        const x=await firstInsertOpening();
+      const preparedVerification = async (nested = false) => {
+        const x=await firstInsertOpening('ignore_once', '', 'Instant', nested);
         await finishFirstInsertWait(x);
         expect((await x.inserting).inserted).toBe(true);
         expect(x.pending.firstInsertOpening.proved).toBe(true);
@@ -3842,8 +3848,8 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           preparedInstantVerificationOpening:grant,...overrides});
         return {...x,grant,verify,calls:()=>calls};
       };
-      const preparedSubmit = async (label = 'Medium', skipReady = false) => {
-        const x = await firstInsertOpening('ignore_once', '', label);
+      const preparedSubmit = async (label = 'Medium', skipReady = false, nested = false) => {
+        const x = await firstInsertOpening('ignore_once', '', label, nested);
         await finishFirstInsertWait(x);
         expect((await x.inserting).inserted).toBe(true);
         x.picker.trigger.onClick = x.open;
@@ -4214,9 +4220,11 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           'id_drift', 'disjoint_intervals', 'duplicate_menu', 'dropped_menu_role', 'message_wrapped',
           'hidden_duplicate_menu_id', 'hidden_duplicate_trigger_id',
           'detached_repaint', 'foreign_portal', 'remounted_trigger', 'still_connected', 'send_toggled'];
+        if (submitting || verifying) modes.push('verified_portal');
         if (submitting) modes.unshift('send_replaced_after_proof', 'send_duplicated_after_proof');
         for (const mode of modes) {
-          const x = submitting ? await preparedSubmit('Medium') : verifying ? await preparedVerification() : await preparedReadinessRecovery('Pro');
+          const nested = mode === 'verified_portal';
+          const x = submitting ? await preparedSubmit('Medium', false, nested) : verifying ? await preparedVerification(nested) : await preparedReadinessRecovery('Pro');
           const { trigger } = x.picker;
           const openings = submitting ? x.openings : verifying ? x.calls : x.recoveryOpenings;
           const readRequest = submitting ? x.request : verifying ? { expectedModelChoice:x.expected,
@@ -4227,14 +4235,14 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
             'aria-labelledby': mode === 'wrong_label' ? 'foreign-trigger' : triggerID });
           const wrapPopup = ['stable_controls', 'duplicate_menu', 'dropped_menu_role', 'message_wrapped', 'detached_repaint'].includes(mode);
           const root = wrapPopup ? new Node('SECTION', mode === 'message_wrapped' ? { 'data-turn': 'assistant' } : {}) : popup;
-          const body = x.f.body, portal = mode === 'foreign_portal' ? new Node('SECTION') : body;
+          const body = x.f.body, portal = nested ? x.picker.menu.parentElement : mode === 'foreign_portal' ? new Node('SECTION') : body;
           Object.assign(x.f.document, { body, querySelector: (selector: string) => x.f.document.querySelectorAll(selector)[0] ?? null });
-          if (portal !== body) body.append(portal);
+          if (mode === 'foreign_portal') body.append(portal);
           if (root !== popup) root.append(popup);
           const otherMenu = ['duplicate_menu', 'dropped_menu_role'].includes(mode) ? new Node('DIV', { ...popup.values }) : null;
           if (otherMenu) root.append(otherMenu);
           const replacement = x.picker.menu;
-          body.children = body.children.filter((node:any) => node !== replacement);
+          replacement.parentElement.children = replacement.parentElement.children.filter((node:any) => node !== replacement);
           replacement.parentElement = null;
           replacement.connected = false;
           if (mode === 'hidden_duplicate_menu_id') body.append(new Node('DIV', { ...popup.values, hidden: '' }));
@@ -4329,7 +4337,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
             }
             expect(x.send.clicks, mode).toBe(0);
             await finishFirstInsertWait(x, 901); await finishFirstInsertWait(x, 901);
-            const result = await reading, accepted = mode === 'stable_controls' || mode === 'transient_controls';
+            const result = await reading, accepted = nested || mode === 'stable_controls' || mode === 'transient_controls';
             if (changeAfterProof) {
               expect(lateSend, mode).not.toBeNull();
               expect(lateSend.clicks + x.send.clicks, mode).toBe(0);

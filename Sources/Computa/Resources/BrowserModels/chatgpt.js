@@ -446,6 +446,26 @@ function websiteChatPickerState() {
     navigationAmbiguous: associated.length > 1 || secondaries.length > 1,
     physical, visible, enabled, family };
 }
+// Capture only the ancestor identities of a menu while its family/power controls
+// are actually verified. Later recovery can observe a mount at one of these exact
+// hosts only while its original path to the same document body remains intact.
+function websiteChatPopupPath(menu) {
+  const path = [];
+  if (!menu?.isConnected || menu.closest(websiteChatPickerBoundary)) return path;
+  for (let host = menu.parentElement; host && path.length < 16; host = host.parentElement) {
+    path.push(host);
+    if (host === document.body) return path;
+  }
+  return [];
+}
+function websiteChatKnownPopupHost(trace, host) {
+  if (!trace.body.isConnected) return false;
+  if (host === trace.body) return true;
+  const path = trace.portalPath;
+  const index = path.indexOf(host);
+  return index >= 0 && path.at(-1) === trace.body && host.isConnected && !host.closest(websiteChatPickerBoundary)
+    && path.slice(index, -1).every((node, offset) => node.parentElement === path[index + offset + 1]);
+}
 function websiteChatRejectPopup(trace, reason) {
   trace.rejection ||= reason;
   return false;
@@ -471,25 +491,30 @@ function websiteChatRecordReadinessPopup(trace, records) {
     if (record.type !== 'childList' || record.addedNodes.length + record.removedNodes.length > 64) return websiteChatRejectPopup(trace, 'record_shape');
     for (const [nodes, added] of [[record.removedNodes, false], [record.addedNodes, true]]) {
       for (const node of nodes) {
-        if ([trace.trigger, trace.composer, trace.send, trace.body].some(pin => node === pin || node.contains?.(pin))) return websiteChatRejectPopup(trace, 'pinned_node_changed');
+        if ([trace.trigger, trace.composer, trace.send, trace.body, ...trace.portalPath].some(pin => node === pin || node.contains?.(pin)))
+          return websiteChatRejectPopup(trace, 'pinned_node_changed');
         const descendants = node.querySelectorAll?.('[role="menu"], [role="listbox"], [role="dialog"]') ?? [];
         const menus = menuRoles.includes(node.getAttribute?.('role')) ? [node, ...descendants] : descendants;
         if (menus.length === 0) continue;
         const menu = menus[0];
         if (menus.length !== 1 || menu.getAttribute('role') !== 'menu' || menu.closest(websiteChatPickerBoundary))
           return websiteChatRejectPopup(trace, 'portal_shape');
-        if (record.target !== trace.body || trace.body.isConnected !== true)
-          return websiteChatRejectPopup(trace, 'portal_parent');
+        if (!websiteChatKnownPopupHost(trace, record.target)) {
+          const host = record.target;
+          const kind = host.hasAttribute?.('data-radix-popper-content-wrapper') ? 'positioner'
+            : host.isConnected ? 'connected' : 'detached';
+          return websiteChatRejectPopup(trace, 'portal_parent_' + kind);
+        }
         // Snapshot attributes when the observer delivers the records. A later
         // mutation of a detached portal must never rewrite its opening history.
         const id = menu.getAttribute('id');
         if (menu.getAttribute('aria-labelledby') !== trace.triggerID) return websiteChatRejectPopup(trace, 'menu_label');
         if (added) {
           if (trace.opening) return websiteChatRejectPopup(trace, 'multiple_opens');
-          trace.opening = { index, menu, node, id };
+          trace.opening = { index, menu, node, id, host: record.target };
         } else {
           const opening = trace.opening;
-          if (!opening || trace.removal !== null || menu !== opening.menu || node !== opening.node || id !== opening.id) return websiteChatRejectPopup(trace, 'removed_node');
+          if (!opening || trace.removal !== null || record.target !== opening.host || menu !== opening.menu || node !== opening.node || id !== opening.id) return websiteChatRejectPopup(trace, 'removed_node');
           trace.removal = index;
         }
       }
@@ -507,7 +532,7 @@ function websiteChatReadinessPopupDetached(trace) {
     || trigger.getAttribute('aria-expanded') !== trace.expanded
     || trigger.getAttribute('aria-controls') !== trace.controls) return websiteChatRejectPopup(trace, 'trigger_state');
   if (!opening || removal === null) return websiteChatRejectPopup(trace, 'incomplete_mount');
-  if (opening.menu.isConnected !== false || opening.node.isConnected !== false
+  if (!websiteChatKnownPopupHost(trace, opening.host) || opening.menu.isConnected !== false || opening.node.isConnected !== false
     || !opening.node.contains(opening.menu) || identityChanges.has(trigger)
     || [...identityChanges].some(node => node === opening.menu || node.contains?.(opening.menu))
     || opening.menu.getAttribute('role') !== 'menu' || opening.menu.getAttribute('id') !== opening.id
@@ -1054,7 +1079,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
           // Require a fresh model read after a proved detachment and bind
           // the currently visible Send control across that recovery.
           readinessPopupTrace = { trigger, composer: insertOpening.composer, send: popupSend,
-            body: document.body,
+            body: document.body, portalPath: prior.portalPath || [],
             triggerID: trigger.getAttribute('id'), controls: trigger.getAttribute('aria-controls'),
             expanded: trigger.getAttribute('aria-expanded'), expandedChanges: [], controlsChanges: [],
             identityChanges: new Set(), changedIDs: new Set(), recordCount: 0, opening: null, removal: null, overflow: false, invalid: false };
@@ -1441,6 +1466,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     }
     if (!familyState.checkedFamily || familyState.checkedFamily.key !== familyState.newest.key) return failure('model_mismatch');
     const family = familyState.checkedFamily, offered = familyState.offered;
+    const portalPath = websiteChatPopupPath(familyState.topMenu);
     if (genericHeader && mutable) { observer.takeRecords?.(); tracked.clear(); }
     proofLocked = true;
     for (const node of [familyState.semanticSlider, ...familyState.familyControls.map(control => control.node)].filter(Boolean))
@@ -1504,7 +1530,10 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     if (cappedFirstInsert && Date.now() >= until) return failure('model_unverified');
     if (insertOpening?.insertProof && insertOpening.recoveryClaimed && !insertOpeningIntact(final, true))
       return failure('model_unverified');
-    if (insertOpening && request.action === 'insert') insertOpening.proved = true;
+    if (insertOpening && request.action === 'insert') {
+      insertOpening.proved = true;
+      insertOpening.portalPath = portalPath;
+    }
     const provedPin = globalThis.__computaChatPresetPin;
     if (provedPin?.owner === owner && provedPin.document === originalDocument
       && provedPin.headerTrigger === trigger && provedPin.invalidated !== true
