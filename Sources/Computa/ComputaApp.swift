@@ -2,6 +2,9 @@ import AppKit
 import AutomationCore
 import SwiftUI
 import WebKit
+#if !SWIFT_PACKAGE
+import Sparkle
+#endif
 
 /// Hosted XCTest launches the application entry point before running fixtures.
 /// Its scene must never attach a second runtime to the user's production home.
@@ -59,11 +62,19 @@ private struct InertTestHostPermissions: AutomationPermissionClient {
 struct ComputaApp: App {
     @NSApplicationDelegateAdaptor(ComputaAppDelegate.self) private var appDelegate
     @State private var state: AppState
+    #if !SWIFT_PACKAGE
+    private let updateController: SPUStandardUpdaterController?
+    #endif
     private let launchMode: ComputaLaunchMode
 
     init() {
         let launchMode = ComputaLaunchMode.current
         self.launchMode = launchMode
+        #if !SWIFT_PACKAGE
+        updateController = launchMode == .application
+            ? SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+            : nil
+        #endif
         let state = launchMode.makeState()
         _state = State(initialValue: state)
         appDelegate.state = state
@@ -87,6 +98,11 @@ struct ComputaApp: App {
         .defaultSize(width: 1_280, height: 820)
         .windowStyle(.hiddenTitleBar)
         .commands {
+            #if !SWIFT_PACKAGE
+            CommandGroup(after: .appInfo) {
+                if let updateController { CheckForUpdatesButton(updater: updateController.updater) }
+            }
+            #endif
             CommandGroup(after: .newItem) {
                 Button("New Task") {
                     state.createTask()
@@ -161,3 +177,16 @@ final class ComputaAppDelegate: NSObject, NSApplicationDelegate {
         application.reply(toApplicationShouldTerminate: true)
     }
 }
+
+#if !SWIFT_PACKAGE
+private struct CheckForUpdatesButton: View {
+    let updater: SPUUpdater
+    @State private var canCheck = false
+
+    var body: some View {
+        Button("Check for Updates…", action: updater.checkForUpdates)
+            .disabled(!canCheck)
+            .onReceive(updater.publisher(for: \.canCheckForUpdates)) { canCheck = $0 }
+    }
+}
+#endif

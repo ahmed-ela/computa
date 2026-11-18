@@ -32,7 +32,7 @@ The Rust workers use native MLX and their exact bundled Metal library.
 Download the DMG, quit any running copy of Computa, open the disk image and drag
 Computa.app into Applications. Open the app and sign in to your provider in its
 built-in browser. Browser models use your own account. The release page includes
-the matching manifest, checksums and signing status. [Public releases](https://github.com/ahmed-ela/computa/releases).
+the matching manifest, checksums and signing status. Starting with build 586, Computa checks for signed updates automatically. Choose **Computa → Check for Updates…** to check immediately. Earlier builds need one manual install. [Public releases](https://github.com/ahmed-ela/computa/releases).
 
 The current alpha is Developer ID signed. A DMG labeled `signed-test` may be
 blocked by Gatekeeper until Apple notarization is available.

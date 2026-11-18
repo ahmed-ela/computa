@@ -164,7 +164,12 @@ export async function inspectApp(context: Context, app: string, channel: Options
   if (binary.kind !== "file" || runtime.binarySHA256 !== binary.sha256 || runtime.binarySize !== binary.size) {
     throw new Error("Agent runtime signature/hash differs from its sealed manifest");
   }
-  for (const binaryPath of [join(app, "Contents/MacOS/Computa"), join(runtimePath, "codex-app-server")]) {
+  const updatePublicKey = info.SUPublicEDKey;
+  const mainExecutable = join(app, "Contents/MacOS/Computa");
+  if (updatePublicKey !== undefined && (typeof updatePublicKey !== "string" || !/^[A-Za-z0-9+/]{43}=$/.test(updatePublicKey)
+    || info.SUFeedURL !== "https://computa.wtf/appcast.xml" || info.SUVerifyUpdateBeforeExtraction !== true
+    || !regular.has("Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle"))) throw new Error("Incomplete Sparkle configuration");
+  for (const binaryPath of [mainExecutable, join(runtimePath, "codex-app-server")]) {
     const architectures = (await checked(context, ["/usr/bin/lipo", "-archs", binaryPath])).split(/\s+/);
     if (!architectures.includes("arm64")) throw new Error("All release executables must include arm64");
     // The app may be universal, while the packaged MLX/runtime target is
@@ -172,6 +177,7 @@ export async function inspectApp(context: Context, app: string, channel: Options
     const libraries = await checked(context, ["/usr/bin/otool", "-arch", "arm64", "-L", binaryPath]);
     for (const line of libraries.split("\n").slice(1).filter(value => value.trim())) {
       const dependency = line.trim().split(" (", 1)[0];
+      if (binaryPath === mainExecutable && updatePublicKey && dependency === "@rpath/Sparkle.framework/Versions/B/Sparkle") continue;
       if (!dependency.startsWith("/System/Library/") && !dependency.startsWith("/usr/lib/")) {
         throw new Error(`Unreviewed non-system dynamic dependency: ${dependency}`);
       }
@@ -184,7 +190,7 @@ export async function inspectApp(context: Context, app: string, channel: Options
     await checked(context, ["/usr/bin/xcrun", "stapler", "validate", app]);
     await checked(context, ["/usr/sbin/spctl", "--assess", "--type", "execute", app]);
   }
-  return { version, build, minimumMacOS, files, runtime };
+  return { version, build, minimumMacOS, files, runtime, updatePublicKey };
 }
 
 export async function packageRelease(options: Options, context: Context) {
@@ -217,7 +223,7 @@ export async function packageRelease(options: Options, context: Context) {
   const manifest = {
     schemaVersion: 1, bundleIdentifier: bundleID, version: releaseVersion, tag: options.tag,
     appVersion: inspected.version, appBuild: inspected.build, architecture: "arm64",
-    minimumMacOS: inspected.minimumMacOS, channel: options.channel,
+    minimumMacOS: inspected.minimumMacOS, channel: options.channel, updatePublicKey: inspected.updatePublicKey,
     notarizedAppVerified: options.channel === "notarized", modelIncluded: false,
     modelManifestSHA256: await sha256(join(payload, "Installer/mlx-model.lock.json")),
     requirementsSHA256: await sha256(join(payload, "Installer/mlx-runtime-requirements.lock")),

@@ -4,6 +4,7 @@ import { lstat, mkdtemp, readFile, readdir, readlink, realpath, rm, writeFile } 
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { bundleID, inspectApp, sha256, type Context as PackageContext } from "./package-release";
+import { verifyAppcast } from "./sparkle-appcast";
 import { tagMetadata } from "./release-policy";
 import { parseVersionConfig } from "./version";
 
@@ -117,12 +118,14 @@ export async function publishAlpha(options: PublishOptions, context: PublishCont
   const dmgName = dmgAssets[0].name as string;
   const manifestName = dmgName.replace(/\.dmg$/, ".manifest.json");
   const expected = [dmgName, manifestName, "SHA256SUMS"];
+  const hasAppcast = release.assets.some((asset: any) => asset.name === "appcast.xml");
+  if (hasAppcast) expected.push("appcast.xml");
   if (!manifestNames.includes(manifestName) || release.assets.length !== expected.length
     || new Set(release.assets.map((asset: any) => asset.name)).size !== expected.length
     || release.assets.some((asset: any) => !expected.includes(asset.name) || asset.state !== "uploaded"
       || !Number.isSafeInteger(asset.id) || !Number.isSafeInteger(asset.size) || asset.size <= 0
       || !/^sha256:[a-f0-9]{64}$/.test(asset.digest))) {
-    throw new Error("Draft needs exactly the final DMG, manifest and SHA256SUMS with GitHub SHA-256 digests");
+    throw new Error("Invalid draft asset set or GitHub SHA-256 digest");
   }
   const snapshot = draftSnapshot(release);
   const installerFiles = new Map<string, Uint8Array>();
@@ -140,7 +143,7 @@ export async function publishAlpha(options: PublishOptions, context: PublishCont
       const bytes = await readFile(path);
       if (bytes.length !== asset.size || `sha256:${await sha256(path)}` !== asset.digest) throw new Error(`GitHub digest mismatch: ${asset.name}`);
     }
-    const sums = checksumEntries(await readFile(join(stage, "SHA256SUMS"), "utf8"), [dmgName, manifestName]);
+    const sums = checksumEntries(await readFile(join(stage, "SHA256SUMS"), "utf8"), expected.filter(name => name !== "SHA256SUMS"));
     for (const [name, digest] of sums) if (await sha256(join(stage, name)) !== digest) throw new Error(`SHA256SUMS mismatch: ${name}`);
     const manifestBytes = await readFile(join(stage, manifestName));
     const manifest = JSON.parse(manifestBytes.toString("utf8"));
@@ -151,6 +154,13 @@ export async function publishAlpha(options: PublishOptions, context: PublishCont
       || manifest.notarizedAppVerified !== (channel === "notarized")) {
       throw new Error("Draft manifest differs from its tag, source app version/build or signing channel");
     }
+    const appInfo = await api(`contents/Config/Computa-Info.plist?ref=${source}`);
+    if (appInfo.encoding !== "base64" || typeof appInfo.content !== "string") throw new Error("Tagged application settings are missing");
+    const plist = Buffer.from(appInfo.content, "base64").toString("utf8");
+    const key = /<key>SUPublicEDKey<\/key>\s*<string>([A-Za-z0-9+/]{43}=)<\/string>/.exec(plist)?.[1];
+    if (plist.includes("<key>SUPublicEDKey</key>") !== !!key || key !== manifest.updatePublicKey) throw new Error("Update key differs from the tagged app configuration");
+    if (hasAppcast !== (channel === "notarized" && !!manifest.updatePublicKey)) throw new Error("Notarized updater clients require an appcast");
+    if (hasAppcast) verifyAppcast(await readFile(join(stage, "appcast.xml"), "utf8"), await readFile(join(stage, dmgName)), manifest, repo);
     await context.verifyPackage(join(stage, dmgName), manifest, manifestBytes, installerFiles);
     await ensureMerged();
     const currentRelease = await api(releasePath);
@@ -227,12 +237,16 @@ export async function verifyMountedPackage(dmg: string, manifest: any, manifestB
   try {
     await checked(["/usr/bin/hdiutil", "attach", "-readonly", "-nobrowse", "-mountpoint", mount, dmg]);
     attached = true;
+    if (manifest.updatePublicKey && manifest.channel === "notarized") {
+      await checked(["/usr/bin/xcrun", "stapler", "validate", dmg]);
+      await checked(["/usr/sbin/spctl", "--assess", "--type", "open", "--context", "context:primary-signature", dmg]);
+    }
     const sealed = await readFile(join(mount, "release-manifest.json"));
     if (!sealed.equals(Buffer.from(manifestBytes))) throw new Error("Mounted and external release manifests differ");
     await verifyInstallerPayload(mount, manifest, installerFiles);
     const inspected = await inspectApp(context, join(mount, "Computa.app"), manifest.channel);
     if (inspected.version !== manifest.appVersion || inspected.build !== manifest.appBuild
-      || inspected.minimumMacOS !== manifest.minimumMacOS
+      || inspected.updatePublicKey !== manifest.updatePublicKey || inspected.minimumMacOS !== manifest.minimumMacOS
       || JSON.stringify(inspected.files) !== JSON.stringify(manifest.appFiles)) {
       throw new Error("Mounted app differs from its release manifest");
     }
