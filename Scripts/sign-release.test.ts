@@ -106,3 +106,17 @@ test("rechecks copied resources before applying a signature", async () => {
   await expect(signRelease(f.options, run)).rejects.toThrow("Retired bundle resource remains");
   expect(f.calls.some(call => call.includes("--sign"))).toBe(false);
 });
+
+test('timestamps and signs each updater helper before its enclosing framework and app', async () => {
+  const f = await fixture();
+  const framework = 'Contents/Frameworks/Sparkle.framework';
+  await mkdir(join(f.app, framework), { recursive: true });
+  await signRelease(f.options, f.run);
+  const signs = f.calls.filter(call => call.includes('--sign'));
+  const nested = signs.slice(1, -2);
+  expect(nested.map(call => call.at(-1))).toEqual(['XPCServices/Downloader.xpc', 'XPCServices/Installer.xpc', 'Autoupdate', 'Updater.app']
+    .map(name => join(f.output, framework, 'Versions/B', name)));
+  expect(nested.every(call => call.includes('--timestamp') && call.includes('runtime'))).toBe(true);
+  expect(nested.filter(call => call.includes('--preserve-metadata=entitlements'))).toEqual([nested[0]]);
+  expect(signs.slice(-2).map(call => call.at(-1))).toEqual([join(f.output, framework), f.output]);
+});
