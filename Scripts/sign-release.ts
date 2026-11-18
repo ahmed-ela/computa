@@ -112,6 +112,17 @@ export async function signRelease(options: SignOptions, run: SignRunner): Promis
     if (error.code !== "ENOENT") throw error;
   });
   if (frameworkInfo) {
+    // SwiftPM's binary archive supplies ad-hoc helper signatures. Seal each
+    // helper inside out, retaining the downloader's sandbox entitlements.
+    const version = join(framework, "Versions/B");
+    for (const helper of ["XPCServices/Downloader.xpc", "XPCServices/Installer.xpc", "Autoupdate", "Updater.app"]) {
+      const path = join(version, helper);
+      const preserve = helper === "XPCServices/Downloader.xpc" ? ["--preserve-metadata=entitlements"] : [];
+      await run(["/usr/bin/codesign", "--force", ...preserve, "--options", "runtime",
+        "--timestamp", "--sign", identity, path]);
+      await run(["/usr/bin/codesign", "--verify", "--strict", "-R",
+        "=anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists", path]);
+    }
     await run(["/usr/bin/codesign", "--force", "--options", "runtime", "--timestamp", "--sign", identity, framework]);
     await run(["/usr/bin/codesign", "--verify", "--strict", "--deep", framework]);
   }
