@@ -125,7 +125,11 @@ not part of this release source or its manifest.
 Retained historical replies remain assistant-role excerpts, not new assertions
 of success. Up to four replies use at most 1 KiB of text each and 4 KiB serialized
 in total. Ambiguous, truncated, or misordered user boundaries are skipped. Tool
-receipts retain at most 32 genuine calls. The ordinary projection allows
+receipts ordinarily retain up to 32 genuine calls. Since mactopus-19, a ChatGPT
+website turn containing only terminal calls and session polls can retain up to
+128 pairs, subject to the same byte limits, with exact identities, arguments,
+exit and failure evidence. A turn mixing other tools keeps the 32-pair guard.
+The ordinary projection allows
 12 KiB of serialized provider input, including array punctuation, and 24 KiB of
 canonical items and metadata. Since mactopus-18, the ChatGPT website route can
 use up to 32 KiB of projected receipts and 64 KiB of canonical receipts after

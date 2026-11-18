@@ -1271,9 +1271,9 @@ private final class GroqCommandOutputAudit {
 /// Test-only eligibility check. Neither a model hint nor a catalog row alone
 /// proves that the new native command-policy implementation is installed.
 enum GroqCommandPolicyProof {
-    static let expectedPatchSHA256 = "c8629fda78890a0072720b40fa083d75e878a67364a2389928033461810c9345"
+    static let expectedPatchSHA256 = "f7f4fc173c7b16555e3fda08c2590418d54c39a1735a27a252dc14699fc476f2"
     static func require(artifact: ComputaRuntimeArtifact, modelID: String) throws {
-        guard artifact.manifest.runtimeVersion == "mactopus-18",
+        guard artifact.manifest.runtimeVersion == "mactopus-19",
               artifact.manifest.patchSHA256 == expectedPatchSHA256,
               artifact.manifest.sourceCommit == ComputaRuntimeArtifact.sourceCommit,
               CodexAppServerRuntime.localThreadConfig(for: modelID)["tool_output_token_limit"] == nil else {

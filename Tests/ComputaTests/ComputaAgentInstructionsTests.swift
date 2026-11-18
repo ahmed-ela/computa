@@ -607,7 +607,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
                 XCTAssertFalse(qwen.contains("This website does not execute calls"))
                 XCTAssertTrue(qwen.contains("Within tool_choice, governing rules and user scope"))
                 XCTAssertTrue(qwen.contains("validates names, arguments, local permissions and approvals before execution"))
-                XCTAssertTrue(qwen.contains("Use matching function_call_output/custom_tool_call_output to verify execution"))
+                XCTAssertTrue(qwen.contains("Use matching function_call_output/custom_tool_call_output as evidence"))
                 XCTAssertTrue(qwen.contains("No tools means no tool call"))
                 XCTAssertTrue(qwen.contains("Never replay uncertain calls"))
                 XCTAssertTrue(qwen.contains("Return exactly one fenced JSON code block labelled json"))

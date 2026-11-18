@@ -14891,10 +14891,10 @@ index 0000000..5d0ece5
 +}
 diff --git a/codex-rs/core/src/compact_tool_receipts.rs b/codex-rs/core/src/compact_tool_receipts.rs
 new file mode 100644
-index 0000000..2c4b7c2
+index 0000000..c2c95ee
 --- /dev/null
 +++ b/codex-rs/core/src/compact_tool_receipts.rs
-@@ -0,0 +1,843 @@
+@@ -0,0 +1,851 @@
 +//! Bounded, genuine current-turn receipts for local mid-turn compaction.
 +//!
 +//! Mutations and failures remain paired tool history. Older proven native reads may become
@@ -14921,6 +14921,10 @@ index 0000000..2c4b7c2
 +use codex_utils_output_truncation::truncate_function_output_payload;
 +
 +const MAX_PAIRS: usize = 32;
++// Terminal pairs carry their original call and result and never enter the
++// ordinal-based native-browser read ledger. Byte and context admission below
++// still applies to every pair, including polls, failures and mutating commands.
++const MAX_CHAT_TERMINAL_PAIRS: usize = 128;
 +const MAX_OUTPUT_TEXT_BYTES: usize = 2048;
 +const MAX_OUTPUT_BYTES: usize = 3072;
 +const MAX_LATEST_OUTPUT_TEXT_BYTES: usize = 4096;
@@ -14998,22 +15002,26 @@ index 0000000..2c4b7c2
 +    let mut pending = HashMap::new();
 +    let mut seen = HashSet::new();
 +    let mut pairs = Vec::new();
++    let mut chat_terminal = matches!(provider, ReceiptProvider::ComputaChat);
 +    for (index, envelope) in history.iter().enumerate() {
 +        if envelope.turn_id() != Some(turn_id) {
 +            continue;
 +        }
 +        match &envelope.item {
-+            ResponseItem::FunctionCall { call_id, .. } => {
++            ResponseItem::FunctionCall { call_id, name, namespace, .. } => {
 +                if call_id.is_empty() {
 +                    return Err(receipt_error("empty function call identity"));
 +                }
 +                if !seen.insert(call_id) {
 +                    return Err(receipt_error("duplicate function call identity"));
 +                }
-+                if seen.len() > MAX_PAIRS {
-+                    return Err(receipt_error(
-+                        "current turn exceeds the 32 completed-function-call bound",
-+                    ));
++                chat_terminal &= matches!(namespace.as_deref(), None | Some("functions"))
++                    && matches!(name.as_str(), "exec_command" | "write_stdin");
++                if seen.len() > MAX_PAIRS && !chat_terminal {
++                    return Err(receipt_error("current turn exceeds the 32 completed-function-call bound"));
++                }
++                if seen.len() > MAX_CHAT_TERMINAL_PAIRS {
++                    return Err(receipt_error("current ChatGPT terminal turn exceeds the 128 completed-call bound"));
 +                }
 +                // Calls remain exact, including code-writing arguments and local metadata.
 +                // Reject only a call that cannot fit the existing canonical receipt budget;
@@ -15084,7 +15092,7 @@ index 0000000..2c4b7c2
 +    let latest_output_index = pairs.last().map(|(_, _, index, _)| *index);
 +    let has_complete_browser_observation = latest_browser_output_index.is_some();
 +    // Try all bounded historical excerpts before reducing the latest observation. No receipt
-+    // is reordered, replayed, or promoted to authority, and global budgets remain unchanged.
++    // is reordered, replayed, or promoted to authority.
 +    // First try the ordinary compact representation. Only the ChatGPT bridge
 +    // has a separate 128 KiB whole-request preflight. Its fallback reserves at
 +    // least three quarters of that budget for the rest of the prompt.
@@ -15740,10 +15748,10 @@ index 0000000..2c4b7c2
 +mod tests;
 diff --git a/codex-rs/core/src/compact_tool_receipts_tests.rs b/codex-rs/core/src/compact_tool_receipts_tests.rs
 new file mode 100644
-index 0000000..1eb2e19
+index 0000000..0623513
 --- /dev/null
 +++ b/codex-rs/core/src/compact_tool_receipts_tests.rs
-@@ -0,0 +1,2406 @@
+@@ -0,0 +1,2431 @@
 +use super::*;
 +use codex_history::CodexHarnessMetadata;
 +use codex_protocol::models::FunctionCallOutputPayload;
@@ -18148,6 +18156,31 @@ index 0000000..1eb2e19
 +            *arguments = "x".repeat(2_000);
 +        }
 +    }
++    assert!(super::current_turn_receipts(&history, REALISTIC_TURN, provider).is_err());
++}
++
++#[test]
++fn longer_chat_terminal_review_preserves_every_call_without_extending_mixed_ledgers() {
++    let provider = ReceiptProvider::for_turn(false, "web_browser", "browser/chatgpt");
++    let mut history = Vec::new();
++    for i in 0..40 {
++        let mut pair = pair(&format!("call_{i}"), REALISTIC_TURN, "Process exited with code 0");
++        if let ResponseItem::FunctionCall { name, arguments, .. } = &mut pair[0].item {
++            *name = if i % 2 == 0 { "exec_command" } else { "write_stdin" }.to_string();
++            *arguments = if i % 2 == 0 { r#"{"cmd":"echo ok"}"# } else { r#"{"session_id":42,"chars":""}"# }.to_string();
++        }
++        history.extend(pair);
++    }
++    assert_eq!(super::current_turn_receipts(&history, REALISTIC_TURN, provider).unwrap(), history);
++    assert!(super::current_turn_receipts(&history, REALISTIC_TURN, ReceiptProvider::External).is_err());
++    for pos in [0, history.len() - 2] {
++        let mut mixed = history.clone();
++        if let ResponseItem::FunctionCall { name, .. } = &mut mixed[pos].item {
++            *name = "browser_click".into();
++        }
++        assert!(super::current_turn_receipts(&mixed, REALISTIC_TURN, provider).is_err());
++    }
++    history.pop();
 +    assert!(super::current_turn_receipts(&history, REALISTIC_TURN, provider).is_err());
 +}
 diff --git a/codex-rs/core/src/responses_metadata.rs b/codex-rs/core/src/responses_metadata.rs
