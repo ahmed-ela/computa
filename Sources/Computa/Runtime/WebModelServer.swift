@@ -3884,6 +3884,10 @@ actor WebModelServer {
             // generic HTTP 500 high-demand display; never replay an uncertain Send.
             case .ownershipFailure:
                 return .init(status: "400 Bad Request", type: "model_error", code: "website_ownership_unverified")
+            // A failed selection check is terminal for this inference. Use the
+            // engine's nonretryable path so its specific message reaches the chat.
+            case .modelUnverified, .modelMismatch:
+                return .init(status: "400 Bad Request", type: "model_error", code: "browser_model_error")
             case .capacity: return .init(status: "400 Bad Request", type: "invalid_request", code: failure.diagnosticCode!)
             // The request no longer has a valid owned website context. HTTP 400
             // preserves this body in the pinned runtime's nonretryable
@@ -3898,6 +3902,8 @@ actor WebModelServer {
         }
         if let failure = error as? Failure {
             switch failure {
+            case .modelUnverified, .modelMismatch:
+                return .init(status: "400 Bad Request", type: "model_error", code: "browser_model_error")
             case .turnLimit: return .init(status: "409 Conflict", type: "invalid_request", code: "website_turn_limit")
             case .invalidRequest: return .init(status: "400 Bad Request", type: "invalid_request", code: "invalid_request")
             case .modelNotFound: return .init(status: "404 Not Found", type: "not_found", code: "model_not_found", param: "model")

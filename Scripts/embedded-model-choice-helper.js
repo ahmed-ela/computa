@@ -459,7 +459,7 @@ function websiteChatPopupPath(menu) {
   return [];
 }
 function websiteChatKnownPopupHost(trace, host) {
-  if (!trace.body.isConnected) return false;
+  if (trace.body?.isConnected !== true) return false;
   if (host === trace.body) return true;
   const path = trace.portalPath;
   const index = path.indexOf(host);
@@ -469,6 +469,26 @@ function websiteChatKnownPopupHost(trace, host) {
 function websiteChatRejectPopup(trace, reason) {
   trace.rejection ||= reason;
   return false;
+}
+// Assign local ordinals only. No page text, selectors or attribute values leave the tab.
+function websiteChatPopupMutationSummary(trace, records) {
+  const ref = node => {
+    if (!node) return 0;
+    if (!trace.nodeRefs.has(node)) trace.nodeRefs.set(node, ++trace.lastRef);
+    return trace.nodeRefs.get(node);
+  };
+  for (const record of records) {
+    if (trace.topology.length >= 64 || record.type !== 'childList') continue;
+    const target = record.target;
+    for (const [nodes, direction] of [[record.addedNodes, '+'], [record.removedNodes, '-']]) {
+      for (const node of Array.from(nodes).slice(0, 3)) {
+        if (trace.topology.length >= 64 || !node.getAttribute) continue;
+        const menu = node.getAttribute('role') === 'menu' ? node : node.querySelector?.('[role="menu"]');
+        trace.topology.push([direction, ref(target), ref(node), ref(menu), ref(target.parentNode || target.parentElement),
+          target === trace.body, target.isConnected === true]);
+      }
+    }
+  }
 }
 function websiteChatRecordReadinessPopup(trace, records) {
   const menuRoles = ['menu', 'listbox', 'dialog'];
@@ -597,6 +617,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   let detachedSubmitSend = null;
   const recordReadinessPopup = records => {
     if (readinessPopupTrace.recordCount + records.length > 64) readinessPopupTrace.overflow = true;
+    if (!readinessPopupTrace.overflow) websiteChatPopupMutationSummary(readinessPopupTrace, records);
     if (!readinessPopupTrace.overflow && !readinessPopupTrace.invalid)
       readinessPopupTrace.invalid = !websiteChatRecordReadinessPopup(readinessPopupTrace, records);
   };
@@ -685,6 +706,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         selectionSettled: selection?.completed === true, selectionCompleted: selection?.completed === true,
         recoveryEligible: prepareOpening !== null || insertOpening !== null,
         firstVerificationOpening: firstVerificationOpeningDiagnostic,
+        ...(readinessPopupTrace?.rejection ? { popupTopology: readinessPopupTrace.topology } : {}),
         ...(preparedVerificationOpeningDiagnostic ? { preparedVerificationOpening: {
           ...preparedVerificationOpeningDiagnostic, draftChanged, draftChangeReason,
           observedAcknowledgement: verifyAcknowledged, acknowledgementSources: { ...acknowledgementSources },
@@ -1079,7 +1101,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
           // Require a fresh model read after a proved detachment and bind
           // the currently visible Send control across that recovery.
           readinessPopupTrace = { trigger, composer: insertOpening.composer, send: popupSend,
-            body: document.body, portalPath: prior.portalPath || [],
+            body: document.body, portalPath: prior.portalPath || [], topology: [], nodeRefs: new WeakMap(), lastRef: 0,
             triggerID: trigger.getAttribute('id'), controls: trigger.getAttribute('aria-controls'),
             expanded: trigger.getAttribute('aria-expanded'), expandedChanges: [], controlsChanges: [],
             identityChanges: new Set(), changedIDs: new Set(), recordCount: 0, opening: null, removal: null, overflow: false, invalid: false };

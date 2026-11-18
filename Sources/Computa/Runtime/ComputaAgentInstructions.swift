@@ -264,8 +264,7 @@ enum ComputaAgentInstructions {
         let hasRipgrep = AgentRuntimeIsolation.executableSearchPath.split(separator: ":").contains {
             FileManager.default.isExecutableFile(atPath: String($0) + "/rg")
         }
-        return hasRipgrep ? "Use rg for scoped file searches."
-            : "rg is unavailable in this shell. In a repository use git ls-files and git grep -n. Else use find and grep."
+        return hasRipgrep ? "Use rg for scoped search." : "rg is unavailable. Use git ls-files/git grep in repos, else find/grep."
     }()
 
     /// Shared by native instructions and freshly projected terminal contracts.
@@ -275,15 +274,12 @@ enum ComputaAgentInstructions {
     <cwd> if no project directory is given. Never prepend <cwd> or private HOME to
     an absolute path.
     \(fileSearchGuidance)
-    For reviews, read targeted paths and line ranges with short commands. Use a small output budget.
-    Git is optional for edits. Use it for requested Git work or an
-    established in-scope repository; skip preflights for loose files.
-    Repository context or .git (directory, worktree file or ancestor) can
-    establish scope. Do not initialize Git to inspect files.
-    Run each independent check in a separate call. Batch only independent calls.
-    For dependent steps, await the prior result or use &&. Do not join
-    independent checks with ;, && or ||. Read output and each exit code;
-    report failed subcommands even if the shell finally exits zero.
+    For reviews, read narrow ranges with short commands and bounded output.
+    Use Git only for requested Git work or an established repo (.git file, directory or ancestor).
+    Never initialize Git or probe loose files for edits.
+    Batch independent checks as separate calls. Never join them with ;, && or ||.
+    For dependent steps await output or use &&. Read every output and exit code.
+    Report failed subcommands even if the final exit is zero.
     """
 
     static let commandLine = """

@@ -4298,6 +4298,20 @@ final class WebModelServerTests: XCTestCase {
         _ = await server.shutdown()
     }
 
+    func testTerminalModelSelectionFailuresPreserveTheirCauseForTheBundledEngine() throws {
+        let failures: [any Error] = [
+            EmbeddedWebModelTransport.Failure.modelUnverified, EmbeddedWebModelTransport.Failure.modelMismatch,
+            WebModelServer.Failure.modelUnverified, WebModelServer.Failure.modelMismatch,
+        ]
+        for failure in failures {
+            XCTAssertEqual(WebModelServer.errorPresentation(for: failure).status, "400 Bad Request")
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: WebModelServer.errorBody(for: failure)) as? [String: Any])
+            let error = try XCTUnwrap(body["error"] as? [String: Any])
+            XCTAssertEqual(error["message"] as? String, failure.localizedDescription)
+            XCTAssertEqual(error["code"] as? String, "browser_model_error")
+        }
+    }
+
     func testOwnershipHTTP400DoesNotBroadenCodecCleanupOrUnclassifiedFailures() {
         let unchanged: [any Error] = [
             WebModelResponseCodec.Failure.unsupportedCallFields,
