@@ -20,6 +20,7 @@ final class WebsiteContextBudgetEngineTests: XCTestCase {
         if [ "$1" -ge 16 ]; then
             /usr/bin/awk 'BEGIN { for (i=0; i<500; i++) print "bounded code observation" }'
         fi
+        echo "$marker"
         """
         try script.write(to: project.appendingPathComponent("read.sh"), atomically: true, encoding: .utf8)
         let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
@@ -121,11 +122,18 @@ private actor BudgetEngineTransport: WebModelTransport {
                 let callCount = calls.count, outputCount = outputs.count
                 result.receiptsPreserved = callCount == result.commands && outputCount == result.commands
                 for index in 0..<result.commands {
-                    let marker = "READ_\(index)"
-                    let output = try XCTUnwrap(outputs.first { ($0["output"] as? String)?.contains(marker) == true })
-                    let callID = try XCTUnwrap(output["call_id"] as? String)
-                    XCTAssertEqual(calls.filter { $0["call_id"] as? String == callID }.count, 1)
-                    XCTAssertTrue((output["output"] as? String)?.contains("Process exited with code 0") == true)
+                    let expectedCommand = "sh read.sh \(index)"
+                    let call = try XCTUnwrap(try calls.first { item in
+                        let args = try XCTUnwrap(item["arguments"] as? String)
+                        let decoded = try JSONDecoder().decode([String: String].self, from: Data(args.utf8))
+                        return decoded["cmd"] == expectedCommand
+                    })
+                    let callID = try XCTUnwrap(call["call_id"] as? String)
+                    let matched = outputs.filter { $0["call_id"] as? String == callID }
+                    XCTAssertEqual(matched.count, 1)
+                    let text = try XCTUnwrap(matched.first?["output"] as? String)
+                    XCTAssertTrue(text.contains("Process exited with code 0"))
+                    XCTAssertTrue(text.split(separator: "\n").contains(Substring("READ_\(index)")))
                 }
                 let name = try XCTUnwrap(request.offeredToolNames.first { $0 == "apply_patch" || $0.hasSuffix(".apply_patch") })
                 let patch = "*** Begin Patch\n*** Add File: review.txt\n+Verified after compaction\n*** End Patch"
