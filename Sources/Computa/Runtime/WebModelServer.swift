@@ -2741,7 +2741,9 @@ actor WebModelServer {
                         }
                         // This field is minted only by the native poll that inspected
                         // this submission. Never renew a format-correction allowance.
-                        if correctionTicket == nil, value["verifiedGenerationActive"] as? Bool == true {
+                        if correctionTicket == nil, session.firstUserFingerprint != nil,
+                           let active = value["verifiedGenerationActive"] as? NSNumber,
+                           CFGetTypeID(active) == CFBooleanGetTypeID(), active.boolValue {
                             end = .now + responseTimeout
                             responseDeadline = end
                         }
