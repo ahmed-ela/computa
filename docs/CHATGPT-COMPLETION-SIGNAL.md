@@ -20,6 +20,21 @@ fresh model, Chat product, Temporary mode, user-message ownership, response-coun
 nonbusy, and completion-control verification. It checks that the native receipt
 is still current after the final await and immediately before publication.
 
+### Waiting for long responses
+
+Build 588 treats five minutes as an inactivity window. During an acknowledged
+submission, a fresh inspection of its owned page can renew the window when
+the provider shows a visible generation control or the incomplete answer grows.
+DOM events normally wake the reader. While generation remains verified, a
+read-only check halfway through the window also covers long reasoning steps
+that leave the page unchanged. A pending ownership check or an unchanged
+partial answer alone cannot renew the window. Stop, provider errors, and loss
+of ownership still interrupt the request. A format correction retains the
+deadline inherited from the first attempt.
+
+The terminal-event hint has its own original expiry. After it expires, the
+existing verified DOM completion path can still finish the request.
+
 Late mutations, errors, cancellation, navigation, another Send, conflicting IDs,
 or expired leases revoke the hint. Empty or partial DOM, missing controls, changed
 model or ownership, and unsupported text representations cannot use the fast path.
