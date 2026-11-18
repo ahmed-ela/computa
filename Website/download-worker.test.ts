@@ -16,7 +16,7 @@ test('selects the highest published build with a ready macOS package', () => {
 test('prefers a notarized package and falls back to public releases when none are ready', () => {
   const release = alpha(584);
   release.assets.push({ ...release.assets[0], name: 'Computa-0.8.0-alpha.584-arm64.dmg' });
-  expect(newestMacDownload([release])).toBe(base + '/download/v0.8.0-alpha.584/Computa-0.8.0-alpha.584-arm64.dmg');
+  expect(newestMacDownload([alpha(600), release, alpha(601)])).toBe(base + '/download/v0.8.0-alpha.584/Computa-0.8.0-alpha.584-arm64.dmg');
   expect(newestMacDownload([])).toBe(base);
 });
 

@@ -6,16 +6,20 @@ const apiURL = `https://api.github.com/repos/${repo}/releases?per_page=100`;
 // across versions, so publishing an older build later cannot roll downloads back.
 export function newestMacDownload(releases, appcast = false) {
   let newestBuild = 0;
+  let notarizedSelected = false;
   let download = appcast ? null : releasesURL;
   for (const release of releases) {
     const match = /^v\d+\.\d+\.\d+-alpha\.([1-9]\d{0,3})$/.exec(release.tag_name);
-    if (!match || release.draft || !release.published_at || Number(match[1]) <= newestBuild) continue;
+    if (!match || release.draft || !release.published_at) continue;
     const base = `Computa-${release.tag_name.slice(1)}-arm64`;
     const ready = name => release.assets?.find(item => item.name === name && item.state === 'uploaded' && item.size > 0);
     const notarized = ready(base + '.dmg');
     const asset = appcast ? notarized && ready('appcast.xml') : notarized || ready(base + '-signed-test.dmg');
-    if (asset) {
-      newestBuild = Number(match[1]);
+    const build = Number(match[1]);
+    const prefer = notarized && !notarizedSelected;
+    if (asset && (prefer || Boolean(notarized) === notarizedSelected && build > newestBuild)) {
+      newestBuild = build;
+      notarizedSelected = Boolean(notarized);
       download = `${releasesURL}/download/${release.tag_name}/${asset.name}`;
     }
   }
