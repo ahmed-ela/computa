@@ -624,7 +624,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             case .humanVerificationRequired(let provider): "\(provider.displayName) has a saved or current website-verification block. Check its website in Computa's built-in browser and resolve any challenge shown. Once the page is clear, refresh website models before retrying. No prompt was replayed."
             case .unexpectedPage(let provider): "\(provider.displayName)'s website opened an unexpected page. Check its page in Computa's built-in browser before retrying. No prompt was replayed."
             case .preparationDeadline: "The website did not prepare a verified chat session before the 45-second deadline. This website inference was not submitted."
-            case .deadline: "The website did not finish its response before the five-minute deadline."
+            case .deadline: "The website response timed out while waiting for verified generation or completion."
             }
         }
     }
@@ -1014,6 +1014,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         var response = ""
         var lastChanged = ContinuousClock.now
         var turnStarted = ContinuousClock.now
+        var lastVerifiedGeneration: ContinuousClock.Instant?
+        func responseDeadline(idleTimeout: Duration) -> ContinuousClock.Instant {
+            (lastVerifiedGeneration ?? turnStarted) + idleTimeout
+        }
         var responseProfile: WebsiteResponseProfile?
         var completionObserverArmed = false
         var completionMatchDiagnostic: (reason: String, routeKind: String)?
@@ -1630,6 +1634,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         guard let session = sessions[sessionToken], session.state == "running", session.submitted,
               session.firstUserFingerprint != nil, !session.pendingSubmission else { return false }
         session.turnStarted = .now
+        session.lastVerifiedGeneration = nil
         return true
     }
 
@@ -2748,6 +2753,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 session.candidateSince = nil
                 session.lastChanged = .now
                 session.turnStarted = .now
+                session.lastVerifiedGeneration = nil
                 session.responseProfile = session.provider == .chatgpt
                     ? WebsiteResponseProfile.begin(source: .nativeTurn, sessionToken: session.token,
                         sequence: session.sequence + 1, started: session.turnStarted) : nil
@@ -3177,7 +3183,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         try checkProviderGate(session)
         var wake = deadline
         if session.state == "loading" { wake = min(wake, session.created + preparationTimeout) }
-        else if session.state == "running" { wake = min(wake, session.turnStarted + responseTimeout) }
+        else if session.state == "running" { wake = min(wake, session.responseDeadline(idleTimeout: responseTimeout)) }
         let responseEnd = wake
         if session.state == "running", let pending = session.qwenCodePayload, session.qwenCodePayloadGrant == nil {
             wake = min(wake, pending.since + Self.completionQuietInterval)
@@ -3202,6 +3208,11 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 wake = responseEnd - lead
                 checksForMissedCompletion = true
             }
+        }
+        // A long reasoning step may leave the Stop control visible without DOM
+        // mutations. Reinspect the owned page before the activity watchdog expires.
+        if session.state == "running", session.lastVerifiedGeneration != nil {
+            wake = min(wake, .now + responseTimeout / 2)
         }
         let groqProgress = groqFailureProgressLease(session, allowingPending: true)
         if groqProgress != nil { session.groqFailureProgress.waitStarted() }
@@ -3568,7 +3579,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // A slow return is observation only: retain the exact route and every
         // ownership guard, within the original inspection/response deadlines.
         let waitStarted = ContinuousClock.now
-        let limit = min(deadline, session.turnStarted + responseTimeout, waitStarted + .seconds(10))
+        let limit = min(deadline, session.responseDeadline(idleTimeout: responseTimeout), waitStarted + .seconds(10))
         guard ContinuousClock.now < limit, session.view.url == fresh, isCurrent() else { return false }
         session.kimiProvisionalRouteWaitSpent = true
 
@@ -5164,7 +5175,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             return try snapshot(session)
         }
         let timeoutFailure: Failure = session.state == "loading" ? .preparationDeadline : .deadline
-        let deadline = session.state == "loading" ? session.created + preparationTimeout : session.turnStarted + responseTimeout
+        let deadline = session.state == "loading" ? session.created + preparationTimeout : session.responseDeadline(idleTimeout: responseTimeout)
         guard ContinuousClock.now < deadline else { throw session.state == "loading" ? preparationFailure(session) : timeoutFailure }
         let observed: [String: Any]
         let kimiRouteWaitWasSpent = session.kimiProvisionalRouteWaitSpent
@@ -5476,6 +5487,18 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             }
             let response = observed["text"] as? String ?? ""
             guard response.utf8.count <= 220_000 else { throw Failure.responseTooLarge }
+            // Renew the idle watchdog only after inspecting the acknowledged submission.
+            // A visible generation control also covers reasoning with no new text.
+            let growingAnswer = count(observed, "responseCount") > session.baseline
+                && response.utf8.count > session.response.utf8.count
+            let verifiedGeneration = session.acknowledgedSendSequence == session.sequence
+                && session.submitted && session.firstUserFingerprint != nil && !session.pendingSubmission
+                && session.confirmedUsers == session.sequence && count(observed, "userCount") == session.sequence
+                && (!session.usesSubmissionOwnership || (session.currentSubmissionVerified
+                    && session.currentSubmission?.sequence == session.sequence))
+                && (Self.firstUserDiagnosticBool(observed["busy"]) == true
+                    || (growingAnswer && Self.firstUserDiagnosticBool(observed["answerComplete"]) == false))
+            if verifiedGeneration { session.lastVerifiedGeneration = .now }
             if count(observed, "responseCount") > session.baseline,
                count(observed, "userCount") == session.sequence, !session.pendingSubmission, !response.isEmpty {
                 if session.usesSubmissionOwnership {
@@ -5563,7 +5586,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                 final = try await page(session, action: "inspect",
                                     recheckModelAfterAwait: false, recheckProductAfterAwait: false,
                                     allowPendingChatGPTModelVerification: false,
-                                    maximumWait: min(inspectionTimeout, session.turnStarted + responseTimeout - .now))
+                                    maximumWait: min(inspectionTimeout, session.responseDeadline(idleTimeout: responseTimeout) - .now))
                             }
                             currentAnswerVerified = final["modelVerificationPending"] == nil
                                 && (!inspectsQuietCompletion || quietCandidateResponse.map { $0.utf8.elementsEqual(response.utf8) } == true
@@ -5601,7 +5624,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             // an older answer across native model-only awaits.
                             let final = try await page(session, action: "inspect",
                                 recheckModelAfterAwait: false, recheckProductAfterAwait: false,
-                                maximumWait: min(inspectionTimeout, session.turnStarted + responseTimeout - .now))
+                                maximumWait: min(inspectionTimeout, session.responseDeadline(idleTimeout: responseTimeout) - .now))
                             currentAnswerVerified = final["temporary"] as? Bool == true
                                 && final["interrupted"] as? Bool == false
                                 && final["busy"] as? Bool == false && final["answerComplete"] as? Bool == true
@@ -5620,7 +5643,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             // Make the optional page-world comparison before the already-required final independent DOM
                             // read. Never stage a result across changed ordinary selection, answer bytes or message IDs.
                             var wireTag: String?
-                            if session.qwenMarkerWire?.isCurrent == true, session.turnStarted + responseTimeout - .now > .seconds(2) {
+                            if session.qwenMarkerWire?.isCurrent == true, session.responseDeadline(idleTimeout: responseTimeout) - .now > .seconds(2) {
                                 wireTag = await compareQwenMarker(session, observed:observed, response:response)
                             }
                             // Saved/cleared sessions' native model recheck also yields. Its model
@@ -5629,7 +5652,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             let final = try await page(session, action: "inspect",
                                 recheckModelAfterAwait: false, recheckProductAfterAwait: false,
                                 groqRejectedAttributeNameSink: session.provider == .groq ? { finalGroqRejectedAttributeName = $0 } : nil,
-                                maximumWait: min(inspectionTimeout, session.turnStarted + responseTimeout - .now))
+                                maximumWait: min(inspectionTimeout, session.responseDeadline(idleTimeout: responseTimeout) - .now))
                             currentAnswerVerified = session.lifecycleVerified && observesLifecycle(final, session: session)
                                 && final["interrupted"] as? Bool == false
                                 && final["busy"] as? Bool == false && final["answerComplete"] as? Bool == true
@@ -5675,7 +5698,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                                 session.completionCandidate = false; session.candidateSince = nil
                                 return try snapshot(session)
                             }
-                            guard ContinuousClock.now - session.turnStarted < responseTimeout else { throw Failure.deadline }
+                            guard ContinuousClock.now < session.responseDeadline(idleTimeout: responseTimeout) else { throw Failure.deadline }
                             logResourceTimingDiagnostic(completionObservation["resourceTimingDiagnostic"], session: session, phase: "completion")
                             if session.provider == .chatgpt {
                                 // A session-bound notice survives the ordinary log level and
@@ -5742,9 +5765,10 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                 if case .renderedMessage? = session.groqCompletionSource { session.response = "" }
                 session.groqCompletionSource = nil
             }
-            guard session.state == "complete" || ContinuousClock.now - session.turnStarted < responseTimeout else {
+            guard session.state == "complete" || ContinuousClock.now < session.responseDeadline(idleTimeout: responseTimeout) else {
                 throw Failure.deadline
             }
+            return try snapshot(session, verifiedGeneration: verifiedGeneration)
         }
         return try snapshot(session)
     }
@@ -10542,7 +10566,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                           canObservePendingGrokTranscript(session, context: .acknowledgedRead) {
                     renderingContext = .acknowledgedRead
                 } else { renderingContext = nil }
-                let renderingDeadline = grokRecheckDeadline.map { min($0, session.turnStarted + responseTimeout) }
+                let renderingDeadline = grokRecheckDeadline.map { min($0, session.responseDeadline(idleTimeout: responseTimeout)) }
                 var fresh: [String: Any]
                 while true {
                     try Task.checkCancellation()
@@ -10553,7 +10577,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                             throw Failure.ownershipFailure(.javaScriptFirstUser)
                         }
                         guard let deadline = renderingDeadline, ContinuousClock.now < deadline else {
-                            throw ContinuousClock.now >= session.turnStarted + responseTimeout ? Failure.deadline : Failure.pageUnavailable
+                            throw ContinuousClock.now >= session.responseDeadline(idleTimeout: responseTimeout) ? Failure.deadline : Failure.pageUnavailable
                         }
                         // Take the revision before the read, so a reveal that
                         // races its callback cannot be lost before the wait.
@@ -10577,7 +10601,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
                     }
                     if context == .acknowledgedRead { throw Failure.submissionObservationPending }
                     guard ContinuousClock.now < deadline else {
-                        throw ContinuousClock.now >= session.turnStarted + responseTimeout ? Failure.deadline : Failure.pageUnavailable
+                        throw ContinuousClock.now >= session.responseDeadline(idleTimeout: responseTimeout) ? Failure.deadline : Failure.pageUnavailable
                     }
                     _ = try await browser.waitForModelChange(tabID: session.tabID, after: revision, until: deadline)
                 }
@@ -10995,7 +11019,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         // The outer server can reach its deadline before another native poll
         // is scheduled. Observe only an already-expired running response;
         // successful, preparing and early-cancelled sessions are untouched.
-        if session.state == "running", ContinuousClock.now - session.turnStarted >= responseTimeout {
+        if session.state == "running", ContinuousClock.now >= session.responseDeadline(idleTimeout: responseTimeout) {
             logResponseProgressFailure(session, cause: "response_deadline")
             await logFailedPageDiagnostic(session)
         } else if cancel {
@@ -11165,7 +11189,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         }
     }
 
-    private func snapshot(_ session: Session, cleanup: String? = nil) throws -> Data {
+    private func snapshot(_ session: Session, cleanup: String? = nil, verifiedGeneration: Bool = false) throws -> Data {
         if session.deepSeekComposerHandoffPending || session.qwenPendingFirstBody != nil,
            session.state == "running", cleanup == nil {
             guard canObservePendingSavedFirstBody(session),
@@ -11209,6 +11233,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
         else { renderedGroq = false }
         var value: [String: Any] = ["sessionToken": session.token, "provider": session.provider.rawValue,
                                   "state": session.state, "text": pendingModel || renderedGroq ? "" : session.response, "sequence": session.sequence]
+        if verifiedGeneration, session.state == "running" { value["verifiedGenerationActive"] = true }
         if session.state == "complete", case .renderedMessage? = session.groqCompletedReplyProof?.payload {
             value[GroqCompletedReplyProof.renderedMessageSnapshotKey] = true
         }

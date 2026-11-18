@@ -23744,6 +23744,39 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         try await assertHumanTabIntact(fixture)
     }
 
+    func testVerifiedChatGPTGenerationCanOutliveTheResponseWatchdog() async throws {
+        // Opt in to the same scenario at production duration for release qualification.
+        let production = ProcessInfo.processInfo.environment["COMPUTA_TEST_FIVE_MINUTE_GENERATION"] == "1"
+        let idleSeconds = production ? 300 : 4
+        let generationSeconds = production ? 310 : 7
+        let page = Self.modelChoicePage(.chatgpt).replacingOccurrences(
+            of: "document.getElementById('messages').appendChild(turn);", with: """
+            document.getElementById('messages').appendChild(turn);
+            controls.hidden = true;
+            const stop = document.createElement('button');
+            stop.setAttribute('data-testid','stop-button'); stop.textContent = 'Stop generating';
+            document.body.appendChild(stop);
+            setTimeout(() => { stop.remove(); controls.hidden = false; }, \(generationSeconds * 1_000));
+            """)
+        let fixture = try Fixture(page: page)
+        defer { fixture.shutdown() }
+        let server = try await makePrecreationFixtureServer()
+        await server.configureEmbeddedTransport(fixture.transport)
+        fixture.transport.setTimeoutsForTesting(preparation: .seconds(45), response: .seconds(idleSeconds))
+        await server.setTimeoutsForTesting(readiness: .seconds(45), response: .seconds(idleSeconds))
+        let request = try JSONSerialization.data(withJSONObject: ["model": Self.fixtureChoice(.chatgpt).modelID,
+            "input": "Return the fixture reply", "tools": [], "stream": true])
+        let started = ContinuousClock.now
+        let result = try await server.fixtureInfer(request, taskID: "long-owned-generation")
+        XCTAssertGreaterThan(ContinuousClock.now - started, .seconds(generationSeconds))
+        let stream = String(decoding: result, as: UTF8.self)
+        XCTAssertTrue(stream.contains("response.completed"))
+        XCTAssertTrue(stream.contains("Fixture reply"))
+        let receipts = await server.latestCleanupReceipts()
+        XCTAssertEqual(receipts.count, 1)
+        XCTAssertEqual(receipts.first?.outcome, .closed)
+    }
+
     func testChatGPTQuietCompletionKeepsTheOriginalResponseDeadline() async throws {
         let (fixture, token, view) = try await boundInspectionFixture(prompt: "A full quiet proof cannot extend the response deadline")
         defer { fixture.shutdown() }

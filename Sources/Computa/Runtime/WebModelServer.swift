@@ -127,7 +127,7 @@ actor WebModelServer {
             case .busy: "This browser model already has a request running."
             case .providerFailed: "The website could not produce a response. Check its sign-in, usage limit, or error message in the browser."
             case .preparationDeadline: "The website did not become ready before the 45-second preparation deadline. This website inference was not submitted."
-            case .deadline: "The website did not finish its response before the five-minute deadline."
+            case .deadline: "The website response timed out while waiting for verified generation or completion."
             case .cleanupFailed: "The web conversation cleanup could not be verified. Its local transcript has been retained."
             case .productModeUnverified: EmbeddedWebModelTransport.Failure.productModeUnverified.errorDescription
             case .modelUnverified: "The website's selected model could not be verified. No response was accepted and no prompt was replayed."
@@ -2462,7 +2462,7 @@ actor WebModelServer {
                     ? WebsiteResponseProfile.begin(source: .serverAcknowledged, sessionToken: session.token,
                         sequence: session.sequence, inferenceID: inferenceID) : nil
                 responseProfile?.mark(.serverSendAcknowledged)
-                let end = responseDeadline ?? (ContinuousClock.now + responseTimeout)
+                var end = responseDeadline ?? (ContinuousClock.now + responseTimeout)
                 while ContinuousClock.now < end {
                     try requireCurrentContext()
                     let revision = try await session.transport.changeRevision(sessionToken: session.token)
@@ -2738,6 +2738,12 @@ actor WebModelServer {
                         try Self.verifyInferenceSnapshot(value, session: &session)
                         if value["modelVerificationPending"] as? Bool != true {
                             _ = try verifiedSelectionEvidence(value, session: &session)
+                        }
+                        // This field is minted only by the native poll that inspected
+                        // this submission. Never renew a format-correction allowance.
+                        if correctionTicket == nil, value["verifiedGenerationActive"] as? Bool == true {
+                            end = .now + responseTimeout
+                            responseDeadline = end
                         }
                         sessions[taskID] = session
                         lease = session
