@@ -134,13 +134,14 @@ candidate against the effective context window. The bridge checks the full
 request against its 128 KiB byte threshold before sending. External projection
 omits internal chat metadata, encrypted arguments and optional item IDs, while
 retaining exact call IDs. Computa sizes this projection on a clone so that
-native identities, timestamps, failures and ordering survive in history. Both byte budgets use a placeholder for the separately
+native identities, timestamps, failures and ordering survive in history. Both byte budgets use a placeholder for the
+separately
 bounded latest image described below, not its pixel payload. When needed,
 older excerpts shrink before the newest completed observation. The newest output
 may retain up to 4 KiB of text and 6 KiB serialized (excluding its separately
 bounded image); historical outputs remain capped at 2 KiB text/3 KiB serialized.
 If necessary the newest excerpt also shrinks. All former shared-cap candidates
-remain available, within the unchanged aggregate budgets. Completion order, not
+remain available within the route's aggregate budgets. Completion order, not
 tool name or call order, determines priority. No call identities or arguments
 are shortened. The larger individual item has been manually reviewed; byte
 counts are not token counts, and final context-fit validation still applies.

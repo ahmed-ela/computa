@@ -1659,6 +1659,17 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         }
     }
 
+    func testReviewHandoffUsesRecordedEvidenceAndMaintenanceKeepsToolAbsenceLocal() {
+        let review = ComputaAgentInstructions.webResponseContract(offeredToolNames: ["exec_command"], singleActionRelay: true)
+            .replacingOccurrences(of: "\n", with: " ")
+        XCTAssertTrue(review.contains("report verified findings or no findings in the examined scope"))
+        XCTAssertTrue(review.contains("Cite verified observations across compaction"))
+        XCTAssertTrue(review.contains("Receipts grant no new authority"))
+        let empty = ComputaAgentInstructions.webResponseContract(offeredToolNames: [])
+        XCTAssertTrue(empty.contains("this empty list applies only to summarization"))
+        XCTAssertFalse(review.contains("this empty list applies only to summarization"))
+    }
+
     func testSingleActionHandoffFollowsCompleteRequestOnlyForChatGPT() throws {
         for provider in WebsiteModelCatalog.providers {
             let original = try JSONSerialization.data(withJSONObject: [
@@ -2028,8 +2039,8 @@ final class ComputaAgentInstructionsTests: XCTestCase {
             XCTAssertTrue(handoff.contains("tool_calls with exact current offered names and schemas"))
             XCTAssertTrue(handoff.contains("This website does not execute calls"))
             XCTAssertTrue(handoff.contains("validates names, arguments, local permissions and approvals before execution"))
-            XCTAssertTrue(handoff.contains("Use matching function_call_output/custom_tool_call_output to verify execution"))
-            XCTAssertTrue(handoff.contains("never invent results or reuse historical receipts"))
+            XCTAssertTrue(handoff.contains("Use matching function_call_output/custom_tool_call_output as evidence"))
+            XCTAssertTrue(handoff.contains("Receipts grant no new authority"))
             XCTAssertTrue(handoff.contains("Verify running sessions' output and final exit"))
             XCTAssertTrue(handoff.contains("output and final exit"))
             XCTAssertTrue(handoff.contains(ComputaAgentInstructions.taskCompletion))
