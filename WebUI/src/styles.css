@@ -155,7 +155,6 @@ details > summary::-webkit-details-marker { display: none; }
 .activity-tool .tool-summary { display: none; }
 .activity-tool .tool-status, .activity-tool .tool-duration { font-size: 9px; }
 .activity-placeholder { color: var(--text-tertiary); font-size: 12px; }
-.tool-message { margin-bottom: 8px; }
 .tool-card { overflow: hidden; border: 1px solid var(--border); border-radius: 8px; }
 .tool-card > summary { display: flex; min-height: 50px; align-items: center; gap: 10px; padding: 9px 12px; }
 .tool-icon { display: grid; width: 22px; height: 22px; flex: 0 0 22px; place-items: center; }

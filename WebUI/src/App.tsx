@@ -19,7 +19,7 @@ import { WebsiteSessionCleanupControl } from './WebsiteSessionCleanupControl';
 import { fileChangeSummary } from './reviewDiff';
 import { ResponseMarkdown } from './ResponseMarkdown';
 import { ActivityDisclosure, activityLabel } from './ActivityDisclosure';
-import { activityTimeline, systemMessageText, type ActivityGroup } from './activityTimeline';
+import { activityTimeline, systemMessageText, type ActivityGroup, type ConversationEntry } from './activityTimeline';
 import { formatWorkedFor } from './duration';
 import { TaskActivityIndicator } from './TaskActivityIndicator';
 import { isTaskActive, startSidebarClock } from './sidebarActivity';
@@ -254,12 +254,10 @@ function ToolDetails({ entry, showPayload }: { entry: EntrySnapshot; showPayload
 function TimelineEntry({
   entry,
   selected,
-  showToolPayloads,
   hideAnswerDuration = false,
 }: {
-  entry: EntrySnapshot;
+  entry: ConversationEntry;
   selected: boolean;
-  showToolPayloads: boolean;
   hideAnswerDuration?: boolean;
 }) {
   if (entry.kind === 'assistant' && !entry.body.trim()) return null;
@@ -273,17 +271,6 @@ function TimelineEntry({
         >
           {entry.body}
         </Button>
-      </article>
-    );
-  }
-
-  if (entry.kind === 'tool') {
-    return (
-      <article
-        className={`message-row tool-message ${selected ? 'selected' : ''}`}
-        onClick={() => post({ action: 'selectEntry', id: entry.id })}
-      >
-        <ToolDetails entry={entry} showPayload={showToolPayloads} />
       </article>
     );
   }
@@ -771,7 +758,7 @@ function Conversation({ snapshot, task }: { snapshot: AppSnapshot; task: TaskSna
           ) : (
             rows.map((row) => {
               if (row.kind === 'entry') return <TimelineEntry key={row.entry.id} entry={row.entry}
-                selected={snapshot.selectedEntryID === row.entry.id} showToolPayloads={snapshot.showToolPayloads}
+                selected={snapshot.selectedEntryID === row.entry.id}
                 hideAnswerDuration={row.hideAnswerMetadata} />;
               const group = row.group;
               const key = `${task.id}:${group.id}`;

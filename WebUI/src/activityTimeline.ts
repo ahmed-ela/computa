@@ -32,9 +32,20 @@ export interface ActivityGroup {
   timedAnswerID?: string;
 }
 
+export type ConversationEntry = EntrySnapshot & { kind: 'user' | 'assistant' | 'system' };
+
+// A tool receipt belongs to its turn for its entire lifetime. Approval prompts
+// are presented by the native approval queue, independently of this transcript.
+function isConversationEntry(entry: EntrySnapshot): entry is ConversationEntry {
+  switch (entry.kind) {
+    case 'user': case 'assistant': case 'system': return true;
+    case 'reasoning': case 'tool': return false;
+  }
+}
+
 export type ActivityRow =
   | { kind: 'activity'; group: ActivityGroup }
-  | { kind: 'entry'; entry: EntrySnapshot; hideAnswerMetadata: boolean };
+  | { kind: 'entry'; entry: ConversationEntry; hideAnswerMetadata: boolean };
 
 function validDuration(seconds?: number): seconds is number {
   return seconds != null && Number.isFinite(seconds) && seconds >= 0;
@@ -94,14 +105,9 @@ export function activityTimeline(task: TaskSnapshot): ActivityRow[] {
   };
   for (const entry of task.entries) {
     const owner = owners.get(entry.id)!;
-    if (entry.kind === 'reasoning') {
-      if (hasReasoningText(entry)) insertGroup(owner);
+    if (!isConversationEntry(entry)) {
+      if (groups.get(owner)?.entries[0]?.id === entry.id) insertGroup(owner);
       continue;
-    }
-    if (entry.kind === 'tool') {
-      insertGroup(owner);
-      // Safety-relevant steps stay visible even when the activity is closed.
-      if (entry.tool?.status !== 'Failed' && entry.tool?.status !== 'Needs approval') continue;
     }
     if (entry.kind === 'assistant' && !entry.body.trim()) continue;
     rows.push({ kind: 'entry', entry, hideAnswerMetadata: groups.get(owner)?.timedAnswerID === entry.id });
