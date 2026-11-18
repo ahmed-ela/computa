@@ -63,7 +63,7 @@ struct ComputaApp: App {
     @NSApplicationDelegateAdaptor(ComputaAppDelegate.self) private var appDelegate
     @State private var state: AppState
     #if !SWIFT_PACKAGE
-    private let updateController: SPUStandardUpdaterController?
+    private let updates: ComputaUpdates?
     #endif
     private let launchMode: ComputaLaunchMode
 
@@ -71,9 +71,7 @@ struct ComputaApp: App {
         let launchMode = ComputaLaunchMode.current
         self.launchMode = launchMode
         #if !SWIFT_PACKAGE
-        updateController = launchMode == .application
-            ? SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
-            : nil
+        updates = launchMode == .application ? ComputaUpdates() : nil
         #endif
         let state = launchMode.makeState()
         _state = State(initialValue: state)
@@ -100,7 +98,7 @@ struct ComputaApp: App {
         .commands {
             #if !SWIFT_PACKAGE
             CommandGroup(after: .appInfo) {
-                if let updateController { CheckForUpdatesButton(updater: updateController.updater) }
+                if let updates { CheckForUpdatesButton(updates: updates) }
             }
             #endif
             CommandGroup(after: .newItem) {
@@ -179,14 +177,22 @@ final class ComputaAppDelegate: NSObject, NSApplicationDelegate {
 }
 
 #if !SWIFT_PACKAGE
+@MainActor
+private final class ComputaUpdates: ObservableObject {
+    let controller = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+    @Published private(set) var canCheck = false
+
+    init() {
+        controller.updater.publisher(for: \.canCheckForUpdates).assign(to: &$canCheck)
+    }
+}
+
 private struct CheckForUpdatesButton: View {
-    let updater: SPUUpdater
-    @State private var canCheck = false
+    @ObservedObject var updates: ComputaUpdates
 
     var body: some View {
-        Button("Check for Updates…", action: updater.checkForUpdates)
-            .disabled(!canCheck)
-            .onReceive(updater.publisher(for: \.canCheckForUpdates)) { canCheck = $0 }
+        Button("Check for Updates…", action: updates.controller.updater.checkForUpdates)
+            .disabled(!updates.canCheck)
     }
 }
 #endif
