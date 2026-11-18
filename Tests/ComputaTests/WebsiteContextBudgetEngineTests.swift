@@ -51,7 +51,7 @@ final class WebsiteContextBudgetEngineTests: XCTestCase {
             XCTAssertEqual(receipt.summaries, 1)
             XCTAssertTrue(receipt.receiptsPreserved)
             XCTAssertTrue(receipt.patchVerified)
-            XCTAssertGreaterThan(receipt.commands, 1)
+            XCTAssertGreaterThanOrEqual(receipt.commands, WebModelServer.maximumTurnInferences)
             XCTAssertEqual(receipt.sends, receipt.commands + 3, "Commands, summary, patch and final only")
             XCTAssertEqual(receipt.starts, receipt.sends)
             XCTAssertEqual(receipt.finishes, receipt.sends)
@@ -102,11 +102,13 @@ private actor BudgetEngineTransport: WebModelTransport {
                 result.summaries += 1
                 reply = #"{"type":"message","text":"The code reads completed. Their original tool receipts are retained. Create review.txt with Verified after compaction, then report completion. Never repeat the executed reads."}"#
             } else if result.summaries == 0 {
-                guard result.commands < 12 else { throw WebModelServer.Failure.turnLimit }
+                guard result.commands < 32 else { throw WebModelServer.Failure.turnLimit }
                 let name = try XCTUnwrap(request.offeredToolNames.first { $0 == "exec_command" || $0.hasSuffix(".exec_command") })
                 let marker = "READ_\(result.commands)"
-                // Grow genuine tool history; the ledger independently detects replay.
-                let command = #"/usr/bin/python3 -c 'from pathlib import Path; p=Path("executed.txt"); p.open("a").write("\#(marker)\n"); print("\#(marker)"); print("bounded code observation " * 500)'"#
+                // Cross the original inference cap, then grow history until native compaction.
+                // The independent file ledger catches any replay through either boundary.
+                let repetitions = result.commands < WebModelServer.maximumTurnInferences ? 1 : 500
+                let command = #"/usr/bin/python3 -c 'from pathlib import Path; p=Path("executed.txt"); p.open("a").write("\#(marker)\n"); print("\#(marker)"); print("bounded code observation " * \#(repetitions))'"#
                 let args: [String: Any] = ["cmd": command, "workdir": project, "max_output_tokens": 4000, "yield_time_ms": 10000]
                 reply = String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [["name": name, "arguments": args]]]), as: UTF8.self)
                 result.commands += 1

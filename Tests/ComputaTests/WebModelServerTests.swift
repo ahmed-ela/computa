@@ -1804,6 +1804,20 @@ final class WebModelServerTests: XCTestCase {
         }
     }
 
+    func testDistinctCompletedActionsCannotRenewPastAbsoluteTurnBudget() throws {
+        var budget = WebModelServer.TurnBudget()
+        let bytes = WebModelResponseCodec.maximumPromptBytes
+        for index in 0..<WebModelServer.TurnBudget.absoluteInferenceLimit {
+            if index > 0 { budget.recordMatchedActions([Data(String(index).utf8)]) }
+            try budget.charge(bytes: bytes)
+        }
+        budget.recordMatchedActions([Data("another completed action".utf8)])
+        XCTAssertFalse(budget.admits(bytes: 1))
+        XCTAssertEqual(budget.remainingBytes, 0)
+        XCTAssertThrowsError(try budget.charge(bytes: 1))
+        XCTAssertEqual(budget.submissions, WebModelServer.TurnBudget.absoluteInferenceLimit)
+    }
+
     func testChatFreshLeasesCarryNativeTurnCountAndByteBudgetsWithoutAnotherStart() async throws {
         for largePrompts in [false, true] {
             let tool = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"bounded"}}]}"#
@@ -1822,7 +1836,7 @@ final class WebModelServerTests: XCTestCase {
                     dispatched += 1; total += bytes
                     let calls = try responseOutput(response)
                     input += calls + [["type": "function_call_output", "call_id": try XCTUnwrap(calls.first?["call_id"] as? String),
-                        "output": "Observed exit 0"]]
+                        "output": "Observed exit 0 at step \(dispatched)"]]
                 } catch {
                     XCTAssertEqual(WebModelServer.errorPresentation(for: error).code, "website_turn_limit")
                     XCTAssertEqual(dispatched, WebModelServer.maximumTurnInferences)

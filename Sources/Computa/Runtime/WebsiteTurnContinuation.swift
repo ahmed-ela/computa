@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Admission state for an authenticated native tool loop, never website text.
@@ -29,6 +30,21 @@ struct WebsiteTurnContinuation: Sendable {
     private let emittedOutput: [JSONValue]
     private let pendingCalls: [PendingCall]
     let pendingToolCallCount: Int
+
+    /// Fingerprints identify distinct tool invocations for loop budgeting only.
+    /// Configuration, IDs, outputs and immutable history are checked by validate(next:).
+    var toolActionFingerprints: Set<Data> {
+        Set(emittedOutput.compactMap { item in
+            guard let type = item["type"], type == .text("function_call") || type == .text("custom_tool_call"),
+                  let name = item["name"], var payload = item["arguments"] ?? item["input"] else { return nil }
+            if type == .text("function_call"), let arguments = payload.textBytes {
+                var parser = JSONParser(arguments)
+                if let canonical = try? parser.parse() { payload = canonical }
+            }
+            let identity = JSONValue.array([type, item["namespace"] ?? .null, name, payload])
+            return Data(SHA256.hash(data: identity.encoded()))
+        })
+    }
 
     /// Run before the first website Send as well as when admitting a follow-up.
     /// The existing codec validates provider options; this adds lossless JSON

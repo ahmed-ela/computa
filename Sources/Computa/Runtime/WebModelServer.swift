@@ -145,13 +145,43 @@ actor WebModelServer {
         }
     }
 
-    // Native-turn bounds survive physical website-page replacement. Every
-    // inference is charged its complete canonical prompt, including repeated
-    // history and any correction reminder. The byte budget admits every legal
-    // request in the finite inference budget instead of imposing an earlier,
-    // history-size-dependent stop after already-completed native actions.
+    // Retained pages and non-renewing turns keep this base allowance.
     static let maximumTurnInferences = 16
     static let maximumTurnPromptUTF8Bytes = maximumTurnInferences * WebModelResponseCodec.maximumPromptBytes
+
+    struct TurnBudget: Sendable {
+        // Keep even continuously changing commands bounded within one native turn.
+        static let absoluteInferenceLimit = 128
+        private(set) var submissions = 0
+        private var promptBytes = 0
+        private var inferenceLimit = WebModelServer.maximumTurnInferences
+        private var completedActions: Set<Data> = []
+
+        var remainingBytes: Int {
+            inferenceLimit * WebModelResponseCodec.maximumPromptBytes - promptBytes
+        }
+
+        func admits(bytes: Int) -> Bool {
+            submissions < inferenceLimit && bytes <= remainingBytes
+        }
+
+        mutating func charge(bytes: Int) throws {
+            guard admits(bytes: bytes) else { throw Failure.turnLimit }
+            submissions += 1
+            promptBytes += bytes
+        }
+
+        // Call only after validating the previous released calls against their
+        // native outputs. Reissued IDs and variable tool output earn no credit.
+        mutating func recordMatchedActions(_ fingerprints: Set<Data>) {
+            let previousCount = completedActions.count
+            completedActions.formUnion(fingerprints)
+            if completedActions.count > previousCount && completedActions.count > 1 {
+                inferenceLimit = min(Self.absoluteInferenceLimit, submissions + WebModelServer.maximumTurnInferences)
+            }
+        }
+    }
+
     private static func requiresNativeContinuationProof(provider: String) -> Bool {
         provider == "gemini" || provider == "chatgpt"
     }
@@ -172,8 +202,7 @@ actor WebModelServer {
         var requestMetadata: ChatGPTRequestMetadataLease?
         var nativeStartAdmission: WebModelStartAdmission?
         var submittedPromptFingerprint = ""
-        var cumulativePromptUTF8Count = 0
-        var turnInferenceCount = 0
+        var budget = TurnBudget()
         // Local history validation also protects fresh Claude sessions; it
         // does not claim that Claude can continue a retained website page.
         var usesVerifiedHistory: Bool { provesNativeContinuation || provesFreshSessionSubmission }
@@ -202,8 +231,7 @@ actor WebModelServer {
         let continuation: WebsiteTurnContinuation
         let transportGeneration: UUID
         let resolvedSelection: WebsiteSelectionEvidence?
-        let turnInferenceCount: Int
-        let cumulativePromptUTF8Count: Int
+        let budget: TurnBudget
         var hasValidatedOpus3FormatCorrection = false
         var ambiguousHandoff = false
     }
@@ -2067,14 +2095,13 @@ actor WebModelServer {
                           previous.sequence < 1_024 else { throw Failure.invalidRequest }
                     try yielded.continuation.validate(next: request)
                     if previous.usesBoundedTurn {
-                        guard previous.turnInferenceCount < Self.maximumTurnInferences,
-                              request.prompt.utf8.count <= Self.maximumTurnPromptUTF8Bytes - previous.cumulativePromptUTF8Count else {
+                        guard previous.budget.admits(bytes: request.prompt.utf8.count) else {
                             throw Failure.turnLimit
                         }
                     }
                     if previous.provider == "claude", !context.isMaintenance,
                        let annotated = Self.claudePromptWithMatchedOutputNote(request.prompt,
-                         remainingTurnBytes: Self.maximumTurnPromptUTF8Bytes - previous.cumulativePromptUTF8Count,
+                         remainingTurnBytes: previous.budget.remainingBytes,
                          modelChoice: choice) {
                         prompt = annotated
                         includesClaudeOutputNote = true
@@ -2104,19 +2131,23 @@ actor WebModelServer {
                 } else {
                     guard yielded == nil else { throw Failure.invalidRequest }
                     let closed = closedHandoff
+                    var budget = correctionSource?.budget ?? closed?.budget ?? TurnBudget()
                     if let closed {
                         guard closed.context == context, closed.transportGeneration == transportGeneration,
                               !closed.ambiguousHandoff else { throw Failure.inferenceContextRequired }
-                        if nativeCheckpoint == nil { try closed.continuation.validate(next: request) }
+                        if nativeCheckpoint == nil {
+                            try closed.continuation.validate(next: request)
+                            if provider == "chatgpt", !context.isMaintenance, correctionTicket == nil {
+                                budget.recordMatchedActions(closed.continuation.toolActionFingerprints)
+                            }
+                        }
                     }
                     let retainClaudeTurn = qualifiesRetainedHaiku && !context.isMaintenance && choice?.supportsClaudeTurnPilot == true
                     let provesNativeContinuation = Self.requiresNativeContinuationProof(provider: provider) || retainClaudeTurn
                     let provesFreshSessionSubmission = provider == "claude" && choice != nil && !retainClaudeTurn
                     if provesNativeContinuation || provesFreshSessionSubmission { try WebsiteTurnContinuation.validateRequest(request) }
                     if provider == "chatgpt" || provider == "claude" && choice != nil {
-                        guard (closed?.turnInferenceCount ?? 0) < Self.maximumTurnInferences,
-                              request.prompt.utf8.count <= Self.maximumTurnPromptUTF8Bytes - (closed?.cumulativePromptUTF8Count ?? 0)
-                        else { throw Failure.turnLimit }
+                        guard budget.admits(bytes: request.prompt.utf8.count) else { throw Failure.turnLimit }
                     }
                     if let correctionTicket {
                         prompt = request.prompt + Self.correctionReminder(for: correctionTicket.reason)
@@ -2124,14 +2155,13 @@ actor WebModelServer {
                     } else if provesFreshSessionSubmission, !context.isMaintenance, let closed,
                               closed.continuation.pendingToolCallCount > 0 {
                         // validate(next:) joined only these appended outputs to the prior released calls.
-                        let budget = min(WebModelResponseCodec.maximumPromptBytes,
-                            Self.maximumTurnPromptUTF8Bytes - closed.cumulativePromptUTF8Count)
+                        let annotationBudget = min(WebModelResponseCodec.maximumPromptBytes, budget.remainingBytes)
                         let annotated = Self.claudePromptWithMatchedOutputNote(request.prompt,
-                            remainingTurnBytes: budget, modelChoice: choice)
+                            remainingTurnBytes: annotationBudget, modelChoice: choice)
                         let continuationPrompt = annotated ?? request.prompt
                         let reminder = Self.claudeOpus3ContinuationFormatReminder
                         prompt = choice == .claudeOpus3 && closed.hasValidatedOpus3FormatCorrection
-                            && continuationPrompt.utf8.count + reminder.utf8.count <= budget
+                            && continuationPrompt.utf8.count + reminder.utf8.count <= annotationBudget
                             ? continuationPrompt + reminder : continuationPrompt
                         includesClaudeOutputNote = annotated != nil
                     } else {
@@ -2259,8 +2289,7 @@ actor WebModelServer {
                     session.requestMetadata = requestMetadata
                     session.nativeStartAdmission = provider == "groq" ? admission : nil
                     session.resolvedSelection = correctionSource?.resolvedSelection ?? closed?.resolvedSelection
-                    session.turnInferenceCount = correctionSource?.turnInferenceCount ?? closed?.turnInferenceCount ?? 0
-                    session.cumulativePromptUTF8Count = correctionSource?.cumulativePromptUTF8Count ?? closed?.cumulativePromptUTF8Count ?? 0
+                    session.budget = budget
                     // Capture ownership before cancellation or validation can fail.
                     sessions[taskID] = session
                     lease = session
@@ -2334,13 +2363,7 @@ actor WebModelServer {
                     }
                 }
                 if session.usesBoundedTurn {
-                    let bytes = prompt.utf8.count
-                    guard session.turnInferenceCount < Self.maximumTurnInferences,
-                          bytes <= Self.maximumTurnPromptUTF8Bytes - session.cumulativePromptUTF8Count else {
-                        throw Failure.turnLimit
-                    }
-                    session.cumulativePromptUTF8Count += bytes
-                    session.turnInferenceCount += 1
+                    try session.budget.charge(bytes: prompt.utf8.count)
                 }
                 // An earlier HTTP output may fail while the new page prepares.
                 // Recheck its exact closed handoff after every preparation await.
@@ -2376,7 +2399,7 @@ actor WebModelServer {
                         request: request, prompt: prompt, isNewThread: context.isNewThread,
                         isMaintenance: context.isMaintenance,
                         isFirstInference: firstNativeInference && correctionTicket == nil
-                            && session.sequence == 1 && session.turnInferenceCount == 1)
+                            && session.sequence == 1 && session.budget.submissions == 1)
                 }
                 defer { claudeFirstRequest?.revoke() }
                 // A private nonce arm can retain only a new synthetic first
@@ -2387,7 +2410,7 @@ actor WebModelServer {
                     request: request, taskID: taskID, threadID: context.threadID, turnID: context.turnID,
                     runtimeGeneration: context.runtimeGeneration, preparationID: context.preparationID,
                     isNewThread: context.isNewThread, isMaintenance: context.isMaintenance,
-                    isFirstInference: firstNativeInference && correctionTicket == nil && session.sequence == 1 && session.turnInferenceCount == 1)
+                    isFirstInference: firstNativeInference && correctionTicket == nil && session.sequence == 1 && session.budget.submissions == 1)
                 defer { benchmarkCapture?.revoke() }
                 // Groq's website has an observed 8K token-per-minute allowance.
                 // Local pacing is separate from prompt admission and cannot
@@ -2679,7 +2702,7 @@ actor WebModelServer {
                             if let continuation {
                                 closedTurns[taskID] = ClosedTurn(inferenceID: inferenceID, context: context, continuation: continuation,
                                     transportGeneration: session.transportGeneration, resolvedSelection: session.resolvedSelection,
-                                    turnInferenceCount: session.turnInferenceCount, cumulativePromptUTF8Count: session.cumulativePromptUTF8Count,
+                                    budget: session.budget,
                                     hasValidatedOpus3FormatCorrection: session.modelChoice == .claudeOpus3
                                         && continuation.pendingToolCallCount > 0 && closedHandoff?.hasValidatedOpus3FormatCorrection == true)
                             }
@@ -2746,9 +2769,8 @@ actor WebModelServer {
                               session.resolvedSelection != nil, session.documentGeneration != nil,
                               !session.submittedPromptFingerprint.isEmpty,
                               sessions[taskID]?.token == session.token,
-                              session.turnInferenceCount < Self.maximumTurnInferences,
+                              session.budget.admits(bytes: prompt.utf8.count),
                               prompt.utf8.count <= WebModelResponseCodec.maximumPromptBytes,
-                              prompt.utf8.count <= Self.maximumTurnPromptUTF8Bytes - session.cumulativePromptUTF8Count,
                               ContinuousClock.now < candidate.deadline, let correctionStore,
                               let firstToken = UUID(uuidString: session.token),
                               let ticket = try? correctionStore.claim(taskID: taskID, threadID: context.threadID,
