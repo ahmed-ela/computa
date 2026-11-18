@@ -7,6 +7,23 @@ import XCTest
 /// incremental delivery is established before the fixture can finish a reply.
 @MainActor
 final class RuntimeStreamingTests: XCTestCase {
+    func testObservedCompletionPublishesStableThreadIdentityBeforeTerminalStatusAndHistoryDoesNotRepeatIt() async throws {
+        try await withHarness(scenario: "name-fast-completed") { harness in
+            XCTAssertTrue(harness.audit.completions.isEmpty)
+            try await harness.submit()
+            try await self.waitFor("observed successful turn") { harness.audit.status == .completed }
+            XCTAssertEqual(harness.audit.boundThreads, ["streaming-thread"])
+            XCTAssertNotEqual(harness.taskID, harness.audit.boundThreads.first)
+            XCTAssertEqual(harness.audit.completions.map(\.threadID), ["streaming-thread"])
+            XCTAssertEqual(harness.audit.completions.map(\.turnID), ["streaming-turn-1"])
+            XCTAssertEqual(harness.audit.completionOrder, ["observed:streaming-turn-1", "completed"])
+            let restored = try await harness.runtime.loadTasks()
+            XCTAssertEqual(restored.first?.id, harness.taskID)
+            XCTAssertEqual(restored.first?.runtimeThreadID, "streaming-thread")
+            XCTAssertEqual(harness.audit.completions.count, 1, "Loading historical completed tasks cannot manufacture a new unread event.")
+        }
+    }
+
     func testHistoryTitlesPreserveExplicitNamesAndUseOnlyTheFirstVisibleUserPrompt() throws {
         let prompt = "APP_RUNTIME_literal 🧭 café"
         let history: [String: Any] = ["result": ["thread": ["turns": [
@@ -633,11 +650,19 @@ final class RuntimeStreamingTests: XCTestCase {
         var measuredTokens: Int?
         var compactionsCompleted = 0
         var streamingEvents = [String]()
+        var boundThreads = [String]()
+        var completions = [(threadID: String, turnID: String)]()
+        var completionOrder = [String]()
         var state: AppState?
 
         func record(_ event: AgentRuntimeEvent, taskID: String) {
             state?.apply(event)
             switch event {
+            case .taskThreadBound(let id, let threadID) where id == taskID:
+                boundThreads.append(threadID)
+            case .taskCompletionObserved(let id, let threadID, let turnID) where id == taskID:
+                completions.append((threadID, turnID))
+                completionOrder.append("observed:\(turnID)")
             case .assistantMessagePhaseUpdated(let id, let itemID, let phase) where id == taskID:
                 phases.append(Delta(itemID: itemID, text: phase))
             case .reasoningMessageUpdated(let id, let itemID, let text) where id == taskID:
@@ -659,6 +684,7 @@ final class RuntimeStreamingTests: XCTestCase {
                 approvals.append(request)
             case .taskStatusChanged(let id, let value) where id == taskID:
                 status = value
+                if value == .completed { completionOrder.append("completed") }
             case .contextUsageUpdated(let id, let usage) where id == taskID:
                 measuredTokens = usage?.usedTokens
             case .contextCompactionChanged(let id, .completed) where id == taskID:

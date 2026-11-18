@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Admission state for an authenticated native tool loop, never website text.
@@ -24,17 +25,41 @@ struct WebsiteTurnContinuation: Sendable {
         let namespace: Data?
     }
 
-    private let configuration: Data
+    private let configuration: JSONValue
     private let previousInput: [Data]
     private let emittedOutput: [JSONValue]
     private let pendingCalls: [PendingCall]
     let pendingToolCallCount: Int
+
+    /// Fingerprints identify distinct tool invocations for loop budgeting only.
+    /// Configuration, IDs, outputs and immutable history are checked by validate(next:).
+    var toolActionFingerprints: Set<Data> {
+        Set(emittedOutput.compactMap { item in
+            guard let type = item["type"], type == .text("function_call") || type == .text("custom_tool_call"),
+                  let name = item["name"], var payload = item["arguments"] ?? item["input"] else { return nil }
+            if type == .text("function_call"), let arguments = payload.textBytes {
+                var parser = JSONParser(arguments)
+                if let canonical = try? parser.parse() { payload = canonical }
+            }
+            let identity = JSONValue.array([type, item["namespace"] ?? .null, name, payload])
+            return Data(SHA256.hash(data: identity.encoded()))
+        })
+    }
 
     /// Run before the first website Send as well as when admitting a follow-up.
     /// The existing codec validates provider options; this adds lossless JSON
     /// identity, duplicate-key rejection and finite history traversal bounds.
     static func validateRequest(_ request: WebModelResponseCodec.Request) throws {
         _ = try requestContext(request)
+    }
+
+    /// Private comparison bytes for digest equality only, using exactly the
+    /// continuation parser's lossless value equivalence and traversal bounds.
+    /// Never substitute this encoding for raw source, history or payload bytes.
+    static func canonicalValueDataForDigest(_ data: Data) throws -> Data {
+        guard data.count <= WebModelResponseCodec.maximumPromptBytes else { throw Failure.contextLimitExceeded }
+        var parser = JSONParser(data)
+        return try parser.parse().encoded()
     }
 
     init(request: WebModelResponseCodec.Request, encodedResponse: Data) throws {
@@ -74,7 +99,7 @@ struct WebsiteTurnContinuation: Sendable {
             if let callID = item["call_id"]?.textBytes,
                calls.contains(where: { $0.callID == callID }) { throw Failure.invalidResponse }
         }
-        configuration = context.configuration.encoded()
+        configuration = context.configuration
         previousInput = context.input.map { $0.encoded() }
         emittedOutput = nativeOutput
         pendingCalls = calls
@@ -86,7 +111,7 @@ struct WebsiteTurnContinuation: Sendable {
     /// conversation. The full next request remains intact for either path.
     func validate(next request: WebModelResponseCodec.Request) throws {
         let next = try Self.requestContext(request)
-        guard next.configuration.encoded() == configuration else { throw Failure.changedConfiguration }
+        guard next.configuration.encoded() == configuration.encoded() else { throw Failure.changedConfiguration }
         let prefixCount = previousInput.count + emittedOutput.count
         guard next.input.count > prefixCount,
               next.input.prefix(previousInput.count).map({ $0.encoded() }) == previousInput else {
@@ -129,6 +154,30 @@ struct WebsiteTurnContinuation: Sendable {
             }
         }
         guard received.count == pendingCalls.count else { throw Failure.invalidToolOutputs }
+    }
+
+    /// Native checkpoint authorization is checked by WebModelServer separately.
+    /// A summary may omit tools and use the engine's maintenance user-text
+    /// metadata, but cannot change its model, base instructions or other options.
+    func validateCompactionConfiguration(next request: WebModelResponseCodec.Request) throws {
+        guard request.offeredToolNames.isEmpty,
+              var before = configuration.object,
+              var after = try Self.requestContext(request).configuration.object else { throw Failure.changedConfiguration }
+        for key in ["tools", "tool_choice", "parallel_tool_calls", "client_metadata"] {
+            before.removeValue(forKey: Data(key.utf8)); after.removeValue(forKey: Data(key.utf8))
+        }
+        guard JSONValue.object(before).encoded() == JSONValue.object(after).encoded() else { throw Failure.changedConfiguration }
+    }
+
+    /// The native engine rotates window IDs and regenerates current-user-text
+    /// metadata at a checkpoint. The server separately verifies the actual
+    /// thread/turn identity. Keep every model, instruction and tool option exact.
+    func validateCompactedConfiguration(next request: WebModelResponseCodec.Request) throws {
+        guard var before = configuration.object,
+              var after = try Self.requestContext(request).configuration.object else { throw Failure.changedConfiguration }
+        before.removeValue(forKey: Data("client_metadata".utf8))
+        after.removeValue(forKey: Data("client_metadata".utf8))
+        guard JSONValue.object(before).encoded() == JSONValue.object(after).encoded() else { throw Failure.changedConfiguration }
     }
 
     private static func requestContext(_ request: WebModelResponseCodec.Request) throws -> (configuration: JSONValue, input: [JSONValue]) {

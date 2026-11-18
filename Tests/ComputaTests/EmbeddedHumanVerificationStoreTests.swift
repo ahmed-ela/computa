@@ -9,7 +9,10 @@ final class EmbeddedHumanVerificationStoreTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let profile = UUID()
         let store = EmbeddedHumanVerificationStore(defaults: defaults, profileID: profile)
-        let expected = Dictionary(uniqueKeysWithValues: ["chatgpt", "claude", "gemini", "groq"].map { ($0, UUID()) })
+        let providerIDs = ["chatgpt", "claude", "gemini", "groq", "grok", "kimi", "qwen", "deepseek"]
+        let expected = Dictionary(uniqueKeysWithValues: providerIDs.map { ($0, UUID()) })
+        XCTAssertTrue(Set(WebsiteModelCatalog.providers).isSubset(of: Set(expected.keys)),
+                      "Every public provider must retain its checkpoint across restart")
         var supplied = expected
         supplied["https://www.google.com/sorry/?private=query"] = UUID()
         store.save(supplied)
@@ -18,7 +21,7 @@ final class EmbeddedHumanVerificationStoreTests: XCTestCase {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(Set(object.keys), ["version", "checkpoints"])
         let checkpoints = try XCTUnwrap(object["checkpoints"] as? [String: String])
-        XCTAssertEqual(Set(checkpoints.keys), ["chatgpt", "claude", "gemini", "groq"])
+        XCTAssertEqual(Set(checkpoints.keys), Set(providerIDs))
         XCTAssertTrue(checkpoints.values.allSatisfy { UUID(uuidString: $0) != nil })
         XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("private"))
         XCTAssertTrue(EmbeddedHumanVerificationStore(defaults: defaults, profileID: UUID()).load().isEmpty)
@@ -132,6 +135,26 @@ final class EmbeddedHumanVerificationStoreTests: XCTestCase {
         }
         XCTAssertEqual(EmbeddedHumanVerificationStore.provider(forTrustedHumanURL: URL(string: "https://google.com/sorry")), "gemini")
         XCTAssertNil(EmbeddedHumanVerificationStore.recoveryProvider(forTrustedHumanURL: URL(string: "https://google.com/sorry")))
+    }
+
+    func testGrokCheckpointAndCleanupIdentityRemainSeparateFromGroq() throws {
+        let suite = "Computa.GrokCheckpoint.Tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let profile = UUID(), grokID = UUID(), groqID = UUID()
+        let store = EmbeddedHumanVerificationStore(defaults: defaults, profileID: profile)
+        store.save(["grok": grokID, "groq": groqID])
+        let restored = EmbeddedHumanVerificationStore(defaults: defaults, profileID: profile)
+        XCTAssertEqual(restored.load(), ["grok": grokID, "groq": groqID])
+        store.save(["groq": groqID])
+        XCTAssertEqual(restored.load(), ["groq": groqID])
+        XCTAssertEqual(try JSONDecoder().decode(WebsiteSessionCleanupReceipt.Provider.self,
+            from: Data("\"grok\"".utf8)), .grok)
+        XCTAssertNotEqual(WebsiteSessionCleanupReceipt.Provider.grok, .groq)
+        for raw in ["https://grok.com/", "https://grok.com/sorry", "https://grok.com/app"] {
+            XCTAssertNil(EmbeddedHumanVerificationStore.provider(forTrustedHumanURL: URL(string: raw)), raw)
+            XCTAssertNil(EmbeddedHumanVerificationStore.recoveryProvider(forTrustedHumanURL: URL(string: raw)), raw)
+        }
     }
 
 }

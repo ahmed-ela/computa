@@ -1,0 +1,288 @@
+// Private prototype. Only a fresh owned tab with a native synthetic lease receives this main-world, main-frame script.
+((config) => {
+  'use strict';
+  const origin = 'https://chat.groq.com', endpoint = 'https://api.groq.com/openai/v1/chat/completions';
+  if (window !== top || location.origin !== origin || !config || !/^[a-f0-9]{32}$/.test(config.key)
+    || !/^[a-f0-9]{32}$/.test(config.secret) || config.key === config.secret
+    || !Number.isInteger(config.durationMs) || config.durationMs < 1 || config.durationMs > 390000) return;
+  const setupDiagnostics = config.setupDiagnostics === true;
+  const earlyPassive = Object.getOwnPropertyDescriptor(config, 'earlyPassive')?.value === true;
+  const streamMetadata = Object.getOwnPropertyDescriptor(config, 'streamMetadata')?.value === true;
+  const streamPurpose = Object.getOwnPropertyDescriptor(config, 'streamMetadataPurpose')?.value;
+  const toolChoiceNoneForTesting = Object.getOwnPropertyDescriptor(config, 'toolChoiceNoneForTesting')?.value === true;
+  const transformPurpose = streamPurpose === 'groq_120b_fixture_tool_choice_none_v1';
+  // Native replaces this inert expression only for the separate exact fixture purpose.
+  const streamFactory = null /*__GROQ_RESPONSE_STREAM_FACTORY__*/;
+  // A failed fixture initializer may expose only its closed reason/dispose
+  // controller. This path never reads or replaces fetch, or issues a request.
+  function setupFailure(reason) {
+    if (!setupDiagnostics) return;
+    const key = '__computaGroqStatus_' + config.key;
+    if (key in window) return;
+    const ownerDocument = document, time = performance.now.bind(performance), expires = time() + config.durationMs;
+    let used = false, timer;
+    const control = (secret, command) => {
+      if (secret !== config.secret || ownerDocument !== document || window !== top || location.origin !== origin) return false;
+      if (command === 'dispose') {
+        clearTimeout(timer); if (window[key] === control) delete window[key]; return true;
+      }
+      if (command === 'arm' && !used && time() < expires) { used = true; return reason; }
+      return false;
+    };
+    try {
+      Object.defineProperty(window, key, {configurable: true, value: control});
+      timer = setTimeout(() => { if (window[key] === control) delete window[key]; }, config.durationMs);
+    } catch { /* An unavailable key remains controller_absent; never replace it. */ }
+  }
+  // Fixed first-party request profiles; the page cannot broaden native admission.
+  const profiles = {
+    gptoss20b: {model:'openai/gpt-oss-20b',label:'GPT OSS 20B',temperature:1,maximum:16384,topP:1},
+    qwen27b: {model:'qwen/qwen3.8-27b',label:'Qwen/Qwen3.8-27B',temperature:0.6,maximum:8192,topP:0.95},
+    gptoss120b: {model:'openai/gpt-oss-120b',label:'GPT OSS 120B',temperature:1,maximum:16384,topP:1}
+  };
+  if (!Object.prototype.hasOwnProperty.call(profiles, config.profile) || earlyPassive && config.profile !== 'gptoss120b') { setupFailure('js_profile_unavailable'); return; }
+  const profile = profiles[config.profile];
+  if (toolChoiceNoneForTesting !== transformPurpose || toolChoiceNoneForTesting && !streamMetadata) { setupFailure('js_profile_unavailable'); return; }
+  if (streamMetadata && (!earlyPassive || !setupDiagnostics || config.profile !== 'gptoss120b'
+    || !['groq_120b_fixture_response_stream_metadata_v1','groq_120b_fixture_response_stream_tail_metadata_v2','groq_120b_fixture_tool_choice_none_v1'].includes(streamPurpose)
+    || typeof streamFactory?.startMatchedGroqResponseStreamProbe !== 'function')) {
+    setupFailure('js_profile_unavailable'); return;
+  }
+  const ownerDocument = document, original = window.fetch, key = '__computaGroqStatus_' + config.key;
+  const apply = Reflect.apply, desc = Object.getOwnPropertyDescriptor, then = Promise.prototype.then;
+  const stringify = JSON.stringify, proto = Object.getPrototypeOf;
+  const initKeys = Reflect.ownKeys, initCreate = Object.create, initDefine = Object.defineProperties,
+    initExtensible = Object.isExtensible, initPreventExtensions = Object.preventExtensions, initSame = Object.is;
+  if (setupDiagnostics && typeof Response !== 'function') { setupFailure('js_response_getters'); return; }
+  const response = Object.fromEntries(['url', 'redirected', 'status', 'type'].map(p => [p, desc(Response.prototype, p)?.get]));
+  const time = performance.now.bind(performance), deadline = time() + config.durationMs;
+  const fetchSlot = desc(window, 'fetch');
+  if (!fetchSlot || fetchSlot.value !== original || !fetchSlot.writable || typeof original !== 'function'
+    || key in window || Object.values(response).some(get => typeof get !== 'function')) {
+    setupFailure(!fetchSlot || fetchSlot.value !== original || !fetchSlot.writable || typeof original !== 'function'
+      ? 'js_fetch_descriptor' : 'js_response_getters');
+    return;
+  }
+  let phase = 'idle', outcome = 'ambiguous', seen = false, prompt = null, model = null, label = null, pin = null, route = null;
+  let control = null, streamProbe = null;
+  const style = node => !!node?.isConnected && node.getClientRects().length > 0 && getComputedStyle(node).visibility === 'visible';
+  const unauthored = node => !node.closest('[class*="group/input"],.font-inter,pre,code');
+  // Small side-band check of the same physical closed picker that the existing native adapter independently qualified.
+  let renderedFailure = 'js_picker_unavailable';
+  function rendered() {
+    renderedFailure = 'js_route_unavailable';
+    const url = new URL(location.href), triggers = document.querySelectorAll('button[aria-haspopup="dialog"][aria-controls]');
+    if (ownerDocument !== document || window !== top || location.origin !== origin || location.href !== route
+      || url.pathname !== '/' || url.hash || url.username || url.password || url.searchParams.size !== 1
+      || url.searchParams.get('model') !== model || triggers.length > 64) {
+      if (triggers.length > 64) renderedFailure = 'js_picker_unavailable';
+      return null;
+    }
+    renderedFailure = 'js_picker_unavailable';
+    const candidates = [...triggers].filter(n => style(n) && unauthored(n) && n.querySelectorAll('svg.lucide-chevrons-up-down').length === 1);
+    const node = candidates[0], dialogs = document.querySelectorAll('[role="dialog"]');
+    if (candidates.length !== 1 || !node.getAttribute('aria-controls')?.match(/^\S{1,256}$/) || dialogs.length > 16
+      || [...dialogs].some(n => style(n) && unauthored(n)) || node.closest('[hidden],[inert],[aria-hidden="true"]')) return null;
+    if (node.getAttribute('aria-expanded') !== 'false' || node.getAttribute('data-state') !== 'closed') {
+      renderedFailure = 'js_picker_not_closed'; return null;
+    }
+    if ((node.innerText || node.textContent).normalize('NFC').replace(/\s+/g, ' ').trim() !== label) {
+      renderedFailure = 'js_picker_label_mismatch'; return null;
+    }
+    return node;
+  }
+  function ownController() {
+    return ownerDocument === document && window === top && location.origin === origin && desc(window, key)?.value === control;
+  }
+  function current() { return phase === 'armed' && time() < deadline
+    && (earlyPassive ? ownController() : window.fetch === wrapped) && rendered() === pin; }
+  function invalidate() {
+    // Only the opt-in clone branch exists here. Cancellation is never awaited.
+    try { streamProbe?.stop('revoked'); } catch { /* Diagnostic-only. */ }
+    streamProbe = null;
+    outcome = 'ambiguous'; phase = 'invalid'; prompt = model = label = pin = route = null;
+  }
+  function dispose() {
+    invalidate(); clearTimeout(timer);
+    if (window.fetch === wrapped) window.fetch = original;
+    if (!earlyPassive || desc(window, key)?.value === control) delete window[key];
+  }
+  function matches(init, returnBody = false) {
+    if (!init || ![Object.prototype, null].includes(proto(init))) return false;
+    const method = desc(init, 'method')?.value, body = desc(init, 'body')?.value;
+    if (typeof method !== 'string' || !/^[Pp][Oo][Ss][Tt]$/.test(method) || typeof body !== 'string' || body.length > 262144) return false;
+    // Match the exact two first-party fresh request serializations. Consume an optional
+    // system string lexically, never materializing a foreign message or its fields.
+    // Embedded quotes in an escaped system value cannot terminate that value.
+    function skipString(at) {
+      if (body[at++] !== '"') return -1;
+      while (at < body.length) {
+        const value=body[at++];
+        if (value==='"') return at;
+        if (value==='\\') {
+          if (body[at]==='u') {
+            if (!/^[0-9a-fA-F]{4}$/.test(body.slice(at+1,at+5))) return -1;
+            at+=5;
+          } else if (!'"\\/bfnrt'.includes(body[at++])) return -1;
+        } else if (value.charCodeAt(0)<32) return -1;
+      }
+      return -1;
+    }
+    for (const indent of [undefined,2]) {
+      const sample = 'groq_dummy_prompt', system = 'groq_dummy_system';
+      const fresh = [{content:sample,role:'user'}];
+      // The public Qwen branch drops system messages; GPT OSS may retain one.
+      const messageSets = config.profile === 'qwen27b' ? [fresh] : [fresh,[{content:system,role:'system'},...fresh]];
+      for (const messages of messageSets) {
+        const template=stringify({model,messages,temperature:profile.temperature,max_completion_tokens:profile.maximum,top_p:profile.topP,stream:true},null,indent);
+        const split=template.indexOf(stringify(sample));
+        const prefix=template.slice(0,split),suffix=template.slice(split+stringify(sample).length);
+        let pos=0;
+        if (messages.length===2) {
+          const at=prefix.indexOf(stringify(system));
+          if (!body.startsWith(prefix.slice(0,at))) continue;
+          pos=skipString(at); if (pos<0) continue;
+          const rest=prefix.slice(at+stringify(system).length);
+          if (!body.startsWith(rest,pos)) continue;
+          pos+=rest.length;
+        } else {
+          if (!body.startsWith(prefix)) continue;
+          pos=prefix.length;
+        }
+        const content=stringify(prompt);
+        if (body.startsWith(content,pos) && body.length===pos+content.length+suffix.length && body.endsWith(suffix)) return returnBody ? body : true;
+      }
+    }
+    return false;
+  }
+  // Separate native experiment only. Inspect own data descriptors, never
+  // header contents, signal state, credentials or accessor values. Reflection
+  // failures/unstable or nonstandard shapes leave the caller request unchanged.
+  function transformedInit(init, body) {
+    const fields = ['method','body','headers','signal','credentials','mode','cache','redirect','referrer',
+      'referrerPolicy','integrity','keepalive','duplex','priority','window'];
+    const prototype = proto(init), keys = initKeys(init), extensible = initExtensible(init);
+    if (![Object.prototype, null].includes(prototype) || keys.length > fields.length
+      || keys.some(key => typeof key !== 'string' || !fields.includes(key))
+      || prototype !== null && fields.some(key => desc(prototype, key) !== undefined)) return null;
+    const descriptors = initCreate(null);
+    for (const key of keys) {
+      const value = desc(init, key);
+      if (!value || !Object.prototype.hasOwnProperty.call(value, 'value')) return null;
+      descriptors[key] = value;
+    }
+    if (descriptors.body?.value !== body || typeof descriptors.method?.value !== 'string'
+      || !/^[Pp][Oo][Ss][Tt]$/.test(descriptors.method.value) || !body.endsWith('}')) return null;
+    const field = ',"tool_choice":"none"', nextBody = body.slice(0, -1) + field + '}';
+    // Exact inverse proves the six original JSON lexemes (including the opaque
+    // optional system string) are unchanged; no message materialization/repair.
+    if (nextBody.length > 262144 || nextBody.slice(0, -(field.length + 1)) + '}' !== body) return null;
+    const currentKeys = initKeys(init);
+    if (proto(init) !== prototype || initExtensible(init) !== extensible || currentKeys.length !== keys.length
+      || keys.some((key,index) => currentKeys[index] !== key)) return null;
+    for (const key of keys) {
+      const previous = descriptors[key], current = desc(init, key);
+      if (!current || !Object.prototype.hasOwnProperty.call(current, 'value')
+        || !initSame(current.value, previous.value) || current.writable !== previous.writable
+        || current.enumerable !== previous.enumerable || current.configurable !== previous.configurable) return null;
+    }
+    descriptors.body.value = nextBody;
+    const next = initDefine(initCreate(prototype), descriptors);
+    if (!extensible) initPreventExtensions(next);
+    return desc(next, 'body')?.value === nextBody ? next : null;
+  }
+  function wrapped(input, init) {
+    // Early bootstrap has no request knowledge or observation before native arm.
+    // Capture original once; a cached closure never rebinds to the site's wrapper.
+    if (earlyPassive) {
+      if (phase === 'idle') return apply(original, this, arguments);
+      if (phase !== 'armed' || time() >= deadline || !ownController()) {
+        invalidate(); return apply(original, this, arguments);
+      }
+    }
+    let track = false, forwarded = null;
+    try {
+      const url = phase !== 'invalid' && typeof input === 'string' ? new URL(input, document.baseURI) : null;
+      if (phase !== 'invalid' && (!url || url.origin + url.pathname === endpoint)) {
+        if (input !== endpoint || arguments.length !== 2 || seen || !current()) invalidate();
+        else {
+          const matched = matches(init, toolChoiceNoneForTesting);
+          if (!matched) invalidate();
+          else if (toolChoiceNoneForTesting) {
+            const next = transformedInit(init, matched);
+            if (!next || !current()) invalidate();
+            else { forwarded = [input, next]; seen = true; prompt = null; outcome='matched_fetch_unsettled'; track = true; }
+          } else { seen = true; prompt = null; outcome='matched_fetch_unsettled'; track = true; }
+        }
+      }
+    } catch { invalidate(); }
+    let result;
+    try { result = apply(original, this, forwarded ?? arguments); }
+    catch (error) { if (track) invalidate(); throw error; }
+    if (track) {
+      try {
+        apply(then, result, [
+          value => {
+            try {
+              if (!current() || apply(response.url, value, []) !== endpoint || apply(response.redirected, value, [])
+                || !['basic', 'cors'].includes(apply(response.type, value, []))) return invalidate();
+              const status = apply(response.status, value, []);
+              outcome = status >= 200 && status < 300 ? 'http_2xx_opened'
+                : [400, 401, 403, 413, 429].includes(status) ? 'http_' + status
+                : status >= 400 && status < 600 ? 'http_other_non_2xx' : 'ambiguous';
+              if (streamMetadata && status >= 200 && status < 300) {
+                try {
+                  streamProbe = streamFactory.startMatchedGroqResponseStreamProbe(value, {
+                    purpose: streamPurpose, profile: config.profile, streamMetadata: true,
+                    ...(toolChoiceNoneForTesting ? {toolChoiceNoneForTesting:true} : {}),
+                    // No additional DOM/picker scan while consuming clone chunks.
+                    isCurrent: () => phase === 'armed' && time() < deadline && ownController() && location.href === route
+                  });
+                } catch { /* An unavailable diagnostic never changes the header observation or SDK result. */ }
+              }
+            } catch { invalidate(); }
+          },
+          () => { try { if (current()) outcome = 'transport_rejected'; else invalidate(); } catch { invalidate(); } }
+        ]);
+      } catch { invalidate(); }
+    }
+    return result;
+  }
+  window.fetch = wrapped;
+  const timer = setTimeout(dispose, config.durationMs);
+  control = (secret, command, args) => {
+    if (secret !== config.secret) return false;
+    if (command === 'dispose') { dispose(); return true; }
+    if (command === 'arm') {
+      if (!(phase === 'idle' && !seen && time() < deadline && (earlyPassive ? ownController() : window.fetch === wrapped))) {
+        return setupDiagnostics ? (!earlyPassive && window.fetch !== wrapped ? 'js_fetch_replaced' : 'js_arm_state_unavailable') : false;
+      }
+      if (!args || args.model !== profile.model || args.label !== profile.label
+        || typeof args.label !== 'string' || !args.label.length || args.label.length > 128) {
+        invalidate(); return setupDiagnostics ? 'js_model_mismatch' : false;
+      }
+      if (typeof args.prompt !== 'string' || !args.prompt.length || args.prompt.length > 180200) {
+        invalidate(); return setupDiagnostics ? 'js_prompt_unavailable' : false;
+      }
+      model = args.model; label = args.label; route = location.href; pin = rendered();
+      if (!pin) { const reason = renderedFailure; invalidate(); return setupDiagnostics ? reason : false; }
+      prompt = args.prompt; phase = 'armed'; return true;
+    }
+    // Native may call finish only after its separately proven single Send plus exact optimistic rollback.
+    if ((command === 'finish' || streamMetadata && command === 'finish_metadata') && phase !== 'idle') {
+      let finite = 'ambiguous', metadata = null;
+      try {
+        if (current()) {
+          finite = seen ? outcome : 'no_matching_fetch_observed';
+          if (command === 'finish_metadata') metadata = streamProbe?.finishFailure() ?? null;
+        }
+      } catch { finite = 'ambiguous'; metadata = null; } finally { dispose(); }
+      // The old command remains the exact short String protocol. This separate
+      // result is still untrusted: native admits only exact finite typed fields.
+      return command === 'finish_metadata'
+        ? stringify({__proto__:null, stage:finite, responseStream:metadata === null ? null : stringify(metadata)}) : finite;
+    }
+    return false;
+  };
+  Object.defineProperty(window, key, {configurable: true, value: control});
+})(__GROQ_OWNED_SYNTHETIC_CONFIG__)

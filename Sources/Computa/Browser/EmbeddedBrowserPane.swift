@@ -8,6 +8,11 @@ import WebKit
 struct EmbeddedBrowserPane: View {
     let session: EmbeddedBrowserSession
     var isInteractionBlocked = false
+    var canConfigureKimiProfile = false
+    var kimiModelSignInMessage: String?
+    var onOpenKimiModelSignIn: () -> Void = {}
+    var onVerifyKimiModelSignIn: () -> Void = {}
+    var onUseSharedKimiModelProfile: () -> Void = {}
     let onClose: () -> Void
 
     @State private var address = ""
@@ -24,6 +29,18 @@ struct EmbeddedBrowserPane: View {
             Divider()
             navigationBar
             Divider()
+
+            if let tab = selectedTab, session.isKimiProfileTab(tab.id),
+               let message = kimiModelSignInMessage {
+                Text(message)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .accessibilityIdentifier("browser-kimi-sign-in-status")
+                Divider()
+            }
 
             if let error = addressError ?? selectedTab?.error ?? session.errorMessage {
                 HStack(alignment: .top, spacing: 8) {
@@ -75,6 +92,7 @@ struct EmbeddedBrowserPane: View {
                             EmbeddedBrowserTabButton(
                                 tab: tab,
                                 selected: tab.id == session.selectedTabID,
+                                isKimiProfile: session.isKimiProfileTab(tab.id),
                                 onSelect: { session.selectTab(tab.id) },
                                 onClose: { session.closeTab(tab.id) }
                             )
@@ -101,6 +119,8 @@ struct EmbeddedBrowserPane: View {
             .accessibilityLabel("New browser tab")
             .accessibilityIdentifier("browser-new-tab")
 
+            modelSignInsMenu
+
             Button(action: onClose) {
                 Image(systemName: "sidebar.right")
                     .frame(width: 24, height: 24)
@@ -112,6 +132,44 @@ struct EmbeddedBrowserPane: View {
         .buttonStyle(.plain)
         .padding(.horizontal, 8)
         .frame(height: 42)
+    }
+
+    private var modelSignInsMenu: some View {
+        Menu {
+            Button("Kimi sign-in") {
+                guard canConfigureKimiProfile, !isInteractionBlocked else { return }
+                onOpenKimiModelSignIn()
+            }
+            .accessibilityIdentifier("browser-kimi-sign-in")
+
+            if session.kimiModelProfileID != nil {
+                Button("Verify Kimi sign-in") {
+                    guard canConfigureKimiProfile, !isInteractionBlocked,
+                          session.kimiModelProfileID != nil else { return }
+                    onVerifyKimiModelSignIn()
+                }
+                .accessibilityIdentifier("browser-verify-kimi-sign-in")
+
+                Divider()
+
+                Button("Use regular browser profile") {
+                    guard canConfigureKimiProfile, !isInteractionBlocked,
+                          session.kimiModelProfileID != nil else { return }
+                    onUseSharedKimiModelProfile()
+                }
+                .accessibilityIdentifier("browser-kimi-use-regular-profile")
+            }
+        } label: {
+            Label("Model sign-ins", systemImage: "person.crop.circle")
+                .labelStyle(.titleAndIcon)
+                .font(.system(size: 12))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .disabled(!canConfigureKimiProfile || isInteractionBlocked)
+        .help("Manage model sign-ins")
+        .accessibilityLabel("Model sign-ins")
+        .accessibilityIdentifier("browser-model-sign-ins")
     }
 
     private var navigationBar: some View {
@@ -247,8 +305,12 @@ struct EmbeddedBrowserPane: View {
 private struct EmbeddedBrowserTabButton: View {
     let tab: EmbeddedBrowserTab
     let selected: Bool
+    let isKimiProfile: Bool
     let onSelect: () -> Void
     let onClose: () -> Void
+
+    private var pageTitle: String { tab.title.isEmpty ? "New tab" : tab.title }
+    private var displayTitle: String { isKimiProfile ? "Kimi sign-in" : pageTitle }
 
     var body: some View {
         HStack(spacing: 4) {
@@ -257,23 +319,24 @@ private struct EmbeddedBrowserTabButton: View {
                     if tab.isLoading {
                         ProgressView().controlSize(.mini).frame(width: 12, height: 12)
                     } else {
-                        Image(systemName: "globe").font(.caption)
+                        Image(systemName: isKimiProfile ? "person.crop.circle" : "globe").font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    Text(tab.title.isEmpty ? "New tab" : tab.title)
+                    Text(displayTitle)
                         .font(.system(size: 12))
                         .lineLimit(1)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .contentShape(Rectangle())
             }
-            .accessibilityLabel(tab.title.isEmpty ? "New tab" : tab.title)
+            .help(isKimiProfile ? "Kimi sign-in profile — \(pageTitle)" : pageTitle)
+            .accessibilityLabel(isKimiProfile ? "Kimi sign-in, \(pageTitle)" : pageTitle)
             .accessibilityValue(selected ? "Selected" : "")
 
             Button(action: onClose) { Image(systemName: "xmark").font(.system(size: 9, weight: .semibold)) }
                 .frame(width: 18, height: 24)
                 .help("Close tab")
-                .accessibilityLabel("Close \(tab.title.isEmpty ? "tab" : tab.title)")
+                .accessibilityLabel("Close \(isKimiProfile ? "Kimi sign-in tab" : tab.title.isEmpty ? "tab" : tab.title)")
         }
         .buttonStyle(.plain)
         .padding(.horizontal, 8)

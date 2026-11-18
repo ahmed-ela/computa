@@ -108,6 +108,21 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             else { return }
             state.selectTask(id)
 
+        case "acknowledgeTaskCompletion":
+            // A rendered background web view is not evidence that the user
+            // checked the answer. Bind acknowledgement to the exact completion
+            // displayed in the active, unobscured conversation.
+            guard Set(body.keys) == ["action", "taskID", "completionID"],
+                  let taskID = body["taskID"] as? String,
+                  let completionID = body["completionID"] as? String,
+                  NSApp.isActive, webView?.window?.isKeyWindow == true,
+                  webView?.window?.isVisible == true,
+                  webView?.isHiddenOrHasHiddenAncestor == false,
+                  !state.isReviewPresented, state.presentedSheet == nil,
+                  !state.isAPIProvidersPresented, !state.approvalGateBlocksInteraction
+            else { return }
+            state.acknowledgeTaskCompletion(taskID: taskID, completionID: completionID)
+
         case "selectEntry":
             guard let id = body["id"] as? String,
                   state.selectedTask?.entries.contains(where: { $0.id == id }) == true
@@ -319,7 +334,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         }
         guard Set(body.keys) == ["action", "provider"],
               let provider = body["provider"] as? String,
-              WebsiteModelCatalog.providers.contains(provider) else { return }
+              WebsiteModelCatalog.discoveryProviders.contains(provider) else { return }
         await state?.refreshWebsiteModels(provider: provider)
     }
 

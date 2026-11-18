@@ -1,6 +1,7 @@
 import AppKit
 import AutomationCore
 import SwiftUI
+import WebKit
 
 /// Hosted XCTest launches the application entry point before running fixtures.
 /// Its scene must never attach a second runtime to the user's production home.
@@ -22,7 +23,8 @@ enum ComputaLaunchMode: Equatable {
     @MainActor
     func makeState(
         runtimeFactory: () -> any AgentRuntimeClient = { CodexAppServerRuntime(configuration: .localQwen) },
-        preferencesFactory: () -> UserDefaults = { .standard }
+        preferencesFactory: () -> UserDefaults = { .standard },
+        unreadCompletionStoreFactory: () -> ChatUnreadCompletionStore? = { .applicationDefault }
     ) -> AppState {
         switch self {
         case .application:
@@ -31,6 +33,7 @@ enum ComputaLaunchMode: Equatable {
             // the privileged app UI remains in its separate WebView.
             let browser = EmbeddedBrowserSession(defaults: preferences)
             return AppState(tasks: [], runtime: runtimeFactory(), preferences: preferences,
+                            unreadCompletionStore: unreadCompletionStoreFactory(),
                             browserSession: browser)
         case .testHost:
             // A unique suite prevents even incidental test-host state changes
@@ -76,8 +79,8 @@ struct ComputaApp: App {
                 WebWorkspaceView(state: state)
                     .preferredColorScheme(state.appearance.colorScheme)
                     .frame(minWidth: 980, minHeight: 640)
-                    .task {
-                        await state.startRuntime()
+                    .onAppear {
+                        state.startRuntimeIfNeeded()
                     }
             }
         }
@@ -123,10 +126,18 @@ final class ComputaAppDelegate: NSObject, NSApplicationDelegate {
     private var terminationStarted = false
     private var replied = false
     private var watchdog: Task<Void, Never>?
+    // Keep the profile sessions registered until WebKit sees the UI process
+    // close and flushes its cookies. This retains no pages and adds no delay.
+    private var terminationBrowserProfiles: [WKWebsiteDataStore] = []
+
+    func prepareBrowserProfilesForTermination() {
+        terminationBrowserProfiles = state?.browserSession.persistentDataStoresForApplicationTermination ?? []
+    }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !terminationStarted else { return .terminateLater }
         terminationStarted = true
+        prepareBrowserProfilesForTermination()
 
         watchdog = Task { @MainActor in
             do { try await Task.sleep(for: .seconds(10)) } catch { return }

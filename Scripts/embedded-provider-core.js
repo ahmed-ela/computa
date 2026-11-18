@@ -26,7 +26,7 @@ function computaProviderCore(request, provider, origin, actions) {
     if (values.length !== 1) fail(error, detail);
     return values[0];
   };
-  const hitFailure = node => {
+  const hitFailure = (node, testIntersection) => {
     if (!enabled(node)) return 'disabled';
     if (typeof node.getBoundingClientRect !== 'function' || typeof document.elementFromPoint !== 'function') return 'invalid_geometry';
     const r = node.getBoundingClientRect(), width = window.innerWidth, height = window.innerHeight;
@@ -38,6 +38,7 @@ function computaProviderCore(request, provider, origin, actions) {
     const left = Math.max(0, r.left), top = Math.max(0, r.top);
     const clippedRight = Math.min(width, right), clippedBottom = Math.min(height, bottom);
     if (clippedRight <= left || clippedBottom <= top) return 'outside_viewport';
+    if (testIntersection) return testIntersection(left, top, clippedRight, clippedBottom) ? null : 'occluded';
     const x = left + (clippedRight - left) / 2, y = top + (clippedBottom - top) / 2;
     return node.contains(document.elementFromPoint(x, y)) ? null : 'occluded';
   };
@@ -71,7 +72,10 @@ function computaProviderCore(request, provider, origin, actions) {
     });
     record.observer.observe(document.documentElement || document, { subtree: true, childList: true,
       characterData: true, attributes: true, attributeFilter: ['disabled', 'aria-disabled', 'aria-hidden', 'aria-busy',
-        'aria-label', 'aria-expanded', 'aria-controls', 'aria-selected', 'data-state', 'class', 'style', 'hidden', 'inert'] });
+        'aria-label', 'aria-expanded', 'aria-controls', 'aria-selected', 'data-state', 'class', 'style', 'hidden', 'inert',
+        ...(provider === 'kimi' ? ['role', 'contenteditable', 'data-lexical-editor', 'data-testid', 'aria-haspopup', 'id', 'href']
+          : provider === 'qwen' ? ['role', 'aria-haspopup', 'id']
+          : provider === 'deepseek' ? ['role', 'placeholder', 'aria-pressed'] : [])] });
     globalThis[signalKey] = record;
   }
   return { uuid, fail, normalize, bodyText, choiceValid, equalChoice, physical, visible, enabled, nodes, unique, hit, hitFailure, context, assertContext, hash };

@@ -18,6 +18,121 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
                        expected, file: file, line: line)
     }
 
+    func testEveryPageOperationRejectsUnboundBeforeBackendWorkOrReferenceAuthority() async throws {
+        for inventoried in [false, true] {
+            let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+            let key = "stable-schema-unbound"
+            let scope = ComputerTaskScope(userPrompt: "Use only http://127.0.0.1:63846 to send the requested test message.")
+            if inventoried { _ = try await call(controller, "browser_tabs", key: key, scope: scope) }
+            let before = await backend.counts()
+            let beforeReads = await backend.readAdmissionCounts()
+            let beforeWaits = await backend.waitCallCount()
+            let beforeInventory = await backend.inventoryReadCount()
+            let operations: [(String, [String: Any])] = [
+                ("browser_click", ["click_ref": "unissued-current-reference"]),
+                ("browser_fill", ["fill_ref": "unissued-current-reference", "text": "MUST_NOT_INPUT"]),
+                ("browser_read", [:]),
+                ("browser_continue", ["cursor": "unissued-current-cursor"]),
+                ("browser_wait", ["text": "requested result", "timeout_ms": 1]),
+                ("browser_navigate", ["url": "http://127.0.0.1:63846/next"]),
+                ("browser_close", [:])
+            ]
+            for (tool, arguments) in operations {
+                if tool == "browser_click" || tool == "browser_fill" {
+                    do {
+                        _ = try await controller.prepareMutation(taskKey: key, tool: tool, arguments: argumentData(arguments))
+                        XCTFail("A schema or an invented reference cannot establish a binding")
+                    } catch { XCTAssertTrue(error is EmbeddedBrowserBindingRequiredFailure, "\(tool): \(error)") }
+                    do {
+                        try await controller.preflightMutation(taskKey: key, tool: tool, arguments: argumentData(arguments), scope: scope)
+                        XCTFail("Unbound mutations must fail the pre-approval controller check")
+                    } catch { XCTAssertTrue(error is EmbeddedBrowserBindingRequiredFailure, "\(tool): \(error)") }
+                }
+                do {
+                    _ = try await call(controller, tool, arguments, key: key, scope: scope)
+                    XCTFail("An unbound page operation must not execute: \(tool)")
+                } catch let failure as EmbeddedBrowserBindingRequiredFailure {
+                    let feedback = try jsonObject(failure.localizedDescription)
+                    XCTAssertEqual((feedback["error"] as? [String: Any])?["code"] as? String, "browser_binding_required")
+                    XCTAssertEqual(feedback["binding_state"] as? String, "unbound_current_turn")
+                    XCTAssertEqual(feedback["permission_evidence"] as? String, "not_assessed")
+                    XCTAssertEqual(feedback["dispatched"] as? Bool, false)
+                    XCTAssertEqual(feedback["no_replay"] as? Bool, true)
+                } catch { XCTFail("Unexpected unbound failure for \(tool): \(error)") }
+                let after = await backend.counts()
+                let reads = await backend.readAdmissionCounts()
+                let waits = await backend.waitCallCount()
+                let inventory = await backend.inventoryReadCount()
+                XCTAssertEqual(after, before, tool)
+                XCTAssertEqual(reads.preparations, beforeReads.preparations, tool)
+                XCTAssertEqual(reads.admissions, beforeReads.admissions, tool)
+                XCTAssertEqual(waits, beforeWaits, tool)
+                XCTAssertEqual(inventory, beforeInventory, tool)
+                let state = try await controller.apiToolState(taskKey: key)
+                XCTAssertEqual(state.availability, .unbound)
+                XCTAssertEqual(state.references, .empty)
+                XCTAssertTrue(state.isValid)
+            }
+            let report = await controller.releaseReport(taskKey: key)
+            XCTAssertTrue(report.isSettled)
+            XCTAssertTrue(report.targets.isEmpty)
+            XCTAssertTrue(report.failures.isEmpty)
+            XCTAssertFalse(report.pendingOperation)
+            do {
+                _ = try await call(controller, "browser_read", key: key, scope: scope)
+                XCTFail("A retired turn cannot recover by advertising or calling the schema")
+            } catch { XCTAssertEqual(error as? BrowserTabBrokerError, .handleMissing) }
+            _ = await controller.shutdown()
+        }
+        // Core may request its existing approval before an unbound navigate/close;
+        // these controls prove controller dispatch safety, not zero approval UI.
+    }
+
+    func testRejectedUnboundCloseDoesNotRetireTheTurnOrContaminateLaterOwnedCleanup() async throws {
+        let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
+        let key = "stable-schema-close-then-open"
+        let scope = ComputerTaskScope(userPrompt: "Use only http://127.0.0.1:63846 to fill the flight field with UA 4629, inspect it and close the task page.")
+        do {
+            _ = try await call(controller, "browser_close", key: key, scope: scope)
+            XCTFail("There is no binding to close")
+        } catch { XCTAssertTrue(error is EmbeddedBrowserBindingRequiredFailure) }
+        let rejected = await backend.counts()
+        XCTAssertEqual(rejected.creates, 0); XCTAssertEqual(rejected.closes, 0)
+        XCTAssertEqual(rejected.closeAttempts, 0); XCTAssertEqual(rejected.observes, 0)
+        let unbound = try await controller.apiToolState(taskKey: key)
+        XCTAssertEqual(unbound.availability, .unbound); XCTAssertEqual(unbound.references, .empty)
+        _ = try await call(controller, "browser_open", ["url": "http://127.0.0.1:63846"], key: key, scope: scope)
+        let read = try await call(controller, "browser_read", key: key, scope: scope)
+        let row = try XCTUnwrap(read.split(separator: "\n").first { $0.contains("fill_ref=") })
+        let reference = try XCTUnwrap(publishedString("fill_ref", in: String(row)))
+        let fill: [String: Any] = ["fill_ref": reference, "text": "UA 4629"]
+        let beforeForeign = await backend.counts()
+        do {
+            _ = try await controller.prepareMutation(taskKey: "foreign-unbound-turn", tool: "browser_fill", arguments: argumentData(fill))
+            XCTFail("A valid published reference cannot bind or authorize another turn")
+        } catch { XCTAssertTrue(error is EmbeddedBrowserBindingRequiredFailure) }
+        let afterForeign = await backend.counts()
+        XCTAssertEqual(afterForeign, beforeForeign)
+        try await controller.preflightMutation(taskKey: key, tool: "browser_fill", arguments: argumentData(fill), scope: scope)
+        _ = try await call(controller, "browser_fill", fill, key: key, scope: scope)
+        let value = await backend.fieldValue()
+        XCTAssertEqual(value, "UA 4629")
+        let closed = try jsonObject(await call(controller, "browser_close", key: key, scope: scope))
+        XCTAssertEqual(closed["released"] as? Bool, true)
+        let report = await controller.releaseReport(taskKey: key)
+        XCTAssertTrue(report.isSettled)
+        XCTAssertFalse(report.pendingOperation)
+        XCTAssertTrue(report.failures.isEmpty)
+        XCTAssertEqual(report.targets.count, 1)
+        XCTAssertEqual(report.targets.first?.closed, true)
+        let final = await backend.counts()
+        XCTAssertEqual(final.creates, 1); XCTAssertEqual(final.closes, 1); XCTAssertEqual(final.closeAttempts, 1)
+        XCTAssertEqual(final.fills, 1); XCTAssertEqual(final.presses, 0); XCTAssertEqual(final.navigations, 0)
+        let humans = try await backend.humanTargets()
+        XCTAssertEqual(humans.count, 1)
+        _ = await controller.shutdown()
+    }
+
     func testDocumentChangeWaitKeepsUnchangedTimeoutReferencesAndRetiresChangedOnes() async throws {
         let backend = EmbeddedBrowserFixtureBackend(), controller = EmbeddedBrowserToolController(transport: backend)
         _ = try await call(controller, "browser_open", ["url": "http://localhost:8123/flight"])
@@ -2334,7 +2449,7 @@ final class EmbeddedBrowserToolControllerTests: XCTestCase {
             let links = try await call(controller, "browser_read", ["view": "links"])
             let lines = links.split(separator: "\n")
             XCTAssertTrue(lines[1].hasPrefix("READ view=links"))
-            XCTAssertTrue(links.contains("VIEW links omitted_input_nodes=2 basis=captured_view_and_query. Read overview/all without cursor/query for controls before an access-block claim."))
+            XCTAssertTrue(links.contains("VIEW links omitted_input_nodes=2 basis=captured_view_and_query. Get fresh action refs with overview/all without query/cursor."))
             XCTAssertTrue(links.contains("not site results/relevance/absence"))
             XCTAssertFalse(links.contains("label=\"Check flight\"")); XCTAssertFalse(links.contains("label=\"Flight number\""))
             if !hasLink { XCTAssertTrue(links.contains("no_matches=1")) }
@@ -4386,6 +4501,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     let humanID = UUID().uuidString
     private var targets = [String: BrowserTarget](), owned = Set<String>(), stats = Counts()
     private var inventoryReads = 0
+    private var waitCalls = 0
     private var generation = UUID().uuidString, field = "", result = ""
     private var committedDocumentID: UUID? = UUID()
     private var committedIdentityExposed = false
@@ -4498,6 +4614,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     }
     func resumeFreshRead() { freshReadContinuation?.resume(); freshReadContinuation = nil }
     func inventoryReadCount() -> Int { inventoryReads }
+    func waitCallCount() -> Int { waitCalls }
     func reportInvalidFieldOnPress() { invalidFieldOnPress = true; committedIdentityExposed = true }
     func hideCommittedDocumentIdentity() { committedIdentityExposed = false }
     func exposeCommittedDocumentIdentity() { committedIdentityExposed = true }
@@ -4707,7 +4824,7 @@ private actor EmbeddedBrowserFixtureBackend: EmbeddedBrowserControlBackend {
     func navigate(target:BrowserTarget,url:URL,permit:BrowserMutationPermit) async throws {
         try permit.commit { stats.navigations += 1; generation=UUID().uuidString; committedDocumentID=UUID(); targets[target.targetID]=BrowserTarget(targetID:target.targetID,instanceToken:target.instanceToken,title:target.title,url:url) }
     }
-    func wait(target:BrowserTarget,text:String?,timeoutMS:Int) async throws -> Bool { text == nil || result.contains(text!) }
+    func wait(target:BrowserTarget,text:String?,timeoutMS:Int) async throws -> Bool { waitCalls += 1; return text == nil || result.contains(text!) }
     func showCompactMailboxForm(message: String = "Please confirm Tuesday at 10:30 AM.") {
         compactMailboxForm = true; field = message; semanticReadiness = .ready
     }

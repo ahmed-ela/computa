@@ -9,7 +9,7 @@ const { WebsiteSessionCleanupControl, websiteSessionCleanupAction } = await impo
 const task = (changes: Partial<TaskSnapshot> = {}): TaskSnapshot => ({
   id: 'failed-website-task', title: 'Task', summary: '', status: 'Waiting', statusTone: 'orange',
   updatedAt: 0, workspace: '/tmp', model: 'browser/claude', modelSelectable: true,
-  queuedPrompts: [], queuePaused: true, canSteer: false, isBusy: false, entries: [],
+  queuedPrompts: [], queuePaused: true, canSteer: false, isBusy: false, hasUnreadCompletion: false, entries: [],
   websiteSessionCleanupAvailable: true, ...changes,
 });
 const render = (value: TaskSnapshot, blocked = false) => renderToStaticMarkup(h(WebsiteSessionCleanupControl, {

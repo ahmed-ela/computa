@@ -263,8 +263,8 @@ extension EmbeddedBrowserControlBackend {
     }
 }
 
-/// Uses only Computa's human WebViews. Inference pages and the privileged app UI
-/// are absent from this inventory, even when their titles or URLs match.
+/// Uses Computa's tool-accessible human WebViews. Inference pages, dedicated
+/// sign-in pages and the privileged app UI cannot enter this inventory.
 @MainActor
 final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
     private let session: EmbeddedBrowserSession
@@ -345,7 +345,7 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
     }
 
     private func target(for id: UUID) -> BrowserTarget? {
-        guard let tab = session.humanTab(id: id) else { return nil }
+        guard let tab = session.browserToolTab(id: id) else { return nil }
         return BrowserTarget(
             targetID: id.uuidString, instanceToken: id.uuidString, title: tab.title,
             url: tab.url ?? URL(string: "about:blank")!)
@@ -547,7 +547,7 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
     ) async throws -> BrowserInputFeedback? {
         let id = try exactID(target)
         let generation = try generation(for: id)
-        guard document.loaderID == generation.uuidString, session.humanTab(id: id)?.url == document.url,
+        guard document.loaderID == generation.uuidString, session.browserToolTab(id: id)?.url == document.url,
             let node = document.nodes.first(where: { $0.backendNodeID == nodeID }),
             document.verificationPlan == nil
         else {
@@ -651,7 +651,7 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
     }
 
     private func generation(for id: UUID) throws -> UUID {
-        guard session.humanTab(id: id) != nil, let generation = session.documentGeneration(for: id)
+        guard session.browserToolTab(id: id) != nil, let generation = session.documentGeneration(for: id)
         else { throw BrowserTabBrokerError.targetClosed }
         return generation
     }
@@ -668,7 +668,7 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
         permit: BrowserMutationPermit? = nil, mutation: Bool = false,
         readAdmission: (() throws -> Void)? = nil
     ) async throws -> Data {
-        guard let source = script, let view = session.webView(for: id), session.humanTab(id: id) != nil,
+        guard let source = script, let view = session.webView(for: id), session.browserToolTab(id: id) != nil,
             try self.generation(for: id) == generation
         else { throw BrowserTabBrokerError.staleDocument }
         var input = input

@@ -3,6 +3,32 @@ import XCTest
 @testable import Computa
 
 final class WebsiteTurnContinuationTests: XCTestCase {
+    func testNativeCompactionConfigurationAllowsWindowMetadataButPinsModelInstructionsAndTools() throws {
+        let object: [String: Any] = ["model": syntheticChatGPTModelID, "input": "Review code",
+            "instructions": "Preserve the scope", "tools": [["type": "function", "name": "exec_command",
+                "parameters": ["type": "object", "properties": ["cmd": ["type": "string"]]]]],
+            "client_metadata": ["x-codex-window-id": "before"]]
+        func prepared(_ value: [String: Any]) throws -> WebModelResponseCodec.Request {
+            try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: value))
+        }
+        let first = try prepared(object)
+        let state = try WebsiteTurnContinuation(request: first,
+            encodedResponse: WebModelResponseCodec.completedResponse(for: .message("Historical answer"), request: first))
+        var resumed = object
+        resumed["client_metadata"] = ["x-codex-window-id": "after"]
+        resumed["input"] = "Native compacted history"
+        XCTAssertNoThrow(try state.validateCompactedConfiguration(next: prepared(resumed)))
+        XCTAssertThrowsError(try state.validate(next: prepared(resumed)), "Ordinary continuation remains strict")
+        for (key, changed) in [("model", "browser/gemini" as Any), ("instructions", "Different scope"),
+                               ("tools", [] as [Any])] {
+            var altered = resumed; altered[key] = changed
+            XCTAssertThrowsError(try state.validateCompactedConfiguration(next: prepared(altered)), key)
+        }
+        var summary = resumed; summary["tools"] = []
+        XCTAssertNoThrow(try state.validateCompactionConfiguration(next: prepared(summary)))
+        summary["instructions"] = "Changed instructions"
+        XCTAssertThrowsError(try state.validateCompactionConfiguration(next: prepared(summary)))
+    }
     private let model = "browser/gemini"
     private let initialInput: [[String: Any]] = [
         ["type": "message", "role": "user", "content": [["type": "input_text", "text": "Inspect, patch, and run the tests. Preserve café and cafe\u{301}."]]],
@@ -18,6 +44,47 @@ final class WebsiteTurnContinuationTests: XCTestCase {
             .init(name: "exec_command", argumentsJSON: #"{"cmd":"python3 -m unittest"}"#, namespace: "functions"),
             .init(name: "apply_patch", argumentsJSON: "", namespace: "functions", customInput: "*** Begin Patch\n*** Update File: café.py\n@@\n-a\n+b\n*** End Patch\n"),
         ], "Inspecting and editing the fixture.")
+    }
+
+    func testDigestCanonicalValuesUseTheSameLosslessJSONEquivalence() throws {
+        func canonical(_ text: String) throws -> Data {
+            try WebsiteTurnContinuation.canonicalValueDataForDigest(Data(text.utf8))
+        }
+        let first = #"{"z":[1.2300e+04,-0,true,null],"text":"caf\u00e9 / cafe\u0301","object":{"b":2,"a":1}}"#
+        let equivalent = #" { "object" : {"a":1.0,"b":20e-1}, "text":"café \/ café", "z":[12300,0.000,true,null] } "#
+        XCTAssertEqual(try canonical(first), try canonical(equivalent))
+        XCTAssertEqual(try canonical(#""\u00e9""#), try canonical(#""é""#))
+        XCTAssertNotEqual(try canonical(#""e\u0301""#), try canonical(#""é""#),
+            "Decoded UTF-8 bytes must not acquire Swift String's normalization equivalence")
+        for (a, b) in [("9007199254740992", "9007199254740993"),
+                       ("1.000000000000000000000000001", "1"), ("true", "1"),
+                       (#""1""#, "1"), ("[1,2]", "[2,1]"),
+                       (#"{"required":["cmd"]}"#, #"{"required":["cwd"]}"#)] {
+            XCTAssertNotEqual(try canonical(a), try canonical(b))
+        }
+        XCTAssertEqual(try canonical(#""\n""#), Data(#""\u000a""#.utf8))
+    }
+
+    func testDigestCanonicalValuesRetainSourceParserAndTraversalBounds() throws {
+        let limit = WebModelResponseCodec.maximumPromptBytes
+        let atLimit = Data(("0" + String(repeating: " ", count: limit - 1)).utf8)
+        XCTAssertEqual(try WebsiteTurnContinuation.canonicalValueDataForDigest(atLimit), Data("0".utf8))
+        XCTAssertThrowsError(try WebsiteTurnContinuation.canonicalValueDataForDigest(Data(repeating: 32, count: limit + 1))) {
+            XCTAssertEqual($0 as? WebsiteTurnContinuation.Failure, .contextLimitExceeded)
+        }
+        // Canonical control escapes may expand, so a source-bound value must
+        // not acquire a smaller, incompatible bound on comparison output.
+        let controls = "\"" + String(repeating: "\\n", count: limit / 2 - 2) + "\""
+        let expanded = try WebsiteTurnContinuation.canonicalValueDataForDigest(Data(controls.utf8))
+        XCTAssertGreaterThan(expanded.count, limit)
+        let invalid = ["", "{} trailing", #"{"a":1,"\u0061":1}"#,
+            #"{"nested":{"x":true,"x":true}}"#, "01", "1e4097", String(repeating: "1", count: 129),
+            String(repeating: "[", count: 65) + "0" + String(repeating: "]", count: 65),
+            "[" + Array(repeating: "0", count: 16_384).joined(separator: ",") + "]"]
+        for text in invalid {
+            XCTAssertThrowsError(try WebsiteTurnContinuation.canonicalValueDataForDigest(Data(text.utf8)))
+        }
+        XCTAssertThrowsError(try WebsiteTurnContinuation.canonicalValueDataForDigest(Data([34, 255, 34])))
     }
 
     func testActualEncodedMixedToolReplyAdmitsOnlyNativeRoundTripForBothWireModes() throws {

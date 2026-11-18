@@ -22,7 +22,7 @@ enum WebsiteRequestFixture {
         guard let object = try? JSONSerialization.jsonObject(with: Data(prompt[jsonRange].utf8)) as? [String: Any],
               let model = object["model"] as? String,
               expectedModel == nil || expectedModel == model,
-              fenced == ["chatgpt", "claude"].contains(LocalModelCatalog.webProvider(for: model) ?? "") else { throw Failure.invalidFrame }
+              fenced == ["chatgpt", "claude", "groq"].contains(LocalModelCatalog.webProvider(for: model) ?? "") else { throw Failure.invalidFrame }
         return jsonRange
     }
 

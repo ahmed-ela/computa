@@ -6,6 +6,14 @@ const durationUnits = [
   { label: 's', seconds: 1 },
 ] as const;
 
+/** Sidebar elapsed time uses one unit, including hours beyond a day. */
+export function formatElapsedDuration(seconds: number): string {
+  const elapsed = Number.isFinite(seconds) ? Math.max(0, Math.floor(seconds)) : 0;
+  if (elapsed >= 3_600) return `${Math.floor(elapsed / 3_600)}h`;
+  if (elapsed >= 60) return `${Math.floor(elapsed / 60)}m`;
+  return `${elapsed}s`;
+}
+
 export function formatWorkedFor(seconds: number): string {
   let remaining = Number.isFinite(seconds) ? Math.max(0, Math.floor(seconds)) : 0;
   const parts: string[] = [];

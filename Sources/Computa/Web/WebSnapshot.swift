@@ -43,7 +43,9 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
                 websiteSessionCleanupOutcome: state.currentWebsiteSessionCleanupReceipt(taskID: task.id)?.outcome.rawValue,
                 websiteSessionCleanupReceiptSaved: state.currentWebsiteSessionCleanupReceipt(taskID: task.id)?.receiptSaved,
                 activeTurnStartedAt: state.activeTurnStartedAt(for: task.id),
-                activeActivityGroupID: state.activeActivityGroupID(for: task.id)
+                activeActivityGroupID: state.activeActivityGroupID(for: task.id),
+                hasUnreadCompletion: state.hasUnreadCompletion(for: task.id),
+                unreadCompletionID: state.unreadCompletionID(for: task.id)
             )
         }
         pendingApprovalCount = state.approvalGateBlocksInteraction
@@ -88,6 +90,8 @@ struct WebTaskSnapshot: Codable, Equatable, Sendable {
     let websiteSessionCleanupReceiptSaved: Bool?
     let activeTurnStartedAt: TimeInterval?
     let activeActivityGroupID: String?
+    let hasUnreadCompletion: Bool
+    let unreadCompletionID: String?
     let branch: String?
     let entries: [WebEntrySnapshot]
 
@@ -105,7 +109,9 @@ struct WebTaskSnapshot: Codable, Equatable, Sendable {
         websiteSessionCleanupOutcome: String? = nil,
         websiteSessionCleanupReceiptSaved: Bool? = nil,
         activeTurnStartedAt: TimeInterval? = nil,
-        activeActivityGroupID: String? = nil
+        activeActivityGroupID: String? = nil,
+        hasUnreadCompletion: Bool = false,
+        unreadCompletionID: String? = nil
     ) {
         id = task.id
         title = task.title
@@ -126,10 +132,47 @@ struct WebTaskSnapshot: Codable, Equatable, Sendable {
         self.websiteSessionCleanupReceiptSaved = websiteSessionCleanupReceiptSaved
         self.activeTurnStartedAt = activeTurnStartedAt
         self.activeActivityGroupID = activeActivityGroupID
+        self.hasUnreadCompletion = hasUnreadCompletion
+        self.unreadCompletionID = hasUnreadCompletion ? unreadCompletionID : nil
         branch = task.branch
         entries = includeEntries
             ? task.entries.map { WebEntrySnapshot($0, includeToolPayload: includeToolPayloads) }
             : []
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, summary, status, statusTone, updatedAt, workspace, model, modelSelectable
+        case queuedPrompts, queuePaused, canSteer, isBusy, websiteSessionCleanupAvailable
+        case websiteSessionCleanupInProgress, websiteSessionCleanupOutcome, websiteSessionCleanupReceiptSaved
+        case activeTurnStartedAt, activeActivityGroupID, hasUnreadCompletion, unreadCompletionID, branch, entries
+    }
+
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        title = try values.decode(String.self, forKey: .title)
+        summary = try values.decode(String.self, forKey: .summary)
+        status = try values.decode(String.self, forKey: .status)
+        statusTone = try values.decode(String.self, forKey: .statusTone)
+        updatedAt = try values.decode(TimeInterval.self, forKey: .updatedAt)
+        workspace = try values.decode(String.self, forKey: .workspace)
+        model = try values.decode(String.self, forKey: .model)
+        modelSelectable = try values.decode(Bool.self, forKey: .modelSelectable)
+        queuedPrompts = try values.decode([QueuedPrompt].self, forKey: .queuedPrompts)
+        queuePaused = try values.decode(Bool.self, forKey: .queuePaused)
+        canSteer = try values.decode(Bool.self, forKey: .canSteer)
+        isBusy = try values.decode(Bool.self, forKey: .isBusy)
+        websiteSessionCleanupAvailable = try values.decode(Bool.self, forKey: .websiteSessionCleanupAvailable)
+        websiteSessionCleanupInProgress = try values.decode(Bool.self, forKey: .websiteSessionCleanupInProgress)
+        websiteSessionCleanupOutcome = try values.decodeIfPresent(String.self, forKey: .websiteSessionCleanupOutcome)
+        websiteSessionCleanupReceiptSaved = try values.decodeIfPresent(Bool.self, forKey: .websiteSessionCleanupReceiptSaved)
+        activeTurnStartedAt = try values.decodeIfPresent(TimeInterval.self, forKey: .activeTurnStartedAt)
+        activeActivityGroupID = try values.decodeIfPresent(String.self, forKey: .activeActivityGroupID)
+        hasUnreadCompletion = try values.decodeIfPresent(Bool.self, forKey: .hasUnreadCompletion) ?? false
+        let completionID = try values.decodeIfPresent(String.self, forKey: .unreadCompletionID)
+        unreadCompletionID = hasUnreadCompletion ? completionID : nil
+        branch = try values.decodeIfPresent(String.self, forKey: .branch)
+        entries = try values.decode([WebEntrySnapshot].self, forKey: .entries)
     }
 }
 

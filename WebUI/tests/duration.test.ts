@@ -1,5 +1,17 @@
 import { describe, expect, test } from 'bun:test';
-import { formatWorkedFor } from '../src/duration';
+import { formatElapsedDuration, formatWorkedFor } from '../src/duration';
+
+describe('compact sidebar elapsed duration', () => {
+  test('uses only the largest unit, floored, with no relative-time suffix', () => {
+    for (const [seconds, label] of [[0, '0s'], [1.9, '1s'], [59.99, '59s'], [60, '1m'],
+      [119, '1m'], [3_599, '59m'], [3_600, '1h'], [7_201, '2h'], [90_000, '25h']] as const) {
+      expect(formatElapsedDuration(seconds)).toBe(label);
+    }
+  });
+  test('never renders negative or invalid times', () => {
+    for (const seconds of [-1, NaN, Infinity, -Infinity]) expect(formatElapsedDuration(seconds)).toBe('0s');
+  });
+});
 
 describe('turn duration display', () => {
   test('shows seconds and floors fractional time', () => {

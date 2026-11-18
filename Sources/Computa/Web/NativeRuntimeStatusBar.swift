@@ -23,6 +23,20 @@ struct NativeRuntimeStatusBar: View {
 
     var body: some View {
         HStack(spacing: 10) {
+            Button {
+                if state.presentSettings() { state.refreshAutomationPermissions() }
+            } label: {
+                Label("Settings", systemImage: "gearshape")
+                    .labelStyle(.iconOnly)
+                    .font(.system(size: 13))
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(state.approvalGateBlocksInteraction)
+            .accessibilityLabel("Settings")
+            .help("Settings")
+
             Menu {
                 Picker("Access mode", selection: Binding(
                     get: { state.accessMode },

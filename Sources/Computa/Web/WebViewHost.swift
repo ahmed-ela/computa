@@ -22,6 +22,13 @@ struct WebWorkspaceView: View {
                         EmbeddedBrowserPane(
                             session: state.browserSession,
                             isInteractionBlocked: state.approvalGateBlocksInteraction,
+                            canConfigureKimiProfile: state.canConfigureKimiProfile,
+                            kimiModelSignInMessage: state.kimiModelSignInMessage,
+                            onOpenKimiModelSignIn: { state.openKimiModelSignIn() },
+                            onVerifyKimiModelSignIn: {
+                                Task { @MainActor in await state.verifyKimiModelSignIn() }
+                            },
+                            onUseSharedKimiModelProfile: { state.useSharedKimiModelProfile() },
                             onClose: { state.isBrowserPresented = false }
                         )
                         .frame(minWidth: 360, idealWidth: 640, maxWidth: .infinity, maxHeight: .infinity)

@@ -48,6 +48,9 @@ targets:
       - path: Sources/Computa/Resources/BrowserModels
         type: folder
         buildPhase: resources
+      - path: Sources/Computa/Resources/Tokenizers
+        type: folder
+        buildPhase: resources
     dependencies:
       - target: AutomationCore
     configFiles:

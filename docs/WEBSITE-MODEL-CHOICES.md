@@ -132,7 +132,7 @@ Only that owned normal-Chat document can claim the explicit temporary-chat butto
 
 Every embedded action admitted as product-ready carries separate finite `productModeEvidence` with `product:chatgpt`, `mode:chat`, `source:composer_mode_control` and `temporaryTransition:not_requested|acknowledged`. Native checks reject missing evidence or transition regression and perform a fresh read-only product observation after awaited actions. The existing claimed pending model-picker phase can finish closing while its modal hides a previously verified temporary control; terminal readiness, insertion, Send and response admission still require the physical mode. The native Responses server independently requires the acknowledged product proof at ready, submission and response boundaries, including Website default. Private model sidecars retain that proof alongside model identity and document lineage. This establishes observed website product mode and selection, without claiming backend model attestation.
 
-An invalid product proof returns finite `product_mode_unverified`, `retryable:false`, and `required_action:refresh_website_models`. It cannot cause an automatic prompt replay. A later rejection can occur after one genuine Send; it does not imply that the website received nothing.
+An invalid product proof returns finite `product_mode_unverified`, `retryable:false`, and `required_action:inspect_website`. It cannot cause an automatic prompt replay. A later rejection can occur after one genuine Send; it does not imply that the website received nothing.
 
 ## External website gates
 

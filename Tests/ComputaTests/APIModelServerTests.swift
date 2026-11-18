@@ -1374,6 +1374,129 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
         }
     }
 
+    func testActualInvalidToolGuardsSurviveFirstAndSecondDecodeWithoutExtraRequests() async throws {
+        for streaming in [false, true] {
+            for failSecond in [false, true] {
+                let requests = APIRequestRecorder(), diagnostics = APIFailureDiagnosticRecorder(), credentials = APICredentialCounter()
+                let root = try namingRoot(); defer { try? FileManager.default.removeItem(at: root) }
+                let directory = root.appendingPathComponent("accounting")
+                let remote = try APILoopbackFixture { request in
+                    await requests.record(request)
+                    let ordinal = await requests.count()
+                    if failSecond && ordinal == 1 { return self.correctionResponse(request, invalid: true, usage: true) }
+                    let response = self.correctionResponse(request, invalid: false, usage: true)
+                    var object = try! JSONSerialization.jsonObject(with: response.body) as! [String: Any]
+                    var choices = object["choices"] as! [[String: Any]], message = choices[0]["message"] as! [String: Any]
+                    var calls = message["tool_calls"] as! [[String: Any]]
+                    // A valid first call in the rejected batch must never be
+                    // emitted even when the later identity/type guard fails.
+                    calls.append(["id": "PRIVATE_CALL", "type": streaming ? "PRIVATE_TYPE" : "function",
+                        "function": ["name": "PRIVATE_UNOFFERED_TOOL", "arguments": "{\"cmd\":\"PRIVATE_ARGUMENT\"}"]])
+                    if streaming {
+                        let rows = calls.enumerated().map { index, call -> [String: Any] in
+                            var row = call; row["index"] = index; return row
+                        }
+                        let chunk: [String: Any] = ["id": "PRIVATE_STREAM", "model": "fixture-model", "choices": [["index": 0,
+                            "delta": ["role": "assistant", "tool_calls": rows], "finish_reason": "tool_calls"]]]
+                        let body = Data("data: ".utf8) + (try! JSONSerialization.data(withJSONObject: chunk)) + Data("\n\ndata: [DONE]\n\n".utf8)
+                        return .init(status: "200 OK", headers: ["Content-Type": "text/event-stream"], body: body)
+                    }
+                    message["tool_calls"] = calls; choices[0]["message"] = message; object["choices"] = choices
+                    return .init(status: "200 OK", headers: ["Content-Type": "application/json"], body: try! JSONSerialization.data(withJSONObject: object))
+                }
+                defer { remote.stop() }
+                let p = provider(try await remote.start())
+                let server = APIModelServer(credentials: credentials, capsules: try .init(key: Data(repeating: 1, count: 32)), correctionAccountingDirectory: directory)
+                await server.setFailureDiagnosticsObserverForTesting { diagnostics.record($0) }
+                let base = try await server.start(), task = UUID().uuidString.lowercased(), thread = UUID().uuidString.lowercased(), turn = UUID().uuidString.lowercased(), prep = UUID()
+                try await server.updateProviders([p]); try await server.prepareInferenceTurn(taskID: task, threadID: thread, preparationID: prep)
+                try await server.registerInferenceTurn(taskID: task, threadID: thread, turnID: turn, preparationID: prep)
+                let (bytes, response) = try await URLSession.shared.data(for: correctionRequest(base: base, server: server, task: task, thread: thread, turn: turn, provider: p))
+                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 400)
+                let count = await requests.count(); XCTAssertEqual(count, failSecond ? 2 : 1)
+                XCTAssertEqual(credentials.counts().reads, 1); XCTAssertEqual(credentials.counts().writes, 0)
+                let publicObject = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+                let error = try XCTUnwrap(publicObject["error"] as? [String: Any])
+                XCTAssertEqual(error["code"] as? String, "invalid_tool")
+                XCTAssertEqual(error["message"] as? String, "The provider response contained a malformed or unavailable tool call. No tool from this response was executed.")
+                XCTAssertEqual(error["x-computa-retryable"] as? Bool, false)
+                let emitted = diagnostics.snapshot(); XCTAssertEqual(emitted.count, 1)
+                let record = try XCTUnwrap(emitted.first), event = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(record.utf8)) as? [String: Any])
+                XCTAssertEqual(event["stage"] as? String, "decode"); XCTAssertEqual(event["code"] as? String, "invalid_tool")
+                XCTAssertNil(event["argument_validation"]); XCTAssertNil(event["response_validation"])
+                let projected = try XCTUnwrap(event["tool_validation"] as? [String: Any])
+                XCTAssertEqual(projected["attempt"] as? Int, failSecond ? 2 : 1)
+                let validation = try XCTUnwrap(projected["validation"] as? [String: Any])
+                XCTAssertEqual(validation["format"] as? String, streaming ? "chat_sse" : "chat_json")
+                XCTAssertEqual(validation["guardID"] as? String, streaming ? "sse_tool_type" : "chat_name_not_allowed")
+                if streaming { XCTAssertNil(validation["nameMatch"]) }
+                else { XCTAssertEqual(validation["nameMatch"] as? String, "none") }
+                let ids = try XCTUnwrap(event["native_context"] as? [String: String])
+                XCTAssertEqual(ids["taskID"]?.lowercased(), task); XCTAssertEqual(ids["threadID"]?.lowercased(), thread); XCTAssertEqual(ids["turnID"]?.lowercased(), turn)
+                for forbidden in ["PRIVATE", "fixture-secret", "exec_fixture", "cmd", "NEVER_EXECUTED", "http", "output_item", "function_call", "x_computa_correction"] {
+                    XCTAssertFalse(record.contains(forbidden)); XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains(forbidden))
+                }
+                if failSecond {
+                    let accounting = try correctionRecords(directory)
+                    XCTAssertEqual(accounting.count, 3)
+                    let final = try XCTUnwrap(accounting.first { $0.phase == "finished" })
+                    XCTAssertEqual(final.outcome, .decodeFailed); XCTAssertTrue(final.secondRequestClaimed)
+                    XCTAssertNil(final.secondUsage); XCTAssertTrue(final.secondUsageUnknown)
+                } else { XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path)) }
+                await server.shutdown()
+            }
+        }
+    }
+
+    func testInvalidToolFailureProjectionIsFiniteBoundedAndOnlyDecodeScoped() throws {
+        let context = APIModelServer.FailureDiagnosticContext(taskID: UUID(), threadID: UUID(), turnID: UUID())
+        let diagnostic = APIModelServer.ToolFailureDiagnostic(validation: .init(format: .chatSSE, guardID: .sseToolType), attempt: 1)
+        for stage in APIModelServer.FailureStage.allCases {
+            let text = try XCTUnwrap(APIModelServer.failureDiagnostic(APIModelResponseCodec.Failure.invalidTool,
+                stage: stage, toolDiagnostic: diagnostic, context: context))
+            let value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+            if stage == .decode {
+                XCTAssertEqual(Set(value.keys), ["kind", "stage", "code", "retryable", "tool_validation", "native_context"])
+                let observed = try XCTUnwrap(value["tool_validation"] as? [String: Any])
+                XCTAssertEqual(Set(observed.keys), ["validation", "attempt"])
+                let validation = try XCTUnwrap(observed["validation"] as? [String: Any])
+                XCTAssertEqual(Set(validation.keys), ["format", "guardID"])
+                XCTAssertEqual(validation["format"] as? String, "chat_sse"); XCTAssertEqual(validation["guardID"] as? String, "sse_tool_type")
+                let ids = try XCTUnwrap(value["native_context"] as? [String: String])
+                XCTAssertEqual(ids, ["taskID": context.taskID.uuidString, "threadID": context.threadID.uuidString, "turnID": context.turnID.uuidString])
+                XCTAssertLessThanOrEqual(text.utf8.count, 1_024)
+            } else {
+                XCTAssertNil(value["tool_validation"]); XCTAssertNil(value["native_context"])
+                XCTAssertLessThanOrEqual(text.utf8.count, 256)
+            }
+            XCTAssertEqual(value["code"] as? String, "invalid_tool"); XCTAssertEqual(value["retryable"] as? Bool, false)
+            XCTAssertNil(value["argument_validation"]); XCTAssertNil(value["response_validation"])
+        }
+        for error in [APIModelResponseCodec.Failure.invalidArguments, .invalidResponse, .incompleteResponse, .modelMismatch] {
+            let text = try XCTUnwrap(APIModelServer.failureDiagnostic(error, stage: .decode, toolDiagnostic: diagnostic, context: context))
+            XCTAssertFalse(text.contains("tool_validation")); XCTAssertFalse(text.contains("native_context"))
+        }
+        for invalid in [APIModelServer.ToolFailureDiagnostic(validation: .init(format: .chatJSON, guardID: .sseToolType), attempt: 1),
+                        .init(validation: .init(format: .chatSSE, guardID: .sseToolType, nameMatch: .nativeName), attempt: 1),
+                        .init(validation: .init(format: .responsesJSON, guardID: .chatNameNotAllowed), attempt: 1),
+                        .init(validation: .init(format: .chatSSE, guardID: .sseToolType), attempt: 0),
+                        .init(validation: .init(format: .chatSSE, guardID: .sseToolType), attempt: 3)] {
+            let text = try XCTUnwrap(APIModelServer.failureDiagnostic(APIModelResponseCodec.Failure.invalidTool,
+                stage: .decode, toolDiagnostic: invalid, context: context))
+            XCTAssertFalse(text.contains("tool_validation")); XCTAssertFalse(text.contains("native_context"))
+        }
+        let absent = try XCTUnwrap(APIModelServer.failureDiagnostic(APIModelResponseCodec.Failure.invalidTool, stage: .decode, context: context))
+        XCTAssertFalse(absent.contains("tool_validation")); XCTAssertFalse(absent.contains("native_context"))
+        let publicError = try XCTUnwrap(JSONSerialization.jsonObject(with: APIModelServer.errorBody(APIModelResponseCodec.Failure.invalidTool, stage: .decode)) as? [String: Any])
+        let fields = try XCTUnwrap(publicError["error"] as? [String: Any])
+        XCTAssertEqual(Set(fields.keys), ["type", "code", "message", "x-computa-retryable"])
+        XCTAssertEqual(fields["code"] as? String, "invalid_tool"); XCTAssertEqual(fields["x-computa-retryable"] as? Bool, false)
+        for stage in [APIModelServer.FailureStage.prepare, .requestTransport, .eventSerialization] {
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: APIModelServer.errorBody(APIModelResponseCodec.Failure.invalidTool, stage: stage)) as? [String: Any])
+            XCTAssertEqual((body["error"] as? [String: Any])?["message"] as? String, APIModelResponseCodec.Failure.invalidTool.localizedDescription)
+        }
+    }
+
     func testInvalidResponseFailureProjectionIsFiniteBoundedAndOnlyDecodeScoped() throws {
         let context = APIModelServer.FailureDiagnosticContext(taskID: UUID(), threadID: UUID(), turnID: UUID())
         let diagnostic = APIModelServer.ResponseFailureDiagnostic(validation: .init(format: .chatSSE, guardID: .sseRepeatedCallID), attempt: 1)
@@ -1441,6 +1564,31 @@ final class APIModelServerTests: XCTestCase, @unchecked Sendable {
             argumentDiagnostic: .init(validation: invalid, gate: .accountingDisabled, attempt: 3), context: context))
         XCTAssertFalse(text.contains("argument_validation")); XCTAssertFalse(text.contains("native_context"))
     }
+    func testOptionalPatchProbeCannotDisplaceTheOriginalBoundedFailureLog() throws {
+        let probe = APIModelResponseCodec.PatchSchemaProbe(tool: .namedApplyPatch, projection: .literalInput,
+            path: .operations, actual: .boolean, status: .nonLocal,
+            outer: [.input, .operations, .environmentID, .other], keys: .overLimit, operations: .boolean)
+        let failure = APIModelResponseCodec.FiniteSchemaFailure(toolIndex: 127, constraint: .schemaMismatch, patchProbe: probe)
+        var validation = APIModelResponseCodec.ArgumentValidationDiagnostic(reason: .schemaMismatch,
+            schemaFailures: [failure, failure], callCount: 128, rejectedCount: 128, envelopeShapeValid: true,
+            unambiguousJSON: true, streamShapeAndUsageValid: true, knownUsage: true, correctionEligible: true)
+        let context = APIModelServer.FailureDiagnosticContext(taskID: UUID(), threadID: UUID(), turnID: UUID())
+        let enriched = try XCTUnwrap(APIModelServer.failureDiagnostic(APIModelResponseCodec.Failure.invalidArguments, stage: .decode,
+            argumentDiagnostic: .init(validation: validation, gate: .correctionRejected, attempt: 2), context: context))
+        validation.schemaFailures = [
+            .init(toolIndex: 127, constraint: .schemaMismatch), .init(toolIndex: 127, constraint: .schemaMismatch)]
+        let original = try XCTUnwrap(APIModelServer.failureDiagnostic(APIModelResponseCodec.Failure.invalidArguments, stage: .decode,
+            argumentDiagnostic: .init(validation: validation, gate: .correctionRejected, attempt: 2), context: context))
+        XCTAssertEqual(enriched, original, "Oversized optional probes must leave the exact previous failure packet available")
+        XCTAssertLessThanOrEqual(enriched.utf8.count, 1_024)
+        XCTAssertFalse(enriched.contains("patchProbe"))
+        validation.schemaFailures = [.init(toolIndex: 0, constraint: .typeMismatch,
+            patchProbe: .init(tool: .other, projection: .unrecognized, path: .other, actual: .string, status: .nonPatch))]
+        let small = try XCTUnwrap(APIModelServer.failureDiagnostic(APIModelResponseCodec.Failure.invalidArguments, stage: .decode,
+            argumentDiagnostic: .init(validation: validation, gate: .correctionRejected, attempt: 2)))
+        XCTAssertTrue(small.contains("patchProbe")); XCTAssertLessThanOrEqual(small.utf8.count, 1_024)
+    }
+
     func testBuiltinSchemaFailureLocationsFitExistingLogBoundAndRemainPrivateToDiagnostics() throws {
         let failure = APIModelResponseCodec.FiniteSchemaFailure(toolIndex: 127, constraint: .unexpectedFields,
             location: .init(tool: .browserFill, schemaPath: [.expectedLabel], expectedType: .string, actualType: .boolean))

@@ -228,6 +228,23 @@ final class AppStateQueueTests: XCTestCase {
         XCTAssertEqual(after.map(\.prompt), ["Recoverable", "Recoverable"])
     }
 
+    func testUnprovenPersistenceFailureAndRPCProseCannotClaimNonDelivery() async throws {
+        for rpc in [false, true] {
+            let (state, runtime) = fixture()
+            await runtime.rejectNextSubmissionWithUnprovenPersistenceFailure(asRPC: rpc)
+            _ = await state.submitOrQueue(prompt: "Keep this unconfirmed prompt", toTaskID: taskID)
+            XCTAssertEqual(state.queuedPrompts[taskID]?.first?.status, .failed)
+            XCTAssertEqual(state.queuedPrompts[taskID]?.first?.deliveryUncertain, true)
+            XCTAssertEqual(state.selectedTask?.entries.last?.title, "Agent error")
+            XCTAssertEqual(state.selectedTask?.entries.last?.body, WebModelServer.Failure.persistenceRequired.localizedDescription)
+            XCTAssertTrue(state.pausedQueueTaskIDs.contains(taskID))
+            XCTAssertFalse(state.canChangeModel(for: taskID))
+            await settleScheduledWork()
+            let calls = await runtime.submissions
+            XCTAssertEqual(calls.count, 1, "Neither a shared error enum nor identical RPC prose may authorize replay")
+        }
+    }
+
     func testQueueDrainRemainsBoundToOriginalTaskWhenSelectionChanges() async throws {
         let (state, runtime) = fixture(running: true)
         let other = makeTask(id: "other-task")
@@ -663,6 +680,7 @@ private actor QueueControlledRuntime: AgentRuntimeClient {
     private var shouldHoldSubmission = false
     private var shouldRejectSubmission = false
     private var shouldRejectBeforeDispatch = false
+    private var unprovenPersistenceFailureAsRPC: Bool?
     private var validatesWebsiteSelection = false
     private var shouldHoldSteer = false
     private var shouldRejectSteer = false
@@ -675,6 +693,9 @@ private actor QueueControlledRuntime: AgentRuntimeClient {
     func holdNextSubmission() { shouldHoldSubmission = true }
     func rejectNextSubmission() { shouldRejectSubmission = true }
     func rejectNextSubmissionBeforeDispatch() { shouldRejectBeforeDispatch = true }
+    func rejectNextSubmissionWithUnprovenPersistenceFailure(asRPC: Bool) {
+        unprovenPersistenceFailureAsRPC = asRPC
+    }
     func validateWebsiteSelectionsBeforeDispatch() { validatesWebsiteSelection = true }
     func holdNextSteer() { shouldHoldSteer = true }
     func rejectNextSteer() { shouldRejectSteer = true }
@@ -686,6 +707,14 @@ private actor QueueControlledRuntime: AgentRuntimeClient {
             try CodexAppServerRuntime.Configuration.localQwen.validateSelectedModel(modelID)
         }
         submissions.append(call)
+        if let asRPC = unprovenPersistenceFailureAsRPC {
+            unprovenPersistenceFailureAsRPC = nil
+            if asRPC {
+                throw AgentRPCError(object: ["code": -32603,
+                    "message": WebModelServer.Failure.persistenceRequired.localizedDescription])
+            }
+            throw WebModelServer.Failure.persistenceRequired
+        }
         if shouldRejectBeforeDispatch {
             shouldRejectBeforeDispatch = false
             throw WebModelServer.Failure.embeddedRequired

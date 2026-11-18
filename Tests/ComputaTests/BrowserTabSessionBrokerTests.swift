@@ -723,7 +723,7 @@ final class BrowserTabSessionBrokerTests: XCTestCase {
             XCTAssertEqual(after, before + 1, "The signal uses the existing capture, without another read")
             let text = read.snapshot.formattedText
             XCTAssertTrue(text.contains("VIEW content omitted_input_nodes=2 basis=captured_view_and_query."))
-            XCTAssertTrue(text.contains("Read overview/all without cursor/query for controls before an access-block claim."))
+            XCTAssertTrue(text.contains("Get fresh action refs with overview/all without query/cursor."))
             XCTAssertTrue(text.contains("source_truncated=\(truncated ? 1 : 0)"))
             XCTAssertTrue(text.contains("not site results/relevance/absence"))
             XCTAssertEqual(read.snapshot.elements.map(\.label), ["Pick an account"])

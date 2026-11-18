@@ -1,7 +1,58 @@
+import CryptoKit
 import XCTest
 @testable import Computa
 
 final class APIModelResponseCodecTests: XCTestCase {
+
+    func testSharedLiteralCustomTransportKeepsTheEstablishedAPIBytesAndFailureBoundary() throws {
+        let grammar = "start: /[a-z]+/\n"
+        let custom: [String: Any] = ["type": "custom", "name": "literal_document", "description": "Literal fixture grammar.",
+            "format": ["type": "grammar", "syntax": "lark", "definition": grammar]]
+        // Fixed hashes were reconstructed from the PRE-extraction API contract,
+        // not derived from the shared helper or from its new output in this test.
+        func digest(_ value: String) -> String { SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined() }
+        let namingGoldens: [(APIModelResponseCodec.ToolNaming, String)] = [(.legacy, "2d0f0a6403fdb0b822af9b1f9c78eb5cafb5c3f038b14e7df31dfbc271fdfc01"),
+            (.semantic, "50b59193c7627ac932c03694e3ebf86b9070823cb5c3b0091b26b6024653d6f8")]
+        for (naming, wireDescriptionSHA256) in namingGoldens {
+            let prepared = try request(["tools": [custom, function]], toolNaming: naming)
+            let wrapped = try XCTUnwrap(wireFunctions(prepared).first)
+            XCTAssertEqual(digest(prepared.tools[0].description), "0971191c7eb8cc7a4d45430682a6fd00f4397fd77139d599413019f77d9e3648")
+            XCTAssertEqual(digest(try XCTUnwrap(wrapped["description"] as? String)), wireDescriptionSHA256)
+            let schema = try XCTUnwrap(wrapped["parameters"] as? [String: Any])
+            let schemaBytes = try JSONSerialization.data(withJSONObject: schema, options: [.sortedKeys, .withoutEscapingSlashes])
+            XCTAssertEqual(SHA256.hash(data: schemaBytes).map { String(format: "%02x", $0) }.joined(), "7a78d967a3844952e15b151b1c7fe16e9f0aa13e738c58b09e8a9d82e825ff48")
+            let input = try XCTUnwrap((schema["properties"] as? [String: Any])?["input"] as? [String: Any])
+            XCTAssertEqual(digest(try XCTUnwrap(input["description"] as? String)), "bbfab460e0d7e6fa83845d0578116df3263b5998086603f3263ac9d455e40d73")
+            let alias = try XCTUnwrap(wrapped["name"] as? String)
+            let payload = "literal \"quote\" \\ slash\r\n\te\u{0301} / é 🌍\n{\"looks\":\"like JSON\"}\n"
+            let arguments = String(decoding: try JSONSerialization.data(withJSONObject: ["input": payload]), as: UTF8.self)
+            let decoded = try decode(["role": "assistant", "tool_calls": [["id": "native-literal-fixture", "type": "function",
+                "function": ["name": alias, "arguments": arguments]]]], finish: "tool_calls", request: prepared)
+            let output = try XCTUnwrap((decoded.response["output"] as? [[String: Any]])?.first)
+            XCTAssertEqual(output["type"] as? String, "custom_tool_call")
+            XCTAssertEqual(Data(try XCTUnwrap(output["input"] as? String).utf8), Data(payload.utf8))
+            XCTAssertNil(output["arguments"])
+            for bad in [#"{"input":"literal","extra":true}"#, #"{"input":{"nested":"literal"}}"#, #"{"patch":"literal"}"#] {
+                XCTAssertThrowsError(try decode(["role": "assistant", "tool_calls": [["id": "bad-literal-fixture", "type": "function",
+                    "function": ["name": alias, "arguments": bad]]]], finish: "tool_calls", request: prepared)) {
+                    XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+                }
+            }
+        }
+        let invalidFormats: [Any] = [["type": "text", "extra": "ignored"], ["type": "grammar", "syntax": "unknown", "definition": "start: /.+/"],
+            ["type": "grammar", "syntax": "lark", "definition": String(repeating: "x", count: 16_385)], NSNull()]
+        for format in invalidFormats {
+            var invalid = custom; invalid["format"] = format
+            XCTAssertThrowsError(try request(["tools": [invalid]])) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
+            }
+        }
+        let nativeProvider = APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL,
+            wireAPI: .responses, models: provider.models)
+        let nativeBody = try XCTUnwrap(JSONSerialization.jsonObject(with: request(["tools": [custom, function]], provider: nativeProvider).body) as? [String: Any])
+        XCTAssertEqual(nativeBody["tools"] as? NSArray, [custom, function] as NSArray)
+    }
+
     private let taskID = "550e8400-e29b-41d4-a716-446655440000"
     private var provider: APIProviderDefinition { .init(id: "fixture", name: "Fixture", baseURL: URL(string: "https://example.invalid/v1")!, wireAPI: .chatCompletions, models: [.init(id: "fixture-model", name: "Fixture", supportsImages: true)]) }
     private var capsules: APIReasoningCapsules { try! .init(key: Data(repeating: 7, count: 32)) }
@@ -1404,6 +1455,276 @@ final class APIModelResponseCodecTests: XCTestCase {
         }
     }
 
+    private func toolDiagnosticRequest(_ base: APIModelResponseCodec.Request, allowed: Set<String>? = nil,
+                                       history: Set<String>? = nil, maximumCalls: Int? = nil,
+                                       required: Bool? = nil) -> APIModelResponseCodec.Request {
+        .init(localModelID: base.localModelID, provider: base.provider, model: base.model, threadID: base.threadID,
+              stream: base.stream, body: base.body, tools: base.tools, toolNaming: base.toolNaming,
+              allowedTools: allowed ?? base.allowedTools, requiredTool: required ?? base.requiredTool,
+              maximumCalls: maximumCalls ?? base.maximumCalls, historyCallIDs: history ?? base.historyCallIDs,
+              capsules: base.capsules, responseConfiguration: base.responseConfiguration)
+    }
+
+    func testFatalChatToolGuardsAreFiniteOrderedAndExcludeArgumentCorrection() throws {
+        let prepared = try request(toolNaming: .semantic), name = prepared.tools[0].wireName
+        typealias Guard = APIModelResponseCodec.InvalidToolDiagnostic.Guard
+        let valid: [String: Any] = ["id": "PRIVATE_CALL_ID", "type": "function",
+            "function": ["name": name, "arguments": "{\"path\":\"PRIVATE_ARGUMENT\"}"]]
+        func call(_ field: String, _ value: Any) -> [String: Any] { valid.merging([field: value]) { _, v in v } }
+        func function(_ field: String, _ value: Any) -> [String: Any] {
+            call("function", (valid["function"] as! [String: Any]).merging([field: value]) { _, v in v })
+        }
+        let cases: [(APIModelResponseCodec.Request, [[String: Any]], Guard)] = [
+            (prepared, [call("type", "PRIVATE_WRONG_TYPE")], .chatCallType),
+            (prepared, [call("id", [])], .chatCallIDType), (prepared, [call("id", "")], .chatCallIDSyntax),
+            (prepared, [call("id", "PRIVATE\nID")], .chatCallIDSyntax),
+            (toolDiagnosticRequest(prepared, history: ["PRIVATE_CALL_ID"]), [valid], .chatCallIDHistory),
+            (prepared, [valid, valid], .chatCallIDDuplicate),
+            (prepared, [call("function", NSNull())], .chatFunctionType),
+            (prepared, [function("name", [])], .chatNameType),
+            (prepared, [function("name", "PRIVATE_UNDECLARED_NAME")], .chatNameNotAllowed),
+            (toolDiagnosticRequest(prepared, allowed: ["PRIVATE_UNDECLARED_NAME"]),
+             [function("name", "PRIVATE_UNDECLARED_NAME")], .chatNameNotDeclared),
+            (prepared, [function("arguments", ["PRIVATE": true])], .chatArgumentsType),
+            // Earlier rejected arguments must not hide a later invalid identity.
+            (prepared, [function("arguments", "{\"path\":false}"),
+                        call("id", "PRIVATE_SECOND_ID").merging(["function": ["name": "PRIVATE_UNKNOWN", "arguments": "{}"]]) { _, v in v }], .chatNameNotAllowed),
+            // Preserve the original short-circuit order when several fields fail.
+            (prepared, [["type": false, "id": [], "function": false]], .chatCallType)]
+        for (req, calls, expected) in cases {
+            let object: [String: Any] = ["model": req.model.id, "choices": [["index": 0, "finish_reason": "tool_calls",
+                "message": ["role": "assistant", "content": "PRIVATE_RESPONSE", "tool_calls": calls]]],
+                "usage": ["prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2]]
+            let result = APIProviderHTTPClient.Result(body: try JSONSerialization.data(withJSONObject: object), contentType: "application/json")
+            for observe in [false, true] {
+                var diagnostics: [APIModelResponseCodec.InvalidToolDiagnostic] = [], argumentObserved = false, responseObserved = false
+                XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(result, request: req,
+                    onArgumentRejection: { _ in argumentObserved = true }, onInvalidResponse: { _ in responseObserved = true },
+                    onInvalidTool: observe ? { diagnostics.append($0) } : nil)) {
+                    XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool, "\(expected)")
+                }
+                XCTAssertEqual(diagnostics, observe ? [.init(format: .chatJSON, guardID: expected,
+                    nameMatch: expected == .chatNameNotAllowed ? .some(.none) : nil)] : [])
+                XCTAssertFalse(argumentObserved); XCTAssertFalse(responseObserved)
+                for diagnostic in diagnostics {
+                    XCTAssertTrue(diagnostic.isConsistent)
+                    let bytes = try JSONEncoder().encode(diagnostic)
+                    let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+                    XCTAssertEqual(Set(fields.keys), expected == .chatNameNotAllowed ? ["format", "guardID", "nameMatch"] : ["format", "guardID"])
+                    XCTAssertLessThan(bytes.count, 128)
+                    for privateValue in ["PRIVATE", name, "path", "http"] {
+                        XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains(privateValue))
+                    }
+                }
+            }
+        }
+    }
+
+    func testFatalResponsesToolGuardsPreserveFailureOrderAndArgumentClassification() throws {
+        let p = APIProviderDefinition(id: provider.id, name: provider.name, baseURL: provider.baseURL,
+            wireAPI: .responses, models: provider.models)
+        let prepared = try request(provider: p)
+        typealias Guard = APIModelResponseCodec.InvalidToolDiagnostic.Guard
+        let valid: [String: Any] = ["id": "PRIVATE_ITEM_ID", "type": "function_call", "name": "read", "namespace": "files",
+            "call_id": "PRIVATE_CALL_ID", "arguments": "{\"path\":\"PRIVATE_ARGUMENT\"}"]
+        func call(_ field: String, _ value: Any) -> [String: Any] { valid.merging([field: value]) { _, v in v } }
+        let message: [String: Any] = ["id": "PRIVATE_MESSAGE_ID", "type": "message", "role": "assistant", "status": "completed",
+            "content": [["type": "output_text", "text": "PRIVATE_TEXT"]]]
+        let cases: [(APIModelResponseCodec.Request, [[String: Any]], Guard)] = [
+            (prepared, [call("name", [])], .responsesNameType),
+            (prepared, [call("name", "PRIVATE_UNKNOWN")], .responsesNameNotDeclared),
+            (prepared, [call("type", "custom_tool_call")], .responsesToolType),
+            (toolDiagnosticRequest(prepared, allowed: []), [valid], .responsesNameNotAllowed),
+            (prepared, [call("call_id", [])], .responsesCallIDType),
+            (prepared, [call("call_id", "")], .responsesCallIDSyntax),
+            (toolDiagnosticRequest(prepared, history: ["PRIVATE_CALL_ID"]), [valid], .responsesCallIDHistory),
+            (prepared, [valid, call("id", "PRIVATE_SECOND_ITEM")], .responsesCallIDDuplicate),
+            (toolDiagnosticRequest(prepared, maximumCalls: 0), [valid], .responsesCallCount),
+            (toolDiagnosticRequest(prepared, required: true), [message], .responsesRequiredCall),
+            (prepared, [call("name", []).merging(["call_id": []]) { _, v in v }], .responsesNameType)]
+        func result(_ output: [[String: Any]]) throws -> APIProviderHTTPClient.Result {
+            .init(body: try JSONSerialization.data(withJSONObject: ["id": "PRIVATE_RESPONSE_ID", "object": "response",
+                "status": "completed", "model": prepared.model.id, "output": output]), contentType: "application/json")
+        }
+        for (req, output, expected) in cases {
+            for observe in [false, true] {
+                var diagnostics: [APIModelResponseCodec.InvalidToolDiagnostic] = [], responseObserved = false
+                XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(result(output), request: req,
+                    onInvalidResponse: { _ in responseObserved = true }, onInvalidTool: observe ? { diagnostics.append($0) } : nil)) {
+                    XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool, "\(expected)")
+                }
+                XCTAssertEqual(diagnostics, observe ? [.init(format: .responsesJSON, guardID: expected)] : [])
+                XCTAssertFalse(responseObserved)
+                for diagnostic in diagnostics {
+                    XCTAssertTrue(diagnostic.isConsistent)
+                    let bytes = try JSONEncoder().encode(diagnostic)
+                    XCTAssertLessThan(bytes.count, 128); XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains("PRIVATE"))
+                }
+            }
+        }
+        var observed = false
+        XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(result([call("arguments", [])]), request: prepared,
+            onInvalidTool: { _ in observed = true })) { XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments) }
+        XCTAssertFalse(observed, "Responses argument-shape failures keep their existing error classification")
+    }
+
+    func testSSEToolGuardAndAssembledChatGuardRetainTheirFormats() throws {
+        let prepared = try request()
+        typealias Guard = APIModelResponseCodec.InvalidToolDiagnostic.Guard
+        for (call, expected) in [
+            (["index": 0, "id": "PRIVATE_CALL", "type": "PRIVATE_BAD_TYPE", "function": ["name": prepared.tools[0].wireName, "arguments": "{}"]] as [String: Any], Guard.sseToolType),
+            (["index": 0, "id": "PRIVATE_CALL", "type": "function", "function": ["name": "PRIVATE_UNKNOWN", "arguments": "{}"]], Guard.chatNameNotAllowed)] {
+            let chunk: [String: Any] = ["id": "PRIVATE_RESPONSE", "model": prepared.model.id,
+                "choices": [["index": 0, "delta": ["role": "assistant", "tool_calls": [call]], "finish_reason": "tool_calls"]],
+                "usage": ["prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2]]
+            let body = Data("data: ".utf8) + (try JSONSerialization.data(withJSONObject: chunk)) + Data("\n\ndata: [DONE]\n\n".utf8)
+            var diagnostics: [APIModelResponseCodec.InvalidToolDiagnostic] = []
+            XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(.init(body: body, contentType: "text/event-stream"), request: prepared,
+                onInvalidTool: { diagnostics.append($0) })) { XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool) }
+            XCTAssertEqual(diagnostics, [.init(format: .chatSSE, guardID: expected,
+                nameMatch: expected == .chatNameNotAllowed ? .some(.none) : nil)])
+            XCTAssertTrue(try XCTUnwrap(diagnostics.first).isConsistent)
+            XCTAssertFalse(String(decoding: try JSONEncoder().encode(diagnostics), as: UTF8.self).contains("PRIVATE"))
+        }
+    }
+
+    func testRejectedChatNamesOnlyRecordExactCurrentCatalogRelationWithoutRemapping() throws {
+        for naming in [APIModelResponseCodec.ToolNaming.legacy, .semantic] {
+            let prepared = try request(toolNaming: naming)
+            let wire = prepared.tools[0].wireName
+            let cases: [(String, APIModelResponseCodec.InvalidToolDiagnostic.NameMatch)] = [
+                (wire, .wireName), ("read", .nativeName), ("files.read", .qualifiedName),
+                ("PRIVATE_UNOFFERED", .none), ("READ", .none), ("files.READ", .none)]
+            // Even a declared alias is unavailable when tool_choice excludes it.
+            let req = toolDiagnosticRequest(prepared, allowed: [])
+            for (name, match) in cases {
+                var object = try JSONSerialization.jsonObject(with: correctionResult(req).body) as! [String: Any]
+                object["choices"] = [["index": 0, "finish_reason": "tool_calls", "message": ["role": "assistant",
+                    "tool_calls": [["id": "PRIVATE_CALL", "type": "function", "function": ["name": name, "arguments": "{}"]]]]]]
+                var observed: [APIModelResponseCodec.InvalidToolDiagnostic] = []
+                XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(
+                    .init(body: try JSONSerialization.data(withJSONObject: object), contentType: "application/json"), request: req,
+                    onInvalidTool: { observed.append($0) })) { XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool) }
+                XCTAssertEqual(observed, [.init(format: .chatJSON, guardID: .chatNameNotAllowed, nameMatch: match)])
+                XCTAssertTrue(try XCTUnwrap(observed.first).isConsistent)
+                let text = String(decoding: try JSONEncoder().encode(observed), as: UTF8.self)
+                for privateValue in ["PRIVATE", wire, "read", "files"] { XCTAssertFalse(text.contains(privateValue)) }
+            }
+        }
+        for guardID in APIModelResponseCodec.InvalidToolDiagnostic.Guard.allCases where guardID != .chatNameNotAllowed {
+            XCTAssertFalse(APIModelResponseCodec.InvalidToolDiagnostic(format: .chatJSON, guardID: guardID, nameMatch: .nativeName).isConsistent)
+        }
+    }
+
+    func testAlibabaSemanticRejectedNamesHaveFiniteShapesWithoutAdmissionOrRetention() throws {
+        let alibaba = APIProviderDefinition(id: "fixture", name: "Fixture",
+            baseURL: URL(string: "https://ws-fixture123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1")!,
+            wireAPI: .chatCompletions, models: provider.models)
+        let prepared = try request(provider: alibaba, toolNaming: .semantic)
+        let wire = prepared.tools[0].wireName, stem = String(wire.dropLast(24))
+        typealias Diagnostic = APIModelResponseCodec.InvalidToolDiagnostic
+        func reject(_ name: String, _ req: APIModelResponseCodec.Request, expectedMatch: Diagnostic.NameMatch = .none,
+                    shape: Diagnostic.OfferedNameShape?) throws {
+            let call: [String: Any] = ["id":"PRIVATE_CALL", "type":"function", "function":["name":name,"arguments":"{}"]]
+            let reply = try correctionResult(req, changes:["choices":[["index":0,"finish_reason":"tool_calls",
+                "message":["role":"assistant","tool_calls":[call]]]]])
+            var events: [Diagnostic] = []
+            XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(reply, request:req, onInvalidTool:{events.append($0)})) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
+            }
+            XCTAssertEqual(events, [.init(format:.chatJSON, guardID:.chatNameNotAllowed, nameMatch:expectedMatch, offeredNameShape:shape)])
+            let encoded = try JSONEncoder().encode(XCTUnwrap(events.first))
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with:encoded) as? [String:Any])
+            XCTAssertEqual(Set(object.keys), shape == nil ? ["format","guardID","nameMatch"] : ["format","guardID","nameMatch","offeredNameShape"])
+            XCTAssertFalse(String(decoding:encoded,as:UTF8.self).contains("PRIVATE"))
+            XCTAssertFalse(String(decoding:encoded,as:UTF8.self).contains(wire))
+        }
+        try reject(String(wire.dropLast()), prepared, shape:.digestPrefix)
+        try reject(stem, prepared, shape:.digestPrefix)
+        try reject(stem + "z" + String(repeating:"a",count:23), prepared, shape:.otherSuffix)
+        try reject(wire + wire, prepared, shape:.doubled)
+        try reject("PRIVATE_UNKNOWN", prepared, shape:.noMatch)
+        try reject("readSomething__abcdef", prepared, shape:.noMatch)
+        try reject(wire + "_", prepared, shape:.noMatch)
+        try reject(String(repeating:"x",count:129), prepared, shape:nil)
+        try reject("files.read", prepared, expectedMatch:.qualifiedName, shape:nil)
+        try reject("read", prepared, expectedMatch:.nativeName, shape:nil)
+        for chunks in [[wire + wire], [wire, wire], [String(wire.prefix(4)), String(wire.dropFirst(4))]] {
+            var stream = Data()
+            for (index, value) in chunks.enumerated() {
+                var delta: [String: Any] = ["index":0, "function":["name":value]]
+                if index == 0 {
+                    delta["id"] = "PRIVATE_STREAM"; delta["type"] = "function"
+                    delta["function"] = ["name":value,"arguments":#"{"path":"safe"}"#]
+                }
+                var messageDelta: [String: Any] = ["tool_calls": [delta]]
+                if index == 0 { messageDelta["role"] = "assistant" }
+                let row: [String: Any] = ["id":"synthetic-stream","object":"chat.completion.chunk","model":prepared.model.id,
+                    "choices":[["index":0,"delta":messageDelta, "finish_reason": index + 1 == chunks.count ? "tool_calls" : NSNull()]]]
+                stream.append(Data("data: ".utf8)); stream.append(try JSONSerialization.data(withJSONObject:row)); stream.append(Data("\n\n".utf8))
+            }
+            stream.append(Data("data: [DONE]\n\n".utf8))
+            let reply = APIProviderHTTPClient.Result(body:stream, contentType:"text/event-stream")
+            var observed: [Diagnostic] = []
+            if chunks.joined() == wire {
+                guard case .reply = try APIModelResponseCodec.decodeForCorrection(reply,request:prepared,onInvalidTool:{observed.append($0)}) else {
+                    return XCTFail("Valid split delta must remain accepted")
+                }
+                XCTAssertTrue(observed.isEmpty)
+            } else {
+                XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(reply,request:prepared,onInvalidTool:{observed.append($0)})) {
+                    XCTAssertEqual($0 as? APIModelResponseCodec.Failure,.invalidTool)
+                }
+                XCTAssertEqual(observed,[.init(format:.chatSSE,guardID:.chatNameNotAllowed,nameMatch:.some(.none),offeredNameShape:.doubled)])
+                let diagnostic = try XCTUnwrap(observed.first)
+                let line = try XCTUnwrap(APIModelServer.failureDiagnostic(APIModelResponseCodec.Failure.invalidTool,
+                    stage: .decode, toolDiagnostic: .init(validation: diagnostic, attempt: 1)))
+                let entry = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+                let tool = try XCTUnwrap(entry["tool_validation"] as? [String: Any])
+                let validation = try XCTUnwrap(tool["validation"] as? [String: Any])
+                XCTAssertEqual(validation["offeredNameShape"] as? String, Diagnostic.OfferedNameShape.doubled.rawValue)
+                XCTAssertFalse(line.contains(wire))
+                XCTAssertFalse(line.contains("PRIVATE_STREAM"))
+            }
+        }
+        let excluded = toolDiagnosticRequest(prepared,allowed:[])
+        try reject(wire, excluded, expectedMatch:.wireName, shape:nil)
+        try reject(String(wire.dropLast()), excluded, shape:.noMatch)
+        try reject(wire + wire, try request(toolNaming:.semantic), shape:nil)
+        try reject(wire + wire, try request(provider:alibaba, toolNaming:.legacy), shape:nil)
+        let duplicates = try request(["tools":[["type":"namespace","name":"visible","tools":[function]],
+            ["type":"namespace","name":"other","tools":[function]]]], provider:alibaba, toolNaming:.semantic)
+        try reject(String(duplicates.tools[0].wireName.dropLast()), duplicates, shape:.ambiguousStem)
+        XCTAssertFalse(Diagnostic(format:.chatJSON,guardID:.chatNameNotAllowed,nameMatch:.nativeName,offeredNameShape:.doubled).isConsistent)
+        XCTAssertFalse(Diagnostic(format:.chatJSON,guardID:.chatNameType,nameMatch:.some(.none),offeredNameShape:.doubled).isConsistent)
+    }
+
+    func testToolGuardObservationDoesNotChangeSuccessCorrectionOrOtherFailures() throws {
+        let prepared = try request()
+        var diagnostics: [APIModelResponseCodec.InvalidToolDiagnostic] = []
+        guard case .reply = try APIModelResponseCodec.decodeForCorrection(correctionResult(prepared, arguments: "{\"path\":\"safe\"}"),
+            request: prepared, onInvalidTool: { diagnostics.append($0) }) else { return XCTFail("Expected clean reply") }
+        guard case .argumentsRejected = try APIModelResponseCodec.decodeForCorrection(correctionResult(prepared), request: prepared,
+            onInvalidTool: { diagnostics.append($0) }) else { return XCTFail("Expected unchanged argument correction") }
+        let cases: [(APIProviderHTTPClient.Result, APIModelResponseCodec.Failure)] = [
+            (try correctionResult(prepared, changes: ["model": "PRIVATE_OTHER_MODEL"]), .modelMismatch),
+            (try correctionResult(prepared, changes: ["usage": ["prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 3]]), .invalidResponse),
+            (.init(body: Data("data: [DONE]\n\n".utf8), contentType: "text/event-stream"), .incompleteResponse)]
+        for (result, expected) in cases {
+            XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(result, request: prepared,
+                onInvalidTool: { diagnostics.append($0) })) { XCTAssertEqual($0 as? APIModelResponseCodec.Failure, expected) }
+        }
+        XCTAssertTrue(diagnostics.isEmpty)
+        for format in APIModelResponseCodec.InvalidResponseDiagnostic.Format.allCases {
+            for guardID in APIModelResponseCodec.InvalidToolDiagnostic.Guard.allCases {
+                let diagnostic = APIModelResponseCodec.InvalidToolDiagnostic(format: format, guardID: guardID)
+                let expected = guardID.rawValue.hasPrefix("responses_") ? format == .responsesJSON
+                    : guardID == .sseToolType ? format == .chatSSE : format != .responsesJSON
+                XCTAssertEqual(diagnostic.isConsistent, expected)
+            }
+        }
+    }
+
     func testFatalJSONResponseGuardsRetainExactFailuresAndEmitOnlyOneFiniteLabel() throws {
         let prepared = try request()
         typealias Guard = APIModelResponseCodec.InvalidResponseDiagnostic.Guard
@@ -2122,6 +2443,126 @@ final class APIModelResponseCodecTests: XCTestCase {
         XCTAssertFalse(encoded.contains("PRIVATE"))
     }
 
+    func testFreshToolNamingUsesShortNamesOnlyForAlibabaFlashChat() {
+        let alibaba = literalPatchProvider()
+        let flash = alibaba.models[0]
+        let responses = APIProviderDefinition(id: alibaba.id, name: alibaba.name, baseURL: alibaba.baseURL,
+            wireAPI: .responses, models: alibaba.models)
+        let unrelated = APIProviderDefinition(id: alibaba.id, name: alibaba.name, baseURL: provider.baseURL,
+            wireAPI: .chatCompletions, models: alibaba.models)
+        let selection = APIProviderCatalog.Selection(provider: alibaba, model: flash)
+        XCTAssertEqual(APIModelResponseCodec.ToolNaming(selection: selection, fresh: true), .alibabaShort)
+        XCTAssertEqual(APIModelResponseCodec.ToolNaming(selection: selection, fresh: false), .legacy)
+        for other in [
+            APIProviderCatalog.Selection(provider: responses, model: flash),
+            .init(provider: unrelated, model: flash),
+            .init(provider: alibaba, model: .init(id: "other-qwen", name: "Other Qwen")),
+        ] {
+            XCTAssertEqual(APIModelResponseCodec.ToolNaming(selection: other, fresh: true), .semantic)
+        }
+    }
+
+    func testAlibabaShortCatalogKeepsPlainNamesAndRequiresExactScopedAliases() throws {
+        let alibaba = literalPatchProvider()
+        func definition(_ name: String) -> [String: Any] {
+            function.merging(["name": name]) { _, new in new }
+        }
+        let maximumPlain = String(repeating: "a", count: 64)
+        let tooLong = maximumPlain + "a"
+        let definitions: [[String: Any]] = [
+            definition("read"), definition(maximumPlain), definition(tooLong),
+            definition("files.read"), definition("scoped_read"),
+            ["type": "namespace", "name": "files", "tools": [function]],
+            ["type": "namespace", "name": "logs", "tools": [function]],
+        ]
+        let prepared = try request(["tools": definitions], provider: alibaba, toolNaming: .alibabaShort)
+        let names = prepared.tools.map(\.wireName)
+        XCTAssertEqual(names.count, 7)
+        XCTAssertEqual(Array(names.prefix(2)), ["read", maximumPlain])
+        XCTAssertEqual(Set(names).count, names.count)
+        for scoped in names.dropFirst(2) {
+            XCTAssertTrue(scoped.hasPrefix("scoped_"))
+            XCTAssertLessThanOrEqual(scoped.utf8.count, 64)
+            XCTAssertNotNil(scoped.range(of: #"^[A-Za-z0-9_-]+$"#, options: .regularExpression))
+        }
+        let reversed = try request(["tools": Array(definitions.reversed())], provider: alibaba, toolNaming: .alibabaShort)
+        XCTAssertEqual(reversed.tools.map(\.wireName), Array(names.reversed()))
+        let forced = try request(["tools": definitions,
+            "tool_choice": ["type": "function", "name": "read", "namespace": "files"]],
+            provider: alibaba, toolNaming: .alibabaShort)
+        let callable = names[5]
+        XCTAssertEqual(forced.allowedTools, [callable])
+        let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: forced.body) as? [String: Any])
+        XCTAssertEqual((wire["tool_choice"] as? [String: Any])?["function"] as? [String: String], ["name": callable])
+        func response(_ name: String, for request: APIModelResponseCodec.Request) throws -> [String: Any] {
+            let reply = try decode(["role": "assistant", "tool_calls": [["id": "fixture-read", "type": "function",
+                "function": ["name": name, "arguments": #"{"path":"fixture"}"#]]]],
+                finish: "tool_calls", request: request, model: alibaba.models[0].id)
+            return try XCTUnwrap((reply.response["output"] as? [[String: Any]])?.first)
+        }
+        let plain = try response("read", for: prepared)
+        XCTAssertEqual(plain["name"] as? String, "read")
+        XCTAssertNil(plain["namespace"])
+        let scoped = try response(callable, for: forced)
+        XCTAssertEqual(scoped["name"] as? String, "read")
+        XCTAssertEqual(scoped["namespace"] as? String, "files")
+        let semantic = try request(["tools": definitions], provider: alibaba, toolNaming: .semantic)
+        for unoffered in ["read", "files.read", names[6], semantic.tools[5].wireName, callable + "x"] {
+            XCTAssertThrowsError(try response(unoffered, for: forced)) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
+            }
+        }
+        XCTAssertThrowsError(try request(["tools": [definition("read\n")]], provider: alibaba, toolNaming: .alibabaShort)) {
+            XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
+        }
+    }
+
+    func testAlibabaFlashSemanticCatalogLeadsWithExactCallableNameAndStillRejectsNativeNames() throws {
+        let originalInstruction = "Use the native read operation for this authorized file."
+        let originalUser = "Keep the word read unchanged."
+        let requestFields: [String: Any] = [
+            "instructions": originalInstruction,
+            "input": [["role": "user", "content": originalUser]],
+            "tool_choice": ["type": "function", "name": "read", "namespace": "files"],
+        ]
+        let prepared = try request(requestFields, provider: literalPatchProvider(), toolNaming: .semantic)
+        let hostInstruction = "Host policy describes files.read and applies the current permissions."
+        let projected = try APIModelResponseCodec.appendingHostDeveloperMessage(hostInstruction, to: prepared)
+        let declarations = try wireFunctions(projected)
+        let read = try XCTUnwrap(declarations.first)
+        let callable = try XCTUnwrap(read["name"] as? String)
+        XCTAssertEqual(projected.allowedTools, [callable])
+        XCTAssertTrue(try XCTUnwrap(read["description"] as? String).hasPrefix("Callable API function: \(callable).\n"))
+        XCTAssertTrue(try XCTUnwrap(declarations.last?["description"] as? String).hasPrefix("Native tool: apply_patch.\n"))
+
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: projected.body) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.compactMap { $0["role"] as? String }, ["system", "user", "system"])
+        let opening = try XCTUnwrap(messages.first?["content"] as? String)
+        XCTAssertTrue(opening.hasPrefix("For tool calls, copy the exact offered function name, including its entire suffix."))
+        XCTAssertTrue(opening.hasSuffix(originalInstruction))
+        XCTAssertEqual(messages[1]["content"] as? String, originalUser)
+        XCTAssertEqual(messages[2]["content"] as? String, hostInstruction)
+
+        func response(name: String) throws -> APIModelResponseCodec.Reply {
+            try decode(["role": "assistant", "tool_calls": [["id": "fixture-read", "type": "function",
+                "function": ["name": name, "arguments": #"{"path":"fixture"}"#]]]],
+                finish: "tool_calls", request: projected, model: "qwen3.7-flash")
+        }
+        for unoffered in ["read", "files.read", try XCTUnwrap(declarations.last?["name"] as? String)] {
+            XCTAssertThrowsError(try response(name: unoffered)) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
+            }
+        }
+        let accepted = try response(name: callable)
+        let output = try XCTUnwrap((accepted.response["output"] as? [[String: Any]])?.first)
+        XCTAssertEqual(output["name"] as? String, "read")
+        XCTAssertEqual(output["namespace"] as? String, "files")
+
+        let legacy = try request(requestFields, provider: literalPatchProvider(), toolNaming: .legacy)
+        XCTAssertTrue(try XCTUnwrap(wireFunctions(legacy).first?["description"] as? String).hasPrefix("Native tool: files.read.\n"))
+    }
+
     func testSemanticToolNamesStayStableAcrossFilteringReorderingAndNamedChoice() throws {
         let chrome: [String: Any] = ["type": "function", "name": "computer_v2_tabs", "parameters": ["type": "object", "properties": [:], "additionalProperties": false]]
         let browser: [String: Any] = ["type": "function", "name": "browser_open", "description": "Open the requested built-in page.",
@@ -2524,6 +2965,46 @@ final class APIModelResponseCodecTests: XCTestCase {
         XCTAssertEqual(semanticOutput["namespace"] as? String, "editing")
         XCTAssertEqual(semanticOutput["input"] as? String, payload)
     }
+    func testAlibabaPatchInputExplainsTheTerminalHunkWithoutRepairingMalformedPayloads() throws {
+        let alibaba = APIProviderDefinition(id: "fixture", name: "Fixture",
+            baseURL: URL(string: "https://ws-fixture123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1")!,
+            wireAPI: .chatCompletions, models: provider.models)
+        let grammar = #"""
+        end_patch: "*** End Patch" LF?
+        change_context: ("@@" | "@@ " /(.+)/) LF
+        change_line: ("+" | "-" | " ") /(.*)/ LF
+        """#
+        let patch: [String: Any] = ["type": "custom", "name": "apply_patch",
+            "format": ["type": "grammar", "syntax": "lark", "definition": grammar]]
+        func guidance(_ selectedProvider: APIProviderDefinition, _ def: [String: Any]) throws -> String {
+            let req = try request(["tools": [def]], provider: selectedProvider, toolNaming: .semantic)
+            let fn = try XCTUnwrap(wireFunctions(req).first)
+            let params = try XCTUnwrap(fn["parameters"] as? [String: Any])
+            let properties = try XCTUnwrap(params["properties"] as? [String: [String: Any]])
+            return try XCTUnwrap(properties["input"]?["description"] as? String)
+        }
+        let footer = "@@\n-old\n+new\n*** End Patch"
+        XCTAssertTrue(try guidance(alibaba, patch).contains(footer))
+        XCTAssertFalse(try guidance(provider, patch).contains(footer))
+        let foreign: [String: Any] = ["type": "namespace", "name": "editing", "tools": [patch]]
+        XCTAssertFalse(try guidance(alibaba, foreign).contains(footer))
+        var other = patch
+        other["format"] = ["type": "text"]
+        XCTAssertFalse(try guidance(alibaba, other).contains(footer))
+        let prepared = try request(["tools": [patch]], provider: alibaba, toolNaming: .semantic)
+        let start = "*** Begin Patch\n*** Update File: fixture.py\n@@\n-old\n+new\n"
+        for suffix in ["@@", "@@\n*** End Patch", "*** End Patch", "*** End of File\n*** End Patch",
+                       "@@ named anchor\n literal context\n*** End Patch", "+@@\n*** End Patch"] {
+            let literal = start + suffix
+            let arguments = String(decoding: try JSONSerialization.data(withJSONObject: ["input": literal]), as: UTF8.self)
+            let call: [String: Any] = ["id": "example", "type": "function",
+                "function": ["name": prepared.tools[0].wireName, "arguments": arguments]]
+            let reply = try decode(["role": "assistant", "tool_calls": [call]], finish: "tool_calls", request: prepared)
+            let item = try XCTUnwrap((reply.response["output"] as? [[String: Any]])?.first)
+            XCTAssertEqual(item["input"] as? String, literal)
+        }
+    }
+
     func testCustomInputArgumentGuidancePreservesRawStringsAndNativeFunctionSchemas() throws {
         let ordinaryParameters: [String: Any] = ["type": "object", "properties": ["input": ["type": "string", "description": "Native function's own input contract"]], "required": ["input"], "additionalProperties": false]
         let custom: [String: Any] = ["type": "custom", "name": "literal_document", "format": ["type": "text"]]
@@ -2771,7 +3252,7 @@ final class APIModelResponseCodecTests: XCTestCase {
         XCTAssertThrowsError(try request(["input": [call]]))
     }
     func testNoToolsCompactionPreservesCompletedCallsResultsAndReasoningWithoutGrantingTools() throws {
-        for naming in [APIModelResponseCodec.ToolNaming.legacy, .semantic] {
+        for naming in [APIModelResponseCodec.ToolNaming.legacy, .semantic, .alibabaShort] {
             let initial = try request(toolNaming: naming)
             let functions = try wireFunctions(initial)
             let arguments = "{\"path\":\"/tmp/synthetic fixture\",\"note\":\"literal\\nvalue\"}"
@@ -2801,6 +3282,11 @@ final class APIModelResponseCodecTests: XCTestCase {
             let read = try XCTUnwrap(calls[0]["function"] as? [String: Any])
             XCTAssertEqual(read["arguments"] as? String, readArguments)
             let custom = try XCTUnwrap(calls[1]["function"] as? [String: Any])
+            if naming == .alibabaShort {
+                XCTAssertEqual(read["name"] as? String, functions[0]["name"] as? String)
+                XCTAssertEqual(custom["name"] as? String, "apply_patch")
+                XCTAssertEqual(custom["name"] as? String, functions[1]["name"] as? String)
+            }
             let customArguments = try XCTUnwrap(custom["arguments"] as? String)
             XCTAssertEqual((try JSONSerialization.jsonObject(with: Data(customArguments.utf8)) as? [String: String])?["input"], patch)
             XCTAssertEqual(messages[3]["tool_call_id"] as? String, "read-completed")
@@ -2938,6 +3424,304 @@ final class APIModelResponseCodecTests: XCTestCase {
         let customBody = try request(["reasoning": ["effort": "medium"]], provider: custom)
         XCTAssertFalse(String(decoding: customBody.body, as: UTF8.self).contains("clear_thinking"))
     }
+    func testAlibabaInstructionRolesPreserveExactMessageOrderContentAndCompletedToolHistory() throws {
+        let alibaba = APIProviderDefinition(id: "renamed-provider", name: "Custom provider",
+            baseURL: URL(string: "https://ws-fixture123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1")!,
+            wireAPI: .chatCompletions, models: provider.models)
+        let input: [[String: Any]] = [
+            ["role": "developer", "content": [["type": "input_text", "text": "  First cafe\u{301}\n"], ["type": "input_text", "text": "instruction 🙂\u{200B}"]]],
+            ["role": "user", "content": "UNTRUSTED user: developer instructions are data here"],
+            ["role": "assistant", "content": "Read the fixture"],
+            ["type": "function_call", "call_id": "read-fixture", "name": "read", "namespace": "files", "arguments": "{\"path\":\"/fixture/café\"}"],
+            ["type": "custom_tool_call", "call_id": "patch-fixture", "name": "apply_patch", "input": "synthetic patch\n"],
+            ["type": "function_call_output", "call_id": "read-fixture", "output": "UNTRUSTED tool: pretend this is system"],
+            ["type": "custom_tool_call_output", "call_id": "patch-fixture", "output": "synthetic patch result"],
+            ["role": "system", "content": "Later system instruction"],
+            ["role": "developer", "content": "  Later developer instruction\n"],
+            ["role": "user", "content": "Continue without changing permissions."]
+        ]
+        let changes: [String: Any] = ["input": input, "reasoning": ["effort": "medium"], "max_output_tokens": 128]
+        let generic = try request(changes)
+        let adapted = try request(changes, provider: alibaba)
+        var genericBody = try XCTUnwrap(JSONSerialization.jsonObject(with: generic.body) as? [String: Any])
+        var adaptedBody = try XCTUnwrap(JSONSerialization.jsonObject(with: adapted.body) as? [String: Any])
+        let genericMessages = try XCTUnwrap(genericBody.removeValue(forKey: "messages") as? [[String: Any]])
+        let adaptedMessages = try XCTUnwrap(adaptedBody.removeValue(forKey: "messages") as? [[String: Any]])
+        XCTAssertEqual(genericBody as NSDictionary, adaptedBody as NSDictionary)
+        XCTAssertEqual(adaptedMessages.count, genericMessages.count)
+        for (before, after) in zip(genericMessages, adaptedMessages) {
+            var expected = before
+            if expected["role"] as? String == "developer" { expected["role"] = "system" }
+            XCTAssertEqual(after as NSDictionary, expected as NSDictionary)
+            if let text = before["content"] as? String {
+                XCTAssertEqual((after["content"] as? String).map { Data($0.utf8) }, Data(text.utf8))
+            }
+        }
+        XCTAssertEqual(adaptedMessages.compactMap { $0["role"] as? String },
+            ["system", "system", "user", "assistant", "tool", "tool", "system", "system", "user"])
+        XCTAssertEqual(adapted.historyCallIDs, generic.historyCallIDs)
+        XCTAssertEqual(adapted.allowedTools, generic.allowedTools)
+        XCTAssertEqual(adapted.responseConfiguration as NSDictionary, generic.responseConfiguration as NSDictionary)
+        let corrected = try APIModelResponseCodec.correctiveRequest(adapted)
+        let correctedBody = try XCTUnwrap(JSONSerialization.jsonObject(with: corrected.body) as? [String: Any])
+        let correctedMessages = try XCTUnwrap(correctedBody["messages"] as? [[String: Any]])
+        XCTAssertEqual(Array(correctedMessages.dropFirst()) as NSArray, Array(adaptedMessages.dropFirst()) as NSArray)
+        XCTAssertEqual(correctedBody["tools"] as? NSArray, adaptedBody["tools"] as? NSArray)
+    }
+
+    func testAlibabaCompletedCustomPatchAndBrowserHistorySurvivesAvailabilityAndHostTailProjection() throws {
+        // Captured tool payload structure from the controlled 461 invoice case.
+        // Only case paths/URLs/opaque browser IDs and labels are projected to inert
+        // values below; session/private metadata and the rest of its trace are absent.
+        // This proves codec projection, not the historical provider POST or its cause.
+        let capturedHistory = #"""
+        [
+          {
+            "role": "developer",
+            "content": "Use the current native tools and preserve the full existing tool history."
+          },
+          {
+            "role": "user",
+            "content": "Finish the inert invoice task using current evidence. Preserve completed work and do not repeat completed or uncertain actions."
+          },
+          {
+            "type": "custom_tool_call",
+            "name": "apply_patch",
+            "input": "*** Begin Patch\n*** Update File: /synthetic/invoice-projection/coding/reconcile.py\n@@\n def summarize(items):\n     \"\"\"Aggregate normalized SKUs, quantities, and exact integer-cent subtotals.\"\"\"\n     grouped = {}\n     for item in items:\n         sku = item[\"sku\"].strip().upper()\n-        grouped[sku] = {\n-            \"sku\": sku,\n-            \"quantity\": item[\"quantity\"],\n-            \"subtotal_cents\": item[\"quantity\"] * item[\"unit_cents\"],\n-        }\n+        if sku not in grouped:\n+            grouped[sku] = {\n+                \"sku\": sku,\n+                \"quantity\": 0,\n+                \"subtotal_cents\": 0,\n+            }\n+        grouped[sku][\"quantity\"] += item[\"quantity\"]\n+        grouped[sku][\"subtotal_cents\"] += item[\"quantity\"] * item[\"unit_cents\"]\n     rows = [grouped[sku] for sku in sorted(grouped)]\n     return {\"items\": rows, \"total_cents\": sum(row[\"subtotal_cents\"] for row in rows)}\n\n*** End Patch",
+            "call_id": "history-patch"
+          },
+          {
+            "type": "custom_tool_call_output",
+            "call_id": "history-patch",
+            "output": "Exit code: 0\nWall time: 0 seconds\nOutput:\nSuccess. Updated the following files:\nM /synthetic/invoice-projection/coding/reconcile.py\n"
+          },
+          {
+            "type": "function_call",
+            "name": "browser_open",
+            "arguments": "{\"url\": \"http://127.0.0.1:34567/\"}",
+            "call_id": "history-open"
+          },
+          {
+            "type": "function_call_output",
+            "call_id": "history-open",
+            "output": [
+              {
+                "type": "input_text",
+                "text": "{\"retention\":\"complete_browser_observation_v1\"}"
+              },
+              {
+                "type": "input_text",
+                "text": "{\"completed\":true,\"kind\":\"open\",\"outcome\":\"unverified\"}"
+              },
+              {
+                "type": "input_text",
+                "text": "{\"already_bound\":false,\"bound\":true,\"browser\":\"computa_builtin\",\"current_observation\":{\"snapshot_id\":\"10000000-0000-4000-8000-000000000001\",\"status\":\"available\",\"text\":\"AXSNAPSHOT id=10000000-0000-4000-8000-000000000001 tab_handle=10000000-0000-4000-8000-000000000002 source=computa_webkit_dom url=\\\"http://127.0.0.1:34567/\\\" title=\\\"Inert invoice fixture\\\"\\nREAD view=overview scope=document source_observation=10000000-0000-4000-8000-000000000003 consistency=immutable_capture source_nodes=7 source_truncated=0 matches=6 shown=6 offset=0 output_truncated=0 field_truncated=0 metadata_truncated=0 no_matches=0 observation=live semantic_readiness=ready\\nREAD_SELECTION_EVIDENCE local_view query=false counts=capture site_search=false site_count=unmeasured\\nSCOPE captured rows only; not site results/relevance/absence. *_utf8=exact fragments; href_fragment=not_navigable. Defaults enabled=true settable=false actions=[]. Only shown refs authorize input.\\nVIEW overview. Use refs for links/search; content=text.\\n#0 role=\\\"AXGroup\\\" semantic_role=\\\"form\\\" label=\\\"\\\" child_count=3 expandable=true content_scope=main content_kind=unknown \\n#1 role=\\\"AXTextField\\\" semantic_role=\\\"textbox\\\" label=\\\"Reference\\\" value=\\\"\\\" parent_index=0 content_scope=main content_kind=control settable=true  required=true constraint=invalid[value_missing] fill_ref=\\\"bfill_10000000-0000-4000-8000-000000000004\\\"\\n#2 role=\\\"AXStaticText\\\" semantic_role=\\\"statictext\\\" label=\\\"Reference\\\" parent_index=0 content_scope=main content_kind=readable enabled=false \\n#3 role=\\\"AXButton\\\" semantic_role=\\\"button\\\" label=\\\"Record test receipt\\\" parent_index=0 content_scope=main content_kind=control actions=[\\\"AXPress\\\"] click_ref=\\\"bclick_10000000-0000-4000-8000-000000000005\\\"\\n#4 role=\\\"AXHeading\\\" semantic_role=\\\"heading\\\" label=\\\"Inert invoice fixture\\\" content_scope=main content_kind=readable \\n#5 role=\\\"AXStaticText\\\" semantic_role=\\\"statictext\\\" label=\\\"Record the invoice reference produced by the repaired helper.\\\" content_scope=main content_kind=readable \\nBROWSER_ACTION_REFERENCES {\\\"copy\\\":\\\"Verbatim Unicode/whitespace.\\\",\\\"next\\\":\\\"current_observation/browser_read; never replay.\\\",\\\"refs\\\":\\\"Cursor pages retain same-capture refs (120 FIFO); fresh reads require native corroboration; input consumes all.\\\"}\",\"view\":\"overview\"},\"next\":\"Use this observation; continue only its next_cursor. Operation complete; do not repeat it.\",\"no_replay\":true,\"operation_complete\":true,\"operation_kind\":\"open\",\"ownership\":\"task_created\",\"profile\":\"shared_human\",\"result_verified\":false,\"tab_handle\":\"10000000-0000-4000-8000-000000000002\",\"tab_id\":\"10000000-0000-4000-8000-000000000006\"}"
+              }
+            ]
+          },
+          {
+            "type": "function_call",
+            "name": "browser_fill",
+            "arguments": "{\"fill_ref\": \"bfill_10000000-0000-4000-8000-000000000004\", \"text\": \"INV-INERT-600\"}",
+            "call_id": "history-fill"
+          },
+          {
+            "type": "function_call_output",
+            "call_id": "history-fill",
+            "output": [
+              {
+                "type": "input_text",
+                "text": "{\"retention\":\"complete_browser_observation_v1\"}"
+              },
+              {
+                "type": "input_text",
+                "text": "{\"dispatched\":true,\"kind\":\"fill\",\"label\":\"Reference\",\"outcome\":\"unverified\",\"partial\":false}"
+              },
+              {
+                "type": "input_text",
+                "text": "{\"action_references\":{\"consumed\":true,\"next\":\"current_observation\"},\"current_observation\":{\"snapshot_id\":\"10000000-0000-4000-8000-000000000007\",\"status\":\"available\",\"text\":\"AXSNAPSHOT id=10000000-0000-4000-8000-000000000007 tab_handle=10000000-0000-4000-8000-000000000002 source=computa_webkit_dom url=\\\"http://127.0.0.1:34567/\\\" title=\\\"Inert invoice fixture\\\"\\nREAD view=overview scope=document source_observation=10000000-0000-4000-8000-000000000008 consistency=immutable_capture source_nodes=7 source_truncated=0 matches=6 shown=6 offset=0 output_truncated=0 field_truncated=0 metadata_truncated=0 no_matches=0 observation=live semantic_readiness=ready\\nREAD_SELECTION_EVIDENCE local_view query=false counts=capture site_search=false site_count=unmeasured\\nSCOPE captured rows only; not site results/relevance/absence. *_utf8=exact fragments; href_fragment=not_navigable. Defaults enabled=true settable=false actions=[]. Only shown refs authorize input.\\nVIEW overview. Use refs for links/search; content=text.\\n#0 role=\\\"AXGroup\\\" semantic_role=\\\"form\\\" label=\\\"\\\" child_count=3 expandable=true content_scope=main content_kind=unknown \\n#1 role=\\\"AXTextField\\\" semantic_role=\\\"textbox\\\" label=\\\"Reference\\\" value=\\\"INV-INERT-600\\\" parent_index=0 content_scope=main content_kind=control settable=true  required=true constraint=valid fill_ref=\\\"bfill_10000000-0000-4000-8000-000000000009\\\"\\n#2 role=\\\"AXStaticText\\\" semantic_role=\\\"statictext\\\" label=\\\"Reference\\\" parent_index=0 content_scope=main content_kind=readable enabled=false \\n#3 role=\\\"AXButton\\\" semantic_role=\\\"button\\\" label=\\\"Record test receipt\\\" parent_index=0 content_scope=main content_kind=control actions=[\\\"AXPress\\\"] click_ref=\\\"bclick_10000000-0000-4000-8000-00000000000A\\\"\\n#4 role=\\\"AXHeading\\\" semantic_role=\\\"heading\\\" label=\\\"Inert invoice fixture\\\" content_scope=main content_kind=readable \\n#5 role=\\\"AXStaticText\\\" semantic_role=\\\"statictext\\\" label=\\\"Record the invoice reference produced by the repaired helper.\\\" content_scope=main content_kind=readable \\nBROWSER_ACTION_REFERENCES {\\\"copy\\\":\\\"Verbatim Unicode/whitespace.\\\",\\\"next\\\":\\\"current_observation/browser_read; never replay.\\\",\\\"refs\\\":\\\"Cursor pages retain same-capture refs (120 FIFO); fresh reads require native corroboration; input consumes all.\\\"}\",\"view\":\"overview\"},\"dispatched\":true,\"input_kind\":\"fill\",\"next\":\"Fill: no Enter/submit sent; handlers may react. Verify full values/state; no replay.\",\"no_replay\":true,\"receipt_scope\":\"input\",\"result_verified\":false}"
+              }
+            ]
+          },
+          {
+            "type": "function_call",
+            "name": "browser_click",
+            "arguments": "{\"click_ref\": \"bclick_10000000-0000-4000-8000-00000000000A\"}",
+            "call_id": "history-click"
+          },
+          {
+            "type": "function_call_output",
+            "call_id": "history-click",
+            "output": [
+              {
+                "type": "input_text",
+                "text": "{\"retention\":\"complete_browser_observation_v1\"}"
+              },
+              {
+                "type": "input_text",
+                "text": "{\"dispatched\":true,\"kind\":\"click\",\"label\":\"Record test receipt\",\"outcome\":\"unverified\",\"partial\":false}"
+              },
+              {
+                "type": "input_text",
+                "text": "{\"action_references\":{\"consumed\":true,\"next\":\"current_observation\"},\"current_observation\":{\"snapshot_id\":\"10000000-0000-4000-8000-00000000000B\",\"status\":\"available\",\"text\":\"AXSNAPSHOT id=10000000-0000-4000-8000-00000000000B tab_handle=10000000-0000-4000-8000-000000000002 source=computa_webkit_dom url=\\\"http://127.0.0.1:34567/receipt/RCP-INERT-1\\\" title=\\\"Receipt recorded\\\"\\nREAD view=overview scope=document source_observation=10000000-0000-4000-8000-00000000000C consistency=immutable_capture source_nodes=7 source_truncated=0 matches=5 shown=5 offset=0 output_truncated=0 field_truncated=0 metadata_truncated=0 no_matches=0 observation=live semantic_readiness=ready\\nREAD_SELECTION_EVIDENCE local_view query=false counts=capture site_search=false site_count=unmeasured\\nSCOPE captured rows only; not site results/relevance/absence. *_utf8=exact fragments; href_fragment=not_navigable. Defaults enabled=true settable=false actions=[]. Only shown refs authorize input.\\nVIEW overview. Use refs for links/search; content=text.\\nRECORD_PATH is capture-local read-only ancestry: equal paths group rows; prefixes show nesting, not authorship. Records may span pages. Not input targets or verified outcomes.\\n#0 role=\\\"AXHeading\\\" semantic_role=\\\"heading\\\" label=\\\"Receipt recorded\\\" content_scope=main content_kind=readable \\n#1 role=\\\"AXStaticText\\\" semantic_role=\\\"statictext\\\" label=\\\"Reference: INV-INERT-600\\\" record_path=\\\"10000000-0000-4000-8000-00000000000C/1\\\" content_scope=main content_kind=readable \\n#2 role=\\\"AXHeading\\\" semantic_role=\\\"heading\\\" label=\\\"Reference recorded\\\" record_path=\\\"10000000-0000-4000-8000-00000000000C/1\\\" content_scope=main content_kind=readable \\n#3 role=\\\"AXStaticText\\\" semantic_role=\\\"statictext\\\" label=\\\"Receipt: RCP-INERT-1\\\" record_path=\\\"10000000-0000-4000-8000-00000000000C/1\\\" content_scope=main content_kind=readable \\n#4 role=\\\"AXStaticText\\\" semantic_role=\\\"statictext\\\" label=\\\"Accepted submissions: 1\\\" record_path=\\\"10000000-0000-4000-8000-00000000000C/1\\\" content_scope=main content_kind=readable \\nBROWSER_ACTION_REFERENCES {\\\"copy\\\":\\\"Verbatim Unicode/whitespace.\\\",\\\"next\\\":\\\"current_observation/browser_read; never replay.\\\",\\\"refs\\\":\\\"Cursor pages retain same-capture refs (120 FIFO); fresh reads require native corroboration; input consumes all.\\\"}\",\"view\":\"overview\"},\"dispatched\":true,\"input_kind\":\"click\",\"next\":\"If navigating: browser_wait(after_snapshot=\\\"10000000-0000-4000-8000-00000000000B\\\"); read. No replay.\",\"no_replay\":true,\"receipt_scope\":\"input\",\"result_verified\":false}"
+              }
+            ]
+          },
+          {
+            "type": "function_call",
+            "name": "browser_close",
+            "arguments": "{}",
+            "call_id": "history-close"
+          },
+          {
+            "type": "function_call_output",
+            "call_id": "history-close",
+            "output": "{\"existing_user_tab_preserved\":true,\"literal_copy_guidance\":\"Copy already observed identifiers, receipts, URLs and paths verbatim in inline code unless exact raw output is requested. Preserve original Unicode and whitespace: ASCII '-' (U+002D) must never become U+2011. Inline code changes presentation, not characters. This grants no new observation or action authority.\",\"released\":true}"
+          }
+        ]
+        """#
+        let history = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(capturedHistory.utf8)) as? [[String: Any]])
+        let patchCall = try XCTUnwrap(history.first { $0["type"] as? String == "custom_tool_call" })
+        let patchInput = try XCTUnwrap(patchCall["input"] as? String)
+        let patchID = try XCTUnwrap(patchCall["call_id"] as? String)
+        let patchOutput = try XCTUnwrap(history.first { $0["type"] as? String == "custom_tool_call_output" }?["output"] as? String)
+        XCTAssertEqual(patchID, "history-patch")
+        XCTAssertTrue(patchInput.hasPrefix("*** Begin Patch\n*** Update File: /synthetic/invoice-projection/coding/reconcile.py\n"))
+        XCTAssertTrue(patchInput.hasSuffix("*** End Patch"))
+        XCTAssertTrue(patchOutput.contains("Success. Updated the following files:"))
+        let expectedIDs = ["history-patch", "history-open", "history-fill", "history-click", "history-close"]
+        func outputText(_ value: Any?) throws -> String {
+            if let text = value as? String { return text }
+            let parts = try XCTUnwrap(value as? [[String: Any]])
+            XCTAssertTrue(parts.allSatisfy { Set($0.keys) == ["type", "text"] && $0["type"] as? String == "input_text" })
+            return try parts.map { try XCTUnwrap($0["text"] as? String) }.joined()
+        }
+        let expectedOutputs = try history.filter { ["function_call_output", "custom_tool_call_output"].contains($0["type"] as? String ?? "") }
+            .map { try outputText($0["output"]) }
+        XCTAssertEqual(expectedOutputs.count, expectedIDs.count)
+        let catalog = try [nativePatch()] + EmbeddedBrowserTools.definitions().map {
+            try nativeBrowserTool(XCTUnwrap($0["name"] as? String))
+        }
+        let alibaba = literalPatchProvider()
+        let currentRefs = EmbeddedBrowserCurrentActionReferences(clickReferences: ["bclick_current"], fillReferences: ["bfill_current"])
+        let reminder = "Current user reminder: preserve completed work; do not repeat the patch or browser submission."
+        let checkpoints = [
+            "APP_RUNTIME_EXECUTION_CHECKPOINT\nCurrent-turn checkpoint: browser_open completed=1; result remains unverified.",
+            "APP_RUNTIME_EXECUTION_CHECKPOINT\nCurrent-turn checkpoint: browser_close completed=1; existing user tab preserved."
+        ]
+        for naming: APIModelResponseCodec.ToolNaming in [.legacy, .semantic] {
+            var firstMessages: [[String: Any]]?
+            var firstPatchDefinition: [String: Any]?
+            var firstPatchWireName: String?
+            let bound = try request(["tools": catalog, "input": history], provider: alibaba,
+                toolNaming: naming, browserToolAvailability: .bound, browserActionReferences: currentRefs)
+            let hiddenFillName = try XCTUnwrap(bound.tools.first { $0.name == "browser_fill" }?.wireName)
+            for availability: EmbeddedBrowserToolAvailability in [.unbound, .bound, .unbound] {
+                let prepared = try request(["tools": catalog, "input": history], provider: alibaba,
+                    toolNaming: naming, browserToolAvailability: availability,
+                    browserActionReferences: availability == .bound ? currentRefs : .empty)
+                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.body) as? [String: Any])
+                let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+                if let firstMessages { XCTAssertEqual(messages as NSArray, firstMessages as NSArray) }
+                else { firstMessages = messages }
+                XCTAssertEqual(prepared.historyCallIDs, Set(expectedIDs))
+                let patchTool = try XCTUnwrap(prepared.tools.first { $0.name == "apply_patch" && $0.custom })
+                let patchDefinition = try XCTUnwrap(wireFunctions(prepared).first { $0["name"] as? String == patchTool.wireName })
+                if let firstPatchDefinition { XCTAssertEqual(patchDefinition as NSDictionary, firstPatchDefinition as NSDictionary) }
+                else { firstPatchDefinition = patchDefinition }
+                if let firstPatchWireName { XCTAssertEqual(patchTool.wireName, firstPatchWireName) }
+                else { firstPatchWireName = patchTool.wireName }
+                let calls = messages.flatMap { $0["tool_calls"] as? [[String: Any]] ?? [] }
+                XCTAssertEqual(calls.compactMap { $0["id"] as? String }, expectedIDs)
+                let projectedPatch = try XCTUnwrap(calls.first { $0["id"] as? String == patchID }?["function"] as? [String: Any])
+                XCTAssertEqual(projectedPatch["name"] as? String, patchTool.wireName)
+                let arguments = try XCTUnwrap(projectedPatch["arguments"] as? String)
+                let wrapper = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(arguments.utf8)) as? [String: String])
+                XCTAssertEqual(Set(wrapper.keys), ["input"])
+                XCTAssertEqual(Data(try XCTUnwrap(wrapper["input"]).utf8), Data(patchInput.utf8))
+                let outputs = messages.filter { $0["role"] as? String == "tool" }
+                XCTAssertEqual(outputs.compactMap { $0["tool_call_id"] as? String }, expectedIDs)
+                XCTAssertEqual(try outputs.map { Data(try XCTUnwrap($0["content"] as? String).utf8) }, expectedOutputs.map { Data($0.utf8) })
+                XCTAssertEqual(Data(try XCTUnwrap(outputs.first?["content"] as? String).utf8), Data(patchOutput.utf8))
+                XCTAssertTrue(prepared.tools.contains { $0.name == "browser_open" })
+                XCTAssertEqual(prepared.tools.contains { $0.name == "browser_fill" }, availability == .bound)
+                for checkpoint in checkpoints {
+                    for reminders in [[], [reminder]] as [[String]] {
+                        let appended = try APIModelResponseCodec.appendingHostDeveloperMessage(checkpoint,
+                            to: prepared, userInputs: reminders, purpose: .ordinaryInference)
+                        let afterBody = try XCTUnwrap(JSONSerialization.jsonObject(with: appended.body) as? [String: Any])
+                        let after = try XCTUnwrap(afterBody["messages"] as? [[String: Any]])
+                        XCTAssertEqual(Array(after.prefix(messages.count)) as NSArray, messages as NSArray)
+                        XCTAssertEqual(after.count, messages.count + 1 + reminders.count)
+                        XCTAssertEqual(after[messages.count]["role"] as? String, "system")
+                        XCTAssertEqual(Data(try XCTUnwrap(after[messages.count]["content"] as? String).utf8), Data(checkpoint.utf8))
+                        if let reminder = reminders.first {
+                            XCTAssertEqual(after.last?["role"] as? String, "user")
+                            XCTAssertEqual(Data(try XCTUnwrap(after.last?["content"] as? String).utf8), Data(reminder.utf8))
+                        }
+                        XCTAssertEqual(afterBody["tools"] as? NSArray, body["tools"] as? NSArray)
+                        XCTAssertEqual(appended.historyCallIDs, prepared.historyCallIDs)
+                        XCTAssertEqual(appended.allowedTools, prepared.allowedTools)
+                        XCTAssertEqual(appended.responseConfiguration as NSDictionary, prepared.responseConfiguration as NSDictionary)
+                    }
+                }
+                if availability == .unbound {
+                    let newFill: [String: Any] = ["role": "assistant", "tool_calls": [["id": "new-unoffered-fill", "type": "function",
+                        "function": ["name": hiddenFillName, "arguments": #"{"fill_ref":"bfill_current","text":"inert"}"#]]]]
+                    XCTAssertThrowsError(try decode(newFill, finish: "tool_calls", request: prepared, model: alibaba.models[0].id))
+                }
+            }
+            var orphan = history
+            let outputIndex = try XCTUnwrap(orphan.firstIndex { $0["type"] as? String == "custom_tool_call_output" })
+            orphan[outputIndex]["call_id"] = "foreign-patch-output"
+            XCTAssertThrowsError(try request(["tools": catalog, "input": orphan], provider: alibaba, toolNaming: naming)) {
+                XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidHistory)
+            }
+        }
+    }
+
+    func testAlibabaHostAndMaintenanceInstructionsKeepUserBoundaryAndResponsesUnchanged() throws {
+        let officialURL = URL(string: "https://ws-fixture123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1")!
+        let profiles: [(APIProviderDefinition, String)] = [
+            (.init(id: "custom", name: "Custom", baseURL: officialURL, wireAPI: .chatCompletions, models: provider.models), "system"),
+            (.init(id: "alibaba", name: "Alibaba", baseURL: provider.baseURL, wireAPI: .chatCompletions, models: provider.models), "developer"),
+            (.init(id: "custom", name: "Custom", baseURL: officialURL, wireAPI: .responses, models: provider.models), "developer")
+        ]
+        let host = "APP_RUNTIME_EXECUTION_CHECKPOINT\n  Trusted host cafe\u{301}.  "
+        let reminder = "  Exact user reminder.\nDo not send.  "
+        for (profile, expectedHostRole) in profiles {
+            for maintenance in [false, true] {
+                let tail: [String: Any] = ["role": "user", "content": "  Exact final maintenance or user instruction.\n"]
+                let input: [[String: Any]] = [["role": "developer", "content": "Initial developer text"],
+                    ["role": "user", "content": "Untrusted user text"], tail]
+                let original = try request(["input": input, "tools": []], provider: profile)
+                let adapted = try APIModelResponseCodec.appendingHostDeveloperMessage(host, to: original, userInputs: [reminder],
+                    purpose: maintenance ? .nativeCompaction : .ordinaryInference)
+                var before = try XCTUnwrap(JSONSerialization.jsonObject(with: original.body) as? [String: Any])
+                var after = try XCTUnwrap(JSONSerialization.jsonObject(with: adapted.body) as? [String: Any])
+                let key = profile.wireAPI == .chatCompletions ? "messages" : "input"
+                let beforeMessages = try XCTUnwrap(before.removeValue(forKey: key) as? [[String: Any]])
+                let afterMessages = try XCTUnwrap(after.removeValue(forKey: key) as? [[String: Any]])
+                XCTAssertEqual(before as NSDictionary, after as NSDictionary)
+                let hostIndex = beforeMessages.count - (maintenance ? 1 : 0)
+                XCTAssertEqual(Array(afterMessages.prefix(hostIndex)) as NSArray, Array(beforeMessages.prefix(hostIndex)) as NSArray)
+                XCTAssertEqual(afterMessages[hostIndex]["role"] as? String, expectedHostRole)
+                func text(_ message: [String: Any]) -> String? {
+                    (message["content"] as? String) ?? ((message["content"] as? [[String: Any]])?.first?["text"] as? String)
+                }
+                XCTAssertEqual(text(afterMessages[hostIndex]).map { Data($0.utf8) }, Data(host.utf8))
+                XCTAssertEqual(afterMessages[hostIndex + 1]["role"] as? String, "user")
+                XCTAssertEqual(text(afterMessages[hostIndex + 1]).map { Data($0.utf8) }, Data(reminder.utf8))
+                if maintenance { XCTAssertEqual(afterMessages.last as NSDictionary?, beforeMessages.last as NSDictionary?) }
+                if profile.wireAPI == .responses {
+                    XCTAssertEqual(beforeMessages as NSArray, input as NSArray)
+                    XCTAssertEqual(beforeMessages[0]["role"] as? String, "developer")
+                }
+                XCTAssertEqual(adapted.responseConfiguration as NSDictionary, original.responseConfiguration as NSDictionary)
+            }
+        }
+    }
+
     func testCerebrasQwenMovesOnlyInstructionRolesToOneOpeningPreamble() throws {
         let qwen = APIModelDefinition(id: "qwen-3.8-27b", name: "Qwen")
         let cerebras = APIProviderDefinition(id: "custom-name", name: "Cerebras", baseURL: URL(string: "https://api.cerebras.ai/v1")!, wireAPI: .chatCompletions, models: [qwen])
@@ -3299,4 +4083,513 @@ final class APIModelResponseCodecTests: XCTestCase {
         }
     }
 
+    private func literalPatchProvider(model: String = "qwen3.7-flash", base: String = "https://ws-fixture123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1") -> APIProviderDefinition {
+        .init(id: "fixture", name: "Fixture", baseURL: URL(string: base)!, wireAPI: .chatCompletions, models: [.init(id: model, name: "Fixture")])
+    }
+
+    // Exact grammar fixtures emitted by codex-rs/core/src/tools/handlers/apply_patch_spec.rs.
+    private func nativePatch(environments: Bool = false) -> [String: Any] {
+        var grammar = #"""
+        start: begin_patch hunk+ end_patch
+        begin_patch: "*** Begin Patch" LF
+        end_patch: "*** End Patch" LF?
+
+        hunk: add_hunk | delete_hunk | update_hunk
+        add_hunk: "*** Add File: " filename LF add_line+
+        delete_hunk: "*** Delete File: " filename LF
+        update_hunk: "*** Update File: " filename LF change_move? change?
+
+        filename: /(.+)/
+        add_line: "+" /(.*)/ LF -> line
+
+        change_move: "*** Move to: " filename LF
+        change: (change_context | change_line)+ eof_line?
+        change_context: ("@@" | "@@ " /(.+)/) LF
+        change_line: ("+" | "-" | " ") /(.*)/ LF
+        eof_line: "*** End of File" LF
+
+        %import common.LF
+        """# + "\n"
+        if environments {
+            grammar = grammar.replacingOccurrences(of: "start: begin_patch hunk+ end_patch", with: "start: begin_patch environment_id? hunk+ end_patch\nenvironment_id: \"*** Environment ID: \" filename LF")
+        }
+        return ["type": "custom", "name": "apply_patch", "description": "The `apply_patch` tool can be used to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.", "format": ["type": "grammar", "syntax": "lark", "definition": grammar]]
+    }
+
+    func testQwenAlibabaLiteralPatchOffersOnlyInputAndPreservesExactNativeInstructions() throws {
+        XCTAssertTrue(ComputaAgentInstructions.groqNativePolicyIsCurrent, "The original host policy variants must retain their exact bytes")
+        for naming: APIModelResponseCodec.ToolNaming in [.legacy, .semantic] {
+            for environments in [false, true] {
+                for namespaced in [false, true] {
+                    let patch = nativePatch(environments: environments)
+                    let definition: [String: Any] = namespaced
+                        ? ["type": "namespace", "name": "functions", "tools": [patch]] : patch
+                    for references in [false, true] {
+                        for browser in [false, true] {
+                            let native = ComputaAgentInstructions.developerInstructions(referenceTools: references, embeddedBrowserTools: browser)
+                            let input: [[String: Any]] = [
+                                ["role": "developer", "content": [["type": "input_text", "text": native], ["type": "input_text", "text": "KEEP_PERMISSION_PART"]]],
+                                ["role": "user", "content": native],
+                                ["role": "developer", "content": "quoted: " + native],
+                            ]
+                            for choice in ["auto", "none"] {
+                                let req = try request(["tools": [definition], "input": input, "tool_choice": choice],
+                                    provider: literalPatchProvider(), toolNaming: naming)
+                                let fn = try XCTUnwrap(wireFunctions(req).first)
+                                let schema = try XCTUnwrap(fn["parameters"] as? [String: Any])
+                                let properties = try XCTUnwrap(schema["properties"] as? [String: [String: Any]])
+                                XCTAssertEqual(Set(properties.keys), ["input"])
+                                XCTAssertEqual(properties["input"]?["type"] as? String, "string")
+                                XCTAssertEqual(properties["input"]?["pattern"] as? String, APIModelResponseCodec.alibabaLiteralPatchPattern)
+                                XCTAssertNil(fn["strict"], "No unverified provider function.strict flag is added")
+                                XCTAssertEqual(schema["required"] as? [String], ["input"])
+                                XCTAssertEqual(schema["additionalProperties"] as? Bool, false)
+                                XCTAssertNil(req.tools[0].patchProjection)
+                                XCTAssertTrue(req.tools[0].requiresUnambiguousArguments)
+                                let description = try XCTUnwrap(fn["description"] as? String)
+                                let grammar = try XCTUnwrap((patch["format"] as? [String: Any])?["definition"] as? String)
+                                XCTAssertTrue(description.hasSuffix(grammar))
+                                XCTAssertTrue(description.contains("decoded input string is passed unchanged"))
+                                XCTAssertTrue(description.contains(patch["description"] as! String))
+                                XCTAssertFalse(description.contains(AlibabaPatchProjection.argumentContract))
+                                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: req.body) as? [String: Any])
+                                let contents = try XCTUnwrap(body["messages"] as? [[String: Any]]).compactMap { $0["content"] as? String }
+                                XCTAssertTrue(contents.contains(native + "KEEP_PERMISSION_PART"))
+                                XCTAssertTrue(contents.contains(native))
+                                XCTAssertTrue(contents.contains("quoted: " + native))
+                                XCTAssertFalse(contents.contains { $0.contains(AlibabaPatchProjection.argumentDirections) })
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    func testQwenAlibabaLiteralPatchAmbiguityGuardRequiresExactAdmission() throws {
+        let bundled = nativePatch(), alibaba = literalPatchProvider()
+        for scoped in [false, true] {
+            for namespaced in [false, true] {
+                let patch = nativePatch(environments: scoped)
+                let definition: [String: Any] = namespaced ? ["type": "namespace", "name": "functions", "tools": [patch]] : patch
+                let req = try request(["tools": [definition]], provider: alibaba)
+                XCTAssertTrue(req.tools[0].requiresUnambiguousArguments)
+                XCTAssertNil(req.tools[0].patchProjection)
+            }
+        }
+        var drift = bundled, foreignDescription = bundled, deferred = bundled, strict = bundled
+        var grammar = try XCTUnwrap(drift["format"] as? [String: Any])
+        grammar["definition"] = (grammar["definition"] as! String) + " "
+        drift["format"] = grammar; foreignDescription["description"] = "Unrelated tool"
+        deferred["defer_loading"] = true; strict["strict"] = true
+        let foreignNamespace: [String: Any] = ["type": "namespace", "name": "editing", "tools": [bundled]]
+        for (definition, p) in [(drift, alibaba), (foreignDescription, alibaba), (deferred, alibaba), (strict, alibaba),
+                              (foreignNamespace, alibaba), (bundled, literalPatchProvider(model: "other")),
+                              (bundled, literalPatchProvider(base: "https://example.invalid/v1"))] {
+            let req = try request(["tools": [definition]], provider: p)
+            XCTAssertFalse(req.tools[0].requiresUnambiguousArguments)
+            XCTAssertNil(req.tools[0].patchProjection)
+            XCTAssertNil((req.tools[0].schema["properties"] as? [String: [String: Any]])?["input"]?["pattern"])
+            XCTAssertEqual(Set(try XCTUnwrap(req.tools[0].schema["properties"] as? [String: Any]).keys), ["input"])
+        }
+        let responses = APIProviderDefinition(id: alibaba.id, name: alibaba.name, baseURL: alibaba.baseURL,
+            wireAPI: .responses, models: alibaba.models)
+        let req = try request(["tools": [bundled]], provider: responses)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: req.body) as? [String: Any])
+        XCTAssertEqual(body["tools"] as? NSArray, [bundled] as NSArray)
+        XCTAssertFalse(req.tools[0].requiresUnambiguousArguments)
+    }
+
+    func testQwenAlibabaLiteralPatchForwardsEveryInputByteWithoutParsingOrRepair() throws {
+        for naming: APIModelResponseCodec.ToolNaming in [.legacy, .semantic] {
+            for environments in [false, true] {
+                let definition: [String: Any] = ["type": "namespace", "name": "functions", "tools": [nativePatch(environments: environments)]]
+                let req = try request(["tools": [definition]], provider: literalPatchProvider(), toolNaming: naming)
+                let environment = environments ? "*** Environment ID: test-environment\n" : ""
+                let compound = "*** Begin Patch\n" + environment
+                    + "*** Add File: /tmp/new.txt\n+literal 🙂 and \\ quote \"\n+\n"
+                    + "*** Delete File: /tmp/old.txt\n"
+                    + "*** Update File: /tmp/source.txt\n*** Move to: /tmp/moved.txt\n context  \n-old\n+new\n@@ named anchor\n literal @@\n+*** End Patch\n*** End of File\n*** End Patch\n"
+                let payloads = [compound,
+                    "*** Begin Patch\n*** Update File: /tmp/source\n@@\n-old\n+new  \n@@",
+                    "*** Begin Patch\n*** End Patch\n*** End Patch",
+                    "*** Begin Patch\r\n*** Add File: /tmp/crlf\r\n+é e\u{301} 🙂\r\n*** End Patch\r\n",
+                    #"{"operations":[{"delete":"/tmp/never-convert"}]}"#,
+                    #"{"duplicate":1,"duplicate":2}"#,
+                ]
+                for literal in payloads {
+                    let arguments = String(decoding: try JSONSerialization.data(withJSONObject: ["input": literal]), as: UTF8.self)
+                    let reply = try APIModelResponseCodec.decode(correctionResult(req, arguments: arguments), request: req)
+                    let item = try XCTUnwrap((reply.response["output"] as? [[String: Any]])?.first)
+                    XCTAssertEqual(item["type"] as? String, "custom_tool_call")
+                    XCTAssertEqual(item["name"] as? String, "apply_patch")
+                    XCTAssertEqual(item["namespace"] as? String, "functions")
+                    XCTAssertEqual(Data(try XCTUnwrap(item["input"] as? String).utf8), Data(literal.utf8))
+                }
+            }
+        }
+    }
+
+    func testQwenAlibabaLiteralPatchRejectsInvalidOrAmbiguousWrappersAtomically() throws {
+        for naming: APIModelResponseCodec.ToolNaming in [.legacy, .semantic] {
+            for scoped in [false, true] {
+                let req = try request(["tools": [nativePatch(environments: scoped)]], provider: literalPatchProvider(), toolNaming: naming)
+                let valid: [String: Any] = ["type": "function", "id": "valid-sibling", "function": [
+                    "name": req.tools[0].wireName, "arguments": #"{"input":"*** Begin Patch\n*** Delete File: /tmp/sibling\n*** End Patch"}"#]]
+                let invalid = ["{}", #"{"input":17}"#, #"{"input":{"nested":"object"}}"#,
+                    #"{"operations":"PRIVATE"}"#, #"{"operations":[{"delete":"PRIVATE"}]}"#,
+                    #"{"input":"literal","operations":[]}"#, #"{"input":"literal","extra":true}"#,
+                    #"{"input":"first","input":"different"}"#]
+                for arguments in invalid {
+                    let result = try correctionResult(req, arguments: arguments, additionalCalls: [valid])
+                    guard case .argumentsRejected = try APIModelResponseCodec.decodeForCorrection(result, request: req) else {
+                        return XCTFail("Invalid wrappers must not release even a valid sibling")
+                    }
+                    XCTAssertThrowsError(try APIModelResponseCodec.decode(result, request: req)) {
+                        XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+                    }
+                }
+                var observed: APIModelResponseCodec.ArgumentValidationDiagnostic?
+                _ = try APIModelResponseCodec.decodeForCorrection(correctionResult(req, arguments: invalid.last!), request: req,
+                    onArgumentRejection: { observed = $0 })
+                XCTAssertEqual(observed?.reason, .invalidJSON)
+                XCTAssertEqual(observed?.rejectedCount, 1)
+            }
+        }
+    }
+
+    func testQwenAlibabaLiteralPatchCorrectionPreservesHistoryPolicyAndOnlyTheLiteralSchema() throws {
+        let failed = "*** Begin Patch\n*** Update File: /tmp/observed\n@@\n-old\n+new  \n@@"
+        let history: [[String: Any]] = [
+            ["role": "user", "content": "Read observed source before an authorized changed retry."],
+            ["type": "custom_tool_call", "call_id": "old-patch", "name": "apply_patch", "input": failed],
+            ["type": "custom_tool_call_output", "call_id": "old-patch", "output": "native failure: missing footer; no successful mutation confirmed"],
+            ["role": "user", "content": "Continue within the current scope."],
+        ]
+        for naming: APIModelResponseCodec.ToolNaming in [.legacy, .semantic] {
+            let req = try request(["tools": [nativePatch()], "input": history], provider: literalPatchProvider(), toolNaming: naming)
+            let rejected = try correctionResult(req, arguments: #"{"input":17}"#)
+            guard case .argumentsRejected(_, let details) = try APIModelResponseCodec.decodeForCorrection(rejected, request: req) else {
+                return XCTFail("Expected a rejected wrapper without native dispatch")
+            }
+            let (records, payload) = try schemaFeedback(req, details: details)
+            let record = try XCTUnwrap(records.first)
+            XCTAssertEqual(record["schema_path"] as? [String], ["properties", "input"])
+            XCTAssertEqual(record["expected_types"] as? [String], ["string"])
+            XCTAssertNil(record["typed_patch_contract"]); XCTAssertNil(record["example_arguments_template"])
+            XCTAssertFalse(payload.contains("operations"))
+            let corrected = try APIModelResponseCodec.correctiveRequest(req, rejectionDetails: details)
+            let before = try XCTUnwrap(JSONSerialization.jsonObject(with: req.body) as? [String: Any])
+            let after = try XCTUnwrap(JSONSerialization.jsonObject(with: corrected.body) as? [String: Any])
+            XCTAssertEqual(before["tools"] as? NSArray, after["tools"] as? NSArray)
+            let beforeMessages = try XCTUnwrap(before["messages"] as? [[String: Any]])
+            let afterMessages = try XCTUnwrap(after["messages"] as? [[String: Any]])
+            XCTAssertEqual(Array(beforeMessages.dropFirst()) as NSArray, Array(afterMessages.dropFirst()) as NSArray)
+            let oldCall = try XCTUnwrap(beforeMessages.compactMap { $0["tool_calls"] as? [[String: Any]] }.first?.first)
+            let oldArguments = try XCTUnwrap((oldCall["function"] as? [String: Any])?["arguments"] as? String)
+            let oldWrapper = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(oldArguments.utf8)) as? [String: String])
+            XCTAssertEqual(Set(oldWrapper.keys), ["input"])
+            XCTAssertEqual(Data(try XCTUnwrap(oldWrapper["input"]).utf8), Data(failed.utf8))
+            XCTAssertEqual(beforeMessages.first { $0["tool_call_id"] as? String == "old-patch" }?["content"] as? String,
+                "native failure: missing footer; no successful mutation confirmed")
+            XCTAssertEqual(req.historyCallIDs, corrected.historyCallIDs)
+            XCTAssertEqual(req.allowedTools, corrected.allowedTools)
+            XCTAssertEqual(req.maximumCalls, corrected.maximumCalls)
+            XCTAssertTrue(corrected.tools[0].requiresUnambiguousArguments)
+            let literal = "*** Begin Patch\n*** Delete File: /tmp/observed\n*** End Patch"
+            let arguments = String(decoding: try JSONSerialization.data(withJSONObject: ["input": literal]), as: UTF8.self)
+            let reply = try APIModelResponseCodec.decode(correctionResult(corrected, arguments: arguments), request: corrected)
+            XCTAssertEqual((reply.response["output"] as? [[String: Any]])?.first?["input"] as? String, literal)
+            XCTAssertThrowsError(try APIModelResponseCodec.decode(correctionResult(corrected, arguments: #"{"operations":[]}"#), request: corrected))
+            let missing = try rejectedDetails(req, arguments: #"{"operations":"PRIVATE_REJECTED"}"#)
+            let (missingRecords, missingPayload) = try schemaFeedback(req, details: missing)
+            XCTAssertFalse(missingPayload.contains("PRIVATE_REJECTED"))
+            XCTAssertFalse(missingRecords.contains { $0["typed_patch_contract"] != nil || $0["example_arguments_template"] != nil })
+        }
+    }
+
+    func testQwenAlibabaLiteralPatchProbeReportsLiteralInputWithoutGrantingTypedAuthority() throws {
+        for environments in [false, true] {
+            let req = try request(["tools": [nativePatch(environments: environments)]], provider: literalPatchProvider())
+            let details = try rejectedDetails(req, arguments: #"{"input":17,"PRIVATE":"PRIVATE"}"#)
+            let detail = try XCTUnwrap(details.first), probe = try XCTUnwrap(detail.patchProbe)
+            XCTAssertNil(detail.patchLocation)
+            XCTAssertEqual(probe.tool, .namedApplyPatch)
+            XCTAssertEqual(probe.projection, .literalInput)
+            XCTAssertEqual(probe.status, .nonLocal, "A malformed literal wrapper is not the admitted pattern mismatch")
+            XCTAssertTrue(probe.isConsistent)
+            XCTAssertFalse(String(decoding: try JSONEncoder().encode(probe), as: UTF8.self).contains("PRIVATE"))
+            var withoutProbe = details; withoutProbe[0].patchProbe = nil
+            XCTAssertEqual(try APIModelResponseCodec.correctiveRequest(req, rejectionDetails: details).body,
+                           try APIModelResponseCodec.correctiveRequest(req, rejectionDetails: withoutProbe).body)
+        }
+    }
+
+    func testQwenAlibabaLiteralPatchStreamingReleasesExactInputAndHonorsCurrentPolicy() throws {
+        let patch = nativePatch(), p = literalPatchProvider()
+        let prepared = try request(["tools": [patch]], provider: p, toolNaming: .semantic)
+        let literal = "*** Begin Patch\n*** Add File: /tmp/new\n+literal 🙂 and \\ quote \"  \n+\n*** End Patch\n"
+        let arguments = String(decoding: try JSONSerialization.data(withJSONObject: ["input": literal]), as: UTF8.self)
+        let middle = arguments.index(arguments.startIndex, offsetBy: arguments.count / 2)
+        let fragments = [String(arguments[..<middle]), String(arguments[middle...])]
+        let chunks: [[String: Any]] = [
+            ["choices": [["index": 0, "delta": ["role": "assistant", "tool_calls": [["index": 0, "id": "fresh", "type": "function", "function": ["name": prepared.tools[0].wireName, "arguments": fragments[0]]]]], "finish_reason": NSNull()]]],
+            ["choices": [["index": 0, "delta": ["tool_calls": [["index": 0, "function": ["arguments": fragments[1]]]]], "finish_reason": NSNull()]]],
+            ["choices": [["index": 0, "delta": [:], "finish_reason": "tool_calls"]]],
+            ["choices": [], "usage": ["prompt_tokens": 5, "completion_tokens": 4, "total_tokens": 9]]]
+        var upstream = Data()
+        for chunk in chunks {
+            let object = chunk.merging(["id": "stream-fixture", "model": p.models[0].id]) { first, _ in first }
+            upstream.append(Data("data: ".utf8))
+            upstream.append(try JSONSerialization.data(withJSONObject: object))
+            upstream.append(Data("\n\n".utf8))
+        }
+        XCTAssertThrowsError(try APIModelResponseCodec.decode(.init(body: upstream, contentType: "text/event-stream"), request: prepared))
+        upstream.append(Data("data: [DONE]\n\n".utf8))
+        let result = APIProviderHTTPClient.Result(body: upstream, contentType: "text/event-stream")
+        let reply = try APIModelResponseCodec.decode(result, request: prepared)
+        let bytes = try APIModelResponseCodec.encode(reply, stream: true)
+        let events = try String(decoding: bytes, as: UTF8.self).components(separatedBy: "\n").compactMap { line -> [String: Any]? in
+            guard line.hasPrefix("data: "), line != "data: [DONE]" else { return nil }
+            return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.dropFirst(6).utf8)) as? [String: Any])
+        }
+        XCTAssertEqual(events.filter { $0["type"] as? String == "response.custom_tool_call_input.delta" }.compactMap { $0["delta"] as? String }, [literal])
+        XCTAssertEqual(events.filter { $0["type"] as? String == "response.custom_tool_call_input.done" }.compactMap { $0["input"] as? String }, [literal])
+        let denied = try request(["tools": [patch], "tool_choice": "none"], provider: p, toolNaming: .semantic)
+        XCTAssertThrowsError(try APIModelResponseCodec.decode(result, request: denied)) {
+            XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
+        }
+    }
+
+    private var observed446TrailingEmptyPatch: String { "*** Begin Patch\n*** Update File: /Users/ahmed/Documents/Codex/2026-10-05/testing-testing-okay-the-mic-works/work/all-models-20261102/alibaba/coding446/case/coding/reconcile.py\n@@\n def summarize(items):\n     \"\"\"Aggregate normalized SKUs, quantities, and exact integer-cent subtotals.\"\"\"\n     grouped = {}\n     for item in items:\n         sku = item[\"sku\"].strip().upper()\n-        grouped[sku] = {\n-            \"sku\": sku,\n-            \"quantity\": item[\"quantity\"],\n-            \"subtotal_cents\": item[\"quantity\"] * item[\"unit_cents\"],\n-        }\n+        if sku not in grouped:\n+            grouped[sku] = {\"sku\": sku, \"quantity\": 0, \"subtotal_cents\": 0}\n+        grouped[sku][\"quantity\"] += item[\"quantity\"]\n+        grouped[sku][\"subtotal_cents\"] += item[\"quantity\"] * item[\"unit_cents\"]\n     rows = [grouped[sku] for sku in sorted(grouped)]\n     return {\"items\": rows, \"total_cents\": sum(row[\"subtotal_cents\"] for row in rows)}\n@@\n*** End Patch" }
+
+    func testAlibabaLiteralPatternRejectsObservedCanonicalEmptyHunkBeforeAnySibling() throws {
+        for naming: APIModelResponseCodec.ToolNaming in [.legacy, .semantic] {
+            for environments in [false, true] {
+                let req = try request(["tools": [["type": "namespace", "name": "functions", "tools": [nativePatch(environments: environments)]]]], provider: literalPatchProvider(), toolNaming: naming)
+                let sibling: [String: Any] = ["id": "valid-sibling", "type": "function", "function": ["name": req.tools[0].wireName,
+                    "arguments": #"{"input":"*** Begin Patch\n*** Delete File: /synthetic/sibling\n*** End Patch"}"#]]
+                for literal in [observed446TrailingEmptyPatch, observed446TrailingEmptyPatch + "\n"] {
+                    let arguments = String(decoding: try JSONSerialization.data(withJSONObject: ["input": literal]), as: UTF8.self)
+                    var observed: APIModelResponseCodec.ArgumentValidationDiagnostic?
+                    let result = try correctionResult(req, arguments: arguments, additionalCalls: [sibling])
+                    guard case .argumentsRejected(_, let details) = try APIModelResponseCodec.decodeForCorrection(result, request: req,
+                        onArgumentRejection: { observed = $0 }) else { return XCTFail("No native call or valid sibling may be released") }
+                    XCTAssertEqual(observed?.reason, .schemaMismatch)
+                    XCTAssertEqual(observed?.callCount, 2); XCTAssertEqual(observed?.rejectedCount, 1)
+                    XCTAssertEqual(details.count, 1); XCTAssertEqual(details.first?.constraint, .schemaMismatch)
+                    XCTAssertEqual(details.first?.path, [.property("input")])
+                    XCTAssertEqual(details.first?.patchProbe?.projection, .literalInput)
+                    XCTAssertEqual(details.first?.patchProbe?.status, .literalInputPatternMismatch)
+                    XCTAssertThrowsError(try APIModelResponseCodec.decode(result, request: req)) {
+                        XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidArguments)
+                    }
+                }
+            }
+        }
+    }
+
+    func testAlibabaLiteralPatternProbeRejectsFalseAttributionAndRoundTripsFiniteRecord() throws {
+        typealias C = APIModelResponseCodec
+        typealias F = APIModelCorrectionAccounting.FirstValidation
+        let p = literalPatchProvider()
+        let req = try request(["tools": [nativePatch()]], provider: p, toolNaming: .semantic)
+        let literal = "*** Begin Patch\n*** Update File: /synthetic/file\n@@\n-old\n+PRIVATE_LITERAL_PATCH_CONTENT\n@@\n*** End Patch"
+        func arguments(_ value: [String: Any]) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), as: UTF8.self)
+        }
+        let bad = try arguments(["input": literal])
+        var observed: C.ArgumentValidationDiagnostic?
+        guard case .argumentsRejected(_, let details) = try C.decodeForCorrection(correctionResult(req, arguments: bad), request: req,
+            onArgumentRejection: { observed = $0 }) else { return XCTFail("The entire invalid response must remain rejected") }
+        let detail = try XCTUnwrap(details.first), probe = try XCTUnwrap(detail.patchProbe)
+        XCTAssertEqual(details.count, 1)
+        XCTAssertEqual(detail.constraint, .schemaMismatch)
+        XCTAssertEqual(detail.path, [.property("input")])
+        XCTAssertNil(detail.patchLocation)
+        XCTAssertEqual(probe, .init(tool: .namedApplyPatch, projection: .literalInput, path: .input, actual: .string,
+            status: .literalInputPatternMismatch, outer: [.input], keys: .one, operations: .missing))
+        XCTAssertTrue(probe.isConsistent)
+        let observation = try XCTUnwrap(observed)
+        let finite = try XCTUnwrap(F(observation))
+        let encoded = try JSONEncoder().encode(finite)
+        XCTAssertEqual(try JSONDecoder().decode(F.self, from: encoded), finite)
+        let text = String(decoding: encoded, as: UTF8.self)
+        XCTAssertTrue(text.contains("literal_input_pattern_mismatch"))
+        XCTAssertFalse(text.contains("PRIVATE_LITERAL_PATCH_CONTENT"))
+        XCTAssertFalse(text.contains("/synthetic/file"))
+
+        let crossed = C.ArgumentValidationDiagnostic(reason: .schemaMismatch,
+            schemaFailures: [.init(toolIndex: 0, constraint: .typeMismatch, patchProbe: probe)],
+            callCount: 1, rejectedCount: 1, envelopeShapeValid: true, unambiguousJSON: true,
+            streamShapeAndUsageValid: true, knownUsage: true, correctionEligible: true)
+        XCTAssertNil(F(crossed))
+        var envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        var failures = try XCTUnwrap(envelope["schemaFailures"] as? [[String: Any]])
+        failures[0]["constraint"] = "type_mismatch"
+        envelope["schemaFailures"] = failures
+        XCTAssertThrowsError(try JSONDecoder().decode(F.self, from: JSONSerialization.data(withJSONObject: envelope)))
+        let probeObject = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(probe)) as? [String: Any])
+        let invalidProbeFields: [(String, Any)] = [("tool", "other"), ("projection", "local"), ("path", "operations"),
+            ("actual", "integer"), ("outer", ["input", "other"]), ("keys", "multiple"), ("operations", "array")]
+        for (key, value) in invalidProbeFields {
+            var changed = probeObject; changed[key] = value
+            XCTAssertThrowsError(try JSONDecoder().decode(C.PatchSchemaProbe.self, from: JSONSerialization.data(withJSONObject: changed)), key)
+        }
+
+        let foreign = try request(["tools": [["type": "function", "name": "apply_patch", "parameters": req.tools[0].schema]]],
+            provider: p, toolNaming: .semantic)
+        let otherFailures = try [rejectedDetails(foreign, arguments: bad),
+            rejectedDetails(req, arguments: arguments(["input": literal, "extra": true])),
+            rejectedDetails(req, arguments: #"{"input":17}"#), rejectedDetails(req, arguments: "{}")]
+        for failures in otherFailures {
+            XCTAssertFalse(failures.isEmpty)
+            XCTAssertFalse(failures.contains { $0.patchProbe?.status == .literalInputPatternMismatch })
+        }
+        let withoutPattern = try request(["tools": [nativePatch()]], provider: literalPatchProvider(model: "other"), toolNaming: .semantic)
+        XCTAssertNil((withoutPattern.tools[0].schema["properties"] as? [String: [String: Any]])?["input"]?["pattern"])
+        let legacy = try C.decode(correctionResult(withoutPattern, arguments: bad), request: withoutPattern)
+        let item = try XCTUnwrap((legacy.response["output"] as? [[String: Any]])?.first)
+        XCTAssertEqual(Data(try XCTUnwrap(item["input"] as? String).utf8), Data(literal.utf8),
+            "A diagnostic must not extend the admission pattern to an unrelated tool profile")
+
+        let duplicate = String(bad.dropLast()) + #", "input": "other"}"#
+        var duplicateObservation: C.ArgumentValidationDiagnostic?
+        guard case .argumentsRejected(_, let duplicateDetails) = try C.decodeForCorrection(correctionResult(req, arguments: duplicate),
+            request: req, onArgumentRejection: { duplicateObservation = $0 }) else { return XCTFail("Duplicate input is ambiguous") }
+        XCTAssertEqual(duplicateObservation?.reason, .invalidJSON)
+        XCTAssertNil(duplicateObservation?.schemaFailures)
+        XCTAssertTrue(duplicateDetails.isEmpty)
+    }
+
+    func testAlibabaLiteralPatternPreservesSourcePrefixesAndUninterceptedInputBytes() throws {
+        let req = try request(["tools": [nativePatch()]], provider: literalPatchProvider())
+        let prefix = "*** Begin Patch\n*** Update File: /synthetic/file\n@@\n-old\n+new\n"
+        let literals = [
+            prefix + "*** End Patch", prefix + "*** End Patch\n",
+            prefix + "+@@\n*** End Patch", prefix + "-@@\n*** End Patch", prefix + " @@\n*** End Patch",
+            prefix + "@@\n \n*** End Patch", prefix + "@@ named anchor\n context\n*** End Patch",
+            "*** Begin Patch\n*** Add File: /synthetic/file\n+@@\n+*** End Patch\n*** End Patch",
+            observed446TrailingEmptyPatch + "\n\n", // Out of this narrow pattern, not a native grammar pass.
+            observed446TrailingEmptyPatch.replacingOccurrences(of: "\n", with: "\r\n"),
+            observed446TrailingEmptyPatch + " ", observed446TrailingEmptyPatch + "\u{2028}",
+        ]
+        for literal in literals {
+            let arguments = String(decoding: try JSONSerialization.data(withJSONObject: ["input": literal]), as: UTF8.self)
+            let reply = try APIModelResponseCodec.decode(correctionResult(req, arguments: arguments), request: req)
+            let item = try XCTUnwrap((reply.response["output"] as? [[String: Any]])?.first)
+            XCTAssertEqual(Data(try XCTUnwrap(item["input"] as? String).utf8), Data(literal.utf8))
+        }
+    }
+
+    func testAlibabaLiteralPatternCorrectionUsesStaticGuidanceAndPreservesFailedHistory() throws {
+        let failure = "apply_patch verification failed: invalid hunk at line 21, Update hunk does not contain any lines"
+        let history: [[String: Any]] = [["role": "user", "content": "Authorized coding fixture"],
+            ["type": "custom_tool_call", "name": "apply_patch", "call_id": "failed446", "input": observed446TrailingEmptyPatch],
+            ["type": "custom_tool_call_output", "call_id": "failed446", "output": failure],
+            ["role": "user", "content": "Use current observed source and preserve completed outcomes."]]
+        for naming: APIModelResponseCodec.ToolNaming in [.legacy, .semantic] {
+            let req = try request(["tools": [nativePatch()], "input": history], provider: literalPatchProvider(), toolNaming: naming)
+            let bad = String(decoding: try JSONSerialization.data(withJSONObject: ["input": observed446TrailingEmptyPatch]), as: UTF8.self)
+            let details = try rejectedDetails(req, arguments: bad)
+            let (records, payload) = try schemaFeedback(req, details: details)
+            let record = try XCTUnwrap(records.first)
+            XCTAssertEqual(record["constraint"] as? String, "schema_mismatch")
+            XCTAssertEqual(record["schema_path"] as? [String], ["properties", "input"])
+            XCTAssertEqual(record["expected_types"] as? [String], ["string"])
+            XCTAssertEqual(record["literal_input_rule"] as? String, "no_empty_trailing_update_hunk")
+            XCTAssertTrue((record["literal_input_guidance"] as? String ?? "").contains("following source-prefixed lines"))
+            XCTAssertNil(record["typed_patch_contract"]); XCTAssertNil(record["example_arguments_template"])
+            XCTAssertFalse(payload.contains("/Users/ahmed/")); XCTAssertFalse(payload.contains("reconcile.py"))
+            XCTAssertLessThanOrEqual(payload.utf8.count, 1_536)
+            let corrected = try APIModelResponseCodec.correctiveRequest(req, rejectionDetails: details)
+            let before = try XCTUnwrap(JSONSerialization.jsonObject(with: req.body) as? [String: Any])
+            let after = try XCTUnwrap(JSONSerialization.jsonObject(with: corrected.body) as? [String: Any])
+            XCTAssertEqual(before["tools"] as? NSArray, after["tools"] as? NSArray)
+            let a = try XCTUnwrap(before["messages"] as? [[String: Any]])
+            let b = try XCTUnwrap(after["messages"] as? [[String: Any]])
+            XCTAssertEqual(Array(a.dropFirst()) as NSArray, Array(b.dropFirst()) as NSArray)
+            let call = try XCTUnwrap(a.compactMap { $0["tool_calls"] as? [[String: Any]] }.first?.first)
+            let args = try XCTUnwrap((call["function"] as? [String: Any])?["arguments"] as? String)
+            let old = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(args.utf8)) as? [String: String])
+            XCTAssertEqual(Data(try XCTUnwrap(old["input"]).utf8), Data(observed446TrailingEmptyPatch.utf8))
+            XCTAssertEqual(a.first { $0["tool_call_id"] as? String == "failed446" }?["content"] as? String, failure)
+            XCTAssertEqual(req.allowedTools, corrected.allowedTools); XCTAssertEqual(req.historyCallIDs, corrected.historyCallIDs)
+            XCTAssertEqual(req.requiredTool, corrected.requiredTool); XCTAssertEqual(req.maximumCalls, corrected.maximumCalls)
+            let valid = "*** Begin Patch\n*** Update File: /synthetic/file\n@@\n-old\n+new\n*** End Patch"
+            let next = String(decoding: try JSONSerialization.data(withJSONObject: ["input": valid]), as: UTF8.self)
+            let reply = try APIModelResponseCodec.decode(correctionResult(corrected, arguments: next), request: corrected)
+            XCTAssertEqual((reply.response["output"] as? [[String: Any]])?.first?["input"] as? String, valid)
+            XCTAssertThrowsError(try APIModelResponseCodec.decode(correctionResult(corrected, arguments: bad), request: corrected))
+        }
+    }
+
+    func testAlibabaLiteralPatternFeedbackRefusesForeignAuthorityAndWrongLocalization() throws {
+        let req = try request(["tools": [nativePatch()]], provider: literalPatchProvider(), toolNaming: .semantic)
+        let bad = String(decoding: try JSONSerialization.data(withJSONObject: ["input": observed446TrailingEmptyPatch]), as: UTF8.self)
+        let details = try rejectedDetails(req, arguments: bad), real = try XCTUnwrap(details.first)
+        let denied = try request(["tools": [nativePatch()], "tool_choice": "none"], provider: literalPatchProvider(), toolNaming: .semantic)
+        let foreign = try request(["tools": [["type": "function", "name": "apply_patch", "parameters": req.tools[0].schema]]], provider: literalPatchProvider(), toolNaming: .semantic)
+        let wrongWire = APIModelResponseCodec.ArgumentRejectionDetail(toolIndex: 0, wireName: "PRIVATE_UNOFFERED", constraint: .schemaMismatch, path: [.property("input")])
+        let wrongPath = APIModelResponseCodec.ArgumentRejectionDetail(toolIndex: 0, wireName: real.wireName, constraint: .schemaMismatch, path: [.property("PRIVATE_UNKNOWN")])
+        let wrongConstraint = APIModelResponseCodec.ArgumentRejectionDetail(toolIndex: 0, wireName: real.wireName, constraint: .typeMismatch, path: [.property("input")])
+        for (candidate, failures) in [(denied, details), (foreign, try rejectedDetails(foreign, arguments: bad)),
+            (req, [wrongWire]), (req, [wrongPath]), (req, [wrongConstraint]), (req, details + details),
+            (req, try rejectedDetails(req, arguments: "{}")), (req, try rejectedDetails(req, arguments: #"{"input":17}"#))] {
+            let (records, payload) = try schemaFeedback(candidate, details: failures)
+            XCTAssertFalse(records.contains { $0["literal_input_rule"] != nil || $0["literal_input_guidance"] != nil })
+            XCTAssertFalse(payload.contains("PRIVATE_"))
+        }
+        XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(correctionResult(denied, arguments: bad), request: denied)) {
+            XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
+        }
+        let unknown: [String: Any] = ["id": "unoffered", "type": "function", "function": ["name": "PRIVATE_UNOFFERED", "arguments": "{}"]]
+        XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(correctionResult(req, arguments: bad, additionalCalls: [unknown]), request: req)) {
+            XCTAssertEqual($0 as? APIModelResponseCodec.Failure, .invalidTool)
+        }
+    }
+
+    func testAlibabaLiteralPatternCorrectionKeepsOriginalBriefAtTheRequestByteBoundary() throws {
+        func sized(_ count: Int) throws -> APIModelResponseCodec.Request {
+            try request(["tools": [nativePatch()], "input": [["role": "user", "content": String(repeating: "x", count: count)]]], provider: literalPatchProvider(), toolNaming: .semantic)
+        }
+        let small = try sized(0)
+        let bad = String(decoding: try JSONSerialization.data(withJSONObject: ["input": observed446TrailingEmptyPatch]), as: UTF8.self)
+        let details = try rejectedDetails(small, arguments: bad)
+        var brief = try XCTUnwrap(schemaFeedback(small, details: details).0.first)
+        XCTAssertNotNil(brief.removeValue(forKey: "literal_input_rule"))
+        XCTAssertNotNil(brief.removeValue(forKey: "literal_input_guidance"))
+        let json = try JSONSerialization.data(withJSONObject: [brief], options: [.sortedKeys, .withoutEscapingSlashes])
+        let suffix = "\n\n" + APIModelResponseCodec.schemaFeedbackMarker + String(decoding: json, as: UTF8.self)
+        let needed = 2 * (APIModelResponseCodec.correctiveFeedback.utf8.count + suffix.utf8.count) + 64
+        let boundary = try sized(2_000_000 - needed - small.body.count)
+        XCTAssertEqual(boundary.body.count + needed, 2_000_000)
+        XCTAssertEqual(try schemaFeedback(boundary, details: details).0 as NSArray, [brief] as NSArray)
+        let beyond = try sized(2_000_000 - needed - small.body.count + 1)
+        XCTAssertTrue(try schemaFeedback(beyond, details: details).0.isEmpty)
+    }
+
+    func testAlibabaLiteralPatternStreamRejectsBeforeAnyNativeInputPublication() throws {
+        let p = literalPatchProvider(), req = try request(["tools": [nativePatch()]], provider: literalPatchProvider(), toolNaming: .semantic)
+        let arguments = String(decoding: try JSONSerialization.data(withJSONObject: ["input": observed446TrailingEmptyPatch]), as: UTF8.self)
+        let middle = arguments.index(arguments.startIndex, offsetBy: arguments.count / 2)
+        let parts = [String(arguments[..<middle]), String(arguments[middle...])]
+        let chunks: [[String: Any]] = [
+            ["choices": [["index": 0, "delta": ["role": "assistant", "tool_calls": [["index": 0, "id": "stream-pattern", "type": "function", "function": ["name": req.tools[0].wireName, "arguments": parts[0]]]]], "finish_reason": NSNull()]]],
+            ["choices": [["index": 0, "delta": ["tool_calls": [["index": 0, "function": ["arguments": parts[1]]]]], "finish_reason": NSNull()]]],
+            ["choices": [["index": 0, "delta": [:], "finish_reason": "tool_calls"]]],
+            ["choices": [], "usage": ["prompt_tokens": 5, "completion_tokens": 4, "total_tokens": 9]]]
+        var data = Data()
+        for chunk in chunks {
+            data.append(Data("data: ".utf8))
+            data.append(try JSONSerialization.data(withJSONObject: chunk.merging(["id": "literal-pattern", "model": p.models[0].id]) { old, _ in old }))
+            data.append(Data("\n\n".utf8))
+        }
+        XCTAssertThrowsError(try APIModelResponseCodec.decodeForCorrection(.init(body: data, contentType: "text/event-stream"), request: req))
+        data.append(Data("data: [DONE]\n\n".utf8))
+        let result = APIProviderHTTPClient.Result(body: data, contentType: "text/event-stream")
+        guard case .argumentsRejected(_, let details) = try APIModelResponseCodec.decodeForCorrection(result, request: req) else { return XCTFail("No reply may publish native input") }
+        XCTAssertEqual(details.first?.path, [.property("input")])
+        XCTAssertThrowsError(try APIModelResponseCodec.decode(result, request: req))
+    }
 }

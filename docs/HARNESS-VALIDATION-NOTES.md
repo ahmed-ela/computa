@@ -5338,3 +5338,65 @@ Receipts (SHA-256):
 - Finite log: ad2ea1381e0206bdd9b11f7720c643e079b9a1869c7a6f013f87c70432db30c6.
 - Failed build-70 archive receipt: 997974c21fea98343c8bbab01434df1f597e0a80d57edb8f87ba8f28d395b707.
 - Failed build-70 ZIP: fd7ce7878bbf506545e2e9ca0b552dc8c7d2bda249bcfb5d3014ce29c5f12792.
+
+### Build 370 sidebar completion persistence
+
+On November 1, 2026, installed build 370 (`d87792bc`) passed one controlled
+completion/read-state sequence. The later `f928209d` change was documentation
+only. The synthetic `SIDEBAR370-PERSIST-14DA90` task completed with its exact
+expected answer and zero tool calls. Its persisted unread flag was `true` in
+PID 74402, remained `true` after restart into PID 85890, and became `false`
+after the operator opened that exact completed task. All three observations
+refer to the same completion turn and installed artifact; the store hash was
+unchanged across restart and changed after opening.
+
+The operator separately observed the blue unread indicator after restart,
+then the accessibility label change from `Completed, unread` to `Completed`
+after selecting the task. Retained screenshots include
+`live-unread-after-restart370.png` and `live-read-after-opening370.png`.
+The disk audit establishes persisted state and process identity; the visual
+and selection observations are operator evidence, not inferred from JSON.
+
+Evidence is retained privately under `work/sidebar-activity-20261101/`.
+`sidebar370-persistence-audit.json` has SHA-256
+`a8f6244a52208477ba2379628598a1dc1b1a3e5f117507dcf5b36c2f342b1a20`;
+its three snapshot hashes were independently checked against their files.
+This result covers the observed completion, restart and read sequence only;
+it does not establish timer accuracy, every concurrent-task/window case, or
+broader website-provider qualification.
+
+### November 1, 2026 — Claude failure diagnostics for build372
+
+A fresh Fable 5.1 exact-marker task on installed build370 passed model selection
+and submission verification, then failed conversation ownership with
+`ownership_reason=user_count` after 2.346 seconds. It returned no answer and
+executed no tools. Cleanup remained unconfirmed. The exact task, journal and
+failure screenshot were retained before the user-approved build371 restart;
+the prompt was not replayed. The last healthy inspection saw one user message,
+but the failed read did not record its actual count. Zero or duplicate messages
+and a transient rendering cause therefore remain unproved.
+
+The count diagnostic now records the count already used by that failed guard,
+its saturation flag and bounded expected counts. It performs no additional DOM
+read and does not access uninitialized first-message state. Native logging
+accepts only this exact finite shape on Claude's existing `user_count` failure;
+its original error and failed-cleanup behavior remain unchanged. Native action
+context distinguishes the initial failure from a later cleanup inspection.
+
+The separate Opus 5 remount diagnostic records finite completion structure at
+entry and failure exit of the existing detached-header wait. It also records
+bounded elapsed time and predicate observations, not observer wake counts.
+These are diagnostic rereads, never current-model or completion authority.
+The original 1.8-second deadline, ownership checks and action count are retained.
+The clipped-host rendering experiment failed its unoccluded-window precondition
+in all three phases and supplies no causal conclusion.
+
+The remount change passed 957 cross-provider JavaScript tests. The count change
+passed 207 Claude tests; five focused native tests passed, including real WebKit
+ownership-loss, remount and cleanup regressions. Nine versioning tests passed.
+These changes are prepared for build372; installed build371 does not contain
+them. Full Claude qualification remains incomplete and tracked in issue #15.
+
+Private evidence: `work/claude-qualification-20261031/evidence/fable51-marker370/`,
+`claude-remount371-js-validation-a.json`, `claude-user-count371-js-validation-a.json`
+and `claude-diagnostics372-native-test.log`.

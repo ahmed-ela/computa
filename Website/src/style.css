@@ -16,3 +16,25 @@ img {
   width: min(70vw, 320px);
   height: auto;
 }
+
+main {
+  text-align: center;
+  font-family: system-ui, sans-serif;
+  color: #262626;
+}
+
+main img { margin: 0 auto 2rem; }
+
+main a { color: inherit; }
+
+main a[href="/download"] {
+  display: inline-block;
+  padding: .75rem 1.25rem;
+  border-radius: .5rem;
+  color: white;
+  background: #242424;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+main p, .notes { font-size: .875rem; }

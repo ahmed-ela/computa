@@ -9,6 +9,12 @@ enum APIModelResponseCodec {
     enum ToolNaming: String, Codable, Sendable {
         case legacy = "legacy_index_v1"
         case semantic = "semantic_v2"
+        case alibabaShort = "alibaba_short_v1"
+
+        init(selection: APIProviderCatalog.Selection, fresh: Bool) {
+            guard fresh else { self = .legacy; return }
+            self = selection.isAlibabaQwen37FlashChat ? .alibabaShort : .semantic
+        }
     }
     enum Failure: String, Error, LocalizedError, Sendable {
         case invalidRequest, unsupportedParameter, unsupportedModality, invalidTool, invalidArguments
@@ -18,7 +24,7 @@ enum APIModelResponseCodec {
             case .invalidRequest: "The API inference request is invalid."
             case .unsupportedParameter: "The API adapter does not support a requested parameter."
             case .unsupportedModality: "The selected API model does not support this input attachment."
-            case .invalidTool: "The API response used an unknown or unavailable tool."
+            case .invalidTool: "An API tool definition or call was malformed or unavailable."
             case .invalidArguments: "The API response contained invalid tool arguments. No tool from this response was executed."
             case .invalidHistory: "The API tool history is incomplete or inconsistent."
             case .invalidResponse: "The API provider returned an invalid response. No tool from this response was executed."
@@ -81,6 +87,87 @@ enum APIModelResponseCodec {
         observe?(guardID)
         return .invalidResponse
     }
+    /// Only the fatal tool-call guard is retained. Provider names, IDs, values,
+    /// call contents and catalog entries never enter this observation.
+    struct InvalidToolDiagnostic: Codable, Equatable, Sendable {
+        enum NameMatch: String, Codable, Sendable {
+            case wireName = "wire_name", nativeName = "native_name", qualifiedName = "qualified_name", none
+        }
+        enum OfferedNameShape: String, Codable, Sendable {
+            case doubled = "double_offered_wire", digestPrefix = "stem_digest_prefix"
+            case otherSuffix = "stem_other_suffix", ambiguousStem = "ambiguous_stem", noMatch = "no_shape_match"
+        }
+        enum Guard: String, Codable, Sendable, CaseIterable {
+            case chatCallType = "chat_call_type", chatCallIDType = "chat_call_id_type"
+            case chatCallIDSyntax = "chat_call_id_syntax", chatCallIDHistory = "chat_call_id_history"
+            case chatCallIDDuplicate = "chat_call_id_duplicate", chatFunctionType = "chat_function_type"
+            case chatNameType = "chat_name_type", chatNameNotAllowed = "chat_name_not_allowed"
+            case chatNameNotDeclared = "chat_name_not_declared", chatArgumentsType = "chat_arguments_type"
+            case sseToolType = "sse_tool_type"
+            case responsesNameType = "responses_name_type", responsesNameNotDeclared = "responses_name_not_declared"
+            case responsesToolType = "responses_tool_type", responsesNameNotAllowed = "responses_name_not_allowed"
+            case responsesCallIDType = "responses_call_id_type", responsesCallIDSyntax = "responses_call_id_syntax"
+            case responsesCallIDHistory = "responses_call_id_history", responsesCallIDDuplicate = "responses_call_id_duplicate"
+            case responsesCallCount = "responses_call_count", responsesRequiredCall = "responses_required_call"
+        }
+        let format: InvalidResponseDiagnostic.Format
+        let guardID: Guard
+        /// Exact relation to the current declared catalog, never authorization.
+        /// Absent for every guard that did not validate a disallowed chat name.
+        var nameMatch: NameMatch? = nil
+        var offeredNameShape: OfferedNameShape? = nil
+        var isConsistent: Bool {
+            guard nameMatch == nil || guardID == .chatNameNotAllowed else { return false }
+            guard offeredNameShape == nil || nameMatch == .some(.none) else { return false }
+            switch guardID {
+            case .chatCallType, .chatCallIDType, .chatCallIDSyntax, .chatCallIDHistory, .chatCallIDDuplicate,
+                 .chatFunctionType, .chatNameType, .chatNameNotAllowed, .chatNameNotDeclared, .chatArgumentsType:
+                return format == .chatJSON || format == .chatSSE
+            case .sseToolType: return format == .chatSSE
+            case .responsesNameType, .responsesNameNotDeclared, .responsesToolType, .responsesNameNotAllowed,
+                 .responsesCallIDType, .responsesCallIDSyntax, .responsesCallIDHistory, .responsesCallIDDuplicate,
+                 .responsesCallCount, .responsesRequiredCall:
+                return format == .responsesJSON
+            }
+        }
+    }
+    private typealias InvalidToolObserver = (InvalidToolDiagnostic.Guard, InvalidToolDiagnostic.NameMatch?) -> Void
+    private static func invalidTool(_ guardID: InvalidToolDiagnostic.Guard, _ observe: InvalidToolObserver?,
+                                    nameMatch: InvalidToolDiagnostic.NameMatch? = nil) -> Failure {
+        observe?(guardID, nameMatch)
+        return .invalidTool
+    }
+    // Shape of a rejected spelling against the offered semantic_v2 catalog. A
+    // doubled assembled value does not identify which stream deltas produced it.
+    private static func offeredNameShape(_ name: String, allowedNames: Set<String>) -> InvalidToolDiagnostic.OfferedNameShape? {
+        // Declared wire names are at most 64 ASCII bytes; two whole names fit.
+        guard name.utf8.prefix(129).count <= 128 else { return nil }
+        guard name.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) ||
+            (48...57).contains($0) || $0 == 95 || $0 == 45 }) else { return .noMatch }
+        if allowedNames.contains(where: { name == $0 + $0 }) { return .doubled }
+        var match: InvalidToolDiagnostic.OfferedNameShape?
+        for wire in allowedNames {
+            // The semantic catalog uses "__" followed by exactly 24 hex digits.
+            let stemAndSeparator = wire.dropLast(24)
+            guard name.hasPrefix(stemAndSeparator) else { continue }
+            let suffix = name.dropFirst(stemAndSeparator.count)
+            guard suffix.count <= 24, suffix.utf8.allSatisfy({ (65...90).contains($0) ||
+                (97...122).contains($0) || (48...57).contains($0) }) else { continue }
+            if match != nil { return .ambiguousStem }
+            match = suffix.count < 24 && wire.suffix(24).hasPrefix(suffix) ? .digestPrefix : .otherSuffix
+        }
+        return match ?? .noMatch
+    }
+
+    private static func diagnosticNameMatch(_ name: String, tools: [Tool]) -> InvalidToolDiagnostic.NameMatch {
+        if tools.contains(where: { $0.wireName == name }) { return .wireName }
+        if tools.contains(where: { $0.name == name }) { return .nativeName }
+        if tools.contains(where: { tool in
+            guard let namespace = tool.namespace else { return false }
+            return namespace + "." + tool.name == name
+        }) { return .qualifiedName }
+        return .none
+    }
     /// Preserve the exact Foundation parser/options. Only parser failure is
     /// reclassified; parsed nonobject/root-shape guards remain at their callers.
     private static func responseJSONValue(_ data: Data, observe: InvalidResponseObserver?) throws -> Any {
@@ -105,6 +192,10 @@ enum APIModelResponseCodec {
         let custom: Bool
         let schema: [String: Any]
         let description: String
+        var patchProjection: AlibabaPatchProjection? = nil
+        // Exact admitted Qwen patch wrappers stay unambiguous without parsing,
+        // compiling or changing the literal native input string they contain.
+        var requiresUnambiguousArguments = false
         var browserWaitHistoricalSchemas: [[String: Any]]? = nil
         var identity: String { (namespace ?? "") + "\u{0}" + name }
     }
@@ -154,12 +245,142 @@ enum APIModelResponseCodec {
         let constraint: SchemaConstraint
         let path: [SchemaPathPart]
         var location: BuiltinSchemaLocation? = nil
+        var patchLocation: LocalPatchSchemaLocation? = nil
+        var patchProbe: PatchSchemaProbe? = nil
     }
     struct FiniteSchemaFailure: Codable, Equatable, Sendable {
         let toolIndex: Int
         let constraint: SchemaConstraint
         var location: BuiltinSchemaLocation? = nil
+        var patchLocation: LocalPatchSchemaLocation? = nil
+        var patchProbe: PatchSchemaProbe? = nil
     }
+    /// Finite location in the exact local typed-patch operation union. The one
+    /// recognized update-line rejection may guide correction, never admission.
+    /// No argument values, unknown keys, file paths or array indexes are retained.
+    struct LocalPatchSchemaLocation: Codable, Equatable, Sendable {
+        enum Operation: String, Codable, Sendable { case notObject = "not_object", missing, ambiguous, add, delete, update }
+        enum Field: String, Codable, Sendable {
+            case operation, path, lines, line, hunks, hunk, anchor
+            case moveTo = "move_to", endOfFile = "end_of_file"
+        }
+        let operation: Operation
+        let field: Field
+        let constraint: SchemaConstraint
+        var isConsistent: Bool {
+            if operation == .notObject { return field == .operation && constraint == .typeMismatch }
+            if operation == .missing || operation == .ambiguous { return field == .operation && constraint == .schemaMismatch }
+            let fields: Set<Field>
+            switch operation {
+            case .add: fields = [.operation, .path, .lines, .line]
+            case .delete: fields = [.operation, .path]
+            case .update: fields = [.operation, .path, .moveTo, .endOfFile, .hunks, .hunk, .anchor, .lines, .line]
+            default: return false
+            }
+            guard fields.contains(field) else { return false }
+            switch constraint {
+            case .unexpectedFields: return field == .operation || field == .hunk
+            case .missingRequired: return field == .lines || field == .hunks
+            case .arrayBounds: return field == .lines || field == .hunks
+            case .typeMismatch: return field != .operation
+            case .schemaMismatch: return [.path, .moveTo, .endOfFile, .anchor, .line].contains(field)
+            case .readModeConflict: return false
+            }
+        }
+        init(operation: Operation, field: Field, constraint: SchemaConstraint) {
+            self.operation = operation; self.field = field; self.constraint = constraint
+        }
+        private enum CodingKeys: String, CodingKey, CaseIterable { case operation, field, constraint }
+        private struct Key: CodingKey {
+            let stringValue: String; var intValue: Int? { nil }
+            init?(stringValue: String) { self.stringValue = stringValue }
+            init?(intValue: Int) { return nil }
+        }
+        init(from decoder: any Decoder) throws {
+            let keys = Set(try decoder.container(keyedBy: Key.self).allKeys.map(\.stringValue))
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            self.init(operation: try values.decode(Operation.self, forKey: .operation),
+                field: try values.decode(Field.self, forKey: .field), constraint: try values.decode(SchemaConstraint.self, forKey: .constraint))
+            guard keys == Set(CodingKeys.allCases.map(\.stringValue)), isConsistent else {
+                throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid finite local patch location."))
+            }
+        }
+    }
+    /// Why the optional local-patch location was unavailable. This is not tool
+    /// authority: a name match without admitted grammar remains named_apply_patch.
+    /// Original validation, corrective feedback and rejected bytes are unchanged.
+    struct PatchSchemaProbe: Codable, Equatable, Sendable {
+        enum ToolKind: String, Codable, Sendable { case namedApplyPatch = "named_apply_patch", other }
+        enum Projection: String, Codable, Sendable { case local, environments, literalInput = "literal_input", unrecognized }
+        enum Path: String, Codable, Sendable { case root, input, operations, operation, nested, other }
+        enum ValueType: String, Codable, Sendable { case missing, null, object, array, string, boolean, integer, number, unknown }
+        enum OuterKey: String, Codable, Sendable { case input, operations, environmentID = "environment_id", other }
+        enum Count: String, Codable, Sendable { case zero, one, multiple, overLimit = "over_limit" }
+        enum Status: String, Codable, Sendable {
+            case nonPatch = "non_patch", nonLocal = "non_local", schemaIdentity = "schema_identity"
+            case literalInputPatternMismatch = "literal_input_pattern_mismatch"
+            case outerKeys = "outer_keys", operationsType = "operations_type", operationsEmpty = "operations_empty"
+            case operationsLimit = "operations_limit", schemaShape = "schema_shape", traversalLimit = "traversal_limit"
+            case objectLimit = "object_limit", arrayLimit = "array_limit", unsupportedField = "unsupported_field"
+            case inconsistentLocation = "inconsistent_location", noBranchViolation = "no_branch_violation"
+        }
+        let tool: ToolKind
+        let projection: Projection
+        let path: Path
+        let actual: ValueType
+        let status: Status
+        var outer: [OuterKey]? = nil
+        var keys: Count? = nil
+        var operations: ValueType? = nil
+        var isConsistent: Bool {
+            if tool == .other {
+                return projection == .unrecognized && status == .nonPatch && outer == nil && keys == nil && operations == nil
+            }
+            guard let outer, let keys, let operations,
+                  outer.count <= 4, Set(outer).count == outer.count,
+                  outer == [OuterKey.input, .operations, .environmentID, .other].filter({ outer.contains($0) }),
+                  (keys == .zero) == outer.isEmpty,
+                  (operations == .missing) == !outer.contains(.operations),
+                  keys != .one || outer.count == 1,
+                  keys == .zero || !outer.isEmpty else { return false }
+            if status == .nonPatch { return projection == .unrecognized }
+            if status == .nonLocal { return projection == .environments || projection == .literalInput }
+            if status == .literalInputPatternMismatch {
+                return projection == .literalInput && path == .input && actual == .string
+                    && outer == [.input] && keys == .one && operations == .missing
+            }
+            guard projection == .local else { return false }
+            if status == .schemaIdentity { return true }
+            if status == .outerKeys { return keys != .one }
+            guard keys == .one else { return false }
+            if status == .operationsType { return operations != .array }
+            return outer == [.operations] && operations == .array
+        }
+        private enum CodingKeys: String, CodingKey, CaseIterable { case tool, projection, path, actual, status, outer, keys, operations }
+        private struct Key: CodingKey {
+            let stringValue: String; var intValue: Int? { nil }
+            init?(stringValue: String) { self.stringValue = stringValue }
+            init?(intValue: Int) { return nil }
+        }
+        init(tool: ToolKind, projection: Projection, path: Path, actual: ValueType, status: Status,
+             outer: [OuterKey]? = nil, keys: Count? = nil, operations: ValueType? = nil) {
+            self.tool = tool; self.projection = projection; self.path = path; self.actual = actual; self.status = status
+            self.outer = outer; self.keys = keys; self.operations = operations
+        }
+        init(from decoder: any Decoder) throws {
+            let keys = Set(try decoder.container(keyedBy: Key.self).allKeys.map(\.stringValue))
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            self.init(tool: try c.decode(ToolKind.self, forKey: .tool), projection: try c.decode(Projection.self, forKey: .projection),
+                path: try c.decode(Path.self, forKey: .path), actual: try c.decode(ValueType.self, forKey: .actual),
+                status: try c.decode(Status.self, forKey: .status), outer: try c.decodeIfPresent([OuterKey].self, forKey: .outer),
+                keys: try c.decodeIfPresent(Count.self, forKey: .keys), operations: try c.decodeIfPresent(ValueType.self, forKey: .operations))
+            let expected: Set<String> = tool == .other ? ["tool", "projection", "path", "actual", "status"] : Set(CodingKeys.allCases.map(\.stringValue))
+            guard keys == expected, isConsistent else {
+                throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid finite patch probe."))
+            }
+        }
+    }
+
     /// Closed vocabulary for app-owned browser contracts only. Custom/MCP
     /// names, schema keys and rejected argument values never enter diagnostics.
     enum DiagnosticBuiltinTool: String, Codable, Sendable {
@@ -229,6 +450,8 @@ enum APIModelResponseCodec {
     private struct SchemaViolation {
         let constraint: SchemaConstraint; let path: [SchemaPathPart]
         var actualType: DiagnosticJSONType? = nil
+        var patchLocation: LocalPatchSchemaLocation? = nil
+        var patchProbe: PatchSchemaProbe? = nil
     }
     /// Finite observations only. This callback cannot authorize correction or
     /// publish any call; all existing complete-envelope gates remain authoritative.
@@ -258,15 +481,25 @@ enum APIModelResponseCodec {
     static let correctiveFeedback = "Native validation rejected the preceding provider response because tool arguments did not match the offered JSON schemas. No call from that rejected response was executed. Produce a new response using only the unchanged offered tools and exact schema-valid arguments. Preserve the confirmed outcomes in the supplied history; do not repeat actions already completed in that history."
 
     static let schemaFeedbackMarker = "Trusted schema validation details (from the unchanged offered tools):\n"
+    // The inner end assertion is absolute: unlike $, it cannot stop before a
+    // final LF. This excludes only the captured suffix with zero or one LF.
+    static let alibabaLiteralPatchPattern = #"^(?![\s\S]*\n@@\n\*\*\* End Patch\n?(?![\s\S]))[\s\S]*$"#
+    private static let literalCustomInputDescription = LiteralCustomToolTransport.inputDescription
+    private static let alibabaPatchTailGuidance = " For an update, every @@ header needs at least one following source line (space, + or - prefix). Close the patch with *** End Patch. Example decoded update tail with sample lines:\n@@\n-old\n+new\n*** End Patch"
+    private static func literalCustomInputSchema(description: String, pattern: String? = nil) -> [String: Any] {
+        LiteralCustomToolTransport.inputSchema(description: description, pattern: pattern)
+    }
+    private static func isAlibabaLiteralPatchPatternTool(_ tool: Tool) -> Bool {
+        guard tool.requiresUnambiguousArguments, tool.custom, tool.name == "apply_patch",
+              tool.namespace == nil || tool.namespace == "functions", tool.patchProjection == nil else { return false }
+        return equalJSON(tool.schema, literalCustomInputSchema(description: literalCustomInputDescription + alibabaPatchTailGuidance,
+                                                               pattern: alibabaLiteralPatchPattern))
+    }
     static func correctiveRequest(_ original: Request, rejectionDetails: [ArgumentRejectionDetail] = []) throws -> Request {
         guard original.provider.wireAPI == .chatCompletions,
               var body = try JSONSerialization.jsonObject(with: original.body) as? [String: Any],
               var messages = body["messages"] as? [[String: Any]], !messages.isEmpty else { throw Failure.invalidRequest }
-        let suffix = trustedSchemaFeedback(original, details: rejectionDetails)
-        // Optional detail never displaces the existing generic instruction or
-        // changes the original request-size guard.
-        let feedback = original.body.count + 2 * (correctiveFeedback.utf8.count + suffix.utf8.count) + 64 <= maximumText
-            ? correctiveFeedback + suffix : correctiveFeedback
+        let feedback = correctiveFeedback + trustedSchemaFeedback(original, details: rejectionDetails)
         if messages[0]["role"] as? String == "system" {
             guard let originalText = messages[0]["content"] as? String else { throw Failure.invalidRequest }
             messages[0]["content"] = originalText + "\n\n" + feedback
@@ -316,9 +549,52 @@ enum APIModelResponseCodec {
             if schema["enum"] != nil { record["follow_offered_enum"] = true }
             records.append(record)
         }
-        guard !records.isEmpty, let bytes = try? json(records), bytes.count <= 1_536,
-              let text = String(data: bytes, encoding: .utf8) else { return "" }
-        return "\n\n" + schemaFeedbackMarker + text
+        func boundedFeedback(_ entries: [[String: Any]]) -> String? {
+            guard !entries.isEmpty, let bytes = try? json(entries), bytes.count <= 1_536,
+                  let text = String(data: bytes, encoding: .utf8) else { return nil }
+            let suffix = "\n\n" + schemaFeedbackMarker + text
+            guard request.body.count + 2 * (correctiveFeedback.utf8.count + suffix.utf8.count) + 64 <= maximumText else { return nil }
+            return suffix
+        }
+        // This is the exact declared string pattern, not a new parser or repair.
+        // Only one admitted failure may add static guidance to the same correction.
+        if details.count == 1, let detail = details.first, var record = records.first,
+           detail.constraint == .schemaMismatch, detail.path == [.property("input")],
+           request.provider.wireAPI == .chatCompletions, request.provider.isAlibabaModelStudioInference,
+           request.model.id == "qwen3.7-flash", request.tools.indices.contains(detail.toolIndex) {
+            let tool = request.tools[detail.toolIndex]
+            if isAlibabaLiteralPatchPatternTool(tool),
+               tool.wireName == detail.wireName, request.allowedTools.contains(tool.wireName),
+               record["schema_path"] as? [String] == ["properties", "input"] {
+                record["literal_input_rule"] = "no_empty_trailing_update_hunk"
+                record["literal_input_guidance"] = "The declared input pattern forbids a bare @@ immediately before the final *** End Patch footer (with optional final LF). Every update hunk header needs following source-prefixed lines. Produce a new literal patch using the offered native grammar and observed source."
+                if let feedback = boundedFeedback([record]) { return feedback }
+            }
+        }
+        // Teach both layers together within the one already-admitted correction:
+        // an outer array failure can otherwise consume the budget before the
+        // provider learns the update-line contract. Never coerce rejected values.
+        if details.count == 1, let detail = details.first, var record = records.first,
+           request.tools.indices.contains(detail.toolIndex) {
+            let operationsType = detail.constraint == .typeMismatch && detail.path == [.property("operations")]
+            let updateLine = detail.constraint == .schemaMismatch && detail.path.isEmpty
+                && detail.patchLocation == .init(operation: .update, field: .line, constraint: .schemaMismatch)
+            let tool = request.tools[detail.toolIndex]
+            if operationsType || updateLine,
+               tool.custom, tool.name == "apply_patch", tool.namespace == nil || tool.namespace == "functions",
+               tool.wireName == detail.wireName, request.allowedTools.contains(tool.wireName),
+               tool.patchProjection == .local, equalJSON(tool.schema, AlibabaPatchProjection.local.schema) {
+                record["typed_patch_contract"] = AlibabaPatchProjection.argumentContract
+                if let example = try? JSONSerialization.jsonObject(with: Data(AlibabaPatchProjection.updateExample.utf8)) {
+                    var withExample = record
+                    withExample["example_arguments_template"] = example
+                    if let feedback = boundedFeedback([withExample]) { return feedback }
+                }
+                // The optional example must not displace the actionable contract.
+                if let feedback = boundedFeedback([record]) { return feedback }
+            }
+        }
+        return boundedFeedback(records) ?? ""
     }
 
     struct TextShape: Codable, Equatable, Sendable {
@@ -387,10 +663,11 @@ enum APIModelResponseCodec {
             guard var messages = body["messages"] as? [[String: Any]] else { throw Failure.invalidRequest }
             let maintenance = try removeMaintenanceTail(from: &messages)
             // Preserve the provider's template after adding trusted host text.
-            // Qwen requires its system instructions in one opening message;
+            // Cerebras Qwen requires its system instructions in one opening message;
             // merely mapping developer to system would create a late system
             // message and revive the provider's wrong_api_format rejection.
-            let role = original.provider.isCerebrasInference && original.model.id == "qwen-3.8-27b" ? "system" : "developer"
+            let role = APIProviderCatalog.Selection(provider: original.provider, model: original.model)
+                .chatCompletionsInstructionRole.rawValue
             messages.append(["role": role, "content": text])
             messages += userInputs.map { ["role": "user", "content": $0] }
             if let maintenance { messages.append(maintenance) }
@@ -445,10 +722,13 @@ enum APIModelResponseCodec {
         // Removing an active tool must not renumber its neighbours: historical
         // calls and current declarations share one stable provider identity.
         let historyByIdentity = Dictionary(uniqueKeysWithValues: historyTools.map { ($0.identity, $0) })
-        let tools = try parseTools(raw["tools"], naming: toolNaming).map { visible -> Tool in
+        let alibabaPatchGuidance = selection.provider.wireAPI == .chatCompletions && selection.provider.isAlibabaModelStudioInference
+        let alibabaFlash = selection.isAlibabaQwen37FlashChat
+        let tools = try parseTools(raw["tools"], naming: toolNaming, alibabaPatchGuidance: alibabaPatchGuidance, literalPatch: alibabaFlash).map { visible -> Tool in
             guard let original = historyByIdentity[visible.identity] else { throw Failure.invalidTool }
             return Tool(name: visible.name, namespace: visible.namespace, wireName: original.wireName,
-                        custom: visible.custom, schema: visible.schema, description: visible.description)
+                        custom: visible.custom, schema: visible.schema, description: visible.description, patchProjection: visible.patchProjection,
+                        requiresUnambiguousArguments: visible.requiresUnambiguousArguments)
         }
         var allowed = Set(tools.map(\.wireName)), required = false
         var wireChoice: Any = "auto"
@@ -467,7 +747,9 @@ enum APIModelResponseCodec {
         let limit = try integer(raw["max_tool_calls"], default: 64, range: 1...128)
         let maximumCalls = parallel ? limit : 1
         let configuration = try responseConfiguration(raw, parallel: parallel)
-        let history = try messages(raw, tools: historyTools, selection: selection, threadID: threadID, capsules: capsules, toolNaming: toolNaming)
+        let usesCompiledPatch = tools.contains { $0.patchProjection != nil && allowed.contains($0.wireName) }
+        let history = try messages(raw, tools: historyTools, selection: selection, threadID: threadID, capsules: capsules,
+            toolNaming: toolNaming, usesCompiledPatch: usesCompiledPatch)
         var body: [String: Any]
         if selection.provider.wireAPI == .responses {
             body = raw
@@ -479,9 +761,23 @@ enum APIModelResponseCodec {
             // adapter's locally sealed continuation is never sent to a different wire API.
             body["stream"] = false
         } else {
-            body = ["model": selection.model.id, "messages": history.messages, "stream": stream, "n": 1]
+            let clarifyToolNames = alibabaFlash && toolNaming != .legacy && !allowed.isEmpty
+            var messages = history.messages
+            if clarifyToolNames {
+                let affix = toolNaming == .alibabaShort ? "any prefix or suffix" : "its entire suffix"
+                let guidance = "For tool calls, copy the exact offered function name, including \(affix). Use native operation names in the instructions only to find the matching offered function."
+                if messages.first?["role"] as? String == "system", let instructions = messages[0]["content"] as? String {
+                    messages[0]["content"] = guidance + "\n\n" + instructions
+                } else {
+                    messages.insert(["role": "system", "content": guidance], at: 0)
+                }
+            }
+            body = ["model": selection.model.id, "messages": messages, "stream": stream, "n": 1]
             if !tools.isEmpty {
-                body["tools"] = try tools.map { ["type": "function", "function": ["name": $0.wireName, "description": try chatCompletionToolDescription($0), "parameters": $0.schema]] as [String: Any] }
+                body["tools"] = try tools.map { tool in
+                    let description = try chatCompletionToolDescription(tool, callableNameFirst: clarifyToolNames && allowed.contains(tool.wireName))
+                    return ["type": "function", "function": ["name": tool.wireName, "description": description, "parameters": tool.schema]] as [String: Any]
+                }
                 body["tool_choice"] = wireChoice
                 body["parallel_tool_calls"] = parallel
             } else if required { throw Failure.invalidTool }
@@ -580,28 +876,40 @@ enum APIModelResponseCodec {
                 "service_tier": "default", "metadata": metadata, "safety_identifier": NSNull(), "prompt_cache_key": NSNull()]
     }
 
-    private static func chatCompletionToolDescription(_ tool: Tool) throws -> String {
+    private static func chatCompletionToolDescription(_ tool: Tool, callableNameFirst: Bool) throws -> String {
         // Describe the final alias only after active tools have been rebound to
         // their original history indices. Native Responses keeps its own names.
         let qualified = tool.namespace.map { $0 + "." + tool.name } ?? tool.name
-        let identity = "Native tool: \(qualified).\nNative namespace: \(tool.namespace ?? "(none)"); native name: \(tool.name).\nCallable API function: \(tool.wireName).\nWhen instructions refer to this native tool, call this API function with its declared arguments.\n\n"
+        let identity: String
+        if callableNameFirst {
+            identity = "Callable API function: \(tool.wireName).\nCopy this exact identifier in function.name. Native instructions describe this operation as \(qualified).\n\n"
+        } else {
+            identity = "Native tool: \(qualified).\nNative namespace: \(tool.namespace ?? "(none)"); native name: \(tool.name).\nCallable API function: \(tool.wireName).\nWhen instructions refer to this native tool, call this API function with its declared arguments.\n\n"
+        }
         // Existing tool descriptions (including custom grammars) remain intact
         // at their existing limit; the separately bounded identity is additive.
         guard identity.utf8.count <= 1_024, tool.description.utf8.count <= 64_000 else { throw Failure.invalidTool }
         return identity + tool.description
     }
 
-    private static func semanticToolName(name: String, namespace: String?) -> String {
+    private static func stableToolName(name: String, namespace: String?, naming: ToolNaming) -> String {
+        let prefix = naming == .alibabaShort ? "scoped_" : ""
+        if naming == .alibabaShort, namespace == nil, !name.hasPrefix(prefix), name.utf8.count <= 64,
+           name.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) ||
+               (48...57).contains($0) || $0 == 95 || $0 == 45 }) {
+            return name
+        }
         // Native names are validated ASCII. Dots are legal natively but not in
-        // Chat Completions; the digest retains their exact qualified identity.
-        let stem = String(name.replacingOccurrences(of: ".", with: "_").prefix(38))
+        // Chat Completions. The digest retains their exact qualified identity.
+        // The reserved prefix keeps scoped aliases distinct from plain names.
+        let stem = String(name.replacingOccurrences(of: ".", with: "_").prefix(38 - prefix.utf8.count))
         let identity = (namespace ?? "") + "\u{0}" + name
         let suffix = SHA256.hash(data: Data(identity.utf8)).prefix(12)
             .map { String(format: "%02x", $0) }.joined()
-        return stem + "__" + suffix
+        return prefix + stem + "__" + suffix
     }
 
-    private static func parseTools(_ value: Any?, naming: ToolNaming) throws -> [Tool] {
+    private static func parseTools(_ value: Any?, naming: ToolNaming, alibabaPatchGuidance: Bool = false, literalPatch: Bool = false) throws -> [Tool] {
         if absent(value) { return [] }
         guard let definitions = value as? [[String: Any]], definitions.count <= 256 else { throw Failure.invalidTool }
         var result: [Tool] = [], identities = Set<String>(), wireNames = Set<String>()
@@ -611,12 +919,30 @@ enum APIModelResponseCodec {
             if !absent(definition["description"]), !(definition["description"] is String) { throw Failure.invalidTool }
             if !absent(definition["strict"]), strictBool(definition["strict"]) == nil { throw Failure.invalidTool }
             let custom = type == "custom"
+            // Exact admission grants only wrapper ambiguity rejection and the
+            // declared terminal-hunk pattern. Every custom tool still receives
+            // its existing literal-input transport and verbatim native grammar.
+            let admittedLiteralPatch = literalPatch && AlibabaPatchProjection.matching(definition, namespace: namespace) != nil
             let schema: [String: Any]
             if custom {
                 // Put the literal-input contract on the argument the provider fills,
                 // while preserving the complete native grammar in the description.
-                let inputDescription = "Literal native tool input. Follow the exact text or grammar contract in this function's description, including delimiters and newlines. Encode the contents once as this JSON string; do not add quoting, JSON, shell syntax or Markdown fences unless the native contract requires them."
-                schema = ["type": "object", "properties": ["input": ["type": "string", "description": inputDescription]], "required": ["input"], "additionalProperties": false]
+                var inputDescription = literalCustomInputDescription
+                // Both bundled Rust apply_patch grammars use these update and footer rules.
+                // Describe the suffix on the string field; the engine still parses the original input.
+                if alibabaPatchGuidance, name == "apply_patch", namespace == nil || namespace == "functions",
+                   let format = definition["format"] as? [String: Any], format["type"] as? String == "grammar",
+                   format["syntax"] as? String == "lark", let grammar = format["definition"] as? String,
+                   grammar.utf8.count <= 16_384 {
+                    let rules = Set(grammar.split(separator: "\n"))
+                    if rules.contains(#"end_patch: "*** End Patch" LF?"#),
+                       rules.contains(#"change_context: ("@@" | "@@ " /(.+)/) LF"#),
+                       rules.contains(#"change_line: ("+" | "-" | " ") /(.*)/ LF"#) {
+                        inputDescription += alibabaPatchTailGuidance
+                    }
+                }
+                schema = literalCustomInputSchema(description: inputDescription,
+                    pattern: admittedLiteralPatch ? alibabaLiteralPatchPattern : nil)
             } else {
                 guard var parameters = definition["parameters"] as? [String: Any], parameters["type"] as? String == "object" else { throw Failure.invalidTool }
                 try checkSchema(parameters)
@@ -627,9 +953,9 @@ enum APIModelResponseCodec {
                 schema = parameters
             }
             let description = custom ? try customToolDescription(definition) : (definition["description"] as? String ?? "")
-            let wireName = naming == .legacy ? "computa_tool_\(result.count)" : semanticToolName(name: name, namespace: namespace)
+            let wireName = naming == .legacy ? "computa_tool_\(result.count)" : stableToolName(name: name, namespace: namespace, naming: naming)
             let tool = Tool(name: name, namespace: namespace, wireName: wireName, custom: custom,
-                            schema: schema, description: description,
+                            schema: schema, description: description, requiresUnambiguousArguments: admittedLiteralPatch,
                             browserWaitHistoricalSchemas: ComputaModelToolCatalog.browserWaitDefinitionVariants(
                                 definition, namespace: namespace)?.historical)
             // Validate the complete catalog before filtering, so a collision
@@ -650,35 +976,13 @@ enum APIModelResponseCodec {
     }
 
     private static func customToolDescription(_ definition: [String: Any]) throws -> String {
-        let original = definition["description"] as? String ?? ""
-        guard original.utf8.count <= 64_000 else { throw Failure.invalidTool }
-        let format: [String: Any]
-        if let supplied = definition["format"] {
-            guard let value = supplied as? [String: Any] else { throw Failure.invalidTool }; format = value
-        } else { format = ["type": "text"] }
-        let contract: String
-        switch format["type"] as? String {
-        case "text":
-            guard Set(format.keys) == ["type"] else { throw Failure.invalidTool }
-            contract = "The native tool accepts raw text."
-        case "grammar":
-            guard Set(format.keys) == ["type", "syntax", "definition"], let syntax = format["syntax"] as? String,
-                  ["lark", "regex"].contains(syntax), let grammar = format["definition"] as? String,
-                  !grammar.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  grammar.utf8.count <= 16_384 else { throw Failure.invalidTool }
-            // Preserve the native contract verbatim. The gateway does not claim
-            // to implement provider-side constrained decoding or a Lark parser.
-            contract = "The decoded input string must satisfy this native \(syntax) grammar. Grammar definition (verbatim):\n\(grammar)"
-        default: throw Failure.invalidTool
-        }
-        let description = original + "\n\nCustom tool transport: call this function with exactly one string argument named input. The JSON object is only the transport wrapper; the decoded input string is passed unchanged to the native custom tool. Any instruction above to use freeform input or not wrap it in JSON applies to that string's contents, not the transport object. Do not add another layer of JSON encoding inside input.\n" + contract
-        guard description.utf8.count <= 64_000 else { throw Failure.invalidTool }
-        return description
+        do { return try LiteralCustomToolTransport.description(for: definition) }
+        catch { throw Failure.invalidTool }
     }
 
     private struct History { let messages: [[String: Any]]; let callIDs: Set<String> }
     private static func messages(_ raw: [String: Any], tools: [Tool], selection: APIProviderCatalog.Selection,
-                                 threadID: String, capsules: APIReasoningCapsules, toolNaming: ToolNaming) throws -> History {
+                                 threadID: String, capsules: APIReasoningCapsules, toolNaming: ToolNaming, usesCompiledPatch: Bool) throws -> History {
         var messages: [[String: Any]] = [], seen = Set<String>(), pending = Set<String>(), pendingCustom = Set<String>()
         // Native compaction deliberately offers no tools while retaining completed
         // calls/results. Their display-only aliases cannot recover declaration
@@ -720,7 +1024,7 @@ enum APIModelResponseCodec {
                 }
             case "message":
                 guard let originalRole = item["role"] as? String, ["system", "developer", "user", "assistant"].contains(originalRole) else { throw Failure.invalidHistory }
-                let role = selection.provider.isCerebrasInference && selection.model.id == "qwen-3.8-27b" && originalRole == "developer" ? "system" : originalRole
+                let role = originalRole == "developer" ? selection.chatCompletionsInstructionRole.rawValue : originalRole
                 if selection.provider.isCerebrasInference, role != "user", containsImage(item["content"]) { throw Failure.unsupportedModality }
                 if role == "assistant", assistant == nil {
                     assistant = ["role": role, "content": try content(item["content"], images: selection.model.supportsImages, cerebras: selection.provider.isCerebrasInference)]
@@ -731,7 +1035,11 @@ enum APIModelResponseCodec {
                         assistant = ["role": role, "content": try content(item["content"], images: selection.model.supportsImages, cerebras: selection.provider.isCerebrasInference)]
                         assistantIsFinal = item["phase"] as? String == "final_answer"
                     }
-                    else { messages.append(["role": role, "content": try content(item["content"], images: selection.model.supportsImages, cerebras: selection.provider.isCerebrasInference)]) }
+                    else {
+                        let project = originalRole == "developer" && usesCompiledPatch
+                        messages.append(["role": role, "content": try content(item["content"], images: selection.model.supportsImages,
+                            cerebras: selection.provider.isCerebrasInference, projectPatchInstructions: project)])
+                    }
                 }
             case "function_call", "custom_tool_call":
                 guard let id = item["call_id"] as? String, validCallID(id), seen.insert(id).inserted,
@@ -757,7 +1065,7 @@ enum APIModelResponseCodec {
                         guard uncataloguedKinds.count < 256 else { throw Failure.invalidHistory }
                         uncataloguedKinds[identity] = custom
                     }
-                    wireName = semanticToolName(name: name, namespace: namespace)
+                    wireName = stableToolName(name: name, namespace: namespace, naming: toolNaming)
                 }
                 let arguments: String
                 if custom {
@@ -840,15 +1148,19 @@ enum APIModelResponseCodec {
         }
         return items
     }
-    private static func content(_ value: Any?, images: Bool, cerebras: Bool) throws -> Any {
-        if let string = value as? String { guard string.utf8.count <= maximumText else { throw Failure.invalidRequest }; return string }
+    private static func content(_ value: Any?, images: Bool, cerebras: Bool, projectPatchInstructions: Bool = false) throws -> Any {
+        func present(_ text: String) -> String {
+            projectPatchInstructions ? AlibabaPatchProjection.projectedDeveloperText(text) : text
+        }
+        if let string = value as? String { guard string.utf8.count <= maximumText else { throw Failure.invalidRequest }; return present(string) }
         guard let parts = value as? [[String: Any]], parts.count <= 2_048 else { throw Failure.invalidHistory }
         var converted: [[String: Any]] = [], text = "", imagePresent = false
         for part in parts {
             switch part["type"] as? String {
             case "input_text", "output_text", "text":
                 guard let value = part["text"] as? String else { throw Failure.invalidHistory }
-                text += value; converted.append(["type": "text", "text": value])
+                let projected = present(value)
+                text += projected; converted.append(["type": "text", "text": projected])
             case "input_image":
                 guard images, let url = part["image_url"] as? String,
                       url.hasPrefix("data:image/") || URL(string: url)?.scheme == "https" else { throw Failure.unsupportedModality }
@@ -878,19 +1190,23 @@ enum APIModelResponseCodec {
 
     static func decodeForCorrection(_ result: APIProviderHTTPClient.Result, request: Request,
                                     onArgumentRejection: ((ArgumentValidationDiagnostic) -> Void)? = nil,
-                                    onInvalidResponse: ((InvalidResponseDiagnostic) -> Void)? = nil) throws -> DecodeOutcome {
+                                    onInvalidResponse: ((InvalidResponseDiagnostic) -> Void)? = nil,
+                                    onInvalidTool: ((InvalidToolDiagnostic) -> Void)? = nil) throws -> DecodeOutcome {
         let format: InvalidResponseDiagnostic.Format = request.provider.wireAPI == .responses ? .responsesJSON
             : (result.contentType.contains("text/event-stream") ? .chatSSE : .chatJSON)
         let observeResponseGuard: InvalidResponseObserver? = onInvalidResponse.map { callback in
             { guardID in callback(.init(format: format, guardID: guardID)) }
         }
-        if request.provider.wireAPI == .responses { return .reply(try decodeResponses(result.body, request: request, observe: observeResponseGuard)) }
+        let observeToolGuard: InvalidToolObserver? = onInvalidTool.map { callback in
+            { guardID, nameMatch in callback(.init(format: format, guardID: guardID, nameMatch: nameMatch)) }
+        }
+        if request.provider.wireAPI == .responses { return .reply(try decodeResponses(result.body, request: request, observe: observeResponseGuard, observeTool: observeToolGuard)) }
         let envelope: [String: Any], textDeltas: [String], argumentDeltas: [[String]]
         let rawCorrectionEligible: Bool, envelopeShapeValid: Bool, unambiguousJSON: Bool, streamShapeAndUsageValid: Bool
         let envelopeRejection: ArgumentValidationDiagnostic.EnvelopeRejection?
         let jsonRejection: APIModelCorrectionJSON.RejectionDiagnostic?
         if result.contentType.contains("text/event-stream") {
-            let assembled = try assembleChatStream(result.body, cerebras: request.provider.isCerebrasInference, diagnostics: onArgumentRejection != nil, observe: observeResponseGuard)
+            let assembled = try assembleChatStream(result.body, cerebras: request.provider.isCerebrasInference, diagnostics: onArgumentRejection != nil, observe: observeResponseGuard, observeTool: observeToolGuard)
             envelope = assembled.object; textDeltas = assembled.text; argumentDeltas = assembled.arguments
             rawCorrectionEligible = assembled.correctionEligible
             envelopeShapeValid = assembled.envelopeShapeValid; unambiguousJSON = assembled.unambiguousJSON
@@ -931,10 +1247,27 @@ enum APIModelResponseCodec {
         var callIDs = request.historyCallIDs
         var validatedCalls: [(id: String, tool: Tool, arguments: String)] = []
         for call in calls {
-            guard call["type"] as? String == "function", let id = call["id"] as? String, validCallID(id), callIDs.insert(id).inserted,
-                  let function = call["function"] as? [String: Any], let wireName = function["name"] as? String,
-                  request.allowedTools.contains(wireName), let tool = request.tools.first(where: { $0.wireName == wireName }),
-                  let arguments = function["arguments"] as? String else { throw Failure.invalidTool }
+            // Keep the original short-circuit order and insertion point. Each
+            // failed guard emits one finite label, then the same fatal error.
+            guard call["type"] as? String == "function" else { throw invalidTool(.chatCallType, observeToolGuard) }
+            guard let id = call["id"] as? String else { throw invalidTool(.chatCallIDType, observeToolGuard) }
+            guard validCallID(id) else { throw invalidTool(.chatCallIDSyntax, observeToolGuard) }
+            guard callIDs.insert(id).inserted else {
+                throw invalidTool(request.historyCallIDs.contains(id) ? .chatCallIDHistory : .chatCallIDDuplicate, observeToolGuard)
+            }
+            guard let function = call["function"] as? [String: Any] else { throw invalidTool(.chatFunctionType, observeToolGuard) }
+            guard let wireName = function["name"] as? String else { throw invalidTool(.chatNameType, observeToolGuard) }
+            guard request.allowedTools.contains(wireName) else {
+                if let onInvalidTool {
+                    let match = diagnosticNameMatch(wireName, tools: request.tools)
+                    let shape = match == .none && request.toolNaming == .semantic && request.provider.isAlibabaModelStudioInference
+                        ? offeredNameShape(wireName, allowedNames: request.allowedTools) : nil
+                    onInvalidTool(.init(format: format, guardID: .chatNameNotAllowed, nameMatch: match, offeredNameShape: shape))
+                }
+                throw Failure.invalidTool
+            }
+            guard let tool = request.tools.first(where: { $0.wireName == wireName }) else { throw invalidTool(.chatNameNotDeclared, observeToolGuard) }
+            guard let arguments = function["arguments"] as? String else { throw invalidTool(.chatArgumentsType, observeToolGuard) }
             validatedCalls.append((id, tool, arguments))
         }
         var parsedArguments: [[String: Any]] = [], argumentsRejected = false
@@ -947,7 +1280,7 @@ enum APIModelResponseCodec {
         }
         func emitArgumentRejection(oversized: Bool = false) {
             guard let reason = rejectionReason else { return }
-            onArgumentRejection?(.init(reason: reason, envelopeRejection: envelopeRejection, jsonRejection: jsonRejection, schemaFailures: rejectionDetails.isEmpty ? nil : rejectionDetails.prefix(2).map { .init(toolIndex: $0.toolIndex, constraint: $0.constraint, location: $0.location) }, callCount: validatedCalls.count, rejectedCount: rejectedCount,
+            onArgumentRejection?(.init(reason: reason, envelopeRejection: envelopeRejection, jsonRejection: jsonRejection, schemaFailures: rejectionDetails.isEmpty ? nil : rejectionDetails.prefix(2).map { .init(toolIndex: $0.toolIndex, constraint: $0.constraint, location: $0.location, patchLocation: $0.patchLocation, patchProbe: $0.patchProbe) }, callCount: validatedCalls.count, rejectedCount: rejectedCount,
                 envelopeShapeValid: envelopeShapeValid, unambiguousJSON: unambiguousJSON,
                 streamShapeAndUsageValid: streamShapeAndUsageValid, knownUsage: correctionUsage(normalizedUsage) != nil,
                 correctionEligible: rawCorrectionEligible && correctionUsage(normalizedUsage) != nil && !oversized))
@@ -956,10 +1289,12 @@ enum APIModelResponseCodec {
             guard call.arguments.utf8.count <= maximumText else {
                 observe(.oversized); emitArgumentRejection(oversized: true); throw Failure.invalidArguments
             }
-            do { parsedArguments.append(try validatedArguments(call.arguments, tool: call.tool, onRejection: observe, onSchemaMismatch: { violation in
+            do { parsedArguments.append(try validatedArguments(call.arguments, tool: call.tool,
+                observingPatchSchema: request.provider.isAlibabaModelStudioInference && request.model.id == "qwen3.7-flash", onRejection: observe, onSchemaMismatch: { violation in
                 if rejectionDetails.count < 8, let index = request.tools.firstIndex(where: { $0.wireName == call.tool.wireName }) {
                     rejectionDetails.append(.init(toolIndex: index, wireName: call.tool.wireName, constraint: violation.constraint,
-                        path: violation.path, location: builtinSchemaLocation(tool: request.tools[index], violation: violation)))
+                        path: violation.path, location: builtinSchemaLocation(tool: request.tools[index], violation: violation),
+                        patchLocation: violation.patchLocation, patchProbe: violation.patchProbe))
                 }
             })) }
             catch let failure as Failure where failure == .invalidArguments {
@@ -1004,7 +1339,7 @@ enum APIModelResponseCodec {
                            finalTextSource: calls.isEmpty ? finalTextSource(text, response: resource) : nil))
     }
 
-    private static func decodeResponses(_ data: Data, request: Request, observe: InvalidResponseObserver?) throws -> Reply {
+    private static func decodeResponses(_ data: Data, request: Request, observe: InvalidResponseObserver?, observeTool: InvalidToolObserver?) throws -> Reply {
         guard let raw = try responseJSONValue(data, observe: observe) as? [String: Any], raw["object"] as? String == "response",
               raw["status"] as? String == "completed", absent(raw["error"]), absent(raw["incomplete_details"]),
               let original = raw["output"] as? [[String: Any]], !original.isEmpty else { throw Failure.incompleteResponse }
@@ -1016,10 +1351,15 @@ enum APIModelResponseCodec {
             switch type {
             case "function_call", "custom_tool_call":
                 guard absent(value["status"]) || value["status"] as? String == "completed" else { throw Failure.incompleteResponse }
-                guard let name = value["name"] as? String,
-                      let tool = request.tools.first(where: { $0.name == name && $0.namespace == value["namespace"] as? String }),
-                      tool.custom == (type == "custom_tool_call"), request.allowedTools.contains(tool.wireName),
-                      let callID = value["call_id"] as? String, validCallID(callID), ids.insert(callID).inserted else { throw Failure.invalidTool }
+                guard let name = value["name"] as? String else { throw invalidTool(.responsesNameType, observeTool) }
+                guard let tool = request.tools.first(where: { $0.name == name && $0.namespace == value["namespace"] as? String }) else { throw invalidTool(.responsesNameNotDeclared, observeTool) }
+                guard tool.custom == (type == "custom_tool_call") else { throw invalidTool(.responsesToolType, observeTool) }
+                guard request.allowedTools.contains(tool.wireName) else { throw invalidTool(.responsesNameNotAllowed, observeTool) }
+                guard let callID = value["call_id"] as? String else { throw invalidTool(.responsesCallIDType, observeTool) }
+                guard validCallID(callID) else { throw invalidTool(.responsesCallIDSyntax, observeTool) }
+                guard ids.insert(callID).inserted else {
+                    throw invalidTool(request.historyCallIDs.contains(callID) ? .responsesCallIDHistory : .responsesCallIDDuplicate, observeTool)
+                }
                 if tool.custom {
                     guard let input = value["input"] as? String else { throw Failure.invalidArguments }
                     _ = try validatedArguments(String(decoding: try json(["input": input]), as: UTF8.self), tool: tool)
@@ -1047,7 +1387,8 @@ enum APIModelResponseCodec {
             default: throw invalidResponse(.responsesItemType, observe)
             }
         }
-        guard count <= request.maximumCalls, !request.requiredTool || count > 0 else { throw Failure.invalidTool }
+        guard count <= request.maximumCalls else { throw invalidTool(.responsesCallCount, observeTool) }
+        guard !request.requiredTool || count > 0 else { throw invalidTool(.responsesRequiredCall, observeTool) }
         let resource = response(id: "resp_" + UUID().uuidString, request: request, output: output, text: text,
                                 usage: try usage(raw["usage"], responses: true, observe: observe))
         return Reply(response: resource, textDeltas: text.isEmpty ? [] : [text], argumentDeltas: [],
@@ -1123,7 +1464,7 @@ enum APIModelResponseCodec {
         }
     }
 
-    private static func assembleChatStream(_ data: Data, cerebras: Bool, diagnostics: Bool = false, observe: InvalidResponseObserver?) throws -> ChatStream {
+    private static func assembleChatStream(_ data: Data, cerebras: Bool, diagnostics: Bool = false, observe: InvalidResponseObserver?, observeTool: InvalidToolObserver?) throws -> ChatStream {
         guard let string = String(data: data, encoding: .utf8) else { throw invalidResponse(.sseUTF8, observe) }
         var done = false, model: String?, id: String?, role: String?, finish: String?, usage: Any?
         var text: [String] = [], reasoning = "", calls: [Int: (id: String, name: String, arguments: [String])] = [:]
@@ -1182,7 +1523,7 @@ enum APIModelResponseCodec {
                     let index = try responseInteger(row["index"], default: -1, range: 0...127, guardID: .sseToolIndex, observe: observe)
                     var call = calls[index] ?? (id: "", name: "", arguments: [])
                     if let value = row["id"] as? String { guard call.id.isEmpty else { throw invalidResponse(.sseRepeatedCallID, observe) }; call.id = value }
-                    if let type = row["type"] as? String { guard type == "function" else { throw Failure.invalidTool } }
+                    if let type = row["type"] as? String { guard type == "function" else { throw invalidTool(.sseToolType, observeTool) } }
                     if let function = row["function"] as? [String: Any] {
                         if let value = function["name"] as? String { call.name += value }
                         if let value = function["arguments"] as? String { call.arguments.append(value) }
@@ -1477,13 +1818,129 @@ enum APIModelResponseCodec {
         }
         return nil
     }
-    private static func validatedArguments(_ text: String, tool: Tool,
+    private static func localPatchSchemaLocation(_ object: [String: Any], tool: Tool,
+                                                 declined: (PatchSchemaProbe.Status) -> Void) -> LocalPatchSchemaLocation? {
+        // patchProjection is granted only for the exact bundled native grammar
+        // on the supported Alibaba admission. Recheck its complete offered schema.
+        guard tool.custom, tool.name == "apply_patch", tool.namespace == nil || tool.namespace == "functions"
+        else { declined(.nonPatch); return nil }
+        guard tool.patchProjection == .local else { declined(.nonLocal); return nil }
+        guard equalJSON(tool.schema, AlibabaPatchProjection.local.schema) else { declined(.schemaIdentity); return nil }
+        guard object.count == 1 else { declined(.outerKeys); return nil }
+        guard let operations = object["operations"] as? [Any] else { declined(.operationsType); return nil }
+        guard (1...64).contains(operations.count) else {
+            declined(operations.isEmpty ? .operationsEmpty : .operationsLimit); return nil
+        }
+        guard let properties = tool.schema["properties"] as? [String: [String: Any]],
+              let items = properties["operations"]?["items"] as? [String: Any],
+              let branches = items["oneOf"] as? [[String: Any]], branches.count == 3
+        else { declined(.schemaShape); return nil }
+        typealias Location = LocalPatchSchemaLocation
+        var nodes = 0, exhausted = false
+        func visit(_ value: Any, schema: [String: Any], operation: Location.Operation, field: Location.Field) -> Location? {
+            nodes += 1
+            guard nodes <= 256 else { declined(.traversalLimit); exhausted = true; return nil }
+            func failure(_ constraint: SchemaConstraint, _ field: Location.Field) -> Location {
+                .init(operation: operation, field: field, constraint: constraint)
+            }
+            guard let type = schema["type"] as? String, typeMatches(value, type: type) else { return failure(.typeMismatch, field) }
+            if let value = value as? [String: Any], let properties = schema["properties"] as? [String: [String: Any]] {
+                guard value.count <= 16 else { declined(.objectLimit); exhausted = true; return nil }
+                func childField(_ name: String) -> Location.Field? {
+                    switch name {
+                    case "add", "delete", "update": return .path
+                    case "lines": return .lines
+                    case "hunks": return .hunks
+                    case "anchor": return .anchor
+                    case "move_to": return .moveTo
+                    case "end_of_file": return .endOfFile
+                    default: return nil
+                    }
+                }
+                for name in (schema["required"] as? [String] ?? []).sorted() where value[name] == nil {
+                    guard let child = childField(name) else { declined(.unsupportedField); exhausted = true; return nil }
+                    return failure(.missingRequired, child)
+                }
+                if value.keys.contains(where: { properties[$0] == nil }) { return failure(.unexpectedFields, field) }
+                for name in properties.keys.sorted() {
+                    guard let child = value[name] else { continue }
+                    guard let target = childField(name) else { declined(.unsupportedField); exhausted = true; return nil }
+                    if let result = visit(child, schema: properties[name]!, operation: operation, field: target) { return result }
+                    if exhausted { return nil }
+                }
+            } else if let value = value as? [Any], let items = schema["items"] as? [String: Any] {
+                guard value.count <= 256 else { declined(.arrayLimit); exhausted = true; return nil }
+                if value.isEmpty { return failure(.arrayBounds, field) }
+                let child: Location.Field
+                if field == .hunks { child = .hunk }
+                else if field == .lines { child = .line }
+                else { declined(.unsupportedField); exhausted = true; return nil }
+                for item in value {
+                    if let result = visit(item, schema: items, operation: operation, field: child) { return result }
+                    if exhausted { return nil }
+                }
+            } else if !matches(value, schema: schema, root: schema, depth: 0) {
+                // Exact known scalar pattern/enum constraints only, no value text.
+                return failure(.schemaMismatch, field)
+            }
+            return nil
+        }
+        for item in operations {
+            guard let value = item as? [String: Any] else { return .init(operation: .notObject, field: .operation, constraint: .typeMismatch) }
+            let kinds = ["add", "delete", "update"].filter { value[$0] != nil }
+            guard !kinds.isEmpty else { return .init(operation: .missing, field: .operation, constraint: .schemaMismatch) }
+            guard kinds.count == 1 else { return .init(operation: .ambiguous, field: .operation, constraint: .schemaMismatch) }
+            let name = kinds[0], index = name == "add" ? 0 : name == "delete" ? 1 : 2
+            guard let operation = Location.Operation(rawValue: name) else { declined(.unsupportedField); return nil }
+            if let result = visit(value, schema: branches[index], operation: operation, field: .operation) {
+                guard result.isConsistent else { declined(.inconsistentLocation); return nil }
+                return result
+            }
+            if exhausted { return nil }
+        }
+        declined(.noBranchViolation); return nil
+    }
+
+    private static func patchSchemaProbe(_ object: [String: Any], tool: Tool,
+                                         violation: SchemaViolation, status: PatchSchemaProbe.Status) -> PatchSchemaProbe {
+        typealias Probe = PatchSchemaProbe
+        let named = tool.name == "apply_patch" && (tool.namespace == nil || tool.namespace == "functions")
+        let path: Probe.Path
+        switch violation.path {
+        case []: path = .root
+        case [.property("input")]: path = .input
+        case [.property("operations")]: path = .operations
+        case [.property("operations"), .items]: path = .operation
+        default: path = violation.path.first == .property("operations") ? .nested : .other
+        }
+        let actual = violation.actualType.flatMap { Probe.ValueType(rawValue: $0.rawValue) } ?? .unknown
+        guard named else { return .init(tool: .other, projection: .unrecognized, path: path, actual: actual, status: status) }
+        let projection: Probe.Projection = tool.patchProjection == .local ? .local
+            : tool.patchProjection == .environments ? .environments : tool.custom ? .literalInput : .unrecognized
+        // Three fixed dictionary lookups; never copy or traverse unknown keys.
+        var outer: [Probe.OuterKey] = []
+        if object["input"] != nil { outer.append(.input) }
+        if object["operations"] != nil { outer.append(.operations) }
+        if object["environment_id"] != nil { outer.append(.environmentID) }
+        if object.count > outer.count { outer.append(.other) }
+        let count: Probe.Count = object.isEmpty ? .zero : object.count == 1 ? .one : object.count <= 16 ? .multiple : .overLimit
+        let operations = object["operations"].map { value in
+            diagnosticType(value).flatMap { Probe.ValueType(rawValue: $0.rawValue) } ?? .unknown
+        } ?? .missing
+        return .init(tool: .namedApplyPatch, projection: projection, path: path, actual: actual, status: status,
+            outer: outer, keys: count, operations: operations)
+    }
+
+    private static func validatedArguments(_ text: String, tool: Tool, observingPatchSchema: Bool = false,
                                            onRejection: ((ArgumentValidationDiagnostic.Reason) -> Void)? = nil,
                                            onSchemaMismatch: ((SchemaViolation) -> Void)? = nil) throws -> [String: Any] {
         guard text.utf8.count <= maximumText, let data = text.data(using: .utf8) else {
             onRejection?(.oversized); throw Failure.invalidArguments
         }
         guard let value = try? JSONSerialization.jsonObject(with: data) else {
+            onRejection?(.invalidJSON); throw Failure.invalidArguments
+        }
+        if tool.patchProjection != nil || tool.requiresUnambiguousArguments, !APIModelCorrectionJSON.isUnambiguous(data) {
             onRejection?(.invalidJSON); throw Failure.invalidArguments
         }
         guard let object = value as? [String: Any] else {
@@ -1502,15 +1959,39 @@ enum APIModelResponseCodec {
                 }
                 var violation = localizeSchemaFailure(object, schema: diagnosticSchema, depth: 0, path: [], nodes: &nodes)
                     ?? .init(constraint: .schemaMismatch, path: [])
+                var admittedLiteralPatternMismatch = false
+                // matches() already rejected this exact closed native wrapper.
+                // Localize only its declared pattern, never a foreign string rule.
+                if isAlibabaLiteralPatchPatternTool(tool), object.count == 1,
+                   let literal = object["input"] as? String,
+                   literal.range(of: alibabaLiteralPatchPattern, options: .regularExpression) == nil {
+                    violation = .init(constraint: .schemaMismatch, path: [.property("input")], actualType: .string)
+                    admittedLiteralPatternMismatch = true
+                }
                 // The parsed root is known even when the failing constraint
                 // is not localized. Exact native-schema checks still decide
                 // whether this finite fact can name a built-in tool.
                 if violation.constraint == .schemaMismatch, violation.path.isEmpty, violation.actualType == nil {
                     violation = .init(constraint: .schemaMismatch, path: [], actualType: .object)
                 }
+                // This independent observation never changes the violation/path
+                // used by the existing corrective feedback or admission decision.
+                var decline: PatchSchemaProbe.Status?
+                violation.patchLocation = localPatchSchemaLocation(object, tool: tool, declined: { decline = $0 })
+                if observingPatchSchema, let decline {
+                    let status: PatchSchemaProbe.Status = admittedLiteralPatternMismatch && decline == .nonLocal
+                        ? .literalInputPatternMismatch : decline
+                    violation.patchProbe = patchSchemaProbe(object, tool: tool, violation: violation, status: status)
+                }
                 onSchemaMismatch(violation)
             }
             onRejection?(.schemaMismatch); throw Failure.invalidArguments
+        }
+        if let projection = tool.patchProjection {
+            guard let patch = projection.compile(object, byteLimit: maximumText) else {
+                onRejection?(.schemaMismatch); throw Failure.invalidArguments
+            }
+            return ["input":patch]
         }
         return object
     }
@@ -1693,7 +2174,7 @@ enum APIModelResponseCodec {
         }
     }
     private static func equalJSON(_ lhs: Any, _ rhs: Any) -> Bool { (try? JSONSerialization.data(withJSONObject: lhs, options: [.fragmentsAllowed, .sortedKeys])) == (try? JSONSerialization.data(withJSONObject: rhs, options: [.fragmentsAllowed, .sortedKeys])) }
-    private static func validName(_ value: String) -> Bool { !value.isEmpty && value.utf8.count <= 128 && value.range(of: #"^[A-Za-z0-9_.-]+$"#, options: .regularExpression) != nil }
+    private static func validName(_ value: String) -> Bool { !value.isEmpty && value.utf8.count <= 128 && value.range(of: #"\A[A-Za-z0-9_.-]+\z"#, options: .regularExpression) != nil }
     private static func validCallID(_ value: String) -> Bool { !value.isEmpty && value.utf8.count <= 256 && !value.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) } }
     private static func absent(_ value: Any?) -> Bool { value == nil || value is NSNull }
     private static func strictBool(_ value: Any?) -> Bool? { guard let n = value as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() else { return nil }; return n.boolValue }

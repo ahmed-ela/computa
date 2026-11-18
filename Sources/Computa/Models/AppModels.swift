@@ -149,6 +149,8 @@ struct TimelineEntry: Identifiable, Hashable, Sendable {
 
 struct AgentTask: Identifiable, Hashable, Sendable {
     let id: String
+    /// Engine thread identity survives restarts; the UI's initial task UUID does not.
+    var runtimeThreadID: String?
     var title: String
     var summary: String
     var status: TaskStatus
@@ -161,6 +163,7 @@ struct AgentTask: Identifiable, Hashable, Sendable {
 
     init(
         id: String = UUID().uuidString,
+        runtimeThreadID: String? = nil,
         title: String,
         summary: String,
         status: TaskStatus,
@@ -172,6 +175,7 @@ struct AgentTask: Identifiable, Hashable, Sendable {
         turnDiffs: [AgentTurnDiff] = []
     ) {
         self.id = id
+        self.runtimeThreadID = runtimeThreadID
         self.title = title
         self.summary = summary
         self.status = status

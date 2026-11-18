@@ -6,7 +6,10 @@ use block2::RcBlock;
 use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained, sel,
 };
-use objc2_app_kit::{NSAlert, NSModalResponse, NSPopUpButton, NSTextField, NSView, NSWindow};
+use objc2_app_kit::{
+    NSAccessibility, NSAlert, NSButton, NSCellImagePosition, NSImage, NSModalResponse,
+    NSPopUpButton, NSTextField, NSView, NSWindow,
+};
 use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 use std::{
     cell::{Cell, RefCell},
@@ -21,6 +24,7 @@ pub enum NativeAccessMode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NativeControlEvent {
     AccessModeChanged(NativeAccessMode),
+    ShowSettings,
     ApprovalResolved { id: String, approved: bool },
     RequestAccessibility,
     RequestScreenRecording,
@@ -40,6 +44,7 @@ struct TargetIvars {
     callback: Rc<dyn Fn(NativeControlEvent)>,
     mode: Cell<NativeAccessMode>,
     mode_button: RefCell<Option<Retained<NSPopUpButton>>>,
+    settings_button: RefCell<Option<Retained<NSButton>>>,
     permissions_button: RefCell<Option<Retained<NSPopUpButton>>>,
     pending: Rc<RefCell<Option<Prompt>>>,
 }
@@ -62,6 +67,12 @@ define_class!(
             self.ivars().mode.set(mode);(self.ivars().callback)(NativeControlEvent::AccessModeChanged(mode));
         }
         // SAFETY: exact native sender and action signature, no page-controlled input.
+        #[unsafe(method(showSettings:))]
+        fn show_settings(&self, sender: &NSButton) {
+            if self.ivars().settings_button.borrow().as_ref().is_some_and(|button| std::ptr::eq(&**button, sender)) {
+                (self.ivars().callback)(NativeControlEvent::ShowSettings);
+            }
+        }
         #[unsafe(method(permissionsChanged:))]
         fn permissions_changed(&self,sender:&NSPopUpButton){
             if self.ivars().permissions_button.borrow().as_ref().is_none_or(|b|!std::ptr::eq(&**b,sender)){return}
@@ -76,6 +87,7 @@ impl ControlTarget {
             callback,
             mode: Cell::new(NativeAccessMode::AskEveryTime),
             mode_button: RefCell::new(None),
+            settings_button: RefCell::new(None),
             permissions_button: RefCell::new(None),
             pending: Rc::new(RefCell::new(None)),
         });
@@ -88,6 +100,7 @@ pub struct TrustedNativeControls {
     view: Retained<NSView>,
     target: Retained<ControlTarget>,
     mode: Retained<NSPopUpButton>,
+    settings: Retained<NSButton>,
     permissions: Retained<NSPopUpButton>,
     status: Retained<NSTextField>,
     alert: Option<Retained<NSAlert>>,
@@ -114,9 +127,26 @@ impl TrustedNativeControls {
         for title in ["Ask every time", "Full access"] {
             mode.addItemWithTitle(&NSString::from_str(title))
         }
+        let settings = NSButton::initWithFrame(
+            NSButton::alloc(mtm),
+            NSRect::new(NSPoint::new(170., 3.), NSSize::new(28., 28.)),
+        );
+        let label = NSString::from_str("Settings");
+        if let Some(icon) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            &NSString::from_str("gearshape"),
+            Some(&label),
+        ) {
+            settings.setTitle(&NSString::from_str(""));
+            settings.setImage(Some(&icon));
+            settings.setImagePosition(NSCellImagePosition::ImageOnly);
+        } else {
+            settings.setTitle(&NSString::from_str("⚙︎"));
+        }
+        settings.setToolTip(Some(&label));
+        settings.setAccessibilityLabel(Some(&label));
         let permissions = NSPopUpButton::initWithFrame_pullsDown(
             NSPopUpButton::alloc(mtm),
-            NSRect::new(NSPoint::new(170., 3.), NSSize::new(190., 28.)),
+            NSRect::new(NSPoint::new(205., 3.), NSSize::new(190., 28.)),
             false,
         );
         for title in [
@@ -127,20 +157,24 @@ impl TrustedNativeControls {
             permissions.addItemWithTitle(&NSString::from_str(title))
         }
         let status = NSTextField::labelWithString(&NSString::from_str("Runtime disconnected"), mtm);
-        status.setFrame(NSRect::new(NSPoint::new(375., 8.), NSSize::new(550., 20.)));
+        status.setFrame(NSRect::new(NSPoint::new(410., 8.), NSSize::new(550., 20.)));
         // SAFETY: targets have the matching selector ABI and are retained for
         // the complete controls lifetime; views belong to this live NSWindow.
         unsafe {
             mode.setTarget(Some(&target));
             mode.setAction(Some(sel!(modeChanged:)));
+            settings.setTarget(Some(&target));
+            settings.setAction(Some(sel!(showSettings:)));
             permissions.setTarget(Some(&target));
             permissions.setAction(Some(sel!(permissionsChanged:)));
             view.addSubview(&mode);
+            view.addSubview(&settings);
             view.addSubview(&permissions);
             view.addSubview(&status);
             content.addSubview(&view);
         }
         *target.ivars().mode_button.borrow_mut() = Some(mode.clone());
+        *target.ivars().settings_button.borrow_mut() = Some(settings.clone());
         *target.ivars().permissions_button.borrow_mut() = Some(permissions.clone());
         // SAFETY: a live borrowed window is retained before long-term storage.
         let window = unsafe { Retained::retain(window as *const NSWindow as *mut NSWindow) }
@@ -150,6 +184,7 @@ impl TrustedNativeControls {
             view,
             target,
             mode,
+            settings,
             permissions,
             status,
             alert: None,
@@ -172,8 +207,8 @@ impl TrustedNativeControls {
             self.view
                 .setFrame(NSRect::new(NSPoint::new(0., 0.), NSSize::new(width, 34.)));
             self.status.setFrame(NSRect::new(
-                NSPoint::new(375., 8.),
-                NSSize::new((width - 385.).max(1.), 20.),
+                NSPoint::new(410., 8.),
+                NSSize::new((width - 420.).max(1.), 20.),
             ));
         }
     }
@@ -254,10 +289,12 @@ impl Drop for TrustedNativeControls {
             self.dismiss_prompt(&id);
         }
         self.mode.setEnabled(false);
+        self.settings.setEnabled(false);
         self.permissions.setEnabled(false);
         // SAFETY: targets are disconnected before their owner is destroyed.
         unsafe {
             self.mode.setTarget(None);
+            self.settings.setTarget(None);
             self.permissions.setTarget(None);
             self.view.removeFromSuperview();
         }

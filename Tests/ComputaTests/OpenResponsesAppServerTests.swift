@@ -30,6 +30,10 @@ final class OpenResponsesAppServerTests: XCTestCase {
         try await qualify(model: syntheticChatGPTModelID, scenario: .usageLimit)
     }
 
+    func testBundledEnginePreservesUnexpectedQwenPage400WithoutReplayingInference() async throws {
+        try await qualify(model: syntheticQwenChoice.modelID, scenario: .unexpectedWebsitePage)
+    }
+
     private func qualify(model: String, scenario: EngineInferenceScenario) async throws {
         let artifact: ComputaRuntimeArtifact
         do { artifact = try ComputaRuntimeArtifact.resolve() }
@@ -83,6 +87,7 @@ final class OpenResponsesAppServerTests: XCTestCase {
             default:
                 prompt = "Reply with the fixture acknowledgment. Do not use tools."
             }
+            try await inference.expectUserPrompt(prompt)
             try await runtime.submit(prompt: prompt, toTaskID: taskID, modelID: model)
             let deadline = ContinuousClock.now + .seconds(45)
             while !audit.terminal, ContinuousClock.now < deadline {
@@ -94,9 +99,11 @@ final class OpenResponsesAppServerTests: XCTestCase {
             }
             XCTAssertEqual(audit.approvals, 0, "A read-only status query cannot request user approval")
             let receipt = await inference.receipt()
-            XCTAssertTrue(receipt.requestsWereStreaming)
-            XCTAssertTrue(receipt.nativeEncryptedReasoningIncludePresent,
-                          "Exercise the unconditional include sent by the actual pinned Codex HTTP client")
+            // The synthetic website sees the presentation, not the actual
+            // bundled HTTP input. Native API transport controls are validated
+            // and retained upstream but omitted from every website's task copy.
+            XCTAssertTrue(receipt.websiteAPIOnlyControlsOmitted)
+            XCTAssertTrue(receipt.websiteUserTaskAndToolsPreserved)
             XCTAssertEqual(receipt.requestModels, Array(repeating: model, count: scenario.responseCount))
             let expectedInferences = scenario == .statusTool ? 2 : 1
             XCTAssertEqual(receipt.startCount, expectedInferences)
@@ -107,8 +114,13 @@ final class OpenResponsesAppServerTests: XCTestCase {
             if scenario.isFailure {
                 XCTAssertEqual(audit.status, .failed)
                 XCTAssertFalse(audit.errors.isEmpty)
-                XCTAssertTrue(audit.errors.joined().contains(scenario == .usageLimit ? "website_usage_limit" : "malformed_website_reply"),
-                              "The actual HTTP client's terminal error must preserve the structured failure code")
+                if scenario == .unexpectedWebsitePage {
+                    XCTAssertTrue(audit.errors.joined().contains("unexpected_website_page"))
+                    XCTAssertFalse(audit.errors.joined().contains("high demand"))
+                } else {
+                    XCTAssertTrue(audit.errors.joined().contains(scenario == .usageLimit ? "website_usage_limit" : "malformed_website_reply"),
+                                  "The actual HTTP client's terminal error must preserve the structured failure code")
+                }
                 XCTAssertTrue(audit.assistant.isEmpty, "A failed HTTP inference must not become an assistant answer")
                 XCTAssertEqual(receipt.finishCount, expectedInferences)
             } else {
@@ -125,6 +137,30 @@ final class OpenResponsesAppServerTests: XCTestCase {
             let trace = try AppServerWireTrace.load(traceURL)
             XCTAssertEqual(trace.parseFailures, [])
             XCTAssertEqual(trace.messages.filter { $0.method == "turn/start" && $0.direction == .clientToServer }.count, 1)
+            if scenario == .unexpectedWebsitePage {
+                // App-layer failure history can replace a generic engine message.
+                // Require the raw bundled-engine terminal notification itself to
+                // preserve the complete HTTP error body before that overlay.
+                let completion = try XCTUnwrap(trace.messages.filter {
+                    $0.method == "turn/completed" && $0.direction == .serverToClient
+                }.only)
+                let params = try XCTUnwrap(completion.object["params"] as? [String: Any])
+                let turn = try XCTUnwrap(params["turn"] as? [String: Any])
+                XCTAssertEqual(turn["status"] as? String, "failed")
+                let error = try XCTUnwrap(turn["error"] as? [String: Any])
+                let message = try XCTUnwrap(error["message"] as? String)
+                let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(message.utf8)) as? [String: Any])
+                let expectedBytes = try WebModelServer.errorBody(for: EmbeddedWebModelTransport.Failure.unexpectedPage(.qwen))
+                let expected = try XCTUnwrap(JSONSerialization.jsonObject(with: expectedBytes) as? [String: Any])
+                XCTAssertTrue(NSDictionary(dictionary: decoded).isEqual(to: expected))
+                XCTAssertTrue(message.contains("unexpected_website_page"))
+                XCTAssertTrue(message.contains("inspect_website"))
+                XCTAssertFalse(message.contains("high demand"))
+                XCTAssertFalse(trace.messages.contains {
+                    $0.direction == .serverToClient && $0.method == "error"
+                        && ($0.object["params"] as? [String: Any])?["willRetry"] as? Bool == true
+                }, "The raw engine must not advertise another inference attempt")
+            }
             let toolRequests = trace.messages.filter { $0.method == "item/tool/call" && $0.direction == .serverToClient }
             if scenario == .statusTool || scenario == .sevenToolRounds {
                 XCTAssertTrue(receipt.statusToolOffered)
@@ -148,10 +184,11 @@ final class OpenResponsesAppServerTests: XCTestCase {
                     XCTAssertEqual(receipt.matchingNativeOutputCount, 6)
                     XCTAssertEqual(Set(receipt.nativeCallIDs).count, 6)
                     XCTAssertEqual(Set(receipt.nativeOutputCallIDs), Set(receipt.nativeCallIDs))
-                    XCTAssertEqual(receipt.nativeOutputIDs.count, 6)
-                    XCTAssertEqual(Set(receipt.nativeOutputIDs).count, 6)
-                    XCTAssertTrue(receipt.nativeOutputIDs.allSatisfy { $0.hasPrefix("fco_") && $0.utf8.count == 40 },
-                                  "The actual Core assigns and retains prefixed native tool-result item IDs")
+                    XCTAssertTrue(receipt.nativeOutputIDs.isEmpty,
+                                  "Pinned mactopus16 omits result record IDs from external HTTP copies")
+                    XCTAssertTrue(receipt.nativeFunctionRecordIDsAbsent,
+                                  "Each external input omits both function-call and result record IDs; call_id remains authoritative")
+                    XCTAssertEqual(receipt.nativeRecordIDAbsenceChecks, 6)
                     XCTAssertTrue(receipt.nativeWireMetadataAbsent)
                     XCTAssertEqual(receipt.sentSessionTokens, Array(repeating: try XCTUnwrap(receipt.sessionTokens.only), count: 7))
                     XCTAssertEqual(receipt.finishedSessionTokens, receipt.sessionTokens)
@@ -173,8 +210,8 @@ final class OpenResponsesAppServerTests: XCTestCase {
 }
 
 private enum EngineInferenceScenario: String, Sendable {
-    case text, statusTool, sevenToolRounds, malformedReply, usageLimit
-    var isFailure: Bool { self == .malformedReply || self == .usageLimit }
+    case text, statusTool, sevenToolRounds, malformedReply, usageLimit, unexpectedWebsitePage
+    var isFailure: Bool { self == .malformedReply || self == .usageLimit || self == .unexpectedWebsitePage }
     var responseCount: Int { self == .sevenToolRounds ? 7 : self == .statusTool ? 2 : 1 }
 }
 
@@ -232,8 +269,8 @@ private actor EngineInferenceTransport: WebModelTransport {
         var finishCount = 0
         var sessionTokens = [String]()
         var requestModels = [String]()
-        var requestsWereStreaming = true
-        var nativeEncryptedReasoningIncludePresent = true
+        var websiteAPIOnlyControlsOmitted = true
+        var websiteUserTaskAndToolsPreserved = true
         var statusToolOffered = false
         var matchingCallAndOutput = false
         var actualHostStatusOutputPresent = false
@@ -241,6 +278,8 @@ private actor EngineInferenceTransport: WebModelTransport {
         var nativeCallIDs = [String]()
         var nativeOutputCallIDs = [String]()
         var nativeOutputIDs = [String]()
+        var nativeFunctionRecordIDsAbsent = true
+        var nativeRecordIDAbsenceChecks = 0
         var nativeWireMetadataAbsent = true
         var sentSessionTokens = [String]()
         var finishedSessionTokens = [String]()
@@ -251,12 +290,20 @@ private actor EngineInferenceTransport: WebModelTransport {
     var token = UUID().uuidString
     var reply = ""
     var observations = Receipt()
+    private var expectedUserPrompt: String?
+    private var currentProvider: String?
     init(scenario: EngineInferenceScenario, marker: String) { self.scenario = scenario; self.marker = marker }
     func receipt() -> Receipt { observations }
+    func expectUserPrompt(_ prompt: String) throws {
+        guard observations.startCount == 0 else { throw EngineTestFailure("Fixture input must be fixed before inference") }
+        expectedUserPrompt = prompt
+    }
     func request(operation: String, params: Data) async throws -> Data {
         let result: [String: Any]
         switch operation {
         case "webProviderStart":
+            let parameters = try XCTUnwrap(JSONSerialization.jsonObject(with: params) as? [String: String])
+            currentProvider = try XCTUnwrap(parameters["provider"])
             observations.startCount += 1
             token = UUID().uuidString
             observations.sessionTokens.append(token)
@@ -270,9 +317,21 @@ private actor EngineInferenceTransport: WebModelTransport {
             let object = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
             let prepared = try WebModelResponseCodec.prepareRequest(bytes)
             observations.requestModels.append(prepared.model)
-            observations.requestsWereStreaming = observations.requestsWereStreaming && prepared.stream
-            observations.nativeEncryptedReasoningIncludePresent = observations.nativeEncryptedReasoningIncludePresent
-                && ((object["include"] as? [String])?.contains("reasoning.encrypted_content") == true)
+            let apiOnlyFields = ["include", "reasoning", "client_metadata", "prompt_cache_key", "metadata", "safety_identifier",
+                "stream", "stream_options", "store", "background", "service_tier"]
+            observations.websiteAPIOnlyControlsOmitted = observations.websiteAPIOnlyControlsOmitted
+                && apiOnlyFields.allSatisfy { object[$0] == nil }
+            let expectedUserPrompt = try XCTUnwrap(self.expectedUserPrompt)
+            let userTexts = (object["input"] as? [[String: Any]] ?? []).filter { $0["role"] as? String == "user" }
+                .flatMap { item -> [String] in
+                    if let text = item["content"] as? String { return [text] }
+                    return (item["content"] as? [[String: Any]] ?? []).filter { $0["type"] as? String == "input_text" }
+                        .compactMap { $0["text"] as? String }
+                }
+            let tools = object["tools"] as? [[String: Any]]
+            observations.websiteUserTaskAndToolsPreserved = observations.websiteUserTaskAndToolsPreserved
+                && userTexts.filter { Data($0.utf8) == Data(expectedUserPrompt.utf8) }.count == 1
+                && tools?.isEmpty == false
             if scenario == .statusTool || scenario == .sevenToolRounds, observations.sendCount > 1 {
                 let items = object["input"] as? [[String: Any]] ?? []
                 let calls = items.filter { $0["type"] as? String == "function_call" }
@@ -289,6 +348,9 @@ private actor EngineInferenceTransport: WebModelTransport {
                 observations.nativeCallIDs = callIDs
                 observations.nativeOutputCallIDs = outputIDs
                 observations.nativeOutputIDs = outputs.compactMap { $0["id"] as? String }
+                observations.nativeFunctionRecordIDsAbsent = observations.nativeFunctionRecordIDsAbsent
+                    && calls.allSatisfy { !$0.keys.contains("id") } && outputs.allSatisfy { !$0.keys.contains("id") }
+                observations.nativeRecordIDAbsenceChecks += 1
                 observations.nativeWireMetadataAbsent = observations.nativeWireMetadataAbsent &&
                     outputs.allSatisfy { $0["internal_chat_message_metadata_passthrough"] == nil }
                 observations.actualHostStatusOutputPresent = !outputs.isEmpty && outputs.allSatisfy {
@@ -297,6 +359,7 @@ private actor EngineInferenceTransport: WebModelTransport {
                 }
             }
             if scenario == .usageLimit { throw EmbeddedWebModelTransport.Failure.usageLimited(.chatgpt) }
+            if scenario == .unexpectedWebsitePage { throw EmbeddedWebModelTransport.Failure.unexpectedPage(.qwen) }
             if scenario == .malformedReply { reply = #"{"type":"tool_calls","calls":["# }
             else if (scenario == .statusTool || scenario == .sevenToolRounds), observations.sendCount < scenario.responseCount {
                 let name = try XCTUnwrap(prepared.offeredToolNames.first {
@@ -318,7 +381,19 @@ private actor EngineInferenceTransport: WebModelTransport {
             result = ["cleanup": "not_created"]
         default: throw EngineTestFailure("Unexpected deterministic transport operation")
         }
-        return try JSONSerialization.data(withJSONObject: syntheticPreparedWebsiteSnapshot(result))
+        var snapshot = syntheticPreparedWebsiteSnapshot(result)
+        if currentProvider == "chatgpt", operation == "webProviderPoll", snapshot["state"] as? String == "complete" {
+            // This inert provider serializes its own exact literal JSON bytes.
+            // It must supply the same finite extraction proof required of the
+            // live transport; absence or rendered fallback remains a rejection.
+            snapshot["completionEvidence"] = ["codeStructure": [
+                "selectedExtraction": "raw_code", "extractionReason": "accepted_literal_code"]]
+        }
+        if scenario == .unexpectedWebsitePage, ["ready", "running", "complete"].contains(snapshot["state"] as? String ?? "") {
+            snapshot["modelEvidence"] = ["selected": ["key": syntheticQwenChoice.key, "label": syntheticQwenChoice.label],
+                "source": "model_picker_label", "verification": "website_selection"]
+        }
+        return try JSONSerialization.data(withJSONObject: snapshot)
     }
 }
 

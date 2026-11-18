@@ -18,9 +18,10 @@ export class Element {
   events: unknown[] = [];
   constructor(public tagName: string, public values: Record<string, string> = {}, public text = "") {}
   get nodeType() { return this.tagName === "#text" ? 3 : 1; }
+  get length() { return this.tagName === "#text" ? this.text.length : undefined; }
   get childElementCount() { return this.children.filter(child => child.nodeType === 1).length; }
   get attributes() { return Object.entries(this.values).map(([name, value]) => ({ name, value })); }
-  get childNodes(): any[] { return [...(this.text ? [{ nodeType: 3, textContent: this.text, parentElement: this }] : []), ...this.children]; }
+  get childNodes(): any[] { return [...(this.text ? [{ nodeType: 3, length: this.text.length, textContent: this.text, parentElement: this }] : []), ...this.children]; }
   get isConnected(): boolean { return this.connected && (!this.parentElement || this.parentElement.isConnected); }
   set isConnected(value: boolean) { this.connected = value; }
   get textContent(): string { return this.text + this.children.map(child => child.tagName === "BR" ? "\n" : child.textContent).join(""); }
@@ -371,7 +372,7 @@ export function fixture(provider: Provider, options: { temporary?: boolean; user
   if (provider === "claude") article.append(response, controls); else { response.append(controls); article.append(response); }
   if (options.response ?? options.userPrompt !== undefined) messages.append(article);
   const location = { origin, pathname: provider === "claude" ? "/new" : "/app" };
-  const document: any = { URL: origin + location.pathname, documentElement: html, activeElement: null,
+  const document: any = { URL: origin + location.pathname, documentElement: html, body, activeElement: null,
     querySelectorAll: (selector: string) => html.querySelectorAll(selector),
     createElement: (tag: string) => new Element(tag.toUpperCase()), createTextNode: (text: string) => new Element("#text", {}, text),
     createRange: () => { const range: any = { node: null, selectNodeContents: (node: Element) => { range.node = node; }, collapse: () => {} }; return range; },
@@ -435,7 +436,7 @@ export function fixture(provider: Provider, options: { temporary?: boolean; user
       const result = await execute({ provider, action, expectedURL: document.URL, expectedUserCounts: expectedCounts, ownerToken, bindOwner: true,
         expectedFirstUserMarker: firstMarker, expectedFirstUserFingerprint: nativeFingerprint,
         allowFirstUserBinding: nativeFingerprint === undefined, ...overrides }, document, window, location,
-        options.computedStyle ?? ((node: Element) => ({ visibility: node.values.visibility || "visible" })), Observer,
+        options.computedStyle ?? ((node: Element) => ({ visibility: node.values.visibility || "visible", display: node.values.display || "block" })), Observer,
         (callback: () => void, delay: number) => { timers.push(callback); delays.push(delay); }, world,
         { subtle: { digest: async (algorithm: string, data: Uint8Array) => { const digest = await crypto.subtle.digest(algorithm, data); digestHook?.(); digestHook = undefined; return digest; } } }, TextArea, FixtureInputEvent);
       if (adopt && result.firstUserVerified) nativeFingerprint = result.firstUserFingerprint;

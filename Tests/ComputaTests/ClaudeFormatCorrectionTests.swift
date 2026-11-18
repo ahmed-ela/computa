@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import XCTest
 @testable import Computa
@@ -12,6 +13,92 @@ final class ClaudeFormatCorrectionTests: XCTestCase {
         return "\u{E056}\njson\n" + close + "\nI need to review the observed output first.\n\u{E056}\njson\n" + close
     }
 
+    private var isolatedMalformed: String {
+        "\u{E056}\njson\n" + #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf rejected-one"}}},{"name":"exec_command","arguments":{"cmd":"printf rejected-two"}}},{"name":"exec_command","arguments":{"cmd":"printf rejected-three"}}]}"#
+    }
+
+    private var rejectedShape: [String: Any] {
+        ["preCount": 2, "codeCount": 2, "codeTextLength": 0, "outsideTextLength": 4_086,
+         "outsideTruncated": false, "preParentTags": ["div"], "literalCodeValidJSON": NSNull(),
+         "repeatedIdenticalToolCalls": false, "isolatedJSONCodeBlock": NSNull(),
+         "literalCodeKnownEnvelopeType": NSNull(), "selectedExtraction": "rendered_fallback",
+         "extractionReason": "multiple_pre"]
+    }
+
+    private func rejectionEvent(_ structure: [String: Any], provider: String = "claude",
+                                ownership: Bool = true, model: Bool = true,
+                                state: String = "complete", bytes: Int = 4_086) -> String? {
+        WebModelServer.claudeMalformedReplyShapeDiagnostic(provider: provider, ownershipVerified: ownership,
+            modelVerified: model, inferenceID: UUID(uuidString: "00000000-0000-4000-8000-000000000001")!,
+            diagnostic: .init(reason: .invalidJSON, utf8Bytes: bytes, fenced: false),
+            snapshot: ["state": state, "text": "PRIVATE_REPLY_CANARY",
+                       "completionEvidence": ["codeStructure": structure]])
+    }
+
+    func testClaudeRejectedShapeKeepsDecisionFieldsBelowLogLimitWithoutAncestryOrContent() throws {
+        var structure = rejectedShape
+        let parent: [String: Any] = ["tag": "private-element", "classes": Array(repeating: "PRIVATE_CLASS_CANARY", count: 6),
+            "preDescendants": 2, "copyControls": 2]
+        structure["outsideNodes"] = Array(repeating: ["kind": "other", "textLength": 70,
+            "text": "PRIVATE_NODE_CANARY", "ancestors": Array(repeating: parent, count: 4)] as [String: Any], count: 2)
+        structure["replyText"] = "PRIVATE_EXTRA_CANARY"
+        let full = try XCTUnwrap(EmbeddedWebModelTransport.sanitizedCodeStructure(structure))
+        XCTAssertGreaterThan(full.utf8.count, 1_024, "Reproduce the observed unified-log truncation risk")
+        let event = try XCTUnwrap(rejectionEvent(structure))
+        XCTAssertLessThanOrEqual(event.utf8.count, 768)
+        XCTAssertTrue(event.hasPrefix("claudeRejectedReplyShape "))
+        let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(event.dropFirst("claudeRejectedReplyShape ".count).utf8)) as? [String: Any])
+        var expected = rejectedShape
+        expected.removeValue(forKey: "preParentTags")
+        expected.merge(["version": 1, "inference": "00000000-0000-4000-8000-000000000001",
+                        "reason": "invalid_json", "replyBytes": 4_086, "jsonFenced": false]) { _, new in new }
+        XCTAssertEqual(fields as NSDictionary, expected as NSDictionary)
+        for omitted in ["PRIVATE", "private-element", "outsideNodes", "ancestors", "classes", "preParentTags", "replyText"] {
+            XCTAssertFalse(event.contains(omitted), omitted)
+        }
+        XCTAssertEqual(rejectionEvent(structure), event, "Projection is deterministic and does not mutate evidence")
+        XCTAssertEqual(structure["replyText"] as? String, "PRIVATE_EXTRA_CANARY")
+    }
+
+    func testClaudeRejectedShapeRequiresCurrentVerifiedClaudeCompletionAndFiniteStructure() throws {
+        for provider in ["chatgpt", "groq", "claude ", "Claude"] { XCTAssertNil(rejectionEvent(rejectedShape, provider: provider)) }
+        XCTAssertNil(rejectionEvent(rejectedShape, ownership: false))
+        XCTAssertNil(rejectionEvent(rejectedShape, model: false))
+        XCTAssertNil(rejectionEvent(rejectedShape, state: "running"))
+        XCTAssertNil(rejectionEvent(rejectedShape, bytes: -1))
+        XCTAssertNil(rejectionEvent(rejectedShape, bytes: WebModelRejectedReplyCapture.maximumReplyBytes + 1))
+        XCTAssertNil(rejectionEvent([:]))
+        let invalid: [(String, Any)] = [("kind", "groq_literal_profile_v1"), ("preCount", true),
+            ("codeCount", 1_001), ("outsideTextLength", 220_002), ("outsideTruncated", 0),
+            ("literalCodeValidJSON", 1), ("repeatedIdenticalToolCalls", "false"), ("isolatedJSONCodeBlock", 0),
+            ("literalCodeKnownEnvelopeType", "PRIVATE_TYPE"), ("selectedExtraction", "PRIVATE_EXTRACTION"),
+            ("extractionReason", "PRIVATE_REASON")]
+        for (key, value) in invalid {
+            var structure = rejectedShape; structure[key] = value
+            XCTAssertNil(rejectionEvent(structure), key)
+        }
+    }
+
+    func testClaudeRejectedShapePreservesBooleanNullAndAbsentFactsAndWorstCaseBound() throws {
+        let keys = ["literalCodeValidJSON", "repeatedIdenticalToolCalls", "isolatedJSONCodeBlock"]
+        for value in [true, false, NSNull()] as [Any] {
+            var structure = rejectedShape
+            structure["preCount"] = 1_000; structure["codeCount"] = 1_000
+            structure["codeTextLength"] = 220_001; structure["outsideTextLength"] = 220_001
+            structure["literalCodeKnownEnvelopeType"] = "tool_calls"
+            structure["extractionReason"] = "unknown_envelope_type"
+            for key in keys { structure[key] = value }
+            let event = try XCTUnwrap(rejectionEvent(structure, bytes: WebModelRejectedReplyCapture.maximumReplyBytes))
+            XCTAssertLessThanOrEqual(event.utf8.count, 768)
+            let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(event.dropFirst("claudeRejectedReplyShape ".count).utf8)) as? [String: Any])
+            for key in keys { XCTAssertEqual(fields[key] as? NSObject, value as? NSObject, key) }
+        }
+        var historical = rejectedShape
+        for key in keys { historical.removeValue(forKey: key) }
+        let event = try XCTUnwrap(rejectionEvent(historical))
+        for key in keys { XCTAssertFalse(event.contains(key), "Missing evidence must not become false or null") }
+    }
+
     private func request(_ input: [[String: Any]]? = nil, model: String? = nil, toolChoice: String = "auto") throws -> Data {
         try JSONSerialization.data(withJSONObject: ["model": model ?? choice.modelID, "stream": false,
             "input": input ?? [user], "tool_choice": toolChoice,
@@ -20,12 +107,13 @@ final class ClaudeFormatCorrectionTests: XCTestCase {
     }
     private func server(_ base: FormatCorrectionFixtureTransport, root: URL? = nil,
                         mutation: String? = nil, mutationStart: Int = 1,
-                        duplicateReply: String? = nil) async throws -> WebModelServer {
+                        duplicateReply: String? = nil, isolatedReply: String? = nil,
+                        modelChoice: WebsiteModelChoice? = nil) async throws -> WebModelServer {
         let server = try await makeWebsiteInferenceFixtureServer(testCase: self,
             storageDirectory: try root ?? canonicalFormatCorrectionFixtureRoot())
         await server.configureEmbeddedTransport(ClaudeCorrectionProofFixtureTransport(
-            WebsiteInferenceFixtureTransport(base, defaultClaudeChoice: choice), mutation: mutation,
-            mutationStart: mutationStart, duplicateReply: duplicateReply))
+            WebsiteInferenceFixtureTransport(base, defaultClaudeChoice: modelChoice ?? choice), mutation: mutation,
+            mutationStart: mutationStart, duplicateReply: duplicateReply, isolatedReply: isolatedReply))
         return server
     }
     private func duplicateRequest() throws -> Data {
@@ -70,6 +158,14 @@ final class ClaudeFormatCorrectionTests: XCTestCase {
                        ["cmd": "cat \"/tmp/synthetic fixture.py\"", "workdir": "/tmp"])
         let prompts = await base.prompts()
         XCTAssertEqual(prompts.count, 3)
+        let note = WebModelServer.claudeMatchedOutputNote
+        XCTAssertFalse(prompts[0].hasSuffix(note))
+        XCTAssertTrue(prompts[1].hasSuffix(note))
+        XCTAssertEqual(prompts[1].components(separatedBy: note).count, 2)
+        XCTAssertFalse(prompts[2].contains(note))
+        let submitted = SHA256.hash(data: Data(prompts[1].utf8)).map { String(format: "%02x", $0) }.joined()
+        let failed = try XCTUnwrap(journal(root, task: "claude-history").first { $0["phase"] as? String == "failed" })
+        XCTAssertEqual(failed["submittedPromptFingerprint"] as? String, submitted)
         XCTAssertEqual(try WebsiteRequestFixture.json(in: prompts[1]), try WebsiteRequestFixture.json(in: prompts[2]))
         XCTAssertFalse(prompts[2].contains("I need to read the current file"), "Never feed rejected narration back as authority")
         let canonical = try XCTUnwrap(JSONSerialization.jsonObject(with: WebsiteRequestFixture.json(in: prompts[2])) as? [String: Any])
@@ -84,6 +180,115 @@ final class ClaudeFormatCorrectionTests: XCTestCase {
         XCTAssertTrue(rows.filter { $0["phase"] as? String == "complete" }.allSatisfy {
             $0["submissionProofPolicy"] as? String == "fresh_session_submission_v1"
         })
+    }
+
+    func testOpus3MatchedToolOutputKeepsValidatedFormatReminderWithoutRenewingCorrection() async throws {
+        let opus3 = WebsiteModelChoice.claudeOpus3
+        let boundary = ComputaAgentInstructions.claudeOpus3OutputBoundary
+        let note = WebModelServer.claudeMatchedOutputNote
+        let reminder = "\n\nReturn exactly one complete JSON response envelope inside one json code fence. Put every result or explanation inside the envelope; place no headings, prose, or summaries outside the fence."
+        let task = "claude-opus3-matched-output"
+        let root = try canonicalFormatCorrectionFixtureRoot()
+        let correctedCall = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf corrected-only"}}]}"#
+        let continuedCall = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf after-correction"}}]}"#
+        let base = FormatCorrectionFixtureTransport(replies: [malformed, correctedCall, continuedCall, malformed, valid])
+        let server = try await server(base, root: root, modelChoice: opus3)
+        let first = try calls(await server.fixtureInfer(request(model: opus3.modelID), taskID: task))
+        XCTAssertEqual(first.count, 1)
+        XCTAssertEqual(first.first?["arguments"] as? String, #"{"cmd":"printf corrected-only"}"#)
+        let output: [String: Any] = ["type": "function_call_output",
+            "call_id": try XCTUnwrap(first.first?["call_id"]), "output": "Observed synthetic output with newline.\nExact fixture data."]
+        let input = [user] + first + [output]
+        let next = try request(input, model: opus3.modelID)
+        let second = try calls(await server.fixtureInfer(next, taskID: task))
+        XCTAssertEqual(second.count, 1)
+        XCTAssertEqual(second.first?["arguments"] as? String, #"{"cmd":"printf after-correction"}"#)
+        let secondOutput: [String: Any] = ["type": "function_call_output",
+            "call_id": try XCTUnwrap(second.first?["call_id"]), "output": "Observed subsequent synthetic output."]
+        let laterInput = input + second + [secondOutput]
+        let later = try request(laterInput, model: opus3.modelID)
+        do {
+            _ = try await server.fixtureInfer(later, taskID: task)
+            XCTFail("The later malformed reply cannot renew the used correction allowance")
+        } catch let failure as WebModelServer.Failure {
+            guard case .malformedReply(let diagnostic) = failure else { return XCTFail("Expected the original malformed reply") }
+            XCTAssertEqual(diagnostic.reason, .invalidJSON)
+        }
+
+        let prompts = await base.prompts()
+        guard prompts.count == 4 else { return XCTFail("Expected original, correction and two ordinary continuations") }
+        XCTAssertTrue(prompts[0].hasSuffix(boundary))
+        XCTAssertFalse(prompts[0].contains(note))
+        XCTAssertTrue(prompts[1].hasPrefix(prompts[0]))
+        XCTAssertTrue(prompts[1].contains("COMPUTA RESPONSE CORRECTION — ONE ATTEMPT"))
+        XCTAssertFalse(prompts[1].hasSuffix(boundary))
+        XCTAssertFalse(prompts[1].contains(note))
+        XCTAssertTrue(prompts.allSatisfy { $0.components(separatedBy: boundary).count == 2 })
+        XCTAssertEqual(try WebsiteRequestFixture.json(in: prompts[0], expectedModel: opus3.modelID),
+                       try WebsiteRequestFixture.json(in: prompts[1], expectedModel: opus3.modelID))
+        for (rendered, bytes, expectedInput) in [(prompts[2], next, input), (prompts[3], later, laterInput)] {
+            XCTAssertTrue(rendered.hasSuffix(note + boundary + reminder))
+            XCTAssertEqual(rendered.components(separatedBy: reminder).count, 2)
+            XCTAssertEqual(rendered.components(separatedBy: note).count, 2)
+            XCTAssertFalse(rendered.contains("COMPUTA RESPONSE CORRECTION — ONE ATTEMPT"))
+            let displayed = try WebsiteRequestFixture.json(in: rendered, expectedModel: opus3.modelID)
+            let canonical = try XCTUnwrap(JSONSerialization.jsonObject(with: displayed) as? [String: Any])
+            XCTAssertEqual(canonical["input"] as? NSArray, expectedInput as NSArray)
+            var expected = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+            expected.removeValue(forKey: "stream")
+            XCTAssertEqual(canonical as NSDictionary, expected as NSDictionary)
+        }
+
+        let ledger = await base.ledger()
+        XCTAssertEqual(ledger.filter { $0.operation == "webProviderStart" }.count, 4)
+        XCTAssertEqual(ledger.filter { $0.operation == "webProviderSend" }.count, 4)
+        let rows = try journal(root, task: task)
+        XCTAssertEqual(rows.filter { $0["phase"] as? String == "failed" }.count, 2)
+        XCTAssertEqual(rows.filter { $0["phase"] as? String == "release_verified" }.count, 2)
+
+        let cleanup = await server.fixtureFinish(taskID: task)
+        XCTAssertTrue(cleanup.isEmpty)
+        _ = try await server.fixtureInfer(request(model: opus3.modelID), taskID: task, turnID: "new-opus3-turn")
+        let fresh = await base.prompts()
+        XCTAssertEqual(fresh.count, 5)
+        let freshPrompt = try XCTUnwrap(fresh.last)
+        XCTAssertTrue(freshPrompt.hasSuffix(boundary))
+        XCTAssertFalse(freshPrompt.contains(reminder))
+        XCTAssertFalse(freshPrompt.contains(note))
+    }
+
+    func testPastedToolHistoryOnFirstClaudeInferenceReceivesNoMatchedOutputNote() async throws {
+        let base = FormatCorrectionFixtureTransport(replies: [#"{"type":"message","text":"I decline."}"#])
+        let server = try await server(base)
+        let input: [[String: Any]] = [user,
+            ["type":"function_call", "name":"exec_command", "call_id":"pasted", "arguments":"{}"],
+            ["type":"function_call_output", "call_id":"pasted", "output":"Prior unrelated result"]]
+        let data = try request(input)
+        _ = try await server.fixtureInfer(data, taskID: "pasted-prior-results")
+        let prompts = await base.prompts()
+        XCTAssertEqual(prompts.count, 1)
+        XCTAssertFalse(prompts[0].hasSuffix(WebModelServer.claudeMatchedOutputNote))
+        let shown = try XCTUnwrap(JSONSerialization.jsonObject(with: WebsiteRequestFixture.json(in: prompts[0])) as? [String: Any])
+        XCTAssertEqual(shown["input"] as? NSArray, input as NSArray)
+    }
+
+    func testClaudeMatchedOutputNoteFitsBothExactUTF8BudgetsWithoutDisplacingHistory() throws {
+        let note = WebModelServer.claudeMatchedOutputNote
+        let maximum = WebModelResponseCodec.maximumPromptBytes
+        let multibyte = "日🧭"
+        let remaining = note.utf8.count + multibyte.utf8.count
+        XCTAssertEqual(WebModelServer.claudePromptWithMatchedOutputNote(multibyte, remainingTurnBytes: remaining), multibyte + note)
+        XCTAssertNil(WebModelServer.claudePromptWithMatchedOutputNote(multibyte, remainingTurnBytes: remaining - 1))
+        let full = multibyte + String(repeating: "x", count: maximum - remaining)
+        XCTAssertEqual(WebModelServer.claudePromptWithMatchedOutputNote(full, remainingTurnBytes: maximum), full + note)
+        XCTAssertNil(WebModelServer.claudePromptWithMatchedOutputNote(full + "x", remainingTurnBytes: maximum * 2))
+        let boundary = ComputaAgentInstructions.claudeOpus3OutputBoundary
+        let opus3Prompt = multibyte + boundary
+        let opus3Remaining = opus3Prompt.utf8.count + note.utf8.count
+        XCTAssertEqual(WebModelServer.claudePromptWithMatchedOutputNote(opus3Prompt,
+            remainingTurnBytes: opus3Remaining, modelChoice: .claudeOpus3), multibyte + note + boundary)
+        XCTAssertNil(WebModelServer.claudePromptWithMatchedOutputNote(opus3Prompt,
+            remainingTurnBytes: opus3Remaining - 1, modelChoice: .claudeOpus3))
     }
 
     func testClaudeIdenticalDuplicateBlocksRejectOriginalAndReleaseOnlyFreshCorrectedCall() async throws {
@@ -137,6 +342,110 @@ final class ClaudeFormatCorrectionTests: XCTestCase {
                 XCTAssertEqual(response.first?["type"] as? String, "message")
                 XCTAssertTrue(String(describing: response).contains("I cannot perform this request."))
             } else { try await reject(server, input: duplicateRequest(), task: task) }
+            let ledger = await base.ledger()
+            XCTAssertEqual(ledger.filter { $0.operation == "webProviderSend" }.count, 2)
+            XCTAssertEqual(ledger.filter { $0.operation == "webProviderFinish" }.count, refuses ? 2 : 1)
+            if !refuses {
+                // infer rejects the second malformed reply without renewing
+                // correction. Its terminal session is closed by the task's
+                // normal finish path, which fixtureInfer does not invoke.
+                let issues = await server.fixtureFinish(taskID: task)
+                XCTAssertTrue(issues.isEmpty)
+                let secondToken = try XCTUnwrap(ledger.last { $0.operation == "webProviderStart" }?.token)
+                let receipts = await server.latestCleanupReceipts()
+                XCTAssertTrue(receipts.contains { $0.sessionToken == secondToken && $0.outcome == .closed && $0.receiptSaved })
+            }
+            let finishedLedger = await base.ledger()
+            XCTAssertEqual(finishedLedger.filter { $0.operation == "webProviderFinish" }.count, 2)
+            XCTAssertEqual(finishedLedger.filter { $0.operation == "webProviderSend" }.count, 2, "Cleanup cannot request a third response")
+        }
+    }
+
+    func testClaudeIsolatedMalformedJSONPreservesCompletedHistoryAndCorrectsOnlyOnce() async throws {
+        let root = try canonicalFormatCorrectionFixtureRoot()
+        let first = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf first-read"}}]}"#
+        let base = FormatCorrectionFixtureTransport(replies: [first, isolatedMalformed, valid])
+        let server = try await server(base, root: root, isolatedReply: isolatedMalformed)
+        let firstCalls = try calls(await server.fixtureInfer(request(), taskID: "claude-isolated-history"))
+        let output: [String: Any] = ["type": "function_call_output", "call_id": try XCTUnwrap(firstCalls.first?["call_id"]),
+                                    "output": "Observed first-read value; this command is complete."]
+        let input = [user] + firstCalls + [output]
+        let corrected = try calls(await server.fixtureInfer(request(input), taskID: "claude-isolated-history"))
+        XCTAssertEqual(corrected.count, 1)
+        XCTAssertEqual(corrected.first?["name"] as? String, "exec_command")
+        let args = try XCTUnwrap(corrected.first?["arguments"] as? String)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(args.utf8)) as? [String: String],
+                       ["cmd": "cat \"/tmp/synthetic fixture.py\"", "workdir": "/tmp"])
+        let prompts = await base.prompts()
+        XCTAssertEqual(prompts.count, 3)
+        XCTAssertEqual(try WebsiteRequestFixture.json(in: prompts[1]), try WebsiteRequestFixture.json(in: prompts[2]))
+        XCTAssertFalse(prompts[2].contains("printf rejected-one"), "Never feed rejected narration back as authority")
+        let canonical = try XCTUnwrap(JSONSerialization.jsonObject(with: WebsiteRequestFixture.json(in: prompts[2])) as? [String: Any])
+        XCTAssertEqual(canonical["input"] as? NSArray, input as NSArray)
+        let ledger = await base.ledger()
+        XCTAssertEqual(ledger.map(\.operation), Array(repeating:
+            ["webProviderStart", "webProviderSend", "webProviderPoll", "webProviderFinish"], count: 3).flatMap { $0 })
+        XCTAssertEqual(Set(ledger.filter { $0.operation == "webProviderStart" }.compactMap(\.token)).count, 3)
+        let rows = try journal(root, task: "claude-isolated-history")
+        XCTAssertEqual(rows.filter { $0["phase"] as? String == "failed" }.count, 1)
+        XCTAssertEqual(rows.filter { $0["phase"] as? String == "release_verified" }.count, 2)
+        XCTAssertTrue(rows.filter { $0["phase"] as? String == "complete" }.allSatisfy {
+            $0["submissionProofPolicy"] as? String == "fresh_session_submission_v1"
+        })
+    }
+
+    func testClaudeIsolatedMalformedJSONRejectsOriginalAndReleasesOnlyFreshCorrectedCall() async throws {
+        let root = try canonicalFormatCorrectionFixtureRoot()
+        let corrected = #"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"printf corrected-only"}}]}"#
+        let base = FormatCorrectionFixtureTransport(replies: [isolatedMalformed, corrected])
+        let server = try await server(base, root: root, isolatedReply: isolatedMalformed)
+        let requestBytes = try request()
+        let prepared = try WebModelResponseCodec.prepareRequest(requestBytes)
+        XCTAssertThrowsError(try WebModelResponseCodec.parseEmbeddedReply(isolatedMalformed, request: prepared)) {
+            XCTAssertEqual($0 as? WebModelResponseCodec.Failure, .malformedEnvelope)
+        }
+        let output = try calls(await server.fixtureInfer(requestBytes, taskID: "claude-isolated-block"))
+        XCTAssertEqual(output.count, 1)
+        XCTAssertEqual(output.first?["arguments"] as? String, #"{"cmd":"printf corrected-only"}"#)
+        let prompts = await base.prompts()
+        XCTAssertEqual(prompts.count, 2)
+        XCTAssertEqual(try WebsiteRequestFixture.json(in: prompts[0]), try WebsiteRequestFixture.json(in: prompts[1]))
+        XCTAssertFalse(prompts[1].contains("printf rejected-one"))
+        let ledger = await base.ledger()
+        XCTAssertEqual(ledger.map(\.operation), Array(repeating:
+            ["webProviderStart", "webProviderSend", "webProviderPoll", "webProviderFinish"], count: 2).flatMap { $0 })
+        let rows = try journal(root, task: "claude-isolated-block")
+        XCTAssertEqual(rows.filter { $0["phase"] as? String == "failed" }.count, 1)
+        XCTAssertEqual(rows.filter { $0["phase"] as? String == "release_verified" }.count, 1)
+        let rejectedID = rows.first { $0["phase"] as? String == "failed" }?["inferenceID"] as? String
+        XCTAssertFalse(rows.contains { $0["inferenceID"] as? String == rejectedID && ["complete", "release_verified"].contains($0["phase"] as? String ?? "") })
+    }
+
+    func testClaudeIsolatedMalformedJSONRequiresStrictEvidenceAndFreshProof() async throws {
+        for mutation in ["isolated_missing", "isolated_false", "isolated_null", "isolated_numeric", "isolated_string",
+                         "isolated_array", "isolated_pre", "isolated_code", "isolated_valid", "isolated_valid_numeric", "isolated_reason",
+                         "raw_extraction", "missing", "prompt", "model"] {
+            let base = FormatCorrectionFixtureTransport(replies: [isolatedMalformed, valid])
+            let server = try await server(base, mutation: mutation, isolatedReply: isolatedMalformed)
+            try await reject(server, input: request(), task: "claude-isolated-evidence-" + mutation)
+            let ledger = await base.ledger()
+            XCTAssertEqual(ledger.filter { $0.operation == "webProviderStart" }.count, 1, mutation)
+            XCTAssertLessThanOrEqual(ledger.filter { $0.operation == "webProviderSend" }.count, 1, mutation)
+        }
+    }
+
+    func testClaudeIsolatedMalformedJSONCorrectionAcceptsRefusalAndCannotRequestThirdReply() async throws {
+        for refuses in [true, false] {
+            let refusal = #"{"type":"message","text":"I cannot perform this request."}"#
+            let base = FormatCorrectionFixtureTransport(replies: [isolatedMalformed, refuses ? refusal : isolatedMalformed, valid])
+            let server = try await server(base, isolatedReply: isolatedMalformed)
+            let task = "claude-isolated-second-\(refuses)"
+            if refuses {
+                let response = try calls(await server.fixtureInfer(request(), taskID: task))
+                XCTAssertEqual(response.count, 1)
+                XCTAssertEqual(response.first?["type"] as? String, "message")
+                XCTAssertTrue(String(describing: response).contains("I cannot perform this request."))
+            } else { try await reject(server, input: request(), task: task) }
             let ledger = await base.ledger()
             XCTAssertEqual(ledger.filter { $0.operation == "webProviderSend" }.count, 2)
             XCTAssertEqual(ledger.filter { $0.operation == "webProviderFinish" }.count, refuses ? 2 : 1)
@@ -377,9 +686,10 @@ private actor ClaudeCorrectionProofFixtureTransport: WebModelTransport {
     let mutation: String?
     let mutationStart: Int
     let duplicateReply: String?
+    let isolatedReply: String?
     var starts = 0
-    init(_ base: any WebModelTransport, mutation: String?, mutationStart: Int, duplicateReply: String?) {
-        self.base = base; self.mutation = mutation; self.mutationStart = mutationStart; self.duplicateReply = duplicateReply
+    init(_ base: any WebModelTransport, mutation: String?, mutationStart: Int, duplicateReply: String?, isolatedReply: String?) {
+        self.base = base; self.mutation = mutation; self.mutationStart = mutationStart; self.duplicateReply = duplicateReply; self.isolatedReply = isolatedReply
     }
     func request(operation: String, params: Data) async throws -> Data {
         let bytes = try await base.request(operation: operation, params: params)
@@ -397,6 +707,11 @@ private actor ClaudeCorrectionProofFixtureTransport: WebModelTransport {
         if value["state"] as? String == "complete", let duplicateReply, value["text"] as? String == duplicateReply {
             value["completionEvidence"] = ["codeStructure": ["preCount": 2, "codeCount": 2,
                 "repeatedIdenticalToolCalls": true, "extractionReason": "multiple_pre", "selectedExtraction": "rendered_fallback"]]
+        }
+        if value["state"] as? String == "complete", let isolatedReply, value["text"] as? String == isolatedReply {
+            value["completionEvidence"] = ["codeStructure": ["preCount": 1, "codeCount": 1,
+                "isolatedJSONCodeBlock": true, "literalCodeValidJSON": false,
+                "extractionReason": "invalid_json", "selectedExtraction": "rendered_fallback"]]
         }
         if operation == "webProviderStart" { starts += 1 }
         guard starts == mutationStart, let mutation else { return try JSONSerialization.data(withJSONObject: value) }
@@ -417,6 +732,17 @@ private actor ClaudeCorrectionProofFixtureTransport: WebModelTransport {
             case "message_literal": structure["literalCodeKnownEnvelopeType"] = "message"
             case "raw_extraction": structure["selectedExtraction"] = "raw_code"
             case "other_reason": structure["extractionReason"] = "invalid_json"
+            case "isolated_missing": structure.removeValue(forKey: "isolatedJSONCodeBlock")
+            case "isolated_false": structure["isolatedJSONCodeBlock"] = false
+            case "isolated_null": structure["isolatedJSONCodeBlock"] = NSNull()
+            case "isolated_numeric": structure["isolatedJSONCodeBlock"] = 1
+            case "isolated_string": structure["isolatedJSONCodeBlock"] = "true"
+            case "isolated_array": structure["isolatedJSONCodeBlock"] = [true]
+            case "isolated_pre": structure["preCount"] = 2
+            case "isolated_code": structure["codeCount"] = 2
+            case "isolated_valid": structure["literalCodeValidJSON"] = true
+            case "isolated_valid_numeric": structure["literalCodeValidJSON"] = 0
+            case "isolated_reason": structure["extractionReason"] = "outside_content"
             case "duplicate_missing": structure.removeValue(forKey: "repeatedIdenticalToolCalls")
             case "duplicate_false": structure["repeatedIdenticalToolCalls"] = false
             case "duplicate_null": structure["repeatedIdenticalToolCalls"] = NSNull()

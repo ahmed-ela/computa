@@ -11,7 +11,7 @@ its agent runtime. Ask it to run a command in a specific directory; the task
 shows command output and exit status. See [CLI commands](docs/COMMANDS.md) for
 examples, approvals, and process-session limits.
 
-Private personal repository: [ahmed-wlb/computa](https://github.com/ahmed-wlb/computa). Repository access is required; this is not an anonymous public download.
+[Download the latest macOS alpha](https://computa.wtf/download) for Apple Silicon Macs running macOS 14 or later.
 
 Next work: [built-in browser tooling and generalized evidence handling](TODO.md).
 
@@ -29,38 +29,21 @@ The Rust workers use native MLX and their exact bundled Metal library.
 
 ## Install the macOS app
 
-The draft preview uses the explicit private release tag
-[`v0.1.0-preview.1`](https://github.com/ahmed-wlb/computa/releases/tag/v0.1.0-preview.1).
-Repository access is required. The signed Computa DMG was built, verified and
-uploaded to the draft release with matching GitHub/local digests. Its mounted
-installer migrated the existing legacy app on this Mac.
-All 5,559 checked pre-existing preferences, CodexHome and model files remained
-byte-identical before first launch. Computa launched with prior tasks, the Qwen
-default, connected MLX and granted Accessibility, then quit normally. This is an
-existing-Mac migration and launch check; the known model-stream and controlled
-live Stop acceptance gaps remain open. The preview remains a draft. Once the
-intended asset is available, download its DMG and matching checksums, verify
-them, then open **Install Computa.command** from the mounted image and confirm
-**INSTALL**. On an Apple Silicon Mac with macOS 14 or later, it installs into
-`~/Applications`, downloads private Python/MLX dependencies and the pinned Qwen
-4B model (~3.06 GB), then opens the app. Allow about 10 GB free space. No Xcode,
-Homebrew, Git, Bun, or preinstalled Python is needed for this route.
+Download the DMG, quit any running copy of Computa, open the disk image and drag
+Computa.app into Applications. Open the app and sign in to your provider in its
+built-in browser. Browser models use your own account. The release page includes
+the matching manifest, checksums and signing status. [Public releases](https://github.com/ahmed-ela/computa/releases).
 
-Assets labeled `signed-test` are Developer ID signed but **not notarized** and
-may be blocked by macOS; they are previews, not a Gatekeeper acceptance claim.
-Release publication and clean Mac validation are separate from having these
-packaging scripts in source. Existing app backups, retry behavior, download
-commands, and the path for already configured users are described in the
-[distribution guide](docs/DISTRIBUTION.md). Permissions and browser consent remain
-explicit user actions. Known lookup and stream failures remain documented in
-[TODO.md](TODO.md).
+The current alpha is Developer ID signed. A DMG labeled `signed-test` may be
+blocked by Gatekeeper until Apple notarization is available.
+[Distribution guide](docs/DISTRIBUTION.md).
 
 ## Build, install, and run from GitHub
 
 On an Apple Silicon Mac, first install the [documented prerequisites](docs/BUILDING.md#requirements): full Xcode with Swift 6.2+, Git, XcodeGen, Bun, Rustup with Rust 1.95.0, and `uv`. Then:
 
 ```sh
-git clone https://github.com/ahmed-wlb/computa.git
+git clone https://github.com/ahmed-ela/computa.git
 cd computa
 ./Scripts/setup.sh --download-model
 ```
@@ -552,7 +535,7 @@ open .build/DerivedData/Build/Products/Debug/Computa.app
 
 ## Release bundle
 
-The supported target is **Apple Silicon macOS**. Some historical local bundles contain an Intel slice in the outer Swift app, but the owned Rust/MLX runtime is arm64-only; that does not establish Intel support. Historical `Mactopus-macOS.zip` archives are local artifacts. The new private preview distribution uses a Developer ID signed DMG, labeled `signed-test` when not notarized; see the [distribution guide](docs/DISTRIBUTION.md). Model weights and Python environments are downloaded separately and are not committed.
+The supported target is **Apple Silicon macOS**. Some historical local bundles contain an Intel slice in the outer Swift app, but the owned Rust/MLX runtime is arm64-only; that does not establish Intel support. Historical `Mactopus-macOS.zip` archives are local artifacts. The public macOS alpha ships as a Developer ID–signed app in a DMG. The `signed-test` label identifies builds awaiting notarization. See the [distribution guide](docs/DISTRIBUTION.md). Model weights and Python environments are downloaded separately and are not committed.
 
 Earlier local releases used Ahmed's Apple Development identity (`TeamIdentifier=MSMG8CJLB3`) with hardened runtime enabled. That historical signature did not establish Developer ID distribution or notarization. The release signer now signs the app and bundled helpers with Developer ID; notarization remains a separate step. macOS can bind Accessibility approval for a local development build to that build's exact code hash, so replacing an app may require requesting Accessibility again even when the signing identity is unchanged. Screen Recording can remain attached to the designated signing requirement.
 
@@ -678,7 +661,7 @@ After overlapping visual-sidecar preparation with Qwen and embedding a fresh ver
 - The previously signed installed app passed separate `open → capture → snapshot` and natively approved `open → snapshot → AXPress → snapshot` Chrome turns, both ending `Completed`. Screen Recording was **Granted** for that app. The screenshot turn took 540 seconds; this capability result was not a speed benchmark. The coordinate-click path was separately validated in the V1 production-runtime test host, not repeated in that installed binary.
 - App Server persists a task's dynamic-tool schema when that task is created. Existing threads can retain older schemas and lack the new tab tools. Durable in-place schema migration is unfinished; the app must not claim old chats have gained these tools or that a new chat is the intended long-term recovery mechanism.
 - The App Server is bundle-only: missing, incompatible, or corrupt runtime artifacts fail closed, without silently falling back to the installed Codex/ChatGPT application. LM Studio provider and initial workspace are fixed in code; the default model is selectable in Settings.
-- Historical local ZIPs used Apple Development signing. The new private preview DMG uses Developer ID signing; a `signed-test` asset is not notarized and may be blocked by macOS. See the [distribution guide](docs/DISTRIBUTION.md) for the exact install path and release checks.
+- Historical local ZIPs used Apple Development signing. The public alpha uses Developer ID signing. Gatekeeper may block a `signed-test` download until Apple has notarized it. See the [distribution guide](docs/DISTRIBUTION.md) for the exact install path and release checks.
 
 ## Source layout
 

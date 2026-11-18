@@ -1,5 +1,17 @@
 import type { EntrySnapshot, TaskSnapshot } from './types';
 
+// Keep the original diagnostic in the entry for the inspector and persisted history.
+export function systemMessageText(entry: EntrySnapshot): string {
+  if (entry.kind !== 'system' || entry.title !== 'Agent error') return entry.body;
+  try {
+    const diagnostic = JSON.parse(entry.body)?.error;
+    if (typeof diagnostic?.message === 'string' && diagnostic.message.trim()) return diagnostic.message;
+  } catch {
+    // Older turns and native errors already contain plain text.
+  }
+  return entry.body;
+}
+
 export function hasReasoningText(entry: EntrySnapshot): boolean {
   const text = entry.body.trim();
   return entry.kind === 'reasoning' && text.length > 0 && text !== 'Reasoning completed.';
