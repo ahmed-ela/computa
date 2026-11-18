@@ -12,6 +12,16 @@ final class WebsiteContextBudgetEngineTests: XCTestCase {
             .appendingPathComponent("ComputaByteBudget-" + UUID().uuidString)
         let project = root.appendingPathComponent("Project")
         try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        // Short commands leave enough room for all exact call receipts at compaction.
+        let script = """
+        marker="READ_$1"
+        echo "$marker" >> executed.txt
+        echo "$marker"
+        if [ "$1" -ge 16 ]; then
+            /usr/bin/awk 'BEGIN { for (i=0; i<500; i++) print "bounded code observation" }'
+        fi
+        """
+        try script.write(to: project.appendingPathComponent("read.sh"), atomically: true, encoding: .utf8)
         let choice = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
         var config = CodexAppServerRuntime.Configuration.externalLocalQwen
         config.executable = .bundled; config.model = choice.modelID
@@ -19,7 +29,7 @@ final class WebsiteContextBudgetEngineTests: XCTestCase {
         config.workspacePath = project.path
         config.protocolTracePath = root.appendingPathComponent("wire.jsonl").path
         let runtime = CodexAppServerRuntime(configuration: config)
-        let provider = BudgetEngineTransport(project: project.path)
+        let provider = BudgetEngineTransport()
         var terminal = false, final = "", errors: [String] = [], completedCompactions = 0
         let observer = Task {
             for await event in runtime.events() {
@@ -77,10 +87,8 @@ private actor BudgetEngineTransport: WebModelTransport {
         var receiptsPreserved = false, patchVerified = false
         var promptSizes: [Int] = []
     }
-    let project: String
     private var result = Receipt(), reply = "", token = ""
     private var patchIssued = false
-    init(project: String) { self.project = project }
     func receipt() -> Receipt { result }
 
     func request(operation: String, params: Data) throws -> Data {
@@ -104,12 +112,7 @@ private actor BudgetEngineTransport: WebModelTransport {
             } else if result.summaries == 0 {
                 guard result.commands < 32 else { throw WebModelServer.Failure.turnLimit }
                 let name = try XCTUnwrap(request.offeredToolNames.first { $0 == "exec_command" || $0.hasSuffix(".exec_command") })
-                let marker = "READ_\(result.commands)"
-                // Cross the original inference cap, then grow history until native compaction.
-                // The independent file ledger catches any replay through either boundary.
-                let repetitions = result.commands < WebModelServer.maximumTurnInferences ? 1 : 500
-                let command = #"/usr/bin/python3 -c 'from pathlib import Path; p=Path("executed.txt"); p.open("a").write("\#(marker)\n"); print("\#(marker)"); print("bounded code observation " * \#(repetitions))'"#
-                let args: [String: Any] = ["cmd": command, "workdir": project, "max_output_tokens": 4000, "yield_time_ms": 10000]
+                let args = ["cmd": "sh read.sh \(result.commands)"]
                 reply = String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [["name": name, "arguments": args]]]), as: UTF8.self)
                 result.commands += 1
             } else if !patchIssued {
