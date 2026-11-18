@@ -14034,7 +14034,7 @@ index b129556..ab796d0 100644
      test_model_client_with_thread_id(ThreadId::new(), session_source)
  }
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index c2ab78a..8b6ff67 100644
+index c2ab78a..21cde24 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
 @@ -59,15 +59,28 @@ pub use codex_prompts::SUMMARIZATION_PROMPT;
@@ -14077,11 +14077,11 @@ index c2ab78a..8b6ff67 100644
 +    // Only the local mid-turn path needs to continue an already executing turn. Preserve genuine
 +    // receipts before summary sampling mutates live history; a malformed/oversized set fails closed.
 +    let receipts = if matches!(compaction_metadata.phase(), CompactionPhase::MidTurn) {
-+        let receipt_provider = if turn_context.provider.info().is_openai() {
-+            tool_receipts::ReceiptProvider::OpenAI
-+        } else {
-+            tool_receipts::ReceiptProvider::External
-+        };
++        let receipt_provider = tool_receipts::ReceiptProvider::for_turn(
++            turn_context.provider.info().is_openai(),
++            &turn_context.config.model_provider_id,
++            &turn_context.model_info().slug,
++        );
 +        match tool_receipts::current_turn_receipts(
 +            history.annotated_items(),
 +            &turn_context.sub_id,
@@ -14891,10 +14891,10 @@ index 0000000..5d0ece5
 +}
 diff --git a/codex-rs/core/src/compact_tool_receipts.rs b/codex-rs/core/src/compact_tool_receipts.rs
 new file mode 100644
-index 0000000..d94e9d9
+index 0000000..2c4b7c2
 --- /dev/null
 +++ b/codex-rs/core/src/compact_tool_receipts.rs
-@@ -0,0 +1,815 @@
+@@ -0,0 +1,843 @@
 +//! Bounded, genuine current-turn receipts for local mid-turn compaction.
 +//!
 +//! Mutations and failures remain paired tool history. Older proven native reads may become
@@ -14968,6 +14968,21 @@ index 0000000..d94e9d9
 +pub(super) enum ReceiptProvider {
 +    OpenAI,
 +    External,
++    ComputaChat,
++}
++
++impl ReceiptProvider {
++    pub(super) fn for_turn(is_openai: bool, provider_id: &str, model: &str) -> Self {
++        if is_openai {
++            Self::OpenAI
++        } else if provider_id == "web_browser"
++            && (model == "browser/chatgpt" || model.starts_with("browser/chatgpt/choice/"))
++        {
++            Self::ComputaChat
++        } else {
++            Self::External
++        }
++    }
 +}
 +
 +pub(super) fn current_turn_receipts(
@@ -15070,7 +15085,12 @@ index 0000000..d94e9d9
 +    let has_complete_browser_observation = latest_browser_output_index.is_some();
 +    // Try all bounded historical excerpts before reducing the latest observation. No receipt
 +    // is reordered, replayed, or promoted to authority, and global budgets remain unchanged.
-+    for (latest_text_cap, older_text_cap, omit_optional_context) in
++    // First try the ordinary compact representation. Only the ChatGPT bridge
++    // has a separate 128 KiB whole-request preflight. Its fallback reserves at
++    // least three quarters of that budget for the rest of the prompt.
++    const CHAT_RECEIPT_BYTES: usize = 32 * 1024;
++    let overflow = matches!(provider, ReceiptProvider::ComputaChat).then_some(CHAT_RECEIPT_BYTES);
++    let normal =
 +        LATEST_OUTPUT_TEXT_CAPS.into_iter().flat_map(|latest| {
 +            OUTPUT_TEXT_CAPS
 +                .into_iter()
@@ -15080,8 +15100,14 @@ index 0000000..d94e9d9
 +            MAX_LATEST_OUTPUT_TEXT_BYTES,
 +            OUTPUT_TEXT_CAPS[OUTPUT_TEXT_CAPS.len() - 1],
 +            true,
-+        )))
-+    {
++        )));
++    let candidates = normal.map(|(latest, older, omit)| (latest, older, omit, MAX_RECEIPT_BYTES))
++        .chain(overflow.into_iter().flat_map(|limit| {
++            LATEST_OUTPUT_TEXT_CAPS.into_iter().map(move |latest| {
++                (latest, OUTPUT_TEXT_CAPS[OUTPUT_TEXT_CAPS.len() - 1], true, limit)
++            })
++        }));
++    for (latest_text_cap, older_text_cap, omit_optional_context, byte_limit) in candidates {
 +        let mut retained = Vec::new();
 +        let mut fits = true;
 +        for &(call_index, call, output_index, envelope) in &pairs {
@@ -15154,11 +15180,11 @@ index 0000000..d94e9d9
 +            // Native read records are an explicit lossy projection of old page
 +            // detail, not new tool replies. Both their display and local metadata
 +            // are charged. Rehydrated records may never escape as invented pairs.
-+            if !expanded.previously_omitted.is_empty() || !receipt_set_fits(&retained, provider)? {
++            if !expanded.previously_omitted.is_empty() || !receipt_set_fits(&retained, provider, byte_limit)? {
 +                let protected: Vec<_> = [latest_output_index, latest_browser_output_index].into_iter().flatten().collect();
 +                retained = native_read_ledger::pack(&retained, history, turn_id, &protected, &expanded.previously_omitted, &expanded.prior_run_starts, &expanded.prior_run_ids)?;
 +            }
-+            if !receipt_set_fits(&retained, provider)? { continue; }
++            if !receipt_set_fits(&retained, provider, byte_limit)? { continue; }
 +            if let Some((index, image)) = latest_image {
 +                let (_, receipt) = retained
 +                    .iter_mut()
@@ -15186,20 +15212,22 @@ index 0000000..d94e9d9
 +            return Ok(retained.into_iter().map(|(_, item)| item).collect());
 +        }
 +    }
-+    Err(receipt_error(if has_complete_browser_observation {
++    Err(receipt_error(if overflow.is_some() {
++        "completed tool receipts cannot fit the bounded ChatGPT fallback (32 KiB provider input, 64 KiB canonical history) with protected observations intact"
++    } else if has_complete_browser_observation {
 +        "the complete latest browser observation and all genuine tool receipts cannot fit the existing text/output limits or 12 KiB provider-input/24 KiB canonical serialized bounds"
 +    } else {
 +        "all genuine tool receipts cannot fit the 12 KiB provider-input or 24 KiB canonical serialized bounds"
 +    }))
 +}
 +
-+fn receipt_set_fits(retained: &[(usize, ResponseItemEnvelope)], provider: ReceiptProvider) -> Result<bool> {
++fn receipt_set_fits(retained: &[(usize, ResponseItemEnvelope)], provider: ReceiptProvider, byte_limit: usize) -> Result<bool> {
 +    let items: Vec<_> = retained.iter().map(|(_, item)| &item.item).collect();
 +    let metadata: Vec<_> = retained.iter().map(|(_, item)| &item.metadata).collect();
 +    let canonical_bytes = serde_json::to_vec(&items)?.len() + serde_json::to_vec(&metadata)?.len();
 +    let mut projected: Vec<_> = items.into_iter().cloned().collect();
-+    if matches!(provider, ReceiptProvider::External) { prepare_input_for_non_openai_provider(&mut projected); }
-+    Ok(canonical_bytes <= MAX_CANONICAL_RECEIPT_BYTES && serde_json::to_vec(&projected)?.len() <= MAX_RECEIPT_BYTES)
++    if !matches!(provider, ReceiptProvider::OpenAI) { prepare_input_for_non_openai_provider(&mut projected); }
++    Ok(canonical_bytes <= byte_limit * 2 && serde_json::to_vec(&projected)?.len() <= byte_limit)
 +}
 +
 +fn has_complete_browser_marker(call: &ResponseItem, output: &FunctionCallOutputPayload) -> bool {
@@ -15712,10 +15740,10 @@ index 0000000..d94e9d9
 +mod tests;
 diff --git a/codex-rs/core/src/compact_tool_receipts_tests.rs b/codex-rs/core/src/compact_tool_receipts_tests.rs
 new file mode 100644
-index 0000000..38cadfd
+index 0000000..1eb2e19
 --- /dev/null
 +++ b/codex-rs/core/src/compact_tool_receipts_tests.rs
-@@ -0,0 +1,2366 @@
+@@ -0,0 +1,2406 @@
 +use super::*;
 +use codex_history::CodexHarnessMetadata;
 +use codex_protocol::models::FunctionCallOutputPayload;
@@ -18081,6 +18109,46 @@ index 0000000..38cadfd
 +    let source=vec![first[0].clone(),gap.into(),first[1].clone()];
 +    let indexed=vec![(0,source[0].clone()),(2,source[2].clone())];
 +    assert_eq!(native_read_ledger::pack(&indexed,&source,"turn",&[],&HashSet::new(),&HashSet::new(),&HashMap::new()).unwrap(),indexed);
++}
++
++#[test]
++fn computa_chat_review_keeps_exact_calls_and_only_expands_when_needed() {
++    let mut history = realistic_mixed_receipts(22, &"review result ".repeat(240));
++    for entry in &mut history {
++        if let ResponseItem::FunctionCall { name, arguments, .. } = &mut entry.item {
++            *name = "exec_command".into();
++            *arguments = json!({"cmd": format!("git grep -n {}", "source-path/".repeat(37))}).to_string();
++        }
++    }
++    let profile = |provider, model| ReceiptProvider::for_turn(false, provider, model);
++    for provider in [profile("web_browser", "browser/gemini"), profile("api", "browser/chatgpt"),
++                     profile("web_browser", "browser/chatgpt-other")] {
++        assert!(super::current_turn_receipts(&history, REALISTIC_TURN, provider).is_err());
++    }
++    let provider = profile("web_browser", "browser/chatgpt/choice/example");
++    let retained = super::current_turn_receipts(&history, REALISTIC_TURN, provider).unwrap();
++    assert_eq!(retained.len(), history.len());
++    for (original, pair) in history.chunks_exact(2).zip(retained.chunks_exact(2)) {
++        assert_eq!(original[0], pair[0]);
++        match (&original[1].item, &pair[1].item) {
++            (ResponseItem::FunctionCallOutput { call_id: a, output: before, .. },
++             ResponseItem::FunctionCallOutput { call_id: b, output: after, .. }) => {
++                assert_eq!(a, b);
++                assert_eq!(before.success, after.success);
++            }
++            _ => panic!("matching output required"),
++        }
++    }
++    assert_eq!(super::current_turn_receipts(&retained, REALISTIC_TURN, provider).unwrap(), retained);
++    let small = &history[..4];
++    assert_eq!(super::current_turn_receipts(small, REALISTIC_TURN, provider).unwrap(),
++               super::current_turn_receipts(small, REALISTIC_TURN, ReceiptProvider::External).unwrap());
++    for entry in &mut history {
++        if let ResponseItem::FunctionCall { arguments, .. } = &mut entry.item {
++            *arguments = "x".repeat(2_000);
++        }
++    }
++    assert!(super::current_turn_receipts(&history, REALISTIC_TURN, provider).is_err());
 +}
 diff --git a/codex-rs/core/src/responses_metadata.rs b/codex-rs/core/src/responses_metadata.rs
 index fbd3661..08d2348 100644

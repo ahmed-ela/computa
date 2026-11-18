@@ -125,14 +125,16 @@ not part of this release source or its manifest.
 Retained historical replies remain assistant-role excerpts, not new assertions
 of success. Up to four replies use at most 1 KiB of text each and 4 KiB serialized
 in total. Ambiguous, truncated, or misordered user boundaries are skipped. Tool
-receipts retain at most 32 genuine calls and 12 KiB of serialized provider-input
-text/headers, including array punctuation. The budget uses the same external-
-provider projection as the request builder: external providers do not receive
-internal chat metadata, encrypted arguments, or optional function item IDs. They
-still receive exact call IDs for pairing. This projection is measured on a clone;
-canonical call identities, turn IDs, timestamps, failures, and ordering remain
-unchanged in history. A separate 24 KiB bound covers serialized canonical items
-and their metadata arrays. Both byte budgets use a placeholder for the separately
+receipts retain at most 32 genuine calls. The ordinary projection allows
+12 KiB of serialized provider input, including array punctuation, and 24 KiB of
+canonical items and metadata. Since mactopus-18, the ChatGPT website route can
+use up to 32 KiB of projected receipts and 64 KiB of canonical receipts after
+all ordinary projections fail. The native engine still checks the complete
+candidate against the effective context window. The bridge checks the full
+request against its 128 KiB byte threshold before sending. External projection
+omits internal chat metadata, encrypted arguments and optional item IDs, while
+retaining exact call IDs. Computa sizes this projection on a clone so that
+native identities, timestamps, failures and ordering survive in history. Both byte budgets use a placeholder for the separately
 bounded latest image described below, not its pixel payload. When needed,
 older excerpts shrink before the newest completed observation. The newest output
 may retain up to 4 KiB of text and 6 KiB serialized (excluding its separately

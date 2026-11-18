@@ -1,7 +1,7 @@
 {
-  "runtimeVersion": "mactopus-17",
+  "runtimeVersion": "mactopus-18",
   "sourceURL": "https://github.com/openai/codex.git",
   "sourceTag": "rust-v0.155.0-alpha.9.2",
   "sourceCommit": "4607249e430dac1c961df4dc615beae88e33cec8",
-  "patchSHA256": "4d9b0d7d2294bae67c9b7f15f2cd8be509f666bbdb8f78ea89ced68e17a767b2"
+  "patchSHA256": "c8629fda78890a0072720b40fa083d75e878a67364a2389928033461810c9345"
 }

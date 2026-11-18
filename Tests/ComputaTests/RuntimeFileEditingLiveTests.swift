@@ -31,7 +31,7 @@ final class RuntimeFileEditingLiveTests: XCTestCase {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_FILE_EDITING_ENGINE_TEST"] == "1",
             "Enable the isolated bundled website tool-continuation qualification.")
         let artifact = try ComputaRuntimeArtifact.resolve()
-        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-17")
+        XCTAssertEqual(artifact.manifest.runtimeVersion, "mactopus-18")
         let failuresBefore = testRun?.failureCount ?? 0
         let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
             .appendingPathComponent("ComputaWebsiteContinuation-\(UUID().uuidString)", isDirectory: true)
