@@ -4219,11 +4219,12 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
         const modes = ['stable_controls', 'transient_controls', 'menu_only', 'aria_only', 'wrong_id', 'wrong_label',
           'id_drift', 'disjoint_intervals', 'duplicate_menu', 'dropped_menu_role', 'message_wrapped',
           'hidden_duplicate_menu_id', 'hidden_duplicate_trigger_id',
-          'detached_repaint', 'foreign_portal', 'remounted_trigger', 'still_connected', 'send_toggled'];
+          'detached_repaint', 'foreign_portal', 'remounted_trigger', 'still_connected', 'send_toggled',
+          'split_unmount', 'split_retained_host', 'split_reparented', 'split_wrong_label', 'split_foreign_host', 'split_remounted'];
         if (submitting || verifying) modes.push('verified_portal');
         if (submitting) modes.unshift('send_replaced_after_proof', 'send_duplicated_after_proof');
         for (const mode of modes) {
-          const nested = mode === 'verified_portal';
+          const nested = mode === 'verified_portal', split = mode.startsWith('split_');
           const x = submitting ? await preparedSubmit('Medium', false, nested) : verifying ? await preparedVerification(nested) : await preparedReadinessRecovery('Pro');
           const { trigger } = x.picker;
           const openings = submitting ? x.openings : verifying ? x.calls : x.recoveryOpenings;
@@ -4232,13 +4233,17 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           const controls = trigger.getAttribute('aria-controls'), triggerID = trigger.getAttribute('id');
           const stable = mode === 'stable_controls' || mode === 'menu_only';
           const popup = new Node('DIV', { role: 'menu', id: ['wrong_id', 'detached_repaint'].includes(mode) ? 'foreign-picker' : controls,
-            'aria-labelledby': mode === 'wrong_label' ? 'foreign-trigger' : triggerID });
+            'aria-labelledby': ['wrong_label', 'split_wrong_label'].includes(mode) ? 'foreign-trigger' : triggerID });
           const wrapPopup = ['stable_controls', 'duplicate_menu', 'dropped_menu_role', 'message_wrapped', 'detached_repaint'].includes(mode);
-          const root = wrapPopup ? new Node('SECTION', mode === 'message_wrapped' ? { 'data-turn': 'assistant' } : {}) : popup;
+          const root = wrapPopup || split ? new Node('SECTION', mode === 'message_wrapped' ? { 'data-turn': 'assistant' } : {}) : popup;
           const body = x.f.body, portal = nested ? x.picker.menu.parentElement : mode === 'foreign_portal' ? new Node('SECTION') : body;
           Object.assign(x.f.document, { body, querySelector: (selector: string) => x.f.document.querySelectorAll(selector)[0] ?? null });
           if (mode === 'foreign_portal') body.append(portal);
+          const outer = new Node('DIV');
+          const anchor = mode === 'split_foreign_host' ? new Node('DIV') : body;
+          if (anchor !== body) body.append(anchor);
           if (root !== popup) root.append(popup);
+          if (split) outer.append(root);
           const otherMenu = ['duplicate_menu', 'dropped_menu_role'].includes(mode) ? new Node('DIV', { ...popup.values }) : null;
           if (otherMenu) root.append(otherMenu);
           const replacement = x.picker.menu;
@@ -4300,7 +4305,12 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
             };
             const childList = (addedNodes: any[], removedNodes: any[], target = portal) =>
               records.push({ type: 'childList', target, addedNodes, removedNodes });
-            const mount = () => { portal.append(root); childList([root], []); };
+            const mount = () => {
+              if (split) {
+                anchor.append(outer); childList([outer], [], anchor);
+                if (mode === 'split_reparented') childList([root], [], outer);
+              } else { portal.append(root); childList([root], []); }
+            };
             if (mode !== 'menu_only') attribute('aria-expanded', 'true');
             if (!stable) attribute('aria-controls', controls);
             if (mode !== 'aria_only' && mode !== 'disjoint_intervals') mount();
@@ -4311,8 +4321,14 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
             if (!stable) attribute('aria-controls', null);
             if (mode === 'disjoint_intervals') mount();
             if (mode !== 'aria_only') {
-              portal.children = portal.children.filter((node:any) => node !== root);
-              root.parentElement = null; root.connected = false; childList([], [root]);
+              const parent = split ? outer : portal;
+              parent.children = parent.children.filter((node:any) => node !== root);
+              root.parentElement = null; root.connected = false; childList([], [root], parent);
+              if (split && mode !== 'split_retained_host') {
+                anchor.children = anchor.children.filter((node:any) => node !== outer);
+                outer.parentElement = null; outer.connected = false; childList([], [outer], anchor);
+                if (mode === 'split_remounted') { anchor.append(outer); childList([outer], [], anchor); }
+              }
             }
             if (mode === 'still_connected') {
               root.connected = true; root.values.hidden = ''; mount();
@@ -4337,7 +4353,7 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
             }
             expect(x.send.clicks, mode).toBe(0);
             await finishFirstInsertWait(x, 901); await finishFirstInsertWait(x, 901);
-            const result = await reading, accepted = nested || mode === 'stable_controls' || mode === 'transient_controls';
+            const result = await reading, accepted = nested || mode === 'split_unmount' || mode === 'stable_controls' || mode === 'transient_controls';
             if (changeAfterProof) {
               expect(lateSend, mode).not.toBeNull();
               expect(lateSend.clicks + x.send.clicks, mode).toBe(0);

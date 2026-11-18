@@ -470,25 +470,19 @@ function websiteChatRejectPopup(trace, reason) {
   trace.rejection ||= reason;
   return false;
 }
-// Assign local ordinals only. No page text, selectors or attribute values leave the tab.
-function websiteChatPopupMutationSummary(trace, records) {
-  const ref = node => {
-    if (!node) return 0;
-    if (!trace.nodeRefs.has(node)) trace.nodeRefs.set(node, ++trace.lastRef);
-    return trace.nodeRefs.get(node);
-  };
-  for (const record of records) {
-    if (trace.topology.length >= 64 || record.type !== 'childList') continue;
-    const target = record.target;
-    for (const [nodes, direction] of [[record.addedNodes, '+'], [record.removedNodes, '-']]) {
-      for (const node of Array.from(nodes).slice(0, 3)) {
-        if (trace.topology.length >= 64 || !node.getAttribute) continue;
-        const menu = node.getAttribute('role') === 'menu' ? node : node.querySelector?.('[role="menu"]');
-        trace.topology.push([direction, ref(target), ref(node), ref(menu), ref(target.parentNode || target.parentElement),
-          target === trace.body, target.isConnected === true]);
-      }
-    }
-  }
+// React can assemble the menu off-document, mount its outer host, then
+// remove the menu from the host before removing the host itself. Mutation
+// records retain the physical nodes, but addedNodes reflects their later,
+// already-empty contents. Pair the two exact child-list edges in that case.
+function websiteChatCompletePopupMount(trace, opening) {
+  if (!opening.outerHost) return websiteChatKnownPopupHost(trace, opening.host);
+  const host = opening.outerHost;
+  const edges = trace.edges.get(host);
+  return websiteChatKnownPopupHost(trace, opening.host) && host.isConnected === false
+    && !host.closest(websiteChatPickerBoundary) && !trace.identityChanges.has(host)
+    && edges.length === 2 && edges[1].added === false && edges[1].host === opening.host
+    && edges[1].index > trace.removal && trace.edges.get(opening.node).length === 1
+    && (opening.node === opening.menu || !trace.edges.has(opening.menu));
 }
 function websiteChatRecordReadinessPopup(trace, records) {
   const menuRoles = ['menu', 'listbox', 'dialog'];
@@ -511,6 +505,10 @@ function websiteChatRecordReadinessPopup(trace, records) {
     if (record.type !== 'childList' || record.addedNodes.length + record.removedNodes.length > 64) return websiteChatRejectPopup(trace, 'record_shape');
     for (const [nodes, added] of [[record.removedNodes, false], [record.addedNodes, true]]) {
       for (const node of nodes) {
+        if (++trace.edgeCount > 256) return websiteChatRejectPopup(trace, 'child_limit');
+        const edges = trace.edges.get(node) || [];
+        edges.push({ host: record.target, index, added });
+        trace.edges.set(node, edges);
         if ([trace.trigger, trace.composer, trace.send, trace.body, ...trace.portalPath].some(pin => node === pin || node.contains?.(pin)))
           return websiteChatRejectPopup(trace, 'pinned_node_changed');
         const descendants = node.querySelectorAll?.('[role="menu"], [role="listbox"], [role="dialog"]') ?? [];
@@ -519,16 +517,21 @@ function websiteChatRecordReadinessPopup(trace, records) {
         const menu = menus[0];
         if (menus.length !== 1 || menu.getAttribute('role') !== 'menu' || menu.closest(websiteChatPickerBoundary))
           return websiteChatRejectPopup(trace, 'portal_shape');
-        if (!websiteChatKnownPopupHost(trace, record.target)) {
-          const host = record.target;
-          const kind = host.hasAttribute?.('data-radix-popper-content-wrapper') ? 'positioner'
-            : host.isConnected ? 'connected' : 'detached';
-          return websiteChatRejectPopup(trace, 'portal_parent_' + kind);
-        }
-        // Snapshot attributes when the observer delivers the records. A later
-        // mutation of a detached portal must never rewrite its opening history.
         const id = menu.getAttribute('id');
         if (menu.getAttribute('aria-labelledby') !== trace.triggerID) return websiteChatRejectPopup(trace, 'menu_label');
+        if (!websiteChatKnownPopupHost(trace, record.target)) {
+          const outerHost = record.target;
+          const mounts = trace.edges.get(outerHost);
+          // An observed removal is proof of prior membership only when no
+          // insertion/reparenting touched the child during this observation.
+          if (added || trace.opening || edges.length !== 1 || mounts?.length !== 1
+            || !mounts[0].added || mounts[0].index >= index || !websiteChatKnownPopupHost(trace, mounts[0].host)
+            || !outerHost.closest || outerHost.closest(websiteChatPickerBoundary))
+            return websiteChatRejectPopup(trace, 'portal_parent');
+          trace.opening = { index: mounts[0].index, menu, node, id, host: mounts[0].host, outerHost };
+          trace.removal = index;
+          continue;
+        }
         if (added) {
           if (trace.opening) return websiteChatRejectPopup(trace, 'multiple_opens');
           trace.opening = { index, menu, node, id, host: record.target };
@@ -552,7 +555,7 @@ function websiteChatReadinessPopupDetached(trace) {
     || trigger.getAttribute('aria-expanded') !== trace.expanded
     || trigger.getAttribute('aria-controls') !== trace.controls) return websiteChatRejectPopup(trace, 'trigger_state');
   if (!opening || removal === null) return websiteChatRejectPopup(trace, 'incomplete_mount');
-  if (!websiteChatKnownPopupHost(trace, opening.host) || opening.menu.isConnected !== false || opening.node.isConnected !== false
+  if (!websiteChatCompletePopupMount(trace, opening) || opening.menu.isConnected !== false || opening.node.isConnected !== false
     || !opening.node.contains(opening.menu) || identityChanges.has(trigger)
     || [...identityChanges].some(node => node === opening.menu || node.contains?.(opening.menu))
     || opening.menu.getAttribute('role') !== 'menu' || opening.menu.getAttribute('id') !== opening.id
@@ -617,7 +620,6 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   let detachedSubmitSend = null;
   const recordReadinessPopup = records => {
     if (readinessPopupTrace.recordCount + records.length > 64) readinessPopupTrace.overflow = true;
-    if (!readinessPopupTrace.overflow) websiteChatPopupMutationSummary(readinessPopupTrace, records);
     if (!readinessPopupTrace.overflow && !readinessPopupTrace.invalid)
       readinessPopupTrace.invalid = !websiteChatRecordReadinessPopup(readinessPopupTrace, records);
   };
@@ -706,7 +708,6 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         selectionSettled: selection?.completed === true, selectionCompleted: selection?.completed === true,
         recoveryEligible: prepareOpening !== null || insertOpening !== null,
         firstVerificationOpening: firstVerificationOpeningDiagnostic,
-        ...(readinessPopupTrace?.rejection ? { popupTopology: readinessPopupTrace.topology } : {}),
         ...(preparedVerificationOpeningDiagnostic ? { preparedVerificationOpening: {
           ...preparedVerificationOpeningDiagnostic, draftChanged, draftChangeReason,
           observedAcknowledgement: verifyAcknowledged, acknowledgementSources: { ...acknowledgementSources },
@@ -1101,7 +1102,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
           // Require a fresh model read after a proved detachment and bind
           // the currently visible Send control across that recovery.
           readinessPopupTrace = { trigger, composer: insertOpening.composer, send: popupSend,
-            body: document.body, portalPath: prior.portalPath || [], topology: [], nodeRefs: new WeakMap(), lastRef: 0,
+            body: document.body, portalPath: prior.portalPath || [], edges: new Map(), edgeCount: 0,
             triggerID: trigger.getAttribute('id'), controls: trigger.getAttribute('aria-controls'),
             expanded: trigger.getAttribute('aria-expanded'), expandedChanges: [], controlsChanges: [],
             identityChanges: new Set(), changedIDs: new Set(), recordCount: 0, opening: null, removal: null, overflow: false, invalid: false };
