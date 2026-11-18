@@ -260,12 +260,22 @@ enum ComputaAgentInstructions {
     \(literalIdentifiers)
     """
 
+    private static let fileSearchGuidance: String = {
+        let hasRipgrep = AgentRuntimeIsolation.executableSearchPath.split(separator: ":").contains {
+            FileManager.default.isExecutableFile(atPath: String($0) + "/rg")
+        }
+        return hasRipgrep ? "Use rg for scoped file searches."
+            : "rg is unavailable in this shell. In a repository use git ls-files and git grep -n. Else use find and grep."
+    }()
+
     /// Shared by native instructions and freshly projected terminal contracts.
     /// These guide command choice; they never rewrite a user's shell program.
     static let commandChecks = """
     For exec_command, copy a requested absolute workdir verbatim. Use the native
     <cwd> if no project directory is given. Never prepend <cwd> or private HOME to
     an absolute path.
+    \(fileSearchGuidance)
+    For reviews, read targeted paths and line ranges with short commands. Use a small output budget.
     Git is optional for edits. Use it for requested Git work or an
     established in-scope repository; skip preflights for loose files.
     Repository context or .git (directory, worktree file or ancestor) can
@@ -284,7 +294,7 @@ enum ComputaAgentInstructions {
     configuration or credentials may be absent. Do not copy credentials or change
     settings to bypass that boundary.
     HOME is isolated, not macOS home. Use observed paths; quoted ~ is literal. Locate files
-    before search; use bounded grep/sed (rg if available). Scope product diagnostics
+    before search; use bounded grep/sed. Scope product diagnostics
     to relevant config/help files; skip histories/logs unless needed. Fix observed
     path errors before repeating.
     A running process or session ID is not success. Poll the exact session with

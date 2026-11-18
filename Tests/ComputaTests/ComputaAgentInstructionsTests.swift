@@ -951,7 +951,7 @@ final class ComputaAgentInstructionsTests: XCTestCase {
         let commandInstructions = ComputaAgentInstructions.commandLine.replacingOccurrences(of: "\n", with: " ")
         for rule in [
             "HOME is isolated, not macOS home. Use observed paths; quoted ~ is literal",
-            "Locate files before search; use bounded grep/sed (rg if available)",
+            "Locate files before search; use bounded grep/sed",
             "Scope product diagnostics to relevant config/help files; skip histories/logs unless needed",
             "Fix observed path errors before repeating",
             "Commands use a private HOME and no login-shell initialization",
@@ -1040,6 +1040,10 @@ final class ComputaAgentInstructionsTests: XCTestCase {
     func testCommandChecksFollowCurrentTerminalCapabilityAndRemainInFreshHandoff() {
         // Instruction delivery, not a semantic model-adherence test.
         let checks = ComputaAgentInstructions.commandChecks
+        let hasRipgrep = AgentRuntimeIsolation.executableSearchPath.split(separator: ":").contains {
+            FileManager.default.isExecutableFile(atPath: String($0) + "/rg")
+        }
+        XCTAssertTrue(checks.contains(hasRipgrep ? "Use rg" : "rg is unavailable"))
         let normalized = checks.replacingOccurrences(of: "\n", with: " ")
         for rule in ["copy a requested absolute workdir verbatim", "Use the native <cwd> if no project directory is given",
                      "Never prepend <cwd> or private HOME to an absolute path"] {

@@ -3,6 +3,8 @@ import Foundation
 /// App-owned process configuration, independent of the launching shell or Codex host.
 /// This helper neither creates the private home nor edits or removes any policy.
 enum AgentRuntimeIsolation {
+    static let executableSearchPath = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
+
     private static let inheritedKeys = [
         "TMPDIR", "LANG", "LC_ALL", "LC_COLLATE", "LC_CTYPE", "LC_MESSAGES",
         "LC_MONETARY", "LC_NUMERIC", "LC_TIME",
@@ -18,7 +20,7 @@ enum AgentRuntimeIsolation {
         var result = [
             "HOME": userHomePath,
             "CODEX_HOME": codexHomePath,
-            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
+            "PATH": executableSearchPath,
         ]
         for key in inheritedKeys {
             if let value = inherited[key] { result[key] = value }
