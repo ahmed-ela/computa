@@ -15,6 +15,11 @@ settings:
     CLANG_ENABLE_MODULES: YES
     ENABLE_CODE_COVERAGE: NO
 
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.10.1
+
 targets:
   AutomationCore:
     type: library.static
@@ -53,6 +58,7 @@ targets:
         buildPhase: resources
     dependencies:
       - target: AutomationCore
+      - package: Sparkle
     configFiles:
       Debug: Config/Version.xcconfig
       Release: Config/Version.xcconfig

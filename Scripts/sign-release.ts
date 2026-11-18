@@ -2,7 +2,7 @@
 // Sign a COPY of a completed build. Never edits the source bundle or installation.
 import { createHash } from "node:crypto";
 import { rejectRetiredBundleResources } from "./retired-bundle-resources";
-import { lstat, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, readlink, realpath, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 
 export interface SignOptions { app: string; output: string; identity: string }
@@ -31,14 +31,17 @@ async function regular(path: string, directory = false): Promise<void> {
   }
 }
 
-async function noSymlinks(directory: string): Promise<void> {
-  // This product has no framework-version symlinks. Reject links anywhere in
-  // the input/copy, including code-signature and resource parent directories.
+async function validatePaths(directory: string, framework = join(directory, "Contents/Frameworks/Sparkle.framework")): Promise<void> {
+  // Sparkle uses standard versioned framework links. Their resolved targets
+  // must stay inside that framework, including throughout a staged copy.
   for (const child of await readdir(directory, { withFileTypes: true })) {
     const path = join(directory, child.name);
     const stat = await lstat(path);
-    if (stat.isSymbolicLink()) throw new Error(`Refusing a symlink inside the bundle: ${path}`);
-    if (stat.isDirectory()) await noSymlinks(path);
+    if (stat.isSymbolicLink()) {
+      if (!path.startsWith(framework + sep) || (await readlink(path)).startsWith("/") || !(await realpath(path)).startsWith(framework + sep)) {
+        throw new Error(`Refusing a symlink inside the bundle: ${path}`);
+      }
+    } else if (stat.isDirectory()) await validatePaths(path, framework);
     else if (!stat.isFile()) throw new Error(`Unsupported bundle entry: ${path}`);
   }
 }
@@ -65,7 +68,7 @@ export async function signRelease(options: SignOptions, run: SignRunner): Promis
   }
   try { await lstat(output); throw new Error("Output already exists; choose a new staging path."); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-  await noSymlinks(app);
+  await validatePaths(app);
   await rejectRetiredBundleResources(app);
 
   const identityList = await run(["/usr/bin/security", "find-identity", "-v", "-p", "codesigning"]);
@@ -93,7 +96,7 @@ export async function signRelease(options: SignOptions, run: SignRunner): Promis
   if (await realpath(dirname(output)) !== dirname(output)) throw new Error("Output parent changed during preflight.");
   await run(["/usr/bin/ditto", app, output]);
   await regular(output, true);
-  await noSymlinks(output);
+  await validatePaths(output);
   await rejectRetiredBundleResources(output);
   // Sign inside out. Signing changes Mach-O bytes, so refresh the runtime's
   // integrity fields before sealing the outer app. Preserve source provenance.
@@ -103,6 +106,14 @@ export async function signRelease(options: SignOptions, run: SignRunner): Promis
     await run(["/usr/bin/codesign", "--force", "--options", "runtime", "--timestamp", "--identifier", identifier,
       "--sign", identity, join(output, relative)]);
     await run(["/usr/bin/codesign", "--verify", "--strict", "-R", "=anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists", join(output, relative)]);
+  }
+  const framework = join(output, "Contents/Frameworks/Sparkle.framework");
+  const frameworkInfo = await lstat(framework).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error;
+  });
+  if (frameworkInfo) {
+    await run(["/usr/bin/codesign", "--force", "--options", "runtime", "--timestamp", "--sign", identity, framework]);
+    await run(["/usr/bin/codesign", "--verify", "--strict", "--deep", framework]);
   }
   const signedRuntime = await readFile(join(output, runtimePath));
   manifest.binarySHA256 = digest(signedRuntime);

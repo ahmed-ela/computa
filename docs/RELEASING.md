@@ -73,6 +73,18 @@ notarization and stapling steps first and package with `--channel notarized`.
 Use that channel's filenames when uploading. The alpha label describes release
 stability, not notarization status.
 
+## Prepare in-app updates
+
+Build 586 and later use the pinned Sparkle framework in the Xcode app. The release publisher verifies the update archive with the public key embedded in that app. The private Ed25519 signing key stays in the release maintainer’s Keychain under the Sparkle account `com.ahmedelamin.LocalCodex.Sparkle`. Keep a secure backup of that key. Use the `sign_update` binary from the pinned Sparkle distribution or Xcode’s resolved `SourcePackages/artifacts/sparkle/Sparkle/bin` directory.
+
+After notarizing and stapling the **app**, package it with `--channel notarized`. Sign the resulting DMG with Developer ID, submit it to Apple notarization, and staple its ticket. Generate the feed and final checksums from those exact bytes:
+
+```sh
+bun Scripts/sparkle-appcast.ts "$sparkle_tools/sign_update" "$computa_release_output/Computa-${computa_release_version}-arm64.dmg"
+```
+
+Upload `appcast.xml` alongside the final DMG, manifest, and `SHA256SUMS` when creating the draft. Use the notarized asset names (without `-signed-test`). The publisher verifies the feed's download URL, version, length, checksum, and Ed25519 signature before it makes the draft public. `https://computa.wtf/appcast.xml` then points clients at the highest published build with both a notarized DMG and a feed. Publishing future app updates requires no website deploy. A `signed-test` package cannot be offered to an installed client.
+
 ## Upload a draft, then dispatch publication
 
 Write release notes to a local file, identifying the source commit, app version
