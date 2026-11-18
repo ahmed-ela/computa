@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { activityDisclosureOpen, activityTimeline, type ActivityGroup, type ActivityRow } from '../src/activityTimeline';
+import { activityDisclosureOpen, activityTimeline, systemMessageText, type ActivityGroup, type ActivityRow } from '../src/activityTimeline';
 import type { EntrySnapshot, TaskSnapshot } from '../src/types';
 
 const entry = (id: string, kind: EntrySnapshot['kind'], changes: Partial<EntrySnapshot> = {}): EntrySnapshot => ({
@@ -274,4 +274,15 @@ describe('activity timeline', () => {
     activityTimeline(input);
     expect(input).toEqual(original);
   });
+});
+
+test('agent errors show the diagnostic message while preserving raw inspector details', () => {
+  const body = JSON.stringify({ error: { code: 'browser_model_error', message: 'Model selection could not be verified.' } });
+  const error = entry('failed', 'system', { title: 'Agent error', body });
+  expect(systemMessageText(error)).toBe('Model selection could not be verified.');
+  expect(error.body).toBe(body);
+  for (const body of ['Connection closed.', '{"error":null}', '']) {
+    expect(systemMessageText({ ...error, body })).toBe(body);
+  }
+  expect(systemMessageText({ ...error, title: 'Other event' })).toBe(body);
 });

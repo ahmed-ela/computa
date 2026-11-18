@@ -19,7 +19,7 @@ import { WebsiteSessionCleanupControl } from './WebsiteSessionCleanupControl';
 import { fileChangeSummary } from './reviewDiff';
 import { ResponseMarkdown } from './ResponseMarkdown';
 import { ActivityDisclosure, activityLabel } from './ActivityDisclosure';
-import { activityTimeline, type ActivityGroup } from './activityTimeline';
+import { activityTimeline, systemMessageText, type ActivityGroup } from './activityTimeline';
 import { formatWorkedFor } from './duration';
 import { TaskActivityIndicator } from './TaskActivityIndicator';
 import { isTaskActive, startSidebarClock } from './sidebarActivity';
@@ -295,7 +295,7 @@ function TimelineEntry({
         onClick={() => post({ action: 'selectEntry', id: entry.id })}
       >
         <Icon name="info" size={16} />
-        <div><strong>{entry.title}</strong><p>{entry.body}</p></div>
+        <div><strong>{entry.title}</strong><p>{systemMessageText(entry)}</p></div>
       </article>
     );
   }

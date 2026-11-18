@@ -446,6 +446,10 @@ function websiteChatPickerState() {
     navigationAmbiguous: associated.length > 1 || secondaries.length > 1,
     physical, visible, enabled, family };
 }
+function websiteChatRejectPopup(trace, reason) {
+  trace.rejection ||= reason;
+  return false;
+}
 function websiteChatRecordReadinessPopup(trace, records) {
   const menuRoles = ['menu', 'listbox', 'dialog'];
   for (const record of records) {
@@ -458,33 +462,34 @@ function websiteChatRecordReadinessPopup(trace, records) {
         trace.changedIDs.add(oldValue);
         trace.changedIDs.add(target.getAttribute('id'));
       }
-      if (attributeName === 'role' && (menuRoles.includes(oldValue) || menuRoles.includes(target.getAttribute('role')))) return false;
+      if (attributeName === 'role' && (menuRoles.includes(oldValue) || menuRoles.includes(target.getAttribute('role')))) return websiteChatRejectPopup(trace, 'menu_role_changed');
       if (['id', 'role', 'aria-labelledby', 'data-message-author-role', 'data-markdown-text-style',
         'data-turn', 'data-user-message-bubble'].includes(attributeName)) trace.identityChanges.add(target);
-      if (target === trace.send && ['disabled', 'aria-disabled'].includes(attributeName)) return false;
+      if (target === trace.send && ['disabled', 'aria-disabled'].includes(attributeName)) return websiteChatRejectPopup(trace, 'send_changed');
       continue;
     }
-    if (record.type !== 'childList' || record.addedNodes.length + record.removedNodes.length > 64) return false;
+    if (record.type !== 'childList' || record.addedNodes.length + record.removedNodes.length > 64) return websiteChatRejectPopup(trace, 'record_shape');
     for (const [nodes, added] of [[record.removedNodes, false], [record.addedNodes, true]]) {
       for (const node of nodes) {
-        if ([trace.trigger, trace.composer, trace.send, trace.body].some(pin => node === pin || node.contains?.(pin))) return false;
+        if ([trace.trigger, trace.composer, trace.send, trace.body].some(pin => node === pin || node.contains?.(pin))) return websiteChatRejectPopup(trace, 'pinned_node_changed');
         const descendants = node.querySelectorAll?.('[role="menu"], [role="listbox"], [role="dialog"]') ?? [];
         const menus = menuRoles.includes(node.getAttribute?.('role')) ? [node, ...descendants] : descendants;
         if (menus.length === 0) continue;
         const menu = menus[0];
-        if (menus.length !== 1 || menu.getAttribute('role') !== 'menu' || menu.closest(websiteChatPickerBoundary)
-          || record.target !== trace.body
-          || trace.body.isConnected !== true) return false;
+        if (menus.length !== 1 || menu.getAttribute('role') !== 'menu' || menu.closest(websiteChatPickerBoundary))
+          return websiteChatRejectPopup(trace, 'portal_shape');
+        if (record.target !== trace.body || trace.body.isConnected !== true)
+          return websiteChatRejectPopup(trace, 'portal_parent');
         // Snapshot attributes when the observer delivers the records. A later
         // mutation of a detached portal must never rewrite its opening history.
         const id = menu.getAttribute('id');
-        if (menu.getAttribute('aria-labelledby') !== trace.triggerID) return false;
+        if (menu.getAttribute('aria-labelledby') !== trace.triggerID) return websiteChatRejectPopup(trace, 'menu_label');
         if (added) {
-          if (trace.opening) return false;
+          if (trace.opening) return websiteChatRejectPopup(trace, 'multiple_opens');
           trace.opening = { index, menu, node, id };
         } else {
           const opening = trace.opening;
-          if (!opening || trace.removal !== null || menu !== opening.menu || node !== opening.node || id !== opening.id) return false;
+          if (!opening || trace.removal !== null || menu !== opening.menu || node !== opening.node || id !== opening.id) return websiteChatRejectPopup(trace, 'removed_node');
           trace.removal = index;
         }
       }
@@ -500,28 +505,30 @@ function websiteChatReadinessPopupDetached(trace) {
   if (trace.overflow || trace.invalid || !validID(trace.triggerID) || trigger.getAttribute('id') !== trace.triggerID
     || trace.body !== document.body || trace.body.isConnected !== true || identityChanges.has(trace.body)
     || trigger.getAttribute('aria-expanded') !== trace.expanded
-    || trigger.getAttribute('aria-controls') !== trace.controls) return false;
-  if (!opening || removal === null || opening.menu.isConnected !== false || opening.node.isConnected !== false
+    || trigger.getAttribute('aria-controls') !== trace.controls) return websiteChatRejectPopup(trace, 'trigger_state');
+  if (!opening || removal === null) return websiteChatRejectPopup(trace, 'incomplete_mount');
+  if (opening.menu.isConnected !== false || opening.node.isConnected !== false
     || !opening.node.contains(opening.menu) || identityChanges.has(trigger)
     || [...identityChanges].some(node => node === opening.menu || node.contains?.(opening.menu))
     || opening.menu.getAttribute('role') !== 'menu' || opening.menu.getAttribute('id') !== opening.id
     || opening.menu.getAttribute('aria-labelledby') !== trace.triggerID
     || expandedChanges.length !== 2 || expandedChanges[0].oldValue !== trace.expanded
-    || expandedChanges[1].oldValue !== 'true') return false;
+    || expandedChanges[1].oldValue !== 'true') return websiteChatRejectPopup(trace, 'menu_state');
   const menuID = opening.id;
-  if (!validID(menuID) || trace.changedIDs.has(menuID) || trace.changedIDs.has(trace.triggerID)) return false;
+  if (!validID(menuID) || trace.changedIDs.has(menuID) || trace.changedIDs.has(trace.triggerID)) return websiteChatRejectPopup(trace, 'menu_id');
   const triggerIDs = document.querySelectorAll(`[id="${trace.triggerID}"]`);
   if (triggerIDs.length !== 1 || triggerIDs[0] !== trigger
-    || document.querySelector(`[id="${menuID}"]`)) return false;
+    || document.querySelector(`[id="${menuID}"]`)) return websiteChatRejectPopup(trace, 'duplicate_id');
   let linkedFrom = -1, linkedUntil = trace.recordCount;
   if (trace.controls === null) {
-    if (controlsChanges.length !== 2 || controlsChanges[0].oldValue !== null || controlsChanges[1].oldValue !== menuID) return false;
+    if (controlsChanges.length !== 2 || controlsChanges[0].oldValue !== null || controlsChanges[1].oldValue !== menuID) return websiteChatRejectPopup(trace, 'controls_sequence');
     linkedFrom = controlsChanges[0].index;
     linkedUntil = controlsChanges[1].index;
-  } else if (trace.controls !== menuID || controlsChanges.length !== 0) return false;
+  } else if (trace.controls !== menuID || controlsChanges.length !== 0) return websiteChatRejectPopup(trace, 'controls_id');
   // The three intervals must overlap. This proves only the original popup's
   // structural lifecycle, never the model or even the popup's visibility.
-  return Math.max(opening.index, expandedChanges[0].index, linkedFrom) < Math.min(removal, expandedChanges[1].index, linkedUntil);
+  return Math.max(opening.index, expandedChanges[0].index, linkedFrom) < Math.min(removal, expandedChanges[1].index, linkedUntil)
+    || websiteChatRejectPopup(trace, 'disjoint_intervals');
 }
 function websiteChatVisibleSendControls(visible) {
   return [...new Set(document.querySelectorAll(
@@ -1093,7 +1100,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
             && (!(firstSubmit || preparedVerify) || exactVisibleSend(current, readinessPopupTrace.send));
           if (firstSubmit && detachedReadinessPopup) detachedSubmitSend = readinessPopupTrace.send;
           readinessPopupLifecycle = readinessPopupTrace.overflow ? 'overflow'
-            : detachedReadinessPopup ? 'detached_associated' : 'unproved';
+            : detachedReadinessPopup ? 'detached_associated' : readinessPopupTrace.rejection || 'unproved';
         }
         if (emptyEditorOpening && verifyAcknowledged) {
           // An acknowledged opening is now positively closed. Only this untouched
