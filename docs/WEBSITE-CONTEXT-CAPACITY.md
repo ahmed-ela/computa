@@ -118,3 +118,36 @@ closure for all 19 inference sessions. It required a bounded second user turn
 after the existing 16-inference cap; that cap and all byte/tool/ownership
 checks remain enabled. This qualifies the tested Instant transport workflow,
 not Pro, other providers, or the correctness of the review's findings.
+
+### November 17, build 576 — continuing a review in one turn
+
+ChatGPT website reviews start with 16 inferences. Once the next native request
+matches the released tool calls and their results, a newly observed action can
+extend the allowance to 16 inferences beyond the current count. The first
+distinct action establishes the baseline. Computa compares the tool type,
+namespace, name and arguments. Argument key order, call IDs and varying output
+from repeated commands cannot earn extra capacity. A turn can spend at most
+128 inferences. Compaction and formatting correction spend capacity and carry
+the budget across verified session closure. Neither renews the allowance.
+
+This uses the engine's existing next request in the same turn. A final model
+answer, Stop, ambiguous history, failed model verification or unconfirmed
+cleanup cannot schedule another request through the budget. Each request
+retains its byte ceiling. Native compaction can also stop when exact tool
+receipts cannot fit its 12 KiB provider-input or 24 KiB canonical limits.
+
+The original implementation stopped the regression fixture at exactly 16
+submissions. The updated bundled engine test crosses 16 with real shell
+commands, compacts once, matches every result to its command, applies a patch
+and returns the final marker after one user prompt. An independent disk ledger
+checks command order and replay. All 96 focused tests passed, including the
+repeated-command, correction, cancellation, cleanup and absolute-ceiling cases.
+
+Two fresh installed Instant reviews used the original prompt once per chat.
+The second made 14 native tool calls, compacted three times and released 17
+verified Chat-mode Instant responses in one native turn. Its eighteenth session
+stopped before submission at the model-picker check. The first stopped at the
+same check on its sixth session. All 24 sessions across the two runs had saved
+closure receipts. Both failures recorded an intact draft and header, an opening
+acknowledgement and an unproved popup lifecycle during the Submit precheck.
+These runs establish live continuation past 16. Neither returned a final review.
