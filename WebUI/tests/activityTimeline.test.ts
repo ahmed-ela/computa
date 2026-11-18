@@ -40,7 +40,8 @@ describe('activity timeline', () => {
     const [group] = activity(rows);
     expect(group.isRunning).toBe(true);
     expect(activityDisclosureOpen(group.isRunning, group.hasFinalAnswer)).toBe(true);
-    expect(outside(rows).map(({ entry }) => entry.id)).toEqual(['prompt', 'approve']);
+    expect(outside(rows).map(({ entry }) => entry.id)).toEqual(['prompt']);
+    expect(group.entries.map(({ id }) => id)).toEqual(['approve']);
   });
 
   test('reasoning and ordinary tools share one group without duplicate outside rows', () => {
@@ -55,24 +56,17 @@ describe('activity timeline', () => {
     expect(activity(rows)[0].hasFinalAnswer).toBe(false);
   });
 
-  test('failed and approval tools retain compact history and visible external detail', () => {
-    const rows = activityTimeline(task([
-      entry('prompt', 'user'), tool('succeeded'), tool('running', 'Running'),
-      tool('failed', 'Failed'), tool('approval', 'Needs approval'),
-    ]));
-    expect(activity(rows)[0].entries.map(({ id }) => id)).toEqual(['succeeded', 'running', 'failed', 'approval']);
-    expect(outside(rows).map(({ entry }) => entry.id)).toEqual(['prompt', 'failed', 'approval']);
-    expect(new Set(outside(rows).map(({ entry }) => entry.id)).size).toBe(outside(rows).length);
-  });
-
-  test('a tool becoming failed or approval-needed is immediately exposed outside', () => {
-    for (const status of ['Failed', 'Needs approval']) {
-      const before = activityTimeline(task([entry('prompt', 'user'), tool('same-tool', 'Running')]));
-      const after = activityTimeline(task([entry('prompt', 'user'), tool('same-tool', status)]));
-      expect(outside(before).map(({ entry }) => entry.id)).toEqual(['prompt']);
-      expect(outside(after).map(({ entry }) => entry.id)).toEqual(['prompt', 'same-tool']);
-      expect(activity(after)[0].entries.map(({ id }) => id)).toEqual(['same-tool']);
-      expect(activity(after)[0].id).toBe(activity(before)[0].id);
+  test('each tool receipt has one location across status transitions and history reload', () => {
+    for (const name of ['commandExecution', 'write_stdin', 'browser_read', 'fileChange', 'futureTool']) {
+      for (const status of ['Running', 'Failed', 'Needs approval', 'Cancelled', 'Succeeded', 'future status']) {
+        const receipt = tool('same-tool', status);
+        receipt.tool = { ...receipt.tool!, name, output: 'Exit code 1' };
+        for (const taskStatus of ['Running', 'Completed']) {
+          const rows = activityTimeline(task([entry('prompt', 'user'), receipt], { status: taskStatus }));
+          expect(activity(rows).map(group => [group.id, group.entries])).toEqual([['prompt', [receipt]]]);
+          expect(outside(rows).map(({ entry }) => entry.id)).toEqual(['prompt']);
+        }
+      }
     }
   });
 
@@ -253,7 +247,8 @@ describe('activity timeline', () => {
     expect(group.isRunning).toBe(false);
     expect(group.hasFinalAnswer).toBe(false);
     expect(activityDisclosureOpen(group.isRunning, group.hasFinalAnswer)).toBe(false);
-    expect(outside(rows).map(({ entry }) => entry.id)).toEqual(['prompt', 'failed', 'error']);
+    expect(outside(rows).map(({ entry }) => entry.id)).toEqual(['prompt', 'error']);
+    expect(group.entries.map(({ id }) => id)).toEqual(['failed']);
   });
 
   test('a completed text-only turn has no empty activity group and keeps its metadata', () => {
