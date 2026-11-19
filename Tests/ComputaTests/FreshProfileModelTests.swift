@@ -48,9 +48,11 @@ final class FreshProfileModelTests: XCTestCase {
     }
 
     func testFreshDefaultDoesNotReplaceSavedLocalAPIOrWebsiteSelectionsOrHistory() throws {
+        let paused = APIProviderCatalog.appModelID(providerID: "cerebras", modelID: "gpt-oss-120b")
         let savedModels = [
             LocalModelCatalog.defaultModelID,
-            APIProviderCatalog.appModelID(providerID: "cerebras", modelID: "gpt-oss-120b"),
+            paused,
+            APIProviderCatalog.appModelID(providerID: "custom", modelID: "model"),
             WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/high", label: "High").modelID,
             WebsiteModelChoice(provider: "gemini", key: "fixture-pro", label: "Fixture Pro").modelID,
             WebsiteModelChoice(provider: "claude", key: "fixture-sonnet", label: "Fixture Sonnet").modelID,
@@ -65,12 +67,14 @@ final class FreshProfileModelTests: XCTestCase {
             let preferences = isolatedTestPreferences()
             preferences.set(model, forKey: "LocalCodex.defaultModelID")
             let state = AppState(tasks: history, preferences: preferences)
-            XCTAssertEqual(state.defaultModel, model)
+            let expectedDefault = model == paused ? WebsiteModelCatalog.freshProfileDefaultModelID : model
+            XCTAssertEqual(state.defaultModel, expectedDefault)
+            XCTAssertEqual(preferences.string(forKey: "LocalCodex.defaultModelID"), model)
             XCTAssertEqual(preferences.string(forKey: "LocalCodex.defaultModelID"), model)
             XCTAssertEqual(state.tasks.map(\.model), savedModels)
             XCTAssertEqual(state.tasks.map(\.entries), history.map(\.entries))
             state.createTask()
-            XCTAssertEqual(state.selectedTask?.model, model)
+            XCTAssertEqual(state.selectedTask?.model, expectedDefault)
         }
     }
 }

@@ -89,15 +89,7 @@ final class WebsiteModeCatalogTests: XCTestCase {
     func testCachedModesRevalidateOnlySelectedProviderOncePerLaunch() async throws {
         let preferences = isolatedTestPreferences(), browser = EmbeddedBrowserSession(persistent: false)
         defer { browser.shutdown() }
-        let named = WebsiteModelCatalog.providers.filter { $0 != "deepseek" }.map { provider -> WebsiteModelChoice in
-            switch provider {
-            case "chatgpt": syntheticChatGPTChoice
-            case "kimi": syntheticKimiChoice
-            case "qwen": .init(provider: provider, key: "Qwen3.7-Plus", label: "Qwen3.7-Plus")
-            case "groq": .init(provider: provider, key: "openai/gpt-oss-120b", label: "GPT OSS 120B")
-            default: .init(provider: provider, key: "fixture", label: "Fixture")
-            }
-        }
+        let named = namedWebsiteModelProviders.map { syntheticWebsiteChoice(provider: $0, key: "fixture", label: "Fixture") }
         WebsiteModelCatalog.save(named, to: preferences); WebsiteModeCatalog.save(modes, to: preferences)
         preferences.set(modes[0].requestID, forKey: "LocalCodex.defaultModelID")
         var calls: [String] = []

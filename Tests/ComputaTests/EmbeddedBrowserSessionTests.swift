@@ -636,6 +636,26 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertFalse(view.isInspectable, "Retaining the detached WebView cannot retain inspection access")
     }
 
+    func testProviderSetupAndOAuthPopupShareProfileAndStayOutsideBrowserTools() async throws {
+        let session = EmbeddedBrowserSession(persistent: false, defaults: isolatedTestPreferences())
+        defer { session.shutdown() }
+        let regular = try session.createTab()
+        try session.openProviderSignIn(.chatgpt)
+        let signIn = try XCTUnwrap(session.setupTab(for: .chatgpt))
+        let opener = try XCTUnwrap(session.webView(for: signIn.id))
+        XCTAssertTrue(opener.configuration.websiteDataStore === session.webView(for: regular)?.configuration.websiteDataStore)
+        try await loadPopupFixture(opener)
+        _ = try await script(opener, "document.getElementById('blank-link').click(); return true;")
+        try await waitForPopupCount(3, session: session)
+        let popup = try XCTUnwrap(session.humanTabs.first(where: \.isPopup))
+        XCTAssertEqual(popup.setupProvider, .chatgpt)
+        XCTAssertTrue(session.webView(for: popup.id)?.configuration.websiteDataStore === opener.configuration.websiteDataStore)
+        XCTAssertNil(session.browserToolTab(id: signIn.id))
+        XCTAssertNil(session.browserToolTab(id: popup.id))
+        let targets = try await EmbeddedBrowserTabTransport(session: session).humanTargets()
+        XCTAssertEqual(targets.map(\.targetID), [regular.uuidString])
+    }
+
     func testWebInspectorDoesNotPropagateToPopupsAndShutdownRevokesHeldViews() async throws {
         let session = EmbeddedBrowserSession(persistent: false)
         let openerID = try session.createTab()
