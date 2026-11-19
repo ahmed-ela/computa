@@ -11,13 +11,15 @@ const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest(
 const stages: string[] = [];
 afterEach(async () => { for (const stage of stages.splice(0)) await rm(stage, { recursive: true, force: true }); });
 
-function fixture() {
+function fixture(anchorAhead?: number, anchorStatus = "ahead") {
   const manifest = { schemaVersion: 1, bundleIdentifier: "com.ahmedelamin.LocalCodex", tag,
     version: "0.1.2-alpha.3", appVersion: "0.1.2", appBuild: "3", architecture: "arm64",
     channel: "signed-test", notarizedAppVerified: false };
   const files = new Map<string, Buffer>();
   let release: any, releasedReads = 0, listing: unknown;
-  const config = "MARKETING_VERSION = 0.1.2\nCURRENT_PROJECT_VERSION = 3\n";
+  const anchor = "c".repeat(40);
+  const config = anchorAhead === undefined ? "MARKETING_VERSION = 0.1.2\nCURRENT_PROJECT_VERSION = 3\n"
+    : "MARKETING_VERSION = 0.1.2\nCURRENT_PROJECT_VERSION = 1\nCOMPUTA_ALPHA_BUILD_ANCHOR = " + anchor + "\n";
   const calls: string[][] = [];
   let failure: string | undefined, changed: string | undefined, verified = false;
   function prepare() {
@@ -58,6 +60,9 @@ function fixture() {
         const path = command[2];
         if (path.includes("git/ref/tags")) return JSON.stringify({ object: { type: "commit", sha: changed === "tag" && verified ? "b".repeat(40) : source } });
         if (path === `repos/${repo}`) return JSON.stringify({ default_branch: "main" });
+        if (path.endsWith("compare/" + anchor + "..." + source)) return JSON.stringify({
+          base_commit: { sha: anchor }, status: anchorStatus, ahead_by: anchorAhead,
+        });
         if (path.includes("compare/")) return JSON.stringify({ status: failure === "unmerged" || (changed === "branch" && verified) ? "diverged" : "ahead" });
         if (path.includes("contents/")) return JSON.stringify({ encoding: "base64", content: Buffer.from(config).toString("base64") });
         if (path.includes("releases/tags")) throw new Error("404: tag endpoint excludes drafts");
@@ -263,4 +268,14 @@ test("drag-install shortcut must point exactly to Applications", async () => {
   const f = await installerFixture(), shortcut = join(f.mount, "Applications");
   await rm(shortcut); await symlink("/tmp", shortcut);
   await expect(verifyInstallerPayload(f.mount, f.manifest, f.sources)).rejects.toThrow("shortcut");
+});
+
+test("publisher independently verifies the merged build number from tagged anchor ancestry", async () => {
+  const good = fixture(2);
+  await publishAlpha({ tag, repo, publish: true }, good.context);
+  expect(good.release().draft).toBe(false);
+  for (const bad of [fixture(1), fixture(2, "diverged")]) {
+    await expect(publishAlpha({ tag, repo, publish: true }, bad.context)).rejects.toThrow();
+    expect(bad.calls.some(args => args.includes("download") || args.includes("PATCH"))).toBe(false);
+  }
 });

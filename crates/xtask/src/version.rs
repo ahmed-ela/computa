@@ -69,6 +69,7 @@ pub fn validate_release_metadata(
 pub fn parse_xcconfig(source: &str) -> io::Result<AppVersion> {
     let mut marketing = None;
     let mut build = None;
+    let mut anchor = None;
     for line in source.lines() {
         let line = line
             .split_once("//")
@@ -83,6 +84,13 @@ pub fn parse_xcconfig(source: &str) -> io::Result<AppVersion> {
         let target = match key.trim() {
             "MARKETING_VERSION" => &mut marketing,
             "CURRENT_PROJECT_VERSION" => &mut build,
+            "COMPUTA_ALPHA_BUILD_ANCHOR" => {
+                let sha = value.trim();
+                if sha.len() != 40 || !sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+                    return Err(invalid("Invalid alpha build anchor"));
+                }
+                &mut anchor
+            }
             _ => return Err(invalid("Unexpected canonical version setting")),
         };
         if target.replace(value.trim().to_owned()).is_some() {
@@ -206,6 +214,14 @@ mod tests {
 
     #[test]
     fn config_rejects_duplicates_missing_keys_and_substitutions() {
+        let base = "MARKETING_VERSION = 0.1.1\nCURRENT_PROJECT_VERSION = 2";
+        let anchor = format!("COMPUTA_ALPHA_BUILD_ANCHOR = {}", "a".repeat(40));
+        assert_eq!(
+            parse_xcconfig(base).unwrap(),
+            parse_xcconfig(&format!("{base}\n{anchor}")).unwrap()
+        );
+        assert!(parse_xcconfig(&format!("{base}\n{anchor}\n{anchor}")).is_err());
+        assert!(parse_xcconfig(&format!("{base}\nCOMPUTA_ALPHA_BUILD_ANCHOR = bad")).is_err());
         assert_eq!(
             parse_xcconfig("// version\nMARKETING_VERSION = 0.1.1\nCURRENT_PROJECT_VERSION = 2\n")
                 .unwrap(),

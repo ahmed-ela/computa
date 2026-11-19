@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { bumpVersion, checkVersion, isAppVersion, isBuildNumber, nextVersion, parseVersionConfig, releaseBase } from "./version";
+import { alphaBuild, bumpVersion, checkVersion, isAppVersion, isBuildNumber, nextVersion, parseVersionConfig, releaseBase } from "./version";
 
 const directories: string[] = [];
 afterEach(async () => { for (const path of directories.splice(0)) await rm(path, { recursive: true, force: true }); });
@@ -83,4 +83,16 @@ test("source drift and missing workspace lock entries fail before changing files
     await expect(bumpVersion(root, "minor")).rejects.toThrow("differs");
     expect(await readFile(join(root, "Config/Version.xcconfig"), "utf8")).toBe(before);
   }
+});
+
+test("merged commits allocate a reproducible bounded build above the original build", async () => {
+  const root = await fixture(), path = join(root, "Config/Version.xcconfig"), anchor = "b".repeat(40);
+  await writeFile(path, await readFile(path, "utf8") + "COMPUTA_ALPHA_BUILD_ANCHOR = " + anchor + "\n");
+  const config = await checkVersion(root);
+  expect(alphaBuild(config, 0)).toBe("41");
+  expect(alphaBuild(config, 2)).toBe("43");
+  for (const distance of [-1, 0.5, NaN, 9959]) expect(() => alphaBuild(config, distance)).toThrow();
+  await expect(bumpVersion(root, "build")).rejects.toThrow("automatically");
+  await bumpVersion(root, "minor");
+  expect(await checkVersion(root)).toEqual({ ...config, version: "0.2.0", alphaBuildAnchor: anchor });
 });

@@ -4,7 +4,7 @@ import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
-export interface AppVersion { version: string; build: string }
+export interface AppVersion { version: string; build: string; alphaBuildAnchor?: string }
 export type Bump = "major" | "minor" | "patch" | "build";
 const core = "(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)";
 const releasePattern = new RegExp(`^${core}(?:-([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?(?:\\+([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$`);
@@ -33,19 +33,31 @@ export function parseVersionConfig(text: string): AppVersion {
   for (const line of text.split(/\r?\n/)) {
     const setting = line.split("//", 1)[0].trim();
     if (!setting) continue;
-    const match = /^(MARKETING_VERSION|CURRENT_PROJECT_VERSION)\s*=\s*(\S+)\s*$/.exec(setting);
+    const match = /^(MARKETING_VERSION|CURRENT_PROJECT_VERSION|COMPUTA_ALPHA_BUILD_ANCHOR)\s*=\s*(\S+)\s*$/.exec(setting);
     if (!match || settings.has(match[1])) throw new Error("Version.xcconfig must contain exactly one of each version setting");
     settings.set(match[1], match[2]);
   }
   const version = settings.get("MARKETING_VERSION"), build = settings.get("CURRENT_PROJECT_VERSION");
   if (!isAppVersion(version)) throw new Error("MARKETING_VERSION must be major.minor.patch without leading zeros");
   if (!isBuildNumber(build)) throw new Error("CURRENT_PROJECT_VERSION must be an integer from 1 through 9999");
-  return { version, build };
+  const alphaBuildAnchor = settings.get("COMPUTA_ALPHA_BUILD_ANCHOR");
+  if (alphaBuildAnchor !== undefined && !/^[0-9a-f]{40}$/.test(alphaBuildAnchor)) throw new Error("Invalid alpha build anchor");
+  return alphaBuildAnchor ? { version, build, alphaBuildAnchor } : { version, build };
+}
+
+// Every fast-forward of the default branch introduces at least one reachable
+// commit. GitHub's compare.ahead_by and git rev-list --count use this same set.
+export function alphaBuild(config: AppVersion, commitsAhead: number): string {
+  if (!Number.isSafeInteger(commitsAhead) || commitsAhead < 0) throw new Error("Invalid release commit distance");
+  const build = String(Number(config.build) + commitsAhead);
+  if (!isBuildNumber(build)) throw new Error("Alpha build exceeds the Apple build number range");
+  return build;
 }
 
 export function nextVersion(current: AppVersion, kind: Bump): AppVersion {
   if (!["major", "minor", "patch", "build"].includes(kind)) throw new Error("Choose major, minor, patch or build");
   if (!isAppVersion(current.version) || !isBuildNumber(current.build)) throw new Error("Invalid current app version");
+  if (current.alphaBuildAnchor && kind === "build") throw new Error("Each merge already allocates an alpha build automatically");
   if (current.build === "9999") throw new Error("Apple build number exhausted; no files were changed");
   const parts = current.version.split(".").map(Number);
   const index = { major: 0, minor: 1, patch: 2 }[kind as Exclude<Bump, "build">];
@@ -53,7 +65,7 @@ export function nextVersion(current: AppVersion, kind: Bump): AppVersion {
     parts[index]++;
     for (let i = index + 1; i < parts.length; i++) parts[i] = 0;
   }
-  const next = { version: parts.join("."), build: String(Number(current.build) + 1) };
+  const next = { ...current, version: parts.join("."), build: current.alphaBuildAnchor ? current.build : String(Number(current.build) + 1) };
   if (!isAppVersion(next.version)) throw new Error("Version component exhausted; no files were changed");
   return next;
 }
@@ -134,13 +146,23 @@ export async function bumpVersion(root: string, kind: Bump): Promise<AppVersion>
   return next;
 }
 
-const help = "Usage: bun Scripts/version.ts [show | check | bump major|minor|patch|build]";
+const help = "Usage: bun Scripts/version.ts [show | check | alpha-tag | bump major|minor|patch|build]";
 if (import.meta.main) {
   try {
     const args = process.argv.slice(2), root = resolve(import.meta.dir, "..");
     if (args.length === 1 && args[0] === "--help") console.log(help);
     else {
       let version: AppVersion;
+      if (args.length === 1 && args[0] === "alpha-tag") {
+        const config = await checkVersion(root);
+        if (!config.alphaBuildAnchor) throw new Error("Missing alpha build anchor");
+        const git = (...args: string[]) => Bun.spawnSync(["git", ...args], { cwd: root });
+        if (git("merge-base", "--is-ancestor", config.alphaBuildAnchor, "HEAD").exitCode !== 0) throw new Error("Source is outside release history");
+        const count = git("rev-list", "--count", config.alphaBuildAnchor + "..HEAD");
+        if (count.exitCode !== 0 || !/^\d+$/.test(count.stdout.toString().trim())) throw new Error("Cannot count release commits");
+        console.log(`v${config.version}-alpha.${alphaBuild(config, Number(count.stdout.toString().trim()))}`);
+        process.exit(0);
+      }
       if (!args.length || (args.length === 1 && ["show", "check"].includes(args[0]))) version = await checkVersion(root);
       else if (args.length === 2 && args[0] === "bump" && ["major", "minor", "patch", "build"].includes(args[1])) version = await bumpVersion(root, args[1] as Bump);
       else throw new Error(help);

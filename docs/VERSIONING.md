@@ -19,10 +19,13 @@ Cargo version or source workspace version. The native runtime handshake reads
 the version from its own built bundle.
 
 `MARKETING_VERSION` supplies Apple's `CFBundleShortVersionString`: exactly three
-numeric components without leading zeros. `CURRENT_PROJECT_VERSION` supplies
-`CFBundleVersion`: a separate positive build number, increasing across releases
-and rebuilds. It never resets on a major, minor, or patch bump. The current
-integer convention supports builds 1–9999 and refuses overflow.
+numeric components without leading zeros. For public alphas, the build number is
+the baseline `CURRENT_PROJECT_VERSION` plus the number of commits reachable
+from the release commit beyond `COMPUTA_ALPHA_BUILD_ANCHOR`. A squash merge
+adds one. A merge commit can introduce several commits and skip numbers.
+The same commit always yields the same build. Xcode receives that value as
+`CURRENT_PROJECT_VERSION` when building the release. It increases across
+marketing-version bumps. Builds are integers from 1 through 9999.
 
 This repository currently contains **only a macOS app**. An iOS target added
 here should reference this same xcconfig in both configurations and use the
@@ -40,12 +43,12 @@ bun Scripts/version.ts check
 bun Scripts/version.ts bump patch
 bun Scripts/version.ts bump minor
 bun Scripts/version.ts bump major
-bun Scripts/version.ts bump build
+bun Scripts/version.ts alpha-tag
 ```
 
-Choose **one** bump for the intended release. For example, from `0.1.1` build
-`2`, patch produces `0.1.2` build `3`, minor produces `0.2.0` build `3`, major
-produces `1.0.0` build `3`, and build produces `0.1.1` build `3`.
+Ordinary PRs can keep the current marketing version. For a marketing-version
+change, choose one of patch, minor, or major. Each merged commit already gets
+its own public build number.
 
 The bump command checks consistency first, then updates the xcconfig, Cargo
 workspace version, and only the workspace packages in `Cargo.lock`. Dependency
@@ -56,8 +59,7 @@ release changes. Run `check` and the normal build/tests before packaging.
 
 The Swift source setup prerequisite check validates the shared source and Cargo
 lock versions. Xcode project regeneration preserves the xcconfig references;
-no regeneration is required just to bump a version. Command-line Xcode setting
-overrides are intended for local experiments, not release versioning.
+no regeneration is required just to bump a version. The merge publisher independently checks the computed build against GitHub history.
 
 ## Release packages
 
@@ -66,7 +68,7 @@ Alpha is the only prerelease channel; beta, release-candidate and preview labels
 are not used for new packages. The automatic publisher currently accepts only
 alpha tags, leaving stable publication for a separately qualified release.
 Use the increasing Apple build number as `N`: app `0.1.2` build `3` produces
-`v0.1.2-alpha.3`. A build-only bump produces `v0.1.2-alpha.4`; a patch bump
+`v0.1.2-alpha.3`. The next squash merge produces `v0.1.2-alpha.4`; a squash merge with a patch bump instead
 produces `v0.1.3-alpha.4`. The suffix belongs to the release tag and manifest,
 while the Apple app version remains numeric.
 Both packagers validate this tag policy and require the tag's numeric base to
@@ -81,12 +83,8 @@ inventory. Rust packages carry their matching installer; older Rust installers
 with strict manifest fields are not forward compatible with new fields.
 Historical preview packages and their manifests are not rewritten.
 
-Release useful, validated checkpoints as they become ready, including multiple
-alphas in a day when warranted. There is no fixed timer or daily quota.
-Version changes go through a feature branch, pull request and squash merge.
-After local build/sign/package preparation and draft upload, the GitHub Actions
-publisher automatically verifies the assets and publishes an alpha on explicit
-dispatch. See [the release procedure](RELEASING.md).
+A merge to `computa` queues an alpha on the signing Mac. See
+[releasing](RELEASING.md) for the release checks, signing setup, and recovery.
 
 Qualification of the draft Rust migration remains separate from app versioning;
 a matching version does not approve installation or satisfy its release gates.

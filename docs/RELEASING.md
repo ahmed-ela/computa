@@ -15,63 +15,53 @@ installation. Record the actual checks and known limitations in the release
 notes. See [distribution](DISTRIBUTION.md), [versioning](VERSIONING.md), and
 [migration gates](RUST-MIGRATION.md).
 
-## Prepare the source
+## Release on merge
 
-1. Choose one appropriate version bump using `bun Scripts/version.ts bump
-   patch`, `minor`, `major`, or `build`. A build-only bump produces another
-   alpha of the same marketing version; every bump increases the Apple build.
-2. Include the version changes with the release changes in a pull request.
-   Run the relevant checks, review the diff, and squash-merge it into the
-   default branch, `computa`, only when its gates are satisfied.
-3. Check out that merged default-branch commit in a clean checkout. Run
-   `bun Scripts/version.ts check`. The alpha tag must identify this commit or
-   another qualified ancestor of the current default branch.
+Squash-merge a reviewed PR into `computa`, the default branch. Each new
+first-parent commit queues a macOS alpha. The signing Mac checks GitHub every
+60 seconds while the release user is logged in. After sleep or downtime it
+resumes from its last completed commit. Feature branches and open PRs do not
+enter the queue. Merge marketing-version changes with the PR when appropriate.
+`bun Scripts/version.ts alpha-tag` prints the tag for a checkout.
 
-The workflow and publisher must themselves be merged into the default branch
-before dispatching. Do not merge a draft migration merely to enable releases.
+The service builds the exact merged commit in a dedicated clone, runs release
+and WebUI tests, signs the app, and submits both the app and DMG to Apple.
+It staples both tickets, signs the final DMG for Sparkle, and uploads a draft.
+The publisher independently verifies the tagged build number, mounted image,
+asset digests and update signature before publication. The public
+[download](https://computa.wtf/download) and [update feed](https://computa.wtf/appcast.xml)
+follow the release. Existing updater-enabled clients discover it on their
+next check. The service does not restart an installed app.
 
-## Build and package locally
+### Signing Mac setup
 
-Use an Apple Silicon Mac with the [build prerequisites](BUILDING.md#requirements)
-and an installed Developer ID Application signing identity. Signing keys stay
-in the local Keychain; the workflow does not need an exported certificate,
-signing secret, or notarization credential.
-
-From the qualified source checkout, derive the tag from the canonical metadata:
-
-```sh
-computa_release_tag=$(bun -e 'import { checkVersion } from "./Scripts/version.ts"; const app = await checkVersion(process.cwd()); console.log("v" + app.version + "-alpha." + app.build);')
-computa_release_version="${computa_release_tag#v}"
-computa_release_root="$PWD/.build/Alpha/$computa_release_tag"
-computa_release_output="$computa_release_root/package"
-computa_signing_identity='Developer ID Application: Your Name (TEAMID)'
-```
-
-Replace the example identity with your installed certificate. Use a fresh
-output path; the signer and packager refuse to overwrite previous artifacts.
-Create and push the exact tag, then build and sign a copy:
+On an Apple Silicon Mac with the [build prerequisites](BUILDING.md#requirements),
+sign in to GitHub CLI with release, tag, and commit-status permissions. Configure
+a Developer ID Application identity, a `notarytool` profile in the login Keychain,
+and the existing Computa Sparkle key. The macOS login session must be able to
+use all three unattended. Run once, substituting the local paths and identity:
 
 ```sh
-git tag "$computa_release_tag"
-git push origin "$computa_release_tag"
-./Scripts/setup.sh --build-only
-bun Scripts/sign-release.ts \
-  --app "$PWD/.build/SourceInstall/Build/Products/Release/Computa.app" \
-  --output "$computa_release_root/signed/Computa.app" \
-  --identity "$computa_signing_identity"
-bun Scripts/package-release.ts \
-  --app "$computa_release_root/signed/Computa.app" \
-  --output "$computa_release_output" \
-  --tag "$computa_release_tag" --channel signed-test
+/usr/bin/python3 Scripts/merge-release-worker.py install /absolute/path/to/release-state \
+  --identity 'Developer ID Application: Your Name (TEAMID)' \
+  --notary-profile your-notary-profile
 ```
 
-`--build-only` does not install or launch Computa or download model weights.
-The build still obtains its pinned source and development dependencies.
-`signed-test` means Developer ID signed but **not notarized**; macOS may block
-the downloaded app on another Mac. For a notarized alpha, complete the separate
-notarization and stapling steps first and package with `--channel notarized`.
-Use that channel's filenames when uploading. The alpha label describes release
-stability, not notarization status.
+An optional `--sparkle-signer /path/to/sign_update` uses an already-authorized
+signer when its SHA-256 matches the pinned distribution. The installer captures
+the current PATH and Rust toolchain locations. Keep the state directory on a
+persistent volume with space for Xcode and a clean runtime build. An unchanged
+runtime can be reused after checking its files against a published notarized
+release manifest. Re-run the installer after updating the scheduler or moving
+the tools. Use one signing service for this repository.
+
+Each commit has a **Computa / macOS release** status on GitHub. Detailed output
+is in `STATE/<commit>.log`, and scheduler errors are in
+`~/Library/Application Support/ComputaRelease/worker.log`. A failing tip is
+retried after ten minutes. When a newer merge arrives, a persistently broken
+older build is marked failed and the newer one can ship. Successful releases
+are immutable. A retry resumes the same draft from its staged bytes. The previous
+public update stays available during a build or failure.
 
 ## Prepare in-app updates
 
@@ -80,64 +70,23 @@ Build 586 and later use the pinned Sparkle framework in the Xcode app. The relea
 After notarizing and stapling the **app**, package it with `--channel notarized`. Sign the resulting DMG with Developer ID, submit it to Apple notarization, and staple its ticket. Generate the feed and final checksums from those exact bytes:
 
 ```sh
-bun Scripts/sparkle-appcast.ts "$sparkle_tools/sign_update" "$computa_release_output/Computa-${computa_release_version}-arm64.dmg"
+bun Scripts/sparkle-appcast.ts "$sparkle_tools/sign_update" "/path/to/Computa-VERSION-alpha.BUILD-arm64.dmg"
 ```
 
 Upload `appcast.xml` alongside the final DMG, manifest, and `SHA256SUMS` when creating the draft. Use the notarized asset names (without `-signed-test`). The publisher verifies the feed's download URL, version, length, checksum, and Ed25519 signature before it makes the draft public. `https://computa.wtf/appcast.xml` then points clients at the highest published build with both a notarized DMG and a feed. Publishing future app updates requires no website deploy. A `signed-test` package cannot be offered to an installed client.
 
-## Upload a draft, then dispatch publication
+## Manual recovery
 
-Write release notes to a local file, identifying the source commit, app version
-and build, signing/notarization status, validation performed, and remaining
-limitations. For the `signed-test` package above:
+The **Publish Computa alpha** GitHub Actions workflow can verify and publish an
+already prepared draft. Use this if the signed assets are uploaded and only the
+final publication step needs intervention. Check the signing service status
+and stop it before taking over a draft. From the repository, run:
 
 ```sh
-computa_release_notes=/absolute/path/alpha-release-notes.md
-computa_asset_stem="Computa-${computa_release_version}-arm64-signed-test"
-gh release create "$computa_release_tag" \
-  "$computa_release_output/$computa_asset_stem.dmg" \
-  "$computa_release_output/$computa_asset_stem.manifest.json" \
-  "$computa_release_output/SHA256SUMS" \
-  --repo ahmed-ela/computa --verify-tag --draft --prerelease --latest=false \
-  --title "Computa $computa_release_tag (alpha)" \
-  --notes-file "$computa_release_notes"
-gh workflow run release-alpha.yml --repo ahmed-ela/computa \
-  --ref computa --field tag="$computa_release_tag"
+gh workflow run release-alpha.yml --ref computa --field tag="$computa_release_tag"
 ```
 
-The repository, [`ahmed-ela/computa`](https://github.com/ahmed-ela/computa), is
-public. GitHub CLI must be signed in with permission to create releases and
-dispatch workflows; an unpublished draft still requires maintainer access.
-Published release assets are public downloads. Finish uploading all assets
-before dispatching; a tag push alone does not publish a release. You can also
-dispatch **Publish Computa alpha** in GitHub's Actions page and provide the
-existing draft tag.
-
-The workflow checks out the current default branch rather than executing code
-from the supplied tag. On a macOS runner, the publisher downloads the draft's
-assets into unique staging, checks the tag and default-branch ancestry,
-manifest and checksums, verifies installer files against the tagged source and
-their dependency pins, and verifies the app inside the mounted DMG. It rejects
-non-alpha tags and already published releases. Only after those checks pass
-does it publish the draft as a prerelease with latest disabled. Publication is
-serialized per tag. No build, signing, installation, launch, or model download
-runs in this workflow.
-
-If verification fails, review the failure and keep the release unpublished.
-Published artifacts are immutable: changed app bytes need a new build and
-alpha tag, not replacement assets under an existing published tag.
-
-## Cadence and limits
-
-Release an alpha whenever a useful, reviewed checkpoint is ready. The flow has
-no daily timer, release quota, or automatic merge. The version bump and local
-artifact preparation are deliberate steps; verification and publication run
-automatically after dispatch. A future merge-triggered build would require its
-own signing, runner, version-bump, and qualification policy.
-
-The publisher verifies release assets; it does not establish live model
-correctness, browser sign-in compatibility, native permission behavior, or
-clean-Mac acceptance. Matching app metadata and a valid signature do not prove
-the compiled app came from the tag; maintainers must build from the qualified
-clean source checkout and record that provenance. The publisher labels the
-commit as the tagged source. Stable publication remains outside this workflow.
+The workflow checks out the default branch and verifies the exact tag, draft,
+installer files and mounted DMG before publishing a prerelease. A changed
+artifact requires a new merge and build. Stable releases and the Rust app
+migration have separate qualification gates.
