@@ -91,7 +91,7 @@ function renderToken(token: Token): OctaneNode {
     }
 }
 
-export function ResponseMarkdown({ text }: { text: string }): ElementDescriptor {
+export function ResponseMarkdown({ text, contentRef }: { text: string; contentRef?: { current: HTMLDivElement | null } }): ElementDescriptor {
   // Parsing the complete body removes presentation-only blank-line tokens. Raw
   // runtime/state/inspector text is never rewritten, and code whitespace survives.
   let children: OctaneNode;
@@ -100,5 +100,5 @@ export function ResponseMarkdown({ text }: { text: string }): ElementDescriptor 
   } catch {
     children = element('p', text, { className: 'response-plain-text' });
   }
-  return element('div', children, { className: 'assistant-copy' });
+  return element('div', children, { className: 'assistant-copy', ref: contentRef });
 }
