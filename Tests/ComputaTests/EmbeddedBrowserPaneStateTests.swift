@@ -5,6 +5,82 @@ import XCTest
 @testable import Computa
 
 final class EmbeddedBrowserPaneStateTests: XCTestCase {
+    /// Use the shipping WebKit UI and native bridge with empty preferences and
+    /// an ephemeral browser. Only provider authentication/discovery is simulated.
+    @MainActor
+    func testFirstLaunchProviderPickerConnectsAndSelectsOnlyAccountModels() async throws {
+        let prefs = isolatedTestPreferences()
+        let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
+        defer { session.shutdown() }
+        @MainActor final class Account { var signedIn = false }
+        let account = Account()
+        let choice = syntheticWebsiteChoice(provider: "chatgpt", key: "new", label: "High")
+        let state = AppState(tasks: [], preferences: prefs, browserSession: session, websiteModelDiscovery: { provider in
+            guard account.signedIn, provider == "chatgpt" else { throw EmbeddedWebModelTransport.Failure.signInRequired }
+            return [choice]
+        }, websiteModeDiscovery: { _ in throw EmbeddedWebModelTransport.Failure.signInRequired })
+        let hosting = NSHostingView(rootView: WebWorkspaceView(state: state))
+        hosting.frame = NSRect(x: 0, y: 0, width: 1280, height: 820)
+        let window = NSWindow(contentRect: hosting.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        defer { window.close() }
+        hosting.layoutSubtreeIfNeeded()
+        let web = try XCTUnwrap(nativeViews(in: hosting).compactMap { $0 as? WKWebView }.first)
+        func requireDOM(_ expression: String, line: UInt = #line) async throws {
+            let ready = await waitForScriptBool(on: web, script: expression)
+            _ = try XCTUnwrap(ready ? true : nil, "Missing expected picker state: \(expression)", line: line)
+        }
+        func openMenu(_ provider: String) async throws {
+            try await requireDOM("Boolean(document.querySelector('.model-selector-trigger:not([disabled])'))")
+            _ = try await web.evaluateJavaScript("""
+                document.querySelector('.model-selector-trigger').dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true}))
+                """)
+            try await requireDOM("document.querySelectorAll('.model-provider-option').length === 8")
+            let names = try await web.evaluateJavaScript("Array.from(document.querySelectorAll('.model-provider-name'), e => e.textContent)")
+            XCTAssertEqual(names as? [String], ["ChatGPT", "Gemini", "Claude", "Grok", "Kimi", "Qwen", "DeepSeek", "Alibaba"])
+            _ = try await web.evaluateJavaScript("document.querySelector('.model-provider-option[data-provider=\"\(provider)\"]').click()")
+            try await requireDOM("Boolean(document.querySelector('.model-selector-submenu'))")
+        }
+        try await openMenu("chatgpt")
+        let submenu = "document.querySelector('.model-selector-submenu')"
+        try await requireDOM("\(submenu)?.textContent === 'Sign in to ChatGPT' && !\(submenu)?.querySelector('[role=menuitemradio]')")
+        _ = try await web.evaluateJavaScript("\(submenu).querySelector('[role=menuitem]').click()")
+        try await requireDOM("!document.querySelector('.model-selector-content')")
+        let deadline = ContinuousClock.now + .seconds(5)
+        while session.setupTab(for: .chatgpt) == nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+        let tab = try XCTUnwrap(session.setupTab(for: .chatgpt))
+        XCTAssertTrue(state.isBrowserPresented)
+        XCTAssertNil(session.browserToolTab(id: tab.id))
+        session.webView(for: tab.id)?.stopLoading()
+        state.connectModelProvider(route: "browser/chatgpt")
+        XCTAssertEqual(session.humanTabs.map(\.id), [tab.id])
+        await state.loadSignedInModels(tabID: tab.id)
+        guard case .failed = tab.setupStatus else { return XCTFail("Signed-out discovery offered models") }
+        XCTAssertFalse(state.setDefaultModel(choice.modelID))
+
+        account.signedIn = true
+        await state.loadSignedInModels(tabID: tab.id)
+        XCTAssertEqual(tab.setupStatus, .loaded(1))
+        state.isBrowserPresented = false
+        try await openMenu("chatgpt")
+        try await requireDOM("\(submenu)?.querySelectorAll('[role=menuitemradio]').length === 1 && \(submenu)?.textContent.includes('High')")
+        _ = try await web.evaluateJavaScript("\(submenu).querySelector('[role=menuitemradio]').click()")
+        try await requireDOM("document.querySelector('.model-selector-trigger')?.textContent.includes('High')")
+        XCTAssertEqual(state.defaultModel, choice.modelID)
+        state.createTask()
+        XCTAssertEqual(state.selectedTask?.model, choice.modelID)
+        XCTAssertEqual(WebsiteModelCatalog.load(from: prefs), [choice])
+
+        try await openMenu("alibaba")
+        try await requireDOM("\(submenu)?.textContent === 'Connect API'")
+        _ = try await web.evaluateJavaScript("\(submenu).querySelector('[role=menuitem]').click()")
+        let apiDeadline = ContinuousClock.now + .seconds(5)
+        while !state.isAPIProvidersPresented, ContinuousClock.now < apiDeadline { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertTrue(state.isAPIProvidersPresented)
+        XCTAssertEqual(state.alibabaSetupID, "alibaba")
+    }
+
     /// Native task selection resets review to Last turn. Exercise the compiled
     /// Octane select as well as the native state, without desktop input.
     @MainActor

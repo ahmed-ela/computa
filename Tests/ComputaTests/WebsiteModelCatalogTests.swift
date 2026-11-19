@@ -155,7 +155,9 @@ final class WebsiteModelCatalogTests: XCTestCase {
             XCTAssertEqual(WebsiteModelCatalog.selection(for: id)?.provider, provider)
             XCTAssertNil(WebsiteModelCatalog.choice(for: id))
             if provider == "grok" {
-                XCTAssertNil(LocalModelCatalog.option(for: id), "Grok has no legacy selectable website default")
+                let placeholder = LocalModelCatalog.option(for: id)
+                XCTAssertEqual(placeholder?.selectable, false)
+                XCTAssertEqual(placeholder?.available, false)
                 XCTAssertNil(WebsiteModelCatalog.inferenceSelection(for: id))
                 continue
             }

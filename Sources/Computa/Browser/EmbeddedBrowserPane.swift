@@ -8,6 +8,8 @@ import WebKit
 struct EmbeddedBrowserPane: View {
     let session: EmbeddedBrowserSession
     var isInteractionBlocked = false
+    var canLoadModels = false
+    var onLoadModels: (UUID) -> Void = { _ in }
     var canConfigureKimiProfile = false
     var kimiModelSignInMessage: String?
     var onOpenKimiModelSignIn: () -> Void = {}
@@ -30,7 +32,29 @@ struct EmbeddedBrowserPane: View {
             navigationBar
             Divider()
 
-            if let tab = selectedTab, session.isKimiProfileTab(tab.id),
+            if let tab = selectedTab, !tab.isPopup, let provider = tab.setupProvider {
+                HStack {
+                    switch tab.setupStatus {
+                    case .awaitingSignIn: Text("Sign in to \(provider.displayName), then load your models.")
+                    case .loading: ProgressView().controlSize(.small); Text("Checking \(provider.displayName)…")
+                    case .loaded(let count): Text("\(count) options available in the model picker.")
+                    case .failed(let message): Text(message).textSelection(.enabled)
+                    }
+                    Spacer()
+                    if case .loaded = tab.setupStatus {
+                        Button("Done") {
+                            session.closeTab(tab.id)
+                            onClose()
+                        }
+                    } else {
+                        Button("Load models") { onLoadModels(tab.id) }
+                            .disabled(!canLoadModels || tab.setupStatus == .loading)
+                    }
+                }
+                .font(.callout)
+                .padding(10)
+                Divider()
+            } else if let tab = selectedTab, session.isKimiProfileTab(tab.id),
                let message = kimiModelSignInMessage {
                 Text(message)
                     .font(.callout)

@@ -9,6 +9,9 @@ final class EmbeddedBrowserTab: Identifiable {
     let id: UUID
     let isPopup: Bool
     fileprivate let kimiProfileID: UUID?
+    fileprivate(set) var setupProvider: EmbeddedWebModelTransport.Provider?
+    enum SetupStatus: Equatable { case awaitingSignIn, loading, loaded(Int), failed(String) }
+    var setupStatus: SetupStatus = .awaitingSignIn
     fileprivate(set) var title = "New tab"
     fileprivate(set) var url: URL?
     fileprivate(set) var isLoading = false
@@ -216,7 +219,8 @@ final class EmbeddedBrowserSession {
         let usesIsolatedChatGPTProfile: Bool
         let navigationChanges = EmbeddedModelChangeChannel(ownerToken: UUID().uuidString)
         let popupOpenerTabID: UUID?
-        var isAvailableToBrowserTools: Bool { !isModelOwned && tab.kimiProfileID == nil }
+        var isRegularBrowserTab: Bool { !isModelOwned && tab.kimiProfileID == nil }
+        var isAvailableToBrowserTools: Bool { isRegularBrowserTab && tab.setupProvider == nil }
         weak var presentationHost: NSView?
         var toolRenderLeases: Set<UUID> = []
         var frameBeforeToolRendering: (frame: NSRect, autoresizing: NSView.AutoresizingMask)?
@@ -358,6 +362,32 @@ final class EmbeddedBrowserSession {
 
     func isKimiProfileTab(_ id: UUID) -> Bool { entries[id]?.tab.kimiProfileID != nil }
 
+    func setupTab(for provider: EmbeddedWebModelTransport.Provider) -> EmbeddedBrowserTab? {
+        humanTabs.first { !$0.isPopup && $0.setupProvider == provider
+            && (provider != .kimi || $0.kimiProfileID == kimiModelProfileID) }
+    }
+
+    func openProviderSignIn(_ provider: EmbeddedWebModelTransport.Provider) throws {
+        if let tab = setupTab(for: provider) {
+            if tab.setupStatus != .loading { tab.setupStatus = .awaitingSignIn }
+            selectTab(tab.id)
+            return
+        }
+        let id: UUID
+        if provider == .kimi, kimiModelProfileID != nil {
+            id = try openKimiModelSignIn()
+        } else {
+            id = try createTab()
+        }
+        guard let tab = humanTab(id: id) else { throw Failure.tabClosed }
+        tab.setupProvider = provider
+        tab.isWebInspectorAvailable = false
+        if tab.kimiProfileID == nil {
+            do { try navigate(tabID: id, to: provider.startURL) }
+            catch { closeTab(id); throw error }
+        }
+    }
+
     func openKimiModelSignIn() throws -> UUID { try openKimiModelSignIn(loadHome: true) }
 
     func useSharedKimiModelProfile() {
@@ -434,7 +464,7 @@ final class EmbeddedBrowserSession {
 
     func isProviderSignInRecoveryCandidateCurrent(_ candidate: ProviderSignInRecoveryCandidate) -> Bool {
         guard candidate.provider == "deepseek", !isShutdown,
-              let entry = entries[candidate.tabID], entry.isAvailableToBrowserTools, !entry.isToolOwned,
+              let entry = entries[candidate.tabID], entry.isRegularBrowserTab, !entry.isToolOwned,
               !entry.recoveryToolUsed, entry.toolPopupContext == nil,
               entry.humanCommittedDocumentID == candidate.committedDocumentID,
               entry.tab.documentID == candidate.documentID, entry.tab.documentGeneration == candidate.documentGeneration,
@@ -487,7 +517,7 @@ final class EmbeddedBrowserSession {
     }
 
     private func isHumanVerificationRecoverySourceCurrent(_ candidate: HumanVerificationRecoveryCandidate) -> Bool {
-        guard !isShutdown, let entry = entries[candidate.tabID], entry.isAvailableToBrowserTools, !entry.isToolOwned,
+        guard !isShutdown, let entry = entries[candidate.tabID], entry.isRegularBrowserTab, !entry.isToolOwned,
               !entry.recoveryToolUsed, entry.toolPopupContext == nil,
               entry.humanCommittedDocumentID == candidate.committedDocumentID,
               entry.tab.documentID == candidate.documentID, entry.tab.documentGeneration == candidate.documentGeneration,
@@ -813,8 +843,11 @@ final class EmbeddedBrowserSession {
             }
             // Preserve WebKit's configuration, opener and initial navigation.
             // Registration adds the same browser identity; never load again.
-            return try registerTab(configuration: configuration, select: true, modelOwned: false,
-                                   popupOpenerTabID: tabID, kimiProfileID: opener.tab.kimiProfileID).view
+            let popup = try registerTab(configuration: configuration, select: true, modelOwned: false,
+                                        popupOpenerTabID: tabID, kimiProfileID: opener.tab.kimiProfileID)
+            popup.tab.setupProvider = opener.tab.setupProvider
+            if popup.tab.setupProvider != nil { popup.tab.isWebInspectorAvailable = false }
+            return popup.view
         } catch {
             report(error.localizedDescription, tabID: tabID)
             return nil
@@ -3620,7 +3653,7 @@ final class EmbeddedBrowserSession {
         entry.tab.canGoForward = view.canGoForward
         // A provisional load can still expose the old page URL. Observe the
         // committed document or settled native URL without inspecting its DOM.
-        if entry.isAvailableToBrowserTools, committedNavigation || !view.isLoading {
+        if entry.isRegularBrowserTab, committedNavigation || !view.isLoading {
             observeHumanVerificationCheckpoint(entry)
             if entry.recoverySettledGeneration == entry.tab.documentGeneration {
                 observeHumanVerificationRecovery(entry)
@@ -3830,7 +3863,7 @@ final class EmbeddedBrowserSession {
     fileprivate func recordGeminiRecoveryHTTPFailure(_ response: URLResponse, isMainFrame: Bool,
                                                      view: WKWebView, tabID: UUID) {
         guard !isShutdown, isMainFrame, let entry = entries[tabID], entry.view === view,
-              entry.isAvailableToBrowserTools, !entry.isToolOwned, let navigation = entry.navigation,
+              entry.isRegularBrowserTab, !entry.isToolOwned, let navigation = entry.navigation,
               entry.recoveryCommittedGeneration != entry.tab.documentGeneration,
               let response = response as? HTTPURLResponse, (400..<600).contains(response.statusCode),
               let url = response.url, EmbeddedHumanVerificationStore.recoveryProvider(forTrustedHumanURL: url) == "gemini" else { return }
@@ -3912,7 +3945,7 @@ final class EmbeddedBrowserSession {
         if navigation != nil {
             if entry.isModelOwned {
                 entry.modelNavigationGeneration = entry.tab.documentGeneration
-            } else if entry.isAvailableToBrowserTools, !entry.isToolOwned,
+            } else if entry.isRegularBrowserTab, !entry.isToolOwned,
                       let checkpointID = savedHumanVerificationCheckpointIDs["gemini"] {
                 // Title and same-document URL changes cannot pair an older
                 // landing page with a checkpoint seen after navigation started.

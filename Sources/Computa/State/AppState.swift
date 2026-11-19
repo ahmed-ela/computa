@@ -108,6 +108,7 @@ final class AppState {
     private(set) var websiteModeChoices: [WebsiteModeChoice]
     private(set) var apiProviders: [APIProviderDefinition] = []
     @ObservationIgnored private(set) var apiProviderSettings: APIProviderSettings!
+    private(set) var alibabaSetupID: String?
     var isAPIProvidersPresented = false
     private(set) var websiteModelsRefreshing = false
     private(set) var websiteModelsError: String?
@@ -244,9 +245,15 @@ final class AppState {
         options += APIProviderCatalog.options(for: apiProviders)
         for id in [defaultModel, selectedTask?.model].compactMap({ $0 })
             where id.hasPrefix("api/") && !options.contains(where: { $0.id == id }) {
+            let selectable: Bool?
+            if let identity = APIProviderCatalog.identity(for: id),
+               let provider = apiProviders.first(where: { $0.id == identity.providerID }),
+               !APIProviderCatalog.showsModel(identity.modelID, for: provider) {
+                selectable = false
+            } else { selectable = nil }
             options.append(LocalModelOption(id: id, label: "Unavailable API model",
                 detail: "Reconnect this model's API provider in Settings. The saved model has not been substituted.",
-                highMemory: false, available: false))
+                highMemory: false, available: false, selectable: selectable))
         }
         for id in [defaultModel, selectedTask?.model].compactMap({ $0 })
             where id.hasPrefix("browser/") && !options.contains(where: { $0.id == id }) {
@@ -292,9 +299,58 @@ final class AppState {
             && !compactionStateByTask.values.contains(where: { $0 == .running })
     }
 
-    func presentAPIProviders() {
+    // A custom endpoint may already own the preferred identifier. Never replace
+    // its credentials or mistake its catalog for the built-in provider.
+    var alibabaPickerID: String {
+        if let existing = apiProviders.first(where: \.isAlibabaModelStudioInference) { return existing.id }
+        var id = "alibaba"
+        var suffix = 2
+        while apiProviders.contains(where: { $0.id == id }) {
+            id = "alibaba-\(suffix)"
+            suffix += 1
+        }
+        return id
+    }
+
+    func connectModelProvider(route: String) {
+        guard canRefreshWebsiteModels else { return }
+        if route == "api/" + alibabaPickerID {
+            presentAPIProviders(alibabaID: alibabaPickerID)
+            return
+        }
+        guard route.hasPrefix("browser/"),
+              let provider = EmbeddedWebModelTransport.Provider(rawValue: String(route.dropFirst("browser/".count))),
+              WebsiteModelCatalog.discoveryProviders.contains(provider.rawValue) else { return }
+        presentedSheet = nil
+        isBrowserPresented = true
+        do { try browserSession.openProviderSignIn(provider) }
+        catch { websiteModelsError = error.localizedDescription }
+    }
+
+    func loadSignedInModels(tabID: UUID) async {
+        guard canRefreshWebsiteModels, browserSession.selectedTabID == tabID,
+              let tab = browserSession.humanTab(id: tabID), let provider = tab.setupProvider,
+              browserSession.setupTab(for: provider)?.id == tabID, tab.setupStatus != .loading else { return }
+        tab.setupStatus = .loading
+        await refreshWebsiteModels(provider: provider.rawValue)
+        if tab.setupStatus == .loading {
+            tab.setupStatus = .failed("The check was interrupted. Try again when Computa is idle.")
+        }
+    }
+
+    private func reportSetupDiscovery(_ intent: WebsiteModelRefreshIntent, status: EmbeddedBrowserTab.SetupStatus) {
+        // Manual discovery can queue behind an older startup attempt. Only a
+        // verified manual/recovery result may settle a pending setup check.
+        guard intent.retryBlocked, let provider = EmbeddedWebModelTransport.Provider(rawValue: intent.provider),
+              let tab = browserSession.setupTab(for: provider), tab.setupStatus == .loading else { return }
+        if case .failed = status, intent.candidate != nil || intent.signInRecovery != nil { return }
+        tab.setupStatus = status
+    }
+
+    func presentAPIProviders(alibabaID: String? = nil) {
         guard !isShuttingDown, !approvalGateBlocksInteraction else { return }
         presentedSheet = nil
+        alibabaSetupID = alibabaID
         isAPIProvidersPresented = true
     }
 
@@ -747,6 +803,7 @@ final class AppState {
                         self.websiteModelChoices.append(contentsOf: choices)
                         WebsiteModelCatalog.save(self.websiteModelChoices, to: self.preferences)
                     }
+                    self.reportSetupDiscovery(intent, status: .loaded(choices.count + modes.count))
                     if provider == "kimi", self.browserSession.kimiModelProfileID != nil {
                         self.kimiModelSignInMessage = "Kimi sign-in verified for this profile."
                     }
@@ -782,6 +839,17 @@ final class AppState {
                 } catch {
                     guard !self.isShuttingDown, self.websiteModelRefreshGeneration == generation else { break }
                     var message = error.localizedDescription
+                    if (error as? EmbeddedWebModelTransport.Failure) == .signInRequired, self.canRefreshWebsiteModels {
+                        // A verified sign-out ends this account's catalog. Preserve saved
+                        // task IDs and retain the last good catalog for transient errors.
+                        if provider == "deepseek" {
+                            self.websiteModeChoices.removeAll { $0.provider == provider }
+                            WebsiteModeCatalog.save(self.websiteModeChoices, to: self.preferences)
+                        } else {
+                            self.websiteModelChoices.removeAll { $0.provider == provider }
+                            WebsiteModelCatalog.save(self.websiteModelChoices, to: self.preferences)
+                        }
+                    }
                     if provider == "kimi", self.browserSession.kimiModelProfileID != nil {
                         if (error as? EmbeddedWebModelTransport.Failure) == .signInRequired {
                             message = Self.kimiModelSignInInstructions
@@ -792,6 +860,7 @@ final class AppState {
                         self.browserSession.recordHumanVerificationRecovery(candidate, phase: .blocked,
                             reason: self.humanVerificationRecoveryFailureReason(error))
                     }
+                    self.reportSetupDiscovery(intent, status: .failed(message))
                     errors.append("\(WebsiteModelCatalog.providerLabel(provider)): \(message)")
                 }
             }

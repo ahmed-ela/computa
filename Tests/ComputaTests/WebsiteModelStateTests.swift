@@ -696,6 +696,7 @@ final class WebsiteModelStateTests: XCTestCase {
                 ? [WebsiteModelChoice(provider: provider, key: "chat/latest/medium", label: "Medium"),
                    WebsiteModelChoice(provider: provider, key: "chat/latest/pro", label: "GPT-6 Pro")]
                 : provider == "kimi" ? [syntheticKimiChoice]
+                : provider == "grok" ? [syntheticGrokChoice]
                 : provider == "qwen" ? [syntheticWebsiteChoice(provider: provider, key: "fixture-old", label: "Fixture"),
                                          syntheticWebsiteChoice(provider: provider, key: "fixture-new", label: "Fixture")]
                 : [WebsiteModelChoice(provider: provider, key: "fixture-fast", label: "Fixture Fast"),
@@ -1117,9 +1118,7 @@ private final class WebsiteDiscoveryLedger {
 
 private func modelStateChoice(provider: String, key: String, label: String) -> WebsiteModelChoice {
     provider == "chatgpt" ? WebsiteModelChoice(provider: provider, key: "chat/latest/medium", label: "Medium")
-        : provider == "kimi" ? syntheticKimiChoice
-        : provider == "qwen" ? syntheticWebsiteChoice(provider: provider, key: key, label: label)
-        : WebsiteModelChoice(provider: provider, key: key, label: label)
+        : syntheticWebsiteChoice(provider: provider, key: key, label: label)
 }
 
 private var modelStateModes: [WebsiteModeChoice] { WebsiteModeChoice.DeepSeekMode.allCases.map { .init(deepSeekMode: $0) } }

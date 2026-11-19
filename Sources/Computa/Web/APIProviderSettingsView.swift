@@ -3,6 +3,7 @@ import SwiftUI
 @MainActor
 struct APIProviderSettingsView: View {
     @Bindable var settings: APIProviderSettings
+    var alibabaSetupID: String?
     @Environment(\.dismiss) private var dismiss
     @State private var providerID = ""
     @State private var name = ""
@@ -14,13 +15,13 @@ struct APIProviderSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Text("API providers").font(.title2.bold())
+                Text(alibabaSetupID == nil ? "API providers" : "Connect Alibaba Model Studio").font(.title2.bold())
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.cancelAction).disabled(settings.isConnecting)
             }
             Text("Connect a provider to use its models with your existing task tools and access mode.")
                 .foregroundStyle(.secondary)
-            if !settings.providers.isEmpty {
+            if alibabaSetupID == nil, !settings.providers.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(settings.providers, id: \.id) { provider in
                         HStack {
@@ -38,17 +39,25 @@ struct APIProviderSettingsView: View {
                 }.disabled(!settings.canEditProviders)
                 Divider()
             }
-            Button("Custom provider") {
-                providerID = "custom-" + UUID().uuidString.prefix(8).lowercased()
-                name = ""; baseURL = "https://"; wireAPI = .chatCompletions; key = ""; inputError = nil; settings.clearError()
-            }.disabled(!settings.canEditProviders)
+            if alibabaSetupID == nil {
+                Button("Custom provider") {
+                    providerID = "custom-" + UUID().uuidString.prefix(8).lowercased()
+                    name = ""; baseURL = "https://"; wireAPI = .chatCompletions; key = ""; inputError = nil; settings.clearError()
+                }.disabled(!settings.canEditProviders)
+            }
             Form {
-                TextField("Provider ID", text: $providerID)
-                TextField("Name", text: $name)
-                TextField("API base URL", text: $baseURL)
-                Picker("API format", selection: $wireAPI) {
-                    Text("Chat Completions").tag(APIProviderDefinition.WireAPI.chatCompletions)
-                    Text("Open Responses").tag(APIProviderDefinition.WireAPI.responses)
+                if alibabaSetupID == nil {
+                    TextField("Provider ID", text: $providerID)
+                    TextField("Name", text: $name)
+                    Picker("API format", selection: $wireAPI) {
+                        Text("Chat Completions").tag(APIProviderDefinition.WireAPI.chatCompletions)
+                        Text("Open Responses").tag(APIProviderDefinition.WireAPI.responses)
+                    }
+                }
+                TextField(alibabaSetupID == nil ? "API base URL" : "Workspace API base URL", text: $baseURL)
+                if alibabaSetupID != nil {
+                    Text("Paste the OpenAI-compatible URL from your Model Studio workspace, ending in /compatible-mode/v1.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 SecureField("API key", text: $key)
                 Text("Keys stay in macOS Keychain. Leave the key blank to keep it when editing the same endpoint.")
@@ -64,6 +73,16 @@ struct APIProviderSettingsView: View {
         }
         .padding(24).frame(width: 540)
         .interactiveDismissDisabled(settings.isConnecting)
+        .onAppear {
+            guard let id = alibabaSetupID else { return }
+            if let existing = settings.providers.first(where: { $0.id == id && $0.isAlibabaModelStudioInference }) {
+                load(existing)
+            } else {
+                providerID = id
+                name = "Alibaba"
+                settings.clearError()
+            }
+        }
         .onDisappear { key = "" }
     }
     private func load(_ definition: APIProviderDefinition) {
@@ -76,9 +95,23 @@ struct APIProviderSettingsView: View {
         }
         let definition = APIProviderDefinition(id: providerID.trimmingCharacters(in: .whitespacesAndNewlines),
             name: name.trimmingCharacters(in: .whitespacesAndNewlines), baseURL: url, wireAPI: wireAPI, models: [])
+        if alibabaSetupID != nil, !definition.isAlibabaModelStudioInference {
+            inputError = "Enter your Alibaba Model Studio workspace endpoint."
+            return
+        }
         inputError = nil
         let supplied = key
         key = ""
-        Task { try? await settings.connect(definition, key: supplied) }
+        Task {
+            do {
+                try await settings.connect(definition, key: supplied)
+                if alibabaSetupID != nil {
+                    let connected = settings.providers.filter { $0.id == definition.id }
+                    if APIProviderCatalog.options(for: connected).isEmpty {
+                        inputError = "Connected. This workspace did not return a supported Qwen3.7 Flash model."
+                    } else { dismiss() }
+                }
+            } catch { /* APIProviderSettings publishes the connection error. */ }
+        }
     }
 }

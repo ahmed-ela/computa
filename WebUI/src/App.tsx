@@ -618,6 +618,9 @@ function Composer({
               label="Task model"
               model={task.model}
               options={snapshot.modelOptions}
+              setups={snapshot.providerSetups}
+              canConnect={snapshot.canRefreshWebsiteModels === true}
+              onConnect={(route) => post({ action: 'connectModelProvider', route })}
               disabled={!task.modelSelectable}
               onSelect={(modelID) => post({ action: 'setTaskModel', taskID: task.id, modelID })}
             />
@@ -867,6 +870,13 @@ function Inspector({ snapshot, task }: { snapshot: AppSnapshot; task: TaskSnapsh
   );
 }
 
+function DefaultModelSelector({ snapshot }: { snapshot: AppSnapshot }) {
+  return <ModelSelector label="Default model for new tasks" model={snapshot.defaultModel}
+    options={snapshot.modelOptions} setups={snapshot.providerSetups} canConnect={snapshot.canRefreshWebsiteModels === true}
+    onConnect={(route) => post({ action: 'connectModelProvider', route })}
+    onSelect={(modelID) => post({ action: 'setDefaultModel', modelID })} />;
+}
+
 function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
   const dialog = useRef<HTMLElement | null>(null);
   const canRestoreFocus = useRef(true);
@@ -925,12 +935,7 @@ function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
             <h2>Models and runtime</h2>
             <label className="setting-row">
               <span><strong>Default model</strong><small>Used for new tasks. You can choose another in the composer.</small></span>
-              <ModelSelector
-                label="Default model for new tasks"
-                model={snapshot.defaultModel}
-                options={snapshot.modelOptions}
-                onSelect={(modelID) => post({ action: 'setDefaultModel', modelID })}
-              />
+              <DefaultModelSelector snapshot={snapshot} />
             </label>
             <p className={defaultModel?.highMemory ? 'model-note high-memory' : 'model-note'}>{defaultModel?.detail}</p>
             <div className="setting-row"><span><strong>Website models</strong><small>Choices come from the model menus on your signed-in provider websites.</small></span>
@@ -1088,7 +1093,8 @@ export function App() {
         ) : (
           <div className="no-task-view">
             <h1>Computa</h1>
-            <p>Fast, Mac-optimized local AI.</p>
+            <p>Choose a model for your next task.</p>
+            <DefaultModelSelector snapshot={snapshot} />
             <Button onClick={() => post({ action: 'createTask' })}><Icon name="plus" size={15} /> New task</Button>
           </div>
         )}

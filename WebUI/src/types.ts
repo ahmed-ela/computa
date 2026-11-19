@@ -141,6 +141,12 @@ export interface ModelOption {
   selectable?: boolean;
 }
 
+export interface ModelProviderSetup {
+  route: string;
+  name: string;
+  connected: boolean;
+}
+
 export interface AppSnapshot {
   revision: number;
   selectedTaskID?: string;
@@ -154,6 +160,7 @@ export interface AppSnapshot {
   accessMode: 'askEveryTime' | 'fullAccess';
   defaultModel: string;
   modelOptions: ModelOption[];
+  providerSetups: ModelProviderSetup[];
   websiteModelsRefreshing?: boolean;
   canRefreshWebsiteModels?: boolean;
   websiteModelsError?: string;
@@ -197,6 +204,7 @@ export type NativeAction =
   | { action: 'setDefaultModel'; modelID: string }
   | { action: 'setTaskModel'; taskID: string; modelID: string }
   | { action: 'refreshWebsiteModels'; provider?: WebsiteModelProvider }
+  | { action: 'connectModelProvider'; route: string }
   | { action: 'showAPIProviders' }
   | { action: 'setShowToolPayloads'; value: boolean }
   | { action: 'refreshPermissions' }

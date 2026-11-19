@@ -148,22 +148,19 @@ enum APIProviderCatalog {
               let model = provider.models.first(where: { $0.id == identity.modelID }) else { return nil }
         return Selection(provider: provider, model: model)
     }
+    static func showsModel(_ id: String, for provider: APIProviderDefinition) -> Bool {
+        if provider.isCerebrasInference { return showAdditionalCerebrasModels || id == "gpt-oss-120b" }
+        // Prefer the moving Flash alias. The dated release is a fallback only
+        // for accounts whose catalog does not contain the alias.
+        if provider.isAlibabaModelStudioInference {
+            return id == "qwen3.7-flash" || id == "qwen3.7-flash-2026-07-15"
+                && !provider.models.contains { $0.id == "qwen3.7-flash" }
+        }
+        return true
+    }
     static func options(for providers: [APIProviderDefinition]) -> [LocalModelOption] {
         guard (try? validate(providers)) != nil else { return [] }
-        return providers.flatMap { provider in provider.models.filter { model in
-            if provider.isCerebrasInference {
-                return showAdditionalCerebrasModels || model.id == "gpt-oss-120b"
-            }
-            // Keep Model Studio's other discovered models internal for now.
-            // Prefer the moving Flash alias; expose its dated version only
-            // when that is the only discovered Qwen3.7 Flash option.
-            if provider.isAlibabaModelStudioInference {
-                return model.id == "qwen3.7-flash"
-                    || model.id == "qwen3.7-flash-2026-07-15"
-                        && !provider.models.contains { $0.id == "qwen3.7-flash" }
-            }
-            return true
-        }.map { model in
+        return providers.flatMap { provider in provider.models.filter { showsModel($0.id, for: provider) }.map { model in
             LocalModelOption(id: appModelID(providerID: provider.id, modelID: model.id),
                 label: "\(provider.name) / \(model.name) · API",
                 detail: "Uses \(model.name) through \(provider.name), with a \(model.contextWindow)-token context window. Your task tools and access mode apply.",
