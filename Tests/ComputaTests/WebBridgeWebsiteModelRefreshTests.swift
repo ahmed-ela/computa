@@ -4,6 +4,50 @@ import XCTest
 
 @MainActor
 final class WebBridgeWebsiteModelRefreshTests: XCTestCase {
+    func testFreshAccountCatalogSurvivesRestartAndSignOutRetiresOnlyItsModels() async throws {
+        let prefs = isolatedTestPreferences()
+        let gemini = syntheticWebsiteChoice(provider: "gemini", key: "Pro", label: "Pro")
+        let chat = syntheticWebsiteChoice(provider: "chatgpt", key: "new", label: "High")
+        @MainActor final class Account { var failure: EmbeddedWebModelTransport.Failure? }
+        let account = Account()
+        let state = AppState(tasks: [], preferences: prefs, websiteModelDiscovery: { provider in
+            if let failure = account.failure { throw failure }
+            return provider == "gemini" ? [gemini] : [chat]
+        })
+        let first = WebUISnapshot(state: state)
+        XCTAssertEqual(first.providerSetups.map(\.route), WebsiteModelCatalog.discoveryProviders.map { "browser/" + $0 } + ["api/alibaba"])
+        XCTAssertTrue(first.providerSetups.allSatisfy { !$0.connected })
+        await state.refreshWebsiteModels(provider: "gemini")
+        await state.refreshWebsiteModels(provider: "chatgpt")
+        XCTAssertTrue(state.setDefaultModel(chat.modelID))
+        let restored = AppState(tasks: [], preferences: prefs)
+        XCTAssertEqual(WebUISnapshot(state: restored).providerSetups.filter(\.connected).map(\.route), ["browser/chatgpt", "browser/gemini"])
+        account.failure = .usageLimited(.chatgpt)
+        await state.refreshWebsiteModels(provider: "chatgpt")
+        XCTAssertTrue(state.websiteModelChoices.contains(chat))
+        account.failure = .signInRequired
+        await state.refreshWebsiteModels(provider: "chatgpt")
+        XCTAssertEqual(WebsiteModelCatalog.load(from: prefs), [gemini])
+        XCTAssertEqual(state.defaultModel, chat.modelID)
+        XCTAssertFalse(state.setDefaultModel(chat.modelID))
+    }
+
+    func testOnlySupportedIdleSetupRoutesCanOpenTabsOrProviderSettings() {
+        let prefs = isolatedTestPreferences()
+        let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
+        defer { session.shutdown() }
+        let task = AgentTask(title: "Busy fixture", summary: "", status: .running, workspace: "", model: "browser/chatgpt")
+        let state = AppState(tasks: [task], preferences: prefs, browserSession: session)
+        for route in ["browser/chatgpt", "api/alibaba"] { state.connectModelProvider(route: route) }
+        state.apply(.taskStatusChanged(taskID: task.id, status: .completed))
+        for route in ["browser/groq", "api/cerebras", "https://example.org", "browser/gemini/other", "api/unknown"] {
+            state.connectModelProvider(route: route)
+        }
+        XCTAssertTrue(session.humanTabs.isEmpty)
+        XCTAssertFalse(state.isBrowserPresented)
+        XCTAssertFalse(state.isAPIProvidersPresented)
+    }
+
     func testExplicitProviderRefreshesOnlyThatProviderAndOmittedProviderRetainsGlobalAction() async {
         var calls: [String] = []
         let state = AppState(tasks: [], preferences: isolatedTestPreferences(), websiteModelDiscovery: { provider in

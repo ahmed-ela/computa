@@ -7,7 +7,7 @@ import {
 import { Button } from '@octanejs/shadcn/Button';
 import { Icon } from './Icon';
 import { ModelProviderIcon } from './ModelProviderIcon';
-import type { ModelOption, NativeAction, WebsiteModelProvider } from './types';
+import type { ModelOption, ModelProviderSetup, NativeAction, WebsiteModelProvider } from './types';
 
 function fullModelLabel(option: ModelOption): string {
   return option.label.split(' · ')[0];
@@ -24,11 +24,12 @@ function isCustomAPIWithPausedProviderID(option?: ModelOption): boolean {
     && (option.id.startsWith('api/cerebras/model/') || option.id.startsWith('api/groq/model/'));
 }
 
-export function ModelLabel({ model, option }: { model: string; option?: ModelOption }) {
+export function ModelLabel({ model, option, group }: { model: string; option?: ModelOption; group?: ModelProviderGroup }) {
   const fullLabel = option ? fullModelLabel(option) : model;
   const separator = fullLabel.indexOf(' / ');
   return <span className="model-option-label" title={fullLabel}>
-    {isCustomAPIWithPausedProviderID(option) ? <Icon name="sparkles" size={16} /> : <ModelProviderIcon model={model} />}
+    {(group?.genericAPIIcon ?? isCustomAPIWithPausedProviderID(option))
+      ? <Icon name="sparkles" size={16} /> : <ModelProviderIcon model={group?.iconModel ?? model} />}
     {separator >= 0 && <span className="sr-only">{fullLabel.slice(0, separator)}: </span>}
     <span className="model-option-name">{option ? modelOptionLabel(option) : model}</span>
   </span>;
@@ -39,15 +40,8 @@ const websiteProviderNames: Record<WebsiteModelProvider, string> = {
   kimi: 'Kimi', qwen: 'Qwen', deepseek: 'DeepSeek',
 };
 const websiteDefaultModels = new Set(Object.keys(websiteProviderNames).map((provider) => `browser/${provider}`));
-// Temporarily hide the other Alibaba catalog models, including dated duplicates.
-// Keep their saved configuration and runtime support; only expose Qwen3.7 Flash.
-const showAdditionalAlibabaModels = false;
-const alibabaQwen37Flash = 'api/alibaba/model/cXdlbjMuNy1mbGFzaA'; // qwen3.7-flash
-
-// Offer specific website/API models only. Keep hidden local/default selections
-// and runtime support intact without silently substituting a different model.
+// Account catalogs and provider-specific model filters are owned by native discovery.
 function isVisibleModel(model: string): boolean {
-  if (model.startsWith('api/alibaba/')) return showAdditionalAlibabaModels || model === alibabaQwen37Flash;
   return (model.startsWith('browser/') || model.startsWith('api/')) && !websiteDefaultModels.has(model);
 }
 
@@ -56,27 +50,34 @@ const providerNames: Record<string, string> = {
   cerebras: 'Cerebras', alibaba: 'Alibaba', openai: 'OpenAI',
 };
 
-type ModelProviderGroup = { id: string; name: string; iconModel: string; genericAPIIcon: boolean; options: ModelOption[] };
+type ModelProviderGroup = { route: string; id: string; name: string; iconModel: string; genericAPIIcon: boolean; setup?: ModelProviderSetup; options: ModelOption[] };
 
-export function groupModelOptions(options: ModelOption[], model: string): ModelProviderGroup[] {
+export function groupModelOptions(options: ModelOption[], model: string, setups: ModelProviderSetup[] = []): ModelProviderGroup[] {
   const visibleOptions = options.filter((option) => option.selectable !== false && isVisibleModel(option.id));
   // Preserve an unavailable saved selection without substituting another model.
-  if (isVisibleModel(model) && !options.some((option) => option.id === model)) {
+  if (model.startsWith('browser/') && isVisibleModel(model) && !options.some((option) => option.id === model)) {
     visibleOptions.push({ id: model, label: model, detail: model, highMemory: false, available: false });
   }
   const groups = new Map<string, ModelProviderGroup>();
+  for (const setup of setups) {
+    const [transport, provider] = setup.route.split('/');
+    groups.set(setup.route, { route: setup.route, id: provider, name: setup.name, setup, options: [],
+      iconModel: transport === 'api' ? 'api/alibaba' : setup.route, genericAPIIcon: false });
+  }
   for (const option of visibleOptions) {
-    const provider = option.id.split('/')[1];
-    const genericAPIIcon = isCustomAPIWithPausedProviderID(option);
-    const groupID = genericAPIIcon ? `api/${provider}` : provider;
-    let group = groups.get(groupID);
+    const [transport, provider] = option.id.split('/');
+    const route = transport + '/' + provider;
+    let group = groups.get(route);
     if (!group) {
       const label = fullModelLabel(option);
       const separator = label.indexOf(' / ');
       const configuredName = separator > 0 ? label.slice(0, separator) : provider;
+      const genericAPIIcon = isCustomAPIWithPausedProviderID(option)
+        || (transport === 'api' && (Object.hasOwn(websiteProviderNames, provider) || (provider === 'alibaba' && setups.length > 0)));
+      const groupID = genericAPIIcon ? route : provider;
       const name = !genericAPIIcon && Object.hasOwn(providerNames, provider) ? providerNames[provider] : configuredName;
-      group = { id: groupID, name, iconModel: option.id, genericAPIIcon, options: [] };
-      groups.set(groupID, group);
+      group = { route, id: groupID, name, iconModel: option.id, genericAPIIcon, options: [] };
+      groups.set(route, group);
     }
     group.options.push(option);
   }
@@ -84,10 +85,13 @@ export function groupModelOptions(options: ModelOption[], model: string): ModelP
 }
 
 export function ModelSelector({ options, model, label, disabled = false, className,
-  onSelect }: { options: ModelOption[]; model: string; label: string; disabled?: boolean;
+  setups = [], canConnect = false, onConnect, onSelect }: { options: ModelOption[]; setups?: ModelProviderSetup[];
+  canConnect?: boolean; onConnect?: (route: string) => void; model: string; label: string; disabled?: boolean;
   className?: string; onSelect: (model: string) => void }) {
   const selected = options.find((option) => option.id === model);
-  const groups = groupModelOptions(options, model);
+  const groups = groupModelOptions(options, model, setups);
+  const needsSelection = setups.length > 0 && selected?.available === false
+    && !groups.some((group) => group.options.some((option) => option.available !== false));
   const [open, setOpen] = useState(false);
   useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
   const selectModel = (value: string) => {
@@ -100,13 +104,13 @@ export function ModelSelector({ options, model, label, disabled = false, classNa
       <DropdownMenuTrigger asChild disabled={disabled}>
         <Button type="button" variant="outline" size="sm" disabled={disabled}
           className={`model-selector-trigger ${className ?? ''}`}
-          aria-label={`${label}: ${selected ? fullModelLabel(selected) : model}`} title={selected?.detail ?? model}>
-          <ModelLabel model={model} option={selected} />
+          aria-label={`${label}: ${needsSelection ? 'Choose model' : selected ? fullModelLabel(selected) : model}`} title={selected?.detail ?? model}>
+          {needsSelection ? <span>Choose model</span> : <ModelLabel model={model} option={selected} group={groups.find((group) => group.options.some((option) => option.id === model))} />}
           <span className="model-selector-chevron"><Icon name="chevron" size={12} /></span>
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent className="model-selector-content" align="start" collisionPadding={12} aria-label="Model providers">
-        {groups.map((group) => <DropdownMenuSub key={group.id}>
+        {groups.map((group) => <DropdownMenuSub key={group.route}>
           <DropdownMenuSubTrigger disabled={disabled} textValue={group.name} className="model-provider-option"
             data-provider={group.id}>
             {group.genericAPIIcon ? <Icon name="sparkles" size={16} /> : <ModelProviderIcon model={group.iconModel} />}
@@ -116,12 +120,21 @@ export function ModelSelector({ options, model, label, disabled = false, classNa
             <DropdownMenuSubContent className="model-selector-submenu" sideOffset={6} collisionPadding={12}
               aria-label={`${group.name} ${group.id === 'deepseek' ? 'modes' : 'models'}`}>
               <DropdownMenuRadioGroup value={model} onValueChange={selectModel}>
-                {group.options.map((option) => <DropdownMenuRadioItem key={option.id} value={option.id}
+                {group.options.filter((option) => !group.setup || option.available !== false).map((option) => <DropdownMenuRadioItem key={option.id} value={option.id}
                   textValue={modelOptionLabel(option)} title={option.detail} disabled={disabled || option.available === false}>
                   <span className="model-option-name">{modelOptionLabel(option)}</span>
                   {option.available === false && <span className="model-option-unavailable"> (unavailable)</span>}
                 </DropdownMenuRadioItem>)}
               </DropdownMenuRadioGroup>
+              {group.setup && !group.options.some((option) => option.available !== false) && <DropdownMenuItem
+                disabled={disabled || !canConnect} title={!canConnect ? "Finish active tasks and approvals to connect a provider" : undefined} onSelect={() => {
+                  if (disabled || !canConnect || !group.setup) return;
+                  setOpen(false);
+                  onConnect?.(group.setup.route);
+                }}>
+                {group.setup.route.startsWith('browser/') ? 'Sign in to ' + group.name
+                  : group.setup.connected ? 'Manage API connection' : 'Connect API'}
+              </DropdownMenuItem>}
             </DropdownMenuSubContent>
           </DropdownMenuPortal>
         </DropdownMenuSub>)}

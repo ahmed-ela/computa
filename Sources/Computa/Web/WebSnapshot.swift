@@ -1,6 +1,12 @@
 import AutomationCore
 import Foundation
 
+struct ModelProviderSetup: Codable, Equatable, Sendable {
+    let route: String
+    let name: String
+    let connected: Bool
+}
+
 struct WebUISnapshot: Codable, Equatable, Sendable {
     var revision: UInt64 = 0
     let selectedTaskID: String?
@@ -13,6 +19,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     let accessMode: String
     let defaultModel: String
     let modelOptions: [LocalModelOption]
+    let providerSetups: [ModelProviderSetup]
     let websiteModelsRefreshing: Bool
     let canRefreshWebsiteModels: Bool
     let websiteModelsError: String?
@@ -57,6 +64,12 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         accessMode = state.accessMode.rawValue
         defaultModel = state.defaultModel
         modelOptions = state.modelOptions
+        providerSetups = WebsiteModelCatalog.discoveryProviders.map { provider in
+            ModelProviderSetup(route: "browser/" + provider, name: WebsiteModelCatalog.providerLabel(provider),
+                connected: state.websiteModelChoices.contains { choice in choice.provider == provider }
+                    || state.websiteModeChoices.contains { choice in choice.provider == provider })
+        } + [ModelProviderSetup(route: "api/" + state.alibabaPickerID, name: "Alibaba",
+                                connected: state.apiProviders.contains(where: \.isAlibabaModelStudioInference))]
         websiteModelsRefreshing = state.websiteModelsRefreshing
         canRefreshWebsiteModels = state.canRefreshWebsiteModels
         websiteModelsError = state.websiteModelsError

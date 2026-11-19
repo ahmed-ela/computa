@@ -260,6 +260,12 @@ return {
   appearance: 'system',
   accessMode: 'askEveryTime',
   defaultModel: modelChatGPT,
+  providerSetups: [
+    ...['ChatGPT', 'Gemini', 'Claude', 'Grok', 'Kimi', 'Qwen', 'DeepSeek'].map((name) => ({
+      route: 'browser/' + name.toLowerCase(), name, connected: name === 'ChatGPT',
+    })),
+    { route: 'api/alibaba', name: 'Alibaba', connected: false },
+  ],
   modelOptions: [
     { id: modelChatGPT, label: 'ChatGPT / Instant · Built-in browser', detail: 'Preview ChatGPT model; no provider request is made.', highMemory: false },
     ...['Medium', 'High', 'Extra High', 'Pro'].map((name) => ({
@@ -601,6 +607,7 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
         // Preview has no signed-in browser. Never invent provider availability.
         publish({ ...snapshot, websiteModelsRefreshing: false, websiteModelsError: 'Website discovery is available in the desktop app.' });
         return;
+      case 'connectModelProvider':
       case 'showAPIProviders':
         return; // Credentials are entered only in the desktop's native sheet.
     }

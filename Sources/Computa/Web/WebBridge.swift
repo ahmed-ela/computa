@@ -285,6 +285,10 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         case "refreshWebsiteModels":
             Task { @MainActor [weak self] in await self?.refreshWebsiteModels(body: body) }
 
+        case "connectModelProvider":
+            guard Set(body.keys) == ["action", "route"], let route = body["route"] as? String else { return }
+            state.connectModelProvider(route: route)
+
         case "showAPIProviders":
             guard Set(body.keys) == ["action"] else { return }
             state.presentAPIProviders()

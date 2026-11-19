@@ -59,6 +59,27 @@ const selector = (model = options[1].id, label = 'Task model', disabled = false)
 })).html;
 
 describe('website model selectors', () => {
+  test('fresh profile lists setup actions without offering unverified models; discovery replaces only its provider action', async () => {
+    const names = ['ChatGPT', 'Gemini', 'Claude', 'Grok', 'Kimi', 'Qwen', 'DeepSeek', 'Alibaba'];
+    const setups = names.map((name) => ({
+      route: (name === 'Alibaba' ? 'api/' : 'browser/') + name.toLowerCase(), name, connected: false,
+    }));
+    const props = { model: options[1].id, label: 'Task model', setups, canConnect: true,
+      onSelect: () => {}, onConnect: () => {} };
+    const saved = { ...options[1], available: false };
+    const render = (models: ModelOption[]) => renderToStaticMarkup(h(ModelSelector, { ...props, options: models })).html;
+    const html = render([saved]);
+    expect((await renderedProviderGroups(html)).map((group) => group.name)).toEqual(names);
+    expect(await textBySelector(html, '[data-submenu-content] [role="menuitem"]')).toEqual([
+      ...names.slice(0, -1).map((name) => 'Sign in to ' + name), 'Connect API',
+    ]);
+    expect(await attributesBySelector(html, '[role="menuitemradio"]', 'data-value')).toEqual([]);
+    const connected = render([saved, options[3]]);
+    expect(await attributesBySelector(connected, '[role="menuitemradio"]', 'data-value')).toEqual([options[3].id]);
+    expect(connected).not.toContain('Sign in to Gemini');
+    expect(connected).toContain('Sign in to ChatGPT');
+  });
+
   test('Grok is distinct from Groq and only supplied specific choices enter its submenu', () => {
     const grokDefault = { ...options[0], id: 'browser/grok', label: 'Grok / Website default' };
     const grokChoice = { ...options[1], id: 'browser/grok/choice/fixture', label: 'Grok / Fixture Observed Model' };
@@ -79,10 +100,11 @@ describe('website model selectors', () => {
     expect(groups.map(({ id, name, options: models }) => ({ id, name, ids: models.map(({ id }) => id) }))).toEqual([
       { id: 'chatgpt', name: 'ChatGPT', ids: [options[1].id, options[2].id] },
       { id: 'gemini', name: 'Gemini', ids: [options[3].id] },
-      { id: 'claude', name: 'Claude', ids: [options[4].id, claudeAPI.id] },
+      { id: 'claude', name: 'Claude', ids: [options[4].id] },
+      { id: 'api/claude', name: 'Other label', ids: [claudeAPI.id] },
       { id: 'groq', name: 'Groq', ids: [options[8].id] },
     ]);
-    for (const group of groups) expect(group.iconModel.split('/')[1]).toBe(group.id);
+    for (const group of groups) expect(group.iconModel.split('/')[1]).toBe(group.id.split('/').at(-1));
     expect(input).toEqual(original);
   });
 
@@ -336,7 +358,7 @@ describe('website model selectors', () => {
     const flash = { ...options[1], id: 'api/alibaba/model/cXdlbjMuNy1mbGFzaA', label: 'Alibaba / Qwen 3.7 Flash · API' };
     const dated = { ...flash, id: 'api/alibaba/model/cXdlbjMuNy1mbGFzaC0yMDI2MTAzMQ' };
     const other = { ...flash, id: 'api/alibaba/model/cXdlbi1tYXg', label: 'Alibaba / Qwen Max · API' };
-    const input = [...options, dated, flash, other];
+    const input = [...options, { ...dated, selectable: false }, flash, { ...other, selectable: false }];
     for (const model of [flash.id, dated.id, other.id, 'api/alibaba/model/saved-missing']) {
       expect(groupModelOptions(input, model).find(({ id }) => id === 'alibaba')?.options.map(({ id }) => id)).toEqual([flash.id]);
       const html = renderToStaticMarkup(h(ModelSelector, { options: input, model, label: 'Task model', onSelect: () => {} })).html;
@@ -347,7 +369,7 @@ describe('website model selectors', () => {
       expect((await textBySelector(html, '.model-option-name'))[0]).toBe(input.find(({ id }) => id === model)
         ? modelOptionLabel(input.find(({ id }) => id === model)!) : model);
     }
-    expect(groupModelOptions([dated, other], other.id)).toEqual([]);
+    expect(groupModelOptions(input.filter((option) => option.selectable === false), other.id)).toEqual([]);
   });
 
   test('model changes preserve exact IDs and ignore busy, unchanged, unavailable or hidden choices', () => {

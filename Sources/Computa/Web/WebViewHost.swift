@@ -22,6 +22,8 @@ struct WebWorkspaceView: View {
                         EmbeddedBrowserPane(
                             session: state.browserSession,
                             isInteractionBlocked: state.approvalGateBlocksInteraction,
+                            canLoadModels: state.canRefreshWebsiteModels,
+                            onLoadModels: { id in Task { await state.loadSignedInModels(tabID: id) } },
                             canConfigureKimiProfile: state.canConfigureKimiProfile,
                             kimiModelSignInMessage: state.kimiModelSignInMessage,
                             onOpenKimiModelSignIn: { state.openKimiModelSignIn() },
@@ -74,7 +76,7 @@ struct WebWorkspaceView: View {
         }
         .sheet(isPresented: Binding(get: { state.isAPIProvidersPresented && !state.approvalGateBlocksInteraction },
             set: { state.isAPIProvidersPresented = $0 })) {
-            APIProviderSettingsView(settings: state.apiProviderSettings)
+            APIProviderSettingsView(settings: state.apiProviderSettings, alibabaSetupID: state.alibabaSetupID)
         }
     }
 }

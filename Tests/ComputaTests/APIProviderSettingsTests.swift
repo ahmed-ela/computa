@@ -11,6 +11,36 @@ final class APIProviderSettingsTests: XCTestCase {
     }
     @MainActor private final class EditPermission { var allowed: Bool; init(_ value: Bool) { allowed = value } }
     private let model = APIModelDefinition(id: "fixture", name: "Fixture")
+    func testFirstLaunchAlibabaPickerUsesAccountCatalogAndRespectsExistingCustomEndpoint() async throws {
+        let prefs = isolatedTestPreferences()
+        let vault = APIProviderTestVault()
+        let custom = APIProviderDefinition(id: "alibaba", name: "My custom API",
+            baseURL: URL(string: "https://api.example.test/v1")!, wireAPI: .chatCompletions, models: [])
+        let settings = APIProviderSettings(preferences: prefs, credentials: vault.store, listModels: { provider, _ in
+            provider.isAlibabaModelStudioInference
+                ? [APIModelDefinition(id: "qwen3.7-flash-2026-07-15", name: "Flash"), APIModelDefinition(id: "other", name: "Other")]
+                : [APIModelDefinition(id: "custom", name: "Custom")]
+        }, onChanged: { _, mutation in try mutation() })
+        try await settings.connect(custom, key: "fixture-custom")
+        let state = AppState(tasks: [], preferences: prefs)
+        let setup = try XCTUnwrap(WebUISnapshot(state: state).providerSetups.last)
+        XCTAssertEqual(setup.route, "api/alibaba-2")
+        XCTAssertFalse(setup.connected)
+        state.connectModelProvider(route: setup.route)
+        let id = try XCTUnwrap(state.alibabaSetupID)
+        let alibaba = APIProviderDefinition(id: id, name: "Alibaba",
+            baseURL: URL(string: "https://ws-test.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1")!,
+            wireAPI: .chatCompletions, models: [])
+        try await settings.connect(alibaba, key: "fixture-alibaba")
+        let restored = WebUISnapshot(state: AppState(tasks: [], preferences: prefs))
+        XCTAssertEqual(restored.providerSetups.last?.route, setup.route)
+        XCTAssertEqual(restored.providerSetups.last?.connected, true)
+        XCTAssertEqual(restored.modelOptions.filter { $0.id.hasPrefix(setup.route + "/") }.map(\.id),
+            [APIProviderCatalog.appModelID(providerID: id, modelID: "qwen3.7-flash-2026-07-15")])
+        XCTAssertTrue(restored.modelOptions.contains { $0.id == APIProviderCatalog.appModelID(providerID: "alibaba", modelID: "custom") })
+        XCTAssertEqual(vault.value("alibaba"), "fixture-custom")
+    }
+
     func testConnectDiscoversBeforeAdmissionAndPersistsMetadataWithoutKey() async throws {
         let preferences = isolatedTestPreferences(), vault = APIProviderTestVault()
         var admitted: [APIProviderDefinition] = []
