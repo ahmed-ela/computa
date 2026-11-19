@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { bundleID, inspectApp, sha256, type Context as PackageContext } from "./package-release";
 import { verifyAppcast } from "./sparkle-appcast";
 import { tagMetadata } from "./release-policy";
-import { parseVersionConfig } from "./version";
+import { alphaBuild, parseVersionConfig } from "./version";
 
 export interface PublishOptions { tag: string; repo: string; publish: boolean }
 export interface PublishContext {
@@ -88,6 +88,13 @@ export async function publishAlpha(options: PublishOptions, context: PublishCont
   const configFile = await api(`contents/Config/Version.xcconfig?ref=${source}`);
   if (configFile.encoding !== "base64" || typeof configFile.content !== "string") throw new Error("Tagged app version config is missing");
   const config = parseVersionConfig(Buffer.from(configFile.content, "base64").toString("utf8"));
+  if (config.alphaBuildAnchor) {
+    const history = await api(`compare/${config.alphaBuildAnchor}...${source}`);
+    if (!["ahead", "identical"].includes(history.status) || history.base_commit?.sha !== config.alphaBuildAnchor) {
+      throw new Error("Release source is outside the tagged build anchor history");
+    }
+    config.build = alphaBuild(config, history.ahead_by);
+  }
   if (metadata.appVersion !== config.version || tag !== `v${config.version}-alpha.${config.build}`) {
     throw new Error("Alpha tag must use the tagged app version and increasing Apple build number");
   }
