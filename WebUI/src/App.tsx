@@ -13,6 +13,7 @@ import {
   DropdownMenuTrigger,
 } from '@octanejs/shadcn/DropdownMenu';
 import { Icon } from './Icon';
+import { copyText } from './clipboard';
 import { ReviewPanel } from './ReviewPanel';
 import { ModelLabel, ModelSelector } from './ModelSelector';
 import { WebsiteSessionCleanupControl } from './WebsiteSessionCleanupControl';
@@ -251,6 +252,42 @@ function ToolDetails({ entry, showPayload }: { entry: EntrySnapshot; showPayload
   );
 }
 
+function UserMessage({ entry, selected }: { entry: EntrySnapshot; selected: boolean }) {
+  const [feedback, setFeedback] = useState<'' | 'Copied' | 'Copy failed'>('');
+  useEffect(() => {
+    if (!feedback) return;
+    const timer = window.setTimeout(() => setFeedback(''), 2200);
+    return () => window.clearTimeout(timer);
+  }, [feedback]);
+
+  async function copyMessage() {
+    try {
+      await copyText(entry.body);
+      setFeedback('Copied');
+    } catch {
+      setFeedback('Copy failed');
+    }
+  }
+
+  return (
+    <article className={`message-row user-message ${selected ? 'selected' : ''}`}>
+      <Button variant="secondary" className="user-bubble"
+        onClick={() => post({ action: 'selectEntry', id: entry.id })}
+        aria-label={`You: ${entry.body}`}>
+        {entry.body}
+      </Button>
+      <div className="user-message-actions">
+        <time className="message-time" dateTime={new Date(entry.timestamp * 1000).toISOString()}>{clockTime(entry.timestamp)}</time>
+        <Button type="button" variant="ghost" size="icon-xs" className="user-message-copy"
+          aria-label="Copy message" title="Copy message" onClick={copyMessage}>
+          <Icon name={feedback === 'Copied' ? 'check' : 'copy'} size={14} />
+        </Button>
+        <span className={feedback === 'Copy failed' ? 'message-time' : 'sr-only'} role="status">{feedback}</span>
+      </div>
+    </article>
+  );
+}
+
 function TimelineEntry({
   entry,
   selected,
@@ -261,19 +298,7 @@ function TimelineEntry({
   hideAnswerDuration?: boolean;
 }) {
   if (entry.kind === 'assistant' && !entry.body.trim()) return null;
-  if (entry.kind === 'user') {
-    return (
-      <article className={`message-row user-message ${selected ? 'selected' : ''}`}>
-        <Button variant="secondary"
-          className="user-bubble"
-          onClick={() => post({ action: 'selectEntry', id: entry.id })}
-          aria-label={`You: ${entry.body}`}
-        >
-          {entry.body}
-        </Button>
-      </article>
-    );
-  }
+  if (entry.kind === 'user') return <UserMessage entry={entry} selected={selected} />;
 
   if (entry.kind === 'system') {
     return (
