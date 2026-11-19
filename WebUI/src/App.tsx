@@ -252,7 +252,7 @@ function ToolDetails({ entry, showPayload }: { entry: EntrySnapshot; showPayload
   );
 }
 
-function UserMessage({ entry, selected }: { entry: EntrySnapshot; selected: boolean }) {
+function MessageActions({ timestamp, label, copy }: { timestamp: number; label: string; copy: () => Promise<void> }) {
   const [feedback, setFeedback] = useState<'' | 'Copied' | 'Copy failed'>('');
   useEffect(() => {
     if (!feedback) return;
@@ -260,15 +260,27 @@ function UserMessage({ entry, selected }: { entry: EntrySnapshot; selected: bool
     return () => window.clearTimeout(timer);
   }, [feedback]);
 
-  async function copyMessage() {
+  async function copyMessage(event: MouseEvent) {
+    event.stopPropagation();
     try {
-      await copyText(entry.body);
+      await copy();
       setFeedback('Copied');
     } catch {
       setFeedback('Copy failed');
     }
   }
 
+  return <div className="message-actions">
+    <time className="message-time" dateTime={new Date(timestamp * 1000).toISOString()}>{clockTime(timestamp)}</time>
+    <Button type="button" variant="ghost" size="icon-xs" className="message-copy"
+      aria-label={label} title={label} onClick={copyMessage}>
+      <Icon name={feedback === 'Copied' ? 'check' : 'copy'} size={14} />
+    </Button>
+    <span className={feedback === 'Copy failed' ? 'message-time' : 'sr-only'} role="status">{feedback}</span>
+  </div>;
+}
+
+function UserMessage({ entry, selected }: { entry: EntrySnapshot; selected: boolean }) {
   return (
     <article className={`message-row user-message ${selected ? 'selected' : ''}`}>
       <Button variant="secondary" className="user-bubble"
@@ -276,14 +288,7 @@ function UserMessage({ entry, selected }: { entry: EntrySnapshot; selected: bool
         aria-label={`You: ${entry.body}`}>
         {entry.body}
       </Button>
-      <div className="user-message-actions">
-        <time className="message-time" dateTime={new Date(entry.timestamp * 1000).toISOString()}>{clockTime(entry.timestamp)}</time>
-        <Button type="button" variant="ghost" size="icon-xs" className="user-message-copy"
-          aria-label="Copy message" title="Copy message" onClick={copyMessage}>
-          <Icon name={feedback === 'Copied' ? 'check' : 'copy'} size={14} />
-        </Button>
-        <span className={feedback === 'Copy failed' ? 'message-time' : 'sr-only'} role="status">{feedback}</span>
-      </div>
+      <MessageActions timestamp={entry.timestamp} label="Copy message" copy={() => copyText(entry.body)} />
     </article>
   );
 }
@@ -297,6 +302,7 @@ function TimelineEntry({
   selected: boolean;
   hideAnswerDuration?: boolean;
 }) {
+  const response = useRef<HTMLDivElement | null>(null);
   if (entry.kind === 'assistant' && !entry.body.trim()) return null;
   if (entry.kind === 'user') return <UserMessage entry={entry} selected={selected} />;
 
@@ -320,13 +326,13 @@ function TimelineEntry({
       onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); post({ action: 'selectEntry', id: entry.id }); } }}
       aria-label="Assistant response"
     >
-      {!hideAnswerDuration ? <div className="assistant-metadata">
-        {entry.workedForSeconds != null && Number.isFinite(entry.workedForSeconds) && entry.workedForSeconds >= 0 ? (
-          <span>Worked for {formatWorkedFor(entry.workedForSeconds)}</span>
-        ) : null}
-        <span className="message-time">{clockTime(entry.timestamp)}</span>
-      </div> : null}
-      <ResponseMarkdown text={entry.body} />
+      {!hideAnswerDuration && entry.workedForSeconds != null && Number.isFinite(entry.workedForSeconds) && entry.workedForSeconds >= 0
+        ? <div className="assistant-metadata">Worked for {formatWorkedFor(entry.workedForSeconds)}</div> : null}
+      <ResponseMarkdown text={entry.body} contentRef={response} />
+      <MessageActions timestamp={entry.timestamp} label="Copy response" copy={async () => {
+        if (!response.current) throw new Error('Response is unavailable');
+        await copyText(entry.body, response.current.innerHTML);
+      }} />
     </article>
   );
 }
