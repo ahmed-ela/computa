@@ -1,5 +1,6 @@
 {
   "name": "computa",
+  "account_id": "8aefdf0e2931f23d384769fa3cdc7a84",
   "compatibility_date": "2026-09-28",
   "assets": {
     "directory": "./dist",

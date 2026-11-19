@@ -6,7 +6,7 @@
   "packageManager": "bun@1.3.5",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "build": "vite build",
+    "build": "bun run check && bun test && VITE_BUILD_REVISION=${WORKERS_CI_COMMIT_SHA:-local} vite build",
     "check": "tsc --noEmit"
   },
   "dependencies": {
