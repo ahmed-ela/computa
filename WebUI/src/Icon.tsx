@@ -2,6 +2,7 @@ import ArrowUp from '@octanejs/lucide/icons/arrow-up';
 import ArrowDown from '@octanejs/lucide/icons/arrow-down';
 import Check from '@octanejs/lucide/icons/check';
 import ChevronRight from '@octanejs/lucide/icons/chevron-right';
+import Copy from '@octanejs/lucide/icons/copy';
 import CircleAlert from '@octanejs/lucide/icons/circle-alert';
 import CornerUpLeft from '@octanejs/lucide/icons/corner-up-left';
 import Ellipsis from '@octanejs/lucide/icons/ellipsis';
@@ -25,6 +26,7 @@ const icons = {
   check: Check,
   chevron: ChevronRight,
   computer: Monitor,
+  copy: Copy,
   delete: Trash2,
   down: ArrowDown,
   drag: GripVertical,

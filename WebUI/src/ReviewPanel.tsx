@@ -4,6 +4,7 @@ import { Input } from '@octanejs/shadcn/Input';
 import { Textarea } from '@octanejs/shadcn/Textarea';
 import { NativeSelect, NativeSelectOption } from '@octanejs/shadcn/NativeSelect';
 import { Icon } from './Icon';
+import { copyText } from './clipboard';
 import { parseUnifiedDiff, reconcileReviewPresentation, reviewFeedback, reviewFileLabel, reviewPresentationIdentity, splitDiffLines, type DiffLine, type ParsedDiff, type ReviewPresentationState } from './reviewDiff';
 import type { NativeAction, ReviewFile, ReviewOperation, ReviewScope, ReviewState } from './types';
 
@@ -15,22 +16,6 @@ const statusLabels: Record<ReviewFile['status'], string> = {
   added: 'Added', deleted: 'Deleted', modified: 'Modified', renamed: 'Renamed',
   copied: 'Copied', untracked: 'Untracked', typeChanged: 'Type changed', unmerged: 'Conflict',
 };
-
-async function copyText(text: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    try { await navigator.clipboard.writeText(text); return; } catch { /* Native custom-scheme WebKit may need its copy fallback. */ }
-  }
-  const previous = document.activeElement as HTMLElement | null;
-  const field = document.createElement('textarea');
-  field.value = text;
-  field.style.cssText = 'position:fixed;left:-10000px;top:0';
-  document.body.appendChild(field);
-  field.select();
-  const copied = document.execCommand('copy');
-  field.remove();
-  previous?.focus();
-  if (!copied) throw new Error('Copy failed. Select the patch text and copy it manually.');
-}
 
 interface FeedbackLocation { line: number; side: 'old' | 'new' }
 
