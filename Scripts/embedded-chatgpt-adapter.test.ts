@@ -1276,6 +1276,27 @@ describe('ChatGPT named paired-turn Copy association', () => {
     expect(await p.x.f.diagnose()).toMatchObject({ failureDiagnostic: { copyPresent: false, copyEnabled: false } });
   });
 
+  test('paired feedback menu toolbar proves completion only with both unique sibling menus and Read aloud', async () => {
+    for (const variant of ['complete', 'wrong_kind', 'disabled', 'duplicate', 'foreign_row', 'missing_reader']) {
+      const p = await pairedChatGPTFooterFixture();
+      const [feedback, reader, more] = p.companions;
+      feedback.values['aria-label'] = 'Feedback'; feedback.values['aria-haspopup'] = 'menu';
+      more.values['aria-label'] = 'More actions'; more.values['aria-haspopup'] = 'menu';
+      if (variant === 'wrong_kind') more.values['aria-haspopup'] = 'dialog';
+      if (variant === 'disabled') feedback.values['aria-disabled'] = 'true';
+      if (variant === 'duplicate') p.row.append(new Element('BUTTON', { ...more.values }));
+      if (variant === 'foreign_row') moveFixtureElement(feedback, p.pair);
+      if (variant === 'missing_reader') reader.values['aria-label'] = 'Unknown';
+      const observed = await p.x.observe(p.record, { deferModelVerification: false });
+      expect(observed.answerComplete, variant).toBe(variant === 'complete');
+      if (variant === 'complete') {
+        expect(observed.modelEvidence.selected).toEqual(p.choice);
+        expect(observed.completionEvidence.footerAssociation).toBe('paired_turn');
+      }
+      expect(p.copy.clicks).toBe(0); expect(p.x.send.clicks).toBe(1);
+    }
+  });
+
   test('paired Copy never uses incomplete cancelled generic or ambiguous named turns', async () => {
     for (const mutation of ['in_progress', 'cancelled', 'unknown', 'missing_state', 'generic', 'missing_key',
       'empty_key', 'oversized_key', 'comparison', 'second_assistant', 'hidden_assistant', 'outer_assistant',
@@ -2392,6 +2413,32 @@ describe('ChatGPT bounded in-flight model proof deferral', () => {
     expect(full.error).toBeUndefined(); expect(full.modelEvidence.selected).toEqual(choice);
     expect(pin.headerTrigger).toBe(picker.trigger); expect(picker.trigger.clicks).toBeGreaterThan(before);
     expect(pin.provisionalHeader).toBe(provisional); expect(provisional.completed).toBe(true); expect(disconnected).toBe(1);
+  });
+
+  test('a replacement span with joined labels is neutral only during full proof of its pinned power', async () => {
+    for (const variant of ['same', 'wrong_power', 'outside_proof', 'wrong_element']) {
+      const x = await chatTurnFixture(choice), picker: any = x.picker;
+      const record = await x.dispatch('Owned header formatting'); x.answer('Owned answer');
+      const pin = x.f.world.__computaChatPresetPin, old = picker.replaceTrigger();
+      expect((await x.observe(record, { deferModelVerification: true })).modelVerificationPending).toBe(true);
+      const pending = pin.provisionalHeader;
+      const span = new Element(variant === 'wrong_element' ? 'DIV' : 'SPAN', {},
+        'Thinking effort' + (variant === 'wrong_power' ? 'Pro' : choice.label));
+      const change = () => pending.observer.callback([{ type: 'childList', target: picker.trigger, addedNodes: [span], removedNodes: [] }]);
+      if (variant === 'outside_proof') change();
+      else {
+        const open = picker.trigger.onClick;
+        picker.trigger.onClick = () => { open(); change(); };
+      }
+      const full = await x.observe(record, { deferModelVerification: false });
+      if (variant === 'same') {
+        expect(full.error).toBeUndefined(); expect(full.modelEvidence.selected).toEqual(choice);
+        expect(pending.completed).toBe(true); expect(pin.headerTrigger).toBe(picker.trigger);
+      } else {
+        expect(full.error).toBeDefined(); expect(full.modelEvidence).toBeUndefined();
+        expect(pin.invalidated).toBe(true); expect(pin.headerTrigger).toBe(old);
+      }
+    }
   });
 
   test('provisional header negative history cannot be restored replaced rearmed or borrowed by a stale owner', async () => {

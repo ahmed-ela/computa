@@ -4800,6 +4800,34 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           expect(arrows(picker)).toHaveLength(steps);
         }
       });
+      test('Medium to Instant confirms the slider, checked family and closed header after generic open chrome', async () => {
+        for (const reset of [false, true]) {
+          const { f, picker } = setup(false, { closedCompositeHeader: true, resetToPowerOnClose: true });
+          preserveOpenPowerHeader(picker);
+          const dispatch = picker.powerItem.onDispatch;
+          picker.powerItem.onDispatch = (event: any) => {
+            dispatch(event);
+            setImmediate(() => {
+              picker.primary.text = 'Thinking effort';
+              for (const observer of [...f.observers]) observer.callback([]);
+            });
+          };
+          const openFamily = picker.secondary.onClick;
+          picker.secondary.onClick = () => { openFamily(); if (reset) picker.selected('Medium'); };
+          const result = await f.run('selectModel', { modelChoice: choice('Instant') });
+          expect(arrows(picker)).toHaveLength(1);
+          if (reset) {
+            expect(result.error).toBe('model_mismatch'); expect(result.modelEvidence).toBeUndefined();
+            expect(f.world.__computaChatPresetPin).toBeUndefined();
+          } else {
+            expect(result.modelEvidence.chatSelection.family.key).toBe('GPT-6');
+            expect(result.modelEvidence.chatSelection.power.key).toBe('instant');
+            expect(picker.trigger.clicks).toBe(1);
+            expect(result.modelDiagnostic.powerTransition).toMatchObject({ from: 1, observed: 0, header: 'generic' });
+            expect((await f.run('verifyModel', { expectedModelChoice: choice('Instant') })).modelEvidence.selected).toEqual(choice('Instant'));
+          }
+        }
+      });
       const pendingPowerHeader = async () => {
         const { f, picker } = setup(false, { closedCompositeHeader: true });
         picker.selected('Instant'); preserveOpenPowerHeader(picker);

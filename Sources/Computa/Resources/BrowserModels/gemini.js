@@ -668,6 +668,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   };
   let headerReadiness = null, changingPowerHeader = null, changingPowerSlider = null, initialReadinessBinding = null;
   let initialReadinessFacts = null;
+  const powerTransition = mutable && expected ? { from: null, requested: expected.key, observed: null, header: null } : null;
   const tracked = new Map();
   const observeHeader = records => {
     const diagnostic = {};
@@ -697,7 +698,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     attributeFilter: ['aria-valuenow', 'aria-checked', 'aria-selected'] });
   const failure = code => {
     const current = websiteChatPickerState(), selection = globalThis.__computaModelSelection;
-    return { error: code, modelDiagnostic: websiteModelDiagnostic(current, { readStage, headerReadiness, initialReadinessFacts,
+    return { error: code, modelDiagnostic: websiteModelDiagnostic(current, { readStage, headerReadiness, initialReadinessFacts, powerTransition,
       readContext: {
         scope: ['action_precheck', 'action_final_guard', 'completed_selection', 'post_selection'].includes(context?.scope)
           ? context.scope : 'unknown',
@@ -1232,6 +1233,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       current = await wait(() => websiteChatPickerState().powerIndex !== before);
       if (current.powerIndex !== before + direction) throw failure('model_unverified');
       const nextPower = websiteChatPowers[current.powerIndex];
+      if (powerTransition) powerTransition.observed = current.powerIndex;
       if (current.headerPower && current.headerPower.key !== nextPower.key) {
         // React can acknowledge the slider before committing the header text.
         // Only this fresh, exact keyboard step may wait for its old header to
@@ -1261,7 +1263,11 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         } finally { changingPowerHeader = null; changingPowerSlider = null; }
         if (Date.now() >= until) throw failure('model_unverified');
         current = state();
-        if (current.headerPower?.key !== nextPower.key || current.topMenu !== popup
+        // The open picker can replace its old effort label with “Thinking effort”.
+        // It supplies no power proof. Keep the exact acknowledged slider below,
+        // then require the checked family and independent closed-header or Power proof.
+        if (powerTransition) powerTransition.header = websiteChatHeaderPresentation(current.trigger.innerText).kind;
+        if ((!current.headerPresentation && current.headerPower?.key !== nextPower.key) || current.topMenu !== popup
           || current.powerItem !== powerItem || current.slider !== slider || current.mode !== 'power'
           || current.powerIndex !== before + direction || freshGuard() !== true) throw failure('model_mismatch');
         headerExpected = null; // The next owned step has its own observed predecessor.
@@ -1461,6 +1467,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     if (genericHeader && powerState.mode !== 'power') return failure('model_unverified');
     const startingPower = headerIndex ?? powerState.powerIndex;
     const desiredPower = expectedIndex ?? startingPower;
+    if (powerTransition) powerTransition.from = powerState.powerIndex;
     if (!Number.isInteger(startingPower) || !Number.isInteger(desiredPower)) return failure('model_unverified');
     if (powerState.mode === 'power' && powerState.powerIndex !== startingPower) return failure(mutable ? 'model_unverified' : 'model_mismatch');
     if (!mutable && startingPower !== desiredPower) return failure('model_mismatch');
@@ -1495,7 +1502,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     for (const node of [familyState.semanticSlider, ...familyState.familyControls.map(control => control.node)].filter(Boolean))
       tracked.set(node, { 'aria-valuenow': node.getAttribute('aria-valuenow'),
         'aria-checked': node.getAttribute('aria-checked'), 'aria-selected': node.getAttribute('aria-selected') });
-    const modelDiagnostic = websiteModelDiagnostic(familyState, { headerReadiness });
+    const modelDiagnostic = websiteModelDiagnostic(familyState, { headerReadiness, powerTransition });
     observedProof = true; readStage = 'family_proof_observed';
     await close();
     let final = state();
@@ -2032,6 +2039,7 @@ function websiteModelDiagnostic(state, readObservation = null) {
   if (state.provider === 'claude') diagnostic.lastModelTrigger = websiteClaudeModelTriggerDiagnostic(state);
   if (state.provider === 'chatgpt') {
     diagnostic.chatPower = state.powerDiagnostic;
+    if (readObservation?.powerTransition) diagnostic.powerTransition = { ...readObservation.powerTransition };
     const pin = globalThis.__computaChatPresetPin;
     diagnostic.chatPin = {
       present: !!pin, invalidated: pin?.invalidated === true,
