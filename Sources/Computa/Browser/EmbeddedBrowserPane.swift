@@ -382,6 +382,9 @@ private struct EmbeddedBrowserPageHost: NSViewRepresentable {
 
     func makeNSView(context: Context) -> EmbeddedBrowserPageContainer {
         let view = EmbeddedBrowserPageContainer()
+        // AppKit can include the surrounding split pane in a child's visibleRect
+        // unless the page host clips at its own bounds.
+        view.clipsToBounds = true
         view.update(session: session, tabID: tabID, webView: webView, interactionBlocked: isInteractionBlocked)
         return view
     }

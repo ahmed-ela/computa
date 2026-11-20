@@ -34,6 +34,9 @@ struct WebWorkspaceView: View {
                             onClose: { state.isBrowserPresented = false }
                         )
                         .frame(minWidth: 360, idealWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
+                        // When this pane opens, the chat already occupies the whole split.
+                        // Give the new pane room above its minimum before growing the chat.
+                        .layoutPriority(1)
                     }
                 }
                 .allowsHitTesting(!state.approvalGateBlocksInteraction)

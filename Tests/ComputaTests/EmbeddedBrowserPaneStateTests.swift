@@ -5,6 +5,55 @@ import XCTest
 @testable import Computa
 
 final class EmbeddedBrowserPaneStateTests: XCTestCase {
+    @MainActor
+    func testBrowserViewportFollowsSplitPane() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let state = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: session)
+        let id = try session.createTab()
+        let web = try XCTUnwrap(session.webView(for: id))
+        web.loadHTMLString("""
+            <!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
+            <style>
+                body { margin: 0 }
+                button { position: fixed; right: 0; bottom: 0 }
+                @media (max-width: 480px) { nav { display: none } }
+            </style>
+            <nav>Desktop navigation</nav><button>Continue</button>
+            """, baseURL: nil)
+        let hosting = NSHostingView(rootView: WebWorkspaceView(state: state))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1024, height: 740),
+                              styleMask: [.borderless, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        defer { window.close() }
+        await settleLayout(hosting)
+        state.isBrowserPresented = true
+        await settleLayout(hosting)
+        let split = try XCTUnwrap(nativeViews(in: hosting).compactMap { $0 as? NSSplitView }.first)
+        let pane = try XCTUnwrap(split.arrangedSubviews.last)
+        XCTAssertGreaterThanOrEqual(pane.bounds.width, 400, "Opening the pane should use the space available beside the chat")
+        window.setContentSize(NSSize(width: 1440, height: 800))
+        await settleLayout(hosting)
+        for width: CGFloat in [360, 520, 730, 360] {
+            split.setPosition(split.bounds.width - width - split.dividerThickness, ofDividerAt: 0)
+            await settleLayout(hosting)
+            XCTAssertEqual(pane.bounds.width, width, accuracy: 1)
+            XCTAssertEqual(web.bounds.width, pane.bounds.width, accuracy: 1)
+            XCTAssertEqual(web.visibleRect, web.bounds, "WebKit should only see the page area below the browser toolbar")
+            let fits = await waitForScriptBool(on: web, script: """
+                (() => {
+                    const edge = document.querySelector('button')?.getBoundingClientRect();
+                    return innerWidth === \(Int(width)) && visualViewport.width === innerWidth
+                        && innerHeight === \(Int(web.bounds.height)) && edge?.right === innerWidth && edge.bottom === innerHeight
+                        && document.elementFromPoint(innerWidth - 2, innerHeight - 2)?.tagName === 'BUTTON'
+                        && (getComputedStyle(document.querySelector('nav')).display === 'none') === (innerWidth <= 480);
+                })()
+                """)
+            XCTAssertTrue(fits, "The page should reflow with its controls inside the \(width)-point pane")
+        }
+    }
+
     /// Use the shipping WebKit UI and native bridge with empty preferences and
     /// an ephemeral browser. Only provider authentication/discovery is simulated.
     @MainActor
