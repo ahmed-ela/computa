@@ -54,6 +54,71 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testDesktopPageFitsAndReleasesScaleAsLayoutChanges() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createTab()
+        let web = try XCTUnwrap(session.webView(for: id))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 423, height: 600),
+                              styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let pane = try XCTUnwrap(window.contentView)
+        try session.presentTab(id, in: pane)
+        web.loadHTMLString("""
+            <!doctype html><style>
+            body { margin: 0 } .desktop { min-width: 780px }
+            header { display: flex; justify-content: space-between }
+            section { width: 100%; overflow: auto } article { width: 1400px }
+            </style><body class="desktop"><header><b>Inbox</b><button>Compose</button></header>
+            <section><article>Horizontally scrollable content</article></section>
+            """, baseURL: nil)
+        let rightEdgeWorks = """
+            (() => {
+                const button = document.querySelector('button');
+                if (!button) return false;
+                const r = button.getBoundingClientRect();
+                return Math.abs(r.right - innerWidth) < 2
+                    && document.elementFromPoint(r.x + r.width/2, r.y + r.height/2) === button;
+            })()
+            """
+        for width: CGFloat in [423, 360, 860, 520] {
+            window.setContentSize(NSSize(width: width, height: 600))
+            let fits = await waitForScriptBool(on: web, script: """
+                innerWidth === \(Int(width)) && \(rightEdgeWorks) &&
+                Math.abs(parseFloat(getComputedStyle(document.documentElement).zoom) - Math.min(1, innerWidth/780)) < .01
+                """)
+            XCTAssertTrue(fits, "Desktop controls should fit and receive pointer input at \(width) points")
+        }
+
+        _ = try await web.evaluateJavaScript("document.body.classList.remove('desktop')")
+        let responsive = await waitForScriptBool(on: web, script:
+            "\(rightEdgeWorks) && getComputedStyle(document.documentElement).zoom === '1'")
+        XCTAssertTrue(responsive, "A nested horizontal scroller should keep its own overflow at normal page scale")
+        _ = try await web.evaluateJavaScript("document.body.classList.add('desktop')")
+        let refitted = await waitForScriptBool(on: web, script: rightEdgeWorks)
+        XCTAssertTrue(refitted)
+
+        let renderWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1024, height: 768),
+                                    styleMask: .borderless, backing: .buffered, defer: false)
+        renderWindow.isReleasedWhenClosed = false
+        defer { renderWindow.close() }
+        session.installModelRenderHost(try XCTUnwrap(renderWindow.contentView))
+        let lease = try session.acquireToolRendering(tabID: id)
+        let originalScale = await waitForScriptBool(on: web, script:
+            "innerWidth === 1024 && getComputedStyle(document.documentElement).zoom === '1'")
+        XCTAssertTrue(originalScale, "A background task should get its ordinary viewport and coordinates")
+        session.releaseToolRendering(tabID: id, lease: lease)
+        let presentedAgain = await waitForScriptBool(on: web, script: "innerWidth === 520 && \(rightEdgeWorks)")
+        XCTAssertTrue(presentedAgain)
+
+        web.loadHTMLString("<!doctype html><style>html{zoom:.9}</style><p>New document</p>", baseURL: nil)
+        let newPage = await waitForScriptBool(on: web, script:
+            "document.querySelector('p') && Math.abs(parseFloat(getComputedStyle(document.documentElement).zoom) - .9) < .01")
+        XCTAssertTrue(newPage, "Navigation should preserve the new document's own zoom")
+    }
+
     /// Use the shipping WebKit UI and native bridge with empty preferences and
     /// an ephemeral browser. Only provider authentication/discovery is simulated.
     @MainActor

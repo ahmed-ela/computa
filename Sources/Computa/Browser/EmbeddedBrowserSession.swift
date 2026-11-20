@@ -224,6 +224,10 @@ final class EmbeddedBrowserSession {
         var isRegularBrowserTab: Bool { !isModelOwned && tab.kimiProfileID == nil }
         var isDesktopHumanRecoverySource: Bool { isRegularBrowserTab && !isToolOwned && !tab.requestsMobileSite }
         var isAvailableToBrowserTools: Bool { isRegularBrowserTab && tab.setupProvider == nil }
+        var fitsPresentedPage: Bool {
+            isAvailableToBrowserTools && !isToolOwned && !tab.requestsMobileSite
+                && presentationHost != nil && view.superview === presentationHost
+        }
         weak var presentationHost: NSView?
         var toolRenderLeases: Set<UUID> = []
         var frameBeforeToolRendering: (frame: NSRect, autoresizing: NSView.AutoresizingMask)?
@@ -2388,11 +2392,13 @@ final class EmbeddedBrowserSession {
         entry.view.autoresizingMask = [.width, .height]
         (entry.view as? EmbeddedModelWebView)?.captureNativeFocus(in: host.window)
         host.addSubview(entry.view)
+        if entry.fitsPresentedPage { EmbeddedBrowserPageFit.start(in: entry.view) }
     }
 
     func detachPresentedTab(_ id: UUID, from host: NSView) {
         guard let entry = entries[id], entry.presentationHost === host else { return }
         if !entry.toolRenderLeases.isEmpty { rememberPresentedFrame(entry, host: host) }
+        if entry.fitsPresentedPage { EmbeddedBrowserPageFit.stop(in: entry.view) }
         entry.presentationHost = nil
         if entry.view.superview === host { entry.view.removeFromSuperview() }
         if entry.needsBackgroundRendering { mountModelView(entry) }
@@ -2450,6 +2456,7 @@ final class EmbeddedBrowserSession {
 
     private func mountModelView(_ entry: Entry) {
         guard let host = modelRenderHost else { return }
+        if entry.fitsPresentedPage { EmbeddedBrowserPageFit.stop(in: entry.view) }
         if !entry.isModelOwned, !entry.isToolOwned, entry.frameBeforeToolRendering == nil {
             entry.frameBeforeToolRendering = (entry.view.frame, entry.view.autoresizingMask)
         }
@@ -3989,6 +3996,7 @@ final class EmbeddedBrowserSession {
                 entry.modelFailedGeneration = entry.tab.documentGeneration
             }
         }
+        if error == nil, entry.fitsPresentedPage { EmbeddedBrowserPageFit.start(in: view) }
         entry.navigation = nil
         if error != nil { entry.geminiRecoveryNavigationStart = nil }
         entry.pendingGeminiRecoveryHTTPFailure = nil
@@ -4039,6 +4047,7 @@ final class EmbeddedBrowserSession {
             entry.toolPopupContext = nil
             entry.tab.isWebInspectorAvailable = entry.isAvailableToBrowserTools && !entry.isToolOwned
         }
+        if entry.fitsPresentedPage { EmbeddedBrowserPageFit.start(in: view) }
         refresh(tabID, view: view, committedNavigation: true)
         emitGeminiPostBlockNativeEvent(entry, .committed)
     }
