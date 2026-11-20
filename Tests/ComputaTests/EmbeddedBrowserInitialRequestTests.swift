@@ -17,6 +17,31 @@ final class EmbeddedBrowserInitialRequestTests: XCTestCase {
         try await compareFactories(order: ["model", "human"], finalStatus: 429)
     }
 
+    func testMobileTabRequestsMobileOnFirstLoadAndRedirectOnlyInThatTab() async throws {
+        let server = try InitialRequestHTTPFixture(finalStatus: 200)
+        let origin = try await server.start()
+        defer { server.stop() }
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let mobile = try session.createTab(requestsMobileSite: true)
+        let desktop = try session.createTab()
+        let mobileView = try XCTUnwrap(session.webView(for: mobile))
+        let desktopView = try XCTUnwrap(session.webView(for: desktop))
+        XCTAssertTrue(mobileView.configuration.websiteDataStore === desktopView.configuration.websiteDataStore)
+        XCTAssertNil(mobileView.url)
+        XCTAssertTrue(server.requests.isEmpty)
+        for (index, id) in [mobile, desktop].enumerated() {
+            let view = try XCTUnwrap(session.webView(for: id))
+            try session.navigate(tabID: id, to: origin.appendingPathComponent("human/start"))
+            try await InitialRequestLoadBoundary(view: view, finalURL: origin.appendingPathComponent("human/final")).wait()
+            let requests = Array(server.requests.dropFirst(index * 2))
+            XCTAssertEqual(requests.map(\.path), ["/human/start", "/human/final"])
+            let jsAgent = try await view.evaluateJavaScript("navigator.userAgent") as? String
+            XCTAssertEqual(jsAgent?.contains("iPhone"), id == mobile)
+            for request in requests { XCTAssertEqual(request.headers["user-agent"], jsAgent) }
+        }
+    }
+
     private func compareFactories(order: [String], finalStatus: Int) async throws {
         let server = try InitialRequestHTTPFixture(finalStatus: finalStatus)
         let origin = try await server.start()
