@@ -86,18 +86,17 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         for width: CGFloat in [423, 360, 860, 520] {
             window.setContentSize(NSSize(width: width, height: 600))
             let fits = await waitForScriptBool(on: web, script: """
-                innerWidth === \(Int(width)) && \(rightEdgeWorks) &&
-                Math.abs(parseFloat(getComputedStyle(document.documentElement).zoom) - Math.min(1, innerWidth/780)) < .01
+                Math.abs(innerWidth - \(Int(max(width, 780)))) <= 1 && \(rightEdgeWorks)
                 """)
             XCTAssertTrue(fits, "Desktop controls should fit and receive pointer input at \(width) points")
         }
 
         _ = try await web.evaluateJavaScript("document.body.classList.remove('desktop')")
         let responsive = await waitForScriptBool(on: web, script:
-            "\(rightEdgeWorks) && getComputedStyle(document.documentElement).zoom === '1'")
+            "innerWidth === 520 && \(rightEdgeWorks)")
         XCTAssertTrue(responsive, "A nested horizontal scroller should keep its own overflow at normal page scale")
         _ = try await web.evaluateJavaScript("document.body.classList.add('desktop')")
-        let refitted = await waitForScriptBool(on: web, script: rightEdgeWorks)
+        let refitted = await waitForScriptBool(on: web, script: "Math.abs(innerWidth - 780) <= 1 && \(rightEdgeWorks)")
         XCTAssertTrue(refitted)
 
         let renderWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1024, height: 768),
@@ -110,13 +109,62 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             "innerWidth === 1024 && getComputedStyle(document.documentElement).zoom === '1'")
         XCTAssertTrue(originalScale, "A background task should get its ordinary viewport and coordinates")
         session.releaseToolRendering(tabID: id, lease: lease)
-        let presentedAgain = await waitForScriptBool(on: web, script: "innerWidth === 520 && \(rightEdgeWorks)")
+        let presentedAgain = await waitForScriptBool(on: web, script: "Math.abs(innerWidth - 780) <= 1 && \(rightEdgeWorks)")
         XCTAssertTrue(presentedAgain)
+
+        web.loadHTMLString("<!doctype html><style>body{margin:0}main{width:100vw}</style><main>Responsive</main>", baseURL: nil)
+        let nextPageFits = await waitForScriptBool(on: web, script:
+            "document.querySelector('main') && innerWidth === 520 && document.documentElement.scrollWidth === 520")
+        XCTAssertTrue(nextPageFits, "The next page should choose its own layout at normal size")
 
         web.loadHTMLString("<!doctype html><style>html{zoom:.9}</style><p>New document</p>", baseURL: nil)
         let newPage = await waitForScriptBool(on: web, script:
-            "document.querySelector('p') && Math.abs(parseFloat(getComputedStyle(document.documentElement).zoom) - .9) < .01")
+            "innerWidth === 520 && document.querySelector('p') && Math.abs(parseFloat(getComputedStyle(document.documentElement).zoom) - .9) < .01")
         XCTAssertTrue(newPage, "Navigation should preserve the new document's own zoom")
+    }
+
+    @MainActor
+    func testFittedInboxUsesFullHeightAndCanScrollToItsLastRow() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createTab()
+        let web = try XCTUnwrap(session.webView(for: id))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 423, height: 527),
+                              styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        try session.presentTab(id, in: XCTUnwrap(window.contentView))
+        web.loadHTMLString("""
+            <!doctype html><style>
+            html,body { margin:0; overflow:hidden } body { min-width:780px }
+            main { display:flex; flex-direction:column } section { flex:1; overflow:auto }
+            article { height:3000px } footer { height:32px }
+            #css-viewport { position:absolute; top:0; width:1px; height:100dvh; visibility:hidden }
+            </style><div id="css-viewport"></div><main><section><article></article><button>Last row</button></section><footer>Footer</footer></main>
+            <script>
+            const sizeInbox = () => document.querySelector('main').style.height = innerHeight + 'px';
+            addEventListener('resize', sizeInbox); sizeInbox();
+            </script>
+            """, baseURL: nil)
+        for (width, height) in [(423, 527), (423, 700), (360, 527), (850, 600)] {
+            window.setContentSize(NSSize(width: width, height: height))
+            let scale = min(1, Double(width) / 780)
+            let reachesBottom = await waitForScriptBool(on: web, script: """
+                (() => {
+                    const section = document.querySelector('section'), footer = document.querySelector('footer');
+                    if (!section || !footer) return false;
+                    section.scrollTop = section.scrollHeight;
+                    const row = document.querySelector('button'), r = row.getBoundingClientRect();
+                    const cssHeight = document.querySelector('#css-viewport').getBoundingClientRect().height;
+                    return Math.abs(innerHeight * \(scale) - \(height)) <= 1
+                        && Math.abs(cssHeight * \(scale) - \(height)) <= 1
+                        && Math.abs(footer.getBoundingClientRect().bottom * \(scale) - \(height)) <= 1
+                        && document.elementFromPoint(20, innerHeight - 2) === footer && section.scrollTop > 0
+                        && document.elementFromPoint(r.x + r.width/2, r.y + r.height/2) === row;
+                })()
+                """)
+            XCTAssertTrue(reachesBottom, "Last row and footer should be reachable in a \(width) × \(height) pane")
+        }
     }
 
     /// Use the shipping WebKit UI and native bridge with empty preferences and

@@ -1,72 +1,113 @@
 import WebKit
 
-/// A presentation-only stylesheet for the visible desktop tab. All measurements use the
-/// top document's geometry. No page contents or messages cross into the native app.
+/// Only the visible desktop tab fits to the pane. WebKit's native zoom updates both
+/// viewport dimensions, including those read by JavaScript to size an inner scroller.
 @MainActor
-enum EmbeddedBrowserPageFit {
+final class EmbeddedBrowserPageFit: NSObject, WKScriptMessageHandler {
     private static let world = WKContentWorld.world(name: "computa.browser.page-fit")
+    private let handler = "fit" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+    private weak var view: WKWebView?
+    private var measurement = 0
 
-    static func start(in view: WKWebView) {
-        view.evaluateJavaScript(startScript, in: nil, in: world, completionHandler: nil)
+    init(view: WKWebView) {
+        self.view = view
+        super.init()
+        view.configuration.userContentController.add(self, contentWorld: Self.world, name: handler)
     }
 
-    static func stop(in view: WKWebView) {
-        view.evaluateJavaScript("globalThis.stopPageFit?.()", in: nil, in: world, completionHandler: nil)
+    func observeDocument() {
+        guard let view else { return }
+        view.callAsyncJavaScript(Self.observeScript, arguments: ["handler": handler],
+                                 in: nil, in: Self.world, completionHandler: nil)
+        measure()
     }
 
-    private static let startScript = """
-    (() => {
-        if (globalThis.stopPageFit || document.contentType !== 'text/html') return;
-        const root = document.documentElement;
-        if (!root) return;
-        let sheet, rule, observedBody, timer;
-        const minimumScale = 0.45;
-        function fit() {
+    func stop() {
+        guard let view else { return }
+        self.view = nil
+        view.configuration.userContentController.removeScriptMessageHandler(forName: handler, contentWorld: Self.world)
+        view.callAsyncJavaScript("if (globalThis.fitOwner === handler) globalThis.stopPageFit()",
+                                 arguments: ["handler": handler], in: nil, in: Self.world, completionHandler: nil)
+        view.pageZoom = 1
+    }
+
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let view, message.webView === view, message.frameInfo.isMainFrame else { return }
+        measure()
+    }
+
+    private func measure() {
+        guard let view, view.bounds.width >= 1 else { return }
+        let width = view.bounds.width
+        measurement += 1
+        let current = measurement
+        view.callAsyncJavaScript(Self.measureScript, arguments: ["paneWidth": width],
+                                 in: nil, in: Self.world) { [weak self] result in
+            guard let self, let view = self.view, measurement == current, abs(view.bounds.width - width) < 0.5,
+                  case let .success(value) = result, let scale = value as? Double, scale.isFinite else { return }
+            let zoom = min(1, max(0.45, scale))
+            if abs(view.pageZoom - zoom) > 0.001 { view.pageZoom = zoom }
+        }
+    }
+
+    private static let measureScript = """
+    const root = document.documentElement, body = document.body;
+    if (document.contentType !== 'text/html' || !root || !body || !innerWidth ||
+        parseFloat(getComputedStyle(root).zoom) !== 1) return 1;
+    const inverse = Math.max(1, innerWidth / paneWidth);
+    const viewport = root.clientWidth / inverse;
+    // Measure the page at its natural width even when WebKit is already zoomed out.
+    // The calibration sheet exists only for this synchronous layout read, never for paint.
+    let sheet;
+    try {
+        if (inverse > 1.001) {
+            sheet = new CSSStyleSheet();
+            sheet.insertRule(':root { zoom: ' + inverse + ' !important }');
+            document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+        }
+        const content = Math.max(root.scrollWidth / inverse, body.scrollWidth);
+        return viewport > 0 && content > viewport + 1 ? viewport / content : 1;
+    } finally {
+        if (sheet) document.adoptedStyleSheets = document.adoptedStyleSheets.filter(s => s !== sheet);
+    }
+    """
+
+    private static let observeScript = """
+    if (globalThis.fitOwner === handler) return;
+    globalThis.stopPageFit?.();
+    if (document.contentType !== 'text/html' || !document.documentElement) return;
+    let timer, body;
+    function schedule() {
+        if (timer !== undefined) return;
+        timer = setTimeout(() => {
             timer = undefined;
-            const body = document.body;
-            if (!body || !root.isConnected) return;
-            if (body !== observedBody) {
-                if (observedBody) sizes.unobserve(observedBody);
-                sizes.observe(body);
-                observedBody = body;
+            if (body !== document.body) {
+                if (body) sizes.unobserve(body);
+                body = document.body;
+                if (body) sizes.observe(body);
             }
-            // Measure at the site's own scale and restore the fit before the next paint.
-            // Otherwise the result of the previous fit becomes the input to the next one.
-            if (sheet) sheet.disabled = true;
-            const viewport = root.clientWidth;
-            const content = Math.max(root.scrollWidth, body.scrollWidth);
-            if (!viewport || content <= viewport + 1 || parseFloat(getComputedStyle(root).zoom) !== 1) return;
-            if (!sheet) {
-                sheet = new CSSStyleSheet();
-                sheet.insertRule(':root {}');
-                rule = sheet.cssRules[0];
-                document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
-            }
-            rule.style.zoom = Math.max(minimumScale, viewport / content);
-            sheet.disabled = false;
-        }
-        function schedule() {
-            if (timer === undefined) timer = setTimeout(fit, 32);
-        }
-        const sizes = new ResizeObserver(schedule);
-        sizes.observe(root);
-        const changes = new MutationObserver(schedule);
-        changes.observe(root, {subtree: true, childList: true, attributes: true, attributeFilter: ['style', 'class', 'hidden']});
-        window.addEventListener('resize', schedule);
-        document.addEventListener('load', schedule, true);
-        function stop() {
-            clearTimeout(timer);
-            sizes.disconnect();
-            changes.disconnect();
-            window.removeEventListener('resize', schedule);
-            window.removeEventListener('pagehide', stop);
-            document.removeEventListener('load', schedule, true);
-            if (sheet) document.adoptedStyleSheets = document.adoptedStyleSheets.filter(s => s !== sheet);
-            delete globalThis.stopPageFit;
-        }
-        globalThis.stopPageFit = stop;
-        window.addEventListener('pagehide', stop);
-        fit();
-    })()
+            window.webkit.messageHandlers[handler].postMessage(null);
+        }, 32);
+    }
+    const sizes = new ResizeObserver(schedule);
+    sizes.observe(document.documentElement);
+    const changes = new MutationObserver(schedule);
+    changes.observe(document.documentElement, {subtree: true, childList: true, attributes: true, attributeFilter: ['style', 'class', 'hidden']});
+    window.addEventListener('resize', schedule);
+    document.addEventListener('load', schedule, true);
+    function stop() {
+        clearTimeout(timer);
+        sizes.disconnect();
+        changes.disconnect();
+        window.removeEventListener('resize', schedule);
+        window.removeEventListener('pagehide', stop);
+        document.removeEventListener('load', schedule, true);
+        delete globalThis.stopPageFit;
+        delete globalThis.fitOwner;
+    }
+    globalThis.fitOwner = handler;
+    globalThis.stopPageFit = stop;
+    window.addEventListener('pagehide', stop);
+    schedule();
     """
 }
