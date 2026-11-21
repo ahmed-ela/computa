@@ -4088,7 +4088,7 @@ final class WebModelServerTests: XCTestCase {
         let kimi = syntheticKimiChoice.modelID
         let deepSeek = WebsiteModeChoice(deepSeekMode: .chat).requestID
         let cases = [
-            (kimi, deepSeek, "In Computa's browser, choose Model sign-ins, then Kimi sign-in. Sign in on that tab, then choose Verify Kimi sign-in. Start a new task once verification succeeds."),
+            (kimi, deepSeek, "Open Kimi from the model picker. Sign in on its setup tab, then choose Load models. Start a new task once your models appear."),
             (deepSeek, kimi, "Sign in to DeepSeek in a regular tab in Computa's browser. With Computa idle, return to the DeepSeek chat home at chat.deepseek.com so Computa can verify your sign-in before you start a new task."),
         ]
         let legacy = #"{"error":{"code":"sign_in_required","message":"Sign in to the selected AI website in Computa's built-in browser, then refresh website models before retrying.","param":null,"required_action":"sign_in","retryable":false,"type":"model_error"}}"#

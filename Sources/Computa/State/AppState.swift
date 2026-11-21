@@ -9,6 +9,11 @@ enum WebsiteModelSetupStatus: Equatable {
     case loaded(Int)
     case signInRequired(String)
     case failed(String)
+
+    var isLoaded: Bool {
+        if case .loaded = self { return true }
+        return false
+    }
 }
 
 private struct ActiveTurnTiming {
@@ -120,7 +125,6 @@ final class AppState {
     var isAPIProvidersPresented = false
     private(set) var websiteModelsRefreshing = false
     private(set) var websiteModelsError: String?
-    private(set) var kimiModelSignInMessage: String?
     var showToolPayloads = false
     var connectionState: RuntimeConnectionState = .disconnected
     var automationPermissions: AutomationPermissionSnapshot
@@ -515,35 +519,17 @@ final class AppState {
 
     var canConfigureKimiProfile: Bool { canRefreshWebsiteModels && !websiteModelsRefreshing }
 
-    private static let kimiModelSignInInstructions =
-        "Sign in on the Kimi sign-in tab, then choose Verify Kimi sign-in from Model sign-ins."
-
-    func openKimiModelSignIn() {
-        guard canConfigureKimiProfile else { return }
-        let previous = browserSession.kimiModelProfileID
+    func switchKimiSignInProfile(from tabID: UUID) {
+        guard canConfigureKimiProfile, browserSession.selectedTabID == tabID,
+              browserSession.setupTab(for: .kimi)?.id == tabID else { return }
         do {
-            _ = try browserSession.openKimiModelSignIn()
-            if previous != browserSession.kimiModelProfileID || kimiModelSignInMessage == nil {
-                kimiModelSignInMessage = Self.kimiModelSignInInstructions
-            }
+            try browserSession.openKimiSetup(usingDedicatedProfile: !browserSession.isKimiProfileTab(tabID))
+            // The previous account's model choices do not verify this profile.
+            websiteModelChoices.removeAll { $0.provider == "kimi" }
+            WebsiteModelCatalog.save(websiteModelChoices, to: preferences)
+            websiteModelCheckResults.removeValue(forKey: "kimi")
         } catch {
-            kimiModelSignInMessage = error.localizedDescription
-        }
-    }
-
-    func useSharedKimiModelProfile() {
-        guard canConfigureKimiProfile else { return }
-        browserSession.useSharedKimiModelProfile()
-        kimiModelSignInMessage = nil
-    }
-
-    func verifyKimiModelSignIn() async {
-        guard canConfigureKimiProfile, let profile = browserSession.kimiModelProfileID else { return }
-        let checking = "Checking Kimi sign-in…"
-        kimiModelSignInMessage = checking
-        await refreshWebsiteModels(provider: "kimi")
-        if browserSession.kimiModelProfileID == profile, kimiModelSignInMessage == checking {
-            kimiModelSignInMessage = "Kimi sign-in verification was interrupted. Try again when Computa is idle."
+            websiteModelCheckResults["kimi"] = .failed(error.localizedDescription)
         }
     }
 
@@ -811,9 +797,6 @@ final class AppState {
                         WebsiteModelCatalog.save(self.websiteModelChoices, to: self.preferences)
                     }
                     self.websiteModelCheckResults.removeValue(forKey: provider)
-                    if provider == "kimi", self.browserSession.kimiModelProfileID != nil {
-                        self.kimiModelSignInMessage = "Kimi sign-in verified for this profile."
-                    }
                     errors.removeAll { $0.hasPrefix(WebsiteModelCatalog.providerLabel(provider) + ": ") }
                     self.retireWebsiteModelSelections()
                     if intent.signInRecovery != nil, self.canRefreshWebsiteModels {
@@ -857,11 +840,8 @@ final class AppState {
                             WebsiteModelCatalog.save(self.websiteModelChoices, to: self.preferences)
                         }
                     }
-                    if provider == "kimi", self.browserSession.kimiModelProfileID != nil {
-                        if (error as? EmbeddedWebModelTransport.Failure) == .signInRequired {
-                            message = Self.kimiModelSignInInstructions
-                        }
-                        self.kimiModelSignInMessage = message
+                    if provider == "kimi", (error as? EmbeddedWebModelTransport.Failure) == .signInRequired {
+                        message = "Sign in to Kimi on the setup tab, then choose Load models."
                     }
                     if let candidate = intent.candidate {
                         self.browserSession.recordHumanVerificationRecovery(candidate, phase: .blocked,
