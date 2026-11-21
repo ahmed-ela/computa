@@ -136,12 +136,15 @@ struct EmbeddedBrowserPane: View {
                 }
             }
 
-            Button(action: createTab) {
+            Button { createTab() } label: {
                 Image(systemName: "plus")
                     .frame(width: 24, height: 24)
             }
             .keyboardShortcut("t", modifiers: .command)
-            .help("New tab (⌘T)")
+            .contextMenu {
+                Button("New Mobile Tab") { createTab(requestsMobileSite: true) }
+            }
+            .help("New tab (⌘T). Control-click for a mobile tab.")
             .accessibilityLabel("New browser tab")
             .accessibilityIdentifier("browser-new-tab")
 
@@ -276,14 +279,14 @@ struct EmbeddedBrowserPane: View {
         VStack(spacing: 10) {
             Image(systemName: "globe").font(.system(size: 32, weight: .light))
                 .foregroundStyle(.secondary)
-            Text(hasTab ? "New tab" : "Your browser, inside Computa")
+            Text(hasTab ? (selectedTab?.requestsMobileSite == true ? "New mobile tab" : "New tab") : "Your browser, inside Computa")
                 .font(.headline)
             Text("Search or enter a website address to get started.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
             if !hasTab {
-                Button("New tab", action: createTab)
+                Button("New tab") { createTab() }
                     .buttonStyle(.bordered)
                     .padding(.top, 4)
             }
@@ -301,10 +304,10 @@ struct EmbeddedBrowserPane: View {
         address = selectedTab?.url?.absoluteString ?? ""
     }
 
-    private func createTab() {
+    private func createTab(requestsMobileSite: Bool = false) {
         guard !isInteractionBlocked else { return }
         do {
-            _ = try session.createTab()
+            _ = try session.createTab(requestsMobileSite: requestsMobileSite)
             addressError = nil
             address = ""
             // Only an explicit human new-tab action changes editor focus.
@@ -337,6 +340,14 @@ private struct EmbeddedBrowserTabButton: View {
 
     private var pageTitle: String { tab.title.isEmpty ? "New tab" : tab.title }
     private var displayTitle: String { isKimiProfile ? "Kimi sign-in" : pageTitle }
+    private var tabIcon: String {
+        if tab.requestsMobileSite { return "iphone" }
+        return isKimiProfile ? "person.crop.circle" : "globe"
+    }
+    private var tabDescription: String {
+        if tab.requestsMobileSite { return "Mobile tab, " + pageTitle }
+        return isKimiProfile ? "Kimi sign-in, " + pageTitle : pageTitle
+    }
 
     var body: some View {
         HStack(spacing: 4) {
@@ -345,7 +356,7 @@ private struct EmbeddedBrowserTabButton: View {
                     if tab.isLoading {
                         ProgressView().controlSize(.mini).frame(width: 12, height: 12)
                     } else {
-                        Image(systemName: isKimiProfile ? "person.crop.circle" : "globe").font(.caption)
+                        Image(systemName: tabIcon).font(.caption)
                             .foregroundStyle(.secondary)
                     }
                     Text(displayTitle)
@@ -355,8 +366,8 @@ private struct EmbeddedBrowserTabButton: View {
                 }
                 .contentShape(Rectangle())
             }
-            .help(isKimiProfile ? "Kimi sign-in profile — \(pageTitle)" : pageTitle)
-            .accessibilityLabel(isKimiProfile ? "Kimi sign-in, \(pageTitle)" : pageTitle)
+            .help(tabDescription)
+            .accessibilityLabel(tabDescription)
             .accessibilityValue(selected ? "Selected" : "")
 
             Button(action: onClose) { Image(systemName: "xmark").font(.system(size: 9, weight: .semibold)) }
@@ -384,6 +395,9 @@ private struct EmbeddedBrowserPageHost: NSViewRepresentable {
 
     func makeNSView(context: Context) -> EmbeddedBrowserPageContainer {
         let view = EmbeddedBrowserPageContainer()
+        // AppKit can include the surrounding split pane in a child's visibleRect
+        // unless the page host clips at its own bounds.
+        view.clipsToBounds = true
         view.update(session: session, tabID: tabID, webView: webView, interactionBlocked: isInteractionBlocked)
         return view
     }

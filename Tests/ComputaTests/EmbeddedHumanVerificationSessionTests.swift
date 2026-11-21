@@ -192,6 +192,20 @@ final class EmbeddedHumanVerificationSessionTests: XCTestCase {
         XCTAssertEqual(session.tabs.map(\.id), [human])
     }
 
+    func testMobileInboxTabCannotSettleADesktopProviderCheckpoint() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        session.recordHumanVerificationRequired(provider: "gemini")
+        let checkpoint = try XCTUnwrap(session.savedHumanVerificationCheckpointIDs["gemini"])
+        var candidates: [EmbeddedBrowserSession.HumanVerificationRecoveryCandidate] = []
+        session.onHumanVerificationRecoveryCandidate = { candidates.append($0) }
+        let tab = try session.createTab(requestsMobileSite: true)
+        let page = try XCTUnwrap(session.webView(for: tab))
+        try await loadLocalFixture(page, at: XCTUnwrap(URL(string: "https://gemini.google.com/app")))
+        XCTAssertTrue(candidates.isEmpty)
+        XCTAssertEqual(session.savedHumanVerificationCheckpointIDs["gemini"], checkpoint)
+    }
+
     func testSettledHumanRecoveryIsOncePerCheckpointAndCommittedDocumentWithoutClearance() async throws {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }

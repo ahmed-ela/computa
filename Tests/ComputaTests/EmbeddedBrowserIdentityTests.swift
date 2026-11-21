@@ -82,9 +82,19 @@ final class EmbeddedBrowserIdentityTests: XCTestCase {
 
     @MainActor
     func testPopupRetainsBrowserIdentityAndProfileWithoutCustomUserAgent() async throws {
+        try await assertPopupIdentity(mobile: false)
+    }
+
+    @MainActor
+    func testMobileTabPopupRetainsMobileIdentityAndProfile() async throws {
+        try await assertPopupIdentity(mobile: true)
+    }
+
+    @MainActor
+    private func assertPopupIdentity(mobile: Bool) async throws {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }
-        let openerID = try session.createTab()
+        let openerID = try session.createTab(requestsMobileSite: mobile)
         let opener = try XCTUnwrap(session.webView(for: openerID))
         opener.loadHTMLString("<p id='identity-ready'>Ready</p><a id='identity-popup' target='_blank' href='about:blank'>Open</a>", baseURL: nil)
         let loadDeadline = ContinuousClock.now + .seconds(5)
@@ -102,7 +112,8 @@ final class EmbeddedBrowserIdentityTests: XCTestCase {
         let popupID = try XCTUnwrap(session.tabs.first(where: { $0.id != openerID })).id
         let popup = try XCTUnwrap(session.webView(for: popupID))
         XCTAssertEqual(popup.configuration.applicationNameForUserAgent, EmbeddedBrowserIdentity.currentApplicationName)
-        XCTAssertTrue(popup.customUserAgent?.isEmpty != false, "No popup-specific user-agent override")
+        XCTAssertEqual(popup.customUserAgent, opener.customUserAgent)
+        XCTAssertEqual(session.humanTab(id: popupID)?.requestsMobileSite, mobile)
         let popupUserAgent = try await userAgent(popup)
         let openerUserAgent = try await userAgent(opener)
         XCTAssertEqual(popupUserAgent, openerUserAgent)

@@ -4,6 +4,10 @@ import WebKit
 /// Browser compatibility identity for the system WebKit used by every embedded tab.
 /// Keep WebKit's platform/engine prefix and add only corroborated product tokens.
 enum EmbeddedBrowserIdentity {
+    // The Safari Web Inspector iPhone preset verified with the mobile Gmail inbox.
+    // macOS WKWebpagePreferences.preferredContentMode alone leaves the desktop UA on the wire.
+    static let mobileSiteUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.4 Mobile/15E148 Safari/604.1"
+
     struct Product: Equatable, Sendable {
         let identifier: String
         let version: String

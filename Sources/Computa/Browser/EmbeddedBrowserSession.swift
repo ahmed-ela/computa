@@ -8,6 +8,7 @@ import WebKit
 final class EmbeddedBrowserTab: Identifiable {
     let id: UUID
     let isPopup: Bool
+    let requestsMobileSite: Bool
     fileprivate let kimiProfileID: UUID?
     fileprivate(set) var setupProvider: EmbeddedWebModelTransport.Provider?
     fileprivate(set) var title = "New tab"
@@ -22,7 +23,8 @@ final class EmbeddedBrowserTab: Identifiable {
     fileprivate(set) var isWebInspectorEnabled = false
     fileprivate(set) var isWebInspectorAvailable = false
 
-    fileprivate init(id: UUID = UUID(), isPopup: Bool = false, kimiProfileID: UUID? = nil) {
+    fileprivate init(id: UUID = UUID(), isPopup: Bool = false, kimiProfileID: UUID? = nil, requestsMobileSite: Bool = false) {
+        self.requestsMobileSite = requestsMobileSite
         self.id = id; self.isPopup = isPopup; self.kimiProfileID = kimiProfileID
     }
 }
@@ -218,7 +220,21 @@ final class EmbeddedBrowserSession {
         let navigationChanges = EmbeddedModelChangeChannel(ownerToken: UUID().uuidString)
         let popupOpenerTabID: UUID?
         var isRegularBrowserTab: Bool { !isModelOwned && tab.kimiProfileID == nil }
+        var isDesktopHumanRecoverySource: Bool { isRegularBrowserTab && !isToolOwned && !tab.requestsMobileSite }
         var isAvailableToBrowserTools: Bool { isRegularBrowserTab && tab.setupProvider == nil }
+        private var pageFit: EmbeddedBrowserPageFit?
+        func fitPresentedPage() {
+            guard isAvailableToBrowserTools, !isToolOwned, !tab.requestsMobileSite,
+                  let presentationHost, view.superview === presentationHost else { return }
+            if pageFit == nil { pageFit = EmbeddedBrowserPageFit(view: view) }
+            pageFit?.observeDocument()
+        }
+
+        func stopFittingPage() {
+            pageFit?.stop()
+            pageFit = nil
+        }
+
         weak var presentationHost: NSView?
         var toolRenderLeases: Set<UUID> = []
         var frameBeforeToolRendering: (frame: NSRect, autoresizing: NSView.AutoresizingMask)?
@@ -461,7 +477,7 @@ final class EmbeddedBrowserSession {
 
     func isProviderSignInRecoveryCandidateCurrent(_ candidate: ProviderSignInRecoveryCandidate) -> Bool {
         guard !isShutdown,
-              let entry = entries[candidate.tabID], entry.isRegularBrowserTab, !entry.isToolOwned,
+              let entry = entries[candidate.tabID], entry.isDesktopHumanRecoverySource,
               !entry.recoveryToolUsed, entry.toolPopupContext == nil,
               entry.humanCommittedDocumentID == candidate.committedDocumentID,
               entry.tab.documentID == candidate.documentID, entry.tab.documentGeneration == candidate.documentGeneration,
@@ -521,7 +537,7 @@ final class EmbeddedBrowserSession {
     }
 
     private func isHumanVerificationRecoverySourceCurrent(_ candidate: HumanVerificationRecoveryCandidate) -> Bool {
-        guard !isShutdown, let entry = entries[candidate.tabID], entry.isRegularBrowserTab, !entry.isToolOwned,
+        guard !isShutdown, let entry = entries[candidate.tabID], entry.isDesktopHumanRecoverySource,
               !entry.recoveryToolUsed, entry.toolPopupContext == nil,
               entry.humanCommittedDocumentID == candidate.committedDocumentID,
               entry.tab.documentID == candidate.documentID, entry.tab.documentGeneration == candidate.documentGeneration,
@@ -737,12 +753,12 @@ final class EmbeddedBrowserSession {
     }
 
     @discardableResult
-    func createTab(url: URL? = nil, select: Bool = true) throws -> UUID {
-        try createTab(url: url, select: select, modelOwned: false)
+    func createTab(url: URL? = nil, select: Bool = true, requestsMobileSite: Bool = false) throws -> UUID {
+        try createTab(url: url, select: select, modelOwned: false, requestsMobileSite: requestsMobileSite)
     }
 
     private func createTab(url: URL? = nil, select: Bool, modelOwned: Bool, toolOwned: Bool = false,
-                           isolatedChatGPTStore: WKWebsiteDataStore? = nil, kimiProfile: KimiProfile? = nil) throws -> UUID {
+                           requestsMobileSite: Bool = false, isolatedChatGPTStore: WKWebsiteDataStore? = nil, kimiProfile: KimiProfile? = nil) throws -> UUID {
         do {
             guard !isShutdown else { throw Failure.sessionClosed }
             guard tabs.count + pendingChatGPTInferenceCookiePreparationCount < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
@@ -772,7 +788,8 @@ final class EmbeddedBrowserSession {
             }
             configuration.defaultWebpagePreferences.allowsContentJavaScript = true
             let entry = try registerTab(configuration: configuration, select: select, modelOwned: modelOwned, toolOwned: toolOwned,
-                                        usesIsolatedChatGPTProfile: isolatedChatGPTStore != nil, kimiProfileID: kimiProfile?.id)
+                                        usesIsolatedChatGPTProfile: isolatedChatGPTStore != nil, kimiProfileID: kimiProfile?.id,
+                                        requestsMobileSite: requestsMobileSite)
             if toolOwned { mountModelView(entry) }
             // Empty tabs intentionally do not load a homepage or trigger any network request.
             if let url { try navigate(tabID: entry.tab.id, to: url) }
@@ -785,14 +802,14 @@ final class EmbeddedBrowserSession {
 
     private func registerTab(configuration: WKWebViewConfiguration, select: Bool, modelOwned: Bool, toolOwned: Bool = false,
                              popupOpenerTabID: UUID? = nil, usesIsolatedChatGPTProfile: Bool = false,
-                             kimiProfileID: UUID? = nil) throws -> Entry {
+                             kimiProfileID: UUID? = nil, requestsMobileSite: Bool = false) throws -> Entry {
         guard !isShutdown else { throw Failure.sessionClosed }
         guard exclusiveCookieMaintenance == nil else { throw Failure.cookieMaintenancePending }
         guard tabs.count + pendingChatGPTInferenceCookiePreparationCount < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
         // Apply before construction/initial navigation for human, tool, model
         // and popup tabs. Keep WebKit's own platform/engine user-agent prefix.
         configuration.applicationNameForUserAgent = EmbeddedBrowserIdentity.currentApplicationName
-        let tab = EmbeddedBrowserTab(isPopup: popupOpenerTabID != nil, kimiProfileID: kimiProfileID)
+        let tab = EmbeddedBrowserTab(isPopup: popupOpenerTabID != nil, kimiProfileID: kimiProfileID, requestsMobileSite: requestsMobileSite)
         let view: WKWebView
         #if DEBUG
         if modelOwned, let factory = modelViewFactoryForTesting { view = factory(configuration) }
@@ -804,6 +821,7 @@ final class EmbeddedBrowserSession {
         view = EmbeddedModelWebView(frame: modelOwned || toolOwned ? NSRect(x: 0, y: 0, width: 1_024, height: 768) : .zero,
                                     configuration: configuration)
         #endif
+        if requestsMobileSite { view.customUserAgent = EmbeddedBrowserIdentity.mobileSiteUserAgent }
         if kimiProfileID != nil, view.configuration.websiteDataStore !== configuration.websiteDataStore {
             throw Failure.kimiProfileUnavailable
         }
@@ -848,7 +866,8 @@ final class EmbeddedBrowserSession {
             // Preserve WebKit's configuration, opener and initial navigation.
             // Registration adds the same browser identity; never load again.
             let popup = try registerTab(configuration: configuration, select: true, modelOwned: false,
-                                        popupOpenerTabID: tabID, kimiProfileID: opener.tab.kimiProfileID)
+                                        popupOpenerTabID: tabID, kimiProfileID: opener.tab.kimiProfileID,
+                                        requestsMobileSite: opener.tab.requestsMobileSite)
             popup.tab.setupProvider = opener.tab.setupProvider
             if popup.tab.setupProvider != nil { popup.tab.isWebInspectorAvailable = false }
             return popup.view
@@ -879,6 +898,7 @@ final class EmbeddedBrowserSession {
             || entry.geminiDiagnosticIncident != nil {
             captureGeminiCAPTCHA(tabID: id, view: entry.view, trigger: .beforeClose)
         }
+        entry.stopFittingPage()
         entries.removeValue(forKey: id)
         entry.toolRenderLeases.removeAll()
         entry.frameBeforeToolRendering = nil
@@ -2386,11 +2406,13 @@ final class EmbeddedBrowserSession {
         entry.view.autoresizingMask = [.width, .height]
         (entry.view as? EmbeddedModelWebView)?.captureNativeFocus(in: host.window)
         host.addSubview(entry.view)
+        entry.fitPresentedPage()
     }
 
     func detachPresentedTab(_ id: UUID, from host: NSView) {
         guard let entry = entries[id], entry.presentationHost === host else { return }
         if !entry.toolRenderLeases.isEmpty { rememberPresentedFrame(entry, host: host) }
+        entry.stopFittingPage()
         entry.presentationHost = nil
         if entry.view.superview === host { entry.view.removeFromSuperview() }
         if entry.needsBackgroundRendering { mountModelView(entry) }
@@ -2448,6 +2470,7 @@ final class EmbeddedBrowserSession {
 
     private func mountModelView(_ entry: Entry) {
         guard let host = modelRenderHost else { return }
+        entry.stopFittingPage()
         if !entry.isModelOwned, !entry.isToolOwned, entry.frameBeforeToolRendering == nil {
             entry.frameBeforeToolRendering = (entry.view.frame, entry.view.autoresizingMask)
         }
@@ -3867,7 +3890,7 @@ final class EmbeddedBrowserSession {
     fileprivate func recordGeminiRecoveryHTTPFailure(_ response: URLResponse, isMainFrame: Bool,
                                                      view: WKWebView, tabID: UUID) {
         guard !isShutdown, isMainFrame, let entry = entries[tabID], entry.view === view,
-              entry.isRegularBrowserTab, !entry.isToolOwned, let navigation = entry.navigation,
+              entry.isDesktopHumanRecoverySource, let navigation = entry.navigation,
               entry.recoveryCommittedGeneration != entry.tab.documentGeneration,
               let response = response as? HTTPURLResponse, (400..<600).contains(response.statusCode),
               let url = response.url, EmbeddedHumanVerificationStore.recoveryProvider(forTrustedHumanURL: url) == "gemini" else { return }
@@ -3949,7 +3972,7 @@ final class EmbeddedBrowserSession {
         if navigation != nil {
             if entry.isModelOwned {
                 entry.modelNavigationGeneration = entry.tab.documentGeneration
-            } else if entry.isRegularBrowserTab, !entry.isToolOwned,
+            } else if entry.isDesktopHumanRecoverySource,
                       let checkpointID = savedHumanVerificationCheckpointIDs["gemini"] {
                 // Title and same-document URL changes cannot pair an older
                 // landing page with a checkpoint seen after navigation started.
@@ -3987,6 +4010,7 @@ final class EmbeddedBrowserSession {
                 entry.modelFailedGeneration = entry.tab.documentGeneration
             }
         }
+        if error == nil { entry.fitPresentedPage() }
         entry.navigation = nil
         if error != nil { entry.geminiRecoveryNavigationStart = nil }
         entry.pendingGeminiRecoveryHTTPFailure = nil
@@ -4037,6 +4061,9 @@ final class EmbeddedBrowserSession {
             entry.toolPopupContext = nil
             entry.tab.isWebInspectorAvailable = entry.isAvailableToBrowserTools && !entry.isToolOwned
         }
+        // Let the replacement document resolve its media queries at normal size first.
+        entry.stopFittingPage()
+        entry.fitPresentedPage()
         refresh(tabID, view: view, committedNavigation: true)
         emitGeminiPostBlockNativeEvent(entry, .committed)
     }
