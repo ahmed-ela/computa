@@ -3372,7 +3372,7 @@ actor WebModelServer {
                       context["submittedPromptFingerprint"] as? String == session.submittedPromptFingerprint,
                       receiptInteger(context["responseCount"], range: 0...0) == 0 else { throw Failure.invalidRequest }
             } else {
-                guard session.provider == "chatgpt", session.modelChoice?.chatGPTPower != nil,
+                guard session.provider == "chatgpt", session.modelChoice?.isSelectable == true,
                       session.resolvedSelection != nil, snapshot["modelVerificationPendingReason"] == nil,
                       (try? WebsiteProductModeEvidence.parse(snapshot["productModeEvidence"], requireTemporary: true)) != nil else {
                     throw Failure.invalidRequest

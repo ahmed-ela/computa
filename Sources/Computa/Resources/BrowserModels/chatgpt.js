@@ -397,8 +397,10 @@ function websiteChatPickerState() {
   const metadataDisabled = node => !!node && (node.disabled || node.getAttribute('disabled') !== null
     || !!node.closest('[disabled], [aria-disabled="true"]'));
   const rawValue = physicalSlider?.getAttribute('aria-valuenow');
+  const rawMax = physicalSlider?.getAttribute('aria-valuemax');
+  const maxPower = /^[0-4]$/.test(rawMax || '') ? Number(rawMax) : null;
   const shapePowerIndex = physicalSlider && physicalSlider.tagName.toLowerCase() === 'span'
-    && physicalSlider.getAttribute('aria-valuemin') === '0' && physicalSlider.getAttribute('aria-valuemax') === '4'
+    && physicalSlider.getAttribute('aria-valuemin') === '0' && maxPower !== null && Number(rawValue) <= maxPower
     && physicalSlider.getAttribute('aria-orientation') === 'horizontal' && /^[0-4]$/.test(rawValue || '')
     ? Number(rawValue) : null;
   const recognizedPowerIndex = metadataScoped(slider) ? shapePowerIndex : null;
@@ -428,7 +430,7 @@ function websiteChatPickerState() {
     controls: familyControls.filter(control => control.choice), choices: [], selected: null, evidence: null,
     familyControls, offered: plain.map(choice => choice.label), newest,
     checkedFamily: checked.length === 1 && websiteChatFamilyValid(checked[0].choice) ? checked[0].choice : null,
-    powerItem, slider, powerIndex, powerUnavailable, power: powerIndex === null ? null : websiteChatPowers[powerIndex],
+    powerItem, slider, powerIndex, maxPower, powerUnavailable, power: powerIndex === null ? null : websiteChatPowers[powerIndex],
     powerDiagnostic: {
       physicalItemCount: physicalPowerItems.length, physicalSliderCount: physicalSliders.length,
       itemVisible: !!powerItem, itemEnabled: enabled(powerItem), sliderPhysical: physical(physicalSlider),
@@ -1473,6 +1475,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     if (!mutable && startingPower !== desiredPower) return failure('model_mismatch');
     if (mutable) {
       if (powerState.mode !== 'power') return failure('model_unverified');
+      if (desiredPower > powerState.maxPower) return failure('model_unavailable');
       powerState = await changePower(desiredPower);
       headerExpected = websiteChatPowers[desiredPower];
     }
@@ -1570,7 +1573,13 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       && websiteChatResolvedSelectionEqual(provedPin.selection, evidence.chatSelection))
       provedPin.genericHeaderVerified = final.headerPresentation && !final.headerPower ? trigger : null;
     if (detachedSubmitSend) context.recordRecoveredSubmitSend(detachedSubmitSend);
-    return { modelEvidence: evidence, modelChoices: websiteChatPowers.map(power => websiteChatPresetChoice(family, power)), modelDiagnostic };
+    // A family panel can be remembered across openings. Only the enabled
+    // associated Power control establishes a range for this account. Without
+    // that range the checked family and closed header attest one preset.
+    const range = finalPowerState || powerState;
+    const powers = range.mode === 'power' && Number.isInteger(range.maxPower)
+      ? websiteChatPowers.slice(0, range.maxPower + 1) : [finalPower];
+    return { modelEvidence: evidence, modelChoices: powers.map(power => websiteChatPresetChoice(family, power)), modelDiagnostic };
   } catch (error) {
     return error?.error ? error : failure('model_unverified');
   } finally {
@@ -2784,6 +2793,125 @@ async function websiteModelFinalGuard(provider, request, observed, currentTempor
     ? { modelDiagnostic: websiteModelDiagnostic(websiteModelPickerState(provider)) } : {}) };
 }
 
+// Some signed-in Chat accounts choose Thinking from the composer's tools. That
+// layout does not identify a numbered model family. Keep its choices distinct
+// from the family/effort picker and re-read the selected control for each turn.
+const chatGPTComposerChat = Object.freeze({ key: 'chat/composer/chat', label: 'Chat' });
+const chatGPTComposerThinking = Object.freeze({ key: 'chat/composer/thinking', label: 'Thinking' });
+function chatGPTComposerChoice(choice) {
+  return websiteModelChoiceEqual(choice, chatGPTComposerChat) || websiteModelChoiceEqual(choice, chatGPTComposerThinking);
+}
+function chatGPTComposerControls() {
+  const mode = chatGPTProductModeState();
+  if (!mode.composerTools || !mode.markerRecognized || mode.contradictory || mode.groups.length) return null;
+  const form = mode.markedForm, tools = mode.composerTools;
+  const visible = node => mode.visible(node) && mode.outside(node);
+  const removals = [...form.querySelectorAll('button[aria-label^="Remove "]')].filter(visible);
+  const toggles = [...form.querySelectorAll('button[type="button"][aria-pressed]')].filter(visible);
+  const think = toggles.filter(node => websiteModelNormalize(node.innerText) === 'Think');
+  if (removals.length > 1 || removals.some(node => node.getAttribute('aria-label') !== 'Remove Thinking')
+    || think.length > 1 || think.some(node => !['true', 'false'].includes(node.getAttribute('aria-pressed')))
+    || toggles.some(node => !think.includes(node) && node.getAttribute('aria-pressed') !== 'false')
+    || removals.length && think.length) return null;
+  const thinking = removals[0] || (think[0]?.getAttribute('aria-pressed') === 'true' ? think[0] : null);
+  return { form, tools, toggle: think[0] || null, thinking, current: thinking ? chatGPTComposerThinking : chatGPTComposerChat };
+}
+function chatGPTComposerEvidence(expected) {
+  const pin = globalThis.__computaChatComposerChoice, controls = chatGPTComposerControls();
+  if (!pin || pin.invalidated || pin.document !== document || pin.owner !== globalThis.__computaModelOwner
+    || window !== window.top || location.origin !== 'https://chatgpt.com' || !controls
+    || !websiteModelChoiceEqual(expected, pin.choice) || !websiteModelChoiceEqual(controls.current, expected)
+    || !chatGPTTemporaryVerified()) return { error: 'model_mismatch' };
+  return { modelEvidence: { selected: expected, verification: 'website_selection', source: 'chat_composer_control' } };
+}
+async function chatGPTComposerPicker(request, freshGuard) {
+  const initial = chatGPTComposerControls(), discovery = request.action === 'discoverModels';
+  const fail = stage => ({ error: 'model_unverified', modelDiagnostic: { kind: 'chat_composer_picker', stage } });
+  if (!initial || (!discovery && !chatGPTComposerChoice(request.modelChoice))) return { error: 'model_unavailable' };
+  const owner = globalThis.__computaModelOwner, doc = document, url = document.URL;
+  const same = () => window === window.top && location.origin === 'https://chatgpt.com' && doc === document
+    && document.URL === url && owner === globalThis.__computaModelOwner && freshGuard() === true
+    && initial.tools === chatGPTComposerControls()?.tools;
+  const enabled = node => chatGPTControlExposed(node) && !node.disabled && !node.closest('[disabled],[aria-disabled="true"]');
+  const visible = node => node.isConnected && node.getClientRects().length > 0 && getComputedStyle(node).visibility !== 'hidden'
+    && !node.closest('[aria-hidden="true"],[inert]') && !node.closest(websiteChatPickerBoundary);
+  const label = node => websiteModelNormalize(node.getAttribute('aria-label') || node.innerText);
+  const menu = () => {
+    if (initial.tools.getAttribute('aria-expanded') !== 'true') return null;
+    const overlays = [...document.querySelectorAll('[data-composer-overlay-floating-ui]')].filter(visible);
+    if (overlays.length !== 1) return null;
+    const lists = [...overlays[0].querySelectorAll('[data-mention-list-scroll-area]')].filter(visible);
+    if (lists.length !== 1) return null;
+    const scope = lists[0], rows = [...scope.querySelectorAll('button[data-list-navigation-item]')].filter(visible);
+    if (!rows.some(row => label(row) === 'Add photos & files Upload from computer')
+      || !rows.some(row => label(row) === 'Web search Find real-time news and info')) return null;
+    const thinking = rows.filter(row => label(row) === 'Thinking For detailed answers');
+    if (thinking.length > 1) return null;
+    return { scope, thinking: thinking[0] || null };
+  };
+  const deadline = Date.now() + 2500;
+  const selected = async () => {
+    await websiteModelWaitForChange(deadline, () => !same() || websiteModelChoiceEqual(chatGPTComposerControls()?.current, request.modelChoice));
+    if (!same() || !websiteModelChoiceEqual(chatGPTComposerControls()?.current, request.modelChoice)) return fail('selected_choice');
+    globalThis.__computaChatComposerChoice = { document: doc, owner, choice: request.modelChoice };
+    return { selected: true, ...chatGPTComposerEvidence(request.modelChoice) };
+  };
+  // Once used, ChatGPT can move Thinking from the tools list to a persistent
+  // Think toggle. Its pressed state also attests the selection when it is off.
+  if (same() && initial.tools.getAttribute('aria-expanded') === 'false' && initial.toggle && enabled(initial.toggle)) {
+    if (discovery) return { modelChoices: [chatGPTComposerChat, chatGPTComposerThinking] };
+    if (!websiteModelChoiceEqual(initial.current, request.modelChoice)) initial.toggle.click();
+    return selected();
+  }
+  if (!same() || initial.tools.getAttribute('aria-expanded') !== 'false') return fail('initial_context');
+  if (!enabled(initial.tools)) {
+    await websiteModelWaitForChange(deadline, () => !same() || enabled(initial.tools));
+    if (!same() || initial.tools.getAttribute('aria-expanded') !== 'false' || !enabled(initial.tools)) return fail('tools_unavailable');
+  }
+  initial.tools.click();
+  try {
+    await websiteModelWaitForChange(deadline, () => !same() || !!menu());
+    const panel = menu();
+    if (!same() || !panel) return fail('menu_open');
+    const available = [chatGPTComposerChat];
+    if (panel.thinking && !panel.thinking.disabled && !panel.thinking.closest('[disabled],[aria-disabled="true"]')) available.push(chatGPTComposerThinking);
+    if (!discovery && !available.some(choice => websiteModelChoiceEqual(choice, request.modelChoice))) return { error: 'model_unavailable' };
+    if (!discovery && !websiteModelChoiceEqual(initial.current, request.modelChoice) && request.modelChoice.key === chatGPTComposerThinking.key) {
+      panel.thinking.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      if (!same() || menu()?.thinking !== panel.thinking || !enabled(panel.thinking)) return fail('thinking_control');
+      panel.thinking.click();
+    } else {
+      initial.tools.click();
+    }
+    await websiteModelWaitForChange(deadline, () => !same() || initial.tools.getAttribute('aria-expanded') === 'false');
+    if (!same() || initial.tools.getAttribute('aria-expanded') !== 'false') return fail('menu_close');
+    if (discovery) return { modelChoices: available };
+    if (request.modelChoice.key === chatGPTComposerChat.key && initial.thinking) {
+      const chip = chatGPTComposerControls()?.thinking;
+      if (chip !== initial.thinking || !enabled(chip)) return fail('chip_control');
+      chip.click();
+    }
+    return await selected();
+  } finally {
+    if (same() && initial.tools.getAttribute('aria-expanded') === 'true' && menu() && enabled(initial.tools)) initial.tools.click();
+  }
+}
+
+const paidChatPickerAction = websiteChatPickerAction;
+websiteChatPickerAction = function(request, fresh, freshGuard) {
+  if (request.action !== 'modelDiagnostic' && (chatGPTComposerChoice(request.modelChoice)
+    || request.action === 'discoverModels' && chatGPTProductModeState().composerTools)) {
+    if (!fresh || typeof freshGuard !== 'function') return { error: 'not_fresh' };
+    return chatGPTComposerPicker(request, freshGuard);
+  }
+  return paidChatPickerAction(request, fresh, freshGuard);
+};
+const paidModelReadEvidence = websiteModelReadEvidence;
+websiteModelReadEvidence = function(provider, expected, openingRecovery = null, context = null) {
+  if (provider === 'chatgpt' && chatGPTComposerChoice(expected)) return chatGPTComposerEvidence(expected);
+  return paidModelReadEvidence(provider, expected, openingRecovery, context);
+};
+
 // Provider-only private profiling leaves the audited shared model-control source
 // byte-identical. Only an armed invocation wraps these local function bindings.
 const chatGPTRendererWorkDiagnostic = chatGPTInstallRendererWorkDiagnostic(input);
@@ -3301,6 +3429,10 @@ function websiteChatDeferredModelReadUnprofiled(expected, context) {
       && !(input.action === 'submit' && context?.scope === 'action_final_guard' && context.action === 'submit'
         && chatGPTSubmissionContext(globalThis.__computaChatSubmissionState, true))
     || globalThis.__computaModelOwner !== input.ownerToken) return { error: 'document_changed' };
+  if (chatGPTComposerChoice(expected)) {
+    const proof = chatGPTComposerEvidence(expected);
+    return proof.error ? proof : { modelVerificationPending: true };
+  }
   const pin = globalThis.__computaChatPresetPin;
   if (!websiteChatPresetIntentValid(expected) || !pin || pin.owner !== input.ownerToken || pin.document !== document
     || !pin.headerTrigger || !websiteChatFamilyValid(pin.selection?.family) || !websiteChatPowerValid(pin.selection?.power))
@@ -3772,7 +3904,11 @@ function chatGPTFinalizeResponseRead(observed) {
   websiteChatDrainPinnedMutations(pin);
   const picker = websiteChatPickerState();
   const proof = chatGPTFinalResponseSnapshot;
-  if (!pin || pin !== proof.pin || pin.headerTrigger !== proof.header || pin.selection !== proof.selection
+  if (chatGPTComposerChoice(proof.expected)) {
+    if (!websiteModelChoiceEqual(input.expectedModelChoice, proof.expected)
+      || proof.composerPin !== globalThis.__computaChatComposerChoice
+      || !chatGPTComposerEvidence(proof.expected).modelEvidence) return { error: 'model_mismatch' };
+  } else if (!pin || pin !== proof.pin || pin.headerTrigger !== proof.header || pin.selection !== proof.selection
     || pin.owner !== input.ownerToken || pin.document !== document || pin.invalidated === true
     || pin.selection?.family?.key !== proof.family || pin.selection?.power?.key !== proof.power
     || picker.trigger !== proof.header || !websiteChatClosedHeaderMatches(picker, pin.selection.power, pin)
@@ -3964,7 +4100,7 @@ websiteModelFinalGuard = async function(provider, request, observed, currentTemp
     if (!chatGPTResponseSnapshotMatches(candidate, result))
       return { error: 'conversation_changed', detail: 'response_changed' };
     const pin = globalThis.__computaChatPresetPin;
-    chatGPTFinalResponseSnapshot = { ...candidate, pin, header: pin?.headerTrigger,
+    chatGPTFinalResponseSnapshot = { ...candidate, pin, composerPin: globalThis.__computaChatComposerChoice, header: pin?.headerTrigger,
       selection: pin?.selection, family: pin?.selection?.family?.key, power: pin?.selection?.power?.key,
       expected: result.modelEvidence?.selected, fingerprint: firstUserFingerprint };
   }
@@ -4923,7 +5059,18 @@ function chatGPTProductModeStateUnprofiled() {
   const editors = editorCandidates.length <= 64 ? editorCandidates.filter(node => physical(node) && !node.closest(boundary)) : [];
   const triggers = triggerCandidates.length <= 64 ? triggerCandidates.filter(node => physical(node) && !node.closest(boundary)) : [];
   const markedEditor = editors.length === 1 && editors[0].closest('form') === markedForm ? editors[0] : null;
-  const markedTrigger = triggers.length === 1 && triggers[0].closest('form') === markedForm ? triggers[0] : null;
+  const paidTrigger = triggers.length === 1 && triggers[0].closest('form') === markedForm ? triggers[0] : null;
+  // The basic composer carries the same explicit Chat form/editor markers, but
+  // offers Thinking in its tools. A signed-out or partially hydrated page with
+  // a missing picker alone must never qualify as this account layout.
+  let composerTools = null;
+  if (markedEditor && triggerCandidates.length === 0 && groups.length === 0) {
+    const tools = [...markedForm.querySelectorAll('button[aria-label="Add files and more"]')].filter(node => visible(node) && !node.closest(boundary));
+    const temporary = [...document.querySelectorAll('button[aria-label="Temporary chat"], button[aria-label="Turn on temporary chat"], button[aria-label="Turn off temporary chat"]')]
+      .filter(node => visible(node) && !node.closest(boundary));
+    if (tools.length === 1 && (temporary.length === 1 || globalThis.__computaChatProductMode?.composerTools === true && globalThis.__computaChatProductMode.temporaryAcknowledged === true)) composerTools = tools[0];
+  }
+  const markedTrigger = paidTrigger || composerTools;
   const firstFormIssue = formIssue(markedForm);
   const markerRecognized = firstFormIssue === null && visible(markedForm) && visible(markedEditor) && visible(markedTrigger);
   const markerInputs = () => {
@@ -4944,7 +5091,7 @@ function chatGPTProductModeStateUnprofiled() {
     contradictory: groups.length > 1 || !!group && (!recognized || workSelected === true), physical, visible, enabled,
     outside: node => !!node && node.nodeType === 1 && !node.closest(boundary),
     namedGroup: node => !!node && node.nodeType === 1 && !node.closest(boundary) && labelledGroup(node),
-    labelledGroup, markedForm, markedEditor, markedTrigger, markerRecognized, markerReady, markerShape, markerInputs,
+    labelledGroup, markedForm, markedEditor, markedTrigger, composerTools, markerRecognized, markerReady, markerShape, markerInputs,
     markerActiveForms: Math.min(activeForms.length, 16),
     markerCandidateOverflow: forms.length > 64 || editorCandidates.length > 64 || triggerCandidates.length > 64,
     modeControl: (node, trackedGroup = false) => !!node && node.nodeType === 1 && (trackedGroup || !node.closest(boundary)) && label(node) === 'Work'
@@ -5526,7 +5673,7 @@ function chatGPTProductModeAction(request) {
     globalThis.__computaModelSignal?.observer?.takeRecords?.();
     globalThis.__computaChatProductMode = { owner: globalThis.__computaModelOwner, document,
       source: markerAdmission ? 'chat_composer_marker' : 'composer_mode_control',
-      ...(markerAdmission ? { form: state.markedForm, editor: state.markedEditor,
+      ...(markerAdmission ? { form: state.markedForm, editor: state.markedEditor, composerTools: !!state.composerTools,
         forms: new Set([state.markedForm]), editors: new Set([state.markedEditor]) } : {}),
       groups: new Set(state.group ? [state.group] : []), works: new Set(state.work ? [state.work] : []), invalidated: false,
       temporaryRequested: false, temporaryAcknowledged: false };
@@ -7148,6 +7295,7 @@ function chatGPTFirstRouteModelPins(candidate) {
     return value;
   };
   const pin = globalThis.__computaChatPresetPin;
+  if (chatGPTComposerChoice(candidate.modelChoice)) return !!chatGPTComposerEvidence(candidate.modelChoice).modelEvidence;
   chatGPTFirstRouteModelFailurePin = pin;
   websiteChatDrainPinnedMutations(pin);
   const picker = websiteChatPickerState(), selected = pin && websiteChatPresetChoice(pin.selection?.family, pin.selection?.power);

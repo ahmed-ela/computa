@@ -397,8 +397,10 @@ function websiteChatPickerState() {
   const metadataDisabled = node => !!node && (node.disabled || node.getAttribute('disabled') !== null
     || !!node.closest('[disabled], [aria-disabled="true"]'));
   const rawValue = physicalSlider?.getAttribute('aria-valuenow');
+  const rawMax = physicalSlider?.getAttribute('aria-valuemax');
+  const maxPower = /^[0-4]$/.test(rawMax || '') ? Number(rawMax) : null;
   const shapePowerIndex = physicalSlider && physicalSlider.tagName.toLowerCase() === 'span'
-    && physicalSlider.getAttribute('aria-valuemin') === '0' && physicalSlider.getAttribute('aria-valuemax') === '4'
+    && physicalSlider.getAttribute('aria-valuemin') === '0' && maxPower !== null && Number(rawValue) <= maxPower
     && physicalSlider.getAttribute('aria-orientation') === 'horizontal' && /^[0-4]$/.test(rawValue || '')
     ? Number(rawValue) : null;
   const recognizedPowerIndex = metadataScoped(slider) ? shapePowerIndex : null;
@@ -428,7 +430,7 @@ function websiteChatPickerState() {
     controls: familyControls.filter(control => control.choice), choices: [], selected: null, evidence: null,
     familyControls, offered: plain.map(choice => choice.label), newest,
     checkedFamily: checked.length === 1 && websiteChatFamilyValid(checked[0].choice) ? checked[0].choice : null,
-    powerItem, slider, powerIndex, powerUnavailable, power: powerIndex === null ? null : websiteChatPowers[powerIndex],
+    powerItem, slider, powerIndex, maxPower, powerUnavailable, power: powerIndex === null ? null : websiteChatPowers[powerIndex],
     powerDiagnostic: {
       physicalItemCount: physicalPowerItems.length, physicalSliderCount: physicalSliders.length,
       itemVisible: !!powerItem, itemEnabled: enabled(powerItem), sliderPhysical: physical(physicalSlider),
@@ -1473,6 +1475,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     if (!mutable && startingPower !== desiredPower) return failure('model_mismatch');
     if (mutable) {
       if (powerState.mode !== 'power') return failure('model_unverified');
+      if (desiredPower > powerState.maxPower) return failure('model_unavailable');
       powerState = await changePower(desiredPower);
       headerExpected = websiteChatPowers[desiredPower];
     }
@@ -1570,7 +1573,13 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       && websiteChatResolvedSelectionEqual(provedPin.selection, evidence.chatSelection))
       provedPin.genericHeaderVerified = final.headerPresentation && !final.headerPower ? trigger : null;
     if (detachedSubmitSend) context.recordRecoveredSubmitSend(detachedSubmitSend);
-    return { modelEvidence: evidence, modelChoices: websiteChatPowers.map(power => websiteChatPresetChoice(family, power)), modelDiagnostic };
+    // A family panel can be remembered across openings. Only the enabled
+    // associated Power control establishes a range for this account. Without
+    // that range the checked family and closed header attest one preset.
+    const range = finalPowerState || powerState;
+    const powers = range.mode === 'power' && Number.isInteger(range.maxPower)
+      ? websiteChatPowers.slice(0, range.maxPower + 1) : [finalPower];
+    return { modelEvidence: evidence, modelChoices: powers.map(power => websiteChatPresetChoice(family, power)), modelDiagnostic };
   } catch (error) {
     return error?.error ? error : failure('model_unverified');
   } finally {
