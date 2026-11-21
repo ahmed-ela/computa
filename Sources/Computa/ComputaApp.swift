@@ -25,7 +25,7 @@ enum ComputaLaunchMode: Equatable {
 
     @MainActor
     func makeState(
-        runtimeFactory: () -> any AgentRuntimeClient = { CodexAppServerRuntime(configuration: .localQwen) },
+        runtimeFactory: () -> any AgentRuntimeClient = { SelectableCodexRuntime() },
         preferencesFactory: () -> UserDefaults = { .standard },
         unreadCompletionStoreFactory: () -> ChatUnreadCompletionStore? = { .applicationDefault }
     ) -> AppState {

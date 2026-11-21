@@ -118,6 +118,7 @@ export interface TaskSnapshot {
   workspace: string;
   model: string;
   modelSelectable: boolean;
+  hasBoundThread?: boolean;
   branch?: string;
   entries: EntrySnapshot[];
   queuedPrompts: QueuedPromptSnapshot[];
@@ -142,6 +143,7 @@ export interface ModelOption {
 }
 
 export interface ModelProviderSetup {
+  detail?: string | null;
   checkStatus?: 'checking' | 'signInRequired' | 'unavailable';
   route: string;
   name: string;

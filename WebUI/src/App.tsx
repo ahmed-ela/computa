@@ -543,7 +543,7 @@ function PromptQueue({ task }: { task: TaskSnapshot }) {
 }
 
 function availableForNewPrompt(model: string, snapshot: AppSnapshot): boolean {
-  if (!model.startsWith('browser/') || !snapshot.providerSetups?.length) return true;
+  if (!(model.startsWith('browser/') || model.startsWith('cli/')) || !snapshot.providerSetups?.length) return true;
   return snapshot.modelOptions.some(option => option.id === model && option.available !== false && option.selectable !== false);
 }
 
@@ -624,6 +624,7 @@ function Composer({
               className="model-picker"
               label="Task model"
               model={task.model}
+              boundToRuntime={task.hasBoundThread}
               options={snapshot.modelOptions}
               setups={snapshot.providerSetups}
               canConnect={snapshot.canRefreshWebsiteModels === true}

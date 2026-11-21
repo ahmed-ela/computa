@@ -15,7 +15,7 @@ final class WebBridgeWebsiteModelRefreshTests: XCTestCase {
             return provider == "gemini" ? [gemini] : [chat]
         })
         let first = WebUISnapshot(state: state)
-        XCTAssertEqual(first.providerSetups.map(\.route), WebsiteModelCatalog.discoveryProviders.map { "browser/" + $0 })
+        XCTAssertEqual(first.providerSetups.map(\.route), WebsiteModelCatalog.discoveryProviders.map { "browser/" + $0 } + ["cli/codex"])
         XCTAssertTrue(first.providerSetups.allSatisfy { !$0.connected })
         await state.refreshWebsiteModels(provider: "gemini")
         await state.refreshWebsiteModels(provider: "chatgpt")

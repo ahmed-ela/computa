@@ -6,6 +6,7 @@ import Foundation
 protocol AgentRuntimeClient: Sendable {
     var providerName: String { get }
 
+    func installedCLIModels() async throws -> [LocalModelOption]
     func loadTasks() async throws -> [AgentTask]
     func events() -> AsyncStream<AgentRuntimeEvent>
     func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String) async throws
@@ -30,6 +31,7 @@ struct RuntimeShutdownReport: Equatable, Sendable {
 }
 
 extension AgentRuntimeClient {
+    func installedCLIModels() async throws -> [LocalModelOption] { throw InstalledCodexCLI.Failure.missing }
     /// Older adapters may keep their restricted submission path. They cannot
     /// silently claim Full access without implementing its execution policy.
     func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String, accessMode: AccessMode) async throws {
