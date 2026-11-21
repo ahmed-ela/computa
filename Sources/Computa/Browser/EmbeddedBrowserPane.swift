@@ -12,10 +12,7 @@ struct EmbeddedBrowserPane: View {
     var modelSetupStatus: (String) -> WebsiteModelSetupStatus = { _ in .unchecked }
     var onLoadModels: (UUID) -> Void = { _ in }
     var canConfigureKimiProfile = false
-    var kimiModelSignInMessage: String?
-    var onOpenKimiModelSignIn: () -> Void = {}
-    var onVerifyKimiModelSignIn: () -> Void = {}
-    var onUseSharedKimiModelProfile: () -> Void = {}
+    var onSwitchKimiProfile: (UUID) -> Void = { _ in }
     let onClose: () -> Void
 
     @State private var address = ""
@@ -33,38 +30,43 @@ struct EmbeddedBrowserPane: View {
             navigationBar
             Divider()
 
-            if let tab = selectedTab, !tab.isPopup, let provider = tab.setupProvider {
+            if let tab = selectedTab, let provider = tab.setupProvider,
+               session.setupTab(for: provider)?.id == tab.id {
                 let status = modelSetupStatus(provider.rawValue)
                 HStack {
-                    switch status {
-                    case .unchecked: Text("Check which models are available in your \(provider.displayName) account.")
-                    case .checking: ProgressView().controlSize(.small); Text("Checking \(provider.displayName)…")
-                    case .loaded(let count): Text("\(count) options available in the model picker.")
-                    case .signInRequired(let message), .failed(let message): Text(message).textSelection(.enabled)
+                    VStack(alignment: .leading, spacing: 4) {
+                        switch status {
+                        case .unchecked: Text("Check which models are available in your \(provider.displayName) account.")
+                        case .checking:
+                            HStack {
+                                ProgressView().controlSize(.small)
+                                Text("Checking \(provider.displayName)…")
+                            }
+                        case .loaded(let count): Text("\(count) options available in the model picker.")
+                        case .signInRequired(let message), .failed(let message): Text(message).textSelection(.enabled)
+                        }
+                        if provider == .kimi {
+                            Button(session.isKimiProfileTab(tab.id) ? "Use regular browser profile" : "Use separate Kimi profile") {
+                                onSwitchKimiProfile(tab.id)
+                            }
+                            .buttonStyle(.link)
+                            .disabled(!canConfigureKimiProfile || isInteractionBlocked)
+                        }
                     }
                     Spacer()
-                    if case .loaded = status {
+                    if provider == .kimi || !status.isLoaded {
+                        Button("Load models") { onLoadModels(tab.id) }
+                            .disabled(!canLoadModels || status == .checking)
+                    }
+                    if status.isLoaded {
                         Button("Done") {
                             session.closeTab(tab.id)
                             onClose()
                         }
-                    } else {
-                        Button("Load models") { onLoadModels(tab.id) }
-                            .disabled(!canLoadModels || status == .checking)
                     }
                 }
                 .font(.callout)
                 .padding(10)
-                Divider()
-            } else if let tab = selectedTab, session.isKimiProfileTab(tab.id),
-               let message = kimiModelSignInMessage {
-                Text(message)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10)
-                    .accessibilityIdentifier("browser-kimi-sign-in-status")
                 Divider()
             }
 
@@ -148,8 +150,6 @@ struct EmbeddedBrowserPane: View {
             .accessibilityLabel("New browser tab")
             .accessibilityIdentifier("browser-new-tab")
 
-            modelSignInsMenu
-
             Button(action: onClose) {
                 Image(systemName: "sidebar.right")
                     .frame(width: 24, height: 24)
@@ -161,44 +161,6 @@ struct EmbeddedBrowserPane: View {
         .buttonStyle(.plain)
         .padding(.horizontal, 8)
         .frame(height: 42)
-    }
-
-    private var modelSignInsMenu: some View {
-        Menu {
-            Button("Kimi sign-in") {
-                guard canConfigureKimiProfile, !isInteractionBlocked else { return }
-                onOpenKimiModelSignIn()
-            }
-            .accessibilityIdentifier("browser-kimi-sign-in")
-
-            if session.kimiModelProfileID != nil {
-                Button("Verify Kimi sign-in") {
-                    guard canConfigureKimiProfile, !isInteractionBlocked,
-                          session.kimiModelProfileID != nil else { return }
-                    onVerifyKimiModelSignIn()
-                }
-                .accessibilityIdentifier("browser-verify-kimi-sign-in")
-
-                Divider()
-
-                Button("Use regular browser profile") {
-                    guard canConfigureKimiProfile, !isInteractionBlocked,
-                          session.kimiModelProfileID != nil else { return }
-                    onUseSharedKimiModelProfile()
-                }
-                .accessibilityIdentifier("browser-kimi-use-regular-profile")
-            }
-        } label: {
-            Label("Model sign-ins", systemImage: "person.crop.circle")
-                .labelStyle(.titleAndIcon)
-                .font(.system(size: 12))
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .disabled(!canConfigureKimiProfile || isInteractionBlocked)
-        .help("Manage model sign-ins")
-        .accessibilityLabel("Model sign-ins")
-        .accessibilityIdentifier("browser-model-sign-ins")
     }
 
     private var navigationBar: some View {

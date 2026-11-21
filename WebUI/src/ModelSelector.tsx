@@ -125,10 +125,9 @@ export function ModelSelector({ options, model, label, disabled = false, classNa
                   {option.available === false && <span className="model-option-unavailable"> (unavailable)</span>}
                 </DropdownMenuRadioItem>)}
               </DropdownMenuRadioGroup>
-              {group.setup && !group.options.some((option) => option.available !== false) && <ProviderSetupActions
-                setup={group.setup} disabled={disabled || !canConnect}
-                onConnect={() => { setOpen(false); onConnect?.(group.route); }}
-                onRefresh={onRefresh} />}
+              {group.setup && <ProviderSetupActions setup={group.setup}
+                hasModels={group.options.some((option) => option.available !== false)} disabled={disabled || !canConnect}
+                onConnect={() => { setOpen(false); onConnect?.(group.route); }} onRefresh={onRefresh} />}
             </DropdownMenuSubContent>
           </DropdownMenuPortal>
         </DropdownMenuSub>)}
@@ -138,9 +137,13 @@ export function ModelSelector({ options, model, label, disabled = false, classNa
   );
 }
 
-function ProviderSetupActions({ setup, disabled, onConnect, onRefresh }: {
-  setup: ModelProviderSetup; disabled: boolean; onConnect: () => void; onRefresh?: (action: WebsiteModelsRefreshAction) => void;
+function ProviderSetupActions({ setup, hasModels, disabled, onConnect, onRefresh }: {
+  setup: ModelProviderSetup; hasModels: boolean; disabled: boolean; onConnect: () => void; onRefresh?: (action: WebsiteModelsRefreshAction) => void;
 }) {
+  if (hasModels) {
+    return setup.route === 'browser/kimi'
+      ? <DropdownMenuItem disabled={disabled} onSelect={onConnect}>Manage Kimi sign-in</DropdownMenuItem> : null;
+  }
   const refresh = websiteModelsRefreshAction(setup.route);
   if (!refresh) return <DropdownMenuItem disabled={disabled} onSelect={onConnect}>
     {setup.connected ? 'Manage API connection' : 'Connect API'}

@@ -165,35 +165,55 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
     func testKimiProfileVerificationReportsItsActualOutcomeAndSwitchesOnlyWhenIdle() async throws {
         let browser = EmbeddedBrowserSession(persistent: false)
         defer { browser.shutdown() }
-        _ = try browser.openKimiModelSignInForTesting()
-        let profile = try XCTUnwrap(browser.kimiModelProfileID)
+        let preferences = isolatedTestPreferences()
         var signedIn = false
         var discoveries: [String] = []
-        let state = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: browser,
+        let state = AppState(tasks: [], preferences: preferences, browserSession: browser,
             websiteModelDiscovery: { provider in
                 discoveries.append(provider)
                 guard signedIn else { throw EmbeddedWebModelTransport.Failure.signInRequired }
                 return Self.choices(provider)
             })
 
-        await state.verifyKimiModelSignIn()
-        let instructions = "Sign in on the Kimi sign-in tab, then choose Verify Kimi sign-in from Model sign-ins."
-        XCTAssertEqual(state.kimiModelSignInMessage, instructions)
-        XCTAssertEqual(state.websiteModelsError, "Kimi: " + instructions)
+        state.connectModelProvider(route: "browser/kimi")
+        let regular = try XCTUnwrap(browser.setupTab(for: .kimi))
+        browser.webView(for: regular.id)?.stopLoading()
+        state.switchKimiSignInProfile(from: regular.id)
+        let separate = try XCTUnwrap(browser.setupTab(for: .kimi))
+        browser.webView(for: separate.id)?.stopLoading()
+        XCTAssertNotEqual(regular.id, separate.id)
+        XCTAssertTrue(browser.isKimiProfileTab(separate.id))
+        XCTAssertNil(browser.browserToolTab(id: separate.id))
+        state.connectModelProvider(route: "browser/kimi")
+        XCTAssertEqual(browser.selectedTabID, separate.id)
+        XCTAssertEqual(browser.humanTabs.count, 2)
+
+        await state.loadSignedInModels(tabID: regular.id)
+        XCTAssertTrue(discoveries.isEmpty)
+        await state.loadSignedInModels(tabID: separate.id)
+        XCTAssertEqual(state.websiteModelSetupStatus(for: "kimi"),
+                       .signInRequired("Sign in to Kimi on the setup tab, then choose Load models."))
         signedIn = true
-        await state.verifyKimiModelSignIn()
+        await state.loadSignedInModels(tabID: separate.id)
         XCTAssertEqual(discoveries, ["kimi", "kimi"])
-        XCTAssertEqual(state.kimiModelSignInMessage, "Kimi sign-in verified for this profile.")
+        XCTAssertEqual(state.websiteModelSetupStatus(for: "kimi"), .loaded(1))
         XCTAssertNil(state.websiteModelsError)
 
         state.activeTurnTaskIDs.insert("fixture-running")
-        XCTAssertFalse(state.canConfigureKimiProfile)
-        state.useSharedKimiModelProfile()
-        XCTAssertEqual(browser.kimiModelProfileID, profile)
+        state.switchKimiSignInProfile(from: separate.id)
+        XCTAssertEqual(browser.selectedTabID, separate.id)
+        XCTAssertNotNil(browser.kimiModelProfileID)
         state.activeTurnTaskIDs.remove("fixture-running")
-        state.useSharedKimiModelProfile()
+        state.switchKimiSignInProfile(from: separate.id)
+        XCTAssertEqual(browser.selectedTabID, regular.id)
         XCTAssertNil(browser.kimiModelProfileID)
-        XCTAssertNil(state.kimiModelSignInMessage)
+        XCTAssertEqual(state.websiteModelSetupStatus(for: "kimi"), .unchecked)
+        XCTAssertFalse(WebsiteModelCatalog.load(from: preferences).contains { $0.provider == "kimi" })
+        browser.selectTab(separate.id)
+        await state.loadSignedInModels(tabID: separate.id)
+        state.switchKimiSignInProfile(from: separate.id)
+        XCTAssertNil(browser.kimiModelProfileID)
+        XCTAssertEqual(discoveries.count, 2)
     }
 
     func testWebsitePrewarmingFollowsSelectedProviderOnlyAfterRenderHostReadiness() async {

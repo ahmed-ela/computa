@@ -382,26 +382,36 @@ final class EmbeddedBrowserSession {
     }
 
     func openProviderSignIn(_ provider: EmbeddedWebModelTransport.Provider) throws {
-        if let tab = setupTab(for: provider) {
-            selectTab(tab.id)
-            return
-        }
-        let id: UUID
         if provider == .kimi, kimiModelProfileID != nil {
-            id = try openKimiModelSignIn()
+            try openKimiSetup(usingDedicatedProfile: true)
         } else {
-            id = try createTab()
-        }
-        guard let tab = humanTab(id: id) else { throw Failure.tabClosed }
-        tab.setupProvider = provider
-        tab.isWebInspectorAvailable = false
-        if tab.kimiProfileID == nil {
-            do { try navigate(tabID: id, to: provider.startURL) }
-            catch { closeTab(id); throw error }
+            try openSharedProviderSetup(provider)
         }
     }
 
-    func openKimiModelSignIn() throws -> UUID { try openKimiModelSignIn(loadHome: true) }
+    func openKimiSetup(usingDedicatedProfile: Bool) throws {
+        if usingDedicatedProfile {
+            let id = try openKimiModelSignIn(loadHome: true)
+            guard let tab = humanTab(id: id) else { throw Failure.tabClosed }
+            tab.setupProvider = .kimi
+        } else {
+            try openSharedProviderSetup(.kimi)
+            useSharedKimiModelProfile()
+        }
+    }
+
+    private func openSharedProviderSetup(_ provider: EmbeddedWebModelTransport.Provider) throws {
+        if let tab = humanTabs.first(where: { !$0.isPopup && $0.setupProvider == provider && $0.kimiProfileID == nil }) {
+            selectTab(tab.id)
+            return
+        }
+        let id = try createTab()
+        guard let tab = humanTab(id: id) else { throw Failure.tabClosed }
+        tab.setupProvider = provider
+        tab.isWebInspectorAvailable = false
+        do { try navigate(tabID: id, to: provider.startURL) }
+        catch { closeTab(id); throw error }
+    }
 
     func useSharedKimiModelProfile() {
         guard !isShutdown, kimiModelProfileID != nil else { return }

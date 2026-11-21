@@ -174,10 +174,14 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let prefs = isolatedTestPreferences()
         let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
         defer { session.shutdown() }
-        @MainActor final class Account { var signedIn = false }
+        @MainActor final class Account {
+            var signedIn = false
+            var kimiSignedIn = false
+        }
         let account = Account()
         let choice = syntheticWebsiteChoice(provider: "chatgpt", key: "new", label: "High")
         let state = AppState(tasks: [], preferences: prefs, browserSession: session, websiteModelDiscovery: { provider in
+            if provider == "kimi", account.kimiSignedIn { return [syntheticKimiChoice] }
             guard account.signedIn, provider == "chatgpt" else { throw EmbeddedWebModelTransport.Failure.signInRequired }
             return [choice]
         }, websiteModeDiscovery: { _ in throw EmbeddedWebModelTransport.Failure.signInRequired })
@@ -236,6 +240,25 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         state.createTask()
         XCTAssertEqual(state.selectedTask?.model, choice.modelID)
         XCTAssertEqual(WebsiteModelCatalog.load(from: prefs), [choice])
+
+        await state.refreshWebsiteModels(provider: "kimi")
+        try await openMenu("kimi")
+        let kimiAction = "\(submenu)?.querySelector('[role=menuitem]')"
+        try await requireDOM("\(kimiAction)?.textContent === 'Sign in to Kimi'")
+        _ = try await web.evaluateJavaScript("\(kimiAction).click()")
+        try await requireDOM("!document.querySelector('.model-selector-content')")
+        let kimiTab = try XCTUnwrap(session.setupTab(for: .kimi))
+        session.webView(for: kimiTab.id)?.stopLoading()
+        account.kimiSignedIn = true
+        await state.loadSignedInModels(tabID: kimiTab.id)
+        state.isBrowserPresented = false
+        try await openMenu("kimi")
+        try await requireDOM("\(submenu)?.querySelectorAll('[role=menuitemradio]').length === 1 && \(kimiAction)?.textContent === 'Manage Kimi sign-in'")
+        _ = try await web.evaluateJavaScript("\(kimiAction).click()")
+        try await requireDOM("!document.querySelector('.model-selector-content')")
+        XCTAssertTrue(state.isBrowserPresented)
+        XCTAssertEqual(session.selectedTabID, kimiTab.id)
+        state.isBrowserPresented = false
 
         try await openMenu("alibaba")
         try await requireDOM("\(submenu)?.textContent === 'Connect API'")

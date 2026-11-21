@@ -4004,7 +4004,7 @@ actor WebModelServer {
         if error as? EmbeddedWebModelTransport.Failure == .signInRequired, let modelID {
             switch provider(for: modelID) {
             case "kimi":
-                fields["message"] = "In Computa's browser, choose Model sign-ins, then Kimi sign-in. Sign in on that tab, then choose Verify Kimi sign-in. Start a new task once verification succeeds."
+                fields["message"] = "Open Kimi from the model picker. Sign in on its setup tab, then choose Load models. Start a new task once your models appear."
             case "deepseek":
                 fields["message"] = "Sign in to DeepSeek in a regular tab in Computa's browser. With Computa idle, return to the DeepSeek chat home at chat.deepseek.com so Computa can verify your sign-in before you start a new task."
             default: break
