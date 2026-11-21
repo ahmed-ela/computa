@@ -348,6 +348,14 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let chatReady = await waitForScriptBool(on: chat, script: "Boolean(document.querySelector('.task-toolbar'))")
         let browserReady = await waitForScriptBool(on: browser, script: "document.title === 'Local browser fixture'")
         XCTAssertTrue(chatReady, "Bundled Octane UI should render in the real shell")
+        let toolbarButtons = try await chat.evaluateJavaScript("""
+            Array.from(document.querySelectorAll('.task-toolbar button'), button =>
+                button.getAttribute('aria-label') || button.textContent.trim())
+            """) as? [String]
+        let buttons = try XCTUnwrap(toolbarButtons)
+        XCTAssertTrue(buttons.contains("Toggle browser"))
+        XCTAssertFalse(buttons.contains("Toggle inspector"))
+        XCTAssertFalse(buttons.contains("Toggle changes"))
         XCTAssertTrue(browserReady, "The browser fixture is entirely in memory")
         hosting.layoutSubtreeIfNeeded()
 

@@ -1,7 +1,34 @@
+import SwiftUI
 import XCTest
 @testable import Computa
 
 final class ContextIndicatorPresentationTests: XCTestCase {
+    @MainActor
+    func testStatusBarHidesContextUsageForMeasuredAndCompactingTasks() throws {
+        let task = AgentTask(title: "Status bar fixture", summary: "", status: .draft, workspace: "", model: "local")
+        let state = AppState(tasks: [task], preferences: isolatedTestPreferences())
+        XCTAssertEqual(state.selectedTaskID, task.id)
+        state.apply(.contextUsageUpdated(taskID: task.id, usage: usage(7168)))
+
+        for compacting in [false, true] {
+            if compacting { state.apply(.contextCompactionChanged(taskID: task.id, state: .running)) }
+            let bar = NativeRuntimeStatusBar(state: state).frame(width: 760, height: 34)
+                .environment(\.colorScheme, .light)
+            let renderer = ImageRenderer(content: bar)
+            let image = NSBitmapImageRep(cgImage: try XCTUnwrap(renderer.cgImage))
+
+            // Use the center spacer as the background sample on each scan line.
+            func hasContent(in columns: Range<Int>) -> Bool {
+                (0..<image.pixelsHigh).contains { y in
+                    let background = image.colorAt(x: image.pixelsWide / 2, y: y)
+                    return columns.contains { image.colorAt(x: $0, y: y) != background }
+                }
+            }
+            XCTAssertTrue(hasContent(in: 0..<240), "Settings and access mode should be visible")
+            XCTAssertFalse(hasContent(in: 520..<760), "Context should be hidden, compacting=\(compacting)")
+        }
+    }
+
     func testUnknownIsNotReportedAsZero() {
         let result = ContextIndicatorPresentation(usage: nil, compaction: nil)
         XCTAssertNil(result.fraction)
