@@ -6,6 +6,7 @@ import Foundation
 protocol AgentRuntimeClient: Sendable {
     var providerName: String { get }
 
+    func providerCLIModels(_ provider: ProviderCLI) async throws -> [LocalModelOption]
     func installedCLIModels() async throws -> [LocalModelOption]
     func loadTasks() async throws -> [AgentTask]
     func events() -> AsyncStream<AgentRuntimeEvent>
@@ -31,6 +32,7 @@ struct RuntimeShutdownReport: Equatable, Sendable {
 }
 
 extension AgentRuntimeClient {
+    func providerCLIModels(_ provider: ProviderCLI) async throws -> [LocalModelOption] { throw AgentCLIError.unavailable("CLI catalog unavailable.") }
     func installedCLIModels() async throws -> [LocalModelOption] { throw InstalledCodexCLI.Failure.missing }
     /// Older adapters may keep their restricted submission path. They cannot
     /// silently claim Full access without implementing its execution policy.

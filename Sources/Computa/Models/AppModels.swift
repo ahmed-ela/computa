@@ -1,6 +1,6 @@
 import SwiftUI
 
-enum TaskStatus: String, CaseIterable, Sendable {
+enum TaskStatus: String, CaseIterable, Codable, Sendable {
     case running
     case waiting
     case failed
@@ -19,7 +19,7 @@ enum TaskStatus: String, CaseIterable, Sendable {
 
 }
 
-enum TimelineEntryKind: String, Sendable {
+enum TimelineEntryKind: String, Codable, Sendable {
     case user
     case assistant
     case reasoning
@@ -38,7 +38,7 @@ enum TimelineEntryKind: String, Sendable {
 
 }
 
-enum ToolRunStatus: String, Sendable {
+enum ToolRunStatus: String, Codable, Sendable {
     case running
     case succeeded
     case needsApproval
@@ -55,7 +55,7 @@ enum ToolRunStatus: String, Sendable {
 
 }
 
-struct ToolEvent: Hashable, Sendable {
+struct ToolEvent: Hashable, Codable, Sendable {
     var name: String
     var summary: String
     var status: ToolRunStatus
@@ -94,7 +94,7 @@ struct ActionApprovalRequest: Identifiable, Hashable, Sendable {
     let details: String
 }
 
-struct TimelineEntry: Identifiable, Hashable, Sendable {
+struct TimelineEntry: Identifiable, Hashable, Codable, Sendable {
     let id: String
     var kind: TimelineEntryKind
     var title: String
@@ -147,7 +147,7 @@ struct TimelineEntry: Identifiable, Hashable, Sendable {
     }
 }
 
-struct AgentTask: Identifiable, Hashable, Sendable {
+struct AgentTask: Identifiable, Hashable, Codable, Sendable {
     let id: String
     /// Engine thread identity survives restarts; the UI's initial task UUID does not.
     var runtimeThreadID: String?

@@ -175,6 +175,7 @@ final class AppState {
     init(
         tasks: [AgentTask] = SampleData.tasks,
         runtime: (any AgentRuntimeClient)? = nil,
+        installedProviderCLIs: [ProviderCLI] = ProviderCLI.installed,
         permissionClient: any AutomationPermissionClient = PermissionInspector(),
         preferences: UserDefaults = .standard,
         unreadCompletionStore: ChatUnreadCompletionStore? = nil,
@@ -187,6 +188,7 @@ final class AppState {
         }
     ) {
         self.runtime = runtime
+        self.installedProviderCLIs = installedProviderCLIs
         self.permissionClient = permissionClient
         self.preferences = preferences
         self.unreadCompletionStore = unreadCompletionStore
@@ -212,7 +214,7 @@ final class AppState {
             guard !Self.isModelHiddenFromPicker(id, apiProviders: storedAPIProviders) else { return nil }
             // Saved website choices remain selected if an account/menu changes.
             // Invalid ones are visible and rejected, never replaced with Qwen.
-            return id.hasPrefix("browser/") || id.hasPrefix("api/") || InstalledCodexCLI.slug(id) != nil ? id : LocalModelCatalog.option(for: id)?.id
+            return id.hasPrefix("browser/") || id.hasPrefix("api/") || ProviderCLI(modelID: id) != nil || InstalledCodexCLI.slug(id) != nil ? id : LocalModelCatalog.option(for: id)?.id
         } ?? WebsiteModelCatalog.freshProfileDefaultModelID
         websiteModelChoices = WebsiteModelCatalog.load(from: preferences)
         websiteModeChoices = WebsiteModeCatalog.load(from: preferences)
@@ -250,6 +252,19 @@ final class AppState {
         return tasks.first { $0.id == selectedTaskID }
     }
 
+    private var providerCLIOptions: [ProviderCLI: [LocalModelOption]] = [:]
+    private var providerCLIErrors: [ProviderCLI: String] = [:]
+    private var checkingProviderCLIs = Set<ProviderCLI>()
+    var providerCLISetups: [ModelProviderSetup] {
+        installedProviderCLIs.map { provider in
+            ModelProviderSetup(route: provider.route, name: provider.name, connected: providerCLIOptions[provider] != nil,
+                checkStatus: checkingProviderCLIs.contains(provider) ? .checking : providerCLIErrors[provider] == nil ? nil : .unavailable,
+                detail: providerCLIErrors[provider])
+        }
+    }
+
+    private let installedProviderCLIs: [ProviderCLI]
+
     var modelOptions: [LocalModelOption] {
         var options = LocalModelCatalog.options.flatMap { option -> [LocalModelOption] in
             guard let provider = LocalModelCatalog.webProvider(for: option.id) else { return [option] }
@@ -257,6 +272,12 @@ final class AppState {
             return provider == "chatgpt" ? observed : [option] + observed
         }
         options += websiteModeChoices.map { WebsiteModelCatalog.option(for: $0, available: true) }
+        for provider in installedProviderCLIs {
+            var defaultOption = provider.option
+            defaultOption.available = providerCLIErrors[provider] == nil
+            options.append(defaultOption)
+            options += providerCLIOptions[provider] ?? []
+        }
         options += installedCLIOptions
         options += APIProviderCatalog.options(for: apiProviders)
         for id in [defaultModel, selectedTask?.model].compactMap({ $0 })
@@ -334,6 +355,10 @@ final class AppState {
 
     func connectModelProvider(route: String) {
         guard canRefreshWebsiteModels else { return }
+        if let provider = installedProviderCLIs.first(where: { $0.route == route }) {
+            Task { await refreshProviderCLI(provider) }
+            return
+        }
         if route == InstalledCodexCLI.route {
             Task { await refreshInstalledCLIModels() }
             return
@@ -349,6 +374,20 @@ final class AppState {
         isBrowserPresented = true
         do { try browserSession.openProviderSignIn(provider) }
         catch { websiteModelsError = error.localizedDescription }
+    }
+
+    private func refreshProviderCLI(_ provider: ProviderCLI) async {
+        guard let runtime, !isShuttingDown, checkingProviderCLIs.insert(provider).inserted else { return }
+        defer { checkingProviderCLIs.remove(provider) }
+        do {
+            let options = try await runtime.providerCLIModels(provider)
+            guard !isShuttingDown else { return }
+            providerCLIOptions[provider] = options
+            providerCLIErrors[provider] = nil
+        } catch {
+            providerCLIOptions[provider] = nil
+            providerCLIErrors[provider] = error.localizedDescription
+        }
     }
 
     func refreshInstalledCLIModels() async {
@@ -1197,7 +1236,8 @@ final class AppState {
               option.selectable != false,
               let index = tasks.firstIndex(where: { $0.id == taskID }),
               canChangeModel(for: taskID),
-              tasks[index].runtimeThreadID == nil || (InstalledCodexCLI.slug(tasks[index].model) != nil) == (InstalledCodexCLI.slug(modelID) != nil)
+              tasks[index].runtimeThreadID == nil || ((InstalledCodexCLI.slug(tasks[index].model) != nil) == (InstalledCodexCLI.slug(modelID) != nil)
+                && ProviderCLI(modelID: tasks[index].model) == ProviderCLI(modelID: modelID))
         else { return false }
         tasks[index].model = modelID
         requestAutomaticWebsiteModelRefresh(for: modelID)
@@ -1335,7 +1375,7 @@ final class AppState {
 
     func canSteer(taskID: AgentTask.ID) -> Bool {
         runtime != nil && !isShuttingDown
-            && tasks.contains(where: { $0.id == taskID && $0.status == .running })
+            && tasks.contains(where: { $0.id == taskID && $0.status == .running && ProviderCLI(modelID: $0.model) == nil })
             && activeTurnTaskIDs.contains(taskID)
             && compactionStateByTask[taskID] != .running
             && !interruptingTaskIDs.contains(taskID)
@@ -1702,6 +1742,9 @@ final class AppState {
             }
             guard !Task.isCancelled, !isShuttingDown else { return }
             connectionState = .connected(provider: runtime.providerName)
+            for provider in Set([defaultModel, selectedTask?.model].compactMap { $0 }.compactMap(ProviderCLI.init(modelID:))) {
+                Task { await refreshProviderCLI(provider) }
+            }
             if InstalledCodexCLI.slug(defaultModel) != nil || selectedTask.flatMap({ InstalledCodexCLI.slug($0.model) }) != nil {
                 Task { await refreshInstalledCLIModels() }
             }
@@ -1963,7 +2006,7 @@ final class AppState {
                 }
             } else {
                 completedEntry.assistantPhase = nil
-                if entry.kind == .tool, let name = entry.toolEvent?.name, ["commandExecution", "fileChange"].contains(name),
+                if entry.kind == .tool, let name = entry.toolEvent?.name, ["commandExecution", "fileChange", "providerTool"].contains(name),
                    let existing = tasks[index].entries.firstIndex(where: {
                        $0.id == entry.id && $0.kind == .tool && $0.toolEvent?.name == name
                    }) {

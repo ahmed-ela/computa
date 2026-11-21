@@ -74,6 +74,24 @@ describe('website model selectors', () => {
     expect(html).toContain('Task model: Codex CLI / one');
   });
 
+  test('a bound CLI chat shows only its own provider and preserves nested model IDs', async () => {
+    const setups = [
+      { route: 'cli/opencode', name: 'OpenCode', connected: true },
+      { route: 'cli/claude', name: 'Claude Code', connected: true },
+      { route: 'browser/claude', name: 'Claude', connected: false },
+    ];
+    const models = ['cli/opencode/model/opencode/model-a', 'cli/claude/model/sonnet'].map(id => ({
+      id, label: id, detail: '', highMemory: false,
+    }));
+    const html = renderToStaticMarkup(h(ModelSelector, {
+      model: models[0].id, label: 'Task model', setups, options: models, boundToRuntime: true,
+      canConnect: true, onSelect: () => {},
+    })).html;
+    expect(await attributesBySelector(html, '[role="menuitemradio"]', 'data-value')).toEqual([models[0].id]);
+    expect(html).toContain('OpenCode models');
+    expect(html).not.toContain('Claude Code models');
+  });
+
   test('fresh profile lists setup actions without offering unverified models; discovery replaces only its provider action', async () => {
     const names = ['ChatGPT', 'Gemini', 'Claude', 'Grok', 'Kimi', 'Qwen', 'DeepSeek'];
     const setups = names.map((name) => ({

@@ -10,7 +10,7 @@ final class WebBridgeWebsiteModelRefreshTests: XCTestCase {
         let chat = syntheticWebsiteChoice(provider: "chatgpt", key: "new", label: "High")
         @MainActor final class Account { var failure: EmbeddedWebModelTransport.Failure? }
         let account = Account()
-        let state = AppState(tasks: [], preferences: prefs, websiteModelDiscovery: { provider in
+        let state = AppState(tasks: [], installedProviderCLIs: [], preferences: prefs, websiteModelDiscovery: { provider in
             if let failure = account.failure { throw failure }
             return provider == "gemini" ? [gemini] : [chat]
         })

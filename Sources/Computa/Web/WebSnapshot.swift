@@ -89,6 +89,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         setups.append(ModelProviderSetup(route: InstalledCodexCLI.route, name: "Codex CLI",
             connected: !state.installedCLIOptions.isEmpty, checkStatus: state.installedCLICheckStatus,
             detail: state.installedCLIError))
+        setups += state.providerCLISetups
         providerSetups = setups
         websiteModelsRefreshing = state.websiteModelsRefreshing
         canRefreshWebsiteModels = state.canRefreshWebsiteModels
