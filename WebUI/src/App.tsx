@@ -190,6 +190,7 @@ function TaskToolbar({ snapshot, task }: { snapshot: AppSnapshot; task?: TaskSna
             <span className="status-dot" />{task.status}
           </Badge>
         ) : null}
+        {/* Temporarily hide the Changes and inspector buttons.
         {task ? <Button variant="ghost" size="sm" className={`review-toolbar-button ${snapshot.isReviewPresented ? 'active' : ''}`}
           aria-label="Toggle changes" aria-pressed={Boolean(snapshot.isReviewPresented)} onClick={() => post({ action: 'toggleReview' })}>
           <Icon name="edit" size={15} /> Changes
@@ -203,6 +204,7 @@ function TaskToolbar({ snapshot, task }: { snapshot: AppSnapshot; task?: TaskSna
         >
           <Icon name="info" size={18} />
         </Button>
+        */}
         <Button variant="ghost" size="icon"
           className={`icon-button ${snapshot.isBrowserPresented ? 'active' : ''}`}
           aria-label="Toggle browser"
