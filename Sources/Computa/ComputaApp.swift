@@ -144,6 +144,10 @@ final class ComputaAppDelegate: NSObject, NSApplicationDelegate {
     // close and flushes its cookies. This retains no pages and adds no delay.
     private var terminationBrowserProfiles: [WKWebsiteDataStore] = []
 
+    func applicationDidBecomeActive(_ notification: Notification) {
+        state?.recheckPendingCLIInstallations()
+    }
+
     func prepareBrowserProfilesForTermination() {
         terminationBrowserProfiles = state?.browserSession.persistentDataStoresForApplicationTermination ?? []
     }

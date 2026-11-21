@@ -14,10 +14,11 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
     private var listeners: [Task<Void, Never>] = []
     private let channel = AsyncStream<AgentRuntimeEvent>.makeStream()
 
-    init(configuration: CodexAppServerRuntime.Configuration = .localQwen) {
+    init(configuration: CodexAppServerRuntime.Configuration = .localQwen,
+         providerCLISearchDirectories: [String] = ProviderCLI.directories()) {
         let events = channel.continuation
         providerChats = ProviderCLIChats(root: URL(fileURLWithPath: configuration.codexHomePath)
-            .appendingPathComponent("ProviderCLIChats", isDirectory: true)) { events.yield($0) }
+            .appendingPathComponent("ProviderCLIChats", isDirectory: true), searchDirectories: providerCLISearchDirectories) { events.yield($0) }
         bundled = CodexAppServerRuntime(configuration: configuration)
         providerName = bundled.providerName
         var native = configuration

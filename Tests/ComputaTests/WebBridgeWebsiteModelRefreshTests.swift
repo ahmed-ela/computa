@@ -10,12 +10,12 @@ final class WebBridgeWebsiteModelRefreshTests: XCTestCase {
         let chat = syntheticWebsiteChoice(provider: "chatgpt", key: "new", label: "High")
         @MainActor final class Account { var failure: EmbeddedWebModelTransport.Failure? }
         let account = Account()
-        let state = AppState(tasks: [], installedProviderCLIs: [], preferences: prefs, websiteModelDiscovery: { provider in
+        let state = AppState(tasks: [], preferences: prefs, websiteModelDiscovery: { provider in
             if let failure = account.failure { throw failure }
             return provider == "gemini" ? [gemini] : [chat]
         })
         let first = WebUISnapshot(state: state)
-        XCTAssertEqual(first.providerSetups.map(\.route), WebsiteModelCatalog.discoveryProviders.map { "browser/" + $0 } + ["cli/codex"])
+        XCTAssertEqual(first.providerSetups.map(\.route), WebsiteModelCatalog.discoveryProviders.map { "browser/" + $0 } + ["cli/codex"] + ProviderCLI.allCases.map(\.route))
         XCTAssertTrue(first.providerSetups.allSatisfy { !$0.connected })
         await state.refreshWebsiteModels(provider: "gemini")
         await state.refreshWebsiteModels(provider: "chatgpt")

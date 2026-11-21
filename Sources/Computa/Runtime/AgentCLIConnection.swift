@@ -2,10 +2,10 @@ import Darwin
 import Foundation
 
 enum AgentCLIError: LocalizedError, Sendable {
-    case unavailable(String), protocolError(String), cancelled
+    case installationRequired(String), unavailable(String), protocolError(String), cancelled
     var errorDescription: String? {
         switch self {
-        case .unavailable(let reason), .protocolError(let reason): reason
+        case .installationRequired(let reason), .unavailable(let reason), .protocolError(let reason): reason
         case .cancelled: "CLI task interrupted."
         }
     }

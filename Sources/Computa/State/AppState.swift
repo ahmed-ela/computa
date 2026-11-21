@@ -175,7 +175,6 @@ final class AppState {
     init(
         tasks: [AgentTask] = SampleData.tasks,
         runtime: (any AgentRuntimeClient)? = nil,
-        installedProviderCLIs: [ProviderCLI] = ProviderCLI.installed,
         permissionClient: any AutomationPermissionClient = PermissionInspector(),
         preferences: UserDefaults = .standard,
         unreadCompletionStore: ChatUnreadCompletionStore? = nil,
@@ -188,7 +187,6 @@ final class AppState {
         }
     ) {
         self.runtime = runtime
-        self.installedProviderCLIs = installedProviderCLIs
         self.permissionClient = permissionClient
         self.preferences = preferences
         self.unreadCompletionStore = unreadCompletionStore
@@ -256,14 +254,14 @@ final class AppState {
     private var providerCLIErrors: [ProviderCLI: String] = [:]
     private var checkingProviderCLIs = Set<ProviderCLI>()
     var providerCLISetups: [ModelProviderSetup] {
-        installedProviderCLIs.map { provider in
+        ProviderCLI.allCases.map { provider in
             ModelProviderSetup(route: provider.route, name: provider.name, connected: providerCLIOptions[provider] != nil,
                 checkStatus: checkingProviderCLIs.contains(provider) ? .checking : providerCLIErrors[provider] == nil ? nil : .unavailable,
                 detail: providerCLIErrors[provider])
         }
     }
 
-    private let installedProviderCLIs: [ProviderCLI]
+    @ObservationIgnored private var pendingCLIInstallations = Set<String>()
 
     var modelOptions: [LocalModelOption] {
         var options = LocalModelCatalog.options.flatMap { option -> [LocalModelOption] in
@@ -272,11 +270,10 @@ final class AppState {
             return provider == "chatgpt" ? observed : [option] + observed
         }
         options += websiteModeChoices.map { WebsiteModelCatalog.option(for: $0, available: true) }
-        for provider in installedProviderCLIs {
-            var defaultOption = provider.option
-            defaultOption.available = providerCLIErrors[provider] == nil
-            options.append(defaultOption)
-            options += providerCLIOptions[provider] ?? []
+        for provider in ProviderCLI.allCases {
+            guard let discovered = providerCLIOptions[provider] else { continue }
+            options.append(provider.option)
+            options += discovered
         }
         options += installedCLIOptions
         options += APIProviderCatalog.options(for: apiProviders)
@@ -355,7 +352,7 @@ final class AppState {
 
     func connectModelProvider(route: String) {
         guard canRefreshWebsiteModels else { return }
-        if let provider = installedProviderCLIs.first(where: { $0.route == route }) {
+        if let provider = ProviderCLI.allCases.first(where: { $0.route == route }) {
             Task { await refreshProviderCLI(provider) }
             return
         }
@@ -376,8 +373,13 @@ final class AppState {
         catch { websiteModelsError = error.localizedDescription }
     }
 
+    func recheckPendingCLIInstallations() {
+        for route in pendingCLIInstallations { connectModelProvider(route: route) }
+    }
+
     private func refreshProviderCLI(_ provider: ProviderCLI) async {
         guard let runtime, !isShuttingDown, checkingProviderCLIs.insert(provider).inserted else { return }
+        pendingCLIInstallations.remove(provider.route)
         defer { checkingProviderCLIs.remove(provider) }
         do {
             let options = try await runtime.providerCLIModels(provider)
@@ -385,6 +387,8 @@ final class AppState {
             providerCLIOptions[provider] = options
             providerCLIErrors[provider] = nil
         } catch {
+            guard !isShuttingDown else { return }
+            if case AgentCLIError.installationRequired = error { pendingCLIInstallations.insert(provider.route) }
             providerCLIOptions[provider] = nil
             providerCLIErrors[provider] = error.localizedDescription
         }
@@ -392,6 +396,7 @@ final class AppState {
 
     func refreshInstalledCLIModels() async {
         guard let runtime, !isShuttingDown, installedCLICheckStatus != .checking else { return }
+        pendingCLIInstallations.remove(InstalledCodexCLI.route)
         installedCLICheckStatus = .checking
         installedCLIError = nil
         do {
@@ -401,6 +406,8 @@ final class AppState {
             installedCLICheckStatus = nil
             if options.isEmpty { installedCLIError = "The signed-in CLI returned no visible models." }
         } catch {
+            guard !isShuttingDown else { return }
+            if error as? InstalledCodexCLI.Failure == .missing { pendingCLIInstallations.insert(InstalledCodexCLI.route) }
             installedCLIOptions = []
             installedCLICheckStatus = .unavailable
             installedCLIError = error.localizedDescription
