@@ -149,14 +149,6 @@ struct EmbeddedBrowserPane: View {
             .help("New tab (⌘T). Control-click for a mobile tab.")
             .accessibilityLabel("New browser tab")
             .accessibilityIdentifier("browser-new-tab")
-
-            Button(action: onClose) {
-                Image(systemName: "sidebar.right")
-                    .frame(width: 24, height: 24)
-            }
-            .help("Hide browser — tabs stay open")
-            .accessibilityLabel("Hide browser")
-            .accessibilityIdentifier("browser-hide")
         }
         .buttonStyle(.plain)
         .padding(.horizontal, 8)

@@ -6,6 +6,7 @@ import Copy from '@octanejs/lucide/icons/copy';
 import CircleAlert from '@octanejs/lucide/icons/circle-alert';
 import CornerUpLeft from '@octanejs/lucide/icons/corner-up-left';
 import Ellipsis from '@octanejs/lucide/icons/ellipsis';
+import Globe from '@octanejs/lucide/icons/globe';
 import GripVertical from '@octanejs/lucide/icons/grip-vertical';
 import Monitor from '@octanejs/lucide/icons/monitor';
 import PanelRight from '@octanejs/lucide/icons/panel-right';
@@ -23,6 +24,7 @@ import X from '@octanejs/lucide/icons/x';
 
 // Import only the icons we use, through the same native Octane port as shadcn.
 const icons = {
+  browser: Globe,
   check: Check,
   chevron: ChevronRight,
   computer: Monitor,

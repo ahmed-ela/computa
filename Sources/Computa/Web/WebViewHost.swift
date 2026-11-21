@@ -122,6 +122,7 @@ private struct CodexWebView: NSViewRepresentable {
         )
 
         let webView = WindowConfiguredWebView(frame: .zero, configuration: configuration)
+        webView.configureBrowserToggle(state: state)
         webView.navigationDelegate = context.coordinator
         webView.setValue(false, forKey: "drawsBackground")
         webView.allowsMagnification = false
@@ -167,6 +168,23 @@ private struct CodexWebView: NSViewRepresentable {
 
 @MainActor
 private final class WindowConfiguredWebView: WKWebView {
+    private let browserAccessory = NSTitlebarAccessoryViewController()
+
+    func configureBrowserToggle(state: AppState) {
+        let control = NSHostingView(rootView: BrowserTitlebarToggle(state: state))
+        control.setFrameSize(control.fittingSize)
+        browserAccessory.view = control
+        browserAccessory.layoutAttribute = .right
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if let window, window !== newWindow, window.styleMask.contains(.titled),
+           let index = window.titlebarAccessoryViewControllers.firstIndex(of: browserAccessory) {
+            window.removeTitlebarAccessoryViewController(at: index)
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         guard let window else { return }
@@ -175,6 +193,30 @@ private final class WindowConfiguredWebView: WKWebView {
         window.titlebarAppearsTransparent = true
         window.styleMask.insert(.fullSizeContentView)
         window.minSize = NSSize(width: 980, height: 640)
+        if window.styleMask.contains(.titled), !window.titlebarAccessoryViewControllers.contains(browserAccessory) {
+            window.addTitlebarAccessoryViewController(browserAccessory)
+        }
+    }
+}
+
+private struct BrowserTitlebarToggle: View {
+    @Bindable var state: AppState
+
+    var body: some View {
+        Toggle(isOn: $state.isBrowserPresented) {
+            Image(systemName: "globe")
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(state.shouldPresentBrowserPane ? Color.accentColor : .secondary)
+                .frame(width: 28, height: 22)
+                .contentShape(Rectangle())
+        }
+        .toggleStyle(.button)
+        .buttonStyle(.borderless)
+        .accessibilityLabel("Browser")
+        .accessibilityIdentifier("browser-toggle")
+        .help(state.shouldPresentBrowserPane ? "Hide browser" : "Show browser")
+        .disabled(state.presentedSheet != nil || state.approvalGateBlocksInteraction)
+        .padding(.trailing, 6)
     }
 }
 
