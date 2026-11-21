@@ -74,6 +74,90 @@ final class ProviderCLIIntegrationTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testOpenCodeBrowserIsPrivateToTurnAndUsesNativeApproval() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executable = directory.appendingPathComponent("opencode")
+        let source = #"""
+        #!/usr/bin/python3
+        import json, sys, urllib.request, urllib.error
+        def request(method, rpc_id, params, authorized=True, origin=None):
+            headers = {"Content-Type":"application/json"}
+            if authorized: headers.update({h["name"]:h["value"] for h in endpoint["headers"]})
+            if origin: headers["Origin"] = origin
+            msg = dict(jsonrpc="2.0", method=method, params=params)
+            if rpc_id is not None: msg["id"] = rpc_id
+            req = urllib.request.Request(endpoint["url"], data=json.dumps(msg).encode(), headers=headers)
+            try:
+                with urllib.request.urlopen(req,timeout=8) as r:
+                    return r.status, json.loads(r.read() or b"{}")
+            except urllib.error.HTTPError as e: return e.code, {}
+        def emit(**obj): print(json.dumps(dict(jsonrpc="2.0", **obj)),flush=True)
+        def call(i,name,arguments): return request("tools/call",i,dict(name=name,arguments=arguments))[1]
+        for line in sys.stdin:
+            m=json.loads(line); method=m["method"]; p=m["params"]
+            if method=="initialize":
+                result={"protocolVersion":1,"agentCapabilities":{"loadSession":True,"mcpCapabilities":{"http":True}}}
+            elif method in ["session/new","session/load"]:
+                if p["mcpServers"]:
+                    endpoint,=p["mcpServers"]
+                    assert endpoint["type"]=="http" and endpoint["url"].startswith("http://127.0.0.1:")
+                    assert request("initialize",1,{},authorized=False)[0]==401
+                    assert request("initialize",1,{},origin="https://example.com")[0]==403
+                    assert "tools" in request("initialize",1,{"protocolVersion":"2025-11-25"})[1]["result"]["capabilities"]
+                    assert request("notifications/initialized",None,{})[0]==202
+                    tools=request("tools/list",2,{})[1]["result"]["tools"]
+                    assert len(tools)==10 and all(t["name"].startswith("browser_") and "inputSchema" in t for t in tools)
+                    assert call(3,"browser_tabs",{})["result"]["isError"]
+                else: assert "Discovery" in p["cwd"]
+                result={"sessionId":"owned","models":{"availableModels":[{"modelId":"fixture","name":"Fixture"}]}}
+            elif method=="session/set_model": result={}
+            elif method=="session/prompt":
+                assert not call(4,"browser_tabs",{})["result"].get("isError")
+                assert call(5,"browser_open",{"url":"https://example.net"})["result"]["isError"]
+                failure=call(6,"browser_open",{"url":"https://example.com"})["result"]
+                assert failure["isError"] and "declined" in failure["content"][0]["text"]
+                assert "error" in call(6,"browser_open",{"url":"https://example.com"})
+                emit(method="session/update",params={"sessionId":"owned","update":{"sessionUpdate":"agent_message_chunk",
+                    "content":{"type":"text","text":endpoint["url"]}}})
+                result={"stopReason":"end_turn"}
+            else: raise ValueError(method)
+            emit(id=m["id"],result=result)
+        """#
+        try Data(source.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let task = UUID().uuidString
+        for _ in 0..<2 {
+            let events = AsyncStream<AgentRuntimeEvent>.makeStream()
+            let runtime = ProviderCLIChats(root: directory.appendingPathComponent("store"), searchDirectories: [directory.path]) {
+                events.continuation.yield($0)
+            }
+            await runtime.configureEmbeddedBrowserTools(.init(transport: EmbeddedBrowserTabTransport(session: session)))
+            let models = try await runtime.models(.opencode)
+            let model = try XCTUnwrap(models.first?.id)
+            _ = try await runtime.load()
+            try await runtime.submit("Use only https://example.com", id: task, provider: .opencode, modelID: model)
+            let endpoint = try await Self.answer(events.stream, id: task) { request in
+                XCTAssertEqual(request.kind, .computerUse)
+                XCTAssertEqual(request.summary, "browser_open")
+                XCTAssertTrue(request.details.contains("example.com"))
+                try await runtime.approve(request.id, false)
+            }
+            let url = try XCTUnwrap(URL(string: endpoint))
+            do {
+                _ = try await URLSession.shared.data(from: url)
+                XCTFail("Turn ended but the endpoint was still listening")
+            } catch let error as URLError {
+                XCTAssertEqual(error.code, .cannotConnectToHost)
+            }
+            _ = await runtime.shutdown()
+        }
+    }
+
     /// Runs only on a machine explicitly selected for signed-in provider testing.
     @MainActor
     func testInstalledProviderThroughComputa() async throws {

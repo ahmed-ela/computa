@@ -19,8 +19,10 @@ Qwen Code, Kimi Code and OpenCode use their native ACP commands. DeepSeek models
 are available through OpenCode when listed by the signed-in account.
 Claude Code additionally needs the `claude-agent-acp` executable from
 `@agentclientprotocol/claude-agent-acp`. Sign in through the provider's CLI first.
-Computa uses the CLI's existing account session. Each CLI supplies its own tools and permissions. Its available models and
-plan limits can differ from those on its chat website.
+Computa uses the CLI's existing account session. OpenCode chats can use Computa’s built-in
+browser alongside OpenCode’s file and terminal tools. Browser actions use Computa’s
+current access mode, and the browser connection closes when the turn ends.
+Each CLI’s available models and plan limits can differ from those on its chat website.
 
 Next work: [built-in browser tooling and generalized evidence handling](TODO.md).
 

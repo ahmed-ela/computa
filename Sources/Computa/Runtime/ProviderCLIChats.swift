@@ -14,6 +14,9 @@ actor ProviderCLIChats {
         var tools: [String: TimelineEntry] = [:]
         var item = UUID().uuidString
         var acceptingUpdates = false
+        var ending = false
+        var browser: OpenCodeBrowserBridge?
+        var browserController: EmbeddedBrowserToolController?
     }
     struct Permission {
         let taskID: String
@@ -31,7 +34,18 @@ actor ProviderCLIChats {
     private var active: [String: Turn] = [:]
     private var permissions: [String: Permission] = [:]
     private var discoveries: [UUID: AgentCLIConnection] = [:]
+    private var browserController: EmbeddedBrowserToolController?
+    private struct BrowserPermission {
+        let task: String
+        let turn: String
+        let decision: CheckedContinuation<Bool, Never>
+    }
+    private var browserPermissions: [String: BrowserPermission] = [:]
     private var shuttingDown = false
+
+    func configureEmbeddedBrowserTools(_ controller: EmbeddedBrowserToolController) {
+        browserController = controller
+    }
 
     init(root: URL, searchDirectories: [String] = ProviderCLI.directories(), publish: @escaping @Sendable (AgentRuntimeEvent) -> Void) {
         self.root = root
@@ -67,7 +81,7 @@ actor ProviderCLIChats {
     func setDirectory(_ path: String, for id: String) { directories[id] = path }
 
     private func check(_ id: String, _ turnID: String) throws {
-        guard !shuttingDown, active[id]?.id == turnID else { throw AgentCLIError.cancelled }
+        guard !shuttingDown, active[id]?.id == turnID, active[id]?.ending == false else { throw AgentCLIError.cancelled }
     }
 
     private func rpc(_ conn: AgentCLIConnection, _ method: String, _ params: [String: Any],
@@ -145,6 +159,22 @@ actor ProviderCLIChats {
             let initResult = try await initialize(conn)
             try check(id, turnID)
             var params: [String: Any] = ["cwd": directory.path, "mcpServers": [Any]()]
+            if provider == .opencode, let controller = browserController {
+                let capabilities = initResult["agentCapabilities"] as? [String: Any]
+                guard (capabilities?["mcpCapabilities"] as? [String: Any])?["http"] as? Bool == true else {
+                    throw AgentCLIError.unavailable("Update OpenCode to a version with HTTP MCP support to use Computa’s browser.")
+                }
+                let scope = ComputerTaskScope(userPrompt: prompt)
+                let bridge = OpenCodeBrowserBridge { [weak self] tool, input in
+                    guard let self else { throw AgentCLIError.cancelled }
+                    return try await self.browserCall(tool, input: input, task: id, turn: turnID, controller: controller, scope: scope)
+                }
+                active[id]?.browser = bridge
+                active[id]?.browserController = controller
+                let endpoint = try await bridge.start()
+                try check(id, turnID)
+                params["mcpServers"] = [endpoint.descriptor]
+            }
             let session: String
             let config: [String: Any]
             if let saved {
@@ -191,7 +221,11 @@ actor ProviderCLIChats {
             publish(.taskStatusChanged(taskID: id, status: .running))
             Task { await self.run(prompt, id: id, turn: turnID, session: session, conn: conn) }
         } catch {
-            if active[id]?.id == turnID { active.removeValue(forKey: id) }
+            if let current = active[id], current.id == turnID, !current.ending {
+                active[id]?.ending = true
+                _ = await retireBrowser(current, task: id)
+                active.removeValue(forKey: id)
+            }
             await conn.close()
             throw error
         }
@@ -205,23 +239,30 @@ actor ProviderCLIChats {
                   !current.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw AgentCLIError.protocolError("The CLI ended the turn without a completed answer.")
             }
-            finish(id, turn: turn, entry: .init(id: current.item, kind: .assistant, title: "Computa",
+            await finish(id, turn: turn, entry: .init(id: current.item, kind: .assistant, title: "Computa",
                 body: current.answer, assistantPhase: "final_answer"), status: .completed)
         } catch {
-            finish(id, turn: turn, entry: .init(kind: .system, title: "CLI task failed",
+            await finish(id, turn: turn, entry: .init(kind: .system, title: "CLI task failed",
                 body: error.localizedDescription), status: .failed)
         }
         await conn.close()
     }
 
-    private func finish(_ id: String, turn: String, entry: TimelineEntry, status: TaskStatus) {
-        guard let current = active[id], current.id == turn, var row = records[id] else { return }
-        active.removeValue(forKey: id)
+    private func finish(_ id: String, turn: String, entry: TimelineEntry, status: TaskStatus) async {
+        guard let current = active[id], current.id == turn, !current.ending else { return }
+        active[id]?.ending = true
+        active[id]?.acceptingUpdates = false
         clearPermissions(id)
+        let issues = await retireBrowser(current, task: id)
+        active.removeValue(forKey: id)
+        guard var row = records[id] else { return }
+        let status = issues.isEmpty ? status : .failed
         row.task.updatedAt = .now
         row.task.status = status
         row.task.entries += current.tools.values.sorted { $0.timestamp < $1.timestamp }
         row.task.entries.append(entry)
+        let cleanup = issues.isEmpty ? nil : TimelineEntry(kind: .system, title: "Browser cleanup unconfirmed", body: issues.joined(separator: " "))
+        if let cleanup { row.task.entries.append(cleanup) }
         do { try save(row) }
         catch {
             publish(.timelineEntryAppended(taskID: id, entry: .init(kind: .system, title: "CLI transcript could not be saved", body: error.localizedDescription)))
@@ -229,8 +270,67 @@ actor ProviderCLIChats {
             return
         }
         publish(.timelineEntryAppended(taskID: id, entry: entry))
+        if let cleanup { publish(.timelineEntryAppended(taskID: id, entry: cleanup)) }
         if status == .completed { publish(.taskCompletionObserved(taskID: id, threadID: id, turnID: turn)) }
         publish(.taskStatusChanged(taskID: id, status: status))
+    }
+
+    private func retireBrowser(_ current: Turn, task: String) async -> [String] {
+        for (key, permission) in browserPermissions where permission.task == task && permission.turn == current.id {
+            resolveBrowserPermission(key, allowed: false)
+        }
+        await current.browser?.close()
+        return await current.browserController?.release(taskKey: current.id) ?? []
+    }
+
+    private func browserCall(_ tool: String, input: Data, task: String, turn: String,
+                             controller: EmbeddedBrowserToolController, scope: ComputerTaskScope) async throws -> [String] {
+        func checkTurn() throws {
+            try Task.checkCancellation()
+            try check(task, turn)
+            guard active[task]?.acceptingUpdates == true else { throw AgentCLIError.cancelled }
+        }
+        try checkTurn()
+        guard let arguments = try JSONSerialization.jsonObject(with: input) as? [String: Any] else {
+            throw AgentCLIError.protocolError("Invalid browser arguments.")
+        }
+        try EmbeddedBrowserTools.validate(tool: tool, arguments: arguments)
+        if let violation = scope.embeddedBrowserToolViolation() { throw AgentCLIError.protocolError(violation) }
+        if let raw = arguments["url"] as? String, let url = URL(string: raw), let violation = scope.siteViolation(url: url) {
+            throw AgentCLIError.protocolError(violation)
+        }
+        var prepared: EmbeddedBrowserActionReferences.Prepared?
+        if tool == "browser_click" || tool == "browser_fill" {
+            prepared = try await controller.prepareMutation(taskKey: turn, tool: tool, arguments: input)
+            try await controller.preflightMutation(taskKey: turn, tool: tool, arguments: input, scope: scope, prepared: prepared)
+        }
+        try checkTurn()
+        if EmbeddedBrowserTools.requiresApproval(tool: tool) {
+            let details = try JSONSerialization.data(withJSONObject: prepared?.canonicalArguments ?? arguments, options: [.prettyPrinted, .sortedKeys])
+            let key = "provider-cli/" + UUID().uuidString
+            let allowed = await withTaskCancellationHandler {
+                await withCheckedContinuation { decision in
+                    browserPermissions[key] = BrowserPermission(task: task, turn: turn, decision: decision)
+                    publish(.approvalRequested(.init(id: key, taskID: task, kind: .computerUse, title: "Allow built-in browser action?",
+                        summary: tool, details: String(decoding: details, as: UTF8.self))))
+                }
+            } onCancel: {
+                Task { await self.resolveBrowserPermission(key, allowed: false) }
+            }
+            guard allowed else { throw AgentCLIError.unavailable("The built-in browser action was declined. No input was dispatched.") }
+        }
+        try checkTurn()
+        let result = try await controller.executeResult(taskKey: turn, tool: tool, arguments: input, scope: scope,
+            prepared: prepared, lifecycleObservationsEnabled: true)
+        try checkTurn()
+        return [result.completeObservation ? BrowserCompleteObservation.marker : nil,
+                result.actionReceipt?.compactText ?? result.lifecycleReceipt?.compactText, result.response].compactMap { $0 }
+    }
+
+    private func resolveBrowserPermission(_ key: String, allowed: Bool) {
+        guard let request = browserPermissions.removeValue(forKey: key) else { return }
+        request.decision.resume(returning: allowed)
+        publish(.approvalResolved(requestID: key))
     }
 
     private func clearPermissions(_ id: String) {
@@ -288,6 +388,11 @@ actor ProviderCLIChats {
     }
 
     func approve(_ key: String, _ allowed: Bool) async throws {
+        if let request = browserPermissions[key] {
+            try check(request.task, request.turn)
+            resolveBrowserPermission(key, allowed: allowed)
+            return
+        }
         guard let p = permissions.removeValue(forKey: key), let turn = active[p.taskID], turn.id == p.turnID,
               let conn = turn.connection else { throw AgentCLIError.cancelled }
         let choice = allowed ? p.allow : p.deny
@@ -300,8 +405,7 @@ actor ProviderCLIChats {
 
     func interrupt(_ id: String) async {
         guard let current = active[id] else { return }
-        finish(id, turn: current.id, entry: .init(kind: .system, title: "CLI interrupted", body: "The task was stopped."), status: .failed)
-        if active[id]?.id == current.id { active.removeValue(forKey: id) }
+        await finish(id, turn: current.id, entry: .init(kind: .system, title: "CLI interrupted", body: "The task was stopped."), status: .failed)
         await current.connection?.close()
     }
 

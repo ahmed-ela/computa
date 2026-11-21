@@ -141,13 +141,15 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
         await bundled.configureEmbeddedWebModelTransport(transport)
     }
     func configureEmbeddedBrowserTools(_ controller: EmbeddedBrowserToolController) async {
+        await providerChats.configureEmbeddedBrowserTools(controller)
         await bundled.configureEmbeddedBrowserTools(controller)
         await cli.configureEmbeddedBrowserTools(controller)
     }
     func shutdown() async -> RuntimeShutdownReport {
+        // Retire MCP callers before either app-server shuts down the shared browser.
+        let providerIssues = await providerChats.shutdown()
         async let mainReport = bundled.shutdown()
         async let cliReport = cli.shutdown()
-        let providerIssues = await providerChats.shutdown()
         let reports = await [mainReport, cliReport]
         for listener in listeners { await listener.value }
         channel.continuation.finish()
