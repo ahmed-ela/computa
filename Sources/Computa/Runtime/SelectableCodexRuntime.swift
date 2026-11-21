@@ -5,6 +5,8 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
     nonisolated let providerName: String
     private let bundled: CodexAppServerRuntime
     private let cli: CodexAppServerRuntime
+    private let providerChats: ProviderCLIChats
+    private var providerOwners: [String: ProviderCLI] = [:]
     private let cliThreads: InstalledCodexCLI.Threads
     private var owners: [String: Bool] = [:]
     private var submitting = Set<String>()
@@ -13,6 +15,9 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
     private let channel = AsyncStream<AgentRuntimeEvent>.makeStream()
 
     init(configuration: CodexAppServerRuntime.Configuration = .localQwen) {
+        let events = channel.continuation
+        providerChats = ProviderCLIChats(root: URL(fileURLWithPath: configuration.codexHomePath)
+            .appendingPathComponent("ProviderCLIChats", isDirectory: true)) { events.yield($0) }
         bundled = CodexAppServerRuntime(configuration: configuration)
         providerName = bundled.providerName
         var native = configuration
@@ -52,16 +57,20 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
 
     func loadTasks() async throws -> [AgentTask] {
         listen()
+        let external = try await providerChats.load()
+        for chat in external { providerOwners[chat.id] = ProviderCLI(modelID: chat.model) }
         let regular = try await bundled.loadTasks()
         for chat in regular { owners[chat.id] = false }
         let saved = try cliThreads.entries()
-        guard !saved.isEmpty else { return regular }
+        guard !saved.isEmpty else { return (regular + external).sorted { $0.updatedAt > $1.updatedAt } }
         let native: [AgentTask]
         do { native = try await cli.loadTasks() }
         catch { native = saved.map { InstalledCodexCLI.unavailableTask(threadID: $0.key, modelID: $0.value, error: error) } }
         for chat in native { owners[chat.id] = true }
-        return (regular + native).sorted { $0.updatedAt > $1.updatedAt }
+        return (regular + native + external).sorted { $0.updatedAt > $1.updatedAt }
     }
+
+    func providerCLIModels(_ provider: ProviderCLI) async throws -> [LocalModelOption] { try await providerChats.models(provider) }
 
     func installedCLIModels() async throws -> [LocalModelOption] { try await cli.installedCLIModels() }
 
@@ -71,7 +80,18 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
 
     func submit(prompt: String, toTaskID taskID: String, modelID: String, accessMode: AccessMode) async throws {
         listen()
-        let isCLI = modelID.hasPrefix("cli/")
+        if let provider = ProviderCLI(modelID: modelID) {
+            guard owners[taskID] == nil, providerOwners[taskID].map({ $0 == provider }) != false else { throw InstalledCodexCLI.Failure.differentRuntime }
+            guard submitting.insert(taskID).inserted else { throw InstalledCodexCLI.Failure.busy }
+            defer { submitting.remove(taskID) }
+            let previous = providerOwners[taskID]
+            providerOwners[taskID] = provider
+            do { try await providerChats.submit(prompt, id: taskID, provider: provider, modelID: modelID) }
+            catch { providerOwners[taskID] = previous; throw error }
+            return
+        }
+        guard providerOwners[taskID] == nil else { throw InstalledCodexCLI.Failure.differentRuntime }
+        let isCLI = InstalledCodexCLI.slug(modelID) != nil
         if let existing = owners[taskID], existing != isCLI { throw InstalledCodexCLI.Failure.differentRuntime }
         guard submitting.insert(taskID).inserted else { throw InstalledCodexCLI.Failure.busy }
         defer { submitting.remove(taskID) }
@@ -86,6 +106,8 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
 
     private func runtime(for id: String) -> CodexAppServerRuntime { owners[id] == true ? cli : bundled }
     func configureWorkspace(path: String, forTaskID id: String) async throws {
+        await providerChats.setDirectory(path, for: id)
+        if providerOwners[id] != nil { return }
         if owners[id] != nil {
             try await runtime(for: id).configureWorkspace(path: path, forTaskID: id)
         } else {
@@ -93,13 +115,23 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
             try await cli.configureWorkspace(path: path, forTaskID: id)
         }
     }
-    func steer(prompt: String, toTaskID id: String) async throws { try await runtime(for: id).steer(prompt: prompt, toTaskID: id) }
-    func compact(taskID: String) async throws { try await runtime(for: taskID).compact(taskID: taskID) }
-    func interrupt(taskID: String) async throws { try await runtime(for: taskID).interrupt(taskID: taskID) }
+    func steer(prompt: String, toTaskID id: String) async throws {
+        guard providerOwners[id] == nil else { throw AgentRuntimeCapabilityError.steeringUnsupported }
+        try await runtime(for: id).steer(prompt: prompt, toTaskID: id)
+    }
+    func compact(taskID: String) async throws {
+        guard providerOwners[taskID] == nil else { throw AgentRuntimeCapabilityError.compactionUnsupported }
+        try await runtime(for: taskID).compact(taskID: taskID)
+    }
+    func interrupt(taskID: String) async throws {
+        if providerOwners[taskID] != nil { await providerChats.interrupt(taskID); return }
+        try await runtime(for: taskID).interrupt(taskID: taskID)
+    }
     func retryWebsiteSessionCleanup(taskID: String) async -> WebsiteSessionCleanupReceipt {
         await runtime(for: taskID).retryWebsiteSessionCleanup(taskID: taskID)
     }
     func resolveApproval(requestID: String, approved: Bool) async throws {
+        if requestID.hasPrefix("provider-cli/") { try await providerChats.approve(requestID, approved); return }
         try await (cliApprovals.contains(requestID) ? cli : bundled).resolveApproval(requestID: requestID, approved: approved)
     }
     func configureAPIProviders(_ providers: [APIProviderDefinition], credentialMutation: @escaping @Sendable () throws -> Void) async throws {
@@ -115,9 +147,10 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
     func shutdown() async -> RuntimeShutdownReport {
         async let mainReport = bundled.shutdown()
         async let cliReport = cli.shutdown()
+        let providerIssues = await providerChats.shutdown()
         let reports = await [mainReport, cliReport]
         for listener in listeners { await listener.value }
         channel.continuation.finish()
-        return RuntimeShutdownReport(issues: reports.flatMap(\.issues))
+        return RuntimeShutdownReport(issues: reports.flatMap(\.issues) + providerIssues)
     }
 }

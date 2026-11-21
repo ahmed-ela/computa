@@ -16,12 +16,12 @@ const marks: Record<string, string> = { chatgpt: openai, openai, claude, groq, g
 
 export function ModelProviderIcon({ model }: { model: string }) {
   const [transport, provider] = model.split('/');
-  if (transport === 'cli' && provider === 'codex') return <Icon name="terminal" size={16} />;
-  const colorMark = provider === 'gemini' && (transport === 'browser' || transport === 'api') ? gemini
+  if (transport === 'cli' && ['codex', 'opencode', 'antigravity'].includes(provider)) return <Icon name="terminal" size={16} />;
+  const colorMark = provider === 'gemini' && ['browser', 'api', 'cli'].includes(transport) ? gemini
     : provider === 'alibaba' && transport === 'api' ? alibabaCloud : undefined;
   if (colorMark) return <img className={`model-provider-icon model-provider-icon-color provider-${provider}`}
     data-provider={provider} aria-hidden="true" alt="" src={colorMark} width={16} height={16} />;
-  const mark = (transport === 'browser' || transport === 'api') && Object.hasOwn(marks, provider)
+  const mark = ['browser', 'api', 'cli'].includes(transport) && Object.hasOwn(marks, provider)
     ? marks[provider] : undefined;
   return mark
     ? <span className={`model-provider-icon provider-${provider}`} data-provider={provider} aria-hidden="true"

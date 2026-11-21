@@ -13,6 +13,14 @@ examples, approvals, and process-session limits.
 
 [Download the latest macOS alpha](https://computa.wtf/download) for Apple Silicon Macs running macOS 14 or later.
 
+Computa's model picker also supports locally installed agent CLIs. Open a provider submenu to
+load its model catalog, then choose a model for a new chat. Antigravity, Gemini CLI,
+Qwen Code, DeepSeek Harness, Kimi Code and OpenCode use their native ACP commands.
+Claude Code additionally needs the `claude-agent-acp` executable from
+`@agentclientprotocol/claude-agent-acp`. Sign in through the provider's CLI first.
+Each CLI supplies its own tools and account permissions. Its available models and
+plan limits can differ from those on its chat website.
+
 Next work: [built-in browser tooling and generalized evidence handling](TODO.md).
 
 The complete Rust migration is being qualified on
