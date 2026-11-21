@@ -474,6 +474,37 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         XCTAssertFalse(window.isKeyWindow)
     }
 
+    @MainActor
+    func testSettingsFooterReservesOnlySidebarSpaceAtEachWidth() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let state = AppState(tasks: [AgentTask(title: "Layout", summary: "", status: .draft, workspace: "", model: "local")],
+                             preferences: isolatedTestPreferences(), browserSession: session)
+        let hosting = NSHostingView(rootView: WebWorkspaceView(state: state))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 720),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        defer { window.close() }
+        hosting.layoutSubtreeIfNeeded()
+        let chat = try XCTUnwrap(nativeViews(in: hosting).compactMap { $0 as? WKWebView }.first)
+        for (width, sidebarWidth) in [(1280, 230), (900, 216), (640, 190)] {
+            window.setContentSize(NSSize(width: width, height: 720))
+            hosting.layoutSubtreeIfNeeded()
+            let fits = await waitForScriptBool(on: chat, script: """
+                (() => {
+                    const sidebar = document.querySelector('.sidebar')?.getBoundingClientRect();
+                    const list = document.querySelector('.task-list')?.getBoundingClientRect();
+                    const composer = document.querySelector('.composer-zone')?.getBoundingClientRect();
+                    return innerWidth === \(width) && innerHeight === 720 && sidebar?.width === \(sidebarWidth)
+                        && sidebar.bottom - list?.bottom === 34 && composer?.bottom === innerHeight
+                        && !!document.elementFromPoint(sidebar.right + 3, innerHeight - 2)?.closest('.workspace');
+                })()
+                """)
+            XCTAssertTrue(fits, "The Settings footer should end at the sidebar edge at window width \(width)")
+        }
+    }
+
     /// Mounts the real shell offscreen, with synthetic chat data and an in-memory
     /// browser document. No runtime, account, external URL, or desktop input.
     @MainActor
@@ -525,6 +556,10 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         XCTAssertGreaterThan(browserFrame.midX, hosting.bounds.midX)
         XCTAssertLessThanOrEqual(browserFrame.maxX, hosting.bounds.maxX + 1)
         XCTAssertGreaterThan(browserFrame.height, 600)
+        XCTAssertEqual(chatFrame.height, hosting.bounds.height, accuracy: 1)
+        let browserBottom = hosting.isFlipped ? browserFrame.maxY : browserFrame.minY
+        let windowBottom = hosting.isFlipped ? hosting.bounds.maxY : hosting.bounds.minY
+        XCTAssertEqual(browserBottom, windowBottom, accuracy: 1)
         XCTAssertFalse(window.isVisible)
         XCTAssertFalse(window.isKeyWindow)
         let pageContainer = try XCTUnwrap(browser.superview)

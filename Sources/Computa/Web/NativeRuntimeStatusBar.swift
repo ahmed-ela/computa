@@ -71,7 +71,7 @@ struct NativeRuntimeStatusBar: View {
         }
         .padding(.horizontal, 18)
         .frame(maxWidth: .infinity)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .lineLimit(1)
         .disabled(state.presentedSheet != nil)
         .onChange(of: state.approvalGateBlocksInteraction) { _, blocked in
             if blocked {
