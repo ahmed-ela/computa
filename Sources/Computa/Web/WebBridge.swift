@@ -28,6 +28,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     private var latestContent: Data?
     private var nextRevision: UInt64 = 0
     private var pageIsReady = false
+    private let showAccessModeSettings: () -> Void
     private let openScreenRecordingSettings: (URL) -> Bool
 
     static let screenRecordingSettingsURL = URL(
@@ -37,9 +38,11 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
 
     init(
         state: AppState,
-        openScreenRecordingSettings: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }
+        openScreenRecordingSettings: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) },
+        showAccessModeSettings: @escaping () -> Void = {}
     ) {
         self.state = state
+        self.showAccessModeSettings = showAccessModeSettings
         self.openScreenRecordingSettings = openScreenRecordingSettings
     }
 
@@ -268,6 +271,11 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         case "showSettings":
             state.refreshAutomationPermissions()
             state.presentedSheet = .settings
+
+        case "showAccessModeSettings":
+            guard Set(body.keys) == ["action"], state.presentedSheet == .settings,
+                  !state.approvalGateBlocksInteraction else { return }
+            showAccessModeSettings()
 
         case "dismissSettings":
             state.presentedSheet = nil

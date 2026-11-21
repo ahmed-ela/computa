@@ -886,7 +886,7 @@ function DefaultModelSelector({ snapshot }: { snapshot: AppSnapshot }) {
     onSelect={(modelID) => post({ action: 'setDefaultModel', modelID })} />;
 }
 
-function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
+function SettingsModal({ snapshot, nativeHost }: { snapshot: AppSnapshot; nativeHost: boolean }) {
   const dialog = useRef<HTMLElement | null>(null);
   const canRestoreFocus = useRef(true);
   canRestoreFocus.current = snapshot.pendingApprovalCount === 0;
@@ -917,6 +917,7 @@ function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
   const accessibilityGranted = snapshot.permissions.accessibility === 'Granted';
   const screenRecordingGranted = snapshot.permissions.screenRecording === 'Granted';
   const defaultModel = snapshot.modelOptions.find((option) => option.id === snapshot.defaultModel);
+  const accessModeLabel = snapshot.accessMode === 'fullAccess' ? 'Full access' : 'Ask every time';
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={() => post({ action: 'dismissSettings' })}>
       <section ref={dialog} className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
@@ -968,7 +969,14 @@ function SettingsModal({ snapshot }: { snapshot: AppSnapshot }) {
                 onCheckedChange={(checked: boolean) => post({ action: 'setShowToolPayloads', value: checked })}
               />
             </label>
-            <div className="setting-row"><span><strong>Access mode</strong><small>Close Settings to change this using the native menu at the bottom of the app.</small></span><span className="locked-setting"><Icon name="check" size={14} />{snapshot.accessMode === 'fullAccess' ? 'Full access' : 'Ask every time'}</span></div>
+            <div className="setting-row">
+              <span><strong>Access mode</strong></span>
+              <Button variant="outline" disabled={!nativeHost} aria-haspopup="dialog"
+                aria-label={`Change access mode: ${accessModeLabel}`}
+                onClick={() => post({ action: 'showAccessModeSettings' })}>
+                {accessModeLabel}
+              </Button>
+            </div>
           </section>
           <section>
             <h2>Computer use</h2>
@@ -1110,7 +1118,7 @@ export function App() {
       </main>
       {task && snapshot.isInspectorPresented && !snapshot.isReviewPresented ? <Inspector snapshot={snapshot} task={task} /> : null}
       </div>
-      <SettingsModal snapshot={snapshot} />
+      <SettingsModal snapshot={snapshot} nativeHost={nativeHost} />
     </div>
   );
 }

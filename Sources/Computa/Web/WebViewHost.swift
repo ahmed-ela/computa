@@ -4,6 +4,7 @@ import WebKit
 @MainActor
 struct WebWorkspaceView: View {
     @Bindable var state: AppState
+    @State private var showsAccessModeSettings = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -11,7 +12,8 @@ struct WebWorkspaceView: View {
                 HSplitView {
                     CodexWebView(
                         state: state,
-                        snapshot: WebUISnapshot(state: state)
+                        snapshot: WebUISnapshot(state: state),
+                        showAccessModeSettings: { showsAccessModeSettings = true }
                     )
                     .frame(minWidth: 600, idealWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
 
@@ -40,8 +42,6 @@ struct WebWorkspaceView: View {
                 .disabled(state.approvalGateBlocksInteraction)
 
                 // The web surface stays inert through approval settlement.
-                // The separate native mode menu remains a human-controlled way
-                // to switch modes, including while an action awaits approval.
                 if state.resolvingApprovalIDs.isEmpty,
                    let request = state.presentedApproval {
                     Color.black.opacity(0.16)
@@ -73,6 +73,12 @@ struct WebWorkspaceView: View {
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
         }
+        .onChange(of: state.presentedSheet) { _, sheet in
+            if sheet != .settings { showsAccessModeSettings = false }
+        }
+        .sheet(isPresented: $showsAccessModeSettings) {
+            NativeAccessModeSettings(state: state)
+        }
         .sheet(isPresented: Binding(get: { state.isAPIProvidersPresented && !state.approvalGateBlocksInteraction },
             set: { state.isAPIProvidersPresented = $0 })) {
             APIProviderSettingsView(settings: state.apiProviderSettings, alibabaSetupID: state.alibabaSetupID)
@@ -84,9 +90,10 @@ struct WebWorkspaceView: View {
 private struct CodexWebView: NSViewRepresentable {
     let state: AppState
     let snapshot: WebUISnapshot
+    let showAccessModeSettings: () -> Void
 
     func makeCoordinator() -> WebBridge {
-        WebBridge(state: state)
+        WebBridge(state: state, showAccessModeSettings: showAccessModeSettings)
     }
 
     func makeNSView(context: Context) -> WKWebView {
