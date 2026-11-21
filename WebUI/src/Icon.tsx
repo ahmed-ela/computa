@@ -9,13 +9,13 @@ import Ellipsis from '@octanejs/lucide/icons/ellipsis';
 import GripVertical from '@octanejs/lucide/icons/grip-vertical';
 import Monitor from '@octanejs/lucide/icons/monitor';
 import PanelRight from '@octanejs/lucide/icons/panel-right';
+import Pause from '@octanejs/lucide/icons/pause';
 import Pencil from '@octanejs/lucide/icons/pencil';
 import Play from '@octanejs/lucide/icons/play';
 import Plus from '@octanejs/lucide/icons/plus';
 import Search from '@octanejs/lucide/icons/search';
 import Settings from '@octanejs/lucide/icons/settings';
 import Sparkles from '@octanejs/lucide/icons/sparkles';
-import Square from '@octanejs/lucide/icons/square';
 import SquarePen from '@octanejs/lucide/icons/square-pen';
 import Terminal from '@octanejs/lucide/icons/terminal';
 import Trash2 from '@octanejs/lucide/icons/trash-2';
@@ -36,13 +36,13 @@ const icons = {
   inspect: PanelRight,
   more: Ellipsis,
   new: SquarePen,
+  pause: Pause,
   plus: Plus,
   resume: Play,
   search: Search,
   send: ArrowUp,
   sparkles: Sparkles,
   steer: CornerUpLeft,
-  stop: Square,
   terminal: Terminal,
   x: X,
 } as const;
