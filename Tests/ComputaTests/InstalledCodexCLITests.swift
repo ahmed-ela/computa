@@ -4,6 +4,50 @@ import XCTest
 
 @MainActor
 final class InstalledCodexCLITests: XCTestCase {
+    func testNewestCompatibleCLIWinsRegardlessOfInstallationOrder() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        func fixture(_ name: String, _ version: String, models: String = #"{"data":[],"nextCursor":null}"#) throws -> URL {
+            let url = root.appendingPathComponent(name)
+            let script = """
+            #!/bin/sh
+            test "$1" = app-server && test "$3" = stdio:// || exit 1
+            test "$HOME" = "$CODEX_HOME" || exit 1
+            IFS= read -r initialize || exit 1
+            echo '{"id":1,"result":{"userAgent":"computa_probe/\(version) (fixture)"}}'
+            IFS= read -r ready && IFS= read -r account && IFS= read -r catalog || exit 1
+            echo '{"id":3,"result":\(models)}'
+            echo '{"id":2,"result":{"account":null}}'
+            """
+            try script.write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+            return url.resolvingSymlinksInPath()
+        }
+        let standalone = try fixture("standalone", "0.139.0")
+        let homebrew = try fixture("homebrew", "0.171.0")
+        let preview = try fixture("desktop", "0.171.0-alpha.13")
+        let incompatible = try fixture("future", "1.0.0", models: #"{"unsupported":true}"#)
+        for paths in [[standalone, homebrew], [homebrew, standalone], [incompatible, preview, standalone, homebrew]] {
+            let selected = try await InstalledCodexCLI.executable(candidates: paths)
+            XCTAssertEqual(selected, homebrew)
+        }
+        do {
+            _ = try await InstalledCodexCLI.executable(candidates: [incompatible])
+            XCTFail("Accepted a CLI without a compatible model catalog")
+        } catch InstalledCodexCLI.Failure.incompatible {}
+    }
+
+    func testCLIVersionPrecedence() throws {
+        typealias Version = InstalledCodexCLI.Version
+        let versions: [Substring] = ["0.99.0", "0.171.0-alpha.9", "0.171.0-alpha.13", "0.171.0", "0.172.0-alpha"]
+        let parsed = try versions.map { try XCTUnwrap(Version($0)) }
+        XCTAssertEqual(parsed.reversed().sorted(), parsed)
+        XCTAssertEqual(Version("0.171.0+build.2"), Version("0.171.0"))
+        XCTAssertNil(Version("0.171"))
+        XCTAssertNil(Version("0.171.0-alpha.01"))
+    }
+
     func testPickerLoadsEveryVisibleModelAcrossPagesAndRejectsRepeatedCursor() async throws {
         typealias Page = InstalledCodexCLI.Page
         let one = Page.Model(model: "one", displayName: "First", description: nil, hidden: false)

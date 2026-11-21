@@ -263,11 +263,45 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             XCTAssertTrue(loaded, state.installedCLIError ?? "Opening the provider should load its catalog")
             let labels = try await web.evaluateJavaScript("Array.from(" + radios + ", item => item.textContent.trim())") as? [String]
             XCTAssertEqual(labels, state.installedCLIOptions.map { String($0.label.dropFirst("Codex CLI / ".count)) })
-            let expected = try XCTUnwrap(state.installedCLIOptions.last)
-            _ = try await web.evaluateJavaScript("Array.from(" + radios + ").at(-1).click()")
+            let liveModel = ProcessInfo.processInfo.environment["COMPUTA_LIVE_CODEX_CLI_MODEL"]
+            let options = state.installedCLIOptions
+            let index: Int
+            if let liveModel {
+                index = try XCTUnwrap(options.firstIndex { InstalledCodexCLI.slug($0.id) == liveModel }, "Requested model missing from picker")
+            } else {
+                index = try XCTUnwrap(options.indices.last)
+            }
+            let expected = options[index]
+            print("Computa picker models: " + (labels ?? []).joined(separator: ", "))
+            _ = try await web.evaluateJavaScript("Array.from(" + radios + ")[\(index)].click()")
             let closed = await waitForScriptBool(on: web, script: "!document.querySelector('.model-selector-content')")
             XCTAssertTrue(closed)
             XCTAssertEqual(state.selectedTask?.model, expected.id)
+            if liveModel != nil {
+                _ = try await web.evaluateJavaScript("""
+                    (() => {
+                        const field = document.querySelector('textarea[aria-label="Task prompt"]');
+                        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(field, 'hi');
+                        field.dispatchEvent(new Event('input', {bubbles: true}));
+                    })()
+                    """)
+                let send = #"document.querySelector('button[aria-label="Send prompt"]:not(:disabled)')"#
+                let enabled = await waitForScriptBool(on: web, script: "Boolean(" + send + ")")
+                XCTAssertTrue(enabled)
+                _ = try await web.evaluateJavaScript(send + ".click()")
+                let deadline = ContinuousClock.now + .seconds(90)
+                while state.selectedTask?.status != .completed, ContinuousClock.now < deadline {
+                    if state.selectedTask?.status == .failed { break }
+                    try await Task.sleep(for: .milliseconds(100))
+                }
+                let task = try XCTUnwrap(state.selectedTask)
+                XCTAssertEqual(task.status, .completed, task.entries.last?.body ?? "")
+                XCTAssertEqual(task.model, expected.id)
+                let reply = try XCTUnwrap(task.entries.last { $0.kind == .assistant && !$0.body.isEmpty })
+                let rendered = await waitForScriptBool(on: web, script: "Boolean(document.querySelector('.assistant-message')?.innerText.trim())")
+                XCTAssertTrue(rendered)
+                print("Computa live UI: \(expected.label) | user=hi | reply=\(reply.body)")
+            }
         } catch { _ = await state.shutdownRuntime(); throw error }
         _ = await state.shutdownRuntime()
     }

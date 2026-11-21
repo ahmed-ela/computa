@@ -892,15 +892,11 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
             case fixture(path: String)
             #endif
 
-            func resolve() throws -> ResolvedExecutable {
+            func resolve() async throws -> ResolvedExecutable {
                 switch self {
                 case .installedCLI:
-                    return ResolvedExecutable(url: try InstalledCodexCLI.executable(), arguments: [
-                        "app-server", "--listen", "stdio://", "-c", "model_provider=\"openai\"",
-                        "-c", "project_root_markers=[]", "-c", "allow_login_shell=false",
-                        "-c", "mcp_servers={}", "-c", "features.hooks=false",
-                        "-c", "features.plugins=false", "-c", "features.apps=false",
-                    ], capabilities: [])
+                    return ResolvedExecutable(url: try await InstalledCodexCLI.executable(),
+                                              arguments: InstalledCodexCLI.arguments, capabilities: [])
                 case .bundled:
                     let artifact = try ComputaRuntimeArtifact.resolve()
                     return ResolvedExecutable(url: artifact.executableURL, arguments: artifact.launchArguments,
@@ -1561,7 +1557,9 @@ private extension CodexAppServerRuntime {
             defer { isStartingServer = false }
             await configureWebsiteEvidence()
             guard !isPreparingCommandShutdown, !isShuttingDown else { throw RuntimeError.serverStopped }
-            let executable = try configuration.executable.resolve()
+            let executable = try await configuration.executable.resolve()
+            try Task.checkCancellation()
+            guard !isPreparingCommandShutdown, !isShuttingDown else { throw RuntimeError.serverStopped }
             guard FileManager.default.isExecutableFile(atPath: executable.url.path) else {
                 throw RuntimeError.executableMissing(executable.url.path)
             }
