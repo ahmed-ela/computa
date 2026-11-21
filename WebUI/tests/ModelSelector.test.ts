@@ -59,6 +59,21 @@ const selector = (model = options[1].id, label = 'Task model', disabled = false)
 })).html;
 
 describe('website model selectors', () => {
+  test('Codex CLI has its own setup and preserves the exact discovered model IDs', async () => {
+    const setup = { route: 'cli/codex', name: 'Codex CLI', connected: false };
+    const render = (choices: ModelOption[], detail?: string) => renderToStaticMarkup(h(ModelSelector, {
+      model: choices[0]?.id ?? '', label: 'Task model', setups: [{ ...setup, connected: choices.length > 0, detail }],
+      canConnect: true, options: choices, onSelect: () => {},
+    })).html;
+    const signedOut = render([], 'Run codex login in Terminal.');
+    expect(await textBySelector(signedOut, '[role="status"]')).toEqual(['Run codex login in Terminal.']);
+    expect(await attributesBySelector(signedOut, '[role="menuitemradio"]', 'data-value')).toEqual([]);
+    const models = ['one', 'two'].map(name => ({ id: 'cli/codex/model/' + name, label: 'Codex CLI / ' + name, detail: '', highMemory: false }));
+    const html = render(models);
+    expect(await attributesBySelector(html, '[role="menuitemradio"]', 'data-value')).toEqual(models.map(m => m.id));
+    expect(html).toContain('Task model: Codex CLI / one');
+  });
+
   test('fresh profile lists setup actions without offering unverified models; discovery replaces only its provider action', async () => {
     const names = ['ChatGPT', 'Gemini', 'Claude', 'Grok', 'Kimi', 'Qwen', 'DeepSeek'];
     const setups = names.map((name) => ({

@@ -42,7 +42,7 @@ const websiteProviderNames: Record<WebsiteModelProvider, string> = {
 const websiteDefaultModels = new Set(Object.keys(websiteProviderNames).map((provider) => `browser/${provider}`));
 // Account catalogs and provider-specific model filters are owned by native discovery.
 function isVisibleModel(model: string): boolean {
-  return (model.startsWith('browser/') || model.startsWith('api/')) && !websiteDefaultModels.has(model);
+  return (model.startsWith('browser/') || model.startsWith('api/') || model.startsWith('cli/codex/model/')) && !websiteDefaultModels.has(model);
 }
 
 const providerNames: Record<string, string> = {
@@ -85,11 +85,12 @@ export function groupModelOptions(options: ModelOption[], model: string, setups:
 }
 
 export function ModelSelector({ options, model, label, disabled = false, className,
-  setups = [], canConnect = false, onConnect, onRefresh, onSelect }: { options: ModelOption[]; setups?: ModelProviderSetup[];
+  setups = [], canConnect = false, boundToRuntime = false, onConnect, onRefresh, onSelect }: { boundToRuntime?: boolean; options: ModelOption[]; setups?: ModelProviderSetup[];
   onRefresh?: (action: WebsiteModelsRefreshAction) => void; canConnect?: boolean; onConnect?: (route: string) => void; model: string; label: string; disabled?: boolean;
   className?: string; onSelect: (model: string) => void }) {
   const selected = options.find((option) => option.id === model);
-  const groups = groupModelOptions(options, model, setups);
+  const groups = groupModelOptions(options, model, setups).filter(group =>
+    !boundToRuntime || (group.route === 'cli/codex') === model.startsWith('cli/codex/model/'));
   const needsSelection = setups.length > 0 && (!selected || selected.available === false || selected.selectable === false);
   const [open, setOpen] = useState(false);
   useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
@@ -109,7 +110,10 @@ export function ModelSelector({ options, model, label, disabled = false, classNa
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent className="model-selector-content" align="start" collisionPadding={12} aria-label="Model providers">
-        {groups.map((group) => <DropdownMenuSub key={group.route}>
+        {groups.map((group) => <DropdownMenuSub key={group.route} onOpenChange={(opened: boolean) => {
+          if (opened && group.route === 'cli/codex' && group.setup && !group.setup.connected
+              && !group.setup.checkStatus && !group.setup.detail && canConnect) onConnect?.(group.route);
+        }}>
           <DropdownMenuSubTrigger disabled={disabled} textValue={group.name} className="model-provider-option"
             data-provider={group.id}>
             {group.genericAPIIcon ? <Icon name="sparkles" size={16} /> : <ModelProviderIcon model={group.iconModel} />}
@@ -127,7 +131,7 @@ export function ModelSelector({ options, model, label, disabled = false, classNa
               </DropdownMenuRadioGroup>
               {group.setup && <ProviderSetupActions setup={group.setup}
                 hasModels={group.options.some((option) => option.available !== false)} disabled={disabled || !canConnect}
-                onConnect={() => { setOpen(false); onConnect?.(group.route); }} onRefresh={onRefresh} />}
+                onConnect={() => { if (group.route !== 'cli/codex') setOpen(false); onConnect?.(group.route); }} onRefresh={onRefresh} />}
             </DropdownMenuSubContent>
           </DropdownMenuPortal>
         </DropdownMenuSub>)}
@@ -140,6 +144,13 @@ export function ModelSelector({ options, model, label, disabled = false, classNa
 function ProviderSetupActions({ setup, hasModels, disabled, onConnect, onRefresh }: {
   setup: ModelProviderSetup; hasModels: boolean; disabled: boolean; onConnect: () => void; onRefresh?: (action: WebsiteModelsRefreshAction) => void;
 }) {
+  if (setup.route === 'cli/codex') return <>
+    {setup.detail && <div role="status" className="model-setup-detail">{setup.detail}</div>}
+    <DropdownMenuItem disabled={disabled || setup.checkStatus === 'checking'} onSelect={(event: Event) => {
+      event.preventDefault();
+      onConnect();
+    }}>{setup.checkStatus === 'checking' ? 'Checking available models…' : hasModels ? 'Refresh models' : 'Check available models'}</DropdownMenuItem>
+  </>;
   if (hasModels) {
     return setup.route === 'browser/kimi'
       ? <DropdownMenuItem disabled={disabled} onSelect={onConnect}>Manage Kimi sign-in</DropdownMenuItem> : null;

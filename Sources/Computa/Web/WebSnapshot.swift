@@ -7,6 +7,7 @@ struct ModelProviderSetup: Codable, Equatable, Sendable {
     let connected: Bool
     enum CheckStatus: String, Codable, Sendable { case checking, signInRequired, unavailable }
     var checkStatus: CheckStatus? = nil
+    var detail: String? = nil
 
     static func checkStatus(for status: WebsiteModelSetupStatus) -> CheckStatus? {
         switch status {
@@ -85,6 +86,9 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
             setups.append(ModelProviderSetup(route: "api/" + id, name: "Alibaba",
                 connected: state.apiProviders.contains(where: \.isAlibabaModelStudioInference)))
         }
+        setups.append(ModelProviderSetup(route: InstalledCodexCLI.route, name: "Codex CLI",
+            connected: !state.installedCLIOptions.isEmpty, checkStatus: state.installedCLICheckStatus,
+            detail: state.installedCLIError))
         providerSetups = setups
         websiteModelsRefreshing = state.websiteModelsRefreshing
         canRefreshWebsiteModels = state.canRefreshWebsiteModels
@@ -108,6 +112,7 @@ struct WebTaskSnapshot: Codable, Equatable, Sendable {
     let updatedAt: TimeInterval
     let workspace: String
     let model: String
+    let hasBoundThread: Bool
     let modelSelectable: Bool
     let queuedPrompts: [QueuedPrompt]
     let queuePaused: Bool
@@ -150,6 +155,7 @@ struct WebTaskSnapshot: Codable, Equatable, Sendable {
         updatedAt = task.updatedAt.timeIntervalSince1970
         workspace = task.workspace
         model = task.model
+        hasBoundThread = task.runtimeThreadID != nil
         self.modelSelectable = modelSelectable
         self.queuedPrompts = queuedPrompts
         self.queuePaused = queuePaused
@@ -170,7 +176,7 @@ struct WebTaskSnapshot: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, summary, status, statusTone, updatedAt, workspace, model, modelSelectable
+        case id, title, summary, status, statusTone, updatedAt, workspace, model, modelSelectable, hasBoundThread
         case queuedPrompts, queuePaused, canSteer, isBusy, websiteSessionCleanupAvailable
         case websiteSessionCleanupInProgress, websiteSessionCleanupOutcome, websiteSessionCleanupReceiptSaved
         case activeTurnStartedAt, activeActivityGroupID, hasUnreadCompletion, unreadCompletionID, branch, entries
@@ -186,6 +192,7 @@ struct WebTaskSnapshot: Codable, Equatable, Sendable {
         updatedAt = try values.decode(TimeInterval.self, forKey: .updatedAt)
         workspace = try values.decode(String.self, forKey: .workspace)
         model = try values.decode(String.self, forKey: .model)
+        hasBoundThread = try values.decodeIfPresent(Bool.self, forKey: .hasBoundThread) ?? false
         modelSelectable = try values.decode(Bool.self, forKey: .modelSelectable)
         queuedPrompts = try values.decode([QueuedPrompt].self, forKey: .queuedPrompts)
         queuePaused = try values.decode(Bool.self, forKey: .queuePaused)

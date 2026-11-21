@@ -221,6 +221,57 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         XCTAssertEqual(state.presentedApproval, request)
     }
 
+    @MainActor
+    func testInstalledCLIPickerLoadsSignedInModelsOnOpen() async throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_LIVE_CODEX_CLI"] == "1",
+                          "Requires the installed signed-in Codex CLI.")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaCLIPicker-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var config = CodexAppServerRuntime.Configuration.localQwen
+        config.codexHomePath = root.path
+        config.workspacePath = root.appendingPathComponent("Workspace").path
+        let runtime = SelectableCodexRuntime(configuration: config)
+        let prefs = isolatedTestPreferences()
+        let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
+        let state = AppState(tasks: [], runtime: runtime, preferences: prefs, browserSession: session)
+        let hosting = NSHostingView(rootView: WebWorkspaceView(state: state))
+        hosting.frame = NSRect(x: 0, y: 0, width: 1280, height: 820)
+        let window = NSWindow(contentRect: hosting.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        defer { window.close(); session.shutdown() }
+        hosting.layoutSubtreeIfNeeded()
+        state.startRuntimeIfNeeded()
+        do {
+            let deadline = ContinuousClock.now + .seconds(30)
+            while ContinuousClock.now < deadline {
+                if case .connected = state.connectionState { break }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            state.createTask()
+            let web = try XCTUnwrap(nativeViews(in: hosting).compactMap { $0 as? WKWebView }.first)
+            let trigger = "document.querySelector('.model-selector-trigger:not([disabled])')"
+            let ready = await waitForScriptBool(on: web, script: "Boolean(" + trigger + ")")
+            XCTAssertTrue(ready)
+            _ = try await web.evaluateJavaScript(trigger + ".dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true}))")
+            let provider = "document.querySelector('.model-provider-option[data-provider=codex]')"
+            let listed = await waitForScriptBool(on: web, script: "Boolean(" + provider + ")")
+            XCTAssertTrue(listed)
+            _ = try await web.evaluateJavaScript(provider + ".click()")
+            let radios = "document.querySelectorAll('.model-selector-submenu [role=menuitemradio]')"
+            let loaded = await waitForScriptBool(on: web, script: radios + ".length > 0")
+            XCTAssertTrue(loaded, state.installedCLIError ?? "Opening the provider should load its catalog")
+            let labels = try await web.evaluateJavaScript("Array.from(" + radios + ", item => item.textContent.trim())") as? [String]
+            XCTAssertEqual(labels, state.installedCLIOptions.map { String($0.label.dropFirst("Codex CLI / ".count)) })
+            let expected = try XCTUnwrap(state.installedCLIOptions.last)
+            _ = try await web.evaluateJavaScript("Array.from(" + radios + ").at(-1).click()")
+            let closed = await waitForScriptBool(on: web, script: "!document.querySelector('.model-selector-content')")
+            XCTAssertTrue(closed)
+            XCTAssertEqual(state.selectedTask?.model, expected.id)
+        } catch { _ = await state.shutdownRuntime(); throw error }
+        _ = await state.shutdownRuntime()
+    }
+
     /// Use the shipping WebKit UI and native bridge with empty preferences and
     /// an ephemeral browser. Only provider authentication/discovery is simulated.
     @MainActor
@@ -256,9 +307,9 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             _ = try await web.evaluateJavaScript("""
                 document.querySelector('.model-selector-trigger').dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true}))
                 """)
-            try await requireDOM("document.querySelectorAll('.model-provider-option').length === 7")
+            try await requireDOM("document.querySelectorAll('.model-provider-option').length === 8")
             let names = try await web.evaluateJavaScript("Array.from(document.querySelectorAll('.model-provider-name'), e => e.textContent)")
-            XCTAssertEqual(names as? [String], ["ChatGPT", "Gemini", "Claude", "Grok", "Kimi", "Qwen", "DeepSeek"])
+            XCTAssertEqual(names as? [String], ["ChatGPT", "Gemini", "Claude", "Grok", "Kimi", "Qwen", "DeepSeek", "Codex CLI"])
             _ = try await web.evaluateJavaScript("document.querySelector('.model-provider-option[data-provider=\"\(provider)\"]').click()")
             try await requireDOM("Boolean(document.querySelector('.model-selector-submenu'))")
         }

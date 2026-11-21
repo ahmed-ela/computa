@@ -886,6 +886,7 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
 
         enum Executable: Sendable {
             case bundled
+            case installedCLI
             #if DEBUG
             /// Only isolated tests replace the transport with a bounded fixture.
             case fixture(path: String)
@@ -893,6 +894,13 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
 
             func resolve() throws -> ResolvedExecutable {
                 switch self {
+                case .installedCLI:
+                    return ResolvedExecutable(url: try InstalledCodexCLI.executable(), arguments: [
+                        "app-server", "--listen", "stdio://", "-c", "model_provider=\"openai\"",
+                        "-c", "project_root_markers=[]", "-c", "allow_login_shell=false",
+                        "-c", "mcp_servers={}", "-c", "features.hooks=false",
+                        "-c", "features.plugins=false", "-c", "features.apps=false",
+                    ], capabilities: [])
                 case .bundled:
                     let artifact = try ComputaRuntimeArtifact.resolve()
                     return ResolvedExecutable(url: artifact.executableURL, arguments: artifact.launchArguments,
@@ -935,6 +943,10 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         /// Bundled launches ignore this and use only the validated manifest.
         var fixtureRuntimeCapabilities: Set<ComputaRuntimeArtifact.Capability> = []
         #endif
+        var usesInstalledCLI: Bool {
+            if case .installedCLI = executable { return true }
+            return false
+        }
         var isBundled: Bool {
             if case .bundled = executable { return true }
             return false
@@ -956,6 +968,10 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
             return modelProvider == "lmstudio" ? backend : .external
         }
         func validateSelectedModel(_ modelID: String) throws {
+            if usesInstalledCLI || modelID.hasPrefix("cli/") {
+                guard usesInstalledCLI, InstalledCodexCLI.slug(modelID) != nil else { throw InstalledCodexCLI.Failure.unavailable }
+                return
+            }
             if WebsiteModelCatalog.inferenceSelection(for: modelID) != nil { return }
             if modelID.hasPrefix("browser/") { throw WebsiteModelCatalog.Failure.invalidModelID }
             if modelID.hasPrefix("api/") {
@@ -1027,6 +1043,12 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         eventStream = AsyncStream { continuation = $0 }
         core = Core(configuration: configuration, events: continuation!, visualGrounder: visualGrounder)
     }
+
+    func installedCLIModels() async throws -> [LocalModelOption] {
+        try await core.refreshInstalledCLIModels()
+    }
+
+    func hasBoundThread(taskID: String) async -> Bool { await core.hasBoundThread(taskID: taskID) }
 
     func loadTasks() async throws -> [AgentTask] {
         try await core.start()
@@ -1557,8 +1579,6 @@ private extension CodexAppServerRuntime {
             )
             let processHome = AgentRuntimeIsolation.processHomeURL(codexHomePath: configuration.codexHomePath)
             try FileManager.default.createDirectory(at: processHome, withIntermediateDirectories: true)
-            let modelCatalogURL = try ComputaModelToolCatalog.prepare(codexHomePath: configuration.codexHomePath,
-                additionalModelID: configuration.model)
             if let protocolTracePath = configuration.protocolTracePath {
                 try startProtocolTrace(atPath: protocolTracePath)
             }
@@ -1567,6 +1587,12 @@ private extension CodexAppServerRuntime {
                 userHomePath: processHome.path,
                 codexHomePath: configuration.codexHomePath
             )
+            if configuration.usesInstalledCLI {
+                let userHome = FileManager.default.homeDirectoryForCurrentUser
+                let configured = ProcessInfo.processInfo.environment["CODEX_HOME"]
+                environment["CODEX_HOME"] = configured.flatMap { $0.hasPrefix("/") ? $0 : nil }
+                    ?? userHome.appendingPathComponent(".codex").path
+            }
             // The explicitly opted-in external test/backend retains only its
             // endpoint controls, never ambient credentials or other Codex state.
             if configuration.effectiveBackend == .external {
@@ -1581,12 +1607,19 @@ private extension CodexAppServerRuntime {
             // Website providers need App Server and their configured browser transport.
             // Start the local inference service when a local model is submitted.
             let localInferenceOwner = inferenceServer
+            var arguments = executable.arguments
+            if !configuration.usesInstalledCLI {
+                let catalog = try ComputaModelToolCatalog.prepare(codexHomePath: configuration.codexHomePath,
+                    additionalModelID: configuration.model)
+                if configuration.isBundled {
+                    arguments += AgentRuntimeIsolation.configurationArguments + (try ComputaModelToolCatalog.launchArguments(catalogURL: catalog))
+                }
+            }
             let process: OwnedChildProcess
             do {
                 process = try OwnedChildProcess(
                     executableURL: executable.url,
-                    arguments: executable.arguments + (configuration.isBundled
-                        ? AgentRuntimeIsolation.configurationArguments + (try ComputaModelToolCatalog.launchArguments(catalogURL: modelCatalogURL)) : []),
+                    arguments: arguments,
                     environment: environment,
                     workingDirectory: URL(fileURLWithPath: configuration.workspacePath, isDirectory: true),
                     inputDescriptor: stdin.fileHandleForReading.fileDescriptor,
@@ -2100,6 +2133,14 @@ private extension CodexAppServerRuntime {
             }
             let runtimeStarted = ContinuousClock.now
             try await start()
+            if configuration.usesInstalledCLI {
+                guard try await installedCLIModels().contains(where: { $0.id == modelID }) else { throw InstalledCodexCLI.Failure.unavailable }
+                if threadForTask[taskID] == nil, UUID(uuidString: taskID) != nil,
+                   try cliThreads.model(threadID: taskID) != nil {
+                    threadForTask[taskID] = taskID
+                    taskForThread[taskID] = taskID
+                }
+            }
             dispatchProfile?.mark(.runtimeReady, since: runtimeStarted)
             if let existing = threadForTask[taskID], let loaded = contextForLoadedThread[existing],
                !loaded.supportsModelSwitch(to: modelID, apiModel: apiModel(for: modelID), apiProviderURL: apiProviderURL(for: modelID)) {
@@ -2170,7 +2211,7 @@ private extension CodexAppServerRuntime {
                         params: [
                             "threadId": threadID,
                             "modelProvider": configuration.modelProvider(for: modelID),
-                            "model": modelID,
+                            "model": InstalledCodexCLI.slug(modelID) ?? modelID,
                             "cwd": workspacePath(taskID: taskID),
                             "sandbox": accessMode.sandboxMode,
                             "approvalPolicy": accessMode.approvalPolicy,
@@ -2181,6 +2222,7 @@ private extension CodexAppServerRuntime {
                             "initialTurnsPage": ["limit": 3, "sortDirection": "desc", "itemsView": "full"],
                         ]
                     )
+                    if configuration.usesInstalledCLI { try verifyCLIModel(resumed, selected: modelID) }
                     guard serverGeneration == generation, turnSubmissionClaims[taskID] == claim,
                           !cancelledSubmissions.contains(claim) else { throw CancellationError() }
                     let context = try await resumedContextUsage(resumed, threadID: threadID,
@@ -2205,10 +2247,11 @@ private extension CodexAppServerRuntime {
                     method: "thread/start",
                     params: [
                         "modelProvider": configuration.modelProvider(for: modelID),
-                        "model": modelID,
+                        "model": InstalledCodexCLI.slug(modelID) ?? modelID,
                         "cwd": workspacePath(taskID: taskID),
                         "sandbox": accessMode.sandboxMode,
                         "approvalPolicy": accessMode.approvalPolicy,
+                        "allowProviderModelFallback": false,
                         "ephemeral": false,
                         "threadSource": "local_codex",
                         "baseInstructions": baseInstructions(for: modelID),
@@ -2218,6 +2261,10 @@ private extension CodexAppServerRuntime {
                     ]
                 )
                 threadID = try parseThreadID(from: response)
+                if configuration.usesInstalledCLI {
+                    try verifyCLIModel(response, selected: modelID)
+                    try cliThreads.save(threadID: threadID, modelID: modelID)
+                }
                 dispatchProfile?.mark(.threadStarted, since: threadStarted)
                 isNewThread = true
                 rememberReferenceToolThread(threadID)
@@ -2249,7 +2296,7 @@ private extension CodexAppServerRuntime {
             if previousModel != nil, previousModel != modelID { measuredContext.removeValue(forKey: taskID) }
             let compactLimit = (threadConfig(for: modelID)["model_auto_compact_token_limit"] as? Int) ?? 3_072
             let contextMaintenanceStarted = ContinuousClock.now
-            if resumedWithoutUsage || (measuredContext[taskID]?.usedTokens ?? 0) >= compactLimit {
+            if !configuration.usesInstalledCLI && (resumedWithoutUsage || (measuredContext[taskID]?.usedTokens ?? 0) >= compactLimit) {
                 try await runManagedCompaction(taskID: taskID, threadID: threadID, modelID: maintenanceModelID)
             }
             dispatchProfile?.mark(.contextMaintenanceFinished, since: contextMaintenanceStarted)
@@ -2308,8 +2355,8 @@ private extension CodexAppServerRuntime {
                     params: [
                         "threadId": threadID,
                         "input": try computerTurnInput(prompt: prompt, threadID: threadID, modelID: modelID),
-                        "effort": configuration.reasoningEffort,
-                        "model": modelID,
+                        "effort": configuration.usesInstalledCLI ? NSNull() as Any : configuration.reasoningEffort,
+                        "model": InstalledCodexCLI.slug(modelID) ?? modelID,
                         "sandboxPolicy": accessMode.sandboxPolicy,
                         "approvalPolicy": accessMode.approvalPolicy,
                     ]
@@ -2325,6 +2372,13 @@ private extension CodexAppServerRuntime {
                 throw error
             }
             turnAccepted = true
+            if configuration.usesInstalledCLI, previousModel != modelID, !isNewThread {
+                do { try cliThreads.save(threadID: threadID, modelID: modelID) }
+                catch {
+                    events.yield(.timelineEntryAppended(taskID: taskID, entry: TimelineEntry(kind: .system,
+                        title: "Model selection could not be saved", body: error.localizedDescription)))
+                }
+            }
             accessModeForTask[taskID] = accessMode
             if supportsVisualGrounding {
                 // Start only after App Server accepts the turn so a rejected
@@ -2434,6 +2488,11 @@ private extension CodexAppServerRuntime {
         private func threadConfig(for modelID: String, taskID: AgentTask.ID? = nil) -> [String: Any] {
             var result = CodexAppServerRuntime.localThreadConfig(for: modelID,
                 autoCompactLimitOverride: configuration.autoCompactLimitOverride, apiModel: apiModel(for: modelID), apiProviderURL: apiProviderURL(for: modelID))
+            if configuration.usesInstalledCLI {
+                result.removeValue(forKey: "model_context_window")
+                result.removeValue(forKey: "model_auto_compact_token_limit")
+                return result
+            }
             result["model_catalog_json"] = ComputaModelToolCatalog.url(codexHomePath: configuration.codexHomePath).path
             if LocalModelCatalog.isWebBrowser(modelID), let webProviderBaseURL {
                 var headers = ["Authorization": "Bearer " + webModelServer.bearerToken]
@@ -3108,7 +3167,7 @@ private extension CodexAppServerRuntime {
                     let resumed = try await request(method: "thread/resume", params: [
                         "threadId": threadID,
                         "modelProvider": configuration.modelProvider(for: modelID),
-                        "model": modelID,
+                        "model": InstalledCodexCLI.slug(modelID) ?? modelID,
                         "cwd": workspacePath(taskID: taskID),
                         "sandbox": accessMode.sandboxMode,
                         "approvalPolicy": accessMode.approvalPolicy,
@@ -3342,7 +3401,48 @@ private extension CodexAppServerRuntime {
             return sessions.count
         }
 
-        func loadTasks() async throws -> [AgentTask] {
+        private var cliThreads: InstalledCodexCLI.Threads { .init(home: configuration.codexHomePath) }
+
+        func hasBoundThread(taskID: String) -> Bool { threadForTask[taskID] != nil }
+
+        private func verifyCLIModel(_ response: Data, selected: String) throws {
+            let reply = try JSONSerialization.jsonObject(with: response) as? [String: Any]
+            let result = reply?["result"] as? [String: Any]
+            guard result?["model"] as? String == InstalledCodexCLI.slug(selected),
+                  result?["modelProvider"] as? String == "openai" else { throw InstalledCodexCLI.Failure.unavailable }
+        }
+
+        func refreshInstalledCLIModels() async throws -> [LocalModelOption] {
+            guard configuration.usesInstalledCLI else { throw InstalledCodexCLI.Failure.missing }
+            // Login and account changes in Terminal belong to another process.
+            // A new idle CLI reads its current credential store without exposing it to Computa.
+            if isReady {
+                guard headlessWorkState().isIdle, pending.isEmpty, !isPreparingCommandShutdown,
+                      pendingServerApprovals.isEmpty, pendingComputerUseApprovals.isEmpty else { throw InstalledCodexCLI.Failure.busy }
+                serverFailed(RuntimeError.serverStopped)
+            }
+            try await start()
+            return try await installedCLIModels()
+        }
+
+        private func installedCLIModels() async throws -> [LocalModelOption] {
+            guard configuration.usesInstalledCLI else { throw InstalledCodexCLI.Failure.missing }
+            let bytes = try await request(method: "account/read", params: [:], timeout: .seconds(15))
+            let object = try JSONSerialization.jsonObject(with: bytes) as? [String: Any]
+            guard let result = object?["result"] as? [String: Any] else { throw InstalledCodexCLI.Failure.invalidCatalog }
+            if result["account"] is NSNull { throw InstalledCodexCLI.Failure.signedOut }
+            guard result["account"] is [String: Any] else { throw InstalledCodexCLI.Failure.invalidCatalog }
+            struct Reply: Decodable { let result: InstalledCodexCLI.Page }
+            return try await InstalledCodexCLI.models { cursor in
+                var params: [String: Any] = ["limit": 100, "includeHidden": false]
+                if let cursor { params["cursor"] = cursor }
+                let bytes = try await self.request(method: "model/list", params: params, timeout: .seconds(15))
+                do { return try JSONDecoder().decode(Reply.self, from: bytes).result }
+                catch is DecodingError { throw InstalledCodexCLI.Failure.invalidCatalog }
+            }
+        }
+
+        private func bundledThreadRecords() async throws -> [[String: Any]] {
             let response = try await request(
                 method: "thread/list",
                 params: [
@@ -3360,6 +3460,29 @@ private extension CodexAppServerRuntime {
             else {
                 throw RuntimeError.malformedResponse("thread/list did not return a thread collection")
             }
+
+            return records
+        }
+
+        func loadTasks() async throws -> [AgentTask] {
+            var records: [[String: Any]] = []
+            var histories: [String: Data] = [:]
+            var unavailable: [AgentTask] = []
+            if configuration.usesInstalledCLI {
+                for (id, model) in try cliThreads.entries() {
+                    do {
+                        let bytes = try await request(method: "thread/read", params: ["threadId": id, "includeTurns": true])
+                        let object = try JSONSerialization.jsonObject(with: bytes) as? [String: Any]
+                        let result = object?["result"] as? [String: Any]
+                        guard var record = result?["thread"] as? [String: Any], record["id"] as? String == id else {
+                            throw RuntimeError.malformedResponse("thread/read returned a different thread")
+                        }
+                        record["model"] = model
+                        records.append(record)
+                        histories[id] = bytes
+                    } catch { unavailable.append(InstalledCodexCLI.unavailableTask(threadID: id, modelID: model, error: error)) }
+                }
+            } else { records = try await bundledThreadRecords() }
 
             var explicitlyNamedTaskIDs = Set<AgentTask.ID>()
             var tasks = records.compactMap { record -> AgentTask? in
@@ -3412,9 +3535,9 @@ private extension CodexAppServerRuntime {
                 let taskID = tasks[index].id
                 let threadID = threadForTask[taskID] ?? taskID
                 do {
-                    let history = try await request(method: "thread/read", params: [
-                        "threadId": threadID, "includeTurns": true,
-                    ])
+                    let history: Data
+                    if let cached = histories.removeValue(forKey: threadID) { history = cached }
+                    else { history = try await request(method: "thread/read", params: ["threadId": threadID, "includeTurns": true]) }
                     let failures = try nativeFailureStore().load(threadID: threadID)
                     let historyTurnIDs = try AppServerThreadHistoryContract.turnIDs(from: history)
                     let websiteFailures = ((try? websiteTurnFailureStore().load(threadID: threadID)) ?? [])
@@ -3467,7 +3590,7 @@ private extension CodexAppServerRuntime {
             for receipt in await webModelServer.latestCleanupReceipts() {
                 events.yield(.websiteSessionCleanupUpdated(receipt))
             }
-            return tasks
+            return tasks + unavailable
         }
 
         func resolveApproval(requestID: String, approved: Bool) throws {
@@ -8337,6 +8460,13 @@ private extension CodexAppServerRuntime {
         }
 
         private func serverFailed(_ error: Error) {
+            if configuration.usesInstalledCLI, !isShuttingDown, !isPreparingCommandShutdown {
+                for taskID in threadForTask.keys where turnIdentity.activeTurnID(for: taskID) != nil {
+                    events.yield(.timelineEntryAppended(taskID: taskID, entry: TimelineEntry(kind: .system,
+                        title: "Codex CLI disconnected", body: error.localizedDescription)))
+                    events.yield(.taskStatusChanged(taskID: taskID, status: .failed))
+                }
+            }
             runtimeCapabilities.removeAll()
             for taskID in threadForTask.keys where isRemoteInference(modelForTask[taskID] ?? "") {
                 scheduleInferenceCleanup(taskID: taskID, cancelled: true)

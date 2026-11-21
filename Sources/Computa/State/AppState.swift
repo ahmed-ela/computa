@@ -63,6 +63,9 @@ final class AppState {
     @ObservationIgnored private var pendingProviderSignInRecovery: ProviderSignInRecovery?
     @ObservationIgnored private var providerSignInRecoveryIdleObservation: UUID?
     private var websiteModelRefreshIntents: [WebsiteModelRefreshIntent] = []
+    private(set) var installedCLIOptions: [LocalModelOption] = []
+    private(set) var installedCLICheckStatus: ModelProviderSetup.CheckStatus?
+    private(set) var installedCLIError: String?
     private var websiteModelCheckResults: [String: WebsiteModelSetupStatus] = [:]
     private var websiteModelRefreshCurrentIntent: WebsiteModelRefreshIntent?
     #if DEBUG
@@ -209,7 +212,7 @@ final class AppState {
             guard !Self.isModelHiddenFromPicker(id, apiProviders: storedAPIProviders) else { return nil }
             // Saved website choices remain selected if an account/menu changes.
             // Invalid ones are visible and rejected, never replaced with Qwen.
-            return id.hasPrefix("browser/") || id.hasPrefix("api/") ? id : LocalModelCatalog.option(for: id)?.id
+            return id.hasPrefix("browser/") || id.hasPrefix("api/") || InstalledCodexCLI.slug(id) != nil ? id : LocalModelCatalog.option(for: id)?.id
         } ?? WebsiteModelCatalog.freshProfileDefaultModelID
         websiteModelChoices = WebsiteModelCatalog.load(from: preferences)
         websiteModeChoices = WebsiteModeCatalog.load(from: preferences)
@@ -254,6 +257,7 @@ final class AppState {
             return provider == "chatgpt" ? observed : [option] + observed
         }
         options += websiteModeChoices.map { WebsiteModelCatalog.option(for: $0, available: true) }
+        options += installedCLIOptions
         options += APIProviderCatalog.options(for: apiProviders)
         for id in [defaultModel, selectedTask?.model].compactMap({ $0 })
             where id.hasPrefix("api/") && !options.contains(where: { $0.id == id }) {
@@ -330,6 +334,10 @@ final class AppState {
 
     func connectModelProvider(route: String) {
         guard canRefreshWebsiteModels else { return }
+        if route == InstalledCodexCLI.route {
+            Task { await refreshInstalledCLIModels() }
+            return
+        }
         if let id = alibabaPickerID, route == "api/" + id {
             presentAPIProviders(alibabaID: id)
             return
@@ -341,6 +349,23 @@ final class AppState {
         isBrowserPresented = true
         do { try browserSession.openProviderSignIn(provider) }
         catch { websiteModelsError = error.localizedDescription }
+    }
+
+    func refreshInstalledCLIModels() async {
+        guard let runtime, !isShuttingDown, installedCLICheckStatus != .checking else { return }
+        installedCLICheckStatus = .checking
+        installedCLIError = nil
+        do {
+            let options = try await runtime.installedCLIModels()
+            guard !isShuttingDown else { return }
+            installedCLIOptions = options
+            installedCLICheckStatus = nil
+            if options.isEmpty { installedCLIError = "The signed-in CLI returned no visible models." }
+        } catch {
+            installedCLIOptions = []
+            installedCLICheckStatus = .unavailable
+            installedCLIError = error.localizedDescription
+        }
     }
 
     func websiteModelSetupStatus(for provider: String) -> WebsiteModelSetupStatus {
@@ -1171,7 +1196,8 @@ final class AppState {
         guard let option = modelOptions.first(where: { $0.id == modelID }), option.available != false,
               option.selectable != false,
               let index = tasks.firstIndex(where: { $0.id == taskID }),
-              canChangeModel(for: taskID)
+              canChangeModel(for: taskID),
+              tasks[index].runtimeThreadID == nil || (InstalledCodexCLI.slug(tasks[index].model) != nil) == (InstalledCodexCLI.slug(modelID) != nil)
         else { return false }
         tasks[index].model = modelID
         requestAutomaticWebsiteModelRefresh(for: modelID)
@@ -1676,6 +1702,9 @@ final class AppState {
             }
             guard !Task.isCancelled, !isShuttingDown else { return }
             connectionState = .connected(provider: runtime.providerName)
+            if InstalledCodexCLI.slug(defaultModel) != nil || selectedTask.flatMap({ InstalledCodexCLI.slug($0.model) }) != nil {
+                Task { await refreshInstalledCLIModels() }
+            }
 
             for await event in runtime.events() {
                 guard !Task.isCancelled, !isShuttingDown else { return }
@@ -2267,7 +2296,7 @@ final class AppState {
                     rejectedBeforeDispatch = true
                 } else if case .invalidModelID? = error as? WebsiteModelCatalog.Failure {
                     rejectedBeforeDispatch = true
-                } else if error is LocalModelServerPreflight.Failure {
+                } else if error is InstalledCodexCLI.Failure || error is LocalModelServerPreflight.Failure {
                     rejectedBeforeDispatch = true
                 } else if case .accessModeUnsupported? = error as? AgentRuntimeCapabilityError {
                     rejectedBeforeDispatch = true

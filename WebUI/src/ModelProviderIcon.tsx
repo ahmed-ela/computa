@@ -16,6 +16,7 @@ const marks: Record<string, string> = { chatgpt: openai, openai, claude, groq, g
 
 export function ModelProviderIcon({ model }: { model: string }) {
   const [transport, provider] = model.split('/');
+  if (transport === 'cli' && provider === 'codex') return <Icon name="terminal" size={16} />;
   const colorMark = provider === 'gemini' && (transport === 'browser' || transport === 'api') ? gemini
     : provider === 'alibaba' && transport === 'api' ? alibabaCloud : undefined;
   if (colorMark) return <img className={`model-provider-icon model-provider-icon-color provider-${provider}`}

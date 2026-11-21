@@ -264,6 +264,7 @@ pre { max-height: 240px; margin: 0; padding: 12px; overflow: auto; border: 1px s
 .model-selector-submenu [data-slot="dropdown-menu-radio-item"] { padding-right: 28px; }
 .model-provider-option:where(:focus, [data-highlighted], [data-state="open"]), .model-selector-submenu [data-slot="dropdown-menu-radio-item"]:where(:focus, [data-highlighted]) { background: var(--surface-hover); }
 .model-provider-option[data-disabled], .model-selector-submenu [data-slot="dropdown-menu-radio-item"][data-disabled] { opacity: .45; pointer-events: none; }
+.model-setup-detail { max-width: 30ch; padding: 6px 8px; color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
 .model-option-unavailable { flex-shrink: 0; color: var(--text-tertiary); font-size: 11px; }
 .composer-shell .model-selector-trigger { height: 28px; border: 0; box-shadow: none; background: transparent; color: var(--text-secondary); font-size: 11px; }
 .composer-shell .model-selector-trigger:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
