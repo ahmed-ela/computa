@@ -173,7 +173,7 @@ function Sidebar({
   );
 }
 
-function TaskToolbar({ snapshot, task }: { snapshot: AppSnapshot; task?: TaskSnapshot }) {
+function TaskToolbar({ task }: { task?: TaskSnapshot }) {
   return (
     <header className="task-toolbar">
       <div className="toolbar-title-block">
@@ -202,15 +202,6 @@ function TaskToolbar({ snapshot, task }: { snapshot: AppSnapshot; task?: TaskSna
           <Icon name="info" size={18} />
         </Button>
         */}
-        <Button variant="ghost" size="icon"
-          className={`icon-button ${snapshot.isBrowserPresented ? 'active' : ''}`}
-          aria-label="Toggle browser"
-          aria-pressed={snapshot.isBrowserPresented}
-          title="Browser"
-          onClick={() => post({ action: 'toggleBrowser' })}
-        >
-          <Icon name="inspect" size={18} />
-        </Button>
       </div>
     </header>
   );
@@ -1094,7 +1085,13 @@ export function App() {
       <div className="app-panels" inert={snapshot.isSettingsPresented || snapshot.pendingApprovalCount > 0}>
       <Sidebar snapshot={snapshot} search={search} setSearch={setSearch} />
       <main className="workspace">
-        <TaskToolbar snapshot={snapshot} task={task} />
+        {!nativeHost && <Button variant="ghost" size="icon" className="preview-browser-toggle"
+          aria-label="Toggle browser" aria-pressed={snapshot.isBrowserPresented}
+          title={snapshot.isBrowserPresented ? 'Hide browser' : 'Show browser'}
+          onClick={() => post({ action: 'toggleBrowser' })}>
+          <Icon name="browser" size={18} />
+        </Button>}
+        <TaskToolbar task={task} />
         {task ? (
           <Conversation snapshot={snapshot} task={task} />
         ) : (

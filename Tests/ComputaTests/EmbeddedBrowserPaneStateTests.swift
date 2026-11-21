@@ -6,6 +6,35 @@ import XCTest
 
 final class EmbeddedBrowserPaneStateTests: XCTestCase {
     @MainActor
+    func testBrowserControlStaysAtTrailingEdgeOfTitlebarAcrossPaneChanges() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let state = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: session)
+        let hosting = NSHostingView(rootView: WebWorkspaceView(state: state))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 740),
+                              styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        defer { window.close() }
+
+        let close = try XCTUnwrap(window.standardWindowButton(.closeButton))
+        for (width, presented) in [(1100, false), (980, true), (1280, false)] {
+            window.setContentSize(NSSize(width: width, height: 740))
+            state.isBrowserPresented = presented
+            await settleLayout(hosting)
+            XCTAssertEqual(window.titlebarAccessoryViewControllers.count, 1)
+            let accessory = try XCTUnwrap(window.titlebarAccessoryViewControllers.first)
+            let frame = accessory.view.convert(accessory.view.bounds, to: nil)
+            let trafficLight = close.convert(close.bounds, to: nil)
+            XCTAssertEqual(accessory.layoutAttribute, .right)
+            XCTAssertGreaterThanOrEqual(frame.width, 24)
+            XCTAssertEqual(frame.midY, trafficLight.midY, accuracy: 3)
+            XCTAssertEqual(frame.maxX, window.frame.width, accuracy: 12)
+        }
+    }
+
+    @MainActor
     func testBrowserViewportFollowsSplitPane() async throws {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }
@@ -341,9 +370,11 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             _ = try await web.evaluateJavaScript("""
                 document.querySelector('.model-selector-trigger').dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true}))
                 """)
-            try await requireDOM("document.querySelectorAll('.model-provider-option').length === 8")
+            let expectedProviders = ["ChatGPT", "Gemini", "Claude", "Grok", "Kimi", "Qwen", "DeepSeek", "Codex CLI"]
+                + ProviderCLI.allCases.map(\.name)
+            try await requireDOM("document.querySelectorAll('.model-provider-option').length === \(expectedProviders.count)")
             let names = try await web.evaluateJavaScript("Array.from(document.querySelectorAll('.model-provider-name'), e => e.textContent)")
-            XCTAssertEqual(names as? [String], ["ChatGPT", "Gemini", "Claude", "Grok", "Kimi", "Qwen", "DeepSeek", "Codex CLI"])
+            XCTAssertEqual(names as? [String], expectedProviders)
             _ = try await web.evaluateJavaScript("document.querySelector('.model-provider-option[data-provider=\"\(provider)\"]').click()")
             try await requireDOM("Boolean(document.querySelector('.model-selector-submenu'))")
         }
@@ -542,7 +573,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                 button.getAttribute('aria-label') || button.textContent.trim())
             """) as? [String]
         let buttons = try XCTUnwrap(toolbarButtons)
-        XCTAssertTrue(buttons.contains("Toggle browser"))
+        XCTAssertFalse(buttons.contains("Toggle browser"), "The window title bar owns the browser toggle")
         XCTAssertFalse(buttons.contains("Toggle inspector"))
         XCTAssertFalse(buttons.contains("Toggle changes"))
         XCTAssertTrue(browserReady, "The browser fixture is entirely in memory")
