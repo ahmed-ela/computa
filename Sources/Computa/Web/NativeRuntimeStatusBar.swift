@@ -6,20 +6,7 @@ import SwiftUI
 @MainActor
 struct NativeRuntimeStatusBar: View {
     @Bindable var state: AppState
-    @State private var contextPresented = false
     @State private var approvalErrorPresented = false
-
-    private var usage: RuntimeContextUsage? {
-        state.selectedTaskID.flatMap { state.contextUsageByTask[$0] }
-    }
-
-    private var compaction: RuntimeCompactionState? {
-        state.selectedTaskID.flatMap { state.compactionStateByTask[$0] }
-    }
-
-    private var context: ContextIndicatorPresentation {
-        .init(usage: usage, compaction: compaction)
-    }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -97,63 +84,20 @@ struct NativeRuntimeStatusBar: View {
 
             Spacer(minLength: 12)
 
-            Button { contextPresented.toggle() } label: {
-                HStack(spacing: 7) {
-                    if compaction == .running {
-                        ProgressView().controlSize(.mini)
-                            .frame(width: 19, height: 19)
-                            .accessibilityHidden(true)
-                    } else {
-                        Gauge(value: context.fraction ?? 0, in: 0...1) {
-                            Text("Context usage")
-                        }
-                        .gaugeStyle(.accessoryCircularCapacity)
-                        .tint(context.needsAttention ? Color.orange : Color.secondary)
-                        .scaleEffect(0.38)
-                        .frame(width: 19, height: 19)
-                        .opacity(context.fraction == nil ? 0.45 : 1)
-                        .accessibilityHidden(true)
-                    }
-                    Text(context.label)
-                        .font(.system(size: 11))
-                        .monospacedDigit()
-                }
-                .foregroundStyle(context.needsAttention ? Color.orange : Color.secondary)
-            }
-            .buttonStyle(.plain)
-            .disabled(state.approvalGateBlocksInteraction)
-            .accessibilityLabel("Context usage")
-            .accessibilityValue(context.accessibilityValue)
-            .help(context.detail)
-            .popover(isPresented: $contextPresented) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Context window").font(.headline)
-                    Text(context.detail).textSelection(.enabled)
-                    Text("Automatic compaction keeps a shorter summary for the model; the conversation remains visible. Summaries can omit details.")
-                        .foregroundStyle(.secondary)
-                    Text("Usage is the last measured model request, not lifetime token consumption. New input and tool results may add more.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-                .font(.system(size: 12))
-                .padding(18)
-                .frame(width: 330, alignment: .leading)
-            }
+            // Temporarily hide context usage from the status bar.
+            // ContextUsageIndicator(state: state)
         }
         .padding(.horizontal, 18)
         .frame(maxWidth: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
         .disabled(state.presentedSheet != nil)
-        .onChange(of: state.selectedTaskID) { _, _ in contextPresented = false }
         .onChange(of: state.approvalGateBlocksInteraction) { _, blocked in
             if blocked {
-                contextPresented = false
                 approvalErrorPresented = false
             }
         }
         .onChange(of: state.presentedSheet) { _, sheet in
             if sheet != nil {
-                contextPresented = false
                 approvalErrorPresented = false
             }
         }
@@ -165,6 +109,66 @@ struct NativeRuntimeStatusBar: View {
             } else {
                 approvalErrorPresented = false
             }
+        }
+    }
+}
+
+@MainActor
+private struct ContextUsageIndicator: View {
+    let state: AppState
+    @State private var contextPresented = false
+
+    var body: some View {
+        let taskID = state.selectedTaskID
+        let usage = taskID.flatMap { state.contextUsageByTask[$0] }
+        let compaction = taskID.flatMap { state.compactionStateByTask[$0] }
+        let context = ContextIndicatorPresentation(usage: usage, compaction: compaction)
+
+        Button { contextPresented.toggle() } label: {
+            HStack(spacing: 7) {
+                if compaction == .running {
+                    ProgressView().controlSize(.mini)
+                        .frame(width: 19, height: 19)
+                        .accessibilityHidden(true)
+                } else {
+                    Gauge(value: context.fraction ?? 0, in: 0...1) {
+                        Text("Context usage")
+                    }
+                    .gaugeStyle(.accessoryCircularCapacity)
+                    .tint(context.needsAttention ? Color.orange : Color.secondary)
+                    .scaleEffect(0.38)
+                    .frame(width: 19, height: 19)
+                    .opacity(context.fraction == nil ? 0.45 : 1)
+                    .accessibilityHidden(true)
+                }
+                Text(context.label)
+                    .font(.system(size: 11))
+                    .monospacedDigit()
+            }
+            .foregroundStyle(context.needsAttention ? Color.orange : Color.secondary)
+        }
+        .buttonStyle(.plain)
+        .disabled(state.approvalGateBlocksInteraction)
+        .accessibilityLabel("Context usage")
+        .accessibilityValue(context.accessibilityValue)
+        .help(context.detail)
+        .popover(isPresented: $contextPresented) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Context window").font(.headline)
+                Text(context.detail).textSelection(.enabled)
+                Text("Automatic compaction keeps a shorter summary for the model; the conversation remains visible. Summaries can omit details.")
+                    .foregroundStyle(.secondary)
+                Text("Usage is the last measured model request, not lifetime token consumption. New input and tool results may add more.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            .font(.system(size: 12))
+            .padding(18)
+            .frame(width: 330, alignment: .leading)
+        }
+        .onChange(of: state.selectedTaskID) { _, _ in contextPresented = false }
+        .onChange(of: state.approvalGateBlocksInteraction || state.presentedSheet != nil) { _, blocked in
+            if blocked { contextPresented = false }
         }
     }
 }
