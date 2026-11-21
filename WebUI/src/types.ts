@@ -142,6 +142,7 @@ export interface ModelOption {
 }
 
 export interface ModelProviderSetup {
+  checkStatus?: 'checking' | 'signInRequired' | 'unavailable';
   route: string;
   name: string;
   connected: boolean;

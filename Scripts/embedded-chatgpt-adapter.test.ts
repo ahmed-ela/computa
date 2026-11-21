@@ -431,8 +431,11 @@ function simpleMatches(node: Element, target: string) {
   if (id && node.getAttribute("id") !== id) return false;
   const head = target.split("[", 1)[0];
   if ([...head.matchAll(/\.([a-zA-Z0-9_-]+)/g)].some(([, name]) => !node.classList.contains(name))) return false;
-  return [...target.matchAll(/\[([^=\]]+)(?:="([^"]*)")?\]/g)].every(([, name, value]) => value === undefined
-    ? node.getAttribute(name) !== null : node.getAttribute(name) === value);
+  return [...target.matchAll(/\[([^=^\]]+)(?:(\^?=)"([^"]*)")?\]/g)].every(([, name, operator, value]) => {
+    const actual = node.getAttribute(name);
+    if (operator === '^=') return actual?.startsWith(value) === true;
+    return value === undefined ? actual !== null : actual === value;
+  });
 }
 
 function fixture(options: { articleOnly?: boolean; userPrompt?: string; renderedMarkdown?: boolean; userBubble?: boolean; sharedCopy?: boolean; response?: boolean;
@@ -597,6 +600,86 @@ function markedChatComposerFixture() {
   form.append(f.composer, picker.trigger); f.body.append(form);
   return { ...f, form, picker };
 }
+
+describe('ChatGPT composer account choices', () => {
+  const chat = { key: 'chat/composer/chat', label: 'Chat' };
+  const thinking = { key: 'chat/composer/thinking', label: 'Thinking' };
+
+  async function account(offer: 'enabled' | 'locked' | 'absent', pressed = false) {
+    const f = markedChatComposerFixture();
+    f.form.children = f.form.children.filter(node => node !== f.picker.trigger);
+    f.picker.trigger.connected = false;
+    const tools = new Element('BUTTON', { 'aria-label': 'Add files and more', 'aria-expanded': 'false' });
+    f.form.append(tools);
+    const overlay = new Element('DIV', { 'data-composer-overlay-floating-ui': '' });
+    const list = new Element('DIV', { 'data-mention-list-scroll-area': '' });
+    const row = (label: string) => new Element('BUTTON', { 'data-list-navigation-item': '' }, label);
+    const option = row('Thinking For detailed answers');
+    list.append(row('Add photos & files Upload from computer'), row('Web search Find real-time news and info'));
+    if (offer !== 'absent') list.append(option);
+    option.disabled = offer === 'locked';
+    Object.assign(option, { scrollIntoView() {} });
+    overlay.append(list);
+    f.body.append(overlay);
+    overlay.connected = false;
+    tools.onClick = () => {
+      overlay.connected = !overlay.connected;
+      tools.values['aria-expanded'] = String(overlay.connected);
+    };
+    const chip = pressed ? new Element('BUTTON', { type: 'button', 'aria-pressed': 'true' }, 'Think')
+      : new Element('BUTTON', { 'aria-label': 'Remove Thinking' });
+    option.onClick = () => { tools.click(); f.form.append(chip); };
+    chip.onClick = () => { f.form.children = f.form.children.filter(node => node !== chip); };
+    expect((await f.rawRun({ action: 'ensureChatMode' })).chatModeReady).toBe(true);
+    expect((await f.rawRun({ action: 'enableTemporary' })).temporary).toBe(true);
+    return { f, option, tools, chip };
+  }
+
+  test('discovers only enabled choices offered by the account and restores its menu', async () => {
+    for (const offer of ['enabled', 'locked', 'absent'] as const) {
+      const { f, tools, option } = await account(offer);
+      expect((await f.rawRun({ action: 'discoverModels' })).modelChoices)
+        .toEqual(offer === 'enabled' ? [chat, thinking] : [chat]);
+      expect(tools.values['aria-expanded']).toBe('false');
+      expect(option.clicks).toBe(0);
+      if (offer !== 'enabled') {
+        expect((await f.rawRun({ action: 'selectModel', modelChoice: thinking })).error).toBe('model_unavailable');
+        expect(option.clicks).toBe(0);
+      }
+    }
+  });
+
+  test('discovers and uses a pinned Think toggle even after its menu row disappears', async () => {
+    const { f, tools, chip } = await account('absent', true);
+    f.form.append(chip);
+    chip.values['aria-pressed'] = 'false';
+    chip.onClick = () => { chip.values['aria-pressed'] = String(chip.values['aria-pressed'] !== 'true'); };
+    expect((await f.rawRun({ action: 'discoverModels' })).modelChoices).toEqual([chat, thinking]);
+    expect(chip.clicks).toBe(0);
+    expect((await f.rawRun({ action: 'selectModel', modelChoice: thinking })).modelEvidence?.selected).toEqual(thinking);
+    expect(chip.clicks).toBe(1);
+    expect(tools.clicks).toBe(0);
+  });
+
+  test('reads the rendered Think toggle and rejects an indeterminate or changed state', async () => {
+    const { f, chip } = await account('enabled', true);
+    const selected = await f.rawRun({ action: 'selectModel', modelChoice: thinking });
+    expect(selected.modelEvidence?.selected).toEqual(thinking);
+    chip.values['aria-pressed'] = 'mixed';
+    expect((await f.rawRun({ action: 'verifyModel', expectedModelChoice: thinking })).error).toBe('model_mismatch');
+    chip.values['aria-pressed'] = 'false';
+    expect((await f.rawRun({ action: 'verifyModel', expectedModelChoice: thinking })).error).toBe('model_mismatch');
+  });
+
+  test('requires current composer mode evidence after selecting Thinking', async () => {
+    const { f, chip } = await account('enabled');
+    const selected = await f.rawRun({ action: 'selectModel', modelChoice: thinking });
+    expect(selected).toMatchObject({ selected: true, modelEvidence: { selected: thinking, source: 'chat_composer_control' } });
+    expect((await f.rawRun({ action: 'verifyModel', expectedModelChoice: thinking })).modelEvidence?.selected).toEqual(thinking);
+    chip.click();
+    expect((await f.rawRun({ action: 'verifyModel', expectedModelChoice: thinking })).error).toBe('model_mismatch');
+  });
+});
 
 describe('ChatGPT explicit Chat composer provenance', () => {
   test('initial missing Chat proof reports only the form and exact control predicates that decided it', async () => {
@@ -1274,6 +1357,27 @@ describe('ChatGPT named paired-turn Copy association', () => {
     // Native's deadline-only diagnostic deliberately omits submission proof
     // inputs. False here means no proved scope, not that no Copy exists in DOM.
     expect(await p.x.f.diagnose()).toMatchObject({ failureDiagnostic: { copyPresent: false, copyEnabled: false } });
+  });
+
+  test('paired feedback menu toolbar proves completion only with both unique sibling menus and Read aloud', async () => {
+    for (const variant of ['complete', 'wrong_kind', 'disabled', 'duplicate', 'foreign_row', 'missing_reader']) {
+      const p = await pairedChatGPTFooterFixture();
+      const [feedback, reader, more] = p.companions;
+      feedback.values['aria-label'] = 'Feedback'; feedback.values['aria-haspopup'] = 'menu';
+      more.values['aria-label'] = 'More actions'; more.values['aria-haspopup'] = 'menu';
+      if (variant === 'wrong_kind') more.values['aria-haspopup'] = 'dialog';
+      if (variant === 'disabled') feedback.values['aria-disabled'] = 'true';
+      if (variant === 'duplicate') p.row.append(new Element('BUTTON', { ...more.values }));
+      if (variant === 'foreign_row') moveFixtureElement(feedback, p.pair);
+      if (variant === 'missing_reader') reader.values['aria-label'] = 'Unknown';
+      const observed = await p.x.observe(p.record, { deferModelVerification: false });
+      expect(observed.answerComplete, variant).toBe(variant === 'complete');
+      if (variant === 'complete') {
+        expect(observed.modelEvidence.selected).toEqual(p.choice);
+        expect(observed.completionEvidence.footerAssociation).toBe('paired_turn');
+      }
+      expect(p.copy.clicks).toBe(0); expect(p.x.send.clicks).toBe(1);
+    }
   });
 
   test('paired Copy never uses incomplete cancelled generic or ambiguous named turns', async () => {
@@ -2392,6 +2496,32 @@ describe('ChatGPT bounded in-flight model proof deferral', () => {
     expect(full.error).toBeUndefined(); expect(full.modelEvidence.selected).toEqual(choice);
     expect(pin.headerTrigger).toBe(picker.trigger); expect(picker.trigger.clicks).toBeGreaterThan(before);
     expect(pin.provisionalHeader).toBe(provisional); expect(provisional.completed).toBe(true); expect(disconnected).toBe(1);
+  });
+
+  test('a replacement span with joined labels is neutral only during full proof of its pinned power', async () => {
+    for (const variant of ['same', 'wrong_power', 'outside_proof', 'wrong_element']) {
+      const x = await chatTurnFixture(choice), picker: any = x.picker;
+      const record = await x.dispatch('Owned header formatting'); x.answer('Owned answer');
+      const pin = x.f.world.__computaChatPresetPin, old = picker.replaceTrigger();
+      expect((await x.observe(record, { deferModelVerification: true })).modelVerificationPending).toBe(true);
+      const pending = pin.provisionalHeader;
+      const span = new Element(variant === 'wrong_element' ? 'DIV' : 'SPAN', {},
+        'Thinking effort' + (variant === 'wrong_power' ? 'Pro' : choice.label));
+      const change = () => pending.observer.callback([{ type: 'childList', target: picker.trigger, addedNodes: [span], removedNodes: [] }]);
+      if (variant === 'outside_proof') change();
+      else {
+        const open = picker.trigger.onClick;
+        picker.trigger.onClick = () => { open(); change(); };
+      }
+      const full = await x.observe(record, { deferModelVerification: false });
+      if (variant === 'same') {
+        expect(full.error).toBeUndefined(); expect(full.modelEvidence.selected).toEqual(choice);
+        expect(pending.completed).toBe(true); expect(pin.headerTrigger).toBe(picker.trigger);
+      } else {
+        expect(full.error).toBeDefined(); expect(full.modelEvidence).toBeUndefined();
+        expect(pin.invalidated).toBe(true); expect(pin.headerTrigger).toBe(old);
+      }
+    }
   });
 
   test('provisional header negative history cannot be restored replaced rearmed or borrowed by a stale owner', async () => {

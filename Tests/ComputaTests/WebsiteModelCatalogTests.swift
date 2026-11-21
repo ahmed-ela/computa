@@ -3,6 +3,25 @@ import XCTest
 @testable import Computa
 
 final class WebsiteModelCatalogTests: XCTestCase {
+    func testComposerCatalogAndSelectionEvidenceRemainSeparateFromNumberedChatPresets() throws {
+        let chat = WebsiteModelChoice(provider: "chatgpt", key: "chat/composer/chat", label: "Chat")
+        let thinking = WebsiteModelChoice(provider: "chatgpt", key: "chat/composer/thinking", label: "Thinking")
+        let instant = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
+        for choice in [chat, thinking] {
+            XCTAssertEqual(WebsiteModelCatalog.inferenceSelection(for: choice.modelID)?.choice, choice)
+            let snapshot: [String: Any] = ["selected": ["key": choice.key, "label": choice.label],
+                                           "verification": "website_selection", "source": "chat_composer_control"]
+            let evidence = try WebsiteModelEvidence.parse(snapshot, provider: "chatgpt", expected: choice)
+            XCTAssertNil(evidence.chatSelection)
+            XCTAssertThrowsError(try WebsiteModelEvidence.parse(snapshot, provider: "chatgpt", expected: instant))
+            XCTAssertThrowsError(try WebsiteModelEvidence.parse(snapshot, provider: "gemini"))
+        }
+        XCTAssertNoThrow(try WebsiteModelCatalog.validateObserved([chat, thinking], provider: "chatgpt"))
+        XCTAssertNoThrow(try WebsiteModelCatalog.validateObserved([chat], provider: "chatgpt"))
+        XCTAssertThrowsError(try WebsiteModelCatalog.validateObserved([thinking], provider: "chatgpt"))
+        XCTAssertThrowsError(try WebsiteModelCatalog.validateObserved([chat, instant], provider: "chatgpt"))
+    }
+
     func testGrokPilotRequiresObservedFastWithoutDefaultsSeededModelsOrGroqAliases() throws {
         let grok = WebsiteModelChoice(provider: "grok", key: "Fast", label: "Fast")
         let groq = WebsiteModelChoice(provider: "groq", key: grok.key, label: grok.label)
@@ -98,7 +117,7 @@ final class WebsiteModelCatalogTests: XCTestCase {
                        "A family-only choice no longer proves a Chat power preset")
     }
 
-    func testV3ClaudeRequiresFreshRowsWhileChatPresetsAndOtherProvidersSurvive() throws {
+    func testOldCatalogsRediscoverAccountScopedChoicesAndPreserveOtherProviders() throws {
         let preferences = isolatedTestPreferences()
         let fable = WebsiteModelChoice(provider: "claude", key: "Fable 5.1", label: "Fable 5.1")
         let opus = WebsiteModelChoice(provider: "claude", key: "Opus 5", label: "Opus 5")
@@ -106,9 +125,14 @@ final class WebsiteModelCatalogTests: XCTestCase {
                       WebsiteModelChoice(provider: "groq", key: "test", label: "Test")]
         let prior = try JSONEncoder().encode([fable, opus] + others)
         preferences.set(prior, forKey: WebsiteModelCatalog.priorSelectableRowsPreferenceKey)
-        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), others)
-        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), others)
+        let unchanged = others.filter { $0.provider != "chatgpt" }
+        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), unchanged)
+        XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), unchanged)
         XCTAssertEqual(preferences.data(forKey: WebsiteModelCatalog.priorSelectableRowsPreferenceKey), prior)
+
+        let v4 = isolatedTestPreferences()
+        v4.set(prior, forKey: WebsiteModelCatalog.priorAccountOptionsPreferenceKey)
+        XCTAssertEqual(WebsiteModelCatalog.load(from: v4), [fable, opus] + unchanged)
         XCTAssertEqual(WebsiteModelCatalog.choice(for: fable.modelID), fable)
         XCTAssertEqual(WebsiteModelCatalog.option(for: fable, available: false).available, false)
         WebsiteModelCatalog.save(others + [fable, opus], to: preferences)

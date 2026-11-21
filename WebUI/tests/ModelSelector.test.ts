@@ -65,19 +65,35 @@ describe('website model selectors', () => {
       route: (name === 'Alibaba' ? 'api/' : 'browser/') + name.toLowerCase(), name, connected: false,
     }));
     const props = { model: options[1].id, label: 'Task model', setups, canConnect: true,
-      onSelect: () => {}, onConnect: () => {} };
+      onSelect: () => {}, onConnect: () => {}, onRefresh: () => {} };
     const saved = { ...options[1], available: false };
     const render = (models: ModelOption[]) => renderToStaticMarkup(h(ModelSelector, { ...props, options: models })).html;
     const html = render([saved]);
     expect((await renderedProviderGroups(html)).map((group) => group.name)).toEqual(names);
     expect(await textBySelector(html, '[data-submenu-content] [role="menuitem"]')).toEqual([
-      ...names.slice(0, -1).map((name) => 'Sign in to ' + name), 'Connect API',
+      ...names.slice(0, -1).map(() => 'Check available models'), 'Connect API',
     ]);
     expect(await attributesBySelector(html, '[role="menuitemradio"]', 'data-value')).toEqual([]);
     const connected = render([saved, options[3]]);
+    expect(connected).toContain('Task model: Choose model');
     expect(await attributesBySelector(connected, '[role="menuitemradio"]', 'data-value')).toEqual([options[3].id]);
     expect(connected).not.toContain('Sign in to Gemini');
-    expect(connected).toContain('Sign in to ChatGPT');
+    expect(connected).not.toContain('Sign in to');
+  });
+
+  test('only a confirmed signed-out result offers sign-in; other states allow a scoped check', async () => {
+    const setups = [
+      { name: 'ChatGPT', route: 'browser/chatgpt', checkStatus: 'checking' as const },
+      { name: 'Claude', route: 'browser/claude', checkStatus: 'signInRequired' as const },
+      { name: 'Gemini', route: 'browser/gemini', checkStatus: 'unavailable' as const },
+    ].map((setup) => ({ ...setup, connected: false }));
+    const html = renderToStaticMarkup(h(ModelSelector, {
+      setups, options: [], model: '', label: 'Model', canConnect: true, onSelect: () => {}, onRefresh: () => {},
+    })).html;
+    expect(await textBySelector(html, '[data-submenu-content] [role="menuitem"]')).toEqual([
+      'Checking available models…', 'Sign in to Claude', 'Check again', 'Open Gemini', 'Check again',
+    ]);
+    expect(await textBySelector(html, '[data-submenu-content] [aria-disabled="true"]')).toEqual(['Checking available models…']);
   });
 
   test('Grok is distinct from Groq and only supplied specific choices enter its submenu', () => {

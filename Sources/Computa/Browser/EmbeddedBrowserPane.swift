@@ -9,6 +9,7 @@ struct EmbeddedBrowserPane: View {
     let session: EmbeddedBrowserSession
     var isInteractionBlocked = false
     var canLoadModels = false
+    var modelSetupStatus: (String) -> WebsiteModelSetupStatus = { _ in .unchecked }
     var onLoadModels: (UUID) -> Void = { _ in }
     var canConfigureKimiProfile = false
     var kimiModelSignInMessage: String?
@@ -33,22 +34,23 @@ struct EmbeddedBrowserPane: View {
             Divider()
 
             if let tab = selectedTab, !tab.isPopup, let provider = tab.setupProvider {
+                let status = modelSetupStatus(provider.rawValue)
                 HStack {
-                    switch tab.setupStatus {
-                    case .awaitingSignIn: Text("Sign in to \(provider.displayName), then load your models.")
-                    case .loading: ProgressView().controlSize(.small); Text("Checking \(provider.displayName)…")
+                    switch status {
+                    case .unchecked: Text("Check which models are available in your \(provider.displayName) account.")
+                    case .checking: ProgressView().controlSize(.small); Text("Checking \(provider.displayName)…")
                     case .loaded(let count): Text("\(count) options available in the model picker.")
-                    case .failed(let message): Text(message).textSelection(.enabled)
+                    case .signInRequired(let message), .failed(let message): Text(message).textSelection(.enabled)
                     }
                     Spacer()
-                    if case .loaded = tab.setupStatus {
+                    if case .loaded = status {
                         Button("Done") {
                             session.closeTab(tab.id)
                             onClose()
                         }
                     } else {
                         Button("Load models") { onLoadModels(tab.id) }
-                            .disabled(!canLoadModels || tab.setupStatus == .loading)
+                            .disabled(!canLoadModels || status == .checking)
                     }
                 }
                 .font(.callout)

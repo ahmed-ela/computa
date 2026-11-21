@@ -23,6 +23,7 @@ struct WebWorkspaceView: View {
                             session: state.browserSession,
                             isInteractionBlocked: state.approvalGateBlocksInteraction,
                             canLoadModels: state.canRefreshWebsiteModels,
+                            modelSetupStatus: state.websiteModelSetupStatus(for:),
                             onLoadModels: { id in Task { await state.loadSignedInModels(tabID: id) } },
                             canConfigureKimiProfile: state.canConfigureKimiProfile,
                             kimiModelSignInMessage: state.kimiModelSignInMessage,

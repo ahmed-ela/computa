@@ -85,13 +85,12 @@ export function groupModelOptions(options: ModelOption[], model: string, setups:
 }
 
 export function ModelSelector({ options, model, label, disabled = false, className,
-  setups = [], canConnect = false, onConnect, onSelect }: { options: ModelOption[]; setups?: ModelProviderSetup[];
-  canConnect?: boolean; onConnect?: (route: string) => void; model: string; label: string; disabled?: boolean;
+  setups = [], canConnect = false, onConnect, onRefresh, onSelect }: { options: ModelOption[]; setups?: ModelProviderSetup[];
+  onRefresh?: (action: WebsiteModelsRefreshAction) => void; canConnect?: boolean; onConnect?: (route: string) => void; model: string; label: string; disabled?: boolean;
   className?: string; onSelect: (model: string) => void }) {
   const selected = options.find((option) => option.id === model);
   const groups = groupModelOptions(options, model, setups);
-  const needsSelection = setups.length > 0 && selected?.available === false
-    && !groups.some((group) => group.options.some((option) => option.available !== false));
+  const needsSelection = setups.length > 0 && (!selected || selected.available === false || selected.selectable === false);
   const [open, setOpen] = useState(false);
   useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
   const selectModel = (value: string) => {
@@ -126,15 +125,10 @@ export function ModelSelector({ options, model, label, disabled = false, classNa
                   {option.available === false && <span className="model-option-unavailable"> (unavailable)</span>}
                 </DropdownMenuRadioItem>)}
               </DropdownMenuRadioGroup>
-              {group.setup && !group.options.some((option) => option.available !== false) && <DropdownMenuItem
-                disabled={disabled || !canConnect} title={!canConnect ? "Finish active tasks and approvals to connect a provider" : undefined} onSelect={() => {
-                  if (disabled || !canConnect || !group.setup) return;
-                  setOpen(false);
-                  onConnect?.(group.setup.route);
-                }}>
-                {group.setup.route.startsWith('browser/') ? 'Sign in to ' + group.name
-                  : group.setup.connected ? 'Manage API connection' : 'Connect API'}
-              </DropdownMenuItem>}
+              {group.setup && !group.options.some((option) => option.available !== false) && <ProviderSetupActions
+                setup={group.setup} disabled={disabled || !canConnect}
+                onConnect={() => { setOpen(false); onConnect?.(group.route); }}
+                onRefresh={onRefresh} />}
             </DropdownMenuSubContent>
           </DropdownMenuPortal>
         </DropdownMenuSub>)}
@@ -142,6 +136,27 @@ export function ModelSelector({ options, model, label, disabled = false, classNa
       </DropdownMenuContent>
     </DropdownMenu>
   );
+}
+
+function ProviderSetupActions({ setup, disabled, onConnect, onRefresh }: {
+  setup: ModelProviderSetup; disabled: boolean; onConnect: () => void; onRefresh?: (action: WebsiteModelsRefreshAction) => void;
+}) {
+  const refresh = websiteModelsRefreshAction(setup.route);
+  if (!refresh) return <DropdownMenuItem disabled={disabled} onSelect={onConnect}>
+    {setup.connected ? 'Manage API connection' : 'Connect API'}
+  </DropdownMenuItem>;
+  const status = setup.checkStatus;
+  return <>
+    {(status === 'signInRequired' || status === 'unavailable') && <DropdownMenuItem disabled={disabled} onSelect={onConnect}>
+      {status === 'signInRequired' ? 'Sign in to ' + setup.name : 'Open ' + setup.name}
+    </DropdownMenuItem>}
+    <DropdownMenuItem disabled={disabled || !onRefresh || status === 'checking'} onSelect={(event: Event) => {
+      event.preventDefault();
+      if (!disabled && status !== 'checking') onRefresh?.(refresh);
+    }}>
+      {status === 'checking' ? 'Checking available models…' : status ? 'Check again' : 'Check available models'}
+    </DropdownMenuItem>
+  </>;
 }
 
 type WebsiteModelsRefreshAction = Extract<NativeAction, { action: 'refreshWebsiteModels' }>;

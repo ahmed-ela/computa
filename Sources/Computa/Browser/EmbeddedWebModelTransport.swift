@@ -1209,14 +1209,14 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     private let signInRecoveryOwner = UUID()
 
     func signInRecoveryGate(provider rawProvider: String) -> SignInRecoveryGate? {
-        guard rawProvider == Provider.deepseek.rawValue else { return nil }
-        synchronizeProviderGate(.deepseek)
-        guard let gate = providerGates[.deepseek], gate.failure == .signInRequired else { return nil }
-        return SignInRecoveryGate(owner: signInRecoveryOwner, provider: .deepseek, id: gate.id)
+        guard let provider = Provider(rawValue: rawProvider), provider == .deepseek || provider == .chatgpt else { return nil }
+        synchronizeProviderGate(provider)
+        guard let gate = providerGates[provider], gate.failure == .signInRequired else { return nil }
+        return SignInRecoveryGate(owner: signInRecoveryOwner, provider: provider, id: gate.id)
     }
 
     func isSignInRecoveryGateCurrent(_ token: SignInRecoveryGate) -> Bool {
-        guard token.owner == signInRecoveryOwner, token.provider == .deepseek else { return false }
+        guard token.owner == signInRecoveryOwner, token.provider == .deepseek || token.provider == .chatgpt else { return false }
         synchronizeProviderGate(token.provider)
         return providerGates[token.provider].map { $0.id == token.id && $0.failure == .signInRequired } == true
     }
@@ -1234,7 +1234,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
     /// Post-discovery bookkeeping only. Native discovery owns the unchanged
     /// exact mode, cleanup and newer-gate checks that actually remove the gate.
     func didClearSignInRecoveryGate(_ token: SignInRecoveryGate) -> Bool {
-        guard token.owner == signInRecoveryOwner, token.provider == .deepseek else { return false }
+        guard token.owner == signInRecoveryOwner, token.provider == .deepseek || token.provider == .chatgpt else { return false }
         synchronizeProviderGate(token.provider)
         return providerGates[token.provider] == nil && signInRecoveryIsQuiescent(token)
     }
@@ -2392,7 +2392,7 @@ final class EmbeddedWebModelTransport: WebModelTransport {
             modeChoice = parsed
         } else { modeChoice = nil }
         guard provider.usesWebsiteModes ? choice == nil && modeChoice != nil : modeChoice == nil else { throw Failure.invalidRequest }
-        guard provider != .chatgpt || choice?.chatGPTPower != nil else { throw Failure.invalidRequest }
+        guard provider != .chatgpt || choice?.isSelectable == true else { throw Failure.invalidRequest }
         guard provider != .grok || choice != nil else { throw Failure.invalidRequest }
         guard provider.lifecycle == .temporary || choice != nil || modeChoice != nil else { throw Failure.invalidRequest }
         let groqLease = provider == .groq && choice==groqCandidate?.modelChoice && admission != nil && groqCandidate?.admission==admission ? groqCandidate : nil

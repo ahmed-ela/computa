@@ -36,6 +36,11 @@ struct WebsiteModelChoice: Codable, Equatable, Sendable {
         return ChatGPTPower.allCases.first { key == $0.modelKey }
     }
 
+    var isChatComposerChoice: Bool {
+        provider == "chatgpt" && ((key == "chat/composer/chat" && label == "Chat")
+            || (key == "chat/composer/thinking" && label == "Thinking"))
+    }
+
     var supportsClaudeTurnPilot: Bool {
         self == Self.claudeHaiku55
     }
@@ -49,7 +54,7 @@ struct WebsiteModelChoice: Codable, Equatable, Sendable {
         // unavailable; this policy does not alias Alibaba's API model IDs.
         if provider == "qwen" { return key != label || !["Qwen3.7-Plus", "Qwen3.8-Max"].contains(key) }
         guard provider == "chatgpt" else { return false }
-        guard let power = chatGPTPower else { return true }
+        guard let power = chatGPTPower else { return !isChatComposerChoice }
         if power == .pro {
             return label != "Pro" && (!label.hasSuffix(" Pro") || WebsiteModelCatalog.plainGPTVersion(String(label.dropLast(4))) == nil)
         }
@@ -135,7 +140,8 @@ enum WebsiteModelCatalog {
     // broader website model availability is never inferred from this registry.
     static let knownProviders = ["chatgpt", "gemini", "claude", "groq", "grok", "kimi", "qwen", "deepseek"]
     static let maximumChoicesPerProvider = 32
-    static let preferenceKey = "Computa.websiteModelChoices.v4-claude-selectable-rows"
+    static let preferenceKey = "Computa.websiteModelChoices.v5-account-options"
+    static let priorAccountOptionsPreferenceKey = "Computa.websiteModelChoices.v4-claude-selectable-rows"
     static let priorSelectableRowsPreferenceKey = "Computa.websiteModelChoices.v3-chat-latest-power"
     static let priorPreferenceKey = "Computa.websiteModelChoices.v2-chat-product"
     static let legacyPreferenceKey = "Computa.websiteModelChoices.v1"
@@ -253,6 +259,8 @@ enum WebsiteModelCatalog {
             label: "\(providerLabel(choice.provider)) / \(choice.label) · Built-in browser",
             detail: choice.isRetired
                 ? "This website model choice has been removed. Choose another model to continue."
+                : selectable && choice.isChatComposerChoice
+                ? "Uses the \(choice.label) mode offered in your ChatGPT composer. ChatGPT chooses the underlying model."
                 : selectable && choice.provider == "chatgpt"
                 ? "Uses the newest available GPT family in ChatGPT Chat with \(choice.chatGPTPower?.label ?? choice.label) power. Computa verifies the website's family and power before sending and accepting a response. Website limits still apply."
                 : selectable
@@ -278,10 +286,14 @@ enum WebsiteModelCatalog {
     static func validateObserved(_ choices: [WebsiteModelChoice], provider: String) throws {
         try validate(choices, provider: provider)
         guard choices.allSatisfy(\.isObservedChoice) else { throw Failure.invalidChoices }
+        if choices.contains(where: \.isChatComposerChoice) {
+            guard choices.allSatisfy(\.isChatComposerChoice),
+                  choices.contains(where: { $0.key == "chat/composer/chat" }) else { throw Failure.invalidChoices }
+        }
     }
 
     static func load(from preferences: UserDefaults) -> [WebsiteModelChoice] {
-        let keys = [preferenceKey, priorSelectableRowsPreferenceKey, priorPreferenceKey, legacyPreferenceKey]
+        let keys = [preferenceKey, priorAccountOptionsPreferenceKey, priorSelectableRowsPreferenceKey, priorPreferenceKey, legacyPreferenceKey]
         guard let storedKey = keys.first(where: { preferences.object(forKey: $0) != nil }),
               let data = preferences.data(forKey: storedKey), data.count <= 100 * 1_024,
               let choices = try? JSONDecoder().decode([WebsiteModelChoice].self, from: data),
@@ -296,13 +308,13 @@ enum WebsiteModelCatalog {
         // Validate the complete stored catalog first: retiring a choice must
         // not hide duplicate or malformed entries from cache validation.
         // Pre-v4 Claude catalogs do not prove selectable row semantics. Leave
-        // that provider missing for normal idle discovery. v3 already bound Chat
-        // presets to a family. Saved task/default identities are independent.
-        let legacyChat = storedKey == priorPreferenceKey || storedKey == legacyPreferenceKey
+        // that provider missing for normal idle discovery. Older ChatGPT catalogs
+        // expanded a family to all presets without checking the account control.
+        let hasSelectableClaudeRows = storedKey == preferenceKey || storedKey == priorAccountOptionsPreferenceKey
         let selectable = choices.filter { choice in
             providers.contains(choice.provider) && choice.isObservedChoice
-                && (choice.provider != "claude" || storedKey == preferenceKey)
-                && (choice.provider != "chatgpt" || !legacyChat)
+                && (choice.provider != "claude" || hasSelectableClaudeRows)
+                && (choice.provider != "chatgpt" || storedKey == preferenceKey)
         }
         if storedKey != preferenceKey || selectable.count != choices.count { save(selectable, to: preferences) }
         return selectable

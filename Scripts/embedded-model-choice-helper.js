@@ -397,8 +397,10 @@ function websiteChatPickerState() {
   const metadataDisabled = node => !!node && (node.disabled || node.getAttribute('disabled') !== null
     || !!node.closest('[disabled], [aria-disabled="true"]'));
   const rawValue = physicalSlider?.getAttribute('aria-valuenow');
+  const rawMax = physicalSlider?.getAttribute('aria-valuemax');
+  const maxPower = /^[0-4]$/.test(rawMax || '') ? Number(rawMax) : null;
   const shapePowerIndex = physicalSlider && physicalSlider.tagName.toLowerCase() === 'span'
-    && physicalSlider.getAttribute('aria-valuemin') === '0' && physicalSlider.getAttribute('aria-valuemax') === '4'
+    && physicalSlider.getAttribute('aria-valuemin') === '0' && maxPower !== null && Number(rawValue) <= maxPower
     && physicalSlider.getAttribute('aria-orientation') === 'horizontal' && /^[0-4]$/.test(rawValue || '')
     ? Number(rawValue) : null;
   const recognizedPowerIndex = metadataScoped(slider) ? shapePowerIndex : null;
@@ -428,7 +430,7 @@ function websiteChatPickerState() {
     controls: familyControls.filter(control => control.choice), choices: [], selected: null, evidence: null,
     familyControls, offered: plain.map(choice => choice.label), newest,
     checkedFamily: checked.length === 1 && websiteChatFamilyValid(checked[0].choice) ? checked[0].choice : null,
-    powerItem, slider, powerIndex, powerUnavailable, power: powerIndex === null ? null : websiteChatPowers[powerIndex],
+    powerItem, slider, powerIndex, maxPower, powerUnavailable, power: powerIndex === null ? null : websiteChatPowers[powerIndex],
     powerDiagnostic: {
       physicalItemCount: physicalPowerItems.length, physicalSliderCount: physicalSliders.length,
       itemVisible: !!powerItem, itemEnabled: enabled(powerItem), sliderPhysical: physical(physicalSlider),
@@ -668,6 +670,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
   };
   let headerReadiness = null, changingPowerHeader = null, changingPowerSlider = null, initialReadinessBinding = null;
   let initialReadinessFacts = null;
+  const powerTransition = mutable && expected ? { from: null, requested: expected.key, observed: null, header: null } : null;
   const tracked = new Map();
   const observeHeader = records => {
     const diagnostic = {};
@@ -697,7 +700,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     attributeFilter: ['aria-valuenow', 'aria-checked', 'aria-selected'] });
   const failure = code => {
     const current = websiteChatPickerState(), selection = globalThis.__computaModelSelection;
-    return { error: code, modelDiagnostic: websiteModelDiagnostic(current, { readStage, headerReadiness, initialReadinessFacts,
+    return { error: code, modelDiagnostic: websiteModelDiagnostic(current, { readStage, headerReadiness, initialReadinessFacts, powerTransition,
       readContext: {
         scope: ['action_precheck', 'action_final_guard', 'completed_selection', 'post_selection'].includes(context?.scope)
           ? context.scope : 'unknown',
@@ -1232,6 +1235,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       current = await wait(() => websiteChatPickerState().powerIndex !== before);
       if (current.powerIndex !== before + direction) throw failure('model_unverified');
       const nextPower = websiteChatPowers[current.powerIndex];
+      if (powerTransition) powerTransition.observed = current.powerIndex;
       if (current.headerPower && current.headerPower.key !== nextPower.key) {
         // React can acknowledge the slider before committing the header text.
         // Only this fresh, exact keyboard step may wait for its old header to
@@ -1261,7 +1265,11 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
         } finally { changingPowerHeader = null; changingPowerSlider = null; }
         if (Date.now() >= until) throw failure('model_unverified');
         current = state();
-        if (current.headerPower?.key !== nextPower.key || current.topMenu !== popup
+        // The open picker can replace its old effort label with “Thinking effort”.
+        // It supplies no power proof. Keep the exact acknowledged slider below,
+        // then require the checked family and independent closed-header or Power proof.
+        if (powerTransition) powerTransition.header = websiteChatHeaderPresentation(current.trigger.innerText).kind;
+        if ((!current.headerPresentation && current.headerPower?.key !== nextPower.key) || current.topMenu !== popup
           || current.powerItem !== powerItem || current.slider !== slider || current.mode !== 'power'
           || current.powerIndex !== before + direction || freshGuard() !== true) throw failure('model_mismatch');
         headerExpected = null; // The next owned step has its own observed predecessor.
@@ -1461,11 +1469,13 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     if (genericHeader && powerState.mode !== 'power') return failure('model_unverified');
     const startingPower = headerIndex ?? powerState.powerIndex;
     const desiredPower = expectedIndex ?? startingPower;
+    if (powerTransition) powerTransition.from = powerState.powerIndex;
     if (!Number.isInteger(startingPower) || !Number.isInteger(desiredPower)) return failure('model_unverified');
     if (powerState.mode === 'power' && powerState.powerIndex !== startingPower) return failure(mutable ? 'model_unverified' : 'model_mismatch');
     if (!mutable && startingPower !== desiredPower) return failure('model_mismatch');
     if (mutable) {
       if (powerState.mode !== 'power') return failure('model_unverified');
+      if (desiredPower > powerState.maxPower) return failure('model_unavailable');
       powerState = await changePower(desiredPower);
       headerExpected = websiteChatPowers[desiredPower];
     }
@@ -1495,7 +1505,7 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
     for (const node of [familyState.semanticSlider, ...familyState.familyControls.map(control => control.node)].filter(Boolean))
       tracked.set(node, { 'aria-valuenow': node.getAttribute('aria-valuenow'),
         'aria-checked': node.getAttribute('aria-checked'), 'aria-selected': node.getAttribute('aria-selected') });
-    const modelDiagnostic = websiteModelDiagnostic(familyState, { headerReadiness });
+    const modelDiagnostic = websiteModelDiagnostic(familyState, { headerReadiness, powerTransition });
     observedProof = true; readStage = 'family_proof_observed';
     await close();
     let final = state();
@@ -1563,7 +1573,13 @@ async function websiteChatObserveSelection(request, expected, freshGuard = null,
       && websiteChatResolvedSelectionEqual(provedPin.selection, evidence.chatSelection))
       provedPin.genericHeaderVerified = final.headerPresentation && !final.headerPower ? trigger : null;
     if (detachedSubmitSend) context.recordRecoveredSubmitSend(detachedSubmitSend);
-    return { modelEvidence: evidence, modelChoices: websiteChatPowers.map(power => websiteChatPresetChoice(family, power)), modelDiagnostic };
+    // A family panel can be remembered across openings. Only the enabled
+    // associated Power control establishes a range for this account. Without
+    // that range the checked family and closed header attest one preset.
+    const range = finalPowerState || powerState;
+    const powers = range.mode === 'power' && Number.isInteger(range.maxPower)
+      ? websiteChatPowers.slice(0, range.maxPower + 1) : [finalPower];
+    return { modelEvidence: evidence, modelChoices: powers.map(power => websiteChatPresetChoice(family, power)), modelDiagnostic };
   } catch (error) {
     return error?.error ? error : failure('model_unverified');
   } finally {
@@ -2032,6 +2048,7 @@ function websiteModelDiagnostic(state, readObservation = null) {
   if (state.provider === 'claude') diagnostic.lastModelTrigger = websiteClaudeModelTriggerDiagnostic(state);
   if (state.provider === 'chatgpt') {
     diagnostic.chatPower = state.powerDiagnostic;
+    if (readObservation?.powerTransition) diagnostic.powerTransition = { ...readObservation.powerTransition };
     const pin = globalThis.__computaChatPresetPin;
     diagnostic.chatPin = {
       present: !!pin, invalidated: pin?.invalidated === true,

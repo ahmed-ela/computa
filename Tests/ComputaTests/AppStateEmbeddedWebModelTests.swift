@@ -5,6 +5,106 @@ import XCTest
 
 @MainActor
 final class AppStateEmbeddedWebModelTests: XCTestCase {
+    func testUpgradeWithSignedInAccountAndLegacyCatalogDiscoversActualModelsWithoutSetup() async throws {
+        let prefs = isolatedTestPreferences()
+        let stale = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/high", label: "High")
+        let actual = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
+        prefs.set(try JSONEncoder().encode([stale]), forKey: WebsiteModelCatalog.priorAccountOptionsPreferenceKey)
+        let storage = try PersistentBrowserTestStorage(testCase: self)
+        let profile: UUID
+        // Normal app termination keeps WebKit registered while the profile flushes.
+        let delegate = ComputaAppDelegate()
+        defer { withExtendedLifetime(delegate) {} }
+        let marker = try XCTUnwrap(HTTPCookie(properties: [.name: "fixture-session", .value: "signed-in",
+            .domain: "fixture.invalid", .path: "/", .expires: Date().addingTimeInterval(3600)]))
+        do {
+            let previous = storage.session(defaults: prefs)
+            defer { previous.shutdown() }
+            delegate.state = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: previous)
+            let human = try previous.createTab()
+            let store = try XCTUnwrap(previous.webView(for: human)?.configuration.websiteDataStore)
+            profile = try XCTUnwrap(store.identifier)
+            addTeardownBlock { @MainActor in try await WKWebsiteDataStore.remove(forIdentifier: profile) }
+            await store.httpCookieStore.setCookie(marker)
+            delegate.prepareBrowserProfilesForTermination()
+            let before = await store.httpCookieStore.allCookies()
+            XCTAssertTrue(before.contains(where: { $0.name == marker.name && $0.value == marker.value }),
+                          "The previous installation must have an established session before upgrade")
+        }
+        let browser = storage.session(defaults: prefs)
+        defer { browser.shutdown() }
+        var probe: CheckedContinuation<[WebsiteModelChoice], Error>?
+        var attempts = 0
+        let state = AppState(tasks: [], preferences: prefs, browserSession: browser, websiteModelDiscovery: { provider in
+            guard provider == "chatgpt" else { throw EmbeddedWebModelTransport.Failure.signInRequired }
+            attempts += 1
+            let modelTab = try browser.createUnloadedModelTabForTesting()
+            defer { browser.closeTab(modelTab) }
+            let store = try XCTUnwrap(browser.webView(for: modelTab)?.configuration.websiteDataStore)
+            XCTAssertEqual(store.identifier, profile)
+            let cookies = await store.httpCookieStore.allCookies()
+            guard cookies.contains(where: { $0.name == marker.name && $0.value == marker.value })
+            else { throw EmbeddedWebModelTransport.Failure.signInRequired }
+            return try await withCheckedThrowingContinuation { probe = $0 }
+        }, websiteModeDiscovery: { _ in throw EmbeddedWebModelTransport.Failure.signInRequired })
+        func chatSetup() throws -> ModelProviderSetup {
+            try XCTUnwrap(WebUISnapshot(state: state).providerSetups.first { $0.route == "browser/chatgpt" })
+        }
+        XCTAssertNil(try chatSetup().checkStatus)
+        XCTAssertFalse(try chatSetup().connected)
+        XCTAssertFalse(state.websiteModelChoices.contains(stale))
+        state.refreshWebsiteModelsIfNeeded()
+        try await waitUntil { probe != nil }
+        XCTAssertEqual(try chatSetup().checkStatus, .checking)
+        probe?.resume(returning: [actual])
+        try await waitUntil { state.websiteModelSetupStatus(for: "chatgpt") == .loaded(1) }
+        XCTAssertTrue(try chatSetup().connected)
+        XCTAssertEqual(state.websiteModelChoices, [actual])
+        XCTAssertEqual(WebsiteModelCatalog.load(from: prefs), [actual])
+        XCTAssertEqual(attempts, 1)
+        XCTAssertTrue(browser.humanTabs.isEmpty)
+    }
+
+    func testChatGPTRecoveryRecognizesOnlyTheCommittedHumanChatLanding() async throws {
+        let browser = EmbeddedBrowserSession(persistent: false)
+        defer { browser.shutdown() }
+        var candidates: [EmbeddedBrowserSession.ProviderSignInRecoveryCandidate] = []
+        browser.onProviderSignInRecoveryCandidate = { candidates.append($0) }
+        let (id, view) = try await humanLandingPage(browser, url: "https://chatgpt.com/c/old")
+        XCTAssertTrue(candidates.isEmpty)
+        let landing = EmbeddedWebModelTransport.Provider.chatgpt.startURL
+        try await loadHumanLandingFixture(view, url: landing.absoluteString)
+        try await waitUntil { !candidates.isEmpty }
+        let candidate = try XCTUnwrap(candidates.last)
+        XCTAssertEqual(candidate.provider, "chatgpt")
+        XCTAssertEqual(candidate.tabID, id)
+        XCTAssertTrue(browser.isProviderSignInRecoveryCandidateCurrent(candidate))
+        try await loadHumanLandingFixture(view, url: "https://example.org/")
+        XCTAssertFalse(browser.isProviderSignInRecoveryCandidateCurrent(candidate))
+    }
+
+    func testChatGPTRefreshReplacesThePreviousAccountsSelectableModels() async throws {
+        let preferences = isolatedTestPreferences()
+        let browser = EmbeddedBrowserSession(persistent: false)
+        defer { browser.shutdown() }
+        let instant = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
+        let chat = WebsiteModelChoice(provider: "chatgpt", key: "chat/composer/chat", label: "Chat")
+        let thinking = WebsiteModelChoice(provider: "chatgpt", key: "chat/composer/thinking", label: "Thinking")
+        WebsiteModelCatalog.save([instant], to: preferences)
+        let accountMenus = [[chat, thinking], [chat], [instant]]
+        var offers = accountMenus.makeIterator()
+        let state = AppState(tasks: [], preferences: preferences, browserSession: browser,
+            websiteModelDiscovery: { _ in try XCTUnwrap(offers.next()) })
+        for choices in accountMenus {
+            await state.refreshWebsiteModels(provider: "chatgpt")
+            let selectable = WebUISnapshot(state: state).modelOptions.filter {
+                $0.id.hasPrefix("browser/chatgpt/") && $0.available != false && $0.selectable != false
+            }
+            XCTAssertEqual(Set(selectable.map(\.id)), Set(choices.map(\.modelID)))
+            XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), choices)
+        }
+    }
+
     func testGrokFreshDiscoveryPublishesFastToTheSelectorWithoutEnablingTheBaseID() async throws {
         let browser = EmbeddedBrowserSession(persistent: false)
         defer { browser.shutdown() }
@@ -292,7 +392,7 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         fixture.signIn = false
         var refreshes: [(String, Bool)] = []
         state.setWebsiteModelRefreshObserverForTesting { refreshes.append(($0, $1)) }
-        let (humanID, _) = try await deepSeekHumanPage(fixture.browser, url: "https://chat.deepseek.com/")
+        let (humanID, _) = try await humanLandingPage(fixture.browser, url: "https://chat.deepseek.com/")
         try await waitUntil {
             state.websiteTransportForTesting.didClearSignInRecoveryGate(gate) && !state.websiteModelsRefreshing
         }
@@ -317,16 +417,16 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         let forwarding = fixture.browser.onProviderSignInRecoveryCandidate
         var candidates: [EmbeddedBrowserSession.ProviderSignInRecoveryCandidate] = []
         fixture.browser.onProviderSignInRecoveryCandidate = { candidate in candidates.append(candidate); forwarding?(candidate) }
-        let (id, view) = try await deepSeekHumanPage(fixture.browser, url: "https://chat.deepseek.com/")
+        let (id, view) = try await humanLandingPage(fixture.browser, url: "https://chat.deepseek.com/")
         try await waitUntil { candidates.count == 1 }
         XCTAssertTrue(probes.isEmpty)
         XCTAssertNil(state.websiteTransportForTesting.signInRecoveryGate(provider: "deepseek"))
         let oldCandidate = try XCTUnwrap(candidates.last)
-        try await loadDeepSeekHumanFixture(view, url: "https://chat.deepseek.com/sign_in")
+        try await loadHumanLandingFixture(view, url: "https://chat.deepseek.com/sign_in")
         XCTAssertFalse(fixture.browser.isProviderSignInRecoveryCandidateCurrent(oldCandidate))
-        try await loadDeepSeekHumanFixture(view, url: "https://chat.deepseek.com/a/chat/s/foreign")
-        try await loadDeepSeekHumanFixture(view, url: "https://example.test/")
-        try await loadDeepSeekHumanFixture(view, url: "https://chat.deepseek.com/")
+        try await loadHumanLandingFixture(view, url: "https://chat.deepseek.com/a/chat/s/foreign")
+        try await loadHumanLandingFixture(view, url: "https://example.test/")
+        try await loadHumanLandingFixture(view, url: "https://chat.deepseek.com/")
         try await waitUntil { candidates.count == 2 }
         XCTAssertEqual(candidates.map(\.provider), ["deepseek", "deepseek"])
         XCTAssertTrue(probes.isEmpty, "A committed normal page is not a saved sign-in gate")
@@ -360,7 +460,7 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         fixture.browser.onProviderSignInRecoveryCandidate = { candidate in observed.append(candidate); forwarding?(candidate) }
         var refreshes: [(String, Bool)] = []
         state.setWebsiteModelRefreshObserverForTesting { refreshes.append(($0, $1)) }
-        let (_, view) = try await deepSeekHumanPage(fixture.browser, url: "https://chat.deepseek.com/")
+        let (_, view) = try await humanLandingPage(fixture.browser, url: "https://chat.deepseek.com/")
         try await waitUntil { observed.count == 1 }
         let candidate = try XCTUnwrap(observed.first)
         XCTAssertTrue(state.providerSignInRecoveryPendingForTesting)
@@ -396,7 +496,7 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
             let forwarding = fixture.browser.onProviderSignInRecoveryCandidate
             var candidate: EmbeddedBrowserSession.ProviderSignInRecoveryCandidate?
             fixture.browser.onProviderSignInRecoveryCandidate = { candidate = $0; forwarding?($0) }
-            let (_, view) = try await deepSeekHumanPage(fixture.browser, url: "https://chat.deepseek.com/")
+            let (_, view) = try await humanLandingPage(fixture.browser, url: "https://chat.deepseek.com/")
             try await waitUntil { candidate != nil }
             XCTAssertTrue(state.providerSignInRecoveryPendingForTesting)
             if replaceGate {
@@ -409,7 +509,7 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
                 XCTAssertFalse(state.websiteTransportForTesting.isSignInRecoveryGateCurrent(oldGate))
                 XCTAssertNotNil(state.websiteTransportForTesting.signInRecoveryGate(provider: "deepseek"))
             } else {
-                try await loadDeepSeekHumanFixture(view, url: "https://example.test/")
+                try await loadHumanLandingFixture(view, url: "https://example.test/")
                 XCTAssertFalse(fixture.browser.isProviderSignInRecoveryCandidateCurrent(try XCTUnwrap(candidate)))
             }
             state.activeTurnTaskIDs.removeAll()
@@ -434,7 +534,7 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
             state.refreshWebsiteModelsIfNeeded()
             let oldModes = state.websiteModeChoices
             let gate = try await seedDeepSeekSignInGate(state, fixture: fixture)
-            let (_, view) = try await deepSeekHumanPage(fixture.browser, url: "https://chat.deepseek.com/")
+            let (_, view) = try await humanLandingPage(fixture.browser, url: "https://chat.deepseek.com/")
             try await waitUntil { held != nil }
             view.navigationDelegate?.webView?(view, didFinish: nil)
             if fail { held?.resume(throwing: EmbeddedWebModelTransport.Failure.modelUnverified) }
@@ -471,15 +571,15 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         return gate
     }
 
-    private func deepSeekHumanPage(_ browser: EmbeddedBrowserSession, url: String) async throws -> (UUID, WKWebView) {
+    private func humanLandingPage(_ browser: EmbeddedBrowserSession, url: String) async throws -> (UUID, WKWebView) {
         let id = try browser.createTab(), view = try XCTUnwrap(browser.webView(for: id))
-        try await loadDeepSeekHumanFixture(view, url: url)
+        try await loadHumanLandingFixture(view, url: url)
         return (id, view)
     }
 
-    private func loadDeepSeekHumanFixture(_ view: WKWebView, url raw: String) async throws {
+    private func loadHumanLandingFixture(_ view: WKWebView, url raw: String) async throws {
         let url = try XCTUnwrap(URL(string: raw))
-        view.loadHTMLString("<!doctype html><p>Local normal human DeepSeek fixture</p>", baseURL: url)
+        view.loadHTMLString("<!doctype html><p>Local human landing fixture</p>", baseURL: url)
         try await waitUntil { !view.isLoading && view.url == url }
         await Task.yield()
     }

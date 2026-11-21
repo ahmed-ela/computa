@@ -258,6 +258,18 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       }
     });
 
+    if (provider === 'chatgpt') test('discovery and selection respect the range of the account Power control', async () => {
+      const { f, picker } = setup();
+      picker.slider.values['aria-valuemax'] = '2';
+      const result = await advance(f, 'discoverModels');
+      expect(result.modelChoices).toEqual(['Instant', 'Medium', 'High'].map(choice));
+      const selecting = setup();
+      selecting.picker.slider.values['aria-valuemax'] = '2';
+      const attempt = await advance(selecting.f, 'selectModel', { modelChoice: choice('Pro') });
+      expect(attempt.error).toBe('model_unavailable');
+      expect(selecting.picker.powerItem.events.filter((event: any) => event.key?.startsWith('Arrow'))).toHaveLength(0);
+    });
+
     if (provider === 'chatgpt') test('discovery waits for a fresh disabled closed trigger without claiming or clicking it', async () => {
       const { f, picker } = setup();
       picker.trigger.values['aria-disabled'] = 'true';
@@ -4798,6 +4810,34 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
           expect(f.composer.textContent).toBe(''); expect(f.world.__computaModelFirstSubmitted).toBeUndefined();
           expect((await f.run('verifyModel', { expectedModelChoice: choice(label) })).modelEvidence.selected).toEqual(choice(label));
           expect(arrows(picker)).toHaveLength(steps);
+        }
+      });
+      test('Medium to Instant confirms the slider, checked family and closed header after generic open chrome', async () => {
+        for (const reset of [false, true]) {
+          const { f, picker } = setup(false, { closedCompositeHeader: true, resetToPowerOnClose: true });
+          preserveOpenPowerHeader(picker);
+          const dispatch = picker.powerItem.onDispatch;
+          picker.powerItem.onDispatch = (event: any) => {
+            dispatch(event);
+            setImmediate(() => {
+              picker.primary.text = 'Thinking effort';
+              for (const observer of [...f.observers]) observer.callback([]);
+            });
+          };
+          const openFamily = picker.secondary.onClick;
+          picker.secondary.onClick = () => { openFamily(); if (reset) picker.selected('Medium'); };
+          const result = await f.run('selectModel', { modelChoice: choice('Instant') });
+          expect(arrows(picker)).toHaveLength(1);
+          if (reset) {
+            expect(result.error).toBe('model_mismatch'); expect(result.modelEvidence).toBeUndefined();
+            expect(f.world.__computaChatPresetPin).toBeUndefined();
+          } else {
+            expect(result.modelEvidence.chatSelection.family.key).toBe('GPT-6');
+            expect(result.modelEvidence.chatSelection.power.key).toBe('instant');
+            expect(picker.trigger.clicks).toBe(1);
+            expect(result.modelDiagnostic.powerTransition).toMatchObject({ from: 1, observed: 0, header: 'generic' });
+            expect((await f.run('verifyModel', { expectedModelChoice: choice('Instant') })).modelEvidence.selected).toEqual(choice('Instant'));
+          }
         }
       });
       const pendingPowerHeader = async () => {
