@@ -6,13 +6,13 @@ import XCTest
 
 /// Synthetic Mach-O-shaped bytes only. Nothing in these tests is executed.
 final class ComputaRuntimeArtifactTests: XCTestCase {
-    func testProductionConfigurationRequiresDedicatedBundledArtifactOrFailsClosed() throws {
+    func testProductionConfigurationRequiresDedicatedBundledArtifactOrFailsClosed() async throws {
         let configuration = CodexAppServerRuntime.Configuration.localQwen
         guard case .bundled = configuration.executable else {
             return XCTFail("Production configuration must not select a fixture or installed-app executable.")
         }
         do {
-            let resolved = try configuration.executable.resolve()
+            let resolved = try await configuration.executable.resolve()
             XCTAssertEqual(resolved.url.lastPathComponent, "codex-app-server")
             XCTAssertEqual(resolved.url.deletingLastPathComponent().lastPathComponent, "AgentRuntime")
             XCTAssertFalse(resolved.url.path.contains("ChatGPT.app"))

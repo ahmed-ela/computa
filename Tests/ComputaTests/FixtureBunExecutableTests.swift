@@ -57,8 +57,8 @@ final class FixtureBunExecutableTests: XCTestCase {
         }
     }
 
-    func testNonTypeScriptFixtureStillUsesExplicitExecutable() throws {
-        let result = try CodexAppServerRuntime.Configuration.Executable.fixture(path: "/not-executed").resolve()
+    func testNonTypeScriptFixtureStillUsesExplicitExecutable() async throws {
+        let result = try await CodexAppServerRuntime.Configuration.Executable.fixture(path: "/not-executed").resolve()
         XCTAssertEqual(result.url.path, "/not-executed")
         XCTAssertEqual(result.arguments, ["--listen", "stdio://"])
         XCTAssertTrue(result.capabilities.isEmpty)
