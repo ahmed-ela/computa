@@ -342,7 +342,12 @@ final class AppState {
         // Manual discovery can queue behind an older startup attempt. Only a
         // verified manual/recovery result may settle a pending setup check.
         guard intent.retryBlocked, let provider = EmbeddedWebModelTransport.Provider(rawValue: intent.provider),
-              let tab = browserSession.setupTab(for: provider), tab.setupStatus == .loading else { return }
+              let tab = browserSession.setupTab(for: provider) else { return }
+        if case .loaded = status, intent.signInRecovery?.candidate.tabID == tab.id {
+            tab.setupStatus = status
+            return
+        }
+        guard tab.setupStatus == .loading else { return }
         if case .failed = status, intent.candidate != nil || intent.signInRecovery != nil { return }
         tab.setupStatus = status
     }

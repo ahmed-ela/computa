@@ -5,6 +5,28 @@ import XCTest
 
 @MainActor
 final class AppStateEmbeddedWebModelTests: XCTestCase {
+    func testChatGPTRefreshReplacesThePreviousAccountsSelectableModels() async throws {
+        let preferences = isolatedTestPreferences()
+        let browser = EmbeddedBrowserSession(persistent: false)
+        defer { browser.shutdown() }
+        let instant = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant")
+        let chat = WebsiteModelChoice(provider: "chatgpt", key: "chat/composer/chat", label: "Chat")
+        let thinking = WebsiteModelChoice(provider: "chatgpt", key: "chat/composer/thinking", label: "Thinking")
+        WebsiteModelCatalog.save([instant], to: preferences)
+        let accountMenus = [[chat, thinking], [chat], [instant]]
+        var offers = accountMenus.makeIterator()
+        let state = AppState(tasks: [], preferences: preferences, browserSession: browser,
+            websiteModelDiscovery: { _ in try XCTUnwrap(offers.next()) })
+        for choices in accountMenus {
+            await state.refreshWebsiteModels(provider: "chatgpt")
+            let selectable = WebUISnapshot(state: state).modelOptions.filter {
+                $0.id.hasPrefix("browser/chatgpt/") && $0.available != false && $0.selectable != false
+            }
+            XCTAssertEqual(Set(selectable.map(\.id)), Set(choices.map(\.modelID)))
+            XCTAssertEqual(WebsiteModelCatalog.load(from: preferences), choices)
+        }
+    }
+
     func testGrokFreshDiscoveryPublishesFastToTheSelectorWithoutEnablingTheBaseID() async throws {
         let browser = EmbeddedBrowserSession(persistent: false)
         defer { browser.shutdown() }

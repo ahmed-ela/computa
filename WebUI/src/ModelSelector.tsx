@@ -90,8 +90,7 @@ export function ModelSelector({ options, model, label, disabled = false, classNa
   className?: string; onSelect: (model: string) => void }) {
   const selected = options.find((option) => option.id === model);
   const groups = groupModelOptions(options, model, setups);
-  const needsSelection = setups.length > 0 && selected?.available === false
-    && !groups.some((group) => group.options.some((option) => option.available !== false));
+  const needsSelection = setups.length > 0 && (!selected || selected.available === false || selected.selectable === false);
   const [open, setOpen] = useState(false);
   useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
   const selectModel = (value: string) => {

@@ -258,6 +258,18 @@ export function defineWebsiteModelChoiceTests(provider: 'chatgpt' | 'gemini' | '
       }
     });
 
+    if (provider === 'chatgpt') test('discovery and selection respect the range of the account Power control', async () => {
+      const { f, picker } = setup();
+      picker.slider.values['aria-valuemax'] = '2';
+      const result = await advance(f, 'discoverModels');
+      expect(result.modelChoices).toEqual(['Instant', 'Medium', 'High'].map(choice));
+      const selecting = setup();
+      selecting.picker.slider.values['aria-valuemax'] = '2';
+      const attempt = await advance(selecting.f, 'selectModel', { modelChoice: choice('Pro') });
+      expect(attempt.error).toBe('model_unavailable');
+      expect(selecting.picker.powerItem.events.filter((event: any) => event.key?.startsWith('Arrow'))).toHaveLength(0);
+    });
+
     if (provider === 'chatgpt') test('discovery waits for a fresh disabled closed trigger without claiming or clicking it', async () => {
       const { f, picker } = setup();
       picker.trigger.values['aria-disabled'] = 'true';

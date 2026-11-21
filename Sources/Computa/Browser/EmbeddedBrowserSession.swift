@@ -463,7 +463,7 @@ final class EmbeddedBrowserSession {
     }
 
     func isProviderSignInRecoveryCandidateCurrent(_ candidate: ProviderSignInRecoveryCandidate) -> Bool {
-        guard candidate.provider == "deepseek", !isShutdown,
+        guard !isShutdown,
               let entry = entries[candidate.tabID], entry.isRegularBrowserTab, !entry.isToolOwned,
               !entry.recoveryToolUsed, entry.toolPopupContext == nil,
               entry.humanCommittedDocumentID == candidate.committedDocumentID,
@@ -471,14 +471,21 @@ final class EmbeddedBrowserSession {
               entry.recoveryCommittedGeneration == candidate.documentGeneration,
               entry.recoverySettledGeneration == candidate.documentGeneration,
               entry.navigation == nil, !entry.view.isLoading, !entry.tab.isLoading, entry.tab.error == nil,
-              entry.view.url == EmbeddedWebModelTransport.Provider.deepseek.startURL else { return false }
+              signInRecoveryProvider(for: entry)?.rawValue == candidate.provider else { return false }
         return true
+    }
+
+    private func signInRecoveryProvider(for entry: Entry) -> EmbeddedWebModelTransport.Provider? {
+        if entry.view.url == EmbeddedWebModelTransport.Provider.deepseek.startURL { return .deepseek }
+        guard entry.tab.setupProvider == .chatgpt, !entry.tab.isPopup,
+              entry.view.url == EmbeddedWebModelTransport.Provider.chatgpt.startURL else { return nil }
+        return .chatgpt
     }
 
     private func observeProviderSignInRecovery(_ entry: Entry) {
         guard let callback = onProviderSignInRecoveryCandidate,
-              entry.view.url == EmbeddedWebModelTransport.Provider.deepseek.startURL else { return }
-        let candidate = ProviderSignInRecoveryCandidate(provider: "deepseek", tabID: entry.tab.id,
+              let provider = signInRecoveryProvider(for: entry) else { return }
+        let candidate = ProviderSignInRecoveryCandidate(provider: provider.rawValue, tabID: entry.tab.id,
             committedDocumentID: entry.humanCommittedDocumentID, documentID: entry.tab.documentID,
             documentGeneration: entry.tab.documentGeneration)
         guard isProviderSignInRecoveryCandidateCurrent(candidate),

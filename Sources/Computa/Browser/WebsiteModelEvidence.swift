@@ -86,12 +86,15 @@ struct WebsiteModelEvidence: Codable, Equatable, Sendable {
         var source: String?
         if let rawSource = value["source"] {
             guard let name = rawSource as? String,
-                  ["model_picker_label", "checked_model_option", "selected_model_indicator"].contains(name) else { throw Failure.unverified }
+                  ["model_picker_label", "checked_model_option", "selected_model_indicator", "chat_composer_control"].contains(name) else { throw Failure.unverified }
             source = name
         }
         let selectedChoice = WebsiteModelChoice(provider: provider, key: key, label: label)
         var chatSelection: ChatSelection?
-        if selectedChoice.chatGPTPower != nil {
+        if selectedChoice.isChatComposerChoice || source == "chat_composer_control" {
+            guard selectedChoice.isChatComposerChoice, source == "chat_composer_control",
+                  response == nil, verification == "website_selection", value["chatSelection"] == nil else { throw Failure.unverified }
+        } else if selectedChoice.chatGPTPower != nil {
             guard selectedChoice.isSelectable, source == "selected_model_indicator",
                   response == nil, verification == "website_selection" else { throw Failure.unverified }
             chatSelection = try ChatSelection.parse(value["chatSelection"], selected: selectedChoice)

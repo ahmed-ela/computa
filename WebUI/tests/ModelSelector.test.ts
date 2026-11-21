@@ -75,6 +75,7 @@ describe('website model selectors', () => {
     ]);
     expect(await attributesBySelector(html, '[role="menuitemradio"]', 'data-value')).toEqual([]);
     const connected = render([saved, options[3]]);
+    expect(connected).toContain('Task model: Choose model');
     expect(await attributesBySelector(connected, '[role="menuitemradio"]', 'data-value')).toEqual([options[3].id]);
     expect(connected).not.toContain('Sign in to Gemini');
     expect(connected).toContain('Sign in to ChatGPT');

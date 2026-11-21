@@ -540,6 +540,11 @@ function PromptQueue({ task }: { task: TaskSnapshot }) {
   );
 }
 
+function availableForNewPrompt(model: string, snapshot: AppSnapshot): boolean {
+  if (!model.startsWith('browser/') || !snapshot.providerSetups?.length) return true;
+  return snapshot.modelOptions.some(option => option.id === model && option.available !== false && option.selectable !== false);
+}
+
 function Composer({
   task,
   snapshot,
@@ -571,9 +576,9 @@ function Composer({
     post({ action: 'prepareWebsiteModel', taskID: task.id });
   };
   const queueActive = task.queuedPrompts.length > 0;
-  const canSubmit = !pending && isValidPrompt(value) && (task.modelSelectable || task.isBusy || task.queuePaused || queueActive);
   const willQueue = task.isBusy || task.queuePaused || queueActive;
   const selectedModel = snapshot.modelOptions.find((option) => option.id === task.model);
+  const canSubmit = !pending && isValidPrompt(value) && (willQueue || task.modelSelectable && availableForNewPrompt(task.model, snapshot));
   useEffect(() => {
     if (!textarea.current) return;
     textarea.current.style.height = 'auto';
@@ -746,7 +751,7 @@ function Conversation({ snapshot, task }: { snapshot: AppSnapshot; task: TaskSna
     if (pendingSubmissions[task.id]) return;
     const draft = drafts[task.id] ?? '';
     const prompt = draft.trim();
-    const canSubmit = task.modelSelectable || task.isBusy || task.queuePaused || task.queuedPrompts.length > 0;
+    const canSubmit = task.modelSelectable && availableForNewPrompt(task.model, snapshot) || task.isBusy || task.queuePaused || task.queuedPrompts.length > 0;
     if (!canSubmit || !isValidPrompt(draft)) return;
 
     followingOutput.current = true;
