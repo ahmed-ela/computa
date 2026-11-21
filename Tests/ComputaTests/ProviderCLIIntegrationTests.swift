@@ -12,6 +12,8 @@ final class ProviderCLIIntegrationTests: XCTestCase {
         XCTAssertEqual(ProviderCLI(modelID: "cli/opencode/model/p/m"), .opencode)
         XCTAssertNil(ProviderCLI(modelID: "cli/opencode/model/"))
         XCTAssertNil(ProviderCLI(modelID: "cli/codex/model/other"))
+        XCTAssertNil(ProviderCLI(modelID: "cli/deepseek/default"))
+        XCTAssertNil(ProviderCLI(modelID: "cli/gemini/default"))
     }
 
     @MainActor

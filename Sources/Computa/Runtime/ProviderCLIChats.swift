@@ -91,9 +91,6 @@ actor ProviderCLIChats {
             environment["USER"] = NSUserName()
             environment["CLAUDE_CODE_EXECUTABLE"] = claude.path
         }
-        // Pass only the credential intended for that provider, when explicitly supplied to Computa.
-        let credential: String? = switch provider { case .deepseek: "DEEPSEEK_API_KEY"; case .gemini: "GEMINI_API_KEY"; default: nil }
-        if let credential { environment[credential] = ProcessInfo.processInfo.environment[credential] }
         return try AgentCLIConnection(executable: executable, arguments: provider.arguments, directory: directory,
                                       environment: environment, handler: handler)
     }

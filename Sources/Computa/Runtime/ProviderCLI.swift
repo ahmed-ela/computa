@@ -2,14 +2,12 @@ import Foundation
 
 /// Agent Client Protocol over stdio. The publisher's CLI owns its login.
 enum ProviderCLI: String, CaseIterable, Sendable, Codable {
-    case antigravity, gemini, qwen, deepseek, kimi, opencode, claude
+    case antigravity, qwen, kimi, opencode, claude
 
     var name: String {
         switch self {
         case .antigravity: "Antigravity CLI"
-        case .gemini: "Gemini CLI"
         case .qwen: "Qwen Code"
-        case .deepseek: "DeepSeek Harness"
         case .kimi: "Kimi Code"
         case .opencode: "OpenCode"
         case .claude: "Claude Code"
@@ -19,7 +17,6 @@ enum ProviderCLI: String, CaseIterable, Sendable, Codable {
     var executable: String {
         switch self {
         case .antigravity: "agy"
-        case .deepseek: "dsh"
         case .claude: "claude-agent-acp"
         default: rawValue
         }
@@ -27,8 +24,7 @@ enum ProviderCLI: String, CaseIterable, Sendable, Codable {
 
     var arguments: [String] {
         switch self {
-        case .gemini, .qwen: ["--acp"]
-        case .deepseek: ["--profile", "acp"]
+        case .qwen: ["--acp"]
         case .claude: []
         default: ["acp"]
         }
