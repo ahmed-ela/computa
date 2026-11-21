@@ -43,6 +43,9 @@ import type {
   Tone,
 } from './types';
 
+// Keep both project-folder entry points available for a future UI revision.
+const showProjectFolderPicker = false;
+
 function post(action: NativeAction) {
   const bridge = window.webkit?.messageHandlers?.localCodex;
   if (bridge) bridge.postMessage(action);
@@ -119,12 +122,6 @@ function Sidebar({
   return (
     <aside className="sidebar" aria-label="Task navigation">
       <div className="window-drag-strip" aria-hidden="true" />
-      <div className="sidebar-brand-row">
-        <div className="brand-lockup">
-          <strong title="Fast, Mac-optimized local AI">Computa</strong>
-        </div>
-      </div>
-
       <nav className="primary-nav" aria-label="Primary">
         <Button variant="outline" className="nav-button new-task-button" onClick={() => { setSearch(''); post({ action: 'createTask' }); }}>
           <Icon name="new" size={17} /><span>New task</span>
@@ -180,11 +177,11 @@ function TaskToolbar({ snapshot, task }: { snapshot: AppSnapshot; task?: TaskSna
   return (
     <header className="task-toolbar">
       <div className="toolbar-title-block">
-        <strong>{task?.title === 'Untitled task' ? 'New task' : task?.title ?? 'Computa'}</strong>
+        {task ? <strong>{task.title === 'Untitled task' ? 'New task' : task.title}</strong> : null}
         {task?.workspace && task.workspace !== 'No workspace selected' ? <span className="toolbar-workspace" title={task.workspace}>{task.workspace.split('/').filter(Boolean).at(-1) ?? task.workspace}</span> : null}
       </div>
       <div className="toolbar-actions">
-        {task?.status === 'Draft' && task.entries.length === 0 && !task.isBusy ? <Button variant="ghost" size="sm" onClick={() => post({ action: 'chooseTaskWorkspace', taskID: task.id })}>Choose folder</Button> : null}
+        {showProjectFolderPicker && task?.status === 'Draft' && task.entries.length === 0 && !task.isBusy ? <Button variant="ghost" size="sm" onClick={() => post({ action: 'chooseTaskWorkspace', taskID: task.id })}>Choose folder</Button> : null}
         {task && task.status !== 'Draft' && task.status !== 'Completed' ? (
           <Badge variant="secondary" className={`status-label ${toneClass(task.statusTone)}`}>
             <span className="status-dot" />{task.status}
@@ -769,10 +766,6 @@ function Conversation({ snapshot, task }: { snapshot: AppSnapshot; task: TaskSna
     });
     post({ action: 'submitPrompt', requestID, taskID: task.id, prompt });
   };
-  const suggest = (prompt: string) => {
-    setDraft(prompt);
-    document.getElementById('task-prompt')?.focus();
-  };
   const rows = activityTimeline(task);
   return (
     <div className={`conversation-column ${rows.length === 0 && !snapshot.isReviewPresented ? 'is-empty' : ''} ${snapshot.isReviewPresented ? 'is-reviewing' : ''}`}>
@@ -792,11 +785,7 @@ function Conversation({ snapshot, task }: { snapshot: AppSnapshot; task: TaskSna
             <div className="empty-conversation">
               <h1>How can I help?</h1>
               <p>Ask a question or give your Mac a task.</p>
-              {task.status === 'Draft' && task.entries.length === 0 && !task.isBusy ? <Button variant="outline" size="sm" className="choose-workspace-button" onClick={() => post({ action: 'chooseTaskWorkspace', taskID: task.id })}>Choose a project folder</Button> : null}
-              <div className="suggestion-grid">
-                <Button variant="outline" size="sm" onClick={() => suggest('Check computer-use permissions and tell me what is available.')}>Check setup</Button>
-                <Button variant="outline" size="sm" onClick={() => suggest('List the running applications and summarize what is available.')}>Explore apps</Button>
-              </div>
+              {showProjectFolderPicker && task.status === 'Draft' && task.entries.length === 0 && !task.isBusy ? <Button variant="outline" size="sm" className="choose-workspace-button" onClick={() => post({ action: 'chooseTaskWorkspace', taskID: task.id })}>Choose a project folder</Button> : null}
             </div>
           ) : (
             rows.map((row) => {
@@ -1110,7 +1099,6 @@ export function App() {
           <Conversation snapshot={snapshot} task={task} />
         ) : (
           <div className="no-task-view">
-            <h1>Computa</h1>
             <p>Choose a model for your next task.</p>
             <DefaultModelSelector snapshot={snapshot} />
             <Button onClick={() => post({ action: 'createTask' })}><Icon name="plus" size={15} /> New task</Button>
