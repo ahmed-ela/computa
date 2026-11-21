@@ -75,13 +75,17 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         accessMode = state.accessMode.rawValue
         defaultModel = state.defaultModel
         modelOptions = state.modelOptions
-        providerSetups = WebsiteModelCatalog.discoveryProviders.map { provider in
+        var setups = WebsiteModelCatalog.discoveryProviders.map { provider in
             ModelProviderSetup(route: "browser/" + provider, name: WebsiteModelCatalog.providerLabel(provider),
                 connected: state.websiteModelChoices.contains { choice in choice.provider == provider }
                     || state.websiteModeChoices.contains { choice in choice.provider == provider },
                 checkStatus: ModelProviderSetup.checkStatus(for: state.websiteModelSetupStatus(for: provider)))
-        } + [ModelProviderSetup(route: "api/" + state.alibabaPickerID, name: "Alibaba",
-                                connected: state.apiProviders.contains(where: \.isAlibabaModelStudioInference))]
+        }
+        if let id = state.alibabaPickerID {
+            setups.append(ModelProviderSetup(route: "api/" + id, name: "Alibaba",
+                connected: state.apiProviders.contains(where: \.isAlibabaModelStudioInference)))
+        }
+        providerSetups = setups
         websiteModelsRefreshing = state.websiteModelsRefreshing
         canRefreshWebsiteModels = state.canRefreshWebsiteModels
         websiteModelsError = state.websiteModelsError

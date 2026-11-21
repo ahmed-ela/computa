@@ -15,7 +15,7 @@ final class WebBridgeWebsiteModelRefreshTests: XCTestCase {
             return provider == "gemini" ? [gemini] : [chat]
         })
         let first = WebUISnapshot(state: state)
-        XCTAssertEqual(first.providerSetups.map(\.route), WebsiteModelCatalog.discoveryProviders.map { "browser/" + $0 } + ["api/alibaba"])
+        XCTAssertEqual(first.providerSetups.map(\.route), WebsiteModelCatalog.discoveryProviders.map { "browser/" + $0 })
         XCTAssertTrue(first.providerSetups.allSatisfy { !$0.connected })
         await state.refreshWebsiteModels(provider: "gemini")
         await state.refreshWebsiteModels(provider: "chatgpt")
@@ -44,7 +44,7 @@ final class WebBridgeWebsiteModelRefreshTests: XCTestCase {
         let state = AppState(tasks: [task], preferences: prefs, browserSession: session)
         for route in ["browser/chatgpt", "api/alibaba"] { state.connectModelProvider(route: route) }
         state.apply(.taskStatusChanged(taskID: task.id, status: .completed))
-        for route in ["browser/groq", "api/cerebras", "https://example.org", "browser/gemini/other", "api/unknown"] {
+        for route in ["browser/groq", "api/cerebras", "api/alibaba", "https://example.org", "browser/gemini/other", "api/unknown"] {
             state.connectModelProvider(route: route)
         }
         XCTAssertTrue(session.humanTabs.isEmpty)

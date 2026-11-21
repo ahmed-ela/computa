@@ -11,7 +11,7 @@ final class APIProviderSettingsTests: XCTestCase {
     }
     @MainActor private final class EditPermission { var allowed: Bool; init(_ value: Bool) { allowed = value } }
     private let model = APIModelDefinition(id: "fixture", name: "Fixture")
-    func testFirstLaunchAlibabaPickerUsesAccountCatalogAndRespectsExistingCustomEndpoint() async throws {
+    func testPausedAlibabaPickerPreservesSavedTasksCredentialsAndUnrelatedCustomEndpoints() async throws {
         let prefs = isolatedTestPreferences()
         let vault = APIProviderTestVault()
         let custom = APIProviderDefinition(id: "alibaba", name: "My custom API",
@@ -22,22 +22,23 @@ final class APIProviderSettingsTests: XCTestCase {
                 : [APIModelDefinition(id: "custom", name: "Custom")]
         }, onChanged: { _, mutation in try mutation() })
         try await settings.connect(custom, key: "fixture-custom")
-        let state = AppState(tasks: [], preferences: prefs)
-        let setup = try XCTUnwrap(WebUISnapshot(state: state).providerSetups.last)
-        XCTAssertEqual(setup.route, "api/alibaba-2")
-        XCTAssertFalse(setup.connected)
-        state.connectModelProvider(route: setup.route)
-        let id = try XCTUnwrap(state.alibabaSetupID)
-        let alibaba = APIProviderDefinition(id: id, name: "Alibaba",
+        let alibaba = APIProviderDefinition(id: "alibaba-2", name: "Renamed Model Studio",
             baseURL: URL(string: "https://ws-test.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1")!,
             wireAPI: .chatCompletions, models: [])
         try await settings.connect(alibaba, key: "fixture-alibaba")
-        let restored = WebUISnapshot(state: AppState(tasks: [], preferences: prefs))
-        XCTAssertEqual(restored.providerSetups.last?.route, setup.route)
-        XCTAssertEqual(restored.providerSetups.last?.connected, true)
-        XCTAssertEqual(restored.modelOptions.filter { $0.id.hasPrefix(setup.route + "/") }.map(\.id),
-            [APIProviderCatalog.appModelID(providerID: id, modelID: "qwen3.7-flash-2026-07-15")])
-        XCTAssertTrue(restored.modelOptions.contains { $0.id == APIProviderCatalog.appModelID(providerID: "alibaba", modelID: "custom") })
+        let flashID = APIProviderCatalog.appModelID(providerID: alibaba.id, modelID: "qwen3.7-flash-2026-07-15")
+        prefs.set(flashID, forKey: "LocalCodex.defaultModelID")
+        let saved = AgentTask(title: "Saved task", summary: "", status: .completed, workspace: "", model: flashID)
+        let state = AppState(tasks: [saved], preferences: prefs)
+        let restored = WebUISnapshot(state: state)
+        XCTAssertFalse(restored.providerSetups.contains { $0.route.hasPrefix("api/") })
+        XCTAssertTrue(restored.providerSetups.contains { $0.route == "browser/qwen" })
+        XCTAssertEqual(restored.modelOptions.first { $0.id == flashID }?.selectable, false)
+        XCTAssertEqual(state.defaultModel, WebsiteModelCatalog.freshProfileDefaultModelID)
+        XCTAssertEqual(state.selectedTask?.model, flashID)
+        XCTAssertFalse(state.setDefaultModel(flashID))
+        XCTAssertTrue(state.setDefaultModel(APIProviderCatalog.appModelID(providerID: custom.id, modelID: "custom")))
+        XCTAssertEqual(vault.value(alibaba.id), "fixture-alibaba")
         XCTAssertEqual(vault.value("alibaba"), "fixture-custom")
     }
 
