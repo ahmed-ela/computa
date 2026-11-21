@@ -25,9 +25,13 @@ final class WebBridgeWebsiteModelRefreshTests: XCTestCase {
         account.failure = .usageLimited(.chatgpt)
         await state.refreshWebsiteModels(provider: "chatgpt")
         XCTAssertTrue(state.websiteModelChoices.contains(chat))
+        XCTAssertEqual(WebUISnapshot(state: state).providerSetups.first { $0.route == "browser/chatgpt" }?.checkStatus, .unavailable)
         account.failure = .signInRequired
         await state.refreshWebsiteModels(provider: "chatgpt")
+        XCTAssertEqual(WebUISnapshot(state: state).providerSetups.first { $0.route == "browser/chatgpt" }?.checkStatus, .signInRequired)
         XCTAssertEqual(WebsiteModelCatalog.load(from: prefs), [gemini])
+        let nextLaunch = AppState(tasks: [], preferences: prefs)
+        XCTAssertEqual(nextLaunch.websiteModelSetupStatus(for: "chatgpt"), .unchecked)
         XCTAssertEqual(state.defaultModel, chat.modelID)
         XCTAssertFalse(state.setDefaultModel(chat.modelID))
     }

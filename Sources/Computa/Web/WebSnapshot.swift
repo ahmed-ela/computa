@@ -5,6 +5,17 @@ struct ModelProviderSetup: Codable, Equatable, Sendable {
     let route: String
     let name: String
     let connected: Bool
+    enum CheckStatus: String, Codable, Sendable { case checking, signInRequired, unavailable }
+    var checkStatus: CheckStatus? = nil
+
+    static func checkStatus(for status: WebsiteModelSetupStatus) -> CheckStatus? {
+        switch status {
+        case .checking: .checking
+        case .signInRequired: .signInRequired
+        case .failed: .unavailable
+        case .unchecked, .loaded: nil
+        }
+    }
 }
 
 struct WebUISnapshot: Codable, Equatable, Sendable {
@@ -67,7 +78,8 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         providerSetups = WebsiteModelCatalog.discoveryProviders.map { provider in
             ModelProviderSetup(route: "browser/" + provider, name: WebsiteModelCatalog.providerLabel(provider),
                 connected: state.websiteModelChoices.contains { choice in choice.provider == provider }
-                    || state.websiteModeChoices.contains { choice in choice.provider == provider })
+                    || state.websiteModeChoices.contains { choice in choice.provider == provider },
+                checkStatus: ModelProviderSetup.checkStatus(for: state.websiteModelSetupStatus(for: provider)))
         } + [ModelProviderSetup(route: "api/" + state.alibabaPickerID, name: "Alibaba",
                                 connected: state.apiProviders.contains(where: \.isAlibabaModelStudioInference))]
         websiteModelsRefreshing = state.websiteModelsRefreshing

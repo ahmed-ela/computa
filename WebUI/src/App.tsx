@@ -626,6 +626,7 @@ function Composer({
               setups={snapshot.providerSetups}
               canConnect={snapshot.canRefreshWebsiteModels === true}
               onConnect={(route) => post({ action: 'connectModelProvider', route })}
+              onRefresh={post}
               disabled={!task.modelSelectable}
               onSelect={(modelID) => post({ action: 'setTaskModel', taskID: task.id, modelID })}
             />
@@ -879,6 +880,7 @@ function DefaultModelSelector({ snapshot }: { snapshot: AppSnapshot }) {
   return <ModelSelector label="Default model for new tasks" model={snapshot.defaultModel}
     options={snapshot.modelOptions} setups={snapshot.providerSetups} canConnect={snapshot.canRefreshWebsiteModels === true}
     onConnect={(route) => post({ action: 'connectModelProvider', route })}
+    onRefresh={post}
     onSelect={(modelID) => post({ action: 'setDefaultModel', modelID })} />;
 }
 
