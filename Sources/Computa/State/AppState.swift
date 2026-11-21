@@ -292,16 +292,19 @@ final class AppState {
         }
     }
 
-    /// Pause new Groq and Cerebras selections while saved tasks retain their model identity.
+    private static let showsAlibabaInModelPicker = false
+
+    /// Paused providers keep their configuration and saved task identities.
     private static func isModelHiddenFromPicker(_ id: String, apiProviders: [APIProviderDefinition]) -> Bool {
         if id == LocalModelCatalog.groqBrowserModelID || id.hasPrefix(LocalModelCatalog.groqBrowserModelID + "/") {
             return true
         }
         guard let identity = APIProviderCatalog.identity(for: id) else { return false }
         if let provider = apiProviders.first(where: { $0.id == identity.providerID }) {
-            return provider.isCerebrasInference
+            return provider.isCerebrasInference || (!showsAlibabaInModelPicker && provider.isAlibabaModelStudioInference)
         }
         return identity.providerID == APIProviderDefinition.cerebras.id
+            || (!showsAlibabaInModelPicker && identity.providerID == "alibaba")
     }
 
     private var canEditAPIProviders: Bool {
@@ -313,7 +316,8 @@ final class AppState {
 
     // A custom endpoint may already own the preferred identifier. Never replace
     // its credentials or mistake its catalog for the built-in provider.
-    var alibabaPickerID: String {
+    var alibabaPickerID: String? {
+        guard Self.showsAlibabaInModelPicker else { return nil }
         if let existing = apiProviders.first(where: \.isAlibabaModelStudioInference) { return existing.id }
         var id = "alibaba"
         var suffix = 2
@@ -326,8 +330,8 @@ final class AppState {
 
     func connectModelProvider(route: String) {
         guard canRefreshWebsiteModels else { return }
-        if route == "api/" + alibabaPickerID {
-            presentAPIProviders(alibabaID: alibabaPickerID)
+        if let id = alibabaPickerID, route == "api/" + id {
+            presentAPIProviders(alibabaID: id)
             return
         }
         guard route.hasPrefix("browser/"),

@@ -256,9 +256,9 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             _ = try await web.evaluateJavaScript("""
                 document.querySelector('.model-selector-trigger').dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true}))
                 """)
-            try await requireDOM("document.querySelectorAll('.model-provider-option').length === 8")
+            try await requireDOM("document.querySelectorAll('.model-provider-option').length === 7")
             let names = try await web.evaluateJavaScript("Array.from(document.querySelectorAll('.model-provider-name'), e => e.textContent)")
-            XCTAssertEqual(names as? [String], ["ChatGPT", "Gemini", "Claude", "Grok", "Kimi", "Qwen", "DeepSeek", "Alibaba"])
+            XCTAssertEqual(names as? [String], ["ChatGPT", "Gemini", "Claude", "Grok", "Kimi", "Qwen", "DeepSeek"])
             _ = try await web.evaluateJavaScript("document.querySelector('.model-provider-option[data-provider=\"\(provider)\"]').click()")
             try await requireDOM("Boolean(document.querySelector('.model-selector-submenu'))")
         }
@@ -314,13 +314,9 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         XCTAssertEqual(session.selectedTabID, kimiTab.id)
         state.isBrowserPresented = false
 
-        try await openMenu("alibaba")
-        try await requireDOM("\(submenu)?.textContent === 'Connect API'")
-        _ = try await web.evaluateJavaScript("\(submenu).querySelector('[role=menuitem]').click()")
-        let apiDeadline = ContinuousClock.now + .seconds(5)
-        while !state.isAPIProvidersPresented, ContinuousClock.now < apiDeadline { try await Task.sleep(for: .milliseconds(20)) }
-        XCTAssertTrue(state.isAPIProvidersPresented)
-        XCTAssertEqual(state.alibabaSetupID, "alibaba")
+        await state.refreshWebsiteModels(provider: "qwen")
+        try await openMenu("qwen")
+        try await requireDOM("\(submenu)?.querySelector('[role=menuitem]')?.textContent === 'Sign in to Qwen'")
     }
 
     /// Native task selection resets review to Last turn. Exercise the compiled

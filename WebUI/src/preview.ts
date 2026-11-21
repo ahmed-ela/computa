@@ -260,12 +260,9 @@ return {
   appearance: 'system',
   accessMode: 'askEveryTime',
   defaultModel: modelChatGPT,
-  providerSetups: [
-    ...['ChatGPT', 'Gemini', 'Claude', 'Grok', 'Kimi', 'Qwen', 'DeepSeek'].map((name) => ({
-      route: 'browser/' + name.toLowerCase(), name, connected: name === 'ChatGPT',
-    })),
-    { route: 'api/alibaba', name: 'Alibaba', connected: false },
-  ],
+  providerSetups: ['ChatGPT', 'Gemini', 'Claude', 'Grok', 'Kimi', 'Qwen', 'DeepSeek'].map((name) => ({
+    route: 'browser/' + name.toLowerCase(), name, connected: name === 'ChatGPT',
+  })),
   modelOptions: [
     { id: modelChatGPT, label: 'ChatGPT / Instant · Built-in browser', detail: 'Preview ChatGPT model; no provider request is made.', highMemory: false },
     ...['Medium', 'High', 'Extra High', 'Pro'].map((name) => ({
@@ -280,7 +277,7 @@ return {
       detail: 'Preview Groq model; no provider request is made.', highMemory: false, selectable: false },
     { id: modelCerebras, label: 'Cerebras / gpt-oss-120b',
       detail: 'Preview API model; no provider request is made.', highMemory: false, selectable: false },
-    { id: 'api/alibaba/model/cXdlbjMuNy1mbGFzaA', label: 'Alibaba / Qwen3.7 Flash · API', detail: 'Preview API model; no provider request is made.', highMemory: false },
+    { id: 'api/alibaba/model/cXdlbjMuNy1mbGFzaA', label: 'Alibaba / Qwen3.7 Flash · API', detail: 'Preview API model; no provider request is made.', highMemory: false, selectable: false },
   ],
   showToolPayloads: false,
   isInspectorPresented: false,

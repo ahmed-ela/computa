@@ -26,6 +26,8 @@ The adapter currently buffers a bounded provider response before forwarding Resp
 
 ### Alibaba Model Studio / Qwen3.7 Flash (November 1, 2026)
 
+The model picker temporarily hides Alibaba Model Studio for new selections. Existing chats keep their saved model. Qwen’s signed-in website remains available through **Model picker → Qwen**.
+
 A controlled installed-build370 marker failed before tool use with HTTP 400.
 The private capture classified the response as non-JSON. A bounded native
 URLSession comparison isolated the cause: a user-only request was accepted,

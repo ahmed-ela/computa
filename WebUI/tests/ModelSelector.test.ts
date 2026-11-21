@@ -60,9 +60,9 @@ const selector = (model = options[1].id, label = 'Task model', disabled = false)
 
 describe('website model selectors', () => {
   test('fresh profile lists setup actions without offering unverified models; discovery replaces only its provider action', async () => {
-    const names = ['ChatGPT', 'Gemini', 'Claude', 'Grok', 'Kimi', 'Qwen', 'DeepSeek', 'Alibaba'];
+    const names = ['ChatGPT', 'Gemini', 'Claude', 'Grok', 'Kimi', 'Qwen', 'DeepSeek'];
     const setups = names.map((name) => ({
-      route: (name === 'Alibaba' ? 'api/' : 'browser/') + name.toLowerCase(), name, connected: false,
+      route: 'browser/' + name.toLowerCase(), name, connected: false,
     }));
     const props = { model: options[1].id, label: 'Task model', setups, canConnect: true,
       onSelect: () => {}, onConnect: () => {}, onRefresh: () => {} };
@@ -70,9 +70,7 @@ describe('website model selectors', () => {
     const render = (models: ModelOption[]) => renderToStaticMarkup(h(ModelSelector, { ...props, options: models })).html;
     const html = render([saved]);
     expect((await renderedProviderGroups(html)).map((group) => group.name)).toEqual(names);
-    expect(await textBySelector(html, '[data-submenu-content] [role="menuitem"]')).toEqual([
-      ...names.slice(0, -1).map(() => 'Check available models'), 'Connect API',
-    ]);
+    expect(await textBySelector(html, '[data-submenu-content] [role="menuitem"]')).toEqual(names.map(() => 'Check available models'));
     expect(await attributesBySelector(html, '[role="menuitemradio"]', 'data-value')).toEqual([]);
     const connected = render([saved, options[3]]);
     expect(connected).toContain('Task model: Choose model');
@@ -370,22 +368,19 @@ describe('website model selectors', () => {
     }
   });
 
-  test('Alibaba offers only undated Qwen 3.7 Flash, retaining hidden saved choices only in the trigger', async () => {
-    const flash = { ...options[1], id: 'api/alibaba/model/cXdlbjMuNy1mbGFzaA', label: 'Alibaba / Qwen 3.7 Flash · API' };
+  test('saved Alibaba API models stay hidden while the Qwen website remains selectable', async () => {
+    const flash = { ...options[1], id: 'api/alibaba/model/cXdlbjMuNy1mbGFzaA', label: 'Alibaba / Qwen 3.7 Flash · API', selectable: false };
     const dated = { ...flash, id: 'api/alibaba/model/cXdlbjMuNy1mbGFzaC0yMDI2MTAzMQ' };
     const other = { ...flash, id: 'api/alibaba/model/cXdlbi1tYXg', label: 'Alibaba / Qwen Max · API' };
-    const input = [...options, { ...dated, selectable: false }, flash, { ...other, selectable: false }];
+    const qwen = { ...options[1], id: 'browser/qwen/choice/fixture', label: 'Qwen / Fixture · Built-in browser' };
+    const setups = [{ route: 'browser/qwen', name: 'Qwen', connected: true }];
+    const input = [qwen, dated, flash, other];
     for (const model of [flash.id, dated.id, other.id, 'api/alibaba/model/saved-missing']) {
-      expect(groupModelOptions(input, model).find(({ id }) => id === 'alibaba')?.options.map(({ id }) => id)).toEqual([flash.id]);
-      const html = renderToStaticMarkup(h(ModelSelector, { options: input, model, label: 'Task model', onSelect: () => {} })).html;
-      const elements = await parsedElements(html);
-      expect(elements.filter((element) => element.attributes.role === 'menuitemradio')
-        .map((element) => element.attributes['data-value']).filter((id) => id.startsWith('api/alibaba/'))).toEqual([flash.id]);
-      expect(elements.find((element) => element.attributes['data-model-value'])?.attributes['data-model-value']).toBe(model);
-      expect((await textBySelector(html, '.model-option-name'))[0]).toBe(input.find(({ id }) => id === model)
-        ? modelOptionLabel(input.find(({ id }) => id === model)!) : model);
+      const html = renderToStaticMarkup(h(ModelSelector, { options: input, setups, model, label: 'Task model', onSelect: () => {} })).html;
+      expect((await renderedProviderGroups(html)).map((group) => group.name)).toEqual(['Qwen']);
+      expect(await attributesBySelector(html, '[role="menuitemradio"]', 'data-value')).toEqual([qwen.id]);
+      expect(html).toContain('Task model: Choose model');
     }
-    expect(groupModelOptions(input.filter((option) => option.selectable === false), other.id)).toEqual([]);
   });
 
   test('model changes preserve exact IDs and ignore busy, unchanged, unavailable or hidden choices', () => {
