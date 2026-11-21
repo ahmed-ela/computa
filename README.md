@@ -13,8 +13,9 @@ examples, approvals, and process-session limits.
 
 [Download the latest macOS alpha](https://computa.wtf/download) for Apple Silicon Macs running macOS 14 or later.
 
-Computa's model picker also supports locally installed agent CLIs. Open a provider submenu to
-load its model catalog, then choose a model for a new chat. Antigravity (Gemini),
+The model picker lists all supported agent CLIs on first launch. Open a CLI’s submenu to
+check its installation. If it’s missing, install it in Terminal and return to Computa.
+Once the CLI is ready, its submenu shows the models it reports. Antigravity (Gemini),
 Qwen Code, Kimi Code and OpenCode use their native ACP commands. DeepSeek models
 are available through OpenCode when listed by the signed-in account.
 Claude Code additionally needs the `claude-agent-acp` executable from

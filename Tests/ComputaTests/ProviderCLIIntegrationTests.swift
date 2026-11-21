@@ -158,6 +158,69 @@ final class ProviderCLIIntegrationTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testPickerConnectsToNewlyInstalledCLIWithoutRestart() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        var config = CodexAppServerRuntime.Configuration.localQwen
+        config.codexHomePath = home.appendingPathComponent("store").path
+        let directories = ProviderCLI.directories(home: home).filter { $0.hasPrefix(home.path + "/") }
+        let runtime = SelectableCodexRuntime(configuration: config, providerCLISearchDirectories: directories)
+        let state = AppState(tasks: [], runtime: runtime, preferences: isolatedTestPreferences())
+        let route = ProviderCLI.opencode.route
+        let model = route + "/model/account/fixture"
+
+        func waitForSetup(_ predicate: (ModelProviderSetup) -> Bool) async throws -> ModelProviderSetup {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(8))
+            repeat {
+                if let setup = state.providerCLISetups.first(where: { $0.route == route }), predicate(setup) { return setup }
+                try await Task.sleep(for: .milliseconds(20))
+            } while ContinuousClock.now < deadline
+            throw AgentCLIError.protocolError("Timed out waiting for the OpenCode picker to update.")
+        }
+
+        let initial = WebUISnapshot(state: state)
+        XCTAssertEqual(initial.providerSetups.filter { $0.route.hasPrefix("cli/") }.map(\.route),
+                       ["cli/codex", "cli/antigravity", "cli/qwen", "cli/kimi", "cli/opencode", "cli/claude"])
+        XCTAssertFalse(initial.modelOptions.contains { $0.id.hasPrefix("cli/") })
+        state.connectModelProvider(route: route)
+        let missing = try await waitForSetup { $0.checkStatus == .unavailable }
+        XCTAssertTrue(missing.detail?.contains("Install OpenCode") == true)
+        XCTAssertFalse(state.setDefaultModel(ProviderCLI.opencode.modelID))
+
+        // Use the installer's normal per-user location within the disposable home.
+        let binary = home.appendingPathComponent(".opencode/bin/opencode")
+        try FileManager.default.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let source = #"""
+        #!/usr/bin/python3
+        import json, sys
+        for line in sys.stdin:
+            request = json.loads(line)
+            if request["method"] == "initialize":
+                result = {"protocolVersion": 1}
+            elif request["method"] == "session/new":
+                result = {"sessionId": "fixture", "models": {"availableModels": [{"modelId": "account/fixture", "name": "Account model"}]}}
+            else:
+                raise ValueError(request["method"])
+            print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+        """#
+        try Data(source.utf8).write(to: binary)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: binary.path)
+        let delegate = ComputaAppDelegate()
+        delegate.state = state
+        delegate.applicationDidBecomeActive(.init(name: .init("testActivation")))
+        _ = try await waitForSetup { $0.connected }
+        XCTAssertTrue(state.setDefaultModel(model))
+        XCTAssertEqual(state.providerCLISetups.filter(\.connected).map(\.route), [route])
+
+        try FileManager.default.removeItem(at: binary)
+        state.connectModelProvider(route: route)
+        _ = try await waitForSetup { $0.checkStatus == .unavailable }
+        XCTAssertFalse(state.setDefaultModel(model))
+        XCTAssertEqual(state.defaultModel, model)
+        _ = await runtime.shutdown()
+    }
+
     /// Runs only on a machine explicitly selected for signed-in provider testing.
     @MainActor
     func testInstalledProviderThroughComputa() async throws {
@@ -171,7 +234,7 @@ final class ProviderCLIIntegrationTests: XCTestCase {
         let suite = "computa.provider-cli.test." + UUID().uuidString
         let prefs = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { prefs.removePersistentDomain(forName: suite) }
-        let state = AppState(tasks: [], runtime: runtime, installedProviderCLIs: [provider], preferences: prefs,
+        let state = AppState(tasks: [], runtime: runtime, preferences: prefs,
             unreadCompletionStore: .init(fileURL: directory.appendingPathComponent("unread.json")))
         let listener = Task { @MainActor in
             for await event in runtime.events() { state.apply(event) }
@@ -180,7 +243,8 @@ final class ProviderCLIIntegrationTests: XCTestCase {
         do {
             state.connectModelProvider(route: provider.route)
             let deadline = ContinuousClock.now.advanced(by: .seconds(45))
-            while state.providerCLISetups.first?.connected != true, state.providerCLISetups.first?.detail == nil,
+            while state.providerCLISetups.first(where: { $0.route == provider.route })?.connected != true,
+                  state.providerCLISetups.first(where: { $0.route == provider.route })?.detail == nil,
                   ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(50)) }
             let picker = WebUISnapshot(state: state)
             let setup = try XCTUnwrap(picker.providerSetups.first { $0.route == provider.route })

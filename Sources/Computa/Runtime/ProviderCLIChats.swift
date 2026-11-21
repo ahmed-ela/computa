@@ -94,13 +94,16 @@ actor ProviderCLIChats {
     }
 
     private func connection(_ provider: ProviderCLI, directory: URL, handler: @escaping AgentCLIConnection.MessageHandler) throws -> AgentCLIConnection {
-        guard let executable = ProviderCLI.locate(provider.executable, directories: searchDirectories) else { throw AgentCLIError.unavailable("Install " + provider.name + " to use this chat.") }
+        guard let executable = ProviderCLI.locate(provider.executable, directories: searchDirectories) else {
+            let required = provider == .claude ? "Claude Code and its @agentclientprotocol/claude-agent-acp adapter" : provider.name
+            throw AgentCLIError.installationRequired("Install " + required + " in Terminal, then return to Computa.")
+        }
         var environment = AgentRuntimeIsolation.environment(inheriting: ProcessInfo.processInfo.environment,
             userHomePath: FileManager.default.homeDirectoryForCurrentUser.path, codexHomePath: root.path)
         environment.removeValue(forKey: "CODEX_HOME")
         environment["PATH"] = searchDirectories.joined(separator: ":")
         if provider == .claude {
-            guard let claude = ProviderCLI.locate("claude", directories: searchDirectories) else { throw AgentCLIError.unavailable("Install Claude Code and run claude auth login.") }
+            guard let claude = ProviderCLI.locate("claude", directories: searchDirectories) else { throw AgentCLIError.installationRequired("Install Claude Code, run claude auth login in Terminal, then return to Computa.") }
             // Claude Code uses the macOS short user name to locate its Keychain login.
             environment["USER"] = NSUserName()
             environment["CLAUDE_CODE_EXECUTABLE"] = claude.path

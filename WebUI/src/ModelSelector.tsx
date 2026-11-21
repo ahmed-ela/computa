@@ -113,7 +113,7 @@ export function ModelSelector({ options, model, label, disabled = false, classNa
       <DropdownMenuContent className="model-selector-content" align="start" collisionPadding={12} aria-label="Model providers">
         {groups.map((group) => <DropdownMenuSub key={group.route} onOpenChange={(opened: boolean) => {
           if (opened && group.route.startsWith('cli/') && group.setup && !group.setup.connected
-              && !group.setup.checkStatus && !group.setup.detail && canConnect) onConnect?.(group.route);
+              && group.setup.checkStatus !== 'checking' && canConnect) onConnect?.(group.route);
         }}>
           <DropdownMenuSubTrigger disabled={disabled} textValue={group.name} className="model-provider-option"
             data-provider={group.id}>

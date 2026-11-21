@@ -52,13 +52,10 @@ enum ProviderCLI: String, CaseIterable, Sendable, Codable {
                          detail: "Uses the model, account and tool permissions configured in " + name + ".", highMemory: false)
     }
 
-    static var installed: [ProviderCLI] {
-        allCases.filter { locate($0.executable) != nil && ($0 != .claude || locate("claude") != nil) }
-    }
-
     static func directories(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [String] {
         [home.appendingPathComponent(".local/bin").path, "/opt/homebrew/bin", "/usr/local/bin",
-         home.appendingPathComponent(".kimi-code/bin").path, "/usr/bin", "/bin"]
+         home.appendingPathComponent(".kimi-code/bin").path, home.appendingPathComponent(".opencode/bin").path,
+         home.appendingPathComponent(".bun/bin").path, "/usr/bin", "/bin"]
     }
 
     static func locate(_ executable: String, directories: [String] = directories()) -> URL? {
