@@ -7,62 +7,66 @@ struct WebWorkspaceView: View {
     @State private var showsAccessModeSettings = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            ZStack(alignment: .center) {
-                HSplitView {
-                    CodexWebView(
-                        state: state,
-                        snapshot: WebUISnapshot(state: state),
-                        showAccessModeSettings: { showsAccessModeSettings = true }
+        ZStack(alignment: .center) {
+            HSplitView {
+                CodexWebView(
+                    state: state,
+                    snapshot: WebUISnapshot(state: state),
+                    showAccessModeSettings: { showsAccessModeSettings = true }
+                )
+                .frame(minWidth: 600, idealWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
+
+                // External pages are sibling views, never children of the
+                // privileged Octane document or its script-message bridge.
+                // Hiding the pane preserves the session and every tab.
+                if state.shouldPresentBrowserPane {
+                    EmbeddedBrowserPane(
+                        session: state.browserSession,
+                        isInteractionBlocked: state.approvalGateBlocksInteraction,
+                        canLoadModels: state.canRefreshWebsiteModels,
+                        modelSetupStatus: state.websiteModelSetupStatus(for:),
+                        onLoadModels: { id in Task { await state.loadSignedInModels(tabID: id) } },
+                        canConfigureKimiProfile: state.canConfigureKimiProfile,
+                        onSwitchKimiProfile: state.switchKimiSignInProfile(from:),
+                        onClose: { state.isBrowserPresented = false }
                     )
-                    .frame(minWidth: 600, idealWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
-
-                    // External pages are sibling views, never children of the
-                    // privileged Octane document or its script-message bridge.
-                    // Hiding the pane preserves the session and every tab.
-                    if state.shouldPresentBrowserPane {
-                        EmbeddedBrowserPane(
-                            session: state.browserSession,
-                            isInteractionBlocked: state.approvalGateBlocksInteraction,
-                            canLoadModels: state.canRefreshWebsiteModels,
-                            modelSetupStatus: state.websiteModelSetupStatus(for:),
-                            onLoadModels: { id in Task { await state.loadSignedInModels(tabID: id) } },
-                            canConfigureKimiProfile: state.canConfigureKimiProfile,
-                            onSwitchKimiProfile: state.switchKimiSignInProfile(from:),
-                            onClose: { state.isBrowserPresented = false }
-                        )
-                        .frame(minWidth: 360, idealWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
-                        // When this pane opens, the chat already occupies the whole split.
-                        // Give the new pane room above its minimum before growing the chat.
-                        .layoutPriority(1)
-                    }
-                }
-                .allowsHitTesting(!state.approvalGateBlocksInteraction)
-                .accessibilityHidden(state.approvalGateBlocksInteraction)
-                .disabled(state.approvalGateBlocksInteraction)
-
-                // The web surface stays inert through approval settlement.
-                if state.resolvingApprovalIDs.isEmpty,
-                   let request = state.presentedApproval {
-                    Color.black.opacity(0.16)
-                        .onTapGesture { } // Outside clicks never resolve an approval.
-                        .accessibilityHidden(true)
-
-                    NativeApprovalGate(
-                        request: request,
-                        remainingCount: max(0, state.pendingApprovals.count - 1),
-                        isResolving: state.resolvingApprovalIDs.contains(request.id)
-                    ) { approved in
-                        Task { @MainActor in
-                            await state.resolveApproval(request, approved: approved)
-                        }
-                    }
-                    .padding(24)
+                    .frame(minWidth: 360, idealWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
+                    // When this pane opens, the chat already occupies the whole split.
+                    // Give the new pane room above its minimum before growing the chat.
+                    .layoutPriority(1)
                 }
             }
-            Divider()
-            NativeRuntimeStatusBar(state: state)
-                .frame(height: 34)
+            .allowsHitTesting(!state.approvalGateBlocksInteraction)
+            .accessibilityHidden(state.approvalGateBlocksInteraction)
+            .disabled(state.approvalGateBlocksInteraction)
+
+            // The web surface stays inert through approval settlement.
+            if state.resolvingApprovalIDs.isEmpty,
+               let request = state.presentedApproval {
+                Color.black.opacity(0.16)
+                    .onTapGesture { } // Outside clicks never resolve an approval.
+                    .accessibilityHidden(true)
+
+                NativeApprovalGate(
+                    request: request,
+                    remainingCount: max(0, state.pendingApprovals.count - 1),
+                    isResolving: state.resolvingApprovalIDs.contains(request.id)
+                ) { approved in
+                    Task { @MainActor in
+                        await state.resolveApproval(request, approved: approved)
+                    }
+                }
+                .padding(24)
+            }
+        }
+        .overlay(alignment: .bottomLeading) {
+            // WebKit reserves this part of the task sidebar. Keep its native
+            // controls above the approval shield and outside the web bridge.
+            if state.presentedSheet == nil {
+                NativeRuntimeStatusBar(state: state)
+                    .frame(maxWidth: 190, alignment: .leading)
+                    .frame(height: 34)
+            }
         }
         .ignoresSafeArea()
         // A detached WKWebView is not a visible WebKit page. Keep owned model

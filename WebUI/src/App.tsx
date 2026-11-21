@@ -1101,7 +1101,7 @@ export function App() {
 
   const task = snapshot.tasks.find((candidate) => candidate.id === snapshot.selectedTaskID);
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-native-host={nativeHost ? 'true' : undefined}>
       <div className="app-panels" inert={snapshot.isSettingsPresented || snapshot.pendingApprovalCount > 0}>
       <Sidebar snapshot={snapshot} search={search} setSearch={setSearch} />
       <main className="workspace">

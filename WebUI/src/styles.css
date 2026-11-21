@@ -59,6 +59,10 @@ kbd { font: inherit; font-size: 10px; color: var(--text-tertiary); }
 
 /* One navigation column, one clear action, and compact recent tasks. */
 .sidebar { display: flex; width: 230px; flex: 0 0 230px; flex-direction: column; overflow: hidden; border-right: 1px solid var(--border); background: var(--sidebar); user-select: none; }
+/* The native Settings controls overlay this space. The sidebar owns its width. */
+.app-shell[data-native-host] .sidebar::after {
+  content: ""; flex: 0 0 34px; box-sizing: border-box; border-top: 1px solid var(--border);
+}
 .window-drag-strip { height: 30px; flex: 0 0 30px; }
 .sidebar-brand-row { display: flex; height: 40px; flex: 0 0 40px; align-items: center; justify-content: space-between; padding: 0 12px 0 20px; }
 .brand-lockup { display: flex; min-width: 0; align-items: center; }
