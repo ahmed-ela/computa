@@ -206,6 +206,7 @@ export type NativeAction =
   | { action: 'setTaskModel'; taskID: string; modelID: string }
   | { action: 'refreshWebsiteModels'; provider?: WebsiteModelProvider }
   | { action: 'connectModelProvider'; route: string }
+  | { action: 'showAccessModeSettings' }
   | { action: 'showAPIProviders' }
   | { action: 'setShowToolPayloads'; value: boolean }
   | { action: 'refreshPermissions' }

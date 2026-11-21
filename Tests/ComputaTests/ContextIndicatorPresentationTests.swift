@@ -24,7 +24,8 @@ final class ContextIndicatorPresentationTests: XCTestCase {
                     return columns.contains { image.colorAt(x: $0, y: y) != background }
                 }
             }
-            XCTAssertTrue(hasContent(in: 0..<240), "Settings and access mode should be visible")
+            XCTAssertTrue(hasContent(in: 0..<48), "The Settings gear should be visible")
+            XCTAssertFalse(hasContent(in: 54..<240), "The access mode belongs in Settings")
             XCTAssertFalse(hasContent(in: 520..<760), "Context should be hidden, compacting=\(compacting)")
         }
     }

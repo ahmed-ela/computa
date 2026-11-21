@@ -167,6 +167,60 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testSettingsOpensNativeAccessModeChooserAndYieldsToApproval() async throws {
+        let prefs = isolatedTestPreferences()
+        let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
+        defer { session.shutdown() }
+        let state = AppState(tasks: [], preferences: prefs, browserSession: session)
+        let hosting = NSHostingView(rootView: WebWorkspaceView(state: state))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1024, height: 740),
+                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        window.orderBack(nil)
+        defer { window.close() }
+        await settleLayout(hosting)
+        let web = try XCTUnwrap(nativeViews(in: hosting).compactMap { $0 as? WKWebView }.first)
+        let row = "document.querySelector('button[aria-label^=\"Change access mode:\"]')"
+        let bridge = "window.webkit.messageHandlers.localCodex"
+        let ready = await waitForScriptBool(on: web, script: "Boolean(document.querySelector('#root button'))")
+        XCTAssertTrue(ready)
+        _ = try await web.evaluateJavaScript("\(bridge).postMessage({action:'showAccessModeSettings'}); true")
+        await settleLayout(hosting)
+        XCTAssertNil(window.attachedSheet)
+
+        XCTAssertTrue(state.presentSettings())
+        let rowReady = await waitForScriptBool(on: web, script: "\(row)?.textContent === 'Ask every time'")
+        XCTAssertTrue(rowReady)
+        _ = try await web.evaluateJavaScript("""
+            \(bridge).postMessage({action:'setAccessMode',value:'fullAccess'});
+            \(bridge).postMessage({action:'showAccessModeSettings',value:'fullAccess'}); true
+            """)
+        await settleLayout(hosting)
+        XCTAssertNil(window.attachedSheet)
+        XCTAssertEqual(state.accessMode, .askEveryTime)
+
+        _ = try await web.evaluateJavaScript("\(row).click()")
+        let deadline = ContinuousClock.now + .seconds(4)
+        while window.attachedSheet == nil, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertNotNil(window.attachedSheet)
+        XCTAssertEqual(state.accessMode, .askEveryTime, "Opening the chooser must not change access")
+
+        let request = ActionApprovalRequest(id: "settings-test", taskID: nil, kind: .command,
+                                            title: "Fixture", summary: "Fixture", details: "")
+        state.apply(.approvalRequested(request))
+        let dismissed = ContinuousClock.now + .seconds(4)
+        while window.attachedSheet != nil, ContinuousClock.now < dismissed {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertNil(window.attachedSheet)
+        XCTAssertNil(state.presentedSheet)
+        XCTAssertEqual(state.presentedApproval, request)
+    }
+
     /// Use the shipping WebKit UI and native bridge with empty preferences and
     /// an ephemeral browser. Only provider authentication/discovery is simulated.
     @MainActor

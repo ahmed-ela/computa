@@ -207,8 +207,8 @@ until the runtime confirms termination. The user can then shorten the input or
 start a new task; Computa never silently deletes retained instructions to make
 them fit. Diagnostic estimates are not displayed as measured ring occupancy.
 
-Access is deliberately simple and is changed only through a **native macOS
-menu**, not a web bridge action or model tool:
+Choose **Settings → Agent interface → Access mode** to change access in a native
+macOS chooser. While an approval is pending, the Settings gear opens the mode choices directly.
 
 - **Ask every time** (default): terminal/file commands use the workspace sandbox
   with network access disabled. Commands allowed by that sandbox can run without

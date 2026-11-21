@@ -10,45 +10,27 @@ struct NativeRuntimeStatusBar: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Button {
-                if state.presentSettings() { state.refreshAutomationPermissions() }
-            } label: {
-                Label("Settings", systemImage: "gearshape")
-                    .labelStyle(.iconOnly)
-                    .font(.system(size: 13))
-                    .frame(width: 22, height: 22)
-                    .contentShape(Rectangle())
+            if state.approvalGateBlocksInteraction {
+                // General Settings yields to approvals. Its gear can still open
+                // the native access settings without covering the approval card.
+                Menu {
+                    NativeAccessModePicker(state: state)
+                    Divider()
+                    Text("Full access automatically approves waiting action requests.")
+                } label: { settingsIcon }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .accessibilityLabel("Settings")
+                .help("Access mode settings")
+            } else {
+                Button {
+                    if state.presentSettings() { state.refreshAutomationPermissions() }
+                } label: { settingsIcon }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Settings")
+                .help("Settings")
             }
-            .buttonStyle(.plain)
-            .disabled(state.approvalGateBlocksInteraction)
-            .accessibilityLabel("Settings")
-            .help("Settings")
-
-            Menu {
-                Picker("Access mode", selection: Binding(
-                    get: { state.accessMode },
-                    set: { state.setAccessMode($0) }
-                )) {
-                    ForEach(AccessMode.allCases) { mode in
-                        Text(mode.label).tag(mode)
-                    }
-                }
-                Divider()
-                Text("Full access allows terminal/file commands outside the workspace and network access.")
-                Text("It also automatically approves app action requests.")
-                Text("macOS permissions and tool validation still apply.")
-                Text("New submissions use this choice; running turns keep their execution permissions.")
-                Text("Your choice is remembered across launches.")
-            } label: {
-                Label(state.accessMode.label, systemImage: state.accessMode == .fullAccess
-                    ? "bolt.shield" : "hand.raised")
-                    .font(.system(size: 11))
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .accessibilityLabel("Access mode")
-            .accessibilityValue(state.accessMode.label)
-            .help("Choose whether Computa asks before protected actions. This setting applies to all tasks and is remembered across launches.")
 
             if state.accessMode == .askEveryTime, !state.resolvingApprovalIDs.isEmpty {
                 HStack(spacing: 6) {
@@ -73,7 +55,7 @@ struct NativeRuntimeStatusBar: View {
                     VStack(alignment: .leading, spacing: 9) {
                         Text("Action could not be approved").font(.headline)
                         Text(error).textSelection(.enabled)
-                        Text("Switch to Ask every time to review or decline it. No automatic retry was made.")
+                        Text("In Settings, choose Ask every time to review or decline this action.")
                             .foregroundStyle(.secondary)
                     }
                     .font(.system(size: 12))
@@ -110,6 +92,59 @@ struct NativeRuntimeStatusBar: View {
                 approvalErrorPresented = false
             }
         }
+    }
+
+    private var settingsIcon: some View {
+        Label("Settings", systemImage: "gearshape")
+            .labelStyle(.iconOnly)
+            .font(.system(size: 13))
+            .frame(width: 22, height: 22)
+            .contentShape(Rectangle())
+    }
+}
+
+@MainActor
+private struct NativeAccessModePicker: View {
+    let state: AppState
+
+    var body: some View {
+        Picker("Access mode", selection: Binding(
+            get: { state.accessMode },
+            set: { state.setAccessMode($0) }
+        )) {
+            ForEach(AccessMode.allCases) { mode in
+                Text(mode.label).tag(mode)
+            }
+        }
+    }
+}
+
+@MainActor
+struct NativeAccessModeSettings: View {
+    let state: AppState
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Access mode").font(.headline)
+            NativeAccessModePicker(state: state)
+                .pickerStyle(.radioGroup)
+                .labelsHidden()
+                .disabled(state.presentedSheet != .settings || state.approvalGateBlocksInteraction)
+            Text("Full access automatically approves action requests and allows terminal commands and file operations outside the workspace, with network access. macOS permissions still apply.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Text("Your choice is saved for new submissions. Running turns keep their execution permissions.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 400)
     }
 }
 
