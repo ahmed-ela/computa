@@ -4,6 +4,13 @@ import Foundation
 import Observation
 import OSLog
 
+enum WebsiteModelSetupStatus: Equatable {
+    case unchecked, checking
+    case loaded(Int)
+    case signInRequired(String)
+    case failed(String)
+}
+
 private struct ActiveTurnTiming {
     let userEntryID: TimelineEntry.ID
     let startedAt: Date
@@ -50,8 +57,9 @@ final class AppState {
     }
     @ObservationIgnored private var pendingProviderSignInRecovery: ProviderSignInRecovery?
     @ObservationIgnored private var providerSignInRecoveryIdleObservation: UUID?
-    @ObservationIgnored private var websiteModelRefreshIntents: [WebsiteModelRefreshIntent] = []
-    @ObservationIgnored private var websiteModelRefreshCurrentIntent: WebsiteModelRefreshIntent?
+    private var websiteModelRefreshIntents: [WebsiteModelRefreshIntent] = []
+    private var websiteModelCheckResults: [String: WebsiteModelSetupStatus] = [:]
+    private var websiteModelRefreshCurrentIntent: WebsiteModelRefreshIntent?
     #if DEBUG
     @ObservationIgnored private var websiteModelRefreshObserverForTesting: (@MainActor (String, Bool) -> Void)?
     @ObservationIgnored private var websitePrewarmingObserverForTesting: (@MainActor (Bool, Bool) -> Void)?
@@ -327,29 +335,23 @@ final class AppState {
         catch { websiteModelsError = error.localizedDescription }
     }
 
+    func websiteModelSetupStatus(for provider: String) -> WebsiteModelSetupStatus {
+        if websiteModelRefreshCurrentIntent?.provider == provider
+            || websiteModelRefreshIntents.contains(where: { $0.provider == provider }) {
+            return .checking
+        }
+        if let result = websiteModelCheckResults[provider] { return result }
+        let count = websiteModelChoices.filter { $0.provider == provider }.count
+            + websiteModeChoices.filter { $0.provider == provider }.count
+        return count > 0 ? .loaded(count) : .unchecked
+    }
+
     func loadSignedInModels(tabID: UUID) async {
         guard canRefreshWebsiteModels, browserSession.selectedTabID == tabID,
               let tab = browserSession.humanTab(id: tabID), let provider = tab.setupProvider,
-              browserSession.setupTab(for: provider)?.id == tabID, tab.setupStatus != .loading else { return }
-        tab.setupStatus = .loading
+              browserSession.setupTab(for: provider)?.id == tabID,
+              websiteModelSetupStatus(for: provider.rawValue) != .checking else { return }
         await refreshWebsiteModels(provider: provider.rawValue)
-        if tab.setupStatus == .loading {
-            tab.setupStatus = .failed("The check was interrupted. Try again when Computa is idle.")
-        }
-    }
-
-    private func reportSetupDiscovery(_ intent: WebsiteModelRefreshIntent, status: EmbeddedBrowserTab.SetupStatus) {
-        // Manual discovery can queue behind an older startup attempt. Only a
-        // verified manual/recovery result may settle a pending setup check.
-        guard intent.retryBlocked, let provider = EmbeddedWebModelTransport.Provider(rawValue: intent.provider),
-              let tab = browserSession.setupTab(for: provider) else { return }
-        if case .loaded = status, intent.signInRecovery?.candidate.tabID == tab.id {
-            tab.setupStatus = status
-            return
-        }
-        guard tab.setupStatus == .loading else { return }
-        if case .failed = status, intent.candidate != nil || intent.signInRecovery != nil { return }
-        tab.setupStatus = status
     }
 
     func presentAPIProviders(alibabaID: String? = nil) {
@@ -808,7 +810,7 @@ final class AppState {
                         self.websiteModelChoices.append(contentsOf: choices)
                         WebsiteModelCatalog.save(self.websiteModelChoices, to: self.preferences)
                     }
-                    self.reportSetupDiscovery(intent, status: .loaded(choices.count + modes.count))
+                    self.websiteModelCheckResults.removeValue(forKey: provider)
                     if provider == "kimi", self.browserSession.kimiModelProfileID != nil {
                         self.kimiModelSignInMessage = "Kimi sign-in verified for this profile."
                     }
@@ -865,7 +867,10 @@ final class AppState {
                         self.browserSession.recordHumanVerificationRecovery(candidate, phase: .blocked,
                             reason: self.humanVerificationRecoveryFailureReason(error))
                     }
-                    self.reportSetupDiscovery(intent, status: .failed(message))
+                    if !Task.isCancelled && (!requiresIdle || self.canRefreshWebsiteModels) {
+                        self.websiteModelCheckResults[provider] = (error as? EmbeddedWebModelTransport.Failure) == .signInRequired
+                            ? .signInRequired(message) : .failed(message)
+                    }
                     errors.append("\(WebsiteModelCatalog.providerLabel(provider)): \(message)")
                 }
             }

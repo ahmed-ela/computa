@@ -44,7 +44,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         }
         try await openMenu("chatgpt")
         let submenu = "document.querySelector('.model-selector-submenu')"
-        try await requireDOM("\(submenu)?.textContent === 'Sign in to ChatGPT' && !\(submenu)?.querySelector('[role=menuitemradio]')")
+        try await requireDOM("\(submenu)?.querySelector('[role=menuitem]')?.textContent === 'Sign in to ChatGPT' && !\(submenu)?.querySelector('[role=menuitemradio]')")
         _ = try await web.evaluateJavaScript("\(submenu).querySelector('[role=menuitem]').click()")
         try await requireDOM("!document.querySelector('.model-selector-content')")
         let deadline = ContinuousClock.now + .seconds(5)
@@ -56,17 +56,20 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         state.connectModelProvider(route: "browser/chatgpt")
         XCTAssertEqual(session.humanTabs.map(\.id), [tab.id])
         await state.loadSignedInModels(tabID: tab.id)
-        guard case .failed = tab.setupStatus else { return XCTFail("Signed-out discovery offered models") }
+        guard case .signInRequired = state.websiteModelSetupStatus(for: "chatgpt") else { return XCTFail("Signed-out discovery offered models") }
         XCTAssertFalse(state.setDefaultModel(choice.modelID))
 
         account.signedIn = true
-        await state.loadSignedInModels(tabID: tab.id)
-        XCTAssertEqual(tab.setupStatus, .loaded(1))
         state.isBrowserPresented = false
         try await openMenu("chatgpt")
+        try await requireDOM("\(submenu)?.querySelector('[role=menuitem]:last-child')?.textContent === 'Check again'")
+        _ = try await web.evaluateJavaScript("\(submenu).querySelector('[role=menuitem]:last-child').click()")
         try await requireDOM("\(submenu)?.querySelectorAll('[role=menuitemradio]').length === 1 && \(submenu)?.textContent.includes('High')")
         _ = try await web.evaluateJavaScript("\(submenu).querySelector('[role=menuitemradio]').click()")
         try await requireDOM("document.querySelector('.model-selector-trigger')?.textContent.includes('High')")
+        XCTAssertEqual(state.websiteModelSetupStatus(for: "chatgpt"), .loaded(1))
+        XCTAssertFalse(state.isBrowserPresented)
+        XCTAssertEqual(session.humanTabs.map(\.id), [tab.id])
         XCTAssertEqual(state.defaultModel, choice.modelID)
         state.createTask()
         XCTAssertEqual(state.selectedTask?.model, choice.modelID)
