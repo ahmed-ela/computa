@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'octane';
 import { Button } from '@octanejs/shadcn/Button';
-import { Input } from '@octanejs/shadcn/Input';
 import { Textarea } from '@octanejs/shadcn/Textarea';
 import { NativeSelect, NativeSelectOption } from '@octanejs/shadcn/NativeSelect';
 import { Badge } from '@octanejs/shadcn/Badge';
@@ -13,7 +12,8 @@ import {
   DropdownMenuTrigger,
 } from '@octanejs/shadcn/DropdownMenu';
 import { BotAdd16Filled, Icon } from './Icon';
-import { AgentStatusIcon } from './AgentStatusIcon';
+import { useConversationDrafts } from './conversationDrafts';
+import { WorkspaceSidebar } from './WorkspaceSidebar';
 import { copyText } from './clipboard';
 import { ReviewPanel } from './ReviewPanel';
 import { ModelLabel, ModelSelector } from './ModelSelector';
@@ -23,18 +23,14 @@ import { ResponseMarkdown } from './ResponseMarkdown';
 import { ActivityDisclosure, activityLabel } from './ActivityDisclosure';
 import { activityTimeline, systemMessageText, type ActivityGroup, type ConversationEntry } from './activityTimeline';
 import { formatWorkedFor } from './duration';
-import { TaskActivityIndicator } from './TaskActivityIndicator';
-import { sidebarAgentStatus, isTaskActive, startSidebarClock } from './sidebarActivity';
 import { observeDisplayedCompletion } from './completionAcknowledgment';
 import { previewSnapshot, installPreviewBridge } from './preview';
 import {
   dropQueuedPrompt,
   isValidPrompt,
   moveQueuedPrompt,
-  resolvePromptReceipt,
   shouldSubmitPromptKey,
 } from './promptQueue';
-import type { PendingPromptSubmission } from './promptQueue';
 import type {
   AppSnapshot,
   EntrySnapshot,
@@ -91,120 +87,6 @@ const toolNames: Record<string, string> = {
   computer_v2_click: 'Click target', computer_v2_pointer: 'Move pointer',
   computer_v2_keypress: 'Press keys', computer_v2_type: 'Type text',
 };
-
-function CollapsedTaskList({ snapshot }: { snapshot: AppSnapshot }) {
-  return (
-    <nav className="task-list agent-rail" aria-label="Agent activity">
-      {snapshot.tasks.map((task) => {
-        const status = sidebarAgentStatus(task);
-        if (!status) return null;
-        const label = `${task.title} — ${status === 'working' ? 'Working' : 'Ready to read'}`;
-        return <Button key={task.id} variant="ghost" size="icon"
-          className="agent-rail-button" data-agent-status={status}
-          aria-current={task.id === snapshot.selectedTaskID ? 'page' : undefined}
-          aria-label={label} title={label} onClick={() => post({ action: 'selectTask', id: task.id })}>
-          <AgentStatusIcon working={status === 'working'} taskID={task.id} />
-        </Button>;
-      })}
-    </nav>
-  );
-}
-
-interface SidebarProps {
-  snapshot: AppSnapshot;
-  search: string;
-  setSearch: (value: string) => void;
-}
-
-function ExpandedTaskList({ snapshot, search, setSearch }: SidebarProps) {
-  const [now, setNow] = useState(() => Date.now() / 1000);
-  const hasActiveTasks = snapshot.tasks.some(isTaskActive);
-  useEffect(() => {
-    if (!hasActiveTasks) return;
-    return startSidebarClock(setNow, {
-      now: () => Date.now() / 1000,
-      everySecond: (tick) => {
-        const timer = window.setInterval(tick, 1_000);
-        return () => window.clearInterval(timer);
-      },
-    });
-  }, [hasActiveTasks]);
-  const needle = search.trim().toLocaleLowerCase();
-  const tasks = needle
-    ? snapshot.tasks.filter((task) =>
-        `${task.title} ${task.summary} ${task.workspace}`.toLocaleLowerCase().includes(needle),
-      )
-    : snapshot.tasks;
-
-  return (
-    <>
-      <div className="task-search">
-        <Input
-          className="task-search-input pr-8"
-          id="task-search"
-          value={search}
-          onInput={(event) => setSearch((event.currentTarget as HTMLInputElement).value)}
-          placeholder="Search tasks"
-          aria-label="Search tasks"
-        />
-        {search ? (
-          <Button variant="ghost" size="icon-xs" aria-label="Clear search" onClick={() => setSearch('')}><Icon name="x" size={13} /></Button>
-        ) : null}
-      </div>
-
-      <div className="sidebar-section-heading">
-        <span>{search ? 'Search results' : 'Tasks'}</span>
-      </div>
-
-      <div className="task-list" aria-label="Tasks">
-        {tasks.length === 0 ? (
-          <div className="sidebar-empty"><Icon name="search" size={20} /><strong>{search ? 'No tasks found' : 'A fresh start'}</strong><span>{search ? 'Try a different search.' : 'Your tasks will appear here.'}</span></div>
-        ) : (
-          tasks.map((task) => (
-            <Button variant="ghost"
-              key={task.id}
-              className={`task-row ${snapshot.selectedTaskID === task.id ? 'selected' : ''}`}
-              aria-current={snapshot.selectedTaskID === task.id ? 'page' : undefined}
-              onClick={() => post({ action: 'selectTask', id: task.id })}
-            >
-              <span className="task-row-title">{task.title}</span>
-              <TaskActivityIndicator task={task} now={now} />
-            </Button>
-          ))
-        )}
-      </div>
-    </>
-  );
-}
-
-function Sidebar({ snapshot, search, setSearch, nativeHost }: SidebarProps & { nativeHost: boolean }) {
-  const collapsed = snapshot.isTaskSidebarCollapsed === true;
-  return (
-    <aside className="sidebar" aria-label="Task navigation">
-      <div className="window-drag-strip">
-        {!nativeHost && <Button variant="ghost" size="icon-xs"
-          aria-label={collapsed ? 'Expand chat sidebar' : 'Collapse chat sidebar'} aria-expanded={!collapsed}
-          onClick={() => post({ action: 'setTaskSidebarCollapsed', collapsed: !collapsed })}>
-          <Icon name="sidebar" size={16} />
-        </Button>}
-      </div>
-      <nav className="primary-nav" aria-label="Primary">
-        <Button variant="outline" className="nav-button new-task-button" title={collapsed ? 'New task' : undefined} onClick={() => { setSearch(''); post({ action: 'createTask' }); }}>
-          <BotAdd16Filled /><span className={collapsed ? 'sr-only' : undefined}>New task</span>
-        </Button>
-        {snapshot.pendingApprovalCount > 0 ? (
-          <div className="nav-button approval-nav" role="status" aria-live="polite">
-            <Icon name="info" size={17} /><span className={collapsed ? 'sr-only' : undefined}>Native approval</span>
-            <span className="count-pill">{snapshot.pendingApprovalCount}</span>
-          </div>
-        ) : null}
-      </nav>
-
-      {collapsed ? <CollapsedTaskList snapshot={snapshot} />
-        : <ExpandedTaskList snapshot={snapshot} search={search} setSearch={setSearch} />}
-    </aside>
-  );
-}
 
 function TaskToolbar({ task, rowHeight }: { task?: TaskSnapshot; rowHeight?: number }) {
   return (
@@ -702,13 +584,11 @@ function ActivityClock({ group }: { group: ActivityGroup }) {
   return <span className="reasoning-label">{activityLabel(group, now)}</span>;
 }
 
-function Conversation({ snapshot, task }: { snapshot: AppSnapshot; task: TaskSnapshot }) {
+function Conversation({ snapshot, task, draftState }: { snapshot: AppSnapshot; task: TaskSnapshot; draftState: ReturnType<typeof useConversationDrafts> }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const followingOutput = useRef(true);
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [pendingSubmissions, setPendingSubmissions] = useState<Record<string, PendingPromptSubmission>>({});
-  const [submissionErrors, setSubmissionErrors] = useState<Record<string, string>>({});
+  const { drafts, setDrafts, pendingSubmissions, setPendingSubmissions, submissionErrors, setSubmissionErrors } = draftState;
   const [activityOpenOverrides, setActivityOpenOverrides] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
@@ -736,40 +616,6 @@ function Conversation({ snapshot, task }: { snapshot: AppSnapshot; task: TaskSna
       return next;
     });
   };
-
-  useEffect(() => {
-    const resolved = Object.entries(pendingSubmissions).flatMap(([taskID, pending]) => {
-      const receipts = snapshot.promptReceipts.filter((receipt) => receipt.taskID === taskID);
-      const result = resolvePromptReceipt(drafts[taskID] ?? '', pending, receipts);
-      return result ? [{ taskID, pending, result }] : [];
-    });
-    if (resolved.length === 0) return;
-
-    setPendingSubmissions((current) => {
-      const next = { ...current };
-      for (const { taskID, pending } of resolved) {
-        if (next[taskID]?.requestID === pending.requestID) delete next[taskID];
-      }
-      return next;
-    });
-    setDrafts((current) => {
-      const next = { ...current };
-      for (const { taskID, pending } of resolved) {
-        const receipts = snapshot.promptReceipts.filter((receipt) => receipt.taskID === taskID);
-        const result = resolvePromptReceipt(current[taskID] ?? '', pending, receipts);
-        if (result) next[taskID] = result.draft;
-      }
-      return next;
-    });
-    setSubmissionErrors((current) => {
-      const next = { ...current };
-      for (const { taskID, result } of resolved) {
-        if (result.error) next[taskID] = result.error;
-        else delete next[taskID];
-      }
-      return next;
-    });
-  }, [snapshot.promptReceipts, pendingSubmissions]);
 
   const submitDraft = () => {
     if (pendingSubmissions[task.id]) return;
@@ -1054,6 +900,7 @@ export function App() {
   const nativeHost = Boolean(window.webkit?.messageHandlers?.localCodex);
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(nativeHost ? null : previewSnapshot);
   const [search, setSearch] = useState('');
+  const draftState = useConversationDrafts(snapshot?.promptReceipts);
   const focusSearchOnExpand = useRef(false);
   const currentSnapshot = useRef(snapshot);
   currentSnapshot.current = snapshot;
@@ -1076,7 +923,7 @@ export function App() {
     },
   }, post), [snapshot?.selectedTaskID, selectedTask?.unreadCompletionID,
     selectedTask?.hasUnreadCompletion, selectedTask?.status, selectedTask?.isBusy,
-    snapshot?.isSettingsPresented, snapshot?.isReviewPresented, snapshot?.pendingApprovalCount]);
+    snapshot?.primaryBrowserID, snapshot?.isSettingsPresented, snapshot?.isReviewPresented, snapshot?.pendingApprovalCount]);
 
   useEffect(() => {
     if (import.meta.env.DEV && !nativeHost) return installPreviewBridge(setSnapshot);
@@ -1130,10 +977,14 @@ export function App() {
   const task = snapshot.tasks.find((candidate) => candidate.id === snapshot.selectedTaskID);
   return (
     <div className="app-shell" data-native-host={nativeHost ? 'true' : undefined}
+      data-browser-primary={snapshot.primaryBrowserID && !snapshot.isSettingsPresented ? (nativeHost ? "native" : "preview") : undefined}
       data-sidebar-collapsed={snapshot.isTaskSidebarCollapsed ? 'true' : undefined}
       data-browser-pane={nativeHost && snapshot.isBrowserPresented && !snapshot.isSettingsPresented ? 'open' : undefined}>
       <div className="app-panels" inert={snapshot.isSettingsPresented || snapshot.pendingApprovalCount > 0}>
-      <Sidebar snapshot={snapshot} search={search} setSearch={setSearch} nativeHost={nativeHost} />
+      <WorkspaceSidebar post={post} snapshot={snapshot} search={search} setSearch={setSearch} nativeHost={nativeHost} />
+      {!nativeHost && snapshot.primaryBrowserID && <main className="preview-browser-content">
+        <Icon name="browser" /><strong>{snapshot.workspaceBrowsers?.find(tab => tab.id === snapshot.primaryBrowserID)?.title}</strong>
+        <span>Pages open in the desktop browser.</span></main>}
       <main className="workspace">
         {!nativeHost && <Button variant="ghost" size="icon" className="preview-browser-toggle"
           aria-label="Toggle browser" aria-pressed={snapshot.isBrowserPresented}
@@ -1143,7 +994,7 @@ export function App() {
         </Button>}
         <TaskToolbar task={task} rowHeight={snapshot.titlebarHeight} />
         {task ? (
-          <Conversation snapshot={snapshot} task={task} />
+          <Conversation snapshot={snapshot} task={task} draftState={draftState} />
         ) : (
           <div className="no-task-view">
             <p>Choose a model for your next task.</p>

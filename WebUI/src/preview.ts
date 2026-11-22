@@ -253,6 +253,8 @@ return {
   selectedTaskID: 'preview-running',
   selectedEntryID: 'preview-running-tool',
   tasks: previewTasks,
+  workspaceOrder: previewTasks.map(task => ({ kind: 'agent', id: task.id })),
+  workspaceBrowsers: [],
   promptReceipts: [],
   pendingApprovalCount: 0,
   connection: { state: 'disconnected', label: 'Preview only · no runtime connected', tone: 'neutral' },
@@ -329,12 +331,48 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
         // A browser preview must never request macOS permissions.
         return;
 
+      case 'newWorkspaceBrowserTab': {
+        const id = issueID();
+        publish({ ...snapshot, workspaceBrowsers: [...(snapshot.workspaceBrowsers ?? []), { id, title: 'New tab' }],
+          workspaceOrder: [{ kind: 'browser', id }, ...(snapshot.workspaceOrder ?? [])], primaryBrowserID: id });
+        return;
+      }
+      case 'closeWorkspaceTab': {
+        const { id, kind } = action.tab, order = snapshot.workspaceOrder ?? [];
+        const index = order.findIndex(tab => tab.kind === kind && tab.id === id);
+        if (index < 0) return;
+        const remaining = order.filter((_,i) => i !== index);
+        const selected = kind === 'browser' ? snapshot.primaryBrowserID === id : !snapshot.primaryBrowserID && snapshot.selectedTaskID === id;
+        const next = remaining[Math.min(index, remaining.length - 1)];
+        publish({ ...snapshot, workspaceOrder: remaining,
+          workspaceBrowsers: snapshot.workspaceBrowsers?.filter(tab => kind !== 'browser' || tab.id !== id),
+          primaryBrowserID: selected ? (next?.kind === 'browser' ? next.id : undefined) : snapshot.primaryBrowserID,
+          selectedTaskID: selected && next?.kind === 'agent' ? next.id : kind === 'agent' && snapshot.selectedTaskID === id
+            ? remaining.find(tab => tab.kind === 'agent')?.id : snapshot.selectedTaskID });
+        return;
+      }
+      case 'moveWorkspaceTab': {
+        const order = [...(snapshot.workspaceOrder ?? [])];
+        const from = order.findIndex(t => t.kind === action.tab.kind && t.id === action.tab.id);
+        const to = order.findIndex(t => t.kind === action.target.kind && t.id === action.target.id);
+        if (from < 0 || to < 0) return;
+        order.splice(to,0,...order.splice(from,1)); publish({ ...snapshot, workspaceOrder: order });
+        return;
+      }
+      case 'selectWorkspaceTab':
       case 'selectTask': {
-        const task = snapshot.tasks.find((candidate) => candidate.id === action.id);
+        if (action.action === 'selectWorkspaceTab' && action.tab.kind === 'browser') {
+          if (snapshot.workspaceBrowsers?.some(tab => tab.id === action.tab.id)) publish({ ...snapshot, primaryBrowserID: action.tab.id });
+          return;
+        }
+        const id = action.action === 'selectTask' ? action.id : action.tab.id;
+        const task = snapshot.tasks.find((candidate) => candidate.id === id);
         if (!task) return;
         publish({
           ...snapshot,
-          selectedTaskID: task.id,
+          selectedTaskID: task.id, primaryBrowserID: undefined,
+          workspaceOrder: snapshot.workspaceOrder?.some(tab => tab.kind === 'agent' && tab.id === task.id) ? snapshot.workspaceOrder
+            : [{kind: 'agent', id: task.id}, ...(snapshot.workspaceOrder ?? [])],
           tasks: snapshot.tasks.map((candidate) => candidate.id === task.id ? {
             ...candidate, hasUnreadCompletion: false, unreadCompletionID: undefined,
           } : candidate),
@@ -368,7 +406,8 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
           model: snapshot.defaultModel, modelSelectable: true, entries: [],
           queuedPrompts: [], queuePaused: false, canSteer: false, isBusy: false, hasUnreadCompletion: false,
         };
-        publish({ ...snapshot, tasks: [task, ...snapshot.tasks], selectedTaskID: task.id, selectedEntryID: undefined });
+        publish({ ...snapshot, tasks: [task, ...snapshot.tasks], selectedTaskID: task.id, selectedEntryID: undefined,
+          primaryBrowserID: undefined, workspaceOrder: [{ kind: 'agent', id: task.id }, ...(snapshot.workspaceOrder ?? [])] });
         return;
       }
 

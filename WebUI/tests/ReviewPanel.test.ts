@@ -11,7 +11,6 @@ mock.module('@octanejs/shadcn/Button', () => ({ Button: ({ variant: _variant, si
 mock.module('@octanejs/shadcn/Input', () => ({ Input: (props: Record<string, unknown>) => h('input', props) }));
 mock.module('@octanejs/shadcn/Textarea', () => ({ Textarea: (props: Record<string, unknown>) => h('textarea', props) }));
 mock.module('@octanejs/shadcn/NativeSelect', () => ({ NativeSelect: (props: Record<string, unknown>) => h('select', props), NativeSelectOption: (props: Record<string, unknown>) => h('option', props) }));
-mock.module('../src/Icon', () => ({ Icon: () => h('span', { 'aria-hidden': 'true' }) }));
 const { DiffView, ReviewPanel } = await import('../src/ReviewPanel');
 
 const file = (changes: Partial<ReviewFile> = {}): ReviewFile => ({

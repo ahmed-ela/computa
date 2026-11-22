@@ -19,9 +19,19 @@ struct ModelProviderSetup: Codable, Equatable, Sendable {
     }
 }
 
+struct WorkspaceBrowserSnapshot: Codable, Equatable, Sendable {
+    let id: String
+    let title: String
+    let host: String?
+    let favicon: Data?
+}
+
 struct WebUISnapshot: Codable, Equatable, Sendable {
     var revision: UInt64 = 0
     let titlebarHeight: CGFloat?
+    let workspaceOrder: [WorkspaceTabID]
+    let workspaceBrowsers: [WorkspaceBrowserSnapshot]
+    let primaryBrowserID: String?
     let selectedTaskID: String?
     let selectedEntryID: String?
     let tasks: [WebTaskSnapshot]
@@ -48,6 +58,11 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     @MainActor
     init(state: AppState, titlebarHeight: CGFloat? = nil) {
         self.titlebarHeight = titlebarHeight
+        workspaceOrder = state.openWorkspaceTabs
+        workspaceBrowsers = state.browserSession.workspaceBrowserTabs.map {
+            WorkspaceBrowserSnapshot(id: $0.workspaceID.uuidString, title: $0.title, host: $0.url?.host, favicon: $0.favicon)
+        }
+        primaryBrowserID = state.primaryBrowserID?.uuidString
         selectedTaskID = state.selectedTaskID
         selectedEntryID = state.selectedEntryID
         tasks = state.tasks.map { task in

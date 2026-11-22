@@ -103,6 +103,7 @@ final class AppState {
     var isTaskSidebarCollapsed: Bool {
         didSet { preferences.set(isTaskSidebarCollapsed, forKey: Self.sidebarCollapsedKey) }
     }
+    let workspaceTabs: WorkspaceTabs
     var isBrowserPresented = false
     var isReviewPresented = false
     private(set) var review: AppReviewState?
@@ -193,6 +194,7 @@ final class AppState {
         self.runtime = runtime
         self.permissionClient = permissionClient
         self.preferences = preferences
+        workspaceTabs = WorkspaceTabs(defaults: preferences)
         isTaskSidebarCollapsed = preferences.bool(forKey: Self.sidebarCollapsedKey)
         self.unreadCompletionStore = unreadCompletionStore
         do { unreadCompletions = try unreadCompletionStore?.load() ?? [:] }
@@ -223,8 +225,8 @@ final class AppState {
         websiteModeChoices = WebsiteModeCatalog.load(from: preferences)
         automationPermissions = permissionClient.current()
         self.tasks = tasks
-        selectedTaskID = tasks.first?.id
-        selectedEntryID = tasks.first?.entries.last?.id
+        selectedTaskID = workspaceTabs.initialAgent(in: tasks)
+        selectedEntryID = selectedTask?.entries.last?.id
         retireWebsiteModelSelections()
         apiProviderSettings = APIProviderSettings(preferences: preferences,
             listModels: { provider, key in
@@ -242,6 +244,12 @@ final class AppState {
                     self.defaultModel = WebsiteModelCatalog.freshProfileDefaultModelID
                 }
             })
+        for tab in self.browserSession.workspaceBrowserTabs { workspaceTabs.open(.browser(tab.workspaceID)) }
+        self.browserSession.onWorkspaceTabOpened = { [weak self] id in self?.workspaceTabs.open(.browser(id)) }
+        self.browserSession.onWorkspaceTabClosed = { [weak self] id, wasSelected in
+            guard let self else { return }
+            removeWorkspaceTab(.browser(id), wasSelected: wasSelected && workspaceTabs.browserIsPrimary)
+        }
         self.browserSession.onHumanVerificationRecoveryCandidate = { [weak self] candidate in
             Task { @MainActor [weak self] in await self?.recoverWebsiteModels(candidate) }
         }
@@ -950,7 +958,7 @@ final class AppState {
     /// Settings is rendered inside the privileged UI document. Temporarily
     /// remove the sibling pane so it cannot cover or interact through Settings.
     var shouldPresentBrowserPane: Bool {
-        isBrowserPresented && presentedSheet != .settings
+        (isBrowserPresented || primaryBrowserID != nil) && presentedSheet != .settings
     }
 
     var selectedEntry: TimelineEntry? {
@@ -971,9 +979,15 @@ final class AppState {
     }
 
     func selectTask(_ id: AgentTask.ID?) {
+        workspaceTabs.browserIsPrimary = false
+        if let id { workspaceTabs.open(.agent(id)) }
+        updateSelectedConversation(id, acknowledging: true)
+    }
+
+    func updateSelectedConversation(_ id: AgentTask.ID?, acknowledging: Bool) {
         taskSelectionRevision &+= 1
         selectedTaskID = id
-        if let id { markTaskCompletionRead(taskID: id) }
+        if acknowledging, let id { markTaskCompletionRead(taskID: id) }
         requestAutomaticWebsiteModelRefresh(for: selectedTask?.model ?? defaultModel)
         updateWebsitePrewarming()
         selectedEntryID = selectedTask?.entries.last?.id
@@ -998,7 +1012,7 @@ final class AppState {
     /// completion identity prevents an old rendered snapshot reading a new turn.
     @discardableResult
     func acknowledgeTaskCompletion(taskID: AgentTask.ID, completionID: String) -> Bool {
-        guard selectedTaskID == taskID, !isBusy(taskID: taskID),
+        guard primaryBrowserID == nil, selectedTaskID == taskID, !isBusy(taskID: taskID),
               tasks.first(where: { $0.id == taskID })?.status == .completed,
               unreadCompletionID(for: taskID) == completionID else { return false }
         return markTaskCompletionRead(taskID: taskID)
@@ -1088,6 +1102,8 @@ final class AppState {
         tasks.insert(task, at: 0)
         taskSelectionRevision &+= 1
         selectedTaskID = task.id
+        workspaceTabs.browserIsPrimary = false
+        workspaceTabs.open(.agent(task.id))
         // A new draft briefly inherits the user's default model. Pause rather
         // than discard an unused root while the user chooses this task's model.
         updateWebsitePrewarming(preserveUnusedRootOnDeselection: true)
@@ -1883,9 +1899,10 @@ final class AppState {
             if restored.runtimeThreadID == nil { restored.runtimeThreadID = priorThreads[task.id] }
             return restored
         }
+        let firstOpenAgent = workspaceTabs.initialAgent(in: newTasks)
         selectedTaskID = preserveEmptySelection || newTasks.contains(where: { $0.id == priorSelection })
             ? priorSelection
-            : newTasks.first?.id
+            : firstOpenAgent
         updateWebsitePrewarming()
         if let task = selectedTask, retainedTaskIDs.contains(task.id),
            task.entries.contains(where: { $0.id == priorEntry }) {

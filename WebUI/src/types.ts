@@ -150,8 +150,14 @@ export interface ModelProviderSetup {
   connected: boolean;
 }
 
+export interface WorkspaceTab { kind: 'agent' | 'browser'; id: string }
+export interface WorkspaceBrowser { id: string; title: string; host?: string; favicon?: string }
+
 export interface AppSnapshot {
   revision: number;
+  workspaceOrder?: WorkspaceTab[];
+  workspaceBrowsers?: WorkspaceBrowser[];
+  primaryBrowserID?: string;
   titlebarHeight?: number;
   selectedTaskID?: string;
   selectedEntryID?: string;
@@ -182,7 +188,9 @@ export type NativeAction =
   | { action: 'selectTask'; id: string }
   | { action: 'acknowledgeTaskCompletion'; taskID: string; completionID: string }
   | { action: 'selectEntry'; id: string }
-  | { action: 'createTask' }
+  | { action: 'createTask' | 'newWorkspaceBrowserTab' }
+  | { action: 'selectWorkspaceTab' | 'closeWorkspaceTab'; tab: WorkspaceTab }
+  | { action: 'moveWorkspaceTab'; tab: WorkspaceTab; target: WorkspaceTab }
   | { action: 'chooseTaskWorkspace'; taskID: string }
   | { action: 'prepareWebsiteModel'; taskID: string }
   | { action: 'submitPrompt'; requestID: string; taskID: string; prompt: string }

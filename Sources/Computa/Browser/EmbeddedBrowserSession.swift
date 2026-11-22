@@ -7,10 +7,13 @@ import WebKit
 @MainActor @Observable
 final class EmbeddedBrowserTab: Identifiable {
     let id: UUID
+    // The privileged sidebar receives this display handle, never a browser-tool target ID.
+    let workspaceID = UUID()
     let isPopup: Bool
     let requestsMobileSite: Bool
     fileprivate let kimiProfileID: UUID?
     fileprivate(set) var setupProvider: EmbeddedWebModelTransport.Provider?
+    fileprivate(set) var favicon: Data?
     fileprivate(set) var title = "New tab"
     fileprivate(set) var url: URL?
     fileprivate(set) var isLoading = false
@@ -66,6 +69,12 @@ final class EmbeddedBrowserSession {
     /// The human browser never exposes an inference page, including a retained
     /// session whose website cleanup could not be confirmed.
     var humanTabs: [EmbeddedBrowserTab] { tabs.filter { entries[$0.id]?.isModelOwned == false } }
+    var workspaceBrowserTabs: [EmbeddedBrowserTab] {
+        humanTabs.filter { entries[$0.id]?.isToolOwned == false }
+    }
+    @ObservationIgnored private var workspaceFaviconsEnabled = false
+    @ObservationIgnored var onWorkspaceTabOpened: ((UUID) -> Void)?
+    @ObservationIgnored var onWorkspaceTabClosed: ((UUID, Bool) -> Void)?
     private(set) var selectedTabID: UUID?
     private(set) var kimiModelProfileID: UUID?
     private(set) var errorMessage: String?
@@ -241,6 +250,7 @@ final class EmbeddedBrowserSession {
         var needsBackgroundRendering: Bool { isModelOwned || isToolOwned || !toolRenderLeases.isEmpty }
         var shouldMountInBackground: Bool { needsBackgroundRendering && (presentationHost == nil || !toolRenderLeases.isEmpty) }
         var observations: [NSKeyValueObservation] = []
+        var faviconRequestedGeneration: UUID?
         var navigation: WKNavigation?
         var geminiPostBlockObservation: (lease: GeminiPostBlockNativeLease, callback: @MainActor (GeminiPostBlockNativeEvent) -> Void)?
         var geminiResponseObservationGeneration: UUID?
@@ -850,6 +860,7 @@ final class EmbeddedBrowserSession {
         tabs.append(tab)
         // Inactive creation stays inactive, including the first inference tab.
         if select { selectedTabID = tab.id }
+        if !modelOwned && !toolOwned { onWorkspaceTabOpened?(tab.workspaceID) }
         observe(entry)
         if !modelOwned { errorMessage = nil }
         return entry
@@ -921,7 +932,8 @@ final class EmbeddedBrowserSession {
         entry.geminiPostBlockObservation = nil
         revokeModelInspector(entry, reason: isShutdown ? .shutdown : .closed)
         revokeGroqFixtureInspector(entry, reason: isShutdown ? .shutdown : .closed)
-        let humanIndex = tabs.prefix(index).filter { entries[$0.id]?.isModelOwned == false }.count
+        let wasSelected = selectedTabID == id
+        let humanIndex = tabs.prefix(index).filter { entries[$0.id]?.isModelOwned == false && entries[$0.id]?.isToolOwned == false }.count
         entry.view.isInspectable = false
         entry.tab.isWebInspectorEnabled = false
         entry.tab.isWebInspectorAvailable = false
@@ -947,10 +959,11 @@ final class EmbeddedBrowserSession {
         if selectedTabID == id {
             if let opener = entry.popupOpenerTabID, entries[opener]?.isModelOwned == false { selectedTabID = opener }
             else {
-                let remaining = humanTabs
+                let remaining = workspaceBrowserTabs
                 selectedTabID = remaining.isEmpty ? nil : remaining[min(humanIndex, remaining.count - 1)].id
             }
         }
+        if !entry.isModelOwned && !entry.isToolOwned && !isShutdown { onWorkspaceTabClosed?(entry.tab.workspaceID, wasSelected) }
         if !entry.isModelOwned { errorMessage = selectedTabID.flatMap { entries[$0]?.tab.error } }
         if let observation = postBlockObservation {
             observation.lease.exactViewClosed = true
@@ -3683,6 +3696,7 @@ final class EmbeddedBrowserSession {
         entry.tab.title = title.isEmpty ? (view.url?.host ?? "New tab") : String(title.prefix(512))
         // Includes history.pushState/fragment navigation. This is intentionally conservative;
         // a document identity is not proof that arbitrary DOM content has remained unchanged.
+        if entry.tab.url?.host != view.url?.host || committedNavigation { entry.tab.favicon = nil }
         if entry.tab.url != view.url { entry.tab.documentID = UUID() }
         entry.tab.url = view.url
         entry.tab.isLoading = view.isLoading
@@ -4011,6 +4025,25 @@ final class EmbeddedBrowserSession {
         emitGeminiPostBlockNativeEvent(entry, .redirected)
     }
 
+    func enableWorkspaceFavicons() {
+        guard !workspaceFaviconsEnabled else { return }
+        workspaceFaviconsEnabled = true
+        for entry in entries.values where !entry.view.isLoading { readFaviconIfNeeded(entry) }
+    }
+
+    private func readFaviconIfNeeded(_ entry: Entry) {
+        guard workspaceFaviconsEnabled, !entry.isModelOwned, !entry.isToolOwned,
+              let url = entry.view.url, ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              entry.faviconRequestedGeneration != entry.tab.documentGeneration else { return }
+        let generation = entry.tab.documentGeneration
+        entry.faviconRequestedGeneration = generation
+        Task { @MainActor [weak entry, weak view = entry.view] in
+            guard let view, let data = await BrowserFavicon.read(in: view), let entry,
+                  entry.tab.documentGeneration == generation, view.url?.host == url.host else { return }
+            entry.tab.favicon = data
+        }
+    }
+
     fileprivate func completed(_ view: WKWebView, navigation: WKNavigation?, tabID: UUID, error: Error? = nil) {
         guard let entry = entries[tabID], entry.view === view, entry.navigation === navigation else { return }
         if entry.isModelOwned, navigation != nil {
@@ -4020,7 +4053,10 @@ final class EmbeddedBrowserSession {
                 entry.modelFailedGeneration = entry.tab.documentGeneration
             }
         }
-        if error == nil { entry.fitPresentedPage() }
+        if error == nil {
+            entry.fitPresentedPage()
+            readFaviconIfNeeded(entry)
+        }
         entry.navigation = nil
         if error != nil { entry.geminiRecoveryNavigationStart = nil }
         entry.pendingGeminiRecoveryHTTPFailure = nil

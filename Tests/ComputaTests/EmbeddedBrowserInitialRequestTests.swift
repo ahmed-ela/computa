@@ -173,16 +173,20 @@ private final class InitialRequestLoadBoundary {
 
 /// The only listener is IPv4 loopback on an ephemeral port. Responses have no
 /// scripts or external resources; all request evidence is synthetic and in RAM.
-private final class InitialRequestHTTPFixture: @unchecked Sendable {
+final class InitialRequestHTTPFixture: @unchecked Sendable {
     private let listener: NWListener
     private let finalStatus: Int
+    private let finalHTML: String?
+    private let iconPath: String?
     private let queue = DispatchQueue(label: "ComputaTests.InitialRequestHTTP")
     private let lock = NSLock()
     private var connections: [NWConnection] = []
     private var recorded: [APIModelServer.HTTPRequest] = []
     var requests: [APIModelServer.HTTPRequest] { lock.lock(); defer { lock.unlock() }; return recorded }
 
-    init(finalStatus: Int) throws {
+    init(finalStatus: Int, finalHTML: String? = nil, iconPath: String? = nil) throws {
+        self.iconPath = iconPath
+        self.finalHTML = finalHTML
         self.finalStatus = finalStatus
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
@@ -205,6 +209,11 @@ private final class InitialRequestHTTPFixture: @unchecked Sendable {
                     return
                 }
                 self.lock.lock(); self.recorded.append(request); self.lock.unlock()
+                if request.path == self.iconPath, request.method == "GET" {
+                    let svg = "<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'><rect width='16' height='16' fill='red'/></svg>"
+                    self.respond(connection, status: 200, location: nil, body: Data(svg.utf8), mimeType: "image/svg+xml")
+                    return
+                }
                 let parts = request.path.split(separator: "/")
                 guard parts.count == 2, ["human", "model"].contains(String(parts[0])),
                       ["start", "final"].contains(String(parts[1])), request.method == "GET" else {
@@ -213,15 +222,16 @@ private final class InitialRequestHTTPFixture: @unchecked Sendable {
                 if parts[1] == "start" {
                     self.respond(connection, status: 302, location: "/\(parts[0])/final", body: Data())
                 } else {
-                    let html = "<!doctype html><meta charset=utf-8><link rel=icon href='data:,'><body>Synthetic final \(self.finalStatus)</body>"
+                    let html = self.finalHTML ?? "<!doctype html><meta charset=utf-8><link rel=icon href='data:,'><body>Synthetic final \(self.finalStatus)</body>"
                     self.respond(connection, status: self.finalStatus, location: nil, body: Data(html.utf8))
                 }
             } catch { connection.cancel() }
         }
     }
-    private func respond(_ connection: NWConnection, status: Int, location: String?, body: Data) {
+    private func respond(_ connection: NWConnection, status: Int, location: String?, body: Data, mimeType: String = "text/html; charset=utf-8") {
         let redirect = location.map { "Location: \($0)\r\n" } ?? ""
-        var response = Data("HTTP/1.1 \(status) \(HTTPURLResponse.localizedString(forStatusCode: status))\r\n\(redirect)Content-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; img-src data:\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
+        let imageSources = iconPath == nil ? "data:" : "'self' data:"
+        var response = Data("HTTP/1.1 \(status) \(HTTPURLResponse.localizedString(forStatusCode: status))\r\n\(redirect)Content-Type: \(mimeType)\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; img-src \(imageSources)\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
         response.append(body)
         connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
     }

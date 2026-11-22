@@ -6,6 +6,140 @@ import XCTest
 
 final class EmbeddedBrowserPaneStateTests: XCTestCase {
     @MainActor
+    func testMixedSidebarFaviconSwitchingReorderAndHistory() async throws {
+        let html = """
+        <title>Cedar rail</title>
+        <link rel="icon" href="/images/train.svg">
+        <input id="reservation">
+        """
+        let site = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: html, iconPath: "/images/train.svg")
+        let origin = try await site.start()
+        defer { site.stop() }
+        let prefs = isolatedTestPreferences()
+        let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
+        defer { session.shutdown() }
+        let task = AgentTask(title: "Trip agent", summary: "", status: .draft, workspace: "", model: "local")
+        let state = AppState(tasks: [task], preferences: prefs, browserSession: session)
+        let hosting = NSHostingView(rootView: WebWorkspaceView(state: state))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1110, height: 720),
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        window.orderBack(nil)
+        defer { window.close() }
+        await settleLayout(hosting)
+        let chat = try XCTUnwrap(nativeViews(in: hosting).compactMap { $0 as? WKWebView }.first {
+            $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil
+        })
+        func requireDOM(_ script: String, line: UInt = #line) async throws {
+            let ok = await waitForScriptBool(on: chat, script: script)
+            XCTAssertTrue(ok, script, line: line)
+            if !ok { throw CocoaError(.coderInvalidValue) }
+        }
+        try await requireDOM("!!document.querySelector('.composer-shell textarea')")
+        _ = try await chat.evaluateJavaScript("""
+        const draft = document.querySelector('.composer-shell textarea'); draft.value='Return ticket';
+        draft.dispatchEvent(new Event('input', { bubbles:true }));
+        document.querySelector('button[aria-label="New browser tab"]').click(); true
+        """)
+        try await requireDOM("!!document.querySelector('[data-browser-primary=native]') && innerWidth < 300 && getComputedStyle(document.querySelector('.workspace')).display === 'none'")
+        let ref = try XCTUnwrap(state.primaryBrowserID)
+        let id = try XCTUnwrap(session.selectedTabID)
+        XCTAssertNotEqual(id, ref)
+        let page = try XCTUnwrap(session.webView(for: id))
+        try session.navigate(tabID: id, to: origin.appendingPathComponent("human/final"))
+        try await requireDOM("""
+        (() => { const row = document.querySelector('.workspace-tab-row [data-tab-kind=browser]');
+          const icon = row?.querySelector('img'); return row?.getAttribute('aria-current') === 'page' &&
+            row.textContent.includes('Cedar rail') && icon?.complete && icon.naturalWidth === 32; })()
+        """)
+        let data = try XCTUnwrap(session.humanTab(id: id)?.favicon)
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(data: data))
+        XCTAssertEqual(bitmap.pixelsWide, 32)
+        XCTAssertGreaterThan(bitmap.colorAt(x: 16, y: 16)?.usingColorSpace(.sRGB)?.redComponent ?? 0, 0.95)
+        _ = try await page.evaluateJavaScript("document.querySelector('input').value='B12'; history.pushState({}, '', '#seat'); true")
+        _ = try await chat.evaluateJavaScript("document.querySelector('[data-tab-kind=agent]').click(); true")
+        try await requireDOM("!document.querySelector('[data-browser-primary]') && document.querySelector('.composer-shell textarea')?.value === 'Return ticket' && innerWidth > 600")
+        _ = try await chat.evaluateJavaScript("document.querySelector('[data-tab-kind=browser]').click(); true")
+        try await requireDOM("!!document.querySelector('[data-browser-primary=native]')")
+        let preserved = try await page.evaluateJavaScript("document.querySelector('input').value === 'B12' && location.hash === '#seat'") as? Bool
+        XCTAssertEqual(preserved, true)
+        XCTAssertTrue(session.webView(for: id) === page)
+        state.toggleWorkspaceBrowser()
+        XCTAssertNil(state.primaryBrowserID)
+        XCTAssertTrue(state.shouldPresentBrowserPane)
+        try await requireDOM("getComputedStyle(document.querySelector('.workspace')).display !== 'none' && innerWidth >= 600")
+        state.selectWorkspaceTab(.browser(ref))
+        state.isTaskSidebarCollapsed = true
+        try await requireDOM("!!document.querySelector('.agent-rail .site-favicon') && innerWidth === 72")
+        state.isTaskSidebarCollapsed = false
+        try await requireDOM("!!document.querySelector('#task-search')")
+        _ = try await chat.evaluateJavaScript("document.querySelector('[data-tab-kind=browser]').dispatchEvent(new KeyboardEvent('keydown', {key:'ArrowDown',altKey:true,bubbles:true})); true")
+        try await requireDOM("document.querySelector('[data-tab-kind]')?.dataset.tabKind === 'agent'")
+        state.closeWorkspaceTab(.agent(task.id))
+        XCTAssertEqual(state.primaryBrowserID, ref)
+        XCTAssertEqual(state.tasks.first?.id, task.id)
+        _ = try await chat.evaluateJavaScript("document.querySelector('[aria-label=\"Show chat history\"]').click(); true")
+        try await requireDOM("!!document.querySelector('nav[aria-label=\"Chat history\"] [data-tab-kind=agent]')")
+        _ = try await chat.evaluateJavaScript("document.querySelector('[data-tab-kind=agent]').click(); true")
+        try await requireDOM("!!document.querySelector('nav[aria-label=\"Open tabs\"] [data-tab-kind=agent]') && !document.querySelector('[data-browser-primary]')")
+        try await requireDOM("document.querySelector('.composer-shell textarea')?.value === 'Return ticket'")
+        let tool = try session.createToolTab(url: origin.appendingPathComponent("model/final"))
+        XCTAssertEqual(WebUISnapshot(state: state).workspaceBrowsers.map(\.id), [ref.uuidString])
+        session.closeTab(tool)
+        state.closeWorkspaceTab(.browser(ref))
+        XCTAssertNil(session.webView(for: id))
+        XCTAssertEqual(state.openWorkspaceTabs, [.agent(task.id)])
+        state.closeWorkspaceTab(.agent(task.id))
+        let restored = AppState(tasks: [task], preferences: prefs, browserSession: EmbeddedBrowserSession(persistent: false))
+        XCTAssertTrue(restored.openWorkspaceTabs.isEmpty)
+        XCTAssertEqual(restored.tasks.map(\.id), [task.id])
+    }
+
+    @MainActor
+    func testOpenAgentOrderRestoresIndependentlyOfBrowserSessionsAndHistory() throws {
+        let prefs = isolatedTestPreferences()
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let tasks = ["First", "Second", "Archived"].map { AgentTask(title: $0, summary: "", status: .draft, workspace: "", model: "local") }
+        let state = AppState(tasks: tasks, preferences: prefs, browserSession: session)
+        state.selectTask(tasks[1].id)
+        state.newWorkspaceBrowserTab()
+        state.workspaceTabs.move(.agent(tasks[0].id), to: .agent(tasks[1].id))
+        let expected = [WorkspaceTabID.agent(tasks[0].id), .agent(tasks[1].id)]
+        XCTAssertEqual(state.openWorkspaceTabs.filter { $0.kind == .agent }, expected)
+        let restoredSession = EmbeddedBrowserSession(persistent: false)
+        defer { restoredSession.shutdown() }
+        let restored = AppState(tasks: [], preferences: prefs, browserSession: restoredSession)
+        restored.replaceTasks(with: tasks)
+        XCTAssertEqual(restored.openWorkspaceTabs, expected)
+        XCTAssertEqual(restored.selectedTaskID, tasks[0].id)
+        XCTAssertTrue(restored.tasks.contains { $0.id == tasks[2].id })
+    }
+
+    @MainActor
+    func testDefaultFaviconAndClearingOnNavigationToSiteWithoutOne() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        session.enableWorkspaceFavicons()
+        let withIcon = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: "<title>First</title>", iconPath: "/favicon.ico")
+        let withoutIcon = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: "<title>Second</title>")
+        defer { withIcon.stop(); withoutIcon.stop() }
+        let first = try await withIcon.start(), second = try await withoutIcon.start()
+        let id = try session.createTab(url: first.appendingPathComponent("human/final"))
+        let tab = try XCTUnwrap(session.humanTab(id: id))
+        let deadline = ContinuousClock.now + .seconds(6)
+        while tab.favicon == nil, .now < deadline { try await Task.sleep(for: .milliseconds(25)) }
+        XCTAssertNotNil(tab.favicon)
+        XCTAssertTrue(withIcon.requests.contains { $0.path == "/favicon.ico" })
+        try session.navigate(tabID: id, to: second.appendingPathComponent("human/final"))
+        let page = try XCTUnwrap(session.webView(for: id))
+        let loaded = await waitForScriptBool(on: page, script: "document.title === 'Second' && document.readyState === 'complete'")
+        XCTAssertTrue(loaded)
+        XCTAssertNil(tab.favicon)
+    }
+
+    @MainActor
     func testTitlebarSharesBrowserTabsAndSidebarAcrossPaneChanges() async throws {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }
@@ -129,7 +263,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         await settleLayout(hosting)
         let chat = try XCTUnwrap(nativeViews(in: hosting).compactMap { $0 as? WKWebView }
             .first { $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil })
-        let expanded = await waitForScriptBool(on: chat, script: "document.querySelectorAll('.task-row').length === 5 && !document.querySelector('.agent-rail')")
+        let expanded = await waitForScriptBool(on: chat, script: "document.querySelectorAll('.task-row').length === 3 && !document.querySelector('.agent-rail')")
         XCTAssertTrue(expanded)
         let button = try XCTUnwrap(window.titlebarAccessoryViewControllers.first { $0.layoutAttribute == .left }?.view)
         let bounds = button.convert(button.bounds, to: nil)
@@ -181,7 +315,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         state.apply(.taskCompletionObserved(taskID: tasks[2].id, threadID: thread, turnID: UUID().uuidString.lowercased()))
         state.apply(.taskStatusChanged(taskID: tasks[2].id, status: .completed))
         let ready = await waitForScriptBool(on: chat, script: """
-            document.querySelectorAll('.agent-rail-button').length === 2
+            document.querySelectorAll('.agent-rail-button[data-agent-status]').length === 2
                 && document.querySelector('[data-agent-status="ready"]')?.getAttribute('aria-label') === 'Review — Ready to read'
                 && (() => {
                     const badge = document.querySelector('[data-agent-status="ready"] .agent-ready-badge');
@@ -198,7 +332,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         _ = try await chat.evaluateJavaScript("document.querySelector('[data-agent-status=ready]').click()")
         let read = await waitForScriptBool(on: chat, script: """
             document.querySelector('.toolbar-title-block strong')?.textContent === 'Review'
-                && document.querySelectorAll('.agent-rail-button').length === 1 && !document.querySelector('[data-agent-status=ready]')
+                && document.querySelectorAll('.agent-rail-button[data-agent-status]').length === 1 && !document.querySelector('[data-agent-status=ready]')
             """)
         XCTAssertTrue(read)
         XCTAssertFalse(state.hasUnreadCompletion(for: tasks[2].id))
@@ -1070,7 +1204,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
-    func testSnapshotCarriesOnlyPresentationFlagNotBrowserContents() throws {
+    func testSnapshotCarriesDisplayHandleWithoutNativeTabIDOrBrowserContents() throws {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }
         let state = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: session)
@@ -1080,6 +1214,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         XCTAssertTrue(snapshot.isBrowserPresented)
         let encoded = try JSONEncoder().encode(snapshot)
         let body = try XCTUnwrap(String(data: encoded, encoding: .utf8))
+        XCTAssertEqual(snapshot.workspaceBrowsers.map(\.id), [try XCTUnwrap(session.humanTab(id: tabID)).workspaceID.uuidString])
         XCTAssertFalse(body.contains(tabID.uuidString))
         XCTAssertFalse(body.contains("browserSession"))
         XCTAssertEqual(try JSONDecoder().decode(WebUISnapshot.self, from: encoded), snapshot)
