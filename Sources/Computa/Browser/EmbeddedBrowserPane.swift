@@ -280,7 +280,7 @@ private func tabIconAsset(_ name: String, fallback: String) -> Image {
 }
 
 private struct LoadingFavicon: View {
-    private static let icon = tabIconAsset("favicon-loading", fallback: "circle.lefthalf.filled")
+    private static let icon = tabIconAsset("favicon-loading", fallback: "circle.dashed")
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var visible = false
 
