@@ -30,6 +30,7 @@ struct WorkspaceBrowserSnapshot: Codable, Equatable, Sendable {
 struct WebUISnapshot: Codable, Equatable, Sendable {
     var revision: UInt64 = 0
     let titlebarHeight: CGFloat?
+    let mixesBrowserTabsInSidebar: Bool
     let workspaceOrder: [WorkspaceTabID]
     let workspaceBrowsers: [WorkspaceBrowserSnapshot]
     let primaryBrowserID: String?
@@ -59,11 +60,12 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     @MainActor
     init(state: AppState, titlebarHeight: CGFloat? = nil) {
         self.titlebarHeight = titlebarHeight
+        mixesBrowserTabsInSidebar = state.mixesBrowserTabsInSidebar
         workspaceOrder = state.openWorkspaceTabs
-        workspaceBrowsers = state.browserSession.workspaceBrowserTabs.map {
+        workspaceBrowsers = mixesBrowserTabsInSidebar ? state.browserSession.workspaceBrowserTabs.map {
             WorkspaceBrowserSnapshot(id: $0.workspaceID.uuidString, title: $0.title, host: $0.url?.host,
                                      favicon: $0.favicon, isFaviconLoading: $0.isFaviconLoading)
-        }
+        } : []
         primaryBrowserID = state.primaryBrowserID?.uuidString
         selectedTaskID = state.selectedTaskID
         selectedEntryID = state.selectedEntryID

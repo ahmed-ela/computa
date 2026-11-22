@@ -155,6 +155,7 @@ export interface WorkspaceBrowser { id: string; title: string; host?: string; fa
 
 export interface AppSnapshot {
   revision: number;
+  mixesBrowserTabsInSidebar?: boolean;
   workspaceOrder?: WorkspaceTab[];
   workspaceBrowsers?: WorkspaceBrowser[];
   primaryBrowserID?: string;

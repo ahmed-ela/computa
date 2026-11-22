@@ -100,6 +100,7 @@ struct EmbeddedBrowserPane: View {
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .accessibilityIdentifier("embedded-browser-pane")
+        .focusedValue(\.browserPaneFocused, true)
         .focusedSceneValue(\.newBrowserTabInPane, { createTab() })
         .onAppear { synchronizeAddress() }
         .onChange(of: session.selectedTabID) { _, _ in

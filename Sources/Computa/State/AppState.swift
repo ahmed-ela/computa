@@ -105,6 +105,7 @@ final class AppState {
     var isTaskSidebarCollapsed: Bool {
         didSet { preferences.set(isTaskSidebarCollapsed, forKey: Self.sidebarCollapsedKey) }
     }
+    let mixesBrowserTabsInSidebar: Bool
     let workspaceTabs: WorkspaceTabs
     var isBrowserPresented = false {
         didSet { if isBrowserPresented != oldValue { workspaceTabs.onChange?() } }
@@ -190,6 +191,7 @@ final class AppState {
         preferences: UserDefaults = .standard,
         unreadCompletionStore: ChatUnreadCompletionStore? = nil,
         browserSession: EmbeddedBrowserSession? = nil,
+        mixesBrowserTabsInSidebar: Bool = false,
         websiteModelDiscovery: (@MainActor (String) async throws -> [WebsiteModelChoice])? = nil,
         websiteModeDiscovery: (@MainActor (String) async throws -> [WebsiteModeChoice])? = nil,
         cookieMaintenanceOnlyLaunch: Bool? = nil,
@@ -200,6 +202,7 @@ final class AppState {
         self.runtime = runtime
         self.permissionClient = permissionClient
         self.preferences = preferences
+        self.mixesBrowserTabsInSidebar = mixesBrowserTabsInSidebar
         workspaceTabs = WorkspaceTabs(defaults: preferences)
         isTaskSidebarCollapsed = preferences.bool(forKey: Self.sidebarCollapsedKey)
         self.unreadCompletionStore = unreadCompletionStore
@@ -264,8 +267,9 @@ final class AppState {
             })
         if let snapshot, !self.cookieMaintenanceOnlyLaunch {
             self.browserSession.restoreWorkspacePages(snapshot)
-            workspaceTabs.browserIsPrimary = snapshot.browserIsPrimary && self.browserSession.selectedTabID != nil
-            isBrowserPresented = snapshot.showsBrowserPane
+            let restoredPrimary = snapshot.browserIsPrimary && self.browserSession.selectedTabID != nil
+            workspaceTabs.browserIsPrimary = mixesBrowserTabsInSidebar && restoredPrimary
+            isBrowserPresented = snapshot.showsBrowserPane || (!mixesBrowserTabsInSidebar && restoredPrimary)
         }
         for tab in self.browserSession.workspaceBrowserTabs { workspaceTabs.open(.browser(tab.workspaceID)) }
         if !self.cookieMaintenanceOnlyLaunch {

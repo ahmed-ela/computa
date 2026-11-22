@@ -59,6 +59,7 @@ private struct InertTestHostPermissions: AutomationPermissionClient {
 
 extension FocusedValues {
     @Entry var newBrowserTabInPane: (() -> Void)?
+    @Entry var browserPaneFocused: Bool?
     @Entry var tabWorkspace: AppState?
 }
 
@@ -67,6 +68,13 @@ private struct WorkspaceCommands: Commands {
     let isTestHost: Bool
     @FocusedValue(\.newBrowserTabInPane) private var newBrowserTabInPane
     @FocusedValue(\.tabWorkspace) private var tabWorkspace
+
+    @FocusedValue(\.browserPaneFocused) private var browserPaneFocused
+
+    private var usesBrowserShortcuts: Bool {
+        !state.mixesBrowserTabsInSidebar && state.shouldPresentBrowserPane
+            && (browserPaneFocused == true || state.selectedWorkspaceTab == nil)
+    }
 
     private var workspaceUnavailable: Bool {
         isTestHost || state.approvalGateBlocksInteraction || state.presentedSheet != nil
@@ -87,10 +95,10 @@ private struct WorkspaceCommands: Commands {
         CommandGroup(replacing: .saveItem) {
             if let tabWorkspace {
                 Button("Close Tab") {
-                    if let tab = tabWorkspace.selectedWorkspaceTab { tabWorkspace.closeWorkspaceTab(tab) }
+                    if let tab = tabWorkspace.commandTab(inBrowserPane: usesBrowserShortcuts) { tabWorkspace.closeWorkspaceTab(tab) }
                 }
                 .keyboardShortcut("w", modifiers: .command)
-                .disabled(workspaceUnavailable || tabWorkspace.selectedWorkspaceTab == nil)
+                .disabled(workspaceUnavailable || tabWorkspace.commandTab(inBrowserPane: usesBrowserShortcuts) == nil)
             }
             Button("Close Window") {
                 NSApp.sendAction(#selector(NSWindow.performClose(_:)), to: nil, from: nil)
@@ -99,12 +107,12 @@ private struct WorkspaceCommands: Commands {
         }
         CommandGroup(after: .toolbar) {
             Group {
-                Button("Select Previous Workspace Tab") { state.selectAdjacentWorkspaceTab(.previous) }
+                Button("Select Previous Workspace Tab") { state.selectAdjacentWorkspaceTab(.previous, inBrowserPane: usesBrowserShortcuts) }
                     .keyboardShortcut("[", modifiers: [.command, .shift])
-                Button("Select Next Workspace Tab") { state.selectAdjacentWorkspaceTab(.next) }
+                Button("Select Next Workspace Tab") { state.selectAdjacentWorkspaceTab(.next, inBrowserPane: usesBrowserShortcuts) }
                     .keyboardShortcut("]", modifiers: [.command, .shift])
             }
-            .disabled(workspaceUnavailable || state.openWorkspaceTabs.isEmpty)
+            .disabled(workspaceUnavailable || state.commandTabs(inBrowserPane: usesBrowserShortcuts).isEmpty)
         }
     }
 }

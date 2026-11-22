@@ -25,7 +25,7 @@ export function workspaceItems(snapshot: AppSnapshot, history: boolean, search: 
     if (ref.kind === 'agent') {
       const task = agents.get(ref.id);
       if (task) items.push({ ref, task, title: task.title, searchText: [task.title, task.summary, task.workspace].join(' ') });
-    } else {
+    } else if (snapshot.mixesBrowserTabsInSidebar) {
       const browser = browsers.get(ref.id);
       if (browser) items.push({ ref, browser, title: browser.title, searchText: [browser.title, browser.host].join(' ') });
     }
@@ -60,6 +60,10 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, focusSearch, nat
     } });
   }, [active]);
   const items = workspaceItems(snapshot, history, search);
+  const noun = snapshot.mixesBrowserTabsInSidebar ? 'tabs' : 'chats';
+  const openLabel = 'Open ' + noun;
+  const searchLabel = history ? 'Search chat history' : 'Search ' + noun;
+  const historyLabel = history ? 'Show open ' + noun : 'Show chat history';
   const select = (item: Item) => {
     if (history) { setHistory(false); setSearch(''); post({ action: 'selectTask', id: item.ref.id }); }
     else post({ action: 'selectWorkspaceTab', tab: item.ref });
@@ -74,29 +78,29 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, focusSearch, nat
         <Icon name="sidebar" size={16} /></Button>}
     </div>
     <nav className="primary-nav" aria-label="Primary">
-      <Button variant="outline" className="nav-button new-task-button" aria-label="New agent" title="New agent" onClick={() => create('createTask')}>
+      <Button variant="ghost" className="nav-button new-agent-button" aria-label="New agent" title="New agent" onClick={() => create('createTask')}>
         <BotAdd16Filled /><span className={collapsed ? 'sr-only' : undefined}>New agent</span></Button>
-      <Button variant="outline" className="nav-button new-task-button" aria-label="New browser tab" title="New browser tab" onClick={() => create('newWorkspaceBrowserTab')}>
+      {snapshot.mixesBrowserTabsInSidebar && <Button variant="outline" className="nav-button new-task-button" aria-label="New browser tab" title="New browser tab" onClick={() => create('newWorkspaceBrowserTab')}>
         <span className="new-browser-tab-icon" aria-hidden="true" />
-        <span className={collapsed ? 'sr-only' : undefined}>New browser tab</span></Button>
+        <span className={collapsed ? 'sr-only' : undefined}>New browser tab</span></Button>}
       {snapshot.pendingApprovalCount > 0 && <div className="nav-button approval-nav" role="status"><Icon name="info" size={17} />
         <span className={collapsed ? 'sr-only' : undefined}>Native approval</span><span className="count-pill">{snapshot.pendingApprovalCount}</span></div>}
     </nav>
     <div className="task-search">
-      {!collapsed && <Input id="task-search" aria-label={history ? 'Search chat history' : 'Search tabs'}
-        placeholder={history ? 'Search chat history' : 'Search tabs'} value={search} onInput={event => setSearch((event.currentTarget as HTMLInputElement).value)} />}
+      {!collapsed && <Input id="task-search" aria-label={searchLabel}
+        placeholder={searchLabel} value={search} onInput={event => setSearch((event.currentTarget as HTMLInputElement).value)} />}
       <Button variant="ghost" size="icon-xs" className="sidebar-search-button" tabIndex={collapsed ? 0 : -1}
-        aria-label={history ? 'Search chat history' : 'Search tabs'} title={history ? 'Search chat history' : 'Search tabs'} onClick={focusSearch}>
+        aria-label={searchLabel} title={searchLabel} onClick={focusSearch}>
         <Icon name="search" size={15} /></Button>
       {search && <Button variant="ghost" size="icon-xs" className="clear-search" aria-label="Clear search" onClick={() => setSearch('')}><Icon name="x" size={13} /></Button>}
     </div>
     <div className="sidebar-section-heading workspace-list-heading">
-      <Button variant="ghost" size="icon-xs" aria-pressed={history} aria-label={history ? 'Show open tabs' : 'Show chat history'}
-        title={history ? 'Show open tabs' : 'Show chat history'} onClick={() => { setSearch(''); setHistory(!history); }}>
+      <Button variant="ghost" size="icon-xs" aria-pressed={history} aria-label={historyLabel}
+        title={historyLabel} onClick={() => { setSearch(''); setHistory(!history); }}>
         <Icon name={history ? 'sidebar' : 'history'} size={15} /></Button>
-      {!collapsed && <span>{history ? 'Chat history' : 'Open tabs'}</span>}
+      {!collapsed && <span>{history ? 'Chat history' : openLabel}</span>}
     </div>
-    <nav ref={tabList} className={'task-list' + (collapsed ? ' agent-rail' : '')} aria-label={history ? 'Chat history' : 'Open tabs'}>
+    <nav ref={tabList} className={'task-list' + (collapsed ? ' agent-rail' : '')} aria-label={history ? 'Chat history' : openLabel}>
       {items.map((item,index) => {
         const status = item.task && sidebarAgentStatus(item.task);
         const selected = item.browser ? snapshot.primaryBrowserID === item.ref.id : !snapshot.primaryBrowserID && snapshot.selectedTaskID === item.ref.id;
@@ -123,7 +127,7 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, focusSearch, nat
             title="Close tab" onClick={() => post({ action: 'closeWorkspaceTab', tab: item.ref })}><Icon name="x" size={12} /></Button>}
         </div>;
       })}
-      {!items.length && !collapsed && <div className="sidebar-empty">{search ? 'No matching tabs' : history ? 'No closed chats' : 'No open tabs'}</div>}
+      {!items.length && !collapsed && <div className="sidebar-empty">{search ? 'No matching ' + noun : history ? 'No closed chats' : 'No open ' + noun}</div>}
     </nav>
   </aside>;
 }
