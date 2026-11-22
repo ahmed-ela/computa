@@ -2,7 +2,7 @@ import 'octane/compiler/register';
 import { describe, expect, test } from 'bun:test';
 import { createElement as h } from 'octane';
 import { renderToStaticMarkup } from 'octane/server';
-import { isTaskActive, startSidebarClock, taskElapsedLabel, type SidebarTaskActivity } from '../src/sidebarActivity';
+import { sidebarAgentStatus, isTaskActive, startSidebarClock, taskElapsedLabel, type SidebarTaskActivity } from '../src/sidebarActivity';
 import { makePreviewSnapshot } from '../src/preview';
 const { TaskActivityIndicator } = await import('../src/TaskActivityIndicator');
 
@@ -13,6 +13,14 @@ const task = (changes: Partial<SidebarTaskActivity> = {}): SidebarTaskActivity =
 const render = (value: SidebarTaskActivity, now = 225) => renderToStaticMarkup(h(TaskActivityIndicator, { task: value, now })).html;
 
 describe('sidebar activity', () => {
+  test('the compact rail shows working turns and unread successful completions', () => {
+    const completed = { status: 'Completed', hasUnreadCompletion: true };
+    expect(sidebarAgentStatus(task(completed))).toBe('working');
+    expect(sidebarAgentStatus(task({ ...completed, isBusy: false }))).toBe('ready');
+    for (const status of ['Draft', 'Waiting', 'Failed', 'Completed']) {
+      expect(sidebarAgentStatus(task({ status, isBusy: false }))).toBeUndefined();
+    }
+  });
   test('elapsed time uses the current turn start even as activity updates arrive', () => {
     expect(taskElapsedLabel(task(), 225)).toBe('2m');
     expect(taskElapsedLabel(task({ updatedAt: 224 }), 225)).toBe('2m');

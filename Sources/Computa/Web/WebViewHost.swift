@@ -78,7 +78,7 @@ struct WebWorkspaceView: View {
             // controls above the approval shield and outside the web bridge.
             if state.presentedSheet == nil {
                 NativeRuntimeStatusBar(state: state)
-                    .frame(maxWidth: 190, alignment: .leading)
+                    .frame(maxWidth: state.isTaskSidebarCollapsed ? 72 : 190, alignment: .leading)
                     .frame(height: 34)
             }
         }
@@ -136,7 +136,7 @@ private struct CodexWebView: NSViewRepresentable {
         )
 
         let webView = WindowConfiguredWebView(frame: .zero, configuration: configuration)
-        webView.configureBrowserToggle(state: state)
+        webView.configureTitlebarControls(state: state)
         webView.navigationDelegate = context.coordinator
         webView.setValue(false, forKey: "drawsBackground")
         webView.allowsMagnification = false
@@ -182,13 +182,22 @@ private struct CodexWebView: NSViewRepresentable {
 
 @MainActor
 private final class WindowConfiguredWebView: WKWebView {
-    private let browserAccessory = NSTitlebarAccessoryViewController()
+    private var titlebarControls: [NSTitlebarAccessoryViewController] = []
 
-    func configureBrowserToggle(state: AppState) {
-        let control = NSHostingView(rootView: BrowserTitlebarToggle(state: state))
+    func configureTitlebarControls(state: AppState) {
+        titlebarControls = [
+            accessory(.left, SidebarTitlebarToggle(state: state)),
+            accessory(.right, BrowserTitlebarToggle(state: state))
+        ]
+    }
+
+    private func accessory(_ edge: NSLayoutConstraint.Attribute, _ content: some View) -> NSTitlebarAccessoryViewController {
+        let controller = NSTitlebarAccessoryViewController()
+        let control = NSHostingView(rootView: content)
         control.setFrameSize(control.fittingSize)
-        browserAccessory.view = control
-        browserAccessory.layoutAttribute = .right
+        controller.view = control
+        controller.layoutAttribute = edge
+        return controller
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -200,9 +209,12 @@ private final class WindowConfiguredWebView: WKWebView {
     }
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {
-        if let window, window !== newWindow, window.styleMask.contains(.titled),
-           let index = window.titlebarAccessoryViewControllers.firstIndex(of: browserAccessory) {
-            window.removeTitlebarAccessoryViewController(at: index)
+        if let window, window !== newWindow, window.styleMask.contains(.titled) {
+            for control in titlebarControls {
+                if let index = window.titlebarAccessoryViewControllers.firstIndex(of: control) {
+                    window.removeTitlebarAccessoryViewController(at: index)
+                }
+            }
         }
         super.viewWillMove(toWindow: newWindow)
     }
@@ -215,9 +227,31 @@ private final class WindowConfiguredWebView: WKWebView {
         window.titlebarAppearsTransparent = true
         window.styleMask.insert(.fullSizeContentView)
         window.minSize = NSSize(width: 980, height: 640)
-        if window.styleMask.contains(.titled), !window.titlebarAccessoryViewControllers.contains(browserAccessory) {
-            window.addTitlebarAccessoryViewController(browserAccessory)
+        guard window.styleMask.contains(.titled) else { return }
+        for control in titlebarControls where !window.titlebarAccessoryViewControllers.contains(control) {
+            window.addTitlebarAccessoryViewController(control)
         }
+    }
+}
+
+private struct SidebarTitlebarToggle: View {
+    @Bindable var state: AppState
+
+    var body: some View {
+        Button {
+            state.isTaskSidebarCollapsed.toggle()
+        } label: {
+            Image(systemName: "sidebar.left")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 28, height: 22)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .accessibilityIdentifier("task-sidebar-toggle")
+        .accessibilityLabel(state.isTaskSidebarCollapsed ? "Expand chat sidebar" : "Collapse chat sidebar")
+        .help(state.isTaskSidebarCollapsed ? "Expand chat sidebar" : "Collapse chat sidebar")
+        .disabled(state.presentedSheet != nil || state.approvalGateBlocksInteraction)
     }
 }
 

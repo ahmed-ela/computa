@@ -29,8 +29,8 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             state.isBrowserPresented = presented
             state.appearance = width == 980 ? .dark : .light
             await settleLayout(hosting)
-            XCTAssertEqual(window.titlebarAccessoryViewControllers.count, 1)
-            let accessory = try XCTUnwrap(window.titlebarAccessoryViewControllers.first)
+            XCTAssertEqual(window.titlebarAccessoryViewControllers.count, 2)
+            let accessory = try XCTUnwrap(window.titlebarAccessoryViewControllers.first { $0.layoutAttribute == .right })
             let frame = accessory.view.convert(accessory.view.bounds, to: nil)
             let trafficLight = close.convert(close.bounds, to: nil)
             XCTAssertEqual(accessory.layoutAttribute, .right)
@@ -94,6 +94,91 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                 XCTAssertEqual(session.humanTabs.map(\.id), [first, second])
             }
         }
+    }
+
+    @MainActor
+    func testCollapsedSidebarTracksWorkingAndUnreadChats() async throws {
+        let prefs = isolatedTestPreferences()
+        let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
+        defer { session.shutdown() }
+        let thread = UUID().uuidString.lowercased()
+        let tasks = [
+            AgentTask(title: "Inbox", summary: "", status: .draft, workspace: "", model: "local"),
+            AgentTask(title: "Research", summary: "", status: .running, workspace: "", model: "local"),
+            AgentTask(runtimeThreadID: thread, title: "Review", summary: "", status: .running, workspace: "", model: "local"),
+            AgentTask(title: "Earlier", summary: "", status: .completed, workspace: "", model: "local"),
+            AgentTask(title: "Failed", summary: "", status: .failed, workspace: "", model: "local")
+        ]
+        let state = AppState(tasks: tasks, preferences: prefs, browserSession: session)
+        let hosting = NSHostingView(rootView: WebWorkspaceView(state: state))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1080, height: 700),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        window.orderBack(nil)
+        defer { window.close() }
+        await settleLayout(hosting)
+        let chat = try XCTUnwrap(nativeViews(in: hosting).compactMap { $0 as? WKWebView }
+            .first { $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil })
+        let expanded = await waitForScriptBool(on: chat, script: "document.querySelectorAll('.task-row').length === 5 && !document.querySelector('.agent-rail')")
+        XCTAssertTrue(expanded)
+        let button = try XCTUnwrap(window.titlebarAccessoryViewControllers.first { $0.layoutAttribute == .left }?.view)
+        let bounds = button.convert(button.bounds, to: nil)
+        let zoom = try XCTUnwrap(window.standardWindowButton(.zoomButton))
+        let light = zoom.convert(zoom.bounds, to: nil)
+        XCTAssertGreaterThanOrEqual(bounds.minX, light.maxX)
+        XCTAssertLessThan(bounds.minX - light.maxX, 24)
+        XCTAssertEqual(bounds.midY, light.midY, accuracy: 3)
+        let toggle = NSPoint(x: bounds.midX, y: bounds.midY)
+        try await clickInWindow(at: toggle, window: window)
+        XCTAssertTrue(state.isTaskSidebarCollapsed)
+        let working = await waitForScriptBool(on: chat, script: """
+            document.querySelectorAll('[data-agent-status="working"]').length === 2
+                && document.querySelectorAll('.bot-sparkle-star').length === 4
+                && getComputedStyle(document.querySelector('.bot-sparkle-star')).animationName
+                    === (matchMedia('(prefers-reduced-motion: reduce)').matches ? 'none' : 'bot-sparkle-twinkle')
+                && document.querySelector('.sidebar').getBoundingClientRect().width === 72
+                && document.querySelector('.toolbar-title-block').getBoundingClientRect().left >= \(bounds.maxX)
+                && !document.querySelector('#task-search')
+            """)
+        XCTAssertTrue(working)
+        let restored = AppState(tasks: [], preferences: prefs, browserSession: session)
+        XCTAssertTrue(restored.isTaskSidebarCollapsed)
+
+        state.apply(.taskCompletionObserved(taskID: tasks[2].id, threadID: thread, turnID: UUID().uuidString.lowercased()))
+        state.apply(.taskStatusChanged(taskID: tasks[2].id, status: .completed))
+        let ready = await waitForScriptBool(on: chat, script: """
+            document.querySelectorAll('.agent-rail-button').length === 2
+                && document.querySelector('[data-agent-status="ready"]')?.getAttribute('aria-label') === 'Review — Ready to read'
+                && (() => {
+                    const badge = document.querySelector('[data-agent-status="ready"] .agent-ready-badge');
+                    if (!badge) return false;
+                    const circle = badge.querySelector('circle').getBoundingClientRect();
+                    const check = badge.querySelector('path').getBoundingClientRect();
+                    return check.width > 3 && check.width < circle.width
+                        && Math.abs((circle.left + circle.right - check.left - check.right) / 2) < 0.1
+                        && Math.abs((circle.top + circle.bottom - check.top - check.bottom) / 2) < 0.1;
+                })()
+                && !document.querySelector('[data-agent-status="ready"] .bot-sparkle-star')
+            """)
+        XCTAssertTrue(ready)
+        _ = try await chat.evaluateJavaScript("document.querySelector('[data-agent-status=ready]').click()")
+        let read = await waitForScriptBool(on: chat, script: """
+            document.querySelector('.toolbar-title-block strong')?.textContent === 'Review'
+                && document.querySelectorAll('.agent-rail-button').length === 1 && !document.querySelector('[data-agent-status=ready]')
+            """)
+        XCTAssertTrue(read)
+        XCTAssertFalse(state.hasUnreadCompletion(for: tasks[2].id))
+
+        try await clickInWindow(at: toggle, window: window)
+        let reopened = await waitForScriptBool(on: chat, script: "!!document.querySelector('#task-search') && !document.querySelector('.agent-rail')")
+        XCTAssertTrue(reopened)
+        try await clickInWindow(at: toggle, window: window)
+        _ = try await chat.evaluateJavaScript("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true, bubbles: true })); true")
+        let searchFocused = await waitForScriptBool(on: chat, script: "document.activeElement?.id === 'task-search'")
+        XCTAssertTrue(searchFocused)
+        XCTAssertFalse(state.isTaskSidebarCollapsed)
     }
 
     @MainActor

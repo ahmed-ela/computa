@@ -8,6 +8,11 @@ export function isTaskActive(task: SidebarTaskActivity): boolean {
   return task.status === 'Running' || task.isBusy;
 }
 
+export function sidebarAgentStatus(task: SidebarTaskActivity): 'working' | 'ready' | undefined {
+  if (isTaskActive(task)) return 'working';
+  if (task.status === 'Completed' && task.hasUnreadCompletion) return 'ready';
+}
+
 export function taskElapsedLabel(task: SidebarTaskActivity, now: number): string {
   const validTime = (value: number | undefined): value is number =>
     value !== undefined && Number.isFinite(value) && value >= 0;

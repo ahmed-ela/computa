@@ -38,6 +38,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     let websiteModelsError: String?
     let showToolPayloads: Bool
     let isInspectorPresented: Bool
+    let isTaskSidebarCollapsed: Bool
     let isBrowserPresented: Bool
     let isReviewPresented: Bool
     let review: AppReviewState?
@@ -98,6 +99,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         websiteModelsError = state.websiteModelsError
         showToolPayloads = state.showToolPayloads
         isInspectorPresented = state.isInspectorPresented
+        isTaskSidebarCollapsed = state.isTaskSidebarCollapsed
         isBrowserPresented = state.isBrowserPresented
         isReviewPresented = state.isReviewPresented
         review = state.review

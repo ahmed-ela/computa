@@ -1,8 +1,9 @@
-import { isTaskActive, taskElapsedLabel, type SidebarTaskActivity } from './sidebarActivity';
+import { sidebarAgentStatus, taskElapsedLabel, type SidebarTaskActivity } from './sidebarActivity';
 
 export function TaskActivityIndicator({ task, now }: { task: SidebarTaskActivity; now: number }) {
-  const active = isTaskActive(task);
-  const unread = !active && task.status === 'Completed' && task.hasUnreadCompletion;
+  const status = sidebarAgentStatus(task);
+  const active = status === 'working';
+  const unread = status === 'ready';
   const statusDot = !active && task.status !== 'Completed' && task.status !== 'Running';
   return <>
     {active ? <span className="task-row-elapsed" title={`${task.status} · ${taskElapsedLabel(task, now)}`} aria-hidden="true">{taskElapsedLabel(task, now)}</span> : null}

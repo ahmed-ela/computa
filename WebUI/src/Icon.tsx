@@ -9,6 +9,7 @@ import Ellipsis from '@octanejs/lucide/icons/ellipsis';
 import Globe from '@octanejs/lucide/icons/globe';
 import GripVertical from '@octanejs/lucide/icons/grip-vertical';
 import Monitor from '@octanejs/lucide/icons/monitor';
+import PanelLeft from '@octanejs/lucide/icons/panel-left';
 import PanelRight from '@octanejs/lucide/icons/panel-right';
 import Pause from '@octanejs/lucide/icons/pause';
 import Pencil from '@octanejs/lucide/icons/pencil';
@@ -39,6 +40,7 @@ const icons = {
   resume: Play,
   search: Search,
   send: ArrowUp,
+  sidebar: PanelLeft,
   sparkles: Sparkles,
   steer: CornerUpLeft,
   terminal: Terminal,

@@ -9,7 +9,7 @@ struct NativeRuntimeStatusBar: View {
     @State private var approvalErrorPresented = false
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: state.isTaskSidebarCollapsed ? 4 : 10) {
             if state.approvalGateBlocksInteraction {
                 // General Settings yields to approvals. Its gear can still open
                 // the native access settings without covering the approval card.
@@ -35,22 +35,28 @@ struct NativeRuntimeStatusBar: View {
             if state.accessMode == .askEveryTime, !state.resolvingApprovalIDs.isEmpty {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.mini)
-                    Text("Resolving approval…").font(.system(size: 11))
+                    if !state.isTaskSidebarCollapsed { Text("Resolving approval…").font(.system(size: 11)) }
                 }
                 .foregroundStyle(.secondary)
-                .accessibilityElement(children: .combine)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Resolving approval…")
             }
 
             if let error = state.automaticApprovalError {
                 Button {
                     approvalErrorPresented.toggle()
                 } label: {
-                    Label("Action paused", systemImage: "exclamationmark.triangle")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.orange)
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.triangle")
+                        if !state.isTaskSidebarCollapsed { Text("Action paused") }
+                    }
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
                 }
                 .buttonStyle(.plain)
                 .disabled(state.approvalGateBlocksInteraction)
+                .accessibilityLabel("Action paused")
+                .help("Action paused")
                 .popover(isPresented: $approvalErrorPresented) {
                     VStack(alignment: .leading, spacing: 9) {
                         Text("Action could not be approved").font(.headline)
@@ -64,12 +70,12 @@ struct NativeRuntimeStatusBar: View {
                 }
             }
 
-            Spacer(minLength: 12)
+            if !state.isTaskSidebarCollapsed { Spacer(minLength: 12) }
 
             // Temporarily hide context usage from the status bar.
             // ContextUsageIndicator(state: state)
         }
-        .padding(.horizontal, 18)
+        .padding(.horizontal, state.isTaskSidebarCollapsed ? 4 : 18)
         .frame(maxWidth: .infinity)
         .lineLimit(1)
         .disabled(state.presentedSheet != nil)

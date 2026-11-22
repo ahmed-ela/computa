@@ -170,6 +170,7 @@ export interface AppSnapshot {
   websiteModelsError?: string;
   showToolPayloads: boolean;
   isInspectorPresented: boolean;
+  isTaskSidebarCollapsed?: boolean;
   isBrowserPresented: boolean;
   isSettingsPresented: boolean;
   isReviewPresented?: boolean;
@@ -195,6 +196,7 @@ export type NativeAction =
   | { action: 'steerQueuedPrompt'; taskID: string; id: string }
   | { action: 'resumeQueue'; taskID: string }
   | { action: 'toggleInspector' }
+  | { action: 'setTaskSidebarCollapsed'; collapsed: boolean }
   | { action: 'toggleBrowser' }
   | { action: 'toggleReview' }
   | { action: 'setReviewScope'; taskID: string; scope: ReviewScope }
