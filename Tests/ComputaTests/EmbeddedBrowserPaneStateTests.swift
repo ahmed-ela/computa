@@ -136,13 +136,37 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let working = await waitForScriptBool(on: chat, script: """
             document.querySelectorAll('[data-agent-status="working"]').length === 2
                 && document.querySelectorAll('.bot-sparkle-star').length === 4
-                && getComputedStyle(document.querySelector('.bot-sparkle-star')).animationName
-                    === (matchMedia('(prefers-reduced-motion: reduce)').matches ? 'none' : 'bot-sparkle-twinkle')
+                && getComputedStyle(document.querySelector('.bot-sparkle-pass')).animationName
+                    === (matchMedia('(prefers-reduced-motion: reduce)').matches ? 'none' : 'bot-sparkle-pass')
                 && document.querySelector('.sidebar').getBoundingClientRect().width === 72
                 && document.querySelector('.toolbar-title-block').getBoundingClientRect().left >= \(bounds.maxX)
                 && !document.querySelector('#task-search')
             """)
         XCTAssertTrue(working)
+        let motionMatches = try await chat.evaluateJavaScript("""
+            (() => {
+                const icon = document.querySelector('[data-agent-status="working"] .agent-status-icon');
+                const pass = icon.querySelector('.bot-sparkle-pass');
+                const [animation] = pass.getAnimations();
+                const pose = selector => new DOMMatrix(getComputedStyle(pass.querySelector(selector)).transform);
+                if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
+                    return !animation && pose('.sparkle-front').e === 17.5;
+                }
+                animation.pause();
+                try {
+                    for (const [time, x, y] of [[0, 17.5, 17.5], [800, 16.703, 14.578], [1599, 14.5, 12.5]]) {
+                        animation.currentTime = time;
+                        const front = pose('.sparkle-front'), back = pose('.sparkle-back');
+                        if (Math.abs(front.e - x) > .02 || Math.abs(front.f - y) > .02
+                            || Math.abs(front.e + back.e - 32) > .01 || Math.abs(front.f + back.f - 30) > .01
+                            || front.b || front.c || back.b || back.c
+                            || (time === 0 ? front.a >= back.a : front.a <= back.a)) return false;
+                    }
+                    return true;
+                } finally { animation.play(); }
+            })()
+            """) as? Bool
+        XCTAssertEqual(motionMatches, true, "The stars should swap sizes and stay upright around a fixed midpoint.")
         let restored = AppState(tasks: [], preferences: prefs, browserSession: session)
         XCTAssertTrue(restored.isTaskSidebarCollapsed)
 

@@ -101,13 +101,32 @@ kbd { font: inherit; font-size: 10px; color: var(--text-tertiary); }
 .agent-status-icon .agent-ready-badge { width: 12px; height: 12px; }
 .agent-ready-badge circle { fill: currentColor; stroke: var(--sidebar); stroke-width: 2; }
 .agent-ready-badge path { stroke: var(--text-inverse); transform-box: view-box; transform-origin: center; transform: scale(1.45); }
+@property --sparkle-phase {
+  syntax: "<angle>";
+  inherits: true;
+  initial-value: 0deg;
+}
+.bot-sparkle-pass { --sparkle-phase: 0deg; }
+.sparkle-track {
+  --side: 1;
+  --along: calc(var(--side) * cos(var(--sparkle-phase)));
+  --across: calc(var(--side) * sin(var(--sparkle-phase)));
+  /* Project the pass onto a narrow diagonal ellipse about (16, 15). */
+  --x: calc(16px + 1.5px * var(--along) + .703px * var(--across));
+  --y: calc(15px + 2.5px * var(--along) - .422px * var(--across));
+  --size: calc((3 - .5 * var(--along) + .48 * var(--across)) / 3.5);
+  transform: translate(var(--x), var(--y)) scale(var(--size));
+  stroke: black;
+  stroke-width: calc(1.9px / var(--size));
+  stroke-linejoin: round;
+  paint-order: stroke fill;
+}
+.sparkle-back { --side: -1; }
+.sparkle-front { stroke-width: calc(.88px / var(--size)); }
 @media (prefers-reduced-motion: no-preference) {
-  .bot-sparkle-star { transform-box: fill-box; transform-origin: center; animation: bot-sparkle-twinkle 2400ms ease-in-out infinite; }
-  .bot-sparkle-star-small { animation-delay: 360ms; }
-  @keyframes bot-sparkle-twinkle {
-    0%, 36%, 100% { transform: scale(1); opacity: 1; }
-    16% { transform: scale(.62); opacity: .45; }
-  }
+  /* The upright stars are identical. Each half-turn ends in the next one's starting pose. */
+  .bot-sparkle-pass { animation: bot-sparkle-pass 1.6s linear infinite; }
+  @keyframes bot-sparkle-pass { to { --sparkle-phase: 180deg; } }
 }
 
 /* Keep the work itself visually primary. */

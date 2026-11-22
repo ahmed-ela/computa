@@ -103,7 +103,7 @@ function CollapsedTaskList({ snapshot }: { snapshot: AppSnapshot }) {
           className="agent-rail-button" data-agent-status={status}
           aria-current={task.id === snapshot.selectedTaskID ? 'page' : undefined}
           aria-label={label} title={label} onClick={() => post({ action: 'selectTask', id: task.id })}>
-          <AgentStatusIcon working={status === 'working'} />
+          <AgentStatusIcon working={status === 'working'} taskID={task.id} />
         </Button>;
       })}
     </nav>
