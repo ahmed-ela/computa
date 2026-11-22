@@ -1,6 +1,7 @@
 import AutomationCore
 import CoreFoundation
 import Foundation
+import OSLog
 
 /// Strict model-facing contract for Computa's own browser, independent of
 /// native computer/window input.
@@ -36,108 +37,44 @@ enum EmbeddedBrowserTools {
             tool)
     }
 
-    private static func specification(
-        _ name: String, _ description: String, _ properties: [String: Any] = [:],
-        _ required: [String] = []
-    ) -> [String: Any] {
-        let schema: [String: Any] = ["type": "object", "properties": properties,
-            "required": required, "additionalProperties": false]
-        return ["type": "function", "name": name, "description": description, "inputSchema": schema]
+    // JSONSerialization creates immutable containers by default. Callers receive
+    // value-type dictionaries and can project a schema without changing the catalog.
+    private struct Catalog: @unchecked Sendable {
+        let tools: [[String: Any]]
+        let legacyRead: [String: Any]
+        let legacyWait: [String: Any]
+        let wait: [String: Any]
     }
 
-    /// Frozen pre-split contract for saved native catalogs and completed history.
-    /// New catalogs advertise fresh reads and continuation as distinct tools.
-    static var legacyReadDefinition: [String: Any] {
-        let readCursor: [String: Any] = ["type": ["string", "null"], "minLength": 1,
-            "description": "Omit this field on the first page or a fresh read; null starts fresh and never resumes a previous cursor. Continue with the exact nonempty next_cursor from the latest page in the current turn. Prefer cursor alone: repeated view/query must match the captured filters exactly; changing them requires a fresh read. Each successful continuation, fresh read or current_observation replaces older cursors; admitted input invalidates them. Never send an empty or invented cursor. At most 2048 UTF-8 bytes."]
-        let query: [String: Any] = ["type": "string", "minLength": 1,
-            "description": "Local filter of captured fields, including search-box values; not website Search or result-count evidence. At most 2048 UTF-8 bytes. Omit this field for an unfiltered read; never send an empty string."]
-        let readView: [String: Any] = ["type": "string", "enum": ["overview", "content", "all", "headings", "links"]]
-        return specification(
-            "browser_read",
-            "Read the bound built-in tab. Use content for readable text and non-navigation listbox options, including messages/documents; overview for controls/headings and a bounded text sample; all for structural troubleshooting, not page progression. A fresh read restarts page one: omit cursor or use null, with optional view/query. Only browser_read(cursor=next_cursor) advances. Prefer cursor alone; any repeated view/query must match its captured filters exactly. To change filters, omit cursor. Never use computer_v2_continue. READ_SELECTION_EVIDENCE counts and query matches describe the local capture, never website search results or absence. Use browser_click for observed enabled links (including follow_link=true) and controls only when actions contains AXPress; browser_fill requires enabled=true and settable=true. actions=[] cannot be clicked; enabled settable fields can still be filled using their fill_ref. Containers do not inherit child actions. For popup-only links without AXPress, browser_navigate may use the complete exact observed href in the same tab; never reconstruct href_fragment/href_omitted. Use overview/all with observed text to find form controls; links selects links only. Only published click_ref/fill_ref values authorize input; choose the intended row without repeated unchanged reads. Same-capture cursor pages retain earlier refs within the 120-ref FIFO bound. Fresh reads retain prior refs only when the same native target is corroborated without renewing expiry; changed/absent targets expire. Input consumes all refs.",
-            ["view": readView, "query": query, "cursor": readCursor])
-    }
+    private static let catalog: Catalog? = {
+        #if SWIFT_PACKAGE
+        let bundle = Bundle.module
+        #else
+        let bundle = Bundle.main
+        #endif
+        guard let url = bundle.url(forResource: "BrowserToolCatalog", withExtension: "json"),
+              let data = try? Data(contentsOf: url),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let tools = object["tools"] as? [[String: Any]],
+              tools.count == names.count, Set(tools.compactMap { $0["name"] as? String }) == names,
+              let wait = tools.first(where: { $0["name"] as? String == "browser_wait" }),
+              let legacyRead = object["legacyRead"] as? [String: Any],
+              let legacyWait = object["legacyWait"] as? [String: Any] else {
+            Logger(subsystem: "com.ahmedelamin.LocalCodex", category: "browser").fault("Bundled browser tool catalog could not be loaded.")
+            return nil
+        }
+        return Catalog(tools: tools, legacyRead: legacyRead, legacyWait: legacyWait, wait: wait)
+    }()
 
-    /// Frozen pre-document-change wait contract for saved native catalogs.
-    static var legacyWaitDefinition: [String: Any] {
-        let waitText: [String: Any] = ["type": "string", "minLength": 1,
-            "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200B\\u2028\\u2029\\u202F\\u205F\\u3000]",
-            "description": "Nonblank visible text to wait for, at most 512 UTF-8 bytes. Omit text to wait for readable text or controls outside the footer after document readiness; never send an empty or whitespace-only string."]
-        return specification("browser_wait",
-            "Wait by DOM mutation and document events until visible semantic text contains text. When text is omitted, wait for readable text or controls outside the footer after document readiness; a title-only, empty or footer-only shell is not ready. Read-only and bounded; matched=false at deadline. This readiness is not proof that requested content exists. Does not refresh or replay actions.",
-            ["text": waitText, "timeout_ms": ["type": "integer", "minimum": 1, "maximum": 10_000]])
-    }
-
-    static var waitDefinition: [String: Any] {
-        let old = legacyWaitDefinition["inputSchema"] as! [String: Any]
-        let oldProperties = old["properties"] as! [String: Any]
-        let after: [String: Any] = ["type": "string", "minLength": 1, "maxLength": 36,
-            "description": "Exact snapshot_id from the latest published page in this turn. Wait for native document identity or URL to change, then navigation readiness within one deadline. Not a DOM-change or task-success test. Cannot be combined with text."]
-        var result = specification("browser_wait",
-            "Bounded event-driven wait. after_snapshot waits for a native document or URL change from the latest page, then navigation readiness; use it after dispatched input when navigation is pending. text waits for visible semantic text. With neither, wait for readable content after readiness; an already-ready page matches immediately. text and after_snapshot are exclusive. Timeout is unresolved, not denied access. No capture, new references, input replay or verified outcome from after_snapshot.",
-            oldProperties.merging(["after_snapshot": after], uniquingKeysWith: { _, right in right }))
-        var schema = result["inputSchema"] as! [String: Any]
-        schema["oneOf"] = [old, ["type": "object", "properties": ["after_snapshot": after,
-            "timeout_ms": oldProperties["timeout_ms"]!], "required": ["after_snapshot"], "additionalProperties": false]]
-        result["inputSchema"] = schema
-        return result
-    }
-
-    static func definitions() -> [[String: Any]] {
-        let cursor: [String: Any] = ["type": ["string", "null"], "minLength": 1,
-            "description": "Omit this field on the first page or a fresh inventory; null has the same fresh-inventory meaning and never resumes a previous cursor. Only copy an exact nonempty next_cursor returned by browser_tabs in the current turn to continue; never send an empty string or an invented cursor. At most 2048 UTF-8 bytes."]
-        let query: [String: Any] = ["type": "string", "minLength": 1,
-            "description": "Local filter of captured fields, including search-box values; not website Search or result-count evidence. At most 2048 UTF-8 bytes. Omit this field for an unfiltered read; never send an empty string."]
-        let readView: [String: Any] = ["type": "string", "enum": ["overview", "content", "all", "headings", "links"]]
-        let url: [String: Any] = ["type": "string", "minLength": 1, "description": "Copy a supplied or observed URL exactly, preserving punctuation. Without a supplied URL, use a user-named known service's official homepage or sign-in entrypoint, then observed controls. Never invent deep links, account paths, message IDs or address variants."]
-        let clickRef: [String: Any] = ["type": "string", "minLength": 1, "maxLength": 128,
-            "description": "Copy the exact click_ref on the intended current published row. Never construct it or use a fill_ref/native reference. The host resolves and validates the same observed target; the token never searches for a target."]
-        let fillRef: [String: Any] = ["type": "string", "minLength": 1, "maxLength": 128,
-            "description": "Copy the exact fill_ref on the intended current published field. Never construct it or use a click_ref/native reference. Admitted input consumes all current references."]
-        return [
-            specification(
-                "browser_tabs",
-                "List human tabs in Computa's built-in browser, including current logins, within an 8KB page. Omit cursor or use null for a fresh first page. Empty inventory means no matching user tabs were listed, not denied access; use browser_open for a named known service's official entrypoint. Continue with browser_tabs(cursor=next_cursor) alone; computer_v2_continue cannot consume this inventory cursor. Inference and app-control pages are excluded. Use an observed tab_id to bind; busy tabs belong to another task.",
-                ["cursor": cursor]),
-            specification(
-                "browser_open",
-                "Create and bind one background task-owned tab in Computa's built-in browser, sharing its signed-in profile. A user-provided URL is not required for a user-named known service's official homepage or sign-in entrypoint. Preserve any supplied URL exactly; use observed controls for deeper pages. Only this created tab is cleaned up at turn end. Use available current_observation; otherwise browser_read. Completion is not the requested website outcome.",
-                ["url": url], ["url"]),
-            specification(
-                "browser_bind",
-                "Bind the exact observed available human built-in tab without activating or navigating it. Existing user tabs are preserved at cleanup. Use available current_observation; otherwise browser_read.",
-                ["tab_id": ["type": "string", "minLength": 1]], ["tab_id"]),
-            specification(
-                "browser_navigate",
-                "Navigate the currently bound built-in tab once. A timeout never replays navigation. Use available current_observation of the new document; otherwise browser_read. Never repeat completed navigation because observation failed.",
-                ["url": url], ["url"]),
-            specification(
-                "browser_read",
-                "Read the bound built-in tab. Use content for readable text and non-navigation listbox options, including messages/documents; overview for controls/headings and a bounded text sample; all for structural troubleshooting, not page progression. This is a fresh read with optional view/query and restarts page one. Use browser_continue(cursor=next_cursor) to advance the same capture; changing filters requires this fresh tool. Never use computer_v2_continue for browser pages. READ_SELECTION_EVIDENCE counts and query matches describe the local capture, never website search results or absence. Use browser_click for observed enabled links (including follow_link=true) and controls only when actions contains AXPress; browser_fill requires enabled=true and settable=true. actions=[] cannot be clicked; enabled settable fields can still be filled using their fill_ref. Containers do not inherit child actions. For popup-only links without AXPress, browser_navigate may use the complete exact observed href in the same tab; never reconstruct href_fragment/href_omitted. Use overview/all with observed text to find form controls; links selects links only. Only published click_ref/fill_ref values authorize input; choose the intended row without repeated unchanged reads. Same-capture cursor pages retain earlier refs within the 120-ref FIFO bound. Fresh reads retain prior refs only when the same native target is corroborated without renewing expiry; changed/absent targets expire. Input consumes all refs.",
-                ["view": readView, "query": query]),
-            specification(
-                "browser_continue",
-                "Continue the bound built-in browser page using only browser_continue(cursor=next_cursor). Copy the latest page's exact nonempty next_cursor in this turn; view/query are retained and cannot be changed here. A fresh browser_read changes filters and restarts page one. Successful continuation, fresh read or current_observation replaces older cursors; admitted input invalidates them. Never use inventory or computer_v2_continue cursors. A rejected cursor never starts a fresh read or input.",
-                ["cursor": ["type": "string", "minLength": 1, "description": "Exact nonempty next_cursor from the latest browser page; at most 2048 UTF-8 bytes. Required; null never starts a fresh read."]], ["cursor"]),
-            specification(
-                "browser_click",
-                "Press exactly one observed row with enabled=true and actions=[\"AXPress\"] using its current click_ref. Choose the intended row by its observed label and action. actions=[] is not pressable: never click a content container or substitute its parent/child. Find the actual control using browser_read(view=overview or all, query=observed text). An observed existing-account selector may be used within the authorized service/task and approvals; ask for help when credentials, MFA or account ambiguity actually require it, not because they might appear later. Semantic DOM activation, with stale-node and obstruction checks; not native global input. Returns dispatch plus a fresh current_observation when available; inspect it for the result and use only its new references. If dispatched input leaves the page unchanged, wait/read instead of clicking again. After stale errors use available current_observation; otherwise browser_read. Never repeat an input because its following observation failed. Never retry a timed-out mutation.",
-                ["click_ref": clickRef], ["click_ref"]),
-            specification(
-                "browser_fill",
-                "Replace one observed field with enabled=true and settable=true and dispatch input/change events; no Enter key or submit-control click is sent. Page handlers may react to these events. Use that field's current fill_ref, never a label or parent. Uses one current observed capability; password fields are unavailable. Returns a fresh current_observation when available: compare its field value with the complete requested value before submitting. A distinct observed enabled submit/Search control remains available if needed within the task's scope and approvals. Use only new references. If unavailable, browser_read; the fill was still dispatched and must not be repeated.",
-                ["fill_ref": fillRef].merging(["text": ["type": "string", "description": "Copy the complete requested field value verbatim, including prefixes, spaces and punctuation. Do not infer a shorter identifier format. Transform only when the task explicitly requires it."]], uniquingKeysWith: { _, right in right }),
-                ["fill_ref", "text"]),
-            waitDefinition,
-            specification(
-                "browser_close",
-                "Release the bound built-in tab. Closes only this task's created tab; a bound existing user tab stays open."
-            ),
-        ]
-    }
+    static var legacyReadDefinition: [String: Any] { catalog?.legacyRead ?? [:] }
+    static var legacyWaitDefinition: [String: Any] { catalog?.legacyWait ?? [:] }
+    static var waitDefinition: [String: Any] { catalog?.wait ?? [:] }
+    static func definitions() -> [[String: Any]] { catalog?.tools ?? [] }
 
     static func validate(tool: String, arguments: [String: Any]) throws {
+        guard catalog != nil else {
+            throw BrowserTabBrokerError.invalidRead("Computa’s built-in browser tool catalog is unavailable.")
+        }
         guard names.contains(tool) else {
             throw BrowserTabBrokerError.invalidRead("Unknown built-in browser tool.")
         }

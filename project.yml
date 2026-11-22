@@ -53,6 +53,8 @@ targets:
       - path: Sources/Computa/Resources/BrowserModels
         type: folder
         buildPhase: resources
+      - path: Sources/Computa/Resources/BrowserToolCatalog.json
+        buildPhase: resources
       - path: Sources/Computa/Resources/Tokenizers
         type: folder
         buildPhase: resources

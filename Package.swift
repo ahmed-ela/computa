@@ -26,6 +26,7 @@ let package = Package(
                 .copy("Resources/AgentRuntime"),
                 .copy("Resources/MLXServer"),
                 .copy("Resources/BrowserModels"),
+                .copy("Resources/BrowserToolCatalog.json"),
                 .copy("Resources/Tokenizers")
             ]
         ),

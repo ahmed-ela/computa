@@ -4,6 +4,31 @@ Status: in progress. The running installed Computa app remains the verified Swif
 
 The migration covers first-party production code in the native app and computer harness, chat runtime, local inference and grounding workers, browser extension, WebUI, website build, setup/distribution tooling and executable benchmark utilities. The exact upstream App Server is already Rust and continues to own existing private SQLite/rollout history. CSS, images, model weights and protocol data remain resources. Chrome requires generated WebAssembly bindings and a small JavaScript API/DOM boundary; permission, ownership, retry, provider selection and session state decisions belong to Rust.
 
+### Shipping app: built-in browser tool catalog
+
+The [Rust catalog builder](../crates/computa-contracts/src/browser_tools.rs) constructs the ten model-facing browser tool schemas and the frozen read and wait schemas for saved chats. They depend only on the contract version, so the app loads a [generated JSON resource](../Sources/Computa/Resources/BrowserToolCatalog.json) once. Swift continues to validate live arguments, resolve observed references, request approvals, and dispatch to WebKit.
+
+After editing the Rust definitions, regenerate the resource from the repository root and run its release check:
+
+```sh
+catalog=Sources/Computa/Resources/BrowserToolCatalog.json
+cargo run --locked --quiet -p computa-contracts --bin browser-tool-catalog > "$catalog.tmp" && mv "$catalog.tmp" "$catalog"
+cargo test --locked -p computa-contracts --bin browser-tool-catalog
+```
+
+On November 21, 2026, the generated catalog matched the pre-migration Swift builder at `7c8cc95` for every field, all array ordering, and both frozen schemas. Two separate chat turns ran in side-by-side local Release installations with an isolated profile and a scripted OpenCode-compatible provider. In each run the provider fetched the ten schemas over MCP, opened a loopback flight form, read its controls, filled `UA 123`, clicked the observed submit button, waited for the result, and read the server-generated confirmation. Computa requested approval for open, fill, and click. The chat output matched the fixture server’s receipt on both builds.
+
+Release measurements used an Apple M4 with 16 GB RAM, macOS 26.5.1 and Xcode 26.6. Each run built the same arm64 Computa scheme at the same path, with fresh DerivedData, a seeded Sparkle checkout, the same bundled agent runtime, and the release worker’s three-job configuration. Wall time includes resource copying and local code signing. Swift time is Xcode’s `SwiftCompile` total for its two targets. The timed stage ends before distribution signing, notarization, and publication.
+
+| Measured stage | Swift catalog, two runs | Rust catalog, two runs | Mean change |
+| --- | --- | --- | --- |
+| Clean Release build | 288.11s, 268.90s | 257.79s, 247.33s | −25.95s |
+| Swift compilation | 188.773s, 188.405s | 189.252s, 184.910s | −1.508s |
+
+The new release freshness check took 13.11s with an empty Cargo target directory and 0.20s with its cache on Rust 1.95. It runs before the timed Xcode stage. The Swift compile times overlap, and two runs per version on a shared Mac are insufficient to attribute the overall build difference to this migration.
+
+### Migration scope
+
 | Existing responsibility | Rust destination | Qualification required |
 |---|---|---|
 | Models, native actions, tools, bridge and App Server wire contracts | `computa-contracts` | Validate untrusted JSON, preserve persisted IDs and exact serialization |

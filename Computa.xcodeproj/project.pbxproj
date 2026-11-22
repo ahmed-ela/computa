@@ -204,6 +204,7 @@
 		736FE969BBACEE59E53C2DB2 /* ChatGPTRequestMetadataDiagnostic.swift in Sources */ = {isa = PBXBuildFile; fileRef = A699A3A6EB07B6FF37616959 /* ChatGPTRequestMetadataDiagnostic.swift */; };
 		73F4D80442CBDC8FD7F72B88 /* NativeMessageEvidenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADEC149AAF9CD8A873A8CD5A /* NativeMessageEvidenceTests.swift */; };
 		7475FE35CAC19E4FAD9A82A8 /* ChatGPTRequestCookieBudgetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B550A55B732B67B8191A60D /* ChatGPTRequestCookieBudgetTests.swift */; };
+		74AEC2483312C9A16EBF68CD /* BrowserToolCatalog.json in Resources */ = {isa = PBXBuildFile; fileRef = E79CC23ECA673025AAF0519F /* BrowserToolCatalog.json */; };
 		77042D7793B2B0BB1344D766 /* LocalQwenLiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86D5940213BC9BEE73642860 /* LocalQwenLiveTests.swift */; };
 		773BF8CCCBC08F3D8F954A59 /* MLXServer in Resources */ = {isa = PBXBuildFile; fileRef = 75E11D2263CFAA62C4B5304B /* MLXServer */; };
 		77C799E19BA718F319E25194 /* NativeFailureRuntimeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24BCE024925D59165C4DF8F5 /* NativeFailureRuntimeTests.swift */; };
@@ -827,6 +828,7 @@
 		E753E7DC71A4E77C8477AAA5 /* WebsiteSelectionEvidence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebsiteSelectionEvidence.swift; sourceTree = "<group>"; };
 		E77C1D4CF8EDD2417D4E39AB /* OwnedChildProcessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OwnedChildProcessTests.swift; sourceTree = "<group>"; };
 		E785A0E548BF7774640DB613 /* AppServerWireTrace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppServerWireTrace.swift; sourceTree = "<group>"; };
+		E79CC23ECA673025AAF0519F /* BrowserToolCatalog.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = BrowserToolCatalog.json; sourceTree = "<group>"; };
 		E7CA32FB6CCCEF28E9D76082 /* EmbeddedBrowserIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmbeddedBrowserIdentity.swift; sourceTree = "<group>"; };
 		E89FC499FA826533AAB48E4F /* RunningApplicationBinding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunningApplicationBinding.swift; sourceTree = "<group>"; };
 		E8C6C2601F06F46ED8409AA3 /* WindowHitTestVerifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowHitTestVerifier.swift; sourceTree = "<group>"; };
@@ -906,6 +908,7 @@
 			children = (
 				BF808ACB4144D2E6C0B045A9 /* AgentRuntime */,
 				ABF5C281ACC343DCDEE1E730 /* BrowserModels */,
+				E79CC23ECA673025AAF0519F /* BrowserToolCatalog.json */,
 				75E11D2263CFAA62C4B5304B /* MLXServer */,
 				F69D610633F12A8874F4CD96 /* Tokenizers */,
 				99323332E15F6D8A338A20D9 /* VisualGrounding */,
@@ -1581,6 +1584,7 @@
 				996A2C7621590FF87C1D81FF /* AgentRuntime in Resources */,
 				3014A3F295B8212AF1EE639D /* Assets.xcassets in Resources */,
 				11390AB1F5009B5A418CE198 /* BrowserModels in Resources */,
+				74AEC2483312C9A16EBF68CD /* BrowserToolCatalog.json in Resources */,
 				773BF8CCCBC08F3D8F954A59 /* MLXServer in Resources */,
 				2ABB6C99F4824318E22244FA /* Tokenizers in Resources */,
 				F28FF2B5364ED93F76D07068 /* VisualGrounding in Resources */,

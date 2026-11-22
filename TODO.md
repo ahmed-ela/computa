@@ -6,7 +6,8 @@ not remaining feature requirements or instructions to reconnect Chrome.
 
 ## Reduce the Swift footprint
 
-- [ ] Inventory portable logic in the shipping Swift host. Pick one slice with a clear interface, move it to the Rust runtime or Octane UI according to its responsibility, and verify the same behavior through the installed app. Record release-mode Swift compile time before and after. See the [migration plan](docs/RUST-MIGRATION.md).
+- [x] Move the first portable slice, browser tool schema construction, into `computa-contracts`. See the [installed-app check and Release timings](docs/RUST-MIGRATION.md#shipping-app-built-in-browser-tool-catalog).
+- [ ] Evaluate the remaining Swift candidates: Codex CLI version precedence and workspace tab ordering. Both operate on values that can be tested independently of process discovery, WebKit views, and preferences.
 
 ## Embedded browser: human pane first
 
