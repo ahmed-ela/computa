@@ -1,6 +1,6 @@
 # Code editing and review
 
-Computa uses its pinned Codex App Server for code editing. The app-owned model
+Kolmogor uses its pinned Codex App Server for code editing. The app-owned model
 catalog enables native freeform `apply_patch` for website model IDs; the engine parses patches,
 applies sandbox and approval policy, writes files, and emits native file-change
 items. `exec_command` and `write_stdin` remain available for inspection, Git, and
@@ -38,7 +38,7 @@ Last turn is a record of native patch operations, and current files can differ
 from that record. Shell-based edits appear in Git scopes. A later turn with no
 patch displays an empty Last turn instead of replaying an older change.
 The pinned engine omits moves with identical contents from its aggregate diff.
-Computa supplements those with metadata from successful file-change items in
+Kolmogor supplements those with metadata from successful file-change items in
 that exact turn, showing each distinct recorded rename operation without
 inventing a content diff. Chains and cycles retain their distinct operations;
 repeated identical pairs are deduplicated. An open panel refreshes after native

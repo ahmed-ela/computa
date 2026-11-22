@@ -104,7 +104,7 @@ pub fn checked(runner: &dyn Runner, args: &[&str]) -> io::Result<String> {
     Ok(result.stdout.trim().into())
 }
 pub fn require_stopped(runner: &dyn Runner) -> io::Result<()> {
-    for name in ["Computa", "Mactopus"] {
+    for name in ["Kolmogor", "Computa", "Mactopus"] {
         let result = runner.run(&["/usr/bin/pgrep".into(), "-x".into(), name.into()])?;
         match result.code {
             1 => {}
@@ -200,7 +200,7 @@ pub fn inspect_basic(app: &Path, executable: &str, runner: &dyn Runner) -> io::R
     safe_directory(app, false)?;
     read_regular(&app.join("Contents/Info.plist"), 1024 * 1024)?;
     let plist = app.join("Contents/Info.plist");
-    if checked(
+    let identifier = checked(
         runner,
         &[
             "/usr/bin/plutil",
@@ -211,23 +211,24 @@ pub fn inspect_basic(app: &Path, executable: &str, runner: &dyn Runner) -> io::R
             "-",
             text(&plist)?,
         ],
-    )? != BUNDLE_ID
-        || checked(
-            runner,
-            &[
-                "/usr/bin/plutil",
-                "-extract",
-                "CFBundleExecutable",
-                "raw",
-                "-o",
-                "-",
-                text(&plist)?,
-            ],
-        )? != executable
-    {
+    )?;
+    let actual = checked(
+        runner,
+        &[
+            "/usr/bin/plutil",
+            "-extract",
+            "CFBundleExecutable",
+            "raw",
+            "-o",
+            "-",
+            text(&plist)?,
+        ],
+    )?;
+    let matches_name = actual == executable || (executable == "Computa" && actual == "Kolmogor");
+    if identifier != BUNDLE_ID || !matches_name {
         return Err(invalid("Refusing an app with an unknown bundle identity"));
     }
-    let binary = app.join("Contents/MacOS").join(executable);
+    let binary = app.join("Contents/MacOS").join(actual);
     let metadata = fs::symlink_metadata(&binary)?;
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.mode() & 0o111 == 0 {
         return Err(invalid(
@@ -247,7 +248,7 @@ pub fn inspect_basic(app: &Path, executable: &str, runner: &dyn Runner) -> io::R
     Ok(())
 }
 pub fn inspect_rust_app(app: &Path, runner: &dyn Runner) -> io::Result<Vec<FileEntry>> {
-    inspect_basic(app, "Computa", runner)?;
+    inspect_basic(app, "Kolmogor", runner)?;
     let files = bundle_files(app)?;
     if files.iter().any(|file| {
         file.path.starts_with("Contents/Resources/ChromeBridge/")
@@ -260,7 +261,7 @@ pub fn inspect_rust_app(app: &Path, runner: &dyn Runner) -> io::Result<Vec<FileE
         ));
     }
     for required in [
-        "Contents/MacOS/Computa",
+        "Contents/MacOS/Kolmogor",
         "Contents/Resources/AgentRuntime/codex-app-server",
         "Contents/Resources/AgentRuntime/manifest.json",
         "Contents/Resources/InferenceRuntime/computa-inference-worker",
@@ -303,7 +304,7 @@ pub fn inspect_rust_app(app: &Path, runner: &dyn Runner) -> io::Result<Vec<FileE
         }
     }
     for binary in [
-        "Contents/MacOS/Computa",
+        "Contents/MacOS/Kolmogor",
         "Contents/Resources/AgentRuntime/codex-app-server",
         "Contents/Resources/InferenceRuntime/computa-inference-worker",
         "Contents/Resources/InferenceRuntime/computa-grounding-worker",
@@ -392,7 +393,7 @@ pub fn verify_release_gates(
 ) -> io::Result<Vec<FileEntry>> {
     let files = inspect_rust_app(app, runner)?;
     for relative in [
-        "Contents/MacOS/Computa",
+        "Contents/MacOS/Kolmogor",
         "Contents/Resources/AgentRuntime/codex-app-server",
         "Contents/Resources/InferenceRuntime/computa-inference-worker",
         "Contents/Resources/InferenceRuntime/computa-grounding-worker",
@@ -669,24 +670,16 @@ fn require_separate(a: &Path, b: &Path) -> io::Result<()> {
     Ok(())
 }
 fn existing_app(applications: &Path, runner: &dyn Runner) -> io::Result<Option<PathBuf>> {
-    let current = applications.join("Computa.app");
-    let legacy = applications.join("Mactopus.app");
-    let has_current = fs::symlink_metadata(&current).is_ok();
-    let has_legacy = fs::symlink_metadata(&legacy).is_ok();
-    if has_current && has_legacy {
-        return Err(invalid(
-            "Both Computa.app and Mactopus.app exist; resolve duplicate installations first",
-        ));
-    }
-    let app = if has_current {
-        Some(current)
-    } else if has_legacy {
-        Some(legacy)
-    } else {
-        None
-    };
-    if let Some(app) = &app {
-        inspect_basic(app, if has_legacy { "Mactopus" } else { "Computa" }, runner)?;
+    let mut app = None;
+    for name in ["Kolmogor", "Computa", "Mactopus"] {
+        let candidate = applications.join(format!("{name}.app"));
+        if fs::symlink_metadata(&candidate).is_ok() {
+            if app.is_some() {
+                return Err(invalid("Resolve duplicate installations before continuing"));
+            }
+            inspect_basic(&candidate, name, runner)?;
+            app = Some(candidate);
+        }
     }
     Ok(app)
 }
@@ -719,7 +712,7 @@ pub fn install_app_with<F: FnMut(&Path, &Path) -> io::Result<()>>(
 ) -> io::Result<Installation> {
     let files = inspect_rust_app(source, runner)?;
     crate::source_build::load_verified_sealed_receipt(source, &files, runner)?;
-    install_verified(source, user_home, "Computa", true, runner, move_path)
+    install_verified(source, user_home, "Kolmogor", true, runner, move_path)
 }
 fn inspect_install(
     source: &Path,
@@ -850,6 +843,7 @@ pub fn restore_backup(
         ));
     }
     let executable = match backup.file_name().and_then(|n| n.to_str()) {
+        Some("Kolmogor.app") => "Kolmogor",
         Some("Computa.app") => "Computa",
         Some("Mactopus.app") => "Mactopus",
         _ => return Err(invalid("Unknown native backup name")),
@@ -1009,7 +1003,7 @@ pub fn package_release(options: &PackageOptions, runner: &dyn Runner) -> io::Res
     }
     safe_directory(&options.output, true)?;
     let stem = format!(
-        "Computa-{release_version}-arm64{}",
+        "Kolmogor-{release_version}-arm64{}",
         if options.channel == ReleaseChannel::SignedTest {
             "-signed-test"
         } else {
@@ -1040,13 +1034,13 @@ pub fn package_release(options: &PackageOptions, runner: &dyn Runner) -> io::Res
             "--extattr",
             "--acl",
             text(&options.app)?,
-            text(&payload.join("Computa.app"))?,
+            text(&payload.join("Kolmogor.app"))?,
         ],
     )?;
-    if verify_release_gates(&payload.join("Computa.app"), options.channel, runner)? != files {
+    if verify_release_gates(&payload.join("Kolmogor.app"), options.channel, runner)? != files {
         return Err(invalid("Packaging changed the verified signed application"));
     }
-    fs::copy(&options.installer, payload.join("Computa Installer"))?;
+    fs::copy(&options.installer, payload.join("Kolmogor Installer"))?;
     // Native grounding conversion is implemented inside the signed installer.
     // Its immutable library must travel with it as well as with app workers.
     let metal = options.app.join("Contents/Resources/InferenceRuntime");
@@ -1081,10 +1075,10 @@ pub fn package_release(options: &PackageOptions, runner: &dyn Runner) -> io::Res
     };
     let bytes = serde_json::to_vec_pretty(&manifest).map_err(invalid)?;
     write_new(&payload.join("release-manifest.json"), &bytes)?;
-    write_new(&payload.join("READ ME.txt"),format!("Computa {release_version}, Apple Silicon macOS {minimum}+\n\nRun the signed Rust installer with install-release --package-root PATH --download-model to authorize the pinned 4B download. Existing verified model installations work offline; without that flag no weights are downloaded. Existing app backups and chats are preserved. Quit Computa and Mactopus before installation. Grant macOS permissions separately. Channel: {:?}. The app notarization ticket does not notarize the DMG; assess the image separately before publishing.\n",options.channel).as_bytes())?;
+    write_new(&payload.join("READ ME.txt"),format!("Kolmogor {release_version}, Apple Silicon macOS {minimum}+\n\nRun the signed Rust installer with install-release --package-root PATH --download-model to authorize the pinned 4B download. Existing verified model installations work offline; without that flag no weights are downloaded. Existing app backups and chats are preserved. Quit Kolmogor and Mactopus before installation. Grant macOS permissions separately. Channel: {:?}. The app notarization ticket does not notarize the DMG; assess the image separately before publishing.\n",options.channel).as_bytes())?;
     let mut checksums = String::new();
     for name in [
-        "Computa Installer",
+        "Kolmogor Installer",
         "READ ME.txt",
         "mlx-model.lock.json",
         "release-manifest.json",
@@ -1099,7 +1093,7 @@ pub fn package_release(options: &PackageOptions, runner: &dyn Runner) -> io::Res
             "/usr/bin/hdiutil",
             "create",
             "-volname",
-            &format!("Computa {release_version}"),
+            &format!("Kolmogor {release_version}"),
             "-srcfolder",
             text(&payload)?,
             "-fs",
@@ -1212,7 +1206,7 @@ pub async fn install_release(
         manifest.app_build.as_deref(),
     )?;
     crate::models::load_manifest(&package.join("mlx-model.lock.json"))?;
-    let app = package.join("Computa.app");
+    let app = package.join("Kolmogor.app");
     if verify_release_gates(&app, manifest.channel, runner)? != manifest.app_files {
         return Err(invalid("Application differs from its release manifest"));
     }
@@ -1456,7 +1450,7 @@ mod tests {
             let stdout=match args[0].as_str(){
                 "/usr/bin/plutil"=>match args[2].as_str(){
                     "CFBundleIdentifier"=>BUNDLE_ID.into(),
-                    "CFBundleExecutable"=>if args.last().unwrap().contains("Mactopus.app") {"Mactopus".into()} else {"Computa".into()},
+                    "CFBundleExecutable"=>if args.last().unwrap().contains("Mactopus.app") {"Mactopus".into()} else {"Kolmogor".into()},
                     "CFBundleShortVersionString"=>"0.1.0".into(),"CFBundleVersion"=>"1".into(),"LSMinimumSystemVersion"=>"14.0".into(),_=>String::new(),
                 },
                 "/usr/bin/pgrep"=>{code=1;String::new()},
@@ -1484,7 +1478,7 @@ mod tests {
         macho[12..16].copy_from_slice(&2u32.to_le_bytes());
         macho[16..20].copy_from_slice(&1u32.to_le_bytes());
         for binary in [
-            "Contents/MacOS/Computa",
+            "Contents/MacOS/Kolmogor",
             "Contents/Resources/AgentRuntime/codex-app-server",
             "Contents/Resources/InferenceRuntime/computa-inference-worker",
             "Contents/Resources/InferenceRuntime/computa-grounding-worker",
@@ -1492,7 +1486,7 @@ mod tests {
             let file = path.join(binary);
             fs::create_dir_all(file.parent().unwrap()).unwrap();
             let mut bytes = macho.clone();
-            if binary.ends_with("Computa") {
+            if binary.ends_with("Kolmogor") {
                 bytes.extend_from_slice(marker.as_bytes());
             }
             fs::write(&file, bytes).unwrap();
@@ -1546,7 +1540,7 @@ mod tests {
             "BrowserExtension/manifest.json",
         ] {
             let temp = tempfile::tempdir().unwrap();
-            let app = temp.path().canonicalize().unwrap().join("Computa.app");
+            let app = temp.path().canonicalize().unwrap().join("Kolmogor.app");
             fixture_app(&app, "native");
             let runner = FixtureRunner::new();
             inspect_rust_app(&app, &runner).unwrap();
@@ -1565,7 +1559,7 @@ mod tests {
     #[test]
     fn moved_app_requires_both_native_workers_and_exact_colocated_metal_bytes() {
         let temp = tempfile::tempdir().unwrap();
-        let app = temp.path().canonicalize().unwrap().join("Computa.app");
+        let app = temp.path().canonicalize().unwrap().join("Kolmogor.app");
         fixture_app(&app, "native");
         let runner = FixtureRunner::new();
         inspect_rust_app(&app, &runner).expect("The valid moved-app fixture must pass inspection");
@@ -1584,10 +1578,10 @@ mod tests {
     fn failed_commit_restores_previous_app_and_preserves_source_and_stage() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
-        let source = root.join("Build/Computa.app");
+        let source = root.join("Build/Kolmogor.app");
         fixture_app(&source, "new");
         let home = root.join("user");
-        let previous = home.join("Applications/Computa.app");
+        let previous = home.join("Applications/Kolmogor.app");
         fixture_app(&previous, "old");
         let old_files = bundle_files(&previous).unwrap();
         let source_files = bundle_files(&source).unwrap();
@@ -1595,7 +1589,7 @@ mod tests {
         let result = install_verified(
             &source,
             &home,
-            "Computa",
+            "Kolmogor",
             true,
             &FixtureRunner::new(),
             |a, b| {
@@ -1621,15 +1615,15 @@ mod tests {
     fn install_backup_and_restore_keep_both_verified_versions() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
-        let source = root.join("Build/Computa.app");
+        let source = root.join("Build/Kolmogor.app");
         fixture_app(&source, "new");
         let home = root.join("user");
-        let previous = home.join("Applications/Computa.app");
+        let previous = home.join("Applications/Kolmogor.app");
         fixture_app(&previous, "old");
         let old = bundle_files(&previous).unwrap();
         let new = bundle_files(&source).unwrap();
         let runner = FixtureRunner::new();
-        let installed = install_verified(&source, &home, "Computa", true, &runner, |a, b| {
+        let installed = install_verified(&source, &home, "Kolmogor", true, &runner, |a, b| {
             fs::rename(a, b)
         })
         .unwrap();
@@ -1645,23 +1639,28 @@ mod tests {
     fn duplicate_installations_stop_before_staging_or_backup() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
-        let source = root.join("Build/Computa.app");
+        let source = root.join("Build/Kolmogor.app");
         fixture_app(&source, "new");
         let home = root.join("user");
-        fixture_app(&home.join("Applications/Computa.app"), "old");
+        fixture_app(&home.join("Applications/Kolmogor.app"), "old");
         let legacy = home.join("Applications/Mactopus.app");
         fixture_app(&legacy, "legacy");
         fs::rename(
-            legacy.join("Contents/MacOS/Computa"),
+            legacy.join("Contents/MacOS/Kolmogor"),
             legacy.join("Contents/MacOS/Mactopus"),
         )
         .unwrap();
         let before = bundle_files(&home).unwrap();
         let runner = FixtureRunner::new();
         assert!(
-            install_verified(&source, &home, "Computa", true, &runner, |a, b| fs::rename(
-                a, b
-            ))
+            install_verified(
+                &source,
+                &home,
+                "Kolmogor",
+                true,
+                &runner,
+                |a, b| fs::rename(a, b)
+            )
             .is_err()
         );
         assert_eq!(bundle_files(&home).unwrap(), before);
@@ -1678,10 +1677,10 @@ mod tests {
     fn nested_signing_updates_runtime_integrity_without_changing_upstream_provenance() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
-        let source = root.join("Build/Computa.app");
+        let source = root.join("Build/Kolmogor.app");
         fixture_app(&source, "new");
         let before = bundle_files(&source).unwrap();
-        let output = root.join("Signed/Computa.app");
+        let output = root.join("Signed/Kolmogor.app");
         let mut runner = FixtureRunner::new();
         runner.mutate_signature = true;
         fs::create_dir(output.parent().unwrap()).unwrap();
@@ -1713,11 +1712,11 @@ mod tests {
     fn product_install_and_release_signing_reject_missing_source_authority_before_mutation() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
-        let source = root.join("Build/Computa.app");
+        let source = root.join("Build/Kolmogor.app");
         fixture_app(&source, "new");
         let before = bundle_files(&source).unwrap();
         let home = root.join("user");
-        let output = root.join("Signed/Computa.app");
+        let output = root.join("Signed/Kolmogor.app");
         let runner = FixtureRunner::new();
         assert!(install_app(&source, &home, &runner).is_err());
         assert!(!home.exists());
@@ -1745,7 +1744,7 @@ mod tests {
     fn notarization_failure_stops_before_image_or_output_creation() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
-        let app = root.join("Computa.app");
+        let app = root.join("Kolmogor.app");
         fixture_app(&app, "new");
         let installer = root.join("installer");
         fs::write(&installer, b"fixture").unwrap();
@@ -1785,7 +1784,7 @@ mod tests {
             "Cargo.toml",
             "Cargo.lock",
             "rust-toolchain.toml",
-            "Config/Computa-Info.plist",
+            "Config/Kolmogor-Info.plist",
             "Config/Version.xcconfig",
             "Runtime/codex-source.lock.json",
             "Runtime/patches/compaction-retention.patch",

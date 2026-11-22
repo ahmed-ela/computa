@@ -47,18 +47,18 @@ struct ComputaRuntimeArtifact: Sendable {
         case changedDuringValidation
 
         var errorDescription: String? {
-            let prefix = "Computa's dedicated Agent Runtime"
+            let prefix = "Kolmogor's dedicated Agent Runtime"
             switch self {
             case .resourcesUnavailable:
-                return "\(prefix) is missing from the app's Resources/AgentRuntime folder. Rebuild or reinstall Computa."
+                return "\(prefix) is missing from the app's Resources/AgentRuntime folder. Rebuild or reinstall Kolmogor."
             case .unsupportedHost:
                 return "\(prefix) requires an Apple Silicon Mac (macOS arm64)."
             case .unavailableFile(let path):
-                return "\(prefix) file is missing or unreadable: \(path). Rebuild or reinstall Computa."
+                return "\(prefix) file is missing or unreadable: \(path). Rebuild or reinstall Kolmogor."
             case .unsafeFile(let path):
                 return "\(prefix) rejected an unsafe file: \(path). Expected a regular, non-symlink artifact with the required permissions."
             case .invalidManifest(let detail):
-                return "\(prefix) manifest is invalid: \(detail). Rebuild or reinstall Computa."
+                return "\(prefix) manifest is invalid: \(detail). Rebuild or reinstall Kolmogor."
             case .sizeMismatch(let expected, let actual):
                 return "\(prefix) size does not match its manifest (expected \(expected), found \(actual) bytes)."
             case .checksumMismatch:
@@ -174,7 +174,7 @@ struct ComputaRuntimeArtifact: Sendable {
             throw ValidationError.invalidManifest("runtimeVersion must be a bounded version token")
         }
         let commit = try string("sourceCommit")
-        guard commit == sourceCommit else { throw ValidationError.invalidManifest("the source commit is not the pinned Computa runtime source") }
+        guard commit == sourceCommit else { throw ValidationError.invalidManifest("the source commit is not the pinned Kolmogor runtime source") }
         let patch = try string("patchSHA256"), binary = try string("binarySHA256")
         for (key, digest) in [("patchSHA256", patch), ("binarySHA256", binary)] {
             guard digest.range(of: "\\A[0-9a-f]{64}\\z", options: .regularExpression) != nil,

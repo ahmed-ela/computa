@@ -4,8 +4,8 @@ import XCTest
 @testable import Computa
 
 /// Opt-in production approval gate. Run serially, with no other local inference:
-/// TEST_RUNNER_HEYDASH_LIVE_ACCESS_MODE_TEST=1 xcodebuild -project Computa.xcodeproj \
-///   -scheme Computa -configuration Debug -derivedDataPath .build/Computa \
+/// TEST_RUNNER_HEYDASH_LIVE_ACCESS_MODE_TEST=1 xcodebuild -project Kolmogor.xcodeproj \
+///   -scheme Kolmogor -configuration Debug -derivedDataPath .build/Computa \
 ///   -destination 'platform=macOS,arch=arm64' \
 ///   -only-testing:ComputaTests/AccessModeLiveTests/testAskFullAskUsesProductionApprovalDispatch test
 /// Xcode removes TEST_RUNNER_ when forwarding the flag to the test host.
@@ -362,7 +362,7 @@ final class AccessModeLiveTests: XCTestCase {
         let proof = "askFullAskVerified=true\nmanualDecisions=2\nautomaticDecisions=1\n"
             + "successfulCalculatorOpenCalls=3\nunexpectedApprovals=0\nmodel=\(modelID)\nprotocolTrace=\(traceURL.path)\n"
         let attachment = XCTAttachment(string: proof)
-        attachment.name = "Computa production access-mode evidence"
+        attachment.name = "Kolmogor production access-mode evidence"
         attachment.lifetime = .keepAlways
         add(attachment)
         print(proof)

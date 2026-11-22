@@ -1,10 +1,10 @@
-# Working on Computa
+# Working on Kolmogor
 
 The shipping Mac app has a Swift host, an Octane interface rendered in WebKit, and a bundled Rust agent runtime. Keep the [README](README.md) focused on what users can do and how to get started. Put contributor instructions here and detailed designs and qualification results in the relevant guide.
 
 ## Keep Swift at the macOS boundary
 
-Use Swift only where Computa needs a native macOS interface, such as hosting a WebKit view, receiving an AppKit callback, or presenting a system dialog. Keep those adapters small. Build shared UI in Octane and put portable state transitions, provider logic, and tool orchestration in the Rust runtime. Keep permission enforcement on the trusted side of the bridge as logic moves. The table below describes the current shipping layout.
+Use Swift only where Kolmogor needs a native macOS interface, such as hosting a WebKit view, receiving an AppKit callback, or presenting a system dialog. Keep those adapters small. Build shared UI in Octane and put portable state transitions, provider logic, and tool orchestration in the Rust runtime. Keep permission enforcement on the trusted side of the bridge as logic moves. The table below describes the current shipping layout.
 
 ## Where to make a change
 
@@ -36,10 +36,10 @@ Start with the [source-build prerequisites](docs/BUILDING.md#requirements). From
 ## Pull requests
 
 For every PR, record the app version decision and a one-sentence reason in the
-description. Follow [Computa’s versioning policy](docs/VERSIONING.md#version-decision-for-each-pr)
+description. Follow [Kolmogor’s versioning policy](docs/VERSIONING.md#version-decision-for-each-pr)
 and include any major, minor, or patch bump in the same PR. Recheck against
-the current `computa` branch before squash merge.
+the current `kolmogor` branch before squash merge.
 
-A squash merge to `computa` queues a signed macOS alpha. See the [release guide](docs/RELEASING.md#release-on-merge) for the signing worker, notarization, public download, and Sparkle feed checks.
+A squash merge to `kolmogor` queues a signed macOS alpha. See the [release guide](docs/RELEASING.md#release-on-merge) for the signing worker, notarization, public download, and Sparkle feed checks.
 
-The [pre-reorganization README](https://github.com/ahmed-ela/computa/blob/5541a0fc28801c27eedd7bd7ea8917b961c35d52/README.md) preserves the original build recipes, compatibility identifiers, and dated verification records. Current work is tracked in [TODO.md](TODO.md).
+The [pre-reorganization README](https://github.com/ahmed-ela/kolmogor/blob/5541a0fc28801c27eedd7bd7ea8917b961c35d52/README.md) preserves the original build recipes, compatibility identifiers, and dated verification records. Current work is tracked in [TODO.md](TODO.md).

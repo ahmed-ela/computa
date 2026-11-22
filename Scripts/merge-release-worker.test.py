@@ -18,7 +18,7 @@ class MergeQueueTests(unittest.TestCase):
         root = Path(temporary.name)
         self.origin = root / "repository"
         self.origin.mkdir()
-        self.git("init", "-q", "-b", "computa")
+        self.git("init", "-q", "-b", worker.BRANCH)
         self.git("config", "user.name", "Test")
         self.git("config", "user.email", "test@example.com")
         self.git("config", "commit.gpgsign", "false")
@@ -62,7 +62,7 @@ class MergeQueueTests(unittest.TestCase):
         first = self.commit("first")
         self.git("switch", "-q", "-c", "open-pr")
         self.commit("unmerged")
-        self.git("switch", "-q", "computa")
+        self.git("switch", "-q", worker.BRANCH)
         second = self.commit("second")
         worker.run(self.state)
         worker.run(self.state)

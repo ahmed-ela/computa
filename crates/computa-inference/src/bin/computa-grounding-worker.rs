@@ -367,7 +367,7 @@ fn main() {
         "Native visual inference requires Apple Silicon macOS and native-mlx",
     ));
     if let Err(error) = outcome {
-        eprintln!("Computa visual worker: {error}");
+        eprintln!("Kolmogor visual worker: {error}");
         std::process::exit(1);
     }
 }

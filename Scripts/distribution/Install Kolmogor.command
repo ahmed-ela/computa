@@ -12,14 +12,14 @@ for argument in "$@"; do
     --download-model) download_model=1 ;;
     --no-launch) launch_argument=(--no-launch) ;;
     --help|-h)
-      print 'Usage: Install Computa.command [--download-model] [--no-launch]'
+      print 'Usage: Install Kolmogor.command [--download-model] [--no-launch]'
       print 'Install the signed app, private Python/MLX runtime and pinned Qwen 4B (~3.06 GB).'
       print 'Without --download-model, asks before any download or installation.'
       exit 0 ;;
     *) print -u2 "Unknown option: $argument"; exit 2 ;;
   esac
 done
-fail() { print -u2 -- "Computa installer: $*"; exit 1; }
+fail() { print -u2 -- "Kolmogor installer: $*"; exit 1; }
 safe_directory() {
   local candidate=$1
   [[ ${candidate} == /* && ${candidate} != / && ! -L ${candidate} ]] || fail "Unsafe directory: ${candidate}"
@@ -32,31 +32,34 @@ safe_directory() {
 }
 stopped() {
   local result=0 process_name
-  for process_name in Computa Mactopus; do
+  for process_name in Kolmogor Computa Mactopus; do
     /usr/bin/pgrep -x "${process_name}" >/dev/null && result=0 || result=$?
     [[ ${result} == 1 ]] || fail "Quit ${process_name} normally and leave it closed until installation finishes. No process was stopped."
   done
 }
 
 [[ $(/usr/bin/uname -s) == Darwin && $(/usr/bin/uname -m) == arm64 ]] || fail 'Apple Silicon macOS is required. Run Terminal natively, not under Rosetta.'
-[[ -d ${package_dir}/Computa.app && ! -L ${package_dir}/Computa.app ]] || fail 'Keep this command beside Computa.app in the mounted release.'
+[[ -d ${package_dir}/Kolmogor.app && ! -L ${package_dir}/Kolmogor.app ]] || fail 'Keep this command beside Kolmogor.app in the mounted release.'
 [[ -f ${package_dir}/SHA256SUMS && ! -L ${package_dir}/SHA256SUMS ]] || fail 'Release checksums are missing.'
 (cd "${package_dir}" && /usr/bin/shasum -a 256 --check SHA256SUMS) || fail 'Release files failed checksum verification. Download the release again.'
 minimum_os=$(/usr/bin/plutil -extract minimumMacOS raw -o - "${package_dir}/release-manifest.json")
 current_os=$(/usr/bin/sw_vers -productVersion)
 autoload -Uz is-at-least
 is-at-least "${minimum_os}" "${current_os}" || fail "macOS ${minimum_os} or later is required."
-/usr/bin/codesign --verify --deep --strict -R '=anchor apple generic' "${package_dir}/Computa.app" || fail 'The app signature is invalid.'
-[[ $(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "${package_dir}/Computa.app/Contents/Info.plist") == com.ahmedelamin.LocalCodex ]] || fail 'Unexpected application identity.'
+/usr/bin/codesign --verify --deep --strict -R '=anchor apple generic' "${package_dir}/Kolmogor.app" || fail 'The app signature is invalid.'
+[[ $(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "${package_dir}/Kolmogor.app/Contents/Info.plist") == com.ahmedelamin.LocalCodex ]] || fail 'Unexpected application identity.'
 stopped
-[[ ! ( ( -e ${HOME}/Applications/Computa.app || -L ${HOME}/Applications/Computa.app ) &&
-       ( -e ${HOME}/Applications/Mactopus.app || -L ${HOME}/Applications/Mactopus.app ) ) ]] ||
-  fail 'Both Computa.app and Mactopus.app exist in ~/Applications. Resolve the duplicate installations first; neither was changed.'
+installed=()
+for name in Kolmogor Computa Mactopus; do
+  app="${HOME}/Applications/${name}.app"
+  if [[ -e ${app} || -L ${app} ]]; then installed+=("${app}"); fi
+done
+(( ${#installed[@]} <= 1 )) || fail 'Resolve the duplicate installations in ~/Applications before setup.'
 if (( ! download_model )); then
   [[ -t 0 ]] || fail 'Use --download-model to explicitly permit the runtime and model downloads.'
-  print 'Install Computa into ~/Applications and download its private runtime plus Qwen 4B (~3.06 GB)?'
+  print 'Install Kolmogor into ~/Applications and download its private runtime plus Qwen 4B (~3.06 GB)?'
   print 'Allow about 10 GB free space for dependencies, resumable downloads, and model staging.'
-  print 'An existing Computa or legacy Mactopus app is backed up. Conversations, preferences and browser tabs are preserved.'
+  print 'An existing Kolmogor or legacy Mactopus app is backed up. Conversations, preferences and browser tabs are preserved.'
   read -r 'answer?Type INSTALL to continue: '
   [[ ${answer} == INSTALL ]] || fail 'Cancelled; no download or installation started.'
 fi

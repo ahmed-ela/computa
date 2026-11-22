@@ -29,7 +29,7 @@ fi
 if [[ -z ${uv_path} || ! -x ${uv_path} ]]; then
   print -u2 'uv is required. Install it first, then rerun this script.'; exit 1
 fi
-for app_process in Computa Mactopus; do
+for app_process in Kolmogor Mactopus; do
   process_status=0
   /usr/bin/pgrep -x "${app_process}" >/dev/null && process_status=0 || process_status=$?
   if [[ ${process_status} != 1 ]]; then

@@ -39,7 +39,7 @@ enum SampleData {
                 ),
                 TimelineEntry(
                     kind: .assistant,
-                    title: "Computa",
+                    title: "Kolmogor",
                     body: "The application shell is taking shape. Next I’ll connect the composer to a replaceable local runtime client.",
                     timestamp: .now.addingTimeInterval(-120)
                 )
@@ -71,7 +71,7 @@ enum SampleData {
             entries: [
                 TimelineEntry(
                     kind: .assistant,
-                    title: "Computa",
+                    title: "Kolmogor",
                     body: "The proposed flow distinguishes read-only observation, reversible interaction, and privileged actions. No automation code was added.",
                     timestamp: .now.addingTimeInterval(-86_400)
                 )

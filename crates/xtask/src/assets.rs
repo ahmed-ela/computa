@@ -46,7 +46,7 @@ pub fn build_web(root: &Path, wasm_bindgen: &str, release: bool) -> io::Result<P
     fs::copy(root.join("WebUI/src/styles.css"), ui.join("styles.css"))?;
     fs::write(
         ui.join("index.html"),
-        r#"<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; object-src 'none'; form-action 'none'"><link rel="stylesheet" href="styles.css"><title>Computa</title></head><body><div id="root"></div><script type="module" src="bootstrap.js"></script></body></html>"#,
+        r#"<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; object-src 'none'; form-action 'none'"><link rel="stylesheet" href="styles.css"><title>Kolmogor</title></head><body><div id="root"></div><script type="module" src="bootstrap.js"></script></body></html>"#,
     )?;
     fs::write(
         ui.join("bootstrap.js"),
@@ -84,7 +84,7 @@ pub fn copy_tree(source: &Path, destination: &Path) -> io::Result<()> {
 pub fn website(root: &Path) -> io::Result<PathBuf> {
     let destination = root.join("target/website");
     fs::create_dir_all(&destination)?;
-    for image in ["favicon-pastel.png", "computa-pastel.png"] {
+    for image in ["favicon-pastel.png", "kolmogor-pastel.png"] {
         fs::copy(
             root.join("Website/public").join(image),
             destination.join(image),
@@ -96,7 +96,7 @@ pub fn website(root: &Path) -> io::Result<PathBuf> {
     )?;
     fs::write(
         destination.join("index.html"),
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><link rel=\"icon\" type=\"image/png\" href=\"/favicon-pastel.png\"><link rel=\"stylesheet\" href=\"style.css\"><title>Computa</title></head><body><div id=\"root\"><img src=\"/computa-pastel.png\" alt=\"Computa\"></div></body></html>",
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><link rel=\"icon\" type=\"image/png\" href=\"/favicon-pastel.png\"><link rel=\"stylesheet\" href=\"style.css\"><title>Kolmogor</title></head><body><div id=\"root\"><img src=\"/kolmogor-pastel.png\" alt=\"Kolmogor\"></div></body></html>",
     )?;
     Ok(destination)
 }

@@ -1,6 +1,6 @@
 # Website inference transactions
 
-Computa keeps canonical conversation history, terminal sessions, browser-tool
+Kolmogor keeps canonical conversation history, terminal sessions, browser-tool
 tabs and file diffs locally. The Responses bridge sends the full current
 request, including offered tools and their outputs, to a website. Gemini uses
 one owned temporary conversation per native user turn. ChatGPT and Claude use
@@ -13,7 +13,7 @@ and is bounded.
 An inference conversation is distinct from a native user turn. A turn may need
 many inference conversations while retaining one native thread, turn, command
 session and browser-tool lease. The website sees the current canonical request
-on each continuation; temporary-site history is not Computa's source of truth.
+on each continuation; temporary-site history is not Kolmogor's source of truth.
 
 ## Responsibilities
 

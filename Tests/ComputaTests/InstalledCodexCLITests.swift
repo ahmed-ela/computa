@@ -121,7 +121,7 @@ final class InstalledCodexCLITests: XCTestCase {
                 return task?.status == .completed && task?.entries.contains { $0.kind == .assistant && $0.body.contains(marker) } == true
             }
             let thread = try XCTUnwrap(state.selectedTask?.runtimeThreadID)
-            print("Computa CLI live: \(options.count) models; \(model.label); reply \(marker)")
+            print("Kolmogor CLI live: \(options.count) models; \(model.label); reply \(marker)")
             let next = try XCTUnwrap(options.dropFirst().first)
             XCTAssertTrue(state.setTaskModel(next.id, taskID: id))
             let secondMarker = "SWITCH-" + UUID().uuidString.prefix(8)
@@ -131,7 +131,7 @@ final class InstalledCodexCLITests: XCTestCase {
                 if state.selectedTask?.status == .failed { throw NSError(domain: state.selectedTask?.entries.last?.body ?? "Second turn failed", code: 5) }
                 return state.selectedTask?.status == .completed && state.selectedTask?.entries.contains { $0.kind == .assistant && $0.body.contains(secondMarker) } == true
             }
-            print("Computa CLI switch: \(next.label); reply \(secondMarker)")
+            print("Kolmogor CLI switch: \(next.label); reply \(secondMarker)")
             XCTAssertEqual(state.selectedTask?.runtimeThreadID, thread)
             let stopped = await state.shutdownRuntime()
             XCTAssertTrue(stopped.succeeded, stopped.issues.joined(separator: ", "))
@@ -150,7 +150,7 @@ final class InstalledCodexCLITests: XCTestCase {
     private func waitUntil(_ condition: () throws -> Bool) async throws {
         let limit = ContinuousClock.now.advanced(by: .seconds(70))
         while try !condition() {
-            guard ContinuousClock.now < limit else { throw NSError(domain: "Timed out waiting for Computa", code: 3) }
+            guard ContinuousClock.now < limit else { throw NSError(domain: "Timed out waiting for Kolmogor", code: 3) }
             try await Task.sleep(for: .milliseconds(100))
         }
     }

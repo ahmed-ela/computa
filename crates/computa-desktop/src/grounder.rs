@@ -276,7 +276,7 @@ impl NativeGroundingService {
         environment.insert("COMPUTA_GROUNDING_INSTANCE".into(), instance.to_string());
         let (process, input, output) =
             OwnedProcess::spawn(&executable, &args, &self.config.process_home, &environment)
-                .map_err(|_| "Computa's bundled visual worker could not be started.".to_owned())?;
+                .map_err(|_| "Kolmogor's bundled visual worker could not be started.".to_owned())?;
         state.worker = Some(Worker {
             process: Arc::new(process),
             input,
@@ -288,7 +288,7 @@ impl NativeGroundingService {
         let response = tokio::select! {
             _=cancel.cancelled()=>return Err(RefusalCode::Cancelled.message().into()),
             _=self.shutdown.cancelled()=>return Err(RefusalCode::Cancelled.message().into()),
-            result=tokio::time::timeout(Duration::from_secs(30),receive(&mut worker.output))=>result.map_err(|_|"Computa's owned visual worker did not become ready within 30 seconds.".to_owned())??,
+            result=tokio::time::timeout(Duration::from_secs(30),receive(&mut worker.output))=>result.map_err(|_|"Kolmogor's owned visual worker did not become ready within 30 seconds.".to_owned())??,
         };
         if cancel.is_cancelled() || self.shutdown.is_cancelled() {
             return Err(RefusalCode::Cancelled.message().into());
@@ -433,7 +433,7 @@ async fn receive(output: &mut ChildStdout) -> Result<Response, String> {
     wire::decode(&bytes, wire::MAX_RESPONSE_FRAME).map_err(|e| e.to_string())
 }
 fn verify_worker(resources: &Path) -> Result<PathBuf, String> {
-    let invalid = || "Computa's bundled visual worker is missing, changed or unsafe.".to_owned();
+    let invalid = || "Kolmogor's bundled visual worker is missing, changed or unsafe.".to_owned();
     let root = resources.canonicalize().map_err(|_| invalid())?;
     if !resources.is_absolute()
         || root != resources

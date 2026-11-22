@@ -34,7 +34,7 @@ A separate normal-tab Kimi probe used `kimi.com`, while the adapter uses
 `kimi.ai`; that unsent, signed-out probe was cleaned up and is excluded from
 production-provider evidence.
 
-The requested route is each provider's signed-in website in Computa's browser.
+The requested route is each provider's signed-in website in Kolmogor's browser.
 Qwen's website is separate from Alibaba's existing Qwen 3.7 Flash API option.
 Do not seed website choices from API catalogs or marketing model lists.
 
@@ -909,7 +909,7 @@ test entry. Both test conversations are deleted. The original K3/High
 selection, split position and developer settings were restored. No more
 than the two approved messages were sent to the inspected Kimi tab.
 
-Qwen is now signed in in Computa. Two bounded direct website checks on build382
+Qwen is now signed in in Kolmogor. Two bounded direct website checks on build382
 selected Qwen3.7-Plus and Qwen3.8-Max, sent one harmless marker each and observed
 the exact requested replies. Each test conversation was deleted through its
 scoped menu and confirmation; the post-delete observations were retained.
@@ -1107,7 +1107,7 @@ missing user row. Their HTTP responses were not captured.
   draft and showed an error. Groq 20B reported work without a single host
   tool call. Groq Qwen 27B read files four times, then its next request needed
   6,073 body tokens, above the 6,000-token budget. None completed the fixture.
-- Gemini's normal tab loaded its composer and Computa cleared the previous
+- Gemini's normal tab loaded its composer and Kolmogor cleared the previous
   checkpoint. A fresh 3.5 Flash-Lite task returned the exact requested marker
   and closed its owned session. Its subsequent invoice task returned tool
   arguments that failed the JSON-object check. It ended in 10.201 seconds

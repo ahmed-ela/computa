@@ -357,7 +357,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = hunkOnly ? "Revert this hunk?" : "Revert \(target)?"
-        alert.informativeText = "This discards the displayed unstaged edits. Existing staged work is preserved. If the files changed since this review, Computa will refuse and ask you to refresh."
+        alert.informativeText = "This discards the displayed unstaged edits. Existing staged work is preserved. If the files changed since this review, Kolmogor will refuse and ask you to refresh."
         alert.addButton(withTitle: "Cancel")
         alert.addButton(withTitle: "Revert changes")
         return await withCheckedContinuation { continuation in
@@ -410,7 +410,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
                 self?.diagnosePage(webView)
             }
         } catch {
-            assertionFailure("Could not send the Computa web snapshot: \(error)")
+            assertionFailure("Could not send the Kolmogor web snapshot: \(error)")
         }
     }
 

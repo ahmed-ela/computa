@@ -10,7 +10,7 @@ enum InstalledCodexCLI {
         var errorDescription: String? {
             switch self {
             case .missing: "Install Codex CLI, run codex login in Terminal, then check available models."
-            case .incompatible: "No installed Codex CLI could provide Computa’s app-server interface. Update Codex CLI and check available models."
+            case .incompatible: "No installed Codex CLI could provide Kolmogor’s app-server interface. Update Codex CLI and check available models."
             case .signedOut: "Run codex login in Terminal, then check available models."
             case .invalidCatalog: "Codex CLI returned an unreadable model catalog. Update the CLI and check again."
             case .unavailable: "This model is unavailable in the current Codex CLI account. Check available models and select one."
@@ -80,7 +80,7 @@ enum InstalledCodexCLI {
     }
 
     /// The installed CLI shares its login and history with Terminal. Only read
-    /// threads that were created by Computa and recorded in its private index.
+    /// threads that were created by Kolmogor and recorded in its private index.
     struct Threads {
         let directory: URL
         init(home: String) {

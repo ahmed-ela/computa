@@ -263,7 +263,7 @@ extension EmbeddedBrowserControlBackend {
     }
 }
 
-/// Uses Computa's tool-accessible human WebViews. Inference pages, dedicated
+/// Uses Kolmogor's tool-accessible human WebViews. Inference pages, dedicated
 /// sign-in pages and the privileged app UI cannot enter this inventory.
 @MainActor
 final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {

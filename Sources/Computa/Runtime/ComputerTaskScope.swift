@@ -99,7 +99,7 @@ struct ComputerTaskScope: Equatable, Sendable {
     ]
 
     let backgroundBrowserOnly: Bool
-    /// Generic background-browser requests can use Computa's own browser.
+    /// Generic background-browser requests can use Kolmogor's own browser.
     /// An explicit restriction to another browser excludes that backend.
     let externalBrowserOnly: Bool
     let targetConfidence: TargetConfidence
@@ -162,7 +162,7 @@ struct ComputerTaskScope: Equatable, Sendable {
 
     func embeddedBrowserToolViolation() -> String? {
         externalBrowserOnly
-            ? "This request explicitly permits another browser only. Computa's built-in browser is a separate surface; no built-in browser action was dispatched."
+            ? "This request explicitly permits another browser only. Kolmogor's built-in browser is a separate surface; no built-in browser action was dispatched."
             : nil
     }
 

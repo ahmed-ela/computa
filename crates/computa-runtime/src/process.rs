@@ -9,7 +9,7 @@ mod lifecycle_identity;
 pub use lifecycle_identity::OwnedDescendant;
 #[derive(Debug, thiserror::Error)]
 pub enum ProcessError {
-    #[error("Could not launch Computa's Agent Runtime: {0}")]
+    #[error("Could not launch Kolmogor's Agent Runtime: {0}")]
     Io(#[from] io::Error),
     #[error("Owned runtime cleanup could not be verified.")]
     CleanupUnverified,
@@ -34,7 +34,7 @@ impl std::fmt::Display for ObservedExit {
 }
 pub(crate) fn diagnostic_phase(phase: &'static str) {
     if std::env::var("COMPUTA_RUNTIME_DIAGNOSTICS").as_deref() == Ok("1") {
-        eprintln!("Computa runtime phase: {phase}");
+        eprintln!("Kolmogor runtime phase: {phase}");
     }
 }
 impl OwnedProcess {

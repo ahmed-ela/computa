@@ -361,7 +361,7 @@ final class NativeBackgroundAccessibilityLiveTests: XCTestCase {
             return
         }
         let attachment = XCTAttachment(string: text)
-        attachment.name = "Computa native background AX system-backend proof"
+        attachment.name = "Kolmogor native background AX system-backend proof"
         attachment.lifetime = .keepAlways
         add(attachment)
         print("HEYDASH_BACKGROUND_AX_LIVE=\(text)")

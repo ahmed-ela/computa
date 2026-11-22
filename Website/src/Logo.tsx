@@ -77,7 +77,7 @@ export function Logo() {
   }, []);
   return (
     <div className="logo">
-      <img ref={image} src="/computa-pastel.png" alt="Computa" width={LOGO_SIZE} height={LOGO_SIZE} />
+      <img ref={image} src="/kolmogor-pastel.png" alt="Kolmogor" width={LOGO_SIZE} height={LOGO_SIZE} />
       <canvas ref={canvas} width={LOGO_SIZE} height={LOGO_SIZE} aria-hidden="true" hidden />
     </div>
   );

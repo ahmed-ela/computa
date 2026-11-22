@@ -113,10 +113,10 @@ final class AppStateTests: XCTestCase {
         XCTAssertGreaterThan(startedAt, 0)
         state.apply(.taskStatusChanged(taskID: task.id, status: .running))
         state.apply(.timelineEntryAppended(taskID: task.id, entry: TimelineEntry(
-            kind: .assistant, title: "Computa", body: "Intermediate thought"
+            kind: .assistant, title: "Kolmogor", body: "Intermediate thought"
         )))
         state.apply(.timelineEntryAppended(taskID: task.id, entry: TimelineEntry(
-            kind: .assistant, title: "Computa", body: "Final answer"
+            kind: .assistant, title: "Kolmogor", body: "Final answer"
         )))
         state.apply(.taskStatusChanged(taskID: task.id, status: .completed))
 
@@ -144,7 +144,7 @@ final class AppStateTests: XCTestCase {
         let firstSubmitted = await state.submit(prompt: "First", toTaskID: task.id)
         XCTAssertTrue(firstSubmitted)
         state.apply(.timelineEntryAppended(taskID: task.id, entry: TimelineEntry(
-            kind: .assistant, title: "Computa", body: "Unverified reply"
+            kind: .assistant, title: "Kolmogor", body: "Unverified reply"
         )))
         state.apply(.taskStatusChanged(taskID: task.id, status: .waiting))
         XCTAssertNil(state.selectedTask?.entries.last?.workedForSeconds)
@@ -1318,7 +1318,7 @@ extension AppStateTests {
             toolEvent: .init(name: "commandExecution", summary: "Synthetic command", status: .succeeded,
                              input: "synthetic", output: "Synthetic output", duration: 0))
         runtime.emit(.timelineEntryAppended(taskID: task.id, entry: tool))
-        let answer = TimelineEntry(id: "synthetic-answer", kind: .assistant, title: "Computa", body: "Synthetic final")
+        let answer = TimelineEntry(id: "synthetic-answer", kind: .assistant, title: "Kolmogor", body: "Synthetic final")
         runtime.emit(.timelineEntryAppended(taskID: task.id, entry: answer))
         runtime.emit(.taskStatusChanged(taskID: task.id, status: .completed))
         let completed = await eventLifetimeEventually { state.tasks.first?.status == .completed }

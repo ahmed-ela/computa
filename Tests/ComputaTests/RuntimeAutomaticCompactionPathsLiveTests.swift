@@ -7,7 +7,7 @@ import UniformTypeIdentifiers
 import XCTest
 @testable import Computa
 
-/// Real model / real App Server / production Computa Core. The test-only stdio
+/// Real model / real App Server / production Kolmogor Core. The test-only stdio
 /// wrapper replaces status execution with synthetic read-only output and blocks
 /// every other server request. This is not a production desktop-broker test.
 @MainActor
@@ -88,7 +88,7 @@ final class RuntimeAutomaticCompactionPathsLiveTests: XCTestCase {
             permittedSyntheticTools: ["computer_v2_apps", "computer_v2_open", "computer_v2_read_page"], permitsUnboundSnapshotFailure: true)
         let events = pump(runtime, audit: audit)
         defer { events.cancel() }
-        let prompt = "In the already-running Computa Orders Fixture app, what is the delivery status for \(scenario.target)? Return only its exact status text."
+        let prompt = "In the already-running Kolmogor Orders Fixture app, what is the delivery status for \(scenario.target)? Return only its exact status text."
         do {
             try require(try await runtime.loadTasks().isEmpty, "The diagnostic requires isolated history.")
             try await send(prompt, runtime: runtime, audit: audit, timeoutSeconds: 120)
@@ -223,7 +223,7 @@ final class RuntimeAutomaticCompactionPathsLiveTests: XCTestCase {
             nodes.append(node)
             return index
         }
-        let window = add(nil, "AXWindow", title: "Orders — Computa Orders Fixture",
+        let window = add(nil, "AXWindow", title: "Orders — Kolmogor Orders Fixture",
             frame: ["x": 0, "y": 0, "width": 1_280, "height": 900])
         let document = add(window, "AXWebArea", title: "Orders")
         let navigation = add(document, "AXGroup", subrole: "AXLandmarkNavigation")
@@ -261,7 +261,7 @@ final class RuntimeAutomaticCompactionPathsLiveTests: XCTestCase {
                 "The first acquisition must genuinely lack the target text, not merely hide its output line.")
         }
         var raw: [String: Any] = ["id": UUID().uuidString,
-            "application": ["processIdentifier": 4242, "bundleIdentifier": "com.ahmedelamin.ComputaOrdersFixture", "applicationName": "Computa Orders Fixture"],
+            "application": ["processIdentifier": 4242, "bundleIdentifier": "com.ahmedelamin.ComputaOrdersFixture", "applicationName": "Kolmogor Orders Fixture"],
             "limits": ["maxDepth": 16, "maxElements": 240, "maxChildrenPerElement": 80, "maxActionsPerElement": 12, "maxTextLength": 4096],
             "rootIndex": window, "elements": initialNodes, "wasTruncated": false]
         let initialTree = try JSONDecoder().decode(AccessibilityTreeSnapshot.self, from: JSONSerialization.data(withJSONObject: raw))
@@ -279,17 +279,17 @@ final class RuntimeAutomaticCompactionPathsLiveTests: XCTestCase {
         let statusLine = targeted.split(separator: "\n").first { $0.contains("value=\"\(scenario.expectedStatus)\"") }
         try require(statusLine?.hasSuffix("parent=\(targetParent)") == true && targeted.contains("parents=["),
             "The targeted real-format observation must reveal the status with its card association.")
-        let application = ActivatedApplication(processIdentifier: 4242, bundleIdentifier: "com.ahmedelamin.ComputaOrdersFixture", localizedName: "Computa Orders Fixture")
+        let application = ActivatedApplication(processIdentifier: 4242, bundleIdentifier: "com.ahmedelamin.ComputaOrdersFixture", localizedName: "Kolmogor Orders Fixture")
         let open = String(decoding: try JSONEncoder().encode(application), as: UTF8.self)
             + "\nBound this app for the current turn. Observe before acting; no process ID is needed."
 
         let unbound = ComputerToolFailureEvidence.text(
             for: Failure(ComputerV2ToolContract.unboundApplicationMessage), tool: "computer_v2_read_page")
         let syntheticApps = [RunningApplicationInfo(processIdentifier: 4242,
-            bundleIdentifier: "com.ahmedelamin.ComputaOrdersFixture", localizedName: "Computa Orders Fixture", activationPolicy: .regular,
+            bundleIdentifier: "com.ahmedelamin.ComputaOrdersFixture", localizedName: "Kolmogor Orders Fixture", activationPolicy: .regular,
             isActive: true, isHidden: false, isTerminated: false)]
         var fixture = ["queryLiteral": scenario.target, "open": open, "initial": initial, "targeted": targeted, "unbound": unbound,
-                "apps": ComputerV2ToolContract.appInventory(syntheticApps, query: "Computa Orders Fixture"),
+                "apps": ComputerV2ToolContract.appInventory(syntheticApps, query: "Kolmogor Orders Fixture"),
                 "apps-default": ComputerV2ToolContract.appInventory(syntheticApps, query: nil)]
         // A shorter unique literal is a valid production query. Accept it only
         // after proving the real formatter returns exactly the same bytes.
@@ -870,7 +870,7 @@ final class RuntimeAutomaticCompactionPathsLiveTests: XCTestCase {
     }
 
     private func fixtureRoot(_ name: String) throws -> URL {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("Computa\(name)Live-\(UUID().uuidString)", isDirectory: true)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("Kolmogor\(name)Live-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let source = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Fixtures/ReadOnlyLiveCompactionProxy.ts")
@@ -1048,7 +1048,7 @@ final class RuntimeAutomaticCompactionPathsLiveTests: XCTestCase {
 
     private func verifyOnlySyntheticStatus(_ trace: AppServerWireTrace, root: URL, phase: String, imageSHA256: String? = nil) throws {
         try require(!trace.messages.contains { $0.method == "item/tool/call" },
-            "No dynamic tool request may reach Computa's real desktop executor in this fixture.")
+            "No dynamic tool request may reach Kolmogor's real desktop executor in this fixture.")
         let status = try exactlyOneCompletedItem("dynamicToolCall", in: trace)
         let params = try XCTUnwrap(status.object["params"] as? [String: Any])
         let item = try XCTUnwrap(params["item"] as? [String: Any])

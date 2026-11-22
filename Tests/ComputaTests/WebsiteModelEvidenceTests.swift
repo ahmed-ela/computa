@@ -62,7 +62,7 @@ final class WebsiteModelEvidenceTests: XCTestCase {
             XCTAssertEqual(error["code"] as? String, "product_mode_unverified")
             XCTAssertEqual(error["retryable"] as? Bool, false)
             XCTAssertEqual(error["required_action"] as? String, "inspect_website")
-            XCTAssertEqual(error["message"] as? String, "Computa could not verify normal Chat mode. Open chatgpt.com in Computa’s browser and check that you’re signed in. When the requested model is visible in Chat, start a new task.")
+            XCTAssertEqual(error["message"] as? String, "Kolmogor could not verify normal Chat mode. Open chatgpt.com in Kolmogor’s browser and check that you’re signed in. When the requested model is visible in Chat, start a new task.")
             XCTAssertTrue(error["param"] is NSNull)
         }
     }

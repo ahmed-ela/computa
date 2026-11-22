@@ -363,7 +363,7 @@ final class BackgroundBindingRuntimeLiveTests: XCTestCase {
         guard let data = try? JSONSerialization.data(withJSONObject: report, options: [.sortedKeys]),
               let text = String(data: data, encoding: .utf8) else { XCTFail("Could not encode background production proof."); return }
         let attachment = XCTAttachment(string: text)
-        attachment.name = "Computa production Qwen non-activating binding proof"
+        attachment.name = "Kolmogor production Qwen non-activating binding proof"
         attachment.lifetime = .keepAlways
         add(attachment)
         print("HEYDASH_BACKGROUND_BINDING_RUNTIME_LIVE=\(text)")

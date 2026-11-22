@@ -1,6 +1,6 @@
-# Running CLI commands in Computa
+# Running CLI commands in Kolmogor
 
-Computa can use command-line tools as well as browser and desktop controls.
+Kolmogor can use command-line tools as well as browser and desktop controls.
 Ask in the task composer, for example:
 
 > Run `uname -m` and `pwd`, then report their output and exit status.
@@ -16,7 +16,7 @@ is not a success.
 
 ## Working directory and tools
 
-The default working directory is Computa's private workspace under
+The default working directory is Kolmogor's private workspace under
 `~/Library/Application Support/LocalCodex/CodexHome/Workspace`. Give an absolute
 working directory when asking about a project elsewhere.
 
@@ -27,7 +27,7 @@ delete files; **Changes** exposes recorded patches and current Git differences.
 See [code editing and review](CODE-EDITING.md).
 
 System command directories, `/opt/homebrew/bin`, and `/usr/local/bin` are on the
-runtime PATH. Computa does not install missing tools automatically. The engine
+runtime PATH. Kolmogor does not install missing tools automatically. The engine
 keeps a private HOME and configuration directory; shell startup files, aliases,
 personal Codex configuration, and ambient credentials are not imported. Commands
 requiring an existing login or configuration may need an explicit path or their
@@ -64,11 +64,11 @@ the transcript.
 
 ## Current validation and limitations
 
-Before the rename, the signal-fixed Computa build ran `uname -m` and received
+Before the rename, the signal-fixed Kolmogor build ran `uname -m` and received
 `arm64` with exit code 0. Its final
 model reply still failed `unstreamed_final_text` validation. A controlled live
 Stop test with independently observed OS-process exit remains pending. The
-renamed Computa build, installer migration and startup passed; a new live CLI
+renamed Kolmogor build, installer migration and startup passed; a new live CLI
 task was not part of that rename check. The stream/final-answer failure remains
 unresolved and the preview remains a draft. See [TODO.md](../TODO.md).
 

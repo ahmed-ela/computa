@@ -70,7 +70,7 @@ pub fn item_entry(
             let phase = item["phase"]
                 .as_str()
                 .and_then(|s| serde_json::from_value(Value::String(s.into())).ok());
-            (EntryKind::Assistant, "Computa".into(), text, phase, None)
+            (EntryKind::Assistant, "Kolmogor".into(), text, phase, None)
         }
         "reasoning" => {
             let text = reasoning_text(item);

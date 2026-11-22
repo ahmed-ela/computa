@@ -43,7 +43,7 @@ enum EmbeddedBrowserIdentity {
     }
 
     static func applicationName(safari: Product?, webKit: Product?, appVersion: String?) -> String {
-        let app = appVersion.flatMap { validVersion($0) ? "Computa/\($0)" : nil } ?? "Computa"
+        let app = appVersion.flatMap { validVersion($0) ? "Kolmogor/\($0)" : nil } ?? "Kolmogor"
         guard let safari, let webKit,
               safari.identifier == "com.apple.Safari", webKit.identifier == "com.apple.WebKit",
               validVersion(safari.version), validVersion(safari.build), validVersion(webKit.build),

@@ -75,7 +75,7 @@ pub fn render(snapshot: &AppSnapshot, local: &LocalState, now: f64) -> Rendered 
         "<div class=\"app-shell\"><div class=\"app-panels\" {}>",
         if inert { "inert" } else { "" }
     ));
-    r.push("<aside class=\"sidebar\" aria-label=\"Task navigation\"><div class=\"window-drag-strip\"></div><div class=\"sidebar-brand-row\"><strong>Computa</strong></div><nav class=\"primary-nav\" aria-label=\"Primary\">");
+    r.push("<aside class=\"sidebar\" aria-label=\"Task navigation\"><div class=\"window-drag-strip\"></div><div class=\"sidebar-brand-row\"><strong>Kolmogor</strong></div><nav class=\"primary-nav\" aria-label=\"Primary\">");
     r.native(
         "New task",
         "nav-button new-task-button",
@@ -125,7 +125,7 @@ pub fn render(snapshot: &AppSnapshot, local: &LocalState, now: f64) -> Rendered 
             } else {
                 &t.title
             })
-            .unwrap_or("Computa")
+            .unwrap_or("Kolmogor")
         )
     ));
     if let Some(task) = task {
@@ -141,7 +141,7 @@ pub fn render(snapshot: &AppSnapshot, local: &LocalState, now: f64) -> Rendered 
     if let Some(task) = task {
         conversation(&mut r, snapshot, local, task, now);
     } else {
-        r.push("<div class=\"no-task-view\"><h1>Computa</h1><p>Fast, Mac-optimized local AI.</p>");
+        r.push("<div class=\"no-task-view\"><h1>Kolmogor</h1><p>Fast, Mac-optimized local AI.</p>");
         r.native("New task", "new-task-button", NativeAction::CreateTask);
         r.push("</div>");
     }

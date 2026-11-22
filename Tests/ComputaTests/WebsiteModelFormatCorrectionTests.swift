@@ -18,7 +18,7 @@ final class WebsiteModelFormatCorrectionTests: XCTestCase {
             "input": "Draft an email here only; do not send it or use tools.", "tools": [], "tool_choice": "none"])
         do {
             _ = try await server.fixtureInfer(bytes, taskID: "email-card-terminal")
-            XCTFail("Native website card text must not become a Computa final answer")
+            XCTFail("Native website card text must not become a Kolmogor final answer")
         } catch {
             XCTAssertEqual(error as? WebModelResponseCodec.Failure, .unsupportedWebsiteResponse)
             XCTAssertEqual(WebModelServer.errorPresentation(for: error).code, "unsupported_website_response")

@@ -347,7 +347,7 @@ async fn loaded_marker(
         "complete_bounded_policy_required",
     )?;
     let marker = "HEYDASH_PARENT_DEATH_MEMORY_OK";
-    let request = json!({"model":MODEL,"instructions":"You are Computa. This is a read-only local memory-lifecycle test. No tools are available.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":policy}]},{"type":"message","role":"user","content":[{"type":"input_text","text":format!("Reply only {marker}. Do not use tools.")}]}],"tools":[],"stream":true,"store":false,"reasoning":{"effort":"none"},"temperature":0.1,"max_output_tokens":1024});
+    let request = json!({"model":MODEL,"instructions":"You are Kolmogor. This is a read-only local memory-lifecycle test. No tools are available.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":policy}]},{"type":"message","role":"user","content":[{"type":"input_text","text":format!("Reply only {marker}. Do not use tools.")}]}],"tools":[],"stream":true,"store":false,"reasoning":{"effort":"none"},"temperature":0.1,"max_output_tokens":1024});
     let started = Instant::now();
     let (events, bytes) = tokio::time::timeout(Duration::from_secs(120), async {
         let mut response = client
@@ -431,7 +431,7 @@ pub async fn parent_death_probe(options: &ParentDeathOptions) -> Result<Value> {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| BenchmarkError("http_client_unavailable"))?;
-    let mut summary = json!({"state":"preflight","load4BExplicitlyRequested":options.load_4b,"model":MODEL,"endpoint":endpoint,"nonce":nonce,"inferenceLaneRequirement":"Run only when Computa and all other inference producers are idle/stopped.","limitations":"Process disappearance releases its allocations; this is not a matched RAM A/B or whole-system free-memory measurement.","sourceHashes":{"worker":hash(read_bounded(&worker,64*1024*1024)?),"runner":hash(include_bytes!("lifecycle.rs"))},"protocol":"computa-rust-parent-death-v1"});
+    let mut summary = json!({"state":"preflight","load4BExplicitlyRequested":options.load_4b,"model":MODEL,"endpoint":endpoint,"nonce":nonce,"inferenceLaneRequirement":"Run only when Kolmogor and all other inference producers are idle/stopped.","limitations":"Process disappearance releases its allocations; this is not a matched RAM A/B or whole-system free-memory measurement.","sourceHashes":{"worker":hash(read_bounded(&worker,64*1024*1024)?),"runner":hash(include_bytes!("lifecycle.rs"))},"protocol":"computa-rust-parent-death-v1"});
     let mut supervisor = None;
     let mut child_identity = None;
     let mut descendant = None;

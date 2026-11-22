@@ -1,7 +1,7 @@
 import WebKit
 
 /// The ordinary page loads its own icon with WebKit's network, profile and CORS rules.
-/// Only a small, rasterized PNG crosses into Computa's privileged interface.
+/// Only a small, rasterized PNG crosses into Kolmogor's privileged interface.
 enum BrowserFavicon {
     @MainActor
     static func read(in view: WKWebView) async -> Data? {

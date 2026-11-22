@@ -3,12 +3,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "Computa",
+    name: "Kolmogor",
     platforms: [
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "Computa", targets: ["Computa"])
+        .executable(name: "Kolmogor", targets: ["Computa"])
     ],
     targets: [
         .target(

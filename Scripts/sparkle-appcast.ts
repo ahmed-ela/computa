@@ -10,9 +10,9 @@ export function renderAppcast(release: UpdateRelease, repo: string, size: number
   const { tag, appBuild, appVersion, minimumMacOS } = release;
   if (!tagMetadata(tag).prerelease || tag !== `v${appVersion}-alpha.${appBuild}` || !/^\d+\.\d+(\.\d+)?$/.test(minimumMacOS)
     || !/^[\w.-]+\/[\w.-]+$/.test(repo) || !/^[A-Za-z0-9+/]{86}==$/.test(signature)) throw new Error("Invalid appcast metadata");
-  const url = `https://github.com/${repo}/releases/download/${tag}/Computa-${tag.slice(1)}-arm64.dmg`;
+  const url = `https://github.com/${repo}/releases/download/${tag}/Kolmogor-${tag.slice(1)}-arm64.dmg`;
   return `<?xml version="1.0" encoding="UTF-8"?>\n<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel>
-<title>Computa for macOS</title><item><title>Computa ${tag.slice(1)}</title>
+<title>Kolmogor for macOS</title><item><title>Kolmogor ${tag.slice(1)}</title>
 <sparkle:version>${appBuild}</sparkle:version><sparkle:shortVersionString>${appVersion}</sparkle:shortVersionString>
 <sparkle:minimumSystemVersion>${minimumMacOS}</sparkle:minimumSystemVersion>
 <enclosure url="${url}" length="${size}" type="application/octet-stream" sparkle:edSignature="${signature}"/>
@@ -31,11 +31,11 @@ export function verifyAppcast(xml: string, dmg: Buffer, release: UpdateRelease, 
 
 // Run only after the final DMG has been signed, notarized and stapled. The private key stays in Keychain.
 if (import.meta.main) {
-  const [signer, file, repo = "ahmed-ela/computa"] = process.argv.slice(2);
+  const [signer, file, repo = "ahmed-ela/kolmogor"] = process.argv.slice(2);
   if (!signer || !file) throw new Error("Usage: bun Scripts/sparkle-appcast.ts PATH/TO/sign_update FINAL.dmg [OWNER/REPO]");
   const dmg = resolve(file), directory = dirname(dmg), manifest = dmg.replace(/\.dmg$/, ".manifest.json");
   const release = JSON.parse(await readFile(manifest, "utf8"));
-  if (release.channel !== "notarized" || basename(dmg) !== `Computa-${release.tag.slice(1)}-arm64.dmg`) throw new Error("Expected a notarized Computa DMG");
+  if (release.channel !== "notarized" || basename(dmg) !== `Kolmogor-${release.tag.slice(1)}-arm64.dmg`) throw new Error("Expected a notarized Kolmogor DMG");
   async function run(command: string[]) {
     const child = Bun.spawn(command, { stdout: "pipe", stderr: "inherit" });
     const output = await new Response(child.stdout).text();

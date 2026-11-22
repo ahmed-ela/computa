@@ -288,7 +288,7 @@ impl TrustedNativeBrowserControls {
             "Search or enter a website address",
         )));
         let status =
-            NSTextField::labelWithString(&NSString::from_str("Your browser inside Computa"), mtm);
+            NSTextField::labelWithString(&NSString::from_str("Your browser inside Kolmogor"), mtm);
         status.setFrame(NSRect::new(NSPoint::new(8., -8.), NSSize::new(550., 20.)));
         let mut buttons = vec![];
         for title in ["+", "Close tab", "Back", "Forward", "Reload", "Go", "Hide"] {

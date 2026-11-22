@@ -46,7 +46,7 @@ const previewTasks: TaskSnapshot[] = [
     workspace: previewWorkspace, model: modelCerebras, modelSelectable: true,
     queuedPrompts: [], queuePaused: false, canSteer: false, isBusy: false, hasUnreadCompletion: true,
     entries: [{
-      id: 'preview-formatted-answer', kind: 'assistant', title: 'Computa', timestamp: now - 100,
+      id: 'preview-formatted-answer', kind: 'assistant', title: 'Kolmogor', timestamp: now - 100,
       workedForSeconds: 65,
       body: [
         '', '', '## A readable response', '',
@@ -105,7 +105,7 @@ const previewTasks: TaskSnapshot[] = [
         },
       },
       {
-        id: 'preview-4b-assistant', kind: 'assistant', title: 'Computa',
+        id: 'preview-4b-assistant', kind: 'assistant', title: 'Kolmogor',
         body: '\n\nLocal AI runs directly on your Mac instead of relying on a remote server. It can keep your data on the device and work offline.\n\nA practical setup combines a language model with carefully approved computer actions.\n\n- **Privacy:** Keep prompts and model inference local.\n- **Responsiveness:** Use a model that fits your available memory.\n- **Control:** Review clicks and typing before they happen.\n\nThis is synthetic preview content; no model or computer tool ran.\n\n',
         timestamp: now - 130,
         workedForSeconds: 370,
@@ -231,7 +231,7 @@ const previewTasks: TaskSnapshot[] = [
         },
       },
       {
-        id: 'preview-long-assistant', kind: 'assistant', title: 'Computa',
+        id: 'preview-long-assistant', kind: 'assistant', title: 'Kolmogor',
         body: 'The output above is intentionally long and contains literal angle brackets. This preview did not read files or run tools.',
         timestamp: now - 3_900,
         workedForSeconds: 300,

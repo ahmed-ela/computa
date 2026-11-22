@@ -10,13 +10,13 @@ async function file(path: string, value = "fixture") { await mkdir(dirname(path)
 async function fixture() {
   const temporary = await realpath(await mkdtemp(join(tmpdir(), "computa-release-test-")));
   directories.push(temporary);
-  const app = join(temporary, "input/Computa.app"), output = join(temporary, "output");
-  const info = { CFBundleIdentifier: "com.ahmedelamin.LocalCodex", CFBundleExecutable: "Computa",
+  const app = join(temporary, "input/Kolmogor.app"), output = join(temporary, "output");
+  const info = { CFBundleIdentifier: "com.ahmedelamin.LocalCodex", CFBundleExecutable: "Kolmogor",
     CFBundleShortVersionString: "0.1.0", CFBundleVersion: "1", LSMinimumSystemVersion: "14.0" };
   await file(join(app, "Contents/Info.plist"), JSON.stringify(info));
-  for (const name of ["Contents/MacOS/Computa", "Contents/Resources/AgentRuntime/codex-app-server",
+  for (const name of ["Contents/MacOS/Kolmogor", "Contents/Resources/AgentRuntime/codex-app-server",
     "Contents/Resources/MLXServer/server.py", "Contents/Resources/WebUI/index.html"]) await file(join(app, name));
-  await chmod(join(app, "Contents/MacOS/Computa"), 0o755);
+  await chmod(join(app, "Contents/MacOS/Kolmogor"), 0o755);
   const binary = join(app, "Contents/Resources/AgentRuntime/codex-app-server");
   const binaryText = "fixture-runtime".repeat(4);
   await file(binary, binaryText);
@@ -58,7 +58,7 @@ test("requires an explicit safe release tag and keeps pre-release version separa
 test("signed-test packaging preserves exact app bytes and mode, records pins, and never signs or installs", async () => {
   const f = await fixture(); const before = await bundleFiles(f.app);
   const result = (await packageRelease(f.options, f.context))!;
-  expect(result.dmg).toEndWith("Computa-0.1.0-alpha.1-arm64-signed-test.dmg");
+  expect(result.dmg).toEndWith("Kolmogor-0.1.0-alpha.1-arm64-signed-test.dmg");
   expect(await bundleFiles(f.app)).toEqual(before);
   const manifest = JSON.parse(await readFile(result.manifest, "utf8"));
   expect(manifest.appFiles).toEqual(before);
@@ -72,9 +72,9 @@ test("signed-test packaging preserves exact app bytes and mode, records pins, an
   expect(f.calls.some(call => call.includes("--sign") || call[0].endsWith("/open") || call[0].endsWith("/xattr"))).toBe(false);
   expect(f.calls.some(call => call[0].endsWith("/hdiutil") && call[1] === "verify")).toBe(true);
   const guide = await readFile(join(result.stage, "payload/READ ME.txt"), "utf8");
-  expect(guide).toContain("drag Computa.app to Applications");
+  expect(guide).toContain("drag Kolmogor.app to Applications");
   expect(guide).toContain("Browser and API models need no Python, MLX or model downloads");
-  expect(guide).toContain("After signing in, quit and reopen Computa once to discover verified model choices");
+  expect(guide).toContain("After signing in, quit and reopen Kolmogor once to discover verified model choices");
   expect(guide).toContain("Optional legacy local-model setup");
 });
 
@@ -88,7 +88,7 @@ test("packages schema2 runtime capabilities without changing the app or its inte
   const before = await bundleFiles(f.app);
   const result = (await packageRelease(f.options, f.context))!;
   expect(await bundleFiles(f.app)).toEqual(before);
-  expect(JSON.parse(await readFile(join(result.stage, "payload/Computa.app/Contents/Resources/AgentRuntime/manifest.json"), "utf8")))
+  expect(JSON.parse(await readFile(join(result.stage, "payload/Kolmogor.app/Contents/Resources/AgentRuntime/manifest.json"), "utf8")))
     .toEqual(runtime);
   const signatures = f.calls.filter(call => call[0] === "/usr/bin/codesign");
   expect(signatures.some(call => call.some(value => value.includes("certificate leaf[field.1.2.840.113635.100.6.1.13] exists"))
@@ -180,7 +180,7 @@ test("checks the supported arm64 slice of the app plus the arm64-only runtime", 
   expect(inspections).toHaveLength(2);
   expect(inspections.every(call => call.slice(1, 4).join(" ") === "-arch arm64 -L")).toBe(true);
   expect(inspections.map(call => call.at(-1)!.slice(f.app.length + 1))).toEqual([
-    "Contents/MacOS/Computa", "Contents/Resources/AgentRuntime/codex-app-server",
+    "Contents/MacOS/Kolmogor", "Contents/Resources/AgentRuntime/codex-app-server",
   ]);
 });
 

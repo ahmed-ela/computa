@@ -15,10 +15,10 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "FE8030C5BD7536E58BAF1F25"
+               BlueprintIdentifier = "6EA98057435799213CAEC8A0"
                BuildableName = "libAutomationCore.a"
                BlueprintName = "AutomationCore"
-               ReferencedContainer = "container:Computa.xcodeproj">
+               ReferencedContainer = "container:Kolmogor.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
          <BuildActionEntry
@@ -29,10 +29,24 @@
             buildForAnalyzing = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "1C023654AD5A90F93857CF5A"
+               BlueprintIdentifier = "25E4CA263FF67146CCF2F5A6"
                BuildableName = "AutomationCoreTests.xctest"
                BlueprintName = "AutomationCoreTests"
-               ReferencedContainer = "container:Computa.xcodeproj">
+               ReferencedContainer = "container:Kolmogor.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "28ABF4E73C583CB76CC161AB"
+               BuildableName = "ComputaTests.xctest"
+               BlueprintName = "ComputaTests"
+               ReferencedContainer = "container:Kolmogor.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
          <BuildActionEntry
@@ -43,24 +57,10 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "99E9D2F0C52A8B8FC94AA89C"
-               BuildableName = "Computa.app"
-               BlueprintName = "Computa"
-               ReferencedContainer = "container:Computa.xcodeproj">
-            </BuildableReference>
-         </BuildActionEntry>
-         <BuildActionEntry
-            buildForTesting = "YES"
-            buildForRunning = "NO"
-            buildForProfiling = "NO"
-            buildForArchiving = "NO"
-            buildForAnalyzing = "NO">
-            <BuildableReference
-               BuildableIdentifier = "primary"
-               BlueprintIdentifier = "8F52DEC429D956551EE40DA4"
-               BuildableName = "ComputaTests.xctest"
-               BlueprintName = "ComputaTests"
-               ReferencedContainer = "container:Computa.xcodeproj">
+               BlueprintIdentifier = "B2B33E4571523B5B50950976"
+               BuildableName = "Kolmogor.app"
+               BlueprintName = "Kolmogor"
+               ReferencedContainer = "container:Kolmogor.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -74,10 +74,10 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "FE8030C5BD7536E58BAF1F25"
+            BlueprintIdentifier = "6EA98057435799213CAEC8A0"
             BuildableName = "libAutomationCore.a"
             BlueprintName = "AutomationCore"
-            ReferencedContainer = "container:Computa.xcodeproj">
+            ReferencedContainer = "container:Kolmogor.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
       <Testables>
@@ -86,10 +86,10 @@
             parallelizable = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "8F52DEC429D956551EE40DA4"
+               BlueprintIdentifier = "28ABF4E73C583CB76CC161AB"
                BuildableName = "ComputaTests.xctest"
                BlueprintName = "ComputaTests"
-               ReferencedContainer = "container:Computa.xcodeproj">
+               ReferencedContainer = "container:Kolmogor.xcodeproj">
             </BuildableReference>
          </TestableReference>
          <TestableReference
@@ -97,10 +97,10 @@
             parallelizable = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "1C023654AD5A90F93857CF5A"
+               BlueprintIdentifier = "25E4CA263FF67146CCF2F5A6"
                BuildableName = "AutomationCoreTests.xctest"
                BlueprintName = "AutomationCoreTests"
-               ReferencedContainer = "container:Computa.xcodeproj">
+               ReferencedContainer = "container:Kolmogor.xcodeproj">
             </BuildableReference>
          </TestableReference>
       </Testables>
@@ -120,10 +120,10 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "FE8030C5BD7536E58BAF1F25"
+            BlueprintIdentifier = "6EA98057435799213CAEC8A0"
             BuildableName = "libAutomationCore.a"
             BlueprintName = "AutomationCore"
-            ReferencedContainer = "container:Computa.xcodeproj">
+            ReferencedContainer = "container:Kolmogor.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
       <CommandLineArguments>
@@ -138,10 +138,10 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "FE8030C5BD7536E58BAF1F25"
+            BlueprintIdentifier = "6EA98057435799213CAEC8A0"
             BuildableName = "libAutomationCore.a"
             BlueprintName = "AutomationCore"
-            ReferencedContainer = "container:Computa.xcodeproj">
+            ReferencedContainer = "container:Kolmogor.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
    </ProfileAction>

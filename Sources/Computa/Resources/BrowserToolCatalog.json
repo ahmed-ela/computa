@@ -59,7 +59,7 @@
   },
   "tools": [
     {
-      "description": "List human tabs in Computa's built-in browser, including current logins, within an 8KB page. Omit cursor or use null for a fresh first page. Empty inventory means no matching user tabs were listed, not denied access; use browser_open for a named known service's official entrypoint. Continue with browser_tabs(cursor=next_cursor) alone; computer_v2_continue cannot consume this inventory cursor. Inference and app-control pages are excluded. Use an observed tab_id to bind; busy tabs belong to another task.",
+      "description": "List human tabs in Kolmogor's built-in browser, including current logins, within an 8KB page. Omit cursor or use null for a fresh first page. Empty inventory means no matching user tabs were listed, not denied access; use browser_open for a named known service's official entrypoint. Continue with browser_tabs(cursor=next_cursor) alone; computer_v2_continue cannot consume this inventory cursor. Inference and app-control pages are excluded. Use an observed tab_id to bind; busy tabs belong to another task.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -79,7 +79,7 @@
       "type": "function"
     },
     {
-      "description": "Create and bind one background task-owned tab in Computa's built-in browser, sharing its signed-in profile. A user-provided URL is not required for a user-named known service's official homepage or sign-in entrypoint. Preserve any supplied URL exactly; use observed controls for deeper pages. Only this created tab is cleaned up at turn end. Use available current_observation; otherwise browser_read. Completion is not the requested website outcome.",
+      "description": "Create and bind one background task-owned tab in Kolmogor's built-in browser, sharing its signed-in profile. A user-provided URL is not required for a user-named known service's official homepage or sign-in entrypoint. Preserve any supplied URL exactly; use observed controls for deeper pages. Only this created tab is cleaned up at turn end. Use available current_observation; otherwise browser_read. Completion is not the requested website outcome.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

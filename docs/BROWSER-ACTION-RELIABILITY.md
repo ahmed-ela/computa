@@ -241,7 +241,7 @@ search and textarea controls before an observed submit button is pressed.
 
 `Tests/Fixtures/browser_action_mailbox.py` serves an isolated loopback mailbox.
 It cannot send external mail. Start it with a new `--evidence-dir` and use the
-origin in its `connection.json` through Computa's installed model-driven browser.
+origin in its `connection.json` through Kolmogor's installed model-driven browser.
 
 1. Ask the model to read the ODE announcement and attachment filename, with an
    explicit read-only constraint. Confirm no POST delivery in `events.jsonl`.
@@ -477,7 +477,7 @@ then succeeded and exposed the account picker again. The model nevertheless
 claimed a password/possible MFA and permission barrier without observing one.
 The owned tab closed. This completed UI turn is a semantic failure.
 
-Direct inspection in one owned normal Computa browser tab reached the mailbox by
+Direct inspection in one owned normal Kolmogor browser tab reached the mailbox by
 clicking the same existing-account selector once, without a password or MFA.
 The diagnostic tab was closed and the pane hidden again. This manual action
 refreshed the shared sign-in session; later tests must disclose that condition.
@@ -2060,7 +2060,7 @@ source checkpoint. Private receipts: `swift254-grounding`,
 
 ### Installed 254: explicit provider-account blocker
 
-Signed, non-notarized Computa 0.7.0 (254), source `dd68b98`, passed all eleven
+Signed, non-notarized Kolmogor 0.7.0 (254), source `dd68b98`, passed all eleven
 build/source/identity/signature/resource checks and was installed with unchanged
 runtime `mactopus-16`. The running executable and every resource matched the
 validated build. Normal Quit first disposed the idle build253 app and engine;
@@ -2149,7 +2149,7 @@ source checkpoint. Cerebras HTTP 402 remains a separate account-access blocker.
 
 ### Installed 256: cookie preparation repaired; model selection still blocked
 
-Signed, non-notarized Computa 0.7.0 (256), source `57c8291`, passed all eleven
+Signed, non-notarized Kolmogor 0.7.0 (256), source `57c8291`, passed all eleven
 build/identity/signature/resource checks after the 45 passing cookie tests.
 The installed executable matched `3f1e2065a228…`; runtime `mactopus-16` was
 unchanged. These checks do not establish a successful website task.

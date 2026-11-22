@@ -324,7 +324,7 @@ function PromptQueue({ task }: { task: TaskSnapshot }) {
       onDragOver={(event) => { if (draggedID) event.preventDefault(); }}
       onDrop={(event) => drop(event)}
     >
-      <div className="queue-header" title="Queued messages are kept while Computa is open">
+      <div className="queue-header" title="Queued messages are kept while Kolmogor is open">
         <div><strong>Up next</strong><span>{task.queuedPrompts.length}</span></div>
         {task.queuePaused ? (
           <Button variant="outline" size="sm" className="queue-resume-button" onClick={() => post({ action: 'resumeQueue', taskID: task.id })}>
@@ -652,7 +652,7 @@ function Conversation({ snapshot, task, draftState }: { snapshot: AppSnapshot; t
         <div className="conversation-content" ref={contentRef}>
           {rows.length === 0 ? (
             <div className="empty-conversation">
-              <h1>Computa will take care of it.</h1>
+              <h1>Kolmogor will take care of it.</h1>
               <p>Ask a question or give your Mac a task.</p>
               {showProjectFolderPicker && task.status === 'Draft' && task.entries.length === 0 && !task.isBusy ? <Button variant="outline" size="sm" className="choose-workspace-button" onClick={() => post({ action: 'chooseTaskWorkspace', taskID: task.id })}>Choose a project folder</Button> : null}
             </div>
@@ -866,7 +866,7 @@ function SettingsModal({ snapshot, nativeHost }: { snapshot: AppSnapshot; native
                 </Button>
               </span>
             </div>
-            <details className="permission-help"><summary>About computer access <Icon name="chevron" size={13} /></summary><p className="permission-note">macOS permissions are separate from the app's access mode. Full access allows terminal/file commands outside the workspace and network access without engine approval prompts, and automatically approves Computa action requests. Ask every time keeps the workspace sandbox and asks before protected actions. Read-only inspection stays prompt-free. Both modes keep tool validation and macOS permission checks. New submissions use this choice; running turns keep their execution permissions. Your choice is remembered across launches.</p></details>
+            <details className="permission-help"><summary>About computer access <Icon name="chevron" size={13} /></summary><p className="permission-note">macOS permissions are separate from the app's access mode. Full access allows terminal/file commands outside the workspace and network access without engine approval prompts, and automatically approves Kolmogor action requests. Ask every time keeps the workspace sandbox and asks before protected actions. Read-only inspection stays prompt-free. Both modes keep tool validation and macOS permission checks. New submissions use this choice; running turns keep their execution permissions. Your choice is remembered across launches.</p></details>
             <Button variant="outline" className="refresh-button" onClick={() => post({ action: 'refreshPermissions' })}>Refresh permission status</Button>
           </section>
         </div>
@@ -880,7 +880,7 @@ function LoadingView() {
   return (
     <main className="loading-view">
       <span className="loading-mark"><Icon name="sparkles" size={22} /></span>
-      <strong>Starting Computa</strong>
+      <strong>Starting Kolmogor</strong>
       <span>Connecting the native runtime…</span>
     </main>
   );
@@ -891,7 +891,7 @@ function BridgeUnavailableView() {
     <main className="loading-view" role="alert">
       <span className="loading-mark"><Icon name="info" size={22} /></span>
       <strong>Native bridge unavailable</strong>
-      <span>Open this interface from the Computa macOS application.</span>
+      <span>Open this interface from the Kolmogor macOS application.</span>
     </main>
   );
 }

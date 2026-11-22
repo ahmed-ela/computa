@@ -1,6 +1,6 @@
-# Computa agent instructions
+# Kolmogor agent instructions
 
-Computa owns its instructions and tool contracts. Users can describe ordinary
+Kolmogor owns its instructions and tool contracts. Users can describe ordinary
 tasks without naming tools or teaching the model the harness. Tool execution,
 permissions, local history and outcome verification remain in the local App
 Server and native host.
@@ -93,7 +93,7 @@ diffs. Proposed, failed, or interrupted changes are not labeled applied merely
 because the model returned a patch. See [code editing](CODE-EDITING.md).
 
 Current website models receive text observations. The `browser_*` tools control
-Computa's normal built-in WebKit tabs through a separate owned controller;
+Kolmogor's normal built-in WebKit tabs through a separate owned controller;
 the `computer_v2_*` tools operate native applications.
 Embedded provider model pages remain private inference surfaces
 and cannot be selected as browser-tool targets. See [built-in browser tools](BUILT-IN-BROWSER-TOOLS.md).

@@ -92,7 +92,7 @@ final class RuntimeContextResumeLiveTests: XCTestCase {
                 + "exactCanaryRetained=true\nstatusToolCalls=1\ncompactions=1\n"
                 + "firstProtocolTrace=\(firstTraceURL.path)\nresumedProtocolTrace=\(resumedTraceURL.path)\n"
             let attachment = XCTAttachment(string: proof)
-            attachment.name = "Computa cold-resume compaction evidence"
+            attachment.name = "Kolmogor cold-resume compaction evidence"
             attachment.lifetime = .keepAlways
             add(attachment)
             print(proof)

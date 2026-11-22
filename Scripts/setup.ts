@@ -7,13 +7,13 @@ import { checkVersion } from "./version";
 import { retiredBundleResources } from "./retired-bundle-resources";
 
 const bundleID = "com.ahmedelamin.LocalCodex";
-const help = `Build Computa from this checked-out source tree (Apple Silicon macOS only).
+const help = `Build Kolmogor from this checked-out source tree (Apple Silicon macOS only).
 
 Usage: ./Scripts/setup.sh [--check | --build-only] [--no-launch] [--download-model]
                          [--signing-identity CERTIFICATE]
 
   --check           Read-only prerequisite check; no builds, installs, or downloads.
-  --build-only      Build and sign .build/SourceInstall/Build/Products/Release/Computa.app.
+  --build-only      Build and sign .build/SourceInstall/Build/Products/Release/Kolmogor.app.
                     Do not install Python, models, or the app, and do not launch it.
   --no-launch       Install without opening the app.
   --download-model  Explicitly download the pinned Qwen 3.5 4B 4-bit model (~3 GB).
@@ -22,8 +22,8 @@ Usage: ./Scripts/setup.sh [--check | --build-only] [--no-launch] [--download-mod
   --help            Show this help.
 
 Default: build, prepare the private MLX Python environment, install into
-~/Applications/Computa.app, and open it. No model weights are downloaded unless
---download-model is supplied. Existing apps are backed up; quit Computa and
+~/Applications/Kolmogor.app, and open it. No model weights are downloaded unless
+--download-model is supplied. Existing apps are backed up; quit Kolmogor and
 legacy Mactopus first. A legacy Mactopus.app is upgraded with its name preserved
 in the backup. If both app names exist, setup stops for you to resolve them.
 Default signing is ad-hoc. No macOS permissions are auto-granted.
@@ -119,7 +119,7 @@ async function requireSafeDirectory(path: string): Promise<void> {
 
 export async function checkPrerequisites(context: SetupContext): Promise<void> {
   if (context.platform !== "darwin" || context.architecture !== "arm64") {
-    throw new Error("Computa currently builds only on Apple Silicon macOS (arm64). Intel and Linux are not supported.");
+    throw new Error("Kolmogor currently builds only on Apple Silicon macOS (arm64). Intel and Linux are not supported.");
   }
   const missing = ["bun", "git", "xcodegen", "xcodebuild", "xcrun", "rustup", "cargo", "uv"]
     .filter(name => !context.which(name));
@@ -150,21 +150,22 @@ export async function checkPrerequisites(context: SetupContext): Promise<void> {
   context.log("Prerequisites passed. Allow substantial Cargo build time and roughly 35–50 GB free build/cache space.");
 }
 
-async function inspectApp(context: SetupContext, app: string, expectedExecutable = "Computa"): Promise<void> {
+async function inspectApp(context: SetupContext, app: string, expectedExecutable = "Kolmogor"): Promise<void> {
   await requireSafeDirectory(app);
   const plist = join(app, "Contents/Info.plist");
   await requireRegular(plist);
   const identifier = await checked(context, ["/usr/bin/plutil", "-extract", "CFBundleIdentifier", "raw", "-o", "-", plist], true);
   const executable = await checked(context, ["/usr/bin/plutil", "-extract", "CFBundleExecutable", "raw", "-o", "-", plist], true);
-  if (identifier !== bundleID || executable !== expectedExecutable) {
+  const matchesExecutable = executable === expectedExecutable || (expectedExecutable === "Computa" && executable === "Kolmogor");
+  if (identifier !== bundleID || !matchesExecutable) {
     throw new Error(`Refusing to replace or use an unknown app at ${app}. Expected ${expectedExecutable} (${bundleID}).`);
   }
-  await requireRegular(join(app, "Contents/MacOS", expectedExecutable));
+  await requireRegular(join(app, "Contents/MacOS", executable));
   await checked(context, ["/usr/bin/codesign", "--verify", "--deep", "--strict", app], true);
 }
 
 async function requireStopped(context: SetupContext): Promise<void> {
-  for (const name of ["Computa", "Mactopus"]) {
+  for (const name of ["Kolmogor", "Computa", "Mactopus"]) {
     const process = await context.run(["/usr/bin/pgrep", "-x", name], context.root, true);
     if (process.code === 0) throw new Error(`${name} is running. Quit it normally, then rerun setup. No app was replaced or stopped.`);
     if (process.code !== 1) throw new Error(`Could not determine whether ${name} is running; refusing to replace the app.`);
@@ -174,11 +175,14 @@ async function requireStopped(context: SetupContext): Promise<void> {
 async function existingApp(context: SetupContext, applications: string): Promise<string | undefined> {
   if (!await exists(applications)) return undefined;
   await requireSafeDirectory(applications);
-  const current = join(applications, "Computa.app"), legacy = join(applications, "Mactopus.app");
-  const hasCurrent = await exists(current), hasLegacy = await exists(legacy);
-  if (hasCurrent && hasLegacy) throw new Error("Both Computa.app and Mactopus.app exist in ~/Applications. Resolve the duplicate installations before setup; neither was changed.");
-  const existing = hasCurrent ? current : hasLegacy ? legacy : undefined;
-  if (existing) await inspectApp(context, existing, hasLegacy ? "Mactopus" : "Computa");
+  const candidates: string[] = [];
+  for (const name of ["Kolmogor", "Computa", "Mactopus"]) {
+    const app = join(applications, name + ".app");
+    if (await exists(app)) candidates.push(app);
+  }
+  if (candidates.length > 1) throw new Error("Resolve the duplicate installations in ~/Applications before setup.");
+  const [existing] = candidates;
+  if (existing) await inspectApp(context, existing, basename(existing, ".app"));
   return existing;
 }
 
@@ -197,13 +201,13 @@ async function resolveSigningIdentity(options: Options, context: SetupContext): 
 
 export async function installApp(context: SetupContext, source: string): Promise<{ app: string; backup?: string }> {
   const applications = join(context.userHome, "Applications");
-  const destination = join(applications, "Computa.app");
+  const destination = join(applications, "Kolmogor.app");
   if (await exists(applications)) await requireSafeDirectory(applications);
   else await mkdir(applications, { mode: 0o755 });
   await requireStopped(context);
   const previous = await existingApp(context, applications);
   const stage = await mkdtemp(join(applications, ".computa-install-"));
-  const stagedApp = join(stage, "Computa.app");
+  const stagedApp = join(stage, "Kolmogor.app");
   // ditto preserves executable modes and symlinks within the sealed bundle.
   // All validation happens before the existing app is moved.
   await checked(context, ["/usr/bin/ditto", source, stagedApp]);
@@ -256,11 +260,11 @@ export async function setup(options: Options, context: SetupContext): Promise<{ 
   if (webBuild.code !== 0) throw new Error("WebUI build failed.");
   await checked(context, ["xcodegen", "generate"]);
   const derivedData = join(context.root, ".build/SourceInstall");
-  await checked(context, ["xcodebuild", "-project", "Computa.xcodeproj", "-scheme", "Computa",
+  await checked(context, ["xcodebuild", "-project", "Kolmogor.xcodeproj", "-scheme", "Kolmogor",
     "-configuration", "Release", "-destination", "platform=macOS,arch=arm64", "-derivedDataPath", derivedData,
     "CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO", "CODE_SIGN_IDENTITY=", "DEVELOPMENT_TEAM=", "build"]);
-  const product = join(derivedData, "Build/Products/Release/Computa.app");
-  for (const relative of ["Contents/MacOS/Computa",
+  const product = join(derivedData, "Build/Products/Release/Kolmogor.app");
+  for (const relative of ["Contents/MacOS/Kolmogor",
     "Contents/Resources/AgentRuntime/codex-app-server", "Contents/Resources/AgentRuntime/manifest.json",
     "Contents/Resources/MLXServer/server.py", "Contents/Resources/WebUI/index.html"]) {
     await requireRegular(join(product, relative));
@@ -303,5 +307,5 @@ if (import.meta.main) {
     },
   };
   try { await setup(parseOptions(process.argv.slice(2)), context); }
-  catch (error) { console.error(`Computa setup: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; }
+  catch (error) { console.error(`Kolmogor setup: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; }
 }

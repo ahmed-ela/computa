@@ -10,4 +10,4 @@
 
 <!-- Choose major, minor, patch, or alpha build only. Give the reason in one sentence.
 For a bump, include the old and new versions and run bun Scripts/version.ts check.
-See https://github.com/ahmed-ela/computa/blob/computa/docs/VERSIONING.md#version-decision-for-each-pr -->
+See https://github.com/ahmed-ela/kolmogor/blob/kolmogor/docs/VERSIONING.md#version-decision-for-each-pr -->

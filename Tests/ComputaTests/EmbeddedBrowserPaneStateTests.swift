@@ -919,7 +919,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                 index = try XCTUnwrap(options.indices.last)
             }
             let expected = options[index]
-            print("Computa picker models: " + (labels ?? []).joined(separator: ", "))
+            print("Kolmogor picker models: " + (labels ?? []).joined(separator: ", "))
             _ = try await web.evaluateJavaScript("Array.from(" + radios + ")[\(index)].click()")
             let closed = await waitForScriptBool(on: web, script: "!document.querySelector('.model-selector-content')")
             XCTAssertTrue(closed)
@@ -947,7 +947,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                 let reply = try XCTUnwrap(task.entries.last { $0.kind == .assistant && !$0.body.isEmpty })
                 let rendered = await waitForScriptBool(on: web, script: "Boolean(document.querySelector('.assistant-message')?.innerText.trim())")
                 XCTAssertTrue(rendered)
-                print("Computa live UI: \(expected.label) | user=hi | reply=\(reply.body)")
+                print("Kolmogor live UI: \(expected.label) | user=hi | reply=\(reply.body)")
             }
         } catch { _ = await state.shutdownRuntime(); throw error }
         _ = await state.shutdownRuntime()

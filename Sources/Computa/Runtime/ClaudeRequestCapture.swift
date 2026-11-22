@@ -63,7 +63,7 @@ enum ClaudeRequestCapture {
     }
 
     static func syntheticUserText(nonce: UUID) -> String {
-        "Computa latency benchmark \(nonce.uuidString.lowercased()). Reply with exactly HI. Do not use tools."
+        "Kolmogor latency benchmark \(nonce.uuidString.lowercased()). Reply with exactly HI. Do not use tools."
     }
 
     /// Carries native metadata to the actual before-insert boundary. It grants

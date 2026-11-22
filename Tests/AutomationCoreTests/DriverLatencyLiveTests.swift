@@ -50,7 +50,7 @@ final class DriverLatencyLiveTests: XCTestCase {
 
         // Setup is intentionally outside every timed observation. The live
         // test can opt in to activating a known safe app when the host runner
-        // starts with Computa or Codex as the foreground application.
+        // starts with Kolmogor or Codex as the foreground application.
         if environment["LOCALCODEX_DRIVER_PROBE_ACTIVATE"] == "1" {
             _ = try await ComputerInputController().launchOrActivateApplication(
                 bundleIdentifier: bundleID
