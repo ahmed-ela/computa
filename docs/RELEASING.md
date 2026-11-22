@@ -21,7 +21,8 @@ Squash-merge a reviewed PR into `computa`, the default branch. Each new
 first-parent commit queues a macOS alpha. The signing Mac checks GitHub every
 60 seconds while the release user is logged in. After sleep or downtime it
 resumes from its last completed commit. Feature branches and open PRs do not
-enter the queue. Merge marketing-version changes with the PR when appropriate.
+enter the queue. Review the [app version decision](VERSIONING.md#version-decision-for-each-pr)
+when preparing the PR for merge.
 `bun Scripts/version.ts alpha-tag` prints the tag for a checkout.
 
 The service builds the exact merged commit in a dedicated clone, runs release

@@ -1,14 +1,27 @@
 # App versioning
 
-Computa uses `major.minor.patch`, following [Semantic Versioning](https://semver.org/):
+Computa uses `major.minor.patch`, following [Semantic Versioning](https://semver.org/).
+The `0.x.y` series is initial development. `1.0.0` marks the first stable
+contract. Published artifacts are immutable.
 
-- **Major:** incompatible changes to supported interfaces or persisted-data compatibility.
-- **Minor:** new compatible features; reset patch to zero.
-- **Patch:** compatible fixes; keep major and minor unchanged.
+## Version decision for each PR
 
-The `0.x.y` series is initial development and does not promise a stable public
-API. `1.0.0` will mark the first stable contract. Published release artifacts
-are immutable; distribute changed app bytes under a new version or alpha tag.
+Compare what users and integrations can do before and after the PR. Choose
+the highest applicable change and record the decision and reason in the PR
+description, including when the alpha build number alone is sufficient.
+
+| Decision | When to use it | Computa example |
+| --- | --- | --- |
+| Major | A supported interface or persisted-data format becomes incompatible. Identify affected consumers and their migration path. | Removing a supported tool-protocol field that existing clients require. |
+| Minor | Users or integrations gain a backward-compatible capability. | Adding a collapsible sidebar or a model provider. |
+| Patch | A backward-compatible fix restores or corrects existing behavior. | Fixing a provider sign-in regression or centering a misaligned status badge. |
+| Alpha build only | The shipped app's behavior and supported interfaces stay the same. | Changing documentation, adding test coverage, or refactoring without a behavior change. |
+
+Include one app version bump in the PR for a major, minor, or patch decision.
+For example, a PR that adds a sidebar and corrects its badge alignment takes
+one minor bump. Before squash merge, check the decision against the current
+`computa` branch in case another PR changed the base version. The release
+worker assigns the alpha build number automatically.
 
 ## Shared source
 
@@ -46,9 +59,8 @@ bun Scripts/version.ts bump major
 bun Scripts/version.ts alpha-tag
 ```
 
-Ordinary PRs can keep the current marketing version. For a marketing-version
-change, choose one of patch, minor, or major. Each merged commit already gets
-its own public build number.
+For a version bump, run the chosen `bump` command once and then run `check`.
+For an alpha-build-only PR, run `check` and keep the version files as they are.
 
 The bump command checks consistency first, then updates the xcconfig, Cargo
 workspace version, and only the workspace packages in `Cargo.lock`. Dependency
