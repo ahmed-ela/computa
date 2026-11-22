@@ -34,10 +34,6 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let state = AppState(tasks: tasks, preferences: isolatedTestPreferences(), browserSession: session)
         let first = WorkspaceTabID.agent(tasks[0].id)
         let second = WorkspaceTabID.agent(tasks[1].id)
-        func current() -> WorkspaceTabID? {
-            state.primaryBrowserID.map(WorkspaceTabID.browser) ?? state.selectedTaskID.map(WorkspaceTabID.agent)
-        }
-
         state.selectTask(tasks[1].id)
         let page = try session.createTab()
         let browser = WorkspaceTabID.browser(try XCTUnwrap(session.humanTab(id: page)).workspaceID)
@@ -46,27 +42,27 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         state.selectWorkspaceTab(first)
         for expected in [browser, second, first] {
             state.selectAdjacentWorkspaceTab(.next)
-            XCTAssertEqual(current(), expected)
+            XCTAssertEqual(state.selectedWorkspaceTab, expected)
         }
         for expected in [second, browser, first] {
             state.selectAdjacentWorkspaceTab(.previous)
-            XCTAssertEqual(current(), expected)
+            XCTAssertEqual(state.selectedWorkspaceTab, expected)
         }
         state.presentedSheet = .settings
         state.selectAdjacentWorkspaceTab(.next)
-        XCTAssertEqual(current(), first)
+        XCTAssertEqual(state.selectedWorkspaceTab, first)
         state.presentedSheet = nil
 
         state.closeWorkspaceTab(browser)
         state.isTaskSidebarCollapsed = true
         state.selectAdjacentWorkspaceTab(.previous)
-        XCTAssertEqual(current(), second)
+        XCTAssertEqual(state.selectedWorkspaceTab, second)
         state.closeWorkspaceTab(first)
         state.selectAdjacentWorkspaceTab(.next)
-        XCTAssertEqual(current(), second)
+        XCTAssertEqual(state.selectedWorkspaceTab, second)
         state.closeWorkspaceTab(second)
         state.selectAdjacentWorkspaceTab(.previous)
-        XCTAssertNil(current())
+        XCTAssertNil(state.selectedWorkspaceTab)
         XCTAssertTrue(state.openWorkspaceTabs.isEmpty)
     }
 
@@ -512,6 +508,13 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             .first { $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil })
         let expanded = await waitForScriptBool(on: chat, script: "document.querySelectorAll('.task-row').length === 3 && !document.querySelector('.agent-rail')")
         XCTAssertTrue(expanded)
+        let rowPitch = try await chat.evaluateJavaScript("""
+            (() => {
+                const [first, second] = document.querySelectorAll('[data-tab-kind]');
+                return second.getBoundingClientRect().top - first.getBoundingClientRect().top;
+            })()
+            """)
+        XCTAssertEqual(rowPitch as? Double, 28)
         let expandedCenters = try await sidebarIconCenters(in: chat)
         let button = try XCTUnwrap(window.titlebarAccessoryViewControllers.first { $0.layoutAttribute == .left }?.view)
         let bounds = button.convert(button.bounds, to: nil)

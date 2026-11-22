@@ -84,7 +84,7 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 .sidebar-section-heading { flex: 0 0 27px; margin-inline: var(--sidebar-inset); color: var(--text-tertiary); font-size: 11px; }
 .section-count { margin-left: 7px; font-variant-numeric: tabular-nums; }
 .task-list { min-height: 0; flex: 1; overflow: hidden auto; padding-block: 2px 14px; }
-.task-row { width: 100%; height: 38px; margin-bottom: 2px; padding: 0 6px 0 0; border: 0; border-radius: 6px; background: transparent; color: var(--text); }
+.task-row { width: 100%; height: 27px; margin-bottom: 1px; padding: 0 6px 0 0; border: 0; border-radius: 6px; background: transparent; color: var(--text); }
 .task-row:hover { background: var(--surface-hover); }
 .task-row:active { translate: none; }
 .task-row.selected { background: var(--surface-selected); }

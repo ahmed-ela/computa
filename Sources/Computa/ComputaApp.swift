@@ -59,12 +59,14 @@ private struct InertTestHostPermissions: AutomationPermissionClient {
 
 extension FocusedValues {
     @Entry var newBrowserTabInPane: (() -> Void)?
+    @Entry var tabWorkspace: AppState?
 }
 
 private struct WorkspaceCommands: Commands {
     let state: AppState
     let isTestHost: Bool
     @FocusedValue(\.newBrowserTabInPane) private var newBrowserTabInPane
+    @FocusedValue(\.tabWorkspace) private var tabWorkspace
 
     private var workspaceUnavailable: Bool {
         isTestHost || state.approvalGateBlocksInteraction || state.presentedSheet != nil
@@ -81,6 +83,19 @@ private struct WorkspaceCommands: Commands {
             }
             .keyboardShortcut("t", modifiers: .command)
             .disabled(workspaceUnavailable)
+        }
+        CommandGroup(replacing: .saveItem) {
+            if let tabWorkspace {
+                Button("Close Tab") {
+                    if let tab = tabWorkspace.selectedWorkspaceTab { tabWorkspace.closeWorkspaceTab(tab) }
+                }
+                .keyboardShortcut("w", modifiers: .command)
+                .disabled(workspaceUnavailable || tabWorkspace.selectedWorkspaceTab == nil)
+            }
+            Button("Close Window") {
+                NSApp.sendAction(#selector(NSWindow.performClose(_:)), to: nil, from: nil)
+            }
+            .keyboardShortcut("w", modifiers: tabWorkspace == nil ? .command : [.command, .shift])
         }
         CommandGroup(after: .toolbar) {
             Group {
