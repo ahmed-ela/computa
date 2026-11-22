@@ -12,7 +12,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@octanejs/shadcn/DropdownMenu';
-import { Icon } from './Icon';
+import { BotAdd16Filled, Icon } from './Icon';
 import { copyText } from './clipboard';
 import { ReviewPanel } from './ReviewPanel';
 import { ModelLabel, ModelSelector } from './ModelSelector';
@@ -124,7 +124,7 @@ function Sidebar({
       <div className="window-drag-strip" aria-hidden="true" />
       <nav className="primary-nav" aria-label="Primary">
         <Button variant="outline" className="nav-button new-task-button" onClick={() => { setSearch(''); post({ action: 'createTask' }); }}>
-          <Icon name="new" size={17} /><span>New task</span>
+          <BotAdd16Filled /><span>New task</span>
         </Button>
         {snapshot.pendingApprovalCount > 0 ? (
           <div className="nav-button approval-nav" role="status" aria-live="polite">
@@ -1098,7 +1098,7 @@ export function App() {
           <div className="no-task-view">
             <p>Choose a model for your next task.</p>
             <DefaultModelSelector snapshot={snapshot} />
-            <Button onClick={() => post({ action: 'createTask' })}><Icon name="plus" size={15} /> New task</Button>
+            <Button onClick={() => post({ action: 'createTask' })}><BotAdd16Filled /> New task</Button>
           </div>
         )}
       </main>
