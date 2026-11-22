@@ -154,6 +154,7 @@ export interface WorkspaceTab { kind: 'agent' | 'browser'; id: string }
 export interface WorkspaceBrowser { id: string; title: string; host?: string; favicon?: string; isFaviconLoading?: boolean }
 
 export interface AppSnapshot {
+  nativeSidebarControls?: boolean;
   revision: number;
   mixesBrowserTabsInSidebar?: boolean;
   workspaceOrder?: WorkspaceTab[];

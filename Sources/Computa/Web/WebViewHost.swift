@@ -40,6 +40,7 @@ struct WebWorkspaceView: View {
                         session: state.browserSession,
                         tabRowHeight: rowHeight,
                         usesSidebarTabs: browserPrimary,
+                        titlebarLeadingInset: browserPrimary && state.isTaskSidebarCollapsed && topInset > 0 ? 100 : 0,
                         titlebarTrailingInset: topInset > 0 ? BrowserTitlebarToggle.width : 0,
                         isInteractionBlocked: state.approvalGateBlocksInteraction,
                         canLoadModels: state.canRefreshWebsiteModels,
@@ -196,9 +197,22 @@ private final class WindowConfiguredWebView: WKWebView {
 
     func configureTitlebarControls(state: AppState) {
         titlebarControls = [
-            accessory(.left, SidebarTitlebarToggle(state: state)),
+            accessory(.left, SidebarTitlebarControls(state: state, search: { [weak self] in
+                guard let self else { return }
+                window?.makeFirstResponder(self)
+                sendSidebarEvent("kolmogor-search-chats")
+            }, newAgent: { [weak self] in
+                state.createTask()
+                self?.sendSidebarEvent("kolmogor-clear-chat-search")
+            })),
             accessory(.right, BrowserTitlebarToggle(state: state))
         ]
+    }
+
+    private func sendSidebarEvent(_ event: String) {
+        guard WebUIResourceLocator.contains(url) else { return }
+        callAsyncJavaScript("document.dispatchEvent(new Event(eventName))",
+                            arguments: ["eventName": event], in: nil, in: .page, completionHandler: nil)
     }
 
     private func accessory(_ edge: NSLayoutConstraint.Attribute, _ content: some View) -> NSTitlebarAccessoryViewController {
@@ -244,24 +258,35 @@ private final class WindowConfiguredWebView: WKWebView {
     }
 }
 
-private struct SidebarTitlebarToggle: View {
+private struct SidebarTitlebarControls: View {
     @Bindable var state: AppState
+    let search: () -> Void
+    let newAgent: () -> Void
 
     var body: some View {
-        Button {
-            state.isTaskSidebarCollapsed.toggle()
-        } label: {
-            Image(systemName: "sidebar.left")
+        HStack(spacing: 0) {
+            control("sidebar.left", state.isTaskSidebarCollapsed ? "Expand chat sidebar" : "Collapse chat sidebar",
+                    id: "task-sidebar-toggle") { state.isTaskSidebarCollapsed.toggle() }
+            control("magnifyingglass", state.mixesBrowserTabsInSidebar ? "Search tabs" : "Search chats",
+                    id: "task-sidebar-search", action: search)
+            control("plus", "New agent", id: "task-sidebar-new-agent", action: newAgent)
+        }
+        .fixedSize()
+        .disabled(state.presentedSheet != nil || state.approvalGateBlocksInteraction)
+    }
+
+    private func control(_ symbol: String, _ label: String, id: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(.secondary)
                 .frame(width: 28, height: 22)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.borderless)
-        .accessibilityIdentifier("task-sidebar-toggle")
-        .accessibilityLabel(state.isTaskSidebarCollapsed ? "Expand chat sidebar" : "Collapse chat sidebar")
-        .help(state.isTaskSidebarCollapsed ? "Expand chat sidebar" : "Collapse chat sidebar")
-        .disabled(state.presentedSheet != nil || state.approvalGateBlocksInteraction)
+        .accessibilityIdentifier(id)
+        .accessibilityLabel(label)
+        .help(label)
     }
 }
 

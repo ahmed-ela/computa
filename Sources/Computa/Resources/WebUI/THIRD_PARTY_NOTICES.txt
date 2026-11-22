@@ -7,7 +7,7 @@ Tailwind CSS, Marked (Markdown tokenization), and entities (text reference
 decoding). Their upstream license texts
 are retained under licenses/.
 
-The Bot Add 16 Filled and Bot Sparkle 20 Filled artwork comes from Microsoft’s Fluent UI System Icons.
+The Bot Sparkle 20 Filled artwork comes from Microsoft’s Fluent UI System Icons.
 See licenses/fluent-ui-system-icons.txt for its MIT license.
 
 The Octane adaptations retain the Octane MIT terms below. Kolmogor uses

@@ -387,7 +387,8 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     }
 
     private func pushLatestSnapshotIfReady() {
-        guard pageIsReady, let snapshot = latestSnapshot, let webView else { return }
+        guard pageIsReady, var snapshot = latestSnapshot, let webView else { return }
+        snapshot.nativeSidebarControls = webView.window?.styleMask.contains(.titled) == true
 
         do {
             let data = try Self.encoder.encode(snapshot)

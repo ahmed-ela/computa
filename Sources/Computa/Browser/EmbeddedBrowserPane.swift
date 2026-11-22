@@ -9,6 +9,7 @@ struct EmbeddedBrowserPane: View {
     let session: EmbeddedBrowserSession
     var tabRowHeight: CGFloat = 32
     var usesSidebarTabs = false
+    var titlebarLeadingInset: CGFloat = 0
     var titlebarTrailingInset: CGFloat = 0
     var isInteractionBlocked = false
     var canLoadModels = false
@@ -143,6 +144,7 @@ struct EmbeddedBrowserPane: View {
         .buttonStyle(.plain)
         .padding(.horizontal, 8)
         // The globe is a native accessory at the trailing edge of this row.
+        .padding(.leading, titlebarLeadingInset)
         .padding(.trailing, titlebarTrailingInset)
         .frame(height: tabRowHeight)
     }
