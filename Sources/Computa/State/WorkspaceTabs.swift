@@ -152,7 +152,7 @@ extension AppState {
         }
     }
 
-    func newWorkspaceBrowserTab(url: URL? = nil) {
+    func newWorkspaceBrowserTab(url: URL = EmbeddedBrowserURLPolicy.newTabURL) {
         guard !approvalGateBlocksInteraction, presentedSheet == nil else { return }
         do {
             let id = try browserSession.createTab(url: url)
