@@ -16,7 +16,7 @@ export interface PublishContext {
 }
 const help = "Usage: bun Scripts/publish-alpha.ts --tag vVERSION-alpha.N [--repo OWNER/REPO] [--publish]\nWithout --publish, downloads and verifies the draft without changing GitHub.";
 export const installerSources: Record<string, string> = {
-  "Install Computa.command": "Scripts/distribution/Install Computa.command",
+  "Install Kolmogor.command": "Scripts/distribution/Install Kolmogor.command",
   "Installer/install-release.py": "Scripts/distribution/install-release.py",
   "Installer/uv.lock.json": "Scripts/distribution/uv.lock.json",
   "Installer/install-mlx-runtime.sh": "Scripts/install-mlx-runtime.sh",
@@ -117,11 +117,11 @@ export async function publishAlpha(options: PublishOptions, context: PublishCont
   if (!hasReleaseIdentity(release) || release.draft !== true) {
     throw new Error("Select the same existing unpublished draft; published releases are immutable");
   }
-  const stem = `Computa-${metadata.version}-arm64`;
+  const stem = `Kolmogor-${metadata.version}-arm64`;
   const dmgNames = [`${stem}.dmg`, `${stem}-signed-test.dmg`];
   const manifestNames = dmgNames.map(name => name.replace(/\.dmg$/, ".manifest.json"));
   const dmgAssets = release.assets?.filter((asset: any) => dmgNames.includes(asset.name)) ?? [];
-  if (dmgAssets.length !== 1) throw new Error("Draft must contain exactly one expected Computa DMG");
+  if (dmgAssets.length !== 1) throw new Error("Draft must contain exactly one expected Kolmogor DMG");
   const dmgName = dmgAssets[0].name as string;
   const manifestName = dmgName.replace(/\.dmg$/, ".manifest.json");
   const expected = [dmgName, manifestName, "SHA256SUMS"];
@@ -161,7 +161,7 @@ export async function publishAlpha(options: PublishOptions, context: PublishCont
       || manifest.notarizedAppVerified !== (channel === "notarized")) {
       throw new Error("Draft manifest differs from its tag, source app version/build or signing channel");
     }
-    const appInfo = await api(`contents/Config/Computa-Info.plist?ref=${source}`);
+    const appInfo = await api(`contents/Config/Kolmogor-Info.plist?ref=${source}`);
     if (appInfo.encoding !== "base64" || typeof appInfo.content !== "string") throw new Error("Tagged application settings are missing");
     const plist = Buffer.from(appInfo.content, "base64").toString("utf8");
     const key = /<key>SUPublicEDKey<\/key>\s*<string>([A-Za-z0-9+/]{43}=)<\/string>/.exec(plist)?.[1];
@@ -216,7 +216,7 @@ export async function verifyInstallerPayload(mount: string, manifest: any, insta
   for (const path of expected) {
     const full = join(mount, path), info = await lstat(full);
     if (!info.isFile() || info.isSymbolicLink() || await sha256(full) !== sums.get(path)) throw new Error(`Mounted payload checksum mismatch: ${path}`);
-    if (path === "Install Computa.command" && !(info.mode & 0o111)) throw new Error("Installation entrypoint is not executable");
+    if (path === "Install Kolmogor.command" && !(info.mode & 0o111)) throw new Error("Installation entrypoint is not executable");
     const source = installerFiles.get(path);
     if (path in installerSources && (!source || !Buffer.from(source).equals(await readFile(full)))) throw new Error(`Installer differs from tagged source: ${path}`);
   }
@@ -226,7 +226,7 @@ export async function verifyInstallerPayload(mount: string, manifest: any, insta
     throw new Error("Installer dependency pins differ from release metadata");
   }
   const guide = await readFile(join(mount, "READ ME.txt"), "utf8");
-  if (!guide.includes(`Computa ${manifest.version}`) || !guide.includes(`Channel: ${manifest.channel}.`)
+  if (!guide.includes(`Kolmogor ${manifest.version}`) || !guide.includes(`Channel: ${manifest.channel}.`)
     || (manifest.channel === "signed-test" && !guide.includes("Not notarized"))) throw new Error("Mounted guide has incorrect release or notarization status");
 }
 
@@ -251,7 +251,7 @@ export async function verifyMountedPackage(dmg: string, manifest: any, manifestB
     const sealed = await readFile(join(mount, "release-manifest.json"));
     if (!sealed.equals(Buffer.from(manifestBytes))) throw new Error("Mounted and external release manifests differ");
     await verifyInstallerPayload(mount, manifest, installerFiles);
-    const inspected = await inspectApp(context, join(mount, "Computa.app"), manifest.channel);
+    const inspected = await inspectApp(context, join(mount, "Kolmogor.app"), manifest.channel);
     if (inspected.version !== manifest.appVersion || inspected.build !== manifest.appBuild
       || inspected.updatePublicKey !== manifest.updatePublicKey || inspected.minimumMacOS !== manifest.minimumMacOS
       || JSON.stringify(inspected.files) !== JSON.stringify(manifest.appFiles)) {

@@ -29,7 +29,7 @@ enum TimelineEntryKind: String, Codable, Sendable {
     var label: String {
         switch self {
         case .user: "You"
-        case .assistant: "Computa"
+        case .assistant: "Kolmogor"
         case .reasoning: "Working"
         case .tool: "Tool"
         case .system: "System"

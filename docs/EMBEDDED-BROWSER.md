@@ -2,7 +2,7 @@
 
 ## Scope
 
-Computa owns a native WKWebView tab pane beside the chat. People can browse in
+Kolmogor owns a native WKWebView tab pane beside the chat. People can browse in
 the pane; fresh agent chats receive the nine typed
 [built-in browser tools](BUILT-IN-BROWSER-TOOLS.md) for bounded page observation
 and actions. The Swift app's adapters use separate owned Temporary Chat or
@@ -85,7 +85,7 @@ ChatGPT observations defer fresh model verification while a response is running.
 Pending snapshots expose no answer, tool instruction or fresh model proof, and
 these reads do not open the model picker. Current visible header contradictions
 still reject the session. Before publishing a stable answer or tool request,
-Computa rechecks the complete current model, product mode and owned submission.
+Kolmogor rechecks the complete current model, product mode and owned submission.
 The existing first owned SPA transition can follow its acknowledged first Send;
 it cannot replay that Send or authorize a later unrelated conversation route.
 
@@ -96,7 +96,7 @@ reused on startup; only missing catalogs are discovered once. **Refresh website
 models** explicitly reads all provider menus sequentially without sending a
 prompt.
 
-When a provider reports a CAPTCHA, sign-in requirement or usage limit, Computa
+When a provider reports a CAPTCHA, sign-in requirement or usage limit, Kolmogor
 stops new sessions for that provider and wakes its active waits with the same
 failure. Resolve the issue in the built-in Browser, or wait for quota recovery,
 then choose **Refresh website models**. Successful menu discovery and cleanup
@@ -113,7 +113,7 @@ include background sessions. Unverified cleanup retains the owned page; if
 retained sessions exhaust capacity, restarting frees local pages without
 claiming their website conversations were deleted.
 
-Computa saves the open sidebar order, selected chat and browser tab, and split-pane state
+Kolmogor saves the open sidebar order, selected chat and browser tab, and split-pane state
 in local preferences. On relaunch or update, ordinary browser tabs reopen their last web
 address in the same WebKit profile. Each gets a fresh page and runtime handle. Pop-ups,
 provider setup, private sessions, and task-owned pages are excluded. Form contents,
@@ -147,8 +147,8 @@ synthetic content, verify split layout and approval blocking, and export renders
 without accessing accounts or sending desktop input. Launch tests preserve the
 isolated test-host runtime.
 
-Run the pane tests with `xcodebuild test -project Computa.xcodeproj -scheme
-Computa -destination 'platform=macOS,arch=arm64' -only-testing:ComputaTests/EmbeddedBrowserSessionTests
+Run the pane tests with `xcodebuild test -project Kolmogor.xcodeproj -scheme
+Kolmogor -destination 'platform=macOS,arch=arm64' -only-testing:ComputaTests/EmbeddedBrowserSessionTests
 -only-testing:ComputaTests/EmbeddedBrowserPaneStateTests`. These tests use blank
 and in-memory documents; no fixture server is needed. No production model or
 signed-in-account qualification is implied by these checks.
@@ -156,12 +156,12 @@ signed-in-account qualification is implied by these checks.
 ### Earlier ChatGPT and sign-in qualification
 
 On October 6, 2026, the Developer ID signed Swift app installed at
-`~/Applications/Computa.app` completed two live ChatGPT harness tasks with Chrome
+`~/Applications/Kolmogor.app` completed two live ChatGPT harness tasks with Chrome
 disconnected and the Browser pane hidden. A local `/usr/bin/uname -m` execution
 exited 0 and returned `arm64`. A separate task opened the existing synthetic
 fixture app and read its exact marker through `computer_v2_read_page`, without a
 CLI call. Each task closed only its owned Temporary Chat tab; the human ChatGPT
-home tab stayed selected. After restarting Computa, both assistant replies were
+home tab stayed selected. After restarting Kolmogor, both assistant replies were
 present in local history and the ChatGPT profile remained usable. This verifies
 the installed Swift transport, not the deferred Rust runtime migration or other
 providers. The build tested in this checkpoint did not yet restore open browser tabs.

@@ -30,7 +30,7 @@ final class AppStateQueueTests: XCTestCase {
         XCTAssertGreaterThan(startedAt, 0)
 
         state.apply(.timelineEntryAppended(taskID: taskID, entry: TimelineEntry(
-            kind: .assistant, title: "Computa", body: "Next answer is ready."
+            kind: .assistant, title: "Kolmogor", body: "Next answer is ready."
         )))
         state.apply(.taskStatusChanged(taskID: taskID, status: .completed))
         XCTAssertNotNil(state.selectedTask?.entries.last?.workedForSeconds)
@@ -609,7 +609,7 @@ final class AppStateQueueTests: XCTestCase {
         let steering = Task { await state.steerQueuedPrompt(taskID: taskID, id: item.id) }
         try await waitForSteerCount(1, runtime: runtime)
         state.apply(.timelineEntryAppended(taskID: taskID, entry: TimelineEntry(
-            kind: .assistant, title: "Computa", body: "Using blue now."
+            kind: .assistant, title: "Kolmogor", body: "Using blue now."
         )))
         XCTAssertTrue(userText(state).isEmpty)
         await runtime.finishSteer()

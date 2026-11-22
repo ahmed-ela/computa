@@ -1,9 +1,9 @@
-# Computa
+# Kolmogor
 
-Computa lets the AI you already use browse websites, edit files, and run commands on your Mac. You can follow the work in one chat without copying commands and results between apps.
+Kolmogor lets the AI you already use browse websites, edit files, and run commands on your Mac. You can follow the work in one chat without copying commands and results between apps.
 
 > Fix the typo on my homepage, run the tests, and open the local preview.
 
-[Download the macOS alpha](https://computa.wtf/download) for Apple Silicon Macs running macOS 14 or later.
+[Download the macOS alpha](https://kolmogor.com/download) for Apple Silicon Macs running macOS 14 or later.
 
-Drag **Computa** from the disk image into **Applications**. Open the app and use the model picker to sign in to a chat service like ChatGPT or connect an installed tool like Codex CLI.
+Drag **Kolmogor** from the disk image into **Applications**. Open the app and use the model picker to sign in to a chat service like ChatGPT or connect an installed tool like Codex CLI.

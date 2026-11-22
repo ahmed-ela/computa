@@ -178,7 +178,7 @@ final class AppStateReviewTests: XCTestCase {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
         process.arguments = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-                             "-c", "user.name=Computa review fixture", "-c", "user.email=fixture@example.invalid",
+                             "-c", "user.name=Kolmogor review fixture", "-c", "user.email=fixture@example.invalid",
                              "-C", root.path] + arguments
         var environment = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("GIT_") }
         environment["GIT_CONFIG_GLOBAL"] = "/dev/null"

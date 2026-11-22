@@ -57,7 +57,7 @@ enum ComputerV2ToolContract {
         """
         WINDOW_CAPTURE capture_id=\(mapper.captureID.uuidString)
         image_width=\(mapper.imageWidth) image_height=\(mapper.imageHeight) coordinate_space=image_pixels
-        This image shows the focused app window. The x and y for computer_v2_click or computer_v2_pointer are pixels in this image. Copy capture_id exactly; Computa maps image pixels to screen points and checks the bound window.
+        This image shows the focused app window. The x and y for computer_v2_click or computer_v2_pointer are pixels in this image. Copy capture_id exactly; Kolmogor maps image pixels to screen points and checks the bound window.
         """
     }
 
@@ -227,7 +227,7 @@ enum ComputerV2ToolContract {
         let limits = interactionPolicy == .backgroundOnly
             ? "Background-only permits user-authorized native AX/browser writes under native checks. Bind running apps with computer_v2_open(activation=none). Never activate apps, raise windows or send global input, including recovery. Screenshots only observe; no input authority. Full Access cannot lift these delivery limits."
             : "Bind the requested native app and use its supported Accessibility actions. For a visible native target without an available Accessibility action, use only the offered capture and input tools and verify the observed outcome."
-        return limits + " Computer tools operate native apps. For webpages use the offered browser_* tools in Computa's built-in browser. computer_v2_continue accepts only native computer cursors. Use the offered browser page-continuation tool for page cursors; browser_tabs continues inventory."
+        return limits + " Computer tools operate native apps. For webpages use the offered browser_* tools in Kolmogor's built-in browser. computer_v2_continue accepts only native computer cursors. Use the offered browser page-continuation tool for page cursors; browser_tabs continues inventory."
     }
 
     static func validateAlias(tool name: String, arguments: [String: Any]) throws -> ValidatedAliasCall {

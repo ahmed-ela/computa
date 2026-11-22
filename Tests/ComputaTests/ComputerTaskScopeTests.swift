@@ -245,9 +245,9 @@ final class ComputerTaskScopeTests: XCTestCase {
         XCTAssertNotNil(scope.candidateViolation(url: try url("https://github.com/"), title: "Flight Inbox"))
         XCTAssertNil(scope.siteViolation(url: try url("https://mail.google.com/mail/u/0/")))
         XCTAssertNotNil(scope.siteViolation(url: try url("https://github.com/")))
-        let titleOnly = ComputerTaskScope(userPrompt: "In the existing tab titled “Computa Fixture”, read the totals.")
+        let titleOnly = ComputerTaskScope(userPrompt: "In the existing tab titled “Kolmogor Fixture”, read the totals.")
         XCTAssertEqual(titleOnly.targetConfidence, .exactTabTitle)
-        XCTAssertNil(titleOnly.candidateViolation(url: try url("http://localhost:9999/"), title: "Computa Fixture"))
+        XCTAssertNil(titleOnly.candidateViolation(url: try url("http://localhost:9999/"), title: "Kolmogor Fixture"))
     }
 
     func testInventoryMatchReusesTheExistingExactCandidateRestriction() throws {

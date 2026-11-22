@@ -33,7 +33,7 @@ enum ClaudeResponseStreamDiagnostic {
     }
 
     static func syntheticUserText(nonce: UUID) -> String {
-        "Computa response diagnostic. Reply with exactly \(responseMarker(nonce: nonce)). Do not use tools."
+        "Kolmogor response diagnostic. Reply with exactly \(responseMarker(nonce: nonce)). Do not use tools."
     }
 
     /// Only the exact first synthetic user request qualifies. Native policy,

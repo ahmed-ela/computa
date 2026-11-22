@@ -3,7 +3,7 @@ import CoreFoundation
 import Foundation
 import OSLog
 
-/// Strict model-facing contract for Computa's own browser, independent of
+/// Strict model-facing contract for Kolmogor's own browser, independent of
 /// native computer/window input.
 enum EmbeddedBrowserTools {
     /// An assertion mismatch never grants a lookup, retarget, approval or input.
@@ -73,7 +73,7 @@ enum EmbeddedBrowserTools {
 
     static func validate(tool: String, arguments: [String: Any]) throws {
         guard catalog != nil else {
-            throw BrowserTabBrokerError.invalidRead("Computa’s built-in browser tool catalog is unavailable.")
+            throw BrowserTabBrokerError.invalidRead("Kolmogor’s built-in browser tool catalog is unavailable.")
         }
         guard names.contains(tool) else {
             throw BrowserTabBrokerError.invalidRead("Unknown built-in browser tool.")

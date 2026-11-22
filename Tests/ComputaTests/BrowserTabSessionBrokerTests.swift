@@ -3907,7 +3907,7 @@ private actor FakeBrowserTabTransport: BrowserTabTransport {
         BrowserTarget(
             targetID: targetID,
             instanceToken: instanceToken,
-            title: "Safe computer-use benchmark - Computa",
+            title: "Safe computer-use benchmark - Kolmogor",
             url: url
         )
     }
@@ -3918,7 +3918,7 @@ private actor FakeBrowserTabTransport: BrowserTabTransport {
     ) -> BrowserDocumentObservation {
         BrowserDocumentObservation(
             loaderID: loaderID,
-            title: "Safe computer-use benchmark - Computa",
+            title: "Safe computer-use benchmark - Kolmogor",
             url: url,
             nodes: [
                 BrowserDocumentNode(

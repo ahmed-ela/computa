@@ -1,11 +1,11 @@
-# Building Computa from source
+# Building Kolmogor from source
 
 ## Packaging status
 
-The Computa repository is
-[`ahmed-ela/computa`](https://github.com/ahmed-ela/computa), with product site
-[computa.wtf](https://computa.wtf). Source targets and paths use the new name.
-The Computa Release build, signed DMG, mounted-installer migration from
+The Kolmogor repository is
+[`ahmed-ela/kolmogor`](https://github.com/ahmed-ela/kolmogor), with product site
+[kolmogor.com](https://kolmogor.com). The shipping Xcode project and scheme are named Kolmogor. The Swift module and its source directory retain their original names.
+The earlier Computa release build, signed DMG, mounted-installer migration from
 the legacy app, and startup on the existing Mac passed. The checked pre-existing data
 remained byte-identical before launch. See [the distribution checkpoint](DISTRIBUTION.md)
 for scope and artifact identity; clean-Mac, stream/final-answer and controlled
@@ -56,8 +56,8 @@ copied from another app.
 ## Checkout and setup
 
 ```sh
-git clone https://github.com/ahmed-ela/computa.git
-cd computa
+git clone https://github.com/ahmed-ela/kolmogor.git
+cd kolmogor
 ./Scripts/setup.sh --check
 ./Scripts/setup.sh --download-model
 ```
@@ -103,7 +103,7 @@ Other modes:
 ```sh
 ./Scripts/setup.sh --check                 # Read-only; no build/install/download
 ./Scripts/setup.sh --build-only            # Only build a signed app in .build
-./Scripts/setup.sh --no-launch             # Install without opening Computa
+./Scripts/setup.sh --no-launch             # Install without opening Kolmogor
 ./Scripts/setup.sh --download-model --no-launch
 bun test Scripts/setup.test.ts             # Mocked commands and temporary homes
 ```
@@ -111,7 +111,7 @@ bun test Scripts/setup.test.ts             # Mocked commands and temporary homes
 The build-only artifact is:
 
 ```text
-.build/SourceInstall/Build/Products/Release/Computa.app
+.build/SourceInstall/Build/Products/Release/Kolmogor.app
 ```
 
 The source build sequence is pinned Rust App Server, `bun install
@@ -125,29 +125,27 @@ not a Developer ID distribution signature or notarization.
 
 ## Installation, data, and permissions
 
-Setup installs only to `~/Applications/Computa.app`, not `/Applications`.
-Quit Computa and any older app copy normally first; setup refuses to kill
+Setup installs only to `~/Applications/Kolmogor.app`, not `/Applications`.
+Quit Kolmogor and any older app copy normally first; setup refuses to kill
 either app or install while either process name is running. It accepts at most
-one existing bundle at `~/Applications/Computa.app` or
-`~/Applications/Mactopus.app`; if both exist, it stops without choosing between
+one existing bundle at `~/Applications/Kolmogor.app` or either legacy name, `Computa.app` or `Mactopus.app`; if several exist, it stops without choosing between
 them. It checks the existing bundle identity, executable, and signature, and
 refuses an unknown app or a symlinked installation directory.
 
 The new bundle is staged and verified before replacement. A compatible old
 bundle with the same bundle ID is moved into a uniquely named directory under
-`~/Applications/Computa Backups/`, retaining its original `Computa.app` or
-`Mactopus.app` name. The new app is installed as `Computa.app`. A failed final
+`~/Applications/Computa Backups/`, retaining its original bundle name. The new app is installed as `Kolmogor.app`. A failed final
 move attempts to restore the old bundle to its original name and path, and
 reports the preserved paths if recovery needs assistance. Backups are not
 automatically deleted. Existing `~/Library/Application Support/LocalCodex` chats, preferences,
 browser tabs, and installed system-level applications are not removed or reset.
 
-An existing `/Applications/Computa.app` is intentionally left untouched. When
+An existing `/Applications/Kolmogor.app` is intentionally left untouched. When
 both locations exist, use the exact newly installed path instead of assuming
 Spotlight picked the desired copy. The setup command opens that exact path.
 
 The stable legacy bundle ID is `com.ahmedelamin.LocalCodex`; the product name is
-Computa. A locally rebuilt ad-hoc signature may require macOS permissions to
+Kolmogor. A locally rebuilt ad-hoc signature may require macOS permissions to
 be granted again. Setup does not edit TCC, bypass Gatekeeper, or grant Full Access.
 Review Accessibility and Screen Recording prompts yourself. Signing does not
 grant access automatically.

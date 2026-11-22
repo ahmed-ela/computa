@@ -514,7 +514,7 @@ enum AppServerThreadHistoryContract {
                     guard !excluded.contains(turnID), turn["status"] as? String == "inProgress" || !hasSavedError(turn),
                           !["failed", "interrupted"].contains(turn["status"] as? String ?? ""),
                           let text = item["text"] as? String else { continue }
-                    entry = TimelineEntry(id: id, kind: .assistant, title: "Computa", body: text,
+                    entry = TimelineEntry(id: id, kind: .assistant, title: "Kolmogor", body: text,
                         timestamp: timestamp, activityGroupID: userID, assistantPhase: item["phase"] as? String)
                 case "reasoning":
                     let raw = (item["content"] as? [String] ?? []).joined(separator: "\n\n")
@@ -871,7 +871,7 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         return [
             // Do not discover another application's .codex config or AGENTS
             // by walking up through the user's home repository. The complete
-            // machine-protection policy is explicitly supplied by Computa.
+            // machine-protection policy is explicitly supplied by Kolmogor.
             "project_root_markers": [String](),
             "allow_login_shell": false,
             "features.shell_snapshot": false,
@@ -898,7 +898,7 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
             "features.unified_exec": true,
             "features.view_image": false,
             "features.workspace_dependencies": false,
-            // Computa submits Default-mode turns; the engine's structured
+            // Kolmogor submits Default-mode turns; the engine's structured
             // question tool rejects that mode. Ordinary questions remain text.
             "tools.experimental_request_user_input.enabled": false,
             "web_search": "disabled",
@@ -958,7 +958,7 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         var computerInteractionPolicy: ComputerInteractionPolicy = .backgroundOnly
         /// Optional raw NDJSON recorder for protocol-level integration tests.
         /// The production app leaves this nil so prompts and tool payloads are
-        /// never copied into a second log by Computa.
+        /// never copied into a second log by Kolmogor.
         var protocolTracePath: String? = nil
         #if DEBUG
         /// Isolated integration fixtures supply a local gateway and in-memory credentials.
@@ -1691,7 +1691,7 @@ private extension CodexAppServerRuntime {
                         params: [
                             "clientInfo": [
                                 "name": "local_codex",
-                                "title": "Computa",
+                                "title": "Kolmogor",
                                 "version": (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "unknown",
                             ],
                             "capabilities": ["experimentalApi": true],
@@ -1819,7 +1819,7 @@ private extension CodexAppServerRuntime {
                     events.yield(.timelineEntryAppended(taskID: taskID, entry: TimelineEntry(
                         id: "embedded-browser-cleanup-persisted:\(receipt.turnID)", kind: .system,
                         title: "Browser cleanup evidence saved",
-                        body: "Computa saved the original built-in browser cleanup report for this turn.",
+                        body: "Kolmogor saved the original built-in browser cleanup report for this turn.",
                         turnID: receipt.turnID)))
                 }
                 await webModelServer.registerCleanupTurn(taskID: taskID, threadID: threadID, turnID: turnID)
@@ -2004,7 +2004,7 @@ private extension CodexAppServerRuntime {
                             if !issues.isEmpty {
                                 body = "Built-in browser cleanup is unconfirmed. " + issues.joined(separator: " ")
                             } else if automatic > 0 {
-                                body = "Computa closed \(automatic) task-created browser tab(s) during cleanup. This is app cleanup, not a model-issued browser_close or verification of its answer. Existing user tabs were preserved."
+                                body = "Kolmogor closed \(automatic) task-created browser tab(s) during cleanup. This is app cleanup, not a model-issued browser_close or verification of its answer. Existing user tabs were preserved."
                             } else if !closed.isEmpty {
                                 body = "The model's browser_close closed \(closed.count) task-created browser tab(s). The cleanup record is saved. Existing user tabs were preserved."
                             } else {
@@ -2529,7 +2529,7 @@ private extension CodexAppServerRuntime {
                 var headers = ["Authorization": "Bearer " + webModelServer.bearerToken]
                 if let taskID { headers["X-Computa-Task-ID"] = taskID }
                 result["model_providers.web_browser"] = [
-                    "name": "Computa website models",
+                    "name": "Kolmogor website models",
                     "base_url": webProviderBaseURL.absoluteString,
                     "wire_api": "responses",
                     "requires_openai_auth": false,
@@ -2543,7 +2543,7 @@ private extension CodexAppServerRuntime {
                 var headers = ["Authorization": "Bearer " + apiModelServer.bearerToken]
                 if let taskID { headers["X-Computa-Task-ID"] = taskID }
                 result["model_providers.computa_api"] = [
-                    "name": "Computa API providers", "base_url": apiProviderBaseURL.absoluteString,
+                    "name": "Kolmogor API providers", "base_url": apiProviderBaseURL.absoluteString,
                     "wire_api": "responses", "requires_openai_auth": false,
                     "supports_websockets": false, "request_max_retries": 0,
                     "stream_max_retries": 0, "http_headers": headers,
@@ -2882,7 +2882,7 @@ private extension CodexAppServerRuntime {
                     : await webModelServer.finish(taskID: taskID, runtimeGeneration: generation)
                 if !issues.isEmpty {
                     childCleanupIssues.append(contentsOf: issues)
-                    let message = "Your chat is saved in Computa. Closing the temporary website session could not be confirmed. " + issues.joined(separator: "; ")
+                    let message = "Your chat is saved in Kolmogor. Closing the temporary website session could not be confirmed. " + issues.joined(separator: "; ")
                     events.yield(.timelineEntryAppended(taskID: taskID, entry: TimelineEntry(
                         kind: .system, title: "Website session cleanup unconfirmed",
                         body: message)))
@@ -3446,7 +3446,7 @@ private extension CodexAppServerRuntime {
         func refreshInstalledCLIModels() async throws -> [LocalModelOption] {
             guard configuration.usesInstalledCLI else { throw InstalledCodexCLI.Failure.missing }
             // Login and account changes in Terminal belong to another process.
-            // A new idle CLI reads its current credential store without exposing it to Computa.
+            // A new idle CLI reads its current credential store without exposing it to Kolmogor.
             if isReady {
                 guard headlessWorkState().isIdle, pending.isEmpty, !isPreparingCommandShutdown,
                       pendingServerApprovals.isEmpty, pendingComputerUseApprovals.isEmpty else { throw InstalledCodexCLI.Failure.busy }
@@ -4397,7 +4397,7 @@ private extension CodexAppServerRuntime {
                     entry: TimelineEntry(
                         id: itemID,
                         kind: .assistant,
-                        title: "Computa",
+                        title: "Kolmogor",
                         body: text,
                         assistantPhase: phase
                     )
@@ -4527,7 +4527,7 @@ private extension CodexAppServerRuntime {
                 dynamicToolTasks[id] = DynamicToolTask(taskID: taskID, task: operation)
 
             default:
-                try? sendError(id: id, message: "Computa does not yet handle \(method).")
+                try? sendError(id: id, message: "Kolmogor does not yet handle \(method).")
             }
         }
 
@@ -4537,7 +4537,7 @@ private extension CodexAppServerRuntime {
             taskID: AgentTask.ID?
         ) {
             guard let taskID else { return }
-            let summary = "This interactive request type is not supported by Computa yet, so it was declined."
+            let summary = "This interactive request type is not supported by Kolmogor yet, so it was declined."
             events.yield(.timelineEntryAppended(
                 taskID: taskID,
                 entry: TimelineEntry(
@@ -6040,7 +6040,7 @@ private extension CodexAppServerRuntime {
                 )]
 
             default:
-                throw RuntimeError.serverError("Unknown Computa desktop tool: \(tool)")
+                throw RuntimeError.serverError("Unknown Kolmogor desktop tool: \(tool)")
             }
         }
 
@@ -8262,7 +8262,7 @@ private extension CodexAppServerRuntime {
             beforeMutation: @escaping @Sendable () async throws -> Void = {}
         ) async throws {
             try configuration.computerInteractionPolicy.requireForeground()
-            // The native approval overlay activates Computa. Restore the
+            // The native approval overlay activates Kolmogor. Restore the
             // exact inspected process and window before using the retained AX
             // handle. Requiring a short continuous focused interval lets the
             // approval click, SwiftUI teardown, and AppKit activation handoff

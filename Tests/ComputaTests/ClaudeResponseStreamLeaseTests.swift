@@ -62,7 +62,7 @@ final class ClaudeResponseStreamLeaseTests: XCTestCase {
         let lease = try XCTUnwrap(f.lease()), prompt = f.request.prompt
         XCTAssertTrue(lease.matchesPrompt(prompt))
         XCTAssertFalse(lease.matchesPrompt(prompt + " "))
-        XCTAssertFalse(lease.matchesPrompt(prompt.replacingOccurrences(of: "Computa", with: "COMPUTA")))
+        XCTAssertFalse(lease.matchesPrompt(prompt.replacingOccurrences(of: "Kolmogor", with: "COMPUTA")))
         lease.revoke(); XCTAssertFalse(lease.matchesPrompt(prompt))
     }
 

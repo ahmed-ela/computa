@@ -14,7 +14,7 @@ enum WebsiteProviderFailure: Error, LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .signInRequired: "Sign in to the selected website in Computa's built-in browser, then retry."
+        case .signInRequired: "Sign in to the selected website in Kolmogor's built-in browser, then retry."
         case .operation(let reason): "\(reason.message) (\(reason.rawValue))"
         }
     }

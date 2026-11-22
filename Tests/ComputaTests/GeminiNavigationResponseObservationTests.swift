@@ -179,7 +179,7 @@ final class GeminiNavigationResponseObservationTests: XCTestCase {
     }
 
     /// Public WebKit callback coverage only. This loopback fixture does not
-    /// relax Computa's trusted route filter or establish real Google behavior.
+    /// relax Kolmogor's trusted route filter or establish real Google behavior.
     func testRealWebKitRedirectResponseCallbackExposesFinalStatusWithoutEveryHop() async throws {
         let server = try NavigationResponseHTTPFixture()
         defer { server.stop() }

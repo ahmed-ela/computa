@@ -93,7 +93,7 @@ pub fn catalog() -> Value {
     let tools = [
         tool(
             "browser_tabs",
-            "List human tabs in Computa's built-in browser, including current logins, \
+            "List human tabs in Kolmogor's built-in browser, including current logins, \
                 within an 8KB page. Omit cursor or use null for a fresh first page. Empty \
                 inventory means no matching user tabs were listed, not denied access; use \
                 browser_open for a named known service's official entrypoint. Continue with \
@@ -109,7 +109,7 @@ pub fn catalog() -> Value {
         ),
         tool(
             "browser_open",
-            "Create and bind one background task-owned tab in Computa's built-in browser, \
+            "Create and bind one background task-owned tab in Kolmogor's built-in browser, \
                 sharing its signed-in profile. A user-provided URL is not required for a \
                 user-named known service's official homepage or sign-in entrypoint. Preserve \
                 any supplied URL exactly; use observed controls for deeper pages. Only this \

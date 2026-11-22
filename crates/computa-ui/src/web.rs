@@ -73,7 +73,7 @@ pub fn start() -> Result<(), JsValue> {
     let root = root_document
         .get_element_by_id("root")
         .ok_or_else(|| JsValue::from_str("Missing interface root"))?;
-    root.set_inner_html("<main class=\"loading-view\"><strong>Starting Computa</strong><span>Connecting the native runtime…</span></main>");
+    root.set_inner_html("<main class=\"loading-view\"><strong>Starting Kolmogor</strong><span>Connecting the native runtime…</span></main>");
     let receive_app = app.clone();
     let receiver =
         Closure::wrap(Box::new(move |value: JsValue| {
@@ -148,7 +148,7 @@ pub fn start() -> Result<(), JsValue> {
         )?;
     app.borrow_mut().clock = Some(clock);
     if post(&NativeAction::Ready).is_err() {
-        root.set_inner_html("<main class=\"loading-view\" role=\"alert\"><strong>Native bridge unavailable</strong><span>Open this interface from the Computa macOS application.</span></main>");
+        root.set_inner_html("<main class=\"loading-view\" role=\"alert\"><strong>Native bridge unavailable</strong><span>Open this interface from the Kolmogor macOS application.</span></main>");
     }
     Ok(())
 }

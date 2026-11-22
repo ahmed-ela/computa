@@ -328,9 +328,9 @@ enum WebModelResponseCodec {
                 "The Groq website prompt budget could not be verified. No context was truncated or submitted."
             case .emptyReply: "The website returned an empty model reply."
             case .malformedEnvelope: "The website returned a malformed model response envelope. No tool calls from this reply were dispatched."
-            case .unsupportedWebsiteResponse: "ChatGPT returned website content outside the required response envelope. Computa cannot verify a native website card or action. This reply was not accepted or retried, and no local tool calls from it were dispatched."
+            case .unsupportedWebsiteResponse: "ChatGPT returned website content outside the required response envelope. Kolmogor cannot verify a native website card or action. This reply was not accepted or retried, and no local tool calls from it were dispatched."
             case .unknownTool: "The website requested an unoffered tool. No tool calls from this reply were dispatched."
-            case .unsupportedCallFields: "A website tool call included an unsupported field. Function entries allow only name and arguments. Custom entries allow only name and input. Computa supplies call IDs and metadata. No tool calls from this reply were dispatched."
+            case .unsupportedCallFields: "A website tool call included an unsupported field. Function entries allow only name and arguments. Custom entries allow only name and input. Kolmogor supplies call IDs and metadata. No tool calls from this reply were dispatched."
             case .argumentsMustBeObject: "Web model tool arguments must be a JSON object. No tool calls from this reply were dispatched."
             case .customInputMustBeString: "A custom tool needs literal string input and no function arguments. No tool calls from this reply were dispatched."
             case let .invalidParameter(parameter): "The web model request contains an invalid \(parameter) parameter. No prompt was submitted."
@@ -1014,8 +1014,8 @@ enum WebModelResponseCodec {
             guard !entry.isEmpty else { return "" }
             var lines = [
                 "COMPUTA_CURRENT_BROWSER_ENTRY:",
-                "Computa offers these permitted browser entry operations: \(entry.keys.sorted().joined(separator: ", ")). This turn has not bound a page yet.",
-                "If the task needs a webpage, request the relevant browser operation. Computa executes it outside this website. A text-only reply needs no tab inventory.",
+                "Kolmogor offers these permitted browser entry operations: \(entry.keys.sorted().joined(separator: ", ")). This turn has not bound a page yet.",
+                "If the task needs a webpage, request the relevant browser operation. Kolmogor executes it outside this website. A text-only reply needs no tab inventory.",
             ]
             if let open = entry.filter({ $0.value.name == "browser_open" }).keys.sorted().first {
                 lines.append("For a supplied URL, request \(open) with its exact URL in the url argument, including localhost URLs. This creates and binds a task page, subject to native permissions.")
@@ -1040,7 +1040,7 @@ enum WebModelResponseCodec {
             "COMPUTA_CURRENT_BROWSER_CAPABILITIES:",
             "This request has a native browser binding. Tool_choice permits these native browser tools: \(allowed.keys.sorted().joined(separator: ", ")).",
             "For a fresh current-page observation, call \(read) with {}. No continuation cursor is required.",
-            "These are Computa's local relay tools; absent website-native integrations do not make them unavailable. Actual tool errors, permissions and user scope still govern.",
+            "These are Kolmogor's local relay tools; absent website-native integrations do not make them unavailable. Actual tool errors, permissions and user scope still govern.",
         ]
         if let wait = allowed.filter({ $0.value.name == "browser_wait" }).keys.sorted().first {
             lines.append("\(wait) reports read-only readiness. After its matching output reports navigation ready, use \(read) for current page evidence and refs; readiness is not task success. Do not replay the preceding input.")

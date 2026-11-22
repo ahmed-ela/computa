@@ -90,7 +90,7 @@ final class AppState {
     @ObservationIgnored private var startupWebsiteModelRefreshTask: Task<Void, Never>?
     @ObservationIgnored private var startupWebsiteModelIdleObservation: UUID?
     @ObservationIgnored private var lastWebsitePrewarmDemand: (taskID: AgentTask.ID, time: ContinuousClock.Instant)?
-    // Keep the persisted key across the Computa rename.
+    // Keep the persisted key across the Kolmogor rename.
     private static let defaultModelPreferenceKey = "LocalCodex.defaultModelID"
     private static let accessModePreferenceKey = "HeyDash.accessMode"
 
@@ -1409,11 +1409,11 @@ final class AppState {
             let body: String
             switch receipt.outcome {
             case .closed:
-                body = "Computa confirmed that this task's owned website session is closed. Your local chat is retained."
+                body = "Kolmogor confirmed that this task's owned website session is closed. Your local chat is retained."
             case .noOwnedSession:
-                body = "Computa currently has no owned website session for this task. This does not confirm whether an earlier website conversation was deleted."
+                body = "Kolmogor currently has no owned website session for this task. This does not confirm whether an earlier website conversation was deleted."
             case .unconfirmed:
-                body = "Computa could not confirm website session cleanup. The task remains paused."
+                body = "Kolmogor could not confirm website session cleanup. The task remains paused."
             }
             let entry = TimelineEntry(id: entryID, kind: .system, title: "Website session cleanup",
                 body: body + " No prompt was sent and the model was not restarted."
@@ -1812,7 +1812,7 @@ final class AppState {
         if cookieMaintenanceOnlyLaunch {
             await cookieMaintenanceRunner(browserSession)
             guard !isShuttingDown else { return }
-            connectionState = .failed(message: "Browser maintenance launch finished. Restart Computa to connect the runtime.")
+            connectionState = .failed(message: "Browser maintenance launch finished. Restart Kolmogor to connect the runtime.")
             return
         }
 
@@ -2155,7 +2155,7 @@ final class AppState {
                 tasks[index].entries[entryIndex].body += delta
             } else {
                 tasks[index].entries.append(TimelineEntry(
-                    id: itemID, kind: .assistant, title: "Computa", body: delta, isStreaming: true,
+                    id: itemID, kind: .assistant, title: "Kolmogor", body: delta, isStreaming: true,
                     activityGroupID: activeActivityGroupID(for: taskID), assistantPhase: assistantItemPhases[taskID]?[itemID]
                 ))
                 provisionalAssistantItemIDs[taskID, default: []].insert(itemID)

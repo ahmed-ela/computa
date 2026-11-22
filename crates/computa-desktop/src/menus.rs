@@ -143,15 +143,15 @@ impl NativeMenus {
         let previous_main = application.mainMenu();
         let previous_services = application.servicesMenu();
         let previous_windows = application.windowsMenu();
-        let main = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Computa"));
+        let main = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Kolmogor"));
         let target = MenuTarget::new(mtm, callback);
         let command = NSEventModifierFlags::Command;
         let shift_command = command | NSEventModifierFlags::Shift;
-        let app = submenu(mtm, &main, "Computa");
+        let app = submenu(mtm, &main, "Kolmogor");
         responder(
             mtm,
             &app,
-            "About Computa",
+            "About Kolmogor",
             "",
             NSEventModifierFlags::empty(),
             sel!(orderFrontStandardAboutPanel:),
@@ -170,7 +170,7 @@ impl NativeMenus {
         let services = submenu(mtm, &app, "Services");
         application.setServicesMenu(Some(&services));
         app.addItem(&NSMenuItem::separatorItem(mtm));
-        responder(mtm, &app, "Hide Computa", "h", command, sel!(hide:));
+        responder(mtm, &app, "Hide Kolmogor", "h", command, sel!(hide:));
         responder(
             mtm,
             &app,
@@ -192,7 +192,7 @@ impl NativeMenus {
             mtm,
             &app,
             &target,
-            "Quit Computa",
+            "Quit Kolmogor",
             "q",
             command,
             MenuEvent::Quit,

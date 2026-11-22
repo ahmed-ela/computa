@@ -131,7 +131,7 @@ final class BrowserModelCatalogTests: XCTestCase {
                                   (LocalModelCatalog.claudeBrowserModelID, "Claude")] {
             let option = try XCTUnwrap(LocalModelCatalog.option(for: model))
             XCTAssertEqual(option.label, "\(provider) / Website default · Built-in browser")
-            XCTAssertTrue(option.detail.contains("Computa's built-in browser"))
+            XCTAssertTrue(option.detail.contains("Kolmogor's built-in browser"))
             XCTAssertTrue(option.detail.contains("screenshots are unavailable"))
             XCTAssertTrue(option.detail.contains("history is saved locally"))
             XCTAssertFalse(option.detail.contains("Chrome"))

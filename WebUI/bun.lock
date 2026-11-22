@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "computa-web-ui",
+      "name": "kolmogor-web-ui",
       "dependencies": {
         "@octanejs/lucide": "0.1.49",
         "@octanejs/shadcn": "0.0.44",

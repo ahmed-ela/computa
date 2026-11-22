@@ -99,13 +99,16 @@ def bundle_files(app):
     return sorted(result, key=lambda entry: entry["path"].encode("utf-8"))
 
 
-def inspect_app(app, run=checked, expected_files=None, *, expected_executable="Computa"):
+def inspect_app(app, run=checked, expected_files=None, *, expected_executable="Kolmogor"):
     app = safe_directory(app)
     with (app / "Contents/Info.plist").open("rb") as handle:
         info = plistlib.load(handle)
-    if info.get("CFBundleIdentifier") != BUNDLE_ID or info.get("CFBundleExecutable") != expected_executable:
+    # Sparkle replaces the old bundle in place on the first branded update.
+    executable_name = info.get("CFBundleExecutable")
+    allowed = ("Computa", "Kolmogor") if expected_executable == "Computa" else (expected_executable,)
+    if info.get("CFBundleIdentifier") != BUNDLE_ID or executable_name not in allowed:
         raise ValueError("Refusing to replace or install an unknown application")
-    executable = app / "Contents/MacOS" / expected_executable
+    executable = app / "Contents/MacOS" / executable_name
     if executable.is_symlink() or not executable.is_file():
         raise ValueError("The application's executable is missing or nonregular")
     if expected_files is not None and bundle_files(app) != expected_files:
@@ -115,7 +118,7 @@ def inspect_app(app, run=checked, expected_files=None, *, expected_executable="C
 
 
 def require_stopped(run=checked):
-    for name in ("Computa", "Mactopus"):
+    for name in ("Kolmogor", "Computa", "Mactopus"):
         try:
             run(["/usr/bin/pgrep", "-x", name])
         except subprocess.CalledProcessError as error:
@@ -126,15 +129,13 @@ def require_stopped(run=checked):
 
 
 def existing_app(applications, run):
-    current, legacy = applications / "Computa.app", applications / "Mactopus.app"
-    has_current = current.exists() or current.is_symlink()
-    has_legacy = legacy.exists() or legacy.is_symlink()
-    if has_current and has_legacy:
-        raise ValueError("Both Computa.app and Mactopus.app exist in ~/Applications. "
-                         "Resolve the duplicate installations before setup; neither was changed")
-    existing = current if has_current else legacy if has_legacy else None
-    if existing is not None:
-        inspect_app(existing, run, expected_executable="Mactopus" if has_legacy else "Computa")
+    candidates = [applications / (name + ".app") for name in ("Kolmogor", "Computa", "Mactopus")]
+    installed = [app for app in candidates if app.exists() or app.is_symlink()]
+    if len(installed) > 1:
+        raise ValueError("Resolve the duplicate installations in ~/Applications before setup")
+    existing = installed[0] if installed else None
+    if existing:
+        inspect_app(existing, run, expected_executable=existing.stem)
     return existing
 
 
@@ -209,13 +210,13 @@ def install(package_root, home, uv, *, download_model=False, launch=True, run=ch
     actual = tuple(map(int, (mac_version or platform.mac_ver()[0]).split(".")))
     if actual < minimum:
         raise ValueError(f"macOS {manifest['minimumMacOS']} or later is required")
-    source = package_root / "Computa.app"
+    source = package_root / "Kolmogor.app"
     info = inspect_app(source, run, manifest["appFiles"])
     validate_release_metadata(manifest, info)
     run(["/usr/bin/codesign", "--verify", "--strict", "-R", "=anchor apple generic", source])
     require_stopped(run)
     applications = safe_directory(home / "Applications", create=True)
-    destination = applications / "Computa.app"
+    destination = applications / "Kolmogor.app"
     previous = existing_app(applications, run)
     runtime = safe_directory(home / "Library/Application Support/LocalCodex/MLX", create=True)
     for name in ["models", "python", "uv-cache", "model-download-cache"]:
@@ -223,7 +224,7 @@ def install(package_root, home, uv, *, download_model=False, launch=True, run=ch
     # No recursive deletion or in-place app overwrite. Keep a failed staging
     # directory so a retry cannot destroy either the old or new bundle.
     stage = Path(tempfile.mkdtemp(prefix=".computa-install-", dir=applications))
-    staged_app = stage / "Computa.app"
+    staged_app = stage / "Kolmogor.app"
     run(["/usr/bin/ditto", "--rsrc", "--extattr", "--acl", source, staged_app])
     inspect_app(staged_app, run, manifest["appFiles"])
     require_stopped(run)
@@ -286,4 +287,4 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as error:
-        raise SystemExit(f"Computa installer: {error}") from error
+        raise SystemExit(f"Kolmogor installer: {error}") from error

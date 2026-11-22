@@ -121,7 +121,7 @@ actor WebModelServer {
         case toolTextUnverified(ToolTextReason)
         var errorDescription: String? {
             switch self {
-            case .embeddedRequired: "Open the selected website in Computa's built-in browser and sign in before using this model."
+            case .embeddedRequired: "Open the selected website in Kolmogor's built-in browser and sign in before using this model."
             case .invalidRequest: "The browser model request could not be validated."
             case .turnLimit: "The website turn limit was reached. Earlier actions may have completed. Review their results before continuing; no prompt or action was replayed."
             case .busy: "This browser model already has a request running."
@@ -132,13 +132,13 @@ actor WebModelServer {
             case .productModeUnverified: EmbeddedWebModelTransport.Failure.productModeUnverified.errorDescription
             case .modelUnverified: "The website's selected model could not be verified. No response was accepted and no prompt was replayed."
             case .modelMismatch: "The website selected or reported a different model. No response was accepted and no prompt was replayed."
-            case .modelNotFound: "The requested website model is not supported. Choose a model from Computa's selector."
+            case .modelNotFound: "The requested website model is not supported. Choose a model from Kolmogor's selector."
             case .inferenceContextRequired: "The website inference could not be linked to its active local turn. No model response or tool calls were released."
             case .persistenceRequired: "The website inference evidence could not be saved locally. No model response or tool calls were released."
             case .startOwnershipUnconfirmed: "Website startup did not return a verifiable owned session. Cleanup remains unconfirmed and this task is paused."
             case .requestMetadataUnavailable: "The explicitly armed decoded metadata diagnostic could not activate. This website inference was not submitted and no prompt was replayed."
             case .toolTextUnverified:
-                "ChatGPT's tool response text could not be verified without rendering changes. No tool calls from this reply were released and no prompt was replayed. Inspect ChatGPT in Computa before continuing."
+                "ChatGPT's tool response text could not be verified without rendering changes. No tool calls from this reply were released and no prompt was replayed. Inspect ChatGPT in Kolmogor before continuing."
             case let .malformedReply(diagnostic):
                 "The website returned a malformed model response envelope (\(diagnostic.reason.rawValue)). No tool calls from this reply were dispatched."
             }
@@ -2414,7 +2414,7 @@ actor WebModelServer {
                 defer { benchmarkCapture?.revoke() }
                 // Groq's website has an observed 8K token-per-minute allowance.
                 // Local pacing is separate from prompt admission and cannot
-                // account for requests made outside Computa. Hold the permit
+                // account for requests made outside Kolmogor. Hold the permit
                 // through Send, including uncertain failures; never auto-retry.
                 if provider == "groq", let submissionBodyUnits {
                     groqFailureProjection = (inferenceID, session.token, request.promptStatistics, submissionBodyUnits,
@@ -3091,7 +3091,7 @@ actor WebModelServer {
         let failure: String
         switch reason {
         case .invalidJSON: failure = "The entire previous website reply was rejected as invalid JSON."
-        case .rendererFailure: failure = "The website could not render the previous reply. Computa accepted no response or tool calls from that inference."
+        case .rendererFailure: failure = "The website could not render the previous reply. Kolmogor accepted no response or tool calls from that inference."
         case .unofferedTool: failure = "The previous reply called an unloaded tool and was rejected; no call from it executed. Optional tool loads replace the selection. Use currently offered schemas, or request an eligible name through the offered loader and await its next-request schema."
         case .envelopeFormat: failure = "The previous reply used a tool_calls array instead of the required type and calls envelope and was rejected; no call from it executed. Return one complete envelope with \"type\":\"tool_calls\" and a \"calls\" array containing one call that follows its currently offered schema."
         }
@@ -3746,7 +3746,7 @@ actor WebModelServer {
         var errorDescription: String? {
             switch self {
             case .unauthorized: "A valid local model authorization token is required."
-            case .forbidden: "This request is not authorized for Computa's local model endpoint."
+            case .forbidden: "This request is not authorized for Kolmogor's local model endpoint."
             case .notFound: "The requested model endpoint does not exist."
             case .unsupportedMediaType: "Model requests must use Content-Type: application/json."
             }
@@ -3811,7 +3811,7 @@ actor WebModelServer {
             switch self {
             case .profileUnavailable: "Private ChatGPT browser profile preparation is unavailable. No prompt was replayed."
             case .profileBounds: "Private ChatGPT browser profile preparation exceeded its fixed local bounds. No prompt was replayed."
-            case .profileInvalidSource: "Private ChatGPT browser profile preparation rejected the source cookie state. No prompt was replayed. In a regular ChatGPT tab in Computa, try signing out and back in before starting a new task."
+            case .profileInvalidSource: "Private ChatGPT browser profile preparation rejected the source cookie state. No prompt was replayed. In a regular ChatGPT tab in Kolmogor, try signing out and back in before starting a new task."
             case .profileDestinationNotEmpty: "Private ChatGPT browser profile preparation found a nonempty destination. No prompt was replayed."
             case .profileVerificationFailed: "The private ChatGPT browser profile could not be verified. No prompt was replayed."
             case .profileDeadline: "Private ChatGPT browser profile preparation reached its deadline. No prompt was replayed."
@@ -4006,7 +4006,7 @@ actor WebModelServer {
             case "kimi":
                 fields["message"] = "Open Kimi from the model picker. Sign in on its setup tab, then choose Load models. Start a new task once your models appear."
             case "deepseek":
-                fields["message"] = "Sign in to DeepSeek in a regular tab in Computa's browser. With Computa idle, return to the DeepSeek chat home at chat.deepseek.com so Computa can verify your sign-in before you start a new task."
+                fields["message"] = "Sign in to DeepSeek in a regular tab in Kolmogor's browser. With Kolmogor idle, return to the DeepSeek chat home at chat.deepseek.com so Kolmogor can verify your sign-in before you start a new task."
             default: break
             }
         }
@@ -4575,7 +4575,7 @@ final class WebsiteBenchmarkCaptureLease: @unchecked Sendable {
         let expectedModel = WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant").modelID
         guard request.model == expectedModel else { return false }
         return WebsiteSyntheticFirstRequest.matches(request,
-            expectedUserText: "Computa latency benchmark \(nonce.uuidString.lowercased()). Reply with exactly HI. Do not use tools.")
+            expectedUserText: "Kolmogor latency benchmark \(nonce.uuidString.lowercased()). Reply with exactly HI. Do not use tools.")
     }
 }
 

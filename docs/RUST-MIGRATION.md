@@ -1,6 +1,6 @@
-# Computa Rust migration
+# Kolmogor Rust migration
 
-Status: in progress. The running installed Computa app remains the verified Swift baseline until the Rust app passes all qualification gates. Compiling a library, rendering a UI, or passing isolated unit tests does not qualify the product.
+Status: in progress. The running installed Kolmogor app remains the verified Swift baseline until the Rust app passes all qualification gates. Compiling a library, rendering a UI, or passing isolated unit tests does not qualify the product.
 
 The migration covers first-party production code in the native app and computer harness, chat runtime, local inference and grounding workers, browser extension, WebUI, website build, setup/distribution tooling and executable benchmark utilities. The exact upstream App Server is already Rust and continues to own existing private SQLite/rollout history. CSS, images, model weights and protocol data remain resources. Chrome requires generated WebAssembly bindings and a small JavaScript API/DOM boundary; permission, ownership, retry, provider selection and session state decisions belong to Rust.
 
@@ -16,9 +16,9 @@ cargo run --locked --quiet -p computa-contracts --bin browser-tool-catalog > "$c
 cargo test --locked -p computa-contracts --bin browser-tool-catalog
 ```
 
-On November 21, 2026, the generated catalog matched the pre-migration Swift builder at `7c8cc95` for every field, all array ordering, and both frozen schemas. Two separate chat turns ran in side-by-side local Release installations with an isolated profile and a scripted OpenCode-compatible provider. In each run the provider fetched the ten schemas over MCP, opened a loopback flight form, read its controls, filled `UA 123`, clicked the observed submit button, waited for the result, and read the server-generated confirmation. Computa requested approval for open, fill, and click. The chat output matched the fixture server’s receipt on both builds.
+On November 21, 2026, the generated catalog matched the pre-migration Swift builder at `7c8cc95` for every field, all array ordering, and both frozen schemas. Two separate chat turns ran in side-by-side local Release installations with an isolated profile and a scripted OpenCode-compatible provider. In each run the provider fetched the ten schemas over MCP, opened a loopback flight form, read its controls, filled `UA 123`, clicked the observed submit button, waited for the result, and read the server-generated confirmation. Kolmogor requested approval for open, fill, and click. The chat output matched the fixture server’s receipt on both builds.
 
-Release measurements used an Apple M4 with 16 GB RAM, macOS 26.5.1 and Xcode 26.6. Each run built the same arm64 Computa scheme at the same path, with fresh DerivedData, a seeded Sparkle checkout, the same bundled agent runtime, and the release worker’s three-job configuration. Wall time includes resource copying and local code signing. Swift time is Xcode’s `SwiftCompile` total for its two targets. The timed stage ends before distribution signing, notarization, and publication.
+Release measurements used an Apple M4 with 16 GB RAM, macOS 26.5.1 and Xcode 26.6. Each run built the same arm64 Kolmogor scheme at the same path, with fresh DerivedData, a seeded Sparkle checkout, the same bundled agent runtime, and the release worker’s three-job configuration. Wall time includes resource copying and local code signing. Swift time is Xcode’s `SwiftCompile` total for its two targets. The timed stage ends before distribution signing, notarization, and publication.
 
 | Measured stage | Swift catalog, two runs | Rust catalog, two runs | Mean change |
 | --- | --- | --- | --- |

@@ -222,7 +222,7 @@ impl RpcClient {
         .await
     }
     pub async fn initialize(&self) -> Result<Value, ClientError> {
-        let result=tokio::time::timeout(std::time::Duration::from_secs(30),self.request("initialize",json!({"clientInfo":{"name":"local_codex","title":"Computa","version":"0.1.0"},"capabilities":{"experimentalApi":true}}))).await.map_err(|_|ClientError::Timeout)??;
+        let result=tokio::time::timeout(std::time::Duration::from_secs(30),self.request("initialize",json!({"clientInfo":{"name":"local_codex","title":"Kolmogor","version":"0.1.0"},"capabilities":{"experimentalApi":true}}))).await.map_err(|_|ClientError::Timeout)??;
         self.notify("initialized", json!({})).await?;
         Ok(result)
     }

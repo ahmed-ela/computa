@@ -106,8 +106,8 @@ actor OpenCodeBrowserBridge {
             let requested = params["protocolVersion"] as? String ?? ""
             initialized = true
             return try reply(["protocolVersion": versions.contains(requested) ? requested : versions[0],
-                "capabilities": ["tools": [String: Any]()], "serverInfo": ["name": "Computa browser", "version": "1.0.0"],
-                "instructions": "These tools control Computa's built-in browser. Open or bind a tab, read its current controls, and act using its returned references."])
+                "capabilities": ["tools": [String: Any]()], "serverInfo": ["name": "Kolmogor browser", "version": "1.0.0"],
+                "instructions": "These tools control Kolmogor's built-in browser. Open or bind a tab, read its current controls, and act using its returned references."])
         case "ping":
             return try reply([String: Any]())
         case "tools/list" where initialized:

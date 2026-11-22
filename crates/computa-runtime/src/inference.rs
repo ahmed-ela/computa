@@ -123,20 +123,20 @@ impl NativeInferenceLifecycle {
             );
         }
         let metadata = std::fs::symlink_metadata(&self.config.worker_executable)
-            .map_err(|_| "Computa's native MLX worker is missing from its bundle.".to_owned())?;
+            .map_err(|_| "Kolmogor's native MLX worker is missing from its bundle.".to_owned())?;
         use std::os::unix::fs::PermissionsExt;
         if !metadata.is_file()
             || metadata.file_type().is_symlink()
             || metadata.permissions().mode() & 0o111 == 0
         {
-            return Err("Computa's native MLX worker is not a regular executable.".into());
+            return Err("Kolmogor's native MLX worker is not a regular executable.".into());
         }
         // A discovered listener is never adopted, stopped, or treated as ours.
         let probe =
             tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, self.config.port))
                 .await
                 .map_err(|_| {
-                    "Port 1237 is occupied by another listener. Computa will not adopt or stop it."
+                    "Port 1237 is occupied by another listener. Kolmogor will not adopt or stop it."
                         .to_owned()
                 })?;
         drop(probe);
@@ -296,7 +296,7 @@ impl InferenceLifecycle for NativeInferenceLifecycle {
             }
             return self.start_worker(&mut state, *local).await;
         }
-        let external=self.config.external_base_url.as_ref().ok_or_else(||"This model requires an explicitly configured external local provider. Computa will not switch to one automatically.".to_owned())?;
+        let external=self.config.external_base_url.as_ref().ok_or_else(||"This model requires an explicitly configured external local provider. Kolmogor will not switch to one automatically.".to_owned())?;
         if let Some(worker) = state.worker.as_ref() {
             let h = self.health(worker.instance).await?;
             if h["busy"] == true {

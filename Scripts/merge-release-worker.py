@@ -11,9 +11,9 @@ import subprocess
 import sys
 import time
 
-REPO = "ahmed-ela/computa"
+REPO = "ahmed-ela/kolmogor"
 REMOTE = "https://github.com/" + REPO + ".git"
-BRANCH = "computa"
+BRANCH = "kolmogor"
 ANCHOR = "c72bcdba2a9afdaed159e63cc8d722eb91c79dea"
 LABEL = "wtf.computa.merge-release"
 SERVICE = Path.home() / "Library/Application Support/ComputaRelease"
@@ -31,7 +31,7 @@ def save(path, value):
 
 def report(commit, state, description, url=None):
     args = ["gh", "api", "-X", "POST", f"repos/{REPO}/statuses/{commit}", "-f", f"state={state}",
-            "-f", "context=Computa / macOS release", "-f", f"description={description}"]
+            "-f", "context=Kolmogor / macOS release", "-f", f"description={description}"]
     if url:
         args += ["-f", f"target_url={url}"]
     subprocess.run(args, stdout=subprocess.DEVNULL, check=True)

@@ -1,6 +1,6 @@
 # Alpha releases
 
-Computa uses the alpha channel for new testing releases. The automatic publisher
+Kolmogor uses the alpha channel for new testing releases. The automatic publisher
 accepts only `vMAJOR.MINOR.PATCH-alpha.N`, publishes a GitHub prerelease, and
 leaves it out of the latest stable release. It does not publish stable tags.
 The Apple app keeps the numeric `MAJOR.MINOR.PATCH` version and a separate
@@ -17,7 +17,7 @@ notes. See [distribution](DISTRIBUTION.md), [versioning](VERSIONING.md), and
 
 ## Release on merge
 
-Squash-merge a reviewed PR into `computa`, the default branch. Each new
+Squash-merge a reviewed PR into `kolmogor`, the default branch. Each new
 first-parent commit queues a macOS alpha. The signing Mac checks GitHub every
 60 seconds while the release user is logged in. After sleep or downtime it
 resumes from its last completed commit. Feature branches and open PRs do not
@@ -30,7 +30,7 @@ and WebUI tests, signs the app, and submits both the app and DMG to Apple.
 It staples both tickets, signs the final DMG for Sparkle, and uploads a draft.
 The publisher independently verifies the tagged build number, mounted image,
 asset digests and update signature before publication. The public
-[download](https://computa.wtf/download) and [update feed](https://computa.wtf/appcast.xml)
+[download](https://kolmogor.com/download) and [update feed](https://kolmogor.com/appcast.xml)
 follow the release. Existing updater-enabled clients discover it on their
 next check. The service does not restart an installed app.
 
@@ -39,7 +39,7 @@ next check. The service does not restart an installed app.
 On an Apple Silicon Mac with the [build prerequisites](BUILDING.md#requirements),
 sign in to GitHub CLI with release, tag, and commit-status permissions. Configure
 a Developer ID Application identity, a `notarytool` profile in the login Keychain,
-and the existing Computa Sparkle key. The macOS login session must be able to
+and the existing Kolmogor Sparkle key. The macOS login session must be able to
 use all three unattended. Run once, substituting the local paths and identity:
 
 ```sh
@@ -56,7 +56,7 @@ runtime can be reused after checking its files against a published notarized
 release manifest. Re-run the installer after updating the scheduler or moving
 the tools. Use one signing service for this repository.
 
-Each commit has a **Computa / macOS release** status on GitHub. Detailed output
+Each commit has a **Kolmogor / macOS release** status on GitHub. Detailed output
 is in `STATE/<commit>.log`, and scheduler errors are in
 `~/Library/Application Support/ComputaRelease/worker.log`. A failing tip is
 retried after ten minutes. When a newer merge arrives, a persistently broken
@@ -71,23 +71,29 @@ Build 586 and later use the pinned Sparkle framework in the Xcode app. The relea
 After notarizing and stapling the **app**, package it with `--channel notarized`. Sign the resulting DMG with Developer ID, submit it to Apple notarization, and staple its ticket. Generate the feed and final checksums from those exact bytes:
 
 ```sh
-bun Scripts/sparkle-appcast.ts "$sparkle_tools/sign_update" "/path/to/Computa-VERSION-alpha.BUILD-arm64.dmg"
+bun Scripts/sparkle-appcast.ts "$sparkle_tools/sign_update" "/path/to/Kolmogor-VERSION-alpha.BUILD-arm64.dmg"
 ```
 
-Upload `appcast.xml` alongside the final DMG, manifest, and `SHA256SUMS` when creating the draft. Use the notarized asset names (without `-signed-test`). The publisher verifies the feed's download URL, version, length, checksum, and Ed25519 signature before it makes the draft public. `https://computa.wtf/appcast.xml` then points clients at the highest published build with both a notarized DMG and a feed. Publishing future app updates requires no website deploy. A `signed-test` package cannot be offered to an installed client.
+Upload `appcast.xml` alongside the final DMG, manifest, and `SHA256SUMS` when creating the draft. Use the notarized asset names (without `-signed-test`). The publisher verifies the feed's download URL, version, length, checksum, and Ed25519 signature before it makes the draft public. `https://kolmogor.com/appcast.xml` then points clients at the highest published build with both a notarized DMG and a feed. Publishing future app updates requires no website deploy. A `signed-test` package cannot be offered to an installed client.
 
 ## Manual recovery
 
-The **Publish Computa alpha** GitHub Actions workflow can verify and publish an
+The **Publish Kolmogor alpha** GitHub Actions workflow can verify and publish an
 already prepared draft. Use this if the signed assets are uploaded and only the
 final publication step needs intervention. Check the signing service status
 and stop it before taking over a draft. From the repository, run:
 
 ```sh
-gh workflow run release-alpha.yml --ref computa --field tag="$computa_release_tag"
+gh workflow run release-alpha.yml --ref kolmogor --field tag="$computa_release_tag"
 ```
 
 The workflow checks out the default branch and verifies the exact tag, draft,
 installer files and mounted DMG before publishing a prerelease. A changed
 artifact requires a new merge and build. Stable releases and the Rust app
 migration have separate qualification gates.
+
+## Updating from Computa
+
+Both `https://computa.wtf/appcast.xml` and `https://kolmogor.com/appcast.xml` serve the signed update feed. The Worker recognizes historical Computa disk images and new Kolmogor images. Keep the old domain registered and routed for installed clients. Existing copies update in place through Sparkle and can retain the filename `Computa.app`. The updated bundle displays Kolmogor. New downloads install as `Kolmogor.app`.
+
+The Apple bundle identifier, signing team, Sparkle public key, saved chat and tab keys, Keychain services, provider protocols and private signing-worker directory retain their existing identifiers for upgrade compatibility.

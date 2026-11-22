@@ -1,8 +1,8 @@
-# Download and install Computa
+# Download and install Kolmogor
 
-Computa's macOS alpha packages support **Apple Silicon (M1 or later), macOS 14
+Kolmogor's macOS alpha packages support **Apple Silicon (M1 or later), macOS 14
 or later**. Intel Macs are not supported by the bundled runtime. Download from
-the public [GitHub Releases page](https://github.com/ahmed-ela/computa/releases).
+the public [GitHub Releases page](https://github.com/ahmed-ela/kolmogor/releases).
 Alpha releases are marked prerelease and are intentionally excluded from
 GitHub's `latest` endpoint.
 
@@ -11,12 +11,12 @@ GitHub's `latest` endpoint.
 1. Download the DMG, matching `.manifest.json`, and `SHA256SUMS` from the same
    release. Optionally verify the download with `shasum -a 256 --check SHA256SUMS`
    in their download directory.
-2. Quit any running Computa or legacy Mactopus copy. Open the DMG and drag
-   **Computa.app** to **Applications**. Open the installed app.
-3. Open Computa's built-in browser and sign in to the website provider you want
+2. Quit any running Kolmogor or legacy Mactopus copy. Open the DMG and drag
+   **Kolmogor.app** to **Applications**. Open the installed app.
+3. Open Kolmogor's built-in browser and sign in to the website provider you want
    to use. Each recipient uses their own account; no account sessions or API
    credentials are included in the package.
-4. After completing sign-in, quit and reopen Computa once so its existing model
+4. After completing sign-in, quit and reopen Kolmogor once so its existing model
    discovery can populate the selector. Choose a specific model. Fresh profiles
    start with ChatGPT Instant selected, but it remains unavailable until the
    website's choices have been verified. Saved model preferences are preserved.
@@ -55,13 +55,13 @@ preferences and website data also use macOS-managed storage. Quit the running
 app before replacing it. The bundle identifier remains
 `com.ahmedelamin.LocalCodex`.
 
-If both `/Applications/Computa.app` and `~/Applications/Computa.app` exist, open
+If both `/Applications/Kolmogor.app` and `~/Applications/Kolmogor.app` exist, open
 the intended copy explicitly. Dragging to Applications does not migrate or
 remove an older `~/Applications/Mactopus.app`. Preserve any older copy until the
 new installation has been checked.
 
 A website quota is an account limit, not an installation failure. Wait for the
-provider's actual reset, restart Computa to clear its process-local admission
+provider's actual reset, restart Kolmogor to clear its process-local admission
 block, and start a fresh task. Restarting does not reset provider quotas. A failed
 or uncertain external action must not be replayed merely because the app restarted.
 
@@ -69,13 +69,13 @@ or uncertain external action must not be replayed merely because the app restart
 
 Local models are currently hidden from the selector. Existing saved local-model
 workflows remain supported. Only those workflows need the DMG's optional
-**Install Computa.command**, which provisions private Python/MLX and the pinned
+**Install Kolmogor.command**, which provisions private Python/MLX and the pinned
 Qwen 3.5 4B model (about 3.06 GB); allow about 10 GB for dependencies, cache and
 staging. Weights are not included in the DMG.
 
 The command installer asks for `INSTALL` before downloading or installing. It
 uses pinned official downloads and verifies hashes, installs into
-`~/Applications/Computa.app`, and preserves the previous app under
+`~/Applications/Kolmogor.app`, and preserves the previous app under
 `~/Applications/Computa Backups/release-*/`. It supports a lone compatible
 `Mactopus.app`; if both names exist, it stops without replacing either. Existing
 model/download caches and user data are preserved. `--download-model` explicitly

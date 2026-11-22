@@ -221,7 +221,7 @@ struct EmbeddedBrowserPane: View {
         VStack(spacing: 10) {
             Image(systemName: "globe").font(.system(size: 32, weight: .light))
                 .foregroundStyle(.secondary)
-            Text(hasTab ? (selectedTab?.requestsMobileSite == true ? "New mobile tab" : "New tab") : "Your browser, inside Computa")
+            Text(hasTab ? (selectedTab?.requestsMobileSite == true ? "New mobile tab" : "New tab") : "Your browser, inside Kolmogor")
                 .font(.headline)
             Text("Search or enter a website address to get started.")
                 .font(.callout)

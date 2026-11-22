@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::{io, path::PathBuf};
 use xtask::distribution::{PackageOptions, ReleaseChannel, SystemRunner};
 #[derive(Parser)]
-#[command(name = "Computa build tools")]
+#[command(name = "Kolmogor build tools")]
 struct Args {
     #[command(subcommand)]
     command: Task,

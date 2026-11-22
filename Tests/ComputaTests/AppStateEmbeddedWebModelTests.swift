@@ -352,7 +352,7 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         XCTAssertTrue(browser.tabs.isEmpty)
         XCTAssertFalse(state.canRefreshWebsiteModels)
         XCTAssertEqual(state.connectionState,
-            .failed(message: "Browser maintenance launch finished. Restart Computa to connect the runtime."))
+            .failed(message: "Browser maintenance launch finished. Restart Kolmogor to connect the runtime."))
     }
 
     func testMaintenanceLaunchWithNoRuntimeStillCannotStartWebsiteDiscovery() async {

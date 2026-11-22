@@ -1,6 +1,6 @@
 # App versioning
 
-Computa uses `major.minor.patch`, following [Semantic Versioning](https://semver.org/).
+Kolmogor uses `major.minor.patch`, following [Semantic Versioning](https://semver.org/).
 The `0.x.y` series is initial development. `1.0.0` marks the first stable
 contract. Published artifacts are immutable.
 
@@ -10,7 +10,7 @@ Compare what users and integrations can do before and after the PR. Choose
 the highest applicable change and record the decision and reason in the PR
 description, including when the alpha build number alone is sufficient.
 
-| Decision | When to use it | Computa example |
+| Decision | When to use it | Kolmogor example |
 | --- | --- | --- |
 | Major | A supported interface or persisted-data format becomes incompatible. Identify affected consumers and their migration path. | Removing a supported tool-protocol field that existing clients require. |
 | Minor | Users or integrations gain a backward-compatible capability. | Adding a collapsible sidebar or a model provider. |
@@ -20,7 +20,7 @@ description, including when the alpha build number alone is sufficient.
 Include one app version bump in the PR for a major, minor, or patch decision.
 For example, a PR that adds a sidebar and corrects its badge alignment takes
 one minor bump. Before squash merge, check the decision against the current
-`computa` branch in case another PR changed the base version. The release
+`kolmogor` branch in case another PR changed the base version. The release
 worker assigns the alpha build number automatically.
 
 ## Shared source
@@ -95,7 +95,7 @@ inventory. Rust packages carry their matching installer; older Rust installers
 with strict manifest fields are not forward compatible with new fields.
 Historical preview packages and their manifests are not rewritten.
 
-A merge to `computa` queues an alpha on the signing Mac. See
+A merge to `kolmogor` queues an alpha on the signing Mac. See
 [releasing](RELEASING.md) for the release checks, signing setup, and recovery.
 
 Qualification of the draft Rust migration remains separate from app versioning;

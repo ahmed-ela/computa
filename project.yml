@@ -1,4 +1,4 @@
-name: Computa
+name: Kolmogor
 
 options:
   bundleIdPrefix: com.ahmedelamin
@@ -31,7 +31,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.ahmedelamin.LocalCodex.AutomationCore
         DEFINES_MODULE: YES
 
-  Computa:
+  Kolmogor:
     type: application
     platform: macOS
     sources:
@@ -68,11 +68,12 @@ targets:
       base:
         # Stable identity preserves settings and macOS permission association.
         PRODUCT_BUNDLE_IDENTIFIER: com.ahmedelamin.LocalCodex
-        PRODUCT_NAME: Computa
+        PRODUCT_NAME: Kolmogor
+        PRODUCT_MODULE_NAME: Computa
         DEVELOPMENT_TEAM: MSMG8CJLB3
         CODE_SIGN_STYLE: Automatic
         GENERATE_INFOPLIST_FILE: NO
-        INFOPLIST_FILE: Config/Computa-Info.plist
+        INFOPLIST_FILE: Config/Kolmogor-Info.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ENABLE_HARDENED_RUNTIME: YES
       configs:
@@ -85,7 +86,7 @@ targets:
     sources:
       - path: Tests/ComputaTests
     dependencies:
-      - target: Computa
+      - target: Kolmogor
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ahmedelamin.LocalCodexTests
@@ -106,11 +107,11 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
 
 schemes:
-  Computa:
+  Kolmogor:
     build:
       targets:
         AutomationCore: all
-        Computa: all
+        Kolmogor: all
         ComputaTests: [test]
         AutomationCoreTests: [test]
     run:

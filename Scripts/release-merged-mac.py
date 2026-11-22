@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import sys
 
-REPO = "ahmed-ela/computa"
+REPO = "ahmed-ela/kolmogor"
 RUNTIME = Path("Sources/Computa/Resources/AgentRuntime")
 RUNTIME_FILES = ("codex-app-server", "manifest.json", "LICENSE", "NOTICE")
 RUNTIME_INPUTS = ["Runtime/codex-source.lock.json", "Runtime/patches", "Scripts/build-agent-runtime.ts",
@@ -35,7 +35,11 @@ def digest(path):
 def seed_runtime():
     # An existing public package can supply exactly the same runtime inputs.
     # Authenticate the four bytesets against its published inventory before reuse.
-    installed = Path("/Applications/Computa.app/Contents")
+    return any(seed_installed_runtime(Path("/Applications") / (name + ".app") / "Contents")
+               for name in ("Kolmogor", "Computa"))
+
+
+def seed_installed_runtime(installed):
     try:
         info = plistlib.loads((installed / "Info.plist").read_bytes())
         if info["CFBundleIdentifier"] != "com.ahmedelamin.LocalCodex":
@@ -46,7 +50,10 @@ def seed_runtime():
         if subprocess.run(["git", "diff", "--quiet", tag, "HEAD", "--", *RUNTIME_INPUTS]).returncode != 0:
             return False
         release = json.loads(read("gh", "release", "view", tag, "--repo", REPO, "--json", "isDraft,assets"))
-        name = f"Computa-{tag[1:]}-arm64.manifest.json"
+        product = info["CFBundleExecutable"]
+        if product not in ("Kolmogor", "Computa"):
+            return False
+        name = f"{product}-{tag[1:]}-arm64.manifest.json"
         if release["isDraft"]:
             return False
         asset = next(a for a in release["assets"] if a["name"] == name)
@@ -115,14 +122,14 @@ def package(state, tag, job):
     run("bun", "run", "build", cwd="WebUI")
     run("xcodegen", "generate")
     derived = state / "DerivedData"
-    product = derived / "Build/Products/Release/Computa.app"
+    product = derived / "Build/Products/Release/Kolmogor.app"
     if product.exists():
         shutil.rmtree(product)
-    run("xcodebuild", "-project", "Computa.xcodeproj", "-scheme", "Computa", "-configuration", "Release",
+    run("xcodebuild", "-project", "Kolmogor.xcodeproj", "-scheme", "Kolmogor", "-configuration", "Release",
         "-destination", "platform=macOS,arch=arm64", "-derivedDataPath", derived, "-onlyUsePackageVersionsFromResolvedFile",
         "-jobs", "3", "ARCHS=arm64", "ONLY_ACTIVE_ARCH=YES", "CODE_SIGN_STYLE=Manual", "CODE_SIGN_IDENTITY=-",
         "DEVELOPMENT_TEAM=", "SWIFT_ACTIVE_COMPILATION_CONDITIONS=", "CURRENT_PROJECT_VERSION=" + tag.split(".")[-1], "build")
-    app = stage / "signed/Computa.app"
+    app = stage / "signed/Kolmogor.app"
     identity = os.environ["COMPUTA_SIGN_IDENTITY"]
     run("bun", "Scripts/sign-release.ts", "--app", product,
         "--output", app, "--identity", identity)
@@ -133,7 +140,7 @@ def package(state, tag, job):
     run("xcrun", "stapler", "staple", app)
     out = stage / "package"
     run("bun", "Scripts/package-release.ts", "--app", app, "--output", out, "--tag", tag, "--channel", "notarized")
-    image = out / f"Computa-{tag[1:]}-arm64.dmg"
+    image = out / f"Kolmogor-{tag[1:]}-arm64.dmg"
     run("codesign", "--force", "--timestamp", "--sign", identity, image)
     notarize(image)
     run("xcrun", "stapler", "staple", image)
@@ -165,7 +172,7 @@ def main(state, tag):
     if remote and remote.split()[0] != commit:
         raise RuntimeError("Existing tag belongs to another commit")
     release = release_info(tag)
-    names = {f"Computa-{tag[1:]}-arm64.dmg", f"Computa-{tag[1:]}-arm64.manifest.json", "appcast.xml", "SHA256SUMS"}
+    names = {f"Kolmogor-{tag[1:]}-arm64.dmg", f"Kolmogor-{tag[1:]}-arm64.manifest.json", "appcast.xml", "SHA256SUMS"}
     if release and not release["draft"]:
         if not remote or not release["prerelease"] or {a["name"] for a in release["assets"] if a["state"] == "uploaded"} != names:
             raise RuntimeError("Published release has unexpected assets or identity")
@@ -180,9 +187,9 @@ def main(state, tag):
     if not release:
         notes = job / "notes.md"
         notes.write_text(f"Apple Silicon macOS alpha from [commit {commit[:9]}](https://github.com/{REPO}/commit/{commit}).\n\n"
-                         "Download the notarized DMG or choose **Computa → Check for Updates…** in the app.\n")
+                         "Download the notarized DMG or choose **Kolmogor → Check for Updates…** in the app.\n")
         run("gh", "release", "create", tag, "--repo", REPO, "--verify-tag", "--draft", "--prerelease", "--latest=false",
-            "--title", f"Computa {tag[1:]}", "--notes-file", notes)
+            "--title", f"Kolmogor {tag[1:]}", "--notes-file", notes)
     uploaded = {a["name"]: a for a in (release or {}).get("assets", [])}
     if set(uploaded) - names:
         raise RuntimeError("Draft contains unexpected assets")

@@ -1,6 +1,6 @@
 # Browser initiative and tool contracts
 
-Computa can start a task for a named, known website without requiring the user
+Kolmogor can start a task for a named, known website without requiring the user
 to supply its URL. In installed 0.7.0 (206), remote Cerebras `gpt-oss-120b` opened
 Outlook, searched for the requested sender, inspected the relevant message and
 attachment metadata, and reported the attachment in 43.380 seconds. The test
