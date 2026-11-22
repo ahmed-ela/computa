@@ -572,6 +572,9 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
         if (!snapshot.review || snapshot.review.snapshot?.id !== action.snapshotID) return;
         publish({ ...snapshot, review: { ...snapshot.review, error: 'Preview only. No files or Git index were changed, and no external editor was opened.' } });
         return;
+      case 'setTaskSidebarCollapsed':
+        publish({ ...snapshot, isTaskSidebarCollapsed: action.collapsed });
+        return;
       case 'toggleBrowser':
         // The actual browser is a native sibling, not an iframe in this preview.
         publish({ ...snapshot, isBrowserPresented: !snapshot.isBrowserPresented });

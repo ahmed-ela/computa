@@ -7,6 +7,8 @@ import WebKit
 @MainActor
 struct EmbeddedBrowserPane: View {
     let session: EmbeddedBrowserSession
+    var tabRowHeight: CGFloat = 32
+    var titlebarTrailingInset: CGFloat = 0
     var isInteractionBlocked = false
     var canLoadModels = false
     var modelSetupStatus: (String) -> WebsiteModelSetupStatus = { _ in .unchecked }
@@ -127,7 +129,7 @@ struct EmbeddedBrowserPane: View {
                             .id(tab.id)
                         }
                     }
-                    .padding(.vertical, 6)
+                    .padding(.vertical, 2)
                 }
                 .scrollIndicators(.hidden)
                 .onChange(of: session.selectedTabID) { _, id in
@@ -152,7 +154,9 @@ struct EmbeddedBrowserPane: View {
         }
         .buttonStyle(.plain)
         .padding(.horizontal, 8)
-        .frame(height: 42)
+        // The globe is a native accessory at the trailing edge of this row.
+        .padding(.trailing, titlebarTrailingInset)
+        .frame(height: tabRowHeight)
     }
 
     private var navigationBar: some View {
@@ -331,7 +335,7 @@ private struct EmbeddedBrowserTabButton: View {
         }
         .buttonStyle(.plain)
         .padding(.horizontal, 8)
-        .frame(width: 160, height: 30)
+        .frame(width: 160, height: 26)
         .background(selected ? Color(nsColor: .controlBackgroundColor) : .clear, in: RoundedRectangle(cornerRadius: 7))
         .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(.primary.opacity(selected ? 0.12 : 0.04)))
         .accessibilityIdentifier("browser-tab-\(tab.id.uuidString)")

@@ -21,6 +21,7 @@ struct ModelProviderSetup: Codable, Equatable, Sendable {
 
 struct WebUISnapshot: Codable, Equatable, Sendable {
     var revision: UInt64 = 0
+    let titlebarHeight: CGFloat?
     let selectedTaskID: String?
     let selectedEntryID: String?
     let tasks: [WebTaskSnapshot]
@@ -37,6 +38,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     let websiteModelsError: String?
     let showToolPayloads: Bool
     let isInspectorPresented: Bool
+    let isTaskSidebarCollapsed: Bool
     let isBrowserPresented: Bool
     let isReviewPresented: Bool
     let review: AppReviewState?
@@ -44,7 +46,8 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     let promptReceipts: [PromptReceipt]
 
     @MainActor
-    init(state: AppState) {
+    init(state: AppState, titlebarHeight: CGFloat? = nil) {
+        self.titlebarHeight = titlebarHeight
         selectedTaskID = state.selectedTaskID
         selectedEntryID = state.selectedEntryID
         tasks = state.tasks.map { task in
@@ -96,6 +99,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         websiteModelsError = state.websiteModelsError
         showToolPayloads = state.showToolPayloads
         isInspectorPresented = state.isInspectorPresented
+        isTaskSidebarCollapsed = state.isTaskSidebarCollapsed
         isBrowserPresented = state.isBrowserPresented
         isReviewPresented = state.isReviewPresented
         review = state.review

@@ -6,10 +6,11 @@ import XCTest
 
 final class EmbeddedBrowserPaneStateTests: XCTestCase {
     @MainActor
-    func testBrowserControlStaysAtTrailingEdgeOfTitlebarAcrossPaneChanges() async throws {
+    func testTitlebarSharesBrowserTabsAndSidebarAcrossPaneChanges() async throws {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }
-        let state = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: session)
+        let task = AgentTask(title: "Review the layout", summary: "", status: .draft, workspace: "/tmp/Fixture", model: "local")
+        let state = AppState(tasks: [task], preferences: isolatedTestPreferences(), browserSession: session)
         let hosting = NSHostingView(rootView: WebWorkspaceView(state: state))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 740),
                               styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
@@ -18,20 +19,208 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         window.contentView = hosting
         defer { window.close() }
 
+        let first = try session.createTab()
+        let second = try session.createTab()
         let close = try XCTUnwrap(window.standardWindowButton(.closeButton))
-        for (width, presented) in [(1100, false), (980, true), (1280, false)] {
+        let frameView = try XCTUnwrap(hosting.superview)
+        window.orderBack(nil)
+        for (width, presented) in [(1100, false), (980, true), (1280, true), (1280, false)] {
             window.setContentSize(NSSize(width: width, height: 740))
             state.isBrowserPresented = presented
+            state.appearance = width == 980 ? .dark : .light
             await settleLayout(hosting)
-            XCTAssertEqual(window.titlebarAccessoryViewControllers.count, 1)
-            let accessory = try XCTUnwrap(window.titlebarAccessoryViewControllers.first)
+            XCTAssertEqual(window.titlebarAccessoryViewControllers.count, 2)
+            let accessory = try XCTUnwrap(window.titlebarAccessoryViewControllers.first { $0.layoutAttribute == .right })
             let frame = accessory.view.convert(accessory.view.bounds, to: nil)
             let trafficLight = close.convert(close.bounds, to: nil)
             XCTAssertEqual(accessory.layoutAttribute, .right)
-            XCTAssertGreaterThanOrEqual(frame.width, 24)
             XCTAssertEqual(frame.midY, trafficLight.midY, accuracy: 3)
             XCTAssertEqual(frame.maxX, window.frame.width, accuracy: 12)
+
+            let chat = try XCTUnwrap(nativeViews(in: hosting).compactMap { $0 as? WKWebView }
+                .first { $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil })
+            XCTAssertEqual(chat.convert(chat.bounds, to: nil).maxY, window.frame.height, accuracy: 1)
+            let sidebarBehindLights = await waitForScriptBool(on: chat, script: """
+                (() => {
+                    const sidebar = document.querySelector('.sidebar');
+                    return document.documentElement.dataset.appearance === '\(state.appearance.rawValue)'
+                        && sidebar && document.elementFromPoint(120, 12)?.closest('.sidebar') === sidebar
+                        && sidebar.getBoundingClientRect().top === 0;
+                })()
+                """)
+            XCTAssertTrue(sidebarBehindLights)
+            let titleAligned = await waitForScriptBool(on: chat, script: """
+                (() => {
+                    const title = document.querySelector('.toolbar-title-block strong');
+                    const row = title?.closest('header')?.getBoundingClientRect();
+                    if (!row || title.textContent !== 'Review the layout') return false;
+                    const text = title.getBoundingClientRect();
+                    return Math.abs(row.bottom - 1 - \(window.frame.height - window.contentLayoutRect.maxY)) <= 1
+                        && Math.abs((text.top + text.bottom) / 2 - \(window.frame.height - trafficLight.midY)) <= 2;
+                })()
+                """)
+            XCTAssertTrue(titleAligned, "The chat title and its divider should line up with the native title bar")
+
+            let blankTitlebar = NSPoint(x: 300, y: trafficLight.midY)
+            let dragTarget = try XCTUnwrap(frameView.hitTest(frameView.convert(blankTitlebar, from: nil)))
+            XCTAssertTrue(dragTarget.mouseDownCanMoveWindow)
+            XCTAssertFalse(dragTarget === chat || dragTarget.isDescendant(of: chat))
+
+            guard presented else { continue }
+            let split = try XCTUnwrap(nativeViews(in: hosting).compactMap { $0 as? NSSplitView }.first)
+            let pane = try XCTUnwrap(split.arrangedSubviews.last)
+            if width == 1280 {
+                split.setPosition(760, ofDividerAt: 0)
+                await settleLayout(hosting)
+            }
+            let tabs = try XCTUnwrap(nativeViews(in: pane).compactMap { $0 as? NSScrollView }.first)
+            let strip = tabs.convert(tabs.bounds, to: nil)
+            XCTAssertEqual(strip.midY, trafficLight.midY, accuracy: 3)
+            XCTAssertEqual(strip.minX, pane.convert(pane.bounds, to: nil).minX, accuracy: 10)
+            XCTAssertLessThan(strip.maxX, frame.minX)
+            let address = try XCTUnwrap(nativeViews(in: pane).compactMap { $0 as? NSTextField }
+                .first { $0.placeholderString == "Search or enter a website address" })
+            XCTAssertLessThanOrEqual(address.convert(address.bounds, to: nil).maxY, window.contentLayoutRect.maxY)
+
+            if width == 980 {
+                // Two tabs overflow the narrow strip. Select the first, add a tab,
+                // and close the new tab at its scrolled-into-view trailing edge.
+                try await clickInWindow(at: NSPoint(x: strip.minX + 44, y: trafficLight.midY), window: window)
+                XCTAssertEqual(session.selectedTabID, first)
+                try await clickInWindow(at: NSPoint(x: strip.maxX + 16, y: trafficLight.midY), window: window)
+                XCTAssertEqual(session.humanTabs.count, 3)
+                XCTAssertFalse([first, second].contains(try XCTUnwrap(session.selectedTabID)))
+                try await clickInWindow(at: NSPoint(x: strip.maxX - 17, y: trafficLight.midY), window: window)
+                XCTAssertEqual(session.humanTabs.map(\.id), [first, second])
+            }
         }
+    }
+
+    @MainActor
+    func testCollapsedSidebarTracksWorkingAndUnreadChats() async throws {
+        let prefs = isolatedTestPreferences()
+        let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
+        defer { session.shutdown() }
+        let thread = UUID().uuidString.lowercased()
+        let tasks = [
+            AgentTask(title: "Inbox", summary: "", status: .draft, workspace: "", model: "local"),
+            AgentTask(title: "Research", summary: "", status: .running, workspace: "", model: "local"),
+            AgentTask(runtimeThreadID: thread, title: "Review", summary: "", status: .running, workspace: "", model: "local"),
+            AgentTask(title: "Earlier", summary: "", status: .completed, workspace: "", model: "local"),
+            AgentTask(title: "Failed", summary: "", status: .failed, workspace: "", model: "local")
+        ]
+        let state = AppState(tasks: tasks, preferences: prefs, browserSession: session)
+        let hosting = NSHostingView(rootView: WebWorkspaceView(state: state))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1080, height: 700),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        window.orderBack(nil)
+        defer { window.close() }
+        await settleLayout(hosting)
+        let chat = try XCTUnwrap(nativeViews(in: hosting).compactMap { $0 as? WKWebView }
+            .first { $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil })
+        let expanded = await waitForScriptBool(on: chat, script: "document.querySelectorAll('.task-row').length === 5 && !document.querySelector('.agent-rail')")
+        XCTAssertTrue(expanded)
+        let button = try XCTUnwrap(window.titlebarAccessoryViewControllers.first { $0.layoutAttribute == .left }?.view)
+        let bounds = button.convert(button.bounds, to: nil)
+        let zoom = try XCTUnwrap(window.standardWindowButton(.zoomButton))
+        let light = zoom.convert(zoom.bounds, to: nil)
+        XCTAssertGreaterThanOrEqual(bounds.minX, light.maxX)
+        XCTAssertLessThan(bounds.minX - light.maxX, 24)
+        XCTAssertEqual(bounds.midY, light.midY, accuracy: 3)
+        let toggle = NSPoint(x: bounds.midX, y: bounds.midY)
+        try await clickInWindow(at: toggle, window: window)
+        XCTAssertTrue(state.isTaskSidebarCollapsed)
+        let working = await waitForScriptBool(on: chat, script: """
+            document.querySelectorAll('[data-agent-status="working"]').length === 2
+                && document.querySelectorAll('.bot-sparkle-star').length === 4
+                && getComputedStyle(document.querySelector('.bot-sparkle-pass')).animationName
+                    === (matchMedia('(prefers-reduced-motion: reduce)').matches ? 'none' : 'bot-sparkle-pass')
+                && document.querySelector('.sidebar').getBoundingClientRect().width === 72
+                && document.querySelector('.toolbar-title-block').getBoundingClientRect().left >= \(bounds.maxX)
+                && !document.querySelector('#task-search')
+            """)
+        XCTAssertTrue(working)
+        let motionMatches = try await chat.evaluateJavaScript("""
+            (() => {
+                const icon = document.querySelector('[data-agent-status="working"] .agent-status-icon');
+                const pass = icon.querySelector('.bot-sparkle-pass');
+                const [animation] = pass.getAnimations();
+                const pose = selector => new DOMMatrix(getComputedStyle(pass.querySelector(selector)).transform);
+                if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
+                    return !animation && pose('.sparkle-front').e === 17.5;
+                }
+                animation.pause();
+                try {
+                    for (const [time, x, y] of [[0, 17.5, 17.5], [800, 16.703, 14.578], [1599, 14.5, 12.5]]) {
+                        animation.currentTime = time;
+                        const front = pose('.sparkle-front'), back = pose('.sparkle-back');
+                        if (Math.abs(front.e - x) > .02 || Math.abs(front.f - y) > .02
+                            || Math.abs(front.e + back.e - 32) > .01 || Math.abs(front.f + back.f - 30) > .01
+                            || front.b || front.c || back.b || back.c
+                            || (time === 0 ? front.a >= back.a : front.a <= back.a)) return false;
+                    }
+                    return true;
+                } finally { animation.play(); }
+            })()
+            """) as? Bool
+        XCTAssertEqual(motionMatches, true, "The stars should swap sizes and stay upright around a fixed midpoint.")
+        let restored = AppState(tasks: [], preferences: prefs, browserSession: session)
+        XCTAssertTrue(restored.isTaskSidebarCollapsed)
+
+        state.apply(.taskCompletionObserved(taskID: tasks[2].id, threadID: thread, turnID: UUID().uuidString.lowercased()))
+        state.apply(.taskStatusChanged(taskID: tasks[2].id, status: .completed))
+        let ready = await waitForScriptBool(on: chat, script: """
+            document.querySelectorAll('.agent-rail-button').length === 2
+                && document.querySelector('[data-agent-status="ready"]')?.getAttribute('aria-label') === 'Review — Ready to read'
+                && (() => {
+                    const badge = document.querySelector('[data-agent-status="ready"] .agent-ready-badge');
+                    if (!badge) return false;
+                    const circle = badge.querySelector('circle').getBoundingClientRect();
+                    const check = badge.querySelector('path').getBoundingClientRect();
+                    return check.width > 3 && check.width < circle.width
+                        && Math.abs((circle.left + circle.right - check.left - check.right) / 2) < 0.1
+                        && Math.abs((circle.top + circle.bottom - check.top - check.bottom) / 2) < 0.1;
+                })()
+                && !document.querySelector('[data-agent-status="ready"] .bot-sparkle-star')
+            """)
+        XCTAssertTrue(ready)
+        _ = try await chat.evaluateJavaScript("document.querySelector('[data-agent-status=ready]').click()")
+        let read = await waitForScriptBool(on: chat, script: """
+            document.querySelector('.toolbar-title-block strong')?.textContent === 'Review'
+                && document.querySelectorAll('.agent-rail-button').length === 1 && !document.querySelector('[data-agent-status=ready]')
+            """)
+        XCTAssertTrue(read)
+        XCTAssertFalse(state.hasUnreadCompletion(for: tasks[2].id))
+
+        try await clickInWindow(at: toggle, window: window)
+        let reopened = await waitForScriptBool(on: chat, script: "!!document.querySelector('#task-search') && !document.querySelector('.agent-rail')")
+        XCTAssertTrue(reopened)
+        try await clickInWindow(at: toggle, window: window)
+        _ = try await chat.evaluateJavaScript("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true, bubbles: true })); true")
+        let searchFocused = await waitForScriptBool(on: chat, script: "document.activeElement?.id === 'task-search'")
+        XCTAssertTrue(searchFocused)
+        XCTAssertFalse(state.isTaskSidebarCollapsed)
+    }
+
+    @MainActor
+    private func clickInWindow(at point: NSPoint, window: NSWindow) async throws {
+        let events = try [NSEvent.EventType.leftMouseDown, .leftMouseUp].map { type in
+            try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0))
+        }
+        // A native control can consume mouseUp in a tracking loop during mouseDown.
+        NSApp.postEvent(events[1], atStart: true)
+        window.sendEvent(events[0])
+        if let queued = NSApp.nextEvent(matching: .leftMouseUp, until: .distantPast, inMode: .default, dequeue: false),
+           queued.windowNumber == window.windowNumber {
+            _ = NSApp.nextEvent(matching: .leftMouseUp, until: .distantPast, inMode: .default, dequeue: true)
+            window.sendEvent(queued)
+        }
+        await settleLayout(try XCTUnwrap(window.contentView))
     }
 
     @MainActor

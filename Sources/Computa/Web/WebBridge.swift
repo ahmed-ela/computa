@@ -200,6 +200,11 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         case "toggleInspector":
             state.isInspectorPresented.toggle()
 
+        case "setTaskSidebarCollapsed":
+            guard !state.approvalGateBlocksInteraction, state.presentedSheet == nil,
+                  let collapsed = body["collapsed"] as? Bool else { return }
+            state.isTaskSidebarCollapsed = collapsed
+
         case "toggleBrowser":
             guard !state.approvalGateBlocksInteraction else { return }
             state.isBrowserPresented.toggle()

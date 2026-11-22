@@ -63,7 +63,7 @@ kbd { font: inherit; font-size: 10px; color: var(--text-tertiary); }
 .app-shell[data-native-host] .sidebar::after {
   content: ""; flex: 0 0 34px; box-sizing: border-box; border-top: 1px solid var(--border);
 }
-.window-drag-strip { height: 30px; flex: 0 0 30px; }
+.window-drag-strip { display: flex; align-items: center; justify-content: center; height: 30px; flex: 0 0 30px; }
 .sidebar-utilities { display: flex; }
 .primary-nav { display: grid; gap: 6px; padding: 10px 14px 14px; }
 .nav-button { display: flex; width: 100%; align-items: center; justify-content: flex-start; gap: 9px; text-align: left; }
@@ -88,15 +88,56 @@ kbd { font: inherit; font-size: 10px; color: var(--text-tertiary); }
 .sidebar-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 30px 10px; color: var(--text-tertiary); font-size: 11px; text-align: center; }
 .sidebar-empty strong { margin-top: 4px; color: var(--text-secondary); font-weight: 500; }
 
+/* The compact rail leaves its title bar to the traffic lights and native sidebar toggle. */
+.app-shell[data-sidebar-collapsed] .sidebar { width: 72px; flex-basis: 72px; }
+.app-shell[data-native-host][data-sidebar-collapsed] .task-toolbar { padding-left: 52px; }
+.app-shell[data-sidebar-collapsed] .primary-nav { justify-items: center; padding: 10px 4px; }
+.app-shell[data-sidebar-collapsed] .new-task-button { width: 32px; padding: 0; justify-content: center; }
+.agent-rail { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 0 4px 8px; }
+.agent-rail-button { flex-shrink: 0; color: var(--text-secondary); }
+.agent-rail-button[aria-current="page"] { background: var(--surface-selected); }
+.agent-rail-button[data-agent-status="ready"] { color: var(--blue); }
+.agent-rail-button .agent-status-icon { width: 20px; height: 20px; }
+.agent-status-icon .agent-ready-badge { width: 12px; height: 12px; }
+.agent-ready-badge circle { fill: currentColor; stroke: var(--sidebar); stroke-width: 2; }
+.agent-ready-badge path { stroke: var(--text-inverse); transform-box: view-box; transform-origin: center; transform: scale(1.45); }
+@property --sparkle-phase {
+  syntax: "<angle>";
+  inherits: true;
+  initial-value: 0deg;
+}
+.bot-sparkle-pass { --sparkle-phase: 0deg; }
+.sparkle-track {
+  --side: 1;
+  --along: calc(var(--side) * cos(var(--sparkle-phase)));
+  --across: calc(var(--side) * sin(var(--sparkle-phase)));
+  /* Project the pass onto a narrow diagonal ellipse about (16, 15). */
+  --x: calc(16px + 1.5px * var(--along) + .703px * var(--across));
+  --y: calc(15px + 2.5px * var(--along) - .422px * var(--across));
+  --size: calc((3 - .5 * var(--along) + .48 * var(--across)) / 3.5);
+  transform: translate(var(--x), var(--y)) scale(var(--size));
+  stroke: black;
+  stroke-width: calc(1.9px / var(--size));
+  stroke-linejoin: round;
+  paint-order: stroke fill;
+}
+.sparkle-back { --side: -1; }
+.sparkle-front { stroke-width: calc(.88px / var(--size)); }
+@media (prefers-reduced-motion: no-preference) {
+  /* The upright stars are identical. Each half-turn ends in the next one's starting pose. */
+  .bot-sparkle-pass { animation: bot-sparkle-pass 1.6s linear infinite; }
+  @keyframes bot-sparkle-pass { to { --sparkle-phase: 180deg; } }
+}
+
 /* Keep the work itself visually primary. */
 .workspace { display: flex; min-width: 0; flex: 1; flex-direction: column; }
-.task-toolbar { display: flex; height: 60px; flex: 0 0 60px; align-items: center; justify-content: space-between; gap: 16px; padding: 0 24px; border-bottom: 1px solid var(--border); }
+.task-toolbar { display: flex; box-sizing: content-box; height: 32px; flex: none; align-items: center; justify-content: space-between; gap: 16px; padding: 0 24px; border-bottom: 1px solid var(--border); }
 .preview-browser-toggle { position: absolute; top: 2px; right: 6px; }
 .preview-browser-toggle[aria-pressed="true"] { color: var(--blue); }
-.app-shell:not([data-native-host]) .task-toolbar { padding-right: 48px; }
-.toolbar-title-block { min-width: 0; }
+.app-shell:not([data-browser-pane]) .task-toolbar { padding-right: 48px; }
+.toolbar-title-block { display: flex; min-width: 0; align-items: baseline; gap: 8px; }
 .toolbar-title-block strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; }
-.toolbar-workspace { display: block; color: var(--text-tertiary); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toolbar-workspace { display: block; max-width: 40%; color: var(--text-tertiary); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .review-toolbar-button { gap: 6px; }
 .review-toolbar-button.active { background: var(--surface-selected); }
 .toolbar-actions { display: flex; align-items: center; gap: 12px; }

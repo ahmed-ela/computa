@@ -7,14 +7,25 @@ struct WebWorkspaceView: View {
     @State private var showsAccessModeSettings = false
 
     var body: some View {
-        ZStack(alignment: .center) {
+        GeometryReader { geometry in
+            workspace(topInset: geometry.safeAreaInsets.top)
+        }
+    }
+
+    private func workspace(topInset: CGFloat) -> some View {
+        // The web chat and native browser share one divider below the window controls.
+        let rowHeight = topInset > 0 ? topInset : 32
+        return ZStack(alignment: .center) {
             HSplitView {
                 CodexWebView(
                     state: state,
-                    snapshot: WebUISnapshot(state: state),
+                    snapshot: WebUISnapshot(state: state, titlebarHeight: rowHeight),
                     showAccessModeSettings: { showsAccessModeSettings = true }
                 )
                 .frame(minWidth: 600, idealWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
+                // Each split item has its own safe area. Let the web sidebar
+                // paint behind the traffic lights using its actual width and theme.
+                .ignoresSafeArea(.container, edges: .top)
 
                 // External pages are sibling views, never children of the
                 // privileged Octane document or its script-message bridge.
@@ -22,6 +33,8 @@ struct WebWorkspaceView: View {
                 if state.shouldPresentBrowserPane {
                     EmbeddedBrowserPane(
                         session: state.browserSession,
+                        tabRowHeight: rowHeight,
+                        titlebarTrailingInset: topInset > 0 ? BrowserTitlebarToggle.width : 0,
                         isInteractionBlocked: state.approvalGateBlocksInteraction,
                         canLoadModels: state.canRefreshWebsiteModels,
                         modelSetupStatus: state.websiteModelSetupStatus(for:),
@@ -31,6 +44,7 @@ struct WebWorkspaceView: View {
                         onClose: { state.isBrowserPresented = false }
                     )
                     .frame(minWidth: 360, idealWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
+                    .ignoresSafeArea(.container, edges: .top)
                     // When this pane opens, the chat already occupies the whole split.
                     // Give the new pane room above its minimum before growing the chat.
                     .layoutPriority(1)
@@ -64,7 +78,7 @@ struct WebWorkspaceView: View {
             // controls above the approval shield and outside the web bridge.
             if state.presentedSheet == nil {
                 NativeRuntimeStatusBar(state: state)
-                    .frame(maxWidth: 190, alignment: .leading)
+                    .frame(maxWidth: state.isTaskSidebarCollapsed ? 72 : 190, alignment: .leading)
                     .frame(height: 34)
             }
         }
@@ -122,7 +136,7 @@ private struct CodexWebView: NSViewRepresentable {
         )
 
         let webView = WindowConfiguredWebView(frame: .zero, configuration: configuration)
-        webView.configureBrowserToggle(state: state)
+        webView.configureTitlebarControls(state: state)
         webView.navigationDelegate = context.coordinator
         webView.setValue(false, forKey: "drawsBackground")
         webView.allowsMagnification = false
@@ -168,19 +182,39 @@ private struct CodexWebView: NSViewRepresentable {
 
 @MainActor
 private final class WindowConfiguredWebView: WKWebView {
-    private let browserAccessory = NSTitlebarAccessoryViewController()
+    private var titlebarControls: [NSTitlebarAccessoryViewController] = []
 
-    func configureBrowserToggle(state: AppState) {
-        let control = NSHostingView(rootView: BrowserTitlebarToggle(state: state))
+    func configureTitlebarControls(state: AppState) {
+        titlebarControls = [
+            accessory(.left, SidebarTitlebarToggle(state: state)),
+            accessory(.right, BrowserTitlebarToggle(state: state))
+        ]
+    }
+
+    private func accessory(_ edge: NSLayoutConstraint.Attribute, _ content: some View) -> NSTitlebarAccessoryViewController {
+        let controller = NSTitlebarAccessoryViewController()
+        let control = NSHostingView(rootView: content)
         control.setFrameSize(control.fittingSize)
-        browserAccessory.view = control
-        browserAccessory.layoutAttribute = .right
+        controller.view = control
+        controller.layoutAttribute = edge
+        return controller
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        // The web sidebar paints the title bar, but AppKit owns window dragging there.
+        if let window, let superview, superview.convert(point, to: nil).y >= window.contentLayoutRect.maxY {
+            return nil
+        }
+        return super.hitTest(point)
     }
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {
-        if let window, window !== newWindow, window.styleMask.contains(.titled),
-           let index = window.titlebarAccessoryViewControllers.firstIndex(of: browserAccessory) {
-            window.removeTitlebarAccessoryViewController(at: index)
+        if let window, window !== newWindow, window.styleMask.contains(.titled) {
+            for control in titlebarControls {
+                if let index = window.titlebarAccessoryViewControllers.firstIndex(of: control) {
+                    window.removeTitlebarAccessoryViewController(at: index)
+                }
+            }
         }
         super.viewWillMove(toWindow: newWindow)
     }
@@ -193,13 +227,36 @@ private final class WindowConfiguredWebView: WKWebView {
         window.titlebarAppearsTransparent = true
         window.styleMask.insert(.fullSizeContentView)
         window.minSize = NSSize(width: 980, height: 640)
-        if window.styleMask.contains(.titled), !window.titlebarAccessoryViewControllers.contains(browserAccessory) {
-            window.addTitlebarAccessoryViewController(browserAccessory)
+        guard window.styleMask.contains(.titled) else { return }
+        for control in titlebarControls where !window.titlebarAccessoryViewControllers.contains(control) {
+            window.addTitlebarAccessoryViewController(control)
         }
     }
 }
 
+private struct SidebarTitlebarToggle: View {
+    @Bindable var state: AppState
+
+    var body: some View {
+        Button {
+            state.isTaskSidebarCollapsed.toggle()
+        } label: {
+            Image(systemName: "sidebar.left")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 28, height: 22)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .accessibilityIdentifier("task-sidebar-toggle")
+        .accessibilityLabel(state.isTaskSidebarCollapsed ? "Expand chat sidebar" : "Collapse chat sidebar")
+        .help(state.isTaskSidebarCollapsed ? "Expand chat sidebar" : "Collapse chat sidebar")
+        .disabled(state.presentedSheet != nil || state.approvalGateBlocksInteraction)
+    }
+}
+
 private struct BrowserTitlebarToggle: View {
+    static let width: CGFloat = 34
     @Bindable var state: AppState
 
     var body: some View {
@@ -216,7 +273,7 @@ private struct BrowserTitlebarToggle: View {
         .accessibilityIdentifier("browser-toggle")
         .help(state.shouldPresentBrowserPane ? "Hide browser" : "Show browser")
         .disabled(state.presentedSheet != nil || state.approvalGateBlocksInteraction)
-        .padding(.trailing, 6)
+        .frame(width: Self.width, alignment: .leading)
     }
 }
 

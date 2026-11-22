@@ -99,6 +99,10 @@ final class AppState {
     var selectedEntryID: TimelineEntry.ID?
     var composerText = ""
     var isInspectorPresented = false
+    private static let sidebarCollapsedKey = "taskSidebarCollapsed"
+    var isTaskSidebarCollapsed: Bool {
+        didSet { preferences.set(isTaskSidebarCollapsed, forKey: Self.sidebarCollapsedKey) }
+    }
     var isBrowserPresented = false
     var isReviewPresented = false
     private(set) var review: AppReviewState?
@@ -189,6 +193,7 @@ final class AppState {
         self.runtime = runtime
         self.permissionClient = permissionClient
         self.preferences = preferences
+        isTaskSidebarCollapsed = preferences.bool(forKey: Self.sidebarCollapsedKey)
         self.unreadCompletionStore = unreadCompletionStore
         do { unreadCompletions = try unreadCompletionStore?.load() ?? [:] }
         catch {

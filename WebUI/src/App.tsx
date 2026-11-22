@@ -12,7 +12,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@octanejs/shadcn/DropdownMenu';
-import { Icon } from './Icon';
+import { BotAdd16Filled, Icon } from './Icon';
+import { AgentStatusIcon } from './AgentStatusIcon';
 import { copyText } from './clipboard';
 import { ReviewPanel } from './ReviewPanel';
 import { ModelLabel, ModelSelector } from './ModelSelector';
@@ -23,7 +24,7 @@ import { ActivityDisclosure, activityLabel } from './ActivityDisclosure';
 import { activityTimeline, systemMessageText, type ActivityGroup, type ConversationEntry } from './activityTimeline';
 import { formatWorkedFor } from './duration';
 import { TaskActivityIndicator } from './TaskActivityIndicator';
-import { isTaskActive, startSidebarClock } from './sidebarActivity';
+import { sidebarAgentStatus, isTaskActive, startSidebarClock } from './sidebarActivity';
 import { observeDisplayedCompletion } from './completionAcknowledgment';
 import { previewSnapshot, installPreviewBridge } from './preview';
 import {
@@ -91,15 +92,31 @@ const toolNames: Record<string, string> = {
   computer_v2_keypress: 'Press keys', computer_v2_type: 'Type text',
 };
 
-function Sidebar({
-  snapshot,
-  search,
-  setSearch,
-}: {
+function CollapsedTaskList({ snapshot }: { snapshot: AppSnapshot }) {
+  return (
+    <nav className="task-list agent-rail" aria-label="Agent activity">
+      {snapshot.tasks.map((task) => {
+        const status = sidebarAgentStatus(task);
+        if (!status) return null;
+        const label = `${task.title} — ${status === 'working' ? 'Working' : 'Ready to read'}`;
+        return <Button key={task.id} variant="ghost" size="icon"
+          className="agent-rail-button" data-agent-status={status}
+          aria-current={task.id === snapshot.selectedTaskID ? 'page' : undefined}
+          aria-label={label} title={label} onClick={() => post({ action: 'selectTask', id: task.id })}>
+          <AgentStatusIcon working={status === 'working'} taskID={task.id} />
+        </Button>;
+      })}
+    </nav>
+  );
+}
+
+interface SidebarProps {
   snapshot: AppSnapshot;
   search: string;
   setSearch: (value: string) => void;
-}) {
+}
+
+function ExpandedTaskList({ snapshot, search, setSearch }: SidebarProps) {
   const [now, setNow] = useState(() => Date.now() / 1000);
   const hasActiveTasks = snapshot.tasks.some(isTaskActive);
   useEffect(() => {
@@ -120,20 +137,7 @@ function Sidebar({
     : snapshot.tasks;
 
   return (
-    <aside className="sidebar" aria-label="Task navigation">
-      <div className="window-drag-strip" aria-hidden="true" />
-      <nav className="primary-nav" aria-label="Primary">
-        <Button variant="outline" className="nav-button new-task-button" onClick={() => { setSearch(''); post({ action: 'createTask' }); }}>
-          <Icon name="new" size={17} /><span>New task</span>
-        </Button>
-        {snapshot.pendingApprovalCount > 0 ? (
-          <div className="nav-button approval-nav" role="status" aria-live="polite">
-            <Icon name="info" size={17} /><span>Native approval</span>
-            <span className="count-pill">{snapshot.pendingApprovalCount}</span>
-          </div>
-        ) : null}
-      </nav>
-
+    <>
       <div className="task-search">
         <Input
           className="task-search-input pr-8"
@@ -169,13 +173,42 @@ function Sidebar({
           ))
         )}
       </div>
+    </>
+  );
+}
+
+function Sidebar({ snapshot, search, setSearch, nativeHost }: SidebarProps & { nativeHost: boolean }) {
+  const collapsed = snapshot.isTaskSidebarCollapsed === true;
+  return (
+    <aside className="sidebar" aria-label="Task navigation">
+      <div className="window-drag-strip">
+        {!nativeHost && <Button variant="ghost" size="icon-xs"
+          aria-label={collapsed ? 'Expand chat sidebar' : 'Collapse chat sidebar'} aria-expanded={!collapsed}
+          onClick={() => post({ action: 'setTaskSidebarCollapsed', collapsed: !collapsed })}>
+          <Icon name="sidebar" size={16} />
+        </Button>}
+      </div>
+      <nav className="primary-nav" aria-label="Primary">
+        <Button variant="outline" className="nav-button new-task-button" title={collapsed ? 'New task' : undefined} onClick={() => { setSearch(''); post({ action: 'createTask' }); }}>
+          <BotAdd16Filled /><span className={collapsed ? 'sr-only' : undefined}>New task</span>
+        </Button>
+        {snapshot.pendingApprovalCount > 0 ? (
+          <div className="nav-button approval-nav" role="status" aria-live="polite">
+            <Icon name="info" size={17} /><span className={collapsed ? 'sr-only' : undefined}>Native approval</span>
+            <span className="count-pill">{snapshot.pendingApprovalCount}</span>
+          </div>
+        ) : null}
+      </nav>
+
+      {collapsed ? <CollapsedTaskList snapshot={snapshot} />
+        : <ExpandedTaskList snapshot={snapshot} search={search} setSearch={setSearch} />}
     </aside>
   );
 }
 
-function TaskToolbar({ task }: { task?: TaskSnapshot }) {
+function TaskToolbar({ task, rowHeight }: { task?: TaskSnapshot; rowHeight?: number }) {
   return (
-    <header className="task-toolbar">
+    <header className="task-toolbar" style={rowHeight ? { height: `${rowHeight}px` } : undefined}>
       <div className="toolbar-title-block">
         {task ? <strong>{task.title === 'Untitled task' ? 'New task' : task.title}</strong> : null}
         {task?.workspace && task.workspace !== 'No workspace selected' ? <span className="toolbar-workspace" title={task.workspace}>{task.workspace.split('/').filter(Boolean).at(-1) ?? task.workspace}</span> : null}
@@ -1022,6 +1055,7 @@ export function App() {
   const nativeHost = Boolean(window.webkit?.messageHandlers?.localCodex);
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(nativeHost ? null : previewSnapshot);
   const [search, setSearch] = useState('');
+  const focusSearchOnExpand = useRef(false);
   const currentSnapshot = useRef(snapshot);
   currentSnapshot.current = snapshot;
   const selectedTask = snapshot?.tasks.find((candidate) => candidate.id === snapshot.selectedTaskID);
@@ -1057,15 +1091,30 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (!snapshot?.isTaskSidebarCollapsed && focusSearchOnExpand.current) {
+      focusSearchOnExpand.current = false;
+      document.getElementById('task-search')?.focus();
+    }
+  }, [snapshot?.isTaskSidebarCollapsed]);
+
+  useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
       if (!event.metaKey || snapshot?.isSettingsPresented) return;
-      if (event.key.toLowerCase() === 'k') { event.preventDefault(); document.getElementById('task-search')?.focus(); }
+      if (event.key.toLowerCase() === 'k' && !snapshot?.pendingApprovalCount) {
+        event.preventDefault();
+        if (snapshot?.isTaskSidebarCollapsed) {
+          focusSearchOnExpand.current = true;
+          post({ action: 'setTaskSidebarCollapsed', collapsed: false });
+        } else {
+          document.getElementById('task-search')?.focus();
+        }
+      }
       if (!nativeHost && event.key.toLowerCase() === 'n' && event.shiftKey) { event.preventDefault(); post({ action: 'createTask' }); }
       if (!nativeHost && event.key === ',') { event.preventDefault(); post({ action: 'showSettings' }); }
     };
     document.addEventListener('keydown', handleKey);
     return () => document.removeEventListener('keydown', handleKey);
-  }, [snapshot?.isSettingsPresented]);
+  }, [snapshot?.isSettingsPresented, snapshot?.isTaskSidebarCollapsed, snapshot?.pendingApprovalCount]);
 
   useEffect(() => {
     const appearance = snapshot?.appearance ?? 'system';
@@ -1081,9 +1130,11 @@ export function App() {
 
   const task = snapshot.tasks.find((candidate) => candidate.id === snapshot.selectedTaskID);
   return (
-    <div className="app-shell" data-native-host={nativeHost ? 'true' : undefined}>
+    <div className="app-shell" data-native-host={nativeHost ? 'true' : undefined}
+      data-sidebar-collapsed={snapshot.isTaskSidebarCollapsed ? 'true' : undefined}
+      data-browser-pane={nativeHost && snapshot.isBrowserPresented && !snapshot.isSettingsPresented ? 'open' : undefined}>
       <div className="app-panels" inert={snapshot.isSettingsPresented || snapshot.pendingApprovalCount > 0}>
-      <Sidebar snapshot={snapshot} search={search} setSearch={setSearch} />
+      <Sidebar snapshot={snapshot} search={search} setSearch={setSearch} nativeHost={nativeHost} />
       <main className="workspace">
         {!nativeHost && <Button variant="ghost" size="icon" className="preview-browser-toggle"
           aria-label="Toggle browser" aria-pressed={snapshot.isBrowserPresented}
@@ -1091,14 +1142,14 @@ export function App() {
           onClick={() => post({ action: 'toggleBrowser' })}>
           <Icon name="browser" size={18} />
         </Button>}
-        <TaskToolbar task={task} />
+        <TaskToolbar task={task} rowHeight={snapshot.titlebarHeight} />
         {task ? (
           <Conversation snapshot={snapshot} task={task} />
         ) : (
           <div className="no-task-view">
             <p>Choose a model for your next task.</p>
             <DefaultModelSelector snapshot={snapshot} />
-            <Button onClick={() => post({ action: 'createTask' })}><Icon name="plus" size={15} /> New task</Button>
+            <Button onClick={() => post({ action: 'createTask' })}><BotAdd16Filled /> New task</Button>
           </div>
         )}
       </main>
